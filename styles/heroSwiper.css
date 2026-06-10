@@ -1,0 +1,51 @@
+/* ------------------------------------------------------------------ */
+/*  RegisterDesk hero — Swiper theme overrides                         */
+/*  Uses the same theme tokens defined in tailwind.config.ts           */
+/* ------------------------------------------------------------------ */
+
+/* Let shadows / floating cards breathe outside the slide box */
+.hero-swiper {
+  width: 100%;
+  padding-bottom: 2px;
+}
+
+/* Keep fade slides perfectly stacked (no flash of stacked cards) */
+.hero-swiper .swiper-slide {
+  opacity: 0 !important;
+  transition: opacity 0.8s ease;
+}
+.hero-swiper .swiper-slide-active {
+  opacity: 1 !important;
+}
+
+/* ---------------------------- Pagination ---------------------------- */
+.hero-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+.hero-pagination .swiper-pagination-bullet {
+  width: 8px;
+  height: 8px;
+  margin: 0 !important;
+  border-radius: 9999px;
+  background: rgb(217 211 232); /* ink-100 */
+  opacity: 1;
+  cursor: pointer;
+  transition: width 0.3s ease, background-color 0.3s ease;
+}
+
+.hero-pagination .swiper-pagination-bullet-active {
+  width: 26px;
+  background: linear-gradient(90deg, #fb5a6a 0%, #e5277e 100%); /* gradient-brand */
+}
+
+/* Respect users who prefer reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  .hero-swiper .swiper-slide,
+  .hero-pagination .swiper-pagination-bullet {
+    transition: none !important;
+  }
+}

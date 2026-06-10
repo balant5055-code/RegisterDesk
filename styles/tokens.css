@@ -1,0 +1,116 @@
+/* ─── RegisterDesk Design Tokens ──────────────────────────────────────────
+   Single source of truth. Change values here to retheme the entire app.
+   ──────────────────────────────────────────────────────────────────────── */
+
+:root {
+  /* ── Brand: Primary ──────────────────────────────────────── */
+  --primary:          #e5277e;   /* magenta-pink — CTAs, active states, links  */
+  --primary-hover:    #bf1868;   /* deeper pink  — hover on primary elements   */
+  --primary-foreground: #FFFFFF; /* text rendered on primary backgrounds       */
+
+  /* Gradient endpoints — use with from-primary-from / to-primary-to */
+  --primary-from:     #fb5a6a;   /* coral-pink  — gradient start               */
+  --primary-to:       #e5277e;   /* deep magenta — gradient end                */
+
+  /* Full gradient strings — used via CSS overrides, not Tailwind utilities  */
+  --primary-gradient:       linear-gradient(90deg, #fb5a6a 0%, #e5277e 100%);
+  --primary-gradient-hover: linear-gradient(90deg, #ea4858 0%, #bf1868 100%);
+
+  /* ── Brand: Secondary ───────────────────────────────────── */
+  --secondary:            #475569; /* slate-600 — secondary actions           */
+  --secondary-hover:      #334155; /* slate-700                               */
+  --secondary-foreground: #FFFFFF;
+
+  /* ── Page Backgrounds ────────────────────────────────────── */
+  --background: #F8FAFC;           /* slate-50  — page canvas                 */
+  --foreground: #0F172A;           /* slate-900 — primary body text           */
+
+  /* ── Card / Surface ─────────────────────────────────────── */
+  --card:            #FFFFFF;      /* panels, modals, table rows              */
+  --card-foreground: #0F172A;
+
+  /* ── Muted ───────────────────────────────────────────────── */
+  --muted:            #F1F5F9;     /* slate-100 — muted/subtle backgrounds    */
+  --muted-foreground: #64748B;     /* slate-500 — placeholder & helper text   */
+
+  /* ── Borders ─────────────────────────────────────────────── */
+  --border:        #E2E8F0;        /* slate-200 — default dividers/outlines   */
+  --border-strong: #CBD5E1;        /* slate-300 — emphasized borders          */
+
+  /* ── Accent ─────────────────────────────────────────────── */
+  --accent:            #fb5a6a;    /* coral-pink — badges, tags, highlights   */
+  --accent-foreground: #FFFFFF;
+
+  /* ── Feedback: Success ───────────────────────────────────── */
+  --success:            #16A34A;   /* green-600                               */
+  --success-foreground: #FFFFFF;
+
+  /* ── Feedback: Warning ───────────────────────────────────── */
+  --warning:            #D97706;   /* amber-600                               */
+  --warning-foreground: #FFFFFF;
+
+  /* ── Feedback: Destructive ───────────────────────────────── */
+  --destructive:            #DC2626; /* red-600                               */
+  --destructive-foreground: #FFFFFF;
+
+  /* ── Feedback: Info ─────────────────────────────────────── */
+  --info:            #e879a0;      /* rose-pink — informational states        */
+  --info-foreground: #FFFFFF;
+
+  /* ── Typography ─────────────────────────────────────────── */
+  /* Font family loaded via Next.js font optimisation (--font-jakarta).      */
+  /* Tailwind maps it through @theme inline → --font-sans → font-sans class. */
+
+  --fw-body:    400;   /* body text, small text, captions  */
+  --fw-ui:      500;   /* navbar links, labels, meta text  */
+  --fw-strong:  600;   /* buttons, card titles, badges     */
+  --fw-heading: 700;   /* section headings, hero headings  */
+
+  /* ── Typography scale (reference — use with text-[var(--fs-*)]) ─────────── */
+  --fs-2xs:   11px;    /* chart axis labels, tiny meta labels                 */
+  --fs-xs:    12px;    /* timestamps, badge/pill counts, uppercase col heads  */
+  --fs-sm:    13px;    /* helper text, secondary labels, subtle copy          */
+  --fs-base:  14px;    /* body text, table content, form inputs, nav links    */
+  --fs-md:    15px;    /* card titles, prominent labels, event names          */
+  --fs-lg:    18px;    /* page section headings, table section titles         */
+  --fs-xl:    24px;    /* sub-page h1s (check-in, event manage)               */
+  --fs-2xl:   28px;    /* dashboard overview titles                           */
+  --fs-3xl:   32px;    /* top-level page h1 titles                            */
+
+  /* ── Border Radius ───────────────────────────────────────── */
+  --radius-sm:   0.25rem;          /* 4px  — tight chips, badges              */
+  --radius-md:   0.5rem;           /* 8px  — default (inputs, buttons)        */
+  --radius-lg:   0.75rem;          /* 12px — cards, panels                    */
+  --radius-xl:   1rem;             /* 16px — modals, large surfaces           */
+  --radius-full: 9999px;           /* pills                                   */
+
+  /* ── Shadows ─────────────────────────────────────────────── */
+  --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+  --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.08), 0 2px 4px -2px rgb(0 0 0 / 0.06);
+  --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.08), 0 4px 6px -4px rgb(0 0 0 / 0.05);
+}
+
+/* ─── Dark mode overrides ─────────────────────────────────────────────────────
+   Applied when <html class="dark"> is set by the theme toggle.
+   Primary brand colors stay the same; only surfaces, text, and borders change.
+   ─────────────────────────────────────────────────────────────────────────── */
+
+.dark {
+  color-scheme: dark;
+
+  --background: #0F172A;           /* slate-900 — page canvas                  */
+  --foreground: #F1F5F9;           /* slate-100 — primary body text            */
+
+  --card:            #1E293B;      /* slate-800 — panels, modals               */
+  --card-foreground: #F1F5F9;
+
+  --muted:            #1E293B;     /* slate-800 — subtle backgrounds           */
+  --muted-foreground: #94A3B8;     /* slate-400 — placeholder & helper text    */
+
+  --border:        #334155;        /* slate-700 — default dividers             */
+  --border-strong: #475569;        /* slate-600 — emphasized borders           */
+
+  --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.3);
+  --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.3), 0 2px 4px -2px rgb(0 0 0 / 0.2);
+  --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.35), 0 4px 6px -4px rgb(0 0 0 / 0.25);
+}

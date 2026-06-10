@@ -1,0 +1,32 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    // Event assets are stored under a path that encodes the owning user's UID.
+    // Reads are public (event banners / logos need to load for anyone visiting
+    // the event page).  Writes and deletes are restricted to the UID that owns
+    // the path, enforced by comparing request.auth.uid against the {uid} wildcard.
+    match /event-assets/{uid}/{eventId}/{assetType}/{filename} {
+      allow read:   if true;
+      allow write:  if request.auth != null && request.auth.uid == uid;
+      allow delete: if request.auth != null && request.auth.uid == uid;
+    }
+
+    // Organizer branding assets: logo, certificate signature, email header.
+    // Stored as organizer-assets/{uid}/{assetType}.{ext}.
+    // Reads are public so branding images load on event pages and certificates.
+    // Writes and deletes are scoped to the owning organizer.
+    match /organizer-assets/{uid}/{filename} {
+      allow read:   if true;
+      allow write:  if request.auth != null && request.auth.uid == uid;
+      allow delete: if request.auth != null && request.auth.uid == uid;
+    }
+
+    // Deny everything else.  This is belt-and-suspenders: Firebase Storage
+    // has no implicit deny, so an explicit wildcard deny is required to ensure
+    // unauthenticated and mis-pathed writes cannot succeed.
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

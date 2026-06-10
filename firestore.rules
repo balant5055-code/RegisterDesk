@@ -1,0 +1,49 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ── Admin-SDK-only collections ─────────────────────────────────────────────
+    // These are written and read exclusively through server-side API routes using
+    // the Firebase Admin SDK.  Explicit deny prevents accidental client access if
+    // a future developer adds a client-side read without checking the rules.
+    match /registrations/{docId} {
+      allow read, write: if false;
+    }
+    match /registrationCounters/{docId} {
+      allow read, write: if false;
+    }
+    match /registrationClaims/{docId} {
+      allow read, write: if false;
+    }
+    match /ticketCodeClaims/{docId} {
+      allow read, write: if false;
+    }
+
+    // ── Organizer profile ──────────────────────────────────────────────────────
+    match /users/{userId} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+
+      // ── Event drafts ──────────────────────────────────────────────────────────
+      // Clients may read and update wizard fields freely.
+      // Server-controlled fields (status, communicationBilling, publishedAt)
+      // are write-protected — only the Admin SDK (API routes) may set them.
+      match /eventDrafts/{draftId} {
+        allow read: if request.auth != null && request.auth.uid == userId;
+
+        // Allow creating a new draft — must start as 'draft', billing must be null
+        allow create: if request.auth != null
+          && request.auth.uid == userId
+          && request.resource.data.status == 'draft'
+          && request.resource.data.communicationBilling == null;
+
+        // Allow updating wizard fields, but block the server-controlled fields
+        allow update: if request.auth != null
+          && request.auth.uid == userId
+          && !request.resource.data.diff(resource.data)
+              .affectedKeys()
+              .hasAny(['status', 'communicationBilling', 'publishedAt']);
+      }
+    }
+
+  }
+}

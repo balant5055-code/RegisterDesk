@@ -1,0 +1,38 @@
+{
+  "indexes": [
+    {
+      "collectionGroup": "registrations",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "eventSlug",      "order": "ASCENDING" },
+        { "fieldPath": "attendee.email", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "registrations",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "eventSlug",      "order": "ASCENDING" },
+        { "fieldPath": "attendee.phone", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "registrations",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "organizerUid",  "order": "ASCENDING" },
+        { "fieldPath": "eventSlug",     "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "registrations",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "organizerUid",  "order": "ASCENDING" },
+        { "fieldPath": "eventSlug",     "order": "ASCENDING" },
+        { "fieldPath": "registeredAt",  "order": "DESCENDING" }
+      ]
+    }
+  ],
+  "fieldOverrides": []
+}
