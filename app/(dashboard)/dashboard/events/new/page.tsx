@@ -3,6 +3,20 @@
 import { Fragment, useCallback, useEffect, useRef, useState } from 'react'
 import Link from 'next/link'
 import { useDraft } from '@/lib/hooks/useDraft'
+import { useCampaignDraft } from '@/lib/hooks/useCampaignDraft'
+import {
+  type CampaignType,
+  type DonationCampaignSubtype,
+  DONATION_SUBTYPE_LABELS,
+  makeBlankCampaignDetailsDraft,
+  isCampaignDetailsValid,
+  getCampaignPublishBlockers,
+} from '@/lib/campaigns/campaignDetailsConfig'
+import {
+  makeBlankDonationSettingsDraft,
+  isDonationSettingsValid,
+} from '@/lib/campaigns/donationSettingsConfig'
+import dynamic from 'next/dynamic'
 import { AnimatePresence, motion } from 'framer-motion'
 import {
   AlertCircle,
@@ -67,17 +81,57 @@ import type { LucideIcon } from 'lucide-react'
 import { buttonVariants } from '@/components/ui'
 import { WizardFooter } from '@/components/wizard/WizardFooter'
 import { AddPassEditor, type EventPassFull, makeBlankPass } from '@/components/wizard/AddPassEditor'
-import { RegistrationFormBuilder, type PassSummary } from '@/components/wizard/RegistrationFormBuilder'
+import type { PassSummary } from '@/components/wizard/RegistrationFormBuilder'
 import { makeBlankFormDraft, type RegistrationFormDraft, type FormField, type FormSection, type RegistrationRules } from '@/components/wizard/registrationFormConfig'
-import { EventDetailsBuilder } from '@/components/wizard/EventDetailsBuilder'
-import { makeBlankEventDetailsDraft, calcStepHealth, normalizeEventDetailsDraft, type EventDetailsDraft, type Speaker, type Sponsor, type AgendaSession, ONLINE_PLATFORM_LABELS, SPONSOR_TIER_LABELS, SESSION_TYPE_LABELS, EVENT_STATUS_LABELS } from '@/components/wizard/eventDetailsConfig'
+import { getTemplate } from '@/lib/events/templateRegistry'
+import { makeBlankEventDetailsDraft, calcStepHealth, normalizeEventDetailsDraft, type EventDetailsDraft, type Speaker, type Sponsor, type AgendaSession, ONLINE_PLATFORM_LABELS, SPONSOR_TIER_LABELS, SESSION_TYPE_LABELS } from '@/components/wizard/eventDetailsConfig'
 import { ROUTES } from '@/config/navigation'
 import { cn } from '@/lib/utils/cn'
 import { auth } from '@/lib/firebase/auth'
 import { calculateCommunicationCost } from '@/lib/events/communicationCost'
 import { estimateCapacity }           from '@/lib/events/estimateCapacity'
+import { evaluatePublishRequirements, type PublishRequirement } from '@/lib/events/publishRequirements'
 import type { CommunicationCostResult, PublishApiResponse, WalletBalanceResponse, WalletTopupOrderResponse, WalletTopupVerifyResponse } from '@/types/events'
+import { isEventLicenseTier, type EventLicenseTier } from '@/lib/licensing/eventLicense'
+import { useLicenseCatalog } from '@/lib/licensing/licenseCatalogClient'
+import { useBranding } from '@/lib/config/brandingClient'
+import { useCommunicationConfig } from '@/lib/communications/communicationConfigClient'
+import { useFeesConfig } from '@/lib/fees/feesConfigClient'
+import type { PublicFeesConfig } from '@/lib/fees/publicFeesShared'
 import { useToast } from '@/components/ui/Toast'
+
+// GA-7C S2/P4: lazy-load the heavy per-step builders so the initial /dashboard/events/new
+// bundle doesn't ship them all up front. Steps are already conditionally mounted, so each
+// builder's code is fetched only when its step is first reached — functionality unchanged.
+// (AddPassEditor stays static: it co-exports the makeBlankPass value factory this module
+// calls at the top level.)
+const builderLoading = () => (
+  <div className="flex items-center justify-center py-16 text-[13px] text-muted-foreground">Loading…</div>
+)
+const RegistrationFormBuilder = dynamic(
+  () => import('@/components/wizard/RegistrationFormBuilder').then(m => m.RegistrationFormBuilder), { loading: builderLoading },
+)
+const EventDetailsBuilder = dynamic(
+  () => import('@/components/wizard/EventDetailsBuilder').then(m => m.EventDetailsBuilder), { loading: builderLoading },
+)
+const LinkedCampaignStep = dynamic(
+  () => import('@/components/wizard/LinkedCampaignStep').then(m => m.LinkedCampaignStep), { loading: builderLoading },
+)
+const TemplatePreviewPanel = dynamic(
+  () => import('@/components/wizard/TemplatePreviewPanel').then(m => m.TemplatePreviewPanel), { loading: builderLoading },
+)
+const LicenseCards = dynamic(
+  () => import('@/components/wizard/LicenseCards').then(m => m.LicenseCards), { loading: builderLoading },
+)
+const FinalCostSummary = dynamic(
+  () => import('@/components/wizard/FinalCostSummary').then(m => m.FinalCostSummary), { loading: builderLoading },
+)
+const DonationCampaignDetailsBuilder = dynamic(
+  () => import('@/components/campaign/DonationCampaignDetailsBuilder').then(m => m.DonationCampaignDetailsBuilder), { loading: builderLoading },
+)
+const DonationSettingsBuilder = dynamic(
+  () => import('@/components/campaign/DonationSettingsBuilder').then(m => m.DonationSettingsBuilder), { loading: builderLoading },
+)
 
 // --- Constants ----------------------------------------------------------------
 
@@ -92,7 +146,41 @@ const WIZARD_STEPS: WizardStep[] = [
   { name: 'Passes & Pricing' },
   { name: 'Form' },
   { name: 'Details' },
+  { name: 'License' },
   { name: 'Review' },
+]
+
+// event_plus_donation — inserts 'Fundraising' after Details, then 'License' before Review
+const FUNDRAISING_EVENT_WIZARD_STEPS: WizardStep[] = [
+  { name: 'Event Type' },
+  { name: 'Visibility' },
+  { name: 'Access Control' },
+  { name: 'Passes & Pricing' },
+  { name: 'Form' },
+  { name: 'Details' },
+  { name: 'Fundraising' },
+  { name: 'License' },
+  { name: 'Review' },
+]
+
+// Donation-only campaign has its own 4-step wizard that replaces steps 1–6
+const CAMPAIGN_WIZARD_STEPS: WizardStep[] = [
+  { name: 'Visibility' },
+  { name: 'Campaign Details' },
+  { name: 'Donation Settings' },
+  { name: 'Review' },
+]
+
+// Donation-only subtypes — replaces the ticket-based fundraising subtypes
+const DONATION_CAMPAIGN_SUBTYPES: Array<{ id: DonationCampaignSubtype; label: string }> = [
+  { id: 'medical',     label: DONATION_SUBTYPE_LABELS.medical },
+  { id: 'ngo',         label: DONATION_SUBTYPE_LABELS.ngo },
+  { id: 'disaster',    label: DONATION_SUBTYPE_LABELS.disaster },
+  { id: 'animal',      label: DONATION_SUBTYPE_LABELS.animal },
+  { id: 'education',   label: DONATION_SUBTYPE_LABELS.education },
+  { id: 'environment', label: DONATION_SUBTYPE_LABELS.environment },
+  { id: 'community',   label: DONATION_SUBTYPE_LABELS.community },
+  { id: 'other',       label: DONATION_SUBTYPE_LABELS.other },
 ]
 
 // --- Step 1 constants ---------------------------------------------------------
@@ -468,111 +556,140 @@ const ACCESS_CONTROL_OPTIONS: AccessControlOption[] = [
 function Stepper({
   currentStep,
   completedValues = [],
+  steps = WIZARD_STEPS,
 }: {
   currentStep:      number
   completedValues?: (string | undefined)[]
+  steps?:           WizardStep[]
 }) {
-  const totalSteps   = WIZARD_STEPS.length
-  const progressPct  = ((currentStep + 1) / totalSteps) * 100
-  const currentName  = WIZARD_STEPS[currentStep]?.name ?? ''
-  const prevValue    = completedValues[currentStep - 1]
+  const totalSteps = steps.length
 
   return (
-    <nav aria-label="Event creation steps">
-
-      {/* -- Mobile: compact progress bar ------------------------------- */}
+    <nav
+      aria-label="Event creation steps"
+      className="rounded-2xl border border-border bg-card px-5 py-4 shadow-[0_1px_4px_rgba(0,0,0,0.05)]"
+    >
+      {/* ── Mobile: step name + animated progress bar ────────────────── */}
       <div className="sm:hidden">
-        <div className="mb-2 flex items-center justify-between gap-2">
-          <div className="flex items-center gap-1.5">
-            {/* Completed dots */}
-            {Array.from({ length: totalSteps }).map((_, i) => (
-              <span
-                key={i}
-                aria-hidden
-                className={cn(
-                  'rounded-full transition-all duration-200',
-                  i < currentStep
-                    ? 'h-[6px] w-[6px] bg-emerald-500'
-                    : i === currentStep
-                    ? 'h-[8px] w-[8px] bg-primary'
-                    : 'h-[5px] w-[5px] bg-border',
-                )}
-              />
-            ))}
-          </div>
-          <span className="text-[11px] font-medium text-muted-foreground">
-            {currentStep + 1}/{totalSteps}
+        <div className="mb-2 flex items-center justify-between">
+          <span className="text-[12.5px] font-semibold text-foreground">
+            {steps[currentStep]?.name}
+          </span>
+          <span className="text-[11px] tabular-nums text-muted-foreground">
+            {currentStep + 1}
+            <span className="mx-px text-muted-foreground/40">/</span>
+            {totalSteps}
           </span>
         </div>
-
-        {/* Step label row */}
-        <div className="flex items-baseline justify-between gap-2">
-          <span className="text-[13px] font-semibold text-primary">{currentName}</span>
-          {prevValue && (
-            <span className="flex items-center gap-1 truncate text-[11px] text-emerald-600">
-              <Check className="size-2.5 shrink-0" aria-hidden />
-              {prevValue}
-            </span>
-          )}
-        </div>
-
-        {/* Thin progress bar */}
-        <div className="mt-2 h-[3px] w-full overflow-hidden rounded-full bg-border">
+        <div className="relative h-[2px] overflow-hidden rounded-full bg-muted">
           <motion.div
-            className="h-full rounded-full bg-primary"
-            initial={{ width: 0 }}
-            animate={{ width: `${progressPct}%` }}
-            transition={{ duration: 0.35, ease: EASE }}
+            className="absolute inset-y-0 left-0 rounded-full bg-primary"
+            initial={false}
+            animate={{ width: `${((currentStep + 1) / totalSteps) * 100}%` }}
+            transition={{ duration: 0.45, ease: EASE }}
           />
         </div>
       </div>
 
-      {/* -- Desktop: full dot + label stepper -------------------------- */}
-      <div className="hidden sm:flex items-start overflow-x-auto pb-0.5">
-        {WIZARD_STEPS.map((step, i) => {
+      {/* ── Desktop / tablet: full-width single row, no overflow ─────── */}
+      {/* flex w-full replaces overflow-x-auto + min-w-max so all 7 steps
+          share the available width; connectors (flex-1 min-w-0) absorb
+          any extra space and can shrink to 0 on narrow viewports        */}
+      <div className="hidden w-full items-start sm:flex">
+        {steps.map((step, i) => {
           const isCompleted    = i < currentStep
           const isCurrent      = i === currentStep
           const completedValue = completedValues[i]
 
           return (
             <Fragment key={step.name}>
+              {/* ── Connector ── */}
               {i > 0 && (
                 <div
                   aria-hidden
-                  className={cn(
-                    'mx-2 mt-[18px] h-px min-w-[12px] flex-1 transition-colors duration-300',
-                    i < currentStep   ? 'bg-emerald-500' :
-                    i === currentStep ? 'bg-primary'     : 'bg-border',
-                  )}
-                />
+                  className="relative mx-1.5 mt-[9px] h-px min-w-0 flex-1 overflow-hidden rounded-full bg-border"
+                >
+                  <motion.div
+                    className="absolute inset-y-0 left-0 rounded-full bg-emerald-400"
+                    initial={false}
+                    animate={{ width: isCompleted ? '100%' : '0%' }}
+                    transition={{ duration: 0.4, ease: EASE }}
+                  />
+                </div>
               )}
 
-              <div className="flex flex-col items-center">
+              {/* ── Step column ── */}
+              <div
+                className="flex shrink-0 flex-col items-center"
+                aria-current={isCurrent ? 'step' : undefined}
+              >
+                {/* Indicator — uniform 18 px so connector mt-[9px] aligns */}
                 <div
                   className={cn(
-                    'flex size-9 items-center justify-center rounded-full text-[13px] font-bold transition-all duration-200',
-                    isCompleted ? 'bg-emerald-500 text-white'                    :
-                    isCurrent   ? 'bg-primary text-primary-foreground shadow-sm' :
-                                  'border border-border bg-card text-muted-foreground',
+                    'flex size-[18px] items-center justify-center rounded-full transition-all duration-300',
+                    isCompleted
+                      ? 'bg-emerald-500'
+                      : isCurrent
+                      ? 'bg-primary shadow-[0_0_0_3px_rgba(229,39,126,0.15)]'
+                      : 'border border-border bg-card',
                   )}
-                  aria-current={isCurrent ? 'step' : undefined}
                 >
-                  {isCompleted
-                    ? <Check className="size-3.5" aria-hidden />
-                    : <span aria-label={`Step ${i + 1}`}>{i + 1}</span>
-                  }
+                  <AnimatePresence mode="wait" initial={false}>
+                    {isCompleted ? (
+                      <motion.span
+                        key="check"
+                        initial={{ scale: 0, opacity: 0 }}
+                        animate={{ scale: 1, opacity: 1 }}
+                        exit={{ scale: 0, opacity: 0 }}
+                        transition={{ type: 'spring', stiffness: 400, damping: 22 }}
+                      >
+                        <Check className="size-[9px] text-white" aria-hidden />
+                      </motion.span>
+                    ) : isCurrent ? (
+                      <motion.span
+                        key="active"
+                        className="size-[6px] rounded-full bg-white"
+                        initial={{ scale: 0, opacity: 0 }}
+                        animate={{ scale: 1, opacity: 1 }}
+                        exit={{ scale: 0, opacity: 0 }}
+                        transition={{ duration: 0.18 }}
+                      />
+                    ) : (
+                      <motion.span
+                        key="idle"
+                        className="size-[5px] rounded-full bg-muted-foreground/30"
+                        initial={{ scale: 0, opacity: 0 }}
+                        animate={{ scale: 1, opacity: 1 }}
+                        exit={{ scale: 0, opacity: 0 }}
+                        transition={{ duration: 0.18 }}
+                      />
+                    )}
+                  </AnimatePresence>
                 </div>
 
-                <div className="mt-1.5 flex flex-col items-center text-center">
-                  <span className={cn(
-                    'whitespace-nowrap text-[10.5px] font-medium',
-                    isCompleted ? 'text-emerald-600'           :
-                    isCurrent   ? 'font-semibold text-primary' : 'text-muted-foreground',
-                  )}>
+                {/* Label */}
+                <div className="mt-1.5 flex flex-col items-center">
+                  <span
+                    className={cn(
+                      'whitespace-nowrap text-[10.5px] leading-none transition-colors duration-200',
+                      isCompleted
+                        ? 'font-medium text-emerald-600'
+                        : isCurrent
+                        ? 'font-bold text-foreground'
+                        : 'font-normal text-muted-foreground',
+                    )}
+                  >
                     {step.name}
                   </span>
                   {isCompleted && completedValue && (
-                    <span className="text-[10px] text-muted-foreground">{completedValue}</span>
+                    <motion.span
+                      initial={{ opacity: 0, y: 2 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      transition={{ duration: 0.2 }}
+                      className="mt-0.5 max-w-[72px] truncate whitespace-nowrap text-[9.5px] leading-none text-muted-foreground"
+                    >
+                      {completedValue}
+                    </motion.span>
                   )}
                 </div>
               </div>
@@ -580,7 +697,6 @@ function Stepper({
           )
         })}
       </div>
-
     </nav>
   )
 }
@@ -594,65 +710,95 @@ function EventTypeCard({
   selected,
   onSelect,
 }: {
-  type:     EventTypeOption
-  selected: boolean
-  onSelect: (id: string) => void
+  type:         EventTypeOption
+  selected:     boolean
+  onSelect:     (id: string) => void
+  recommended?: boolean
 }) {
   return (
     <motion.button
+      type="button"
       onClick={() => onSelect(type.id)}
-      whileTap={{ scale: 0.988 }}
+      whileTap={{ scale: 0.993 }}
+      whileHover={
+        selected
+          ? {}
+          : { y: -1, transition: { duration: 0.15, ease: [0.22, 1, 0.36, 1] } }
+      }
       aria-pressed={selected}
       aria-label={`Select ${type.name}`}
       className={cn(
-        'group relative flex cursor-pointer items-start gap-2.5 rounded-xl border-[1.5px] bg-card p-2.5 text-left shadow-sm transition-all duration-150 sm:gap-3 sm:p-3.5',
+        'group relative flex w-full cursor-pointer items-center gap-4 rounded-xl border px-5 py-[15px] text-left',
+        'transition-[border-color,box-shadow,background-color] duration-200 ease-out',
         selected
-          ? 'border-primary bg-primary/[0.02] shadow-md ring-1 ring-primary/10'
-          : 'border-border hover:border-primary/35 hover:shadow',
+          ? 'border-primary/50 bg-primary/[0.025] shadow-[0_0_0_2px_rgba(var(--tw-shadow-color,0,0,0),0),0_4px_20px_rgba(0,0,0,0.06)] ring-2 ring-primary/[0.12]'
+          : 'border-border bg-card shadow-[0_1px_3px_rgba(0,0,0,0.04)] hover:border-border-strong hover:shadow-[0_4px_14px_rgba(0,0,0,0.08)]',
       )}
     >
-      {/* Selected check badge */}
+      {/* Left accent bar on selection */}
       <AnimatePresence>
         {selected && (
           <motion.span
-            key="chk"
-            initial={{ scale: 0, opacity: 0 }}
-            animate={{ scale: 1, opacity: 1 }}
-            exit={{ scale: 0, opacity: 0 }}
-            transition={{ duration: 0.14, ease: EASE }}
-            className="absolute right-2.5 top-2.5 flex size-[18px] shrink-0 items-center justify-center rounded-full bg-primary text-primary-foreground shadow-sm"
+            key="accent"
+            initial={{ scaleY: 0, opacity: 0 }}
+            animate={{ scaleY: 1, opacity: 1 }}
+            exit={{ scaleY: 0, opacity: 0 }}
+            transition={{ duration: 0.18, ease: [0.22, 1, 0.36, 1] }}
+            className="pointer-events-none absolute left-2 top-1/2 h-6 w-[3px] -translate-y-1/2 rounded-full bg-primary"
             aria-hidden
-          >
-            <Check className="size-2.5" />
-          </motion.span>
+          />
         )}
       </AnimatePresence>
 
       {/* Icon */}
       <div
         className={cn(
-          'mt-0.5 flex size-[34px] shrink-0 items-center justify-center rounded-lg transition-transform duration-150 group-hover:scale-[1.06] sm:size-[38px]',
+          'flex size-11 shrink-0 items-center justify-center rounded-xl transition-shadow duration-200',
           type.iconBg,
+          selected && 'shadow-[0_2px_8px_rgba(0,0,0,0.10)]',
         )}
         aria-hidden
       >
-        <type.icon className={cn('size-[16px] sm:size-[18px]', type.iconColor)} />
+        <type.icon className={cn('size-[20px]', type.iconColor)} />
       </div>
 
-      {/* Text — padded right so check badge doesn't overlap */}
-      <div className="min-w-0 flex-1 pr-4">
-        <p className="text-[12px] font-semibold leading-tight text-foreground sm:text-[13px]">{type.name}</p>
-        <p className="mt-0.5 hidden text-[11.5px] leading-snug text-muted-foreground line-clamp-2 sm:block">
-          {type.description}
+      {/* Content */}
+      <div className="min-w-0 flex-1">
+        <p className={cn(
+          'text-[13.5px] font-semibold leading-snug tracking-tight transition-colors duration-200',
+          selected ? 'text-foreground' : 'text-foreground/90 group-hover:text-foreground',
+        )}>
+          {type.name}
         </p>
-        <p className="mt-0.5 block text-[10.5px] leading-snug text-muted-foreground line-clamp-1 sm:hidden">
+        <p className="mt-0.5 line-clamp-2 text-[12px] leading-relaxed text-muted-foreground">
           {type.description}
-        </p>
-        <p className="mt-1 text-[10px] text-muted-foreground/50 sm:text-[10.5px]">
-          {type.examples.split(',')[0].trim()}
-          {type.examples.includes(',') && '…'}
         </p>
       </div>
+
+      {/* Selection indicator */}
+      <span
+        className={cn(
+          'ml-1 flex size-5 shrink-0 items-center justify-center rounded-full transition-all duration-200',
+          selected
+            ? 'bg-primary shadow-[0_2px_6px_rgba(0,0,0,0.18)]'
+            : 'border border-border bg-card group-hover:border-border-strong',
+        )}
+        aria-hidden
+      >
+        <AnimatePresence>
+          {selected && (
+            <motion.span
+              key="check"
+              initial={{ scale: 0, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0, opacity: 0 }}
+              transition={{ type: 'spring', stiffness: 500, damping: 25 }}
+            >
+              <Check className="size-3 text-white" />
+            </motion.span>
+          )}
+        </AnimatePresence>
+      </span>
     </motion.button>
   )
 }
@@ -694,7 +840,7 @@ function SubtypeSelector({
   }, [isOther])
 
   const inputCls =
-    'h-9 w-full rounded-lg border border-border bg-background px-3 text-[12.5px] text-foreground placeholder:text-muted-foreground/60 outline-none transition-colors focus:border-primary/50 focus:ring-2 focus:ring-primary/20'
+    'h-9 w-full rounded-lg border border-border bg-background px-3 text-[14px] text-foreground placeholder:text-muted-foreground/60 outline-none transition-colors focus:border-primary/50 focus:ring-2 focus:ring-primary/20'
 
   return (
     <motion.div
@@ -703,9 +849,9 @@ function SubtypeSelector({
       animate={{ opacity: 1, y: 0 }}
       exit={{ opacity: 0, y: -6 }}
       transition={{ duration: 0.2, ease: EASE }}
-      className="flex flex-col gap-2"
+      className="flex flex-col gap-3"
     >
-      <div className="rounded-xl border border-border bg-card p-4 shadow-sm">
+      <div className="rounded-xl border border-border bg-card p-5 shadow-[0_1px_4px_rgba(0,0,0,0.05)]">
         {/* Header */}
         <div className="mb-3 flex items-center gap-2.5">
           {et && (
@@ -714,14 +860,34 @@ function SubtypeSelector({
             </div>
           )}
           <div className="min-w-0 flex-1">
-            <p className="text-[13px] font-semibold text-foreground">
-              {isCustomType ? 'Custom Event Category' : (config?.label ?? 'Event Format')}
-              {!isCustomType && <span className="ml-0.5 text-red-500">*</span>}
-            </p>
-            <p className="text-[11px] text-muted-foreground">
+            {/* Brief accent highlight on first reveal */}
+            <div className="relative">
+              <motion.div
+                key={eventTypeId}
+                initial={{ opacity: 1 }}
+                animate={{ opacity: 0 }}
+                transition={{ delay: 0.3, duration: 0.8, ease: 'easeOut' }}
+                className="pointer-events-none absolute -inset-x-1 -inset-y-0.5 rounded bg-primary/10"
+                aria-hidden
+              />
+              {isCustomType ? (
+                <p className="relative text-[13px] font-semibold text-foreground">
+                  Custom Event Category
+                </p>
+              ) : (
+                <div className="relative flex items-center gap-1.5">
+                  <Sparkles className="size-[12px] shrink-0 text-muted-foreground/60" aria-hidden />
+                  <span className="text-[11px] font-semibold uppercase tracking-[0.1em] text-muted-foreground/60">
+                    Event Format
+                  </span>
+                  <span className="ml-0.5 text-[10px] text-red-500">*</span>
+                </div>
+              )}
+            </div>
+            <p className="text-[12px] text-muted-foreground">
               {isCustomType
                 ? 'Describe your event type or create a custom category.'
-                : config?.hint}
+                : 'Choose the specific format for your event.'}
             </p>
           </div>
         </div>
@@ -753,10 +919,10 @@ function SubtypeSelector({
                     aria-pressed={sel}
                     onClick={() => onSubtype(opt.id)}
                     className={cn(
-                      'flex items-center gap-1 rounded-full border-[1.5px] px-2.5 py-[4px] text-[12px] font-medium transition-all duration-150',
+                      'flex items-center gap-1 rounded-full border px-3 py-[5px] text-[12px] font-medium transition-all duration-150',
                       sel
-                        ? 'border-primary bg-primary text-primary-foreground shadow-sm'
-                        : 'border-border bg-card text-foreground hover:border-primary/40 hover:bg-primary/[0.03]',
+                        ? 'border-primary bg-primary text-white shadow-sm'
+                        : 'border-border bg-card text-foreground hover:border-border-strong hover:bg-muted/60',
                     )}
                   >
                     {sel && <Check className="size-2.5 shrink-0" aria-hidden />}
@@ -786,7 +952,7 @@ function SubtypeSelector({
                       onChange={e => onCustomSubtype(e.target.value)}
                       maxLength={60}
                     />
-                    <p className="mt-1 text-[11px] text-muted-foreground">
+                    <p className="mt-1 text-[12px] text-muted-foreground">
                       e.g. 15K Run, Ultra Marathon, Product Demo Day…
                     </p>
                   </div>
@@ -802,10 +968,10 @@ function SubtypeSelector({
         <motion.div
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
-          className="flex items-center gap-2 rounded-lg border border-primary/15 bg-primary/[0.05] px-3.5 py-2.5"
+          className="flex items-center gap-2 rounded-lg border border-primary/20 bg-card px-3.5 py-2.5 shadow-[0_1px_3px_rgba(0,0,0,0.04)]"
         >
           <CheckCircle2 className="size-3.5 shrink-0 text-primary" aria-hidden />
-          <p className="min-w-0 truncate text-[12.5px] font-medium text-foreground">
+          <p className="min-w-0 truncate text-[14px] font-medium text-foreground">
             {et?.name}
             {resolvedName && (
               <>
@@ -850,14 +1016,9 @@ function Step1HelperPanel() {
         <p className="mb-3.5 text-[12px] leading-relaxed text-muted-foreground">
           We're here to help you create the perfect event.
         </p>
-        <Link
-          href="#"
-          className={cn(buttonVariants({ variant: 'outline', size: 'sm' }), 'w-full')}
-          aria-label="View help guide"
-        >
-          View Help Guide
-          <ExternalLink className="ml-1 size-3" aria-hidden />
-        </Link>
+        {/* GA-7 S1: organizer-facing help docs are not yet published — the help
+            action is hidden rather than shipping a dead link. Restore with the
+            real docs URL once the guide exists. */}
       </div>
 
       <div className="border-t border-border" />
@@ -937,7 +1098,7 @@ function VisibilityCard({
         <p className="mt-5 text-[19px] font-bold text-foreground">{option.name}</p>
 
         <span className={cn(
-          'mt-2 rounded-full px-3 py-0.5 text-[11.5px] font-semibold',
+          'mt-2 rounded-full px-3 py-0.5 text-[13px] font-semibold',
           option.badge.className,
         )}>
           {option.badge.label}
@@ -974,7 +1135,7 @@ function VisibilityCard({
         )}>
           <TipIcon className={cn('size-3.5', option.tipColor)} aria-hidden />
         </div>
-        <p className={cn('text-[12.5px] leading-relaxed', option.tipColor)}>
+        <p className={cn('text-[13px] leading-relaxed', option.tipColor)}>
           {option.tip}
         </p>
       </div>
@@ -983,6 +1144,7 @@ function VisibilityCard({
 }
 
 function Step2HelperPanel() {
+  const { supportEmail } = useBranding()
   return (
     <aside
       aria-label="Visibility selection guide"
@@ -1051,9 +1213,9 @@ function Step2HelperPanel() {
           Our support team is here to assist you.
         </p>
         <Link
-          href="mailto:support@registerdesk.co"
-          className="inline-flex items-center gap-1 text-[12.5px] font-semibold text-primary hover:underline underline-offset-4"
-          aria-label="Contact RegisterDesk support"
+          href={`mailto:${supportEmail}`}
+          className="inline-flex items-center gap-1 text-[14px] font-semibold text-primary hover:underline underline-offset-4"
+          aria-label="Contact support"
         >
           Contact Support
           <ArrowRight className="size-3" aria-hidden />
@@ -1107,7 +1269,7 @@ function AccessControlCard({
       </div>
 
       {/* Description */}
-      <p className="line-clamp-2 px-4 pb-3 text-[11.5px] leading-relaxed text-muted-foreground">
+      <p className="line-clamp-2 px-4 pb-3 text-[13px] leading-relaxed text-muted-foreground">
         {option.description}
       </p>
 
@@ -1115,7 +1277,7 @@ function AccessControlCard({
       <div className="mt-auto border-t border-border/70 px-4 py-2.5">
         <span
           className={cn(
-            'inline-block rounded-md px-2 py-[3px] text-[10.5px] font-medium',
+            'inline-block rounded-md px-2 py-[3px] text-[12px] font-medium',
             option.badgeBg,
             option.badgeColor,
           )}
@@ -1162,7 +1324,7 @@ function Step3SummaryPanel({
     >
       {/* Panel header */}
       <div className="border-b border-border px-4 py-3">
-        <p className="text-[12.5px] font-semibold text-foreground">
+        <p className="text-[14px] font-semibold text-foreground">
           Your event access summary
         </p>
       </div>
@@ -1173,8 +1335,8 @@ function Step3SummaryPanel({
           <VisIcon className={cn('size-[15px]', visIconColor)} aria-hidden />
         </div>
         <div className="min-w-0">
-          <p className="text-[12.5px] font-semibold leading-tight text-primary">{displayLabel}</p>
-          <p className="mt-0.5 text-[11px] leading-snug text-muted-foreground">
+          <p className="text-[14px] font-semibold leading-tight text-primary">{displayLabel}</p>
+          <p className="mt-0.5 text-[12px] leading-snug text-muted-foreground">
             Access restricted by selected method.
           </p>
         </div>
@@ -1182,7 +1344,7 @@ function Step3SummaryPanel({
 
       {/* Selected method */}
       <div className="border-b border-border px-4 py-3">
-        <p className="mb-2 text-[10.5px] font-semibold uppercase tracking-wider text-muted-foreground">
+        <p className="mb-2 text-[12px] font-semibold uppercase tracking-wider text-muted-foreground">
           Selected Method
         </p>
         {selectedOption ? (
@@ -1198,7 +1360,7 @@ function Step3SummaryPanel({
                 {selectedOption.name}
               </p>
               {selectedOption.id === 'approved_contacts' && approvedContactsCount !== undefined && (
-                <p className="mt-0.5 text-[10.5px] text-muted-foreground">
+                <p className="mt-0.5 text-[12px] text-muted-foreground">
                   {approvedContactsCount} contact{approvedContactsCount !== 1 ? 's' : ''} added
                 </p>
               )}
@@ -1206,7 +1368,7 @@ function Step3SummaryPanel({
           </div>
         ) : (
           <div className="flex items-center rounded-lg border border-dashed border-border bg-muted/20 px-3 py-2">
-            <span className="text-[11.5px] text-muted-foreground/60">
+            <span className="text-[13px] text-muted-foreground/60">
               Select an option above
             </span>
           </div>
@@ -1233,7 +1395,7 @@ function Step3SummaryPanel({
                 aria-hidden
               />
               <span className={cn(
-                'text-[11.5px] leading-snug',
+                'text-[13px] leading-snug',
                 selectedOption ? 'text-muted-foreground' : 'text-muted-foreground/45',
               )}>
                 {item}
@@ -1245,7 +1407,7 @@ function Step3SummaryPanel({
 
       {/* Registration confirmation */}
       <div className="border-b border-border px-4 py-3">
-        <p className="mb-2 text-[10.5px] font-semibold uppercase tracking-wider text-muted-foreground">
+        <p className="mb-2 text-[12px] font-semibold uppercase tracking-wider text-muted-foreground">
           Confirmation
         </p>
         <div className={cn(
@@ -1264,7 +1426,7 @@ function Step3SummaryPanel({
             <p className="text-[12px] font-medium leading-tight text-foreground">
               {confirmOpt.title}
             </p>
-            <p className="text-[10.5px] text-muted-foreground">
+            <p className="text-[12px] text-muted-foreground">
               {confirmationMode === 'auto'
                 ? 'Confirmed instantly after submission'
                 : 'Pending until manually reviewed'}
@@ -1277,7 +1439,7 @@ function Step3SummaryPanel({
       <div className="border-b border-border px-4 py-3">
         <div className="flex items-start gap-2 rounded-lg bg-muted/[0.06] px-3 py-2.5">
           <Lightbulb className="mt-0.5 size-3 shrink-0 text-amber-500" aria-hidden />
-          <p className="text-[11px] leading-relaxed text-muted-foreground">
+          <p className="text-[12px] leading-relaxed text-muted-foreground">
             {confirmationMode === 'auto'
               ? 'Auto Confirm works best for open or code-gated events with immediate payment.'
               : 'Manual Approval gives you full control — ideal for exclusive or curated events.'}
@@ -1291,17 +1453,10 @@ function Step3SummaryPanel({
           <Headphones className="size-3.5 shrink-0 text-foreground" aria-hidden />
           <p className="text-[12px] font-semibold text-foreground">Need help choosing?</p>
         </div>
-        <p className="mb-2.5 text-[11px] leading-relaxed text-muted-foreground">
+        <p className="mb-2.5 text-[12px] leading-relaxed text-muted-foreground">
           Learn more about access control options.
         </p>
-        <Link
-          href="#"
-          className="inline-flex items-center gap-1 text-[12px] font-semibold text-primary hover:underline underline-offset-4"
-          aria-label="View access control help guide"
-        >
-          View Help Guide
-          <ExternalLink className="size-3" aria-hidden />
-        </Link>
+        {/* GA-7 S1: help docs not yet published — action hidden until the guide exists. */}
       </div>
     </aside>
   )
@@ -1353,7 +1508,7 @@ function Step3OpenToAllPanel() {
             <div>
               <div className="flex flex-wrap items-center gap-2">
                 <p className="text-[14.5px] font-bold text-foreground">Open to All</p>
-                <span className="rounded-full bg-emerald-50 px-2 py-[2px] text-[10.5px] font-semibold text-emerald-600">
+                <span className="rounded-full bg-emerald-50 px-2 py-[2px] text-[12px] font-semibold text-emerald-600">
                   Recommended
                 </span>
               </div>
@@ -1368,7 +1523,7 @@ function Step3OpenToAllPanel() {
             {OPEN_BENEFITS.map(b => (
               <li key={b} className="flex items-start gap-2.5">
                 <CheckCircle2 className="mt-0.5 size-[14px] shrink-0 text-primary" aria-hidden />
-                <span className="text-[12.5px] text-foreground">{b}</span>
+                <span className="text-[14px] text-foreground">{b}</span>
               </li>
             ))}
           </ul>
@@ -1376,7 +1531,7 @@ function Step3OpenToAllPanel() {
           {/* Tip */}
           <div className="mt-4 flex items-start gap-2.5 rounded-lg border border-primary/10 bg-primary/[0.04] px-3.5 py-3">
             <Lightbulb className="mt-0.5 size-3.5 shrink-0 text-amber-500" aria-hidden />
-            <p className="text-[11.5px] leading-relaxed text-muted-foreground">
+            <p className="text-[13px] leading-relaxed text-muted-foreground">
               This is the best option for public events where you want maximum reach and easy registration.
             </p>
           </div>
@@ -1396,7 +1551,7 @@ function Step3OpenToAllPanel() {
                     <Icon className="size-[17px] text-primary" aria-hidden />
                   </div>
                   <div>
-                    <p className="text-[12.5px] font-medium text-foreground">{item.line1}</p>
+                    <p className="text-[14px] font-medium text-foreground">{item.line1}</p>
                     <p className="text-[12px] text-muted-foreground">{item.line2}</p>
                   </div>
                 </li>
@@ -1503,7 +1658,7 @@ function Step3InviteCodePanel({
                 <p className="text-[14.5px] font-bold text-foreground">
                   Invite Code (Code Required)
                 </p>
-                <span className="rounded-full bg-emerald-50 px-2 py-[2px] text-[10.5px] font-semibold text-emerald-600">
+                <span className="rounded-full bg-emerald-50 px-2 py-[2px] text-[12px] font-semibold text-emerald-600">
                   Recommended
                 </span>
               </div>
@@ -1518,7 +1673,7 @@ function Step3InviteCodePanel({
             {INVITE_CODE_BENEFITS.map(b => (
               <li key={b} className="flex items-start gap-2.5">
                 <CheckCircle2 className="mt-0.5 size-[14px] shrink-0 text-primary" aria-hidden />
-                <span className="text-[12.5px] text-foreground">{b}</span>
+                <span className="text-[14px] text-foreground">{b}</span>
               </li>
             ))}
           </ul>
@@ -1526,7 +1681,7 @@ function Step3InviteCodePanel({
           {/* Tip */}
           <div className="mt-4 flex items-start gap-2.5 rounded-lg border border-primary/10 bg-primary/[0.04] px-3.5 py-3">
             <Lightbulb className="mt-0.5 size-3.5 shrink-0 text-amber-500" aria-hidden />
-            <p className="text-[11.5px] leading-relaxed text-muted-foreground">
+            <p className="text-[13px] leading-relaxed text-muted-foreground">
               Great for private events, invite-only sessions, or exclusive programs where you want controlled access.
             </p>
           </div>
@@ -1540,7 +1695,7 @@ function Step3InviteCodePanel({
           <div>
             <label className="mb-1 flex items-center text-[12px] font-medium text-foreground">
               Invite Code
-              <span className="ml-0.5 text-[11px] text-red-500" aria-hidden>*</span>
+              <span className="ml-0.5 text-[12px] text-red-500" aria-hidden>*</span>
             </label>
             <div className="flex gap-2">
               <input
@@ -1568,7 +1723,7 @@ function Step3InviteCodePanel({
           <div>
             <label className="mb-1 flex items-center text-[12px] font-medium text-foreground">
               Confirm Invite Code
-              <span className="ml-0.5 text-[11px] text-red-500" aria-hidden>*</span>
+              <span className="ml-0.5 text-[12px] text-red-500" aria-hidden>*</span>
             </label>
             <div className="relative">
               <input
@@ -1599,7 +1754,7 @@ function Step3InviteCodePanel({
               )}
             </div>
             {codeMismatch && (
-              <p className="mt-1 text-[11px] text-red-500" role="alert">Codes do not match</p>
+              <p className="mt-1 text-[12px] text-red-500" role="alert">Codes do not match</p>
             )}
           </div>
 
@@ -1607,7 +1762,7 @@ function Step3InviteCodePanel({
           <div>
             <label className="mb-1 flex items-center gap-1.5 text-[12px] font-medium text-foreground">
               Code Description
-              <span className="text-[11px] font-normal text-muted-foreground">(Optional)</span>
+              <span className="text-[12px] font-normal text-muted-foreground">(Optional)</span>
             </label>
             <div className="relative">
               <input
@@ -1618,7 +1773,7 @@ function Step3InviteCodePanel({
                 className={cn(inputCls, 'pr-14')}
                 aria-label="Code description"
               />
-              <span className="pointer-events-none absolute right-3 top-2.5 text-[10.5px] text-muted-foreground">
+              <span className="pointer-events-none absolute right-3 top-2.5 text-[12px] text-muted-foreground">
                 {draft.description.length}/100
               </span>
             </div>
@@ -1629,7 +1784,7 @@ function Step3InviteCodePanel({
             <div>
               <label className="mb-1 flex items-center gap-1 text-[12px] font-medium text-foreground">
                 Code Expiry
-                <span className="text-[11px] font-normal text-muted-foreground">(Optional)</span>
+                <span className="text-[12px] font-normal text-muted-foreground">(Optional)</span>
               </label>
               <div className="relative">
                 <input
@@ -1654,7 +1809,7 @@ function Step3InviteCodePanel({
             <div>
               <label className="mb-1 flex items-center gap-1 text-[12px] font-medium text-foreground">
                 Max Uses
-                <span className="text-[11px] font-normal text-muted-foreground">(Optional)</span>
+                <span className="text-[12px] font-normal text-muted-foreground">(Optional)</span>
               </label>
               <input
                 type="number"
@@ -1786,7 +1941,7 @@ function Step3ApprovedContactListPanel({
   const csvRef  = useRef<HTMLInputElement>(null)
   const xlsxRef = useRef<HTMLInputElement>(null)
 
-  const inputCls     = 'h-9 w-full rounded-lg border border-border bg-background px-3 text-[12.5px] text-foreground placeholder:text-muted-foreground/60 outline-none transition-colors focus:border-primary/50 focus:ring-2 focus:ring-primary/20'
+  const inputCls     = 'h-9 w-full rounded-lg border border-border bg-background px-3 text-[14px] text-foreground placeholder:text-muted-foreground/60 outline-none transition-colors focus:border-primary/50 focus:ring-2 focus:ring-primary/20'
   const editInputCls = 'h-7 w-full min-w-0 rounded border border-border bg-background px-2 text-[12px] text-foreground placeholder:text-muted-foreground/40 outline-none transition-colors focus:border-primary/60 focus:ring-1 focus:ring-primary/15'
 
   // -- Derived
@@ -1972,10 +2127,10 @@ function Step3ApprovedContactListPanel({
         </div>
         <div className="min-w-0 flex-1">
           <p className="text-[13px] font-bold text-foreground">Approved Contact List</p>
-          <p className="text-[11.5px] text-muted-foreground">Only contacts on this list can access and register.</p>
+          <p className="text-[13px] text-muted-foreground">Only contacts on this list can access and register.</p>
         </div>
         {contacts.length > 0 && (
-          <span className="shrink-0 rounded-full bg-blue-50 px-2.5 py-1 text-[11px] font-semibold text-blue-600">
+          <span className="shrink-0 rounded-full bg-blue-50 px-2.5 py-1 text-[12px] font-semibold text-blue-600">
             {contacts.length} contact{contacts.length !== 1 ? 's' : ''}
           </span>
         )}
@@ -2012,7 +2167,7 @@ function Step3ApprovedContactListPanel({
             value={search}
             onChange={e => { setSearch(e.target.value); setPage(1) }}
             placeholder="Search contacts…"
-            className="h-9 w-full rounded-lg border border-border bg-background pl-8 pr-7 text-[12.5px] text-foreground placeholder:text-muted-foreground/50 outline-none transition-colors focus:border-primary/50 focus:ring-2 focus:ring-primary/20"
+            className="h-9 w-full rounded-lg border border-border bg-background pl-8 pr-7 text-[14px] text-foreground placeholder:text-muted-foreground/50 outline-none transition-colors focus:border-primary/50 focus:ring-2 focus:ring-primary/20"
           />
           {search && (
             <button type="button" onClick={() => { setSearch(''); setPage(1) }}
@@ -2035,12 +2190,12 @@ function Step3ApprovedContactListPanel({
             <div className="absolute right-0 top-full z-20 mt-1 min-w-[148px] overflow-hidden rounded-lg border border-border bg-card shadow-md">
               <button type="button" onClick={() => { exportList(contacts); setShowMoreMenu(false) }}
                 disabled={contacts.length === 0}
-                className="flex w-full items-center gap-2 px-3 py-2 text-left text-[12.5px] text-foreground hover:bg-muted/40 disabled:opacity-40">
+                className="flex w-full items-center gap-2 px-3 py-2 text-left text-[14px] text-foreground hover:bg-muted/40 disabled:opacity-40">
                 <Download className="size-3.5 shrink-0 text-muted-foreground" aria-hidden /> Export CSV
               </button>
               <div className="h-px bg-border" />
               <button type="button" onClick={handleClearAll} disabled={contacts.length === 0}
-                className="flex w-full items-center gap-2 px-3 py-2 text-left text-[12.5px] text-red-600 hover:bg-red-50 disabled:opacity-40">
+                className="flex w-full items-center gap-2 px-3 py-2 text-left text-[13px] text-red-600 hover:bg-red-50 disabled:opacity-40">
                 <Trash2 className="size-3.5 shrink-0" aria-hidden /> Clear All
               </button>
             </div>
@@ -2069,15 +2224,15 @@ function Step3ApprovedContactListPanel({
               </span>
               <div className="ml-auto flex items-center gap-2">
                 <button type="button" onClick={() => exportList(contacts.filter(c => selectedIds.has(c.id)))}
-                  className={cn(buttonVariants({ variant: 'outline', size: 'sm' }), 'h-7 gap-1.5 text-[11.5px]')}>
+                  className={cn(buttonVariants({ variant: 'outline', size: 'sm' }), 'h-7 gap-1.5 text-[13px]')}>
                   <Download className="size-3" aria-hidden /> Export
                 </button>
                 <button type="button" onClick={handleBulkDelete}
-                  className={cn(buttonVariants({ variant: 'outline', size: 'sm' }), 'h-7 gap-1.5 border-red-200 text-[11.5px] text-red-600 hover:border-red-300 hover:bg-red-50')}>
+                  className={cn(buttonVariants({ variant: 'outline', size: 'sm' }), 'h-7 gap-1.5 border-red-200 text-[13px] text-red-600 hover:border-red-300 hover:bg-red-50')}>
                   <Trash2 className="size-3" aria-hidden /> Delete
                 </button>
                 <button type="button" onClick={() => setSelectedIds(new Set())}
-                  className="text-[11.5px] text-muted-foreground hover:text-foreground">
+                  className="text-[13px] text-muted-foreground hover:text-foreground">
                   Clear
                 </button>
               </div>
@@ -2098,32 +2253,32 @@ function Step3ApprovedContactListPanel({
           >
             <div className="grid grid-cols-2 gap-3 bg-muted/[0.03] px-5 py-4 sm:grid-cols-4">
               <div>
-                <label className="mb-1 block text-[11.5px] font-medium text-foreground">Name</label>
+                <label className="mb-1 block text-[13px] font-medium text-foreground">Name</label>
                 <input type="text" value={form.name}
                   onChange={e => setForm(f => ({ ...f, name: e.target.value }))}
                   placeholder="Full name" className={inputCls} />
               </div>
               <div>
-                <label className="mb-1 flex items-center text-[11.5px] font-medium text-foreground">
-                  Mobile Number <span className="ml-0.5 text-[10.5px] text-red-500" aria-hidden>*</span>
+                <label className="mb-1 flex items-center text-[13px] font-medium text-foreground">
+                  Mobile Number <span className="ml-0.5 text-[12px] text-red-500" aria-hidden>*</span>
                 </label>
                 <input type="tel" value={form.mobileNumber}
                   onChange={e => { setForm(f => ({ ...f, mobileNumber: e.target.value })); setMobileErr('') }}
                   placeholder="+919876543210" aria-required
                   className={cn(inputCls, mobileErr && 'border-red-400 focus:border-red-400 focus:ring-red-100')} />
-                {mobileErr && <p className="mt-1 text-[10.5px] text-red-500" role="alert">{mobileErr}</p>}
+                {mobileErr && <p className="mt-1 text-[12px] text-red-500" role="alert">{mobileErr}</p>}
               </div>
               <div>
-                <label className="mb-1 flex items-center gap-1 text-[11.5px] font-medium text-foreground">
-                  Email <span className="text-[10.5px] font-normal text-muted-foreground">(Optional)</span>
+                <label className="mb-1 flex items-center gap-1 text-[13px] font-medium text-foreground">
+                  Email <span className="text-[12px] font-normal text-muted-foreground">(Optional)</span>
                 </label>
                 <input type="email" value={form.email}
                   onChange={e => setForm(f => ({ ...f, email: e.target.value }))}
                   placeholder="email@example.com" className={inputCls} />
               </div>
               <div>
-                <label className="mb-1 flex items-center gap-1 text-[11.5px] font-medium text-foreground">
-                  Member ID <span className="text-[10.5px] font-normal text-muted-foreground">(Optional)</span>
+                <label className="mb-1 flex items-center gap-1 text-[13px] font-medium text-foreground">
+                  Member ID <span className="text-[12px] font-normal text-muted-foreground">(Optional)</span>
                 </label>
                 <input type="text" value={form.memberId}
                   onChange={e => setForm(f => ({ ...f, memberId: e.target.value }))}
@@ -2176,7 +2331,7 @@ function Step3ApprovedContactListPanel({
         /* Search returns nothing */
         <div className="flex flex-col items-center gap-2 py-9 text-center">
           <Search className="size-5 text-muted-foreground/30" aria-hidden />
-          <p className="text-[12.5px] font-medium text-muted-foreground">
+          <p className="text-[13px] font-medium text-muted-foreground">
             No results for &ldquo;{search}&rdquo;
           </p>
           <button type="button" onClick={() => setSearch('')}
@@ -2204,7 +2359,7 @@ function Step3ApprovedContactListPanel({
                   />
                 </th>
                 {/* Row number */}
-                <th className="w-8 px-2 py-2.5 text-[10.5px] font-semibold uppercase tracking-wider text-muted-foreground">#</th>
+                <th className="w-8 px-2 py-2.5 text-[12px] font-semibold uppercase tracking-wider text-muted-foreground">#</th>
                 {/* Sortable columns */}
                 {(
                   [
@@ -2216,7 +2371,7 @@ function Step3ApprovedContactListPanel({
                 ).map(({ label, col }) => (
                   <th key={col}
                     onClick={() => handleSort(col)}
-                    className="cursor-pointer select-none px-3 py-2.5 text-[10.5px] font-semibold uppercase tracking-wider text-muted-foreground transition-colors hover:text-foreground"
+                    className="cursor-pointer select-none px-3 py-2.5 text-[12px] font-semibold uppercase tracking-wider text-muted-foreground transition-colors hover:text-foreground"
                   >
                     {label}
                     <SortIndicator col={col} />
@@ -2253,17 +2408,17 @@ function Step3ApprovedContactListPanel({
                         <input type="tel" value={editForm.mobileNumber}
                           onChange={e => { setEditForm(f => ({ ...f, mobileNumber: e.target.value })); setEditMobileErr('') }}
                           placeholder="Mobile" className={cn(editInputCls, editMobileErr && 'border-red-400')} />
-                        {editMobileErr && <p className="mt-0.5 text-[10px] text-red-500">{editMobileErr}</p>}
+                        {editMobileErr && <p className="mt-0.5 text-[12px] text-red-500">{editMobileErr}</p>}
                       </td>
                       <td className="px-3 py-2 text-[12px] text-muted-foreground">{formatDate(c.addedAt)}</td>
                       <td className="px-3 py-2">
                         <div className="flex items-center gap-1">
                           <button type="button" onClick={saveEdit}
-                            className="flex items-center gap-1 rounded px-2 py-1 text-[11.5px] font-medium text-emerald-600 hover:bg-emerald-50">
+                            className="flex items-center gap-1 rounded px-2 py-1 text-[13px] font-medium text-emerald-600 hover:bg-emerald-50">
                             <Check className="size-3" aria-hidden /> Save
                           </button>
                           <button type="button" onClick={cancelEdit}
-                            className="flex items-center gap-1 rounded px-2 py-1 text-[11.5px] text-muted-foreground hover:bg-muted/40">
+                            className="flex items-center gap-1 rounded px-2 py-1 text-[13px] text-muted-foreground hover:bg-muted/40">
                             <X className="size-3" aria-hidden /> Cancel
                           </button>
                         </div>
@@ -2286,7 +2441,7 @@ function Step3ApprovedContactListPanel({
                     </td>
                     <td className="px-2 py-2.5 text-[12px] tabular-nums text-muted-foreground/55">{rowNum}</td>
                     <td className="max-w-[130px] px-3 py-2.5">
-                      <span className="block truncate text-[12.5px] font-medium text-foreground">
+                      <span className="block truncate text-[14px] font-medium text-foreground">
                         {c.name || <span className="text-muted-foreground/35">—</span>}
                       </span>
                     </td>
@@ -2301,11 +2456,11 @@ function Step3ApprovedContactListPanel({
                       {isDeleting ? (
                         <div className="flex items-center gap-1">
                           <button type="button" onClick={() => handleDeleteConfirm(c.id)}
-                            className="rounded bg-red-500 px-2 py-0.5 text-[11px] font-semibold text-white hover:bg-red-600">
+                            className="rounded bg-red-500 px-2 py-0.5 text-[12px] font-semibold text-white hover:bg-red-600">
                             Confirm
                           </button>
                           <button type="button" onClick={() => setDeleteConfirmId(null)}
-                            className="rounded px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-muted/40">
+                            className="rounded px-2 py-0.5 text-[12px] text-muted-foreground hover:bg-muted/40">
                             Cancel
                           </button>
                         </div>
@@ -2336,7 +2491,7 @@ function Step3ApprovedContactListPanel({
       {/* -- Pagination -- */}
       {contacts.length > 0 && totalPages > 1 && (
         <div className="flex items-center justify-between border-t border-border/50 px-5 py-2.5">
-          <p className="text-[11.5px] text-muted-foreground">
+          <p className="text-[13px] text-muted-foreground">
             {(curPage - 1) * PAGE_SIZE + 1}–{Math.min(curPage * PAGE_SIZE, sorted.length)} of {sorted.length}
           </p>
           <div className="flex items-center gap-1">
@@ -2374,8 +2529,8 @@ function Step3ApprovedContactListPanel({
       <div className="flex items-start gap-2.5 border-t border-border/60 bg-amber-50/40 px-5 py-3">
         <AlertCircle className="mt-0.5 size-3.5 shrink-0 text-amber-500" aria-hidden />
         <div>
-          <p className="text-[11.5px] font-medium text-foreground">Validation at registration</p>
-          <p className="mt-0.5 text-[11px] leading-relaxed text-muted-foreground">
+          <p className="text-[13px] font-medium text-foreground">Validation at registration</p>
+          <p className="mt-0.5 text-[12px] leading-relaxed text-muted-foreground">
             Mobile number is the primary match. Email and Member ID are optional secondary fields.
             If not found:{' '}
             <span className="font-medium text-foreground/80">
@@ -2438,16 +2593,13 @@ function RegistrationConfirmationSection({
   return (
     <div className="mt-1">
       {/* Section header */}
-      <div className="mb-3 flex items-start gap-2.5">
-        <span
-          className="mt-0.5 flex size-[22px] shrink-0 items-center justify-center rounded-full bg-primary text-[10.5px] font-bold text-primary-foreground"
-          aria-hidden
-        >
-          2
-        </span>
+      <div className="mb-3 flex items-center gap-3">
+        <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary/[0.09]">
+          <CheckCircle2 className="size-4 text-primary" aria-hidden />
+        </div>
         <div>
           <p className="text-[14px] font-bold text-foreground">Registration Confirmation</p>
-          <p className="mt-0.5 text-[12.5px] text-muted-foreground">
+          <p className="mt-0.5 text-[13px] text-muted-foreground">
             Choose how registrations will be confirmed.
           </p>
         </div>
@@ -2487,7 +2639,7 @@ function RegistrationConfirmationSection({
                 <div className="flex flex-wrap items-center gap-2">
                   <p className="text-[13px] font-bold text-foreground">{opt.title}</p>
                   <span className={cn(
-                    'rounded-full px-2 py-[2px] text-[10.5px] font-semibold',
+                    'rounded-full px-2 py-[2px] text-[12px] font-semibold',
                     opt.badgeBg, opt.badgeColor,
                   )}>
                     {opt.badge}
@@ -2511,7 +2663,7 @@ function RegistrationConfirmationSection({
 
 // --- State types --------------------------------------------------------------
 
-interface Step1State { eventType: string | null; subtype: string | null; customSubtype: string }
+interface Step1State { eventType: string | null; subtype: string | null; customSubtype: string; campaignType: CampaignType | null }
 interface Step2State { visibility: VisibilityId | null }
 interface Step3State { accessControl: { type: AccessControlId } | null }
 
@@ -2524,41 +2676,191 @@ interface StepViewProps {
   onBack:          () => void
   onSaveDraft?:    (data?: unknown) => void
   initialData?:    Record<string, unknown> | null
+  onGoToStep?:     (step: number, fieldHint?: string) => void
+  focusHint?:      string
+  wizardSteps?:    WizardStep[]
+}
+
+// --- Campaign type intercept components ---------------------------------------
+
+function CampaignTypeSelector({
+  value,
+  onChange,
+}: {
+  value:    CampaignType | null
+  onChange: (ct: CampaignType) => void
+}) {
+  const options: Array<{
+    id:          CampaignType
+    label:       string
+    description: string
+    comingSoon?: boolean
+  }> = [
+    {
+      id:          'donation_only',
+      label:       'Donation Only',
+      description: 'Pure fundraising campaign with no tickets or event registration',
+    },
+    {
+      id:          'event_plus_donation',
+      label:       'Event + Donation',
+      description: 'Ticketed event with an optional donation component',
+    },
+    {
+      id:          'ticketed_fundraiser',
+      label:       'Ticketed Fundraiser',
+      description: 'Charity event with paid tickets (gala, benefit dinner, charity run)',
+      comingSoon:  true,
+    },
+  ]
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 6 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.25, ease: EASE }}
+      className="rounded-xl border border-border bg-card p-4 shadow-sm"
+    >
+      <p className="mb-3 text-[14px] font-semibold text-foreground">
+        How do you want to raise funds?
+      </p>
+      <div className="space-y-2.5">
+        {options.map(opt => (
+          <button
+            key={opt.id}
+            type="button"
+            disabled={opt.comingSoon}
+            onClick={() => !opt.comingSoon && onChange(opt.id)}
+            className={cn(
+              'relative flex w-full items-start gap-3 rounded-xl border-[1.5px] px-4 py-3 text-left transition-all duration-150',
+              value === opt.id
+                ? 'border-primary bg-primary/[0.03] shadow-sm'
+                : opt.comingSoon
+                ? 'cursor-not-allowed border-border bg-muted/20 opacity-60'
+                : 'border-border bg-card hover:border-primary/30 hover:bg-muted/[0.03]',
+            )}
+          >
+            <div className={cn('mt-0.5 flex size-[16px] shrink-0 items-center justify-center rounded-full border-2', value === opt.id ? 'border-primary bg-primary' : 'border-border')}>
+              {value === opt.id && <div className="size-[7px] rounded-full bg-white" />}
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2">
+                <span className="text-[14px] font-medium text-foreground">{opt.label}</span>
+                {opt.comingSoon && (
+                  <span className="rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
+                    Coming soon
+                  </span>
+                )}
+              </div>
+              <p className="mt-0.5 text-[12.5px] text-muted-foreground">{opt.description}</p>
+            </div>
+          </button>
+        ))}
+      </div>
+    </motion.div>
+  )
+}
+
+function DonationSubtypeSelector({
+  subtype,
+  onSubtype,
+}: {
+  subtype:   DonationCampaignSubtype | null
+  onSubtype: (id: string) => void
+}) {
+  return (
+    <div className="rounded-xl border border-border bg-card p-4 shadow-sm">
+      <p className="mb-3 text-[14px] font-semibold text-foreground">
+        What is your cause?
+      </p>
+      <div className="flex flex-wrap gap-2">
+        {DONATION_CAMPAIGN_SUBTYPES.map(opt => (
+          <button
+            key={opt.id}
+            type="button"
+            onClick={() => onSubtype(opt.id)}
+            className={cn(
+              'flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-[13px] font-medium transition-all duration-150',
+              subtype === opt.id
+                ? 'border-primary bg-primary/[0.07] text-primary'
+                : 'border-border bg-card text-foreground/70 hover:border-primary/30',
+            )}
+          >
+            {subtype === opt.id && <Check className="size-[12px]" />}
+            {opt.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  )
 }
 
 // --- Step 1 view --------------------------------------------------------------
 
 function Step1View({ currentStep, completedValues, onNext, onSaveDraft, initialData }: StepViewProps) {
   const [step1, setStep1] = useState<Step1State>({
-    eventType:    (initialData?.eventType         as string | null) ?? null,
-    subtype:      (initialData?.eventSubtype       as string | null) ?? null,
-    customSubtype:(initialData?.customEventSubtype as string)        ?? '',
+    eventType:    (initialData?.eventType         as string | null)       ?? null,
+    subtype:      (initialData?.eventSubtype       as string | null)       ?? null,
+    customSubtype:(initialData?.customEventSubtype as string)              ?? '',
+    campaignType: (initialData?.campaignType       as CampaignType | null) ?? null,
   })
 
   const selectedType    = step1.eventType
   const selectedSubtype = step1.subtype
   const customSubtype   = step1.customSubtype
+  const campaignType    = step1.campaignType
   const isCustomType    = selectedType === 'custom'
+  const isFundraising   = selectedType === 'fundraising'
   const isOtherSubtype  = selectedSubtype === 'other'
 
   const hasValidSubtype =
     !selectedType ? false
     : isCustomType ? true  // custom event can proceed without a subtype
+    // event_plus_donation is a ticketed event — no cause-category subtype required
+    : (isFundraising && campaignType === 'event_plus_donation') ? true
     : selectedSubtype !== null && (!isOtherSubtype || customSubtype.trim().length > 0)
 
+  // Fundraising events require a campaign type selection before proceeding
   const canProceed = selectedType !== null && hasValidSubtype
+    && (!isFundraising || campaignType !== null)
+
+  const subtypeSectionRef = useRef<HTMLDivElement>(null)
 
   const handleSelectType = (id: string) =>
     setStep1(prev => ({
       eventType:    id,
       subtype:      id !== prev.eventType ? null : prev.subtype,
       customSubtype: id !== prev.eventType ? ''  : prev.customSubtype,
+      campaignType:  id !== prev.eventType ? null : prev.campaignType,
     }))
+
+  useEffect(() => {
+    if (!selectedType) return
+    const timer = setTimeout(() => {
+      const el        = subtypeSectionRef.current
+      const scroller  = document.getElementById('main-content')
+      if (!el || !scroller) return
+
+      const MARGIN    = 24
+      const elRect        = el.getBoundingClientRect()
+      const scrollerRect  = scroller.getBoundingClientRect()
+      const visibleBottom = scrollerRect.bottom - MARGIN
+
+      const bottomOverflow = elRect.bottom - visibleBottom
+      if (bottomOverflow <= 0) return                         // already fully visible
+
+      // Cap scroll so the section title never scrolls above the visible top
+      const maxScroll = Math.max(0, elRect.top - scrollerRect.top - 16)
+      scroller.scrollBy({ top: Math.min(bottomOverflow, maxScroll), behavior: 'smooth' })
+    }, 340)
+    return () => clearTimeout(timer)
+  }, [selectedType])
 
   const buildData = () => ({
     eventType:    selectedType,
     subtype:      selectedSubtype,
     customSubtype: (isOtherSubtype || isCustomType) ? customSubtype.trim() : '',
+    campaignType:  isFundraising ? campaignType : null,
   })
 
   const handleNext = () => {
@@ -2582,29 +2884,27 @@ function Step1View({ currentStep, completedValues, onNext, onSaveDraft, initialD
         Back to Dashboard
       </Link>
 
-      <div className="rounded-xl border border-border bg-card px-4 py-3.5 shadow-sm sm:px-6 sm:py-5">
-        <Stepper currentStep={currentStep} completedValues={completedValues} />
-      </div>
+      <Stepper currentStep={currentStep} completedValues={completedValues} />
 
-      <div className="mt-4">
-        <h1 className="text-[1.2rem] font-bold tracking-tight text-foreground sm:text-[1.3rem]">
-          Create New Event
+      <div className="mt-6">
+        <h1 className="text-[22px] font-bold tracking-tight text-foreground">
+          Event Category
         </h1>
-        <p className="mt-0.5 text-[12.5px] text-muted-foreground sm:mt-1 sm:text-[13px]">
-          Choose your event type, then select the specific format below.
+        <p className="mt-1 text-[13px] text-muted-foreground">
+          Choose the category that best represents your event.
         </p>
       </div>
 
       <div
-        className="mt-3 grid flex-1 items-start gap-4 sm:mt-4 sm:gap-5 lg:grid-cols-[1fr_256px]"
+        className="mt-5 grid flex-1 items-start gap-5 sm:mt-6 lg:grid-cols-[1fr_296px]"
         aria-label="Event type selection"
       >
         {/* Left: cards grid + secondary selector */}
-        <div className="flex flex-col gap-3">
+        <div className="flex flex-col gap-4">
           <div
             role="group"
             aria-label="Event types"
-            className="grid grid-cols-2 gap-2 sm:gap-2.5 sm:grid-cols-3"
+            className="grid grid-cols-1 gap-2.5"
           >
             {EVENT_TYPES.map(et => (
               <EventTypeCard
@@ -2612,32 +2912,88 @@ function Step1View({ currentStep, completedValues, onNext, onSaveDraft, initialD
                 type={et}
                 selected={selectedType === et.id}
                 onSelect={handleSelectType}
+                recommended={getTemplate(et.id)?.recommended}
               />
             ))}
           </div>
 
-          {/* Secondary subtype selector — appears for every event type */}
+          {/* Mobile inline preview — shows below cards when a template is selected */}
+          <div className="lg:hidden">
+            <AnimatePresence mode="wait">
+              {selectedType && getTemplate(selectedType) && (
+                <motion.div
+                  key={`mobile-preview-${selectedType}`}
+                  initial={{ opacity: 0, height: 0 }}
+                  animate={{ opacity: 1, height: 'auto' }}
+                  exit={{ opacity: 0, height: 0 }}
+                  transition={{ duration: 0.25, ease: [0.22, 1, 0.36, 1] }}
+                  className="overflow-hidden"
+                >
+                  <TemplatePreviewPanel selectedTypeId={selectedType} />
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
+
+          {/* Secondary selector — subtype or campaign-type intercept */}
           <AnimatePresence mode="wait">
             {selectedType && (
-              <SubtypeSelector
-                key={selectedType}
-                eventTypeId={selectedType}
-                subtype={selectedSubtype}
-                customSubtype={customSubtype}
-                onSubtype={id =>
-                  setStep1(prev => ({
-                    ...prev,
-                    subtype:      id,
-                    customSubtype: id !== 'other' ? '' : prev.customSubtype,
-                  }))
-                }
-                onCustomSubtype={v => setStep1(prev => ({ ...prev, customSubtype: v }))}
-              />
+              <div ref={subtypeSectionRef} className="space-y-4">
+                {isFundraising ? (
+                  <>
+                    {/* Campaign type selector — replaces legacy fundraising subtypes */}
+                    <CampaignTypeSelector
+                      value={campaignType}
+                      onChange={ct =>
+                        setStep1(prev => ({ ...prev, campaignType: ct, subtype: null }))
+                      }
+                    />
+                    {/* Cause category selector — shown only for Donation Only campaigns */}
+                    <AnimatePresence>
+                      {campaignType === 'donation_only' && (
+                        <motion.div
+                          key="donation-subtypes"
+                          initial={{ opacity: 0, height: 0 }}
+                          animate={{ opacity: 1, height: 'auto' }}
+                          exit={{ opacity: 0, height: 0 }}
+                          transition={{ duration: 0.25, ease: EASE }}
+                          className="overflow-hidden"
+                        >
+                          <DonationSubtypeSelector
+                            subtype={selectedSubtype as DonationCampaignSubtype | null}
+                            onSubtype={id =>
+                              setStep1(prev => ({ ...prev, subtype: id }))
+                            }
+                          />
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
+                  </>
+                ) : (
+                  <SubtypeSelector
+                    key={selectedType}
+                    eventTypeId={selectedType}
+                    subtype={selectedSubtype}
+                    customSubtype={customSubtype}
+                    onSubtype={id =>
+                      setStep1(prev => ({
+                        ...prev,
+                        subtype:      id,
+                        customSubtype: id !== 'other' ? '' : prev.customSubtype,
+                      }))
+                    }
+                    onCustomSubtype={v => setStep1(prev => ({ ...prev, customSubtype: v }))}
+                  />
+                )}
+              </div>
             )}
           </AnimatePresence>
         </div>
 
-        <Step1HelperPanel />
+        {/* Desktop preview panel — sticky right column */}
+        <div className="hidden lg:block">
+          <TemplatePreviewPanel selectedTypeId={selectedType} />
+        </div>
       </div>
 
       <WizardFooter
@@ -2645,8 +3001,8 @@ function Step1View({ currentStep, completedValues, onNext, onSaveDraft, initialD
         backLabel="Cancel"
         onSaveDraft={onSaveDraft ? () => onSaveDraft(buildData()) : undefined}
         onNext={handleNext}
-        nextLabel="Next: Choose Visibility"
         isNextDisabled={!canProceed}
+        stepContext={`Step ${currentStep + 1} of ${WIZARD_STEPS.length} · ${WIZARD_STEPS[currentStep]?.name ?? ''}`}
       />
     </motion.div>
   )
@@ -2686,12 +3042,10 @@ function Step2View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
         Back to Dashboard
       </Link>
 
-      <div className="rounded-xl border border-border bg-card px-6 py-5 shadow-sm">
-        <Stepper currentStep={currentStep} completedValues={completedValues} />
-      </div>
+      <Stepper currentStep={currentStep} completedValues={completedValues} />
 
       <div className="mt-6">
-        <h1 className="text-[1.3rem] font-bold tracking-tight text-foreground">
+        <h1 className="text-[22px] font-bold tracking-tight text-foreground">
           Choose Visibility
         </h1>
         <p className="mt-1 text-[13px] text-muted-foreground">
@@ -2722,8 +3076,8 @@ function Step2View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
         onBack={onBack}
         onSaveDraft={onSaveDraft ? () => onSaveDraft(step2.visibility) : undefined}
         onNext={handleNext}
-        nextLabel="Next: Access Control"
         isNextDisabled={!canProceed}
+        stepContext={`Step ${currentStep + 1} of ${WIZARD_STEPS.length} · ${WIZARD_STEPS[currentStep]?.name ?? ''}`}
       />
     </motion.div>
   )
@@ -2798,16 +3152,14 @@ function Step3View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
       </Link>
 
       {/* -- Stepper -- */}
-      <div className="rounded-xl border border-border bg-card px-6 py-5 shadow-sm">
-        <Stepper currentStep={currentStep} completedValues={completedValues} />
-      </div>
+      <Stepper currentStep={currentStep} completedValues={completedValues} />
 
       {/* -- Title -- */}
       <div className="mt-5">
-        <h1 className="text-[1.2rem] font-bold tracking-tight text-foreground">
+        <h1 className="text-[22px] font-bold tracking-tight text-foreground">
           Access Control
         </h1>
-        <p className="mt-0.5 text-[13px] text-muted-foreground">
+        <p className="mt-1 text-[13px] text-muted-foreground">
           Choose how people can access and register for your event.
         </p>
       </div>
@@ -2884,8 +3236,8 @@ function Step3View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
           approvedContacts: selectedAccess === 'approved_contacts' ? approvedContacts : [],
         }) : undefined}
         onNext={handleNext}
-        nextLabel="Next: Passes & Pricing"
         isNextDisabled={!canProceed}
+        stepContext={`Step ${currentStep + 1} of ${WIZARD_STEPS.length} · ${WIZARD_STEPS[currentStep]?.name ?? ''}`}
       />
 
     </motion.div>
@@ -2904,7 +3256,9 @@ interface EventPricingDraft {
   estimatedRegistrations:  number            // used only for simulation when unlimited passes exist
   passes:                  EventPass[]
   registrationOpenDate:    string
-  earlyBirdEndDate:        string
+  // Early bird is entirely pass-specific: pricing.passes[].earlyBirdEndDate.
+  // The former event-level earlyBirdEndDate was removed (LS3.2) — no consumer
+  // read it. Legacy drafts are migrated into the passes on load (see Step4View).
   registrationEndDate:     string
   showRemainingSeats:      boolean
   whatsappEnabled:         boolean
@@ -2954,15 +3308,31 @@ interface FeeBreakdown {
   organizerGets: number
 }
 
-function calcFees(ticketPrice: number, model: FeeModel): FeeBreakdown {
-  const pFee  = Math.round(ticketPrice * 0.02   * 100) / 100
-  const gFee  = Math.round(ticketPrice * 0.024  * 100) / 100
-  const gst   = Math.round((pFee + gFee) * 0.18 * 100) / 100
+// Display-only fee rates for the wizard preview, sourced from the runtime fee config
+// (useFeesConfig) — never hardcoded. Percentages are whole numbers (e.g. 2, 18). The
+// authoritative charge is always computed server-side via resolveFeeConfig.
+interface FeeRates { platformPercent: number; gatewayPercent: number; gstPercent: number }
+
+function calcFees(ticketPrice: number, model: FeeModel, rates: FeeRates): FeeBreakdown {
+  const pFee  = Math.round(ticketPrice * (rates.platformPercent / 100) * 100) / 100
+  const gFee  = Math.round(ticketPrice * (rates.gatewayPercent  / 100) * 100) / 100
+  const gst   = Math.round((pFee + gFee) * (rates.gstPercent / 100) * 100) / 100
   const total = Math.round((pFee + gFee + gst)  * 100) / 100
   if (model === 'attendee_pays') {
     return { ticketPrice, platformFee: pFee, gatewayFee: gFee, gstOnFees: gst, totalFees: total, attendeePays: Math.round((ticketPrice + total) * 100) / 100, organizerGets: ticketPrice }
   }
   return { ticketPrice, platformFee: pFee, gatewayFee: gFee, gstOnFees: gst, totalFees: total, attendeePays: ticketPrice, organizerGets: Math.round((ticketPrice - total) * 100) / 100 }
+}
+
+// Maps the runtime public fee config to the wizard's display rates, honouring the
+// gateway/GST master switches (disabled → 0). Platform fee is the representative
+// resolved rate; the authoritative per-tier charge is computed server-side.
+function feeRatesFrom(cfg: PublicFeesConfig): FeeRates {
+  return {
+    platformPercent: cfg.platformFeePercent,
+    gatewayPercent:  cfg.gatewayFeeEnabled ? cfg.gatewayFeePercent : 0,
+    gstPercent:      cfg.gstEnabled ? cfg.gstPercent : 0,
+  }
 }
 
 const FEE_MODEL_LABELS: Record<FeeModel, string> = {
@@ -2972,7 +3342,145 @@ const FEE_MODEL_LABELS: Record<FeeModel, string> = {
 
 // --- Step 4 sub-components ----------------------------------------------------
 
-// Section 1: RegisterDesk Plan — premium plan selector with full feature lists
+// Card used by EventTypeSelectorSection — self-contained popover for examples
+function RegTypeCard({
+  selected, onClick, icon: Icon, title, subtitle, description, examples, dividerClass,
+}: {
+  selected:     boolean
+  onClick:      () => void
+  icon:         LucideIcon
+  title:        string
+  subtitle:     string
+  description:  string
+  examples:     string[]
+  dividerClass: string
+}) {
+  const [infoOpen, setInfoOpen]   = useState(false)
+  const [coords, setCoords]       = useState({ top: 0, left: 0 })
+  const iconBtnRef                = useRef<HTMLButtonElement>(null)
+  const popoverDivRef             = useRef<HTMLDivElement>(null)
+
+  const openInfo = (e: React.MouseEvent) => {
+    e.stopPropagation()
+    if (!infoOpen && iconBtnRef.current) {
+      const r   = iconBtnRef.current.getBoundingClientRect()
+      const top = r.bottom + window.scrollY + 6
+      // clamp left so popover (208px wide) never overflows the right viewport edge
+      const left = Math.min(r.left + window.scrollX, window.innerWidth - 216)
+      setCoords({ top, left })
+    }
+    setInfoOpen(v => !v)
+  }
+
+  useEffect(() => {
+    if (!infoOpen) return
+    const close = (e: MouseEvent) => {
+      if (
+        iconBtnRef.current?.contains(e.target as Node) ||
+        popoverDivRef.current?.contains(e.target as Node)
+      ) return
+      setInfoOpen(false)
+    }
+    const dismiss = () => setInfoOpen(false)
+    document.addEventListener('mousedown', close)
+    window.addEventListener('scroll', dismiss, { passive: true })
+    window.addEventListener('resize', dismiss)
+    return () => {
+      document.removeEventListener('mousedown', close)
+      window.removeEventListener('scroll', dismiss)
+      window.removeEventListener('resize', dismiss)
+    }
+  }, [infoOpen])
+
+  return (
+    <>
+      {/* Fixed popover — position:fixed bypasses any ancestor overflow:hidden */}
+      <AnimatePresence>
+        {infoOpen && (
+          <motion.div
+            ref={popoverDivRef}
+            initial={{ opacity: 0, y: 4, scale: 0.96 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 2, scale: 0.97 }}
+            transition={{ duration: 0.14 }}
+            style={{ position: 'fixed', top: coords.top, left: coords.left, zIndex: 9999 }}
+            className="w-52 rounded-xl border border-border bg-card p-4 shadow-xl"
+            onClick={e => e.stopPropagation()}
+          >
+            <p className="mb-2.5 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Best suited for</p>
+            <ul className="flex flex-col gap-2">
+              {examples.map(ex => (
+                <li key={ex} className="flex items-center gap-2 text-[13px] text-foreground">
+                  <span className="size-1.5 shrink-0 rounded-full bg-primary/50" aria-hidden />
+                  {ex}
+                </li>
+              ))}
+            </ul>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <motion.div
+        whileHover={{ y: selected ? 0 : -2 }}
+        whileTap={{ scale: 0.998 }}
+        onClick={onClick}
+        role="button"
+        tabIndex={0}
+        aria-pressed={selected}
+        onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') onClick() }}
+        className={cn(
+          'relative cursor-pointer flex-col p-6 text-left transition-all duration-200 sm:p-7',
+          dividerClass,
+          selected
+            ? 'bg-primary/[0.04] shadow-md ring-2 ring-inset ring-primary/20'
+            : 'bg-card hover:shadow-lg',
+        )}
+      >
+        {selected && (
+          <span className="absolute inset-x-0 top-0 h-[3px]" style={{ backgroundImage: 'var(--primary-gradient)' }} aria-hidden />
+        )}
+
+        {/* Title row */}
+        <div className="mb-3 flex items-center gap-3">
+          <div className={cn(
+            'flex size-11 shrink-0 items-center justify-center rounded-xl transition-colors',
+            selected ? 'bg-primary/10' : 'bg-muted/50',
+          )}>
+            <Icon className={cn('size-5', selected ? 'text-primary' : 'text-muted-foreground/60')} aria-hidden />
+          </div>
+
+          <div className="flex min-w-0 flex-1 flex-col">
+            <div className="flex items-center gap-1.5">
+              <p className="text-[16px] font-bold text-foreground">{title}</p>
+              <button
+                ref={iconBtnRef}
+                type="button"
+                onClick={openInfo}
+                aria-label={`Examples for ${title}`}
+                className="flex items-center justify-center p-0.5 text-muted-foreground transition-colors hover:text-primary"
+              >
+                <Info className="size-4" aria-hidden />
+              </button>
+            </div>
+            <p className={cn('text-[12px] font-semibold', selected ? 'text-primary' : 'text-muted-foreground/60')}>{subtitle}</p>
+          </div>
+
+        <div className={cn(
+          'flex size-5 shrink-0 items-center justify-center rounded-full border-2 transition-all',
+          selected ? 'border-primary bg-primary' : 'border-border bg-background',
+        )}>
+          {selected && <Check className="size-3 text-primary-foreground" aria-hidden />}
+        </div>
+      </div>
+
+        {/* Description */}
+        <p className="text-[13px] leading-relaxed text-muted-foreground">{description}</p>
+      </motion.div>
+    </>
+  )
+}
+
+// Section 1: Registration Type — simple free / paid selector
 function EventTypeSelectorSection({
   value,
   onChange,
@@ -2980,162 +3488,43 @@ function EventTypeSelectorSection({
   value:    EventPricingType
   onChange: (v: EventPricingType) => void
 }) {
-  const isFree = value === 'free'
-  const isPaid = value === 'paid'
-
   return (
     <div className="overflow-hidden rounded-2xl border border-border bg-card shadow-sm">
       {/* Header */}
-      <div className="border-b border-border px-5 py-4 sm:px-6">
-        <p className="text-[15px] font-bold tracking-tight text-foreground">RegisterDesk Plan</p>
-        <p className="mt-0.5 text-[12.5px] text-muted-foreground">
-          Choose how registrations will be handled for this event.
-        </p>
+      <div className="flex items-center gap-3 border-b border-border px-5 py-4 sm:px-6">
+        <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary/[0.09]">
+          <Ticket className="size-4 text-primary" aria-hidden />
+        </div>
+        <div>
+          <p className="text-[15px] font-bold tracking-tight text-foreground">Registration Type</p>
+          <p className="mt-0.5 text-[13px] text-muted-foreground">
+            Choose whether attendees will register for free or pay during registration.
+          </p>
+        </div>
       </div>
 
-      {/* Two plan cards side-by-side */}
-      <div className="grid grid-cols-1 divide-y divide-border sm:grid-cols-2 sm:divide-x sm:divide-y-0">
-
-        {/* Free Plan */}
-        <motion.button
-          type="button"
-          whileTap={{ scale: 0.995 }}
+      {/* Two selection cards */}
+      <div className="grid grid-cols-1 sm:grid-cols-2">
+        <RegTypeCard
+          selected={value === 'free'}
           onClick={() => onChange('free')}
-          aria-pressed={isFree}
-          className={cn(
-            'relative flex flex-col p-5 text-left transition-colors duration-150 sm:p-6',
-            isFree ? 'bg-emerald-50/50' : 'bg-card hover:bg-muted/[0.025]',
-          )}
-        >
-          {isFree && (
-            <span className="absolute left-0 top-0 h-full w-0.5 rounded-r bg-emerald-400" aria-hidden />
-          )}
-
-          {/* Title row */}
-          <div className="mb-4 flex items-start justify-between gap-2">
-            <div className="flex items-center gap-3">
-              <div className={cn(
-                'flex size-10 shrink-0 items-center justify-center rounded-xl transition-colors',
-                isFree ? 'bg-emerald-100' : 'bg-muted/50',
-              )}>
-                <Heart className={cn('size-5', isFree ? 'text-emerald-600' : 'text-muted-foreground/60')} aria-hidden />
-              </div>
-              <div>
-                <p className="text-[14px] font-bold text-foreground">Free Event</p>
-                <span className="mt-0.5 inline-block rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-bold text-emerald-700">
-                  FREE
-                </span>
-              </div>
-            </div>
-            <div className={cn(
-              'mt-0.5 flex size-[18px] shrink-0 items-center justify-center rounded-full border-2 transition-all',
-              isFree ? 'border-emerald-500 bg-emerald-500' : 'border-border bg-background',
-            )}>
-              {isFree && <Check className="size-2.5 text-white" aria-hidden />}
-            </div>
-          </div>
-
-          {/* Limit pill */}
-          <div className="mb-5 flex items-center gap-1.5 rounded-lg border border-emerald-200/70 bg-emerald-50 px-3 py-1.5">
-            <Users className="size-3.5 shrink-0 text-emerald-600" aria-hidden />
-            <p className="text-[11.5px] font-semibold text-emerald-700">Up to 100 registrations per event</p>
-          </div>
-
-          {/* Features */}
-          <p className="mb-2.5 text-[10.5px] font-semibold uppercase tracking-wider text-muted-foreground">Includes</p>
-          <div className="flex flex-col gap-2">
-            {FREE_PLAN_FEATURES.map(({ Icon, label }) => (
-              <div key={label} className="flex items-center gap-2.5">
-                <div className={cn(
-                  'flex size-[22px] shrink-0 items-center justify-center rounded-md',
-                  isFree ? 'bg-emerald-100' : 'bg-muted/40',
-                )}>
-                  <Icon className={cn('size-3', isFree ? 'text-emerald-600' : 'text-muted-foreground/50')} aria-hidden />
-                </div>
-                <span className={cn('text-[12px]', isFree ? 'text-foreground' : 'text-muted-foreground/70')}>{label}</span>
-              </div>
-            ))}
-          </div>
-
-          {/* Free event limit warning — shown when Free is selected */}
-          {isFree && (
-            <div className="mt-4 flex items-start gap-2 rounded-lg border border-amber-200/70 bg-amber-50/60 px-3 py-2.5">
-              <Info className="mt-0.5 size-3.5 shrink-0 text-amber-600" aria-hidden />
-              <p className="text-[11.5px] text-amber-700">
-                <span className="font-semibold">Need more than 100 registrations?</span>{' '}
-                Upgrade to Paid Event or purchase attendee expansion packs.
-              </p>
-            </div>
-          )}
-        </motion.button>
-
-        {/* Paid Plan */}
-        <motion.button
-          type="button"
-          whileTap={{ scale: 0.995 }}
+          icon={Heart}
+          title="Free Registration"
+          subtitle="No payment required"
+          description="Attendees can register without making any payment."
+          examples={['Community Programs', 'Awareness Campaigns', 'NGO Events', 'School Functions', 'Free Workshops']}
+          dividerClass="border-b border-border/60 sm:border-b-0 sm:border-r"
+        />
+        <RegTypeCard
+          selected={value === 'paid'}
           onClick={() => onChange('paid')}
-          aria-pressed={isPaid}
-          className={cn(
-            'relative flex flex-col p-5 text-left transition-colors duration-150 sm:p-6',
-            isPaid ? 'bg-primary/[0.02]' : 'bg-card hover:bg-muted/[0.025]',
-          )}
-        >
-          {isPaid && (
-            <span className="absolute left-0 top-0 h-full w-0.5 rounded-r bg-primary" aria-hidden />
-          )}
-
-          {/* Title row */}
-          <div className="mb-4 flex items-start justify-between gap-2">
-            <div className="flex items-center gap-3">
-              <div className={cn(
-                'flex size-10 shrink-0 items-center justify-center rounded-xl transition-colors',
-                isPaid ? 'bg-primary/10' : 'bg-muted/50',
-              )}>
-                <IndianRupee className={cn('size-5', isPaid ? 'text-primary' : 'text-muted-foreground/60')} aria-hidden />
-              </div>
-              <div>
-                <p className="text-[14px] font-bold text-foreground">Paid Event</p>
-                <span className="mt-0.5 inline-block rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-bold text-primary">
-                  2% + ₹0.50/reg
-                </span>
-              </div>
-            </div>
-            <div className={cn(
-              'mt-0.5 flex size-[18px] shrink-0 items-center justify-center rounded-full border-2 transition-all',
-              isPaid ? 'border-primary bg-primary' : 'border-border bg-background',
-            )}>
-              {isPaid && <Check className="size-2.5 text-primary-foreground" aria-hidden />}
-            </div>
-          </div>
-
-          {/* Settlement pill */}
-          <div className="mb-5 flex items-center gap-1.5 rounded-lg border border-primary/20 bg-primary/[0.05] px-3 py-1.5">
-            <Clock className="size-3.5 shrink-0 text-primary" aria-hidden />
-            <p className="text-[11.5px] font-semibold text-primary">T+3 Business Day Settlement</p>
-          </div>
-
-          {/* Paid-only extras */}
-          <p className="mb-2.5 text-[10.5px] font-semibold uppercase tracking-wider text-muted-foreground">Everything in Free, plus</p>
-          <div className="mb-4 flex flex-col gap-2">
-            {PAID_EXTRA_FEATURES.map(({ Icon, label }) => (
-              <div key={label} className="flex items-center gap-2.5">
-                <div className={cn(
-                  'flex size-[22px] shrink-0 items-center justify-center rounded-md',
-                  isPaid ? 'bg-primary/10' : 'bg-muted/40',
-                )}>
-                  <Icon className={cn('size-3', isPaid ? 'text-primary' : 'text-muted-foreground/50')} aria-hidden />
-                </div>
-                <span className={cn('text-[12px] font-medium', isPaid ? 'text-foreground' : 'text-muted-foreground/70')}>{label}</span>
-              </div>
-            ))}
-          </div>
-
-          {/* Free features summary */}
-          <div className="flex items-center gap-2 rounded-lg border border-border/60 bg-muted/[0.04] px-3 py-2">
-            <CheckCircle2 className="size-3.5 shrink-0 text-emerald-500" aria-hidden />
-            <p className="text-[11.5px] text-muted-foreground">All {FREE_PLAN_FEATURES.length} Free Event features included</p>
-          </div>
-        </motion.button>
+          icon={IndianRupee}
+          title="Paid Registration"
+          subtitle="Online payment at checkout"
+          description="Attendees must complete payment during registration."
+          examples={['Marathons', 'Conferences', 'Training Programs', 'Exhibitions', 'Fundraising Events']}
+          dividerClass=""
+        />
       </div>
     </div>
   )
@@ -3209,22 +3598,22 @@ function PassesSection({
             <table className="w-full min-w-[680px] text-left" aria-label="Ticket passes">
               <thead>
                 <tr className="border-b border-border/70 bg-muted/[0.04]">
-                  <th className="px-4 py-2.5 text-[10.5px] font-semibold uppercase tracking-wider text-muted-foreground">
+                  <th className="px-4 py-2.5 text-[12px] font-semibold uppercase tracking-wider text-muted-foreground">
                     Pass Name
                   </th>
-                  <th className="px-3 py-2.5 text-[10.5px] font-semibold uppercase tracking-wider text-muted-foreground">
+                  <th className="px-3 py-2.5 text-[12px] font-semibold uppercase tracking-wider text-muted-foreground">
                     Price {!isFreeEvent && '(₹)'}
                   </th>
-                  <th className="px-3 py-2.5 text-[10.5px] font-semibold uppercase tracking-wider text-muted-foreground">
+                  <th className="px-3 py-2.5 text-[12px] font-semibold uppercase tracking-wider text-muted-foreground">
                     Qty / Seats
                   </th>
-                  <th className="px-3 py-2.5 text-[10.5px] font-semibold uppercase tracking-wider text-muted-foreground">
+                  <th className="px-3 py-2.5 text-[12px] font-semibold uppercase tracking-wider text-muted-foreground">
                     Early Bird (₹)
                   </th>
-                  <th className="px-3 py-2.5 text-[10.5px] font-semibold uppercase tracking-wider text-muted-foreground">
+                  <th className="px-3 py-2.5 text-[12px] font-semibold uppercase tracking-wider text-muted-foreground">
                     Sales End
                   </th>
-                  <th className="px-3 py-2.5 text-[10.5px] font-semibold uppercase tracking-wider text-muted-foreground">
+                  <th className="px-3 py-2.5 text-[12px] font-semibold uppercase tracking-wider text-muted-foreground">
                     Status
                   </th>
                   <th className="w-[88px] px-3 py-2.5" />
@@ -3249,10 +3638,10 @@ function PassesSection({
                             <Ticket className={cn('size-3.5', clr.color)} aria-hidden />
                           </div>
                           <div className="min-w-0">
-                            <p className="text-[12.5px] font-semibold leading-tight text-foreground">
+                            <p className="text-[14px] font-semibold leading-tight text-foreground">
                               {pass.name}
                             </p>
-                            <p className="mt-0.5 max-w-[180px] truncate text-[11px] leading-snug text-muted-foreground">
+                            <p className="mt-0.5 max-w-[180px] truncate text-[12px] leading-snug text-muted-foreground">
                               {pass.description}
                             </p>
                           </div>
@@ -3261,7 +3650,7 @@ function PassesSection({
                       {/* Price */}
                       <td className="px-3 py-3">
                         {isFreeEvent ? (
-                          <span className="inline-flex items-center rounded-full bg-emerald-50 px-2 py-[2px] text-[11px] font-semibold text-emerald-600">
+                          <span className="inline-flex items-center rounded-full bg-emerald-50 px-2 py-[2px] text-[12px] font-semibold text-emerald-600">
                             Free
                           </span>
                         ) : (
@@ -3269,7 +3658,7 @@ function PassesSection({
                         )}
                       </td>
                       {/* Quantity */}
-                      <td className="px-3 py-3 text-[12.5px] text-foreground">
+                      <td className="px-3 py-3 text-[14px] text-foreground">
                         {pass.quantity !== null
                           ? pass.quantity.toLocaleString('en-IN')
                           : <span className="text-muted-foreground">Unlimited</span>
@@ -3278,7 +3667,7 @@ function PassesSection({
                       {/* Early bird price */}
                       <td className="px-3 py-3">
                         {pass.earlyBirdEnabled && pass.earlyBirdPrice !== null ? (
-                          <span className="text-[12.5px] font-medium text-primary">
+                          <span className="text-[14px] font-medium text-primary">
                             {formatINR(pass.earlyBirdPrice)}
                           </span>
                         ) : (
@@ -3299,7 +3688,7 @@ function PassesSection({
                           onClick={() => toggleStatus(pass.id)}
                           aria-label={`${pass.status === 'active' ? 'Deactivate' : 'Activate'} ${pass.name}`}
                           className={cn(
-                            'inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-semibold transition-colors',
+                            'inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[12px] font-semibold transition-colors',
                             pass.status === 'active'
                               ? 'bg-emerald-50 text-emerald-600 hover:bg-emerald-100'
                               : 'bg-muted text-muted-foreground hover:bg-muted/70',
@@ -3319,14 +3708,14 @@ function PassesSection({
                             <button
                               type="button"
                               onClick={() => handleDeleteConfirm(pass.id)}
-                              className="rounded bg-red-500 px-2 py-0.5 text-[11px] font-semibold text-white hover:bg-red-600"
+                              className="rounded bg-red-500 px-2 py-0.5 text-[12px] font-semibold text-white hover:bg-red-600"
                             >
                               Confirm
                             </button>
                             <button
                               type="button"
                               onClick={() => setDeleteConfirmId(null)}
-                              className="rounded px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-muted/40"
+                              className="rounded px-2 py-0.5 text-[12px] text-muted-foreground hover:bg-muted/40"
                             >
                               Cancel
                             </button>
@@ -3393,7 +3782,7 @@ function RegistrationPeriodSection({
   onUpdate: (partial: Partial<EventPricingDraft>) => void
 }) {
   const inputCls =
-    'h-9 w-full rounded-lg border border-border bg-background px-3 text-[12.5px] text-foreground placeholder:text-muted-foreground/60 outline-none transition-colors focus:border-primary/50 focus:ring-2 focus:ring-primary/20'
+    'h-9 w-full rounded-lg border border-border bg-background px-3 text-[14px] text-foreground placeholder:text-muted-foreground/60 outline-none transition-colors focus:border-primary/50 focus:ring-2 focus:ring-primary/20'
 
   const milestones = [
     {
@@ -3407,17 +3796,8 @@ function RegistrationPeriodSection({
       dotCls:  'bg-primary',
       iconCls: 'bg-primary/10 text-primary',
     },
-    {
-      key:     'earlybird' as const,
-      icon:    Tag,
-      label:   'Early Bird Ends',
-      hint:    'Early bird pricing expires on this date',
-      optional: true,
-      value:   draft.earlyBirdEndDate,
-      onChange:(v: string) => onUpdate({ earlyBirdEndDate: v }),
-      dotCls:  'bg-amber-400',
-      iconCls: 'bg-amber-50 text-amber-600',
-    },
+    // Early Bird Ends is intentionally NOT here — it is a pass-level field set in
+    // the pass editor (Pricing section), not an event-wide schedule milestone.
     {
       key:     'close' as const,
       icon:    Lock,
@@ -3436,7 +3816,7 @@ function RegistrationPeriodSection({
       {/* Header */}
       <div className="border-b border-border px-5 py-4 sm:px-6">
         <p className="text-[15px] font-bold tracking-tight text-foreground">Registration Schedule</p>
-        <p className="mt-0.5 text-[12.5px] text-muted-foreground">
+        <p className="mt-0.5 text-[13px] text-muted-foreground">
           Control when your event is open for registration.
         </p>
       </div>
@@ -3461,12 +3841,12 @@ function RegistrationPeriodSection({
                 <div className="mb-2 flex flex-wrap items-center gap-2">
                   <label className="text-[13px] font-semibold text-foreground">{label}</label>
                   {optional && (
-                    <span className="rounded-full bg-muted/60 px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
+                    <span className="rounded-full bg-muted/60 px-2 py-0.5 text-[12px] font-medium text-muted-foreground">
                       Optional
                     </span>
                   )}
                   {value && (
-                    <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-semibold text-primary">
+                    <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[12px] font-semibold text-primary">
                       {new Date(value).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}
                     </span>
                   )}
@@ -3478,7 +3858,7 @@ function RegistrationPeriodSection({
                   className={cn(inputCls, 'max-w-[220px]')}
                   aria-label={label}
                 />
-                <p className="mt-1.5 text-[11.5px] text-muted-foreground">{hint}</p>
+                <p className="mt-1.5 text-[13px] text-muted-foreground">{hint}</p>
               </div>
             </div>
           ))}
@@ -3491,8 +3871,8 @@ function RegistrationPeriodSection({
               <Users className="size-4 text-muted-foreground" aria-hidden />
             </div>
             <div className="min-w-0">
-              <p className="text-[12.5px] font-semibold text-foreground">Show remaining seats</p>
-              <p className="text-[11.5px] text-muted-foreground">Encourages early registration by showing available capacity</p>
+              <p className="text-[14px] font-semibold text-foreground">Show remaining seats</p>
+              <p className="text-[13px] text-muted-foreground">Encourages early registration by showing available capacity</p>
             </div>
           </div>
           <button
@@ -3561,7 +3941,7 @@ function AdvancedSettingsSection({
         <div className="flex items-center gap-2.5">
           <Settings2 className="size-4 text-muted-foreground" aria-hidden />
           <p className="text-[13px] font-semibold text-foreground">Advanced Settings</p>
-          <span className="rounded-full bg-muted/60 px-2 py-[2px] text-[10.5px] font-medium text-muted-foreground">
+          <span className="rounded-full bg-muted/60 px-2 py-[2px] text-[12px] font-medium text-muted-foreground">
             Optional
           </span>
         </div>
@@ -3593,10 +3973,10 @@ function AdvancedSettingsSection({
                       <Icon className="size-3.5 text-muted-foreground" aria-hidden />
                     </div>
                     <div className="min-w-0 flex-1">
-                      <p className="text-[12.5px] font-semibold text-foreground">{item.label}</p>
-                      <p className="mt-0.5 text-[11.5px] text-muted-foreground">{item.desc}</p>
+                      <p className="text-[14px] font-semibold text-foreground">{item.label}</p>
+                      <p className="mt-0.5 text-[13px] text-muted-foreground">{item.desc}</p>
                     </div>
-                    <span className="mt-0.5 shrink-0 rounded-full bg-muted/50 px-2 py-0.5 text-[10.5px] font-medium text-muted-foreground">
+                    <span className="mt-0.5 shrink-0 rounded-full bg-muted/50 px-2 py-0.5 text-[12px] font-medium text-muted-foreground">
                       {item.badge}
                     </span>
                   </button>
@@ -3615,9 +3995,13 @@ function AdvancedSettingsSection({
 function FeeBreakdownPopover({
   fees,
   type,
+  platformPercent,
+  gstPercent,
 }: {
   fees: FeeBreakdown
   type: 'attendee' | 'organizer'
+  platformPercent: number
+  gstPercent:      number
 }) {
   const [open, setOpen] = useState(false)
   const ref             = useRef<HTMLDivElement>(null)
@@ -3634,10 +4018,10 @@ function FeeBreakdownPopover({
   const rows =
     type === 'attendee'
       ? [
-          { label: 'Ticket Price',            val: formatINR(fees.ticketPrice), cls: 'text-foreground'       },
-          { label: 'RegisterDesk Fee (2%)',   val: formatINR(fees.platformFee), cls: 'text-muted-foreground' },
-          { label: 'Gateway Fee',             val: formatINR(fees.gatewayFee),  cls: 'text-muted-foreground' },
-          { label: 'GST on Fees (18%)',       val: formatINR(fees.gstOnFees),   cls: 'text-muted-foreground' },
+          { label: 'Ticket Price',                       val: formatINR(fees.ticketPrice), cls: 'text-foreground'       },
+          { label: `RegisterDesk Fee (${platformPercent}%)`, val: formatINR(fees.platformFee), cls: 'text-muted-foreground' },
+          { label: 'Gateway Fee',                        val: formatINR(fees.gatewayFee),  cls: 'text-muted-foreground' },
+          { label: `GST on Fees (${gstPercent}%)`,       val: formatINR(fees.gstOnFees),   cls: 'text-muted-foreground' },
         ]
       : [
           { label: 'Ticket Price',     val:  formatINR(fees.ticketPrice), cls: 'text-foreground' },
@@ -3672,29 +4056,29 @@ function FeeBreakdownPopover({
             className="absolute bottom-full left-1/2 z-50 mb-2 w-56 -translate-x-1/2 overflow-hidden rounded-xl border border-border bg-card shadow-xl"
           >
             <div className="border-b border-border bg-muted/[0.04] px-3.5 py-2.5">
-              <p className="text-[10.5px] font-bold uppercase tracking-wider text-muted-foreground">
+              <p className="text-[12px] font-bold uppercase tracking-wider text-muted-foreground">
                 Sample Calculation
               </p>
             </div>
             <div className="flex flex-col gap-1.5 px-3.5 py-3">
               {rows.map(row => (
                 <div key={row.label} className="flex items-center justify-between gap-3">
-                  <span className="text-[11px] text-muted-foreground">{row.label}</span>
-                  <span className={cn('text-[11px] font-semibold tabular-nums', row.cls)}>
+                  <span className="text-[12px] text-muted-foreground">{row.label}</span>
+                  <span className={cn('text-[12px] font-semibold tabular-nums', row.cls)}>
                     {row.val}
                   </span>
                 </div>
               ))}
               <div className="my-1 border-t border-border/60" />
               <div className="flex items-center justify-between gap-3">
-                <span className="text-[11.5px] font-bold text-foreground">{totalLabel}</span>
+                <span className="text-[13px] font-bold text-foreground">{totalLabel}</span>
                 <span className={cn('text-[12px] font-extrabold tabular-nums', totalCls)}>
                   {totalVal}
                 </span>
               </div>
             </div>
             <div className="border-t border-border/40 bg-muted/[0.03] px-3.5 py-2">
-              <p className="text-[10px] leading-relaxed text-muted-foreground/60">
+              <p className="text-[12px] leading-relaxed text-muted-foreground/60">
                 Actual gateway charges may vary by payment method.
               </p>
             </div>
@@ -3716,8 +4100,10 @@ function FeeCollectionSection({
   onChange:     (m: FeeModel) => void
   samplePrice?: number
 }) {
-  const apFees = calcFees(samplePrice, 'attendee_pays')
-  const oaFees = calcFees(samplePrice, 'organizer_absorbs')
+  const feesCfg = useFeesConfig()
+  const rates   = feeRatesFrom(feesCfg)
+  const apFees = calcFees(samplePrice, 'attendee_pays', rates)
+  const oaFees = calcFees(samplePrice, 'organizer_absorbs', rates)
 
   const OPTIONS = [
     {
@@ -3792,14 +4178,14 @@ function FeeCollectionSection({
 
               {/* Label + badge */}
               <div className="mb-2 flex flex-wrap items-center gap-1.5 pr-7">
-                <p className="text-[12.5px] font-bold text-foreground">{opt.label}</p>
+                <p className="text-[14px] font-bold text-foreground">{opt.label}</p>
                 {opt.badge && (
                   <span className={cn('rounded-full px-1.5 py-0.5 text-[9.5px] font-semibold', opt.badgeCls)}>
                     {opt.badge}
                   </span>
                 )}
               </div>
-              <p className="mb-4 text-[11.5px] leading-relaxed text-muted-foreground">{opt.desc}</p>
+              <p className="mb-4 text-[13px] leading-relaxed text-muted-foreground">{opt.desc}</p>
 
               {/* Embedded example with breakdown popovers */}
               <div className="grid grid-cols-2 gap-2 rounded-xl border border-border/60 bg-muted/[0.04] p-3">
@@ -3807,22 +4193,22 @@ function FeeCollectionSection({
                   <p className="text-[9.5px] font-semibold uppercase tracking-wider text-violet-500">Attendee Pays</p>
                   <div className="flex items-center gap-0.5">
                     <p className="text-[1.1rem] font-extrabold text-violet-700">{formatINR(opt.fees.attendeePays)}</p>
-                    <FeeBreakdownPopover fees={opt.fees} type="attendee" />
+                    <FeeBreakdownPopover fees={opt.fees} type="attendee" platformPercent={rates.platformPercent} gstPercent={rates.gstPercent} />
                   </div>
-                  <p className="text-[10px] text-muted-foreground">at checkout</p>
+                  <p className="text-[12px] text-muted-foreground">at checkout</p>
                 </div>
                 <div className="flex flex-col items-center gap-0.5 rounded-lg bg-background/80 px-2 py-2 text-center">
                   <p className="text-[9.5px] font-semibold uppercase tracking-wider text-emerald-600">You Receive</p>
                   <div className="flex items-center gap-0.5">
                     <p className="text-[1.1rem] font-extrabold text-emerald-700">{formatINR(opt.fees.organizerGets)}</p>
-                    <FeeBreakdownPopover fees={opt.fees} type="organizer" />
+                    <FeeBreakdownPopover fees={opt.fees} type="organizer" platformPercent={rates.platformPercent} gstPercent={rates.gstPercent} />
                   </div>
-                  <p className="text-[10px] text-muted-foreground">per registration</p>
+                  <p className="text-[12px] text-muted-foreground">per registration</p>
                 </div>
               </div>
 
               {/* Summary note */}
-              <p className={cn('mt-2.5 text-[11px] font-medium', opt.summaryCls)}>
+              <p className={cn('mt-2.5 text-[12px] font-medium', opt.summaryCls)}>
                 {opt.summaryNote}
               </p>
             </motion.div>
@@ -3850,7 +4236,7 @@ function Step4SummaryPanel({ pricing }: { pricing: EventPricingDraft }) {
       {/* Pricing Summary */}
       <div className="rounded-xl border border-border bg-card shadow-sm">
         <div className="border-b border-border px-4 py-3">
-          <p className="text-[12.5px] font-semibold text-foreground">Pricing Summary</p>
+          <p className="text-[14px] font-semibold text-foreground">Pricing Summary</p>
         </div>
         <div className="flex flex-col gap-0 divide-y divide-border/40 px-4 py-1">
           {([
@@ -3875,12 +4261,6 @@ function Step4SummaryPanel({ pricing }: { pricing: EventPricingDraft }) {
                 <span className={cn('text-[12px] font-semibold', valCls ?? 'text-foreground')}>{val}</span>
               </div>
             ))}
-          {pricing.eventType === 'paid' && (
-            <div className="flex items-center justify-between py-2.5">
-              <span className="text-[12px] text-muted-foreground">Fee Model</span>
-              <span className="text-right text-[11px] font-semibold text-primary">{FEE_MODEL_LABELS[pricing.feeModel]}</span>
-            </div>
-          )}
         </div>
       </div>
 
@@ -3889,16 +4269,16 @@ function Step4SummaryPanel({ pricing }: { pricing: EventPricingDraft }) {
         <div className="border-b border-border px-4 py-3">
           <div className="flex items-center gap-1.5">
             <Eye className="size-3.5 text-muted-foreground" aria-hidden />
-            <p className="text-[12.5px] font-semibold text-foreground">Event Preview</p>
+            <p className="text-[14px] font-semibold text-foreground">Event Preview</p>
           </div>
-          <p className="mt-0.5 text-[11px] text-muted-foreground">How passes appear to attendees</p>
+          <p className="mt-0.5 text-[12px] text-muted-foreground">How passes appear to attendees</p>
         </div>
         <div className="px-4 py-3">
           <div className="overflow-hidden rounded-lg border border-border/60">
             {/* Mini event header */}
             <div className="bg-gradient-to-br from-primary/[0.08] to-primary/[0.04] px-3 py-3">
               <p className="text-[12px] font-semibold text-foreground">Your Event Name</p>
-              <div className="mt-1 flex items-center gap-1.5 text-[11px] text-muted-foreground">
+              <div className="mt-1 flex items-center gap-1.5 text-[12px] text-muted-foreground">
                 <Calendar className="size-3" aria-hidden />
                 <span>Date TBD · Venue TBD</span>
               </div>
@@ -3911,31 +4291,31 @@ function Step4SummaryPanel({ pricing }: { pricing: EventPricingDraft }) {
                   <div key={pass.id} className="flex items-center justify-between px-3 py-2">
                     <div className="flex items-center gap-2">
                       <span className={cn('size-2 rounded-full', PASS_COLORS[i % PASS_COLORS.length].dot)} />
-                      <span className="max-w-[110px] truncate text-[11.5px] font-medium text-foreground">
+                      <span className="max-w-[110px] truncate text-[13px] font-medium text-foreground">
                         {pass.name}
                       </span>
                     </div>
-                    <span className="text-[11.5px] font-bold text-primary">
+                    <span className="text-[13px] font-bold text-primary">
                       {pricing.eventType === 'free' ? 'Free' : formatINR(pass.price)}
                     </span>
                   </div>
                 ))}
                 {pricing.passes.length > 3 && (
-                  <p className="px-3 py-1.5 text-center text-[10.5px] text-muted-foreground">
+                  <p className="px-3 py-1.5 text-center text-[12px] text-muted-foreground">
                     +{pricing.passes.length - 3} more pass{pricing.passes.length - 3 !== 1 ? 'es' : ''}
                   </p>
                 )}
               </div>
             ) : (
               <div className="px-3 py-5 text-center">
-                <p className="text-[11.5px] text-muted-foreground/60">No passes added yet</p>
+                <p className="text-[13px] text-muted-foreground/60">No passes added yet</p>
               </div>
             )}
 
             {/* Register CTA preview */}
             <div className="border-t border-border/40 px-3 py-2.5">
               <div className="rounded-lg bg-primary/10 py-2 text-center">
-                <p className="flex items-center gap-1 text-[11.5px] font-bold text-primary">
+                <p className="flex items-center gap-1 text-[13px] font-bold text-primary">
                   Register Now <ArrowRight className="size-3" aria-hidden />
                 </p>
               </div>
@@ -3950,17 +4330,10 @@ function Step4SummaryPanel({ pricing }: { pricing: EventPricingDraft }) {
           <Headphones className="size-3.5 shrink-0 text-foreground" aria-hidden />
           <p className="text-[12px] font-semibold text-foreground">Need help with pricing?</p>
         </div>
-        <p className="mb-2.5 text-[11px] leading-relaxed text-muted-foreground">
+        <p className="mb-2.5 text-[12px] leading-relaxed text-muted-foreground">
           Learn about ticket types, early bird pricing, and revenue best practices.
         </p>
-        <Link
-          href="#"
-          className="inline-flex items-center gap-1 text-[12px] font-semibold text-primary hover:underline underline-offset-4"
-          aria-label="View pricing help guide"
-        >
-          View Pricing Guide
-          <ExternalLink className="size-3" aria-hidden />
-        </Link>
+        {/* GA-7 S1: pricing guide not yet published — action hidden until the guide exists. */}
       </div>
 
     </aside>
@@ -3968,26 +4341,6 @@ function Step4SummaryPanel({ pricing }: { pricing: EventPricingDraft }) {
 }
 
 // --- Step 4: RegisterDesk Services & Pricing section -------------------------
-
-const FREE_PLAN_FEATURES = [
-  { Icon: Globe,           label: 'Event Landing Page'    },
-  { Icon: FileSpreadsheet, label: 'Registration Form'     },
-  { Icon: Ticket,          label: 'QR Ticket'             },
-  { Icon: Award,           label: 'ID Card Generator'     },
-  { Icon: Coffee,          label: 'Food Coupon Generator' },
-  { Icon: Mail,            label: 'Email Notifications'   },
-  { Icon: UserCheck,       label: 'QR Check-In'           },
-  { Icon: Download,        label: 'Reports & Export'      },
-  { Icon: TrendingUp,      label: 'Organizer Dashboard'   },
-] as const
-
-const PAID_EXTRA_FEATURES = [
-  { Icon: IndianRupee, label: 'Online Payments'    },
-  { Icon: TrendingUp,  label: 'Revenue Tracking'   },
-  { Icon: Download,    label: 'Settlement Reports' },
-  { Icon: Tag,         label: 'Coupon Codes'       },
-  { Icon: Sparkles,    label: 'Revenue Dashboard'  },
-] as const
 
 const OPTIONAL_SERVICES = [
   { label: 'Email Notifications', badge: 'Included',  badgeCls: 'bg-emerald-100 text-emerald-700',                     desc: 'Confirmations & reminders' },
@@ -4003,10 +4356,12 @@ function RegisterDeskServicesPricingSection({
   isFreeEvent,
   values,
   onChange,
+  standalone = true,
 }: {
   isFreeEvent: boolean
   values:      CommAddonValues
   onChange:    (field: keyof CommAddonValues, value: boolean) => void
+  standalone?: boolean
 }) {
 
   type SvcDef = {
@@ -4077,19 +4432,9 @@ function RegisterDeskServicesPricingSection({
     },
   ]
 
-  return (
-    <div className="overflow-hidden rounded-2xl border border-border bg-card shadow-sm">
-      {/* Header */}
-      <div className="border-b border-border px-5 py-4 sm:px-6">
-        <p className="text-[15px] font-bold tracking-tight text-foreground">Communication &amp; Add-ons</p>
-        <p className="mt-0.5 text-[12.5px] text-muted-foreground">
-          Optional services to improve attendee experience.
-        </p>
-      </div>
-
-      {/* Service rows */}
-      <div className="divide-y divide-border/60">
-        {SERVICES.map((svc) => {
+  const serviceRows = (
+    <div className="divide-y divide-border/60">
+      {SERVICES.map((svc) => {
           const isOn   = svc.always || !!values[svc.key as keyof CommAddonValues]
           const canTog = !svc.always
 
@@ -4118,7 +4463,7 @@ function RegisterDeskServicesPricingSection({
               <div className="min-w-0 flex-1">
                 <div className="flex flex-wrap items-center gap-2">
                   <p className="text-[13px] font-semibold text-foreground">{svc.label}</p>
-                  <span className={cn('rounded-full px-2 py-0.5 text-[10px] font-semibold', svc.badgeCls)}>
+                  <span className={cn('rounded-full px-2 py-0.5 text-[12px] font-semibold', svc.badgeCls)}>
                     {svc.badge}
                   </span>
                 </div>
@@ -4127,10 +4472,10 @@ function RegisterDeskServicesPricingSection({
                 {/* Rate info — shown when there's a rate */}
                 {svc.rate && (
                   <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1">
-                    <span className="text-[11.5px] font-semibold text-foreground">{svc.rate}</span>
+                    <span className="text-[13px] font-semibold text-foreground">{svc.rate}</span>
                     {svc.rateNote && (
                       <span className={cn(
-                        'rounded-full px-2 py-0.5 text-[10px] font-medium',
+                        'rounded-full px-2 py-0.5 text-[12px] font-medium',
                         isFreeEvent
                           ? 'bg-amber-50 text-amber-700'
                           : 'bg-emerald-50 text-emerald-700',
@@ -4146,7 +4491,7 @@ function RegisterDeskServicesPricingSection({
                   <motion.p
                     initial={{ opacity: 0, y: -4 }}
                     animate={{ opacity: 1, y: 0 }}
-                    className="mt-1 text-[11px] text-muted-foreground/70"
+                    className="mt-1 text-[12px] text-muted-foreground/70"
                   >
                     e.g. {svc.example}
                   </motion.p>
@@ -4157,7 +4502,7 @@ function RegisterDeskServicesPricingSection({
               {svc.always ? (
                 <div className="mt-0.5 flex shrink-0 items-center gap-1.5 rounded-full bg-emerald-50 px-2.5 py-1">
                   <CheckCircle2 className="size-3.5 text-emerald-600" aria-hidden />
-                  <span className="text-[11px] font-semibold text-emerald-700">Active</span>
+                  <span className="text-[12px] font-semibold text-emerald-700">Active</span>
                 </div>
               ) : (
                 <button
@@ -4180,7 +4525,23 @@ function RegisterDeskServicesPricingSection({
             </div>
           )
         })}
+    </div>
+  )
+
+  if (!standalone) return serviceRows
+
+  return (
+    <div className="overflow-hidden rounded-2xl border border-border bg-card shadow-sm">
+      <div className="flex items-center gap-3 border-b border-border px-5 py-4 sm:px-6">
+        <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary/[0.09]">
+          <Mail className="size-4 text-primary" aria-hidden />
+        </div>
+        <div>
+          <p className="text-[15px] font-bold tracking-tight text-foreground">Communication &amp; Add-ons</p>
+          <p className="mt-0.5 text-[13px] text-muted-foreground">Optional services to improve attendee experience.</p>
+        </div>
       </div>
+      {serviceRows}
     </div>
   )
 }
@@ -4192,14 +4553,31 @@ function Step4View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
   const eventSubtype = (initialData?.eventSubtype as string | null) ?? null
 
   const [pricing, setPricing] = useState<EventPricingDraft>(() => {
-    const saved = initialData?.pricing as EventPricingDraft | null
-    if (saved) return {
-      ...saved,
-      feeModel:               saved.feeModel               ?? 'attendee_pays',
-      estimatedRegistrations: saved.estimatedRegistrations ?? 100,
-      whatsappEnabled:        saved.whatsappEnabled        ?? false,
-      smsEnabled:             saved.smsEnabled             ?? false,
-      certEnabled:            saved.certEnabled            ?? false,
+    const savedRaw = initialData?.pricing as (EventPricingDraft & { earlyBirdEndDate?: unknown }) | null
+    if (savedRaw) {
+      // LS3.2 migration: the early-bird end date used to live at the event level
+      // (pricing.earlyBirdEndDate). It now belongs only to the pass
+      // (pricing.passes[].earlyBirdEndDate). Backfill any legacy value into
+      // early-bird-enabled passes that don't yet have their own date, then drop
+      // the legacy field so there is exactly one source of truth. No data loss.
+      const { earlyBirdEndDate: legacyEbEnd, ...saved } = savedRaw
+      const legacy = typeof legacyEbEnd === 'string' ? legacyEbEnd.trim() : ''
+      const passes = Array.isArray(saved.passes)
+        ? saved.passes.map(p =>
+            legacy && p.earlyBirdEnabled && !p.earlyBirdEndDate
+              ? { ...p, earlyBirdEndDate: legacy }
+              : p,
+          )
+        : saved.passes
+      return {
+        ...saved,
+        passes,
+        feeModel:               saved.feeModel               ?? 'attendee_pays',
+        estimatedRegistrations: saved.estimatedRegistrations ?? 100,
+        whatsappEnabled:        saved.whatsappEnabled        ?? false,
+        smsEnabled:             saved.smsEnabled             ?? false,
+        certEnabled:            saved.certEnabled            ?? false,
+      }
     }
     return {
       eventType:              'paid',
@@ -4207,7 +4585,6 @@ function Step4View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
       estimatedRegistrations: 100,
       passes:                 [],
       registrationOpenDate:   '',
-      earlyBirdEndDate:       '',
       registrationEndDate:    '',
       showRemainingSeats:     true,
       whatsappEnabled:        false,
@@ -4260,16 +4637,14 @@ function Step4View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
       </Link>
 
       {/* -- Stepper -- */}
-      <div className="rounded-xl border border-border bg-card px-4 py-3.5 shadow-sm sm:px-6 sm:py-5">
-        <Stepper currentStep={currentStep} completedValues={completedValues} />
-      </div>
+      <Stepper currentStep={currentStep} completedValues={completedValues} />
 
       {/* -- Title -- */}
       <div className="mt-4">
-        <h1 className="text-[1.1rem] font-bold tracking-tight text-foreground sm:text-[1.2rem]">
+        <h1 className="text-[22px] font-bold tracking-tight text-foreground">
           Passes &amp; Pricing
         </h1>
-        <p className="mt-0.5 text-[12.5px] text-muted-foreground sm:text-[13px]">
+        <p className="mt-1 text-[13px] text-muted-foreground">
           Configure your plan, ticket types, and registration schedule.
         </p>
       </div>
@@ -4286,14 +4661,7 @@ function Step4View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
             onChange={v => updatePricing({ eventType: v })}
           />
 
-          {/* SECTION 2: Communication & Add-ons */}
-          <RegisterDeskServicesPricingSection
-            isFreeEvent={pricing.eventType === 'free'}
-            values={{ whatsappEnabled: pricing.whatsappEnabled, smsEnabled: pricing.smsEnabled, certEnabled: pricing.certEnabled }}
-            onChange={(field, val) => updatePricing({ [field]: val })}
-          />
-
-          {/* SECTION 3: Ticket Types & Pricing */}
+          {/* SECTION 2: Ticket Types & Pricing */}
           {(() => {
             const hasUnlimitedPass = pricing.passes.some(p => p.unlimited)
             const totalCapacity    = hasUnlimitedPass
@@ -4304,22 +4672,27 @@ function Step4View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
             {/* Section header */}
             <div className="border-b border-border px-5 py-4 sm:px-6">
               <div className="flex items-center justify-between gap-3">
-                <div>
-                  <div className="flex flex-wrap items-center gap-2">
-                    <p className="text-[15px] font-bold tracking-tight text-foreground">Ticket Types &amp; Pricing</p>
-                    {hasUnlimitedPass ? (
-                      <span className="rounded-full bg-amber-100 px-2.5 py-0.5 text-[10.5px] font-semibold text-amber-700">
-                        Unlimited Capacity
-                      </span>
-                    ) : totalCapacity != null && totalCapacity > 0 ? (
-                      <span className="rounded-full bg-muted px-2.5 py-0.5 text-[10.5px] font-semibold text-muted-foreground">
-                        {totalCapacity.toLocaleString('en-IN')} Attendees
-                      </span>
-                    ) : null}
+                <div className="flex min-w-0 items-center gap-3">
+                  <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary/[0.09]">
+                    <Ticket className="size-4 text-primary" aria-hidden />
                   </div>
-                  <p className="mt-0.5 text-[12.5px] text-muted-foreground">
-                    Create ticket categories with different pricing and limits.
-                  </p>
+                  <div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <p className="text-[15px] font-bold tracking-tight text-foreground">Ticket Types &amp; Pricing</p>
+                      {hasUnlimitedPass ? (
+                        <span className="rounded-full bg-amber-100 px-2.5 py-0.5 text-[12px] font-semibold text-amber-700">
+                          Unlimited Capacity
+                        </span>
+                      ) : totalCapacity != null && totalCapacity > 0 ? (
+                        <span className="rounded-full bg-muted px-2.5 py-0.5 text-[12px] font-semibold text-muted-foreground">
+                          {totalCapacity.toLocaleString('en-IN')} Attendees
+                        </span>
+                      ) : null}
+                    </div>
+                    <p className="mt-0.5 text-[13px] text-muted-foreground">
+                      Create ticket categories with different pricing and limits.
+                    </p>
+                  </div>
                 </div>
                 <button
                   type="button"
@@ -4346,24 +4719,13 @@ function Step4View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
               />
             </div>
 
-            {/* Fee Collection Method — paid events only, inside this section */}
-            {pricing.eventType === 'paid' && (
-              <FeeCollectionSection
-                feeModel={pricing.feeModel}
-                onChange={m => updatePricing({ feeModel: m })}
-                samplePrice={
-                  pricing.passes.filter(p => p.status === 'active' && p.price > 0)[0]?.price ?? 500
-                }
-              />
-            )}
-
             {/* Spacer at bottom when section has content */}
             <div className="h-5" />
           </div>
             )
           })()}
 
-          {/* SECTION 4: Registration Schedule */}
+          {/* SECTION 3: Registration Schedule */}
           <RegistrationPeriodSection
             draft={pricing}
             onUpdate={updatePricing}
@@ -4383,7 +4745,7 @@ function Step4View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
       </div>
 
       {pricing.passes.length === 0 && (
-        <p className="mt-4 text-center text-[12.5px] font-medium text-amber-600">
+        <p className="mt-4 text-center text-[13px] font-medium text-amber-600">
           At least one pass is required before continuing.
         </p>
       )}
@@ -4392,8 +4754,8 @@ function Step4View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
         onBack={onBack}
         onSaveDraft={() => onSaveDraft?.(pricing)}
         onNext={() => onNext('Passes & Pricing', pricing)}
-        nextLabel="Next: Form"
         isNextDisabled={pricing.passes.length === 0}
+        stepContext={`Step ${currentStep + 1} of ${WIZARD_STEPS.length} · ${WIZARD_STEPS[currentStep]?.name ?? ''}`}
       />
 
       {/* Add / Edit Pass editor overlay */}
@@ -4467,16 +4829,14 @@ function Step5View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
       </Link>
 
       {/* -- Stepper -- */}
-      <div className="rounded-xl border border-border bg-card px-4 py-3.5 shadow-sm sm:px-6 sm:py-5">
-        <Stepper currentStep={currentStep} completedValues={completedValues} />
-      </div>
+      <Stepper currentStep={currentStep} completedValues={completedValues} />
 
       {/* -- Title -- */}
       <div className="mt-4">
-        <h1 className="text-[1.1rem] font-bold tracking-tight text-foreground sm:text-[1.2rem]">
+        <h1 className="text-[22px] font-bold tracking-tight text-foreground">
           Registration Form
         </h1>
-        <p className="mt-0.5 text-[12.5px] text-muted-foreground sm:text-[13px]">
+        <p className="mt-1 text-[13px] text-muted-foreground">
           Select a template and customise your attendee registration form.
         </p>
       </div>
@@ -4506,7 +4866,7 @@ function Step5View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -4 }}
             transition={{ duration: 0.2 }}
-            className="mt-3 flex items-center gap-2 rounded-lg border border-amber-200/60 bg-amber-50/60 px-3 py-2.5 text-[12.5px] text-amber-800"
+            className="mt-3 flex items-center gap-2 rounded-lg border border-amber-200/60 bg-amber-50/60 px-3 py-2.5 text-[13px] text-amber-800"
             role="alert"
           >
             <AlertTriangle className="size-4 shrink-0" aria-hidden />
@@ -4519,7 +4879,7 @@ function Step5View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
         onBack={onBack}
         onSaveDraft={() => onSaveDraft?.(form)}
         onNext={handleNext}
-        nextLabel="Next: Event Details"
+        stepContext={`Step ${currentStep + 1} of ${WIZARD_STEPS.length} · ${WIZARD_STEPS[currentStep]?.name ?? ''}`}
       />
     </motion.div>
   )
@@ -4527,7 +4887,7 @@ function Step5View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
 
 // --- Step 6 view — Event Details & Communication -----------------------------
 
-function Step6View({ currentStep, completedValues, onNext, onBack, onSaveDraft, initialData }: StepViewProps) {
+function Step6View({ currentStep, completedValues, onNext, onBack, onSaveDraft, initialData, focusHint }: StepViewProps) {
   const eventTypeId  = (initialData?.eventTypeId  as string | null) ?? null
   const eventSubtype = (initialData?.eventSubtype as string | null) ?? null
   const rawForm      = initialData?.eventDetails
@@ -4553,12 +4913,10 @@ function Step6View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
       <Link href={ROUTES.DASHBOARD} className="mb-4 inline-flex items-center gap-1.5 text-[13px] font-medium text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary rounded">
         <ArrowLeft className="size-4" aria-hidden />Back to Dashboard
       </Link>
-      <div className="rounded-xl border border-border bg-card px-4 py-3.5 shadow-sm sm:px-6 sm:py-5">
-        <Stepper currentStep={currentStep} completedValues={completedValues} />
-      </div>
+      <Stepper currentStep={currentStep} completedValues={completedValues} />
       <div className="mt-4">
-        <h1 className="text-[1.1rem] font-bold tracking-tight text-foreground sm:text-[1.2rem]">Event Details &amp; Communication</h1>
-        <p className="mt-0.5 text-[12.5px] text-muted-foreground sm:text-[13px]">Configure your event page, venue, schedule, and attendee communication.</p>
+        <h1 className="text-[22px] font-bold tracking-tight text-foreground">Event Details &amp; Communication</h1>
+        <p className="mt-1 text-[13px] text-muted-foreground">Configure your event page, venue, schedule, and attendee communication.</p>
       </div>
       <div className="mt-4">
         <EventDetailsBuilder
@@ -4568,13 +4926,14 @@ function Step6View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
           eventSubtype={eventSubtype}
           pricingPasses={pricingPasses}
           uploadContext={uploadContext}
+          focusHint={focusHint}
         />
       </div>
       <WizardFooter
         onBack={onBack}
         onSaveDraft={() => onSaveDraft?.(form)}
         onNext={() => onNext('Event Details', form)}
-        nextLabel="Next: Review"
+        stepContext={`Step ${currentStep + 1} of ${WIZARD_STEPS.length} · ${WIZARD_STEPS[currentStep]?.name ?? ''}`}
       />
     </motion.div>
   )
@@ -4618,7 +4977,6 @@ function EventPagePreviewModal({
   const tagline      = safe?.info?.tagline?.trim() || ''
   const shortDesc    = safe?.info?.shortDesc?.trim() || ''
   const fullDesc     = safe?.info?.fullDesc?.trim()  || ''
-  const statusVal    = safe?.status?.status || 'draft'
   const logoUrl      = safe?.media?.logo?.value || ''
   const bannerUrl    = safe?.media?.coverBanner?.value || ''
   const galleryImages = safe?.media?.galleryImages?.filter(g => g.value?.trim()) ?? []
@@ -4695,16 +5053,6 @@ function EventPagePreviewModal({
     ? [startDate, startTime && startTime, endDate && endDate !== startDate && `– ${endDate}`, endTime && endTime].filter(Boolean).join(' ')
     : ''
 
-  const statusColors: Record<string, string> = {
-    draft:     'bg-slate-100 text-slate-600',
-    published: 'bg-emerald-100 text-emerald-700',
-    private:   'bg-violet-100 text-violet-700',
-    postponed: 'bg-amber-100 text-amber-700',
-    cancelled: 'bg-rose-100 text-rose-600',
-    sold_out:  'bg-orange-100 text-orange-700',
-    archived:  'bg-gray-100 text-gray-500',
-  }
-
   const viewportWidths = { desktop: 'max-w-[1280px]', tablet: 'max-w-[768px]', mobile: 'max-w-[390px]' }
 
   return (
@@ -4721,7 +5069,7 @@ function EventPagePreviewModal({
             <Eye className="size-3.5 text-primary" aria-hidden />
           </div>
           <p className="text-[13px] font-semibold text-foreground">Event Page Preview</p>
-          <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10.5px] font-semibold text-amber-700">Preview only</span>
+          <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[12px] font-semibold text-amber-700">Preview only</span>
         </div>
         {/* Viewport switcher */}
         <div className="hidden items-center gap-1 sm:flex">
@@ -4763,19 +5111,16 @@ function EventPagePreviewModal({
                 : <div className="flex h-full flex-col items-center justify-center gap-2 opacity-40"><Upload className="size-10 text-muted-foreground" /><p className="text-[12px] text-muted-foreground">No banner uploaded</p></div>
               }
               <div className="absolute inset-0 bg-gradient-to-t from-black/70 via-black/20 to-transparent" />
-              {/* Status & visibility badges */}
+              {/* Event type & visibility badges */}
               <div className="absolute left-4 top-4 flex items-center gap-2">
-                <span className={cn('rounded-full px-2.5 py-1 text-[11px] font-semibold capitalize', statusColors[statusVal] ?? 'bg-slate-100 text-slate-600')}>
-                  {EVENT_STATUS_LABELS[statusVal as keyof typeof EVENT_STATUS_LABELS] ?? statusVal}
-                </span>
                 {eventTypeId && (
-                  <span className="rounded-full bg-white/15 px-2.5 py-1 text-[11px] font-medium capitalize text-white backdrop-blur-sm">
+                  <span className="rounded-full bg-white/15 px-2.5 py-1 text-[12px] font-medium capitalize text-white backdrop-blur-sm">
                     {eventTypeId}{eventSubtype ? ` · ${eventSubtype}` : ''}
                   </span>
                 )}
               </div>
               {visibility && (
-                <span className="absolute right-4 top-4 flex items-center gap-1.5 rounded-full bg-black/50 px-2.5 py-1 text-[11px] font-medium text-white backdrop-blur-sm">
+                <span className="absolute right-4 top-4 flex items-center gap-1.5 rounded-full bg-black/50 px-2.5 py-1 text-[12px] font-medium text-white backdrop-blur-sm">
                   {visibility === 'public' ? <Globe className="size-3" aria-hidden /> : <Lock className="size-3" aria-hidden />}
                   {visibility === 'public' ? 'Public' : 'Private'}
                 </span>
@@ -4805,13 +5150,13 @@ function EventPagePreviewModal({
           <div className="border-b border-border bg-card px-5 py-3">
             <div className="flex flex-wrap items-center gap-3">
               {dateStr
-                ? <span className="flex items-center gap-1.5 text-[12.5px] text-foreground"><Calendar className="size-3.5 shrink-0 text-primary" aria-hidden />{dateStr}{timezone && ` (${timezone})`}</span>
-                : <span className="flex items-center gap-1.5 text-[12.5px] italic text-muted-foreground/50"><Calendar className="size-3.5 shrink-0" aria-hidden />Date not set</span>
+                ? <span className="flex items-center gap-1.5 text-[14px] text-foreground"><Calendar className="size-3.5 shrink-0 text-primary" aria-hidden />{dateStr}{timezone && ` (${timezone})`}</span>
+                : <span className="flex items-center gap-1.5 text-[13px] italic text-muted-foreground/50"><Calendar className="size-3.5 shrink-0" aria-hidden />Date not set</span>
               }
               <span className="text-border">·</span>
               {venueName
-                ? <span className="flex items-center gap-1.5 text-[12.5px] text-foreground"><MapPin className="size-3.5 shrink-0 text-primary" aria-hidden />{[venueName, venueCity, venueState].filter(Boolean).join(', ')}</span>
-                : <span className="flex items-center gap-1.5 text-[12.5px] italic text-muted-foreground/50"><MapPin className="size-3.5 shrink-0" aria-hidden />Venue not set</span>
+                ? <span className="flex items-center gap-1.5 text-[14px] text-foreground"><MapPin className="size-3.5 shrink-0 text-primary" aria-hidden />{[venueName, venueCity, venueState].filter(Boolean).join(', ')}</span>
+                : <span className="flex items-center gap-1.5 text-[13px] italic text-muted-foreground/50"><MapPin className="size-3.5 shrink-0" aria-hidden />Venue not set</span>
               }
             </div>
           </div>
@@ -4847,26 +5192,26 @@ function EventPagePreviewModal({
                     <div className="flex flex-col gap-4">
                       {Object.entries(agendaByDate).map(([date, sessions]) => (
                         <div key={date}>
-                          <p className="mb-2 text-[11.5px] font-semibold uppercase tracking-wider text-muted-foreground">{date !== 'TBD' ? date : 'Date TBD'}</p>
+                          <p className="mb-2 text-[13px] font-semibold uppercase tracking-wider text-muted-foreground">{date !== 'TBD' ? date : 'Date TBD'}</p>
                           <div className="divide-y divide-border overflow-hidden rounded-xl border border-border bg-card">
                             {sessions.sort((a, b) => (a.startTime ?? '').localeCompare(b.startTime ?? '')).map(session => (
                               <div key={session.id} className={cn('flex items-start gap-3 px-4 py-3.5', session.isBreak && 'bg-muted/20')}>
                                 <div className="w-[70px] shrink-0 text-right">
                                   <p className="text-[12px] font-semibold text-primary">{session.startTime || '--:--'}</p>
-                                  {session.endTime && <p className="text-[11px] text-muted-foreground">{session.endTime}</p>}
+                                  {session.endTime && <p className="text-[12px] text-muted-foreground">{session.endTime}</p>}
                                 </div>
                                 <div className="min-w-0 flex-1">
                                   <div className="flex flex-wrap items-center gap-1.5">
                                     <p className="text-[13px] font-semibold text-foreground">{session.title}</p>
                                     {session.type && !session.isBreak && (
-                                      <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-medium text-primary">
+                                      <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[12px] font-medium text-primary">
                                         {SESSION_TYPE_LABELS[session.type as keyof typeof SESSION_TYPE_LABELS] ?? session.type}
                                       </span>
                                     )}
-                                    {session.isBreak && <span className="rounded-full bg-muted/60 px-2 py-0.5 text-[10px] font-medium text-muted-foreground">Break</span>}
+                                    {session.isBreak && <span className="rounded-full bg-muted/60 px-2 py-0.5 text-[12px] font-medium text-muted-foreground">Break</span>}
                                   </div>
                                   {session.description && <p className="mt-0.5 text-[12px] leading-relaxed text-muted-foreground">{session.description}</p>}
-                                  {session.location && <p className="mt-0.5 flex items-center gap-1 text-[11px] text-muted-foreground"><MapPin className="size-3" aria-hidden />{session.location}</p>}
+                                  {session.location && <p className="mt-0.5 flex items-center gap-1 text-[12px] text-muted-foreground"><MapPin className="size-3" aria-hidden />{session.location}</p>}
                                 </div>
                               </div>
                             ))}
@@ -4898,12 +5243,12 @@ function EventPagePreviewModal({
                           <div className="min-w-0 flex-1">
                             <p className="text-[13.5px] font-semibold text-foreground">{spk.name}</p>
                             {spk.title   && <p className="text-[12px] text-muted-foreground">{spk.title}</p>}
-                            {spk.company && <p className="text-[11.5px] font-medium text-primary/80">{spk.company}</p>}
-                            {spk.bio     && <p className="mt-1.5 line-clamp-3 text-[11.5px] leading-relaxed text-muted-foreground">{spk.bio}</p>}
+                            {spk.company && <p className="text-[13px] font-medium text-primary/80">{spk.company}</p>}
+                            {spk.bio     && <p className="mt-1.5 line-clamp-3 text-[13px] leading-relaxed text-muted-foreground">{spk.bio}</p>}
                             {(spk.social?.linkedin || spk.social?.twitter) && (
                               <div className="mt-2 flex gap-2">
-                                {spk.social.linkedin && <span className="text-[11px] font-medium text-primary">LinkedIn</span>}
-                                {spk.social.twitter  && <span className="text-[11px] font-medium text-primary">Twitter</span>}
+                                {spk.social.linkedin && <span className="text-[12px] font-medium text-primary">LinkedIn</span>}
+                                {spk.social.twitter  && <span className="text-[12px] font-medium text-primary">Twitter</span>}
                               </div>
                             )}
                           </div>
@@ -4926,17 +5271,17 @@ function EventPagePreviewModal({
                   <div className="flex flex-col gap-4">
                     {(Object.entries(sponsorsByTier) as [string, Sponsor[]][]).map(([tier, list]) => (
                       <div key={tier}>
-                        <p className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">{SPONSOR_TIER_LABELS[tier as keyof typeof SPONSOR_TIER_LABELS] ?? tier}</p>
+                        <p className="mb-2 text-[12px] font-semibold uppercase tracking-wider text-muted-foreground">{SPONSOR_TIER_LABELS[tier as keyof typeof SPONSOR_TIER_LABELS] ?? tier}</p>
                         <div className="flex flex-wrap gap-3">
                           {list.map(spo => (
                             <div key={spo.id} className="flex items-center gap-2.5 rounded-xl border border-border bg-card px-3 py-2.5">
                               {spo.logoUrl
                                 ? <img src={spo.logoUrl} alt={spo.name} className="h-8 max-w-[80px] object-contain" />
-                                : <div className="flex size-8 items-center justify-center rounded-lg bg-muted/50 text-[11px] font-bold text-muted-foreground">{spo.name.charAt(0)}</div>
+                                : <div className="flex size-8 items-center justify-center rounded-lg bg-muted/50 text-[12px] font-bold text-muted-foreground">{spo.name.charAt(0)}</div>
                               }
                               <div>
-                                <p className="text-[12.5px] font-semibold text-foreground">{spo.name}</p>
-                                {spo.website && <p className="text-[11px] text-muted-foreground">{spo.website}</p>}
+                                <p className="text-[14px] font-semibold text-foreground">{spo.name}</p>
+                                {spo.website && <p className="text-[12px] text-muted-foreground">{spo.website}</p>}
                               </div>
                             </div>
                           ))}
@@ -4979,7 +5324,7 @@ function EventPagePreviewModal({
                         <div>
                           <p className="font-semibold text-foreground">{online?.platform ? (ONLINE_PLATFORM_LABELS[online.platform] ?? online.platform) : 'Online Event'}</p>
                           {online?.meetingId && <p className="text-[12px] text-muted-foreground">Meeting ID: {online.meetingId}</p>}
-                          {online?.revealAfterRegistration && <p className="mt-1 text-[11.5px] text-amber-600">Meeting link will be shared after registration</p>}
+                          {online?.revealAfterRegistration && <p className="mt-1 text-[13px] text-amber-600">Meeting link will be shared after registration</p>}
                           {online?.joinInstructions && <p className="mt-1.5 text-[12px] text-muted-foreground">{online.joinInstructions}</p>}
                         </div>
                       </div>
@@ -4991,12 +5336,12 @@ function EventPagePreviewModal({
                         </div>
                         <div className="min-w-0">
                           <p className="font-semibold text-foreground">{physical.name}</p>
-                          {venueAddr && <p className="text-[12.5px] text-muted-foreground">{venueAddr}</p>}
+                          {venueAddr && <p className="text-[13px] text-muted-foreground">{venueAddr}</p>}
                           {physical.pincode && <p className="text-[12px] text-muted-foreground">Pincode: {physical.pincode}</p>}
                           {physical.instructions && <p className="mt-1.5 text-[12px] text-muted-foreground">{physical.instructions}</p>}
                           {showVenueMap && physical.mapsLink && (
-                            <div className="mt-3 overflow-hidden rounded-lg border border-border bg-muted/20 px-3 py-2 text-[11.5px] text-primary">
-                            <div className="mt-3 flex items-center gap-1.5 overflow-hidden rounded-lg border border-border bg-muted/20 px-3 py-2 text-[11.5px] text-primary"><MapPin className="size-3.5 shrink-0" aria-hidden /> View on Google Maps</div>
+                            <div className="mt-3 overflow-hidden rounded-lg border border-border bg-muted/20 px-3 py-2 text-[13px] text-primary">
+                            <div className="mt-3 flex items-center gap-1.5 overflow-hidden rounded-lg border border-border bg-muted/20 px-3 py-2 text-[13px] text-primary"><MapPin className="size-3.5 shrink-0" aria-hidden /> View on Google Maps</div>
                             </div>
                           )}
                         </div>
@@ -5023,16 +5368,16 @@ function EventPagePreviewModal({
                       }
                       <div className="min-w-0 flex-1">
                         <p className="text-[14px] font-bold text-foreground">{orgName}</p>
-                        {orgEmail   && <p className="mt-1 flex items-center gap-1.5 text-[12.5px] text-muted-foreground"><Mail  className="size-3.5 shrink-0" aria-hidden />{orgEmail}</p>}
-                        {orgPhone   && <p className="flex items-center gap-1.5 text-[12.5px] text-muted-foreground"><Phone className="size-3.5 shrink-0" aria-hidden />{orgPhone}</p>}
-                        {orgWebsite && <p className="flex items-center gap-1.5 text-[12.5px] text-primary"><Globe className="size-3.5 shrink-0" aria-hidden />{orgWebsite}</p>}
+                        {orgEmail   && <p className="mt-1 flex items-center gap-1.5 text-[13px] text-muted-foreground"><Mail  className="size-3.5 shrink-0" aria-hidden />{orgEmail}</p>}
+                        {orgPhone   && <p className="flex items-center gap-1.5 text-[13px] text-muted-foreground"><Phone className="size-3.5 shrink-0" aria-hidden />{orgPhone}</p>}
+                        {orgWebsite && <p className="flex items-center gap-1.5 text-[13px] text-primary"><Globe className="size-3.5 shrink-0" aria-hidden />{orgWebsite}</p>}
                         {showSocialLinks && org?.social && (
                           <div className="mt-2 flex flex-wrap gap-2">
-                            {org.social.facebook  && <span className="text-[11.5px] font-medium text-primary">Facebook</span>}
-                            {org.social.instagram && <span className="text-[11.5px] font-medium text-primary">Instagram</span>}
-                            {org.social.linkedin  && <span className="text-[11.5px] font-medium text-primary">LinkedIn</span>}
-                            {org.social.twitter   && <span className="text-[11.5px] font-medium text-primary">Twitter</span>}
-                            {org.social.youtube   && <span className="text-[11.5px] font-medium text-primary">YouTube</span>}
+                            {org.social.facebook  && <span className="text-[13px] font-medium text-primary">Facebook</span>}
+                            {org.social.instagram && <span className="text-[13px] font-medium text-primary">Instagram</span>}
+                            {org.social.linkedin  && <span className="text-[13px] font-medium text-primary">LinkedIn</span>}
+                            {org.social.twitter   && <span className="text-[13px] font-medium text-primary">Twitter</span>}
+                            {org.social.youtube   && <span className="text-[13px] font-medium text-primary">YouTube</span>}
                           </div>
                         )}
                       </div>
@@ -5066,9 +5411,9 @@ function EventPagePreviewModal({
                         <div key={p.id} className="flex items-start justify-between rounded-lg border border-border px-3 py-2.5">
                           <div className="min-w-0">
                             <p className="text-[13px] font-semibold text-foreground">{p.name}</p>
-                            {p.description && <p className="text-[11px] text-muted-foreground">{p.description}</p>}
+                            {p.description && <p className="text-[12px] text-muted-foreground">{p.description}</p>}
                             {!p.unlimited && p.quantity != null && (
-                              <p className="text-[11px] text-muted-foreground">{p.quantity} seats available</p>
+                              <p className="text-[12px] text-muted-foreground">{p.quantity} seats available</p>
                             )}
                           </div>
                           <span className="ml-2 shrink-0 text-[13px] font-bold text-primary">
@@ -5083,7 +5428,7 @@ function EventPagePreviewModal({
                     </div>
                   ) : (
                     <div className="rounded-lg border border-dashed border-border p-3 text-center">
-                      <p className="text-[11.5px] italic text-muted-foreground/50">No passes configured yet</p>
+                      <p className="text-[13px] italic text-muted-foreground/50">No passes configured yet</p>
                     </div>
                   )}
 
@@ -5091,13 +5436,13 @@ function EventPagePreviewModal({
                   {approvalMode === 'manual' && (
                     <div className="mt-2 flex items-center gap-2 rounded-lg border border-amber-200/60 bg-amber-50/40 px-2.5 py-1.5">
                       <Clock className="size-3.5 shrink-0 text-amber-600" aria-hidden />
-                      <p className="text-[11.5px] text-amber-700">Requires approval</p>
+                      <p className="text-[13px] text-amber-700">Requires approval</p>
                     </div>
                   )}
                   {waitlistOn && (
                     <div className="mt-2 flex items-center gap-2 rounded-lg border border-blue-200/60 bg-blue-50/40 px-2.5 py-1.5">
                       <Users className="size-3.5 shrink-0 text-blue-600" aria-hidden />
-                      <p className="text-[11.5px] text-blue-700">Waitlist enabled</p>
+                      <p className="text-[13px] text-blue-700">Waitlist enabled</p>
                     </div>
                   )}
 
@@ -5108,14 +5453,14 @@ function EventPagePreviewModal({
                   >
                     Register
                   </button>
-                  <p className="mt-2 text-center text-[10.5px] text-muted-foreground/50">Preview only — not active</p>
+                  <p className="mt-2 text-center text-[12px] text-muted-foreground/50">Preview only — not active</p>
                 </div>
 
                 {/* Registration open/close */}
                 {(regOpen || regClose) && (
                   <div className="border-t border-border px-4 py-3 space-y-1">
-                    {regOpen  && <div className="flex justify-between text-[11.5px]"><span className="text-muted-foreground">Opens</span><span className="font-medium text-foreground">{regOpen}</span></div>}
-                    {regClose && <div className="flex justify-between text-[11.5px]"><span className="text-muted-foreground">Closes</span><span className="font-medium text-foreground">{regClose}</span></div>}
+                    {regOpen  && <div className="flex justify-between text-[13px]"><span className="text-muted-foreground">Opens</span><span className="font-medium text-foreground">{regOpen}</span></div>}
+                    {regClose && <div className="flex justify-between text-[13px]"><span className="text-muted-foreground">Closes</span><span className="font-medium text-foreground">{regClose}</span></div>}
                   </div>
                 )}
               </div>
@@ -5136,7 +5481,7 @@ function EventPagePreviewModal({
             >
               Register Now
             </button>
-            <p className="mt-2 text-[11px] text-muted-foreground/50">Preview only — registration not active</p>
+            <p className="mt-2 text-[12px] text-muted-foreground/50">Preview only — registration not active</p>
           </div>
 
         </div>
@@ -5196,7 +5541,7 @@ function FormPreviewModal({
             <FileSpreadsheet className="size-3.5 text-violet-600" aria-hidden />
           </div>
           <p className="text-[13px] font-semibold text-foreground">Registration Form Preview</p>
-          <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10.5px] font-semibold text-amber-700">Read-only</span>
+          <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[12px] font-semibold text-amber-700">Read-only</span>
         </div>
         <button
           type="button"
@@ -5216,8 +5561,8 @@ function FormPreviewModal({
             <div className="mb-4 flex items-start gap-2.5 rounded-lg border border-amber-200/60 bg-amber-50/60 px-3.5 py-3">
               <Clock className="mt-0.5 size-4 shrink-0 text-amber-600" aria-hidden />
               <div>
-                <p className="text-[12.5px] font-semibold text-amber-700">Manual Approval Required</p>
-                <p className="text-[11.5px] text-amber-600">
+                <p className="text-[14px] font-semibold text-amber-700">Manual Approval Required</p>
+                <p className="text-[13px] text-amber-600">
                   {rules?.pendingMessage?.trim() || 'Your registration will be reviewed by the organiser before confirmation.'}
                 </p>
               </div>
@@ -5227,8 +5572,8 @@ function FormPreviewModal({
             <div className="mb-4 flex items-start gap-2.5 rounded-lg border border-blue-200/60 bg-blue-50/60 px-3.5 py-3">
               <Users className="mt-0.5 size-4 shrink-0 text-blue-600" aria-hidden />
               <div>
-                <p className="text-[12.5px] font-semibold text-blue-700">Waitlist Enabled</p>
-                <p className="text-[11.5px] text-blue-600">
+                <p className="text-[14px] font-semibold text-blue-700">Waitlist Enabled</p>
+                <p className="text-[13px] text-blue-600">
                   If this event is full you will be added to the waitlist automatically.
                 </p>
               </div>
@@ -5250,7 +5595,7 @@ function FormPreviewModal({
                     </div>
                     <div className="min-w-0 flex-1">
                       <p className="text-[13px] font-semibold text-foreground">{p.name}</p>
-                      {p.description && <p className="text-[11.5px] text-muted-foreground">{p.description}</p>}
+                      {p.description && <p className="text-[13px] text-muted-foreground">{p.description}</p>}
                     </div>
                     <span className="shrink-0 text-[13px] font-bold text-primary">
                       {isFreeEvent ? 'FREE' : p.price === 0 ? 'Free' : formatINR(p.price ?? 0)}
@@ -5278,12 +5623,12 @@ function FormPreviewModal({
                   <div className="flex flex-col gap-3">
                     {sec.fields.map(field => (
                       <div key={field.id}>
-                        <label className="mb-1 flex items-center gap-1 text-[12.5px] font-medium text-foreground">
+                        <label className="mb-1 flex items-center gap-1 text-[14px] font-medium text-foreground">
                           {field.label}
-                          {field.required && <span className="text-[11px] text-red-500" aria-hidden>*</span>}
+                          {field.required && <span className="text-[12px] text-red-500" aria-hidden>*</span>}
                         </label>
                         {field.helperText && (
-                          <p className="mb-1 text-[11px] text-muted-foreground">{field.helperText}</p>
+                          <p className="mb-1 text-[12px] text-muted-foreground">{field.helperText}</p>
                         )}
                         {(field.type === 'text' || field.type === 'email' || field.type === 'mobile' || field.type === 'number') && (
                           <div className="h-9 w-full cursor-default rounded-lg border border-border bg-muted/20 px-3 text-[12px] leading-9 text-muted-foreground/40">
@@ -5336,7 +5681,7 @@ function FormPreviewModal({
             <div className="rounded-lg border border-dashed border-border p-8 text-center">
               <FileSpreadsheet className="mx-auto mb-2 size-8 text-muted-foreground/20" aria-hidden />
               <p className="text-[13px] font-medium text-muted-foreground/50">No form fields configured yet</p>
-              <p className="mt-1 text-[11.5px] text-muted-foreground/40">Go back to Step 5 to build your form</p>
+              <p className="mt-1 text-[13px] text-muted-foreground/40">Go back to Step 5 to build your form</p>
             </div>
           )}
 
@@ -5349,7 +5694,7 @@ function FormPreviewModal({
               {isManualApproval ? 'Submit for Approval' : 'Complete Registration'}
             </button>
           )}
-          <p className="mt-3 text-center text-[11px] text-muted-foreground/50">
+          <p className="mt-3 text-center text-[12px] text-muted-foreground/50">
             Read-only preview — form is not active
           </p>
         </div>
@@ -5445,13 +5790,13 @@ function TermsModal({
           <p className="mb-2 font-semibold text-foreground">9. Amendments</p>
           <p className="mb-3">RegisterDesk reserves the right to amend these terms at any time. Continued use of the platform after amendments constitutes acceptance of the updated terms.</p>
 
-          <p className="mt-4 text-[11.5px] text-muted-foreground/60">Last updated: June 2026 · RegisterDesk Pvt Ltd, Bengaluru, India</p>
+          <p className="mt-4 text-[13px] text-muted-foreground/60">Last updated: June 2026 · RegisterDesk Pvt Ltd, Bengaluru, India</p>
         </div>
 
         {/* Footer */}
         <div className="shrink-0 border-t border-border bg-muted/[0.03] px-5 py-4">
           {!hasScrolled && (
-            <p className="mb-2 text-center text-[11.5px] text-amber-600">Please scroll to the bottom to accept</p>
+            <p className="mb-2 text-center text-[13px] text-amber-600">Please scroll to the bottom to accept</p>
           )}
           <div className="flex gap-2.5">
             <button type="button" onClick={onClose} className={cn(buttonVariants({ variant: 'outline' }), 'flex-1 text-[13px]')}>
@@ -5494,10 +5839,11 @@ function CommercialAgreementModal({
   passes:      EventPassFull[]
   feeModel:    FeeModel
 }) {
+  const feesCfg = useFeesConfig()
   const basePrice = !isFreeEvent && passes.length > 0
     ? Math.min(...passes.map(p => p.price ?? 0))
     : 500
-  const fees = calcFees(basePrice, feeModel)
+  const fees = calcFees(basePrice, feeModel, feeRatesFrom(feesCfg))
 
   if (!open) return null
 
@@ -5525,7 +5871,7 @@ function CommercialAgreementModal({
             </div>
             <div>
               <p className="text-[14px] font-bold text-foreground">RegisterDesk Pricing</p>
-              <p className="text-[11px] text-muted-foreground">What you pay and what you receive</p>
+              <p className="text-[12px] text-muted-foreground">What you pay and what you receive</p>
             </div>
           </div>
           <button type="button" onClick={onClose} className="flex size-7 items-center justify-center rounded-lg text-muted-foreground hover:bg-muted/40" aria-label="Close">
@@ -5537,15 +5883,15 @@ function CommercialAgreementModal({
 
           {/* Event type badge */}
           <div className="mb-5 flex items-center gap-2.5 rounded-xl border border-border bg-muted/[0.04] px-4 py-3">
-            <p className="text-[12.5px] font-semibold text-foreground">
+            <p className="text-[14px] font-semibold text-foreground">
               {isFreeEvent ? 'Free Event' : 'Paid Event'}
             </p>
             {isFreeEvent ? (
-              <span className="rounded-full bg-emerald-100 px-2.5 py-0.5 text-[10.5px] font-bold text-emerald-700">
+              <span className="rounded-full bg-emerald-100 px-2.5 py-0.5 text-[12px] font-bold text-emerald-700">
                 No fees — always free
               </span>
             ) : (
-              <span className="rounded-full bg-primary/10 px-2.5 py-0.5 text-[10.5px] font-bold text-primary">
+              <span className="rounded-full bg-primary/10 px-2.5 py-0.5 text-[12px] font-bold text-primary">
                 {FEE_MODEL_LABELS[feeModel]}
               </span>
             )}
@@ -5554,18 +5900,18 @@ function CommercialAgreementModal({
           {/* RegisterDesk fee */}
           <div className="mb-5 rounded-xl border border-border bg-card p-4">
             <p className="mb-3 text-[12px] font-semibold text-foreground">RegisterDesk Charges</p>
-            <div className="flex flex-col gap-2 text-[12.5px]">
+            <div className="flex flex-col gap-2 text-[13px]">
               <div className="flex justify-between">
                 <span className="text-muted-foreground">Platform Fee</span>
-                <span className="font-semibold text-foreground">2% of ticket revenue</span>
+                <span className="font-semibold text-foreground">{feesCfg.platformFeePercent}% of ticket revenue</span>
               </div>
               <div className="flex justify-between">
                 <span className="text-muted-foreground">Payment Gateway</span>
-                <span className="font-semibold text-foreground">2% + ₹0.50 per ticket</span>
+                <span className="font-semibold text-foreground">{feesCfg.gatewayFeeEnabled ? `${feesCfg.gatewayFeePercent}% per ticket` : 'Waived'}</span>
               </div>
               <div className="flex justify-between">
                 <span className="text-muted-foreground">GST on fees</span>
-                <span className="font-semibold text-foreground">18%</span>
+                <span className="font-semibold text-foreground">{feesCfg.gstEnabled ? `${feesCfg.gstPercent}%` : 'Not applicable'}</span>
               </div>
               <div className="flex justify-between border-t border-border pt-2">
                 <span className="text-muted-foreground">Free events</span>
@@ -5582,14 +5928,14 @@ function CommercialAgreementModal({
               </p>
               <div className="grid grid-cols-2 gap-3">
                 <div className="flex flex-col rounded-xl border border-violet-200/60 bg-violet-50/40 p-3.5">
-                  <p className="text-[10px] font-semibold uppercase tracking-wider text-violet-600">Attendee Pays</p>
+                  <p className="text-[12px] font-semibold uppercase tracking-wider text-violet-600">Attendee Pays</p>
                   <p className="mt-2 text-[1.6rem] font-extrabold text-violet-700">{formatINR(fees.attendeePays)}</p>
-                  <p className="mt-0.5 text-[10.5px] text-muted-foreground">at checkout</p>
+                  <p className="mt-0.5 text-[12px] text-muted-foreground">at checkout</p>
                 </div>
                 <div className="flex flex-col rounded-xl border border-emerald-200/60 bg-emerald-50/50 p-3.5">
-                  <p className="text-[10px] font-semibold uppercase tracking-wider text-emerald-600">You Receive</p>
+                  <p className="text-[12px] font-semibold uppercase tracking-wider text-emerald-600">You Receive</p>
                   <p className="mt-2 text-[1.6rem] font-extrabold text-emerald-700">{formatINR(fees.organizerGets)}</p>
-                  <p className="mt-0.5 text-[10.5px] text-muted-foreground">per registration</p>
+                  <p className="mt-0.5 text-[12px] text-muted-foreground">per registration</p>
                 </div>
               </div>
             </div>
@@ -5608,7 +5954,7 @@ function CommercialAgreementModal({
                 <div key={label} className="flex items-start gap-3">
                   <div className="flex flex-col items-center">
                     <div className={cn(
-                      'flex size-6 shrink-0 items-center justify-center rounded-full text-[10px] font-bold',
+                      'flex size-6 shrink-0 items-center justify-center rounded-full text-[12px] font-bold',
                       i === arr.length - 1
                         ? 'bg-emerald-100 text-emerald-700'
                         : 'bg-muted/60 text-muted-foreground',
@@ -5619,7 +5965,7 @@ function CommercialAgreementModal({
                   </div>
                   <div className={cn('min-w-0 pt-0.5', i < arr.length - 1 && 'pb-2')}>
                     <p className="text-[12px] font-semibold text-foreground">{label}</p>
-                    <p className="text-[11px] text-muted-foreground">{sub}</p>
+                    <p className="text-[12px] text-muted-foreground">{sub}</p>
                   </div>
                 </div>
               ))}
@@ -5705,7 +6051,7 @@ function PublishConfirmModal({
             </div>
             <div>
               <p className="text-[16px] font-bold text-foreground">Ready to Publish?</p>
-              <p className="text-[11.5px] text-muted-foreground">Your event will go live immediately.</p>
+              <p className="text-[13px] text-muted-foreground">Your event will go live immediately.</p>
             </div>
           </div>
           <button
@@ -5723,7 +6069,7 @@ function PublishConfirmModal({
           {/* Event summary */}
           <div className="overflow-hidden rounded-xl border border-border bg-muted/[0.03]">
             <div className="border-b border-border/40 px-4 py-2.5">
-              <p className="text-[10.5px] font-semibold uppercase tracking-wider text-muted-foreground">Event Summary</p>
+              <p className="text-[12px] font-semibold uppercase tracking-wider text-muted-foreground">Event Summary</p>
             </div>
             <div className="flex flex-col divide-y divide-border/40">
               {([
@@ -5733,7 +6079,7 @@ function PublishConfirmModal({
                 { label: 'Fee Model',    val: isFreeEvent ? 'Free Event' : FEE_MODEL_LABELS[feeModel], cls: 'font-medium text-foreground' },
                 { label: 'Settlement',   val: isFreeEvent ? 'N/A' : 'T+3 Business Days',           cls: 'font-medium text-foreground' },
               ] as Array<{ label: string; val: string; cls: string }>).map(({ label, val, cls }) => (
-                <div key={label} className="flex items-center justify-between gap-3 px-4 py-2.5 text-[12.5px]">
+                <div key={label} className="flex items-center justify-between gap-3 px-4 py-2.5 text-[13px]">
                   <span className="text-muted-foreground">{label}</span>
                   <span className={cn('truncate text-right', cls)}>{val}</span>
                 </div>
@@ -5746,7 +6092,7 @@ function PublishConfirmModal({
             <div className="flex items-start gap-3 rounded-xl border border-rose-200/60 bg-rose-50/60 p-4">
               <XCircle className="mt-0.5 size-4 shrink-0 text-rose-500" aria-hidden />
               <div>
-                <p className="text-[12.5px] font-semibold text-rose-700 mb-1.5">Publishing blocked</p>
+                <p className="text-[14px] font-semibold text-rose-700 mb-1.5">Publishing blocked</p>
                 <ul className="flex flex-col gap-1">
                   {report.blockers.slice(0, 5).map((b, i) => (
                     <li key={i} className="flex items-center gap-1.5 text-[12px] text-rose-600">
@@ -5763,7 +6109,7 @@ function PublishConfirmModal({
           {report.canPublish && (
             <div className="overflow-hidden rounded-xl border border-border bg-card">
               <div className="border-b border-border/40 px-4 py-2.5">
-                <p className="text-[10.5px] font-semibold uppercase tracking-wider text-muted-foreground">What happens next?</p>
+                <p className="text-[12px] font-semibold uppercase tracking-wider text-muted-foreground">What happens next?</p>
               </div>
               <div className="flex flex-col divide-y divide-border/40">
                 {([
@@ -5776,7 +6122,7 @@ function PublishConfirmModal({
                     <div className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-emerald-50">
                       <CheckCircle2 className="size-3.5 text-emerald-600" aria-hidden />
                     </div>
-                    <p className="text-[12.5px] text-foreground">{text}</p>
+                    <p className="text-[14px] text-foreground">{text}</p>
                   </div>
                 ))}
               </div>
@@ -5806,12 +6152,12 @@ function PublishConfirmModal({
               {isPublishing ? (
                 <>
                   <RefreshCw className="size-4 animate-spin" aria-hidden />
-                  Publishing…
+                  Submitting…
                 </>
               ) : (
                 <>
                   <Zap className="size-4" aria-hidden />
-                  Publish Event
+                  Submit Event
                 </>
               )}
             </button>
@@ -5844,11 +6190,14 @@ interface StepSummary {
 }
 
 interface ReadinessReport {
-  score:      number
-  steps:      StepSummary[]
-  blockers:   string[]
-  warnings:   string[]
-  canPublish: boolean
+  score:        number
+  steps:        StepSummary[]
+  // Mandatory publish requirements — the SAME shared source the server uses.
+  // Drives both the Action Required list and canPublish (payment gate).
+  requirements: PublishRequirement[]
+  blockers:     string[]
+  warnings:     string[]
+  canPublish:   boolean
 }
 
 function buildReadinessReport(
@@ -5977,13 +6326,60 @@ function buildReadinessReport(
     ],
   })
 
-  const blockers = steps.flatMap(s => s.checks.filter(c => c.required && !c.passed).map(c => `${s.name}: ${c.label}`))
+  // Mandatory publish gate — the SHARED requirements (identical to the server's
+  // validateEventPublish). canPublish and the Action Required list derive from
+  // these, so the organizer can never reach payment with a required field the
+  // server would reject still missing. `steps`/`score` remain the readiness
+  // quality display only (optional checks feed the score, not the gate).
+  const requirements = evaluatePublishRequirements({
+    pricing:          pricingData,
+    eventDetails:     detailsData as unknown as Record<string, unknown> | null,
+    registrationForm: formData,
+  })
+  const failed   = requirements.filter(r => !r.passed)
+  const blockers = failed.map(r => `${r.stepName}: ${r.title}`)
   const warnings = steps.flatMap(s => s.checks.filter(c => !c.required && !c.passed).map(c => `${s.name}: ${c.label}`))
 
-  return { score: Math.min(100, Math.round(earned)), steps, blockers, warnings, canPublish: blockers.length === 0 }
+  return {
+    score: Math.min(100, Math.round(earned)),
+    steps,
+    requirements,
+    blockers,
+    warnings,
+    canPublish: failed.length === 0,
+  }
 }
 
-function Step7View({ currentStep, completedValues, onNext, onBack, onSaveDraft, initialData }: StepViewProps) {
+// Wraps FeeCollectionSection (designed for inside a card) as a standalone card
+function FeeCollectionCard({
+  feeModel,
+  onChange,
+  samplePrice,
+}: {
+  feeModel:    FeeModel
+  onChange:    (m: FeeModel) => void
+  samplePrice?: number
+}) {
+  return (
+    <div className="overflow-hidden rounded-2xl border border-border bg-card shadow-sm">
+      <div className="flex items-center gap-3 px-5 py-4 sm:px-6">
+        <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary/[0.09]">
+          <IndianRupee className="size-4 text-primary" aria-hidden />
+        </div>
+        <div>
+          <p className="text-[15px] font-bold tracking-tight text-foreground">Fee Collection Method</p>
+          <p className="mt-0.5 text-[13px] text-muted-foreground">
+            Choose how platform fees will be handled for this event.
+          </p>
+        </div>
+      </div>
+      {/* FeeCollectionSection uses border-t as header separator */}
+      <FeeCollectionSection feeModel={feeModel} onChange={onChange} samplePrice={samplePrice} />
+    </div>
+  )
+}
+
+function Step7View({ currentStep, completedValues, onNext, onBack, onSaveDraft, initialData, onGoToStep, wizardSteps }: StepViewProps) {
   const draftId      = (initialData?.draftId          as string | null) ?? null
   const draftStatus  = (initialData?.status           as string | null) ?? null
   const eventTypeId  = (initialData?.eventType        as string | null) ?? null
@@ -5993,6 +6389,9 @@ function Step7View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
   const pricingData  = (initialData?.pricing          as Record<string, unknown> | null) ?? null
   const formData     = (initialData?.registrationForm as Record<string, unknown> | null) ?? null
   const detailsData  = (initialData?.eventDetails     as EventDetailsDraft | null) ?? null
+  const reviewLicenseTier: EventLicenseTier = isEventLicenseTier(initialData?.licenseTier)
+    ? initialData.licenseTier
+    : 'starter'
 
   const isFreeEvent        = pricingData?.eventType === 'free'
   const isAlreadyPublished = draftStatus === 'published'
@@ -6012,8 +6411,6 @@ function Step7View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
   const rfFields    = Array.isArray(formData?.fields)   ? (formData.fields   as unknown[]) : []
   const hasFormConfigured = rfTemplate.length > 0 || rfSections.length > 0
 
-  const feeModel     = (pricingData?.feeModel as FeeModel | undefined) ?? 'attendee_pays'
-  const estimatedReg = (pricingData?.estimatedRegistrations as number | undefined) ?? 100
   const eventName    = detailsData?.info?.name?.trim() ?? ''
   const passes       = ((pricingData?.passes as EventPassFull[] | undefined) ?? []).filter(p => p.name?.trim())
   const minPassPrice = passes.length > 0 ? Math.min(...passes.map(p => p.price ?? 0)) : 0
@@ -6021,7 +6418,6 @@ function Step7View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
   // Any unlimited-capacity pass makes revenue/capacity estimates meaningless
   const hasUnlimitedCapacity = !isFreeEvent && passes.some(p => p.unlimited || p.quantity == null)
   // null signals "cannot be computed" — never substitute 100 or any platform cap
-  const maxSeats:   number | null = hasUnlimitedCapacity ? null : passes.reduce((s, p) => s + (p.quantity ?? 0), 0)
   const maxRevenue: number | null = hasUnlimitedCapacity ? null : passes.reduce((s, p) => s + ((p.price ?? 0) * (p.quantity ?? 0)), 0)
 
   const report = buildReadinessReport(
@@ -6033,6 +6429,9 @@ function Step7View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
   const termsFees = feesAcceptedAt !== null
 
   const [publishState,     setPublishState]     = useState<'idle' | 'publishing' | 'published'>('idle')
+  // Whether the submitted event went live ('published', auto mode) or is awaiting
+  // admin approval ('pending_review', manual mode) — drives the success screen.
+  const [submittedStatus,  setSubmittedStatus]  = useState<'published' | 'pending_review'>('published')
   const [saveChangesState, setSaveChangesState] = useState<'idle' | 'saving'>('idle')
   const [showEventPreview,    setShowEventPreview]    = useState(false)
   const [showPublishConfirm,  setShowPublishConfirm]  = useState(false)
@@ -6045,31 +6444,51 @@ function Step7View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
     ? termInfo && consentFeeModel && consentTimeline
     : termInfo && termsFees && consentFeeModel && consentTimeline)
 
-  // Communication add-on selections (read from pricing draft)
-  const whatsappEnabled = !!(pricingData?.whatsappEnabled  as boolean | undefined)
-  const smsEnabled      = !!(pricingData?.smsEnabled       as boolean | undefined)
-  const certEnabled     = !!(pricingData?.certEnabled      as boolean | undefined)
+  // ── Interactive state — initialized from draft, persisted via onSaveDraft ──
+  const [localFeeModel,  setLocalFeeModel]  = useState<FeeModel>(() =>
+    (pricingData?.feeModel as FeeModel | undefined) ?? 'attendee_pays')
+  const [localWhatsapp, setLocalWhatsapp] = useState<boolean>(!!pricingData?.whatsappEnabled)
+  const [localSms,      setLocalSms]      = useState<boolean>(!!pricingData?.smsEnabled)
+  const [localCert,     setLocalCert]     = useState<boolean>(!!pricingData?.certEnabled)
 
-  // Communication cost estimate — uses shared estimateCapacity so the UI
-  // always agrees with what the publish API will compute server-side.
+  // Communication cost estimate uses local interactive state. The Final Cost
+  // Summary (F2.5) is the single source of truth for pricing — the standalone
+  // Registration-Plan slider and Billing-Summary panels were removed, so their
+  // derived totals (plan upgrade, platform-fee roll-up, GST) live there now.
+  // Config-resolved per-message rates so the estimate matches the actual charge.
+  const commConfig = useCommunicationConfig()
   const estimatedCapacity = estimateCapacity(pricingData)
   const commCostEstimate: CommunicationCostResult = calculateCommunicationCost({
     estimatedCapacity,
-    whatsappEnabled,
-    smsEnabled,
+    whatsappEnabled: localWhatsapp,
+    smsEnabled:      localSms,
+    whatsappRatePaise: commConfig.whatsapp.pricePaise,
+    smsRatePaise:      commConfig.sms.pricePaise,
   })
-  // Wallet balance check — only for draft publish flow; never for published-event edits
-  const needsWalletCheck = !isAlreadyPublished && isFreeEvent && (whatsappEnabled || smsEnabled)
+  // Per-certificate price from Business Configuration (SSOT) — no longer hardcoded.
+  const certCostAmount = localCert ? estimatedCapacity * (commConfig.certificates.pricePaise / 100) : 0
+
+  // Wallet balance check — only for draft publish flow; free events with comm channels
+  const needsWalletCheck = !isAlreadyPublished && isFreeEvent && (localWhatsapp || localSms)
 
   const [walletBalance, setWalletBalance] = useState<number | null>(null)
   const [walletLoading, setWalletLoading] = useState(false)
+  const [payState, setPayState] = useState<'idle' | 'paying'>('idle')
   const [showAddFundsModal, setShowAddFundsModal] = useState(false)
+  // Applied license coupon (validated by the wizard's cost summary; the server
+  // re-validates + is authoritative). Sent to POST /api/licensing/purchase.
+  const [appliedCouponCode, setAppliedCouponCode] = useState<string | null>(null)
 
   // Wallet is sufficient when: not needed, or balance >= estimated cost
   const walletReady = !needsWalletCheck ||
     (!walletLoading && walletBalance !== null && walletBalance >= commCostEstimate.totalPaise)
   // "Add Funds" mode: balance fetched, insufficient
   const showAddFundsMode = needsWalletCheck && !walletLoading && walletBalance !== null && !walletReady
+
+  // Auto-save pricing changes (feeModel, comm toggles) back to the draft
+  const savePricingChanges = useCallback((patch: Record<string, unknown>) => {
+    onSaveDraft?.({ ...(pricingData ?? {}), feeModel: localFeeModel, whatsappEnabled: localWhatsapp, smsEnabled: localSms, certEnabled: localCert, ...patch })
+  }, [onSaveDraft, pricingData, localFeeModel, localWhatsapp, localSms, localCert])
 
   const safeDetails = detailsData ? normalizeEventDetailsDraft(detailsData) : null
 
@@ -6125,7 +6544,16 @@ function Step7View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
           showToast('Draft not found. Please refresh the page and try again.', 'error')
           setPublishState('idle')
         } else if (json.reason === 'INCOMPLETE_REQUIRED_FIELDS') {
-          showToast('Some required fields are missing. Please review your event details.', 'error')
+          // Show the REAL missing field(s) the server reported (Phase 4/5) — never
+          // a generic message unless the server sent no structured blockers.
+          const first = json.blockers?.[0]
+          showToast(
+            first
+              ? `${first.title} — ${first.description} (Step: ${first.step})`
+              : 'Some required fields are missing. Please review your event details.',
+            'error',
+          )
+          document.getElementById('publish-readiness')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
           setPublishState('idle')
         } else if (json.reason === 'INVALID_TIMEZONE') {
           showToast('The event timezone is invalid. Please select a valid timezone in Schedule settings.', 'error')
@@ -6137,6 +6565,7 @@ function Step7View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
         return
       }
 
+      setSubmittedStatus(json.lifecycleStatus === 'pending_review' ? 'pending_review' : 'published')
       onNext('Published', { publishedAt: json.publishedAt })
       setPublishState('published')
     } catch {
@@ -6225,6 +6654,108 @@ function Step7View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
     }
   }, [topupLoading, showToast])
 
+  // ── License payment (F2.2) — wallet-first, then Razorpay for the remainder ──
+  // Effective (config-aware) catalog so paid-tier detection matches the server.
+  const licenseCatalog = useLicenseCatalog()
+  const licenseDef     = licenseCatalog[reviewLicenseTier]
+  const isPaidLicense  = licenseDef.licensePricePaise > 0
+  // Every paid tier (Growth/Professional/Enterprise) goes through payment; Starter
+  // (free) submits directly. undefined → 'Submit Event'.
+  const submitLabel    = isPaidLicense ? 'Continue to Payment' : undefined
+
+  // Finalize the purchase (deduct wallet + persist), then auto-submit the event.
+  const confirmAndSubmit = useCallback(async (
+    walletUsePaise: number,
+    razorpay?: { razorpay_order_id: string; razorpay_payment_id: string; razorpay_signature: string },
+  ) => {
+    try {
+      const token = await auth.currentUser?.getIdToken()
+      const res   = await fetch('/api/licensing/checkout/confirm', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+        body:    JSON.stringify({ eventId: draftId, tier: reviewLicenseTier, walletUsePaise, ...(razorpay ?? {}) }),
+      })
+      const json = await res.json() as { success?: boolean; error?: string }
+      if (!res.ok || !json.success) throw new Error(json.error ?? 'Could not confirm payment')
+      setPayState('idle')
+      void handleConfirmPublish()   // automatic submission — no second click
+    } catch (e) {
+      setPayState('idle')
+      showToast(e instanceof Error ? e.message : 'Could not confirm payment. Your draft is saved — you can retry.', 'error')
+    }
+  }, [draftId, reviewLicenseTier, handleConfirmPublish, showToast])
+
+  const handlePayAndSubmit = useCallback(async () => {
+    // Starter (free) or Enterprise (contact sales) → submit directly (no payment).
+    if (!isPaidLicense) { handlePublish(); return }
+    // Phase 3 — HARD GATE: never open Razorpay while blockers remain. Stay on the
+    // Review page and scroll to Action Required. (The button is also disabled in
+    // this state; this is a defensive second gate — "no exceptions".)
+    if (!report.canPublish) {
+      document.getElementById('publish-readiness')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      return
+    }
+    if (payState !== 'idle' || !draftId || !allTermsAccepted) return
+    setPayState('paying')
+    console.info('[publish] payment started', { draftId, tier: reviewLicenseTier })
+    try {
+      const token = await auth.currentUser?.getIdToken()
+      const pRes  = await fetch('/api/licensing/purchase', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+        body:    JSON.stringify({ eventId: draftId, tier: reviewLicenseTier, ...(appliedCouponCode ? { couponCode: appliedCouponCode } : {}) }),
+      })
+      const purchase = await pRes.json() as {
+        ok?: boolean; alreadyPaid?: boolean; message?: string; error?: string
+        walletUsePaise?: number; remainderPaise?: number
+        checkout?: { keyId: string; razorpayOrderId: string; amountPaise: number } | null
+      }
+      if (!pRes.ok || !purchase.ok) throw new Error(purchase.message ?? purchase.error ?? 'Could not start payment')
+
+      // Phase 7 — RETRY without a second charge: a paid license already exists for
+      // this draft (payment succeeded before but publish failed). Skip Razorpay and
+      // re-run submission directly. Never charge twice.
+      if (purchase.alreadyPaid) {
+        console.info('[publish] retry — license already paid, no charge', { draftId })
+        setPayState('idle')
+        void handleConfirmPublish()
+        return
+      }
+
+      const walletUsePaise = purchase.walletUsePaise ?? 0
+      const remainderPaise = purchase.remainderPaise ?? 0
+
+      // Wallet fully covers the price → confirm directly, no Razorpay.
+      if (remainderPaise <= 0 || !purchase.checkout) { await confirmAndSubmit(walletUsePaise); return }
+
+      // Remainder → reuse the existing Razorpay checkout script.
+      const checkout = purchase.checkout
+      const script = document.createElement('script')
+      script.src = 'https://checkout.razorpay.com/v1/checkout.js'
+      script.onload = () => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const rz = new (window as any).Razorpay({
+          key:         checkout.keyId,
+          order_id:    checkout.razorpayOrderId,
+          amount:      checkout.amountPaise,
+          currency:    'INR',
+          name:        'RegisterDesk',
+          description: `${licenseDef.name} License`,
+          handler: (resp: { razorpay_order_id: string; razorpay_payment_id: string; razorpay_signature: string }) => {
+            void confirmAndSubmit(walletUsePaise, resp)
+          },
+          modal: { ondismiss: () => { setPayState('idle'); showToast('Payment cancelled. Your draft is saved — you can retry.', 'error') } },
+        })
+        rz.open()
+      }
+      script.onerror = () => { setPayState('idle'); showToast('Could not load payment. Please retry.', 'error') }
+      document.body.appendChild(script)
+    } catch (e) {
+      setPayState('idle')
+      showToast(e instanceof Error ? e.message : 'Payment failed. Your draft is saved — you can retry.', 'error')
+    }
+  }, [isPaidLicense, payState, draftId, allTermsAccepted, report.canPublish, reviewLicenseTier, licenseDef, appliedCouponCode, handlePublish, handleConfirmPublish, confirmAndSubmit, showToast])
+
   // ── Save changes for already-published events ──────────────────────────────
   const handleSaveChanges = useCallback(async () => {
     if (saveChangesState !== 'idle') return
@@ -6255,11 +6786,10 @@ function Step7View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
 
   const scoreGrade   = report.score >= 80 ? 'great' : report.score >= 50 ? 'fair' : 'poor'
   const scoreTextCls = scoreGrade === 'great' ? 'text-emerald-600' : scoreGrade === 'fair' ? 'text-amber-500' : 'text-rose-500'
-  const scoreBgCls   = scoreGrade === 'great' ? 'border-emerald-200/60 bg-emerald-50/40' : scoreGrade === 'fair' ? 'border-amber-200/60 bg-amber-50/40' : 'border-rose-200/60 bg-rose-50/40'
-  const scoreBarCls  = scoreGrade === 'great' ? 'bg-emerald-500' : scoreGrade === 'fair' ? 'bg-amber-500' : 'bg-rose-500'
 
-  // -- Published success screen (draft → published for the first time) -------
+  // -- Submitted success screen (draft → submitted for the first time) -------
   if (publishState === 'published' && !isAlreadyPublished) {
+    const isPendingReview = submittedStatus === 'pending_review'
 
     return (
       <motion.div
@@ -6272,24 +6802,31 @@ function Step7View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
           initial={{ scale: 0.7, opacity: 0 }}
           animate={{ scale: 1, opacity: 1 }}
           transition={{ delay: 0.1, duration: 0.45, ease: EASE }}
-          className="flex size-24 items-center justify-center rounded-full bg-emerald-50 shadow-lg ring-8 ring-emerald-100/50"
+          className={cn(
+            'flex size-24 items-center justify-center rounded-full shadow-lg ring-8',
+            isPendingReview ? 'bg-amber-50 ring-amber-100/50' : 'bg-emerald-50 ring-emerald-100/50',
+          )}
         >
-          <CheckCircle2 className="size-12 text-emerald-500" aria-hidden />
+          <CheckCircle2 className={cn('size-12', isPendingReview ? 'text-amber-500' : 'text-emerald-500')} aria-hidden />
         </motion.div>
 
         <div className="max-w-sm">
           <h1 className="text-[1.4rem] font-bold tracking-tight text-foreground">
-            {eventName || 'Your event'} is live!
+            {isPendingReview
+              ? 'Event Submitted Successfully'
+              : `${eventName || 'Your event'} is live!`}
           </h1>
           <p className="mt-2 text-[13.5px] leading-relaxed text-muted-foreground">
-            {isFreeEvent
-              ? 'Your event is now accepting registrations.'
-              : 'Your event is now accepting paid registrations.'}
+            {isPendingReview
+              ? 'Status: Pending Approval. Your event has been submitted for review — you’ll be notified once an admin approves it and it goes live.'
+              : isFreeEvent
+                ? 'Your event is now accepting registrations.'
+                : 'Your event is now accepting paid registrations.'}
           </p>
         </div>
 
-        {/* Event URL copy row */}
-        {eventUrl && (
+        {/* Event URL copy row — only once live (hidden while pending approval) */}
+        {!isPendingReview && eventUrl && (
           <div className="flex w-full max-w-md items-center gap-2 rounded-xl border border-border bg-muted/[0.04] px-4 py-3">
             <p className="min-w-0 flex-1 truncate text-[12px] text-muted-foreground">{eventUrl}</p>
             <button
@@ -6333,8 +6870,8 @@ function Step7View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
                 <Icon className="size-4 text-primary" aria-hidden />
               </div>
               <div>
-                <p className="text-[12.5px] font-semibold text-foreground">{label}</p>
-                <p className="text-[11px] text-muted-foreground">{desc}</p>
+                <p className="text-[14px] font-semibold text-foreground">{label}</p>
+                <p className="text-[12px] text-muted-foreground">{desc}</p>
               </div>
             </Link>
           ))}
@@ -6352,7 +6889,7 @@ function Step7View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
               <div className="mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-md bg-muted/50">
                 <Icon className="size-3.5 text-muted-foreground" aria-hidden />
               </div>
-              <p className="text-[12.5px] leading-relaxed text-foreground">{text}</p>
+              <p className="text-[13px] leading-relaxed text-foreground">{text}</p>
             </div>
           ))}
         </div>
@@ -6377,17 +6914,15 @@ function Step7View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
         <ArrowLeft className="size-4" aria-hidden />Back to Dashboard
       </Link>
 
-      <div className="rounded-xl border border-border bg-card px-4 py-3.5 shadow-sm sm:px-6 sm:py-5">
-        <Stepper currentStep={currentStep} completedValues={completedValues} />
-      </div>
+      <Stepper currentStep={currentStep} completedValues={completedValues} />
 
       {/* Header row with Preview button */}
       <div className="mt-4 flex items-start justify-between gap-3">
         <div>
-          <h1 className="text-[1.1rem] font-bold tracking-tight text-foreground sm:text-[1.2rem]">
-            Review &amp; {isAlreadyPublished ? 'Save' : 'Publish'}
+          <h1 className="text-[22px] font-bold tracking-tight text-foreground">
+            Review &amp; {isAlreadyPublished ? 'Save' : 'Submit'}
           </h1>
-          <p className="mt-0.5 text-[12.5px] text-muted-foreground sm:text-[13px]">
+          <p className="mt-1 text-[13px] text-muted-foreground">
             {isAlreadyPublished
               ? 'Review your changes and save to update your live event.'
               : 'Review your event and publish when ready.'}
@@ -6403,437 +6938,187 @@ function Step7View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
         </button>
       </div>
 
-      {/* Compact sections */}
-      <div className="mt-4 flex flex-col gap-4">
+      {/* Safety banner */}
+      <p className="mt-1.5 flex items-center gap-1.5 text-[12px] text-muted-foreground/60">
+        <Shield className="size-3 shrink-0" aria-hidden />
+        Your event is safe. You can edit anytime before publishing.
+      </p>
 
-        {/* 1. COMPACT READINESS */}
-        <div className={cn('rounded-xl border p-4 shadow-sm sm:p-5', scoreBgCls)}>
-          <div className="flex items-center gap-4">
-            <span className={cn('shrink-0 text-[2.4rem] font-extrabold tabular-nums leading-none', scoreTextCls)}>
-              {report.score}
-            </span>
-            <div className="min-w-0 flex-1">
-              <div className="mb-1.5 flex flex-wrap items-center gap-2">
-                <span className="text-[12px] font-semibold text-muted-foreground/80">/100 Readiness</span>
-                {report.canPublish
-                  ? <span className="flex items-center gap-1 rounded-full bg-emerald-100 px-2 py-0.5 text-[10.5px] font-semibold text-emerald-700"><CheckCircle2 className="size-3" aria-hidden />Ready</span>
-                  : <span className="flex items-center gap-1 rounded-full bg-rose-100 px-2 py-0.5 text-[10.5px] font-semibold text-rose-600"><XCircle className="size-3" aria-hidden />{report.blockers.length} issue{report.blockers.length !== 1 ? 's' : ''}</span>
-                }
+      {/* ── PUBLISH READINESS CARD ─────────────────────────────────────── */}
+      {(() => {
+        const completedCount = report.steps.filter(s => s.status === 'complete').length
+        // Driven directly by the shared publish requirements (same source of
+        // truth as the server), so EVERY mandatory blocker renders automatically
+        // — no hardcoded per-field cards.
+        const blockerItems = report.requirements.filter(r => !r.passed)
+        return (
+          <div id="publish-readiness" className="mt-4 overflow-hidden rounded-2xl border border-border bg-card shadow-sm">
+
+            {/* ── Header ── */}
+            <div className="flex items-center justify-between px-5 py-4 sm:px-6">
+              <div className="flex items-center gap-2.5">
+                <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary/[0.09]">
+                  <CheckCircle2 className="size-4 text-primary" aria-hidden />
+                </div>
+                <p className="text-[15px] font-bold tracking-tight text-foreground">Publish Readiness</p>
               </div>
-              <div className="h-1.5 w-full overflow-hidden rounded-full bg-border/30">
+              {report.canPublish
+                ? <span className="flex items-center gap-1.5 rounded-full bg-emerald-100 px-3 py-1 text-[12px] font-semibold text-emerald-700"><CheckCircle2 className="size-3" aria-hidden />Ready to publish</span>
+                : <span className="flex items-center gap-1.5 rounded-full bg-amber-100 px-3 py-1 text-[12px] font-semibold text-amber-700"><AlertCircle className="size-3" aria-hidden />{blockerItems.length} issue{blockerItems.length !== 1 ? 's' : ''} remaining</span>
+              }
+            </div>
+
+            {/* ── Score + progress bar ── */}
+            <div className="border-t border-border/40 px-5 py-4 sm:px-6">
+              <div className="mb-3 flex items-end gap-2">
+                <span className={cn('text-[2.6rem] font-extrabold tabular-nums leading-none tracking-tight', scoreTextCls)}>
+                  {report.score}
+                </span>
+                <span className="mb-1 text-[14px] font-medium leading-none text-muted-foreground/60">/ 100</span>
+              </div>
+              <div className="h-2 w-full overflow-hidden rounded-full bg-muted/60">
                 <motion.div
                   initial={{ width: 0 }}
                   animate={{ width: `${report.score}%` }}
-                  transition={{ duration: 0.7, ease: EASE }}
-                  className={cn('h-full rounded-full', scoreBarCls)}
+                  transition={{ duration: 0.8, ease: EASE }}
+                  className="h-full rounded-full"
+                  style={{
+                    backgroundImage: report.canPublish
+                      ? 'linear-gradient(90deg,#10b981,#34d399)'
+                      : 'var(--primary-gradient)',
+                  }}
                 />
               </div>
-            </div>
-          </div>
-
-          {/* Step pills */}
-          <div className="mt-3 flex flex-wrap gap-1.5">
-            {report.steps.map(step => {
-              const isC = step.status === 'complete'
-              const isP = step.status === 'partial'
-              return (
-                <span key={step.index} className={cn(
-                  'flex items-center gap-1 rounded-full px-2.5 py-1 text-[11.5px] font-medium',
-                  isC ? 'bg-emerald-100/70 text-emerald-700' : isP ? 'bg-amber-100/70 text-amber-700' : 'bg-rose-100/70 text-rose-600',
-                )}>
-                  {isC ? <Check className="size-3" aria-hidden /> : isP ? <AlertCircle className="size-3" aria-hidden /> : <XCircle className="size-3" aria-hidden />}
-                  {step.name}
+              <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1">
+                <span className="flex items-center gap-1.5 text-[12px] font-medium text-emerald-600">
+                  <CheckCircle2 className="size-3.5 shrink-0" aria-hidden />
+                  {completedCount} section{completedCount !== 1 ? 's' : ''} complete
                 </span>
-              )
-            })}
-          </div>
-
-          {/* Blockers */}
-          {report.blockers.length > 0 && (
-            <div className="mt-3 flex items-start gap-2 rounded-lg border border-rose-200/60 bg-rose-50/60 px-3 py-2.5">
-              <XCircle className="mt-0.5 size-3.5 shrink-0 text-rose-500" aria-hidden />
-              <div>
-                <p className="text-[12px] font-semibold text-rose-700">Fix these before publishing:</p>
-                <ul className="mt-1 flex flex-col gap-0.5">
-                  {report.blockers.map((b, i) => (
-                    <li key={i} className="flex items-center gap-1.5 text-[11.5px] text-rose-600">
-                      <span className="size-1.5 shrink-0 rounded-full bg-rose-400" aria-hidden />
-                      {b}
-                    </li>
-                  ))}
-                </ul>
-                <button type="button" onClick={onBack}
-                  className="mt-1.5 inline-flex items-center gap-1 text-[11.5px] font-semibold text-rose-700 hover:underline underline-offset-2">
-                  <ArrowLeft className="size-3.5" aria-hidden />Go back to edit
-                </button>
-              </div>
-            </div>
-          )}
-        </div>
-
-        {/* 2. EVENT SUMMARY + PASS LIST (left) / SERVICES + COMPLETENESS (right) */}
-        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-
-          {/* Event Summary card */}
-          <div className="overflow-hidden rounded-xl border border-border bg-card shadow-sm">
-            <div className="border-b border-border px-4 py-3">
-              <p className="text-[13px] font-semibold text-foreground">Event Summary</p>
-            </div>
-            <div className="divide-y divide-border/40 px-4">
-              {([
-                { label: 'Event Type',   val: eventTypeId ? `${eventTypeId.charAt(0).toUpperCase()}${eventTypeId.slice(1)}${eventSubtype ? ` · ${eventSubtype}` : ''}` : '—' },
-                { label: 'Visibility',   val: visibility === 'public' ? 'Public' : visibility === 'private' ? 'Private' : '—' },
-                { label: 'Registration', val: isFreeEvent ? 'Free' : 'Paid' },
-                { label: 'Pass Types',   val: `${passes.length}` },
-                {
-                  label: 'Capacity',
-                  val:   hasUnlimitedCapacity ? 'Unlimited' : maxSeats != null && maxSeats > 0 ? maxSeats.toLocaleString('en-IN') : '—',
-                },
-                ...(!isFreeEvent ? [{ label: 'Fee Model', val: FEE_MODEL_LABELS[feeModel] }] : []),
-              ] as Array<{ label: string; val: string }>).map(({ label, val }) => (
-                <div key={label} className="flex items-center justify-between py-2.5 text-[12.5px]">
-                  <span className="text-muted-foreground">{label}</span>
-                  <span className="font-semibold text-foreground">{val}</span>
-                </div>
-              ))}
-            </div>
-
-            {/* Pass list */}
-            {passes.length > 0 && (
-              <>
-                <div className="border-t border-border px-4 py-2.5">
-                  <p className="text-[10.5px] font-semibold uppercase tracking-wider text-muted-foreground">Passes</p>
-                </div>
-                <div className="divide-y divide-border/40 px-4 pb-2">
-                  {passes.map(pass => (
-                    <div key={pass.id} className="flex items-center justify-between py-2.5 text-[12.5px]">
-                      <span className="font-medium text-foreground">{pass.name}</span>
-                      <div className="flex items-center gap-3 text-right">
-                        <span className={cn('font-semibold', isFreeEvent || pass.price === 0 ? 'text-emerald-600' : 'text-foreground')}>
-                          {isFreeEvent ? 'FREE' : pass.price === 0 ? 'Free' : formatINR(pass.price)}
-                        </span>
-                        <span className="text-[11px] text-muted-foreground">
-                          {pass.unlimited ? 'Unlimited' : `${(pass.quantity ?? 0).toLocaleString('en-IN')} seats`}
-                        </span>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </>
-            )}
-
-          </div>
-
-          {/* Right column: Services + Completeness */}
-          <div className="flex flex-col gap-4">
-
-            {/* Selected Services */}
-            <div className="overflow-hidden rounded-xl border border-border bg-card shadow-sm">
-              <div className="border-b border-border px-4 py-3">
-                <p className="text-[13px] font-semibold text-foreground">Selected Services</p>
-              </div>
-              <div className="divide-y divide-border/40 px-4">
-                {/* Core Features row */}
-                <div className="flex items-center justify-between py-3 text-[12.5px]">
-                  <span className="text-muted-foreground">Core Features Included</span>
-                  <span className="font-semibold text-foreground">
-                    {FREE_PLAN_FEATURES.length + (!isFreeEvent ? PAID_EXTRA_FEATURES.length : 0)} Features
+                {blockerItems.length > 0 && (
+                  <span className="flex items-center gap-1.5 text-[12px] font-medium text-amber-600">
+                    <AlertCircle className="size-3.5 shrink-0" aria-hidden />
+                    {blockerItems.length} issue{blockerItems.length !== 1 ? 's' : ''} remaining
                   </span>
-                </div>
-
-                {/* Communication row */}
-                <div className="flex items-center justify-between py-3 text-[12.5px]">
-                  <span className="text-muted-foreground">Email Notifications</span>
-                  <span className="flex items-center gap-1 font-semibold text-emerald-700">
-                    <CheckCircle2 className="size-3.5" aria-hidden />Always Included
-                  </span>
-                </div>
-
-                {/* Optional Add-ons — only show enabled ones */}
-                {(whatsappEnabled || smsEnabled || certEnabled) && (
-                  <div className="py-3">
-                    <p className="mb-2 text-[10.5px] font-semibold uppercase tracking-wider text-muted-foreground">Optional Add-ons</p>
-                    <div className="flex flex-col gap-1.5">
-                      {whatsappEnabled && (
-                        <div className="flex items-center gap-1.5 text-[12.5px]">
-                          <CheckCircle2 className="size-3.5 text-emerald-600" aria-hidden />
-                          <span className="text-foreground">WhatsApp Notifications</span>
-                        </div>
-                      )}
-                      {smsEnabled && (
-                        <div className="flex items-center gap-1.5 text-[12.5px]">
-                          <CheckCircle2 className="size-3.5 text-emerald-600" aria-hidden />
-                          <span className="text-foreground">SMS Notifications</span>
-                        </div>
-                      )}
-                      {certEnabled && (
-                        <div className="flex items-center gap-1.5 text-[12.5px]">
-                          <CheckCircle2 className="size-3.5 text-emerald-600" aria-hidden />
-                          <span className="text-foreground">Certificates</span>
-                        </div>
-                      )}
-                    </div>
-                  </div>
                 )}
               </div>
             </div>
 
-            {/* Public Page Completeness */}
-            {(() => {
-              const hasName    = !!(safeDetails?.info?.name?.trim())
-              const hasDesc    = !!(safeDetails?.info?.fullDesc?.trim())
-              const hasVenue   = !!(safeDetails?.venue?.type)
-              const hasOrg     = !!(safeDetails?.organizer?.name?.trim() && safeDetails?.organizer?.email?.trim())
-              const hasBanner  = !!(safeDetails?.media?.coverBanner?.value?.trim())
-              const hasDates   = !!(safeDetails?.schedule?.startDate)
-              const tdAny      = safeDetails?.typeDetails as Record<string, unknown> | null | undefined
-              const spks: Speaker[] = Array.isArray(tdAny?.speakers) ? (tdAny!.speakers as Speaker[]) : (Array.isArray(tdAny?.trainers) ? (tdAny!.trainers as Speaker[]) : [])
-              const hasSpeakers = spks.some(s => s.name?.trim())
-              const galleryItems = (safeDetails?.media as unknown as Record<string, unknown>)?.gallery
-              const hasGallery  = Array.isArray(galleryItems) && (galleryItems as unknown[]).length > 0
-
-              const required = [
-                { label: 'Event Name',   ok: hasName  },
-                { label: 'Description',  ok: hasDesc  },
-                { label: 'Date & Time',  ok: hasDates },
-                { label: 'Venue',        ok: hasVenue },
-                { label: 'Organizer',    ok: hasOrg   },
-                { label: 'Cover Banner', ok: hasBanner},
-              ]
-              const optional = [
-                { label: 'Speakers', ok: hasSpeakers },
-                { label: 'Gallery',  ok: hasGallery  },
-              ]
-              const totalPassed = required.filter(i => i.ok).length + optional.filter(i => i.ok).length
-              const totalAll    = required.length + optional.length
-              const pct         = Math.round((totalPassed / totalAll) * 100)
-
-              return (
-                <div className="overflow-hidden rounded-xl border border-border bg-card shadow-sm">
-                  <div className="flex items-center justify-between border-b border-border px-4 py-3">
-                    <div className="flex items-center gap-1.5">
-                      <Globe className="size-3.5 text-muted-foreground" aria-hidden />
-                      <p className="text-[13px] font-semibold text-foreground">Page Completeness</p>
-                    </div>
-                    <span className={cn(
-                      'rounded-full px-2.5 py-0.5 text-[11.5px] font-bold',
-                      totalPassed === totalAll ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700',
-                    )}>
-                      {totalPassed} of {totalAll} Ready
-                    </span>
-                  </div>
-                  <div className="px-4 py-3">
-                    <div className="mb-3 h-1.5 w-full overflow-hidden rounded-full bg-border/30">
-                      <motion.div
-                        initial={{ width: 0 }}
-                        animate={{ width: `${pct}%` }}
-                        transition={{ duration: 0.7, ease: EASE }}
-                        className={cn('h-full rounded-full', pct === 100 ? 'bg-emerald-500' : 'bg-amber-400')}
-                      />
-                    </div>
-                    <div className="grid grid-cols-1 gap-1 sm:grid-cols-2">
-                      {required.map(item => (
-                        <div key={item.label} className="flex items-center gap-1.5 text-[12px]">
-                          <span className={cn('flex size-[14px] shrink-0 items-center justify-center rounded-full',
-                            item.ok ? 'bg-emerald-100 text-emerald-600' : 'bg-rose-100 text-rose-500')}>
-                            {item.ok ? <Check className="size-2" aria-hidden /> : <XCircle className="size-2" aria-hidden />}
-                          </span>
-                          <span className={item.ok ? 'text-foreground' : 'font-medium text-rose-600'}>{item.label}</span>
-                        </div>
-                      ))}
-                      {optional.map(item => (
-                        <div key={item.label} className="flex items-center gap-1.5 text-[12px]">
-                          <span className={cn('flex size-[14px] shrink-0 items-center justify-center rounded-full',
-                            item.ok ? 'bg-emerald-100 text-emerald-600' : 'bg-amber-100 text-amber-500')}>
-                            {item.ok ? <Check className="size-2" aria-hidden /> : <AlertTriangle className="size-2" aria-hidden />}
-                          </span>
-                          <span className={item.ok ? 'text-foreground' : 'text-muted-foreground'}>
-                            {item.label}
-                            {!item.ok && <span className="ml-1 text-[10.5px] text-amber-500">(optional)</span>}
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-              )
-            })()}
-
-          </div>
-        </div>
-
-        {/* 2b. REGISTRATION FORM SUMMARY */}
-        <div className="overflow-hidden rounded-xl border border-border bg-card shadow-sm">
-          <div className="flex items-center justify-between border-b border-border px-4 py-3">
-            <div className="flex items-center gap-2">
-              <FileSpreadsheet className="size-3.5 text-muted-foreground" aria-hidden />
-              <p className="text-[13px] font-semibold text-foreground">Registration Form</p>
-            </div>
-            <span className={cn(
-              'rounded-full px-2.5 py-0.5 text-[11.5px] font-bold',
-              hasFormConfigured ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700',
-            )}>
-              {hasFormConfigured ? 'Ready' : 'Not configured'}
-            </span>
-          </div>
-          <div className="divide-y divide-border/40 px-4">
-            <div className="flex items-center justify-between py-2.5 text-[12.5px]">
-              <span className="text-muted-foreground">Template</span>
-              <span className="font-semibold text-foreground">{rfTemplate || '—'}</span>
-            </div>
-            <div className="flex items-center justify-between py-2.5 text-[12.5px]">
-              <span className="text-muted-foreground">Sections</span>
-              <span className="font-semibold text-foreground">{rfSections.length}</span>
-            </div>
-            <div className="flex items-center justify-between py-2.5 text-[12.5px]">
-              <span className="text-muted-foreground">Fields</span>
-              <span className="font-semibold text-foreground">{rfFields.length}</span>
-            </div>
-          </div>
-        </div>
-
-        {/* 3. COMMUNICATION & BILLING */}
-        <div className="overflow-hidden rounded-xl border border-border bg-card shadow-sm">
-          <div className="border-b border-border px-4 py-3">
-            <div className="flex items-center gap-2">
-              <Mail className="size-3.5 text-muted-foreground" aria-hidden />
-              <p className="text-[13px] font-semibold text-foreground">Communication &amp; Billing</p>
-            </div>
-          </div>
-
-          {/* Service rows */}
-          <div className="divide-y divide-border/40 px-4">
-            {/* Email — always active */}
-            <div className="flex items-center justify-between py-3">
-              <span className="text-[12.5px] text-foreground">Email Notifications</span>
-              <span className="flex items-center gap-1 rounded-full bg-emerald-100 px-2 py-0.5 text-[11px] font-semibold text-emerald-700">
-                <CheckCircle2 className="size-3" aria-hidden />Active · Included
-              </span>
-            </div>
-
-            {/* WhatsApp */}
-            {whatsappEnabled && (
-              <div className="flex items-center justify-between py-3">
-                <div>
-                  <span className="text-[12.5px] text-foreground">WhatsApp Notifications</span>
-                  <p className="text-[11px] text-muted-foreground">₹0.10 / message · 2 msgs per attendee</p>
-                </div>
-                <span className={cn(
-                  'rounded-full px-2 py-0.5 text-[11px] font-semibold',
-                  isFreeEvent ? 'bg-amber-100 text-amber-700' : 'bg-emerald-100 text-emerald-700',
-                )}>
-                  {isFreeEvent ? 'Wallet billing' : 'Settlement billing'}
-                </span>
-              </div>
-            )}
-
-            {/* SMS */}
-            {smsEnabled && (
-              <div className="flex items-center justify-between py-3">
-                <div>
-                  <span className="text-[12.5px] text-foreground">SMS Notifications</span>
-                  <p className="text-[11px] text-muted-foreground">₹0.15 / message · 2 msgs per attendee</p>
-                </div>
-                <span className={cn(
-                  'rounded-full px-2 py-0.5 text-[11px] font-semibold',
-                  isFreeEvent ? 'bg-amber-100 text-amber-700' : 'bg-emerald-100 text-emerald-700',
-                )}>
-                  {isFreeEvent ? 'Wallet billing' : 'Settlement billing'}
-                </span>
-              </div>
-            )}
-
-            {/* Certificates */}
-            {certEnabled && (
-              <div className="flex items-center justify-between py-3">
-                <span className="text-[12.5px] text-foreground">Certificates</span>
-                <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[11px] font-semibold text-emerald-700">
-                  Active
-                </span>
-              </div>
-            )}
-          </div>
-
-          {/* Cost estimate — free events with comm channels */}
-          {isFreeEvent && (whatsappEnabled || smsEnabled) && (
-            isAlreadyPublished ? (
-              /* Published event: informational only, no wallet enforcement */
-              <div className="border-t border-border/40 px-4 py-4">
-                <div className="flex items-start gap-2.5 rounded-lg border border-border/60 bg-muted/[0.025] px-3 py-3">
-                  <Info className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" aria-hidden />
-                  <div>
-                    <p className="text-[12px] font-semibold text-foreground">Event is already live.</p>
-                    <p className="mt-0.5 text-[11.5px] text-muted-foreground">
-                      Communication settings can be updated at any time. Charges will be applied according to your billing model when communications are sent.
-                    </p>
-                  </div>
-                </div>
-              </div>
-            ) : (
-              /* Draft publish flow: show cost estimate + wallet balance check */
-              <div className="border-t border-border/40 px-4 py-4">
-                <p className="mb-2.5 text-[10.5px] font-semibold uppercase tracking-wider text-muted-foreground">
-                  Estimated Communication Cost
+            {/* ── Blocker action cards ── */}
+            {blockerItems.length > 0 && (
+              <div className="border-t border-border/40 px-5 pb-5 pt-4 sm:px-6">
+                <p className="mb-3 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground/50">
+                  Action required
                 </p>
-                <div className="divide-y divide-border/40 overflow-hidden rounded-lg border border-border/60 bg-muted/[0.025]">
-                  <div className="flex items-center justify-between px-3 py-2 text-[12px]">
-                    <span className="text-muted-foreground">Estimated capacity</span>
-                    <span className="font-medium text-foreground">{estimatedCapacity.toLocaleString('en-IN')} registrations</span>
-                  </div>
-                  {whatsappEnabled && (
-                    <div className="flex items-center justify-between px-3 py-2 text-[12px]">
-                      <span className="text-muted-foreground">WhatsApp</span>
-                      <span className="font-medium text-foreground">{formatINR(commCostEstimate.whatsappCost)}</span>
-                    </div>
-                  )}
-                  {smsEnabled && (
-                    <div className="flex items-center justify-between px-3 py-2 text-[12px]">
-                      <span className="text-muted-foreground">SMS</span>
-                      <span className="font-medium text-foreground">{formatINR(commCostEstimate.smsCost)}</span>
-                    </div>
-                  )}
-                  <div className="flex items-center justify-between bg-muted/[0.04] px-3 py-2.5 text-[12.5px]">
-                    <span className="font-semibold text-foreground">Total Estimated</span>
-                    <span className="font-bold text-primary">{formatINR(commCostEstimate.totalCost)}</span>
-                  </div>
-                </div>
-
-                {/* Wallet balance status */}
-                <div className="mt-3">
-                  {walletLoading ? (
-                    <p className="text-[12px] text-muted-foreground">Checking wallet balance…</p>
-                  ) : walletBalance !== null ? (
-                    <div className={cn(
-                      'flex items-center justify-between rounded-lg border px-3 py-2.5',
-                      walletReady
-                        ? 'border-emerald-200 bg-emerald-50/60'
-                        : 'border-amber-200 bg-amber-50/60',
-                    )}>
-                      <div className="flex items-center gap-2">
-                        <Wallet className={cn('size-3.5 shrink-0', walletReady ? 'text-emerald-600' : 'text-amber-600')} aria-hidden />
-                        <span className={cn('text-[12px] font-medium', walletReady ? 'text-emerald-700' : 'text-amber-700')}>
-                          {walletReady
-                            ? `Wallet sufficient · Balance: ${formatINR(walletBalance / 100)}`
-                            : `Balance insufficient · ${formatINR(walletBalance / 100)} available, ${formatINR(commCostEstimate.totalCost)} needed`}
-                        </span>
+                <div className="flex flex-col gap-2">
+                  {blockerItems.map((req) => (
+                    <button
+                      key={req.id}
+                      type="button"
+                      onClick={() => onGoToStep?.(req.stepIndex, req.fieldHint)}
+                      className="group flex w-full items-center justify-between gap-4 rounded-xl border border-border bg-background px-4 py-3.5 text-left transition-all duration-200 hover:border-primary/25 hover:bg-card hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+                    >
+                      <div className="flex min-w-0 items-center gap-3">
+                        <div className="flex size-7 shrink-0 items-center justify-center rounded-full bg-amber-100">
+                          <AlertCircle className="size-3.5 text-amber-600" aria-hidden />
+                        </div>
+                        <div className="min-w-0">
+                          <p className="text-[13px] font-semibold text-foreground">{req.title}</p>
+                          <p className="mt-0.5 text-[12px] text-muted-foreground">{req.description}</p>
+                        </div>
                       </div>
-                    </div>
-                  ) : null}
+                      <span className="flex shrink-0 items-center gap-1 text-[12px] font-semibold text-primary opacity-0 transition-opacity duration-150 group-hover:opacity-100">
+                        Fix now <ArrowRight className="size-3" aria-hidden />
+                      </span>
+                    </button>
+                  ))}
                 </div>
               </div>
-            )
-          )}
+            )}
 
-          {/* Paid event billing note */}
-          {!isFreeEvent && (whatsappEnabled || smsEnabled) && (
-            <div className="border-t border-border/40 bg-muted/[0.03] px-4 py-3">
-              <p className="text-[11.5px] text-muted-foreground">
-                <span className="font-semibold text-foreground">Billing: </span>
-                WhatsApp and SMS charges are deducted from your event settlement. No upfront payment required.
-              </p>
+            {/* ── All clear footer ── */}
+            {report.canPublish && (
+              <div className="flex items-center gap-2.5 border-t border-emerald-100/80 bg-emerald-50/40 px-5 py-3.5 sm:px-6">
+                <CheckCircle2 className="size-4 shrink-0 text-emerald-500" aria-hidden />
+                <p className="text-[13px] font-medium text-emerald-700">All checks passed — your event is ready to publish</p>
+              </div>
+            )}
+
+          </div>
+        )
+      })()}
+
+        {/* ── REVIEW GRID: Left 70% content · Right 30% sticky Final Cost Summary (F2.5) ── */}
+        <div className="mt-4 grid grid-cols-1 gap-5 lg:grid-cols-[minmax(0,1fr)_340px] lg:items-start">
+
+          {/* ── LEFT COLUMN (70%) ──────────────────────────────────────────── */}
+          <div className="flex min-w-0 flex-col gap-5">
+
+            {/* Fee Collection Method */}
+            <FeeCollectionCard
+              feeModel={localFeeModel}
+              onChange={v => { setLocalFeeModel(v); savePricingChanges({ feeModel: v }) }}
+              samplePrice={passes.find(p => p.price && p.price > 0)?.price}
+            />
+
+            {/* Communication Services */}
+            <div className="overflow-hidden rounded-2xl border border-border bg-card shadow-sm">
+              <div className="flex items-center gap-3 border-b border-border px-5 py-4 sm:px-6">
+                <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary/[0.09]">
+                  <Zap className="size-4 text-primary" aria-hidden />
+                </div>
+                <div>
+                  <p className="text-[15px] font-bold tracking-tight text-foreground">Communication Services</p>
+                  <p className="mt-0.5 text-[13px] text-muted-foreground">Enable paid add-ons for this event</p>
+                </div>
+              </div>
+              <RegisterDeskServicesPricingSection
+                isFreeEvent={isFreeEvent}
+                values={{ whatsappEnabled: localWhatsapp, smsEnabled: localSms, certEnabled: localCert }}
+                onChange={(field, value) => {
+                  if (field === 'whatsappEnabled') { setLocalWhatsapp(value); savePricingChanges({ whatsappEnabled: value }) }
+                  if (field === 'smsEnabled')      { setLocalSms(value);      savePricingChanges({ smsEnabled:      value }) }
+                  if (field === 'certEnabled')     { setLocalCert(value);     savePricingChanges({ certEnabled:     value }) }
+                }}
+                standalone={false}
+              />
+              <div className="border-t border-border/30 bg-muted/[0.03] px-5 py-3.5 sm:px-6">
+                <p className="text-[12px] text-muted-foreground">
+                  <span className="font-semibold text-foreground">Why are these paid? </span>
+                  Email confirmations are always free. WhatsApp, SMS, and certificates require third-party
+                  integrations with per-message costs. For paid events, charges are deducted from settlement —
+                  no upfront payment needed. Free events require wallet balance before publishing.
+                </p>
+              </div>
             </div>
-          )}
+
+          </div>
+          {/* END LEFT COLUMN */}
+
+          {/* ── RIGHT COLUMN (30%) · sticky single-source Final Cost Summary (F2.5) ── */}
+          {/* order-first on mobile → summary shows above the left content; natural order on desktop */}
+          <div className="order-first lg:order-none lg:sticky lg:top-4 lg:self-start">
+            <FinalCostSummary
+              tier={reviewLicenseTier}
+              isFreeEvent={isFreeEvent}
+              walletBalancePaise={walletBalance}
+              walletLoading={walletLoading}
+              whatsappEnabled={localWhatsapp}
+              smsEnabled={localSms}
+              certEnabled={localCert}
+              whatsappCostRupees={commCostEstimate.whatsappCost}
+              smsCostRupees={commCostEstimate.smsCost}
+              certCostRupees={certCostAmount}
+              needsWalletCheck={needsWalletCheck}
+              walletReady={walletReady}
+              onAddFunds={() => setShowAddFundsModal(true)}
+              eventId={draftId ?? undefined}
+              onCouponChange={setAppliedCouponCode}
+            />
+          </div>
+          {/* END RIGHT COLUMN */}
+
         </div>
+        {/* END MAIN GRID */}
 
         {/* 4. PUBLISH STATUS / LIVE STATUS */}
         {isAlreadyPublished ? (
@@ -6890,7 +7175,7 @@ function Step7View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
                   initial={{ scale: 0, opacity: 0 }}
                   animate={{ scale: 1, opacity: 1 }}
                   exit={{ scale: 0, opacity: 0 }}
-                  className="flex items-center gap-1 rounded-full bg-emerald-100 px-2.5 py-0.5 text-[11px] font-semibold text-emerald-700"
+                  className="flex items-center gap-1 rounded-full bg-emerald-100 px-2.5 py-0.5 text-[12px] font-semibold text-emerald-700"
                 >
                   <CheckCircle2 className="size-3" aria-hidden />Ready
                 </motion.span>
@@ -6906,7 +7191,7 @@ function Step7View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
                 termInfo ? 'border-primary bg-primary' : 'border-border bg-background hover:border-primary/50')}>
                 {termInfo && <Check className="size-2.5 text-primary-foreground" aria-hidden />}
               </span>
-              <span className={cn('text-[12.5px]', termInfo ? 'font-medium text-foreground' : 'text-muted-foreground')}>
+              <span className={cn('text-[13px]', termInfo ? 'font-medium text-foreground' : 'text-muted-foreground')}>
                 Event information is accurate and complete.
               </span>
             </button>
@@ -6921,13 +7206,13 @@ function Step7View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
                     termsFees ? 'border-primary bg-primary' : 'border-border bg-background hover:border-primary/50')}>
                   {termsFees && <Check className="size-2.5 text-primary-foreground" aria-hidden />}
                 </button>
-                <p className={cn('text-[12.5px]', termsFees ? 'font-medium text-foreground' : 'text-muted-foreground')}>
+                <p className={cn('text-[13px]', termsFees ? 'font-medium text-foreground' : 'text-muted-foreground')}>
                   I understand{' '}
                   <button type="button" onClick={() => setShowCommercialModal(true)}
                     className="text-primary underline underline-offset-2 hover:no-underline">
                     settlement timelines and fee policy
                   </button>
-                  .{feesAcceptedAt && <span className="ml-1.5 text-[10.5px] text-emerald-600">Reviewed ✓</span>}
+                  .{feesAcceptedAt && <span className="ml-1.5 text-[12px] text-emerald-600">Reviewed ✓</span>}
                 </p>
               </div>
             )}
@@ -6939,7 +7224,7 @@ function Step7View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
                 consentFeeModel ? 'border-primary bg-primary' : 'border-border bg-background hover:border-primary/50')}>
                 {consentFeeModel && <Check className="size-2.5 text-primary-foreground" aria-hidden />}
               </span>
-              <span className={cn('text-[12.5px]', consentFeeModel ? 'font-medium text-foreground' : 'text-muted-foreground')}>
+              <span className={cn('text-[13px]', consentFeeModel ? 'font-medium text-foreground' : 'text-muted-foreground')}>
                 I agree to RegisterDesk <span className="text-primary underline underline-offset-2">Terms of Service</span>.
               </span>
             </button>
@@ -6951,14 +7236,12 @@ function Step7View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
                 consentTimeline ? 'border-primary bg-primary' : 'border-border bg-background hover:border-primary/50')}>
                 {consentTimeline && <Check className="size-2.5 text-primary-foreground" aria-hidden />}
               </span>
-              <span className={cn('text-[12.5px]', consentTimeline ? 'font-medium text-foreground' : 'text-muted-foreground')}>
+              <span className={cn('text-[13px]', consentTimeline ? 'font-medium text-foreground' : 'text-muted-foreground')}>
                 I agree to RegisterDesk <span className="text-primary underline underline-offset-2">Privacy Policy</span>.
               </span>
             </button>
           </div>
         </div>}
-
-      </div>
 
       {(publishState === 'publishing' || saveChangesState === 'saving') && (
         <div className="flex items-center justify-center gap-2 py-3 text-[13px] text-muted-foreground">
@@ -7009,7 +7292,7 @@ function Step7View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
                     </div>
                     <div>
                       <p className="text-[15px] font-bold text-foreground">Add Funds to Wallet</p>
-                      <p className="text-[11.5px] text-muted-foreground">Top up your organizer wallet to publish this event.</p>
+                      <p className="text-[13px] text-muted-foreground">Top up your organizer wallet to publish this event.</p>
                     </div>
                   </div>
                   <button type="button" onClick={() => setShowAddFundsModal(false)} className="shrink-0 text-muted-foreground hover:text-foreground">
@@ -7022,11 +7305,11 @@ function Step7View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
               <div className="px-5 py-4">
                 {/* Balance summary */}
                 <div className="mb-4 divide-y divide-border/40 overflow-hidden rounded-xl border border-border">
-                  <div className="flex items-center justify-between px-4 py-2.5 text-[12.5px]">
+                  <div className="flex items-center justify-between px-4 py-2.5 text-[13px]">
                     <span className="text-muted-foreground">Required for publish</span>
                     <span className="font-semibold text-foreground">{formatINR(commCostEstimate.totalCost)}</span>
                   </div>
-                  <div className="flex items-center justify-between px-4 py-2.5 text-[12.5px]">
+                  <div className="flex items-center justify-between px-4 py-2.5 text-[13px]">
                     <span className="text-muted-foreground">Current balance</span>
                     <span className="font-medium text-foreground">
                       {walletBalance !== null ? formatINR(walletBalance / 100) : '—'}
@@ -7052,7 +7335,7 @@ function Step7View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
                 <button
                   type="button"
                   onClick={() => setShowAddFundsModal(false)}
-                  className="text-[12.5px] font-medium text-muted-foreground hover:text-foreground"
+                  className="text-[13px] font-medium text-muted-foreground hover:text-foreground"
                 >
                   Cancel
                 </button>
@@ -7064,7 +7347,7 @@ function Step7View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
                       : commCostEstimate.totalPaise
                     handleTopupWallet(shortfall > 0 ? shortfall : commCostEstimate.totalPaise)
                   }}
-                  className={cn(buttonVariants({ variant: 'primary' }), 'gap-1.5 text-[12.5px]')}
+                  className={cn(buttonVariants({ variant: 'primary' }), 'gap-1.5 text-[13px]')}
                 >
                   <Wallet className="size-3.5" aria-hidden />
                   Add Funds via Razorpay
@@ -7083,7 +7366,7 @@ function Step7View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
             onAccept={(ts) => { setFeesAcceptedAt(ts); setShowCommercialModal(false) }}
             isFreeEvent={isFreeEvent}
             passes={passes}
-            feeModel={feeModel}
+            feeModel={localFeeModel}
           />
         )}
       </AnimatePresence>
@@ -7101,7 +7384,7 @@ function Step7View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
             passes={passes}
             isFreeEvent={isFreeEvent}
             isPublishing={publishState === 'publishing'}
-            feeModel={feeModel}
+            feeModel={localFeeModel}
           />
         )}
       </AnimatePresence>
@@ -7113,7 +7396,7 @@ function Step7View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
             ? handleSaveChanges
             : showAddFundsMode
               ? () => setShowAddFundsModal(true)
-              : handlePublish
+              : handlePayAndSubmit
         }
         isFinalStep
         nextLabel={
@@ -7121,15 +7404,495 @@ function Step7View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
             ? 'Save Changes'
             : showAddFundsMode
               ? 'Add Funds'
-              : undefined
+              : payState === 'paying'
+                ? 'Processing…'
+                : submitLabel
         }
         isNextDisabled={
           isAlreadyPublished
             ? saveChangesState === 'saving'
             : showAddFundsMode
               ? false
-              : !allTermsAccepted || !report.canPublish || publishState !== 'idle' || !walletReady
+              : !allTermsAccepted || !report.canPublish || publishState !== 'idle' || !walletReady || payState !== 'idle'
         }
+        stepContext={(() => {
+          const steps = wizardSteps ?? WIZARD_STEPS
+          return `Step ${currentStep + 1} of ${steps.length} · ${steps[currentStep]?.name ?? ''}`
+        })()}
+      />
+    </motion.div>
+  )
+}
+
+// --- Campaign Publish Success --------------------------------------------------
+
+function CampaignPublishSuccess({ slug }: { slug: string }) {
+  const [copied, setCopied] = useState(false)
+  const campaignUrl = typeof window !== 'undefined'
+    ? `${window.location.origin}/campaign/${slug}`
+    : `/campaign/${slug}`
+
+  async function handleCopy() {
+    try {
+      await navigator.clipboard.writeText(campaignUrl)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    } catch {
+      // clipboard not available — ignore
+    }
+  }
+
+  return (
+    <div className="rounded-xl border border-green-300 bg-green-50 p-4 dark:border-green-800 dark:bg-green-950/20">
+      <p className="flex items-center gap-2 text-[14px] font-semibold text-green-700 dark:text-green-400">
+        <CheckCircle2 size={16} />
+        Campaign published!
+      </p>
+      <p className="mt-1 text-[13px] text-green-600 dark:text-green-500 font-mono break-all">
+        /campaign/{slug}
+      </p>
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        <Link
+          href={`/campaign/${slug}`}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex items-center gap-1.5 rounded-lg bg-green-700 px-3 py-1.5 text-[13px] font-semibold text-white transition-colors hover:bg-green-800"
+        >
+          View Campaign <ExternalLink size={13} />
+        </Link>
+        <button
+          type="button"
+          onClick={handleCopy}
+          className="inline-flex items-center gap-1.5 rounded-lg border border-green-300 bg-white px-3 py-1.5 text-[13px] font-medium text-green-700 transition-colors hover:bg-green-50 dark:border-green-700 dark:bg-transparent dark:text-green-400"
+        >
+          {copied ? <CheckCircle2 size={13} /> : <Copy size={13} />}
+          {copied ? 'Copied!' : 'Copy Link'}
+        </button>
+        <Link
+          href={ROUTES.DASHBOARD}
+          className="inline-flex items-center gap-1.5 rounded-lg border border-green-300 bg-white px-3 py-1.5 text-[13px] font-medium text-green-700 transition-colors hover:bg-green-50 dark:border-green-700 dark:bg-transparent dark:text-green-400"
+        >
+          Go to Dashboard
+        </Link>
+      </div>
+    </div>
+  )
+}
+
+// --- Donation Campaign Wizard -------------------------------------------------
+
+type DonationPublishState = 'idle' | 'publishing' | 'success' | 'error'
+
+function DonationCampaignWizard({
+  eventSubtype,
+  onBackToEventType,
+}: {
+  eventSubtype:       string | null
+  onBackToEventType:  () => void
+}) {
+  const { draft, isLoading, updateDraft } = useCampaignDraft({
+    campaignType: 'donation_only',
+    eventSubtype: eventSubtype ?? undefined,
+  })
+
+  const [currentStep,     setCurrentStep]     = useState(0)
+  const [completedValues, setCompletedValues] = useState<(string | undefined)[]>(
+    Array(CAMPAIGN_WIZARD_STEPS.length).fill(undefined),
+  )
+  const [hydrated, setHydrated] = useState(false)
+
+  // Track validation errors shown for each step
+  const [showDetailsErrors,  setShowDetailsErrors]  = useState(false)
+  const [showSettingsErrors, setShowSettingsErrors] = useState(false)
+
+  // Controlled form state (synced into campaign draft on advance)
+  const [campaignDetails,  setCampaignDetails]  = useState(makeBlankCampaignDetailsDraft())
+  const [donationSettings, setDonationSettings] = useState(makeBlankDonationSettingsDraft())
+  const [visibility, setVisibility]             = useState<'public' | 'private' | null>(null)
+
+  // Publish flow
+  const [publishState, setPublishState] = useState<DonationPublishState>('idle')
+  const [publishedSlug, setPublishedSlug] = useState<string | null>(null)
+  const [publishError,  setPublishError]  = useState<string | null>(null)
+
+  const { showToast } = useToast()
+
+  useEffect(() => {
+    if (isLoading || hydrated || !draft) return
+    setCurrentStep(draft.currentStep ?? 0)
+    setCompletedValues(
+      (draft.completedValues ?? Array(CAMPAIGN_WIZARD_STEPS.length).fill(null)).map(
+        v => (v as string | null | undefined) ?? undefined,
+      ),
+    )
+    if (draft.campaignDetails)  setCampaignDetails(draft.campaignDetails)
+    if (draft.donationSettings) setDonationSettings(draft.donationSettings)
+    if (draft.visibility)       setVisibility(draft.visibility)
+    setHydrated(true)
+  }, [isLoading, draft, hydrated])
+
+  const totalSteps = CAMPAIGN_WIZARD_STEPS.length
+
+  function advance(label: string) {
+    const nextStep   = Math.min(currentStep + 1, totalSteps - 1)
+    const newValues  = completedValues.map((v, i) => (i === currentStep ? label : v))
+    setCompletedValues(newValues)
+    setCurrentStep(nextStep)
+    void updateDraft({ currentStep: nextStep, completedValues: newValues.map(v => v ?? null) })
+  }
+
+  function goBack() {
+    if (currentStep === 0) {
+      onBackToEventType()
+    } else {
+      setCurrentStep(s => Math.max(s - 1, 0))
+    }
+  }
+
+  async function handlePublish() {
+    setPublishState('publishing')
+    setPublishError(null)
+    try {
+      const user = auth.currentUser
+      if (!user) throw new Error('Not authenticated')
+      const token = await user.getIdToken()
+      const res   = await fetch('/api/campaigns/publish', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body:    JSON.stringify({ draftId: draft?.id }),
+      })
+      const json = await res.json() as { success: boolean; slug?: string; error?: string }
+      if (!json.success) throw new Error(json.error ?? 'Publish failed')
+      setPublishedSlug(json.slug ?? null)
+      setPublishState('success')
+      advance('Published')
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Publish failed'
+      setPublishError(msg)
+      setPublishState('error')
+      showToast(msg, 'error')
+    }
+  }
+
+  if (!hydrated || isLoading) {
+    return (
+      <div className="flex min-h-full flex-col gap-5 pt-1" aria-busy="true">
+        <div className="h-4 w-36 animate-pulse rounded-lg bg-muted/50" />
+        <div className="h-[76px] animate-pulse rounded-xl bg-muted/30" />
+        <div className="mt-1 h-7 w-52 animate-pulse rounded-lg bg-muted/40" />
+        <div className="h-44 animate-pulse rounded-xl bg-muted/30" />
+      </div>
+    )
+  }
+
+  const stepContext = `Step ${currentStep + 1} of ${totalSteps} · ${CAMPAIGN_WIZARD_STEPS[currentStep]?.name ?? ''}`
+
+  // ── Step 0: Visibility ────────────────────────────────────────────────────
+  if (currentStep === 0) {
+    return (
+      <motion.div
+        initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.35, ease: EASE }}
+        className="flex min-h-full flex-col"
+      >
+        <Link href={ROUTES.DASHBOARD}
+          className="mb-5 inline-flex items-center gap-1.5 text-[13px] font-medium text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary rounded">
+          <ArrowLeft className="size-4" aria-hidden />
+          Back to Dashboard
+        </Link>
+
+        <Stepper currentStep={currentStep} completedValues={completedValues} steps={CAMPAIGN_WIZARD_STEPS} />
+
+        <div className="mt-6">
+          <h1 className="text-[22px] font-bold tracking-tight text-foreground">Campaign Visibility</h1>
+          <p className="mt-1 text-[13px] text-muted-foreground">
+            Decide who can see and donate to your campaign.
+          </p>
+        </div>
+
+        <div className="mt-5 grid flex-1 items-start gap-5 sm:grid-cols-2">
+          {(['public', 'private'] as const).map(opt => (
+            <button key={opt} type="button" onClick={() => setVisibility(opt)}
+              className={cn(
+                'flex flex-col gap-2 rounded-xl border-[1.5px] p-4 text-left transition-all duration-150',
+                visibility === opt ? 'border-primary bg-primary/[0.03] shadow-sm' : 'border-border bg-card hover:border-primary/30',
+              )}>
+              <div className={cn('flex size-[16px] shrink-0 items-center justify-center rounded-full border-2', visibility === opt ? 'border-primary bg-primary' : 'border-border')}>
+                {visibility === opt && <div className="size-[7px] rounded-full bg-white" />}
+              </div>
+              <p className="text-[15px] font-semibold text-foreground capitalize">{opt} Campaign</p>
+              <p className="text-[13px] text-muted-foreground">
+                {opt === 'public' ? 'Anyone with the link can donate' : 'Only people you share the link with can donate'}
+              </p>
+            </button>
+          ))}
+        </div>
+
+        <WizardFooter
+          onBack={goBack}
+          onNext={() => {
+            if (!visibility) return
+            void updateDraft({ visibility })
+            advance(visibility === 'public' ? 'Public Campaign' : 'Private Campaign')
+          }}
+          isNextDisabled={!visibility}
+          stepContext={stepContext}
+        />
+      </motion.div>
+    )
+  }
+
+  // ── Step 1: Campaign Details ──────────────────────────────────────────────
+  if (currentStep === 1) {
+    const detailsValid = isCampaignDetailsValid(campaignDetails)
+    return (
+      <motion.div
+        initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.35, ease: EASE }}
+        className="flex min-h-full flex-col"
+      >
+        <Link href={ROUTES.DASHBOARD}
+          className="mb-5 inline-flex items-center gap-1.5 text-[13px] font-medium text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary rounded">
+          <ArrowLeft className="size-4" aria-hidden />
+          Back to Dashboard
+        </Link>
+
+        <Stepper currentStep={currentStep} completedValues={completedValues} steps={CAMPAIGN_WIZARD_STEPS} />
+
+        <div className="mt-6">
+          <h1 className="text-[22px] font-bold tracking-tight text-foreground">Campaign Details</h1>
+          <p className="mt-1 text-[13px] text-muted-foreground">Tell donors your story and set your fundraising goal.</p>
+        </div>
+
+        <div className="mt-5 flex-1">
+          <DonationCampaignDetailsBuilder
+            draft={campaignDetails}
+            onChange={patch => setCampaignDetails(prev => ({ ...prev, ...patch }))}
+            showErrors={showDetailsErrors}
+          />
+        </div>
+
+        <WizardFooter
+          onBack={goBack}
+          onNext={() => {
+            if (!detailsValid) { setShowDetailsErrors(true); return }
+            void updateDraft({ campaignDetails })
+            advance(campaignDetails.basics.title || 'Campaign Details')
+          }}
+          isNextDisabled={showDetailsErrors && !detailsValid}
+          stepContext={stepContext}
+        />
+      </motion.div>
+    )
+  }
+
+  // ── Step 2: Donation Settings ─────────────────────────────────────────────
+  if (currentStep === 2) {
+    const settingsValid = isDonationSettingsValid(donationSettings)
+    return (
+      <motion.div
+        initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.35, ease: EASE }}
+        className="flex min-h-full flex-col"
+      >
+        <Link href={ROUTES.DASHBOARD}
+          className="mb-5 inline-flex items-center gap-1.5 text-[13px] font-medium text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary rounded">
+          <ArrowLeft className="size-4" aria-hidden />
+          Back to Dashboard
+        </Link>
+
+        <Stepper currentStep={currentStep} completedValues={completedValues} steps={CAMPAIGN_WIZARD_STEPS} />
+
+        <div className="mt-6">
+          <h1 className="text-[22px] font-bold tracking-tight text-foreground">Donation Settings</h1>
+          <p className="mt-1 text-[13px] text-muted-foreground">Configure how donors give and what they experience.</p>
+        </div>
+
+        <div className="mt-5 flex-1">
+          <DonationSettingsBuilder
+            draft={donationSettings}
+            onChange={patch => setDonationSettings(prev => ({ ...prev, ...patch }))}
+            showErrors={showSettingsErrors}
+          />
+        </div>
+
+        <WizardFooter
+          onBack={goBack}
+          onNext={() => {
+            if (!settingsValid) { setShowSettingsErrors(true); return }
+            void updateDraft({ donationSettings })
+            advance('Donation Settings')
+          }}
+          isNextDisabled={showSettingsErrors && !settingsValid}
+          stepContext={stepContext}
+        />
+      </motion.div>
+    )
+  }
+
+  // ── Step 3: Review & Publish ──────────────────────────────────────────────
+  const blockers = getCampaignPublishBlockers(campaignDetails)
+  const canPublish = blockers.length === 0 && !!visibility
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.35, ease: EASE }}
+      className="flex min-h-full flex-col"
+    >
+      <Link href={ROUTES.DASHBOARD}
+        className="mb-5 inline-flex items-center gap-1.5 text-[13px] font-medium text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary rounded">
+        <ArrowLeft className="size-4" aria-hidden />
+        Back to Dashboard
+      </Link>
+
+      <Stepper currentStep={currentStep} completedValues={completedValues} steps={CAMPAIGN_WIZARD_STEPS} />
+
+      <div className="mt-6">
+        <h1 className="text-[22px] font-bold tracking-tight text-foreground">Review & Publish</h1>
+        <p className="mt-1 text-[13px] text-muted-foreground">Check your campaign details before going live.</p>
+      </div>
+
+      <div className="mt-5 flex-1 space-y-4">
+        {/* Summary cards */}
+        <div className="rounded-xl border border-border bg-card p-4 shadow-sm space-y-2">
+          <p className="text-[14px] font-semibold text-foreground">Campaign</p>
+          <p className="text-[15px] font-bold text-foreground">{campaignDetails.basics.title || '—'}</p>
+          {campaignDetails.basics.tagline && (
+            <p className="text-[13px] text-muted-foreground">{campaignDetails.basics.tagline}</p>
+          )}
+        </div>
+
+        <div className="rounded-xl border border-border bg-card p-4 shadow-sm grid grid-cols-2 gap-3">
+          <div>
+            <p className="text-[12px] text-muted-foreground">Goal</p>
+            <p className="text-[15px] font-semibold text-foreground">
+              {campaignDetails.goal.targetAmountRupees
+                ? `₹${campaignDetails.goal.targetAmountRupees.toLocaleString('en-IN')}`
+                : '—'}
+            </p>
+          </div>
+          <div>
+            <p className="text-[12px] text-muted-foreground">End Date</p>
+            <p className="text-[15px] font-semibold text-foreground">{campaignDetails.goal.endDate || '—'}</p>
+          </div>
+          <div>
+            <p className="text-[12px] text-muted-foreground">Visibility</p>
+            <p className="text-[15px] font-semibold text-foreground capitalize">{visibility ?? '—'}</p>
+          </div>
+          <div>
+            <p className="text-[12px] text-muted-foreground">80G</p>
+            <p className="text-[15px] font-semibold text-foreground">
+              {campaignDetails.taxConfig.enabled ? 'Enabled' : 'Not enabled'}
+            </p>
+          </div>
+        </div>
+
+        {/* Blockers */}
+        {blockers.length > 0 && (
+          <div className="rounded-xl border border-destructive/30 bg-destructive/5 p-4 space-y-2">
+            <p className="flex items-center gap-2 text-[13px] font-semibold text-destructive">
+              <AlertCircle size={15} />
+              Fix these before publishing
+            </p>
+            <ul className="space-y-1">
+              {blockers.map(b => (
+                <li key={b.field} className="text-[13px] text-destructive/80">· {b.message}</li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        {/* Publish success */}
+        {publishState === 'success' && publishedSlug && (
+          <CampaignPublishSuccess slug={publishedSlug} />
+        )}
+
+        {publishError && (
+          <div className="rounded-xl border border-destructive/30 bg-destructive/5 p-3">
+            <p className="text-[13px] text-destructive">{publishError}</p>
+          </div>
+        )}
+      </div>
+
+      <WizardFooter
+        onBack={goBack}
+        onNext={handlePublish}
+        nextLabel={publishState === 'publishing' ? 'Publishing…' : 'Publish Campaign'}
+        isNextDisabled={!canPublish || publishState === 'publishing' || publishState === 'success'}
+        stepContext={stepContext}
+      />
+    </motion.div>
+  )
+}
+
+// --- License step (F2.1) ------------------------------------------------------
+
+function LicenseStepView({
+  currentStep, completedValues, onNext, onBack, steps, selectedTier, onSelectLicense,
+}: {
+  currentStep:     number
+  completedValues: (string | undefined)[]
+  onNext:          (label?: string, data?: unknown) => void
+  onBack:          () => void
+  steps:           WizardStep[]
+  selectedTier:    EventLicenseTier
+  onSelectLicense: (t: EventLicenseTier) => void
+}) {
+  const [tier, setTier] = useState<EventLicenseTier>(selectedTier)
+  const [walletBalance, setWalletBalance] = useState<number | null>(null)
+  const licenseCatalog = useLicenseCatalog()
+
+  useEffect(() => {
+    let alive = true
+    void (async () => {
+      try {
+        const token = await auth.currentUser?.getIdToken()
+        if (!token) { if (alive) setWalletBalance(0); return }
+        const res  = await fetch('/api/organizer/wallet', { headers: { Authorization: `Bearer ${token}` } })
+        const data = await res.json() as WalletBalanceResponse
+        if (alive) setWalletBalance(typeof data.balancePaise === 'number' ? data.balancePaise : 0)
+      } catch { if (alive) setWalletBalance(0) }
+    })()
+    return () => { alive = false }
+  }, [])
+
+  const select = (t: EventLicenseTier) => { setTier(t); onSelectLicense(t) }
+  const handleNext = () => { onSelectLicense(tier); onNext(`License: ${licenseCatalog[tier].name}`, tier) }
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 8 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.35, ease: EASE }}
+      className="flex min-h-full flex-col"
+    >
+      <Link
+        href={ROUTES.DASHBOARD}
+        className="mb-5 inline-flex items-center gap-1.5 text-[13px] font-medium text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary rounded"
+      >
+        <ArrowLeft className="size-4" aria-hidden />
+        Back to Dashboard
+      </Link>
+
+      <Stepper currentStep={currentStep} completedValues={completedValues} steps={steps} />
+
+      <div className="mt-6">
+        <h1 className="text-[22px] font-bold tracking-tight text-foreground">Choose your Event License</h1>
+        <p className="mt-1 text-[13px] text-muted-foreground">
+          Every event runs on a license. Pick the tier for this event — you can see the price, registration
+          limit, and wallet impact below. You’ll pay after submitting.
+        </p>
+      </div>
+
+      <div className="mt-5 flex-1">
+        <LicenseCards selected={tier} onSelect={select} walletBalancePaise={walletBalance} />
+      </div>
+
+      <WizardFooter
+        onBack={onBack}
+        onNext={handleNext}
+        stepContext={`Step ${currentStep + 1} of ${steps.length} · ${steps[currentStep]?.name ?? ''}`}
       />
     </motion.div>
   )
@@ -7138,14 +7901,32 @@ function Step7View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
 // --- Wizard -------------------------------------------------------------------
 
 export default function CreateEventWizard() {
-  const { draft, isLoading, updateDraft } = useDraft()
+  const { draft, isLoading, createDraft, updateDraft } = useDraft()
+
+  // Buffers the Step 1 (category) and Step 2 (visibility) selections BEFORE any
+  // Firestore document exists. These seed the deferred createDraft and let the
+  // organizer navigate Back without losing choices while no draft is persisted.
+  // Held in state (not a ref) so it can be safely read during render.
+  const [pending, setPending] = useState<{ step0: Step1State | null; visibility: VisibilityId | null }>({
+    step0:      null,
+    visibility: null,
+  })
 
   const [currentStep,     setCurrentStep]     = useState(0)
+  // Over-provisioned to 8 — the max across all wizard types (event_plus_donation has 8 steps)
   const [completedValues, setCompletedValues] = useState<(string | undefined)[]>(
-    Array(WIZARD_STEPS.length).fill(undefined),
+    Array(9).fill(undefined),
   )
   // Prevents rendering before draft state is hydrated into local state
   const [hydrated, setHydrated] = useState(false)
+
+  // isDonationOnly: true when user selected Fundraising + Donation Only and advanced past step 0
+  const isDonationOnly =
+    draft?.eventType === 'fundraising' && draft?.campaignType === 'donation_only'
+
+  // isEventPlusDonation: fundraising event with a linked donation campaign (8-step wizard)
+  const isEventPlusDonation =
+    draft?.eventType === 'fundraising' && draft?.campaignType === 'event_plus_donation'
 
   // On first load, seed wizard state from the persisted draft
   useEffect(() => {
@@ -7162,35 +7943,74 @@ export default function CreateEventWizard() {
   }, [isLoading, draft, hydrated])
 
   const goNext = useCallback(
-    (label?: string, data?: unknown) => {
-      const step      = currentStep
-      const nextStep  = Math.min(step + 1, WIZARD_STEPS.length - 1)
-      const newValues = completedValues.map((v, i) => (i === step ? label : v))
+    async (label?: string, data?: unknown) => {
+      const step       = currentStep
+      const totalSteps = isEventPlusDonation ? FUNDRAISING_EVENT_WIZARD_STEPS.length : WIZARD_STEPS.length
+      const nextStep   = Math.min(step + 1, totalSteps - 1)
+      const newValues  = completedValues.map((v, i) => (i === step ? label : v))
+
+      // Buffer Step 1/2 selections so they can seed the deferred createDraft
+      // (and survive Back navigation) before any Firestore document exists.
+      const step0      = step === 0 ? (data as Step1State)  : pending.step0
+      const visibility = step === 1 ? (data as VisibilityId) : pending.visibility
+      if (step === 0 || step === 1) setPending({ step0, visibility })
+
+      // ── First Firestore write — happens ONLY here, on an explicit Continue ──
+      // • donation-only commits at the Category step (it has no Visibility step
+      //   and forks to the campaign wizard immediately after).
+      // • every other event type commits at the Visibility step.
+      const donationOnlyCommit = step === 0 && step0?.campaignType === 'donation_only'
+      const standardCommit     = step === 1
+      if (!draft?.id && (donationOnlyCommit || standardCommit)) {
+        const created = await createDraft({
+          eventType:          step0?.eventType     ?? null,
+          eventSubtype:       step0?.subtype       ?? null,
+          customEventSubtype: step0?.customSubtype ?? null,
+          campaignType:       step0?.campaignType  ?? null,
+          visibility:         visibility ?? null,
+          currentStep:        nextStep,
+          completedValues:    newValues.map(v => v ?? null),
+        })
+        if (!created) return   // creation failed — stay on the current step
+        // Advance only after the draft (and its optimistic local state) exists,
+        // so the donation-only fork reads the correct campaignType with no flash.
+        setCompletedValues(newValues)
+        setCurrentStep(nextStep)
+        return
+      }
 
       setCompletedValues(newValues)
       setCurrentStep(nextStep)
 
-      // Build the partial draft payload for this step
+      // Draft already exists (Resume, or any post-creation step) — persist the
+      // partial payload for this step exactly as before.
       const payload: Record<string, unknown> = {
         currentStep:     nextStep,
         completedValues: newValues.map(v => v ?? null),
       }
       if (step === 0) {
-        const d = data as { eventType: string | null; subtype: string | null; customSubtype: string } | null
-        payload.eventType          = d?.eventType    ?? null
-        payload.eventSubtype       = d?.subtype      ?? null
+        const d = data as Step1State | null
+        payload.eventType          = d?.eventType     ?? null
+        payload.eventSubtype       = d?.subtype       ?? null
         payload.customEventSubtype = d?.customSubtype ?? null
+        payload.campaignType       = d?.campaignType  ?? null
       }
-      if (step === 1) payload.visibility         = data
-      if (step === 2) payload.accessControl      = data
-      if (step === 3) payload.pricing            = data
-      if (step === 4) payload.registrationForm   = data
-      if (step === 5) payload.eventDetails       = data
-      if (step === 6) payload.publishedAt        = (data as Record<string, unknown> | null)?.publishedAt ?? null
+      if (step === 1) payload.visibility       = data
+      if (step === 2) payload.accessControl    = data
+      if (step === 3) payload.pricing          = data
+      if (step === 4) payload.registrationForm = data
+      if (step === 5) payload.eventDetails     = data
+      // Step 6: Fundraising (event_plus_donation) saves the linked campaign.
+      if (step === 6 && isEventPlusDonation) payload.linkedCampaign = data
+      // NOTE (LS2.2): the client must NEVER write `publishedAt` — it is a
+      // server-controlled field (set only by the Admin-SDK publish route) and
+      // firestore.rules blocks any client draft update whose affectedKeys include
+      // it. Writing it here was the root cause of the wizard's
+      // "Missing or insufficient permissions" error on reaching the Review step.
 
       void updateDraft(payload)
     },
-    [currentStep, completedValues, updateDraft],
+    [currentStep, completedValues, createDraft, updateDraft, isEventPlusDonation, draft?.id, pending],
   )
 
   const goBack = useCallback(
@@ -7198,24 +8018,63 @@ export default function CreateEventWizard() {
     [],
   )
 
+  const [stepFocusHint, setStepFocusHint] = useState<string | undefined>(undefined)
+
+  const goToStep = useCallback(
+    (step: number, fieldHint?: string) => {
+      setCurrentStep(step)
+      setStepFocusHint(fieldHint)
+    },
+    [],
+  )
+
   // Called by "Save Draft" buttons (no step advance)
   const saveDraft = useCallback(
-    (step: number, data?: unknown) => {
+    async (step: number, data?: unknown) => {
+      // Keep the buffer current so a Save Draft on Step 1/2 seeds creation.
+      const step0      = step === 0 ? (data as Step1State)  : pending.step0
+      const visibility = step === 1 ? (data as VisibilityId) : pending.visibility
+      if (step === 0 || step === 1) setPending({ step0, visibility })
+
+      // "Save Draft" is an explicit user action too: if no document exists yet
+      // (only possible on Step 1/2), create it once via the same deduped path.
+      if (!draft?.id) {
+        await createDraft({
+          eventType:          step0?.eventType     ?? null,
+          eventSubtype:       step0?.subtype       ?? null,
+          customEventSubtype: step0?.customSubtype ?? null,
+          campaignType:       step0?.campaignType  ?? null,
+          visibility:         visibility ?? null,
+        })
+        return
+      }
+
       const payload: Record<string, unknown> = {}
       if (step === 0) {
-        const d = data as { eventType: string | null; subtype: string | null; customSubtype: string } | null
-        payload.eventType          = d?.eventType    ?? null
-        payload.eventSubtype       = d?.subtype      ?? null
+        const d = data as Step1State | null
+        payload.eventType          = d?.eventType     ?? null
+        payload.eventSubtype       = d?.subtype       ?? null
         payload.customEventSubtype = d?.customSubtype ?? null
+        payload.campaignType       = d?.campaignType  ?? null
       }
-      if (step === 1) payload.visibility       = data
-      if (step === 2) payload.accessControl   = data
-      if (step === 3) payload.pricing         = data
-      if (step === 4) payload.registrationForm = data
-      if (step === 5) payload.eventDetails     = data
-      if (Object.keys(payload).length) void updateDraft(payload)
+      if (step === 1) payload.visibility        = data
+      if (step === 2) payload.accessControl     = data
+      if (step === 3) payload.pricing           = data
+      if (step === 4) payload.registrationForm  = data
+      if (step === 5) payload.eventDetails      = data
+      // Step 6: linkedCampaign draft for event_plus_donation (Fundraising step).
+      if (step === 6 && isEventPlusDonation)  payload.linkedCampaign = data
+      // License step (index 6 standard / 7 event_plus_donation) persists the tier.
+      if (step === 6 && !isEventPlusDonation) payload.licenseTier    = data
+      if (step === 7 && isEventPlusDonation)  payload.licenseTier    = data
+      // Review step (index 7 standard / 8 event_plus_donation): save updated pricing (feeModel).
+      if (step === 7 && !isEventPlusDonation) payload.pricing        = data
+      if (step === 8 && isEventPlusDonation)  payload.pricing        = data
+      if (Object.keys(payload).length) {
+        void updateDraft(payload)
+      }
     },
-    [updateDraft],
+    [createDraft, updateDraft, isEventPlusDonation, draft?.id, pending],
   )
 
   // Loading skeleton — shown while draft is being fetched from Firestore
@@ -7237,6 +8096,26 @@ export default function CreateEventWizard() {
 
   const sharedProps = { completedValues, onNext: goNext, onBack: goBack }
 
+  // Selected Event License tier (F2.1) — defaults to Starter until the organizer chooses.
+  const selectedLicense: EventLicenseTier = isEventLicenseTier(draft?.licenseTier)
+    ? draft.licenseTier
+    : 'starter'
+  const onSelectLicense = (t: EventLicenseTier) => { void updateDraft({ licenseTier: t }) }
+
+  // When donation-only: step 0 shows event type selector; step 1+ hands off to DonationCampaignWizard
+  if (isDonationOnly && currentStep >= 1) {
+    return (
+      <DonationCampaignWizard
+        eventSubtype={draft?.eventSubtype ?? null}
+        onBackToEventType={() => {
+          // Reset back to step 0 so user can change event type
+          setCurrentStep(0)
+          void updateDraft({ currentStep: 0, campaignType: null })
+        }}
+      />
+    )
+  }
+
   return (
     <>
       {currentStep === 0 && (
@@ -7245,9 +8124,10 @@ export default function CreateEventWizard() {
           {...sharedProps}
           onSaveDraft={data => saveDraft(0, data)}
           initialData={{
-            eventType:         draft?.eventType         ?? null,
-            eventSubtype:      draft?.eventSubtype       ?? null,
-            customEventSubtype: draft?.customEventSubtype ?? null,
+            eventType:          draft?.eventType          ?? pending.step0?.eventType     ?? null,
+            eventSubtype:       draft?.eventSubtype        ?? pending.step0?.subtype       ?? null,
+            customEventSubtype: draft?.customEventSubtype  ?? pending.step0?.customSubtype ?? null,
+            campaignType:       (draft?.campaignType as CampaignType | null) ?? pending.step0?.campaignType ?? null,
           }}
         />
       )}
@@ -7256,7 +8136,7 @@ export default function CreateEventWizard() {
           currentStep={1}
           {...sharedProps}
           onSaveDraft={data => saveDraft(1, data)}
-          initialData={{ visibility: draft?.visibility ?? null }}
+          initialData={{ visibility: draft?.visibility ?? pending.visibility ?? null }}
         />
       )}
       {currentStep === 2 && (
@@ -7293,6 +8173,7 @@ export default function CreateEventWizard() {
         <Step6View
           currentStep={5}
           {...sharedProps}
+          focusHint={stepFocusHint}
           onSaveDraft={data => saveDraft(5, data)}
           initialData={{
             eventDetails: draft?.eventDetails ?? null,
@@ -7303,11 +8184,51 @@ export default function CreateEventWizard() {
           }}
         />
       )}
-      {currentStep === 6 && (
-        <Step7View
+      {/* Step 6: Fundraising setup for event_plus_donation, or Review for all other types */}
+      {currentStep === 6 && isEventPlusDonation && (
+        <LinkedCampaignStep
           currentStep={6}
-          {...sharedProps}
+          completedValues={completedValues}
+          onNext={goNext}
+          onBack={goBack}
           onSaveDraft={data => saveDraft(6, data)}
+          wizardSteps={FUNDRAISING_EVENT_WIZARD_STEPS}
+          initialData={{
+            linkedCampaign: draft?.linkedCampaign ?? null,
+            eventEndDate:   (draft?.eventDetails as Record<string, unknown> | null)?.endDate as string | null ?? null,
+          }}
+        />
+      )}
+      {/* Step 6 (standard) / Step 7 (event_plus_donation): License selection */}
+      {currentStep === 6 && !isEventPlusDonation && (
+        <LicenseStepView
+          currentStep={6}
+          completedValues={completedValues}
+          onNext={goNext}
+          onBack={goBack}
+          steps={WIZARD_STEPS}
+          selectedTier={selectedLicense}
+          onSelectLicense={onSelectLicense}
+        />
+      )}
+      {currentStep === 7 && isEventPlusDonation && (
+        <LicenseStepView
+          currentStep={7}
+          completedValues={completedValues}
+          onNext={goNext}
+          onBack={goBack}
+          steps={FUNDRAISING_EVENT_WIZARD_STEPS}
+          selectedTier={selectedLicense}
+          onSelectLicense={onSelectLicense}
+        />
+      )}
+      {/* Review — Step 7 (standard) / Step 8 (event_plus_donation) */}
+      {currentStep === 7 && !isEventPlusDonation && (
+        <Step7View
+          currentStep={7}
+          {...sharedProps}
+          onGoToStep={goToStep}
+          onSaveDraft={data => saveDraft(7, data)}
           initialData={{
             draftId:          draft?.id               ?? null,
             status:           draft?.status           ?? null,
@@ -7318,6 +8239,30 @@ export default function CreateEventWizard() {
             pricing:          draft?.pricing           ?? null,
             registrationForm: draft?.registrationForm  ?? null,
             eventDetails:     draft?.eventDetails      ?? null,
+            licenseTier:      selectedLicense,
+          }}
+        />
+      )}
+      {currentStep === 8 && isEventPlusDonation && (
+        <Step7View
+          currentStep={8}
+          completedValues={completedValues}
+          onNext={goNext}
+          onBack={goBack}
+          onGoToStep={goToStep}
+          onSaveDraft={data => saveDraft(8, data)}
+          wizardSteps={FUNDRAISING_EVENT_WIZARD_STEPS}
+          initialData={{
+            draftId:          draft?.id               ?? null,
+            status:           draft?.status           ?? null,
+            eventType:        draft?.eventType        ?? null,
+            eventSubtype:     draft?.eventSubtype      ?? null,
+            visibility:       draft?.visibility        ?? null,
+            accessControl:    draft?.accessControl     ?? null,
+            pricing:          draft?.pricing           ?? null,
+            registrationForm: draft?.registrationForm  ?? null,
+            eventDetails:     draft?.eventDetails      ?? null,
+            licenseTier:      selectedLicense,
           }}
         />
       )}

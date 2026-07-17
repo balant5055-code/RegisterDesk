@@ -3,12 +3,18 @@
 import { Mail, MessageCircle, Phone, CheckCircle2, Info, Wallet } from 'lucide-react'
 import { cn } from '@/lib/utils/cn'
 import { calculateCommunicationCost } from '@/lib/events/communicationCost'
+import { useCommunicationConfig } from '@/lib/communications/communicationConfigClient'
 import type { EventDetailResponse } from '@/app/api/organizer/events/[eventId]/route'
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function formatINR(rupees: number): string {
   return `₹${rupees.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+}
+
+// Per-message rate label (₹/msg) from the resolved communication config.
+function ratePerMsg(pricePaise: number): string {
+  return `₹${(pricePaise / 100).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} / msg`
 }
 
 // ─── Channel row ─────────────────────────────────────────────────────────────
@@ -79,15 +85,21 @@ function CostEstimate({
   whatsappEnabled,
   smsEnabled,
   isFreeEvent,
+  whatsappRatePaise,
+  smsRatePaise,
 }: {
-  estimatedCapacity: number
-  whatsappEnabled:   boolean
-  smsEnabled:        boolean
-  isFreeEvent:       boolean
+  estimatedCapacity:  number
+  whatsappEnabled:    boolean
+  smsEnabled:         boolean
+  isFreeEvent:        boolean
+  whatsappRatePaise:  number
+  smsRatePaise:       number
 }) {
   if (!whatsappEnabled && !smsEnabled) return null
 
-  const cost = calculateCommunicationCost({ estimatedCapacity, whatsappEnabled, smsEnabled })
+  // Rates come from the resolved Business Configuration so this preview matches what
+  // is actually charged at send time (never a hardcoded per-message rate).
+  const cost = calculateCommunicationCost({ estimatedCapacity, whatsappEnabled, smsEnabled, whatsappRatePaise, smsRatePaise })
 
   return (
     <div className="overflow-hidden rounded-xl border border-border bg-card">
@@ -107,13 +119,13 @@ function CostEstimate({
         </div>
         {whatsappEnabled && (
           <div className="flex items-center justify-between px-4 py-2.5 text-[14px]">
-            <span className="text-muted-foreground">WhatsApp (₹0.10 / msg)</span>
+            <span className="text-muted-foreground">WhatsApp ({ratePerMsg(whatsappRatePaise)})</span>
             <span className="font-medium text-foreground">{formatINR(cost.whatsappCost)}</span>
           </div>
         )}
         {smsEnabled && (
           <div className="flex items-center justify-between px-4 py-2.5 text-[14px]">
-            <span className="text-muted-foreground">SMS (₹0.15 / msg)</span>
+            <span className="text-muted-foreground">SMS ({ratePerMsg(smsRatePaise)})</span>
             <span className="font-medium text-foreground">{formatINR(cost.smsCost)}</span>
           </div>
         )}
@@ -141,6 +153,10 @@ interface Props {
 }
 
 export default function CommunicationsTab({ event }: Props) {
+  const commConfig      = useCommunicationConfig()
+  const whatsappRatePaise = commConfig.whatsapp.pricePaise
+  const smsRatePaise      = commConfig.sms.pricePaise
+
   const pricing         = event.pricing as Record<string, unknown> | null
   const isFreeEvent     = event.isFreeEvent
   const whatsappEnabled = !!(pricing?.whatsappEnabled as boolean | undefined)
@@ -173,9 +189,7 @@ export default function CommunicationsTab({ event }: Props) {
               desc="Confirmation and reminder messages sent to attendees' WhatsApp numbers."
               badge="Active"
               badgeCls="bg-emerald-100 text-emerald-700"
-              meta={isFreeEvent
-                ? '₹0.10 / message · Charged from wallet'
-                : '₹0.10 / message · Charged from settlement'}
+              meta={`${ratePerMsg(whatsappRatePaise).replace('/ msg', '/ message')} · Charged from ${isFreeEvent ? 'wallet' : 'settlement'}`}
             />
           ) : (
             <ChannelRow
@@ -195,9 +209,7 @@ export default function CommunicationsTab({ event }: Props) {
               desc="Short text reminders delivered directly to attendees' mobile numbers."
               badge="Active"
               badgeCls="bg-emerald-100 text-emerald-700"
-              meta={isFreeEvent
-                ? '₹0.15 / message · Charged from wallet'
-                : '₹0.15 / message · Charged from settlement'}
+              meta={`${ratePerMsg(smsRatePaise).replace('/ msg', '/ message')} · Charged from ${isFreeEvent ? 'wallet' : 'settlement'}`}
             />
           ) : (
             <ChannelRow
@@ -219,6 +231,8 @@ export default function CommunicationsTab({ event }: Props) {
           whatsappEnabled={whatsappEnabled}
           smsEnabled={smsEnabled}
           isFreeEvent={isFreeEvent}
+          whatsappRatePaise={whatsappRatePaise}
+          smsRatePaise={smsRatePaise}
         />
       )}
 

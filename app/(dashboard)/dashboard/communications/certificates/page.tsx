@@ -28,7 +28,7 @@ function StatCard({
       </div>
       <div>
         <p className="text-[20px] font-bold leading-none text-foreground">{value}</p>
-        <p className="mt-0.5 text-[12px] text-muted-foreground">{label}</p>
+        <p className="mt-0.5 text-[13px] text-muted-foreground">{label}</p>
       </div>
     </div>
   )
@@ -103,10 +103,10 @@ export default function CertificatesDashboardPage() {
           {/* Certificates table */}
           {certs.length > 0 ? (
             <div>
-              <h2 className="mb-3 text-[14px] font-semibold text-foreground">All Certificates</h2>
+              <h2 className="mb-3 text-[18px] font-semibold text-foreground">All Certificates</h2>
               <div className="overflow-hidden rounded-xl border border-border">
                 <div className="overflow-x-auto">
-                  <table className="w-full text-[12.5px]">
+                  <table className="w-full text-[14px]">
                     <thead>
                       <tr className="border-b border-border bg-muted/40">
                         <th className="px-4 py-2.5 text-left font-semibold text-muted-foreground">Attendee</th>
@@ -123,20 +123,20 @@ export default function CertificatesDashboardPage() {
                         <tr key={cert.certificateId} className="hover:bg-muted/20">
                           <td className="px-4 py-3">
                             <p className="font-medium text-foreground">{cert.attendeeName}</p>
-                            <p className="text-[11px] text-muted-foreground">{cert.attendeeEmail}</p>
+                            <p className="text-[13px] text-muted-foreground">{cert.attendeeEmail}</p>
                           </td>
                           <td className="hidden px-4 py-3 lg:table-cell">
                             <p className="text-foreground">{cert.eventName}</p>
                             <button
                               type="button"
                               onClick={() => router.push(`/dashboard/events/${cert.eventId}`)}
-                              className="text-[11px] text-primary hover:underline"
+                              className="text-[13px] text-primary hover:underline"
                             >
                               Manage event
                             </button>
                           </td>
                           <td className="hidden px-4 py-3 sm:table-cell">
-                            <span className="font-mono text-[11px] text-muted-foreground">{cert.certificateId}</span>
+                            <span className="font-mono text-[12px] text-muted-foreground">{cert.certificateId}</span>
                           </td>
                           <td className="px-4 py-3 text-muted-foreground">
                             {fmtDate(cert.issuedAt)}
@@ -146,10 +146,10 @@ export default function CertificatesDashboardPage() {
                           </td>
                           <td className="px-4 py-3 text-center">
                             {cert.emailStatus === 'sent'
-                              ? <span className="inline-flex rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-semibold text-emerald-700">Sent</span>
+                              ? <span className="inline-flex rounded-full bg-emerald-100 px-2 py-0.5 text-[12px] font-semibold text-emerald-700">Sent</span>
                               : cert.emailStatus === 'failed'
-                                ? <span className="inline-flex rounded-full bg-red-100 px-2 py-0.5 text-[10px] font-semibold text-red-700">Failed</span>
-                                : <span className="inline-flex rounded-full bg-muted px-2 py-0.5 text-[10px] font-semibold text-muted-foreground">—</span>
+                                ? <span className="inline-flex rounded-full bg-red-100 px-2 py-0.5 text-[12px] font-semibold text-red-700">Failed</span>
+                                : <span className="inline-flex rounded-full bg-muted px-2 py-0.5 text-[12px] font-semibold text-muted-foreground">—</span>
                             }
                           </td>
                           <td className="px-4 py-3">
@@ -158,7 +158,7 @@ export default function CertificatesDashboardPage() {
                                 href={`/api/certificates/${cert.certificateId}`}
                                 target="_blank"
                                 rel="noopener noreferrer"
-                                className="inline-flex items-center gap-1 rounded-lg border border-border bg-card px-2.5 py-1 text-[11.5px] font-medium text-foreground transition-colors hover:bg-muted/60"
+                                className="inline-flex items-center gap-1 rounded-lg border border-border bg-card px-2.5 py-1 text-[13px] font-medium text-foreground transition-colors hover:bg-muted/60"
                               >
                                 <Download className="size-3" />
                                 PDF
@@ -167,7 +167,7 @@ export default function CertificatesDashboardPage() {
                                 href={`/verify/certificate/${cert.certificateId}`}
                                 target="_blank"
                                 rel="noopener noreferrer"
-                                className="inline-flex items-center gap-1 rounded-lg border border-border bg-card px-2.5 py-1 text-[11.5px] font-medium text-foreground transition-colors hover:bg-muted/60"
+                                className="inline-flex items-center gap-1 rounded-lg border border-border bg-card px-2.5 py-1 text-[13px] font-medium text-foreground transition-colors hover:bg-muted/60"
                               >
                                 <ExternalLink className="size-3" />
                                 Verify
@@ -191,7 +191,7 @@ export default function CertificatesDashboardPage() {
               <button
                 type="button"
                 onClick={() => router.push('/dashboard/events')}
-                className="mt-2 rounded-xl bg-primary px-5 py-2.5 text-[13px] font-semibold text-white hover:opacity-90"
+                className="mt-2 rounded-xl bg-primary px-5 py-2.5 text-[14px] font-semibold text-white hover:opacity-90"
               >
                 Go to Events
               </button>

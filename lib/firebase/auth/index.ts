@@ -5,7 +5,9 @@ import {
   createUserWithEmailAndPassword,
   updateProfile,
   signInWithEmailAndPassword,
+  sendPasswordResetEmail,
 } from 'firebase/auth'
+import type { User } from 'firebase/auth'
 import { FirebaseError } from 'firebase/app'
 import { firebaseApp } from '../config'
 import { createOrganizerProfile } from '../firestore'
@@ -42,18 +44,47 @@ export async function createOrganizerAccount(data: SignupData): Promise<void> {
   })
 }
 
+// ─── authenticateUser ─────────────────────────────────────────────────────────
+// Neutral, role-agnostic credential sign-in — the SINGLE Firebase entry point
+// shared by every login surface (organizer, admin, future support). Signs in
+// with email/password, reloads the user so emailVerified/claims are fresh, and
+// returns the authenticated user plus its verified state. Role validation and
+// redirects are the caller's responsibility. Throws on auth failure.
+
+export async function authenticateUser(
+  email: string,
+  password: string,
+): Promise<{ user: User; emailVerified: boolean }> {
+  const { user } = await signInWithEmailAndPassword(auth, email, password)
+  await user.reload()
+  return { user, emailVerified: auth.currentUser?.emailVerified ?? user.emailVerified }
+}
+
 // ─── signInOrganizer ──────────────────────────────────────────────────────────
-// Signs in with email/password, reloads the user to get the latest emailVerified
-// state from Firebase, then returns whether the email is verified.
-// Throws on auth failure — caller handles the error message.
+// Organizer-facing wrapper over authenticateUser. Kept for backward
+// compatibility — behavior is identical to before (returns emailVerified only).
 
 export async function signInOrganizer(
   email: string,
   password: string,
 ): Promise<{ emailVerified: boolean }> {
-  const { user } = await signInWithEmailAndPassword(auth, email, password)
-  await user.reload()
-  return { emailVerified: auth.currentUser?.emailVerified ?? user.emailVerified }
+  const { emailVerified } = await authenticateUser(email, password)
+  return { emailVerified }
+}
+
+// ─── sendOrganizerPasswordReset ───────────────────────────────────────────────
+// Sends a Firebase password-reset email. Swallows auth/user-not-found so
+// callers can show the same "check your email" message without revealing
+// whether the account exists.
+// Throws for auth/invalid-email and auth/too-many-requests — mapAuthError handles both.
+
+export async function sendOrganizerPasswordReset(email: string): Promise<void> {
+  try {
+    await sendPasswordResetEmail(auth, email)
+  } catch (err) {
+    if (err instanceof FirebaseError && err.code === 'auth/user-not-found') return
+    throw err
+  }
 }
 
 // ─── mapAuthError ─────────────────────────────────────────────────────────────

@@ -58,20 +58,20 @@ export default function CheckInPageClient({ eventId }: { eventId: string }) {
         <div className="mx-auto flex max-w-lg items-center gap-3 px-4 py-3">
           <Link
             href={`/dashboard/events/${eventId}`}
-            className="flex items-center gap-1 text-[12.5px] text-muted-foreground hover:text-foreground"
+            className="flex items-center gap-1 text-[13px] text-muted-foreground hover:text-foreground"
           >
             <ChevronLeft className="size-3.5" /> Back
           </Link>
           <div className="flex-1 text-center">
             {event && (
-              <p className="text-[13px] font-semibold text-foreground truncate">{event.name}</p>
+              <p className="text-[14px] font-semibold text-foreground truncate">{event.name}</p>
             )}
           </div>
           {event?.slug && (
             <Link
               href={`/events/${event.slug}`}
               target="_blank"
-              className="text-[12px] text-muted-foreground hover:text-foreground"
+              className="text-[13px] text-muted-foreground hover:text-foreground"
             >
               <ExternalLink className="size-3.5" />
             </Link>
@@ -83,7 +83,7 @@ export default function CheckInPageClient({ eventId }: { eventId: string }) {
 
         {/* Page heading */}
         <div className="mb-5">
-          <h1 className="text-[20px] font-bold text-foreground">Check-in</h1>
+          <h1 className="text-[24px] font-bold text-foreground">Check-in</h1>
           <p className="mt-0.5 text-[13px] text-muted-foreground">
             Scan QR codes or enter ticket codes to check in attendees.
           </p>
@@ -109,15 +109,15 @@ export default function CheckInPageClient({ eventId }: { eventId: string }) {
           />
         )}
 
-        {/* Lifecycle warning */}
-        {!loading && event && (event.lifecycleStatus === 'cancelled' || event.lifecycleStatus === 'archived') && (
+        {/* Lifecycle warning — shown for any state not accepted by the check-in API */}
+        {!loading && event && !['published', 'registration_closed', 'completed'].includes(event.lifecycleStatus) && (
           <div className={cn(
-            'mt-4 rounded-xl border px-4 py-3 text-[12.5px]',
+            'mt-4 rounded-xl border px-4 py-3 text-[13px]',
             event.lifecycleStatus === 'cancelled'
               ? 'border-red-200 bg-red-50 text-red-700'
               : 'border-muted bg-muted/30 text-muted-foreground',
           )}>
-            This event is {event.lifecycleStatus}. Check-in submissions will be rejected.
+            This event is {event.lifecycleStatus}. Check-in submissions will be rejected by the server.
           </div>
         )}
       </div>

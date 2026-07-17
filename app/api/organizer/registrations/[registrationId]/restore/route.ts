@@ -9,7 +9,7 @@
 //   - event or pass capacity is already full
 
 import { NextRequest, NextResponse }  from 'next/server'
-import { adminAuth }                   from '@/lib/firebase/admin'
+import { authorizeWorkspace }          from '@/lib/team/workspace'
 import {
   restoreRegistration,
   writeAuditEntry,
@@ -18,6 +18,7 @@ import {
   UnauthorizedCancellationError,
   CapacityBlocksRestoreError,
 } from '@/lib/firebase/firestore/registrations'
+import { SessionError } from '@/lib/sessions/types'
 
 export interface RestoreRegistrationResponse {
   success: boolean
@@ -29,15 +30,10 @@ export async function POST(
   context: { params: Promise<{ registrationId: string }> },
 ): Promise<NextResponse<RestoreRegistrationResponse>> {
   // ── 1. Auth ────────────────────────────────────────────────────────────────
-  const token = (req.headers.get('authorization') ?? '').replace(/^Bearer /, '')
-  if (!token) return NextResponse.json({ success: false, error: 'Unauthorized' }, { status: 401 })
-
-  let uid: string
-  try {
-    uid = (await adminAuth.verifyIdToken(token)).uid
-  } catch {
-    return NextResponse.json({ success: false, error: 'Invalid or expired token' }, { status: 401 })
-  }
+  const authz = await authorizeWorkspace(req, 'registrations')
+  if (!authz.ok) return NextResponse.json({ success: false, error: authz.error }, { status: authz.status })
+  const uid = authz.workspaceUid
+  const callerUid = authz.callerUid
 
   const { registrationId } = await context.params
   if (!registrationId) {
@@ -63,12 +59,15 @@ export async function POST(
         : 'Cannot restore — the event is at full capacity.'
       return NextResponse.json({ success: false, error: msg }, { status: 422 })
     }
+    if (err instanceof SessionError && err.code === 'SESSION_FULL') {
+      return NextResponse.json({ success: false, error: `Cannot restore — a selected session is now full${err.detail ? ` (${err.detail})` : ''}.` }, { status: 422 })
+    }
     console.error('[restore] Unexpected error:', { registrationId, err })
     return NextResponse.json({ success: false, error: 'Failed to restore registration' }, { status: 500 })
   }
 
   // ── 3. Audit entry (fire-and-forget) ──────────────────────────────────────
-  writeAuditEntry(registrationId, 'restored', uid, 'organizer').catch(err =>
+  writeAuditEntry(registrationId, 'restored', callerUid, 'organizer', uid).catch(err =>
     console.error('[restore] Failed to write audit entry:', err),
   )
 

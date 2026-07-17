@@ -30,6 +30,7 @@ export function registrationTemplate(p: RegistrationEmailParams): { subject: str
     <div style="margin:0 0 6px;">
       ${btn('View Ticket', p.ticketPageUrl)}
       ${btn('Download PDF', p.pdfDownloadUrl, false)}
+      ${p.receiptDownloadUrl ? btn('Download Receipt', p.receiptDownloadUrl, false) : ''}
     </div>
 
     <p style="margin:20px 0 0;font-size:12px;color:#9ca3af;line-height:1.6;">

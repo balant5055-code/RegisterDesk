@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { adminAuth, adminDb }       from '@/lib/firebase/admin'
 import { FieldValue }               from 'firebase-admin/firestore'
+import { verifyCaller }             from '@/lib/team/access'
+import { RATE_POLICY, checkPolicy } from '@/lib/rateLimit/policies'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -27,15 +29,14 @@ export interface OrganizerSettings {
 
 // ─── Auth helper ──────────────────────────────────────────────────────────────
 
+// Canonical caller resolution. Delegates to verifyCaller so this route enforces
+// the SAME email-verification gate as every other organizer API (previously this
+// local helper skipped it — an unverified account could read/patch/DELETE its
+// profile). Scoping is unchanged: settings are the caller's own account, so the
+// caller uid is used directly (never a workspace uid).
 async function requireUid(req: NextRequest): Promise<string | null> {
-  const header = req.headers.get('authorization')
-  if (!header?.startsWith('Bearer ')) return null
-  try {
-    const decoded = await adminAuth.verifyIdToken(header.slice(7))
-    return decoded.uid
-  } catch {
-    return null
-  }
+  const caller = await verifyCaller(req)
+  return caller?.uid ?? null
 }
 
 // ─── GET /api/organizer/settings ─────────────────────────────────────────────
@@ -144,6 +145,13 @@ export async function PATCH(req: NextRequest) {
 export async function DELETE(req: NextRequest) {
   const uid = await requireUid(req)
   if (!uid) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+
+  // Throttle this irreversible action to defend against abuse / repeated calls.
+  const rl = checkPolicy(uid, RATE_POLICY.accountDeletion)
+  if (rl.limited) return NextResponse.json(
+    { error: 'Too many requests. Please try again later.' },
+    { status: 429, headers: { 'Retry-After': String(rl.retryAfter) } },
+  )
 
   await adminDb.collection('users').doc(uid).delete()
   await adminAuth.deleteUser(uid)

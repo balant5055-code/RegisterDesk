@@ -6,7 +6,7 @@
 // Body: { action: LifecycleAction, cancelReason?: string }
 
 import { NextRequest, NextResponse }  from 'next/server'
-import { adminAuth }                  from '@/lib/firebase/admin'
+import { authorizeWorkspace }         from '@/lib/team/workspace'
 import { applyLifecycleTransition }   from '@/lib/events/lifecycle'
 import type { LifecycleAction, StatusChangeResponse } from '@/types/events'
 
@@ -26,15 +26,9 @@ export async function POST(
   const { eventId } = await context.params
 
   // ── 1. Auth ────────────────────────────────────────────────────────────────
-  const token = (req.headers.get('authorization') ?? '').replace('Bearer ', '')
-  if (!token) return NextResponse.json({ success: false, error: 'Unauthorized' }, { status: 401 })
-
-  let uid: string
-  try {
-    uid = (await adminAuth.verifyIdToken(token)).uid
-  } catch {
-    return NextResponse.json({ success: false, error: 'Invalid token' }, { status: 401 })
-  }
+  const authz = await authorizeWorkspace(req, 'events')
+  if (!authz.ok) return NextResponse.json({ success: false, error: authz.error }, { status: authz.status })
+  const uid = authz.workspaceUid
 
   // ── 2. Parse body ──────────────────────────────────────────────────────────
   let body: Record<string, unknown>
@@ -48,7 +42,7 @@ export async function POST(
   }
 
   // ── 3. Delegate to shared transition logic ─────────────────────────────────
-  const result = await applyLifecycleTransition(uid, eventId, action, cancelReason)
+  const result = await applyLifecycleTransition(uid, eventId, action, cancelReason, undefined, authz.callerUid)
 
   return NextResponse.json(
     { success: result.success, lifecycleStatus: result.lifecycleStatus, error: result.error },

@@ -4,8 +4,10 @@
 // Security: organizer must own the event (verified via draft doc ownership).
 
 import { NextRequest, NextResponse }  from 'next/server'
-import { adminDb, adminAuth }         from '@/lib/firebase/admin'
+import { adminDb }                    from '@/lib/firebase/admin'
+import { authorizeWorkspace }         from '@/lib/team/workspace'
 import { getTemplate, saveTemplate }  from '@/lib/certificates/firestore'
+import { validateStorageUrl }         from '@/lib/certificates/urlGuard'
 import { defaultTemplateInput }       from '@/lib/certificates/types'
 import type { CertificateTemplate, CertificateTemplateInput } from '@/lib/certificates/types'
 
@@ -17,15 +19,9 @@ async function resolveOwner(
   req: NextRequest,
   eventId: string,
 ): Promise<{ uid: string; error?: never } | { uid?: never; error: NextResponse }> {
-  const token = (req.headers.get('authorization') ?? '').replace(/^Bearer /, '')
-  if (!token) return { error: NextResponse.json({ error: 'Unauthorized' }, { status: 401 }) }
-
-  let uid: string
-  try {
-    uid = (await adminAuth.verifyIdToken(token)).uid
-  } catch {
-    return { error: NextResponse.json({ error: 'Invalid token' }, { status: 401 }) }
-  }
+  const authz = await authorizeWorkspace(req, 'certificates')
+  if (!authz.ok) return { error: NextResponse.json({ error: authz.error }, { status: authz.status }) }
+  const uid = authz.workspaceUid
 
   const draftSnap = await adminDb.doc(`users/${uid}/eventDrafts/${eventId}`).get()
   if (!draftSnap.exists) {
@@ -68,6 +64,18 @@ export async function PUT(req: NextRequest, { params }: Params): Promise<NextRes
   // Validate required fields
   if (typeof input.enabled !== 'boolean') {
     return NextResponse.json({ error: 'enabled is required' }, { status: 400 })
+  }
+
+  // SSRF (save-time): organizer-supplied image URLs must be Firebase Storage
+  // objects in our bucket — these are fetched server-side during PDF rendering.
+  for (const field of ['logoUrl', 'signatureUrl', 'backgroundUrl'] as const) {
+    const value = input[field]
+    if (value && !validateStorageUrl(value).ok) {
+      return NextResponse.json(
+        { error: `${field} must be an uploaded image in this workspace` },
+        { status: 400 },
+      )
+    }
   }
 
   await saveTemplate(eventId, input, auth.uid)

@@ -5,11 +5,14 @@ import Link                                  from 'next/link'
 import { onAuthStateChanged, onIdTokenChanged } from 'firebase/auth'
 import { auth }                              from '@/lib/firebase/auth'
 import { cn }                               from '@/lib/utils/cn'
-import { ExternalLink, Copy, Check, AlertCircle, ChevronLeft, ScanLine } from 'lucide-react'
+import { AlertCircle, ChevronLeft }         from 'lucide-react'
 import type { EventDetailResponse }      from '@/app/api/organizer/events/[eventId]/route'
 import type { RegistrationsApiResponse } from '@/app/api/organizer/events/[eventId]/registrations/route'
-import type { EventLifecycleStatus }     from '@/types/events'
-import EventActionsPanel  from './EventActionsPanel'
+import { EVENT_TABS, isValidEventTab, type EventTabKey } from '@/lib/events/eventTabs'
+import { SET_TAB_EVENT, REFRESH_EVENT } from '@/lib/commandPalette/bridge'
+import EventCommandHeader from './EventCommandHeader'
+import EventHomeTab       from './tabs/EventHomeTab'
+import SetupCenterTab     from './tabs/SetupCenterTab'
 import OverviewTab        from './tabs/OverviewTab'
 import RegistrationsTab   from './tabs/RegistrationsTab'
 import PassesTab          from './tabs/PassesTab'
@@ -18,67 +21,51 @@ import ReportsTab         from './tabs/ReportsTab'
 import SettingsTab        from './tabs/SettingsTab'
 import AttendanceTab      from './tabs/AttendanceTab'
 import CertificatesTab   from './tabs/CertificatesTab'
+import CouponsTab        from './tabs/CouponsTab'
+import WaitlistTab       from './tabs/WaitlistTab'
+import SportsTab                from './tabs/SportsTab'
+import ExhibitionTab            from './tabs/ExhibitionTab'
+import NominationsTab           from './tabs/NominationsTab'
+import SpeakerApplicationsTab  from './tabs/SpeakerApplicationsTab'
+import SponsorApplicationsTab  from './tabs/SponsorApplicationsTab'
+import ConferenceTab           from './tabs/ConferenceTab'
 
 // ─── Tabs ─────────────────────────────────────────────────────────────────────
+// The canonical tab list lives in lib/events/eventTabs so the Command Palette
+// (Phase H.4.2) can deep-link to the exact same tabs without duplicating them.
 
-type TabKey = 'overview' | 'attendance' | 'registrations' | 'passes' | 'communications' | 'reports' | 'certificates' | 'settings'
-
-const TABS: { key: TabKey; label: string }[] = [
-  { key: 'overview',       label: 'Overview'      },
-  { key: 'attendance',     label: 'Attendance'    },
-  { key: 'registrations',  label: 'Registrations' },
-  { key: 'passes',         label: 'Passes'        },
-  { key: 'communications', label: 'Communications'},
-  { key: 'reports',        label: 'Reports'       },
-  { key: 'certificates',   label: 'Certificates'  },
-  { key: 'settings',       label: 'Settings'      },
-]
-
-// ─── Status Badge ─────────────────────────────────────────────────────────────
-
-function StatusBadge({ ls }: { ls: EventLifecycleStatus }) {
-  const map: Record<EventLifecycleStatus, { label: string; cls: string }> = {
-    draft:               { label: 'Draft',                cls: 'bg-muted text-muted-foreground' },
-    published:           { label: 'Published',            cls: 'bg-emerald-100 text-emerald-700' },
-    registration_closed: { label: 'Reg. Closed',          cls: 'bg-amber-100 text-amber-700'   },
-    completed:           { label: 'Completed',            cls: 'bg-sky-100 text-sky-700'        },
-    cancelled:           { label: 'Cancelled',            cls: 'bg-red-100 text-red-600'        },
-    archived:            { label: 'Archived',             cls: 'bg-muted text-muted-foreground' },
-  }
-  const { label, cls } = map[ls] ?? map.draft
-  return <span className={cn('rounded-full px-3 py-1 text-[13px] font-semibold', cls)}>{label}</span>
-}
-
-// ─── Copy Button ──────────────────────────────────────────────────────────────
-
-function CopyButton({ text }: { text: string }) {
-  const [copied, setCopied] = useState(false)
-  async function handleCopy() {
-    await navigator.clipboard.writeText(text)
-    setCopied(true)
-    setTimeout(() => setCopied(false), 2000)
-  }
-  return (
-    <button
-      type="button"
-      onClick={handleCopy}
-      className="flex items-center gap-1.5 rounded-lg border border-border bg-card px-3 py-1.5 text-[12px] font-medium text-foreground transition-colors hover:bg-muted/60"
-    >
-      {copied ? <Check className="size-3.5 text-emerald-600" /> : <Copy className="size-3.5" />}
-      {copied ? 'Copied!' : 'Copy link'}
-    </button>
-  )
-}
+type TabKey = EventTabKey
+const TABS = EVENT_TABS
 
 // ─── Skeletons ────────────────────────────────────────────────────────────────
 
 function HeroSkeleton() {
   return (
-    <div className="space-y-4">
-      <div className="h-48 w-full animate-pulse rounded-2xl bg-muted sm:h-64" />
-      <div className="space-y-2 px-1">
-        <div className="h-7 w-2/3 animate-pulse rounded bg-muted" />
-        <div className="h-4 w-1/3 animate-pulse rounded bg-muted" />
+    <div className="border-b border-border">
+      <div className="h-[90px] w-full animate-pulse bg-muted sm:h-[108px]" />
+      <div className="space-y-3 px-5 py-4 sm:px-6">
+        <div className="space-y-1.5">
+          <div className="flex items-center gap-2">
+            <div className="h-5 w-48 animate-pulse rounded bg-muted" />
+            <div className="h-5 w-20 animate-pulse rounded-full bg-muted" />
+          </div>
+          <div className="h-3.5 w-32 animate-pulse rounded bg-muted" />
+        </div>
+        <div className="flex gap-1.5">
+          {[72, 96, 120].map(w => (
+            <div key={w} className="h-5 animate-pulse rounded-full bg-muted" style={{ width: w }} />
+          ))}
+        </div>
+        <div className="flex gap-2">
+          {[1, 2, 3, 4].map(i => (
+            <div key={i} className="h-[62px] w-[84px] animate-pulse rounded-xl bg-muted" />
+          ))}
+        </div>
+        <div className="flex gap-2">
+          {[88, 80, 88, 80].map((w, i) => (
+            <div key={i} className="h-8 animate-pulse rounded-lg bg-muted" style={{ width: w }} />
+          ))}
+        </div>
       </div>
     </div>
   )
@@ -96,13 +83,14 @@ function TabSkeleton() {
 
 // ─── Main Component ───────────────────────────────────────────────────────────
 
-export default function ManageEventClient({ eventId }: { eventId: string }) {
+export default function ManageEventClient({ eventId, initialTab }: { eventId: string; initialTab?: string }) {
   const [event,      setEvent]     = useState<EventDetailResponse | null>(null)
   const [regData,    setRegData]   = useState<RegistrationsApiResponse | null>(null)
   const [token,      setToken]     = useState<string>('')
   const [loading,    setLoading]   = useState(true)
   const [error,      setError]     = useState<string | null>(null)
-  const [activeTab,  setActiveTab] = useState<TabKey>('overview')
+  // Seed from the deep-link (?tab=) when valid; otherwise Home (Phase H.4.2).
+  const [activeTab,  setActiveTab] = useState<TabKey>(isValidEventTab(initialTab) ? initialTab : 'home')
   const [refreshKey, setRefreshKey] = useState(0)
 
   // ── Data fetch ──────────────────────────────────────────────────────────────
@@ -155,11 +143,35 @@ export default function ManageEventClient({ eventId }: { eventId: string }) {
     return unsub
   }, [])
 
+  // ── Command Palette bridge (Phase H.4.2) ────────────────────────────────────
+  // The palette can switch tabs on THIS already-mounted page (no navigation) and
+  // ask us to refresh after it runs a safe action through the existing services.
+  useEffect(() => {
+    function onSetTab(e: Event) {
+      const detail = (e as CustomEvent).detail as { eventId?: string; tab?: string } | undefined
+      if (detail?.eventId === eventId && isValidEventTab(detail.tab)) setActiveTab(detail.tab)
+    }
+    function onRefresh(e: Event) {
+      const detail = (e as CustomEvent).detail as { eventId?: string } | undefined
+      if (detail?.eventId === eventId) setRefreshKey(k => k + 1)
+    }
+    window.addEventListener(SET_TAB_EVENT, onSetTab)
+    window.addEventListener(REFRESH_EVENT, onRefresh)
+    return () => {
+      window.removeEventListener(SET_TAB_EVENT, onSetTab)
+      window.removeEventListener(REFRESH_EVENT, onRefresh)
+    }
+  }, [eventId])
+
   // ── Re-fetch after lifecycle action ─────────────────────────────────────────
   useEffect(() => {
     if (!token || refreshKey === 0) return
-    setLoading(true)
-    fetchData(token).catch(e => setError(e.message)).finally(() => setLoading(false))
+    void (async () => {
+      setLoading(true)
+      try { await fetchData(token) }
+      catch (e) { setError(e instanceof Error ? e.message : 'Failed to load event') }
+      finally { setLoading(false) }
+    })()
   }, [refreshKey, token, fetchData])
 
   function refresh() { setRefreshKey(k => k + 1) }
@@ -177,10 +189,6 @@ export default function ManageEventClient({ eventId }: { eventId: string }) {
     )
   }
 
-  const publicUrl = event?.slug
-    ? `${typeof window !== 'undefined' ? window.location.origin : ''}/events/${event.slug}`
-    : null
-
   return (
     <div className="space-y-0">
       {/* Back nav */}
@@ -194,78 +202,26 @@ export default function ManageEventClient({ eventId }: { eventId: string }) {
         </Link>
       </div>
 
-      {/* Hero */}
+      {/* Command header */}
       {loading && !event ? (
-        <div className="p-5 sm:p-6"><HeroSkeleton /></div>
+        <HeroSkeleton />
       ) : event ? (
-        <div>
-          {/* Banner */}
-          {event.bannerUrl ? (
-            <div className="relative h-48 w-full overflow-hidden sm:h-64">
-              <img src={event.bannerUrl} alt="" className="h-full w-full object-cover" />
-              <div className="absolute inset-0 bg-gradient-to-t from-black/50 to-transparent" />
-            </div>
-          ) : (
-            <div className="h-28 w-full bg-gradient-to-br from-[#fb5a6a]/20 via-[#e5277e]/10 to-transparent sm:h-36" />
-          )}
-
-          {/* Title + status */}
-          <div className="space-y-4 px-5 py-4 sm:px-6">
-            <div className="flex flex-wrap items-start gap-3">
-              <h1 className="flex-1 text-[22px] font-bold text-foreground sm:text-[26px]">
-                {event.name}
-              </h1>
-              <StatusBadge ls={event.lifecycleStatus} />
-            </div>
-
-            {/* Public URL row */}
-            {publicUrl && (
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="rounded-lg bg-muted/40 px-3 py-1.5 font-mono text-[13px] text-muted-foreground">
-                  {publicUrl}
-                </span>
-                <CopyButton text={publicUrl} />
-                <Link
-                  href={`/events/${event.slug}`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="flex items-center gap-1.5 rounded-lg border border-border bg-card px-3 py-1.5 text-[13px] font-medium text-foreground transition-colors hover:bg-muted/60"
-                >
-                  <ExternalLink className="size-3.5" />
-                  View page
-                </Link>
-                {(event.lifecycleStatus === 'published' || event.lifecycleStatus === 'registration_closed' || event.lifecycleStatus === 'completed') && (
-                  <Link
-                    href={`/dashboard/events/${eventId}/checkin`}
-                    className="flex items-center gap-1.5 rounded-lg border border-primary/30 bg-primary/5 px-3 py-1.5 text-[13px] font-medium text-primary transition-colors hover:bg-primary/10"
-                  >
-                    <ScanLine className="size-3.5" />
-                    Check-in
-                  </Link>
-                )}
-              </div>
-            )}
-
-            {/* Cancellation reason */}
-            {event.lifecycleStatus === 'cancelled' && event.cancelReason && (
-              <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3">
-                <p className="text-[13px] font-semibold text-red-700">Cancellation reason</p>
-                <p className="mt-0.5 text-[14px] text-red-600">{event.cancelReason}</p>
-              </div>
-            )}
-
-            {/* Actions panel */}
-            {token && (
-              <EventActionsPanel event={event} token={token} onSuccess={refresh} />
-            )}
-          </div>
-        </div>
+        <EventCommandHeader
+          event={event}
+          eventId={eventId}
+          token={token}
+          onSuccess={refresh}
+        />
       ) : null}
 
       {/* Tab navigation */}
       <div className="border-b border-border">
         <nav className="-mb-px flex overflow-x-auto px-5 sm:px-6" role="tablist">
-          {TABS.map(t => {
+          {TABS.filter(t =>
+            (!t.sportsOnly    || event?.eventType === 'sports')     &&
+            (!t.exhibitionOnly || event?.eventType === 'exhibition') &&
+            (!t.awardsOnly    || event?.eventType === 'awards')
+          ).map(t => {
             const active = activeTab === t.key
             return (
               <button
@@ -293,6 +249,12 @@ export default function ManageEventClient({ eventId }: { eventId: string }) {
           <TabSkeleton />
         ) : event ? (
           <>
+            {activeTab === 'home' && (
+              <EventHomeTab event={event} regData={regData} token={token} onOpenTab={(t) => setActiveTab(t as TabKey)} />
+            )}
+            {activeTab === 'setup' && (
+              <SetupCenterTab event={event} token={token} onOpenTab={(t) => setActiveTab(t as TabKey)} />
+            )}
             {activeTab === 'overview' && (
               <OverviewTab event={event} registrations={regData?.registrations ?? []} />
             )}
@@ -301,7 +263,7 @@ export default function ManageEventClient({ eventId }: { eventId: string }) {
             )}
             {activeTab === 'registrations' && (
               regData
-                ? <RegistrationsTab data={regData} slug={event.slug ?? eventId} token={token} />
+                ? <RegistrationsTab data={regData} eventId={eventId} />
                 : (
                   <div className="rounded-2xl border border-dashed border-border py-16 text-center">
                     <p className="text-[14px] font-semibold text-foreground">
@@ -313,6 +275,14 @@ export default function ManageEventClient({ eventId }: { eventId: string }) {
                 )
             )}
             {activeTab === 'passes' && <PassesTab passes={event.passes} />}
+            {activeTab === 'coupons' && <CouponsTab eventId={eventId} token={token} />}
+            {activeTab === 'waitlist' && <WaitlistTab eventId={eventId} token={token} />}
+            {activeTab === 'conference' && <ConferenceTab eventId={eventId} token={token} />}
+            {activeTab === 'sports'       && <SportsTab      eventId={eventId} token={token} />}
+            {activeTab === 'exhibition'  && <ExhibitionTab  eventId={eventId} token={token} />}
+            {activeTab === 'nominations'          && <NominationsTab          eventId={eventId} token={token} />}
+            {activeTab === 'speaker-applications' && <SpeakerApplicationsTab  eventId={eventId} token={token} />}
+            {activeTab === 'sponsor-applications' && <SponsorApplicationsTab  eventId={eventId} token={token} />}
             {activeTab === 'communications' && <CommunicationsTab event={event} token={token} />}
             {activeTab === 'reports' && (
               <ReportsTab event={event} registrations={regData?.registrations ?? []} />

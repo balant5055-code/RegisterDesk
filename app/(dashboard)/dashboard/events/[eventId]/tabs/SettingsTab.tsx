@@ -390,7 +390,7 @@ export default function SettingsTab({ event, eventId, token, onSuccess }: Settin
         </div>
       )}
       {!isEditable && (
-        <div className="flex items-center gap-2 rounded-xl border border-muted bg-muted/30 p-3.5 text-[12.5px] text-muted-foreground">
+        <div className="flex items-center gap-2 rounded-xl border border-muted bg-muted/30 p-3.5 text-[13px] text-muted-foreground">
           <Lock className="size-4 shrink-0" aria-hidden />
           This event is {event.lifecycleStatus} — settings are read-only.
         </div>
@@ -609,7 +609,7 @@ export default function SettingsTab({ event, eventId, token, onSuccess }: Settin
                 {s.logoUrl && <img src={s.logoUrl} alt="" className="h-7 max-w-[80px] object-contain" />}
                 <div>
                   <p className="text-[14px] font-medium text-foreground">{s.name || '—'}</p>
-                  <p className="text-[11.5px] capitalize text-muted-foreground">{s.tier} sponsor</p>
+                  <p className="text-[13px] capitalize text-muted-foreground">{s.tier} sponsor</p>
                 </div>
               </div>
             ))

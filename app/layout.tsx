@@ -1,18 +1,58 @@
-import type { Metadata } from 'next'
-import { Inter } from 'next/font/google'
+import type { Metadata, Viewport } from 'next'
+import { Geist } from 'next/font/google'
+import { BASE_URL } from '@/lib/env'
+import { BUSINESS_CONFIG_DEFAULTS } from '@/lib/config/businessConfig'
 import './globals.css'
 import 'swiper/css'
 import 'swiper/css/pagination'
 
-const inter = Inter({
-  subsets: ['latin'],
-  display: 'swap',
-  variable: '--font-inter',
+// Geist is a variable font — all weights (100–900) ship in one file, so no `weight`
+// array is passed (unlike Poppins). Exposed as --font-geist → --font-sans → font-sans.
+const geist = Geist({
+  subsets:  ['latin'],
+  display:  'swap',
+  variable: '--font-geist',
 })
 
+// LS1: metadataBase (so relative OG image URLs resolve) + default OpenGraph/Twitter
+// so pages that don't set their own still share something meaningful. Kept `title`
+// a plain default (no template) to avoid regressing pages that already self-brand.
+//
+// RD-CONF-10: the platform NAME is sourced from the branding code default (one
+// source of truth) rather than a bare literal. This layout wraps every route, so
+// it stays STATIC — it must not read Firestore. Runtime-editable branding applies
+// to dynamic/client surfaces (sitemap, robots, event/campaign metadata, provider);
+// static metadata reflects the code default and changes on redeploy.
+const NAME  = BUSINESS_CONFIG_DEFAULTS.branding.platformName
+const TITLE = `${NAME} — Event Registration, Check-in & Payments`
+const DESC  = 'Create events, sell tickets, check in attendees, and manage payments — all in one platform.'
+
 export const metadata: Metadata = {
-  title: 'RegisterDesk',
-  description: 'Event registration and check-in platform',
+  metadataBase: new URL(BASE_URL),
+  title: TITLE,
+  description: DESC,
+  applicationName: NAME,
+  openGraph: {
+    type: 'website',
+    siteName: NAME,
+    url: BASE_URL,
+    title: TITLE,
+    description: DESC,
+  },
+  twitter: {
+    card: 'summary_large_image',
+    title: NAME,
+    description: DESC,
+  },
+}
+
+// GA-7D S2: `viewport-fit=cover` so iOS populates env(safe-area-inset-*), which the
+// wizard footer and other bottom-anchored controls already reference (they resolved
+// to 0 without this). Next injects width/initial-scale automatically; this adds the fit.
+export const viewport: Viewport = {
+  width: 'device-width',
+  initialScale: 1,
+  viewportFit: 'cover',
 }
 
 export default function RootLayout({
@@ -21,7 +61,7 @@ export default function RootLayout({
   return (
     <html
       lang="en"
-      className={`${inter.variable} h-full antialiased`}
+      className={`${geist.variable} h-full antialiased`}
     >
       <body className="min-h-full flex flex-col">{children}</body>
     </html>

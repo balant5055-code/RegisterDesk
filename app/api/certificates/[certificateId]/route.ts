@@ -14,16 +14,30 @@ import { adminAuth }                    from '@/lib/firebase/admin'
 import {
   getCertificateById,
   getTemplate,
+  getSettings,
   incrementDownloadCount,
 }                                       from '@/lib/certificates/firestore'
+import { defaultCertificateSettings }   from '@/lib/certificates/types'
 import { generateCertificatePdf }       from '@/lib/certificates/pdf'
 import { isValidCertificateId }         from '@/lib/certificates/id'
+import { timingSafeEqualStr }           from '@/lib/security/timingSafe'
+import { getClientIp }                  from '@/lib/rateLimit'
+import { RATE_POLICY, checkPolicy }     from '@/lib/rateLimit/policies'
 
 type Params = { params: Promise<{ certificateId: string }> }
 
 const APP_URL = (process.env.NEXT_PUBLIC_APP_URL ?? 'https://registerdesk.in').replace(/\/$/, '')
 
 export async function GET(req: NextRequest, { params }: Params): Promise<NextResponse> {
+  // On-the-fly PDF generation — per-IP throttle (same policy as ticket/receipt PDFs).
+  const rl = checkPolicy(getClientIp(req), RATE_POLICY.pdfDownload)
+  if (rl.limited) {
+    return NextResponse.json(
+      { error: 'Too many requests. Please try again shortly.' },
+      { status: 429, headers: { 'Retry-After': String(rl.retryAfter) } },
+    )
+  }
+
   const { certificateId } = await params
 
   // Basic format check
@@ -37,20 +51,39 @@ export async function GET(req: NextRequest, { params }: Params): Promise<NextRes
     return NextResponse.json({ error: 'Certificate not found' }, { status: 404 })
   }
 
-  // Optional: if Bearer token provided, verify organizer ownership — but not required.
-  // The certificateId IS the capability token for attendee access.
-  const bearerToken = (req.headers.get('authorization') ?? '').replace(/^Bearer /, '')
-  if (bearerToken) {
+  // Revoked certificates are never downloadable (defensive; legacy records carry
+  // a status field even though legacy revoke is V1.1).
+  if ((record as { status?: string }).status === 'revoked') {
+    return NextResponse.json({ error: 'This certificate has been revoked' }, { status: 410 })
+  }
+
+  // The owning organizer (valid Bearer) bypasses the attendee-facing settings.
+  let isOrganizer = false
+  const authHeader = req.headers.get('authorization') ?? ''
+  if (authHeader.startsWith('Bearer ')) {
     try {
-      const decoded = await adminAuth.verifyIdToken(bearerToken)
-      // If signed in, user must be the organizer or the registration owner
-      const uid = decoded.uid
-      if (uid !== record.organizerUid) {
-        // Allow if they're the attendee — no per-attendee uid stored on record, so just allow
-        // as long as they have a valid Firebase token (they're logged in)
+      const uid = (await adminAuth.verifyIdToken(authHeader.slice(7))).uid
+      isOrganizer = uid === record.organizerUid
+    } catch { /* ignore — treat as public/attendee */ }
+  }
+
+  // P7.1: honor the organizer's download settings for non-organizer requests.
+  // The certificateId is a capability token, but enabled/allowAttendee/
+  // requireVerification must still gate access — no bypass.
+  if (!isOrganizer) {
+    const download = (await getSettings(record.eventId))?.download ?? defaultCertificateSettings().download
+    if (!download.enabled) {
+      return NextResponse.json({ error: 'Downloads are disabled for this certificate.' }, { status: 403 })
+    }
+    if (!download.allowAttendee) {
+      return NextResponse.json({ error: 'Downloads are restricted by the organizer.' }, { status: 403 })
+    }
+    if (download.requireVerification) {
+      const token    = req.nextUrl.searchParams.get('token') ?? ''
+      const recToken = (record as { verificationToken?: string | null }).verificationToken ?? null
+      if (!recToken || !timingSafeEqualStr(token, recToken)) {
+        return NextResponse.json({ error: 'Verification required to download this certificate.' }, { status: 403 })
       }
-    } catch {
-      // Invalid token — proceed with certificateId capability model anyway
     }
   }
 

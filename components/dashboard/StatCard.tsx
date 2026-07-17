@@ -52,7 +52,7 @@ export function StatCard({
       <p className="mt-1.5 text-[13px] text-muted-foreground">{label}</p>
       <p
         className={cn(
-          'mt-1.5 text-[12px] font-medium',
+          'mt-1.5 text-[13px] font-medium',
           trend === 'up' ? 'text-emerald-600' : 'text-destructive',
         )}
       >

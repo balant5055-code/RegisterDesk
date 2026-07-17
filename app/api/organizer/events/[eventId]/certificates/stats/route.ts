@@ -4,7 +4,8 @@
 // organizer's event dashboard.
 
 import { NextRequest, NextResponse }       from 'next/server'
-import { adminDb, adminAuth }              from '@/lib/firebase/admin'
+import { adminDb }                         from '@/lib/firebase/admin'
+import { authorizeWorkspace }              from '@/lib/team/workspace'
 import { getCertificatesByEventId }        from '@/lib/certificates/firestore'
 import type { SerializedCertificateRecord } from '@/lib/certificates/types'
 
@@ -27,15 +28,9 @@ function toISO(val: unknown): string | null {
 }
 
 export async function GET(req: NextRequest, { params }: Params): Promise<NextResponse> {
-  const token = (req.headers.get('authorization') ?? '').replace(/^Bearer /, '')
-  if (!token) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-
-  let uid: string
-  try {
-    uid = (await adminAuth.verifyIdToken(token)).uid
-  } catch {
-    return NextResponse.json({ error: 'Invalid token' }, { status: 401 })
-  }
+  const authz = await authorizeWorkspace(req, 'certificates')
+  if (!authz.ok) return NextResponse.json({ error: authz.error }, { status: authz.status })
+  const uid = authz.workspaceUid
 
   const { eventId } = await params
 
@@ -58,19 +53,19 @@ export async function GET(req: NextRequest, { params }: Params): Promise<NextRes
   const downloaded = records.filter(r => r.downloadCount > 0).length
   const emailed    = records.filter(r => r.emailStatus === 'sent').length
 
-  // Compute pending: eligible registrations without certificates
+  // Compute pending: eligible registrations without certificates.
+  // GA-7C P1-3: derive from a COUNT aggregation (no document reads) instead of the
+  // former O(attendees) full scan of confirmed registrations — pending = confirmed −
+  // generated, the standard scalable form for this KPI.
   let pending = 0
   if (slug) {
-    // Quick count — load confirmed regs and compare
-    const regsSnap = await adminDb
+    const confirmedSnap = await adminDb
       .collection('registrations')
       .where('organizerUid', '==', uid)
       .where('eventSlug',    '==', slug)
       .where('status',       '==', 'confirmed')
-      .get()
-    const confirmedIds = new Set(regsSnap.docs.map(d => d.id))
-    const certRegIds   = new Set(records.map(r => r.registrationId))
-    pending = [...confirmedIds].filter(id => !certRegIds.has(id)).length
+      .count().get()
+    pending = Math.max(0, confirmedSnap.data().count - generated)
   }
 
   // Serialize recent 20 records, newest first

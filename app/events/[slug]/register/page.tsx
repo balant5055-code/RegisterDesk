@@ -7,8 +7,10 @@
 import { notFound }            from 'next/navigation'
 import Link                    from 'next/link'
 import { getEventBySlug }      from '@/lib/firebase/firestore/events'
+import { resolveEffectivePriceRupees } from '@/lib/pricing/earlyBird'
 import { checkRegistrationGate, GATE_REASON_LABELS } from '@/lib/registrations/gate'
 import { RegisterClient }      from './RegisterClient'
+import { WaitlistJoinClient }  from './WaitlistJoinClient'
 import type {
   FormSection,
   ConditionalRule,
@@ -20,7 +22,8 @@ import type {
 interface PassPublic {
   id:           string
   name:         string
-  price:        number
+  price:        number        // effective price — early-bird while active, else regular
+  regularPrice: number        // regular price (for strikethrough when early bird is active)
   isFree:       boolean
   unlimited:    boolean
   quantity:     number | null
@@ -33,18 +36,34 @@ interface PassPublic {
 function extractPasses(pricing: Record<string, unknown> | null): PassPublic[] {
   if (!pricing) return []
   const raw = Array.isArray(pricing.passes) ? pricing.passes as Record<string, unknown>[] : []
+  const now = Date.now()
   return raw
     .filter(p => p.status === 'active')
-    .map(p => ({
-      id:          String(p.id ?? ''),
-      name:        String(p.name ?? 'Pass'),
-      price:       typeof p.price === 'number' ? p.price : 0,
-      isFree:      p.price === 0 || p.isFree === true,
-      unlimited:   p.unlimited === true,
-      quantity:    typeof p.quantity === 'number' ? p.quantity : null,
-      status:      String(p.status ?? 'active'),
-      description: typeof p.description === 'string' ? p.description : undefined,
-    }))
+    .map(p => {
+      const regularPrice = typeof p.price === 'number' ? p.price : 0
+      // Effective price via the shared resolver so the checkout screen shows the
+      // exact amount create-order will charge (early-bird while active, else regular).
+      const price = resolveEffectivePriceRupees(
+        {
+          price:            regularPrice,
+          earlyBirdEnabled: p.earlyBirdEnabled === true,
+          earlyBirdPrice:   typeof p.earlyBirdPrice === 'number' ? p.earlyBirdPrice : null,
+          earlyBirdEndDate: typeof p.earlyBirdEndDate === 'string' ? p.earlyBirdEndDate : undefined,
+        },
+        now,
+      )
+      return {
+        id:          String(p.id ?? ''),
+        name:        String(p.name ?? 'Pass'),
+        price,
+        regularPrice,
+        isFree:      regularPrice === 0 || p.isFree === true,
+        unlimited:   p.unlimited === true,
+        quantity:    typeof p.quantity === 'number' ? p.quantity : null,
+        status:      String(p.status ?? 'active'),
+        description: typeof p.description === 'string' ? p.description : undefined,
+      }
+    })
 }
 
 function filterFieldsForPass(form: RegistrationFormDraft, passId: string): FormSection[] {
@@ -182,6 +201,20 @@ export default async function RegisterPage({
 
   // Run gate check server-side
   const gate = await checkRegistrationGate(slug, passId)
+
+  // When capacity is full but waitlist is enabled, render the join-waitlist form
+  if (!gate.allowed && gate.reason === 'WAITLIST_AVAILABLE') {
+    const wlPass = passes.find(p => p.id === passId)
+    return (
+      <WaitlistJoinClient
+        eventSlug={slug}
+        eventName={eventName}
+        passId={passId}
+        passName={wlPass?.name ?? 'Pass'}
+      />
+    )
+  }
+
   if (!gate.allowed) {
     return <BlockedScreen reason={gate.reason} eventSlug={slug} />
   }
@@ -229,24 +262,57 @@ export default async function RegisterPage({
   // Build event summary for the client component header
   const rawSchedule = rawDetails?.schedule as Record<string, unknown> | null
   const startDate   = typeof rawSchedule?.startDate === 'string' ? rawSchedule.startDate : null
+  const startTime   = typeof rawSchedule?.startTime === 'string' ? rawSchedule.startTime : null
+
+  const rawMedia  = rawDetails?.media as Record<string, unknown> | null
+  const bannerUrl = typeof rawMedia?.bannerUrl === 'string' ? rawMedia.bannerUrl : ''
+
+  const rawVenue    = rawDetails?.venue as Record<string, unknown> | null
+  const venueType   = typeof rawVenue?.type === 'string' ? rawVenue.type : 'physical'
+  const rawPhysical = rawVenue?.physical as Record<string, unknown> | null
+  const rawOnline   = rawVenue?.online   as Record<string, unknown> | null
+  const venueName   = venueType === 'online'
+    ? (typeof rawOnline?.platform === 'string' ? rawOnline.platform : 'Online')
+    : (typeof rawPhysical?.name   === 'string' ? rawPhysical.name   : '')
+  const venueCity   = venueType !== 'online'
+    ? (typeof rawPhysical?.city   === 'string' ? rawPhysical.city   : '')
+    : ''
 
   const regRules = (form as RegistrationFormDraft | null)?.registrationRules
+
+  // Canonical source for approval mode: accessControl.confirmationMode (set in Step 3).
+  // Falls back to registrationRules.approvalMode for events published before Step 3
+  // was wired to the published document, and as a last resort defaults to 'auto'.
+  const ac = event.accessControl as { type?: string; confirmationMode?: string } | null | undefined
+  const acConfirmationMode = ac?.confirmationMode
+  const approvalMode = (acConfirmationMode === 'manual' || acConfirmationMode === 'auto'
+    ? acConfirmationMode
+    : regRules?.approvalMode ?? 'auto') as 'auto' | 'manual'
+
+  const requiresInviteCode = ac?.type === 'invite_code'
 
   return (
     <RegisterClient
       eventSlug={slug}
       eventName={eventName}
       startDate={startDate}
+      startTime={startTime}
+      bannerUrl={bannerUrl}
+      venueName={venueName}
+      venueCity={venueCity}
+      venueType={venueType}
       pass={{
-        id:    pass.id,
-        name:  pass.name,
-        price: pass.price,
-        isFree: pass.isFree,
+        id:           pass.id,
+        name:         pass.name,
+        price:        pass.price,
+        regularPrice: pass.regularPrice,
+        isFree:       pass.isFree,
       }}
       sections={sections}
       conditionalRules={conditionalRules}
-      approvalMode={regRules?.approvalMode ?? 'auto'}
+      approvalMode={approvalMode}
       requireLogin={regRules?.requireLogin ?? false}
+      requiresInviteCode={requiresInviteCode}
     />
   )
 }

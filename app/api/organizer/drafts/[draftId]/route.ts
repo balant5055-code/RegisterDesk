@@ -5,8 +5,11 @@
 // the corresponding events/{slug} document is also deleted.
 
 import { NextRequest, NextResponse } from 'next/server'
-import { adminAuth, adminDb }        from '@/lib/firebase/admin'
+import { FieldValue }                from 'firebase-admin/firestore'
+import { adminDb }                   from '@/lib/firebase/admin'
+import { authorizeWorkspace }        from '@/lib/team/workspace'
 import { deriveLifecycleStatus }     from '@/lib/events/lifecycle'
+import { EVENT_LICENSES_COLLECTION, LICENSE_ORDERS_COLLECTION } from '@/lib/licensing/schema'
 
 export async function DELETE(
   req:     NextRequest,
@@ -14,16 +17,13 @@ export async function DELETE(
 ): Promise<NextResponse> {
   const { draftId } = await context.params
 
-  // ── 1. Auth ────────────────────────────────────────────────────────────────
-  const token = (req.headers.get('authorization') ?? '').replace('Bearer ', '')
-  if (!token) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-
-  let uid: string
-  try {
-    uid = (await adminAuth.verifyIdToken(token)).uid
-  } catch {
-    return NextResponse.json({ error: 'Invalid token' }, { status: 401 })
+  // ── 1. Auth — owner only (team members cannot delete events) ───────────────
+  const authz = await authorizeWorkspace(req, 'events')
+  if (!authz.ok) return NextResponse.json({ error: authz.error }, { status: authz.status })
+  if (!authz.isOwner) {
+    return NextResponse.json({ error: 'Only the account owner can delete events.' }, { status: 403 })
   }
+  const uid = authz.workspaceUid
 
   // ── 2. Load draft (uid in path enforces ownership) ─────────────────────────
   const draftRef  = adminDb.doc(`users/${uid}/eventDrafts/${draftId}`)
@@ -36,7 +36,38 @@ export async function DELETE(
   const d             = draftSnap.data() as Record<string, unknown>
   const currentStatus = deriveLifecycleStatus(d)
 
-  // ── 3. Only drafts may be deleted ─────────────────────────────────────────
+  // ── 3. Resolve slug (present if event was ever published) ──────────────────
+  const details = (d.eventDetails as Record<string, unknown>) ?? {}
+  const seo     = (details.seo    as Record<string, unknown>) ?? {}
+  const slug    = typeof seo.urlSlug === 'string' && seo.urlSlug ? seo.urlSlug : null
+
+  // ── 4. Phase L1: NEVER permanently delete a paid/licensed event ────────────
+  // Payment happens BEFORE publish — the purchase writes a PAID order keyed
+  // `lic_{draftId}` (licenseOrders); the license doc (once the event was ever
+  // published) is keyed by slug (eventLicenses). Either signal proves that a
+  // successful license/payment exists, so permanent deletion is forbidden and
+  // must delete NOTHING. Uses only existing licensing records — creates none.
+  const orderSnap    = await adminDb.collection(LICENSE_ORDERS_COLLECTION).doc(`lic_${draftId}`).get()
+  const hasPaidOrder = orderSnap.exists && (orderSnap.data() as { status?: unknown }).status === 'paid'
+
+  let hasLicense = false
+  if (slug) {
+    const licenseSnap = await adminDb.collection(EVENT_LICENSES_COLLECTION).doc(slug).get()
+    hasLicense = licenseSnap.exists
+  }
+
+  if (hasPaidOrder || hasLicense) {
+    return NextResponse.json(
+      {
+        success: false,
+        code:    'PAID_EVENT_CANNOT_DELETE',
+        message: 'This event has an active license and cannot be permanently deleted.',
+      },
+      { status: 409 },
+    )
+  }
+
+  // ── 5. Only drafts may be deleted ─────────────────────────────────────────
   if (currentStatus !== 'draft') {
     return NextResponse.json(
       { error: `Cannot delete an event with status '${currentStatus}'. Only draft events can be deleted.` },
@@ -44,12 +75,7 @@ export async function DELETE(
     )
   }
 
-  // ── 4. Resolve slug (present if event was previously published then unpublished) ──
-  const details = (d.eventDetails as Record<string, unknown>) ?? {}
-  const seo     = (details.seo    as Record<string, unknown>) ?? {}
-  const slug    = typeof seo.urlSlug === 'string' && seo.urlSlug ? seo.urlSlug : null
-
-  // ── 5. Atomic batch delete ─────────────────────────────────────────────────
+  // ── 6. Atomic batch delete ─────────────────────────────────────────────────
   const batch = adminDb.batch()
   batch.delete(draftRef)
 
@@ -70,6 +96,19 @@ export async function DELETE(
   } catch {
     return NextResponse.json({ error: 'Failed to delete draft' }, { status: 500 })
   }
+
+  // ── 7. Audit log (organizer-scoped, fire-and-forget — never blocks delete) ──
+  const info      = (details.info as Record<string, unknown>) ?? {}
+  const eventName = typeof info.name === 'string' ? info.name : null
+  void adminDb.collection('teamAuditLogs').add({
+    organizerUid: uid,
+    actorUid:     authz.callerUid,
+    action:       'event.deleted',
+    entityType:   'event',
+    entityId:     draftId,
+    metadata:     { name: eventName, slug, hadPublicDoc: Boolean(slug) },
+    createdAt:    FieldValue.serverTimestamp(),
+  }).catch(() => { /* best-effort audit */ })
 
   return NextResponse.json({ success: true })
 }

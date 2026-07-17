@@ -153,10 +153,10 @@ export default function AudienceGrid() {
 
           {/* ── Heading ──────────────────────────────────────────────────── */}
           <motion.div variants={fadeUpV} className="mb-6 text-center lg:mb-7">
-            <p className="mb-3 text-[11px] font-semibold uppercase tracking-[0.2em] text-primary">
+            <p className="mb-3 text-xs font-semibold uppercase tracking-[0.2em] text-primary">
               Built for every organizer
             </p>
-            <h2 className="text-[30px] font-bold leading-[1.1] tracking-tight text-slate-900 lg:text-[40px]">
+            <h2 className="text-3xl font-bold leading-tight tracking-tight text-slate-900 lg:text-4xl xl:text-5xl">
               Built for the{' '}
               <span
                 className="bg-clip-text text-transparent"
@@ -165,7 +165,7 @@ export default function AudienceGrid() {
                 Events You Run.
               </span>
             </h2>
-            <p className="mx-auto mt-4 max-w-lg text-base leading-relaxed text-slate-500 lg:text-md">
+            <p className="mx-auto mt-4 max-w-2xl text-base leading-relaxed text-muted-foreground lg:text-lg">
               From marathons to conferences, schools, NGOs and business
               forums — RegisterDesk adapts to every event format.
             </p>
@@ -189,7 +189,7 @@ export default function AudienceGrid() {
                       aria-selected={isActive}
                       onClick={() => handleSelect(cat.id)}
                       className={cn(
-                        'interactive relative h-8 rounded-full px-4 text-[13px] font-medium whitespace-nowrap',
+                        'interactive relative h-8 rounded-full px-4 text-sm font-medium whitespace-nowrap',
                         'transition-colors duration-150',
                         'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 focus-visible:ring-offset-2',
                         isActive ? 'text-white' : 'text-slate-400 hover:text-slate-600',
@@ -275,7 +275,7 @@ export default function AudienceGrid() {
                   {/* Capability badges — top right */}
                   <div className="pointer-events-auto absolute right-5 top-5 hidden sm:block">
                     <div className="w-[164px] rounded-xl border border-white/[0.11] bg-black/[0.32] p-4 backdrop-blur-xl">
-                      <p className="mb-3 text-[9px] font-semibold uppercase tracking-[0.14em] text-white/40">
+                      <p className="mb-3 text-xs font-semibold uppercase tracking-[0.14em] text-white/40">
                         What&rsquo;s included
                       </p>
                       <div className="flex flex-col gap-2.5">
@@ -286,7 +286,7 @@ export default function AudienceGrid() {
                               className="size-[5px] shrink-0 rounded-full"
                               style={{ backgroundImage: 'var(--primary-gradient)' }}
                             />
-                            <span className="text-[11.5px] leading-none text-white/75">{chip}</span>
+                            <span className="text-xs leading-none text-white/75">{chip}</span>
                           </div>
                         ))}
                       </div>
@@ -295,10 +295,10 @@ export default function AudienceGrid() {
 
                   {/* Title and description — bottom left */}
                   <div className="pointer-events-auto absolute bottom-8 left-8 right-8 lg:bottom-11 lg:left-12 lg:right-[196px]">
-                    <h3 className="text-xl font-bold leading-snug tracking-tight text-white lg:text-2xl">
+                    <h3 className="text-lg font-semibold leading-snug tracking-tight text-white lg:text-xl">
                       {active.title}
                     </h3>
-                    <p className="mt-2 max-w-md text-sm leading-relaxed text-white/75 lg:text-[15px]">
+                    <p className="mt-2 max-w-md text-sm leading-relaxed text-white/75 lg:text-base">
                       {active.desc}
                     </p>
                   </div>

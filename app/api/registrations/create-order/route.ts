@@ -10,16 +10,18 @@
 
 import { NextRequest, NextResponse } from 'next/server'
 import { adminAuth, adminDb }        from '@/lib/firebase/admin'
+import { captureFinancialError }     from '@/lib/monitoring/sentry'
 import { checkRegistrationGate }     from '@/lib/registrations/gate'
 import { getEventBySlug }            from '@/lib/firebase/firestore/events'
 import { createPaymentIntent }       from '@/lib/firebase/firestore/paymentIntents'
 import { razorpay, RAZORPAY_KEY_ID } from '@/lib/razorpay/client'   // C1: throws if keys absent
-import { checkRateLimit, getClientIp } from '@/lib/rateLimit'
-import type {
-  RegistrationFormDraft,
-  FormField,
-  RegistrationRules,
-} from '@/components/wizard/registrationFormConfig'
+import { getClientIp } from '@/lib/rateLimit'
+import { checkDistributedRateLimit } from '@/lib/rateLimit/redis'
+import { validateCoupon }            from '@/lib/coupons/validate'
+import { resolveEffectivePriceRupees } from '@/lib/pricing/earlyBird'
+import { validateInviteCode }        from '@/app/api/registrations/validate-invite-code/route'
+import { validateFormResponses }     from '@/lib/registrations/validateFormResponses'
+import type { RegistrationRules } from '@/components/wizard/registrationFormConfig'
 
 // ─── Request / response shapes ────────────────────────────────────────────────
 
@@ -32,13 +34,19 @@ interface CreateOrderBody {
     phone?: string
   }
   formResponses: Record<string, string>
+  couponCode?:   string
+  inviteCode?:   string
 }
 
 export interface CreateOrderResponse {
-  orderId:  string
-  amount:   number    // paise
-  currency: string
-  keyId:    string    // Razorpay key_id for client-side checkout
+  orderId:       string
+  amount:        number    // paise (already reflects any coupon discount)
+  currency:      string
+  keyId:         string    // Razorpay key_id for client-side checkout
+  // When a coupon reduces the total to zero, no Razorpay order is created.
+  // The client should call /api/registrations/submit with this couponCode instead.
+  isCouponFree?: boolean
+  couponCode?:   string
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -47,25 +55,15 @@ function isValidEmail(email: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())
 }
 
-function getVisibleRequiredFields(form: RegistrationFormDraft, passId: string): FormField[] {
-  return form.sections
-    .flatMap(s => s.fields)
-    .filter(field => {
-      if (!field.visible || !field.required) return false
-      if (field.passVisibility === 'all') return true
-      return Array.isArray(field.passVisibility) && field.passVisibility.includes(passId)
-    })
-}
-
 // ─── Handler ──────────────────────────────────────────────────────────────────
 
 export async function POST(
   req: NextRequest,
 ): Promise<NextResponse<CreateOrderResponse | { error: string; reason?: string }>> {
-  // ── 0. Rate limit: 10 order attempts per 10 minutes per IP ────────────────
+  // ── 0. Rate limit: 10 order attempts per 10 minutes per IP (distributed) ──
   const ip = getClientIp(req)
-  const rl = checkRateLimit(ip, 'create-order', 10, 10 * 60 * 1000)
-  if (rl.limited) {
+  const rl = await checkDistributedRateLimit({ key: `create-order:${ip}`, limit: 10, windowSeconds: 10 * 60, failOpen: true })
+  if (!rl.allowed) {
     return NextResponse.json(
       { error: 'Too many requests. Please try again later.' },
       {
@@ -98,7 +96,7 @@ export async function POST(
     return NextResponse.json({ error: 'Invalid request body' }, { status: 400 })
   }
 
-  const { slug, passId, attendee, formResponses } = body
+  const { slug, passId, attendee, formResponses, couponCode, inviteCode } = body
 
   if (!slug || !passId || !attendee?.name?.trim() || !attendee?.email?.trim()) {
     return NextResponse.json(
@@ -130,7 +128,19 @@ export async function POST(
   const pass = passes.find(p => p.id === passId)
   if (!pass) return NextResponse.json({ error: 'Pass not found' }, { status: 404 })
 
-  const priceRupees = typeof pass.price === 'number' ? pass.price : 0
+  // Server-authoritative price: the early-bird price while active (before its
+  // cutoff), otherwise the regular price. Resolved from the stored pass only —
+  // the client amount is never trusted. Backward-compatible: passes without
+  // early bird resolve to their regular price unchanged.
+  const priceRupees = resolveEffectivePriceRupees(
+    {
+      price:            typeof pass.price === 'number' ? pass.price : 0,
+      earlyBirdEnabled: pass.earlyBirdEnabled === true,
+      earlyBirdPrice:   typeof pass.earlyBirdPrice === 'number' ? pass.earlyBirdPrice : null,
+      earlyBirdEndDate: typeof pass.earlyBirdEndDate === 'string' ? pass.earlyBirdEndDate : undefined,
+    },
+    Date.now(),
+  )
   if (priceRupees === 0) {
     return NextResponse.json(
       { error: 'This pass is free. Use /api/registrations/submit instead.' },
@@ -175,6 +185,16 @@ export async function POST(
     }
   }
 
+  // P0-4: Phone required when limitPerMobile is active. Without this guard an
+  // attendee who omits their phone bypasses the uniqueness rule entirely. Mirrors
+  // the enforcement already present in submit/route.ts:272-277.
+  if (regRules?.limitPerMobile && !attendee.phone?.trim()) {
+    return NextResponse.json(
+      { error: 'A phone number is required to register for this event.', reason: 'PHONE_REQUIRED' },
+      { status: 400 },
+    )
+  }
+
   if (regRules?.limitPerMobile && attendee.phone?.trim()) {
     const normPhone = attendee.phone.trim()
     try {
@@ -195,17 +215,26 @@ export async function POST(
     }
   }
 
+  // ── 5c. Invite code validation (P0-1) ─────────────────────────────────────
+  // submit/route.ts validates invite codes for free registrations; this mirrors
+  // that check for paid registrations so the paid flow cannot bypass invite-only
+  // access control by calling the API directly.
+  const inviteCheck = validateInviteCode(event.accessControl, inviteCode?.trim() ?? '')
+  if (!inviteCheck.valid) {
+    return NextResponse.json(
+      { error: inviteCheck.error ?? 'Invalid invite code.', reason: 'INVITE_CODE_INVALID' },
+      { status: 403 },
+    )
+  }
+
   // ── 6. Form validation ─────────────────────────────────────────────────────
+  // Full validation (conditional + required + per-type formats + configured
+  // rules) — the same rules the builder/client enforce — before charging.
   if (registrationForm?.sections?.length) {
-    const requiredFields = getVisibleRequiredFields(registrationForm, passId)
-    const missing: string[] = []
-    for (const field of requiredFields) {
-      const val = (formResponses?.[field.id] ?? '').toString().trim()
-      if (!val) missing.push(field.label)
-    }
-    if (missing.length > 0) {
+    const validationError = validateFormResponses(registrationForm, passId, formResponses)
+    if (validationError) {
       return NextResponse.json(
-        { error: `Required fields missing: ${missing.slice(0, 5).join(', ')}` },
+        { error: validationError.message },
         { status: 400 },
       )
     }
@@ -216,8 +245,41 @@ export async function POST(
   const rawInfo    = rawDetails?.info as Record<string, unknown> | null
   const eventName  = typeof rawInfo?.name === 'string' ? rawInfo.name : 'Event'
 
+  // ── 7.5. Validate and apply coupon (server-side — never trust client price) ─
+  const originalAmountPaise = Math.round(priceRupees * 100)
+  let   finalAmountPaise    = originalAmountPaise
+  let   couponDocId: string | undefined
+  let   discountAmount: number | undefined
+  let   appliedCouponCode: string | undefined
+
+  if (couponCode?.trim()) {
+    const couponResult = await validateCoupon(slug, couponCode, passId, originalAmountPaise)
+    if (!couponResult.valid) {
+      return NextResponse.json(
+        { error: couponResult.error ?? 'Invalid coupon code.' },
+        { status: 400 },
+      )
+    }
+    finalAmountPaise  = couponResult.finalPaise!
+    discountAmount    = couponResult.discountPaise!
+    couponDocId       = couponResult.couponDocId
+    appliedCouponCode = couponResult.coupon!.code
+
+    // Coupon makes the pass free — tell the client to use the submit (free) flow
+    if (finalAmountPaise === 0) {
+      return NextResponse.json({
+        orderId:      '',
+        amount:       0,
+        currency:     'INR',
+        keyId:        '',
+        isCouponFree: true,
+        couponCode:   appliedCouponCode,
+      })
+    }
+  }
+
   // ── 8. Create Razorpay order (never trust client amount) ───────────────────
-  const amountPaise = Math.round(priceRupees * 100)
+  const amountPaise = finalAmountPaise
   const receipt     = `rd_${Date.now()}`   // max 40 chars
 
   let orderId: string
@@ -229,7 +291,7 @@ export async function POST(
     })
     orderId = order.id
   } catch (err) {
-    console.error('[create-order] Razorpay API error:', err)
+    captureFinancialError(err, { scope: 'create-order.razorpay_failed', eventSlug: slug, passId })
     return NextResponse.json(
       { error: 'Failed to create payment order. Please try again.' },
       { status: 502 },
@@ -258,15 +320,16 @@ export async function POST(
         formResponses: formResponses as Record<string, unknown>,
       },
       uid,
+      ...(inviteCode?.trim() ? { inviteCode: inviteCode.trim() } : {}),
+      ...(appliedCouponCode ? {
+        couponCode:     appliedCouponCode,
+        couponDocId,
+        discountAmount,
+        originalAmount: originalAmountPaise,
+      } : {}),
     })
   } catch (err) {
-    console.error('[create-order] Payment intent write failed — orphaned Razorpay order:', {
-      orderId,
-      eventSlug: slug,
-      passId,
-      amount:    amountPaise,
-      err,
-    })
+    captureFinancialError(err, { scope: 'create-order.intent_write_failed', detail: 'orphaned Razorpay order', orderId, eventSlug: slug, passId, amount: amountPaise })
     return NextResponse.json(
       { error: 'Failed to persist payment record. Please try again.' },
       { status: 500 },

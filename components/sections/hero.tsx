@@ -1,398 +1,431 @@
 'use client'
 
-import { useState, useRef } from 'react'
-import Image from 'next/image'
+import { useRef } from 'react'
 import Link from 'next/link'
-import { AnimatePresence, motion, type Variants } from 'framer-motion'
-import { Swiper, SwiperSlide } from 'swiper/react'
-import { Autoplay, EffectFade } from 'swiper/modules'
-import type { Swiper as SwiperType } from 'swiper'
-
-import 'swiper/css'
-import 'swiper/css/effect-fade'
+import {
+  motion,
+  useMotionValue,
+  useSpring,
+  useTransform,
+  useReducedMotion,
+  type MotionValue,
+  type Variants,
+} from 'framer-motion'
+import {
+  Sparkles,
+  ArrowRight,
+  Play,
+  CircleCheck,
+  TrendingUp,
+  Activity,
+  QrCode,
+  CheckCircle2,
+} from 'lucide-react'
 
 import { ROUTES } from '@/config/navigation'
 import { cn } from '@/lib/utils/cn'
+import { buttonVariants } from '@/components/ui'
 
-// ─── Slide data ───────────────────────────────────────────────────────────────
+// ─── Motion ──────────────────────────────────────────────────────────────────
 
-interface Slide {
-  id:          string
-  eyebrow:     string
-  headline:    [string, string]
-  accentWord:  string
-  description: string
-  image:       string
-  alt:         string
-}
+const EASE = [0.22, 1, 0.36, 1] as const
 
-const SLIDES: Slide[] = [
-  {
-    id:          'marathon',
-    eyebrow:     'Event Registration Platform',
-    headline:    ['Everything Your Event Needs', 'One Powerful Platform'],
-    accentWord:  'Platform',
-    description: 'Create event websites, collect registrations, accept payments, manage participants, and run seamless check-ins from a single dashboard built for modern event organizers.',
-    image:       'https://images.unsplash.com/photo-1571019613454-1cb2f99b2d8b?auto=format&fit=crop&w=2400&q=90',
-    alt:         'Marathon runners racing through a city street',
-  },
-  {
-    id:          'conference',
-    eyebrow:     'Participant Operations',
-    headline:    ['Manage Every Participant', 'With Complete Confidence'],
-    accentWord:  'Confidence',
-    description: 'Track registrations, issue QR tickets, manage check-ins, handle refunds, and stay in control from registration day to event day.',
-    image:       'https://images.unsplash.com/photo-1475721027785-f74eccf877e2?auto=format&fit=crop&w=2400&q=90',
-    alt:         'Conference speaker presenting on stage to a large audience',
-  },
-  {
-    id:          'expo',
-    eyebrow:     'Insights & Growth',
-    headline:    ['Make Better Decisions', 'With Real-Time Insights'],
-    accentWord:  'Insights',
-    description: 'Monitor registrations, revenue, attendance, and event performance through live analytics designed to help organizers grow every event.',
-    image:       'https://images.unsplash.com/photo-1511578314322-379afb476865?auto=format&fit=crop&w=2400&q=90',
-    alt:         'Professional networking event at a corporate expo hall',
-  },
-]
-
-// ─── Trust badges ─────────────────────────────────────────────────────────────
-
-const BADGES = [
-  'Secure Payments',
-  'QR Check-In',
-  'Participant Management',
-  'Real-Time Insights',
-] as const
-
-// ─── Motion variants ──────────────────────────────────────────────────────────
-
-const EASE     = [0.22, 1, 0.36, 1] as const
-const EASE_OUT = [0.60, 0, 1, 0.45] as const
-
-const containerV: Variants = {
+const leftStaggerV: Variants = {
   hidden: {},
-  show:   { transition: { staggerChildren: 0.11, delayChildren: 0.05 } },
-  exit:   { transition: { staggerChildren: 0.05, staggerDirection: -1 } },
+  show:   { transition: { staggerChildren: 0.1, delayChildren: 0.05 } },
 }
 
-const eyebrowV: Variants = {
-  hidden: { opacity: 0, y: 14, filter: 'blur(6px)' },
-  show:   { opacity: 1, y: 0,  filter: 'blur(0px)', transition: { duration: 0.55, ease: EASE } },
-  exit:   { opacity: 0, y: -8,                       transition: { duration: 0.25, ease: EASE_OUT } },
+const fadeUpV: Variants = {
+  hidden: { opacity: 0, y: 22, filter: 'blur(6px)' },
+  show:   { opacity: 1, y: 0, filter: 'blur(0px)', transition: { duration: 0.65, ease: EASE } },
 }
 
-const headlineStaggerV: Variants = {
+const composeV: Variants = {
   hidden: {},
-  show:   { transition: { staggerChildren: 0.08 } },
-  exit:   { transition: { staggerChildren: 0.04, staggerDirection: -1 } },
+  show:   { transition: { staggerChildren: 0.12, delayChildren: 0.25 } },
 }
 
-const lineV: Variants = {
-  hidden: { opacity: 0, y: 20, filter: 'blur(6px)' },
-  show:   { opacity: 1, y: 0,  filter: 'blur(0px)', transition: { duration: 0.60, ease: EASE } },
-  exit:   { opacity: 0, y: -10,                      transition: { duration: 0.20, ease: EASE_OUT } },
+const cardInV: Variants = {
+  hidden: { opacity: 0, scale: 0.92 },
+  show:   { opacity: 1, scale: 1, transition: { duration: 0.7, ease: EASE } },
 }
 
-const itemV: Variants = {
-  hidden: { opacity: 0, y: 20 },
-  show:   { opacity: 1, y: 0,  transition: { duration: 0.55, ease: EASE } },
-  exit:   { opacity: 0,        transition: { duration: 0.18 } },
+// ─── Feature highlights ──────────────────────────────────────────────────────
+
+const HIGHLIGHTS = ['No Credit Card Required', 'Easy Setup', 'Cancel Anytime'] as const
+
+// ─── Floating card wrapper ─────────────────────────────────────────────────────
+// Combines three independent transforms without conflict:
+//   • outer  → mouse parallax (style x/y from shared springs, scaled by depth)
+//   • outer  → entrance opacity/scale (variants, inherited from parent stagger)
+//   • inner  → infinite float (animate y), unique timing per card
+// Parallax depth is capped so the largest movement stays at ±10px.
+
+interface FloatCardProps {
+  sx:        MotionValue<number>
+  sy:        MotionValue<number>
+  depth:     number              // px of parallax travel at full deflection (≤ 10)
+  floatDist: number              // px of vertical float (negative = up)
+  floatDur:  number              // seconds per float cycle
+  floatDelay:number
+  still:     boolean             // reduced-motion → no float
+  className?:string
+  children:  React.ReactNode
 }
 
-// ─── Small icons ─────────────────────────────────────────────────────────────
-
-function ArrowIcon({ className = '' }: { className?: string }) {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}
-      strokeLinecap="round" strokeLinejoin="round" className={className} aria-hidden>
-      <path d="M5 12h14M13 6l6 6-6 6" />
-    </svg>
-  )
-}
-
-function CheckIcon({ className = '' }: { className?: string }) {
-  return (
-    <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth={2}
-      strokeLinecap="round" strokeLinejoin="round" className={className} aria-hidden>
-      <path d="M2 6l3 3 5-5" />
-    </svg>
-  )
-}
-
-// ─── Headline ─────────────────────────────────────────────────────────────────
-
-function Headline({ slide, index }: { slide: Slide; index: number }) {
-  const [line1, line2] = slide.headline
-  const beforeAccent   = line2.slice(0, line2.length - slide.accentWord.length).trimEnd()
+function FloatCard({
+  sx, sy, depth, floatDist, floatDur, floatDelay, still, className, children,
+}: FloatCardProps) {
+  const x = useTransform(sx, (v) => v * depth)
+  const y = useTransform(sy, (v) => v * depth)
 
   return (
-    <motion.div variants={headlineStaggerV}>
-      <h1
-        className={cn(
-          'font-extrabold leading-[1.08] tracking-[-0.03em] text-white',
-          'text-2xl md:text-3xl',
-        )}
+    <motion.div variants={cardInV} style={{ x, y }} className={cn('absolute', className)}>
+      <motion.div
+        animate={still ? undefined : { y: [0, floatDist, 0] }}
+        transition={still ? undefined : { duration: floatDur, delay: floatDelay, repeat: Infinity, ease: 'easeInOut' }}
       >
-        <motion.span key={`${index}-l1`} variants={lineV} className="block">
-          {line1}
-        </motion.span>
-        <motion.span key={`${index}-l2`} variants={lineV} className="block">
-          {beforeAccent}{' '}
-          <span className="text-primary">{slide.accentWord}</span>
-        </motion.span>
-      </h1>
+        {children}
+      </motion.div>
     </motion.div>
   )
 }
 
-// ─── Hero ─────────────────────────────────────────────────────────────────────
+// ─── Shared card surface ───────────────────────────────────────────────────────
 
-export default function HeroSection({ autoplayDelay = 6500 }: { autoplayDelay?: number }) {
-  const [activeIndex, setActiveIndex] = useState(0)
-  const swiperRef = useRef<SwiperType | null>(null)
-  const slide = SLIDES[activeIndex]
+const surface = cn(
+  'rounded-2xl border border-slate-200/70 bg-white/95 backdrop-blur-sm',
+  'shadow-[0_24px_60px_-18px_rgba(2,6,23,0.22),0_6px_16px_-8px_rgba(2,6,23,0.10)]',
+)
+
+// ─── Mini analytics chart ──────────────────────────────────────────────────────
+
+function AnalyticsChart() {
+  return (
+    <svg viewBox="0 0 300 92" fill="none" className="h-[92px] w-full" preserveAspectRatio="none" aria-hidden>
+      <defs>
+        <linearGradient id="rd-area" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%"   stopColor="#e5277e" stopOpacity="0.22" />
+          <stop offset="100%" stopColor="#e5277e" stopOpacity="0" />
+        </linearGradient>
+        <linearGradient id="rd-line" x1="0" y1="0" x2="1" y2="0">
+          <stop offset="0%"   stopColor="#fb5a6a" />
+          <stop offset="100%" stopColor="#e5277e" />
+        </linearGradient>
+      </defs>
+      <path
+        d="M0,72 C24,64 44,70 64,56 C86,40 104,60 124,44 C146,26 164,42 184,30 C206,16 226,32 246,20 C266,10 284,22 300,12 L300,92 L0,92 Z"
+        fill="url(#rd-area)"
+      />
+      <path
+        d="M0,72 C24,64 44,70 64,56 C86,40 104,60 124,44 C146,26 164,42 184,30 C206,16 226,32 246,20 C266,10 284,22 300,12"
+        stroke="url(#rd-line)" strokeWidth="2.5" strokeLinecap="round"
+      />
+    </svg>
+  )
+}
+
+// ─── Event OS composition (right column) ───────────────────────────────────────
+// NOTE: This is a decorative faux-UI illustration, not homepage reading content.
+// Its miniature labels use arbitrary sub-text-xs sizes on purpose — the named
+// Tailwind type scale (12px floor) would overflow these 150–372px mock cards.
+// The homepage typography hierarchy is enforced on real content only.
+
+function EventOSComposition() {
+  const reduce = useReducedMotion() ?? false
+
+  // Shared pointer position, range roughly [-0.5, 0.5] on each axis.
+  const px = useMotionValue(0)
+  const py = useMotionValue(0)
+  const sx = useSpring(px, { stiffness: 60, damping: 18, mass: 0.4 })
+  const sy = useSpring(py, { stiffness: 60, damping: 18, mass: 0.4 })
+
+  const onPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (reduce) return
+    const r = e.currentTarget.getBoundingClientRect()
+    px.set((e.clientX - r.left) / r.width - 0.5)
+    py.set((e.clientY - r.top) / r.height - 0.5)
+  }
+  const onPointerLeave = () => { px.set(0); py.set(0) }
 
   return (
-    <section
-      className="relative w-full overflow-hidden bg-neutral-950 h-[560px] sm:h-[580px] lg:h-[640px]"
-      aria-label="RegisterDesk — event operations platform"
+    <motion.div
+      variants={composeV}
+      onPointerMove={onPointerMove}
+      onPointerLeave={onPointerLeave}
+      aria-hidden
+      className="relative mx-auto h-[440px] w-full max-w-[560px] sm:h-[500px] lg:h-[560px]"
     >
-
-      {/* ─── Layer 1: Full-bleed background image slider ─────────────────── */}
-      <Swiper
-        modules={[Autoplay, EffectFade]}
-        effect="fade"
-        fadeEffect={{ crossFade: true }}
-        speed={1500}
-        loop
-        autoplay={{ delay: autoplayDelay, disableOnInteraction: false, pauseOnMouseEnter: false }}
-        onRealIndexChange={(swiper) => setActiveIndex(swiper.realIndex)}
-        onSwiper={(swiper) => { swiperRef.current = swiper }}
-        className="hero-cin-swiper absolute inset-0"
-        style={{ height: '100%', width: '100%' }}
-      >
-        {SLIDES.map((s, i) => (
-          <SwiperSlide key={s.id} style={{ height: '100%', overflow: 'hidden' }}>
-            <Image
-              src={s.image}
-              alt={s.alt}
-              fill
-              sizes="100vw"
-              priority={i === 0}
-              className="ken-burns object-cover blur-[2px] scale-[1.06]"
-              draggable={false}
-            />
-          </SwiperSlide>
-        ))}
-      </Swiper>
-
-      {/* ─── Layer 2: Overlay ──────────────────────────────────────────────── */}
-      <div aria-hidden className="absolute inset-0 z-10 bg-black/[0.52]" />
+      {/* Brand glow behind the stack */}
       <div
-        aria-hidden
-        className="absolute inset-0 z-10 pointer-events-none"
-        style={{ background: 'radial-gradient(ellipse at 50% 50%, transparent 25%, rgba(0,0,0,0.62) 100%)' }}
+        className="pointer-events-none absolute left-1/2 top-1/2 -z-10 h-[360px] w-[360px] -translate-x-1/2 -translate-y-1/2 rounded-full blur-[90px]"
+        style={{ background: 'radial-gradient(circle, rgba(229,39,126,0.18), transparent 70%)' }}
       />
 
-      {/* ─── Layer 3: Content — glass card ────────────────────────────────────
-          Top offset tracks navbar height at each breakpoint:
-            mobile (h-14, full-width, no outer pad): 56px → top-[58px]
-            md+    (h-16, full-width, no outer pad): 64px → md:top-[68px]
-          ──────────────────────────────────────────────────────────────────── */}
-      <div className="absolute inset-x-0 top-[58px] md:top-[68px] bottom-[56px] z-20 flex flex-col items-center justify-center px-4 sm:px-6 lg:px-8 xl:px-10">
-
-        {/* Glass card */}
-        <div className={cn(
-          'w-full max-w-[660px] mx-auto',
-          'rounded-[20px] lg:rounded-[24px]',
-          'border border-white/[0.13]',
-          'bg-white/[0.05] backdrop-blur-xl',
-          'px-5 py-4 sm:px-6 sm:py-5 lg:px-8 lg:py-6',
-          'shadow-[0_24px_64px_rgba(0,0,0,0.18),inset_0_1px_0_rgba(255,255,255,0.10)]',
-        )}>
-
-          <AnimatePresence mode="wait">
-            <motion.div
-              key={activeIndex}
-              variants={containerV}
-              initial="hidden"
-              animate="show"
-              exit="exit"
-              className="text-center"
-            >
-
-              {/* Eyebrow badge — slightly smaller on mobile */}
-              <motion.div variants={eyebrowV} className="flex justify-center">
-                <span
-                  className="inline-flex h-7 sm:h-8 items-center gap-2 rounded-full px-3 sm:px-4 text-[10px] sm:text-xs font-semibold uppercase tracking-[0.2em] text-white/75"
-                  style={{
-                    background: 'rgba(255,255,255,0.08)',
-                    border:     '1px solid rgba(255,255,255,0.15)',
-                  }}
-                >
-                  <span className="size-[4px] sm:size-[5px] shrink-0 rounded-full bg-primary" aria-hidden />
-                  {slide.eyebrow}
-                </span>
-              </motion.div>
-
-              {/* Headline */}
-              <div className="mt-1.5 sm:mt-2">
-                <Headline slide={slide} index={activeIndex} />
-              </div>
-
-              {/* Description — clamped to 3 lines on mobile to keep card compact */}
-              <motion.p
-                variants={itemV}
-                className="mx-auto mt-1.5 sm:mt-2 max-w-xl text-sm sm:text-base font-normal leading-[1.6] sm:leading-[1.7] text-white/[0.82] line-clamp-3 sm:line-clamp-none"
-              >
-                {slide.description}
-              </motion.p>
-
-              {/* CTAs — equal-width 2-col grid on mobile, flex row on sm+ */}
-              <motion.div
-                variants={itemV}
-                className="mt-2.5 sm:mt-3 grid grid-cols-2 gap-3 sm:flex sm:flex-wrap sm:items-center sm:justify-center sm:gap-3"
-              >
-                {/* Primary */}
-                <Link
-                  href={ROUTES.LOGIN}
-                  className={cn(
-                    'inline-flex h-11 sm:h-10 items-center justify-center gap-2 rounded-[12px] px-4 sm:px-5',
-                    'text-sm font-semibold text-white',
-                    'bg-primary',
-                    'shadow-[0_6px_20px_rgba(229,39,126,0.34)]',
-                    'transition-all duration-200 ease-out',
-                    'hover:-translate-y-[2px] hover:shadow-[0_10px_28px_rgba(229,39,126,0.50)]',
-                    'active:translate-y-0 active:scale-[0.98]',
-                  )}
-                >
-                  Start Free
-                  <ArrowIcon className="size-4" />
-                </Link>
-
-                {/* Secondary — glass outline */}
-                <Link
-                  href="#demo"
-                  className={cn(
-                    'inline-flex h-11 sm:h-10 items-center justify-center gap-2 rounded-[12px] px-4 sm:px-5',
-                    'border border-white/[0.22] bg-white/[0.07]',
-                    'text-sm font-semibold text-white/85',
-                    'backdrop-blur-sm transition-all duration-200',
-                    'hover:border-white/[0.38] hover:bg-white/[0.12] hover:text-white',
-                  )}
-                >
-                  Book Demo
-                  <ArrowIcon className="size-4" />
-                </Link>
-              </motion.div>
-
-              {/* Trust badges */}
-              <motion.div
-                variants={itemV}
-                className="mt-2.5 sm:mt-3 border-t border-white/[0.10] pt-2.5 sm:pt-3"
-              >
-                <div className="flex flex-wrap items-center justify-center gap-x-2.5 gap-y-2">
-                  {BADGES.map((badge) => (
-                    <span
-                      key={badge}
-                      className="inline-flex h-8 items-center gap-2 rounded-full border border-white/[0.18] bg-white/[0.10] px-4 text-xs font-medium text-white/75 backdrop-blur-sm"
-                    >
-                      <CheckIcon className="size-3.5 shrink-0 text-primary" />
-                      {badge}
-                    </span>
-                  ))}
-                </div>
-              </motion.div>
-
-            </motion.div>
-          </AnimatePresence>
-
-          {/* Supporting line — static across all slides */}
-          <motion.p
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            transition={{ duration: 0.7, delay: 1.1 }}
-            className="mt-3 text-center text-[11px] text-white/40 tracking-wide"
-          >
-            Built for marathons, conferences, exhibitions, NGOs and corporate events.
-          </motion.p>
-
-        </div>
-      </div>
-
-      {/* ─── Floating metric card (xl+ only) ─────────────────────────────────
-          Anchored to top-right, below the navbar (top-[96px]).
-          Glass white card — one, small and elegant.
-          ──────────────────────────────────────────────────────────────────── */}
-      <motion.div
-        initial={{ opacity: 0, y: 14, scale: 0.96 }}
-        animate={{ opacity: 1, y: 0, scale: 1 }}
-        transition={{ delay: 0.9, duration: 0.55, ease: [0.22, 1, 0.36, 1] }}
-        className="absolute top-[88px] right-8 z-30 hidden 2xl:block"
-        aria-hidden
+      {/* ── Main: Dashboard Analytics ─────────────────────────────────────── */}
+      <FloatCard
+        sx={sx} sy={sy} depth={8} floatDist={-10} floatDur={7} floatDelay={0} still={reduce}
+        className="left-1/2 top-1/2 w-[300px] -translate-x-1/2 -translate-y-1/2 sm:w-[340px] lg:w-[372px]"
       >
-        <div className={cn(
-          'w-[188px] rounded-2xl',
-          'border border-white/[0.16] bg-white/[0.90]',
-          'px-4 py-4 backdrop-blur-xl',
-          'shadow-[0_20px_56px_rgba(0,0,0,0.16),0_4px_12px_rgba(0,0,0,0.07)]',
-        )}>
+        <div className={cn(surface, 'p-5')}>
           <div className="flex items-center justify-between">
-            <p className="text-[9.5px] font-semibold uppercase tracking-[0.09em] text-slate-400">
-              Live Registrations
-            </p>
-            <span className="size-[6px] animate-pulse rounded-full bg-emerald-500" />
-          </div>
-          <p className="mt-2.5 text-[26px] font-extrabold leading-none tracking-tight text-slate-900">
-            1,842
-          </p>
-          <p className="mt-1.5 text-[11px] font-medium text-slate-500">+124 since yesterday</p>
-          <div className="mt-3.5">
-            <div className="mb-[5px] flex items-center justify-between">
-              <span className="text-[9.5px] font-medium text-slate-400">Capacity</span>
-              <span className="text-[9.5px] font-semibold text-slate-600">92%</span>
+            <div>
+              <p className="text-[13px] font-semibold text-slate-900">Dashboard</p>
+              <p className="text-[10.5px] text-slate-400">Registrations overview</p>
             </div>
-            <div className="h-[3px] overflow-hidden rounded-full bg-slate-100">
-              <div className="h-full w-[92%] rounded-full bg-primary" />
+            <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 px-2 py-1 text-[10px] font-semibold text-emerald-600">
+              <span className="size-1.5 animate-pulse rounded-full bg-emerald-500" /> Live
+            </span>
+          </div>
+
+          <div className="mt-4 grid grid-cols-2 gap-3">
+            <div className="rounded-xl border border-slate-100 bg-slate-50/70 p-3">
+              <p className="text-[9.5px] font-medium uppercase tracking-wide text-slate-400">Total Registrations</p>
+              <p className="mt-1 text-[20px] font-extrabold leading-none tracking-tight text-slate-900">2,543</p>
+              <p className="mt-1 inline-flex items-center gap-0.5 text-[10px] font-semibold text-emerald-600">
+                <TrendingUp className="size-3" /> +12.5%
+              </p>
+            </div>
+            <div className="rounded-xl border border-slate-100 bg-slate-50/70 p-3">
+              <p className="text-[9.5px] font-medium uppercase tracking-wide text-slate-400">Checked-In</p>
+              <p className="mt-1 text-[20px] font-extrabold leading-none tracking-tight text-slate-900">1,872</p>
+              <p className="mt-1 inline-flex items-center gap-0.5 text-[10px] font-semibold text-emerald-600">
+                <TrendingUp className="size-3" /> +8.2%
+              </p>
+            </div>
+          </div>
+
+          <div className="mt-4">
+            <AnalyticsChart />
+            <div className="mt-1 flex justify-between text-[8.5px] font-medium text-slate-300">
+              <span>Mon</span><span>Tue</span><span>Wed</span><span>Thu</span><span>Fri</span><span>Sat</span><span>Sun</span>
             </div>
           </div>
         </div>
-      </motion.div>
+      </FloatCard>
 
-      {/* ─── Layer 4: Bottom bar — slide dots + counter ───────────────────── */}
-      <div className="absolute inset-x-0 bottom-0 z-20 h-[56px] border-t border-white/[0.07]">
-        <div className="mx-auto flex h-full w-full max-w-7xl items-center justify-center sm:justify-between px-6 lg:px-8 xl:px-10">
-
-          <div className="flex items-center gap-2" role="tablist" aria-label="Slide navigation">
-            {SLIDES.map((s, i) => (
-              <button
-                key={s.id}
-                type="button"
-                role="tab"
-                aria-selected={i === activeIndex}
-                aria-label={`Slide ${i + 1}: ${s.eyebrow}`}
-                onClick={() => swiperRef.current?.slideToLoop(i)}
-                className={cn(
-                  'cursor-pointer rounded-full transition-all duration-[450ms] ease-[cubic-bezier(0.22,1,0.36,1)]',
-                  'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-1 focus-visible:ring-offset-transparent',
-                  i === activeIndex
-                    ? 'h-[3px] w-8 bg-primary'
-                    : 'size-[15px] bg-white/28 hover:bg-white/55',
-                )}
+      {/* ── Revenue card (top-right) ──────────────────────────────────────── */}
+      <FloatCard
+        sx={sx} sy={sy} depth={20} floatDist={-12} floatDur={6.4} floatDelay={0.6} still={reduce}
+        className="-right-1 top-2 w-[176px] sm:right-2 lg:-right-2"
+      >
+        <div className={cn(surface, 'p-4')}>
+          <div className="flex items-center justify-between">
+            <p className="text-[9.5px] font-semibold uppercase tracking-wide text-slate-400">Total Revenue</p>
+            <span
+              className="flex size-6 items-center justify-center rounded-lg text-white"
+              style={{ backgroundImage: 'var(--primary-gradient)' }}
+            >
+              <TrendingUp className="size-3.5" />
+            </span>
+          </div>
+          <p className="mt-2 text-[19px] font-extrabold leading-none tracking-tight text-slate-900">₹12,45,000</p>
+          <p className="mt-1.5 text-[10px] font-semibold text-emerald-600">+18.7% this week</p>
+          <div className="mt-3 flex h-9 items-end gap-1">
+            {[35, 52, 44, 68, 58, 82, 74].map((h, i) => (
+              <span
+                key={i}
+                className="flex-1 rounded-t-sm"
+                style={{ height: `${h}%`, backgroundImage: 'var(--primary-gradient)', opacity: 0.35 + i * 0.09 }}
               />
             ))}
           </div>
+        </div>
+      </FloatCard>
 
-          <p className="hidden sm:block select-none font-mono text-[16px] tracking-widest text-white/30" aria-hidden>
-            <span className="text-white/60">{String(activeIndex + 1).padStart(2, '0')}</span>
-            <span className="mx-1.5 text-white/25">/</span>
-            {String(SLIDES.length).padStart(2, '0')}
-          </p>
+      {/* ── QR Check-In card (bottom-right) ───────────────────────────────── */}
+      <FloatCard
+        sx={sx} sy={sy} depth={16} floatDist={-9} floatDur={7.6} floatDelay={1.1} still={reduce}
+        className="-right-1 bottom-3 w-[150px] sm:right-1 lg:right-0"
+      >
+        <div className={cn(surface, 'p-4 text-center')}>
+          <p className="mb-2 text-[9.5px] font-semibold uppercase tracking-wide text-slate-400">Event Check-In</p>
+          <div className="mx-auto flex size-[88px] items-center justify-center rounded-xl border border-slate-100 bg-slate-50">
+            <QrCode className="size-14 text-slate-900" strokeWidth={1.25} />
+          </div>
+          <p className="mt-2.5 text-[10.5px] font-medium text-slate-500">Scan to check in</p>
+        </div>
+      </FloatCard>
+
+      {/* ── Attendee card (bottom-left) ───────────────────────────────────── */}
+      <FloatCard
+        sx={sx} sy={sy} depth={18} floatDist={-11} floatDur={6.8} floatDelay={0.3} still={reduce}
+        className="-left-1 bottom-8 w-[196px] sm:-left-2 lg:-left-3"
+      >
+        <div className={cn(surface, 'flex items-center gap-3 p-3.5')}>
+          <span
+            className="flex size-9 shrink-0 items-center justify-center rounded-full text-[13px] font-bold text-white"
+            style={{ backgroundImage: 'var(--primary-gradient)' }}
+          >
+            AS
+          </span>
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-[12px] font-semibold text-slate-900">Aarav Sharma</p>
+            <p className="truncate text-[10px] text-slate-400">VIP Pass · RD123456</p>
+          </div>
+          <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-1 text-[9.5px] font-semibold text-emerald-600">
+            <CheckCircle2 className="size-3" /> In
+          </span>
+        </div>
+      </FloatCard>
+
+      {/* ── Live registrations pill (top-left) ────────────────────────────── */}
+      <FloatCard
+        sx={sx} sy={sy} depth={14} floatDist={-8} floatDur={6} floatDelay={1.4} still={reduce}
+        className="left-0 top-12 hidden lg:block"
+      >
+        <div className={cn(surface, 'flex items-center gap-2.5 px-3.5 py-2.5')}>
+          <span
+            className="flex size-7 items-center justify-center rounded-lg text-white"
+            style={{ backgroundImage: 'var(--primary-gradient)' }}
+          >
+            <Activity className="size-3.5" />
+          </span>
+          <div>
+            <p className="text-[13px] font-extrabold leading-none tracking-tight text-slate-900">+124</p>
+            <p className="mt-0.5 text-[9px] font-medium text-slate-400">new today</p>
+          </div>
+        </div>
+      </FloatCard>
+    </motion.div>
+  )
+}
+
+// ─── Hero ───────────────────────────────────────────────────────────────────
+
+export default function HeroSection() {
+  const sectionRef = useRef<HTMLElement>(null)
+
+  return (
+    <section
+      ref={sectionRef}
+      aria-label="RegisterDesk — the all-in-one event operating system"
+      className="relative w-full overflow-hidden bg-white"
+    >
+      {/* Decorative background — soft brand wash + grid */}
+      <div aria-hidden className="pointer-events-none absolute inset-0 -z-10">
+        <div className="absolute inset-0 bg-gradient-to-b from-white via-white to-slate-50" />
+        <div
+          className="absolute -left-32 -top-24 h-[480px] w-[480px] rounded-full blur-[120px]"
+          style={{ background: 'radial-gradient(circle, rgba(251,90,106,0.14), transparent 70%)' }}
+        />
+        <div
+          className="absolute -right-24 top-32 h-[520px] w-[520px] rounded-full blur-[120px]"
+          style={{ background: 'radial-gradient(circle, rgba(229,39,126,0.12), transparent 70%)' }}
+        />
+        <div
+          className="absolute inset-0 opacity-[0.5]"
+          style={{
+            backgroundImage:
+              'linear-gradient(to right, rgba(15,23,42,0.035) 1px, transparent 1px), linear-gradient(to bottom, rgba(15,23,42,0.035) 1px, transparent 1px)',
+            backgroundSize: '44px 44px',
+            maskImage: 'radial-gradient(ellipse 80% 60% at 50% 40%, black, transparent 75%)',
+            WebkitMaskImage: 'radial-gradient(ellipse 80% 60% at 50% 40%, black, transparent 75%)',
+          }}
+        />
+      </div>
+
+      <div className="mx-auto max-w-7xl px-6 pb-16 pt-28 sm:pt-32 lg:px-8 lg:pb-24 lg:pt-36">
+        <div className="grid items-center gap-12 lg:grid-cols-[minmax(0,45fr)_minmax(0,55fr)] lg:gap-8">
+
+          {/* ── Left ─────────────────────────────────────────────────────── */}
+          <motion.div
+            variants={leftStaggerV}
+            initial="hidden"
+            animate="show"
+            className="text-center lg:text-left"
+          >
+            {/* Badge */}
+            <motion.div variants={fadeUpV} className="flex justify-center lg:justify-start">
+              <span className="inline-flex items-center gap-2 rounded-full border border-primary/15 bg-primary/[0.06] px-3.5 py-1.5 text-xs font-semibold text-primary">
+                <Sparkles className="size-3.5" />
+                All-In-One Event Management Platform
+              </span>
+            </motion.div>
+
+            {/* Headline */}
+            <motion.h1
+              variants={fadeUpV}
+              className="mt-5 text-5xl font-extrabold leading-[0.95] tracking-tight text-slate-900 lg:text-6xl xl:text-7xl"
+            >
+              Powering Events.
+              <br />
+              <span
+                className="bg-clip-text text-transparent"
+                style={{ backgroundImage: 'var(--primary-gradient)' }}
+              >
+                Simplifying Operations.
+              </span>
+            </motion.h1>
+
+            {/* Supporting text */}
+            <motion.p
+              variants={fadeUpV}
+              className="mx-auto mt-6 max-w-[560px] text-base leading-relaxed text-muted-foreground lg:mx-0 lg:text-lg"
+            >
+              From registrations to check-ins, badges to certificates — RegisterDesk
+              helps you manage every aspect of your event seamlessly, on one secure platform.
+            </motion.p>
+
+            {/* CTAs */}
+            <motion.div
+              variants={fadeUpV}
+              className="mt-8 flex flex-col items-stretch gap-3 sm:flex-row sm:items-center sm:justify-center lg:justify-start"
+            >
+              <motion.div whileHover={{ scale: 1.03 }} whileTap={{ scale: 0.98 }}>
+                <Link
+                  href={ROUTES.LOGIN}
+                  className={cn(
+                    buttonVariants({ variant: 'primary', size: 'xl' }),
+                    'group w-full justify-center rounded-2xl text-sm font-semibold sm:w-auto lg:text-base',
+                  )}
+                >
+                  Get Started Free
+                  <ArrowRight className="size-4 transition-transform duration-200 group-hover:translate-x-0.5" />
+                </Link>
+              </motion.div>
+
+              <motion.div whileHover={{ scale: 1.03 }} whileTap={{ scale: 0.98 }}>
+                <Link
+                  href="#demo"
+                  className={cn(
+                    buttonVariants({ variant: 'outline', size: 'xl' }),
+                    'group w-full justify-center rounded-2xl border-slate-200 bg-white text-sm font-semibold text-slate-700 lg:text-base',
+                    'shadow-sm hover:border-slate-300 hover:bg-slate-50 hover:text-slate-900 sm:w-auto',
+                  )}
+                >
+                  <span
+                    className="flex size-6 items-center justify-center rounded-full text-white"
+                    style={{ backgroundImage: 'var(--primary-gradient)' }}
+                  >
+                    <Play className="size-3 translate-x-px fill-current" />
+                  </span>
+                  Book a Demo
+                </Link>
+              </motion.div>
+            </motion.div>
+
+            {/* Feature highlights */}
+            <motion.ul
+              variants={fadeUpV}
+              className="mt-7 flex flex-wrap items-center justify-center gap-x-5 gap-y-2.5 lg:justify-start"
+            >
+              {HIGHLIGHTS.map((item) => (
+                <li key={item} className="inline-flex items-center gap-1.5 text-sm font-medium text-slate-600">
+                  <CircleCheck className="size-4 text-primary" />
+                  {item}
+                </li>
+              ))}
+            </motion.ul>
+          </motion.div>
+
+          {/* ── Right ────────────────────────────────────────────────────── */}
+          <motion.div initial="hidden" animate="show" className="relative">
+            <EventOSComposition />
+          </motion.div>
 
         </div>
       </div>
-
     </section>
   )
 }

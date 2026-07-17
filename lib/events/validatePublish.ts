@@ -1,7 +1,16 @@
 // Server-side publish validation. Never exposed to the client.
 // Called by the /api/events/publish route before any status change.
+//
+// The mandatory-field checks are delegated to the SHARED, isomorphic
+// validatePublish() so this server gate and the client Review page enforce
+// byte-for-byte identical requirements — the organizer can never reach payment
+// while a required field the server rejects is still missing. On failure it
+// returns the SAME structured blockers the Review page renders, so a
+// post-payment failure can show the REAL missing fields (never a generic
+// "some fields are missing").
 
 import type { PublishValidationResult } from '@/types/events'
+import { validatePublish, toPublishBlocker } from './publishRequirements'
 
 // Minimal shape we expect from a Firestore draft document
 interface DraftSnapshot {
@@ -18,49 +27,35 @@ export function validateEventPublish(draft: DraftSnapshot): PublishValidationRes
     return { canPublish: false, reason: 'EVENT_ALREADY_PUBLISHED' }
   }
 
-  // ── Required event detail fields ───────────────────────────────────────────
-  const pricing   = draft.pricing
-  const details   = draft.eventDetails
-  const info      = (details?.info      as Record<string, unknown> | null | undefined) ?? null
-  const venue     = (details?.venue     as Record<string, unknown> | null | undefined) ?? null
-  const schedule  = (details?.schedule  as Record<string, unknown> | null | undefined) ?? null
-  const organizer = (details?.organizer as Record<string, unknown> | null | undefined) ?? null
-  const passes    = Array.isArray(pricing?.passes) ? (pricing!.passes as unknown[]) : []
-
-  const hasName      = typeof info?.name === 'string' && info.name.trim().length > 0
-  const hasVenueType = typeof venue?.type === 'string' && venue.type.trim().length > 0
-  const hasDates     = typeof schedule?.startDate === 'string' && schedule.startDate.trim().length > 0
-  const hasPasses    = passes.length > 0
-  const hasOrganizer = typeof organizer?.name === 'string' && organizer.name.trim().length > 0
-
-  // Physical / hybrid events must have a named venue — type alone is not enough
-  const venueType    = typeof venue?.type === 'string' ? venue.type : ''
-  const physical     = (venue?.physical as Record<string, unknown> | null | undefined) ?? null
-  const hasVenueName = ['physical', 'hybrid'].includes(venueType)
-    ? typeof physical?.name === 'string' && physical.name.trim().length > 0
-    : true   // online events have no physical address requirement
-
-  if (!hasName || !hasVenueType || !hasDates || !hasPasses || !hasOrganizer || !hasVenueName) {
-    return { canPublish: false, reason: 'INCOMPLETE_REQUIRED_FIELDS' }
-  }
-
-  // ── Registration form must have a template or at least one field section ───
-  const rf         = draft.registrationForm as Record<string, unknown> | null | undefined
-  const rfTemplate = typeof rf?.template === 'string' ? (rf.template as string) : ''
-  const rfSections = Array.isArray(rf?.sections) ? (rf.sections as unknown[]) : []
-  const hasForm    = rfTemplate.length > 0 || rfSections.length > 0
-
-  if (!hasForm) {
-    return { canPublish: false, reason: 'INCOMPLETE_REQUIRED_FIELDS' }
+  // ── Required fields — SHARED source of truth (same as the client Review page) ─
+  // Covers event name, schedule, venue (incl. physical venue name for
+  // physical/hybrid), organizer name + email, pricing model, at least one pass,
+  // and the registration form.
+  const summary = validatePublish({
+    pricing:          draft.pricing,
+    eventDetails:     draft.eventDetails,
+    registrationForm: draft.registrationForm,
+  })
+  if (!summary.canPublish) {
+    return { canPublish: false, reason: 'INCOMPLETE_REQUIRED_FIELDS', blockers: summary.blockers }
   }
 
   // ── Timezone must be a valid IANA name ─────────────────────────────────────
+  const schedule = (draft.eventDetails?.schedule as Record<string, unknown> | null | undefined) ?? null
   const tz = typeof schedule?.timezone === 'string' ? schedule.timezone.trim() : ''
   if (tz) {
     try {
       Intl.DateTimeFormat(undefined, { timeZone: tz })
     } catch {
-      return { canPublish: false, reason: 'INVALID_TIMEZONE' }
+      return {
+        canPublish: false,
+        reason:     'INVALID_TIMEZONE',
+        blockers:   [toPublishBlocker({
+          id: 'timezone', passed: false, stepName: 'Event Details', stepIndex: 5,
+          fieldHint: 'rd-start-date',
+          title: 'Invalid Timezone', description: 'Select a valid timezone in Schedule settings.',
+        })],
+      }
     }
   }
 

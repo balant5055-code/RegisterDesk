@@ -1,0 +1,21 @@
+// Shared auth presentation components. Brand-neutral and logic-free — consumed
+// by the organizer login, the admin login, and any future support login.
+
+export { AuthShell }    from './AuthShell'
+export type { AuthShellProps }  from './AuthShell'
+export { AuthScreen }   from './AuthScreen'
+export type { AuthScreenProps } from './AuthScreen'
+export { OrganizerAuthHero } from './OrganizerAuthHero'
+export { AuthCard }     from './AuthCard'
+export type { AuthCardProps }   from './AuthCard'
+export { AuthHeader }   from './AuthHeader'
+export type { AuthHeaderProps } from './AuthHeader'
+export { AuthFooter }   from './AuthFooter'
+export type { AuthFooterProps } from './AuthFooter'
+export { AuthField }    from './AuthField'
+export type { AuthFieldProps }  from './AuthField'
+export { PasswordField } from './PasswordField'
+export type { PasswordFieldProps } from './PasswordField'
+export { LoginForm }    from './LoginForm'
+export type { LoginFormProps }  from './LoginForm'
+export { SocialLoginRow } from './SocialLoginRow'

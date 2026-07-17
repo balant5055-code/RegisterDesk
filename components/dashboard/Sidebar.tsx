@@ -1,34 +1,39 @@
 'use client'
 
-import { startTransition, useState, useEffect } from 'react'
+import { Suspense, startTransition, useState, useEffect, useRef } from 'react'
 import Link from 'next/link'
-import { usePathname, useRouter } from 'next/navigation'
+import { usePathname, useRouter, useSearchParams } from 'next/navigation'
 import { AnimatePresence, motion } from 'framer-motion'
 import {
-  BarChart3,
-  CalendarDays,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
-  LayoutDashboard,
   LogOut,
-  Mail,
-  ScanLine,
   Settings,
-  Ticket,
   X,
 } from 'lucide-react'
 import { signOut } from 'firebase/auth'
 import { auth } from '@/lib/firebase/auth'
 import { ROUTES } from '@/config/navigation'
+import { WORKSPACE_NAV } from '@/config/workspaceNav'
+import { useFeatureFlags } from '@/lib/config/featureFlagsClient'
+import type { FeatureFlagsConfig } from '@/lib/config/businessConfig'
 import { cn } from '@/lib/utils/cn'
 
 // ─── Navigation structure ─────────────────────────────────────────────────────
 
 interface NavChild {
-  label:        string
-  href:         string
-  exactSearch?: boolean
+  label: string
+  href:  string
+  /**
+   * When present, each key is checked with searchParams.get().
+   * A null value means the param must be absent.
+   * Keys not listed here (e.g. eventId, dateRange) are ignored — adding
+   * new URL filters to a page will never break sidebar highlighting.
+   */
+  matchParams?: Record<string, string | null>
+  /** Open in a new tab (H.3 support hooks). */
+  newTab?: boolean
 }
 
 interface NavGroup {
@@ -44,64 +49,30 @@ interface NavSection {
   groups:       NavGroup[]
 }
 
-const NAV_SECTIONS: NavSection[] = [
-  {
-    sectionLabel: 'Workspace',
-    groups: [
-      {
-        key: 'dashboard', label: 'Overview', icon: LayoutDashboard, href: '/dashboard',
-        children: [{ label: 'Overview', href: '/dashboard' }],
-      },
-    ],
-  },
-  {
-    sectionLabel: 'Event Operations',
-    groups: [
-      {
-        key: 'events', label: 'Events', icon: CalendarDays, href: '/dashboard/events',
-        children: [
-          { label: 'All Events',   href: '/dashboard/events' },
-          { label: 'Create Event', href: '/dashboard/events/new/visibility' },
-        ],
-      },
-      {
-        key: 'registrations', label: 'Registrations', icon: Ticket, href: '/dashboard/registrations',
-        children: [
-          { label: 'All Registrations', href: '/dashboard/registrations',                 exactSearch: true },
-          { label: 'Confirmed',         href: '/dashboard/registrations?status=confirmed', exactSearch: true },
-          { label: 'Cancelled',         href: '/dashboard/registrations?status=cancelled', exactSearch: true },
-        ],
-      },
-      {
-        key: 'checkin', label: 'Check-In', icon: ScanLine, href: '/dashboard/check-in',
-        children: [{ label: 'Check-In Hub', href: '/dashboard/check-in' }],
-      },
-    ],
-  },
-  {
-    sectionLabel: 'Insights',
-    groups: [
-      {
-        key: 'analytics', label: 'Analytics', icon: BarChart3, href: '/dashboard/reports',
-        children: [{ label: 'Overview', href: '/dashboard/reports' }],
-      },
-      {
-        key: 'communications', label: 'Communications', icon: Mail, href: '/dashboard/communications',
-        children: [
-          { label: 'Hub',          href: '/dashboard/communications' },
-          { label: 'Certificates', href: '/dashboard/communications/certificates' },
-        ],
-      },
-    ],
-  },
-]
+// IA is sourced from config/workspaceNav.ts (single source of truth). Every href
+// points at an existing route; the structural shape matches NavSection exactly.
+const NAV_SECTIONS: NavSection[] = WORKSPACE_NAV
 
-// Flat list used in collapsed mode and for active-group detection
-const NAV_GROUPS: NavGroup[] = NAV_SECTIONS.flatMap(s => s.groups)
-
-const BOTTOM_NAV_LINKS = [
-  { label: 'Settings', href: '/dashboard/settings', icon: Settings },
-] as const
+// Feature-flag gating (RD-CONF-08): hide nav items whose feature is globally
+// disabled in Business Configuration. The server still enforces each feature; this
+// just makes a disabled feature disappear from the sidebar.
+function navHrefEnabled(href: string, flags: FeatureFlagsConfig): boolean {
+  if (href.startsWith('/dashboard/crm'))                     return flags.crm
+  if (href.startsWith('/dashboard/communications/broadcasts')) return flags.broadcast
+  if (href.includes('/certificates'))                        return flags.certificates
+  if (href.includes('/campaigns'))                           return flags.donations
+  return true
+}
+function filterNavSections(flags: FeatureFlagsConfig): NavSection[] {
+  return NAV_SECTIONS
+    .map(s => ({
+      ...s,
+      groups: s.groups
+        .filter(g => navHrefEnabled(g.href, flags))
+        .map(g => ({ ...g, children: g.children.filter(c => navHrefEnabled(c.href, flags)) })),
+    }))
+    .filter(s => s.groups.length > 0)
+}
 
 // ─── Active helpers ───────────────────────────────────────────────────────────
 
@@ -110,13 +81,31 @@ function isGroupActive(group: NavGroup, pathname: string): boolean {
   return pathname.startsWith(group.href)
 }
 
-function isChildActive(child: NavChild, pathname: string, search: string): boolean {
-  if (!child.exactSearch) return pathname === child.href
-  if (child.href.includes('?')) {
-    const [p, q] = child.href.split('?')
-    return pathname === p && search === `?${q}`
-  }
-  return pathname === child.href && search === ''
+/**
+ * Determines whether a nav child should appear highlighted.
+ *
+ * Pathname is always compared exactly against the child's base path (query
+ * string stripped from href).  If the child declares matchParams, every listed
+ * key is checked with searchParams.get(); keys not listed are ignored — so
+ * adding ?eventId or any other future filter to the URL never breaks
+ * highlighting of unrelated nav items.
+ */
+function isChildActive(
+  child:        NavChild,
+  pathname:     string,
+  searchParams: { get: (key: string) => string | null },
+): boolean {
+  // Compare pathname against the base path only (strip any ?query from href)
+  const childPath = child.href.split('?')[0]
+  if (pathname !== childPath) return false
+
+  // No param constraints — pathname match alone is sufficient
+  if (!child.matchParams) return true
+
+  // Every declared param must match; unlisted params are ignored
+  return Object.entries(child.matchParams).every(
+    ([key, val]) => searchParams.get(key) === val,
+  )
 }
 
 // ─── Floating tooltip (collapsed mode only) ───────────────────────────────────
@@ -141,7 +130,7 @@ function Tooltip({ label }: { label: string }) {
 
 function SectionLabel({ label }: { label: string }) {
   return (
-    <p className="mb-1 mt-0.5 select-none px-3 text-[10px] font-semibold uppercase tracking-[0.09em] text-muted-foreground/50">
+    <p className="mb-1 mt-0.5 select-none px-3 text-[11px] font-semibold uppercase tracking-[0.09em] text-muted-foreground/50">
       {label}
     </p>
   )
@@ -166,38 +155,55 @@ function SidebarContent({
   email:             string
   initial:           string
 }) {
-  const pathname = usePathname()
-  const router   = useRouter()
+  const pathname     = usePathname()
+  const router       = useRouter()
+  // useSearchParams() is used here for reactive active-state detection.
+  // The <Suspense> wrapper in the Sidebar export satisfies the Next.js
+  // App Router requirement for components that call useSearchParams().
+  const searchParams = useSearchParams()
+
+  // Feature-flag-filtered nav (server still enforces each feature).
+  const flags     = useFeatureFlags()
+  const sections  = filterNavSections(flags)
+  const navGroups = sections.flatMap(s => s.groups)
+
+  // ── Profile card dropdown ──────────────────────────────────────────────────
+  const profileCardRef              = useRef<HTMLDivElement>(null)
+  const [profileOpen, setProfileOpen] = useState(false)
+
+  useEffect(() => {
+    if (!profileOpen) return
+    const onMouseDown = (e: MouseEvent) => {
+      if (!profileCardRef.current?.contains(e.target as Node)) setProfileOpen(false)
+    }
+    document.addEventListener('mousedown', onMouseDown)
+    return () => document.removeEventListener('mousedown', onMouseDown)
+  }, [profileOpen])
 
   async function handleSignOut() {
+    setProfileOpen(false)
     onClose()
     await signOut(auth).catch(() => null)
     router.replace(ROUTES.LOGIN)
   }
 
-  // Track search string for exactSearch child-active matching without Suspense
-  const [search, setSearch] = useState('')
-  useEffect(() => {
-    const s = typeof window !== 'undefined' ? window.location.search : ''
-    startTransition(() => setSearch(s))
-  }, [pathname])
-
   // Which nav groups have their submenu open
   const [openGroups, setOpenGroups] = useState<Set<string>>(() => {
-    const activeKey = NAV_GROUPS.find(g => isGroupActive(g, pathname))?.key
+    const activeKey = navGroups.find(g => isGroupActive(g, pathname))?.key
     return activeKey ? new Set([activeKey]) : new Set()
   })
 
   // Auto-expand the active group on route change
   useEffect(() => {
-    const activeKey = NAV_GROUPS.find(g => isGroupActive(g, pathname))?.key
+    const activeKey = navGroups.find(g => isGroupActive(g, pathname))?.key
     if (activeKey) startTransition(() => setOpenGroups(prev => new Set([...prev, activeKey])))
   }, [pathname])
 
   function toggleGroup(key: string) {
     setOpenGroups(prev => {
       const next = new Set(prev)
-      next.has(key) ? next.delete(key) : next.add(key)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
       return next
     })
   }
@@ -219,7 +225,7 @@ function SidebarContent({
                 className="flex size-8 shrink-0 items-center justify-center rounded-[9px] text-primary-foreground shadow-sm ring-1 ring-primary/20"
                 style={{ backgroundImage: 'var(--primary-gradient)' }}
               >
-                <span className="text-[10.5px] font-extrabold tracking-[0.12em]">RD</span>
+                <span className="text-[11px] font-extrabold tracking-[0.12em]">RD</span>
               </div>
               <div className="leading-none">
                 <span className="text-[15px] font-bold tracking-[-0.02em] text-foreground">Register</span>
@@ -252,7 +258,7 @@ function SidebarContent({
                 className="flex size-8 items-center justify-center rounded-[9px] text-primary-foreground shadow-sm ring-1 ring-primary/20"
                 style={{ backgroundImage: 'var(--primary-gradient)' }}
               >
-                <span className="text-[10.5px] font-extrabold tracking-[0.12em]">RD</span>
+                <span className="text-[11px] font-extrabold tracking-[0.12em]">RD</span>
               </div>
             </Link>
             <button
@@ -276,7 +282,7 @@ function SidebarContent({
       >
         {showExpanded ? (
           <div className="space-y-5">
-            {NAV_SECTIONS.map(section => (
+            {sections.map(section => (
               <div key={section.sectionLabel}>
                 <SectionLabel label={section.sectionLabel} />
                 <ul className="space-y-0.5">
@@ -335,14 +341,16 @@ function SidebarContent({
                             >
                               <div className="ml-5 mt-0.5 border-l border-border/60 pb-1 pl-4">
                                 {group.children.map(child => {
-                                  const childActive = isChildActive(child, pathname, search)
+                                  const childActive = isChildActive(child, pathname, searchParams)
                                   return (
                                     <li key={`${group.key}-${child.label}`}>
                                       <Link
                                         href={child.href}
                                         onClick={onClose}
+                                        target={child.newTab ? '_blank' : undefined}
+                                        rel={child.newTab ? 'noopener noreferrer' : undefined}
                                         className={cn(
-                                          'flex items-center gap-2.5 rounded-lg px-3 py-[7px] text-[13.5px] transition-all duration-150',
+                                          'flex items-center gap-2.5 rounded-lg px-3 py-[7px] text-[14px] transition-all duration-150',
                                           childActive
                                             ? 'bg-primary/[0.08] font-semibold text-primary'
                                             : 'font-medium text-muted-foreground hover:translate-x-0.5 hover:bg-muted/50 hover:text-foreground',
@@ -377,7 +385,7 @@ function SidebarContent({
         ) : (
           /* Collapsed — icon-only links */
           <ul className="space-y-1">
-            {NAV_GROUPS.map(group => {
+            {navGroups.map(group => {
               const active = isGroupActive(group, pathname)
               const Icon   = group.icon
               return (
@@ -410,89 +418,94 @@ function SidebarContent({
         )}
       </nav>
 
-      {/* ── Bottom nav — System ── */}
-      <div className={cn(
-        'shrink-0 border-t border-border py-3',
-        showExpanded ? 'px-3' : 'px-2',
-      )}>
-        {showExpanded && <SectionLabel label="System" />}
-        <ul className="space-y-0.5">
-          {BOTTOM_NAV_LINKS.map(({ href, icon: Icon, label }) => (
-            <li key={label}>
-              {showExpanded ? (
-                <Link
-                  href={href}
-                  onClick={onClose}
-                  className="flex items-center gap-3 rounded-xl px-3 py-2.5 text-[14.5px] font-medium text-muted-foreground transition-all duration-150 hover:translate-x-1 hover:bg-muted/60 hover:text-foreground"
-                >
-                  <Icon className="size-5 shrink-0 text-muted-foreground/70" aria-hidden />
-                  {label}
-                </Link>
-              ) : (
-                <Link
-                  href={href}
-                  onClick={onClose}
-                  className="group relative flex h-10 w-full items-center justify-center rounded-xl text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-                  aria-label={label}
-                >
-                  <Icon className="size-5 shrink-0" aria-hidden />
-                  <Tooltip label={label} />
-                </Link>
-              )}
-            </li>
-          ))}
-          <li>
-            {showExpanded ? (
-              <button
-                type="button"
-                onClick={handleSignOut}
-                className="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left text-[14.5px] font-medium text-muted-foreground transition-all duration-150 hover:translate-x-1 hover:bg-destructive/[0.07] hover:text-destructive"
-              >
-                <LogOut className="size-5 shrink-0 text-muted-foreground/70" aria-hidden />
-                Sign Out
-              </button>
-            ) : (
-              <button
-                type="button"
-                onClick={handleSignOut}
-                className="group relative flex h-10 w-full items-center justify-center rounded-xl text-muted-foreground transition-colors hover:bg-destructive/[0.07] hover:text-destructive"
-                aria-label="Sign Out"
-              >
-                <LogOut className="size-5 shrink-0" aria-hidden />
-                <Tooltip label="Sign Out" />
-              </button>
-            )}
-          </li>
-        </ul>
-      </div>
-
       {/* ── User card ── */}
       {showExpanded ? (
-        <div className="shrink-0 border-t border-border px-3 py-3">
-          <div className="flex items-center gap-3 rounded-xl bg-muted/40 px-3 py-2.5 ring-1 ring-border/60">
+        <div ref={profileCardRef} className="relative shrink-0 border-t border-border px-3 py-3">
+          {/* Dropdown — anchored above the card */}
+          <AnimatePresence>
+            {profileOpen && (
+              <motion.div
+                key="profile-dropdown"
+                initial={{ opacity: 0, y: 4 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: 4 }}
+                transition={{ duration: 0.14, ease: [0.22, 1, 0.36, 1] }}
+                role="menu"
+                aria-label="Profile options"
+                className="absolute bottom-full left-3 right-3 mb-2 overflow-hidden rounded-xl border border-border bg-card shadow-lg"
+              >
+                <div role="group" className="py-1">
+                  <Link
+                    href={ROUTES.DASHBOARD_SETTINGS}
+                    role="menuitem"
+                    onClick={() => { setProfileOpen(false); onClose() }}
+                    className="flex items-center gap-2.5 px-4 py-2 text-[14px] text-foreground transition-colors hover:bg-muted focus-visible:bg-muted focus-visible:outline-none"
+                  >
+                    <Settings className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
+                    Settings
+                  </Link>
+                </div>
+                <div className="border-t border-border py-1">
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={handleSignOut}
+                    className="flex w-full items-center gap-2.5 px-4 py-2 text-left text-[14px] text-destructive transition-colors hover:bg-destructive/[0.07] focus-visible:bg-destructive/[0.07] focus-visible:outline-none"
+                  >
+                    <LogOut className="size-3.5 shrink-0" aria-hidden />
+                    Sign Out
+                  </button>
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+
+          {/* Card trigger */}
+          <button
+            type="button"
+            onClick={() => setProfileOpen(o => !o)}
+            aria-label="Open profile menu"
+            aria-expanded={profileOpen}
+            aria-haspopup="menu"
+            className="flex w-full items-center gap-3 rounded-xl bg-muted/40 px-3 py-2.5 ring-1 ring-border/60 transition-colors hover:bg-muted/60"
+          >
             <div
               className="flex size-8 shrink-0 items-center justify-center rounded-full text-[12px] font-bold text-primary-foreground shadow-sm ring-2 ring-background"
               style={{ backgroundImage: 'var(--primary-gradient)' }}
+              aria-hidden
             >
               {initial}
             </div>
-            <div className="min-w-0 flex-1">
+            <div className="min-w-0 flex-1 text-left">
               <p className="truncate text-[14px] font-semibold leading-tight text-foreground">{displayName}</p>
-              <p className="truncate text-[12px] leading-tight text-muted-foreground">{email}</p>
+              <p className="truncate text-[13px] leading-tight text-muted-foreground">{email}</p>
             </div>
-          </div>
+            <ChevronDown
+              className={cn(
+                'size-3.5 shrink-0 text-muted-foreground/50 transition-transform duration-150',
+                profileOpen && 'rotate-180',
+              )}
+              aria-hidden
+            />
+          </button>
         </div>
       ) : (
         <div className="shrink-0 border-t border-border px-2 py-3">
-          <div className="group relative flex h-10 w-full items-center justify-center">
+          <Link
+            href={ROUTES.DASHBOARD_SETTINGS}
+            onClick={onClose}
+            className="group relative flex h-10 w-full items-center justify-center rounded-xl transition-colors hover:bg-muted"
+            aria-label="Settings"
+          >
             <div
-              className="flex size-8 items-center justify-center rounded-full text-[11px] font-bold text-primary-foreground shadow-sm ring-2 ring-background"
+              className="flex size-8 items-center justify-center rounded-full text-[12px] font-bold text-primary-foreground shadow-sm ring-2 ring-background"
               style={{ backgroundImage: 'var(--primary-gradient)' }}
+              aria-hidden
             >
               {initial}
             </div>
-            <Tooltip label={email} />
-          </div>
+            <Tooltip label="Settings" />
+          </Link>
         </div>
       )}
 
@@ -530,6 +543,10 @@ export function Sidebar({ open, onClose, displayName, email, initial }: SidebarP
     })
   }
 
+  // SidebarContent calls useSearchParams(), which requires a Suspense boundary
+  // in Next.js App Router.  The fallback is null because the sidebar shell
+  // (logo, user card) is inside SidebarContent; a visible flash cannot occur
+  // in practice since the dashboard is fully client-rendered.
   return (
     <>
       {/* ── Mobile off-canvas (< md) ── */}
@@ -554,15 +571,17 @@ export function Sidebar({ open, onClose, displayName, email, initial }: SidebarP
               className="fixed inset-y-0 left-0 z-50 w-[280px] border-r border-border bg-card shadow-xl md:hidden"
               aria-label="Navigation drawer"
             >
-              <SidebarContent
-                collapsed={false}
-                onClose={onClose}
-                onToggleCollapsed={toggleCollapsed}
-                isMobile
-                displayName={displayName}
-                email={email}
-                initial={initial}
-              />
+              <Suspense fallback={null}>
+                <SidebarContent
+                  collapsed={false}
+                  onClose={onClose}
+                  onToggleCollapsed={toggleCollapsed}
+                  isMobile
+                  displayName={displayName}
+                  email={email}
+                  initial={initial}
+                />
+              </Suspense>
             </motion.aside>
           </>
         )}
@@ -578,14 +597,16 @@ export function Sidebar({ open, onClose, displayName, email, initial }: SidebarP
         )}
         aria-label="Dashboard sidebar"
       >
-        <SidebarContent
-          collapsed={collapsed}
-          onClose={onClose}
-          onToggleCollapsed={toggleCollapsed}
-          displayName={displayName}
-          email={email}
-          initial={initial}
-        />
+        <Suspense fallback={null}>
+          <SidebarContent
+            collapsed={collapsed}
+            onClose={onClose}
+            onToggleCollapsed={toggleCollapsed}
+            displayName={displayName}
+            email={email}
+            initial={initial}
+          />
+        </Suspense>
       </aside>
     </>
   )

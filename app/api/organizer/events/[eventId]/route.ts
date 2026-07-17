@@ -4,8 +4,11 @@
 // eventId is the Firestore draft document ID under users/{uid}/eventDrafts.
 
 import { NextRequest, NextResponse } from 'next/server'
-import { adminAuth, adminDb }        from '@/lib/firebase/admin'
+import { adminDb }                   from '@/lib/firebase/admin'
+import { getRegistrationCounter }    from '@/lib/firebase/firestore/registrationCounters'
+import { authorizeWorkspace }        from '@/lib/team/workspace'
 import { deriveLifecycleStatus }     from '@/lib/events/lifecycle'
+import { getFreeEventCapacity }      from '@/lib/licensing/resolveCatalog'
 import type { EventLifecycleStatus } from '@/types/events'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -46,7 +49,6 @@ export interface EventDetailResponse {
   draftId:          string
   status:           'draft' | 'published'
   lifecycleStatus:  EventLifecycleStatus
-  eventStatus:      string | null
   // Cancellation metadata — present when lifecycleStatus = 'cancelled'
   cancelReason?:    string
   cancelledAt?:     string | null
@@ -68,6 +70,8 @@ export interface EventDetailResponse {
   // Classification (locked)
   eventType:        string | null
   eventSubtype:     string | null
+  campaignType:     string | null
+  visibility:       string | null
   // Venue
   venueType:        string | null
   venueName:        string | null
@@ -100,6 +104,10 @@ export interface EventDetailResponse {
   // Raw blobs
   registrationRules: Record<string, unknown> | null
   pricing:           Record<string, unknown> | null
+  // Linked donation campaign fields — populated for event_plus_donation only
+  linkedCampaignSlug: string | null
+  donationTotalPaise: number
+  donorCount:         number
 }
 
 // ─── Helper ───────────────────────────────────────────────────────────────────
@@ -124,15 +132,9 @@ export async function GET(
 ): Promise<NextResponse> {
   const { eventId } = await context.params
 
-  const token = (req.headers.get('authorization') ?? '').replace('Bearer ', '')
-  if (!token) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-
-  let uid: string
-  try {
-    uid = (await adminAuth.verifyIdToken(token)).uid
-  } catch {
-    return NextResponse.json({ error: 'Invalid or expired token' }, { status: 401 })
-  }
+  const authz = await authorizeWorkspace(req, 'events')
+  if (!authz.ok) return NextResponse.json({ error: authz.error }, { status: authz.status })
+  const uid = authz.workspaceUid
 
   // ── Load draft ─────────────────────────────────────────────────────────────
   const draftSnap = await adminDb.doc(`users/${uid}/eventDrafts/${eventId}`).get()
@@ -149,7 +151,6 @@ export async function GET(
   const venue      = (details.venue     as Record<string, unknown>) ?? {}
   const phys       = (venue.physical    as Record<string, unknown>) ?? {}
   const online     = (venue.online      as Record<string, unknown>) ?? {}
-  const dstatus    = (details.status    as Record<string, unknown>) ?? {}
   const orgInfo    = (details.organizer as Record<string, unknown>) ?? {}
   const typeDet    = (details.typeDetails as Record<string, unknown>) ?? {}
   const regForm    = (d.registrationForm as Record<string, unknown>) ?? {}
@@ -159,18 +160,32 @@ export async function GET(
 
   const slug    = str(seo.urlSlug)
   const isFree  = pricing?.eventType === 'free'
+  // Free-event capacity = the effective Starter registration limit (SSOT), not a literal.
+  const freeCapacity = await getFreeEventCapacity()
 
-  // ── Load counter ───────────────────────────────────────────────────────────
+  // ── Load registration counter (GA-5 S3: summing reader folds attendance shards) ──
   let counter: { totalCount: number; passCounts: Record<string, number>; checkedInCount: number } | null = null
   if (slug) {
-    const counterSnap = await adminDb.collection('registrationCounters').doc(slug).get()
-    if (counterSnap.exists) {
-      const cd = counterSnap.data() as { totalCount?: number; passCounts?: Record<string, number>; checkedInCount?: number }
+    const cd = await getRegistrationCounter(slug)
+    if (cd) {
       counter = {
-        totalCount:    cd.totalCount    ?? 0,
-        passCounts:    cd.passCounts    ?? {},
+        totalCount:     cd.totalCount     ?? 0,
+        passCounts:     cd.passCounts      ?? {},
         checkedInCount: cd.checkedInCount ?? 0,
       }
+    }
+  }
+
+  // ── Load donation counter (event_plus_donation only) ───────────────────────
+  const linkedCampaignSlug = d.campaignType === 'event_plus_donation' ? slug : null
+  let donationTotalPaise = 0
+  let donorCount         = 0
+  if (linkedCampaignSlug) {
+    const donationCounterSnap = await adminDb.collection('donationCounters').doc(linkedCampaignSlug).get()
+    if (donationCounterSnap.exists) {
+      const dc = donationCounterSnap.data() as { totalRaisedPaise?: number; donorCount?: number }
+      donationTotalPaise = dc.totalRaisedPaise ?? 0
+      donorCount         = dc.donorCount       ?? 0
     }
   }
 
@@ -240,7 +255,6 @@ export async function GET(
     draftId:          draftSnap.id,
     status:           (d.status as 'draft' | 'published') ?? 'draft',
     lifecycleStatus:  deriveLifecycleStatus(d),
-    eventStatus:      str(dstatus.status),
     cancelReason:     str(d.cancelReason) ?? undefined,
     cancelledAt:      toIso(d.cancelledAt),
     name:             str(info.name)     ?? 'Untitled Event',
@@ -256,15 +270,17 @@ export async function GET(
     // Fix: coverBanner and logo are MediaAsset objects {source, value, originalFileName}
     bannerUrl:        str(coverBanner.value),
     logoUrl:          str(logoAsset.value),
-    eventType:        str(d.eventType as unknown),
+    eventType:        str(d.eventType    as unknown),
     eventSubtype:     str(d.eventSubtype as unknown),
+    campaignType:     str(d.campaignType as unknown),
+    visibility:       str(d.visibility   as unknown),
     venueType:        str(venue.type),
     venueName:        str(phys.name),
     venueCity:        str(phys.city),
     venueAddress:     str(phys.addressLine1),
     onlinePlatform:   str(online.platform),
     onlineMeetingUrl: str(online.meetingUrl),
-    totalCapacity:    isFree ? 100 : null,
+    totalCapacity:    isFree ? freeCapacity : null,
     totalRegistrations: counter?.totalCount ?? 0,
     checkedInCount:   counter?.checkedInCount ?? 0,
     estimatedRevenue,
@@ -284,8 +300,11 @@ export async function GET(
     keywords:         Array.isArray(seo.keywords)
       ? (seo.keywords as unknown[]).map(k => String(k)).filter(Boolean)
       : [],
-    registrationRules: (regForm.registrationRules as Record<string, unknown>) ?? null,
-    pricing:           Object.keys(pricing).length ? pricing : null,
+    registrationRules:  (regForm.registrationRules as Record<string, unknown>) ?? null,
+    pricing:            Object.keys(pricing).length ? pricing : null,
+    linkedCampaignSlug,
+    donationTotalPaise,
+    donorCount,
   }
 
   return NextResponse.json(result)

@@ -3,7 +3,8 @@
 // No canvas module required — QR is drawn as filled rectangles.
 
 import { PDFDocument, StandardFonts, rgb } from 'pdf-lib'
-import QRCode                               from 'qrcode'
+import { drawQrToPdf }                       from '@/lib/qr/draw'
+import { validateStorageUrl, safeFetchBytes } from './urlGuard'
 import type { CertificateTemplate, CertificateRecord } from './types'
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -29,35 +30,18 @@ function sanitize(s: string): string {
 type Page = ReturnType<PDFDocument['addPage']>
 
 function drawQr(page: Page, value: string, x: number, y: number, size: number): void {
-  const qr      = QRCode.create(value, { errorCorrectionLevel: 'M' })
-  const modules = qr.modules
-  const dim     = modules.size
-  const cell    = size / dim
-  for (let row = 0; row < dim; row++) {
-    for (let col = 0; col < dim; col++) {
-      if (modules.get(row, col)) {
-        page.drawRectangle({
-          x:      x + col * cell,
-          y:      y + (dim - row - 1) * cell,
-          width:  cell,
-          height: cell,
-          color:  C_DARK,
-        })
-      }
-    }
-  }
+  drawQrToPdf(page, value, { x, y, size, color: C_DARK })
 }
 
 // Fetch an image URL and return bytes, or null on failure (non-fatal).
+// SSRF-guarded: only Firebase Storage URLs for the configured bucket are
+// fetched, with no redirect following. Organizer-supplied logo/signature/
+// background URLs that aren't in our bucket are skipped (image simply omitted).
 async function fetchImageBytes(url: string | undefined): Promise<Uint8Array | null> {
-  if (!url || !url.startsWith('http')) return null
-  try {
-    const res = await fetch(url, { signal: AbortSignal.timeout(5000) })
-    if (!res.ok) return null
-    return new Uint8Array(await res.arrayBuffer())
-  } catch {
-    return null
-  }
+  if (!url) return null
+  const check = validateStorageUrl(url)
+  if (!check.ok) return null
+  return safeFetchBytes(url, check, { timeoutMs: 5000 }).catch(() => null)
 }
 
 // Returns true when bytes look like a JPEG (magic: FF D8).

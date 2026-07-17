@@ -5,7 +5,7 @@
 // Writes an audit entry fire-and-forget after the transaction.
 
 import { NextRequest, NextResponse }  from 'next/server'
-import { adminAuth }                   from '@/lib/firebase/admin'
+import { authorizeWorkspace }          from '@/lib/team/workspace'
 import {
   cancelRegistration,
   writeAuditEntry,
@@ -13,6 +13,9 @@ import {
   RegistrationNotFoundError,
   UnauthorizedCancellationError,
 } from '@/lib/firebase/firestore/registrations'
+import { sendCancellationEmail }       from '@/lib/registrations/sendCancellationEmail'
+import { enqueueWebhook }              from '@/lib/integrations/webhooks'
+import { releaseIdentifier }           from '@/lib/identifiers/engine'
 
 export interface CancelRegistrationResponse {
   success: boolean
@@ -24,20 +27,24 @@ export async function POST(
   context: { params: Promise<{ registrationId: string }> },
 ): Promise<NextResponse<CancelRegistrationResponse>> {
   // ── 1. Auth ────────────────────────────────────────────────────────────────
-  const token = (req.headers.get('authorization') ?? '').replace(/^Bearer /, '')
-  if (!token) return NextResponse.json({ success: false, error: 'Unauthorized' }, { status: 401 })
-
-  let uid: string
-  try {
-    uid = (await adminAuth.verifyIdToken(token)).uid
-  } catch {
-    return NextResponse.json({ success: false, error: 'Invalid or expired token' }, { status: 401 })
-  }
+  const authz = await authorizeWorkspace(req, 'registrations')
+  if (!authz.ok) return NextResponse.json({ success: false, error: authz.error }, { status: authz.status })
+  const uid = authz.workspaceUid
+  const callerUid = authz.callerUid
 
   const { registrationId } = await context.params
   if (!registrationId) {
     return NextResponse.json({ success: false, error: 'registrationId is required' }, { status: 400 })
   }
+
+  // ── 1b. Parse optional reason ─────────────────────────────────────────────
+  let reason: string | undefined
+  try {
+    const body = await req.json().catch(() => null) as { reason?: unknown } | null
+    if (typeof body?.reason === 'string' && body.reason.trim()) {
+      reason = body.reason.trim()
+    }
+  } catch { /* no body — fine */ }
 
   // ── 2. Cancel atomically ───────────────────────────────────────────────────
   try {
@@ -57,9 +64,23 @@ export async function POST(
   }
 
   // ── 3. Audit entry (fire-and-forget) ──────────────────────────────────────
-  writeAuditEntry(registrationId, 'cancelled', uid, 'organizer').catch(err =>
+  writeAuditEntry(registrationId, 'cancelled', callerUid, 'organizer', uid).catch(err =>
     console.error('[cancel] Failed to write audit entry:', err),
   )
+
+  // ── 3b. Release any held identifier (fire-and-forget, idempotent no-op when
+  //        none). Returns the number to the pool per the event's reuse policy. ──
+  void releaseIdentifier(registrationId, callerUid, 'cancelled').catch(err =>
+    console.error('[cancel] Failed to release identifier:', err),
+  )
+
+  // ── 4. Cancellation email (fire-and-forget) ────────────────────────────────
+  sendCancellationEmail(registrationId, reason).catch(err =>
+    console.error('[cancel] Failed to send cancellation email:', err),
+  )
+
+  // ── 5. Organizer webhook (fire-and-forget) ─────────────────────────────────
+  void enqueueWebhook(uid, 'registration.cancelled', { registrationId }).catch(() => {})
 
   return NextResponse.json({ success: true })
 }

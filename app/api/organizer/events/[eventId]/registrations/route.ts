@@ -6,7 +6,9 @@
 //   all    — 'true' to load full dataset (capped at 2000) for search/filter mode
 
 import { NextRequest, NextResponse } from 'next/server'
-import { adminDb, adminAuth }        from '@/lib/firebase/admin'
+import { adminDb }        from '@/lib/firebase/admin'
+import { authorizeWorkspace } from '@/lib/team/workspace'
+import { getEventStats } from '@/lib/firebase/firestore/registrationCounters'
 import type { RegistrationDocument }  from '@/lib/registrations/types'
 
 // ─── Serialized shape (Timestamps → ISO strings) ──────────────────────────────
@@ -30,6 +32,7 @@ export interface RegistrationsApiResponse {
     pending:    number
     cancelled:  number
     waitlisted: number
+    rejected:   number
     checkedIn:  number
   }
   hasMore:    boolean
@@ -64,17 +67,11 @@ export async function GET(
   req:     NextRequest,
   context: { params: Promise<{ eventId: string }> },
 ): Promise<NextResponse<RegistrationsApiResponse | { error: string }>> {
-  // ── 1. Auth ────────────────────────────────────────────────────────────────
-  const token = (req.headers.get('authorization') ?? '').replace('Bearer ', '')
-  if (!token) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-
-  let uid: string
   try {
-    const decoded = await adminAuth.verifyIdToken(token)
-    uid = decoded.uid
-  } catch {
-    return NextResponse.json({ error: 'Invalid or expired token' }, { status: 401 })
-  }
+  // ── 1. Auth ────────────────────────────────────────────────────────────────
+  const authz = await authorizeWorkspace(req, 'registrations')
+  if (!authz.ok) return NextResponse.json({ error: authz.error }, { status: authz.status })
+  const uid = authz.workspaceUid
 
   const { eventId } = await context.params
 
@@ -122,24 +119,41 @@ export async function GET(
   const pageSize = [25, 50, 100].includes(rawLimit) ? rawLimit : 50
   const cursor   = params.get('cursor') ?? null
 
-  // ── 7. Stats — lightweight query: only fetch status + checkedIn fields ─────
-  // Two equality filters, no orderBy → uses auto single-field indexes.
-  const statsSnap = await adminDb
-    .collection('registrations')
-    .where('organizerUid', '==', uid)
-    .where('eventSlug',    '==', slug)
-    .select('status', 'checkedIn')
-    .get()
+  // ── 7. Stats — O(1) from the per-event statistics doc (EA-2 S1) ────────────
+  // The status breakdown is served from registrationCounters/{slug} instead of
+  // scanning every registration on each page load. Falls back to the former
+  // projected scan for events whose stats doc has not yet been backfilled
+  // (statsVersion < current) so legacy events are never mis-reported.
+  // (Waitlist entries live in a separate `waitlists` collection, so the
+  // registrations status breakdown never contains 'waitlisted'.)
+  const stats = { total: 0, confirmed: 0, pending: 0, cancelled: 0, waitlisted: 0, rejected: 0, checkedIn: 0 }
+  const { counter, complete } = await getEventStats(slug)
 
-  const stats = { total: 0, confirmed: 0, pending: 0, cancelled: 0, waitlisted: 0, checkedIn: 0 }
-  for (const doc of statsSnap.docs) {
-    const d = doc.data() as { status?: string; checkedIn?: boolean }
-    stats.total++
-    if      (d.status === 'confirmed')  stats.confirmed++
-    else if (d.status === 'pending')    stats.pending++
-    else if (d.status === 'cancelled')  stats.cancelled++
-    else if (d.status === 'waitlisted') stats.waitlisted++
-    if (d.checkedIn) stats.checkedIn++
+  if (complete && counter) {
+    stats.confirmed  = counter.totalCount     ?? 0
+    stats.pending    = counter.pendingCount   ?? 0
+    stats.cancelled  = counter.cancelledCount ?? 0
+    stats.rejected   = counter.rejectedCount  ?? 0
+    stats.checkedIn  = counter.checkedInCount ?? 0
+    stats.total      = stats.confirmed + stats.pending + stats.cancelled + stats.rejected + stats.waitlisted
+  } else {
+    // Fallback: projected scan (two equality filters, auto single-field index).
+    const statsSnap = await adminDb
+      .collection('registrations')
+      .where('organizerUid', '==', uid)
+      .where('eventSlug',    '==', slug)
+      .select('status', 'checkedIn')
+      .get()
+    for (const doc of statsSnap.docs) {
+      const d = doc.data() as { status?: string; checkedIn?: boolean }
+      stats.total++
+      if      (d.status === 'confirmed')  stats.confirmed++
+      else if (d.status === 'pending')    stats.pending++
+      else if (d.status === 'cancelled')  stats.cancelled++
+      else if (d.status === 'waitlisted') stats.waitlisted++
+      else if (d.status === 'rejected')   stats.rejected++
+      if (d.checkedIn) stats.checkedIn++
+    }
   }
 
   // ── 8. Registrations query ─────────────────────────────────────────────────
@@ -186,4 +200,12 @@ export async function GET(
     nextCursor,
     totalCount: stats.total,
   })
+  } catch (error) {
+    // Logged server-side; return a generic message rather than the raw exception.
+    console.error('EVENT_REGISTRATIONS_ERROR', error)
+    return NextResponse.json(
+      { error: 'Failed to load registrations.' },
+      { status: 500 },
+    )
+  }
 }

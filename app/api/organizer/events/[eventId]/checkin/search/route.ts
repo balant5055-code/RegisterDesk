@@ -1,16 +1,29 @@
 // GET /api/organizer/events/[eventId]/checkin/search?q=...
 //
 // Server-side attendee lookup for the check-in screen.
-// Returns up to 50 registrations whose ticketCode, name, email, or phone
-// contains the query string (case-insensitive substring match).
+//
+// Search strategy (scales beyond 2 000 registrations):
+//
+//   1. Ticket-code path (q starts with "RD-"):
+//      Single equality query on the globally-unique `ticketCode` field.
+//      O(1) — one Firestore read regardless of event size.
+//
+//   2. General path (name / email / phone):
+//      Scoped query filtered to this event (organizerUid + eventSlug),
+//      capped at 500 documents, then filtered in-process.
+//      For most events this is fast; the 500-doc cap prevents unbounded reads
+//      on very large events.  Gate staff get a hint to use ticket code or email
+//      for exact results when a name search is truncated.
 //
 // Security:
 //   1. Firebase ID token required.
 //   2. Only registrations owned by the authenticated organizer are searched.
-//   3. Event ownership is verified via the organizer's draft document.
+//   3. Event ownership verified via the organizer's draft document.
 
 import { NextRequest, NextResponse } from 'next/server'
-import { adminDb, adminAuth }        from '@/lib/firebase/admin'
+import { adminDb }        from '@/lib/firebase/admin'
+import { authorizeWorkspace } from '@/lib/team/workspace'
+import { getEventCheckInStatus }     from '@/lib/checkin/eventStatus'
 import type { RegistrationDocument } from '@/lib/registrations/types'
 
 // ─── Response types ───────────────────────────────────────────────────────────
@@ -28,11 +41,15 @@ export interface AttendeeSearchResult {
 }
 
 export interface AttendeeSearchResponse {
-  results:   AttendeeSearchResult[]
-  truncated: boolean
+  results:    AttendeeSearchResult[]
+  truncated:  boolean
+  searchMode: 'exact' | 'scan'   // 'exact' = O(1) ticket lookup; 'scan' = bounded name scan
 }
 
-const MAX_RESULTS = 50
+// ─── Constants ────────────────────────────────────────────────────────────────
+
+const MAX_RESULTS   = 50
+const SCAN_DOC_CAP  = 500   // max docs loaded from Firestore in scan mode
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -44,15 +61,35 @@ function toISO(ts: unknown): string | null {
   return null
 }
 
-function matches(reg: RegistrationDocument, q: string): boolean {
+function toResult(id: string, reg: RegistrationDocument): AttendeeSearchResult {
+  return {
+    id,
+    ticketCode:    reg.ticketCode,
+    attendeeName:  reg.attendee.name,
+    attendeeEmail: reg.attendee.email,
+    attendeePhone: reg.attendee.phone,
+    passName:      reg.passName,
+    status:        reg.status,
+    checkedIn:     reg.checkedIn,
+    checkedInAt:   toISO(reg.checkedInAt),
+  }
+}
+
+function matchesScan(reg: RegistrationDocument, q: string): boolean {
   const lower = q.toLowerCase()
-  const upper = q.toUpperCase()
   return (
-    reg.ticketCode.includes(upper) ||
-    reg.attendee.name.toLowerCase().includes(lower) ||
+    reg.attendee.name.toLowerCase().includes(lower)  ||
     reg.attendee.email.toLowerCase().includes(lower) ||
     (typeof reg.attendee.phone === 'string' && reg.attendee.phone.includes(q))
   )
+}
+
+function sortResults(results: AttendeeSearchResult[]): void {
+  // Not-yet-checked-in first, then alphabetical — most useful order at the gate
+  results.sort((a, b) => {
+    if (a.checkedIn !== b.checkedIn) return a.checkedIn ? 1 : -1
+    return a.attendeeName.localeCompare(b.attendeeName)
+  })
 }
 
 // ─── Handler ──────────────────────────────────────────────────────────────────
@@ -61,16 +98,11 @@ export async function GET(
   req:     NextRequest,
   context: { params: Promise<{ eventId: string }> },
 ): Promise<NextResponse<AttendeeSearchResponse | { error: string }>> {
-  // ── 1. Auth ────────────────────────────────────────────────────────────────
-  const token = (req.headers.get('authorization') ?? '').replace('Bearer ', '')
-  if (!token) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
-  let uid: string
-  try {
-    uid = (await adminAuth.verifyIdToken(token)).uid
-  } catch {
-    return NextResponse.json({ error: 'Invalid or expired token' }, { status: 401 })
-  }
+  // ── 1. Auth ────────────────────────────────────────────────────────────────
+  const authz = await authorizeWorkspace(req, 'checkin')
+  if (!authz.ok) return NextResponse.json({ error: authz.error }, { status: authz.status })
+  const uid = authz.workspaceUid
 
   const { eventId } = await context.params
 
@@ -91,52 +123,83 @@ export async function GET(
     return NextResponse.json({ error: 'Event slug not resolved' }, { status: 404 })
   }
 
+  // ── 2b. Verify event lifecycle accepts check-ins ───────────────────────────
+  // draft.status confirms ownership/publication; lifecycleStatus confirms the
+  // event has not been cancelled, archived, or otherwise closed to check-ins.
+  const eventStatus = await getEventCheckInStatus(slug)
+  if (eventStatus !== 'ok') {
+    return NextResponse.json({ error: 'Event is not accepting check-ins' }, { status: 403 })
+  }
+
   // ── 3. Parse + validate query ──────────────────────────────────────────────
   const q = (req.nextUrl.searchParams.get('q') ?? '').trim()
   if (q.length < 2) {
-    return NextResponse.json({ results: [], truncated: false })
+    return NextResponse.json({ results: [], truncated: false, searchMode: 'scan' })
   }
   if (q.length > 100) {
     return NextResponse.json({ error: 'Query too long' }, { status: 400 })
   }
 
-  // ── 4. Load registrations (two equality filters, no composite index needed) ─
+  // ── 4a. Ticket-code fast path ──────────────────────────────────────────────
+  // Ticket codes are globally unique and stored with a single-field auto-index.
+  // An exact lookup is O(1) regardless of how many registrations the event has.
+  // Detect: query starts with "RD-" (case-insensitive) — the system's ticket prefix.
+  if (/^RD-/i.test(q)) {
+    const codeSnap = await adminDb
+      .collection('registrations')
+      .where('ticketCode', '==', q.toUpperCase())
+      .limit(1)
+      .get()
+
+    if (codeSnap.empty) {
+      return NextResponse.json({ results: [], truncated: false, searchMode: 'exact' })
+    }
+
+    const doc = codeSnap.docs[0]!
+    const reg = doc.data() as RegistrationDocument
+
+    // Ownership: the found ticket must belong to this organizer
+    if (reg.organizerUid !== uid) {
+      return NextResponse.json({ results: [], truncated: false, searchMode: 'exact' })
+    }
+
+    return NextResponse.json({
+      results:    [toResult(doc.id, reg)],
+      truncated:  false,
+      searchMode: 'exact',
+    })
+  }
+
+  // ── 4b. General scan path (name / email / phone) ───────────────────────────
+  // Load up to SCAN_DOC_CAP docs scoped to this organizer + event, filter in-process.
+  // The two equality conditions use the existing [organizerUid, eventSlug] composite
+  // index — no additional indexes required.
   const snap = await adminDb
     .collection('registrations')
     .where('organizerUid', '==', uid)
     .where('eventSlug',    '==', slug)
+    .limit(SCAN_DOC_CAP)
     .get()
 
-  // ── 5. Filter and truncate ─────────────────────────────────────────────────
-  const all: AttendeeSearchResult[] = []
+  const matched: AttendeeSearchResult[] = []
 
   for (const doc of snap.docs) {
     const reg = doc.data() as RegistrationDocument
-    if (!matches(reg, q)) continue
-
-    all.push({
-      id:            doc.id,
-      ticketCode:    reg.ticketCode,
-      attendeeName:  reg.attendee.name,
-      attendeeEmail: reg.attendee.email,
-      attendeePhone: reg.attendee.phone,
-      passName:      reg.passName,
-      status:        reg.status,
-      checkedIn:     reg.checkedIn,
-      checkedInAt:   toISO(reg.checkedInAt),
-    })
-
-    if (all.length > MAX_RESULTS) break
+    if (!matchesScan(reg, q)) continue
+    matched.push(toResult(doc.id, reg))
+    if (matched.length > MAX_RESULTS) break
   }
 
-  const truncated = all.length > MAX_RESULTS
-  const results   = truncated ? all.slice(0, MAX_RESULTS) : all
+  const truncated = matched.length > MAX_RESULTS
+  const results   = truncated ? matched.slice(0, MAX_RESULTS) : matched
+  sortResults(results)
 
-  // Sort: not-checked-in first, then by name
-  results.sort((a, b) => {
-    if (a.checkedIn !== b.checkedIn) return a.checkedIn ? 1 : -1
-    return a.attendeeName.localeCompare(b.attendeeName)
+  // truncated may also be true if we hit SCAN_DOC_CAP before exhausting the event
+  const hitCap = snap.size === SCAN_DOC_CAP
+
+  return NextResponse.json({
+    results,
+    truncated: truncated || hitCap,
+    searchMode: 'scan',
   })
-
-  return NextResponse.json({ results, truncated })
 }

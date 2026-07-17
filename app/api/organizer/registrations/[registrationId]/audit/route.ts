@@ -4,7 +4,8 @@
 // Organizer-only: authenticated user must own the event (reg.organizerUid === uid).
 
 import { NextRequest, NextResponse }  from 'next/server'
-import { adminAuth, adminDb }          from '@/lib/firebase/admin'
+import { adminDb }          from '@/lib/firebase/admin'
+import { authorizeWorkspace }          from '@/lib/team/workspace'
 import { getAuditLog }                 from '@/lib/firebase/firestore/registrations'
 import type { RegistrationDocument }   from '@/lib/registrations/types'
 import type { AuditAction, AuditActorType } from '@/lib/registrations/types'
@@ -34,15 +35,9 @@ export async function GET(
   context: { params: Promise<{ registrationId: string }> },
 ): Promise<NextResponse<AuditLogResponse | { error: string }>> {
   // ── 1. Auth ────────────────────────────────────────────────────────────────
-  const token = (req.headers.get('authorization') ?? '').replace(/^Bearer /, '')
-  if (!token) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-
-  let uid: string
-  try {
-    uid = (await adminAuth.verifyIdToken(token)).uid
-  } catch {
-    return NextResponse.json({ error: 'Invalid or expired token' }, { status: 401 })
-  }
+  const authz = await authorizeWorkspace(req, 'registrations')
+  if (!authz.ok) return NextResponse.json({ error: authz.error }, { status: authz.status })
+  const uid = authz.workspaceUid
 
   const { registrationId } = await context.params
 

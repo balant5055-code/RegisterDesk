@@ -6,6 +6,7 @@
 import type { Metadata }     from 'next'
 import { notFound }          from 'next/navigation'
 import Link                  from 'next/link'
+import { Calendar, MapPin, Check } from 'lucide-react'
 import QRCode                from 'qrcode'
 import { adminDb }           from '@/lib/firebase/admin'
 import { getEventBySlug }    from '@/lib/firebase/firestore/events'
@@ -167,13 +168,13 @@ export default async function TicketPage({ params }: PageProps) {
           {(startDate || venueName) && (
             <div className="flex flex-wrap gap-x-5 gap-y-1 border-b border-border px-5 py-3">
               {startDate && (
-                <span className="text-[12.5px] text-muted-foreground">
-                  📅 {fmt(startDate)}{startTime ? ` · ${startTime}` : ''}{endTime ? `–${endTime}` : ''}
+                <span className="inline-flex items-center gap-1.5 text-[12.5px] text-muted-foreground">
+                  <Calendar className="size-3.5 shrink-0" aria-hidden /> {fmt(startDate)}{startTime ? ` · ${startTime}` : ''}{endTime ? `–${endTime}` : ''}
                 </span>
               )}
               {venueName && (
-                <span className="text-[12.5px] text-muted-foreground">
-                  📍 {[venueName, venueCity].filter(Boolean).join(', ')}
+                <span className="inline-flex items-center gap-1.5 text-[12.5px] text-muted-foreground">
+                  <MapPin className="size-3.5 shrink-0" aria-hidden /> {[venueName, venueCity].filter(Boolean).join(', ')}
                 </span>
               )}
             </div>
@@ -184,7 +185,7 @@ export default async function TicketPage({ params }: PageProps) {
             {/* Checked-in badge */}
             {reg.checkedIn && (
               <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-100 px-3 py-1 text-[12px] font-semibold text-emerald-700">
-                ✓ Checked In {checkedInAt ? `at ${new Date(checkedInAt).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}` : ''}
+                <Check className="size-3.5" aria-hidden /> Checked In {checkedInAt ? `at ${new Date(checkedInAt).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}` : ''}
               </span>
             )}
 

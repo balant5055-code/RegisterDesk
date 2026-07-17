@@ -1,31 +1,33 @@
 'use client'
 
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import {
   Award, Bell, Building2, Calendar, Check, CheckCircle2,
   ChevronDown, ChevronUp, Clock, Eye, FileText, Globe, GripVertical, Hash,
   Info, Link2, ListChecks, Mail, MapPin, Mic, Palette, Pencil, Phone,
-  Plus, RefreshCw, Search, Settings2, Share2, Star, Ticket, Trash2,
-  Trophy, Upload, Users, Video, X, Zap,
+  Plus, RefreshCw, Search, Share2, Star, Ticket, Trash2,
+  Trophy, Upload, Users, Video, X,
 } from 'lucide-react'
 import { buttonVariants } from '@/components/ui'
 import { cn } from '@/lib/utils/cn'
 import {
-  type EventDetailsDraft, type StatusConfig, type EventInfo, type MediaConfig,
+  type EventDetailsDraft, type EventInfo, type MediaConfig,
   type VenueConfig, type VenueMaps, type PhysicalVenueConfig,
   type OnlineVenueConfig, type AgendaSession, type EventSchedule,
   type OrganizerInfo, type CommunicationConfig, type ReminderRule,
   type SupportConfig, type SeoConfig, type PublicPageSettings,
   type Speaker, type Sponsor, type ConferenceTrack, type ConferenceDetails,
   type WorkshopDetails, type CulturalDetails, type AwardsDetails,
-  type Tab6Config, type CommChannel, type EventStatus,
+  type ExhibitionDetails, type ExhibitorEntry, type PastWinner,
+  type Tab6Config, type CommChannel,
   makeBlankEventDetailsDraft, makeBlankSession, makeBlankSpeaker,
   makeBlankSponsor, makeTrackId, makeAwardCatId, getEventDays,
   formatDayLabel, fmtTime, slugify, calcStepHealth, getTab6Config,
-  makeBlankTypeDetails,
+  makeBlankTypeDetails, makePastWinnerId, makeExhibitorId,
+  makeHighlightId, makeZoneId, makeExhibitionCatId,
   SESSION_TYPE_LABELS, SPONSOR_TIER_LABELS, ONLINE_PLATFORM_LABELS,
-  EVENT_STATUS_LABELS, LANGUAGE_OPTIONS, TIMEZONE_OPTIONS,
+  LANGUAGE_OPTIONS, TIMEZONE_OPTIONS,
 } from '@/components/wizard/eventDetailsConfig'
 import { BrandingMediaSection } from '@/components/wizard/BrandingMediaSection'
 import { ImageAssetInput } from '@/components/wizard/ImageAssetInput'
@@ -33,9 +35,9 @@ import { ImageAssetInput } from '@/components/wizard/ImageAssetInput'
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const EASE = [0.22, 1, 0.36, 1] as const
-const inputCls = 'h-9 w-full rounded-lg border border-border bg-background px-3 text-[12.5px] text-foreground placeholder:text-muted-foreground/60 outline-none transition-colors focus:border-primary/50 focus:ring-2 focus:ring-primary/20'
-const labelCls = 'mb-1 block text-[12px] font-medium text-foreground'
-const hintCls  = 'mt-1 text-[11px] text-muted-foreground'
+const inputCls = 'h-9 w-full rounded-lg border border-border bg-background px-3 text-[14px] text-foreground placeholder:text-muted-foreground/60 outline-none transition-colors focus:border-primary/50 focus:ring-2 focus:ring-primary/20'
+const labelCls = 'mb-1 block text-[13px] font-medium text-foreground'
+const hintCls  = 'mt-1 text-[13px] text-muted-foreground'
 
 // ─── Shared primitives ────────────────────────────────────────────────────────
 
@@ -44,7 +46,7 @@ function SectionCard({ title, children, action }: { title?: string; children: Re
     <div className="rounded-xl border border-border bg-card p-4 shadow-sm">
       {(title || action) && (
         <div className="mb-4 flex items-center justify-between">
-          {title && <p className="text-[13px] font-semibold text-foreground">{title}</p>}
+          {title && <p className="text-[15px] font-semibold text-foreground">{title}</p>}
           {action}
         </div>
       )}
@@ -57,8 +59,8 @@ function Toggle({ checked, onChange, label, desc }: { checked: boolean; onChange
   return (
     <div className="flex items-center justify-between gap-4">
       <div className="min-w-0">
-        <p className="text-[12.5px] font-medium text-foreground">{label}</p>
-        {desc && <p className="text-[11.5px] leading-snug text-muted-foreground">{desc}</p>}
+        <p className="text-[14px] font-medium text-foreground">{label}</p>
+        {desc && <p className="text-[13px] leading-snug text-muted-foreground">{desc}</p>}
       </div>
       <button type="button" role="switch" aria-checked={checked} onClick={() => onChange(!checked)}
         className={cn('relative inline-flex h-[22px] w-10 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200', checked ? 'bg-primary' : 'bg-muted-foreground/30')}>
@@ -73,12 +75,12 @@ function ModeCard({ label, desc, selected, onClick, disabled }: { label: string;
     <button type="button" aria-pressed={selected} onClick={onClick} disabled={disabled}
       className={cn('flex flex-col gap-1 rounded-xl border-[1.5px] px-3.5 py-3 text-left transition-all duration-150', selected ? 'border-primary bg-primary/[0.03] shadow-sm' : 'border-border bg-card hover:border-primary/30 hover:bg-muted/[0.03]', disabled && 'cursor-not-allowed opacity-40')}>
       <div className="flex items-center justify-between gap-2">
-        <p className={cn('text-[12.5px] font-semibold', selected ? 'text-foreground' : 'text-foreground/80')}>{label}</p>
+        <p className={cn('text-[14px] font-semibold', selected ? 'text-foreground' : 'text-foreground/80')}>{label}</p>
         <div className={cn('flex size-[16px] shrink-0 items-center justify-center rounded-full border-2', selected ? 'border-primary bg-primary' : 'border-border')}>
           {selected && <div className="size-[8px] rounded-full bg-white" />}
         </div>
       </div>
-      {desc && <p className="text-[11.5px] leading-snug text-muted-foreground">{desc}</p>}
+      {desc && <p className="text-[13px] leading-snug text-muted-foreground">{desc}</p>}
     </button>
   )
 }
@@ -113,93 +115,30 @@ const BASE_TABS: { id: Tab; label: string; icon: typeof FileText }[] = [
   { id: 'seo',       label: 'SEO & Discovery',  icon: Globe     },
 ]
 
+const FIELD_TO_TAB: Record<string, Tab> = {
+  'rd-event-name':     'details',
+  'rd-start-date':     'venue',
+  'rd-venue-type':     'venue',
+  'rd-organizer-name': 'organizer',
+}
+
 // ─── Tab 1 — Details ─────────────────────────────────────────────────────────
 
 function Tab1Details({ form, update, uploadContext }: { form: EventDetailsDraft; update: (p: Partial<EventDetailsDraft>) => void; uploadContext?: { uid: string; draftId: string } }) {
-  const us = (p: Partial<StatusConfig>)      => update({ status:    { ...form.status, ...p } })
-  const ui = (p: Partial<EventInfo>)         => update({ info:      { ...form.info, ...p } })
-  const um = (p: Partial<MediaConfig>)       => update({ media:     { ...form.media, ...p } })
+  const ui = (p: Partial<EventInfo>)          => update({ info:      { ...form.info, ...p } })
+  const um = (p: Partial<MediaConfig>)        => update({ media:     { ...form.media, ...p } })
   const up = (p: Partial<PublicPageSettings>) => update({ publicPage:{ ...form.publicPage, ...p } })
-
-  const STATUS_OPTIONS: { id: EventStatus; desc: string }[] = [
-    { id: 'draft',     desc: 'Not visible to the public' },
-    { id: 'published', desc: 'Live — registrations open' },
-    { id: 'private',   desc: 'Live — access controlled'  },
-    { id: 'postponed', desc: 'Visible with postpone notice' },
-    { id: 'cancelled', desc: 'Visible with cancellation notice' },
-    { id: 'sold_out',  desc: 'Full — waitlist may be active' },
-    { id: 'archived',  desc: 'Event ended — read-only record' },
-  ]
-
-  const STATUS_COLORS: Record<EventStatus, string> = {
-    draft: 'bg-muted text-muted-foreground', published: 'bg-emerald-50 text-emerald-700',
-    private: 'bg-blue-50 text-blue-700', postponed: 'bg-amber-50 text-amber-700',
-    cancelled: 'bg-rose-50 text-rose-600', sold_out: 'bg-violet-50 text-violet-700',
-    archived: 'bg-muted/60 text-muted-foreground/60',
-  }
-
-  const THEMES: { id: string; label: string; desc: string }[] = [
-    { id: 'default',      label: 'Default',       desc: 'Clean white with primary accent'   },
-    { id: 'professional', label: 'Professional',   desc: 'Dark header, serif title, muted'  },
-    { id: 'modern',       label: 'Modern',         desc: 'Full-bleed banner, bold type'     },
-    { id: 'minimal',      label: 'Minimal',        desc: 'Whitespace-first, text-driven'    },
-    { id: 'vibrant',      label: 'Vibrant',        desc: 'Gradient header, high contrast'   },
-  ]
 
   return (
     <div className="flex flex-col gap-3">
-      {/* Event Status & Visibility */}
-      <SectionCard title="Event Status & Visibility">
-        <div className="flex flex-col gap-4">
-          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-            {STATUS_OPTIONS.slice(0, 4).map(opt => (
-              <ModeCard key={opt.id} label={EVENT_STATUS_LABELS[opt.id]} desc={opt.desc}
-                selected={form.status.status === opt.id} onClick={() => us({ status: opt.id })} />
-            ))}
-          </div>
-          <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
-            {STATUS_OPTIONS.slice(4).map(opt => (
-              <ModeCard key={opt.id} label={EVENT_STATUS_LABELS[opt.id]} desc={opt.desc}
-                selected={form.status.status === opt.id} onClick={() => us({ status: opt.id })} />
-            ))}
-          </div>
-          <AnimatePresence>
-            {form.status.status === 'postponed' && (
-              <motion.div key="postpone-fields" initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }} exit={{ height: 0, opacity: 0 }} transition={{ duration: 0.2 }} className="overflow-hidden">
-                <div className="flex flex-col gap-3 rounded-lg border border-amber-200/60 bg-amber-50/40 p-3">
-                  <div><label className={labelCls}>New Date (if known)</label><input type="date" className={inputCls} value={form.status.postponedDate} onChange={e => us({ postponedDate: e.target.value })} /></div>
-                  <div><label className={labelCls}>Message to Attendees</label><textarea className={cn(inputCls, 'h-20 resize-none py-2')} maxLength={300} value={form.status.postponedMessage} onChange={e => us({ postponedMessage: e.target.value })} placeholder="e.g. Due to unforeseen circumstances, the event has been postponed." /></div>
-                </div>
-              </motion.div>
-            )}
-            {form.status.status === 'cancelled' && (
-              <motion.div key="cancel-fields" initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }} exit={{ height: 0, opacity: 0 }} transition={{ duration: 0.2 }} className="overflow-hidden">
-                <div className="rounded-lg border border-rose-200/60 bg-rose-50/40 p-3">
-                  <label className={labelCls}>Cancellation Message</label>
-                  <textarea className={cn(inputCls, 'h-20 resize-none py-2')} maxLength={300} value={form.status.cancellationMessage} onChange={e => us({ cancellationMessage: e.target.value })} placeholder="e.g. We regret to inform you that this event has been cancelled." />
-                </div>
-              </motion.div>
-            )}
-          </AnimatePresence>
-          <Toggle checked={form.status.notifyRegistrantsOnStatusChange}
-            onChange={v => us({ notifyRegistrantsOnStatusChange: v })}
-            label="Notify registered attendees of status change"
-            desc="Sends an automated notification to all confirmed registrants" />
-          <div className="flex items-center gap-2 rounded-lg border border-border/60 bg-muted/[0.04] px-3 py-2">
-            <span className={cn('rounded-full px-2 py-0.5 text-[10.5px] font-semibold', STATUS_COLORS[form.status.status])}>{EVENT_STATUS_LABELS[form.status.status]}</span>
-            <p className="text-[11.5px] text-muted-foreground">Visibility is set in Step 2 — change it there if needed.</p>
-          </div>
-        </div>
-      </SectionCard>
-
       {/* Event Information */}
       <SectionCard title="Event Information">
         <div className="flex flex-col gap-3">
-          <div><label className={labelCls}>Event Name <span className="text-red-500">*</span></label><input className={inputCls} maxLength={120} value={form.info.name} onChange={e => ui({ name: e.target.value })} placeholder="e.g. TechFest India 2026" /></div>
+          <div><label className={labelCls} htmlFor="rd-event-name">Event Name <span className="text-red-500">*</span></label><input id="rd-event-name" className={inputCls} maxLength={120} value={form.info.name} onChange={e => ui({ name: e.target.value })} placeholder="e.g. TechFest India 2026" /></div>
           <div><label className={labelCls}>Tagline <span className={hintCls.replace('mt-1 ', '')}>(optional)</span></label><input className={inputCls} maxLength={100} value={form.info.tagline} onChange={e => ui({ tagline: e.target.value })} placeholder="e.g. India's largest developer conference" /></div>
           <div>
             <label className={labelCls}>Short Description <span className={hintCls.replace('mt-1 ', '')}>(shown in search &amp; cards — 300 chars)</span></label>
-            <div className="relative"><textarea className={cn(inputCls, 'h-20 resize-none py-2 pr-14')} maxLength={300} value={form.info.shortDesc} onChange={e => ui({ shortDesc: e.target.value })} placeholder="A brief overview of your event…" /><span className="pointer-events-none absolute bottom-2 right-3 text-[10.5px] text-muted-foreground">{form.info.shortDesc.length}/300</span></div>
+            <div className="relative"><textarea className={cn(inputCls, 'h-20 resize-none py-2 pr-14')} maxLength={300} value={form.info.shortDesc} onChange={e => ui({ shortDesc: e.target.value })} placeholder="A brief overview of your event…" /><span className="pointer-events-none absolute bottom-2 right-3 text-[12px] text-muted-foreground">{form.info.shortDesc.length}/300</span></div>
           </div>
           <div><label className={labelCls}>Full Description <span className={hintCls.replace('mt-1 ', '')}>(shown on event page — markdown supported)</span></label><textarea className={cn(inputCls, 'h-32 resize-none py-2')} value={form.info.fullDesc} onChange={e => ui({ fullDesc: e.target.value })} placeholder="Tell attendees everything about your event…" /></div>
           <div className="grid gap-3 sm:grid-cols-2">
@@ -218,7 +157,7 @@ function Tab1Details({ form, update, uploadContext }: { form: EventDetailsDraft;
       <BrandingMediaSection media={form.media} onChange={um} uploadContext={uploadContext} />
 
       {/* Public Page Settings */}
-      <SectionCard title="Public Page Settings" action={<span className="text-[11px] text-muted-foreground">Controls what appears on your event page</span>}>
+      <SectionCard title="Public Page Settings" action={<span className="text-[12px] text-muted-foreground">Controls what appears on your event page</span>}>
         <div className="flex flex-col gap-3">
           {([
             ['showOrganizerInfo', 'Show Organizer Information', 'Display organizer name, logo and contact'],
@@ -293,7 +232,7 @@ function Tab2VenueSchedule({
       {/* Venue */}
       <SectionCard title="Venue & Access">
         <div className="flex flex-col gap-4">
-          <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+          <div id="rd-venue-type" className="grid grid-cols-1 gap-2 sm:grid-cols-3">
             {([['physical','Physical',Building2,'In-person venue'],['online','Online',Video,'Virtual / live-stream'],['hybrid','Hybrid',Users,'Both physical & online']] as const).map(([id, label, Icon, desc]) => (
               <ModeCard key={id} label={label} desc={desc} selected={form.venue.type === id} onClick={() => uv({ type: id })} />
             ))}
@@ -340,7 +279,7 @@ function Tab2VenueSchedule({
                     <div>
                       <label className={labelCls}>Passcode <span className={hintCls.replace('mt-1 ', '')}>(optional)</span></label>
                       <input className={inputCls} type={showPass ? 'text' : 'password'} value={form.venue.online.passcode} onChange={e => uon({ passcode: e.target.value })} />
-                      <button type="button" onClick={() => setShowPass(v => !v)} className="mt-1 text-[11px] text-primary hover:underline">{showPass ? 'Hide' : 'Show'} passcode</button>
+                      <button type="button" onClick={() => setShowPass(v => !v)} className="mt-1 text-[12px] text-primary hover:underline">{showPass ? 'Hide' : 'Show'} passcode</button>
                     </div>
                   </div>
                   <Toggle checked={form.venue.online.revealAfterRegistration} onChange={v => uon({ revealAfterRegistration: v })} label="Reveal meeting link after registration" desc="Meeting URL is sent only in the confirmation message, not shown publicly" />
@@ -353,14 +292,14 @@ function Tab2VenueSchedule({
           {isPhysical && (
             <div className="overflow-hidden rounded-xl border border-border">
               <button type="button" onClick={() => setShowMaps(v => !v)} className="flex w-full items-center justify-between px-4 py-3 transition-colors hover:bg-muted/[0.03]">
-                <div className="flex items-center gap-2"><MapPin className="size-3.5 text-muted-foreground/50" aria-hidden /><p className="text-[12.5px] font-medium text-foreground">Venue Maps &amp; Layout <span className="ml-1 text-[11px] font-normal text-muted-foreground">(Optional)</span></p></div>
+                <div className="flex items-center gap-2"><MapPin className="size-3.5 text-muted-foreground/50" aria-hidden /><p className="text-[14px] font-medium text-foreground">Venue Maps &amp; Layout <span className="ml-1 text-[12px] font-normal text-muted-foreground">(Optional)</span></p></div>
                 <ChevronDown className={cn('size-4 text-muted-foreground transition-transform duration-200', showMaps && 'rotate-180')} aria-hidden />
               </button>
               <AnimatePresence>
                 {showMaps && (
                   <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }} exit={{ height: 0, opacity: 0 }} transition={{ duration: 0.2 }} className="overflow-hidden border-t border-border">
                     <div className="flex flex-col gap-3 p-4">
-                      <div className="flex items-start gap-2 rounded-lg border border-primary/10 bg-primary/[0.04] px-3 py-2"><Info className="mt-0.5 size-3.5 shrink-0 text-primary/70" aria-hidden /><p className="text-[11.5px] text-muted-foreground">Upload map images to help attendees navigate on the day.</p></div>
+                      <div className="flex items-start gap-2 rounded-lg border border-primary/10 bg-primary/[0.04] px-3 py-2"><Info className="mt-0.5 size-3.5 shrink-0 text-primary/70" aria-hidden /><p className="text-[13px] text-muted-foreground">Upload map images to help attendees navigate on the day.</p></div>
                       <ImageAssetInput label="Venue / Hall Layout" value={form.venue.physical.maps.layoutImageUrl} onChange={v => ump({ layoutImageUrl: v })} hint="Floor plan or hall layout image — PNG / JPG" />
                       <ImageAssetInput label="Parking Map" value={form.venue.physical.maps.parkingMapUrl} onChange={v => ump({ parkingMapUrl: v })} hint="Parking area map image" />
                       <ImageAssetInput label="Entry Gate Map" value={form.venue.physical.maps.entryGateMapUrl} onChange={v => ump({ entryGateMapUrl: v })} hint="Entry gate or directions map image" />
@@ -383,7 +322,7 @@ function Tab2VenueSchedule({
             </select>
           </div>
           <div className="grid grid-cols-2 gap-3">
-            <div><label className={labelCls}>Start Date <span className="text-red-500">*</span></label><input type="date" className={inputCls} value={form.schedule.startDate} onChange={e => us({ startDate: e.target.value })} /></div>
+            <div><label className={labelCls} htmlFor="rd-start-date">Start Date <span className="text-red-500">*</span></label><input id="rd-start-date" type="date" className={inputCls} value={form.schedule.startDate} onChange={e => us({ startDate: e.target.value })} /></div>
             <div><label className={labelCls}>Start Time <span className="text-red-500">*</span></label><input type="time" className={inputCls} value={form.schedule.startTime} onChange={e => us({ startTime: e.target.value })} /></div>
           </div>
           <div className="grid grid-cols-2 gap-3">
@@ -401,16 +340,16 @@ function Tab2VenueSchedule({
       </SectionCard>
 
       {/* Agenda Builder */}
-      <SectionCard title="Agenda" action={<span className="text-[11px] text-muted-foreground">{allSessions} session{allSessions !== 1 ? 's' : ''}</span>}>
+      <SectionCard title="Agenda" action={<span className="text-[12px] text-muted-foreground">{allSessions} session{allSessions !== 1 ? 's' : ''}</span>}>
         <div className="flex flex-col gap-3">
           <div className="flex items-start gap-2 rounded-lg border border-primary/10 bg-primary/[0.04] px-3 py-2">
             <Info className="mt-0.5 size-3.5 shrink-0 text-primary/70" aria-hidden />
-            <p className="text-[11.5px] text-muted-foreground">Agenda appears on your public event page. Add sessions, breaks and panels.</p>
+            <p className="text-[13px] text-muted-foreground">Agenda appears on your public event page. Add sessions, breaks and panels.</p>
           </div>
           {days.length === 0 ? (
             <div className="flex flex-col items-center gap-2 py-8 text-center">
               <Calendar className="size-8 text-muted-foreground/20" aria-hidden />
-              <p className="text-[12.5px] font-semibold text-foreground">Set event dates first</p>
+              <p className="text-[14px] font-semibold text-foreground">Set event dates first</p>
               <p className="text-[12px] text-muted-foreground">Add start and end dates above to build your agenda.</p>
             </div>
           ) : (
@@ -420,7 +359,7 @@ function Tab2VenueSchedule({
                 <div key={date} className="overflow-hidden rounded-xl border border-border">
                   {days.length > 1 && (
                     <div className="border-b border-border/70 bg-muted/[0.04] px-4 py-2">
-                      <p className="text-[12.5px] font-semibold text-foreground">{formatDayLabel(date, dayIdx)}</p>
+                      <p className="text-[14px] font-semibold text-foreground">{formatDayLabel(date, dayIdx)}</p>
                     </div>
                   )}
                   {daySessions.length > 0 && (
@@ -430,10 +369,10 @@ function Tab2VenueSchedule({
                           <GripVertical className="size-3 shrink-0 text-muted-foreground/25" aria-hidden />
                           <div className="min-w-0 flex-1">
                             <div className="flex flex-wrap items-center gap-1.5">
-                              <span className="text-[11.5px] font-medium text-foreground">{fmtTime(sess.startTime)}–{fmtTime(sess.endTime)}</span>
-                              <span className="rounded-full bg-muted/60 px-1.5 py-px text-[10px] font-medium text-muted-foreground">{SESSION_TYPE_LABELS[sess.type]}</span>
+                              <span className="text-[13px] font-medium text-foreground">{fmtTime(sess.startTime)}–{fmtTime(sess.endTime)}</span>
+                              <span className="rounded-full bg-muted/60 px-1.5 py-px text-[12px] font-medium text-muted-foreground">{SESSION_TYPE_LABELS[sess.type]}</span>
                               <span className="truncate text-[12px] text-foreground">{sess.title || <em className="text-muted-foreground/40">Untitled</em>}</span>
-                              {sess.location && <span className="text-[10.5px] text-muted-foreground">· {sess.location}</span>}
+                              {sess.location && <span className="text-[12px] text-muted-foreground">· {sess.location}</span>}
                             </div>
                           </div>
                           <div className="flex items-center gap-0.5">
@@ -476,7 +415,7 @@ function Tab3Organizer({ form, update }: { form: EventDetailsDraft; update: (p: 
       <SectionCard title="Organizer Information">
         <div className="flex flex-col gap-3">
           <div className="grid gap-3 sm:grid-cols-2">
-            <div><label className={labelCls}>Organizer Name <span className="text-red-500">*</span></label><input className={inputCls} value={form.organizer.name} onChange={e => uo({ name: e.target.value })} placeholder="e.g. TechFest Foundation" /></div>
+            <div><label className={labelCls} htmlFor="rd-organizer-name">Organizer Name <span className="text-red-500">*</span></label><input id="rd-organizer-name" className={inputCls} value={form.organizer.name} onChange={e => uo({ name: e.target.value })} placeholder="e.g. TechFest Foundation" /></div>
             <div><label className={labelCls}>Organizer Email <span className="text-red-500">*</span></label><input type="email" className={inputCls} value={form.organizer.email} onChange={e => uo({ email: e.target.value })} placeholder="organizer@example.com" /></div>
           </div>
           <div className="grid gap-3 sm:grid-cols-2">
@@ -540,8 +479,6 @@ function Tab3Organizer({ form, update }: { form: EventDetailsDraft; update: (p: 
 function Tab4Communication({ form, update }: { form: EventDetailsDraft; update: (p: Partial<EventDetailsDraft>) => void }) {
   const uc  = (p: Partial<CommunicationConfig>) => update({ communication: { ...form.communication, ...p } })
   const ucf = (p: Partial<typeof form.communication.confirmation>) => uc({ confirmation: { ...form.communication.confirmation, ...p } })
-  const [tplTab,  setTplTab]  = useState<'ce'|'cw'|'cs'|'re'|'rw'>('ce')
-  const [tplOpen, setTplOpen] = useState(false)
 
   const CHANNELS: { id: CommChannel; label: string }[] = [
     { id: 'email',    label: 'Email'    },
@@ -561,19 +498,6 @@ function Tab4Communication({ form, update }: { form: EventDetailsDraft; update: 
   }
 
   const REMINDER_LABELS: Record<string, string> = { '7d': '7 Days Before', '3d': '3 Days Before', '1d': '1 Day Before', '2h': '2 Hours Before', custom: 'Custom' }
-
-  const TPL_TABS = [
-    { id: 'ce' as const, label: 'Conf. Email' },
-    { id: 'cw' as const, label: 'Conf. WhatsApp' },
-    { id: 're' as const, label: 'Reminder Email' },
-    { id: 'rw' as const, label: 'Reminder WhatsApp' },
-  ]
-
-  const tplKey = {
-    ce: 'confirmationEmail', cw: 'confirmationWhatsApp', cs: 'confirmationSms', re: 'reminderEmail', rw: 'reminderWhatsApp',
-  } as const
-
-  const tpl = form.communication.templates[tplKey[tplTab] as keyof typeof form.communication.templates]
 
   return (
     <div className="flex flex-col gap-3">
@@ -611,7 +535,7 @@ function Tab4Communication({ form, update }: { form: EventDetailsDraft; update: 
                   const on = rule.channels.includes(ch.id)
                   return (
                     <button key={ch.id} type="button" onClick={() => toggleReminderChannel(rule.id, ch.id)}
-                      className={cn('rounded-full border px-2 py-0.5 text-[11px] font-medium transition-colors', on ? 'border-primary bg-primary/10 text-primary' : 'border-border/50 text-muted-foreground/60 hover:border-primary/30')}>
+                      className={cn('rounded-full border px-2 py-0.5 text-[12px] font-medium transition-colors', on ? 'border-primary bg-primary/10 text-primary' : 'border-border/50 text-muted-foreground/60 hover:border-primary/30')}>
                       {ch.label}
                     </button>
                   )
@@ -627,53 +551,14 @@ function Tab4Communication({ form, update }: { form: EventDetailsDraft; update: 
         </div>
       </SectionCard>
 
-      <SectionCard title="Certificate & Badge">
-        <div className="flex flex-col gap-3">
-          <Toggle checked={form.communication.certificate.enabled} onChange={v => uc({ certificate: { ...form.communication.certificate, enabled: v } })} label="Issue Attendance Certificate" desc="PDF certificate sent with confirmation or on check-in" />
-          {form.communication.certificate.enabled && (
-            <div><label className={labelCls}>Certificate Template</label>
-              <select className={inputCls} value={form.communication.certificate.template} onChange={e => uc({ certificate: { ...form.communication.certificate, template: e.target.value as 'default'|'custom' } })}>
-                <option value="default">Default RegisterDesk Template</option>
-                <option value="custom">Custom Template (upload later)</option>
-              </select>
-            </div>
-          )}
+      <div className="flex items-start gap-3 rounded-xl border border-blue-200/60 bg-blue-50/50 px-4 py-3.5">
+        <Info className="mt-0.5 size-4 shrink-0 text-blue-500" aria-hidden />
+        <div>
+          <p className="text-[13px] font-semibold text-blue-900">Advanced Communication Settings</p>
+          <p className="mt-0.5 text-[12px] leading-relaxed text-blue-700">
+            Default notification templates will be used during registration and reminders. You can customise email templates, WhatsApp templates, SMS templates, and certificates from the <span className="font-medium">Communications</span> module after the event is created.
+          </p>
         </div>
-      </SectionCard>
-
-      {/* Templates — collapsible */}
-      <div className="overflow-hidden rounded-xl border border-border">
-        <button type="button" onClick={() => setTplOpen(v => !v)} className="flex w-full items-center justify-between px-4 py-3.5 hover:bg-muted/[0.03]">
-          <div className="flex items-center gap-2"><Settings2 className="size-4 text-muted-foreground" aria-hidden /><p className="text-[13px] font-semibold text-foreground">Custom Message Templates</p><span className="rounded-full bg-muted/60 px-2 py-px text-[10.5px] text-muted-foreground">Advanced</span></div>
-          <ChevronDown className={cn('size-4 text-muted-foreground transition-transform', tplOpen && 'rotate-180')} aria-hidden />
-        </button>
-        <AnimatePresence>
-          {tplOpen && (
-            <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }} exit={{ height: 0, opacity: 0 }} transition={{ duration: 0.2 }} className="overflow-hidden border-t border-border">
-              <div className="p-4">
-                <div className="mb-3 flex overflow-x-auto border-b border-border/70">
-                  {TPL_TABS.map(t => (
-                    <button key={t.id} type="button" onClick={() => setTplTab(t.id)}
-                      className={cn('shrink-0 whitespace-nowrap border-b-2 px-3 py-2 text-[11.5px] font-medium transition-colors', tplTab === t.id ? 'border-primary text-primary' : 'border-transparent text-muted-foreground hover:text-foreground')}>
-                      {t.label}
-                    </button>
-                  ))}
-                </div>
-                {tplTab === 'ce' && <div className="mb-2"><label className={labelCls}>Subject</label><input className={inputCls} value={tpl.subject} onChange={e => uc({ templates: { ...form.communication.templates, [tplKey[tplTab]]: { ...tpl, subject: e.target.value, isCustom: true } } })} placeholder="Your registration is confirmed — {{event_name}}" /></div>}
-                <div>
-                  <label className={labelCls}>Message Body</label>
-                  <textarea className={cn(inputCls, 'h-36 resize-none py-2 font-mono text-[11.5px]')} value={tpl.body} onChange={e => uc({ templates: { ...form.communication.templates, [tplKey[tplTab]]: { ...tpl, body: e.target.value, isCustom: true } } })} placeholder="Hi {{attendee_name}},&#10;Your registration for {{event_name}} is confirmed!&#10;Date: {{event_date}}" />
-                  <p className={hintCls}>Available tokens: <code className="text-primary">{'{{attendee_name}}'}</code> <code className="text-primary">{'{{event_name}}'}</code> <code className="text-primary">{'{{event_date}}'}</code> <code className="text-primary">{'{{venue}}'}</code> <code className="text-primary">{'{{pass_name}}'}</code> <code className="text-primary">{'{{qr_code_url}}'}</code></p>
-                </div>
-                {tpl.isCustom && (
-                  <button type="button" onClick={() => uc({ templates: { ...form.communication.templates, [tplKey[tplTab]]: { subject: '', body: '', isCustom: false } } })} className="mt-2 text-[11.5px] text-muted-foreground hover:text-foreground">
-                    Reset to default template
-                  </button>
-                )}
-              </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
       </div>
     </div>
   )
@@ -683,7 +568,6 @@ function Tab4Communication({ form, update }: { form: EventDetailsDraft; update: 
 
 function Tab5SEO({ form, update }: { form: EventDetailsDraft; update: (p: Partial<EventDetailsDraft>) => void }) {
   const us = (p: Partial<SeoConfig>) => update({ seo: { ...form.seo, ...p } })
-  const [intOpen, setIntOpen] = useState(false)
   const [seoPreviewTab, setSeoPreviewTab] = useState<'google'|'social'>('google')
 
   const slug     = form.seo.urlSlug   || form.info.name && slugify(form.info.name)
@@ -699,19 +583,19 @@ function Tab5SEO({ form, update }: { form: EventDetailsDraft; update: (p: Partia
             <label className={labelCls}>Event URL Slug <span className="text-red-500">*</span></label>
             <div className="flex items-center gap-0 overflow-hidden rounded-lg border border-border focus-within:border-primary/50 focus-within:ring-2 focus-within:ring-primary/20">
               <span className="shrink-0 whitespace-nowrap bg-muted/40 px-3 py-2 text-[12px] text-muted-foreground">registerdesk.co/e/</span>
-              <input className="h-9 flex-1 bg-background px-2 text-[12.5px] text-foreground outline-none" value={form.seo.urlSlug} onChange={e => us({ urlSlug: e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, '') })} placeholder="event-name-2026" />
-              <button type="button" onClick={() => us({ urlSlug: slugify(form.info.name) })} className="mr-1 flex items-center gap-1 rounded px-2 py-1 text-[11px] text-primary hover:bg-primary/10">
+              <input className="h-9 flex-1 bg-background px-2 text-[13px] text-foreground outline-none" value={form.seo.urlSlug} onChange={e => us({ urlSlug: e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, '') })} placeholder="event-name-2026" />
+              <button type="button" onClick={() => us({ urlSlug: slugify(form.info.name) })} className="mr-1 flex items-center gap-1 rounded px-2 py-1 text-[12px] text-primary hover:bg-primary/10">
                 <RefreshCw className="size-3" aria-hidden />Auto
               </button>
             </div>
-            {form.seo.urlSlug && !/^[a-z0-9-]+$/.test(form.seo.urlSlug) && <p className="mt-1 text-[11px] text-red-500">Only lowercase letters, numbers and hyphens allowed.</p>}
+            {form.seo.urlSlug && !/^[a-z0-9-]+$/.test(form.seo.urlSlug) && <p className="mt-1 text-[12px] text-red-500">Only lowercase letters, numbers and hyphens allowed.</p>}
           </div>
           <div>
-            <div className="flex items-center justify-between"><label className={labelCls}>Meta Title</label><span className="text-[10.5px] text-muted-foreground">{(form.seo.metaTitle || title).length}/60</span></div>
+            <div className="flex items-center justify-between"><label className={labelCls}>Meta Title</label><span className="text-[12px] text-muted-foreground">{(form.seo.metaTitle || title).length}/60</span></div>
             <input className={inputCls} maxLength={60} value={form.seo.metaTitle} onChange={e => us({ metaTitle: e.target.value })} placeholder={form.info.name || 'Your event name'} />
           </div>
           <div>
-            <div className="flex items-center justify-between"><label className={labelCls}>Meta Description</label><span className="text-[10.5px] text-muted-foreground">{(form.seo.metaDescription || desc).length}/160</span></div>
+            <div className="flex items-center justify-between"><label className={labelCls}>Meta Description</label><span className="text-[12px] text-muted-foreground">{(form.seo.metaDescription || desc).length}/160</span></div>
             <textarea className={cn(inputCls, 'h-20 resize-none py-2')} maxLength={160} value={form.seo.metaDescription} onChange={e => us({ metaDescription: e.target.value })} placeholder={form.info.shortDesc || 'Brief event description for search results'} />
           </div>
           <div>
@@ -752,48 +636,21 @@ function Tab5SEO({ form, update }: { form: EventDetailsDraft; update: (p: Partia
               {imgUrl ? <img src={imgUrl} alt="" className="h-full w-full object-cover" onError={e => { e.currentTarget.style.display = 'none' }} /> : <div className="flex h-full items-center justify-center"><p className="text-[12px] text-muted-foreground/50">No image — add a cover banner or share image</p></div>}
             </div>
             <div className="border-t border-border/60 bg-card p-3">
-              <p className="text-[10.5px] uppercase tracking-wider text-muted-foreground/60">registerdesk.co</p>
-              <p className="mt-0.5 text-[13px] font-semibold text-foreground">{(title || 'Your Event Name').slice(0, 60)}</p>
-              <p className="mt-0.5 text-[11.5px] leading-snug text-muted-foreground">{(desc || 'Event description').slice(0, 100)}</p>
+              <p className="text-[12px] uppercase tracking-wider text-muted-foreground/60">registerdesk.co</p>
+              <p className="mt-0.5 text-[15px] font-semibold text-foreground">{(title || 'Your Event Name').slice(0, 60)}</p>
+              <p className="mt-0.5 text-[13px] leading-snug text-muted-foreground">{(desc || 'Event description').slice(0, 100)}</p>
             </div>
           </div>
         )}
       </SectionCard>
 
-      {/* Integrations — Coming Soon */}
-      <div className="overflow-hidden rounded-xl border border-border">
-        <button type="button" onClick={() => setIntOpen(v => !v)} className="flex w-full items-center justify-between px-4 py-3.5 hover:bg-muted/[0.03]">
-          <div className="flex items-center gap-2"><Zap className="size-4 text-muted-foreground" aria-hidden /><p className="text-[13px] font-semibold text-foreground">Integrations</p><span className="rounded-full bg-amber-50 px-2 py-px text-[10.5px] font-semibold text-amber-600">Coming Soon</span></div>
-          <ChevronDown className={cn('size-4 text-muted-foreground transition-transform', intOpen && 'rotate-180')} aria-hidden />
-        </button>
-        <AnimatePresence>
-          {intOpen && (
-            <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }} exit={{ height: 0, opacity: 0 }} transition={{ duration: 0.2 }} className="overflow-hidden border-t border-border">
-              <div className="p-4">
-                <div className="mb-4 flex items-start gap-2 rounded-lg border border-primary/10 bg-primary/[0.04] px-3 py-2"><Info className="mt-0.5 size-3.5 shrink-0 text-primary/70" aria-hidden /><p className="text-[11.5px] text-muted-foreground">Integrations are in development. Fields are shown for preview only and are not yet active.</p></div>
-                <div className="grid gap-3 sm:grid-cols-2">
-                  {[
-                    ['Webhook URL', 'webhookUrl', 'https://your-app.com/webhook'],
-                    ['Zapier Catch Hook URL', 'zapierWebhookUrl', 'https://hooks.zapier.com/...'],
-                    ['Google Analytics 4 ID', 'googleAnalyticsId', 'G-XXXXXXXXXX'],
-                    ['Meta Pixel ID', 'metaPixelId', '123456789'],
-                  ].map(([label, , ph]) => (
-                    <div key={label}>
-                      <label className={labelCls}>{label} <span className="ml-1 rounded bg-muted px-1 py-px text-[9px] font-semibold uppercase tracking-wider text-muted-foreground">Disabled</span></label>
-                      <input disabled className={cn(inputCls, 'cursor-not-allowed opacity-50')} placeholder={ph} />
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
-      </div>
     </div>
   )
 }
 
 // ─── Tab 6 — Dynamic Event-Type Sections ──────────────────────────────────────
+
+type SpeakerCtx = 'conference' | 'workshop' | 'cultural' | 'awards'
 
 function Tab6Dynamic({
   form, update, tab6Config,
@@ -802,27 +659,29 @@ function Tab6Dynamic({
   form:          EventDetailsDraft
   update:        (p: Partial<EventDetailsDraft>) => void
   tab6Config:    Tab6Config
-  onAddSpeaker:  (ctx: 'conference' | 'workshop' | 'cultural') => void
-  onEditSpeaker: (s: Speaker, ctx: 'conference' | 'workshop' | 'cultural') => void
+  onAddSpeaker:  (ctx: SpeakerCtx) => void
+  onEditSpeaker: (s: Speaker, ctx: SpeakerCtx) => void
   onAddSponsor:  () => void
   onEditSponsor: (s: Sponsor) => void
 }) {
   const utd = (d: typeof form.typeDetails) => update({ typeDetails: d })
   const t   = tab6Config.sectionType
 
-  const SpeakerList = ({ speakers, ctx, onDelete }: { speakers: Speaker[]; ctx: 'conference'|'workshop'|'cultural'; onDelete: (id: string) => void }) => (
+  const SpeakerList = ({ speakers, ctx, onDelete }: { speakers: Speaker[]; ctx: SpeakerCtx; onDelete: (id: string) => void }) => (
     <div>
       {speakers.length === 0 ? (
         <div className="mb-3 flex flex-col items-center gap-2 rounded-xl border border-dashed border-border bg-muted/[0.03] py-8 text-center">
           <Mic className="size-6 text-muted-foreground/30" aria-hidden />
-          <p className="text-[12px] text-muted-foreground">No {ctx === 'workshop' ? 'trainers' : ctx === 'cultural' ? 'artists' : 'speakers'} added yet</p>
+          <p className="text-[12px] text-muted-foreground">
+            No {ctx === 'workshop' ? 'trainers' : ctx === 'cultural' ? 'artists' : ctx === 'awards' ? 'judges' : 'speakers'} added yet
+          </p>
         </div>
       ) : (
         <div className="mb-3 overflow-hidden rounded-xl border border-border">
-          {speakers.map((s, i) => (
+          {speakers.map((s) => (
             <div key={s.id} className="flex items-center gap-3 border-b border-border/30 px-4 py-2.5 last:border-0 hover:bg-muted/[0.03]">
               <div className="flex size-8 shrink-0 items-center justify-center rounded-full bg-primary/10 text-[12px] font-bold text-primary">{s.name?.[0]?.toUpperCase() || '?'}</div>
-              <div className="min-w-0 flex-1"><p className="truncate text-[12.5px] font-medium text-foreground">{s.name || 'Unnamed'}</p><p className="text-[11.5px] text-muted-foreground">{[s.title, s.company].filter(Boolean).join(' · ')}</p></div>
+              <div className="min-w-0 flex-1"><p className="truncate text-[14px] font-medium text-foreground">{s.name || 'Unnamed'}</p><p className="text-[13px] text-muted-foreground">{[s.title, s.company].filter(Boolean).join(' · ')}</p></div>
               <div className="flex items-center gap-0.5">
                 <button type="button" onClick={() => onEditSpeaker(s, ctx)} className="flex size-6 items-center justify-center rounded text-muted-foreground/40 hover:bg-primary/10 hover:text-primary"><Pencil className="size-3" aria-hidden /></button>
                 <button type="button" onClick={() => onDelete(s.id)} className="flex size-6 items-center justify-center rounded text-muted-foreground/40 hover:bg-red-50 hover:text-red-500"><Trash2 className="size-3" aria-hidden /></button>
@@ -838,76 +697,90 @@ function Tab6Dynamic({
     </div>
   )
 
+  // ── Shared Sponsors section — reads from form.sponsors (top-level) ──────────
+  const sponsorList = form.sponsors ?? []
+  const SponsorListSection = () => (
+    <SectionCard title="Sponsors">
+      <div>
+        {sponsorList.length === 0 ? (
+          <div className="mb-3 flex flex-col items-center gap-2 rounded-xl border border-dashed border-border bg-muted/[0.03] py-8 text-center">
+            <Star className="size-6 text-muted-foreground/30" aria-hidden />
+            <p className="text-[12px] text-muted-foreground">No sponsors added yet</p>
+          </div>
+        ) : (
+          <div className="mb-3 overflow-hidden rounded-xl border border-border">
+            {sponsorList.map(s => (
+              <div key={s.id} className="flex items-center gap-3 border-b border-border/30 px-4 py-2.5 last:border-0 hover:bg-muted/[0.03]">
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-[14px] font-medium text-foreground">{s.name}</p>
+                  <p className="text-[13px] text-muted-foreground">{SPONSOR_TIER_LABELS[s.tier]}</p>
+                </div>
+                <div className="flex items-center gap-0.5">
+                  <button type="button" onClick={() => onEditSponsor(s)} className="flex size-6 items-center justify-center rounded text-muted-foreground/40 hover:bg-primary/10 hover:text-primary"><Pencil className="size-3" aria-hidden /></button>
+                  <button type="button" onClick={() => update({ sponsors: sponsorList.filter(sp => sp.id !== s.id) })} className="flex size-6 items-center justify-center rounded text-muted-foreground/40 hover:bg-red-50 hover:text-red-500"><Trash2 className="size-3" aria-hidden /></button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+        <button type="button" onClick={onAddSponsor} className={cn(buttonVariants({ variant: 'outline', size: 'sm' }), 'gap-1.5 text-primary')}>
+          <Plus className="size-3.5" aria-hidden />Add Sponsor
+        </button>
+      </div>
+    </SectionCard>
+  )
+
+  // ── Type-specific content (assigned; rendered alongside shared sponsors) ────
+  let typeContent: React.ReactNode = null
+
   if (t === 'conference') {
     const conf = (form.typeDetails ?? makeBlankTypeDetails('conference')) as ConferenceDetails
     const setConf = (p: Partial<ConferenceDetails>) => utd({ ...conf, ...p })
-    return (
-      <div className="flex flex-col gap-3">
+    typeContent = (
+      <>
         <SectionCard title="Speakers"><SpeakerList speakers={conf.speakers} ctx="conference" onDelete={id => setConf({ speakers: conf.speakers.filter(s => s.id !== id) })} /></SectionCard>
-        <SectionCard title="Sponsors">
-          <div>
-            {conf.sponsors.length === 0 ? (
-              <div className="mb-3 flex flex-col items-center gap-2 rounded-xl border border-dashed border-border bg-muted/[0.03] py-8 text-center"><Star className="size-6 text-muted-foreground/30" aria-hidden /><p className="text-[12px] text-muted-foreground">No sponsors added yet</p></div>
-            ) : (
-              <div className="mb-3 overflow-hidden rounded-xl border border-border">
-                {conf.sponsors.map(s => (
-                  <div key={s.id} className="flex items-center gap-3 border-b border-border/30 px-4 py-2.5 last:border-0 hover:bg-muted/[0.03]">
-                    <div className="min-w-0 flex-1"><p className="truncate text-[12.5px] font-medium text-foreground">{s.name}</p><p className="text-[11.5px] text-muted-foreground">{SPONSOR_TIER_LABELS[s.tier]}</p></div>
-                    <div className="flex items-center gap-0.5">
-                      <button type="button" onClick={() => onEditSponsor(s)} className="flex size-6 items-center justify-center rounded text-muted-foreground/40 hover:bg-primary/10 hover:text-primary"><Pencil className="size-3" aria-hidden /></button>
-                      <button type="button" onClick={() => setConf({ sponsors: conf.sponsors.filter(sp => sp.id !== s.id) })} className="flex size-6 items-center justify-center rounded text-muted-foreground/40 hover:bg-red-50 hover:text-red-500"><Trash2 className="size-3" aria-hidden /></button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-            <button type="button" onClick={onAddSponsor} className={cn(buttonVariants({ variant: 'outline', size: 'sm' }), 'gap-1.5 text-primary')}><Plus className="size-3.5" aria-hidden />Add Sponsor</button>
-          </div>
-        </SectionCard>
         <SectionCard title="Conference Tracks">
           <div>
             {conf.tracks.map(tr => (
               <div key={tr.id} className="flex items-center gap-3 border-b border-border/30 py-2 last:border-0">
-                <input type="color" className="h-7 w-8 cursor-pointer rounded border border-border p-0.5" value={tr.color} onChange={e => setConf({ tracks: conf.tracks.map(t => t.id === tr.id ? { ...t, color: e.target.value } : t) })} />
-                <input className={cn(inputCls, 'flex-1')} value={tr.name} onChange={e => setConf({ tracks: conf.tracks.map(t => t.id === tr.id ? { ...t, name: e.target.value } : t) })} placeholder="Track name" />
+                <input type="color" className="h-7 w-8 cursor-pointer rounded border border-border p-0.5" value={tr.color} onChange={e => setConf({ tracks: conf.tracks.map(tk => tk.id === tr.id ? { ...tk, color: e.target.value } : tk) })} />
+                <input className={cn(inputCls, 'flex-1')} value={tr.name} onChange={e => setConf({ tracks: conf.tracks.map(tk => tk.id === tr.id ? { ...tk, name: e.target.value } : tk) })} placeholder="Track name" />
                 <button type="button" onClick={() => setConf({ tracks: conf.tracks.filter(tt => tt.id !== tr.id) })} className="flex size-7 items-center justify-center rounded text-muted-foreground/40 hover:bg-red-50 hover:text-red-500"><Trash2 className="size-3" aria-hidden /></button>
               </div>
             ))}
             <button type="button" onClick={() => setConf({ tracks: [...conf.tracks, { id: makeTrackId(), name: '', color: '#6366f1' }] })} className={cn(buttonVariants({ variant: 'outline', size: 'sm' }), 'mt-2 gap-1.5 border-dashed border-primary/30 text-primary/70 w-full')}><Plus className="size-3" aria-hidden />Add Track</button>
           </div>
         </SectionCard>
-      </div>
+      </>
     )
   }
 
-  if (t === 'sports_running') {
+  else if (t === 'sports_running') {
     const d = (form.typeDetails ?? makeBlankTypeDetails('sports_running')) as import('@/components/wizard/eventDetailsConfig').SportsRunningDetails
     const set = (p: Partial<typeof d>) => utd({ ...d, ...p })
-    return (
-      <div className="flex flex-col gap-3">
-        <SectionCard title="Running Event Details">
-          <div className="flex flex-col gap-3">
-            <UrlField label="Route Map URL" value={d.routeMapUrl} onChange={v => set({ routeMapUrl: v })} />
-            <div className="grid gap-3 sm:grid-cols-2">
-              <div><label className={labelCls}>Reporting Time</label><input className={inputCls} value={d.reportingTime} onChange={e => set({ reportingTime: e.target.value })} placeholder="e.g. 5:00 AM at Start Line" /></div>
-              <div><label className={labelCls}>Kit Collection Date</label><input type="date" className={inputCls} value={d.kitCollectionDate} onChange={e => set({ kitCollectionDate: e.target.value })} /></div>
-            </div>
-            <div><label className={labelCls}>Kit Collection Info</label><textarea className={cn(inputCls,'h-16 resize-none py-2')} value={d.kitCollectionInfo} onChange={e => set({ kitCollectionInfo: e.target.value })} /></div>
-            <div><label className={labelCls}>Bag Deposit Info</label><textarea className={cn(inputCls,'h-16 resize-none py-2')} value={d.bagDepositInfo} onChange={e => set({ bagDepositInfo: e.target.value })} /></div>
-            <div><label className={labelCls}>Medical Support Info</label><textarea className={cn(inputCls,'h-16 resize-none py-2')} value={d.medicalSupportInfo} onChange={e => set({ medicalSupportInfo: e.target.value })} /></div>
-            <div><label className={labelCls}>Hydration Points</label><input className={inputCls} value={d.hydrationPoints} onChange={e => set({ hydrationPoints: e.target.value })} placeholder="e.g. Every 2.5 km, km 5, km 10, km 15" /></div>
-            <div><label className={labelCls}>Start Line Info</label><input className={inputCls} value={d.startLineInfo} onChange={e => set({ startLineInfo: e.target.value })} /></div>
-            <UrlField label="Rules URL" value={d.rulesUrl} onChange={v => set({ rulesUrl: v })} />
+    typeContent = (
+      <SectionCard title="Running Event Details">
+        <div className="flex flex-col gap-3">
+          <UrlField label="Route Map URL" value={d.routeMapUrl} onChange={v => set({ routeMapUrl: v })} />
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div><label className={labelCls}>Reporting Time</label><input className={inputCls} value={d.reportingTime} onChange={e => set({ reportingTime: e.target.value })} placeholder="e.g. 5:00 AM at Start Line" /></div>
+            <div><label className={labelCls}>Kit Collection Date</label><input type="date" className={inputCls} value={d.kitCollectionDate} onChange={e => set({ kitCollectionDate: e.target.value })} /></div>
           </div>
-        </SectionCard>
-      </div>
+          <div><label className={labelCls}>Kit Collection Info</label><textarea className={cn(inputCls,'h-16 resize-none py-2')} value={d.kitCollectionInfo} onChange={e => set({ kitCollectionInfo: e.target.value })} /></div>
+          <div><label className={labelCls}>Bag Deposit Info</label><textarea className={cn(inputCls,'h-16 resize-none py-2')} value={d.bagDepositInfo} onChange={e => set({ bagDepositInfo: e.target.value })} /></div>
+          <div><label className={labelCls}>Medical Support Info</label><textarea className={cn(inputCls,'h-16 resize-none py-2')} value={d.medicalSupportInfo} onChange={e => set({ medicalSupportInfo: e.target.value })} /></div>
+          <div><label className={labelCls}>Hydration Points</label><input className={inputCls} value={d.hydrationPoints} onChange={e => set({ hydrationPoints: e.target.value })} placeholder="e.g. Every 2.5 km, km 5, km 10, km 15" /></div>
+          <div><label className={labelCls}>Start Line Info</label><input className={inputCls} value={d.startLineInfo} onChange={e => set({ startLineInfo: e.target.value })} /></div>
+          <UrlField label="Rules URL" value={d.rulesUrl} onChange={v => set({ rulesUrl: v })} />
+        </div>
+      </SectionCard>
     )
   }
 
-  if (t === 'sports_team' || t === 'sports_cycling' || t === 'sports_generic') {
+  else if (t === 'sports_team' || t === 'sports_cycling' || t === 'sports_generic') {
     const d = (form.typeDetails ?? makeBlankTypeDetails(t)) as import('@/components/wizard/eventDetailsConfig').TeamSportDetails
     const set = (p: Partial<typeof d>) => utd({ ...d, ...p })
-    return (
+    typeContent = (
       <SectionCard title={t === 'sports_cycling' ? 'Cycling Details' : 'Match Details'}>
         <div className="flex flex-col gap-3">
           <div><label className={labelCls}>{t === 'sports_cycling' ? 'Route Info' : 'Ground / Court Info'}</label><textarea className={cn(inputCls,'h-16 resize-none py-2')} value={d.groundInfo} onChange={e => set({ groundInfo: e.target.value })} /></div>
@@ -924,11 +797,11 @@ function Tab6Dynamic({
     )
   }
 
-  if (t === 'workshop') {
+  else if (t === 'workshop') {
     const d = (form.typeDetails ?? makeBlankTypeDetails('workshop')) as WorkshopDetails
     const set = (p: Partial<WorkshopDetails>) => utd({ ...d, ...p })
-    return (
-      <div className="flex flex-col gap-3">
+    typeContent = (
+      <>
         <SectionCard title="Trainers"><SpeakerList speakers={d.trainers} ctx="workshop" onDelete={id => set({ trainers: d.trainers.filter(s => s.id !== id) })} /></SectionCard>
         <SectionCard title="Workshop Details">
           <div className="flex flex-col gap-3">
@@ -938,17 +811,18 @@ function Tab6Dynamic({
               <div><label className={labelCls}>Materials Included</label><textarea className={cn(inputCls,'h-16 resize-none py-2')} value={d.materialsIncluded} onChange={e => set({ materialsIncluded: e.target.value })} /></div>
               <div><label className={labelCls}>Software Required</label><input className={inputCls} value={d.softwareRequired} onChange={e => set({ softwareRequired: e.target.value })} /><div><label className={labelCls + ' mt-2'}>Batch Size</label><input type="number" min={1} className={inputCls} value={d.batchSize ?? ''} onChange={e => set({ batchSize: e.target.value ? Number(e.target.value) : null })} /></div></div>
             </div>
+            <Toggle checked={d.hasCertificate ?? false} onChange={v => set({ hasCertificate: v })} label="Issue Certificate" desc="Award a certificate of completion to attendees who meet eligibility criteria" />
           </div>
         </SectionCard>
-      </div>
+      </>
     )
   }
 
   // ── Meetup ────────────────────────────────────────────────────────────────
-  if (t === 'meetup_founder') {
+  else if (t === 'meetup_founder') {
     const d = (form.typeDetails ?? makeBlankTypeDetails('meetup_founder')) as import('@/components/wizard/eventDetailsConfig').MeetupFounderDetails
     const set = (p: Partial<typeof d>) => utd({ ...d, ...p })
-    return (
+    typeContent = (
       <SectionCard title="Founder Circle Details">
         <div className="flex flex-col gap-3">
           <Toggle checked={d.startupShowcaseEnabled} onChange={v => set({ startupShowcaseEnabled: v })} label="Startup Showcase" desc="Dedicated showcase area for startups to demo their products" />
@@ -960,10 +834,10 @@ function Tab6Dynamic({
     )
   }
 
-  if (t === 'meetup_corporate') {
+  else if (t === 'meetup_corporate') {
     const d = (form.typeDetails ?? makeBlankTypeDetails('meetup_corporate')) as import('@/components/wizard/eventDetailsConfig').MeetupCorporateDetails
     const set = (p: Partial<typeof d>) => utd({ ...d, ...p })
-    return (
+    typeContent = (
       <SectionCard title="Corporate Meetup Details">
         <div className="flex flex-col gap-3">
           <div><label className={labelCls}>Guest Speakers <span className={hintCls.replace('mt-1 ','')}>(comma-separated names)</span></label><input className={inputCls} value={d.guestSpeakers.join(', ')} onChange={e => set({ guestSpeakers: e.target.value.split(',').map(s => s.trim()).filter(Boolean) })} /></div>
@@ -973,10 +847,10 @@ function Tab6Dynamic({
     )
   }
 
-  if (t === 'meetup_alumni') {
+  else if (t === 'meetup_alumni') {
     const d = (form.typeDetails ?? makeBlankTypeDetails('meetup_alumni')) as import('@/components/wizard/eventDetailsConfig').MeetupAlumniDetails
     const set = (p: Partial<typeof d>) => utd({ ...d, ...p })
-    return (
+    typeContent = (
       <SectionCard title="Alumni Details">
         <div className="flex flex-col gap-3">
           <div><label className={labelCls}>Institution</label><input className={inputCls} value={d.institution} onChange={e => set({ institution: e.target.value })} placeholder="e.g. IIT Bombay, XLRI" /></div>
@@ -987,11 +861,13 @@ function Tab6Dynamic({
     )
   }
 
-  if (t === 'cultural') {
+  else if (t === 'cultural') {
     const d = (form.typeDetails ?? makeBlankTypeDetails('cultural')) as CulturalDetails
     const set = (p: Partial<CulturalDetails>) => utd({ ...d, ...p })
-    return (
-      <div className="flex flex-col gap-3">
+    const highlights      = d.highlights      ?? []
+    const experienceZones = d.experienceZones ?? []
+    typeContent = (
+      <>
         <SectionCard title="Artists &amp; Performers"><SpeakerList speakers={d.artists} ctx="cultural" onDelete={id => set({ artists: d.artists.filter(a => a.id !== id) })} /></SectionCard>
         <SectionCard title="Program Details">
           <div className="flex flex-col gap-3">
@@ -1002,21 +878,53 @@ function Tab6Dynamic({
             </div>
           </div>
         </SectionCard>
-      </div>
+        <SectionCard title="Festival Highlights">
+          <div className="flex flex-col gap-2">
+            <p className={hintCls}>Add highlights shown in the &quot;What&apos;s at the Festival&quot; section.</p>
+            {highlights.map(h => (
+              <div key={h.id} className="rounded-lg border border-border/60 bg-muted/[0.03] p-3">
+                <div className="flex items-center gap-2">
+                  <input className={cn(inputCls,'flex-1 text-[13px]')} value={h.label} onChange={e => set({ highlights: highlights.map(x => x.id === h.id ? { ...x, label: e.target.value } : x) })} placeholder="Highlight name (e.g. Live Performances)" />
+                  <button type="button" onClick={() => set({ highlights: highlights.filter(x => x.id !== h.id) })} className="flex size-7 items-center justify-center rounded text-muted-foreground/40 hover:bg-red-50 hover:text-red-500"><Trash2 className="size-3" aria-hidden /></button>
+                </div>
+                <textarea className={cn(inputCls,'mt-2 h-14 resize-none py-2')} value={h.desc} onChange={e => set({ highlights: highlights.map(x => x.id === h.id ? { ...x, desc: e.target.value } : x) })} placeholder="Short description" />
+              </div>
+            ))}
+            <button type="button" onClick={() => set({ highlights: [...highlights, { id: makeHighlightId(), label: '', desc: '' }] })} className={cn(buttonVariants({ variant: 'outline', size: 'sm' }), 'w-full gap-1.5 border-dashed border-primary/30 text-primary/70')}><Plus className="size-3" aria-hidden />Add Highlight</button>
+          </div>
+        </SectionCard>
+        <SectionCard title="Experience Zones">
+          <div className="flex flex-col gap-2">
+            <p className={hintCls}>Add zones or activity areas shown on the event page.</p>
+            {experienceZones.map(z => (
+              <div key={z.id} className="rounded-lg border border-border/60 bg-muted/[0.03] p-3">
+                <div className="flex items-center gap-2">
+                  <input className={cn(inputCls,'flex-1 text-[13px]')} value={z.name} onChange={e => set({ experienceZones: experienceZones.map(x => x.id === z.id ? { ...x, name: e.target.value } : x) })} placeholder="Zone name (e.g. Food Court)" />
+                  <button type="button" onClick={() => set({ experienceZones: experienceZones.filter(x => x.id !== z.id) })} className="flex size-7 items-center justify-center rounded text-muted-foreground/40 hover:bg-red-50 hover:text-red-500"><Trash2 className="size-3" aria-hidden /></button>
+                </div>
+                <textarea className={cn(inputCls,'mt-2 h-14 resize-none py-2')} value={z.desc} onChange={e => set({ experienceZones: experienceZones.map(x => x.id === z.id ? { ...x, desc: e.target.value } : x) })} placeholder="Short description" />
+              </div>
+            ))}
+            <button type="button" onClick={() => set({ experienceZones: [...experienceZones, { id: makeZoneId(), name: '', desc: '' }] })} className={cn(buttonVariants({ variant: 'outline', size: 'sm' }), 'w-full gap-1.5 border-dashed border-primary/30 text-primary/70')}><Plus className="size-3" aria-hidden />Add Zone</button>
+          </div>
+        </SectionCard>
+      </>
     )
   }
 
-  if (t === 'awards') {
+  else if (t === 'awards') {
     const d = (form.typeDetails ?? makeBlankTypeDetails('awards')) as AwardsDetails
     const set = (p: Partial<AwardsDetails>) => utd({ ...d, ...p })
-    return (
-      <div className="flex flex-col gap-3">
+    const pastWinners = d.pastWinners ?? []
+    typeContent = (
+      <>
+        <SectionCard title="Jury / Judges"><SpeakerList speakers={d.judges ?? []} ctx="awards" onDelete={id => set({ judges: (d.judges ?? []).filter(j => j.id !== id) })} /></SectionCard>
         <SectionCard title="Award Categories">
           <div>
             {d.categories.map(cat => (
               <div key={cat.id} className="mb-2 rounded-lg border border-border/60 bg-muted/[0.03] p-3">
                 <div className="flex items-center gap-2">
-                  <input className={cn(inputCls, 'flex-1 text-[12.5px] font-medium')} value={cat.name} onChange={e => set({ categories: d.categories.map(c => c.id === cat.id ? { ...c, name: e.target.value } : c) })} placeholder="Category name" />
+                  <input className={cn(inputCls, 'flex-1 text-[13px] font-medium')} value={cat.name} onChange={e => set({ categories: d.categories.map(c => c.id === cat.id ? { ...c, name: e.target.value } : c) })} placeholder="Category name" />
                   <button type="button" onClick={() => set({ categories: d.categories.filter(c => c.id !== cat.id) })} className="flex size-7 items-center justify-center rounded text-muted-foreground/40 hover:bg-red-50 hover:text-red-500"><Trash2 className="size-3" aria-hidden /></button>
                 </div>
                 <input className={cn(inputCls, 'mt-2')} value={cat.description} onChange={e => set({ categories: d.categories.map(c => c.id === cat.id ? { ...c, description: e.target.value } : c) })} placeholder="Category description" />
@@ -1032,14 +940,31 @@ function Tab6Dynamic({
             <div><label className={labelCls}>Ceremony Format</label><input className={inputCls} value={d.ceremonyFormat} onChange={e => set({ ceremonyFormat: e.target.value })} placeholder="e.g. Red carpet, gala dinner, trophy presentation" /></div>
           </div>
         </SectionCard>
-      </div>
+        <SectionCard title="Past Winners (Hall of Fame)">
+          <div className="flex flex-col gap-2">
+            <p className={hintCls}>Add past award winners — shown in the Hall of Fame section.</p>
+            {pastWinners.map(w => (
+              <div key={w.id} className="rounded-lg border border-border/60 bg-muted/[0.03] p-3">
+                <div className="grid grid-cols-[64px_1fr_1fr_32px] items-center gap-2">
+                  <input className={cn(inputCls,'text-[13px]')} value={w.year} onChange={e => set({ pastWinners: pastWinners.map(x => x.id === w.id ? { ...x, year: e.target.value } : x) })} placeholder="Year" />
+                  <input className={cn(inputCls,'text-[13px]')} value={w.category} onChange={e => set({ pastWinners: pastWinners.map(x => x.id === w.id ? { ...x, category: e.target.value } : x) })} placeholder="Category" />
+                  <input className={cn(inputCls,'text-[13px]')} value={w.winner} onChange={e => set({ pastWinners: pastWinners.map(x => x.id === w.id ? { ...x, winner: e.target.value } : x) })} placeholder="Winner name" />
+                  <button type="button" onClick={() => set({ pastWinners: pastWinners.filter(x => x.id !== w.id) })} className="flex size-7 items-center justify-center rounded text-muted-foreground/40 hover:bg-red-50 hover:text-red-500"><Trash2 className="size-3" aria-hidden /></button>
+                </div>
+                <input className={cn(inputCls,'mt-2 text-[13px]')} value={w.organisation} onChange={e => set({ pastWinners: pastWinners.map(x => x.id === w.id ? { ...x, organisation: e.target.value } : x) })} placeholder="Organisation / Company" />
+              </div>
+            ))}
+            <button type="button" onClick={() => set({ pastWinners: [...pastWinners, { id: makePastWinnerId(), year: '', category: '', winner: '', organisation: '' }] })} className={cn(buttonVariants({ variant: 'outline', size: 'sm' }), 'w-full gap-1.5 border-dashed border-primary/30 text-primary/70')}><Plus className="size-3" aria-hidden />Add Past Winner</button>
+          </div>
+        </SectionCard>
+      </>
     )
   }
 
-  if (t === 'fundraising') {
+  else if (t === 'fundraising') {
     const d = (form.typeDetails ?? makeBlankTypeDetails('fundraising')) as import('@/components/wizard/eventDetailsConfig').FundraisingDetails
     const set = (p: Partial<typeof d>) => utd({ ...d, ...p })
-    return (
+    typeContent = (
       <SectionCard title="Fundraising Details">
         <div className="flex flex-col gap-3">
           <div><label className={labelCls}>Beneficiary Info</label><textarea className={cn(inputCls,'h-20 resize-none py-2')} value={d.beneficiaryInfo} onChange={e => set({ beneficiaryInfo: e.target.value })} /></div>
@@ -1054,33 +979,81 @@ function Tab6Dynamic({
     )
   }
 
-  if (t === 'exhibition') {
-    const d = (form.typeDetails ?? makeBlankTypeDetails('exhibition')) as import('@/components/wizard/eventDetailsConfig').ExhibitionDetails
+  else if (t === 'exhibition') {
+    const d = (form.typeDetails ?? makeBlankTypeDetails('exhibition')) as ExhibitionDetails
+    const set = (p: Partial<ExhibitionDetails>) => utd({ ...d, ...p })
+    const exhibitors           = d.exhibitors           ?? []
+    const exhibitionCategories = d.exhibitionCategories ?? []
+    typeContent = (
+      <>
+        <SectionCard title="Expo Details">
+          <div className="flex flex-col gap-3">
+            <UrlField label="Booth Info URL" value={d.boothInfoUrl} onChange={v => set({ boothInfoUrl: v })} />
+            <UrlField label="Floor Plan URL" value={d.floorPlanUrl} onChange={v => set({ floorPlanUrl: v })} />
+            <div><label className={labelCls}>Visitor Instructions</label><textarea className={cn(inputCls,'h-20 resize-none py-2')} value={d.visitorInstructions} onChange={e => set({ visitorInstructions: e.target.value })} /></div>
+            <div><label className={labelCls}>Parking Info</label><textarea className={cn(inputCls,'h-16 resize-none py-2')} value={d.parkingInfo} onChange={e => set({ parkingInfo: e.target.value })} /></div>
+          </div>
+        </SectionCard>
+        <SectionCard title="Exhibitors">
+          <div className="flex flex-col gap-2">
+            <p className={hintCls}>Add companies participating as exhibitors at the event.</p>
+            {exhibitors.map((ex, idx) => (
+              <div key={ex.id} className="rounded-lg border border-border/60 bg-muted/[0.03] p-3">
+                <div className="flex items-center gap-2">
+                  <input className={cn(inputCls,'flex-1 text-[13px] font-medium')} value={ex.name} onChange={e => set({ exhibitors: exhibitors.map(x => x.id === ex.id ? { ...x, name: e.target.value } : x) })} placeholder="Company name" />
+                  <input className={cn(inputCls,'w-24 text-[13px]')} value={ex.boothNumber} onChange={e => set({ exhibitors: exhibitors.map(x => x.id === ex.id ? { ...x, boothNumber: e.target.value } : x) })} placeholder="Booth #" />
+                  <button type="button" onClick={() => set({ exhibitors: exhibitors.filter(x => x.id !== ex.id) })} className="flex size-7 items-center justify-center rounded text-muted-foreground/40 hover:bg-red-50 hover:text-red-500"><Trash2 className="size-3" aria-hidden /></button>
+                </div>
+                <input className={cn(inputCls,'mt-2 text-[13px]')} value={ex.description} onChange={e => set({ exhibitors: exhibitors.map(x => x.id === ex.id ? { ...x, description: e.target.value } : x) })} placeholder="Short description (optional)" />
+                <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                  <UrlField label="" value={ex.logoUrl} onChange={v => set({ exhibitors: exhibitors.map(x => x.id === ex.id ? { ...x, logoUrl: v } : x) })} placeholder="Logo URL" />
+                  <UrlField label="" value={ex.website} onChange={v => set({ exhibitors: exhibitors.map(x => x.id === ex.id ? { ...x, website: v } : x) })} placeholder="Website URL" />
+                </div>
+              </div>
+            ))}
+            <button type="button" onClick={() => set({ exhibitors: [...exhibitors, { id: makeExhibitorId(), name: '', logoUrl: '', website: '', description: '', boothNumber: '', order: exhibitors.length }] })} className={cn(buttonVariants({ variant: 'outline', size: 'sm' }), 'w-full gap-1.5 border-dashed border-primary/30 text-primary/70')}><Plus className="size-3" aria-hidden />Add Exhibitor</button>
+          </div>
+        </SectionCard>
+        <SectionCard title="Industry Categories">
+          <div className="flex flex-col gap-2">
+            <p className={hintCls}>Add industry categories shown on the event page.</p>
+            {exhibitionCategories.map(cat => (
+              <div key={cat.id} className="flex items-start gap-2">
+                <div className="flex flex-1 flex-col gap-1.5">
+                  <input className={cn(inputCls,'text-[13px]')} value={cat.label} onChange={e => set({ exhibitionCategories: exhibitionCategories.map(x => x.id === cat.id ? { ...x, label: e.target.value } : x) })} placeholder="Category name (e.g. Technology)" />
+                  <input className={cn(inputCls,'text-[13px]')} value={cat.desc} onChange={e => set({ exhibitionCategories: exhibitionCategories.map(x => x.id === cat.id ? { ...x, desc: e.target.value } : x) })} placeholder="Short description" />
+                </div>
+                <button type="button" onClick={() => set({ exhibitionCategories: exhibitionCategories.filter(x => x.id !== cat.id) })} className="mt-1 flex size-7 items-center justify-center rounded text-muted-foreground/40 hover:bg-red-50 hover:text-red-500"><Trash2 className="size-3" aria-hidden /></button>
+              </div>
+            ))}
+            <button type="button" onClick={() => set({ exhibitionCategories: [...exhibitionCategories, { id: makeExhibitionCatId(), label: '', desc: '' }] })} className={cn(buttonVariants({ variant: 'outline', size: 'sm' }), 'w-full gap-1.5 border-dashed border-primary/30 text-primary/70')}><Plus className="size-3" aria-hidden />Add Category</button>
+          </div>
+        </SectionCard>
+      </>
+    )
+  }
+
+  else {
+    // community (default)
+    const d = (form.typeDetails ?? makeBlankTypeDetails('community')) as import('@/components/wizard/eventDetailsConfig').CommunityDetails
     const set = (p: Partial<typeof d>) => utd({ ...d, ...p })
-    return (
-      <SectionCard title="Expo Details">
+    typeContent = (
+      <SectionCard title="Community Details">
         <div className="flex flex-col gap-3">
-          <UrlField label="Booth Info URL" value={d.boothInfoUrl} onChange={v => set({ boothInfoUrl: v })} />
-          <UrlField label="Floor Plan URL" value={d.floorPlanUrl} onChange={v => set({ floorPlanUrl: v })} />
-          <div><label className={labelCls}>Visitor Instructions</label><textarea className={cn(inputCls,'h-20 resize-none py-2')} value={d.visitorInstructions} onChange={e => set({ visitorInstructions: e.target.value })} /></div>
-          <div><label className={labelCls}>Parking Info</label><textarea className={cn(inputCls,'h-16 resize-none py-2')} value={d.parkingInfo} onChange={e => set({ parkingInfo: e.target.value })} /></div>
+          <div><label className={labelCls}>Cause Info</label><textarea className={cn(inputCls,'h-16 resize-none py-2')} value={d.causeInfo} onChange={e => set({ causeInfo: e.target.value })} /></div>
+          <div><label className={labelCls}>Volunteer Instructions</label><textarea className={cn(inputCls,'h-20 resize-none py-2')} value={d.volunteerInstructions} onChange={e => set({ volunteerInstructions: e.target.value })} /></div>
+          <div><label className={labelCls}>Campaign Info</label><textarea className={cn(inputCls,'h-16 resize-none py-2')} value={d.campaignInfo} onChange={e => set({ campaignInfo: e.target.value })} /></div>
+          <div><label className={labelCls}>Impact Goal</label><input className={inputCls} value={d.impactGoal} onChange={e => set({ impactGoal: e.target.value })} placeholder="e.g. Plant 10,000 trees by Dec 2026" /></div>
         </div>
       </SectionCard>
     )
   }
 
-  // community (default)
-  const d = (form.typeDetails ?? makeBlankTypeDetails('community')) as import('@/components/wizard/eventDetailsConfig').CommunityDetails
-  const set = (p: Partial<typeof d>) => utd({ ...d, ...p })
   return (
-    <SectionCard title="Community Details">
-      <div className="flex flex-col gap-3">
-        <div><label className={labelCls}>Cause Info</label><textarea className={cn(inputCls,'h-16 resize-none py-2')} value={d.causeInfo} onChange={e => set({ causeInfo: e.target.value })} /></div>
-        <div><label className={labelCls}>Volunteer Instructions</label><textarea className={cn(inputCls,'h-20 resize-none py-2')} value={d.volunteerInstructions} onChange={e => set({ volunteerInstructions: e.target.value })} /></div>
-        <div><label className={labelCls}>Campaign Info</label><textarea className={cn(inputCls,'h-16 resize-none py-2')} value={d.campaignInfo} onChange={e => set({ campaignInfo: e.target.value })} /></div>
-        <div><label className={labelCls}>Impact Goal</label><input className={inputCls} value={d.impactGoal} onChange={e => set({ impactGoal: e.target.value })} placeholder="e.g. Plant 10,000 trees by Dec 2026" /></div>
-      </div>
-    </SectionCard>
+    <div className="flex flex-col gap-3">
+      {typeContent}
+      <SponsorListSection />
+    </div>
   )
 }
 
@@ -1217,13 +1190,6 @@ function SummaryPanel({ form, eventTypeId, eventSubtype, tab6Config, onPreview, 
 }) {
   const health = calcStepHealth(form)
 
-  const STATUS_COLORS: Record<string, string> = {
-    draft: 'bg-muted text-muted-foreground', published: 'bg-emerald-50 text-emerald-700',
-    private: 'bg-blue-50 text-blue-700', postponed: 'bg-amber-50 text-amber-700',
-    cancelled: 'bg-rose-50 text-rose-600', sold_out: 'bg-violet-50 text-violet-700',
-    archived: 'bg-muted/60 text-muted-foreground/60',
-  }
-
   const barColor = health.score >= 80 ? 'bg-emerald-500' : health.score >= 50 ? 'bg-amber-500' : 'bg-rose-500'
 
   const venueDisplay = (() => {
@@ -1259,10 +1225,10 @@ function SummaryPanel({ form, eventTypeId, eventSubtype, tab6Config, onPreview, 
       <div className="rounded-xl border border-border bg-card p-4 shadow-sm">
         <div className="mb-3 flex items-center justify-between">
           <p className="text-[12px] font-semibold uppercase tracking-wider text-muted-foreground">Step Health</p>
-          <span className={cn('rounded-full px-2 py-0.5 text-[11px] font-bold', health.score >= 80 ? 'bg-emerald-50 text-emerald-700' : health.score >= 50 ? 'bg-amber-50 text-amber-700' : 'bg-rose-50 text-rose-600')}>{health.score}%</span>
+          <span className={cn('rounded-full px-2 py-0.5 text-[12px] font-bold', health.score >= 80 ? 'bg-emerald-50 text-emerald-700' : health.score >= 50 ? 'bg-amber-50 text-amber-700' : 'bg-rose-50 text-rose-600')}>{health.score}%</span>
         </div>
         <div className="h-2 w-full overflow-hidden rounded-full bg-border"><div className={cn('h-full rounded-full transition-all duration-500', barColor)} style={{ width: `${health.score}%` }} /></div>
-        <div className="mt-2 flex items-center gap-3 text-[11px]">
+        <div className="mt-2 flex items-center gap-3 text-[12px]">
           {health.blockers.length > 0 && <span className="text-rose-600">{health.blockers.length} blocker{health.blockers.length > 1 ? 's' : ''}</span>}
           {health.warnings.length > 0 && <span className="text-amber-600">{health.warnings.length} warning{health.warnings.length > 1 ? 's' : ''}</span>}
           {health.blockers.length === 0 && health.warnings.length === 0 && <span className="text-emerald-600">All good!</span>}
@@ -1270,15 +1236,9 @@ function SummaryPanel({ form, eventTypeId, eventSubtype, tab6Config, onPreview, 
       </div>
 
       <div className="rounded-xl border border-border bg-card p-4 shadow-sm">
-        <p className="mb-3 text-[12px] font-semibold uppercase tracking-wider text-muted-foreground">Event Status</p>
-        <span className={cn('rounded-full px-2.5 py-1 text-[11.5px] font-semibold', STATUS_COLORS[form.status.status] ?? 'bg-muted text-muted-foreground')}>{EVENT_STATUS_LABELS[form.status.status]}</span>
-      </div>
-
-      <div className="rounded-xl border border-border bg-card p-4 shadow-sm">
         <p className="mb-3 text-[12px] font-semibold uppercase tracking-wider text-muted-foreground">Event Details</p>
         <div className="flex flex-col gap-2 text-[12px]">
           {eventTypeId && <div className="flex justify-between gap-2"><span className="text-muted-foreground">Type</span><span className="text-right font-medium text-foreground capitalize">{eventTypeId}{eventSubtype ? ` · ${eventSubtype}` : ''}</span></div>}
-          <div className="flex justify-between gap-2"><span className="text-muted-foreground">Theme</span><span className="font-medium text-foreground capitalize">{form.media.theme}</span></div>
           {venueDisplay && <div className="flex justify-between gap-2"><span className="text-muted-foreground">Venue</span><span className="truncate text-right font-medium text-foreground">{venueDisplay}</span></div>}
           {startDisplay && <div className="flex justify-between gap-2"><span className="shrink-0 text-muted-foreground">Start</span><span className="text-right font-medium text-foreground">{startDisplay}</span></div>}
           {form.organizer.name && <div className="flex justify-between gap-2"><span className="text-muted-foreground">Organizer</span><span className="truncate text-right font-medium text-foreground">{form.organizer.name}</span></div>}
@@ -1293,7 +1253,7 @@ function SummaryPanel({ form, eventTypeId, eventSubtype, tab6Config, onPreview, 
               <span className={cn('flex size-4 shrink-0 items-center justify-center rounded-full text-[9px]', done ? 'bg-emerald-50 text-emerald-600' : required ? 'bg-rose-50 text-rose-500' : 'bg-amber-50 text-amber-500')}>
                 {done ? '✓' : required ? '!' : '⚠'}
               </span>
-              <p className={cn('text-[11.5px]', done ? 'text-foreground' : 'text-muted-foreground')}>{label}</p>
+              <p className={cn('text-[13px]', done ? 'text-foreground' : 'text-muted-foreground')}>{label}</p>
             </div>
           ))}
         </div>
@@ -1303,7 +1263,7 @@ function SummaryPanel({ form, eventTypeId, eventSubtype, tab6Config, onPreview, 
         <p className="mb-2 text-[12px] font-semibold uppercase tracking-wider text-muted-foreground">Public Page</p>
         <div className="flex flex-wrap gap-1.5">
           {Object.entries(form.publicPage).map(([key, on]) => (
-            <span key={key} className={cn('rounded-full px-2 py-0.5 text-[10px] font-medium', on ? 'bg-emerald-50 text-emerald-700' : 'bg-muted text-muted-foreground/50')}>
+            <span key={key} className={cn('rounded-full px-2 py-0.5 text-[12px] font-medium', on ? 'bg-emerald-50 text-emerald-700' : 'bg-muted text-muted-foreground/50')}>
               {key.replace('show', '').replace(/([A-Z])/g, ' $1').trim()}
             </span>
           ))}
@@ -1315,11 +1275,11 @@ function SummaryPanel({ form, eventTypeId, eventSubtype, tab6Config, onPreview, 
         <div className="flex flex-wrap gap-1.5">
           {(['email','whatsapp','sms'] as CommChannel[]).map(ch => {
             const on = form.communication.confirmation.channels.includes(ch)
-            return <span key={ch} className={cn('rounded-full px-2 py-0.5 text-[10.5px] font-semibold capitalize', on ? 'bg-primary/10 text-primary' : 'bg-muted text-muted-foreground/50')}>{ch}</span>
+            return <span key={ch} className={cn('rounded-full px-2 py-0.5 text-[12px] font-semibold capitalize', on ? 'bg-primary/10 text-primary' : 'bg-muted text-muted-foreground/50')}>{ch}</span>
           })}
-          {form.communication.confirmation.calendarInvite && <span className="rounded-full bg-blue-50 px-2 py-0.5 text-[10.5px] font-semibold text-blue-600">Calendar ICS</span>}
+          {form.communication.confirmation.calendarInvite && <span className="rounded-full bg-blue-50 px-2 py-0.5 text-[12px] font-semibold text-blue-600">Calendar ICS</span>}
         </div>
-        <p className="mt-2 text-[11px] text-muted-foreground">{form.communication.reminders.filter(r => r.enabled).length} active reminder{form.communication.reminders.filter(r => r.enabled).length !== 1 ? 's' : ''}</p>
+        <p className="mt-2 text-[12px] text-muted-foreground">{form.communication.reminders.filter(r => r.enabled).length} active reminder{form.communication.reminders.filter(r => r.enabled).length !== 1 ? 's' : ''}</p>
       </div>
     </div>
   )
@@ -1330,15 +1290,6 @@ function SummaryPanel({ form, eventTypeId, eventSubtype, tab6Config, onPreview, 
 function PreviewModal({ form, passes, onClose }: {
   form: EventDetailsDraft; passes: { id: string; name: string; price: number; type: 'paid'|'free' }[]; onClose: () => void
 }) {
-  const statusBannerStyle: Partial<Record<string, string>> = {
-    postponed: 'bg-amber-50 text-amber-700 border-amber-200/60',
-    cancelled: 'bg-rose-50 text-rose-600 border-rose-200/60',
-    sold_out:  'bg-violet-50 text-violet-700 border-violet-200/60',
-    draft:     'bg-muted text-muted-foreground border-border',
-  }
-
-  const bannerStyle = statusBannerStyle[form.status.status]
-
   return (
     <>
       <motion.div key="pv-bd" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-50 bg-black/50" onClick={onClose} aria-hidden />
@@ -1346,25 +1297,17 @@ function PreviewModal({ form, passes, onClose }: {
         className="fixed inset-x-4 bottom-4 top-4 z-50 mx-auto flex max-w-[600px] flex-col overflow-hidden rounded-2xl border border-border bg-background shadow-2xl"
         role="dialog" aria-modal aria-label="Event page preview">
         <div className="flex shrink-0 items-center justify-between border-b border-border bg-muted/[0.03] px-6 py-4">
-          <div className="flex items-center gap-2.5"><div className="flex size-8 items-center justify-center rounded-lg bg-primary/10"><Eye className="size-4 text-primary" aria-hidden /></div><div><p className="text-[14px] font-bold text-foreground">Event Page Preview</p><p className="text-[11.5px] text-muted-foreground">Draft — not visible to the public</p></div></div>
+          <div className="flex items-center gap-2.5"><div className="flex size-8 items-center justify-center rounded-lg bg-primary/10"><Eye className="size-4 text-primary" aria-hidden /></div><div><p className="text-[14px] font-bold text-foreground">Event Page Preview</p><p className="text-[13px] text-muted-foreground">Preview only — not visible to the public</p></div></div>
           <button type="button" onClick={onClose} className="flex size-8 items-center justify-center rounded-lg text-muted-foreground hover:bg-muted/50 hover:text-foreground"><X className="size-5" aria-hidden /></button>
         </div>
         <div className="flex-1 overflow-y-auto">
-          {bannerStyle && (
-            <div className={cn('border-b px-6 py-3 text-[12.5px] font-medium', bannerStyle)}>
-              {form.status.status === 'postponed' && `Postponed${form.status.postponedDate ? ` — new date: ${form.status.postponedDate}` : ' — new date TBD'}`}
-              {form.status.status === 'cancelled' && 'This event has been cancelled.'}
-              {form.status.status === 'sold_out'  && 'Registrations are full. Waitlist may be active.'}
-              {form.status.status === 'draft'     && 'Draft preview — this event is not yet published.'}
-            </div>
-          )}
           <div className="relative h-48 w-full bg-muted/30">
             {form.media.coverBanner.value ? <img src={form.media.coverBanner.value} alt="" className="h-full w-full object-cover" onError={e => { e.currentTarget.style.display='none' }} /> : <div className="flex h-full items-center justify-center"><p className="text-[12px] text-muted-foreground/50">Add a cover banner to improve your event page</p></div>}
           </div>
           <div className="px-6 py-5">
             <h1 className="text-[1.4rem] font-bold tracking-tight text-foreground">{form.info.name || 'Your Event Name'}</h1>
             {form.info.tagline && <p className="mt-1 text-[13.5px] text-muted-foreground">{form.info.tagline}</p>}
-            <div className="mt-3 flex flex-wrap gap-3 text-[12.5px] text-muted-foreground">
+            <div className="mt-3 flex flex-wrap gap-3 text-[13px] text-muted-foreground">
               {form.schedule.startDate && <span className="flex items-center gap-1"><Calendar className="size-3.5" aria-hidden />{form.schedule.startDate}{form.schedule.startTime ? ` · ${fmtTime(form.schedule.startTime)}` : ''}</span>}
               {(form.venue.physical.name || form.venue.online.platform) && <span className="flex items-center gap-1"><MapPin className="size-3.5" aria-hidden />{form.venue.type === 'online' ? ONLINE_PLATFORM_LABELS[form.venue.online.platform] : form.venue.physical.name}</span>}
             </div>
@@ -1375,7 +1318,7 @@ function PreviewModal({ form, passes, onClose }: {
                 <div className="flex flex-col gap-2">
                   {passes.map(p => (
                     <div key={p.id} className="flex items-center justify-between rounded-xl border border-border bg-card px-4 py-3">
-                      <p className="text-[13px] font-semibold text-foreground">{p.name}</p>
+                      <p className="text-[15px] font-semibold text-foreground">{p.name}</p>
                       <p className="text-[13px] font-bold text-primary">{p.type === 'free' ? 'Free' : `₹${p.price.toLocaleString('en-IN')}`}</p>
                     </div>
                   ))}
@@ -1387,7 +1330,7 @@ function PreviewModal({ form, passes, onClose }: {
         </div>
         <div className="shrink-0 border-t border-border px-6 py-4">
           <button type="button" disabled className={cn(buttonVariants({ variant: 'primary' }), 'w-full cursor-not-allowed opacity-60')}>Register Now</button>
-          <p className="mt-2 text-center text-[11px] text-muted-foreground">Preview only — registration is disabled</p>
+          <p className="mt-2 text-center text-[12px] text-muted-foreground">Preview only — registration is disabled</p>
         </div>
       </motion.div>
     </>
@@ -1403,16 +1346,16 @@ export interface EventDetailsBuilderProps {
   eventSubtype?:  string | null
   pricingPasses?: { id: string; name: string; price: number; type: 'paid' | 'free' }[]
   uploadContext?: { uid: string; draftId: string }
+  focusHint?:     string
 }
 
 export function EventDetailsBuilder({
-  form: rawForm, onChange, eventTypeId, eventSubtype, pricingPasses = [], uploadContext,
+  form: rawForm, onChange, eventTypeId, eventSubtype, pricingPasses = [], uploadContext, focusHint,
 }: EventDetailsBuilderProps) {
   const blank = makeBlankEventDetailsDraft()
   const raw   = rawForm ?? blank
   const form: EventDetailsDraft = {
     ...blank, ...raw,
-    status:        { ...blank.status,        ...(raw.status        ?? {}) },
     info:          { ...blank.info,          ...(raw.info          ?? {}) },
     media:         { ...blank.media,         ...(raw.media         ?? {}) },
     venue: { ...blank.venue, ...(raw.venue ?? {}),
@@ -1423,8 +1366,6 @@ export function EventDetailsBuilder({
     organizer:     { ...blank.organizer,     ...(raw.organizer     ?? {}), social: { ...blank.organizer.social, ...(raw.organizer?.social ?? {}) } },
     communication: { ...blank.communication, ...(raw.communication ?? {}),
       confirmation: { ...blank.communication.confirmation, ...(raw.communication?.confirmation ?? {}) },
-      templates:    { ...blank.communication.templates,    ...(raw.communication?.templates    ?? {}) },
-      certificate:  { ...blank.communication.certificate,  ...(raw.communication?.certificate  ?? {}) },
     },
     support:      { ...blank.support,      ...(raw.support      ?? {}), refundWindow: { ...blank.support.refundWindow, ...(raw.support?.refundWindow ?? {}) } },
     seo:          { ...blank.seo,          ...(raw.seo          ?? {}) },
@@ -1436,11 +1377,33 @@ export function EventDetailsBuilder({
   const [activeTab,       setActiveTab]       = useState<Tab>('details')
   const [editingSession,  setEditingSession]  = useState<AgendaSession | null>(null)
   const [isNewSession,    setIsNewSession]    = useState(false)
-  const [editingSpeaker,  setEditingSpeaker]  = useState<{ speaker: Speaker; ctx: 'conference'|'workshop'|'cultural' } | null>(null)
+  const [editingSpeaker,  setEditingSpeaker]  = useState<{ speaker: Speaker; ctx: SpeakerCtx } | null>(null)
   const [isNewSpeaker,    setIsNewSpeaker]    = useState(false)
   const [editingSponsor,  setEditingSponsor]  = useState<Sponsor | null>(null)
   const [isNewSponsor,    setIsNewSponsor]    = useState(false)
   const [previewOpen,     setPreviewOpen]     = useState(false)
+
+  const pendingFocusRef = useRef<string | null>(null)
+
+  useEffect(() => {
+    if (!focusHint) return
+    const tab = FIELD_TO_TAB[focusHint]
+    pendingFocusRef.current = focusHint
+    if (tab && tab !== activeTab) setActiveTab(tab)
+  }, [focusHint]) // activeTab intentionally excluded — switching tabs triggers Effect 2
+
+  useEffect(() => {
+    const hint = pendingFocusRef.current
+    if (!hint) return
+    const timer = setTimeout(() => {
+      const el = document.getElementById(hint)
+      if (!el) return
+      pendingFocusRef.current = null
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      ;(el as HTMLElement).focus?.({ preventScroll: true })
+    }, 100)
+    return () => clearTimeout(timer)
+  }, [activeTab, focusHint])
 
   const tab6Config = getTab6Config(eventTypeId, eventSubtype)
   const update = (p: Partial<EventDetailsDraft>) => onChange({ ...form, ...p })
@@ -1475,7 +1438,7 @@ export function EventDetailsBuilder({
   }
 
   // Speaker handlers
-  const saveSpeakerToForm = (s: Speaker, ctx: 'conference'|'workshop'|'cultural') => {
+  const saveSpeakerToForm = (s: Speaker, ctx: SpeakerCtx) => {
     if (!effectiveForm.typeDetails) return
     if (ctx === 'conference') {
       const d = effectiveForm.typeDetails as ConferenceDetails
@@ -1483,6 +1446,10 @@ export function EventDetailsBuilder({
     } else if (ctx === 'workshop') {
       const d = effectiveForm.typeDetails as WorkshopDetails
       update({ typeDetails: { ...d, trainers: isNewSpeaker ? [...d.trainers, s] : d.trainers.map(x => x.id === s.id ? s : x) } })
+    } else if (ctx === 'awards') {
+      const d = effectiveForm.typeDetails as AwardsDetails
+      const judges = d.judges ?? []
+      update({ typeDetails: { ...d, judges: isNewSpeaker ? [...judges, s] : judges.map(x => x.id === s.id ? s : x) } })
     } else {
       const d = effectiveForm.typeDetails as CulturalDetails
       update({ typeDetails: { ...d, artists: isNewSpeaker ? [...d.artists, s] : d.artists.map(x => x.id === s.id ? s : x) } })
@@ -1490,15 +1457,17 @@ export function EventDetailsBuilder({
     setEditingSpeaker(null)
   }
 
-  // Sponsor handlers
+  // Sponsor handlers — write to top-level sponsors (not typeDetails)
   const saveSponsorToForm = (s: Sponsor) => {
-    if (!effectiveForm.typeDetails) return
-    const d = effectiveForm.typeDetails as ConferenceDetails
-    update({ typeDetails: { ...d, sponsors: isNewSponsor ? [...d.sponsors, s] : d.sponsors.map(x => x.id === s.id ? s : x) } })
+    const current = effectiveForm.sponsors ?? []
+    update({ sponsors: isNewSponsor ? [...current, s] : current.map(x => x.id === s.id ? s : x) })
     setEditingSponsor(null)
   }
 
-  const speakerLabel = editingSpeaker?.ctx === 'workshop' ? 'Trainer' : editingSpeaker?.ctx === 'cultural' ? 'Artist' : 'Speaker'
+  const speakerLabel = editingSpeaker?.ctx === 'workshop' ? 'Trainer'
+    : editingSpeaker?.ctx === 'cultural' ? 'Artist'
+    : editingSpeaker?.ctx === 'awards'   ? 'Judge'
+    : 'Speaker'
 
   return (
     <div className="grid items-start gap-4 lg:grid-cols-[1fr_260px]">

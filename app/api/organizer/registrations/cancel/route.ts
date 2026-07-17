@@ -4,7 +4,7 @@
 // The organizer must own the registration (organizerUid check inside the transaction).
 
 import { NextRequest, NextResponse }  from 'next/server'
-import { adminAuth }                  from '@/lib/firebase/admin'
+import { authorizeWorkspace }         from '@/lib/team/workspace'
 import {
   cancelRegistration,
   AlreadyCancelledError,
@@ -18,20 +18,9 @@ interface CancelBody {
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
   // ── 1. Verify organizer token ──────────────────────────────────────────────
-  const authHeader = req.headers.get('authorization') ?? ''
-  const token      = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : ''
-
-  if (!token) {
-    return NextResponse.json({ success: false, error: 'Unauthorized' }, { status: 401 })
-  }
-
-  let uid: string
-  try {
-    const decoded = await adminAuth.verifyIdToken(token)
-    uid = decoded.uid
-  } catch {
-    return NextResponse.json({ success: false, error: 'Invalid or expired token' }, { status: 401 })
-  }
+  const authz = await authorizeWorkspace(req, 'registrations')
+  if (!authz.ok) return NextResponse.json({ success: false, error: authz.error }, { status: authz.status })
+  const uid = authz.workspaceUid
 
   // ── 2. Parse body ──────────────────────────────────────────────────────────
   let body: CancelBody

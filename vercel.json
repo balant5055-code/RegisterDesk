@@ -1,0 +1,84 @@
+{
+  "crons": [
+    {
+      "path": "/api/cron/certificate-jobs",
+      "schedule": "* * * * *"
+    },
+    {
+      "path": "/api/cron/registration-import",
+      "schedule": "* * * * *"
+    },
+    {
+      "path": "/api/cron/registration-bulk",
+      "schedule": "* * * * *"
+    },
+    {
+      "path": "/api/cron/certificate-claims",
+      "schedule": "*/15 * * * *"
+    },
+    {
+      "path": "/api/cron/registration-reconciliation",
+      "schedule": "*/10 * * * *"
+    },
+    {
+      "path": "/api/cron/wallet-reconciliation",
+      "schedule": "*/10 * * * *"
+    },
+    {
+      "path": "/api/cron/donation-reconciliation",
+      "schedule": "*/10 * * * *"
+    },
+    {
+      "path": "/api/cron/broadcasts",
+      "schedule": "* * * * *"
+    },
+    {
+      "path": "/api/cron/whatsapp-broadcasts",
+      "schedule": "* * * * *"
+    },
+    {
+      "path": "/api/cron/email-broadcasts",
+      "schedule": "* * * * *"
+    },
+    {
+      "path": "/api/cron/reminders",
+      "schedule": "*/15 * * * *"
+    },
+    {
+      "path": "/api/cron/report-exports",
+      "schedule": "* * * * *"
+    },
+    {
+      "path": "/api/cron/print-generation",
+      "schedule": "* * * * *"
+    },
+    {
+      "path": "/api/cron/print-packaging",
+      "schedule": "* * * * *"
+    },
+    {
+      "path": "/api/cron/webhooks",
+      "schedule": "* * * * *"
+    },
+    {
+      "path": "/api/cron/release-funds",
+      "schedule": "0 * * * *"
+    },
+    {
+      "path": "/api/cron/ops-alerts",
+      "schedule": "*/15 * * * *"
+    },
+    {
+      "path": "/api/cron/session-reconciliation",
+      "schedule": "0 3 * * *"
+    },
+    {
+      "path": "/api/cron/global-reconciliation",
+      "schedule": "0 4 * * *"
+    },
+    {
+      "path": "/api/cron/storage-cleanup",
+      "schedule": "0 5 * * *"
+    }
+  ]
+}

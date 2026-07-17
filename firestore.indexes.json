@@ -1,5 +1,73 @@
 {
   "indexes": [
+
+    {
+      "collectionGroup": "registrations",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "organizerUid", "order": "ASCENDING"  },
+        { "fieldPath": "registeredAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "registrations",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "organizerUid", "order": "ASCENDING"  },
+        { "fieldPath": "checkedInAt",  "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "registrations",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "organizerUid", "order": "ASCENDING" },
+        { "fieldPath": "emailStatus",  "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "registrations",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "organizerUid",  "order": "ASCENDING" },
+        { "fieldPath": "status",        "order": "ASCENDING" },
+        { "fieldPath": "paymentStatus", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "licenseOrders",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "organizerUid", "order": "ASCENDING" },
+        { "fieldPath": "couponCode",   "order": "ASCENDING" },
+        { "fieldPath": "status",       "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "registrations",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "organizerUid", "order": "ASCENDING"  },
+        { "fieldPath": "eventSlug",    "order": "ASCENDING"  },
+        { "fieldPath": "checkedInAt",  "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "scheduledReminders",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "sendAt", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "registrations",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "eventSlug", "order": "ASCENDING" },
+        { "fieldPath": "status",    "order": "ASCENDING" }
+      ]
+    },
     {
       "collectionGroup": "registrations",
       "queryScope": "COLLECTION",
@@ -20,19 +88,612 @@
       "collectionGroup": "registrations",
       "queryScope": "COLLECTION",
       "fields": [
-        { "fieldPath": "organizerUid",  "order": "ASCENDING" },
-        { "fieldPath": "eventSlug",     "order": "ASCENDING" }
+        { "fieldPath": "organizerUid", "order": "ASCENDING" },
+        { "fieldPath": "eventSlug",    "order": "ASCENDING" }
       ]
     },
     {
       "collectionGroup": "registrations",
       "queryScope": "COLLECTION",
       "fields": [
-        { "fieldPath": "organizerUid",  "order": "ASCENDING" },
-        { "fieldPath": "eventSlug",     "order": "ASCENDING" },
-        { "fieldPath": "registeredAt",  "order": "DESCENDING" }
+        { "fieldPath": "organizerUid", "order": "ASCENDING" },
+        { "fieldPath": "eventSlug",    "order": "ASCENDING" },
+        { "fieldPath": "registeredAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "registrations",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "organizerUid", "order": "ASCENDING" },
+        { "fieldPath": "eventSlug",    "order": "ASCENDING" },
+        { "fieldPath": "status",       "order": "ASCENDING" }
+      ]
+    },
+
+    {
+      "collectionGroup": "donations",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "campaignSlug", "order": "ASCENDING"  },
+        { "fieldPath": "status",       "order": "ASCENDING"  },
+        { "fieldPath": "paidAt",       "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "donations",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "organizerUid", "order": "ASCENDING"  },
+        { "fieldPath": "createdAt",    "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "donations",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "organizerUid", "order": "ASCENDING"  },
+        { "fieldPath": "status",       "order": "ASCENDING"  },
+        { "fieldPath": "paidAt",       "order": "DESCENDING" }
+      ]
+    },
+
+    {
+      "collectionGroup": "donationCampaigns",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status",      "order": "ASCENDING"  },
+        { "fieldPath": "visibility",  "order": "ASCENDING"  },
+        { "fieldPath": "publishedAt", "order": "DESCENDING" }
+      ]
+    },
+
+    {
+      "collectionGroup": "waitlists",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "eventSlug", "order": "ASCENDING" },
+        { "fieldPath": "status",    "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "waitlists",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "eventSlug",      "order": "ASCENDING" },
+        { "fieldPath": "attendee.email", "order": "ASCENDING" },
+        { "fieldPath": "status",         "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "waitlists",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "eventSlug", "order": "ASCENDING"  },
+        { "fieldPath": "joinedAt",  "order": "DESCENDING" }
+      ]
+    },
+
+    {
+      "collectionGroup": "emailLogs",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "organizerUid", "order": "ASCENDING" },
+        { "fieldPath": "createdAt",    "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "emailLogs",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "organizerUid", "order": "ASCENDING" },
+        { "fieldPath": "createdAt",    "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "emailLogs",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "organizerUid", "order": "ASCENDING" },
+        { "fieldPath": "status",       "order": "ASCENDING" },
+        { "fieldPath": "createdAt",    "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "emailLogs",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "organizerUid", "order": "ASCENDING" },
+        { "fieldPath": "templateKey",  "order": "ASCENDING" },
+        { "fieldPath": "createdAt",    "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "emailLogs",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "organizerUid", "order": "ASCENDING" },
+        { "fieldPath": "status",       "order": "ASCENDING" },
+        { "fieldPath": "templateKey",  "order": "ASCENDING" },
+        { "fieldPath": "createdAt",    "order": "DESCENDING" }
+      ]
+    },
+
+    {
+      "collectionGroup": "broadcastCampaigns",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "organizerUid", "order": "ASCENDING" },
+        { "fieldPath": "createdAt",    "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "broadcastCampaigns",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "organizerUid", "order": "ASCENDING" },
+        { "fieldPath": "createdAt",    "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "broadcastCampaigns",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "organizerUid", "order": "ASCENDING" },
+        { "fieldPath": "status",       "order": "ASCENDING" }
+      ]
+    },
+
+    {
+      "collectionGroup": "walletTransactions",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "organizerUid", "order": "ASCENDING" },
+        { "fieldPath": "createdAt",    "order": "DESCENDING" }
+      ]
+    },
+
+    {
+      "collectionGroup": "communicationUsage",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "organizerUid", "order": "ASCENDING" },
+        { "fieldPath": "createdAt",    "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "communicationUsage",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "organizerUid", "order": "ASCENDING" },
+        { "fieldPath": "createdAt",    "order": "ASCENDING" }
+      ]
+    },
+
+    {
+      "collectionGroup": "certificateRecords",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "organizerUid", "order": "ASCENDING" },
+        { "fieldPath": "eventId",      "order": "ASCENDING" }
       ]
     }
+    ,
+{
+  "collectionGroup": "settlementRequests",
+  "queryScope": "COLLECTION",
+  "fields": [
+    { "fieldPath": "organizerUid", "order": "ASCENDING" },
+    { "fieldPath": "requestedAt", "order": "DESCENDING" }
+  ]
+},
+{
+  "collectionGroup": "settlementRequests",
+  "queryScope": "COLLECTION",
+  "fields": [
+    { "fieldPath": "organizerUid", "order": "ASCENDING" },
+    { "fieldPath": "status", "order": "ASCENDING" }
+  ]
+},
+{
+  "collectionGroup": "platformTransactions",
+  "queryScope": "COLLECTION",
+  "fields": [
+    { "fieldPath": "organizerUid", "order": "ASCENDING" },
+    { "fieldPath": "paidAt", "order": "DESCENDING" }
+  ]
+},
+{
+  "collectionGroup": "platformTransactions",
+  "queryScope": "COLLECTION",
+  "fields": [
+    { "fieldPath": "organizerUid", "order": "ASCENDING" },
+    { "fieldPath": "category", "order": "ASCENDING" },
+    { "fieldPath": "paidAt", "order": "DESCENDING" }
+  ]
+},
+{
+  "collectionGroup": "platformTransactions",
+  "queryScope": "COLLECTION",
+  "fields": [
+    { "fieldPath": "organizerUid", "order": "ASCENDING" },
+    { "fieldPath": "status", "order": "ASCENDING" },
+    { "fieldPath": "paidAt", "order": "DESCENDING" }
+  ]
+},
+{
+  "collectionGroup": "registrations",
+  "queryScope": "COLLECTION",
+  "fields": [
+    { "fieldPath": "eventSlug", "order": "ASCENDING" },
+    { "fieldPath": "organizerUid", "order": "ASCENDING" },
+    { "fieldPath": "registeredAt", "order": "DESCENDING" }
+  ]
+},
+{
+  "collectionGroup": "platformTransactions",
+  "queryScope": "COLLECTION",
+  "fields": [
+    { "fieldPath": "status", "order": "ASCENDING" },
+    { "fieldPath": "releaseStatus", "order": "ASCENDING" },
+    { "fieldPath": "paidAt", "order": "ASCENDING" }
+  ]
+},
+{
+  "collectionGroup": "settlementRequests",
+  "queryScope": "COLLECTION",
+  "fields": [
+    {
+      "fieldPath": "status",
+      "order": "ASCENDING"
+    },
+    {
+      "fieldPath": "amountPaise",
+      "order": "ASCENDING"
+    }
+  ]
+},
+{
+  "collectionGroup": "registrations",
+  "queryScope": "COLLECTION",
+  "fields": [
+    { "fieldPath": "organizerUid", "order": "ASCENDING" },
+    { "fieldPath": "eventSlug",    "order": "ASCENDING" },
+    { "fieldPath": "status",       "order": "ASCENDING" },
+    { "fieldPath": "__name__",     "order": "ASCENDING" }
+  ]
+},
+{
+  "collectionGroup": "registrations",
+  "queryScope": "COLLECTION",
+  "fields": [
+    { "fieldPath": "organizerUid", "order": "ASCENDING" },
+    { "fieldPath": "eventSlug",    "order": "ASCENDING" },
+    { "fieldPath": "status",       "order": "ASCENDING" },
+    { "fieldPath": "checkedIn",    "order": "ASCENDING" },
+    { "fieldPath": "__name__",     "order": "ASCENDING" }
+  ]
+},
+{
+  "collectionGroup": "certificateJobs",
+  "queryScope": "COLLECTION",
+  "fields": [
+    { "fieldPath": "organizerUid", "order": "ASCENDING" },
+    { "fieldPath": "eventId",      "order": "ASCENDING" },
+    { "fieldPath": "createdAt",    "order": "DESCENDING" }
+  ]
+},
+{
+  "collectionGroup": "certificateJobs",
+  "queryScope": "COLLECTION",
+  "fields": [
+    {
+      "fieldPath": "eventId",
+      "order": "ASCENDING"
+    },
+    {
+      "fieldPath": "organizerUid",
+      "order": "ASCENDING"
+    },
+    {
+      "fieldPath": "createdAt",
+      "order": "DESCENDING"
+    }
+  ]
+},
+{
+  "collectionGroup": "eventNominations",
+  "queryScope": "COLLECTION",
+  "fields": [
+    { "fieldPath": "organizerUid", "order": "ASCENDING"  },
+    { "fieldPath": "eventSlug",    "order": "ASCENDING"  },
+    { "fieldPath": "submittedAt",  "order": "DESCENDING" }
+  ]
+},
+{
+  "collectionGroup": "speakerApplications",
+  "queryScope": "COLLECTION",
+  "fields": [
+    { "fieldPath": "organizerUid", "order": "ASCENDING"  },
+    { "fieldPath": "eventSlug",    "order": "ASCENDING"  },
+    { "fieldPath": "submittedAt",  "order": "DESCENDING" }
+  ]
+},
+{
+  "collectionGroup": "sponsorApplications",
+  "queryScope": "COLLECTION",
+  "fields": [
+    { "fieldPath": "organizerUid", "order": "ASCENDING"  },
+    { "fieldPath": "eventSlug",    "order": "ASCENDING"  },
+    { "fieldPath": "submittedAt",  "order": "DESCENDING" }
+  ]
+},
+{
+  "collectionGroup": "organizerPayoutProfiles",
+  "queryScope": "COLLECTION",
+  "fields": [
+    { "fieldPath": "isVerified", "order": "ASCENDING"  },
+    { "fieldPath": "createdAt",  "order": "DESCENDING" }
+  ]
+},
+{
+  "collectionGroup": "contentReports",
+  "queryScope": "COLLECTION",
+  "fields": [
+    { "fieldPath": "status",    "order": "ASCENDING"  },
+    { "fieldPath": "createdAt", "order": "DESCENDING" }
+  ]
+},
+{
+  "collectionGroup": "contentReports",
+  "queryScope": "COLLECTION",
+  "fields": [
+    { "fieldPath": "targetType", "order": "ASCENDING"  },
+    { "fieldPath": "status",     "order": "ASCENDING"  },
+    { "fieldPath": "createdAt",  "order": "DESCENDING" }
+  ]
+},
+{
+  "collectionGroup": "contentReports",
+  "queryScope": "COLLECTION",
+  "fields": [
+    { "fieldPath": "targetId",  "order": "ASCENDING"  },
+    { "fieldPath": "createdAt", "order": "DESCENDING" }
+  ]
+},
+{
+  "collectionGroup": "adminAuditLogs",
+  "queryScope": "COLLECTION",
+  "fields": [
+    { "fieldPath": "action",    "order": "ASCENDING"  },
+    { "fieldPath": "createdAt", "order": "DESCENDING" }
+  ]
+},
+{
+  "collectionGroup": "adminAuditLogs",
+  "queryScope": "COLLECTION",
+  "fields": [
+    { "fieldPath": "entityType", "order": "ASCENDING"  },
+    { "fieldPath": "createdAt",  "order": "DESCENDING" }
+  ]
+},
+{
+  "collectionGroup": "adminAuditLogs",
+  "queryScope": "COLLECTION",
+  "fields": [
+    { "fieldPath": "adminUid",  "order": "ASCENDING"  },
+    { "fieldPath": "createdAt", "order": "DESCENDING" }
+  ]
+},
+{
+  "collectionGroup": "adminAuditLogs",
+  "queryScope": "COLLECTION",
+  "fields": [
+    { "fieldPath": "entityId",  "order": "ASCENDING"  },
+    { "fieldPath": "createdAt", "order": "DESCENDING" }
+  ]
+},
+{
+  "collectionGroup": "donations",
+  "queryScope": "COLLECTION",
+  "fields": [
+    { "fieldPath": "campaignSlug", "order": "ASCENDING" },
+    { "fieldPath": "donorEmail",   "order": "ASCENDING" },
+    { "fieldPath": "status",       "order": "ASCENDING" }
+  ]
+},
+{
+  "collectionGroup": "donationRefunds",
+  "queryScope": "COLLECTION",
+  "fields": [
+    { "fieldPath": "donationId", "order": "ASCENDING"  },
+    { "fieldPath": "createdAt",  "order": "DESCENDING" }
+  ]
+},
+{
+  "collectionGroup": "donationRefunds",
+  "queryScope": "COLLECTION",
+  "fields": [
+    { "fieldPath": "organizerUid", "order": "ASCENDING"  },
+    { "fieldPath": "createdAt",    "order": "DESCENDING" }
+  ]
+},
+{
+  "collectionGroup": "registrations",
+  "queryScope": "COLLECTION",
+  "fields": [
+    { "fieldPath": "attendee.email", "order": "ASCENDING"  },
+    { "fieldPath": "registeredAt",   "order": "DESCENDING" }
+  ]
+},
+{
+  "collectionGroup": "donations",
+  "queryScope": "COLLECTION",
+  "fields": [
+    { "fieldPath": "donorEmail", "order": "ASCENDING"  },
+    { "fieldPath": "createdAt",  "order": "DESCENDING" }
+  ]
+},
+{
+  "collectionGroup": "certificates",
+  "queryScope": "COLLECTION",
+  "fields": [
+    { "fieldPath": "attendeeEmail", "order": "ASCENDING"  },
+    { "fieldPath": "generatedAt",   "order": "DESCENDING" }
+  ]
+},
+{
+  "collectionGroup": "certificates",
+  "queryScope": "COLLECTION",
+  "fields": [
+    { "fieldPath": "eventId",      "order": "ASCENDING"  },
+    { "fieldPath": "organizerUid", "order": "ASCENDING"  },
+    { "fieldPath": "generatedAt",  "order": "DESCENDING" }
+  ]
+},
+{
+  "collectionGroup": "broadcastCampaigns",
+  "queryScope": "COLLECTION",
+  "fields": [
+    { "fieldPath": "status",       "order": "ASCENDING" },
+    { "fieldPath": "scheduledFor", "order": "ASCENDING" }
+  ]
+},
+{
+  "collectionGroup": "walletClawbacks",
+  "queryScope": "COLLECTION",
+  "fields": [
+    { "fieldPath": "organizerUid", "order": "ASCENDING"  },
+    { "fieldPath": "status",       "order": "ASCENDING"  },
+    { "fieldPath": "createdAt",    "order": "DESCENDING" }
+  ]
+},
+{
+  "collectionGroup": "walletClawbacks",
+  "queryScope": "COLLECTION",
+  "fields": [
+    { "fieldPath": "organizerUid", "order": "ASCENDING"  },
+    { "fieldPath": "createdAt",    "order": "DESCENDING" }
+  ]
+},
+{
+  "collectionGroup": "walletClawbacks",
+  "queryScope": "COLLECTION",
+  "fields": [
+    { "fieldPath": "status",    "order": "ASCENDING"  },
+    { "fieldPath": "createdAt", "order": "DESCENDING" }
+  ]
+},
+{
+  "collectionGroup": "apiKeys",
+  "queryScope": "COLLECTION",
+  "fields": [
+    { "fieldPath": "keyPrefix", "order": "ASCENDING" },
+    { "fieldPath": "status",    "order": "ASCENDING" }
+  ]
+},
+{
+  "collectionGroup": "webhookDeliveries",
+  "queryScope": "COLLECTION",
+  "fields": [
+    { "fieldPath": "organizerUid", "order": "ASCENDING"  },
+    { "fieldPath": "createdAt",    "order": "DESCENDING" }
+  ]
+},
+{
+  "collectionGroup": "webhookDeliveries",
+  "queryScope": "COLLECTION",
+  "fields": [
+    { "fieldPath": "status",      "order": "ASCENDING" },
+    { "fieldPath": "nextRetryAt", "order": "ASCENDING" }
+  ]
+},
+{
+  "collectionGroup": "crmContacts",
+  "queryScope": "COLLECTION",
+  "fields": [
+    { "fieldPath": "organizerUid", "order": "ASCENDING"  },
+    { "fieldPath": "lastSeenAt",   "order": "DESCENDING" }
+  ]
+},
+{
+  "collectionGroup": "crmActivities",
+  "queryScope": "COLLECTION",
+  "fields": [
+    { "fieldPath": "contactId", "order": "ASCENDING"  },
+    { "fieldPath": "createdAt", "order": "DESCENDING" }
+  ]
+},
+{
+  "collectionGroup": "eventSessions",
+  "queryScope": "COLLECTION",
+  "fields": [
+    { "fieldPath": "eventSlug", "order": "ASCENDING" },
+    { "fieldPath": "startTime", "order": "ASCENDING" }
+  ]
+},
+{
+  "collectionGroup": "registrations",
+  "queryScope": "COLLECTION",
+  "fields": [
+    { "fieldPath": "organizerUid",     "order": "ASCENDING" },
+    { "fieldPath": "eventSlug",        "order": "ASCENDING" },
+    { "fieldPath": "identifier.value", "order": "ASCENDING" }
+  ]
+},
+{
+  "collectionGroup": "identifierHistory",
+  "queryScope": "COLLECTION",
+  "fields": [
+    { "fieldPath": "value",     "order": "ASCENDING" },
+    { "fieldPath": "timestamp", "order": "ASCENDING" }
+  ]
+},
+{
+  "collectionGroup": "teamMembers",
+  "queryScope": "COLLECTION",
+  "fields": [
+    { "fieldPath": "organizerUid", "order": "ASCENDING" },
+    { "fieldPath": "memberUid",    "order": "ASCENDING" },
+    { "fieldPath": "status",       "order": "ASCENDING" }
+  ]
+},
+{
+  "collectionGroup": "teamMembers",
+  "queryScope": "COLLECTION",
+  "fields": [
+    { "fieldPath": "memberUid", "order": "ASCENDING" },
+    { "fieldPath": "status",    "order": "ASCENDING" }
+  ]
+},{
+      "collectionGroup": "printTemplates",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "organizerUid",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "updatedAt",
+          "order": "DESCENDING"
+        }
+      ]
+    },
+    {
+  "collectionGroup": "registrations",
+  "queryScope": "COLLECTION",
+  "fields": [
+    {
+      "fieldPath": "organizerUid",
+      "order": "ASCENDING"
+    },
+    {
+      "fieldPath": "registeredAt",
+      "order": "DESCENDING"
+    }
+  ]
+}
   ],
+  
   "fieldOverrides": []
 }

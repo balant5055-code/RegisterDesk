@@ -6,9 +6,15 @@ import { auth } from '@/lib/firebase/auth'
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const IDLE_TIMEOUT_MS = 60 * 60 * 1000   // 60 minutes → hard logout
-const WARN_BEFORE_MS  =  5 * 60 * 1000   // warn 5 minutes before timeout
-const WARN_AT_MS      = IDLE_TIMEOUT_MS - WARN_BEFORE_MS  // 55 minutes
+// Code defaults — mirror security.sessionIdleTimeoutMinutes / sessionWarnBeforeMinutes.
+// Callers pass live policy via `opts`; these are the fallback when none is supplied.
+const DEFAULT_IDLE_TIMEOUT_MS = 60 * 60 * 1000   // 60 minutes → hard logout
+const DEFAULT_WARN_BEFORE_MS  =  5 * 60 * 1000   // warn 5 minutes before timeout
+
+export interface SessionTimeoutOptions {
+  idleTimeoutMs?: number
+  warnBeforeMs?:  number
+}
 
 const ACTIVITY_EVENTS = [
   'mousedown', 'mousemove', 'keydown', 'touchstart', 'scroll', 'click',
@@ -27,9 +33,15 @@ export interface SessionManagerResult {
 
 // ─── Hook ─────────────────────────────────────────────────────────────────────
 
-export function useSessionManager(enabled: boolean): SessionManagerResult {
+export function useSessionManager(enabled: boolean, opts?: SessionTimeoutOptions): SessionManagerResult {
   const [showWarning, setShowWarning] = useState(false)
   const [countdown,   setCountdown]   = useState(0)
+
+  // Live policy (from security config) or the code defaults. Primitives → stable
+  // deps; when the resolved config changes, the timers below restart with it.
+  const idleTimeoutMs = opts?.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS
+  const warnBeforeMs  = opts?.warnBeforeMs  ?? DEFAULT_WARN_BEFORE_MS
+  const warnAtMs      = Math.max(0, idleTimeoutMs - warnBeforeMs)
 
   const idleTimerRef     = useRef<ReturnType<typeof setTimeout>  | undefined>(undefined)
   const warnTimerRef     = useRef<ReturnType<typeof setTimeout>  | undefined>(undefined)
@@ -60,13 +72,13 @@ export function useSessionManager(enabled: boolean): SessionManagerResult {
     clearAll()
     warnTimerRef.current = setTimeout(() => {
       setShowWarning(true)
-      setCountdown(WARN_BEFORE_MS / 1000)
+      setCountdown(warnBeforeMs / 1000)
       countdownRef.current = setInterval(() => {
         setCountdown(c => Math.max(0, c - 1))
       }, 1000)
-    }, WARN_AT_MS)
-    idleTimerRef.current = setTimeout(performLogout, IDLE_TIMEOUT_MS)
-  }, [clearAll, performLogout])
+    }, warnAtMs)
+    idleTimerRef.current = setTimeout(performLogout, idleTimeoutMs)
+  }, [clearAll, performLogout, warnAtMs, warnBeforeMs, idleTimeoutMs])
 
   // Reset all timers — called from activity event handlers.
   const reset = useCallback(() => {

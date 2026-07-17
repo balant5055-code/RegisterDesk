@@ -10,16 +10,19 @@ export function Skeleton({ className }: { className?: string }) {
 
 // ─── KPI card ─────────────────────────────────────────────────────────────────
 
+// Mirrors MetricCard exactly: rounded-2xl card, rounded-xl icon tile, and the
+// value + label + hint line rhythm — so swapping skeleton → real card shifts
+// nothing.
 export function KpiCardSkeleton() {
   return (
-    <div className="rounded-xl border border-border bg-card p-4 shadow-sm" aria-hidden>
+    <div className="rounded-2xl border border-border bg-card p-4 shadow-sm" aria-hidden>
       <div className="flex items-start justify-between">
-        <Skeleton className="size-9 rounded-lg" />
-        <Skeleton className="h-3.5 w-8 rounded" />
+        <Skeleton className="size-9 rounded-xl" />
+        <Skeleton className="size-4 rounded" />
       </div>
-      <Skeleton className="mt-3 h-8 w-24 rounded" />
-      <Skeleton className="mt-2 h-3 w-20 rounded" />
-      <Skeleton className="mt-1.5 h-3 w-28 rounded" />
+      <Skeleton className="mt-3 h-7 w-24 rounded" />
+      <Skeleton className="mt-1.5 h-3 w-20 rounded" />
+      <Skeleton className="mt-0.5 h-3 w-16 rounded" />
     </div>
   )
 }

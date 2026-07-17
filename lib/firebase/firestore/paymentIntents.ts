@@ -33,6 +33,15 @@ export interface PaymentIntentRecord {
   refundStatus?:   RefundStatus
   refundAmount?:   number        // paise — should equal amount for full refunds
   failureReason?:  string        // why registration creation failed
+  // Invite code — stored by create-order after server-side validation so that
+  // verify-payment can re-validate against the live event state (P0-1 defence-in-depth).
+  // Undefined for events that do not require an invite code.
+  inviteCode?:     string
+  // Coupon fields — populated when a promo code was applied at order creation
+  couponCode?:     string        // normalized uppercase code
+  couponDocId?:    string        // Firestore doc ID in events/{slug}/coupons/{id}
+  discountAmount?: number        // paise discount; amount already reflects the discount
+  originalAmount?: number        // paise before discount
   createdAt:       unknown       // Firestore Timestamp
   updatedAt:       unknown       // Firestore Timestamp
 }

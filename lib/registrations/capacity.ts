@@ -21,6 +21,23 @@ export function resolveTotalCapacity(plan: CapacityPlan): number | null {
 }
 
 /**
+ * Maps an Event License registration limit (from the license tier's
+ * `limits.maxRegistrations`) to the capacity bucket that enforces it, so an event's
+ * enforced capacity is driven by its purchased license — the single source of truth.
+ * The frozen license tiers map exactly (100→free, 1,000→pack_1000, 5,000→pack_5000,
+ * Infinity→unlimited); any other value resolves to the smallest bucket that covers it.
+ */
+export function capacityPlanForRegistrationLimit(maxRegistrations: number): CapacityPlan {
+  if (!Number.isFinite(maxRegistrations)) return 'unlimited'
+  const ordered: CapacityPlan[] = ['free', 'pack_500', 'pack_1000', 'pack_5000']
+  for (const plan of ordered) {
+    const limit = CAPACITY_PLANS[plan].limit
+    if (limit != null && maxRegistrations <= limit) return plan
+  }
+  return 'unlimited'
+}
+
+/**
  * Computes the effective availability for a single pass, taking both
  * pass-level and event-level capacity into account.
  *

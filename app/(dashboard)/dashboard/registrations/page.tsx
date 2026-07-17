@@ -1,17 +1,20 @@
 'use client'
 
-import { useState, useEffect, useMemo } from 'react'
+import { Suspense, useState, useEffect, useMemo, useRef } from 'react'
 import { useSearchParams, useRouter }   from 'next/navigation'
 import { onAuthStateChanged }           from 'firebase/auth'
 import { auth }                         from '@/lib/firebase/auth'
 import Link                             from 'next/link'
 import {
   Search, X, Users, CheckCircle2, XCircle,
-  Clock, Loader2, AlertCircle, Ticket,
+  Clock, Loader2, Ticket, ChevronDown,
 } from 'lucide-react'
 import { cn }                           from '@/lib/utils/cn'
+import { PageHeader, EmptyState }       from '@/components/ui'
+import { ErrorState }                   from '@/components/dashboard/EmptyState'
 import type { AllRegistrationsResponse } from '@/app/api/organizer/registrations/route'
 import type { SerializedRegistration }   from '@/app/api/organizer/events/[eventId]/registrations/route'
+import type { EventListItem, EventsListResponse } from '@/app/api/organizer/events/route'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -42,7 +45,7 @@ function StatusBadge({ status }: { status: string }) {
   }
   return (
     <span className={cn(
-      'inline-flex rounded-full px-2.5 py-0.5 text-[11px] font-semibold capitalize',
+      'inline-flex rounded-full px-2.5 py-0.5 text-[12px] font-semibold capitalize',
       cls[status] ?? 'bg-muted text-muted-foreground',
     )}>
       {status}
@@ -92,7 +95,7 @@ function RegistrationRow({ reg }: { reg: SerializedRegistration }) {
           href={`/tickets/${reg.id}`}
           target="_blank"
           rel="noopener noreferrer"
-          className="inline-flex items-center gap-1 rounded-lg border border-border bg-card px-2.5 py-1 text-[11.5px] font-medium text-foreground transition-colors hover:bg-muted/60"
+          className="inline-flex items-center gap-1 rounded-lg border border-border bg-card px-2.5 py-1 text-[13px] font-medium text-foreground transition-colors hover:bg-muted/60"
         >
           <Ticket className="size-3" />
           Ticket
@@ -102,26 +105,179 @@ function RegistrationRow({ reg }: { reg: SerializedRegistration }) {
   )
 }
 
+// ─── Event Selector ───────────────────────────────────────────────────────────
+
+function EventSelector({
+  events,
+  loading,
+  eventId,
+  onSelect,
+}: {
+  events:   EventListItem[]
+  loading:  boolean
+  eventId:  string | null
+  onSelect: (id: string | null) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!open) return
+    function handler(e: MouseEvent) {
+      if (!ref.current?.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [open])
+
+  useEffect(() => {
+    function handler(e: KeyboardEvent) { if (e.key === 'Escape') setOpen(false) }
+    document.addEventListener('keydown', handler)
+    return () => document.removeEventListener('keydown', handler)
+  }, [])
+
+  // Reuse the same publish-status fields already on EventListItem:
+  //   status === 'published'             → excludes drafts and unpublished events
+  //   lifecycleStatus !== 'cancelled'    → excludes cancelled events
+  //   lifecycleStatus !== 'archived'     → excludes archived events
+  //   lifecycleStatus !== 'unpublished'  → Phase L2 recognition (never emitted yet)
+  // This matches the business rules used in EventsClient.tsx's tabsForEvent().
+  const publishedEvents = events.filter(e =>
+    e.status === 'published' &&
+    e.lifecycleStatus !== 'cancelled' &&
+    e.lifecycleStatus !== 'archived' &&
+    e.lifecycleStatus !== 'unpublished',
+  )
+
+  const selected = publishedEvents.find(e => e.draftId === eventId)
+  const label    = selected ? selected.name : 'All Events'
+
+  return (
+    <div ref={ref} className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen(v => !v)}
+        disabled={loading}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        className="flex h-9 items-center gap-2 rounded-lg border border-border bg-card px-3 text-[13px] font-medium text-foreground transition-colors hover:bg-muted/60 disabled:opacity-50"
+      >
+        <span className="max-w-[160px] truncate">{label}</span>
+        <ChevronDown
+          className={cn(
+            'size-3.5 shrink-0 text-muted-foreground transition-transform duration-150',
+            open && 'rotate-180',
+          )}
+          aria-hidden
+        />
+      </button>
+
+      {open && (
+        <div
+          role="listbox"
+          aria-label="Select event"
+          className="absolute right-0 top-full z-20 mt-1.5 w-56 overflow-hidden rounded-xl border border-border bg-card shadow-lg"
+        >
+          <div className="max-h-64 overflow-y-auto py-1">
+            <button
+              role="option"
+              aria-selected={eventId === null}
+              type="button"
+              onClick={() => { onSelect(null); setOpen(false) }}
+              className={cn(
+                'flex w-full items-center px-3.5 py-2 text-left text-[13px] transition-colors hover:bg-muted/60',
+                eventId === null ? 'font-semibold text-primary' : 'text-foreground',
+              )}
+            >
+              All Events
+            </button>
+            {publishedEvents.length === 0 ? (
+              <p className="px-3.5 py-2 text-[13px] text-muted-foreground">
+                No published events available
+              </p>
+            ) : (
+              <>
+                <div className="mx-3.5 my-1 border-t border-border/40" />
+                {publishedEvents.map(e => (
+                  <button
+                    key={e.draftId}
+                    role="option"
+                    aria-selected={eventId === e.draftId}
+                    type="button"
+                    onClick={() => { onSelect(e.draftId); setOpen(false) }}
+                    className={cn(
+                      'flex w-full items-center px-3.5 py-2 text-left text-[13px] transition-colors hover:bg-muted/60',
+                      eventId === e.draftId ? 'font-semibold text-primary' : 'text-foreground',
+                    )}
+                  >
+                    <span className="line-clamp-1">{e.name}</span>
+                  </button>
+                ))}
+              </>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function RegistrationsHubPage() {
+  return (
+    <Suspense>
+      <RegistrationsHubContent />
+    </Suspense>
+  )
+}
+
+function RegistrationsHubContent() {
   const router       = useRouter()
   const searchParams = useSearchParams()
   const statusParam  = searchParams.get('status') as StatusFilter | null
   const activeTab    = (statusParam && TABS.some(t => t.key === statusParam))
     ? statusParam : 'all'
+  const eventId      = searchParams.get('eventId') ?? null
 
-  const [data,    setData]    = useState<AllRegistrationsResponse | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [error,   setError]   = useState<string | null>(null)
-  const [search,  setSearch]  = useState('')
+  const [data,          setData]          = useState<AllRegistrationsResponse | null>(null)
+  const [loading,       setLoading]       = useState(true)
+  const [error,         setError]         = useState<string | null>(null)
+  const [search,        setSearch]        = useState('')
+  const [events,        setEvents]        = useState<EventListItem[]>([])
+  const [eventsLoading, setEventsLoading] = useState(true)
 
+  // ── Load events for filter dropdown (once on mount) ───────────────────────
+  // auth.currentUser is guaranteed non-null: DashboardLayout blocks render until
+  // auth resolves and redirects unauthenticated users before children mount.
   useEffect(() => {
+    async function loadEvents() {
+      const user = auth.currentUser
+      if (!user) return
+      try {
+        const token = await user.getIdToken()
+        const res   = await fetch('/api/organizer/events', {
+          headers: { Authorization: `Bearer ${token}` },
+        })
+        if (res.ok) setEvents((await res.json() as EventsListResponse).events)
+      } catch { /* dropdown degrades gracefully if events fail to load */ }
+      finally  { setEventsLoading(false) }
+    }
+    void loadEvents()
+  }, [])
+
+  // ── Load registrations — re-runs whenever the event filter changes ─────────
+  useEffect(() => {
+    setLoading(true)
+    setError(null)
     const unsub = onAuthStateChanged(auth, async user => {
       if (!user) { setLoading(false); return }
       try {
         const token = await user.getIdToken()
-        const res   = await fetch('/api/organizer/registrations', {
+        const url   = eventId
+          ? `/api/organizer/registrations?eventId=${encodeURIComponent(eventId)}`
+          : '/api/organizer/registrations'
+        const res   = await fetch(url, {
           headers: { Authorization: `Bearer ${token}` },
         })
         if (!res.ok) throw new Error('Failed to load registrations')
@@ -133,7 +289,7 @@ export default function RegistrationsHubPage() {
       }
     })
     return unsub
-  }, [])
+  }, [eventId])
 
   const filtered = useMemo((): SerializedRegistration[] => {
     let regs = data?.registrations ?? []
@@ -150,11 +306,23 @@ export default function RegistrationsHubPage() {
     return regs
   }, [data, activeTab, search])
 
+  // Preserve eventId when switching status tabs
   function goTab(key: StatusFilter) {
-    const url = key === 'all'
-      ? '/dashboard/registrations'
-      : `/dashboard/registrations?status=${key}`
-    router.push(url)
+    const params = new URLSearchParams()
+    if (key !== 'all') params.set('status', key)
+    if (eventId)       params.set('eventId', eventId)
+    const qs = params.toString()
+    router.push(`/dashboard/registrations${qs ? `?${qs}` : ''}`)
+    setSearch('')
+  }
+
+  // Preserve active status tab when switching events
+  function goEvent(id: string | null) {
+    const params = new URLSearchParams()
+    if (activeTab !== 'all') params.set('status', activeTab)
+    if (id)                  params.set('eventId', id)
+    const qs = params.toString()
+    router.push(`/dashboard/registrations${qs ? `?${qs}` : ''}`)
     setSearch('')
   }
 
@@ -164,12 +332,18 @@ export default function RegistrationsHubPage() {
     <div className="space-y-5">
 
       {/* ── Header ── */}
-      <div>
-        <h1 className="text-[22px] font-bold text-foreground">Registrations</h1>
-        <p className="mt-0.5 text-[13px] text-muted-foreground">
-          All registrations across your events.
-        </p>
-      </div>
+      <PageHeader
+        title="Registrations"
+        subtitle="All registrations across your events."
+        action={
+          <EventSelector
+            events={events}
+            loading={eventsLoading}
+            eventId={eventId}
+            onSelect={goEvent}
+          />
+        }
+      />
 
       {/* ── Stat cards ── */}
       {stats && (
@@ -200,7 +374,7 @@ export default function RegistrationsHubPage() {
               <t.icon className="size-3.5" aria-hidden />
               {t.label}
               {stats && (
-                <span className="ml-0.5 rounded-full bg-muted px-1.5 py-0 text-[10px] text-muted-foreground">
+                <span className="ml-0.5 rounded-full bg-muted px-1.5 py-0 text-[12px] text-muted-foreground">
                   {t.key === 'all'
                     ? stats.total
                     : (stats as Record<string, number>)[t.key] ?? 0}
@@ -241,16 +415,14 @@ export default function RegistrationsHubPage() {
 
       {/* ── Error ── */}
       {!loading && error && (
-        <div className="flex items-center gap-2 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-[13px] text-red-700">
-          <AlertCircle className="size-4 shrink-0" /> {error}
-        </div>
+        <ErrorState message={error} onRetry={() => window.location.reload()} className="rounded-xl border border-border" />
       )}
 
       {/* ── Table ── */}
       {!loading && !error && (
         filtered.length > 0 ? (
           <div className="overflow-hidden rounded-xl border border-border">
-            <table className="w-full text-[12.5px]">
+            <table className="w-full text-[13px]">
               <thead>
                 <tr className="border-b border-border bg-muted/40">
                   <th className="px-4 py-2.5 text-left font-semibold text-muted-foreground">Attendee</th>
@@ -268,25 +440,16 @@ export default function RegistrationsHubPage() {
             </table>
           </div>
         ) : (
-          <div className="flex flex-col items-center justify-center gap-3 rounded-2xl border border-dashed border-border py-20 text-center">
-            <Users className="size-10 text-muted-foreground/30" aria-hidden />
-            <p className="text-[15px] font-semibold text-foreground">
-              {search ? 'No results found' : 'No registrations yet'}
-            </p>
-            <p className="max-w-xs text-[13px] text-muted-foreground">
-              {search
-                ? 'Try a different search term.'
-                : 'Registrations will appear here once attendees sign up for your events.'}
-            </p>
-            {search && (
-              <button
-                onClick={() => setSearch('')}
-                className="mt-1 rounded-xl border border-border bg-card px-4 py-2 text-[12.5px] font-medium text-foreground hover:bg-muted/60"
-              >
-                Clear search
-              </button>
-            )}
-          </div>
+          <EmptyState
+            icon={Users}
+            title={search ? 'No results found' : 'No registrations yet'}
+            description={search
+              ? 'Try a different search term.'
+              : 'Registrations will appear here once attendees sign up for your events.'}
+            size="md"
+            action={search ? { label: 'Clear search', onClick: () => setSearch('') } : undefined}
+            className="rounded-2xl border border-dashed border-border"
+          />
         )
       )}
     </div>

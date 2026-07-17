@@ -4,46 +4,13 @@
 
 import { FieldValue }    from 'firebase-admin/firestore'
 import { adminDb }       from '@/lib/firebase/admin'
-import type { EventLifecycleStatus, LifecycleAction } from '@/types/events'
+import type { EventLifecycleStatus, LifecycleAction, EventReviewMeta } from '@/types/events'
+import { targetStatus, isValidTransition, deriveLifecycleStatus } from './lifecycleStateMachine'
 
-// ─── State machine ────────────────────────────────────────────────────────────
-
-const VALID_TRANSITIONS: Partial<Record<EventLifecycleStatus, EventLifecycleStatus[]>> = {
-  published:            ['registration_closed', 'completed', 'cancelled', 'draft'],
-  registration_closed:  ['published', 'cancelled'],
-  completed:            ['archived'],
-  cancelled:            ['archived'],
-  // draft → published is handled by the existing /api/events/publish endpoint
-  // published → draft is the 'unpublish' action
-}
-
-export function targetStatus(action: LifecycleAction): EventLifecycleStatus {
-  switch (action) {
-    case 'close_registrations':  return 'registration_closed'
-    case 'reopen_registrations': return 'published'
-    case 'complete':             return 'completed'
-    case 'cancel':               return 'cancelled'
-    case 'archive':              return 'archived'
-    case 'unpublish':            return 'draft'
-  }
-}
-
-export function isValidTransition(from: EventLifecycleStatus, to: EventLifecycleStatus): boolean {
-  return (VALID_TRANSITIONS[from] ?? []).includes(to)
-}
-
-// ─── Derive lifecycleStatus from a raw Firestore document ─────────────────────
-// Used for backward-compat: existing documents don't have lifecycleStatus yet.
-
-export function deriveLifecycleStatus(d: Record<string, unknown>): EventLifecycleStatus {
-  if (typeof d.lifecycleStatus === 'string') return d.lifecycleStatus as EventLifecycleStatus
-  if (d.status === 'draft') return 'draft'
-  // Legacy published events: check eventDetails.status.status for informal states
-  const details  = (d.eventDetails as Record<string, unknown>) ?? {}
-  const evStatus = ((details.status as Record<string, unknown>) ?? {}).status
-  if (evStatus === 'cancelled') return 'cancelled'
-  return 'published'
-}
+// Re-export the pure state machine so existing importers of this module are
+// unaffected (the machine now lives in ./lifecycleStateMachine for testability).
+export { targetStatus, isValidTransition, deriveLifecycleStatus } from './lifecycleStateMachine'
+export { VALID_TRANSITIONS } from './lifecycleStateMachine'
 
 // ─── Core transition function ─────────────────────────────────────────────────
 
@@ -59,6 +26,8 @@ export async function applyLifecycleTransition(
   eventId:       string,
   action:        LifecycleAction,
   cancelReason?: string,
+  review?:       EventReviewMeta,
+  actorUid?:     string,   // caller uid for audit (defaults to uid / workspace owner)
 ): Promise<TransitionResult> {
   // ── 1. Load draft (uid in path proves ownership) ───────────────────────────
   const draftRef  = adminDb.doc(`users/${uid}/eventDrafts/${eventId}`)
@@ -113,10 +82,105 @@ export async function applyLifecycleTransition(
     draftUpdate.archivedAt  = now
     eventUpdate.archivedAt  = now
   }
+  if (action === 'restore') {
+    // Archived → Unpublished (still PRIVATE). Mirrors the unpublished field-state so
+    // the event behaves exactly like any other unpublished event (404 publicly; the
+    // only way back to live is republish → admin review). Pure lifecycle write — NO
+    // Razorpay / license / order / wallet / registration / certificate writes, so the
+    // existing paid Event License is reused forever.
+    draftUpdate.status      = 'draft'   // legacy binary = "not live" (backward compat)
+    draftUpdate.restoredAt  = now
+    draftUpdate.archivedAt  = null      // no longer archived
+    eventUpdate.restoredAt  = now
+    eventUpdate.archivedAt  = null
+  }
   if (action === 'unpublish') {
-    // Reset legacy status field so dashboard's d.status === 'published' filter excludes this draft
+    // lifecycleStatus becomes 'unpublished' (default newStatus above). The legacy
+    // `status` binary is kept as 'draft' (= "not live") for backward compatibility,
+    // so every existing `status === 'published'` reader still excludes this event.
+    // The events/{slug} doc + paid Event License are PRESERVED for a payment-free
+    // republish (no license/order/wallet/registration/certificate writes here).
     draftUpdate.status       = 'draft'
     draftUpdate.unpublishedAt = now
+  }
+  if (action === 'approve') {
+    // Admin approval goes live: sync the legacy status field and stamp publish time.
+    draftUpdate.status      = 'published'
+    draftUpdate.publishedAt = now
+    draftUpdate.approvedAt  = now
+    draftUpdate.reviewStatus = null
+    eventUpdate.publishedAt = now
+    eventUpdate.approvedAt  = now
+    eventUpdate.reviewStatus = null
+    // Review duration = approval time − submit time (the event's publishedAt was
+    // stamped at submit while it sat in pending_review). Recorded for admin stats.
+    const submittedTs = d.publishedAt as { toDate?: () => Date } | undefined
+    if (submittedTs && typeof submittedTs.toDate === 'function') {
+      eventUpdate.reviewDurationMs = Math.max(0, Date.now() - submittedTs.toDate().getTime())
+    }
+  }
+  if (action === 'reject') {
+    // Admin rejection returns the event to draft (legacy status excludes it) and
+    // records the reason so the organizer can see it and resubmit.
+    draftUpdate.status            = 'draft'
+    draftUpdate.rejectedAt        = now
+    draftUpdate.reviewStatus      = 'rejected'
+    draftUpdate.rejectionReason   = review?.rejectionReason   ?? ''
+    draftUpdate.rejectionCategory = review?.rejectionCategory ?? ''
+    draftUpdate.rejectionNotes    = review?.rejectionNotes    ?? ''
+    eventUpdate.rejectedAt        = now
+    eventUpdate.reviewStatus      = 'rejected'
+    eventUpdate.rejectionReason   = review?.rejectionReason   ?? ''
+    eventUpdate.rejectionCategory = review?.rejectionCategory ?? ''
+    eventUpdate.rejectionNotes    = review?.rejectionNotes    ?? ''
+  }
+  if (action === 'request_changes') {
+    draftUpdate.changesRequestedAt = now
+    draftUpdate.reviewStatus       = 'changes_requested'
+    draftUpdate.changesComment     = review?.changesComment ?? ''
+    eventUpdate.changesRequestedAt = now
+    eventUpdate.reviewStatus       = 'changes_requested'
+    eventUpdate.changesComment     = review?.changesComment ?? ''
+  }
+  if (action === 'resubmit') {
+    // Organizer resubmits after edits: back to review, clearing prior review notes.
+    draftUpdate.status            = 'pending_review'
+    draftUpdate.publishedAt       = now   // submit time for the new review cycle
+    draftUpdate.resubmittedAt     = now
+    draftUpdate.reviewStatus      = null
+    draftUpdate.rejectionReason   = null
+    draftUpdate.rejectionCategory = null
+    draftUpdate.rejectionNotes    = null
+    draftUpdate.changesComment    = null
+    eventUpdate.publishedAt       = now
+    eventUpdate.resubmittedAt     = now
+    eventUpdate.reviewStatus      = null
+    eventUpdate.rejectionReason   = null
+    eventUpdate.rejectionCategory = null
+    eventUpdate.rejectionNotes    = null
+    eventUpdate.changesComment    = null
+  }
+  if (action === 'republish') {
+    // Organizer republishes a previously-unpublished event: back to admin review
+    // (NEVER straight to published). Mirrors resubmit — a pure lifecycle transition
+    // that does NOT re-run the publish transaction, so the existing events/{slug}
+    // doc and its paid Event License are reused (no Razorpay, no licenseOrder,
+    // no eventLicense creation). No payment can ever be requested here.
+    draftUpdate.status            = 'pending_review'
+    draftUpdate.publishedAt       = now   // submit time for the new review cycle
+    draftUpdate.republishedAt     = now
+    draftUpdate.reviewStatus      = null
+    draftUpdate.rejectionReason   = null
+    draftUpdate.rejectionCategory = null
+    draftUpdate.rejectionNotes    = null
+    draftUpdate.changesComment    = null
+    eventUpdate.publishedAt       = now
+    eventUpdate.republishedAt     = now
+    eventUpdate.reviewStatus      = null
+    eventUpdate.rejectionReason   = null
+    eventUpdate.rejectionCategory = null
+    eventUpdate.rejectionNotes    = null
+    eventUpdate.changesComment    = null
   }
 
   // ── 5. Resolve public slug (needed to update events/{slug}) ───────────────
@@ -137,6 +201,21 @@ export async function applyLifecycleTransition(
   }
 
   await batch.commit()
+
+  // ── 7. Audit (fire-and-forget) — archive / restore only ───────────────────
+  // Uses the existing organizer audit collection (teamAuditLogs), the same one the
+  // delete route writes to. Never blocks or fails the transition.
+  if (action === 'archive' || action === 'restore') {
+    void adminDb.collection('teamAuditLogs').add({
+      organizerUid: uid,
+      actorUid:     actorUid ?? uid,
+      action:       action === 'archive' ? 'event.archived' : 'event.restored',
+      entityType:   'event',
+      entityId:     eventId,
+      metadata:     { slug: slug ?? null, lifecycleStatus: newStatus },
+      createdAt:    FieldValue.serverTimestamp(),
+    }).catch(() => { /* best-effort audit */ })
+  }
 
   return { success: true, lifecycleStatus: newStatus, statusCode: 200 }
 }

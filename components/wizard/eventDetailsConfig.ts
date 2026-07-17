@@ -3,10 +3,6 @@
 
 // ─── Union types ──────────────────────────────────────────────────────────────
 
-export type EventStatus =
-  | 'draft' | 'published' | 'private' | 'postponed'
-  | 'cancelled' | 'sold_out' | 'archived'
-
 export type VenueType        = 'physical' | 'online' | 'hybrid'
 export type OnlinePlatform   = 'zoom' | 'google_meet' | 'ms_teams' | 'webex' | 'youtube_live' | 'custom'
 export type CommChannel      = 'email' | 'whatsapp' | 'sms'
@@ -14,7 +10,6 @@ export type SessionType      = 'keynote' | 'panel' | 'workshop' | 'networking' |
 export type SponsorTier      = 'title' | 'gold' | 'silver' | 'bronze' | 'partner' | 'media'
 export type RecordSourceType = 'new' | 'existing_library' | 'imported_event'
 export type ReminderTiming   = '7d' | '3d' | '1d' | '2h' | 'custom'
-export type EventPageTheme   = 'default' | 'professional' | 'modern' | 'minimal' | 'vibrant'
 export type MediaSource      = 'upload' | 'url'
 
 export interface MediaAsset {
@@ -24,14 +19,6 @@ export interface MediaAsset {
 }
 
 // ─── Interfaces ───────────────────────────────────────────────────────────────
-
-export interface StatusConfig {
-  status:                          EventStatus
-  postponedDate:                   string
-  postponedMessage:                string
-  cancellationMessage:             string
-  notifyRegistrantsOnStatusChange: boolean
-}
 
 export interface EventInfo {
   name:      string
@@ -43,12 +30,15 @@ export interface EventInfo {
 }
 
 export interface MediaConfig {
-  logo:          MediaAsset
-  coverBanner:   MediaAsset
-  primaryColor:  string
-  theme:         EventPageTheme
-  galleryImages: MediaAsset[]
-  promoVideoUrl: string
+  logo:             MediaAsset
+  coverBanner:      MediaAsset
+  // Banner crop state — persisted so the crop modal can restore position on re-edit.
+  // Pixel offsets are at the 288 px-wide crop preview scale; scale is 1.0–4.0.
+  bannerPositionX:  number
+  bannerPositionY:  number
+  bannerScale:      number
+  galleryImages:    MediaAsset[]
+  promoVideoUrl:    string
 }
 
 export interface VenueMaps {
@@ -127,12 +117,12 @@ export interface OrganizerInfo {
   website: string
   logoUrl: string
   social:  OrganizerSocial
-}
-
-export interface MessageTemplate {
-  subject:  string
-  body:     string
-  isCustom: boolean
+  // Optional trust/profile fields — rendered by OrganizerShowcase only when present.
+  tagline?:      string
+  bio?:          string
+  verified?:     boolean
+  foundedYear?:  number
+  eventsHosted?: number
 }
 
 export interface ReminderRule {
@@ -150,17 +140,6 @@ export interface CommunicationConfig {
     generateQrTicket: boolean
   }
   reminders: ReminderRule[]
-  templates: {
-    confirmationEmail:    MessageTemplate
-    confirmationWhatsApp: MessageTemplate
-    confirmationSms:      MessageTemplate
-    reminderEmail:        MessageTemplate
-    reminderWhatsApp:     MessageTemplate
-  }
-  certificate: {
-    enabled:  boolean
-    template: 'default' | 'custom'
-  }
 }
 
 export interface RefundWindow {
@@ -210,6 +189,17 @@ export interface IntegrationsConfig {
   metaPixelId:       string
 }
 
+export interface ApplicationsCfgEntry {
+  enabled:     boolean
+  closingDate: string
+  message:     string
+}
+
+export interface ApplicationsConfig {
+  speaker: ApplicationsCfgEntry
+  sponsor: ApplicationsCfgEntry
+}
+
 export interface Speaker {
   id:            string
   name:          string
@@ -234,6 +224,20 @@ export interface Sponsor {
   libraryId?:    string
   sourceEventId?:string
   order:         number
+  // Optional public-page fields — rendered by SponsorsShowcase only when present.
+  description?:  string
+  displayOrder?: number
+  enabled?:      boolean
+  featured?:     boolean
+  themeColor?:   string
+  category?:     string
+  location?:     string
+  since?:        string | number
+  tags?:         string[]
+  industry?:     string
+  country?:      string
+  socials?:      { label?: string; url: string }[]
+  brandGuidelines?: string
 }
 
 export interface ConferenceTrack {
@@ -244,9 +248,17 @@ export interface ConferenceTrack {
 
 export interface ConferenceDetails {
   speakers:  Speaker[]
+  /** @deprecated Migrate to EventDetailsDraft.sponsors; kept for backward-compat reads. */
   sponsors:  Sponsor[]
   tracks:    ConferenceTrack[]
   hallLayout:string
+}
+
+export interface RaceCategory {
+  id:              string
+  name:            string
+  distance:        string
+  maxParticipants: number | null
 }
 
 export interface SportsRunningDetails {
@@ -259,6 +271,28 @@ export interface SportsRunningDetails {
   hydrationPoints:    string
   startLineInfo:      string
   rulesUrl:           string
+  // Sports MVP additions
+  requireWaiver:  boolean
+  waiverText:     string
+  raceCategories: RaceCategory[]
+  // v2 label overrides — allow organiser-specific terminology without code changes
+  disciplineLabel?:      string
+  ctaLabel?:             string
+  categoryLabel?:        string
+  sessionLabel?:         string
+  participantLabel?:     string
+  countdownLabel?:       string
+  reportingTimeLabel?:   string
+  scheduleEyebrow?:      string
+  scheduleSubtitle?:     string
+  routeEyebrow?:         string
+  routeSectionTitle?:    string
+  routeSectionSubtitle?: string
+  startLineLabel?:       string
+  hydrationLabel?:       string
+  faqItems?:             { question: string; answer: string }[]
+  faqSectionTitle?:      string
+  faqSectionSubtitle?:   string
 }
 
 export interface TeamSportDetails {
@@ -279,6 +313,7 @@ export interface WorkshopDetails {
   materialsIncluded: string
   softwareRequired:  string
   batchSize:         number | null
+  hasCertificate:    boolean
 }
 
 export interface MeetupFounderDetails {
@@ -299,11 +334,33 @@ export interface MeetupAlumniDetails {
   reunionActivities: string
 }
 
+export interface CulturalHighlight {
+  id:    string
+  label: string
+  desc:  string
+}
+
+export interface CulturalZone {
+  id:   string
+  name: string
+  desc: string
+}
+
 export interface CulturalDetails {
   artists:         Speaker[]
   programSchedule: string
   entryRules:      string
   ageRestriction:  string
+  highlights:      CulturalHighlight[]
+  experienceZones: CulturalZone[]
+}
+
+export interface PastWinner {
+  id:           string
+  year:         string
+  category:     string
+  winner:       string
+  organisation: string
 }
 
 export interface AwardsDetails {
@@ -311,6 +368,8 @@ export interface AwardsDetails {
   nominationRules: string
   judgingProcess:  string
   ceremonyFormat:  string
+  judges:          Speaker[]
+  pastWinners:     PastWinner[]
 }
 
 export interface FundraisingDetails {
@@ -321,11 +380,29 @@ export interface FundraisingDetails {
   taxExemptionInfo: string
 }
 
+export interface ExhibitorEntry {
+  id:          string
+  name:        string
+  logoUrl:     string
+  website:     string
+  description: string
+  boothNumber: string
+  order:       number
+}
+
+export interface ExhibitionCategory {
+  id:    string
+  label: string
+  desc:  string
+}
+
 export interface ExhibitionDetails {
-  boothInfoUrl:        string
-  floorPlanUrl:        string
-  visitorInstructions: string
-  parkingInfo:         string
+  boothInfoUrl:         string
+  floorPlanUrl:         string
+  visitorInstructions:  string
+  parkingInfo:          string
+  exhibitors:           ExhibitorEntry[]
+  exhibitionCategories: ExhibitionCategory[]
 }
 
 export interface CommunityDetails {
@@ -342,29 +419,143 @@ export type TypeDetails =
   | FundraisingDetails  | ExhibitionDetails  | CommunityDetails
   | null
 
+// ─── Experience ("What Awaits You") ─────────────────────────────────────────────
+// Template-agnostic list of what an attendee receives. Read by every template's
+// shared ExperienceSection. Only `id`, `title` and `enabled` are required; every
+// other field renders only when the organiser provides it. Future-proofed with
+// optional fields so the section can grow without a schema migration.
+export interface ExperienceItem {
+  id:            string
+  title:         string
+  enabled:       boolean
+  description?:  string
+  icon?:         string        // key from the curated set (unknown/blank → no icon)
+  image?:        string        // when present, replaces the icon with imagery
+  category?:     string        // enables auto-grouping
+  displayOrder?: number
+  priority?:     number
+  highlight?:    string        // short tag, e.g. "Included"
+  // Future-proof optional fields — never rendered unless present.
+  themeColor?:   string
+  badge?:        string
+  gallery?:      string[]
+  video?:        string
+  cta?:          string
+  link?:         string
+}
+
+// ─── Event Journey (timeline) ───────────────────────────────────────────────────
+// Template-agnostic "what happens on event day" list, read by the shared
+// JourneySection. Only `id`, `title`, `enabled` are required; everything else
+// renders only when the organiser provides it.
+export interface TimelineItem {
+  id:            string
+  title:         string
+  enabled:       boolean
+  time?:         string        // "09:00"
+  endTime?:      string
+  date?:         string        // "2027-01-01"
+  day?:          number | string
+  description?:  string
+  location?:     string
+  speaker?:      string
+  category?:     string        // optional sub-grouping within a day
+  icon?:         string        // curated key; unknown/blank → plain node
+  image?:        string
+  highlight?:    string
+  status?:       'done' | 'live' | 'upcoming' | string
+  displayOrder?: number
+  // Future-proof optional fields — never rendered unless present.
+  themeColor?:   string
+  badge?:        string
+  link?:         string
+  cta?:          string
+  duration?:     string
+  important?:    boolean
+  attachments?:  { label?: string; url: string }[]
+}
+
+// ─── Gallery (proof) ─────────────────────────────────────────────────────────────
+// Template-agnostic media list read by the shared GalleryShowcase. Only `id`, `url`
+// and `enabled` are required; everything else renders only when present. Supports
+// images plus self-hosted / YouTube / Vimeo video (auto-detected).
+export interface GalleryItem {
+  id:            string
+  url:           string
+  enabled:       boolean
+  type?:         'image' | 'video' | 'drone' | 'poster' | 'banner' | 'reel'
+  thumbnail?:    string
+  title?:        string
+  description?:  string
+  category?:     string
+  photographer?: string
+  date?:         string
+  featured?:     boolean
+  displayOrder?: number
+  aspect?:       string
+  // Future-proof optional fields — never rendered unless present.
+  alt?:          string
+  copyright?:    string
+  license?:      string
+  location?:     string
+  tags?:         string[]
+  featuredOrder?: number
+}
+
+// ─── FAQ ─────────────────────────────────────────────────────────────────────────
+// Template-agnostic Q&A read by the shared FAQShowcase. Only id/question/answer/
+// enabled are required; everything else renders only when present.
+export interface FaqItem {
+  id:           string
+  question:     string
+  answer:       string
+  enabled:      boolean
+  category?:    string
+  displayOrder?:number
+  featured?:    boolean
+  attachments?: { label?: string; url: string }[]
+  links?:       { label?: string; url: string }[]
+  // Future-proof optional fields — never rendered unless present.
+  icon?:        string
+  priority?:    number
+  audience?:    string
+  updatedAt?:   string
+  relatedFaqs?: string[]
+}
+
 export interface EventDetailsDraft {
-  status:        StatusConfig
   info:          EventInfo
   media:         MediaConfig
   venue:         VenueConfig
   schedule:      EventSchedule
   organizer:     OrganizerInfo
+  sponsors:      Sponsor[]
   communication: CommunicationConfig
   support:       SupportConfig
   seo:           SeoConfig
   publicPage:    PublicPageSettings
   integrations:  IntegrationsConfig
+  applications:  ApplicationsConfig
   typeDetails:   TypeDetails
+  experience?:   ExperienceItem[]
+  timeline?:     TimelineItem[]
+  gallery?:      GalleryItem[]
+  faq?:          FaqItem[]
 }
 
 // ─── ID generators ────────────────────────────────────────────────────────────
 
-export const makeSessionId  = (): string => 'ses_' + Math.random().toString(36).slice(2, 10)
-export const makeSpeakerId  = (): string => 'spk_' + Math.random().toString(36).slice(2, 10)
-export const makeSponsorId  = (): string => 'spo_' + Math.random().toString(36).slice(2, 10)
-export const makeTrackId    = (): string => 'trk_' + Math.random().toString(36).slice(2, 10)
-export const makeReminderId = (): string => 'rem_' + Math.random().toString(36).slice(2, 10)
-export const makeAwardCatId = (): string => 'awc_' + Math.random().toString(36).slice(2, 10)
+export const makeSessionId      = (): string => 'ses_' + Math.random().toString(36).slice(2, 10)
+export const makeSpeakerId      = (): string => 'spk_' + Math.random().toString(36).slice(2, 10)
+export const makeSponsorId      = (): string => 'spo_' + Math.random().toString(36).slice(2, 10)
+export const makeTrackId        = (): string => 'trk_' + Math.random().toString(36).slice(2, 10)
+export const makeReminderId     = (): string => 'rem_' + Math.random().toString(36).slice(2, 10)
+export const makeAwardCatId     = (): string => 'awc_' + Math.random().toString(36).slice(2, 10)
+export const makePastWinnerId   = (): string => 'pw_'  + Math.random().toString(36).slice(2, 10)
+export const makeExhibitorId    = (): string => 'exh_' + Math.random().toString(36).slice(2, 10)
+export const makeHighlightId    = (): string => 'hl_'  + Math.random().toString(36).slice(2, 10)
+export const makeZoneId         = (): string => 'zn_'  + Math.random().toString(36).slice(2, 10)
+export const makeExhibitionCatId= (): string => 'exc_' + Math.random().toString(36).slice(2, 10)
 
 // ─── UI label maps ────────────────────────────────────────────────────────────
 
@@ -394,16 +585,6 @@ export const ONLINE_PLATFORM_LABELS: Record<OnlinePlatform, string> = {
   webex:        'Webex',
   youtube_live: 'YouTube Live',
   custom:       'Custom Platform',
-}
-
-export const EVENT_STATUS_LABELS: Record<EventStatus, string> = {
-  draft:     'Draft',
-  published: 'Published',
-  private:   'Private',
-  postponed: 'Postponed',
-  cancelled: 'Cancelled',
-  sold_out:  'Sold Out',
-  archived:  'Archived',
 }
 
 export const LANGUAGE_OPTIONS = [
@@ -442,8 +623,6 @@ export const TIMEZONE_OPTIONS = [
 
 // ─── Blank factories ──────────────────────────────────────────────────────────
 
-const BLANK_TEMPLATE: MessageTemplate = { subject: '', body: '', isCustom: false }
-
 export function makeBlankSpeaker(): Speaker {
   return {
     id: makeSpeakerId(), name: '', title: '', company: '', bio: '',
@@ -473,19 +652,15 @@ function makeReminder(timing: ReminderTiming, channels: CommChannel[] = ['email'
 
 export function makeBlankEventDetailsDraft(): EventDetailsDraft {
   return {
-    status: {
-      status: 'draft',
-      postponedDate: '', postponedMessage: '', cancellationMessage: '',
-      notifyRegistrantsOnStatusChange: true,
-    },
     info: { name: '', tagline: '', shortDesc: '', fullDesc: '', language: 'en', dressCode: '' },
     media: {
-      logo:          { source: 'url', value: '' },
-      coverBanner:   { source: 'url', value: '' },
-      primaryColor:  '#6366f1',
-      theme:         'default',
-      galleryImages: [],
-      promoVideoUrl: '',
+      logo:            { source: 'url', value: '' },
+      coverBanner:     { source: 'url', value: '' },
+      bannerPositionX: 0,
+      bannerPositionY: 0,
+      bannerScale:     1,
+      galleryImages:   [],
+      promoVideoUrl:   '',
     },
     venue: {
       type: 'physical',
@@ -508,6 +683,7 @@ export function makeBlankEventDetailsDraft(): EventDetailsDraft {
       name: '', email: '', phone: '', website: '', logoUrl: '',
       social: { facebook: '', instagram: '', linkedin: '', youtube: '', twitter: '', hashtags: [] },
     },
+    sponsors: [],
     communication: {
       confirmation: { channels: ['email'], calendarInvite: true, generateQrTicket: true },
       reminders: [
@@ -516,14 +692,6 @@ export function makeBlankEventDetailsDraft(): EventDetailsDraft {
         makeReminder('1d', ['email', 'whatsapp']),
         makeReminder('2h', ['whatsapp']),
       ],
-      templates: {
-        confirmationEmail:    BLANK_TEMPLATE,
-        confirmationWhatsApp: BLANK_TEMPLATE,
-        confirmationSms:      BLANK_TEMPLATE,
-        reminderEmail:        BLANK_TEMPLATE,
-        reminderWhatsApp:     BLANK_TEMPLATE,
-      },
-      certificate: { enabled: false, template: 'default' },
     },
     support: {
       supportEmail: '', supportPhone: '', faqUrl: '',
@@ -543,6 +711,10 @@ export function makeBlankEventDetailsDraft(): EventDetailsDraft {
       showSocialLinks: true, showAttendeeCount: false,
     },
     integrations: { webhookUrl: '', zapierWebhookUrl: '', googleAnalyticsId: '', metaPixelId: '' },
+    applications: {
+      speaker: { enabled: false, closingDate: '', message: '' },
+      sponsor: { enabled: false, closingDate: '', message: '' },
+    },
     typeDetails: null,
   }
 }
@@ -571,7 +743,6 @@ export function normalizeEventDetailsDraft(raw: unknown): EventDetailsDraft {
   const p = raw as Partial<EventDetailsDraft>
 
   return {
-    status:   safeObj(b.status,   p.status),
     info:     safeObj(b.info,     p.info),
     media: {
       ...safeObj(b.media, p.media),
@@ -588,10 +759,10 @@ export function normalizeEventDetailsDraft(raw: unknown): EventDetailsDraft {
       ...safeObj(b.organizer, p.organizer),
       social: safeObj(b.organizer.social, p.organizer?.social),
     } as OrganizerInfo,
+    sponsors: Array.isArray(p.sponsors) ? p.sponsors : b.sponsors,
     communication: {
       ...safeObj(b.communication, p.communication),
       confirmation: safeObj(b.communication.confirmation, p.communication?.confirmation),
-      templates:    safeObj(b.communication.templates,    p.communication?.templates),
     } as CommunicationConfig,
     support: {
       ...safeObj(b.support, p.support),
@@ -600,6 +771,10 @@ export function normalizeEventDetailsDraft(raw: unknown): EventDetailsDraft {
     seo:          safeObj(b.seo,          p.seo),
     publicPage:   safeObj(b.publicPage,   p.publicPage),
     integrations: safeObj(b.integrations, p.integrations),
+    applications: {
+      speaker: safeObj(b.applications.speaker, p.applications?.speaker),
+      sponsor: safeObj(b.applications.sponsor, p.applications?.sponsor),
+    } as ApplicationsConfig,
     typeDetails:  p.typeDetails !== undefined ? p.typeDetails : null,
   }
 }
@@ -665,13 +840,14 @@ export function makeBlankTypeDetails(sectionType: DynamicSectionType): TypeDetai
       return {
         routeMapUrl: '', reportingTime: '', kitCollectionInfo: '', kitCollectionDate: '',
         bagDepositInfo: '', medicalSupportInfo: '', hydrationPoints: '', startLineInfo: '', rulesUrl: '',
+        requireWaiver: false, waiverText: '', raceCategories: [],
       }
     case 'sports_cycling':
     case 'sports_team':
     case 'sports_generic':
       return { groundInfo: '', matchFormat: '', teamSize: null, matchDuration: '', rulesUrl: '' }
     case 'workshop':
-      return { trainers: [], prerequisites: '', learningOutcomes: [], materialsIncluded: '', softwareRequired: '', batchSize: null }
+      return { trainers: [], prerequisites: '', learningOutcomes: [], materialsIncluded: '', softwareRequired: '', batchSize: null, hasCertificate: false }
     case 'meetup_founder':
       return { startupShowcaseEnabled: false, pitchSessionEnabled: false, pitchFormat: '', investorConnectEnabled: false }
     case 'meetup_corporate':
@@ -679,13 +855,13 @@ export function makeBlankTypeDetails(sectionType: DynamicSectionType): TypeDetai
     case 'meetup_alumni':
       return { institution: '', batchYears: '', reunionActivities: '' }
     case 'cultural':
-      return { artists: [], programSchedule: '', entryRules: '', ageRestriction: '' }
+      return { artists: [], programSchedule: '', entryRules: '', ageRestriction: '', highlights: [], experienceZones: [] }
     case 'awards':
-      return { categories: [], nominationRules: '', judgingProcess: '', ceremonyFormat: '' }
+      return { categories: [], nominationRules: '', judgingProcess: '', ceremonyFormat: '', judges: [], pastWinners: [] }
     case 'fundraising':
       return { beneficiaryInfo: '', fundUsage: '', donationGoal: null, ngoPartner: '', taxExemptionInfo: '' }
     case 'exhibition':
-      return { boothInfoUrl: '', floorPlanUrl: '', visitorInstructions: '', parkingInfo: '' }
+      return { boothInfoUrl: '', floorPlanUrl: '', visitorInstructions: '', parkingInfo: '', exhibitors: [], exhibitionCategories: [] }
     case 'community':
       return { causeInfo: '', volunteerInstructions: '', campaignInfo: '', impactGoal: '' }
   }
@@ -795,9 +971,8 @@ export function calcStepHealth(input: EventDetailsDraft): StepHealth {
   else warnings.push('Meta description improves click-through from search')
 
   // ── Bonus ──
-  if (d.info.fullDesc.trim())              score += 4
-  if (d.status.status !== 'draft')         score += 4
-  if (d.media.logo.value.trim())            score += 2
+  if (d.info.fullDesc.trim())             score += 4
+  if (d.media.logo.value.trim())           score += 2
   if (d.organizer.social.instagram.trim()
    || d.organizer.social.linkedin.trim())  score += 2
 

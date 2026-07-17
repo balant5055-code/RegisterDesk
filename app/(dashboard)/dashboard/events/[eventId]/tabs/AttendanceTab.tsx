@@ -98,7 +98,7 @@ function HourlyChart({ buckets }: { buckets: HourlyBucket[] }) {
             <div key={b.hour} className="group relative flex flex-1 flex-col items-center">
               {/* Count label on hover */}
               {b.count > 0 && (
-                <span className="mb-0.5 text-[11px] font-semibold tabular-nums text-muted-foreground">
+                <span className="mb-0.5 text-[12px] font-semibold tabular-nums text-muted-foreground">
                   {b.count}
                 </span>
               )}
@@ -122,7 +122,7 @@ function HourlyChart({ buckets }: { buckets: HourlyBucket[] }) {
         {buckets.map((b, i) => (
           <div key={b.hour} className="flex-1 text-center">
             <span className={cn(
-              'text-[11px] leading-none text-muted-foreground',
+              'text-[12px] leading-none text-muted-foreground',
               // Show label every 2 hours to avoid crowding on small screens
               i % 2 !== 0 && 'hidden sm:block',
             )}>

@@ -1,7 +1,36 @@
 // Shared HTML primitives used by all email templates.
 // Inline styles are required — most email clients strip <style> blocks.
 
-export function emailShell(subject: string, bodyHtml: string): string {
+// White-label branding applied to the email shell. All fields optional; absent
+// fields fall back to RegisterDesk defaults so existing callers are unchanged.
+export interface EmailBranding {
+  companyName?:              string | null
+  primaryColor?:             string | null   // hex; tints the header bar
+  hideRegisterDeskBranding?: boolean         // hides the "Powered by RegisterDesk" footer
+}
+
+const HEX = /^#[0-9a-fA-F]{6}$/
+
+/**
+ * Wraps `bodyHtml` in the standard RegisterDesk email shell.
+ *
+ * @param unsubscribeUrl — when provided (broadcast emails only), an
+ *   "Unsubscribe" link is appended to the footer. Omit for transactional
+ *   emails which must always reach the recipient.
+ * @param branding — optional white-label overrides (header color, header label,
+ *   hide "Powered by"). Omit for default RegisterDesk branding.
+ */
+export function emailShell(subject: string, bodyHtml: string, unsubscribeUrl?: string, branding?: EmailBranding): string {
+  const unsubscribeFooter = unsubscribeUrl
+    ? `\n            <br>\n            <span style="font-size:11px;color:#9ca3af;display:block;margin-top:6px;">\n              Don&apos;t want these emails?\n              <a href="${escAttr(unsubscribeUrl)}" style="color:#9ca3af;text-decoration:underline;">Unsubscribe</a>\n            </span>`
+    : ''
+
+  const headerColor = branding?.primaryColor && HEX.test(branding.primaryColor) ? branding.primaryColor : '#e5277e'
+  const headerLabel = branding?.companyName?.trim() || 'RegisterDesk'
+  const poweredBy   = branding?.hideRegisterDeskBranding
+    ? ''
+    : `\n            <span style="font-size:11.5px;color:#9ca3af;">\n              Powered by <a href="https://registerdesk.in" style="color:#9ca3af;text-decoration:none;">RegisterDesk</a>\n            </span>`
+
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -17,8 +46,8 @@ export function emailShell(subject: string, bodyHtml: string): string {
 
         <!-- ── Header ── -->
         <tr>
-          <td style="background:#e5277e;border-radius:12px 12px 0 0;padding:20px 28px;">
-            <span style="font-size:11px;font-weight:700;color:#fff;letter-spacing:0.14em;text-transform:uppercase;opacity:0.9;">RegisterDesk</span>
+          <td style="background:${headerColor};border-radius:12px 12px 0 0;padding:20px 28px;">
+            <span style="font-size:11px;font-weight:700;color:#fff;letter-spacing:0.14em;text-transform:uppercase;opacity:0.9;">${escHtml(headerLabel)}</span>
           </td>
         </tr>
 
@@ -31,10 +60,7 @@ export function emailShell(subject: string, bodyHtml: string): string {
 
         <!-- ── Footer ── -->
         <tr>
-          <td style="background:#f9fafb;border:1px solid #e5e7eb;border-top:none;border-radius:0 0 12px 12px;padding:14px 28px;text-align:center;">
-            <span style="font-size:11.5px;color:#9ca3af;">
-              Powered by <a href="https://registerdesk.in" style="color:#9ca3af;text-decoration:none;">RegisterDesk</a>
-            </span>
+          <td style="background:#f9fafb;border:1px solid #e5e7eb;border-top:none;border-radius:0 0 12px 12px;padding:14px 28px;text-align:center;">${poweredBy}${unsubscribeFooter}
           </td>
         </tr>
 
@@ -62,15 +88,18 @@ export function metaRow(label: string, value: string): string {
   </tr>`
 }
 
-// Minimal HTML escaping — prevents XSS if event/attendee names contain < > & " chars
-function escHtml(s: string): string {
+// Centralized HTML escapers for transactional email templates.
+// escHtml — for text content (between tags). escAttr — for attribute values
+// (e.g. href). Exported so every template escapes user-controlled values the
+// same way; `&` is replaced first to avoid double-encoding.
+export function escHtml(s: string): string {
   return s
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
 }
 
-function escAttr(s: string): string {
+export function escAttr(s: string): string {
   return s
     .replace(/&/g, '&amp;')
     .replace(/"/g, '&quot;')

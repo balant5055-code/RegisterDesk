@@ -8,7 +8,10 @@ service firebase.storage {
     // the path, enforced by comparing request.auth.uid against the {uid} wildcard.
     match /event-assets/{uid}/{eventId}/{assetType}/{filename} {
       allow read:   if true;
-      allow write:  if request.auth != null && request.auth.uid == uid;
+      allow write:  if request.auth != null
+                    && request.auth.uid == uid
+                    && request.resource.size <= 10 * 1024 * 1024
+                    && request.resource.contentType.matches('image/(jpeg|png|webp|gif)');
       allow delete: if request.auth != null && request.auth.uid == uid;
     }
 
@@ -18,7 +21,30 @@ service firebase.storage {
     // Writes and deletes are scoped to the owning organizer.
     match /organizer-assets/{uid}/{filename} {
       allow read:   if true;
-      allow write:  if request.auth != null && request.auth.uid == uid;
+      allow write:  if request.auth != null
+                    && request.auth.uid == uid
+                    && request.resource.size <= 10 * 1024 * 1024
+                    && request.resource.contentType.matches('image/(jpeg|png|webp|gif)');
+      allow delete: if request.auth != null && request.auth.uid == uid;
+    }
+
+    // Certificate template files (PDF / PNG / JPG) AND builder assets (logo /
+    // signature / seal images under .../assets/...), uploaded by organizers.
+    // Stored under certificates/templates/{uid}/{eventId}/** — {allPaths=**}
+    // covers both the top-level template file and nested asset files.
+    // Owner-only read/write/delete (templates are private designs, not public
+    // assets). The server fetches files via their download token, which works
+    // regardless of these read rules. Per-type size limits: PDF 25 MB, image 10 MB.
+    match /certificates/templates/{uid}/{eventId}/{allPaths=**} {
+      allow read:   if request.auth != null && request.auth.uid == uid;
+      allow write:  if request.auth != null
+                    && request.auth.uid == uid
+                    && (
+                      (request.resource.contentType == 'application/pdf'
+                        && request.resource.size <= 25 * 1024 * 1024)
+                      || (request.resource.contentType.matches('image/(jpeg|png)')
+                        && request.resource.size <= 10 * 1024 * 1024)
+                    );
       allow delete: if request.auth != null && request.auth.uid == uid;
     }
 

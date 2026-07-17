@@ -13,22 +13,47 @@
 
 import { NextRequest, NextResponse }         from 'next/server'
 import { FieldValue }                         from 'firebase-admin/firestore'
-import { adminAuth, adminDb }                 from '@/lib/firebase/admin'
-import { razorpay }                           from '@/lib/razorpay/client'
+import { adminDb }                            from '@/lib/firebase/admin'
+import { authorizeWorkspace }                 from '@/lib/team/workspace'
+import { organizerStatusGuard }               from '@/lib/admin/organizerStatus'
+import { razorpay, RAZORPAY_KEY_ID }          from '@/lib/razorpay/client'
+import { checkRateLimit }                     from '@/lib/rateLimit'
+import { getWalletConfig }                    from '@/lib/wallet/resolveWalletConfig'
+import { getWalletBalance }                   from '@/lib/firebase/firestore/wallet'
 import type { WalletTopupOrderResponse }      from '@/types/events'
-
-const MIN_TOPUP_PAISE = 100   // ₹1 minimum
 
 export async function POST(req: NextRequest): Promise<NextResponse<WalletTopupOrderResponse | { error: string }>> {
   // ── Auth ──────────────────────────────────────────────────────────────────────
-  const token = (req.headers.get('authorization') ?? '').replace('Bearer ', '')
-  if (!token) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  const authz = await authorizeWorkspace(req, 'wallet')
+  if (!authz.ok) return NextResponse.json({ error: authz.error }, { status: authz.status })
+  const uid = authz.workspaceUid
 
-  let uid: string
-  try {
-    uid = (await adminAuth.verifyIdToken(token)).uid
-  } catch {
-    return NextResponse.json({ error: 'Invalid or expired token' }, { status: 401 })
+  const blocked = await organizerStatusGuard(uid)
+  if (blocked) return NextResponse.json({ error: blocked.message }, { status: 403 })
+
+  // ── Wallet policy (Business Configuration) — enabled gate + top-up limits ──────
+  const wallet = await getWalletConfig({ organizerUid: uid })
+  if (!wallet.enabled) {
+    return NextResponse.json({ error: 'Wallet top-ups are currently disabled.' }, { status: 403 })
+  }
+  if (wallet.frozen) {
+    return NextResponse.json({ error: 'Wallet is currently frozen. Top-ups are temporarily unavailable.' }, { status: 403 })
+  }
+
+  // ── Rate limit: 10 topup orders per hour per organizer ───────────────────────
+  const rl = checkRateLimit(uid, 'wallet-topup', 10, 60 * 60 * 1000)
+  if (rl.limited) {
+    return NextResponse.json(
+      { error: 'Too many top-up requests. Please try again later.' },
+      {
+        status: 429,
+        headers: {
+          'Retry-After':       String(Math.ceil((rl.resetAt - Date.now()) / 1000)),
+          'X-RateLimit-Limit': '10',
+          'X-RateLimit-Reset': String(rl.resetAt),
+        },
+      },
+    )
   }
 
   // ── Parse body ────────────────────────────────────────────────────────────────
@@ -40,8 +65,27 @@ export async function POST(req: NextRequest): Promise<NextResponse<WalletTopupOr
     return NextResponse.json({ error: 'Invalid request body' }, { status: 400 })
   }
 
-  if (amountPaise < MIN_TOPUP_PAISE) {
-    return NextResponse.json({ error: `Minimum top-up is ₹${MIN_TOPUP_PAISE / 100}` }, { status: 400 })
+  if (amountPaise < wallet.minimumTopupPaise) {
+    return NextResponse.json({ error: `Minimum top-up is ₹${wallet.minimumTopupPaise / 100}` }, { status: 400 })
+  }
+
+  if (amountPaise > wallet.maximumTopupPaise) {
+    return NextResponse.json(
+      { error: `Maximum top-up is ₹${(wallet.maximumTopupPaise / 100).toLocaleString('en-IN')}` },
+      { status: 400 },
+    )
+  }
+
+  // Maximum wallet balance policy (0 = uncapped). Advisory pre-check at order
+  // creation; the balance is re-read at credit time.
+  if (wallet.maximumBalancePaise > 0) {
+    const currentBalance = await getWalletBalance(uid)
+    if (currentBalance + amountPaise > wallet.maximumBalancePaise) {
+      return NextResponse.json(
+        { error: `This top-up would exceed the maximum wallet balance of ₹${(wallet.maximumBalancePaise / 100).toLocaleString('en-IN')}` },
+        { status: 400 },
+      )
+    }
   }
 
   // ── Create Razorpay order ──────────────────────────────────────────────────────
@@ -49,7 +93,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<WalletTopupOr
   try {
     order = await razorpay.orders.create({
       amount:   amountPaise,
-      currency: 'INR',
+      currency: wallet.currency,
       receipt:  `wallet_${uid.slice(-8)}_${Date.now()}`.slice(0, 40),
       notes:    { purpose: 'wallet_topup', uid },
     }) as { id: string; amount: number; currency: string }
@@ -63,7 +107,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<WalletTopupOr
     orderId:     order.id,
     uid,
     amountPaise,
-    currency:    'INR',
+    currency:    wallet.currency,
     status:      'pending',
     createdAt:   FieldValue.serverTimestamp(),
     updatedAt:   FieldValue.serverTimestamp(),
@@ -72,6 +116,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<WalletTopupOr
   return NextResponse.json({
     orderId:  order.id,
     amount:   amountPaise,
-    currency: 'INR',
+    currency: wallet.currency,
+    keyId:    RAZORPAY_KEY_ID ?? '',
   })
 }

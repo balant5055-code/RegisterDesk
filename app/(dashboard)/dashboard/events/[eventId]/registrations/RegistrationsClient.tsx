@@ -1,25 +1,39 @@
 'use client'
 
 import { useState, useEffect, useMemo, useRef } from 'react'
+import { useSearchParams }           from 'next/navigation'
 import { onAuthStateChanged }    from 'firebase/auth'
 import { auth }                  from '@/lib/firebase/auth'
 import Link                      from 'next/link'
 import { cn }                    from '@/lib/utils/cn'
+import { csvCell as csvEscape }  from '@/lib/utils/csv'
 import {
-  Search, Filter, Download, X, ChevronLeft, ChevronRight,
+  Search, Filter, Download, Upload, X, ChevronLeft, ChevronRight,
   Users, CheckCircle, Clock, XCircle, RotateCcw,
   Ticket, Mail, Phone, Calendar, Tag, Eye, Send, Loader2,
   FileDown, BanIcon, Undo2, ChevronDown, ChevronUp,
-  AlertTriangle, History, RotateCw,
+  AlertTriangle, History, RotateCw, Pencil,
 } from 'lucide-react'
 import type { SerializedRegistration, RegistrationsApiResponse } from '@/app/api/organizer/events/[eventId]/registrations/route'
+import { registrationStatusCls } from '@/lib/ui/statusColors'
+import { useConfirm } from '@/components/ui/ConfirmDialog'
+import { useFocusTrap } from '@/lib/hooks/useFocusTrap'
 import type { ResendEmailResponse } from '@/app/api/organizer/registrations/[registrationId]/resend-email/route'
 import type { CancelRegistrationResponse } from '@/app/api/organizer/registrations/[registrationId]/cancel/route'
 import type { RestoreRegistrationResponse } from '@/app/api/organizer/registrations/[registrationId]/restore/route'
 import type { AuditLogResponse, SerializedAuditEntry } from '@/app/api/organizer/registrations/[registrationId]/audit/route'
 import type { RefundRegistrationResponse } from '@/app/api/organizer/registrations/[registrationId]/refund/route'
+import type { EditRegistrationResponse } from '@/app/api/organizer/registrations/[registrationId]/route'
 import type { UndoCheckInResponse } from '@/app/api/organizer/registrations/[registrationId]/undo-checkin/route'
-import type { BulkActionResponse }  from '@/app/api/organizer/events/[eventId]/registrations/bulk/route'
+import type { BulkActionResponse }   from '@/app/api/organizer/events/[eventId]/registrations/bulk/route'
+import type { CreateBulkJobResponse, SerializedBulkJob } from '@/app/api/organizer/events/[eventId]/registrations/bulk-jobs/route'
+import type { ProcessBulkJobResponse } from '@/app/api/organizer/events/[eventId]/registrations/bulk-jobs/[jobId]/process/route'
+import { ImportParticipantsDrawer }  from './ImportParticipantsDrawer'
+import ParticipantWorkspace360       from './ParticipantWorkspace360'
+import type { BulkApproveResponse }  from '@/app/api/organizer/registrations/bulk-approve/route'
+import type { BulkRejectResponse }   from '@/app/api/organizer/registrations/bulk-reject/route'
+import type { ApproveRegistrationResponse } from '@/app/api/organizer/registrations/[registrationId]/approve/route'
+import type { RejectRegistrationResponse }  from '@/app/api/organizer/registrations/[registrationId]/reject/route'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -27,6 +41,8 @@ type SortKey = 'registeredAt' | 'name' | 'status'
 type SortDir = 'asc' | 'desc'
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+const editInputCls = 'w-full rounded-lg border border-border bg-background px-3 py-2 text-[13px] text-foreground outline-none focus:ring-2 focus:ring-primary/30'
 
 function fmtDate(iso: string | null): string {
   if (!iso) return '—'
@@ -43,18 +59,19 @@ function fmtDateShort(iso: string | null): string {
   })
 }
 
-function statusMeta(status: string): { label: string; cls: string } {
-  switch (status) {
-    case 'confirmed':  return { label: 'Confirmed',  cls: 'bg-emerald-100 text-emerald-700' }
-    case 'pending':    return { label: 'Pending',    cls: 'bg-amber-100   text-amber-700'   }
-    case 'cancelled':  return { label: 'Cancelled',  cls: 'bg-red-100     text-red-600'     }
-    case 'waitlisted': return { label: 'Waitlisted', cls: 'bg-sky-100     text-sky-700'     }
-    default:           return { label: status,       cls: 'bg-muted       text-muted-foreground' }
-  }
+const STATUS_LABELS: Record<string, string> = {
+  confirmed:  'Confirmed',
+  pending:    'Pending',
+  cancelled:  'Cancelled',
+  waitlisted: 'Waitlisted',
+  rejected:   'Rejected',
 }
 
-function csvEscape(v: unknown): string {
-  return `"${String(v ?? '').replace(/"/g, '""')}"`
+function statusMeta(status: string): { label: string; cls: string } {
+  return {
+    label: STATUS_LABELS[status] ?? status,
+    cls:   registrationStatusCls[status] ?? 'bg-muted text-muted-foreground',
+  }
 }
 
 function fmtINR(paise: number): string {
@@ -74,6 +91,9 @@ function auditActionLabel(action: string): string {
     case 'checked_in':       return 'Checked in'
     case 'check_in_undone':  return 'Check-in undone'
     case 'refunded':         return 'Refund issued'
+    case 'approved':    return 'Registration approved'
+    case 'rejected':    return 'Registration rejected'
+    case 'updated':     return 'Details edited'
     default:            return action
   }
 }
@@ -87,6 +107,9 @@ function auditActionColor(action: string): string {
     case 'refunded':         return 'text-amber-600'
     case 'email_sent':
     case 'email_resent': return 'text-violet-600'
+    case 'approved':    return 'text-emerald-600'
+    case 'rejected':    return 'text-rose-600'
+    case 'updated':     return 'text-indigo-600'
     default:            return 'text-muted-foreground'
   }
 }
@@ -138,6 +161,7 @@ function recomputeStats(registrations: SerializedRegistration[]) {
     pending:    registrations.filter(r => r.status === 'pending').length,
     cancelled:  registrations.filter(r => r.status === 'cancelled').length,
     waitlisted: registrations.filter(r => r.status === 'waitlisted').length,
+    rejected:   registrations.filter(r => r.status === 'rejected').length,
     checkedIn:  registrations.filter(r => r.checkedIn).length,
   }
 }
@@ -155,7 +179,7 @@ function StatChip({
         <Icon className="size-4" aria-hidden />
       </div>
       <div>
-        <p className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">{label}</p>
+        <p className="text-[12px] font-semibold uppercase tracking-wider text-muted-foreground">{label}</p>
         <p className="text-[22px] font-bold tabular-nums text-foreground">{value}</p>
       </div>
     </div>
@@ -183,19 +207,27 @@ function ConfirmDialog({
   onCancel:      () => void
   loading:       boolean
 }) {
+  const dialogRef = useFocusTrap<HTMLDivElement>()
   return (
-    <div className="fixed inset-0 z-[70] flex items-center justify-center p-4">
-      {/* backdrop */}
-      <div className="absolute inset-0 bg-black/50" onClick={onCancel} aria-hidden />
-      {/* panel */}
-      <div className="relative z-10 w-full max-w-sm rounded-2xl border border-border bg-background p-6 shadow-2xl">
+    <>
+      {/* Backdrop — z-40 beneath the modal at z-50 */}
+      <div className="fixed inset-0 z-40 bg-black/50" onClick={onCancel} aria-hidden />
+      {/* Modal — z-50 */}
+      <div className="fixed inset-0 z-50 flex items-center justify-center p-4 pointer-events-none">
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label={title}
+        className="pointer-events-auto w-full max-w-sm rounded-2xl border border-border bg-background p-6 shadow-2xl"
+      >
         <div className="mb-3 flex items-start gap-3">
           <div className="flex size-9 shrink-0 items-center justify-center rounded-full bg-red-100">
             <AlertTriangle className="size-4 text-red-600" aria-hidden />
           </div>
           <div>
             <p className="text-[14.5px] font-bold text-foreground">{title}</p>
-            <div className="mt-1 text-[12.5px] leading-relaxed text-muted-foreground">{body}</div>
+            <div className="mt-1 text-[13px] leading-relaxed text-muted-foreground">{body}</div>
           </div>
         </div>
         <div className="mt-5 flex justify-end gap-2">
@@ -203,7 +235,7 @@ function ConfirmDialog({
             type="button"
             onClick={onCancel}
             disabled={loading}
-            className="rounded-xl border border-border px-4 py-2 text-[13px] font-medium hover:bg-muted/50 disabled:opacity-50"
+            className="rounded-xl border border-border px-4 py-2 text-[14px] font-medium hover:bg-muted/50 disabled:opacity-50"
           >
             {cancelLabel}
           </button>
@@ -212,7 +244,7 @@ function ConfirmDialog({
             onClick={onConfirm}
             disabled={loading}
             className={cn(
-              'flex items-center gap-1.5 rounded-xl px-4 py-2 text-[13px] font-semibold text-white disabled:opacity-50',
+              'flex items-center gap-1.5 rounded-xl px-4 py-2 text-[14px] font-semibold text-white disabled:opacity-50',
               confirmCls,
             )}
           >
@@ -221,7 +253,8 @@ function ConfirmDialog({
           </button>
         </div>
       </div>
-    </div>
+      </div>
+    </>
   )
 }
 
@@ -229,29 +262,110 @@ function ConfirmDialog({
 
 function RegistrationDrawer({
   reg,
+  eventId,
   fieldLabels,
   token,
   onClose,
   onUpdate,
 }: {
   reg:         SerializedRegistration
+  eventId:     string
   fieldLabels: Record<string, string>
   token:       string
   onClose:     () => void
   onUpdate:    (updates: Partial<SerializedRegistration>) => void
 }) {
   const formResponses = reg.attendee.formResponses as Record<string, unknown> | null | undefined
+  const { confirm } = useConfirm()
 
   // ── Local state (updates immediately after actions) ───────────────────────
   const [localStatus,        setLocalStatus]        = useState(reg.status)
   const [localPaymentStatus, setLocalPaymentStatus] = useState(reg.paymentStatus)
 
   // Sync if parent re-renders with different values (e.g., after re-fetch)
+  /* eslint-disable react-hooks/set-state-in-effect -- prop→state sync */
   useEffect(() => { setLocalStatus(reg.status) },        [reg.status])
   useEffect(() => { setLocalPaymentStatus(reg.paymentStatus) }, [reg.paymentStatus])
 
   const [localCheckedIn, setLocalCheckedIn] = useState(reg.checkedIn)
   useEffect(() => { setLocalCheckedIn(reg.checkedIn) }, [reg.checkedIn])
+  /* eslint-enable react-hooks/set-state-in-effect */
+
+  // ── Edit attendee details ──────────────────────────────────────────────────
+  const responseEntries = Object.entries(formResponses ?? {})
+    .filter(([, v]) => v == null || ['string', 'number', 'boolean'].includes(typeof v))
+  const [editing,   setEditing]   = useState(false)
+  const [savingEdit, setSavingEdit] = useState(false)
+  const [editError, setEditError] = useState<string | null>(null)
+  const [eName,  setEName]  = useState(reg.attendee.name)
+  const [eEmail, setEEmail] = useState(reg.attendee.email)
+  const [ePhone, setEPhone] = useState(reg.attendee.phone ?? '')
+  const [eResp,  setEResp]  = useState<Record<string, string>>(
+    () => Object.fromEntries(responseEntries.map(([k, v]) => [k, v == null ? '' : String(v)])),
+  )
+
+  const editDirty =
+    eName !== reg.attendee.name ||
+    eEmail !== reg.attendee.email ||
+    ePhone !== (reg.attendee.phone ?? '') ||
+    responseEntries.some(([k, v]) => eResp[k] !== (v == null ? '' : String(v)))
+
+  function resetEdit() {
+    setEName(reg.attendee.name)
+    setEEmail(reg.attendee.email)
+    setEPhone(reg.attendee.phone ?? '')
+    setEResp(Object.fromEntries(responseEntries.map(([k, v]) => [k, v == null ? '' : String(v)])))
+    setEditError(null)
+  }
+
+  async function cancelEdit() {
+    if (editDirty && !(await confirm({ message: 'Discard your unsaved changes?', tone: 'danger' }))) return
+    resetEdit()
+    setEditing(false)
+  }
+
+  // Warn on tab close while there are unsaved edits.
+  useEffect(() => {
+    if (!editing || !editDirty) return
+    const handler = (e: BeforeUnloadEvent) => { e.preventDefault(); e.returnValue = '' }
+    window.addEventListener('beforeunload', handler)
+    return () => window.removeEventListener('beforeunload', handler)
+  }, [editing, editDirty])
+
+  async function handleSaveEdit() {
+    if (savingEdit || !token) return
+    setSavingEdit(true)
+    setEditError(null)
+    try {
+      // Send only changed primitive responses, merged over the originals.
+      const mergedResponses: Record<string, unknown> = { ...(formResponses ?? {}) }
+      for (const [k] of responseEntries) mergedResponses[k] = eResp[k]
+
+      const res = await fetch(`/api/organizer/registrations/${reg.id}`, {
+        method:  'PATCH',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body:    JSON.stringify({
+          name:  eName,
+          email: eEmail,
+          phone: ePhone,
+          responses: mergedResponses,
+          expectedUpdatedAt: reg.updatedAt,
+        }),
+      })
+      const body = await res.json() as EditRegistrationResponse
+      if (!res.ok || !body.success) {
+        throw new Error(body.error ?? 'Could not save changes')
+      }
+      if (body.registration) {
+        onUpdate({ attendee: body.registration.attendee, updatedAt: body.registration.updatedAt })
+      }
+      setEditing(false)
+    } catch (err) {
+      setEditError(err instanceof Error ? err.message : 'Could not save changes')
+    } finally {
+      setSavingEdit(false)
+    }
+  }
 
   // ── Undo Check-In ─────────────────────────────────────────────────────────
   const [confirmUndo, setConfirmUndo] = useState(false)
@@ -342,6 +456,38 @@ function RegistrationDrawer({
     }
   }
 
+  // ── Receipt download (paid registrations only) ───────────────────────────
+  const [receiptLoading, setReceiptLoading] = useState(false)
+  const [receiptError,   setReceiptError]   = useState<string | null>(null)
+
+  async function handleDownloadReceipt() {
+    if (receiptLoading || !token) return
+    setReceiptLoading(true)
+    setReceiptError(null)
+    try {
+      const res = await fetch(`/api/receipts/${reg.id}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      if (!res.ok) {
+        setReceiptError('Could not generate receipt.')
+        return
+      }
+      const blob = await res.blob()
+      const url  = URL.createObjectURL(blob)
+      const a    = document.createElement('a')
+      a.href     = url
+      a.download = `receipt-${reg.ticketCode}.pdf`
+      a.click()
+      URL.revokeObjectURL(url)
+    } catch {
+      setReceiptError('Network error. Please try again.')
+    } finally {
+      setReceiptLoading(false)
+    }
+  }
+
+  const showReceipt = reg.amount > 0 && (reg.paymentStatus === 'paid' || reg.paymentStatus === 'refunded')
+
   // ── Cancel ──────────────────────────────────────────────────────────────────
   const [confirmCancel, setConfirmCancel] = useState(false)
   const [cancelling,    setCancelling]    = useState(false)
@@ -369,6 +515,64 @@ function RegistrationDrawer({
       setConfirmCancel(false)
     } finally {
       setCancelling(false)
+    }
+  }
+
+  // ── Approve ─────────────────────────────────────────────────────────────────
+  const [approving,     setApproving]     = useState(false)
+  const [approveError,  setApproveError]  = useState<string | null>(null)
+
+  async function handleApprove() {
+    if (approving || !token) return
+    setApproving(true)
+    setApproveError(null)
+    try {
+      const res  = await fetch(`/api/organizer/registrations/${reg.id}/approve`, {
+        method:  'POST',
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      const body = await res.json() as ApproveRegistrationResponse
+      if (body.success) {
+        setLocalStatus('confirmed')
+        onUpdate({ status: 'confirmed' })
+      } else {
+        setApproveError(body.error ?? 'Failed to approve registration.')
+      }
+    } catch {
+      setApproveError('Network error. Please try again.')
+    } finally {
+      setApproving(false)
+    }
+  }
+
+  // ── Reject ──────────────────────────────────────────────────────────────────
+  const [confirmReject, setConfirmReject] = useState(false)
+  const [rejecting,     setRejecting]     = useState(false)
+  const [rejectError,   setRejectError]   = useState<string | null>(null)
+
+  async function handleReject() {
+    if (rejecting || !token) return
+    setRejecting(true)
+    setRejectError(null)
+    try {
+      const res  = await fetch(`/api/organizer/registrations/${reg.id}/reject`, {
+        method:  'POST',
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      const body = await res.json() as RejectRegistrationResponse
+      if (body.success) {
+        setLocalStatus('rejected')
+        onUpdate({ status: 'rejected' })
+        setConfirmReject(false)
+      } else {
+        setRejectError(body.error ?? 'Failed to reject registration.')
+        setConfirmReject(false)
+      }
+    } catch {
+      setRejectError('Network error. Please try again.')
+      setConfirmReject(false)
+    } finally {
+      setRejecting(false)
     }
   }
 
@@ -482,7 +686,7 @@ function RegistrationDrawer({
         <div className="flex shrink-0 items-center justify-between border-b border-border px-5 py-4">
           <div>
             <p className="text-[15px] font-bold text-foreground">{reg.attendee.name}</p>
-            <p className="text-[12.5px] text-muted-foreground">{reg.attendee.email}</p>
+            <p className="text-[13px] text-muted-foreground">{reg.attendee.email}</p>
           </div>
           <button
             type="button"
@@ -498,10 +702,51 @@ function RegistrationDrawer({
         <div className="flex-1 overflow-y-auto px-5 py-5">
           <div className="flex flex-col gap-5">
 
+            {/* ── Edit attendee details ── */}
+            {editing ? (
+              <div className="space-y-3 rounded-xl border border-primary/30 bg-primary/[0.03] p-4">
+                <p className="text-[12px] font-semibold uppercase tracking-wider text-muted-foreground">Edit Registration</p>
+                <label className="block">
+                  <span className="mb-1 block text-[12px] font-medium text-muted-foreground">Name</span>
+                  <input value={eName} onChange={e => setEName(e.target.value)} className={editInputCls} />
+                </label>
+                <label className="block">
+                  <span className="mb-1 block text-[12px] font-medium text-muted-foreground">Email</span>
+                  <input type="email" value={eEmail} onChange={e => setEEmail(e.target.value)} className={editInputCls} />
+                </label>
+                <label className="block">
+                  <span className="mb-1 block text-[12px] font-medium text-muted-foreground">Phone</span>
+                  <input value={ePhone} onChange={e => setEPhone(e.target.value)} className={editInputCls} />
+                </label>
+                {responseEntries.map(([k]) => (
+                  <label key={k} className="block">
+                    <span className="mb-1 block text-[12px] font-medium text-muted-foreground">{fieldLabels[k] ?? k}</span>
+                    <input value={eResp[k] ?? ''} onChange={e => setEResp(prev => ({ ...prev, [k]: e.target.value }))} className={editInputCls} />
+                  </label>
+                ))}
+                {editError && <p className="text-[13px] text-destructive">{editError}</p>}
+                <div className="flex justify-end gap-2 pt-1">
+                  <button type="button" onClick={cancelEdit} disabled={savingEdit}
+                    className="rounded-lg border border-border px-3 py-1.5 text-[13px] font-medium text-foreground hover:bg-muted disabled:opacity-60">
+                    Cancel
+                  </button>
+                  <button type="button" onClick={handleSaveEdit} disabled={!editDirty || savingEdit}
+                    className="rounded-lg bg-primary px-3 py-1.5 text-[13px] font-semibold text-primary-foreground hover:opacity-90 disabled:opacity-60">
+                    {savingEdit ? 'Saving…' : 'Save'}
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <button type="button" onClick={() => { resetEdit(); setEditing(true) }}
+                className="flex items-center justify-center gap-2 rounded-xl border border-border px-4 py-2.5 text-[13px] font-semibold text-foreground hover:bg-muted">
+                <Pencil className="size-3.5" aria-hidden /> Edit Registration
+              </button>
+            )}
+
             {/* Ticket code */}
             <div className="flex flex-col items-center rounded-xl border border-border bg-muted/[0.03] px-5 py-5 text-center">
               <Ticket className="mb-2 size-5 text-muted-foreground" aria-hidden />
-              <p className="text-[11px] font-semibold uppercase tracking-widest text-muted-foreground">
+              <p className="text-[12px] font-semibold uppercase tracking-widest text-muted-foreground">
                 Ticket Code
               </p>
               <p className="mt-1 font-mono text-[22px] font-bold tracking-[0.12em] text-foreground">
@@ -512,7 +757,7 @@ function RegistrationDrawer({
             {/* Status row */}
             <div className="grid grid-cols-2 gap-3">
               <div className="rounded-xl border border-border bg-card p-3">
-                <p className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                <p className="mb-1 text-[12px] font-semibold uppercase tracking-wider text-muted-foreground">
                   Status
                 </p>
                 <span className={`inline-flex rounded-full px-2.5 py-0.5 text-[12px] font-semibold ${sm.cls}`}>
@@ -520,7 +765,7 @@ function RegistrationDrawer({
                 </span>
               </div>
               <div className="rounded-xl border border-border bg-card p-3">
-                <p className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                <p className="mb-1 text-[12px] font-semibold uppercase tracking-wider text-muted-foreground">
                   Payment
                 </p>
                 <span className="text-[13px] font-medium capitalize text-foreground">
@@ -541,7 +786,7 @@ function RegistrationDrawer({
                 <div key={label} className="flex items-start gap-3 border-b border-border/40 px-4 py-3 last:border-0">
                   <Icon className="mt-0.5 size-4 shrink-0 text-muted-foreground/60" aria-hidden />
                   <div className="min-w-0">
-                    <p className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                    <p className="text-[12px] font-semibold uppercase tracking-wider text-muted-foreground">
                       {label}
                     </p>
                     <p className="mt-0.5 truncate text-[13px] font-medium text-foreground">{value}</p>
@@ -559,7 +804,7 @@ function RegistrationDrawer({
                 <div className="overflow-hidden rounded-xl border border-border bg-card">
                   {Object.entries(formResponses).map(([id, value]) => (
                     <div key={id} className="border-b border-border/40 px-4 py-3 last:border-0">
-                      <p className="text-[11.5px] font-medium text-muted-foreground">
+                      <p className="text-[13px] font-medium text-muted-foreground">
                         {fieldLabels[id] ?? id}
                       </p>
                       <p className="mt-0.5 text-[13px] text-foreground">
@@ -575,7 +820,7 @@ function RegistrationDrawer({
 
             {/* ── Actions panel ── */}
             <div className="rounded-xl border border-border bg-card p-4">
-              <p className="mb-3 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+              <p className="mb-3 text-[12px] font-semibold uppercase tracking-wider text-muted-foreground">
                 Actions
               </p>
 
@@ -586,7 +831,7 @@ function RegistrationDrawer({
                     <p className="text-[12px] font-medium text-muted-foreground">Ticket Email</p>
                     {reg.emailStatus && (
                       <span className={cn(
-                        'inline-flex rounded-full px-2 py-0.5 text-[11px] font-semibold',
+                        'inline-flex rounded-full px-2 py-0.5 text-[12px] font-semibold',
                         reg.emailStatus === 'sent'    && 'bg-emerald-100 text-emerald-700',
                         reg.emailStatus === 'failed'  && 'bg-red-100 text-red-600',
                         reg.emailStatus === 'pending' && 'bg-amber-100 text-amber-700',
@@ -596,7 +841,7 @@ function RegistrationDrawer({
                     )}
                   </div>
                   {reg.emailSentAt && (
-                    <p className="text-[11px] text-muted-foreground">{fmtDate(reg.emailSentAt)}</p>
+                    <p className="text-[13px] text-muted-foreground">{fmtDate(reg.emailSentAt)}</p>
                   )}
                 </div>
 
@@ -608,7 +853,7 @@ function RegistrationDrawer({
                       type="button"
                       onClick={handleResendEmail}
                       disabled={emailSending || !token}
-                      className="flex items-center justify-center gap-1.5 rounded-lg border border-border bg-muted/30 px-3 py-2.5 text-[12.5px] font-medium text-foreground transition-colors hover:bg-muted/60 disabled:opacity-50"
+                      className="flex items-center justify-center gap-1.5 rounded-lg border border-border bg-muted/30 px-3 py-2.5 text-[14px] font-medium text-foreground transition-colors hover:bg-muted/60 disabled:opacity-50"
                     >
                       {emailSending
                         ? <Loader2 className="size-3.5 animate-spin" aria-hidden />
@@ -623,7 +868,7 @@ function RegistrationDrawer({
                     type="button"
                     onClick={handleDownloadPdf}
                     disabled={pdfLoading || !token}
-                    className="flex items-center justify-center gap-1.5 rounded-lg border border-border bg-muted/30 px-3 py-2.5 text-[12.5px] font-medium text-foreground transition-colors hover:bg-muted/60 disabled:opacity-50"
+                    className="flex items-center justify-center gap-1.5 rounded-lg border border-border bg-muted/30 px-3 py-2.5 text-[14px] font-medium text-foreground transition-colors hover:bg-muted/60 disabled:opacity-50"
                   >
                     {pdfLoading
                       ? <Loader2 className="size-3.5 animate-spin" aria-hidden />
@@ -633,7 +878,23 @@ function RegistrationDrawer({
                   </button>
                 </div>
 
-                {/* Email / PDF feedback */}
+                {/* Receipt download (paid only) */}
+                {showReceipt && (
+                  <button
+                    type="button"
+                    onClick={handleDownloadReceipt}
+                    disabled={receiptLoading || !token}
+                    className="col-span-2 flex items-center justify-center gap-1.5 rounded-lg border border-border bg-muted/30 px-3 py-2.5 text-[14px] font-medium text-foreground transition-colors hover:bg-muted/60 disabled:opacity-50"
+                  >
+                    {receiptLoading
+                      ? <Loader2 className="size-3.5 animate-spin" aria-hidden />
+                      : <FileDown className="size-3.5" aria-hidden />
+                    }
+                    {receiptLoading ? 'Generating…' : 'Download Receipt'}
+                  </button>
+                )}
+
+                {/* Email / PDF / Receipt feedback */}
                 {emailFeedback && (
                   <p className={cn(
                     'text-center text-[12px] font-medium',
@@ -645,16 +906,67 @@ function RegistrationDrawer({
                 {pdfError && (
                   <p className="text-center text-[12px] font-medium text-red-600">{pdfError}</p>
                 )}
+                {receiptError && (
+                  <p className="text-center text-[12px] font-medium text-red-600">{receiptError}</p>
+                )}
               </div>
+
+              {/* Pending approval actions */}
+              {localStatus === 'pending' && (
+                <div className="border-t border-border/50 pt-3">
+                  <p className="mb-2 text-[12px] font-semibold uppercase tracking-wider text-amber-600">
+                    Pending Approval
+                  </p>
+                  <div className="flex flex-col gap-2">
+                    <button
+                      type="button"
+                      onClick={() => void handleApprove()}
+                      disabled={approving || !token}
+                      className="flex w-full items-center justify-center gap-2 rounded-lg border border-emerald-300 bg-emerald-50 px-3 py-2.5 text-[14px] font-semibold text-emerald-700 transition-colors hover:bg-emerald-100 disabled:opacity-50"
+                    >
+                      {approving
+                        ? <Loader2 className="size-3.5 animate-spin" aria-hidden />
+                        : <CheckCircle className="size-3.5" aria-hidden />
+                      }
+                      {approving ? 'Approving…' : 'Approve Registration'}
+                    </button>
+                    {approveError && (
+                      <p className="text-center text-[12px] font-medium text-red-600">{approveError}</p>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => { setRejectError(null); setConfirmReject(true) }}
+                      disabled={rejecting || !token}
+                      className="flex w-full items-center justify-center gap-2 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2.5 text-[14px] font-semibold text-rose-700 transition-colors hover:bg-rose-100 disabled:opacity-50"
+                    >
+                      <XCircle className="size-3.5" aria-hidden />
+                      Reject Registration
+                    </button>
+                    {rejectError && (
+                      <p className="text-center text-[12px] font-medium text-red-600">{rejectError}</p>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* Rejected badge */}
+              {localStatus === 'rejected' && (
+                <div className="border-t border-border/50 pt-3">
+                  <div className="flex items-center justify-center gap-2 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2.5">
+                    <XCircle className="size-3.5 text-rose-600" aria-hidden />
+                    <span className="text-[14px] font-semibold text-rose-700">Registration Rejected</span>
+                  </div>
+                </div>
+              )}
 
               {/* Check-In status */}
               <div className="border-t border-border/50 pt-3">
-                <p className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                <p className="mb-2 text-[12px] font-semibold uppercase tracking-wider text-muted-foreground">
                   Check-In
                 </p>
                 {localCheckedIn ? (
                   <div className="space-y-2">
-                    <div className="text-[12.5px]">
+                    <div className="text-[13px]">
                       <span className="font-semibold text-emerald-700">✓ Checked in</span>
                       {reg.checkedInAt && (
                         <span className="ml-2 text-muted-foreground">{fmtDate(reg.checkedInAt)}</span>
@@ -669,7 +981,7 @@ function RegistrationDrawer({
                       type="button"
                       onClick={() => { setUndoError(null); setConfirmUndo(true) }}
                       disabled={undoing || !token}
-                      className="flex w-full items-center justify-center gap-2 rounded-lg border border-sky-200 bg-sky-50 px-3 py-2 text-[12.5px] font-semibold text-sky-700 hover:bg-sky-100 disabled:opacity-50"
+                      className="flex w-full items-center justify-center gap-2 rounded-lg border border-sky-200 bg-sky-50 px-3 py-2 text-[14px] font-semibold text-sky-700 hover:bg-sky-100 disabled:opacity-50"
                     >
                       {undoing
                         ? <Loader2 className="size-3.5 animate-spin" aria-hidden />
@@ -682,7 +994,7 @@ function RegistrationDrawer({
                     )}
                   </div>
                 ) : (
-                  <p className="text-[12.5px] text-muted-foreground/60">Not yet checked in</p>
+                  <p className="text-[13px] text-muted-foreground/60">Not yet checked in</p>
                 )}
               </div>
 
@@ -693,7 +1005,7 @@ function RegistrationDrawer({
                     type="button"
                     onClick={handleRestore}
                     disabled={restoring || !token}
-                    className="flex w-full items-center justify-center gap-2 rounded-lg border border-emerald-300 bg-emerald-50 px-3 py-2.5 text-[12.5px] font-semibold text-emerald-700 transition-colors hover:bg-emerald-100 disabled:opacity-50"
+                    className="flex w-full items-center justify-center gap-2 rounded-lg border border-emerald-300 bg-emerald-50 px-3 py-2.5 text-[14px] font-semibold text-emerald-700 transition-colors hover:bg-emerald-100 disabled:opacity-50"
                   >
                     {restoring
                       ? <Loader2 className="size-3.5 animate-spin" aria-hidden />
@@ -714,7 +1026,7 @@ function RegistrationDrawer({
                     type="button"
                     onClick={() => { setRefundError(null); setConfirmRefund(true) }}
                     disabled={refunding || !token}
-                    className="flex w-full items-center justify-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-[12.5px] font-semibold text-amber-700 transition-colors hover:bg-amber-100 disabled:opacity-50"
+                    className="flex w-full items-center justify-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-[14px] font-semibold text-amber-700 transition-colors hover:bg-amber-100 disabled:opacity-50"
                   >
                     <RotateCw className="size-3.5" aria-hidden />
                     Issue Refund
@@ -730,22 +1042,22 @@ function RegistrationDrawer({
                 <div className="border-t border-border/50 pt-3">
                   <div className="flex items-center justify-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5">
                     <RotateCw className="size-3.5 text-amber-600" aria-hidden />
-                    <span className="text-[12.5px] font-semibold text-amber-700">Refund Issued</span>
+                    <span className="text-[14px] font-semibold text-amber-700">Refund Issued</span>
                   </div>
                 </div>
               )}
 
-              {/* Danger zone (only for non-cancelled) */}
-              {localStatus !== 'cancelled' && (
+              {/* Danger zone (only for non-cancelled, non-rejected) */}
+              {localStatus !== 'cancelled' && localStatus !== 'rejected' && localStatus !== 'pending' && (
                 <div className="border-t border-border/50 pt-3">
-                  <p className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-red-500">
+                  <p className="mb-2 text-[12px] font-semibold uppercase tracking-wider text-red-500">
                     Danger Zone
                   </p>
                   <button
                     type="button"
                     onClick={() => { setCancelError(null); setConfirmCancel(true) }}
                     disabled={cancelling || !token}
-                    className="flex w-full items-center justify-center gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2.5 text-[12.5px] font-semibold text-red-600 transition-colors hover:bg-red-100 disabled:opacity-50"
+                    className="flex w-full items-center justify-center gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2.5 text-[14px] font-semibold text-red-600 transition-colors hover:bg-red-100 disabled:opacity-50"
                   >
                     <BanIcon className="size-3.5" aria-hidden />
                     Cancel Registration
@@ -757,6 +1069,14 @@ function RegistrationDrawer({
               )}
             </div>
 
+            {/* ── Participant 360° — cross-domain orchestration (Phase H.4.4) ── */}
+            <ParticipantWorkspace360
+              reg={reg}
+              eventId={eventId}
+              token={token}
+              onIdentifierChange={(v) => onUpdate({ bibNumber: v })}
+            />
+
             {/* ── Audit history ── */}
             <div className="overflow-hidden rounded-xl border border-border bg-card">
               <button
@@ -766,9 +1086,9 @@ function RegistrationDrawer({
               >
                 <div className="flex items-center gap-2">
                   <History className="size-4 text-muted-foreground" aria-hidden />
-                  <p className="text-[12.5px] font-semibold text-foreground">Audit History</p>
+                  <p className="text-[14px] font-semibold text-foreground">Audit History</p>
                   {auditEntries !== null && (
-                    <span className="rounded-full bg-muted px-1.5 py-0.5 text-[11px] font-semibold text-muted-foreground">
+                    <span className="rounded-full bg-muted px-1.5 py-0.5 text-[12px] font-semibold text-muted-foreground">
                       {auditEntries.length}
                     </span>
                   )}
@@ -784,12 +1104,12 @@ function RegistrationDrawer({
                   {auditLoading && (
                     <div className="flex items-center justify-center gap-2 py-6">
                       <Loader2 className="size-4 animate-spin text-muted-foreground" aria-hidden />
-                      <p className="text-[12.5px] text-muted-foreground">Loading history…</p>
+                      <p className="text-[13px] text-muted-foreground">Loading history…</p>
                     </div>
                   )}
                   {auditError && (
                     <div className="flex items-center justify-between px-4 py-3">
-                      <p className="text-[12.5px] text-red-600">{auditError}</p>
+                      <p className="text-[13px] text-red-600">{auditError}</p>
                       <button
                         type="button"
                         onClick={loadAuditLog}
@@ -801,7 +1121,7 @@ function RegistrationDrawer({
                   )}
                   {!auditLoading && !auditError && auditEntries !== null && (
                     auditEntries.length === 0 ? (
-                      <p className="px-4 py-4 text-[12.5px] italic text-muted-foreground/60">
+                      <p className="px-4 py-4 text-[13px] italic text-muted-foreground/60">
                         No audit entries yet.
                       </p>
                     ) : (
@@ -810,16 +1130,16 @@ function RegistrationDrawer({
                           <div key={entry.id} className="px-4 py-3">
                             <div className="flex items-start justify-between gap-2">
                               <p className={cn(
-                                'text-[12.5px] font-semibold',
+                                'text-[14px] font-semibold',
                                 auditActionColor(entry.action),
                               )}>
                                 {auditActionLabel(entry.action)}
                               </p>
-                              <p className="shrink-0 text-[11px] text-muted-foreground">
+                              <p className="shrink-0 text-[13px] text-muted-foreground">
                                 {entry.timestamp ? fmtDate(entry.timestamp) : '—'}
                               </p>
                             </div>
-                            <p className="mt-0.5 text-[11px] text-muted-foreground">
+                            <p className="mt-0.5 text-[13px] text-muted-foreground">
                               {entry.actorType === 'system'
                                 ? 'System'
                                 : `Organizer · ${entry.actor.slice(0, 8)}…`}
@@ -834,7 +1154,7 @@ function RegistrationDrawer({
             </div>
 
             {/* Internal ID */}
-            <p className="text-center font-mono text-[10.5px] text-muted-foreground/40">
+            <p className="text-center font-mono text-[12px] text-muted-foreground/40">
               ID: {reg.id}
             </p>
           </div>
@@ -915,6 +1235,34 @@ function RegistrationDrawer({
           loading={undoing}
         />
       )}
+
+      {/* Reject confirmation dialog */}
+      {confirmReject && (
+        <ConfirmDialog
+          title="Reject this registration?"
+          body={
+            <>
+              <p>
+                This will reject <strong>{reg.attendee.name}</strong>&apos;s registration
+                ({reg.passName}).
+              </p>
+              <ul className="mt-2 space-y-1 text-[12px]">
+                <li>• Status will change to Rejected.</li>
+                <li>• The attendee will not receive an automatic notification.</li>
+                {reg.paymentStatus === 'paid' && (
+                  <li>• This registration was paid. Refunds must be handled separately.</li>
+                )}
+              </ul>
+            </>
+          }
+          confirmLabel="Yes, Reject Registration"
+          confirmCls="bg-rose-600 hover:bg-rose-700"
+          cancelLabel="Keep Pending"
+          onConfirm={handleReject}
+          onCancel={() => setConfirmReject(false)}
+          loading={rejecting}
+        />
+      )}
     </>
   )
 }
@@ -922,6 +1270,8 @@ function RegistrationDrawer({
 // ─── Main Component ───────────────────────────────────────────────────────────
 
 export function RegistrationsClient({ eventId }: { eventId: string }) {
+  const searchParams = useSearchParams()
+
   // ── Core state ────────────────────────────────────────────────────────────
   const [data,          setData]          = useState<RegistrationsApiResponse | null>(null)
   const [loading,       setLoading]       = useState(true)
@@ -932,7 +1282,7 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
   // ── Filters ───────────────────────────────────────────────────────────────
   const [search,          setSearch]          = useState('')
   const [passFilter,      setPassFilter]      = useState('')
-  const [statusFilter,    setStatusFilter]    = useState('')
+  const [statusFilter,    setStatusFilter]    = useState(() => searchParams.get('status') ?? '')
   const [checkinFilter,   setCheckinFilter]   = useState('')
   const [paymentFilter,   setPaymentFilter]   = useState('')
   const [dateFrom,        setDateFrom]        = useState('')
@@ -946,6 +1296,9 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
   // ── Drawer ────────────────────────────────────────────────────────────────
   const [selected, setSelected] = useState<SerializedRegistration | null>(null)
 
+  // ── Import Participants drawer (RM-2.1) ─────────────────────────────────────
+  const [importOpen, setImportOpen] = useState(false)
+
   // ── Pagination ────────────────────────────────────────────────────────────
   const [pageSize,    setPageSize]    = useState<25 | 50 | 100>(50)
   const [cursorStack, setCursorStack] = useState<string[]>([])
@@ -958,11 +1311,15 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
   const [selectedIds,  setSelectedIds]  = useState<Set<string>>(new Set())
   const [bulkLoading,  setBulkLoading]  = useState<string | null>(null)
   const [bulkFeedback, setBulkFeedback] = useState<string | null>(null)
+  // OE-1 — background bulk check-in/restore job (progress dialog).
+  const [bulkJob,      setBulkJob]      = useState<SerializedBulkJob | null>(null)
+  const bulkRunning = useRef(false)
 
   const searchRef        = useRef<HTMLInputElement>(null)
   const authTokenRef     = useRef('')
   const isFirstFilterRun = useRef(true)
 
+  // eslint-disable-next-line react-hooks/refs -- keep the ref in sync with the latest token
   authTokenRef.current = authToken
 
   // ── Fetch ─────────────────────────────────────────────────────────────────
@@ -1055,11 +1412,13 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
         if (old.status === 'cancelled')  s.cancelled  = Math.max(0, s.cancelled  - 1)
         if (old.status === 'pending')    s.pending    = Math.max(0, s.pending    - 1)
         if (old.status === 'waitlisted') s.waitlisted = Math.max(0, s.waitlisted - 1)
+        if (old.status === 'rejected')   s.rejected   = Math.max(0, (s.rejected ?? 0) - 1)
         if (updates.status === 'confirmed')  s.confirmed++
         if (updates.status === 'cancelled')  s.cancelled++
         if (updates.status === 'pending')    s.pending++
         if (updates.status === 'waitlisted') s.waitlisted++
-        s.total = s.confirmed + s.pending + s.cancelled + s.waitlisted
+        if (updates.status === 'rejected')   s.rejected = (s.rejected ?? 0) + 1
+        s.total = s.confirmed + s.pending + s.cancelled + s.waitlisted + (s.rejected ?? 0)
       }
       if (old && typeof updates.checkedIn === 'boolean' && old.checkedIn !== updates.checkedIn) {
         s.checkedIn = updates.checkedIn
@@ -1108,6 +1467,15 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
       })
   }, [data, search, passFilter, statusFilter, checkinFilter, paymentFilter, dateFrom, dateTo, sortKey, sortDir])
 
+  // GA-7C S2/P5: bound the number of RENDERED rows. all-mode (search/filter) can load
+  // up to 2000 rows; rendering them all — across BOTH the mobile-card and desktop-table
+  // layouts — produces thousands of DOM nodes and janky per-keystroke filtering. The
+  // full `filtered` set still drives the counts and select-all; only the rendered slice
+  // is capped, reusing the existing table/card markup (no virtualization dependency).
+  const RENDER_CAP = 250
+  const visible = filtered.length > RENDER_CAP ? filtered.slice(0, RENDER_CAP) : filtered
+  const renderCapped = filtered.length > RENDER_CAP
+
   function toggleSort(key: SortKey) {
     if (sortKey === key) setSortDir(d => d === 'asc' ? 'desc' : 'asc')
     else { setSortKey(key); setSortDir('desc') }
@@ -1125,7 +1493,9 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
   function clearSelection() { setSelectedIds(new Set()) }
 
   const hasActiveFilters = !!(search || passFilter || statusFilter || checkinFilter || paymentFilter || dateFrom || dateTo)
-  const currentPage = cursorStack.length + 1
+  const currentPage      = cursorStack.length + 1
+  // Pending registrations among the current selection — drives Approve/Reject visibility
+  const pendingSelected  = filtered.filter(r => selectedIds.has(r.id) && r.status === 'pending').length
 
   // ── Loading / error states ─────────────────────────────────────────────────
 
@@ -1172,8 +1542,17 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
     if (rows.length > 0) exportToCsv(rows, eventSlug, fieldLabels)
   }
 
+  function refreshList() {
+    const anyActive = !!(debouncedSearch || passFilter || statusFilter || checkinFilter || paymentFilter || dateFrom || dateTo)
+    void (anyActive
+      ? doFetch({ allMode: true })
+      : doFetch({ allMode: false, limit: pageSize, cursor: cursorStack.length > 0 ? cursorStack[cursorStack.length - 1] : null }))
+  }
+
   async function handleBulkAction(action: 'check_in' | 'cancel' | 'restore' | 'resend_email') {
     if (!authToken || selectedIds.size === 0) return
+    // OE-1: check-in & restore run as background jobs (chunked, resumable, capacity-safe).
+    if (action === 'check_in' || action === 'restore') { await createBulkJob(action); return }
     setBulkLoading(action)
     setBulkFeedback(null)
     try {
@@ -1186,6 +1565,104 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
       if (!res.ok || !body.success) { setBulkFeedback(body.error ?? 'Bulk action failed.'); return }
       const label = { check_in: 'checked in', cancel: 'cancelled', restore: 'restored', resend_email: 'emailed' }[action]
       setBulkFeedback(`${body.succeeded} of ${body.processed} ${label} successfully.`)
+      clearSelection()
+      refreshList()
+    } catch {
+      setBulkFeedback('Network error. Please try again.')
+    } finally {
+      setBulkLoading(null)
+    }
+  }
+
+  // ── OE-1: bulk check-in / restore background job (create → drive → progress) ──
+  const bulkSleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms))
+
+  async function createBulkJob(kind: 'check_in' | 'restore') {
+    setBulkLoading(kind); setBulkFeedback(null)
+    try {
+      const res  = await fetch(`/api/organizer/events/${eventId}/registrations/bulk-jobs`, {
+        method:  'POST',
+        headers: { Authorization: `Bearer ${authToken}`, 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ kind, registrationIds: [...selectedIds] }),
+      })
+      const body = await res.json() as CreateBulkJobResponse
+      if (!res.ok || !body.success) {
+        setBulkFeedback((!body.success && body.error) ? body.error : 'Could not start the bulk job.')
+        return
+      }
+      setBulkJob(body.job)
+      void driveBulkJob(body.jobId)
+    } catch {
+      setBulkFeedback('Network error. Please try again.')
+    } finally { setBulkLoading(null) }
+  }
+
+  async function driveBulkJob(jobId: string) {
+    if (bulkRunning.current) return
+    bulkRunning.current = true
+    try {
+      for (let i = 0; i < 100_000; i++) {
+        const res  = await fetch(`/api/organizer/events/${eventId}/registrations/bulk-jobs/${jobId}/process`, { method: 'POST', headers: { Authorization: `Bearer ${authToken}` } })
+        const json = await res.json() as ProcessBulkJobResponse
+        if (!res.ok || !json.success) break
+        if (json.job) setBulkJob(json.job)
+        if (json.result.done) break
+        if (json.result.reason === 'busy') { await bulkSleep(1500); continue }
+        await bulkSleep(300)
+      }
+    } catch { /* the dialog's last snapshot remains; cron finishes the rest */ }
+    finally { bulkRunning.current = false; refreshList() }
+  }
+
+  async function cancelBulkJob(jobId: string) {
+    try {
+      await fetch(`/api/organizer/events/${eventId}/registrations/bulk-jobs/${jobId}/cancel`, { method: 'POST', headers: { Authorization: `Bearer ${authToken}` } })
+      setBulkJob(prev => prev ? { ...prev, status: 'cancelled' } : prev)
+    } catch { /* next poll reflects it */ }
+  }
+
+  function closeBulkJob() { setBulkJob(null); clearSelection(); refreshList() }
+
+  async function handleBulkApprove() {
+    if (!authToken || pendingSelected === 0) return
+    const ids = filtered.filter(r => selectedIds.has(r.id) && r.status === 'pending').map(r => r.id)
+    setBulkLoading('bulk_approve')
+    setBulkFeedback(null)
+    try {
+      const res  = await fetch('/api/organizer/registrations/bulk-approve', {
+        method:  'POST',
+        headers: { Authorization: `Bearer ${authToken}`, 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ registrationIds: ids }),
+      })
+      const body = await res.json() as BulkApproveResponse
+      if (!res.ok || !body.success) { setBulkFeedback(body.error ?? 'Bulk approve failed.'); return }
+      setBulkFeedback(`${body.succeeded} of ${body.processed} approved successfully.`)
+      clearSelection()
+      const anyActive = !!(debouncedSearch || passFilter || statusFilter || checkinFilter || paymentFilter || dateFrom || dateTo)
+      void (anyActive
+        ? doFetch({ allMode: true })
+        : doFetch({ allMode: false, limit: pageSize, cursor: cursorStack.length > 0 ? cursorStack[cursorStack.length - 1] : null }))
+    } catch {
+      setBulkFeedback('Network error. Please try again.')
+    } finally {
+      setBulkLoading(null)
+    }
+  }
+
+  async function handleBulkReject() {
+    if (!authToken || pendingSelected === 0) return
+    const ids = filtered.filter(r => selectedIds.has(r.id) && r.status === 'pending').map(r => r.id)
+    setBulkLoading('bulk_reject')
+    setBulkFeedback(null)
+    try {
+      const res  = await fetch('/api/organizer/registrations/bulk-reject', {
+        method:  'POST',
+        headers: { Authorization: `Bearer ${authToken}`, 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ registrationIds: ids }),
+      })
+      const body = await res.json() as BulkRejectResponse
+      if (!res.ok || !body.success) { setBulkFeedback(body.error ?? 'Bulk reject failed.'); return }
+      setBulkFeedback(`${body.succeeded} of ${body.processed} rejected.`)
       clearSelection()
       const anyActive = !!(debouncedSearch || passFilter || statusFilter || checkinFilter || paymentFilter || dateFrom || dateTo)
       void (anyActive
@@ -1200,12 +1677,54 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
 
   return (
     <div className="p-4 sm:p-6">
+      {/* OE-1 — bulk check-in/restore progress dialog */}
+      {bulkJob && (() => {
+        const j = bulkJob
+        const total     = j.counts.total || 0
+        const pct       = total ? Math.round((j.counts.processed / total) * 100) : 0
+        const active    = j.status === 'pending' || j.status === 'processing'
+        const remaining = Math.max(0, total - j.counts.processed)
+        const verb      = j.kind === 'restore' ? 'Restore' : 'Check-in'
+        const doneLabel = j.kind === 'restore' ? 'Restored' : 'Checked in'
+        const statusText: Record<string, string> = { pending: 'Queued', processing: 'Processing', completed: 'Completed', failed: 'Failed', cancelled: 'Cancelled' }
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+            <div className="w-full max-w-md rounded-2xl border border-border bg-card p-5 shadow-xl">
+              <div className="mb-3 flex items-center justify-between">
+                <h3 className="text-[15px] font-bold text-foreground">Bulk {verb}</h3>
+                <span className="rounded-full bg-muted px-2 py-0.5 text-[12px] font-semibold text-muted-foreground">{statusText[j.status] ?? j.status}</span>
+              </div>
+              <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
+                <div className="h-full rounded-full bg-primary transition-all" style={{ width: `${pct}%` }} />
+              </div>
+              <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[12px] text-muted-foreground tabular-nums">
+                <span>Processed {j.counts.processed}/{total} ({pct}%)</span>
+                <span className="text-emerald-600">✓ {j.counts.succeeded} {doneLabel.toLowerCase()}</span>
+                <span className="text-rose-600">✗ {j.counts.failed} failed</span>
+                {active && <span>~{remaining} remaining</span>}
+              </div>
+              {j.error && <p className="mt-2 text-[12px] text-rose-600">{j.error}</p>}
+              <div className="mt-4 flex items-center justify-end gap-2">
+                {active
+                  ? (
+                    <>
+                      <button type="button" onClick={() => void driveBulkJob(j.jobId)} className="rounded-lg border border-border px-3 py-1.5 text-[13px] font-semibold text-foreground hover:bg-muted/50">Resume</button>
+                      <button type="button" onClick={() => void cancelBulkJob(j.jobId)} className="rounded-lg border border-border px-3 py-1.5 text-[13px] font-semibold text-rose-600 hover:bg-rose-50">Cancel</button>
+                    </>
+                  )
+                  : <button type="button" onClick={closeBulkJob} className="rounded-lg bg-primary px-4 py-1.5 text-[13px] font-semibold text-white hover:opacity-90">Done</button>}
+              </div>
+            </div>
+          </div>
+        )
+      })()}
+
       {/* Page header */}
       <div className="mb-6 flex items-start justify-between gap-4">
         <div>
           <Link
             href="/dashboard/events"
-            className="mb-2 inline-flex items-center gap-1.5 text-[12.5px] font-medium text-muted-foreground hover:text-foreground"
+            className="mb-2 inline-flex items-center gap-1.5 text-[13px] font-medium text-muted-foreground hover:text-foreground"
           >
             <ChevronLeft className="size-3.5" aria-hidden />
             Events
@@ -1214,16 +1733,35 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
           <p className="mt-0.5 text-[13px] text-muted-foreground">Registrations</p>
         </div>
 
-        <button
-          type="button"
-          onClick={() => exportToCsv(filtered, eventSlug, fieldLabels)}
-          disabled={filtered.length === 0}
-          className="flex shrink-0 items-center gap-2 rounded-xl border border-border bg-card px-4 py-2 text-[13px] font-semibold text-foreground shadow-sm hover:bg-muted/50 disabled:opacity-40"
-        >
-          <Download className="size-4" aria-hidden />
-          Export CSV
-        </button>
+        <div className="flex shrink-0 items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setImportOpen(true)}
+            className="flex shrink-0 items-center gap-2 rounded-xl border border-border bg-card px-4 py-2 text-[13px] font-semibold text-foreground shadow-sm hover:bg-muted/50"
+          >
+            <Upload className="size-4" aria-hidden />
+            Import
+          </button>
+          <button
+            type="button"
+            onClick={() => exportToCsv(filtered, eventSlug, fieldLabels)}
+            disabled={filtered.length === 0}
+            className="flex shrink-0 items-center gap-2 rounded-xl border border-border bg-card px-4 py-2 text-[13px] font-semibold text-foreground shadow-sm hover:bg-muted/50 disabled:opacity-40"
+          >
+            <Download className="size-4" aria-hidden />
+            Export CSV
+          </button>
+        </div>
       </div>
+
+      <ImportParticipantsDrawer
+        open={importOpen}
+        onClose={() => setImportOpen(false)}
+        eventId={eventId}
+        eventSlug={eventSlug}
+        token={authToken}
+        eventName={eventName}
+      />
 
       {/* Stats — always from server (reflect full event, not just loaded page) */}
       <div className="mb-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
@@ -1231,6 +1769,9 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
         <StatChip icon={CheckCircle} label="Confirmed" value={stats.confirmed} color="bg-emerald-100 text-emerald-600"   />
         <StatChip icon={Clock}       label="Pending"   value={stats.pending}   color="bg-amber-100 text-amber-600"       />
         <StatChip icon={XCircle}     label="Cancelled" value={stats.cancelled} color="bg-red-100 text-red-500"           />
+        {(stats.rejected ?? 0) > 0 && (
+          <StatChip icon={XCircle}   label="Rejected"  value={stats.rejected ?? 0} color="bg-rose-100 text-rose-600"  />
+        )}
       </div>
 
       {/* Toolbar row 1: Search + filter dropdowns */}
@@ -1285,6 +1826,7 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
             <option value="pending">Pending</option>
             <option value="waitlisted">Waitlisted</option>
             <option value="cancelled">Cancelled</option>
+            <option value="rejected">Rejected</option>
           </select>
         </div>
 
@@ -1326,7 +1868,7 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
               setCheckinFilter(''); setPaymentFilter(''); setDateFrom(''); setDateTo('')
               searchRef.current?.focus()
             }}
-            className="flex items-center gap-1.5 rounded-xl border border-border bg-card px-3 py-2 text-[12.5px] font-medium text-muted-foreground hover:bg-muted/50"
+            className="flex items-center gap-1.5 rounded-xl border border-border bg-card px-3 py-2 text-[13px] font-medium text-muted-foreground hover:bg-muted/50"
           >
             <X className="size-3" aria-hidden /> Clear filters
           </button>
@@ -1377,10 +1919,48 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
         </div>
       )}
 
-      {/* Bulk action toolbar */}
+      {/* Bulk action toolbar — sticky so it stays visible while scrolling the table */}
       {selectedIds.size > 0 && (
-        <div className="mb-3 flex flex-wrap items-center gap-2 rounded-xl border border-primary/20 bg-primary/5 px-3 py-2.5">
-          <span className="mr-1 text-[12.5px] font-semibold text-foreground">{selectedIds.size} selected</span>
+        <div className="sticky top-4 z-20 mb-3 flex flex-wrap items-center gap-2 rounded-xl border border-primary/20 bg-card/95 px-3 py-2.5 shadow-md backdrop-blur-sm">
+          <span className="mr-1 text-[14px] font-semibold text-foreground">
+            {selectedIds.size} selected
+            {pendingSelected > 0 && (
+              <span className="ml-1.5 text-[13px] font-medium text-amber-600">
+                ({pendingSelected} pending)
+              </span>
+            )}
+          </span>
+
+          {/* Approve / Reject — shown only when pending registrations are selected */}
+          {pendingSelected > 0 && (
+            <>
+              <button
+                type="button"
+                disabled={!!bulkLoading}
+                onClick={() => void handleBulkApprove()}
+                className="flex items-center gap-1.5 rounded-lg border border-emerald-300 bg-emerald-50 px-3 py-1.5 text-[12px] font-semibold text-emerald-700 hover:bg-emerald-100 disabled:opacity-50"
+              >
+                {bulkLoading === 'bulk_approve'
+                  ? <Loader2 className="size-3 animate-spin" aria-hidden />
+                  : <CheckCircle className="size-3 shrink-0" aria-hidden />
+                }
+                Approve Selected
+              </button>
+              <button
+                type="button"
+                disabled={!!bulkLoading}
+                onClick={() => void handleBulkReject()}
+                className="flex items-center gap-1.5 rounded-lg border border-rose-200 bg-rose-50 px-3 py-1.5 text-[12px] font-semibold text-rose-700 hover:bg-rose-100 disabled:opacity-50"
+              >
+                {bulkLoading === 'bulk_reject'
+                  ? <Loader2 className="size-3 animate-spin" aria-hidden />
+                  : <XCircle className="size-3 shrink-0" aria-hidden />
+                }
+                Reject Selected
+              </button>
+            </>
+          )}
+
           <button type="button" disabled={!!bulkLoading} onClick={handleBulkExport}
             className="flex items-center gap-1.5 rounded-lg border border-border bg-card px-3 py-1.5 text-[12px] font-semibold text-foreground hover:bg-muted/50 disabled:opacity-50">
             <Download className="size-3 shrink-0" aria-hidden /> Export CSV
@@ -1405,16 +1985,17 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
             {bulkLoading === 'cancel' && <Loader2 className="size-3 animate-spin" aria-hidden />}
             Cancel
           </button>
-          <button type="button" onClick={clearSelection}
-            className="ml-auto flex size-6 items-center justify-center rounded-full text-muted-foreground/50 hover:bg-muted/60 hover:text-foreground"
-            aria-label="Dismiss selection">
+          <button type="button" onClick={clearSelection} disabled={!!bulkLoading}
+            className="ml-auto flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[12px] font-medium text-muted-foreground hover:bg-muted/60 hover:text-foreground disabled:opacity-50"
+            aria-label="Clear selection">
             <X className="size-3.5" aria-hidden />
+            Clear Selection
           </button>
         </div>
       )}
       {bulkFeedback && (
         <div className="mb-3 flex items-center justify-between rounded-xl border border-border bg-muted/20 px-4 py-2">
-          <span className="text-[12.5px] text-muted-foreground">{bulkFeedback}</span>
+          <span className="text-[13px] text-muted-foreground">{bulkFeedback}</span>
           <button type="button" onClick={() => setBulkFeedback(null)}
             className="ml-2 text-muted-foreground/50 hover:text-foreground" aria-label="Dismiss">
             <X className="size-3" aria-hidden />
@@ -1424,8 +2005,15 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
 
       {/* Cap warning in all-mode */}
       {isAllMode && data.registrations.length >= 2000 && (
-        <div className="mb-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-2.5 text-[12.5px] text-amber-800">
+        <div className="mb-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-2.5 text-[13px] text-amber-800">
           Showing first 2,000 registrations. Use CSV export for the complete list.
+        </div>
+      )}
+
+      {/* GA-7C S2/P5: render-cap note — fewer rows are painted than match, to keep the DOM light */}
+      {renderCapped && (
+        <div className="mb-3 rounded-xl border border-border bg-muted/30 px-4 py-2.5 text-[13px] text-muted-foreground">
+          Showing the first {RENDER_CAP} of {filtered.length.toLocaleString('en-IN')} matching registrations. Refine your search, or export to CSV for the full list.
         </div>
       )}
 
@@ -1448,7 +2036,7 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
           <p className="text-[14px] font-semibold text-foreground">
             {totalCount === 0 ? 'No registrations yet' : 'No results for your search'}
           </p>
-          <p className="text-[12.5px] text-muted-foreground">
+          <p className="text-[13px] text-muted-foreground">
             {totalCount === 0
               ? 'Registrations will appear here once attendees sign up.'
               : 'Try adjusting your search or filters.'}
@@ -1464,7 +2052,7 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
 
           {/* Mobile card list — shown below md */}
           <div className="space-y-2 md:hidden">
-            {filtered.map(reg => {
+            {visible.map(reg => {
               const sm = statusMeta(reg.status)
               return (
                 <div key={reg.id} className={cn('rounded-2xl border border-border bg-card p-4 shadow-sm', selectedIds.has(reg.id) && 'border-primary/30 bg-primary/[0.02]')}>
@@ -1474,7 +2062,7 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
                       <p className="truncate text-[12px] text-muted-foreground">{reg.attendee.email}</p>
                     </div>
                     <div className="flex shrink-0 items-center gap-2">
-                      <span className={`rounded-full px-2.5 py-0.5 text-[11px] font-semibold ${sm.cls}`}>
+                      <span className={`rounded-full px-2.5 py-0.5 text-[12px] font-semibold ${sm.cls}`}>
                         {sm.label}
                       </span>
                       <input
@@ -1486,7 +2074,7 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
                       />
                     </div>
                   </div>
-                  <div className="mt-2.5 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[11.5px] text-muted-foreground">
+                  <div className="mt-2.5 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[13px] text-muted-foreground">
                     <span className="font-mono">{reg.ticketCode}</span>
                     <span aria-hidden>·</span>
                     <span>{reg.passName}</span>
@@ -1540,7 +2128,7 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
                     ].map(({ key, label }) => (
                       <th
                         key={label || 'actions'}
-                        className="px-4 py-3 text-left text-[11px] font-semibold uppercase tracking-wider text-muted-foreground"
+                        className="px-4 py-3 text-left text-[12px] font-semibold uppercase tracking-wider text-muted-foreground"
                       >
                         {key ? (
                           <button type="button" onClick={() => toggleSort(key)} className="flex items-center gap-1 hover:text-foreground">
@@ -1555,7 +2143,7 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
                   </tr>
                 </thead>
                 <tbody>
-                  {filtered.map(reg => {
+                  {visible.map(reg => {
                     const sm = statusMeta(reg.status)
                     return (
                       <tr key={reg.id} className={cn('border-b border-border/30 transition-colors last:border-0', selectedIds.has(reg.id) ? 'bg-primary/[0.03]' : 'hover:bg-muted/[0.03]')}>
@@ -1575,17 +2163,17 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
                         <td className="px-4 py-3 text-muted-foreground">{reg.passName}</td>
                         <td className="whitespace-nowrap px-4 py-3 text-muted-foreground">{fmtDateShort(reg.registeredAt)}</td>
                         <td className="px-4 py-3">
-                          <span className={`inline-flex rounded-full px-2.5 py-0.5 text-[11.5px] font-semibold ${sm.cls}`}>
+                          <span className={`inline-flex rounded-full px-2.5 py-0.5 text-[13px] font-semibold ${sm.cls}`}>
                             {sm.label}
                           </span>
                         </td>
                         <td className="px-4 py-3">
                           {reg.checkedIn ? (
-                            <span className="inline-flex items-center gap-1 text-[11.5px] font-medium text-emerald-600">
+                            <span className="inline-flex items-center gap-1 text-[13px] font-medium text-emerald-600">
                               <CheckCircle className="size-3.5" aria-hidden /> Yes
                             </span>
                           ) : (
-                            <span className="text-[11.5px] text-muted-foreground/40">—</span>
+                            <span className="text-[13px] text-muted-foreground/40">—</span>
                           )}
                         </td>
                         <td className="px-4 py-3">
@@ -1611,7 +2199,7 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
       {/* Pagination controls — hidden when search/filter is active (all-mode) */}
       {!isAllMode && (
         <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-1.5 text-[12.5px] text-muted-foreground">
+          <div className="flex items-center gap-1.5 text-[13px] text-muted-foreground">
             <span>Per page:</span>
             {([25, 50, 100] as const).map(n => (
               <button
@@ -1636,7 +2224,7 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
           </div>
 
           <div className="flex items-center gap-3">
-            <span className="text-[12.5px] text-muted-foreground">
+            <span className="text-[13px] text-muted-foreground">
               Page <span className="font-semibold text-foreground">{currentPage}</span>
               {totalCount > 0 && (
                 <> · <span className="font-semibold text-foreground">{totalCount}</span> total</>
@@ -1678,6 +2266,7 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
       {selected && (
         <RegistrationDrawer
           reg={selected}
+          eventId={eventId}
           fieldLabels={fieldLabels}
           token={authToken}
           onClose={() => setSelected(null)}

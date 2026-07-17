@@ -8,7 +8,6 @@
 //   5. Capacity double-checked inside the transaction (closes TOCTOU race).
 
 import { NextRequest, NextResponse } from 'next/server'
-import { FieldValue }               from 'firebase-admin/firestore'
 import { adminAuth, adminDb }       from '@/lib/firebase/admin'
 import { checkRegistrationGate }    from '@/lib/registrations/gate'
 import { getEventBySlug }           from '@/lib/firebase/firestore/events'
@@ -16,12 +15,18 @@ import {
   createRegistration,
   CapacityExceededError,
   DuplicateRegistrationError,
+  CouponExhaustedError,
   IdempotencyHitError,
 } from '@/lib/firebase/firestore/registrations'
+import { setRegistrationSessions } from '@/lib/sessions/service'
+import { SessionError }            from '@/lib/sessions/types'
 import { checkRateLimit, getClientIp } from '@/lib/rateLimit'
-import { signTicketToken }          from '@/lib/tickets/generate'
-import { getEmailProvider, fmtEmailDate } from '@/lib/email'
-import type { RegistrationFormDraft, FormField, RegistrationRules } from '@/components/wizard/registrationFormConfig'
+import { validateInviteCode }       from '@/app/api/registrations/validate-invite-code/route'
+import { sendConfirmationEmail }    from '@/lib/registrations/sendConfirmationEmail'
+import { validateCoupon }           from '@/lib/coupons/validate'
+import { resolveEffectivePriceRupees } from '@/lib/pricing/earlyBird'
+import { validateFormResponses }     from '@/lib/registrations/validateFormResponses'
+import type { RegistrationRules } from '@/components/wizard/registrationFormConfig'
 
 // ─── Request / response shapes ────────────────────────────────────────────────
 
@@ -35,6 +40,9 @@ interface SubmitBody {
   }
   formResponses:   Record<string, string>
   idempotencyKey?: string
+  inviteCode?:     string
+  couponCode?:     string
+  selectedSessions?: string[]   // optional conference session picks (G.3)
 }
 
 export interface SubmitResponse {
@@ -51,19 +59,6 @@ export interface SubmitResponse {
 
 function isValidEmail(email: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())
-}
-
-function getVisibleRequiredFields(
-  form:   RegistrationFormDraft,
-  passId: string,
-): FormField[] {
-  return form.sections
-    .flatMap(s => s.fields)
-    .filter(field => {
-      if (!field.visible || !field.required) return false
-      if (field.passVisibility === 'all') return true
-      return Array.isArray(field.passVisibility) && field.passVisibility.includes(passId)
-    })
 }
 
 // ─── Handler ──────────────────────────────────────────────────────────────────
@@ -112,7 +107,7 @@ export async function POST(
     )
   }
 
-  const { slug, passId, attendee, formResponses, idempotencyKey } = body
+  const { slug, passId, attendee, formResponses, idempotencyKey, inviteCode, couponCode } = body
 
   if (!slug || !passId || !attendee?.name?.trim() || !attendee?.email?.trim()) {
     return NextResponse.json(
@@ -159,18 +154,26 @@ export async function POST(
     ? null
     : typeof pass.quantity === 'number' ? pass.quantity : null
 
+  // ── 5b. Server-side invite code enforcement ───────────────────────────────
+  // This check runs on every submission regardless of client-side pre-validation.
+  const acCheck = validateInviteCode(event.accessControl, inviteCode?.trim() ?? '')
+  if (!acCheck.valid) {
+    return NextResponse.json(
+      { success: false, reason: 'INVITE_CODE_INVALID', error: acCheck.error ?? 'Invalid invite code.' },
+      { status: 403 },
+    )
+  }
+
   // ── 6. Server-side form validation ────────────────────────────────────────
+  // Full validation: conditional visibility/requirement, required fields, and
+  // per-type formats (email/phone/url/number), option membership, and any
+  // configured rules — the same rules the builder/client enforce.
   const registrationForm = event.registrationForm
   if (registrationForm?.sections?.length) {
-    const requiredFields = getVisibleRequiredFields(registrationForm, passId)
-    const missing: string[] = []
-    for (const field of requiredFields) {
-      const val = (formResponses?.[field.id] ?? '').toString().trim()
-      if (!val) missing.push(field.label)
-    }
-    if (missing.length > 0) {
+    const validationError = validateFormResponses(registrationForm, passId, formResponses)
+    if (validationError) {
       return NextResponse.json(
-        { success: false, error: `Required fields missing: ${missing.slice(0, 5).join(', ')}` },
+        { success: false, error: validationError.message },
         { status: 400 },
       )
     }
@@ -180,6 +183,48 @@ export async function POST(
   const rawDetails = event.eventDetails as Record<string, unknown>
   const rawInfo    = rawDetails?.info as Record<string, unknown> | null
   const eventName  = typeof rawInfo?.name === 'string' ? rawInfo.name : 'Event'
+
+  // ── 7z. Extract exhibition-specific fields ────────────────────────────────
+  const eventType = (event as unknown as { eventType?: string | null }).eventType ?? null
+
+  let extraFields: Record<string, string | null> | undefined
+  if (eventType === 'exhibition') {
+    // Build field-id → label map from the stored registration form
+    const regFormSections = (event.registrationForm as {
+      sections?: Array<{ fields: Array<{ id: string; label: string }> }>
+    } | null)?.sections ?? []
+    const fieldLabelMap: Record<string, string> = {}
+    for (const sec of regFormSections) {
+      for (const fld of sec.fields ?? []) {
+        if (fld.id && fld.label) fieldLabelMap[fld.id] = fld.label
+      }
+    }
+    const fr = (formResponses ?? {}) as Record<string, string>
+    function pickByLabel(pattern: RegExp): string | null {
+      for (const [id, lbl] of Object.entries(fieldLabelMap)) {
+        if (pattern.test(lbl)) return fr[id]?.trim() || null
+      }
+      return null
+    }
+    const companyName = pickByLabel(/company name/i)
+    const passNameLower = passName.toLowerCase()
+    if (
+      (passNameLower.includes('exhibitor') || passNameLower.includes('sponsor'))
+      && !companyName
+    ) {
+      return NextResponse.json(
+        { success: false, error: 'Company Name is required for Exhibitor and Sponsor passes.' },
+        { status: 400 },
+      )
+    }
+    extraFields = {
+      companyName,
+      designation: pickByLabel(/^designation$/i),
+      website:     pickByLabel(/company website|^website$/i),
+      industry:    pickByLabel(/^industry$/i),
+      passType:    passName,
+    }
+  }
 
   // ── 7a. Enforce requireLogin ───────────────────────────────────────────────
   const regRules = registrationForm?.registrationRules as RegistrationRules | undefined
@@ -241,6 +286,68 @@ export async function POST(
     }
   }
 
+  // Canonical source: accessControl.confirmationMode (set in Step 3, always written).
+  // registrationRules.approvalMode can be stale when the organizer changes Step 3
+  // after Step 5 was already saved — the wizard sync is UI-only and not guaranteed.
+  const acConfirmationMode = (event.accessControl as { confirmationMode?: string } | null)
+    ?.confirmationMode
+  const approvalMode = (acConfirmationMode === 'manual' || acConfirmationMode === 'auto'
+    ? acConfirmationMode
+    : regRules?.approvalMode ?? 'auto') as 'auto' | 'manual'
+
+  // ── 7.5. Validate coupon (server-side re-validation) ─────────────────────────
+  // Coupon may be present when a paid pass has been discounted to zero (free-via-coupon).
+  // In that case create-order returned isCouponFree:true and the client calls submit.
+  // Effective price mirrors create-order: early-bird price while active, else
+  // regular. A paid pass stays paid whether or not early bird is active, so the
+  // "paid passes must use the payment flow" guard below is unaffected.
+  const priceRupees   = resolveEffectivePriceRupees(
+    {
+      price:            typeof pass.price === 'number' ? pass.price : 0,
+      earlyBirdEnabled: pass.earlyBirdEnabled === true,
+      earlyBirdPrice:   typeof pass.earlyBirdPrice === 'number' ? pass.earlyBirdPrice : null,
+      earlyBirdEndDate: typeof pass.earlyBirdEndDate === 'string' ? pass.earlyBirdEndDate : undefined,
+    },
+    Date.now(),
+  )
+  const originalPaise = Math.round(priceRupees * 100)
+
+  let couponInfo: {
+    couponDocId:    string
+    code:           string
+    discountAmount: number
+    originalAmount: number
+  } | undefined
+
+  if (couponCode?.trim()) {
+    const couponResult = await validateCoupon(slug, couponCode, passId, originalPaise)
+    if (!couponResult.valid) {
+      return NextResponse.json(
+        { success: false, error: couponResult.error ?? 'Invalid coupon code.' },
+        { status: 400 },
+      )
+    }
+    // Ensure the coupon actually makes this pass free (otherwise use the paid flow)
+    if (couponResult.finalPaise !== 0) {
+      return NextResponse.json(
+        { success: false, error: 'This coupon does not make the pass free. Use the payment flow.' },
+        { status: 400 },
+      )
+    }
+    couponInfo = {
+      couponDocId:    couponResult.couponDocId!,
+      code:           couponResult.coupon!.code,
+      discountAmount: couponResult.discountPaise!,
+      originalAmount: originalPaise,
+    }
+  } else if (priceRupees > 0) {
+    // Paid pass without a coupon should not come through the submit (free) flow
+    return NextResponse.json(
+      { success: false, error: 'Paid passes must use the payment flow.' },
+      { status: 400 },
+    )
+  }
+
   // ── 8. Create registration (transaction + atomic capacity + H2 claim guard) ──
   try {
     const result = await createRegistration({
@@ -265,18 +372,44 @@ export async function POST(
       idempotencyKey: typeof idempotencyKey === 'string' && idempotencyKey.trim()
         ? idempotencyKey.trim()
         : undefined,
+      approvalMode,
+      couponInfo,
+      extraFields,
     })
 
-    // ── 9. Send confirmation email (never blocks or throws to the caller) ───────
-    await sendRegistrationEmail({
-      registrationId: result.registrationId,
-      ticketCode:     result.ticketCode,
-      attendeeName:   attendee.name.trim(),
-      attendeeEmail:  attendee.email.trim().toLowerCase(),
-      eventName,
-      passName,
-      rawDetails:     rawDetails as Record<string, unknown>,
-    })
+    // ── 8b. Optional conference session selection (G.3) ───────────────────────
+    // Sessions are optional; reservation is transactional + independent of the
+    // registration. A failure (full / time-clash) does NOT void the registration —
+    // it is reported back so the UI can prompt a re-pick.
+    let sessionsError: string | null = null
+    let selectedSessions: string[] = []
+    if (Array.isArray(body.selectedSessions) && body.selectedSessions.length > 0) {
+      try {
+        const r = await setRegistrationSessions(result.registrationId, body.selectedSessions, {
+          expectedOrganizerUid: event.uid, expectedEventSlug: slug,
+        })
+        selectedSessions = r.selected
+      } catch (e) {
+        sessionsError = e instanceof SessionError ? e.code : 'SESSION_SELECTION_FAILED'
+      }
+    }
+
+    // ── 9. Send confirmation email only for auto-confirmed registrations ──────
+    // Manual approval registrations stay pending; email is sent from the
+    // approve endpoint once the organizer reviews and approves the registration.
+    if (approvalMode !== 'manual') {
+      await sendConfirmationEmail({
+        registrationId: result.registrationId,
+        ticketCode:     result.ticketCode,
+        attendeeName:   attendee.name.trim(),
+        attendeeEmail:  attendee.email.trim().toLowerCase(),
+        eventName,
+        passName,
+        rawDetails:     rawDetails as Record<string, unknown>,
+        organizerUid:   event.uid,
+        eventSlug:      slug,
+      })
+    }
 
     return NextResponse.json({
       success:        true,
@@ -284,6 +417,8 @@ export async function POST(
       ticketCode:     result.ticketCode,
       eventName,
       passName,
+      selectedSessions,
+      sessionsError,
     })
   } catch (err) {
     if (err instanceof IdempotencyHitError) {
@@ -314,8 +449,16 @@ export async function POST(
           reason:  err.reason,
           error:   err.reason === 'EVENT_CAPACITY_FULL'
             ? 'This event is now full.'
+            : err.reason === 'PASS_NOT_AVAILABLE'
+            ? 'This pass is no longer available.'
             : 'This pass is now sold out.',
         },
+        { status: 409 },
+      )
+    }
+    if (err instanceof CouponExhaustedError) {
+      return NextResponse.json(
+        { success: false, reason: 'COUPON_EXHAUSTED', error: 'This coupon has reached its usage limit.' },
         { status: 409 },
       )
     }
@@ -327,86 +470,3 @@ export async function POST(
   }
 }
 
-// ─── Email helper ─────────────────────────────────────────────────────────────
-//
-// Never throws. Email failures are logged and stored in Firestore but must
-// never break the registration flow.
-
-interface EmailArgs {
-  registrationId: string
-  ticketCode:     string
-  attendeeName:   string
-  attendeeEmail:  string
-  eventName:      string
-  passName:       string
-  rawDetails:     Record<string, unknown>
-}
-
-async function sendRegistrationEmail(args: EmailArgs): Promise<void> {
-  const provider = getEmailProvider()
-  if (!provider) return   // email not configured — skip silently
-
-  const {
-    registrationId, ticketCode, attendeeName, attendeeEmail,
-    eventName, passName, rawDetails,
-  } = args
-
-  // Extract schedule + venue from denormalised event details
-  const schedule   = rawDetails.schedule as Record<string, unknown> | null
-  const startDate  = typeof schedule?.startDate === 'string' ? schedule.startDate : ''
-  const startTime  = typeof schedule?.startTime === 'string' ? schedule.startTime : ''
-
-  const venueRaw   = rawDetails.venue as Record<string, unknown> | null
-  const venueType  = typeof venueRaw?.type === 'string' ? venueRaw.type : ''
-  const physical   = venueRaw?.physical as Record<string, unknown> | null
-  const online     = venueRaw?.online   as Record<string, unknown> | null
-  const venueName  = venueType === 'online'
-    ? (typeof online?.platform === 'string' ? online.platform : 'Online')
-    : (typeof physical?.name === 'string' ? physical.name : '')
-  const venueCity  = venueType !== 'online'
-    ? (typeof physical?.city === 'string' ? physical.city : '')
-    : ''
-
-  const baseUrl   = process.env.NEXT_PUBLIC_APP_URL ?? ''
-  const pdfToken  = signTicketToken(registrationId)
-  const pdfUrl    = `${baseUrl}/api/tickets/${registrationId}/pdf${pdfToken ? `?token=${encodeURIComponent(pdfToken)}` : ''}`
-
-  let emailStatus: 'sent' | 'failed' = 'failed'
-  let emailFailureReason: string | undefined
-
-  try {
-    const result = await provider.sendRegistrationEmail({
-      to:             attendeeEmail,
-      attendeeName,
-      eventName,
-      eventDate:      fmtEmailDate(startDate) || startDate,
-      eventTime:      startTime   || undefined,
-      venueName:      venueName   || undefined,
-      venueCity:      venueCity   || undefined,
-      ticketCode,
-      passName,
-      registrationId,
-      ticketPageUrl:  `${baseUrl}/tickets/${registrationId}`,
-      pdfDownloadUrl: pdfUrl,
-    })
-
-    emailStatus = result.success ? 'sent' : 'failed'
-    if (!result.success) emailFailureReason = result.error
-    if (!result.success) {
-      console.error(`[email] Registration email failed for ${registrationId}:`, result.error)
-    }
-  } catch (err) {
-    emailFailureReason = err instanceof Error ? err.message : 'Unknown error'
-    console.error(`[email] Unexpected error sending registration email for ${registrationId}:`, err)
-  }
-
-  // Update emailStatus in Firestore — fire and forget (non-critical status field)
-  adminDb.collection('registrations').doc(registrationId).update({
-    emailStatus,
-    ...(emailStatus === 'sent'
-      ? { emailSentAt: FieldValue.serverTimestamp() }
-      : { emailFailureReason }),
-  }).catch(updateErr =>
-    console.error(`[email] Failed to persist emailStatus for ${registrationId}:`, updateErr),
-  )
-}

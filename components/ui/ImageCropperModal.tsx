@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useCallback, useRef } from 'react'
+import { useState, useCallback, useEffect } from 'react'
 import Cropper                           from 'react-easy-crop'
 import type { Area, Point }              from 'react-easy-crop'
 import {
@@ -8,6 +8,7 @@ import {
   Loader2, ZoomIn, ZoomOut,
 } from 'lucide-react'
 import { cn } from '@/lib/utils/cn'
+import { useFocusTrap } from '@/lib/hooks/useFocusTrap'
 
 // ─── Public types ─────────────────────────────────────────────────────────────
 
@@ -158,6 +159,15 @@ export function ImageCropperModal({ imageSrc, config, onApply, onCancel }: Props
   const [croppedAreaPixels, setCroppedAreaPixels] = useState<Area | null>(null)
   const [applying, setApplying] = useState(false)
 
+  // GA-7D S1: this full-screen modal had no focus trap or Escape. Reuse the shared
+  // trap (trap + restore) and add Escape-to-cancel; role/aria-modal were present.
+  const trapRef = useFocusTrap<HTMLDivElement>(true)
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onCancel() }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [onCancel])
+
   const onCropComplete = useCallback((_croppedArea: Area, pixels: Area) => {
     setCroppedAreaPixels(pixels)
   }, [])
@@ -185,6 +195,7 @@ export function ImageCropperModal({ imageSrc, config, onApply, onCancel }: Props
 
   return (
     <div
+      ref={trapRef}
       role="dialog"
       aria-modal="true"
       aria-label={config.label}

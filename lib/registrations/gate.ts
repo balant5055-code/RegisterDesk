@@ -3,11 +3,17 @@
 
 import { getEventBySlug }          from '@/lib/firebase/firestore/events'
 import { getRegistrationCounter }  from '@/lib/firebase/firestore/registrationCounters'
+import { isContentTakenDown }      from '@/lib/admin/moderation'
 import { computePassAvailability, resolveTotalCapacity } from './capacity'
 import type {
   RegistrationGateResult, RegistrationBlockReason, CapacityPlan,
 } from './types'
 import type { EventDetailsDraft, EventSchedule } from '@/components/wizard/eventDetailsConfig'
+
+// V1 kill switch: the waitlist is disabled platform-wide until auto-promotion is
+// implemented. While false, full events never report WAITLIST_AVAILABLE and the
+// join endpoint refuses new entries. Re-enable in one place once promotion ships.
+export const WAITLIST_ENABLED = false
 
 // ─── Internal pass shape (matches EventPassFull subset) ───────────────────────
 
@@ -112,21 +118,29 @@ export async function checkRegistrationGate(
     return { allowed: false, reason: 'EVENT_NOT_FOUND' }
   }
 
+  // ── 1b. Admin moderation — a taken-down event is unavailable for registration.
+  //        Post-payment callers (verify-payment / webhook) treat this gate block
+  //        like any other and refund the captured payment.
+  if (isContentTakenDown(event.moderationStatus)) {
+    return { allowed: false, reason: 'EVENT_UNAVAILABLE' }
+  }
+
   // ── 2a. Lifecycle status (authoritative — set by organizer actions) ─────────
   const ls = event.lifecycleStatus
   if (ls === 'cancelled') return { allowed: false, reason: 'EVENT_CANCELLED' }
+  // Not-yet-live / taken-offline events (submitted awaiting approval, sent back for
+  // changes, still a draft, or Phase-L2 'unpublished') must never accept
+  // registrations even though an events/{slug} doc exists. 'unpublished' is
+  // recognition-only and never emitted yet — listing it here is fail-safe.
+  if (ls === 'pending_review' || ls === 'changes_requested' || ls === 'draft' || ls === 'unpublished') {
+    return { allowed: false, reason: 'EVENT_NOT_PUBLISHED' }
+  }
   if (ls === 'registration_closed' || ls === 'completed' || ls === 'archived') {
     return { allowed: false, reason: 'REGISTRATION_CLOSED' }
   }
 
-  // ── 2b. Legacy eventDetails.status.status (informal cancelled/postponed) ──
-  const ed        = event.eventDetails as unknown as EventDetailsDraft
-  const evStatus  = ed.status?.status
-
-  if (evStatus === 'cancelled') return { allowed: false, reason: 'EVENT_CANCELLED' }
-  if (evStatus === 'postponed') return { allowed: false, reason: 'EVENT_POSTPONED' }
-
   // ── 3. Event end datetime (in event timezone) ────────────────────────────
+  const ed       = event.eventDetails as unknown as EventDetailsDraft
   const schedule = ed.schedule as EventSchedule | undefined
   const tz       = schedule?.timezone?.trim() || 'UTC'
   const today    = todayISOInTz(tz)
@@ -169,19 +183,39 @@ export async function checkRegistrationGate(
   }
 
   // ── 6 + 7. Capacity ──────────────────────────────────────────────────────
-  const plan          = (event.capacityPlan ?? 'free') as CapacityPlan
-  const eventCapacity = resolveTotalCapacity(plan)
+  // `event.totalCapacity` is the SINGLE enforced source of truth — the exact field
+  // the atomic registration transaction (and verify-payment / webhook / restore /
+  // approve / bulk) reads. It is written at publish from the license plan and kept
+  // in lock-step by admin registration-limit overrides (RD-LIC-ADMIN-01), so the
+  // gate and the transaction can never disagree. Fall back to the plan-derived
+  // capacity only for legacy events where the field was never stamped.
+  const totalCap      = (event as { totalCapacity?: number | null }).totalCapacity
+  const eventCapacity = typeof totalCap === 'number' ? totalCap
+    : totalCap === null ? null
+    : resolveTotalCapacity((event.capacityPlan ?? 'free') as CapacityPlan)
   const counter       = await getRegistrationCounter(slug)
   const eventCount    = counter?.totalCount ?? 0
   const passCount     = counter?.passCounts?.[passId] ?? 0
 
+  // V1: the waitlist is disabled platform-wide because auto-promotion (promoting
+  // the next entry when a spot frees) is not yet implemented — exposing a
+  // join-only waitlist would strand attendees. Full events fall through to the
+  // plain *_CAPACITY_FULL reasons. Flip WAITLIST_ENABLED to re-enable once
+  // promotion is complete (see app/api/waitlist/join/route.ts).
+  const waitlistEnabled = WAITLIST_ENABLED &&
+    (event as unknown as Record<string, unknown>).waitlistEnabled === true
+
   if (eventCapacity !== null && eventCount >= eventCapacity) {
-    return { allowed: false, reason: 'EVENT_CAPACITY_FULL' }
+    return waitlistEnabled
+      ? { allowed: false, reason: 'WAITLIST_AVAILABLE', waitlistEnabled: true }
+      : { allowed: false, reason: 'EVENT_CAPACITY_FULL' }
   }
 
   const passCapacity = pass.unlimited || pass.quantity == null ? null : pass.quantity
   if (passCapacity !== null && passCount >= passCapacity) {
-    return { allowed: false, reason: 'PASS_CAPACITY_FULL' }
+    return waitlistEnabled
+      ? { allowed: false, reason: 'WAITLIST_AVAILABLE', waitlistEnabled: true }
+      : { allowed: false, reason: 'PASS_CAPACITY_FULL' }
   }
 
   // ── All checks passed ────────────────────────────────────────────────────
@@ -212,4 +246,8 @@ export const GATE_REASON_LABELS: Record<RegistrationBlockReason, string> = {
   PASS_INACTIVE:         'This ticket type is no longer available.',
   PASS_SALES_NOT_OPEN:   'Sales for this ticket have not started yet.',
   PASS_SALES_ENDED:      'Sales for this ticket have ended.',
+  INVITE_CODE_REQUIRED:  'An invite code is required to register for this event.',
+  INVITE_CODE_INVALID:   'The invite code you entered is invalid or has expired.',
+  WAITLIST_AVAILABLE:    'This event is full. You can join the waitlist for a chance to attend.',
+  EVENT_UNAVAILABLE:     'This event is no longer available.',
 }

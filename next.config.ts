@@ -29,8 +29,13 @@ const isDev = process.env.NODE_ENV === 'development'
 //   connect-src *.googleapis.com / *.firebaseio.com / wss:
 //     Firebase Auth token refresh, Firestore listeners, Storage uploads.
 //
-//   frame-src checkout.razorpay.com api.razorpay.com
-//     Razorpay checkout renders inside an iframe from these origins.
+//   frame-src 'self' blob: checkout.razorpay.com api.razorpay.com
+//                    www.youtube.com www.youtube-nocookie.com player.vimeo.com
+//     Razorpay checkout renders inside an iframe from the razorpay origins.
+//     'self' + blob: allow the certificate builder to frame server-generated
+//     PDF previews delivered as same-origin blob: URLs. The YouTube/Vimeo
+//     origins allow the organiser's promotional video to embed (normalised to
+//     an /embed/ URL before rendering) on the event page and the wizard preview.
 //
 //   frame-ancestors 'none'
 //     Clickjacking protection. X-Frame-Options: DENY covers older browsers.
@@ -62,7 +67,7 @@ function buildCSP(): string {
     "img-src 'self' data: blob: https:",
     "font-src 'self' data:",
     `connect-src ${connectSrc.join(' ')}`,
-    'frame-src checkout.razorpay.com api.razorpay.com',
+    "frame-src 'self' blob: checkout.razorpay.com api.razorpay.com https://www.youtube.com https://www.youtube-nocookie.com https://player.vimeo.com",
     "frame-ancestors 'none'",
     "object-src 'none'",
     "base-uri 'self'",
@@ -108,13 +113,15 @@ const securityHeaders = [
 
 const nextConfig: NextConfig = {
   images: {
+    // Trusted image providers only. Kept in sync with APPROVED_IMAGE_HOSTS in
+    // lib/utils/imageUrl.ts. Google cached thumbnails (encrypted-tbn0.gstatic.com)
+    // and googleusercontent mirrors are intentionally NOT allowed — organiser
+    // cover URLs are validated against this list and fall back to a placeholder.
     remotePatterns: [
-      {
-        protocol: 'https',
-        hostname: 'images.unsplash.com',
-        port:     '',
-        pathname: '/**',
-      },
+      { protocol: 'https', hostname: 'firebasestorage.googleapis.com', port: '', pathname: '/**' },
+      { protocol: 'https', hostname: 'storage.googleapis.com',         port: '', pathname: '/**' },
+      { protocol: 'https', hostname: 'res.cloudinary.com',             port: '', pathname: '/**' },
+      { protocol: 'https', hostname: 'images.unsplash.com',            port: '', pathname: '/**' },
     ],
   },
 

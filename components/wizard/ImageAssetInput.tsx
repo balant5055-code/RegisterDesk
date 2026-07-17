@@ -17,9 +17,9 @@ import { cn } from '@/lib/utils/cn'
 
 // ─── Shared style constants (mirror EventDetailsBuilder theme) ────────────────
 
-const inputCls = 'h-9 w-full rounded-lg border border-border bg-background px-3 text-[12.5px] text-foreground placeholder:text-muted-foreground/60 outline-none transition-colors focus:border-primary/50 focus:ring-2 focus:ring-primary/20'
-const labelCls = 'mb-1 block text-[12px] font-medium text-foreground'
-const hintCls  = 'mt-1 text-[11px] text-muted-foreground'
+const inputCls = 'h-9 w-full rounded-lg border border-border bg-background px-3 text-[14px] text-foreground placeholder:text-muted-foreground/60 outline-none transition-colors focus:border-primary/50 focus:ring-2 focus:ring-primary/20'
+const labelCls = 'mb-1 block text-[13px] font-medium text-foreground'
+const hintCls  = 'mt-1 text-[13px] text-muted-foreground'
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────
 
@@ -201,7 +201,7 @@ export function ImageAssetInput({
 
           {/* Compression badge */}
           {stats && stats.orig > stats.final && (
-            <p className="flex items-center gap-1 text-[10.5px] text-emerald-600">
+            <p className="flex items-center gap-1 text-[12px] text-emerald-600">
               <Check className="size-3 shrink-0" />
               Optimised {stats.orig} KB → {stats.final} KB
             </p>
@@ -211,19 +211,19 @@ export function ImageAssetInput({
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
             {/* Replace with file */}
             <label htmlFor={replaceId}
-              className={cn('cursor-pointer text-[11px] text-primary underline-offset-2 hover:underline', busy && 'cursor-not-allowed opacity-50')}>
+              className={cn('cursor-pointer text-[12px] text-primary underline-offset-2 hover:underline', busy && 'cursor-not-allowed opacity-50')}>
               Replace image
               <input id={replaceId} type="file" accept={ACCEPTED} className="sr-only"
                 onChange={handleFileChange} disabled={busy} />
             </label>
             {/* Replace with URL */}
             <button type="button" onClick={() => setShowReplUrl(v => !v)}
-              className="text-[11px] text-muted-foreground underline-offset-2 hover:text-foreground hover:underline">
+              className="text-[12px] text-muted-foreground underline-offset-2 hover:text-foreground hover:underline">
               Paste URL
             </button>
             {/* Remove */}
             <button type="button" onClick={handleRemove}
-              className="flex items-center gap-1 text-[11px] text-muted-foreground hover:text-red-500">
+              className="flex items-center gap-1 text-[12px] text-muted-foreground hover:text-red-500">
               <Trash2 className="size-3" /> Remove
             </button>
           </div>
@@ -297,7 +297,7 @@ export function ImageAssetInput({
                     <p className="text-[12px] font-medium text-foreground">
                       {isDrag ? 'Drop image here' : 'Drag & drop or click to browse'}
                     </p>
-                    <p className="mt-0.5 text-[11px] text-muted-foreground">
+                    <p className="mt-0.5 text-[12px] text-muted-foreground">
                       PNG, JPG, WEBP · max {Math.round(maxBytes / 1024 / 1024)} MB
                     </p>
                   </div>
@@ -321,7 +321,7 @@ export function ImageAssetInput({
 
       {/* Empty-state icon (square shape, no image) */}
       {!hasImage && shape === 'square' && tab === 'upload' && !busy && (
-        <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
+        <div className="flex items-center gap-2 text-[12px] text-muted-foreground">
           <div className="flex size-16 items-center justify-center rounded-lg border border-dashed border-border/60 bg-muted/10">
             <ImageIcon className="size-5 text-muted-foreground/30" />
           </div>
@@ -335,7 +335,7 @@ export function ImageAssetInput({
           <motion.p
             initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }}
             exit={{ opacity: 0, height: 0 }}
-            className="flex items-center gap-1.5 text-[11px] text-red-600">
+            className="flex items-center gap-1.5 text-[12px] text-red-600">
             <AlertTriangle className="size-3 shrink-0" /> {error}
           </motion.p>
         )}

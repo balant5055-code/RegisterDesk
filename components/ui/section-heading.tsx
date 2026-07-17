@@ -34,7 +34,7 @@ export function SectionHeading({
   className,
   ...props
 }: SectionHeadingProps) {
-  const Tag = headingTag[level]
+  const Tag      = headingTag[level]
   const isCenter = align === 'center'
 
   return (
@@ -57,7 +57,7 @@ export function SectionHeading({
               'inline-flex items-center rounded-full',
               'border border-border',
               'px-2.5 py-0.5',
-              'text-xs font-medium text-primary',
+              'text-[var(--fs-xs)] font-medium text-primary',
               !isCenter && 'self-start',
             )}
           >
@@ -67,15 +67,15 @@ export function SectionHeading({
 
         <Tag
           className={cn(
-            'text-[22px] font-semibold tracking-tight text-foreground',
-            'sm:text-[26px]',
+            'text-[var(--fs-2xl)] font-bold tracking-tight text-foreground',
+            'sm:text-[var(--fs-3xl)]',
           )}
         >
           {title}
         </Tag>
 
         {description && (
-          <p className="max-w-prose text-[15px] leading-relaxed text-muted-foreground">
+          <p className="max-w-prose text-[var(--fs-md)] leading-relaxed text-muted-foreground">
             {description}
           </p>
         )}

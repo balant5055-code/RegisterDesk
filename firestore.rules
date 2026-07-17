@@ -8,6 +8,13 @@ service cloud.firestore {
     // a future developer adds a client-side read without checking the rules.
     match /registrations/{docId} {
       allow read, write: if false;
+      // Per-registration audit log (server-only, written via the Admin SDK).
+      // Firestore rules do NOT cascade to subcollections, so this needs its own
+      // explicit deny — otherwise it would rely on implicit default-deny alone
+      // (EA-3 S3 hardening; closes EA-1 L-3).
+      match /auditLog/{auditId} {
+        allow read, write: if false;
+      }
     }
     match /registrationCounters/{docId} {
       allow read, write: if false;
@@ -19,9 +26,156 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
+    // CRM contacts + activity timeline (derived attendee intelligence, contains
+    // PII). Written and read exclusively through server-side API routes via the
+    // Admin SDK. Explicit deny prevents accidental client access.
+    match /crmContacts/{docId} {
+      allow read, write: if false;
+    }
+    match /crmActivities/{docId} {
+      allow read, write: if false;
+    }
+
+    // Identifier Engine — authoritative identifier locks, per-pool counters,
+    // immutable history, per-event config, and the legacy bib collections. All
+    // written and read exclusively through server-side API routes via the Admin
+    // SDK. Explicit deny prevents accidental client access.
+    match /identifierLocks/{docId} {
+      allow read, write: if false;
+    }
+    match /identifierCounters/{docId} {
+      allow read, write: if false;
+    }
+    match /identifierHistory/{docId} {
+      allow read, write: if false;
+    }
+    match /identifierConfigs/{docId} {
+      allow read, write: if false;
+    }
+    match /bibLocks/{docId} {
+      allow read, write: if false;
+    }
+    match /bibCounters/{docId} {
+      allow read, write: if false;
+    }
+
+    // Published donation campaigns and their counters are written exclusively
+    // by POST /api/campaigns/publish (Admin SDK).  Deny direct client writes.
+    match /donationCampaigns/{docId} {
+      allow read, write: if false;
+    }
+    match /donationCounters/{docId} {
+      allow read, write: if false;
+    }
+
+    // ── Financial collections — explicit deny ─────────────────────────────────
+    // All financial data is accessed exclusively through server-side API routes
+    // via the Firebase Admin SDK, which bypasses these rules entirely.
+    // Explicit deny rules ensure no client SDK path (direct reads, realtime
+    // listeners, offline cache) can access this data, even if a future developer
+    // adds a client-side query without auditing the security model first.
+    // Do not remove or relax these rules without a full security review.
+
+    // Platform-level ledger of every payment processed.
+    // Written by POST /api/registrations/verify-payment and webhook handlers.
+    match /platformTransactions/{docId} {
+      allow read, write: if false;
+    }
+
+    // Per-organizer revenue wallet: pendingPaise / availablePaise / settledPaise.
+    // Written by registration, refund, settlement, and release-funds flows.
+    match /organizerRevenueWallets/{docId} {
+      allow read, write: if false;
+    }
+
+    // Organizer-initiated payout requests reviewed by admin.
+    // Written by POST /api/organizer/settlements and PATCH /api/admin/settlements/[id].
+    match /settlementRequests/{docId} {
+      allow read, write: if false;
+    }
+
+    // Audit trail created by the T+2 release engine for every pending→available move.
+    // Written by POST /api/admin/finance/release-funds.
+    match /settlementReleases/{docId} {
+      allow read, write: if false;
+    }
+
+    // Immutable audit log of every admin financial action (approve / reject / paid / release).
+    // Written by lib/admin/audit.ts; never readable or writable from the client.
+    match /adminAuditLogs/{docId} {
+      allow read, write: if false;
+    }
+
+    // Bank account details for organizer payouts.
+    // Written by PUT /api/organizer/payout-profile (Admin SDK); read only via API.
+    match /organizerPayoutProfiles/{docId} {
+      allow read, write: if false;
+    }
+
+    // ── Remaining finance-only collections (P9.1) ─────────────────────────────
+    // All written/read exclusively through server-side API routes via the Admin
+    // SDK (payments, wallets, refunds, clawbacks, comms billing, and the durable
+    // financial-reconciliation records). Explicit deny prevents accidental client
+    // access to money/PII data.
+    match /paymentIntents/{docId}                       { allow read, write: if false; }
+    match /paymentEvents/{docId}                        { allow read, write: if false; }
+    match /refundWebhookEvents/{docId}                  { allow read, write: if false; }
+    match /failedRefunds/{docId}                        { allow read, write: if false; }
+    match /suspiciousPayments/{docId}                   { allow read, write: if false; }
+    match /donationRefunds/{docId}                      { allow read, write: if false; }
+    match /organizerWallets/{docId}                     { allow read, write: if false; }
+    match /walletTransactions/{docId}                   { allow read, write: if false; }
+    match /walletTopups/{docId}                         { allow read, write: if false; }
+    match /walletClawbacks/{docId}                      { allow read, write: if false; }
+    match /communicationUsage/{docId}                   { allow read, write: if false; }
+    match /organizerLimits/{docId}                      { allow read, write: if false; }
+    match /registrationFinancialReconciliation/{docId}  { allow read, write: if false; }
+    match /refundLedgerReconciliation/{docId}           { allow read, write: if false; }
+    match /walletTopupReconciliation/{docId}            { allow read, write: if false; }
+    match /donationFinancialReconciliation/{docId}      { allow read, write: if false; }
+
+    // ── Team, credentials, webhooks & licensing (EA-3 S3) ─────────────────────
+    // Server-only collections holding invite tokens, API-key hashes, webhook
+    // delivery payloads, and event-license/order records. These were already
+    // secured by implicit default-deny (no client SDK path reads them); the
+    // explicit denies below make that guarantee consistent with the doctrine
+    // above and act as a tripwire against a future client query being added
+    // without a security review. No behavioral change — default-deny already
+    // blocked all client access.
+    match /teamMembers/{docId}        { allow read, write: if false; }
+    match /apiKeys/{docId}            { allow read, write: if false; }
+    match /webhookDeliveries/{docId}  { allow read, write: if false; }
+    match /eventLicenses/{docId}      { allow read, write: if false; }
+    match /licenseOrders/{docId}      { allow read, write: if false; }
+    match /licenseHistory/{docId}     { allow read, write: if false; }
+    // EA-4 S2 — license coupons (admin-managed; validated/redeemed server-side only).
+    match /licenseCoupons/{docId}     { allow read, write: if false; }
+    // EA-4 S1 — immutable publish-governance baselines (identity snapshot). Written
+    // exclusively server-side by the Publish Governance Engine (Admin SDK).
+    match /publishBaselines/{docId}   { allow read, write: if false; }
+
     // ── Organizer profile ──────────────────────────────────────────────────────
     match /users/{userId} {
-      allow read, write: if request.auth != null && request.auth.uid == userId;
+      allow read: if request.auth != null && request.auth.uid == userId;
+
+      // Owner may create their own profile doc (createOrganizerProfile, run once
+      // right after Auth signup with the initial role/verification/trust defaults).
+      allow create: if request.auth != null && request.auth.uid == userId;
+
+      // Owner may update their editable profile fields, but NOT server-owned
+      // moderation / identity / trust fields. Those are written exclusively by the
+      // Admin SDK (which bypasses rules) — e.g. moderation status via
+      // setOrganizerAccountStatus, email verification via verify-otp. Without this
+      // guard a suspended/banned organizer could self-reactivate by writing
+      // accountStatus, or forge emailVerified/trust. Mirrors the eventDrafts /
+      // campaignDrafts field-guard pattern below. diff() blocks only actual
+      // changes, so re-sending an unchanged value is still allowed.
+      allow update: if request.auth != null
+        && request.auth.uid == userId
+        && !request.resource.data.diff(resource.data)
+            .affectedKeys()
+            .hasAny(['role', 'accountStatus', 'statusReason', 'statusUpdatedAt',
+                     'statusUpdatedBy', 'emailVerified', 'verification', 'trust']);
 
       // ── Event drafts ──────────────────────────────────────────────────────────
       // Clients may read and update wizard fields freely.
@@ -42,6 +196,40 @@ service cloud.firestore {
           && !request.resource.data.diff(resource.data)
               .affectedKeys()
               .hasAny(['status', 'communicationBilling', 'publishedAt']);
+      }
+
+      // ── Campaign drafts ───────────────────────────────────────────────────────
+      // Donation-only campaign wizard writes directly from the client SDK.
+      // Server-controlled fields (status, publishedCampaignId, publishedSlug)
+      // are write-protected — only POST /api/campaigns/publish (Admin SDK) sets them.
+      match /campaignDrafts/{draftId} {
+        allow read: if request.auth != null && request.auth.uid == userId;
+
+        // Allow creating — must start as 'draft', publish fields must be null
+        allow create: if request.auth != null
+          && request.auth.uid == userId
+          && request.resource.data.status == 'draft'
+          && request.resource.data.publishedCampaignId == null
+          && request.resource.data.publishedSlug == null;
+
+        // Allow updating wizard fields, but block server-controlled publish fields
+        allow update: if request.auth != null
+          && request.auth.uid == userId
+          && !request.resource.data.diff(resource.data)
+              .affectedKeys()
+              .hasAny(['status', 'publishedCampaignId', 'publishedSlug']);
+      }
+
+      // ── Notification Center inbox (Phase H.4.3) ───────────────────────────────
+      // The owner may READ their own notification feed via the client SDK
+      // (real-time onSnapshot). All writes — create, mark-read, mark-all — are
+      // performed server-side through API routes with the Admin SDK, which
+      // bypasses these rules. Team members read the same feed via those API
+      // routes (authorizeAnyWorkspace), since client rules scope reads to the
+      // authenticated user's own document tree.
+      match /notifications/{notificationId} {
+        allow read:  if request.auth != null && request.auth.uid == userId;
+        allow write: if false;
       }
     }
 

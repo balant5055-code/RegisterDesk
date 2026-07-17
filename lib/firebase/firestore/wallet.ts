@@ -45,3 +45,65 @@ export async function creditWallet(uid: string, amountPaise: number): Promise<nu
   })
   return result
 }
+
+// Atomically credits the wallet, marks the topup 'credited', AND writes the
+// immutable wallet-transaction ledger entry — all in ONE transaction. This
+// eliminates the double-credit window (audit C-1) and the previous gap where the
+// ledger was a separate fire-and-forget write that could be lost. Idempotent: if
+// the topup is already 'credited', returns { credited: false } and writes nothing
+// (the ledger doc id is deterministic, so even a forced re-run never duplicates).
+//
+// orderId is taken from topupRef.id (walletTopups is keyed by Razorpay order id).
+export async function atomicTopupCredit(
+  uid:         string,
+  amountPaise: number,
+  topupRef:    FirebaseFirestore.DocumentReference,
+  paymentId:   string,
+): Promise<{ newBalance: number; credited: boolean }> {
+  const wRef     = walletRef(uid)
+  const orderId  = topupRef.id
+  const ledgerRef = adminDb.collection('walletTransactions').doc(`topup_${orderId}`)
+
+  return adminDb.runTransaction(async txn => {
+    const [topupSnap, walletSnap] = await Promise.all([
+      txn.get(topupRef),
+      txn.get(wRef),
+    ])
+    const topup   = topupSnap.data() as { status: string }
+    const current = walletSnap.exists
+      ? ((walletSnap.data() as OrganizerWallet).balancePaise ?? 0)
+      : 0
+
+    if (topup.status === 'credited') {
+      return { newBalance: current, credited: false }  // idempotent — no writes needed
+    }
+
+    const updated = current + amountPaise
+    txn.set(wRef, {
+      balancePaise: updated,
+      currency:     'INR',
+      updatedAt:    FieldValue.serverTimestamp(),
+    }, { merge: true })
+    txn.update(topupRef, {
+      status:    'credited',
+      paymentId,
+      updatedAt: FieldValue.serverTimestamp(),
+    })
+    // Immutable ledger entry — atomic with the credit (deterministic id).
+    txn.set(ledgerRef, {
+      organizerUid:  uid,
+      type:          'fund_added',
+      amountPaise,
+      balancePaise:  updated,
+      status:        'completed',
+      referenceType: 'razorpay',
+      referenceId:   orderId,
+      orderId,
+      paymentId,
+      description:   `Razorpay topup — order ${orderId}`,
+      metadata:      {},
+      createdAt:     FieldValue.serverTimestamp(),
+    })
+    return { newBalance: updated, credited: true }
+  })
+}

@@ -8,12 +8,19 @@
 //   2. Registration loaded from Firestore by ticketCode query — never trusts client.
 //   3. Ownership verified: reg.organizerUid must equal authenticated uid.
 //   4. Double-entry prevention: checkedIn flag checked before write.
-//   5. Event lifecycle checked: cancelled events cannot accept check-ins.
+//   5. Event lifecycle checked: only published/registration_closed/completed events
+//      accept check-ins.  draft, unpublished, cancelled, archived all rejected.
 
 import { NextRequest, NextResponse }   from 'next/server'
 import { FieldValue }                   from 'firebase-admin/firestore'
-import { adminAuth, adminDb }           from '@/lib/firebase/admin'
+import { adminDb }                      from '@/lib/firebase/admin'
+import { writeCheckinDelta }            from '@/lib/firebase/firestore/registrationCounters'
+import { authorizeWorkspace }           from '@/lib/team/workspace'
+import { getEventCheckInStatus }        from '@/lib/checkin/eventStatus'
 import { checkRateLimit }               from '@/lib/rateLimit'
+import { enqueueWebhook }                from '@/lib/integrations/webhooks'
+import { crmRecordCheckIn }              from '@/lib/crm/service'
+import { consumeIdentifier }             from '@/lib/identifiers/engine'
 import type { RegistrationDocument }    from '@/lib/registrations/types'
 
 // ─── Response types ───────────────────────────────────────────────────────────
@@ -34,20 +41,15 @@ export interface CheckInResult {
 
 export async function POST(req: NextRequest): Promise<NextResponse<CheckInResult>> {
   // ── Auth ──────────────────────────────────────────────────────────────────
-  const token = (req.headers.get('authorization') ?? '').replace('Bearer ', '')
-  if (!token) return NextResponse.json({ success: false, error: 'UNAUTHORIZED' }, { status: 401 })
+  const authz = await authorizeWorkspace(req, 'checkin')
+  if (!authz.ok) return NextResponse.json({ success: false, error: authz.error }, { status: authz.status })
+  const uid       = authz.workspaceUid    // authorization / ownership scope
+  const callerUid = authz.callerUid       // attribution: the actual operator
 
-  let uid: string
-  try {
-    uid = (await adminAuth.verifyIdToken(token)).uid
-  } catch {
-    return NextResponse.json({ success: false, error: 'INVALID_TOKEN' }, { status: 401 })
-  }
-
-  // ── Rate limit: 120 scans per minute per organizer UID ────────────────────
-  // Using UID (not IP) because organisers scanning at a venue may share a NAT.
-  // 120/min = 2 scans/second, enough headroom for rapid scanning.
-  const rl = checkRateLimit(uid, 'checkin', 120, 60 * 1000)
+  // ── Rate limit: 120 scans per minute per operator within a workspace ───────
+  // Keyed by workspace+operator so one staff member can't exhaust the whole
+  // workspace's quota; each operator gets their own 120/min budget.
+  const rl = checkRateLimit(`${uid}:${callerUid}`, 'checkin', 120, 60 * 1000)
   if (rl.limited) {
     return NextResponse.json(
       { success: false, error: 'Too many scan requests. Please slow down.' },
@@ -97,9 +99,23 @@ export async function POST(req: NextRequest): Promise<NextResponse<CheckInResult
     return NextResponse.json({ success: false, error: 'UNAUTHORIZED' }, { status: 403 })
   }
 
-  // ── Registration status ───────────────────────────────────────────────────
+  // ── Registration status and payment eligibility ──────────────────────────
   if (reg.status === 'cancelled') {
     return NextResponse.json({ success: false, error: 'REGISTRATION_CANCELLED' }, { status: 422 })
+  }
+
+  // P1-2: Pending registrations (manual approval not yet granted) must not be
+  // admitted. Only 'confirmed' registrations are eligible; 'pending' means the
+  // organizer has not reviewed or approved the application yet.
+  if (reg.status === 'pending') {
+    return NextResponse.json({ success: false, error: 'REGISTRATION_PENDING' }, { status: 422 })
+  }
+
+  // P1-1: Refunded registrations retain status:'confirmed' because the refund
+  // flow updates only paymentStatus. Checking paymentStatus here closes the gap
+  // that would otherwise allow a refunded attendee to enter the event.
+  if (reg.paymentStatus === 'refunded') {
+    return NextResponse.json({ success: false, error: 'REGISTRATION_REFUNDED' }, { status: 422 })
   }
 
   // ── Already checked in ────────────────────────────────────────────────────
@@ -121,13 +137,11 @@ export async function POST(req: NextRequest): Promise<NextResponse<CheckInResult
   }
 
   // ── Event lifecycle check ─────────────────────────────────────────────────
-  const eventSnap = await adminDb.collection('events').doc(reg.eventSlug).get()
-  if (eventSnap.exists) {
-    const evData = eventSnap.data() as Record<string, unknown>
-    const ls = evData.lifecycleStatus as string | undefined
-    if (ls === 'cancelled') {
-      return NextResponse.json({ success: false, error: 'EVENT_CANCELLED' }, { status: 422 })
-    }
+  // Must be published, registration_closed, or completed. All other states
+  // (draft, unpublished, cancelled, archived, or doc missing) reject here.
+  const eventStatus = await getEventCheckInStatus(reg.eventSlug)
+  if (eventStatus !== 'ok') {
+    return NextResponse.json({ success: false, error: 'EVENT_NOT_ACCEPTING_CHECKINS' }, { status: 422 })
   }
 
   // ── Perform check-in atomically ───────────────────────────────────────────
@@ -140,19 +154,38 @@ export async function POST(req: NextRequest): Promise<NextResponse<CheckInResult
     if (fresh.checkedIn) return  // already done — idempotent
 
     txn.update(regRef, {
-      checkedIn:   true,
-      checkedInAt: now,
-      checkedInBy: uid,
-      updatedAt:   now,
+      checkedIn:             true,
+      checkedInAt:           now,
+      checkedInBy:           callerUid,   // the operator who scanned (attribution)
+      checkedInWorkspaceUid: uid,         // the workspace the action belongs to
+      updatedAt:             now,
       ...(source ? { checkedInSource: source } : {}),
     })
 
-    // Increment checked-in counter on the registration counter document
-    const counterRef = adminDb.collection('registrationCounters').doc(reg.eventSlug)
-    txn.set(counterRef, { checkedInCount: FieldValue.increment(1) }, { merge: true })
+    // Increment attendance counters (event-level + per-pass) atomically — GA-5 S3:
+    // routed to the registration's shard so mass gate scanning spreads the writes.
+    writeCheckinDelta(txn, reg.eventSlug, regRef.id, reg.passId, 1)
   })
 
   const checkedInAt = new Date().toISOString()
+
+  void enqueueWebhook(uid, 'registration.checked_in', {
+    registrationId: regDoc.id, ticketCode: reg.ticketCode, eventSlug: reg.eventSlug,
+    attendeeName: reg.attendee.name, checkedInBy: callerUid, checkedInAt,
+  }).catch(() => {})
+
+  // CRM check-in activity (fire-and-forget, idempotent per registration).
+  crmRecordCheckIn({
+    organizerUid: uid, email: reg.attendee.email, name: reg.attendee.name,
+    registrationId: regDoc.id, eventSlug: reg.eventSlug, eventName: reg.eventName,
+  })
+
+  // Identity engine: consume the identifier on check-in (assigned → consumed,
+  // everCheckedIn=true — permanent). Fire-and-forget + idempotent + a no-op when
+  // the registration holds no identifier, so it never affects the check-in path.
+  void consumeIdentifier(regDoc.id, callerUid).catch(err =>
+    console.error('[scan] consumeIdentifier failed:', err),
+  )
 
   return NextResponse.json({
     success:         true,

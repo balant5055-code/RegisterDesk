@@ -9,8 +9,9 @@
 import { NextResponse }       from 'next/server'
 import { FieldValue }         from 'firebase-admin/firestore'
 import { adminAuth, adminDb } from '@/lib/firebase/admin'
-import { getEmailProvider }   from '@/lib/email'
-import { verifyCode, OTP_MAX_ATTEMPTS } from '@/lib/otp'
+import { notificationEngine, NotificationType, NotificationChannel } from '@/lib/notifications'
+import { verifyCode } from '@/lib/otp'
+import { getSecurityConfig } from '@/lib/config/resolveSecurityConfig'
 import type { DecodedIdToken } from 'firebase-admin/auth'
 
 // Trust score granted for email verification (adds to the 20-point base)
@@ -38,11 +39,14 @@ export async function POST(req: Request): Promise<NextResponse> {
     return NextResponse.json({ error: 'BAD_REQUEST' }, { status: 400 })
   }
 
+  // Effective security policy (runtime override → Firestore → code default).
+  const sec = await getSecurityConfig()
+
   const { otpId, code } = body
   if (!otpId || typeof otpId !== 'string') {
     return NextResponse.json({ error: 'MISSING_OTP_ID' }, { status: 400 })
   }
-  if (!code || typeof code !== 'string' || !/^\d{6}$/.test(code)) {
+  if (!code || typeof code !== 'string' || !new RegExp(`^\\d{${sec.otpDigits}}$`).test(code)) {
     return NextResponse.json({ error: 'INVALID_CODE_FORMAT' }, { status: 400 })
   }
 
@@ -75,7 +79,7 @@ export async function POST(req: Request): Promise<NextResponse> {
 
   // Max attempts reached
   const attempts = (otp.attempts as number) ?? 0
-  if (attempts >= OTP_MAX_ATTEMPTS) {
+  if (attempts >= sec.otpMaxAttempts) {
     return NextResponse.json({ error: 'MAX_ATTEMPTS_REACHED' }, { status: 400 })
   }
 
@@ -85,7 +89,7 @@ export async function POST(req: Request): Promise<NextResponse> {
   if (!isValid) {
     const newAttempts = attempts + 1
     await otpRef.update({ attempts: newAttempts })
-    const attemptsLeft = OTP_MAX_ATTEMPTS - newAttempts
+    const attemptsLeft = sec.otpMaxAttempts - newAttempts
     return NextResponse.json(
       { error: 'INVALID_CODE', attemptsLeft },
       { status: 400 },
@@ -127,13 +131,12 @@ export async function POST(req: Request): Promise<NextResponse> {
 
   // ── Send welcome email (fire-and-forget) ────────────────────────────────────
   try {
-    const emailProvider = getEmailProvider()
-    if (emailProvider) {
+    if (notificationEngine.isAvailable(NotificationChannel.EMAIL)) {
       const userDoc = await userRef.get()
       const name    = (userDoc.data()?.name as string | undefined) ?? ''
       const email   = (userDoc.data()?.email as string | undefined) ?? (otp.recipient as string)
       const orgName = (userDoc.data()?.organizationName as string | undefined) ?? ''
-      emailProvider.sendWelcomeEmail({ to: email, name, orgName }).catch(() => {})
+      void notificationEngine.send(NotificationType.ACCOUNT_WELCOME, { to: email, name, orgName }).catch(() => {})
     }
   } catch { /* non-fatal */ }
 

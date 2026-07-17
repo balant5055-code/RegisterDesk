@@ -1,19 +1,18 @@
 // Server-only OTP utilities — never import from client components or pages.
+//
+// RD-CONF-11: OTP POLICY (length / TTL / attempts / resend / hourly cap) now lives
+// in the Business Configuration `security` section, resolved via getSecurityConfig.
+// This module holds only the crypto primitives; callers pass the resolved digit
+// count. No policy constants live here anymore (single source of truth).
 
 import { createHash, randomBytes, randomInt, timingSafeEqual } from 'crypto'
 
-// ─── Constants ────────────────────────────────────────────────────────────────
-
-export const OTP_DIGITS        = 6
-export const OTP_TTL_MS        = 10 * 60 * 1_000    // 10 minutes
-export const OTP_MAX_ATTEMPTS  = 5
-export const OTP_RESEND_WAIT   = 60 * 1_000          // 60-second cooldown
-
 // ─── Generation ───────────────────────────────────────────────────────────────
 
-/** Cryptographically random 6-digit code, zero-padded. */
-export function generateCode(): string {
-  return randomInt(0, 1_000_000).toString().padStart(OTP_DIGITS, '0')
+/** Cryptographically random N-digit code, zero-padded. `digits` comes from the
+ *  resolved security policy (security.otpDigits, validated to 4..10). */
+export function generateCode(digits: number): string {
+  return randomInt(0, 10 ** digits).toString().padStart(digits, '0')
 }
 
 /** Random 32-byte hex salt — unique per OTP request. */

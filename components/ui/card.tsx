@@ -3,18 +3,49 @@ import { cn } from '@/lib/utils/cn'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
+export type CardVariant = 'default' | 'elevated' | 'modal'
+
 export interface CardProps extends HTMLAttributes<HTMLDivElement> {
-  /** Adds responsive inner padding — defaults to true */
+  /**
+   * Visual weight of the card surface.
+   *
+   * - `default`  rounded-xl  shadow-sm   p-4 sm:p-5   Standard cards, panels
+   * - `elevated` rounded-2xl shadow-md   p-5 sm:p-6   Feature / primary cards
+   * - `modal`    rounded-2xl shadow-xl   p-6 sm:p-7   Dialogs, overlays
+   */
+  variant?: CardVariant
+  /** Applies inner padding — defaults to true */
   padded?: boolean
   /** Lifts shadow and sharpens border on hover — use for clickable cards */
   hover?: boolean
 }
 
+// ─── Variant maps ─────────────────────────────────────────────────────────────
+
+const variantRadius: Record<CardVariant, string> = {
+  default:  'rounded-xl',
+  elevated: 'rounded-2xl',
+  modal:    'rounded-2xl',
+}
+
+const variantShadow: Record<CardVariant, string> = {
+  default:  'shadow-sm',
+  elevated: 'shadow-md',
+  modal:    'shadow-xl',
+}
+
+const variantPadding: Record<CardVariant, string> = {
+  default:  'p-4 sm:p-5',
+  elevated: 'p-5 sm:p-6',
+  modal:    'p-6 sm:p-7',
+}
+
 // ─── Component ───────────────────────────────────────────────────────────────
 
 export function Card({
-  padded = true,
-  hover = false,
+  variant = 'default',
+  padded  = true,
+  hover   = false,
   className,
   children,
   ...props
@@ -22,15 +53,11 @@ export function Card({
   return (
     <div
       className={cn(
-        // surface
         'bg-card text-card-foreground',
-        // shape
-        'rounded-lg border border-border',
-        // resting shadow
-        'shadow-sm',
-        // padding
-        padded && 'p-5 sm:p-6',
-        // interactive hover — shadow lifts, border sharpens
+        'border border-border',
+        variantRadius[variant],
+        variantShadow[variant],
+        padded && variantPadding[variant],
         hover && [
           'cursor-pointer',
           'transition-[box-shadow,border-color] duration-200',

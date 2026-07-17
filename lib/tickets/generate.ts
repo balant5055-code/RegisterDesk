@@ -38,26 +38,18 @@ export function parseQrValue(raw: string): {
 
 // ─── Ticket download token ─────────────────────────────────────────────────────
 //
-// Short-lived capability token for the PDF download link.  We use an HMAC rather
-// than a bare UUID so:
-//  1. Even if a registrationId leaks (logs, analytics, URL sharing), the PDF
-//     cannot be downloaded without server knowledge of TICKET_SECRET.
-//  2. The token is stateless — no DB round-trip needed for verification.
-//
-// Set TICKET_SECRET to any random 32+ byte hex or base64 string in .env.local
-// and in your deployment secrets.  If the variable is absent the functions
-// degrade gracefully (sign returns null; verify returns false).
+// HMAC-SHA256 capability token for PDF download links.
+// TICKET_SECRET is required at runtime — validated once at startup by lib/env.ts.
 
-const TICKET_SECRET = process.env.TICKET_SECRET
+import { TICKET_SECRET } from '@/lib/env'
 
 const HEX_64 = /^[0-9a-f]{64}$/
 
 /**
  * Returns the HMAC-SHA256 hex digest that authorises PDF download for this
- * registrationId.  Returns null when TICKET_SECRET is not configured.
+ * registrationId.  TICKET_SECRET is guaranteed non-empty by the startup guard above.
  */
-export function signTicketToken(registrationId: string): string | null {
-  if (!TICKET_SECRET) return null
+export function signTicketToken(registrationId: string): string {
   return crypto
     .createHmac('sha256', TICKET_SECRET)
     .update(registrationId)
@@ -66,10 +58,9 @@ export function signTicketToken(registrationId: string): string | null {
 
 /**
  * Timing-safe verification of a ticket download token.
- * Returns false if TICKET_SECRET is not configured or the token is malformed.
+ * Returns false if the token is malformed or the HMAC does not match.
  */
 export function verifyTicketToken(registrationId: string, token: string): boolean {
-  if (!TICKET_SECRET) return false
   if (!HEX_64.test(token)) return false
 
   const expected = crypto

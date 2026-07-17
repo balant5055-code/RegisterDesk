@@ -5,7 +5,7 @@ import { cn }      from '@/lib/utils/cn'
 import {
   Users, TrendingUp, BarChart3, CalendarDays,
   MapPin, Video, Globe, Clock, Activity,
-  LockOpen, Lock, UserCheck,
+  LockOpen, Lock, UserCheck, Heart,
 } from 'lucide-react'
 import Link from 'next/link'
 import type { EventDetailResponse }    from '@/app/api/organizer/events/[eventId]/route'
@@ -95,7 +95,7 @@ function TrendChart({ registrations }: { registrations: SerializedRegistration[]
       <div className="flex h-28 items-end gap-2">
         {bars.map(b => (
           <div key={b.date} className="flex flex-1 flex-col items-center gap-1">
-            <span className="text-[11px] font-semibold text-muted-foreground tabular-nums">
+            <span className="text-[12px] font-semibold text-muted-foreground tabular-nums">
               {b.count > 0 ? b.count : ''}
             </span>
             <div className="w-full rounded-t-sm bg-muted" style={{ height: '80px' }}>
@@ -107,7 +107,7 @@ function TrendChart({ registrations }: { registrations: SerializedRegistration[]
                 style={{ height: `${(b.count / maxCount) * 80}px` }}
               />
             </div>
-            <span className="text-[11px] text-muted-foreground">{b.label}</span>
+            <span className="text-[12px] text-muted-foreground">{b.label}</span>
           </div>
         ))}
       </div>
@@ -192,7 +192,7 @@ export default function OverviewTab({ event, registrations }: OverviewTabProps) 
         />
         <Metric
           icon={TrendingUp}
-          label="Estimated Revenue"
+          label="Ticket Revenue"
           value={event.isFreeEvent ? 'Free' : fmtINR(event.estimatedRevenue)}
         />
         <Metric
@@ -202,6 +202,25 @@ export default function OverviewTab({ event, registrations }: OverviewTabProps) 
           sub={capacityPct !== null ? undefined : 'No capacity limit'}
         />
       </div>
+
+      {/* Donation revenue — event_plus_donation only */}
+      {event.campaignType === 'event_plus_donation' && (
+        <div className="grid gap-3 sm:grid-cols-2">
+          <Metric
+            icon={Heart}
+            label="Donation Revenue"
+            value={fmtINR(event.donationTotalPaise)}
+            sub={`${event.donorCount.toLocaleString('en-IN')} donor${event.donorCount === 1 ? '' : 's'}`}
+            accent
+          />
+          <Metric
+            icon={TrendingUp}
+            label="Total Revenue"
+            value={fmtINR(event.estimatedRevenue + event.donationTotalPaise)}
+            sub="Tickets + donations"
+          />
+        </div>
+      )}
 
       {/* Capacity bar */}
       {capacityPct !== null && (

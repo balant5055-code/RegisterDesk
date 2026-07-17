@@ -5,13 +5,15 @@
 // Called once on page load; the page derives all sections from this response.
 
 import { NextRequest, NextResponse } from 'next/server'
-import { adminAuth, adminDb }        from '@/lib/firebase/admin'
+import { AggregateField }            from 'firebase-admin/firestore'
+import { adminDb }                   from '@/lib/firebase/admin'
+import { authorizeAnyWorkspace }     from '@/lib/team/workspace'
 import { deriveLifecycleStatus }     from '@/lib/events/lifecycle'
-import type { RegistrationDocument } from '@/lib/registrations/types'
-
-// ─── Constants ────────────────────────────────────────────────────────────────
-
-const PLATFORM_FEE_RATE = 0.02   // 2 % of gross revenue
+import { getWalletBalance }          from '@/lib/firebase/firestore/wallet'
+import { getFeePlanForOrganizer }    from '@/lib/billing/feeEngine'
+import { getFreeEventCapacity }      from '@/lib/licensing/resolveCatalog'
+import { EVENT_STATS_VERSION }       from '@/lib/registrations/types'
+import type { RegistrationDocument, RegistrationCounter } from '@/lib/registrations/types'
 
 // ─── Utilities ────────────────────────────────────────────────────────────────
 
@@ -55,6 +57,27 @@ export interface DashboardEvent {
   fillPct:         number
   startDate:       string | null
   lifecycleStatus: string
+  reviewStatus:    'rejected' | 'changes_requested' | null
+  licenseTier:     string
+  bannerUrl:       string | null
+  revenuePaise:    number
+}
+
+export interface DashboardTransaction {
+  id:           string
+  type:         string
+  amountPaise:  number
+  balancePaise: number
+  description:  string
+  createdAt:    string | null
+}
+
+export interface DashboardActionEvent {
+  draftId:         string
+  name:            string
+  slug:            string | null
+  lifecycleStatus: string
+  reviewStatus:    'rejected' | 'changes_requested' | null
 }
 
 export interface DashboardActivity {
@@ -76,6 +99,7 @@ export interface DashboardData {
     activeEvents:       number
     totalRegistrations: number
     totalRevenuePaise:  number
+    todayRevenuePaise:  number
     todayRegistrations: number
     todayCheckins:      number
   }
@@ -83,6 +107,7 @@ export interface DashboardData {
   settlement: {
     grossRevenuePaise:       number
     platformFeePaise:        number
+    platformFeeRateBps:      number
     communicationCostPaise:  number
     netPayoutPaise:          number
   }
@@ -90,66 +115,165 @@ export interface DashboardData {
   events:     DashboardEvent[]
   trendDays:  { date: string; count: number }[]   // 90 entries, oldest → newest
   communications: {
-    emailsSent:   number
-    smsSent:      number
-    whatsappSent: number
-    costPaise:    number
+    emailsSent:        number
+    emailsSentToday:   number
+    emailsFailedToday: number
+    campaignsSent:     number
+    recipientsReached: number
+    smsSent:           number
+    whatsappSent:      number
+    costPaise:         number
   }
   healthScore: {
     score: number
     items: { label: string; done: boolean }[]
   }
+  walletBalancePaise:  number
+  recentTransactions:  DashboardTransaction[]
+  licenseSummary: {
+    pendingApproval:  number
+    changesRequested: number
+    published:        number
+    rejected:         number
+  }
+  actionEvents:        DashboardActionEvent[]
 }
 
 // ─── Handler ──────────────────────────────────────────────────────────────────
 
 export async function GET(req: NextRequest): Promise<NextResponse> {
-  const token = (req.headers.get('authorization') ?? '').replace('Bearer ', '')
-  if (!token) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  const authz = await authorizeAnyWorkspace(req)
+  if (!authz.ok) return NextResponse.json({ error: authz.error }, { status: authz.status })
+  const uid = authz.workspaceUid
 
-  let uid: string
-  try {
-    uid = (await adminAuth.verifyIdToken(token)).uid
-  } catch {
-    return NextResponse.json({ error: 'Invalid token' }, { status: 401 })
-  }
+  // ── Batch 1: four parallel root fetches ────────────────────────────────────
+  const todayStart = new Date()
+  todayStart.setHours(0, 0, 0, 0)
 
-  // ── Batch 1: three parallel root fetches ───────────────────────────────────
-  const [draftsSnap, regsSnap, profileSnap] = await Promise.all([
-    adminDb.collection(`users/${uid}/eventDrafts`).orderBy('updatedAt', 'desc').get(),
-    adminDb.collection('registrations').where('organizerUid', '==', uid).get(),
+  // EA-2 S1: the former UNBOUNDED all-time registrations scan is gone. All-time
+  // totals + revenue now come from the per-event statistics docs (batch 2). What
+  // still needs per-registration rows — the 90-day trend, today's numbers and the
+  // activity feed — is served by a BOUNDED recent window; the two refund-sensitive
+  // / all-time scalar figures (settlement gross, emails sent, today's check-ins)
+  // are served by indexed aggregates that transfer no documents.
+  const cutoff90         = new Date(Date.now() - 90 * 86_400_000)
+  const RECENT_WINDOW_CAP = 5000
+  const regsCol          = adminDb.collection('registrations')
+
+  const [
+    draftsSnap, recentRegsSnap, recentCheckinsSnap, profileSnap, emailLogsSnap, broadcastsSnap,
+    walletBalancePaise, walletTxnsSnap, feePlan, grossAgg, emailsSentAgg, todayCheckinsAgg,
+  ] = await Promise.all([
+    // LS1: bound the drafts scan (an organizer's own events are naturally few;
+    // 500 covers any realistic account without changing the computed output).
+    adminDb.collection(`users/${uid}/eventDrafts`).orderBy('updatedAt', 'desc').limit(500).get(),
+    // Bounded recent window (projected): powers trendDays (90 days), today's
+    // registration/revenue numbers, and the registration activity feed. Capped at
+    // RECENT_WINDOW_CAP most-recent rows so cost tracks recent velocity, never
+    // lifetime volume (a full 90-day trend for an event above the cap undercounts
+    // its oldest in-window days — acceptable vs. an unbounded scan; daily-bucket
+    // denormalization is a follow-up).
+    regsCol.where('organizerUid', '==', uid).where('registeredAt', '>=', cutoff90)
+      .orderBy('registeredAt', 'desc').limit(RECENT_WINDOW_CAP)
+      .select('status', 'amount', 'registeredAt', 'eventSlug', 'eventName', 'passName', 'attendee.name', 'attendee.email')
+      .get(),
+    // Recent check-ins for the activity feed (bounded, projected).
+    regsCol.where('organizerUid', '==', uid).orderBy('checkedInAt', 'desc').limit(20)
+      .select('checkedInAt', 'eventName', 'passName', 'attendee.name', 'attendee.email')
+      .get(),
     adminDb.collection('users').doc(uid).get(),
+    adminDb.collection('emailLogs')
+      .where('organizerUid', '==', uid)
+      .where('createdAt', '>=', todayStart)
+      .get(),
+    adminDb.collection('broadcastCampaigns')
+      .where('organizerUid', '==', uid)
+      .where('status', 'in', ['sent', 'partial'])
+      .select('recipientCount', 'successCount')
+      .get(),
+    getWalletBalance(uid),
+    adminDb.collection('walletTransactions')
+      .where('organizerUid', '==', uid)
+      .orderBy('createdAt', 'desc')
+      .limit(12)
+      .get(),
+    // D.1: fee plan joins batch 1 so it runs in parallel instead of blocking
+    // sequentially after the batch (same result, one fewer serial round trip).
+    getFeePlanForOrganizer(uid),
+    // Settlement gross = Σ amount over CONFIRMED + PAID (refund-sensitive, so not
+    // denormalized). One indexed sum aggregate — no document transfer.
+    regsCol.where('organizerUid', '==', uid).where('status', '==', 'confirmed').where('paymentStatus', '==', 'paid')
+      .aggregate({ s: AggregateField.sum('amount') }).get().catch(() => null),
+    // All-time emails sent (was derived from the full scan) — one indexed count.
+    regsCol.where('organizerUid', '==', uid).where('emailStatus', '==', 'sent')
+      .count().get().catch(() => null),
+    // Today's check-ins — one indexed count (accurate regardless of volume).
+    regsCol.where('organizerUid', '==', uid).where('checkedInAt', '>=', todayStart)
+      .count().get().catch(() => null),
   ])
 
-  const profile = profileSnap.exists ? (profileSnap.data() ?? {}) : {}
-  const drafts  = draftsSnap.docs.map(d => ({ id: d.id, ...d.data() }) as Record<string, unknown>)
-  const regs    = regsSnap.docs.map(d => d.data() as RegistrationDocument)
+  const profile    = profileSnap.exists ? (profileSnap.data() ?? {}) : {}
+  const drafts     = draftsSnap.docs.map(d => ({ id: d.id, ...d.data() }) as Record<string, unknown>)
+  // Bounded, projected recent registrations (NOT the full history).
+  const recentRegs = recentRegsSnap.docs.map(d => d.data() as RegistrationDocument)
 
   // ── Collect slugs + draft IDs for batch 2 ─────────────────────────────────
   const publishedDrafts = drafts.filter(d => d.status === 'published')
-  const slugList:    string[] = []
-  const draftIdList: string[] = []
+  // Certificate-template alerts are scoped to currently-published events.
+  const draftIdList: string[] = publishedDrafts.map(d => d.id as string)
 
-  publishedDrafts.forEach(d => {
+  // Per-event statistics (counts + revenue) are summed over EVERY event that was
+  // ever published — including ones since archived/cancelled/completed — so the
+  // overview totals match the previous all-events scan rather than only the
+  // currently-published set. Resolved by slug from publishedAt-stamped drafts.
+  const slugOfDraft = (d: Record<string, unknown>): string | null => {
     const details = (d.eventDetails as Record<string, unknown>) ?? {}
     const seo     = (details.seo    as Record<string, unknown>) ?? {}
-    const slug    = typeof seo.urlSlug === 'string' ? seo.urlSlug : null
-    if (slug) slugList.push(slug)
-    draftIdList.push(d.id as string)
-  })
+    return typeof seo.urlSlug === 'string' && seo.urlSlug ? seo.urlSlug : null
+  }
+  const slugList = Array.from(new Set(
+    drafts.filter(d => d.publishedAt).map(slugOfDraft).filter((s): s is string => !!s),
+  ))
 
   // ── Batch 2: counters + cert templates ────────────────────────────────────
+  // D.1: read each set with a single getAll() multi-get instead of N individual
+  // doc().get() calls. Same documents and billed reads, but the round trips drop
+  // from 2·(published events) to 2. getAll preserves argument order, so the
+  // snapshot arrays still align 1:1 with slugList / draftIdList below.
+  // (getAll throws with zero refs, so guard the empty case.)
+  const counterRefs = slugList.map(s     => adminDb.collection('registrationCounters').doc(s))
+  const certRefs    = draftIdList.map(id => adminDb.collection('certificateTemplates').doc(id))
   const [counterSnaps, certSnaps] = await Promise.all([
-    Promise.all(slugList.map(s  => adminDb.collection('registrationCounters').doc(s).get())),
-    Promise.all(draftIdList.map(id => adminDb.collection('certificateTemplates').doc(id).get())),
+    counterRefs.length ? adminDb.getAll(...counterRefs) : Promise.resolve([]),
+    certRefs.length    ? adminDb.getAll(...certRefs)    : Promise.resolve([]),
   ])
 
+  // counterMap = confirmed registered per event (totalCount is ALWAYS maintained,
+  // so reliable even for not-yet-backfilled events). revBySlug = confirmed revenue
+  // per event, from the denormalized stats doc when complete, else deferred to a
+  // self-healing per-event aggregate below.
   const counterMap = new Map<string, number>()
+  const revBySlug  = new Map<string, number>()
+  const revenueFallbackSlugs: string[] = []
   counterSnaps.forEach((snap, i) => {
-    if (!snap.exists) return
-    const d = snap.data() as { totalCount?: number }
-    counterMap.set(slugList[i], d.totalCount ?? 0)
+    const slug = slugList[i]
+    if (!snap.exists) { counterMap.set(slug, 0); revBySlug.set(slug, 0); return }
+    const d = snap.data() as RegistrationCounter
+    counterMap.set(slug, d.totalCount ?? 0)
+    if ((d.statsVersion ?? 0) >= EVENT_STATS_VERSION) revBySlug.set(slug, d.revenuePaise ?? 0)
+    else revenueFallbackSlugs.push(slug)
   })
+  // Self-healing fallback: confirmed-revenue aggregate for any event whose stats
+  // doc predates the backfill. One indexed sum per event, no document transfer;
+  // empty in steady state (after reconciliation stamps statsVersion).
+  if (revenueFallbackSlugs.length) {
+    const sums = await Promise.all(revenueFallbackSlugs.map(slug =>
+      adminDb.collection('registrations').where('eventSlug', '==', slug).where('status', '==', 'confirmed')
+        .aggregate({ s: AggregateField.sum('amount') }).get()
+        .then(r => r.data().s ?? 0).catch(() => 0)))
+    revenueFallbackSlugs.forEach((slug, i) => revBySlug.set(slug, sums[i]))
+  }
+
   const certTemplateSet = new Set<string>()
   certSnaps.forEach((snap, i) => {
     if (snap.exists) certTemplateSet.add(draftIdList[i])
@@ -162,13 +286,23 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     activeLifecycles.has(deriveLifecycleStatus(d)),
   ).length
 
-  const confirmedRegs    = regs.filter(r => r.status === 'confirmed')
-  const totalRegs        = confirmedRegs.length
-  const totalRevPaise    = confirmedRegs.reduce((s, r) => s + (r.amount ?? 0), 0)
-  const todayRegs        = confirmedRegs.filter(r => isToday(r.registeredAt)).length
-  const todayCheckins    = regs.filter(r => r.checkedIn && isToday(r.checkedInAt)).length
+  // All-time totals from the per-event statistics docs (O(events), no scan).
+  const totalRegs     = slugList.reduce((s, slug) => s + (counterMap.get(slug) ?? 0), 0)
+  const totalRevPaise = slugList.reduce((s, slug) => s + (revBySlug.get(slug) ?? 0), 0)
+
+  // Today's registration numbers from the bounded recent window; today's
+  // check-ins from the indexed count aggregate (revBySlug is built in batch 2).
+  const confirmedRecent = recentRegs.filter(r => r.status === 'confirmed')
+  const todayConfirmed  = confirmedRecent.filter(r => isToday(r.registeredAt))
+  const todayRegs       = todayConfirmed.length
+  const todayRevPaise   = todayConfirmed.reduce((s, r) => s + (r.amount ?? 0), 0)
+  const todayCheckins   = todayCheckinsAgg?.data().count ?? 0
 
   // ── Alerts ─────────────────────────────────────────────────────────────────
+
+  // Free-event capacity = the effective Starter registration limit (SSOT), resolved
+  // once from the license catalog rather than a hardcoded literal.
+  const freeCapacity = await getFreeEventCapacity()
 
   const alerts: DashboardAlert[] = []
 
@@ -184,7 +318,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     const draftId   = d.id as string
 
     const isFree   = (d.pricing as Record<string, unknown>)?.eventType === 'free'
-    const capacity = isFree ? 100 : null
+    const capacity = isFree ? freeCapacity : null
     const regCount = slug ? (counterMap.get(slug) ?? 0) : 0
 
     // Nearly full
@@ -250,10 +384,15 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
 
   // ── Settlement ─────────────────────────────────────────────────────────────
 
-  const grossPaise = confirmedRegs.reduce(
-    (s, r) => (r.paymentStatus === 'paid' ? s + (r.amount ?? 0) : s), 0,
-  )
-  const platformFeePaise       = Math.round(grossPaise * PLATFORM_FEE_RATE)
+  const grossPaise = grossAgg?.data().s ?? 0
+
+  // F.5: derive the platform fee rate from the organizer's ACTIVE plan (single
+  // source of truth) rather than the wallet's denormalized tier. Estimate only —
+  // the actual per-transaction fee (with fixed/min/cap) is computed at charge time.
+  // `feePlan` is fetched in batch 1 above (parallelized).
+  const platformFeeRateBps   = Math.round(feePlan.transactionFeePercent * 100)
+  const platformFeePaise     = Math.round(grossPaise * platformFeeRateBps / 10_000)
+
   const communicationCostPaise = drafts.reduce((s, d) => {
     const b = d.communicationBilling as Record<string, unknown> | null | undefined
     return (b?.status === 'paid' && typeof b.amount === 'number') ? s + b.amount : s
@@ -265,13 +404,9 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   type ActivityWithTs = DashboardActivity & { _ms: number }
   const activityRaw: ActivityWithTs[] = []
 
-  // Recent registrations (newest 15)
-  const sortedByReg = [...regs].sort((a, b) => {
-    const at = tsToDate(a.registeredAt)?.getTime() ?? 0
-    const bt = tsToDate(b.registeredAt)?.getTime() ?? 0
-    return bt - at
-  })
-  sortedByReg.slice(0, 15).forEach(r => {
+  // Recent registrations (newest 15) — from the bounded recent window, already
+  // ordered registeredAt desc by the query.
+  recentRegs.slice(0, 15).forEach(r => {
     const d = tsToDate(r.registeredAt)
     if (!d) return
     activityRaw.push({
@@ -285,23 +420,15 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     })
   })
 
-  // Recent check-ins (newest 10)
-  const sortedByCheckin = regs
-    .filter(r => r.checkedIn && r.checkedInAt)
-    .sort((a, b) => {
-      const at = tsToDate(a.checkedInAt)?.getTime() ?? 0
-      const bt = tsToDate(b.checkedInAt)?.getTime() ?? 0
-      return bt - at
-    })
-    .slice(0, 10)
-
-  sortedByCheckin.forEach(r => {
+  // Recent check-ins (newest 10) — from the dedicated bounded checkedInAt query.
+  recentCheckinsSnap.docs.slice(0, 10).forEach(doc => {
+    const r = doc.data() as RegistrationDocument
     const d = tsToDate(r.checkedInAt)
     if (!d) return
     activityRaw.push({
       type: 'checkin',
-      attendeeName:  r.attendee.name,
-      attendeeEmail: r.attendee.email,
+      attendeeName:  r.attendee?.name  ?? '',
+      attendeeEmail: r.attendee?.email ?? '',
       eventName:     r.eventName ?? '',
       passName:      r.passName  ?? '',
       timestamp:     d.toISOString(),
@@ -325,9 +452,11 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       const info     = (details.info    as Record<string, unknown>) ?? {}
       const seo      = (details.seo     as Record<string, unknown>) ?? {}
       const sched    = (details.schedule as Record<string, unknown>) ?? {}
+      const media    = (details.media   as Record<string, unknown>) ?? {}
+      const banner   = (media.coverBanner as Record<string, unknown>) ?? {}
       const slug     = typeof seo.urlSlug === 'string' ? seo.urlSlug : null
       const isFree   = (d.pricing as Record<string, unknown>)?.eventType === 'free'
-      const capacity = isFree ? 100 : null
+      const capacity = isFree ? freeCapacity : null
       const regCount = slug ? (counterMap.get(slug) ?? 0) : 0
       const fillPct  = capacity ? Math.round((regCount / capacity) * 100) : 0
 
@@ -340,13 +469,16 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
         fillPct,
         startDate:       typeof sched.startDate === 'string' ? sched.startDate : null,
         lifecycleStatus: deriveLifecycleStatus(d),
+        reviewStatus:    d.reviewStatus === 'rejected' || d.reviewStatus === 'changes_requested' ? d.reviewStatus : null,
+        licenseTier:     typeof d.licenseTier === 'string' ? d.licenseTier : 'starter',
+        bannerUrl:       typeof banner.value === 'string' ? banner.value : null,
+        revenuePaise:    slug ? (revBySlug.get(slug) ?? 0) : 0,
       }
     })
 
   // ── Trend Data (90-day daily buckets) ──────────────────────────────────────
 
   const trendMap = new Map<string, number>()
-  const cutoff90 = new Date(Date.now() - 90 * 86_400_000)
 
   // Seed all 90 days with 0 (oldest → newest)
   for (let i = 89; i >= 0; i--) {
@@ -354,7 +486,8 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     trendMap.set(ymd(d), 0)
   }
 
-  confirmedRegs.forEach(r => {
+  // Bucketed from the bounded recent window (cutoff90 declared in batch 1).
+  confirmedRecent.forEach(r => {
     const d = tsToDate(r.registeredAt)
     if (!d || d < cutoff90) return
     const k = ymd(d)
@@ -365,9 +498,25 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
 
   // ── Communications ─────────────────────────────────────────────────────────
 
-  const emailsSent = regs.filter(r => r.emailStatus === 'sent').length
+  const emailsSent        = emailsSentAgg?.data().count ?? 0
+  const todayLogs         = emailLogsSnap.docs.map(d => d.data() as { status?: string })
+  const emailsSentToday   = todayLogs.filter(l => l.status === 'sent' || l.status === 'delivered').length
+  const emailsFailedToday = todayLogs.filter(l => l.status === 'failed').length
+
+  let campaignsSent     = 0
+  let recipientsReached = 0
+  broadcastsSnap.docs.forEach(doc => {
+    const d = doc.data() as { recipientCount?: number; successCount?: number }
+    campaignsSent++
+    recipientsReached += d.successCount ?? d.recipientCount ?? 0
+  })
+
   const communications = {
     emailsSent,
+    emailsSentToday,
+    emailsFailedToday,
+    campaignsSent,
+    recipientsReached,
     smsSent:      0,   // not tracked in current schema
     whatsappSent: 0,
     costPaise:    communicationCostPaise,
@@ -417,6 +566,47 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
 
   // ── Assemble and return ────────────────────────────────────────────────────
 
+  // License summary + events needing attention (pending / changes-requested /
+  // rejected) — derived from the drafts already loaded (no extra reads).
+  const licenseSummary = {
+    pendingApproval:  drafts.filter(d => deriveLifecycleStatus(d) === 'pending_review').length,
+    changesRequested: drafts.filter(d => deriveLifecycleStatus(d) === 'changes_requested' || d.reviewStatus === 'changes_requested').length,
+    published:        drafts.filter(d => deriveLifecycleStatus(d) === 'published').length,
+    rejected:         drafts.filter(d => d.reviewStatus === 'rejected').length,
+  }
+
+  const actionEvents: DashboardActionEvent[] = drafts
+    .filter(d => {
+      const ls = deriveLifecycleStatus(d)
+      return ls === 'pending_review' || ls === 'changes_requested' || d.reviewStatus === 'rejected'
+    })
+    .map(d => {
+      const det  = (d.eventDetails as Record<string, unknown>) ?? {}
+      const info = (det.info as Record<string, unknown>) ?? {}
+      const seo  = (det.seo  as Record<string, unknown>) ?? {}
+      return {
+        draftId:         d.id as string,
+        name:            typeof info.name === 'string' ? info.name : 'Untitled Event',
+        slug:            typeof seo.urlSlug === 'string' ? seo.urlSlug : null,
+        lifecycleStatus: deriveLifecycleStatus(d),
+        reviewStatus:    d.reviewStatus === 'rejected' ? 'rejected' as const
+          : d.reviewStatus === 'changes_requested' ? 'changes_requested' as const : null,
+      }
+    })
+    .slice(0, 10)
+
+  const recentTransactions: DashboardTransaction[] = walletTxnsSnap.docs.map(doc => {
+    const d = doc.data() as { type?: string; amountPaise?: number; balancePaise?: number; description?: string; createdAt?: unknown }
+    return {
+      id:           doc.id,
+      type:         typeof d.type === 'string' ? d.type : 'adjustment',
+      amountPaise:  typeof d.amountPaise  === 'number' ? d.amountPaise  : 0,
+      balancePaise: typeof d.balancePaise === 'number' ? d.balancePaise : 0,
+      description:  typeof d.description === 'string' ? d.description : '',
+      createdAt:    tsToDate(d.createdAt)?.toISOString() ?? null,
+    }
+  })
+
   const data: DashboardData = {
     organizer: {
       name:    typeof profile.name             === 'string' ? (profile.name             as string) : '',
@@ -427,6 +617,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       activeEvents:       activeEvents,
       totalRegistrations: totalRegs,
       totalRevenuePaise:  totalRevPaise,
+      todayRevenuePaise:  todayRevPaise,
       todayRegistrations: todayRegs,
       todayCheckins:      todayCheckins,
     },
@@ -434,6 +625,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     settlement: {
       grossRevenuePaise:      grossPaise,
       platformFeePaise,
+      platformFeeRateBps,
       communicationCostPaise,
       netPayoutPaise,
     },
@@ -442,6 +634,10 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     trendDays,
     communications,
     healthScore,
+    walletBalancePaise,
+    recentTransactions,
+    licenseSummary,
+    actionEvents,
   }
 
   return NextResponse.json(data)

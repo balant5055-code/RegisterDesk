@@ -270,7 +270,7 @@ export default function QrScanner({ active, onCode }: Props) {
 
       {/* Hint text */}
       {!camError && !starting && (
-        <p className="text-center text-[12px] text-muted-foreground">
+        <p className="text-center text-[13px] text-muted-foreground">
           Point the camera at the attendee's ticket QR code
         </p>
       )}

@@ -8,7 +8,8 @@
 // Sends a certificate email (fire-and-forget) for each newly generated record.
 
 import { NextRequest, NextResponse }         from 'next/server'
-import { adminDb, adminAuth }                from '@/lib/firebase/admin'
+import { adminDb }                           from '@/lib/firebase/admin'
+import { authorizeWorkspace }                from '@/lib/team/workspace'
 import { getTemplate }                       from '@/lib/certificates/firestore'
 import { generateCertificateId }             from '@/lib/certificates/id'
 import {
@@ -16,7 +17,7 @@ import {
   createCertificateRecord,
   markCertificateEmailed,
 }                                            from '@/lib/certificates/firestore'
-import { getEmailProvider }                  from '@/lib/email'
+import { notificationEngine, NotificationType, NotificationChannel } from '@/lib/notifications'
 import type { RegistrationDocument }         from '@/lib/registrations/types'
 
 type Params = { params: Promise<{ eventId: string }> }
@@ -45,15 +46,9 @@ function toISO(val: unknown): string | null {
 }
 
 export async function POST(req: NextRequest, { params }: Params): Promise<NextResponse> {
-  const token = (req.headers.get('authorization') ?? '').replace(/^Bearer /, '')
-  if (!token) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-
-  let uid: string
-  try {
-    uid = (await adminAuth.verifyIdToken(token)).uid
-  } catch {
-    return NextResponse.json({ error: 'Invalid token' }, { status: 401 })
-  }
+  const authz = await authorizeWorkspace(req, 'certificates')
+  if (!authz.ok) return NextResponse.json({ error: authz.error }, { status: authz.status })
+  const uid = authz.workspaceUid
 
   const { eventId } = await params
 
@@ -95,11 +90,17 @@ export async function POST(req: NextRequest, { params }: Params): Promise<NextRe
 
   let generated = 0, skipped = 0, ineligible = 0
 
-  const emailProvider = getEmailProvider()
+  const emailAvailable = notificationEngine.isAvailable(NotificationChannel.EMAIL)
   const issueDate     = new Date().toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' })
   const eventDate     = startDate ? fmtDate(startDate) : ''
 
   for (const reg of regs) {
+    // Eligibility (P7.1): never issue to a refunded registration. Cancelled /
+    // rejected are already excluded by the status == 'confirmed' query above.
+    if (reg.paymentStatus === 'refunded') {
+      ineligible++
+      continue
+    }
     // Check eligibility
     if (template.type === 'completion' && !reg.checkedIn) {
       ineligible++
@@ -131,10 +132,10 @@ export async function POST(req: NextRequest, { params }: Params): Promise<NextRe
     generated++
 
     // Send email — fire-and-forget
-    if (emailProvider && reg.attendee.email) {
+    if (emailAvailable && reg.attendee.email) {
       void (async () => {
         try {
-          const result = await emailProvider.sendCertificateEmail({
+          const result = await notificationEngine.send(NotificationType.CERTIFICATE_READY, {
             to:            reg.attendee.email,
             attendeeName:  reg.attendee.name,
             eventName,

@@ -58,16 +58,120 @@
   --radius-md:   var(--radius-md);
   --radius-lg:   var(--radius-lg);
   --radius-xl:   var(--radius-xl);
+  --radius-2xl:  var(--radius-2xl);
   --radius-full: var(--radius-full);
 
-  /* Shadows */
+  /* Shadows — neutral */
   --shadow-sm: var(--shadow-sm);
   --shadow-md: var(--shadow-md);
   --shadow-lg: var(--shadow-lg);
+  --shadow-xl: var(--shadow-xl);
 
-  /* Typography */
-  --font-sans: var(--font-inter);
+  /* Typography — font families */
+  --font-sans: var(--font-geist);
   --font-mono: ui-monospace, 'Cascadia Code', 'Source Code Pro', Menlo, Consolas, monospace;
+
+  /* Typography — font-size scale (LS2.1A infrastructure fix).
+     Registers the styles/tokens.css --fs-* design tokens under Tailwind's
+     --text-* theme namespace so they generate real font-size utilities
+     (text-fs-2xs … text-fs-5xl / text-fs-display-*) that compile to
+     `font-size: var(--fs-*)`. Previously the scale had no named utility, so the
+     only way to reference it was the arbitrary `text-[var(--fs-*)]` form, which
+     Tailwind's dual-purpose `text-*` resolver treats as a COLOR (invalid) — the
+     font-size was silently dropped. `@theme inline` keeps styles/tokens.css as
+     the single source of truth (no duplicated values emitted). Deliberately NO
+     paired `--text-fs-*--line-height` keys → these utilities set font-size ONLY,
+     matching the legacy `text-[Npx]` behaviour (line-height stays with leading-*). */
+  --text-fs-2xs:  var(--fs-2xs);
+  --text-fs-xs:   var(--fs-xs);
+  --text-fs-sm:   var(--fs-sm);
+  --text-fs-base: var(--fs-base);
+  --text-fs-md:   var(--fs-md);
+  --text-fs-lg:   var(--fs-lg);
+  --text-fs-xl:   var(--fs-xl);
+  --text-fs-2xl:  var(--fs-2xl);
+  --text-fs-3xl:  var(--fs-3xl);
+  --text-fs-4xl:  var(--fs-4xl);
+  --text-fs-5xl:  var(--fs-5xl);
+  --text-fs-display-sm: var(--fs-display-sm);
+  --text-fs-display-md: var(--fs-display-md);
+  --text-fs-display-lg: var(--fs-display-lg);
+
+  /* ═══ RD-DS-V2 — additive semantic utilities ═══════════════════════════════
+     Wires the new semantic tokens (styles/tokens.css) to Tailwind utilities.
+     Purely additive — every existing utility above is untouched. */
+
+  /* Brand + surface colors → bg-brand-primary, bg-surface-1/2/3, … */
+  --color-brand-primary:       var(--brand-primary);
+  --color-brand-primary-hover: var(--brand-primary-hover);
+  --color-surface-1: var(--surface-1);
+  --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
+
+  /* Elevation → shadow-elevation-0…4, shadow-brand */
+  --shadow-elevation-0: var(--elevation-0);
+  --shadow-elevation-1: var(--elevation-1);
+  --shadow-elevation-2: var(--elevation-2);
+  --shadow-elevation-3: var(--elevation-3);
+  --shadow-elevation-4: var(--elevation-4);
+  --shadow-brand:       var(--brand-elevation);
+
+  /* Radius → rounded-xs (sm…full already mapped above) */
+  --radius-xs: var(--radius-xs);
+
+  /* Typography roles → text-display-xl … text-overline (font-size only) */
+  --text-display-xl:  var(--type-display-xl);
+  --text-display-lg:  var(--type-display-lg);
+  --text-display-md:  var(--type-display-md);
+  --text-headline-xl: var(--type-headline-xl);
+  --text-headline-lg: var(--type-headline-lg);
+  --text-headline-md: var(--type-headline-md);
+  --text-title-xl:    var(--type-title-xl);
+  --text-title-lg:    var(--type-title-lg);
+  --text-title-md:    var(--type-title-md);
+  --text-body-lg:     var(--type-body-lg);
+  --text-body-md:     var(--type-body-md);
+  --text-body-sm:     var(--type-body-sm);
+  --text-label-lg:    var(--type-label-lg);
+  --text-label-md:    var(--type-label-md);
+  --text-label-sm:    var(--type-label-sm);
+  --text-caption:     var(--type-caption);
+  --text-overline:    var(--type-overline);
+}
+
+/* ─── Custom scrollbar — premium minimal style ─────────────────────────────
+   WebKit (Chrome, Edge, Safari): 6 px rounded thumb, transparent track,
+   brand-color on hover. Firefox: thin + matching colors via scrollbar-color.
+   Mobile overlay scrollbars are unaffected — native behavior is preserved.
+   ───────────────────────────────────────────────────────────────────────── */
+
+/* Chrome, Edge, Safari */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background-color: var(--scrollbar-thumb);
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background-color: var(--primary);
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* Firefox — scrollbar-color does not support :hover; thumb/track only */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) transparent;
 }
 
 /* ─── Base ─────────────────────── */
@@ -77,9 +181,9 @@ body {
 }
 
 body {
-  background-color: var(--background);
+ /*  background-color: var(--background); */
   color: var(--foreground);
-  font-family: var(--font-sans, 'Inter', system-ui, sans-serif);
+  font-family: var(--font-sans, 'Geist', system-ui, sans-serif);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
@@ -90,6 +194,32 @@ body {
   *::after {
     border-color: var(--border);
     box-sizing: border-box;
+  }
+
+  /* ── Interactive cursor states ──────────────────────────────────────────────
+     Ensures every clickable element shows the pointer cursor regardless of
+     which HTML element is used. Covers buttons, ARIA-role controls, selects.
+     ───────────────────────────────────────────────────────────────────────── */
+  button:not(:disabled),
+  [role="button"]:not([aria-disabled="true"]),
+  [role="tab"],
+  [role="option"],
+  [role="radio"],
+  [role="checkbox"],
+  [role="switch"],
+  [role="menuitem"],
+  [role="menuitemradio"],
+  [role="menuitemcheckbox"],
+  [role="combobox"]:not(:disabled),
+  select:not(:disabled),
+  summary {
+    cursor: pointer;
+  }
+
+  button:disabled,
+  [aria-disabled="true"],
+  [disabled] {
+    cursor: not-allowed;
   }
 }
 
@@ -221,11 +351,6 @@ body {
   animation: lightSweep 7s linear infinite;
 }
 
-.text-brand-600 {
-    --tw-text-opacity: 1;
-    color: rgb(229 39 126 / var(--primary, 1));
-}
-
 .bg-brand-50 {
     --primary: 1;
     background-color: rgb(253 238 245 / var(--primary, 1));
@@ -250,6 +375,111 @@ body {
   100% { transform: translateX(250%); }
 }
 
+/* ─── Marketing: subtle scroll reveal ────────────────────────────────────────
+   Progressive + fail-safe: content is ALWAYS visible by default. The fade/rise
+   only applies when the browser supports scroll-driven animations AND the user
+   has not requested reduced motion. Unsupported browsers (Safari/Firefox),
+   reduced-motion, and no-CSS all render the content statically — no hidden
+   content, no layout shift, no JavaScript. */
+@media (prefers-reduced-motion: no-preference) {
+  @supports (animation-timeline: view()) {
+    .rd-reveal {
+      animation: rdReveal linear both;
+      animation-timeline: view();
+      animation-range: entry 0% cover 22%;
+    }
+  }
+}
+@keyframes rdReveal {
+  from { opacity: 0; transform: translateY(12px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
 .glass-sweep {
   animation: glassSweep 8s linear infinite;
+}
+
+/* ─── Hero atmospheric background (RD-HERO-BG-01) ──────────────────────────────
+   "Light moving across premium paper." Ultra-slow (48–60s), oscillating so the loop
+   seam is invisible, transform-only — nothing pulses, floats, scales or flashes.
+   Disabled under reduced-motion (the SVG then renders as a static premium wash). */
+@media (prefers-reduced-motion: no-preference) {
+  .rd-atmo-a      { animation: rdAtmoDriftA 52s ease-in-out infinite; }
+  .rd-atmo-b      { animation: rdAtmoDriftB 60s ease-in-out infinite; }
+  .rd-atmo-ribbon { animation: rdAtmoRibbon var(--rd-atmo-dur, 48s) ease-in-out infinite; animation-delay: var(--rd-atmo-delay, 0s); }
+  .rd-atmo-sweep  { animation: rdAtmoSweep 58s ease-in-out infinite; }
+}
+@keyframes rdAtmoDriftA {
+  0%, 100% { transform: translate3d(0, 0, 0); }
+  50%      { transform: translate3d(-26px, 16px, 0); }
+}
+@keyframes rdAtmoDriftB {
+  0%, 100% { transform: translate3d(0, 0, 0); }
+  50%      { transform: translate3d(24px, -18px, 0); }
+}
+@keyframes rdAtmoRibbon {
+  0%, 100% { transform: translate3d(0, 0, 0); }
+  50%      { transform: translate3d(-30px, 12px, 0); }
+}
+@keyframes rdAtmoSweep {
+  0%   { transform: translate3d(-280px, 0, 0); }
+  50%  { transform: translate3d(280px, 0, 0); }
+  100% { transform: translate3d(-280px, 0, 0); }
+}
+
+/* ── RD-AUTH-BG-01/02 — Aurora background for the organizer auth left panel ───
+   "Soft daylight moving across premium paper" — one atmospheric composition of
+   four soft-white washes (3–8%) over the base pink gradient, beneath content:
+   an oversized top-right light wash, a lower-left reflected glow, one long
+   diagonal ribbon of light, and a very soft highlight around the logo area.
+   No mesh, no pattern, no object that reads as a discrete shape.
+
+   Motion is transform-only and coheres as ONE drift: every layer eases the same
+   gentle direction by just 2–3px, but on intentionally different long periods
+   (29 / 41 / 53 / 67s) so they never sync into "four moving objects." Each frame
+   oscillates (0% == 100%) so there is no visible loop; nothing scales, pulses or
+   flashes. Compositor-only. Panel is hidden below md (never paints on mobile);
+   tablet dims via the component's opacity class; reduced-motion freezes it. */
+.rd-aurora-wash {
+  background: radial-gradient(closest-side,
+    rgb(255 255 255 / 0.08), rgb(255 255 255 / 0.025) 55%, transparent 78%);
+}
+.rd-aurora-glow {
+  background: radial-gradient(closest-side,
+    rgb(255 255 255 / 0.05), rgb(255 255 255 / 0.015) 55%, transparent 78%);
+}
+.rd-aurora-ribbon {
+  background: linear-gradient(118deg,
+    transparent 30%,
+    rgb(255 255 255 / 0.055) 47%,
+    rgb(255 255 255 / 0.055) 53%,
+    transparent 70%);
+}
+.rd-aurora-logo {
+  background: radial-gradient(closest-side,
+    rgb(255 255 255 / 0.06), rgb(255 255 255 / 0.02) 50%, transparent 72%);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .rd-aurora-wash   { animation: rdAuroraWash   29s ease-in-out infinite; }
+  .rd-aurora-glow   { animation: rdAuroraGlow   41s ease-in-out infinite; }
+  .rd-aurora-ribbon { animation: rdAuroraRibbon 53s ease-in-out infinite; }
+  .rd-aurora-logo   { animation: rdAuroraLogo   67s ease-in-out infinite; }
+}
+/* All drift the same gentle down-right arc (2–3px) — a single shift of light. */
+@keyframes rdAuroraWash {
+  0%, 100% { transform: translate3d(0, 0, 0); }
+  50%      { transform: translate3d(2px, 3px, 0); }
+}
+@keyframes rdAuroraGlow {
+  0%, 100% { transform: translate3d(0, 0, 0); }
+  50%      { transform: translate3d(3px, 2px, 0); }
+}
+@keyframes rdAuroraRibbon {
+  0%, 100% { transform: translate3d(0, 0, 0); }
+  50%      { transform: translate3d(3px, 2px, 0); }
+}
+@keyframes rdAuroraLogo {
+  0%, 100% { transform: translate3d(0, 0, 0); }
+  50%      { transform: translate3d(2px, 2px, 0); }
 }

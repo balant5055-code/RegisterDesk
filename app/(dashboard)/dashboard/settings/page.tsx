@@ -15,6 +15,7 @@ import { VerifiedBadge } from '@/components/auth/VerifiedBadge'
 import { cn }                          from '@/lib/utils/cn'
 import { ImageCropperModal }           from '@/components/ui/ImageCropperModal'
 import type { CropConfig }             from '@/components/ui/ImageCropperModal'
+import { useToast }                    from '@/components/ui/Toast'
 
 // ─── Primitive components ─────────────────────────────────────────────────────
 
@@ -68,7 +69,7 @@ function TextInput({
           disabled && 'cursor-not-allowed opacity-55',
         )}
       />
-      {hint && <p className="mt-1 text-[12.5px] text-muted-foreground">{hint}</p>}
+      {hint && <p className="mt-1 text-[13px] text-muted-foreground">{hint}</p>}
     </div>
   )
 }
@@ -95,7 +96,7 @@ function SelectInput({
         </select>
         <ChevronDown className="pointer-events-none absolute right-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" aria-hidden />
       </div>
-      {hint && <p className="mt-1 text-[12.5px] text-muted-foreground">{hint}</p>}
+      {hint && <p className="mt-1 text-[13px] text-muted-foreground">{hint}</p>}
     </div>
   )
 }
@@ -227,7 +228,7 @@ function ImageUpload({
           >
             {preview ? 'Change' : 'Upload image'}
           </button>
-          {hint && <p className="mt-0.5 text-[11.5px] text-muted-foreground">{hint}</p>}
+          {hint && <p className="mt-0.5 text-[13px] text-muted-foreground">{hint}</p>}
         </div>
         <input
           ref={inputRef}
@@ -274,7 +275,7 @@ function ColorPicker({
           className="sr-only"
         />
       </div>
-      {hint && <p className="mt-1.5 text-[11.5px] text-muted-foreground">{hint}</p>}
+      {hint && <p className="mt-1.5 text-[13px] text-muted-foreground">{hint}</p>}
     </div>
   )
 }
@@ -296,7 +297,7 @@ function SaveRow({
         {label}
       </button>
       {saved && (
-        <span className="flex items-center gap-1.5 text-[12.5px] text-emerald-600">
+        <span className="flex items-center gap-1.5 text-[13px] text-emerald-600">
           <Check className="size-3.5" /> Saved
         </span>
       )}
@@ -321,7 +322,7 @@ function BrandingPreview({
               <img src={logoPreview} alt="" className="size-8 rounded-lg object-cover" />
             ) : (
               <div
-                className="flex size-8 shrink-0 items-center justify-center rounded-lg text-[11px] font-bold text-white"
+                className="flex size-8 shrink-0 items-center justify-center rounded-lg text-[12px] font-bold text-white"
                 style={{ backgroundColor: color }}
               >
                 {initial}
@@ -331,7 +332,7 @@ function BrandingPreview({
               <p className="text-[13px] font-semibold text-foreground leading-none">
                 {orgName || 'Your Organization'}
               </p>
-              <p className="mt-0.5 text-[11px] text-muted-foreground">Ticket · Certificate</p>
+              <p className="mt-0.5 text-[12px] text-muted-foreground">Ticket · Certificate</p>
             </div>
           </div>
           <div className="mt-3 space-y-2">
@@ -346,7 +347,7 @@ function BrandingPreview({
           </div>
         </div>
       </div>
-      <p className="mt-1.5 text-[11px] text-muted-foreground">Updates as you change your settings above.</p>
+      <p className="mt-1.5 text-[12px] text-muted-foreground">Updates as you change your settings above.</p>
     </div>
   )
 }
@@ -486,7 +487,7 @@ function AccountHealthPanel({
           {pct}
         </span>
         <div className="flex-1">
-          <div className="mb-1 flex justify-between text-[11px] text-muted-foreground">
+          <div className="mb-1 flex justify-between text-[12px] text-muted-foreground">
             <span>Health score</span>
             <span>{score}/{maxScore} pts</span>
           </div>
@@ -522,7 +523,7 @@ function AccountHealthPanel({
             <span className={cn('text-[12px]', c.done ? 'text-foreground' : 'text-muted-foreground')}>
               {c.label}
             </span>
-            <span className="ml-auto text-[11px] text-muted-foreground">+{c.points}</span>
+            <span className="ml-auto text-[12px] text-muted-foreground">+{c.points}</span>
           </li>
         ))}
       </ul>
@@ -552,6 +553,7 @@ function AccountHealthPanel({
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function SettingsPage() {
+  const { showToast } = useToast()
   const userRef = useRef<User | null>(null)
 
   // Load state
@@ -705,7 +707,7 @@ export default function SettingsPage() {
         logoUrl:     finalLogoUrl,
       })
       markSaved('org')
-    } catch { /* ignore — errors stay silent for now */ }
+    } catch (e) { showToast(e instanceof Error ? e.message : 'Could not save organization details. Please try again.', 'error') }
     finally { markSaving('org', false) }
   }
 
@@ -732,7 +734,7 @@ export default function SettingsPage() {
         primaryColor,
       })
       markSaved('brand')
-    } catch { /* silent */ }
+    } catch (e) { showToast(e instanceof Error ? e.message : 'Could not save branding. Please try again.', 'error') }
     finally { markSaving('brand', false) }
   }
 
@@ -746,7 +748,7 @@ export default function SettingsPage() {
         defaultVisibility:        visibility,
       })
       markSaved('defaults')
-    } catch { /* silent */ }
+    } catch (e) { showToast(e instanceof Error ? e.message : 'Could not save event defaults. Please try again.', 'error') }
     finally { markSaving('defaults', false) }
   }
 
@@ -760,7 +762,7 @@ export default function SettingsPage() {
         sendCertificateEmails:        commCert,
       })
       markSaved('comms')
-    } catch { /* silent */ }
+    } catch (e) { showToast(e instanceof Error ? e.message : 'Could not save communication preferences. Please try again.', 'error') }
     finally { markSaving('comms', false) }
   }
 
@@ -769,7 +771,7 @@ export default function SettingsPage() {
     try {
       await patch('account', { name: accountName })
       markSaved('account')
-    } catch { /* silent */ }
+    } catch (e) { showToast(e instanceof Error ? e.message : 'Could not save account details. Please try again.', 'error') }
     finally { markSaving('account', false) }
   }
 
@@ -779,7 +781,7 @@ export default function SettingsPage() {
       await sendPasswordResetEmail(auth, accountEmail)
       setResetSent(true)
       setTimeout(() => setResetSent(false), 5000)
-    } catch { /* silent */ }
+    } catch (e) { showToast(e instanceof Error ? e.message : 'Could not send the password reset email. Please try again.', 'error') }
   }
 
   async function handleDeleteAccount() {
@@ -793,7 +795,7 @@ export default function SettingsPage() {
         headers: { Authorization: `Bearer ${token}` },
       })
       await auth.signOut()
-    } catch { /* silent */ }
+    } catch (e) { showToast(e instanceof Error ? e.message : 'Could not delete your account. Please try again.', 'error') }
     finally { setDeleting(false) }
   }
 
@@ -1039,6 +1041,82 @@ export default function SettingsPage() {
           5. Account
       ═══════════════════════════════════════════════════════════════════════ */}
       <Section
+        icon={ShieldCheck}
+        title="Branding & Domains"
+        description="White-label your emails and pages, and connect a custom domain"
+      >
+        <a
+          href="/dashboard/settings/branding"
+          className="flex items-center justify-between rounded-xl border border-border bg-muted/30 px-4 py-3.5 transition-colors hover:bg-muted/60"
+        >
+          <div>
+            <p className="text-[14px] font-medium text-foreground">Manage branding & domains</p>
+            <p className="mt-0.5 text-[13px] text-muted-foreground">
+              Logo, colors, sender name, white-label, and custom domain.
+            </p>
+          </div>
+          <span className="text-[13px] font-semibold text-primary">Open →</span>
+        </a>
+      </Section>
+
+      <Section
+        icon={ShieldCheck}
+        title="Integrations"
+        description="API keys and webhooks for external systems"
+      >
+        <a
+          href="/dashboard/settings/integrations"
+          className="flex items-center justify-between rounded-xl border border-border bg-muted/30 px-4 py-3.5 transition-colors hover:bg-muted/60"
+        >
+          <div>
+            <p className="text-[14px] font-medium text-foreground">Manage integrations</p>
+            <p className="mt-0.5 text-[13px] text-muted-foreground">
+              Generate API keys and configure webhook delivery.
+            </p>
+          </div>
+          <span className="text-[13px] font-semibold text-primary">Open →</span>
+        </a>
+      </Section>
+
+      <Section
+        icon={ShieldCheck}
+        title="Billing"
+        description="View your plan, included limits, and features"
+      >
+        <a
+          href="/dashboard/settings/billing"
+          className="flex items-center justify-between rounded-xl border border-border bg-muted/30 px-4 py-3.5 transition-colors hover:bg-muted/60"
+        >
+          <div>
+            <p className="text-[14px] font-medium text-foreground">Manage billing</p>
+            <p className="mt-0.5 text-[13px] text-muted-foreground">
+              See your current plan, usage limits, and upgrade options.
+            </p>
+          </div>
+          <span className="text-[13px] font-semibold text-primary">Open →</span>
+        </a>
+      </Section>
+
+      <Section
+        icon={ShieldCheck}
+        title="Team"
+        description="Invite team members and assign role-based permissions"
+      >
+        <a
+          href="/dashboard/settings/team"
+          className="flex items-center justify-between rounded-xl border border-border bg-muted/30 px-4 py-3.5 transition-colors hover:bg-muted/60"
+        >
+          <div>
+            <p className="text-[14px] font-medium text-foreground">Manage team</p>
+            <p className="mt-0.5 text-[13px] text-muted-foreground">
+              Add admins, managers, check-in staff, and finance users.
+            </p>
+          </div>
+          <span className="text-[13px] font-semibold text-primary">Open →</span>
+        </a>
+      </Section>
+
+      <Section
         icon={UserIcon}
         title="Account"
         description="Your personal account details"
@@ -1078,7 +1156,7 @@ export default function SettingsPage() {
               type="button"
               onClick={handlePasswordReset}
               disabled={resetSent}
-              className="shrink-0 rounded-lg border border-border bg-card px-4 py-2 text-[12.5px] font-medium text-foreground transition-colors hover:bg-muted disabled:opacity-60"
+              className="shrink-0 rounded-lg border border-border bg-card px-4 py-2 text-[14px] font-medium text-foreground transition-colors hover:bg-muted disabled:opacity-60"
             >
               {resetSent ? '✓ Reset link sent' : 'Send reset link'}
             </button>
@@ -1119,19 +1197,18 @@ export default function SettingsPage() {
           <div className="mt-4 border-t border-border pt-3.5">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
-                <p className="text-[12.5px] font-medium text-foreground">Logout All Devices</p>
-                <p className="mt-0.5 text-[11.5px] text-muted-foreground">
-                  Signs you out everywhere. Server-side revocation coming soon.
+                <p className="text-[14px] font-medium text-foreground">Log Out</p>
+                <p className="mt-0.5 text-[13px] text-muted-foreground">
+                  Signs you out of this browser and clears your session.
                 </p>
               </div>
               <button
                 type="button"
-                disabled
-                className="flex shrink-0 items-center gap-1.5 rounded-lg border border-border bg-card px-4 py-2 text-[12.5px] font-medium text-muted-foreground opacity-50 cursor-not-allowed"
-                title="Coming soon — server-side session revocation is not yet implemented"
+                onClick={() => { void auth.signOut() }}
+                className="flex shrink-0 items-center gap-1.5 rounded-lg border border-border bg-card px-4 py-2 text-[13px] font-medium text-foreground transition-colors hover:bg-muted"
               >
                 <LogOut className="size-3.5 shrink-0" aria-hidden />
-                Logout All Devices
+                Log Out
               </button>
             </div>
           </div>
@@ -1149,7 +1226,7 @@ export default function SettingsPage() {
         {/* ── Danger zone ── */}
         <div className="rounded-xl border border-destructive/30 bg-destructive/[0.04] px-4 py-4">
           <p className="text-[14px] font-semibold text-destructive">Delete Account</p>
-          <p className="mt-1 text-[12.5px] text-muted-foreground">
+          <p className="mt-1 text-[13px] text-muted-foreground">
             Permanently removes your account and all associated data. This cannot be undone.
           </p>
 
@@ -1157,7 +1234,7 @@ export default function SettingsPage() {
             <button
               type="button"
               onClick={() => setShowDeleteZone(true)}
-              className="mt-3 rounded-lg border border-destructive/40 px-4 py-2 text-[12.5px] font-semibold text-destructive transition-colors hover:bg-destructive/[0.07]"
+              className="mt-3 rounded-lg border border-destructive/40 px-4 py-2 text-[14px] font-semibold text-destructive transition-colors hover:bg-destructive/[0.07]"
             >
               Delete my account
             </button>
@@ -1181,7 +1258,7 @@ export default function SettingsPage() {
                   type="button"
                   disabled={deleteConfirm !== 'DELETE' || deleting}
                   onClick={handleDeleteAccount}
-                  className="flex items-center gap-1.5 rounded-lg bg-destructive px-4 py-2 text-[12.5px] font-semibold text-white disabled:opacity-50"
+                  className="flex items-center gap-1.5 rounded-lg bg-destructive px-4 py-2 text-[14px] font-semibold text-white disabled:opacity-50"
                 >
                   {deleting && <Loader2 className="size-3.5 animate-spin" />}
                   Permanently delete
@@ -1189,7 +1266,7 @@ export default function SettingsPage() {
                 <button
                   type="button"
                   onClick={() => { setShowDeleteZone(false); setDeleteConfirm('') }}
-                  className="rounded-lg border border-border px-4 py-2 text-[12.5px] font-medium text-muted-foreground hover:bg-muted"
+                  className="rounded-lg border border-border px-4 py-2 text-[13px] font-medium text-muted-foreground hover:bg-muted"
                 >
                   Cancel
                 </button>

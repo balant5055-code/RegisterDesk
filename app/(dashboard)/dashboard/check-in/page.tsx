@@ -26,6 +26,8 @@ function lifecycleLabel(s: string): { label: string; cls: string } {
     case 'published':           return { label: 'Live',         cls: 'bg-emerald-100 text-emerald-700' }
     case 'registration_closed': return { label: 'Reg. Closed',  cls: 'bg-amber-100 text-amber-700'    }
     case 'completed':           return { label: 'Completed',    cls: 'bg-sky-100 text-sky-700'         }
+    // Recognition only (Phase L2) — explicit label so it isn't shown as a raw slug.
+    case 'unpublished':         return { label: 'Unpublished',  cls: 'bg-slate-100 text-slate-600'    }
     default:                    return { label: s,              cls: 'bg-muted text-muted-foreground'  }
   }
 }
@@ -53,7 +55,7 @@ function EventCheckinCard({ event }: { event: EventListItem }) {
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-2">
           <p className="text-[15px] font-semibold text-foreground">{event.name}</p>
-          <span className={cn('rounded-full px-2 py-0.5 text-[11px] font-semibold', cls)}>
+          <span className={cn('rounded-full px-2 py-0.5 text-[12px] font-semibold', cls)}>
             {label}
           </span>
         </div>
@@ -86,7 +88,7 @@ function EventCheckinCard({ event }: { event: EventListItem }) {
                 style={{ width: `${pct}%`, backgroundImage: 'var(--primary-gradient)' }}
               />
             </div>
-            <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground">{pct}%</span>
+            <span className="shrink-0 text-[12px] tabular-nums text-muted-foreground">{pct}%</span>
           </div>
         )}
       </div>
@@ -94,7 +96,7 @@ function EventCheckinCard({ event }: { event: EventListItem }) {
       {/* Action */}
       <Link
         href={`/dashboard/events/${event.draftId}/checkin`}
-        className="flex shrink-0 items-center gap-1.5 rounded-xl bg-primary px-4 py-2.5 text-[12.5px] font-semibold text-white transition-opacity hover:opacity-90"
+        className="flex shrink-0 items-center gap-1.5 rounded-xl bg-primary px-4 py-2.5 text-[14px] font-semibold text-white transition-opacity hover:opacity-90"
       >
         <ScanLine className="size-4" aria-hidden />
         Open Check-In

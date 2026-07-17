@@ -5,7 +5,6 @@ import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import { AnimatePresence, motion } from 'framer-motion'
 import {
-  Bell,
   ChevronDown,
   ChevronRight,
   LogOut,
@@ -21,41 +20,19 @@ import type { User as FirebaseUser } from 'firebase/auth'
 import { onAuthStateChanged, onIdTokenChanged, signOut } from 'firebase/auth'
 import { auth } from '@/lib/firebase/auth'
 import { Sidebar } from '@/components/dashboard/Sidebar'
-import { SessionWarningModal } from '@/components/auth/SessionWarningModal'
-import { useSessionManager } from '@/lib/session/useSessionManager'
+import { WorkspaceBanner } from '@/components/dashboard/WorkspaceBanner'
+import { SessionGuard } from '@/components/auth/SessionGuard'
 import { useTheme } from '@/lib/hooks/useTheme'
 import { VerifiedBadge } from '@/components/auth/VerifiedBadge'
 import { ROUTES } from '@/config/navigation'
 import { cn } from '@/lib/utils/cn'
 import { ToastProvider } from '@/components/ui/Toast'
-
-// ─── Types ────────────────────────────────────────────────────────────────────
-
-type NotifPriority = 'critical' | 'warning' | 'success' | 'info'
-
-interface Notification {
-  id:       string
-  priority: NotifPriority
-  message:  string
-  time:     string
-  read:     boolean
-}
-
-// ─── Static data ──────────────────────────────────────────────────────────────
-
-const INITIAL_NOTIFICATIONS: Notification[] = [
-  { id: '1', priority: 'critical', message: 'DevConf 2026 is 80% full — only 80 seats remaining.', time: '2m ago',  read: false },
-  { id: '2', priority: 'success',  message: '47 check-ins completed for UX Workshop 2026.',         time: '30m ago', read: false },
-  { id: '3', priority: 'warning',  message: '3 pending registrations have incomplete profiles.',     time: '1h ago',  read: true  },
-  { id: '4', priority: 'warning',  message: 'AI & ML Summit registration closes in 48 hours.',      time: '2h ago',  read: true  },
-]
-
-const NOTIF_DOT: Record<NotifPriority, string> = {
-  critical: 'bg-destructive',
-  warning:  'bg-amber-400',
-  success:  'bg-emerald-500',
-  info:     'bg-primary',
-}
+import { ConfirmProvider } from '@/components/ui/ConfirmDialog'
+import { BusinessConfigProvider } from '@/lib/config/BusinessConfigProvider'
+import { buttonVariants } from '@/components/ui'
+import { CommandPalette } from '@/components/dashboard/CommandPalette'
+import { openCommandPalette } from '@/lib/commandPalette/bridge'
+import { NotificationBell } from '@/components/dashboard/NotificationBell'
 
 // ─── Breadcrumb helpers ───────────────────────────────────────────────────────
 
@@ -72,22 +49,43 @@ const SEG_LABELS: Record<string, string> = {
   communications:   'Communications',
   certificates:     'Certificates',
   settings:         'Settings',
+  finance:          'Finance',
 }
 
-interface Crumb { label: string; href: string }
+interface Crumb { label: string; href: string; navigable: boolean }
+
+// GA-7D S2: container segments that have NO index route — clicking them 404'd.
+//   • 'builder' is always a container (the real page is builder/[templateId]).
+//   • 'certificates' / 'licenses' have an index route only at the top level, so they
+//     are non-navigable when nested (event-scoped certificates, billing-scoped
+//     licenses). These render as plain text instead of dead links.
+const NON_INDEX_SEGMENTS = new Set(['builder'])
+const DEPTH1_ONLY_SEGMENTS = new Set(['certificates', 'licenses'])
+
+// GA-7D S2: an ID crumb's label derives from its PARENT segment (a CRM contact was
+// mislabelled "Manage Event"). Depth is 1-based here (dashboard = depth 1).
+const ID_LABEL_BY_PARENT: Record<string, string> = {
+  events:    'Manage Event',
+  crm:       'Contact',
+  campaigns: 'Campaign',
+  licenses:  'License',
+}
 
 function buildBreadcrumbs(pathname: string): Crumb[] {
   const segments = pathname.split('/').filter(Boolean)
   const crumbs: Crumb[] = []
 
   for (let i = 0; i < segments.length; i++) {
-    const seg  = segments[i]
-    const href = '/' + segments.slice(0, i + 1).join('/')
-    const isId = seg.length >= 16 && /^[A-Za-z0-9_-]+$/.test(seg)
+    const seg   = segments[i]
+    const depth = i + 1
+    const href  = '/' + segments.slice(0, i + 1).join('/')
+    const isId  = seg.length >= 16 && /^[A-Za-z0-9_-]+$/.test(seg)
     const label = isId
-      ? 'Manage Event'
+      ? (ID_LABEL_BY_PARENT[segments[i - 1] ?? ''] ?? 'Details')
       : (SEG_LABELS[seg] ?? seg.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase()))
-    crumbs.push({ label, href })
+    const navigable = !NON_INDEX_SEGMENTS.has(seg)
+      && !(DEPTH1_ONLY_SEGMENTS.has(seg) && depth > 1)
+    crumbs.push({ label, href, navigable })
   }
 
   return crumbs
@@ -116,13 +114,16 @@ function Breadcrumbs() {
             )}
             {isLast ? (
               <span className="text-[14px] font-semibold text-foreground">{crumb.label}</span>
-            ) : (
+            ) : crumb.navigable ? (
               <Link
                 href={crumb.href}
                 className="text-[14px] text-muted-foreground transition-colors hover:text-foreground"
               >
                 {crumb.label}
               </Link>
+            ) : (
+              // Non-navigable container segment — plain text, never a dead link.
+              <span className="text-[14px] text-muted-foreground">{crumb.label}</span>
             )}
           </span>
         )
@@ -169,106 +170,6 @@ function useDropdown() {
   return { open, setOpen, containerRef }
 }
 
-// ─── NotificationMenu ─────────────────────────────────────────────────────────
-
-function NotificationMenu() {
-  const { open, setOpen, containerRef } = useDropdown()
-  const [notifications, setNotifications] = useState<Notification[]>(INITIAL_NOTIFICATIONS)
-  const unreadCount = notifications.filter(n => !n.read).length
-
-  const markAllRead = () =>
-    setNotifications(prev => prev.map(n => ({ ...n, read: true })))
-
-  return (
-    <div ref={containerRef} className="relative">
-      <button
-        onClick={() => setOpen(o => !o)}
-        aria-label={`Notifications — ${unreadCount} unread`}
-        aria-expanded={open}
-        aria-haspopup="dialog"
-        className="relative rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
-      >
-        <Bell className="size-[18px]" aria-hidden />
-        {unreadCount > 0 && (
-          <span
-            aria-hidden
-            className="absolute right-1 top-1 flex size-[14px] items-center justify-center rounded-full bg-primary text-[8px] font-bold text-primary-foreground"
-          >
-            {unreadCount}
-          </span>
-        )}
-      </button>
-
-      <AnimatePresence>
-        {open && (
-          <motion.div
-            {...dropdownMotion}
-            role="dialog"
-            aria-label="Notifications panel"
-            className="absolute right-0 top-full z-50 mt-2 w-80 overflow-hidden rounded-xl border border-border bg-card shadow-lg"
-          >
-            <div className="flex items-center justify-between border-b border-border px-4 py-3">
-              <p className="text-[14px] font-semibold text-foreground">Notifications</p>
-              {unreadCount > 0 && (
-                <button
-                  onClick={markAllRead}
-                  className="text-[12px] font-medium text-primary hover:underline underline-offset-4"
-                >
-                  Mark all read
-                </button>
-              )}
-            </div>
-
-            <ul
-              aria-label="Notification list"
-              className="max-h-72 divide-y divide-border overflow-y-auto"
-            >
-              {notifications.map(n => (
-                <li
-                  key={n.id}
-                  className={cn(
-                    'flex gap-3 px-4 py-3 transition-colors hover:bg-muted/40',
-                    !n.read && 'bg-primary/[0.025]',
-                  )}
-                >
-                  <span
-                    className={cn('mt-[5px] h-1.5 w-1.5 shrink-0 rounded-full', NOTIF_DOT[n.priority])}
-                    aria-hidden
-                  />
-                  <div className="min-w-0 flex-1">
-                    <p
-                      className={cn(
-                        'text-[13px] leading-snug',
-                        !n.read ? 'font-medium text-foreground' : 'text-muted-foreground',
-                      )}
-                    >
-                      {n.message}
-                    </p>
-                    <p className="mt-0.5 text-[12px] text-muted-foreground">{n.time}</p>
-                  </div>
-                  {!n.read && (
-                    <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-primary" aria-label="Unread" />
-                  )}
-                </li>
-              ))}
-            </ul>
-
-            <div className="border-t border-border px-4 py-2.5">
-              <Link
-                href={ROUTES.DASHBOARD}
-                onClick={() => setOpen(false)}
-                className="text-[13px] font-medium text-primary hover:underline underline-offset-4"
-              >
-                View all notifications
-              </Link>
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-    </div>
-  )
-}
-
 // ─── ProfileMenu ──────────────────────────────────────────────────────────────
 
 const PROFILE_MENU = [
@@ -306,7 +207,7 @@ function ProfileMenu({ displayName, email, initial, emailVerified }: ProfileMenu
         className="flex items-center gap-1 rounded-md p-0.5 transition-opacity hover:opacity-85 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
       >
         <div
-          className="flex size-[30px] items-center justify-center rounded-full text-[11px] font-bold text-primary-foreground"
+          className="flex size-[30px] items-center justify-center rounded-full text-[12px] font-bold text-primary-foreground"
           style={{ backgroundImage: 'var(--primary-gradient)' }}
           aria-hidden
         >
@@ -340,7 +241,7 @@ function ProfileMenu({ displayName, email, initial, emailVerified }: ProfileMenu
                     <p className="truncate text-[14px] font-semibold text-foreground">{displayName}</p>
                     <VerifiedBadge verified={emailVerified} />
                   </div>
-                  <p className="truncate text-[12px] text-muted-foreground">{email}</p>
+                  <p className="truncate text-[13px] text-muted-foreground">{email}</p>
                 </div>
               </div>
             </div>
@@ -415,14 +316,15 @@ function DashboardHeader({ onMenuClick, displayName, email, initial, emailVerifi
         <Breadcrumbs />
       </div>
 
+      {/* Workspace context (owner vs team member) */}
+      <WorkspaceBanner />
+
       <div className="flex-1" />
 
       {/* Quick Create (desktop) */}
       <Link
         href={ROUTES.NEW_EVENT}
-        className={cn(
-          'hidden items-center gap-1.5 rounded-lg px-3 py-1.5 text-[13px] font-semibold text-primary-foreground transition-opacity hover:opacity-90 md:flex',
-        )}
+        className={cn(buttonVariants({ variant: 'gradient', size: 'sm' }), 'hidden md:inline-flex')}
         style={{ backgroundImage: 'var(--primary-gradient)' }}
         aria-label="Create new event"
       >
@@ -430,26 +332,34 @@ function DashboardHeader({ onMenuClick, displayName, email, initial, emailVerifi
         <span>Create Event</span>
       </Link>
 
-      {/* Search */}
-      <div className="relative hidden sm:block">
+      {/* Global search entry point (Phase H.4.2 — opens the Global Command
+          Palette). Scope: events, participants, registrations, CRM, certificates,
+          settlements, broadcasts, donations, identifiers. Also reachable via
+          Ctrl/⌘+K anywhere in the workspace. */}
+      <button
+        type="button"
+        onClick={openCommandPalette}
+        aria-label="Open command palette — search events, participants, registrations, CRM, certificates, settlements, broadcasts, donations, identifiers"
+        aria-keyshortcuts="Control+K Meta+K"
+        className={cn(
+          'relative hidden h-8 w-44 items-center rounded-lg border border-border bg-muted pl-8 pr-10 text-left text-[14px] text-muted-foreground sm:flex',
+          'transition-colors duration-150 hover:border-primary/40 hover:bg-card focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/25',
+        )}
+      >
         <Search
           className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground"
           aria-hidden
         />
-        <input
-          type="search"
-          placeholder="Search…"
-          aria-label="Search events and attendees"
-          className={cn(
-            'h-8 w-44 rounded-lg border border-border bg-muted pl-8 pr-3 text-[14px] text-foreground',
-            'placeholder:text-muted-foreground',
-            'transition-all duration-150',
-            'focus:w-52 focus:border-primary/40 focus:bg-card focus:outline-none focus:ring-2 focus:ring-primary/25',
-          )}
-        />
-      </div>
+        <span>Search workspace…</span>
+        <kbd
+          aria-hidden
+          className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 rounded border border-border bg-card px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground"
+        >
+          ⌘K
+        </kbd>
+      </button>
 
-      <NotificationMenu />
+      <NotificationBell />
 
       <button
         onClick={toggle}
@@ -524,11 +434,6 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     }
   }, [])
 
-  // ── Session manager (idle timeout + multi-tab sync) ─────────────────────────
-  const { showWarning, countdown, onStaySignedIn, onLogout } = useSessionManager(
-    user != null && user !== undefined,
-  )
-
   // ── Derived user display data ──────────────────────────────────────────────
   const displayName   = user?.displayName ?? user?.email?.split('@')[0] ?? 'Organizer'
   const email         = user?.email ?? ''
@@ -542,7 +447,12 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
   return (
     <ToastProvider>
-    <div className="flex h-screen overflow-hidden bg-background">
+    <ConfirmProvider>
+    <BusinessConfigProvider>
+    {/* GA-7D S2: h-dvh (dynamic viewport) instead of h-screen(=100vh) so the bottom
+        of the internally-scrolling shell — incl. the sticky wizard footer — isn't
+        pushed under the mobile browser's address bar. */}
+    <div className="flex h-dvh overflow-hidden bg-background">
       <Sidebar
         open={sidebarOpen}
         onClose={() => setSidebarOpen(false)}
@@ -566,16 +476,19 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         >
           {children}
         </main>
+        {/* Wizard footer renders here via createPortal — outside padded main, full workspace width */}
+        <div id="wizard-footer-portal" />
       </div>
 
-      {/* Session expiry warning — rendered at layout level so it overlays everything */}
-      <SessionWarningModal
-        open={showWarning}
-        countdown={countdown}
-        onStaySignedIn={onStaySignedIn}
-        onLogout={onLogout}
-      />
+      {/* Session expiry warning — inside the provider so the idle/warn timeouts
+          come from the live security config. Overlays everything at layout level. */}
+      <SessionGuard enabled={user != null} />
+
+      {/* Global Command Palette (Ctrl/⌘+K) — pure orchestration over existing routes/actions */}
+      <CommandPalette />
     </div>
+    </BusinessConfigProvider>
+    </ConfirmProvider>
     </ToastProvider>
   )
 }

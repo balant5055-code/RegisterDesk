@@ -16,22 +16,53 @@ export type { EventDraftDocument, DraftPayload }
 // localStorage key that stores the active draftId per browser
 const DRAFT_KEY = 'rd_event_draft_id'
 
+// Builds an in-memory representation of a freshly created draft so the UI can
+// render immediately without a second Firestore round-trip. Mirrors the server
+// blank template; `payload` overrides the wizard fields the caller seeded.
+function localDraft(id: string, payload: DraftPayload): EventDraftDocument {
+  return {
+    id,
+    status:           'draft',
+    currentStep:      0,
+    completedValues:  Array(9).fill(null),
+    eventType:          null,
+    eventSubtype:       null,
+    customEventSubtype: null,
+    campaignType:       null,
+    linkedCampaign:     null,
+    visibility:         null,
+    accessControl:    null,
+    pricing:          null,
+    registrationForm: null,
+    eventDetails:     {},
+    communicationBilling: null,
+    publishedAt:          null,
+    createdAt:        null,
+    updatedAt:        null,
+    ...payload,
+  }
+}
+
 /**
  * Manages a single event-draft document in Firestore.
  *
  * On mount it looks up the stored draftId in localStorage:
  *   - If found and the document exists in Firestore → restores that draft.
- *   - Otherwise → creates a fresh blank draft and stores the new id.
+ *   - Otherwise → nothing is written. Creation is deferred to an explicit user
+ *     action via `createDraft`, so merely opening the wizard never produces a
+ *     ghost draft.
  *
- * Exposes `updateDraft` for fire-and-forget partial saves.
+ * Exposes `createDraft` (first write) and `updateDraft` (subsequent saves).
  */
 export function useDraft() {
   const [draft,     setDraft]     = useState<EventDraftDocument | null>(null)
   const [isLoading, setIsLoading] = useState(true)
 
   // Keep uid + draftId in refs so closures always see the latest values
-  const uidRef     = useRef<string | null>(null)
-  const draftIdRef = useRef<string | null>(null)
+  const uidRef      = useRef<string | null>(null)
+  const draftIdRef  = useRef<string | null>(null)
+  // Dedupes concurrent create calls (e.g. a double-clicked Continue button).
+  const creatingRef = useRef<Promise<string | null> | null>(null)
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async user => {
@@ -45,7 +76,7 @@ export function useDraft() {
       const storedId = localStorage.getItem(DRAFT_KEY)
 
       try {
-        // Try to rehydrate an existing draft
+        // Try to rehydrate an existing draft (Resume Draft / refresh mid-wizard)
         if (storedId) {
           const existing = await loadEventDraft(user.uid, storedId)
           if (existing) {
@@ -54,32 +85,13 @@ export function useDraft() {
             setIsLoading(false)
             return
           }
+          // Stored id no longer resolves — drop it so we start clean.
+          localStorage.removeItem(DRAFT_KEY)
         }
 
-        // No valid draft found — create a fresh one
-        const newId = await createEventDraft(user.uid)
-        localStorage.setItem(DRAFT_KEY, newId)
-        draftIdRef.current = newId
-
-        // Build local blank draft to avoid a second Firestore round-trip
-        setDraft({
-          id:               newId,
-          status:           'draft',
-          currentStep:      0,
-          completedValues:  Array(7).fill(null),
-          eventType:          null,
-          eventSubtype:       null,
-          customEventSubtype: null,
-          visibility:         null,
-          accessControl:    null,
-          pricing:          null,
-          registrationForm: null,
-          eventDetails:     {},
-          communicationBilling: null,
-          publishedAt:          null,
-          createdAt:        null,
-          updatedAt:        null,
-        })
+        // No existing draft. Intentionally create NOTHING here — the first
+        // Firestore write happens only when the organizer clicks Continue
+        // (see createDraft). This is what prevents accidental ghost drafts.
       } catch (err) {
         // Fail gracefully — wizard still works, persistence is best-effort
         console.error('[useDraft] init failed:', err)
@@ -89,6 +101,36 @@ export function useDraft() {
     })
 
     return () => unsubscribe()
+  }, [])
+
+  /**
+   * Creates the Firestore draft exactly once, seeded with `payload`, and returns
+   * its id (or null if unauthenticated / the write failed). Deduped: repeated or
+   * concurrent calls reuse the in-flight promise, so a double-click can never
+   * create two drafts.
+   */
+  const createDraft = useCallback(async (payload: DraftPayload): Promise<string | null> => {
+    const uid = uidRef.current
+    if (!uid) return null
+    if (draftIdRef.current)  return draftIdRef.current   // already created
+    if (creatingRef.current) return creatingRef.current  // creation in flight — reuse
+
+    const promise = (async () => {
+      const newId = await createEventDraft(uid, payload)
+      localStorage.setItem(DRAFT_KEY, newId)
+      draftIdRef.current = newId
+      setDraft(localDraft(newId, payload))
+      return newId
+    })()
+
+    creatingRef.current = promise
+    try {
+      return await promise
+    } catch (err) {
+      console.error('[useDraft] createDraft failed:', err)
+      creatingRef.current = null   // allow a retry after failure
+      return null
+    }
   }, [])
 
   /** Merges `payload` into Firestore and applies an optimistic local update. */
@@ -107,5 +149,5 @@ export function useDraft() {
     }
   }, [])
 
-  return { draft, isLoading, updateDraft }
+  return { draft, isLoading, createDraft, updateDraft }
 }

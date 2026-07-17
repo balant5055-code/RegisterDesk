@@ -22,7 +22,7 @@
   --secondary-foreground: #FFFFFF;
 
   /* ── Page Backgrounds ────────────────────────────────────── */
-  --background: #F8FAFC;           /* slate-50  — page canvas                 */
+  --background: #FFFFFF;           /* pure white — page canvas                */
   --foreground: #0F172A;           /* slate-900 — primary body text           */
 
   /* ── Card / Surface ─────────────────────────────────────── */
@@ -58,17 +58,17 @@
   --info-foreground: #FFFFFF;
 
   /* ── Typography ─────────────────────────────────────────── */
-  /* Font family loaded via Next.js font optimisation (--font-jakarta).      */
-  /* Tailwind maps it through @theme inline → --font-sans → font-sans class. */
+  /* Font family loaded via Next.js font optimisation (Geist → --font-geist). */
+  /* Tailwind maps it through @theme inline → --font-sans → font-sans class.  */
 
   --fw-body:    400;   /* body text, small text, captions  */
   --fw-ui:      500;   /* navbar links, labels, meta text  */
   --fw-strong:  600;   /* buttons, card titles, badges     */
   --fw-heading: 700;   /* section headings, hero headings  */
 
-  /* ── Typography scale (reference — use with text-[var(--fs-*)]) ─────────── */
-  --fs-2xs:   11px;    /* chart axis labels, tiny meta labels                 */
-  --fs-xs:    12px;    /* timestamps, badge/pill counts, uppercase col heads  */
+  /* ── Typography scale (use via text-[var(--fs-*)]) ─────────────────────── */
+  --fs-2xs:   11px;    /* overlines, timestamps, axis labels                  */
+  --fs-xs:    12px;    /* badges, pill counts, uppercase col heads            */
   --fs-sm:    13px;    /* helper text, secondary labels, subtle copy          */
   --fs-base:  14px;    /* body text, table content, form inputs, nav links    */
   --fs-md:    15px;    /* card titles, prominent labels, event names          */
@@ -76,18 +76,146 @@
   --fs-xl:    24px;    /* sub-page h1s (check-in, event manage)               */
   --fs-2xl:   28px;    /* dashboard overview titles                           */
   --fs-3xl:   32px;    /* top-level page h1 titles                            */
+  --fs-4xl:   40px;    /* hero headings (mobile-to-tablet)                    */
+  --fs-5xl:   48px;    /* display headings (large breakpoints)                */
+
+  /* ── Display scale — responsive, clamp-based (use via text-[var(--fs-display-*)]) */
+  --fs-display-sm: clamp(1.75rem, 3vw, 2.5rem);   /* section headings        */
+  --fs-display-md: clamp(2.25rem, 4vw, 3.25rem);  /* page / large headings   */
+  --fs-display-lg: clamp(2.75rem, 5vw, 4.25rem);  /* hero display            */
 
   /* ── Border Radius ───────────────────────────────────────── */
   --radius-sm:   0.25rem;          /* 4px  — tight chips, badges              */
-  --radius-md:   0.5rem;           /* 8px  — default (inputs, buttons)        */
-  --radius-lg:   0.75rem;          /* 12px — cards, panels                    */
-  --radius-xl:   1rem;             /* 16px — modals, large surfaces           */
+  --radius-md:   0.5rem;           /* 8px  — inputs (legacy)                  */
+  --radius-lg:   0.75rem;          /* 12px — compact cards, inputs            */
+  --radius-xl:   1rem;             /* 16px — buttons, standard cards          */
+  --radius-2xl:  1.5rem;           /* 24px — modals, elevated surfaces        */
   --radius-full: 9999px;           /* pills                                   */
 
-  /* ── Shadows ─────────────────────────────────────────────── */
+  /* ── Shadows — neutral ───────────────────────────────────── */
   --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
   --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.08), 0 2px 4px -2px rgb(0 0 0 / 0.06);
   --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.08), 0 4px 6px -4px rgb(0 0 0 / 0.05);
+  --shadow-xl: 0 20px 40px -4px rgb(0 0 0 / 0.10), 0 8px 16px -4px rgb(0 0 0 / 0.06);
+
+  /* ── Shadows — brand tinted (consolidates 15+ inline variants) ─────────── */
+  --shadow-brand-sm:       0 2px 10px rgba(229, 39, 126, 0.20);
+  --shadow-brand-md:       0 4px 20px rgba(229, 39, 126, 0.25);
+  --shadow-brand-lg:       0 8px 30px rgba(229, 39, 126, 0.32);
+  --shadow-brand-sm-hover: 0 4px 16px rgba(229, 39, 126, 0.32);
+  --shadow-brand-md-hover: 0 6px 28px rgba(229, 39, 126, 0.40);
+
+  /* ═══════════════════════════════════════════════════════════════════════
+     RD-DS-V2 — ENTERPRISE SEMANTIC LAYER (additive · backward compatible)
+     Every value references a PRIMITIVE above (so dark mode is inherited with
+     zero duplication) or a sensible new default that no existing component
+     consumes yet. The primitives and their Tailwind utilities (bg-primary,
+     text-foreground, shadow-lg, rounded-xl, …) are unchanged — this is the
+     forward-looking vocabulary components migrate to over time.
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /* ── Brand ── */
+  --brand-primary:        var(--primary);
+  --brand-primary-hover:  var(--primary-hover);
+  --brand-primary-active: var(--primary-hover);           /* no distinct active today */
+  --brand-gradient:       var(--primary-gradient);
+  --brand-gradient-hover: var(--primary-gradient-hover);
+
+  /* ── Text ── */
+  --text-primary:   var(--foreground);                    /* headings / primary copy */
+  --text-secondary: var(--muted-foreground);              /* secondary copy */
+  --text-tertiary:  #94A3B8;                              /* slate-400 — de-emphasized */
+  --text-muted:     var(--muted-foreground);              /* placeholders / helper */
+  --text-disabled:  #CBD5E1;                              /* slate-300 — disabled */
+  --text-inverse:   var(--primary-foreground);            /* on brand / dark surfaces */
+
+  /* ── Background ── */
+  --bg-page:     var(--background);
+  --bg-card:     var(--card);
+  --bg-muted:    var(--muted);
+  --bg-elevated: var(--card);
+  --bg-overlay:  rgb(15 23 42 / 0.45);                    /* modal / sheet scrim */
+
+  /* ── Surface (elevation ladder of backgrounds) ── */
+  --surface-1: var(--background);                         /* base page */
+  --surface-2: var(--card);                               /* raised panel / card */
+  --surface-3: var(--muted);                              /* inset / subtle */
+
+  /* ── Borders (--border-strong already defined above as a primitive) ── */
+  --border-default: var(--border);
+  --border-subtle:  var(--border);                        /* alias today; own value later */
+  --border-focus:   var(--primary);
+
+  /* ── Status (semantic aliases of the feedback primitives) ── */
+  --status-success: var(--success);
+  --status-warning: var(--warning);
+  --status-danger:  var(--destructive);
+  --status-info:    var(--info);
+
+  /* ── Focus ── */
+  --focus-ring:   var(--primary);
+  --focus-shadow: 0 0 0 3px rgb(229 39 126 / 0.35);
+
+  /* ── Elevation (semantic → neutral shadow primitives) ── */
+  --elevation-0: none;
+  --elevation-1: var(--shadow-sm);
+  --elevation-2: var(--shadow-md);
+  --elevation-3: var(--shadow-lg);
+  --elevation-4: var(--shadow-xl);
+  --brand-elevation: var(--shadow-brand-md);
+
+  /* ── Motion ── */
+  --duration-fast:   150ms;
+  --duration-normal: 220ms;
+  --duration-slow:   360ms;
+  --ease-standard:   cubic-bezier(0.2, 0, 0, 1);
+  --ease-emphasized: cubic-bezier(0.16, 1, 0.3, 1);       /* matches framework EASE */
+  --ease-decelerate: cubic-bezier(0, 0, 0, 1);
+
+  /* ── Radius (V2 adds xs; sm…full already defined above) ── */
+  --radius-xs: 0.125rem;                                  /* 2px */
+
+  /* ── Component tokens ── */
+  --button-height-sm: 2.25rem;   /* 36px (h-9)  */
+  --button-height-md: 2.5rem;    /* 40px (h-10) */
+  --button-height-lg: 2.75rem;   /* 44px (h-11) */
+  --button-padding-x: 1rem;      /* px-4 */
+  --button-radius:    var(--radius-lg);
+  --button-shadow:    var(--shadow-sm);
+
+  --input-height: 2.75rem;       /* 44px (h-11) */
+  --input-radius: var(--radius-xl);
+  --input-border: var(--border);
+
+  --card-padding: 1.5rem;        /* 24px (p-6) */
+  --card-radius:  var(--radius-2xl);
+  --card-shadow:  var(--shadow-sm);
+
+  --badge-padding-x: 0.625rem;   /* px-2.5 */
+  --badge-height:    1.5rem;     /* 24px */
+  --badge-radius:    var(--radius-full);
+
+  /* ── Typography roles (size only → the fs scale; wired to text-* utilities) ── */
+  --type-display-xl:  var(--fs-display-lg);
+  --type-display-lg:  var(--fs-display-md);
+  --type-display-md:  var(--fs-display-sm);
+  --type-headline-xl: var(--fs-4xl);
+  --type-headline-lg: var(--fs-3xl);
+  --type-headline-md: var(--fs-2xl);
+  --type-title-xl:    var(--fs-xl);
+  --type-title-lg:    var(--fs-lg);
+  --type-title-md:    var(--fs-md);
+  --type-body-lg:     var(--fs-md);
+  --type-body-md:     var(--fs-base);
+  --type-body-sm:     var(--fs-sm);
+  --type-label-lg:    var(--fs-base);
+  --type-label-md:    var(--fs-sm);
+  --type-label-sm:    var(--fs-xs);
+  --type-caption:     var(--fs-xs);
+  --type-overline:    var(--fs-2xs);
+
+  /* ── Scrollbar (tokenised; was hardcoded in globals.css) ── */
+  --scrollbar-thumb: #D1D5DB;
 }
 
 /* ─── Dark mode overrides ─────────────────────────────────────────────────────
@@ -113,4 +241,14 @@
   --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.3);
   --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.3), 0 2px 4px -2px rgb(0 0 0 / 0.2);
   --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.35), 0 4px 6px -4px rgb(0 0 0 / 0.25);
+  --shadow-xl: 0 20px 40px -4px rgb(0 0 0 / 0.40), 0 8px 16px -4px rgb(0 0 0 / 0.25);
+
+  /* ── RD-DS-V2 dark overrides ──────────────────────────────────────────────
+     Only the NEW hardcoded semantic tokens are overridden here. Every V2 token
+     that references a primitive (text-primary, bg-*, surface-*, border-*,
+     status-*, elevation-*, brand-*) inherits dark automatically via the
+     primitive overrides above — no palette is duplicated. */
+  --text-tertiary: #64748B;   /* slate-500 */
+  --text-disabled: #475569;   /* slate-600 */
+  --bg-overlay:    rgb(0 0 0 / 0.6);
 }

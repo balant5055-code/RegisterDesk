@@ -11,15 +11,19 @@
 import { NextResponse }    from 'next/server'
 import { FieldValue }      from 'firebase-admin/firestore'
 import { adminAuth, adminDb } from '@/lib/firebase/admin'
-import { getEmailProvider }   from '@/lib/email'
-import {
-  generateCode, generateSalt, hashCode,
-  OTP_TTL_MS, OTP_RESEND_WAIT,
-} from '@/lib/otp'
+import { notificationEngine, NotificationType } from '@/lib/notifications'
+import { writeEmailLog }       from '@/lib/email-logs/write'
+import { EMAIL_PROVIDER_NAME } from '@/lib/email'
+import { generateCode, generateSalt, hashCode } from '@/lib/otp'
+import { getSecurityConfig } from '@/lib/config/resolveSecurityConfig'
 import type { DecodedIdToken } from 'firebase-admin/auth'
 
-const MAX_SENDS_PER_HOUR = 5
-const HOUR_MS            = 60 * 60 * 1_000
+const HOUR_MS = 60 * 60 * 1_000
+
+// Human-readable label for the Communication Log (emailLogs) row only. Mirrors the
+// subject in lib/email/templates/otp.ts — the email itself is still rendered by the
+// Template Registry via the Notification Engine (this route never renders it).
+const OTP_EMAIL_SUBJECT = 'Your RegisterDesk verification code'
 
 export async function POST(req: Request): Promise<NextResponse> {
   // ── Auth ────────────────────────────────────────────────────────────────────
@@ -55,6 +59,11 @@ export async function POST(req: Request): Promise<NextResponse> {
   const channel = 'email'
   const now     = Date.now()
 
+  // Effective security policy (runtime override → Firestore → code default).
+  const sec          = await getSecurityConfig()
+  const resendWaitMs = sec.otpResendWaitSeconds * 1_000
+  const ttlMs        = sec.otpTtlSeconds * 1_000
+
   // ── Rate limit ──────────────────────────────────────────────────────────────
   const limitRef  = adminDb.collection('otpRateLimits').doc(`${uid}_${channel}`)
   const limitSnap = await limitRef.get()
@@ -65,26 +74,26 @@ export async function POST(req: Request): Promise<NextResponse> {
     const lastSentAt  = (d.lastSentAt  as { toMillis?(): number })?.toMillis?.() ?? 0
 
     // Per-request cooldown
-    if (now - lastSentAt < OTP_RESEND_WAIT) {
-      const secondsLeft = Math.ceil((OTP_RESEND_WAIT - (now - lastSentAt)) / 1_000)
+    if (now - lastSentAt < resendWaitMs) {
+      const secondsLeft = Math.ceil((resendWaitMs - (now - lastSentAt)) / 1_000)
       return NextResponse.json({ error: 'COOLDOWN_ACTIVE', secondsLeft }, { status: 429 })
     }
 
     // Hourly cap
     const inWindow = now - windowStart < HOUR_MS
-    if (inWindow && (d.count ?? 0) >= MAX_SENDS_PER_HOUR) {
+    if (inWindow && (d.count ?? 0) >= sec.otpMaxSendsPerHour) {
       const resetInMin = Math.ceil((HOUR_MS - (now - windowStart)) / 60_000)
       return NextResponse.json({ error: 'RATE_LIMITED', resetInMinutes: resetInMin }, { status: 429 })
     }
   }
 
   // ── Generate OTP ────────────────────────────────────────────────────────────
-  const code    = generateCode()
+  const code    = generateCode(sec.otpDigits)
   const salt    = generateSalt()
   const hash    = hashCode(code, salt)
   const otpRef  = adminDb.collection('otpRequests').doc()   // auto-id
   const otpId   = otpRef.id
-  const expiresAt = new Date(now + OTP_TTL_MS)
+  const expiresAt = new Date(now + ttlMs)
   const ip      = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim()
                ?? req.headers.get('x-real-ip')
                ?? 'unknown'
@@ -126,26 +135,67 @@ export async function POST(req: Request): Promise<NextResponse> {
 
   await batch.commit()
 
-  // ── Send email (fire-and-forget — OTP doc is written first) ─────────────────
-  const emailProvider = getEmailProvider()
-  if (emailProvider) {
-    // Get name from Firestore for personalisation
-    let displayName = recipient.split('@')[0]
-    try {
-      const userDoc = await adminDb.collection('users').doc(uid).get()
-      if (userDoc.exists) displayName = (userDoc.data()?.name as string | undefined) ?? displayName
-    } catch { /* non-fatal */ }
+  // ── Send verification email — AWAITED so the API response reflects delivery ──
+  // OTP integrity: the OTP doc is already committed above and is NEVER mutated,
+  // deleted, or regenerated here — a delivery failure leaves the stored code valid.
 
-    emailProvider.sendOtpEmail({
-      to:   recipient,
-      name: displayName,
-      code,
-    }).catch(() => { /* email failure never blocks OTP creation */ })
+  // Name for personalisation. A failed lookup is non-fatal (we fall back to the
+  // local-part of the email); it is NOT a delivery failure, so it is not surfaced.
+  let displayName = recipient.split('@')[0]
+  try {
+    const userDoc = await adminDb.collection('users').doc(uid).get()
+    if (userDoc.exists) displayName = (userDoc.data()?.name as string | undefined) ?? displayName
+  } catch (err) {
+    console.warn('[send-otp] displayName lookup failed (non-fatal):', err)
   }
 
-  return NextResponse.json({
+  // Reuse the Notification Engine → SES Provider → Template Registry. The engine
+  // returns the shared NotificationResult (EmailResult) { success, messageId?, error? }.
+  // A missing/disabled provider is surfaced by the engine as
+  // { success: false, error: 'provider_unavailable' } — no separate guard needed.
+  const result = await notificationEngine.send(NotificationType.EMAIL_VERIFICATION, {
+    to:   recipient,
+    name: displayName,
+    code,
+  })
+
+  // Reuse the existing Communication Log (emailLogs). Written for BOTH outcomes,
+  // AFTER the send, and AWAITED so the row is durable before the response returns
+  // (writeEmailLog never throws — it self-logs on failure and returns '').
+  await writeEmailLog({
+    organizerUid:      uid,
+    eventId:           '',
+    eventSlug:         '',
+    eventName:         '',
+    templateKey:       NotificationType.EMAIL_VERIFICATION,
+    recipientEmail:    recipient,
+    recipientName:     displayName,
+    subject:           OTP_EMAIL_SUBJECT,
+    status:            result.success ? 'sent' : 'failed',
+    provider:          EMAIL_PROVIDER_NAME,
+    channel:           'email',
+    providerMessageId: result.messageId,
+    // Server-only diagnostic (full SES exception) is persisted here for debugging;
+    // it is NEVER returned to the client (the response below stays generic).
+    error:             result.success ? undefined : (result.errorDetail ?? result.error),
+  })
+
+  const responseBody = {
     otpId,
     expiresAt:   expiresAt.toISOString(),
-    resendAfter: new Date(now + OTP_RESEND_WAIT).toISOString(),
-  })
+    resendAfter: new Date(now + resendWaitMs).toISOString(),
+  }
+
+  // Do NOT pretend success when delivery failed. The OTP remains valid, so its
+  // metadata is still returned, but with a structured, non-2xx error. The
+  // normalized provider reason is recorded only in emailLogs — never leaked to the
+  // client (no raw AWS/SES details in the response body).
+  if (!result.success) {
+    return NextResponse.json(
+      { error: 'EMAIL_DELIVERY_FAILED', ...responseBody },
+      { status: 502 },
+    )
+  }
+
+  return NextResponse.json(responseBody)
 }

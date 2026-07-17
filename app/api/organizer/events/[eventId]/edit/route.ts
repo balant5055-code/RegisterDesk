@@ -17,7 +17,8 @@
 
 import { NextRequest, NextResponse }  from 'next/server'
 import { FieldValue }                 from 'firebase-admin/firestore'
-import { adminAuth, adminDb }         from '@/lib/firebase/admin'
+import { adminDb }                    from '@/lib/firebase/admin'
+import { authorizeWorkspace }         from '@/lib/team/workspace'
 import type { EventEditPayload, EventEditResponse } from '@/types/events'
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -35,15 +36,9 @@ export async function PATCH(
   const { eventId } = await context.params
 
   // ── 1. Auth ────────────────────────────────────────────────────────────────
-  const token = (req.headers.get('authorization') ?? '').replace('Bearer ', '')
-  if (!token) return NextResponse.json({ success: false, error: 'Unauthorized' }, { status: 401 })
-
-  let uid: string
-  try {
-    uid = (await adminAuth.verifyIdToken(token)).uid
-  } catch {
-    return NextResponse.json({ success: false, error: 'Invalid token' }, { status: 401 })
-  }
+  const authz = await authorizeWorkspace(req, 'events')
+  if (!authz.ok) return NextResponse.json({ success: false, error: authz.error }, { status: authz.status })
+  const uid = authz.workspaceUid
 
   // ── 2. Parse body ──────────────────────────────────────────────────────────
   let payload: EventEditPayload

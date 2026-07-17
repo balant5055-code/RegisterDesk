@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useRef, useState } from 'react'
+import { useFeatureFlags } from '@/lib/config/featureFlagsClient'
 import { AnimatePresence, motion } from 'framer-motion'
 import {
   Award,
@@ -40,6 +41,12 @@ import type { BenefitGroup, BenefitItem } from '@/components/wizard/passEventTyp
 
 export type PassType       = 'paid' | 'free' | 'complimentary' | 'invite_only'
 export type PassVisibility = 'public' | 'private' | 'invite_only'
+
+// Early-bird pricing is resolved server-side at charge time via the shared
+// resolver in lib/pricing/earlyBird.ts (used by create-order & submit) and on the
+// register/checkout display, so the discounted price is actually honoured before
+// the cutoff and falls back to the regular price after. The builder UI is enabled.
+const EARLY_BIRD_ENABLED = true
 
 export interface RaceDetails {
   category:       string
@@ -137,10 +144,10 @@ const EASE = [0.22, 1, 0.36, 1] as const
 const formatINR = (n: number) => '₹' + n.toLocaleString('en-IN')
 
 const inputCls =
-  'h-9 w-full rounded-lg border border-border bg-background px-3 text-[12.5px] text-foreground placeholder:text-muted-foreground/60 outline-none transition-colors focus:border-primary/50 focus:ring-2 focus:ring-primary/20'
+  'h-9 w-full rounded-lg border border-border bg-background px-3 text-[14px] text-foreground placeholder:text-muted-foreground/60 outline-none transition-colors focus:border-primary/50 focus:ring-2 focus:ring-primary/20'
 
-const labelCls = 'mb-1 block text-[12px] font-medium text-foreground'
-const hintCls  = 'mt-1 text-[11px] text-muted-foreground'
+const labelCls = 'mb-1 block text-[13px] font-medium text-foreground'
+const hintCls  = 'mt-1 text-[13px] text-muted-foreground'
 
 // ─── Field primitives ──────────────────────────────────────────────────────────
 
@@ -162,7 +169,7 @@ function FieldGroup({
       <label className={labelCls}>
         {label}
         {required && <span className="ml-0.5 text-red-500">*</span>}
-        {optional && <span className="ml-1 text-[10.5px] font-normal text-muted-foreground">(Optional)</span>}
+        {optional && <span className="ml-1 text-[12px] font-normal text-muted-foreground">(Optional)</span>}
       </label>
       {children}
       {hint && <p className={hintCls}>{hint}</p>}
@@ -186,8 +193,8 @@ function Toggle({
   return (
     <div className="flex items-center justify-between gap-4">
       <div className="min-w-0">
-        <p className="text-[12.5px] font-medium text-foreground">{label}</p>
-        {desc && <p className="text-[11.5px] leading-snug text-muted-foreground">{desc}</p>}
+        <p className="text-[14px] font-medium text-foreground">{label}</p>
+        {desc && <p className="text-[13px] leading-snug text-muted-foreground">{desc}</p>}
       </div>
       <button
         type="button"
@@ -305,7 +312,7 @@ function TabBasic({
         {isFreeEvent && (
           <div className="mb-3 flex items-center gap-2 rounded-lg border border-emerald-200/70 bg-emerald-50/60 px-3 py-2.5">
             <Info className="size-3.5 shrink-0 text-emerald-600" aria-hidden />
-            <p className="text-[11.5px] text-emerald-700">
+            <p className="text-[13px] text-emerald-700">
               This is a <span className="font-semibold">Free Event</span> — passes are locked to free access. Price is always ₹0.
             </p>
           </div>
@@ -342,10 +349,10 @@ function TabBasic({
                   <Icon className={cn('size-3.5', selected ? 'text-primary' : 'text-muted-foreground')} aria-hidden />
                 </div>
                 <div className="min-w-0 flex-1">
-                  <p className={cn('text-[12.5px] font-semibold', selected ? 'text-foreground' : 'text-foreground/80')}>
+                  <p className={cn('text-[14px] font-semibold', selected ? 'text-foreground' : 'text-foreground/80')}>
                     {opt.label}
                   </p>
-                  <p className="text-[11.5px] text-muted-foreground">{opt.desc}</p>
+                  <p className="text-[13px] text-muted-foreground">{opt.desc}</p>
                 </div>
                 <div className={cn(
                   'mt-1 flex size-[16px] shrink-0 items-center justify-center rounded-full border-2 transition-all',
@@ -378,14 +385,20 @@ function TabPricing({
   onChange,
   isFreeEvent,
   showPriceErr,
+  ebPriceErr,
+  ebDateErr,
 }: {
   pass:          EventPassFull
   onChange:      (p: Partial<EventPassFull>) => void
   isFreeEvent?:  boolean
   showPriceErr?: boolean
+  ebPriceErr?:   boolean
+  ebDateErr?:    boolean
 }) {
   const isPaid     = pass.type === 'paid'
   const isUnlimited= pass.unlimited
+  // Global early-bird master switch (Business Configuration).
+  const earlyBirdFlag = useFeatureFlags().earlyBird
 
   return (
     <div className="flex flex-col gap-4">
@@ -398,8 +411,8 @@ function TabPricing({
             {isFreeEvent ? (
               <FieldGroup label="Price (₹)" hint="Free events always have ₹0 price">
                 <div className="flex h-9 w-full items-center gap-2 rounded-lg border border-border bg-muted/30 px-3">
-                  <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[11px] font-bold text-emerald-700">FREE</span>
-                  <span className="text-[12.5px] text-muted-foreground">₹0.00</span>
+                  <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[12px] font-bold text-emerald-700">FREE</span>
+                  <span className="text-[13px] text-muted-foreground">₹0.00</span>
                 </div>
               </FieldGroup>
             ) : (
@@ -425,12 +438,13 @@ function TabPricing({
                   />
                 </div>
                 {showPriceErr && (
-                  <p className="mt-1 text-[11.5px] font-medium text-red-500">Enter a valid ticket price.</p>
+                  <p className="mt-1 text-[13px] font-medium text-red-500">Enter a valid ticket price.</p>
                 )}
               </FieldGroup>
             )}
 
-            {/* Early bird price */}
+            {/* Early bird price — disabled in V1 (not enforced at registration) */}
+            {EARLY_BIRD_ENABLED && earlyBirdFlag && (
             <div>
               <div className="mb-1 flex items-center justify-between">
                 <label className={labelCls}>Early Bird Price (₹)</label>
@@ -440,7 +454,7 @@ function TabPricing({
                     earlyBirdEnabled: !pass.earlyBirdEnabled,
                     earlyBirdPrice:   !pass.earlyBirdEnabled ? (pass.earlyBirdPrice ?? 0) : null,
                   })}
-                  className="text-[11px] font-semibold text-primary hover:underline"
+                  className="text-[12px] font-semibold text-primary hover:underline"
                 >
                   {pass.earlyBirdEnabled ? 'Disable' : 'Enable'}
                 </button>
@@ -453,6 +467,7 @@ function TabPricing({
                   className={cn(
                     inputCls, 'pl-8',
                     (!pass.earlyBirdEnabled || !isPaid) && 'cursor-not-allowed bg-muted/30 text-muted-foreground',
+                    ebPriceErr && 'border-red-400 focus:border-red-400 focus:ring-red-400/20',
                   )}
                   placeholder="0"
                   value={pass.earlyBirdEnabled ? (pass.earlyBirdPrice ?? '') : ''}
@@ -460,20 +475,26 @@ function TabPricing({
                   disabled={!pass.earlyBirdEnabled || !isPaid}
                 />
               </div>
-              {pass.earlyBirdEnabled && isPaid && (
+              {ebPriceErr ? (
+                <p className="mt-1 text-[13px] font-medium text-red-500">
+                  Early bird price must be above ₹0 and no higher than the regular price.
+                </p>
+              ) : pass.earlyBirdEnabled && isPaid && (
                 <p className={hintCls}>Discounted price before early bird end date</p>
               )}
             </div>
+            )}
           </div>
 
           {isPaid && (
-            <p className="flex items-center gap-1.5 text-[11.5px] text-muted-foreground">
+            <p className="flex items-center gap-1.5 text-[13px] text-muted-foreground">
               <Info className="size-3.5 shrink-0 text-muted-foreground/60" aria-hidden />
               Taxes &amp; platform fees will be added at checkout
             </p>
           )}
 
           {/* Enable early bird pricing toggle */}
+          {EARLY_BIRD_ENABLED && earlyBirdFlag && (
           <div className="rounded-lg border border-border/60 bg-muted/[0.03] px-4 py-3">
             <Toggle
               checked={pass.earlyBirdEnabled}
@@ -485,6 +506,35 @@ function TabPricing({
               desc="Show a discounted price before a cutoff date"
             />
           </div>
+          )}
+
+          {/* Early bird end date — pass-level; grouped here with the early bird
+              price so the whole early-bird cluster lives in the Pricing section
+              (single source of truth: pricing.passes[].earlyBirdEndDate). */}
+          {EARLY_BIRD_ENABLED && earlyBirdFlag && pass.earlyBirdEnabled && (
+          <FieldGroup
+            label="Early Bird Ends"
+            hint="Early bird pricing expires at this date and time, then falls back to the regular price"
+          >
+            <div className="relative">
+              <Calendar className="pointer-events-none absolute left-3 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" aria-hidden />
+              <input
+                type="datetime-local"
+                className={cn(
+                  inputCls, 'pl-8',
+                  ebDateErr && 'border-red-400 focus:border-red-400 focus:ring-red-400/20',
+                )}
+                value={pass.earlyBirdEndDate}
+                onChange={e => onChange({ earlyBirdEndDate: e.target.value })}
+              />
+            </div>
+            {ebDateErr && (
+              <p className="mt-1 text-[13px] font-medium text-red-500">
+                Set an end date so the early bird discount has a defined expiry.
+              </p>
+            )}
+          </FieldGroup>
+          )}
         </div>
       </SectionCard>
 
@@ -518,7 +568,7 @@ function TabPricing({
                 disabled={isUnlimited}
               />
               {!isUnlimited && pass.quantity !== null && (
-                <p className="mt-1 text-[11px] font-medium text-emerald-600">
+                <p className="mt-1 text-[12px] font-medium text-emerald-600">
                   {pass.quantity.toLocaleString('en-IN')} seats available
                 </p>
               )}
@@ -597,31 +647,10 @@ function TabPeriod({
           </FieldGroup>
         </div>
 
-        <p className="mt-3 text-[11.5px] text-muted-foreground">
+        <p className="mt-3 text-[13px] text-muted-foreground">
           Pass will be visible and bookable between these dates.
         </p>
       </SectionCard>
-
-      {/* Early bird end date — only shown when early bird is enabled */}
-      {pass.earlyBirdEnabled && (
-        <SectionCard>
-          <FieldGroup
-            label="Early Bird End Date"
-            optional
-            hint="Early bird pricing expires at this date and time"
-          >
-            <div className="relative">
-              <Calendar className="pointer-events-none absolute left-3 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" aria-hidden />
-              <input
-                type="datetime-local"
-                className={cn(inputCls, 'pl-8')}
-                value={pass.earlyBirdEndDate}
-                onChange={e => onChange({ earlyBirdEndDate: e.target.value })}
-              />
-            </div>
-          </FieldGroup>
-        </SectionCard>
-      )}
 
       {/* Show remaining seats */}
       <SectionCard>
@@ -665,9 +694,9 @@ function RaceDetailsSection({
         </div>
         <div className="min-w-0 flex-1">
           <p className="text-[13px] font-semibold text-foreground">{sportCfg.sectionLabel}</p>
-          <p className="text-[11px] text-muted-foreground">Required for sports / fitness passes</p>
+          <p className="text-[12px] text-muted-foreground">Required for sports / fitness passes</p>
         </div>
-        <span className="shrink-0 rounded-full bg-orange-50 px-2 py-0.5 text-[10.5px] font-semibold text-orange-600">
+        <span className="shrink-0 rounded-full bg-orange-50 px-2 py-0.5 text-[12px] font-semibold text-orange-600">
           Sports &amp; Fitness
         </span>
       </div>
@@ -760,7 +789,7 @@ function RaceDetailsSection({
                 </div>
               </FieldGroup>
             </div>
-            <p className="mt-2 text-[11px] text-muted-foreground">
+            <p className="mt-2 text-[12px] text-muted-foreground">
               Age will be validated during registration.
             </p>
           </div>
@@ -788,7 +817,7 @@ function BenefitGroupPanel({
       <div className="flex items-center justify-between border-b border-border px-4 py-2.5">
         <p className="text-[12px] font-semibold text-foreground">{group.label}</p>
         {checkedCount > 0 && (
-          <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[10.5px] font-semibold text-primary">
+          <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[12px] font-semibold text-primary">
             {checkedCount} selected
           </span>
         )}
@@ -803,7 +832,7 @@ function BenefitGroupPanel({
               aria-pressed={checked}
               onClick={() => onToggle(benefit.id)}
               className={cn(
-                'flex items-center gap-2.5 bg-card px-4 py-2.5 text-left text-[12.5px] transition-colors',
+                'flex items-center gap-2.5 bg-card px-4 py-2.5 text-left text-[14px] transition-colors',
                 checked
                   ? 'text-foreground'
                   : 'text-muted-foreground hover:bg-muted/[0.04] hover:text-foreground',
@@ -870,7 +899,7 @@ function TabBenefits({
           {' '}Selecting a different event type updates this list automatically.
         </p>
         {totalSelected > 0 && (
-          <span className="ml-auto shrink-0 rounded-full bg-emerald-50 px-2 py-0.5 text-[10.5px] font-bold text-emerald-700">
+          <span className="ml-auto shrink-0 rounded-full bg-emerald-50 px-2 py-0.5 text-[12px] font-bold text-emerald-700">
             {totalSelected} selected
           </span>
         )}
@@ -889,7 +918,7 @@ function TabBenefits({
       {/* Custom benefits */}
       <div className="rounded-xl border border-border bg-card p-4 shadow-sm">
         <p className="mb-1 text-[13px] font-semibold text-foreground">Custom Benefits</p>
-        <p className="mb-3 text-[11.5px] text-muted-foreground">
+        <p className="mb-3 text-[13px] text-muted-foreground">
           Add any benefit not listed above. Visible to attendees.
         </p>
 
@@ -902,7 +931,7 @@ function TabBenefits({
               >
                 <div className="flex items-center gap-2">
                   <Check className="size-3.5 shrink-0 text-primary" aria-hidden />
-                  <span className="text-[12.5px] text-foreground">{b}</span>
+                  <span className="text-[13px] text-foreground">{b}</span>
                 </div>
                 <button
                   type="button"
@@ -972,10 +1001,10 @@ function AdvAccordion({
           <Icon className="size-3.5 text-muted-foreground" aria-hidden />
         </div>
         <div className="min-w-0 flex-1">
-          <p className="text-[12.5px] font-semibold text-foreground">{label}</p>
-          <p className="text-[11.5px] text-muted-foreground">{desc}</p>
+          <p className="text-[14px] font-semibold text-foreground">{label}</p>
+          <p className="text-[13px] text-muted-foreground">{desc}</p>
         </div>
-        <span className="shrink-0 rounded-full bg-muted/50 px-2 py-0.5 text-[10.5px] font-medium text-muted-foreground">
+        <span className="shrink-0 rounded-full bg-muted/50 px-2 py-0.5 text-[12px] font-medium text-muted-foreground">
           {badge}
         </span>
         {open
@@ -1073,7 +1102,7 @@ function TabAdvanced({
                   </div>
                 </div>
                 <p className="text-[12px] font-semibold text-foreground">{opt.label}</p>
-                <p className="text-[11px] text-muted-foreground">{opt.desc}</p>
+                <p className="text-[12px] text-muted-foreground">{opt.desc}</p>
               </button>
             )
           })}
@@ -1114,8 +1143,8 @@ function TabAdvanced({
             label="Coupon Eligible"
             desc="Allow discount codes to be applied to this pass"
           />
-          <p className="text-[11px] text-muted-foreground">
-            Early Bird pricing is configured in the Pricing tab. Bulk discounts and coupon rules can be added from event settings.
+          <p className="text-[12px] text-muted-foreground">
+            Bulk discounts and coupon rules can be added from event settings.
           </p>
         </div>
       </AdvAccordion>
@@ -1134,7 +1163,7 @@ function TabAdvanced({
             label="Tax Applicable"
             desc="Apply GST or applicable taxes to this pass price"
           />
-          <p className="text-[11px] text-muted-foreground">
+          <p className="text-[12px] text-muted-foreground">
             Platform fee settings and detailed tax rules can be configured from event settings after publishing.
           </p>
         </div>
@@ -1168,7 +1197,7 @@ function TabAdvanced({
               />
             </FieldGroup>
           </div>
-          <p className="text-[11px] text-muted-foreground">
+          <p className="text-[12px] text-muted-foreground">
             Badge color and special label options are available from event settings.
           </p>
         </div>
@@ -1232,7 +1261,7 @@ function PassPreview({
     ...pass.customBenefits,
   ]
   const isPaid       = pass.type === 'paid'
-  const hasEarlyBird = isPaid && pass.earlyBirdEnabled && (pass.earlyBirdPrice ?? 0) > 0
+  const hasEarlyBird = EARLY_BIRD_ENABLED && isPaid && pass.earlyBirdEnabled && (pass.earlyBirdPrice ?? 0) > 0
   const displayPrice =
     pass.type === 'free'          ? 'Free'
     : pass.type === 'complimentary' ? 'Complimentary'
@@ -1241,7 +1270,7 @@ function PassPreview({
 
   return (
     <aside className="flex flex-col gap-3">
-      <p className="text-[11.5px] font-semibold uppercase tracking-wider text-muted-foreground">
+      <p className="text-[12px] font-semibold uppercase tracking-wider text-muted-foreground">
         Pass Preview
       </p>
 
@@ -1253,7 +1282,7 @@ function PassPreview({
           {pass.featured && (
             <div className="absolute right-3 top-3 flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5">
               <Star className="size-2.5 text-amber-600" aria-hidden />
-              <span className="text-[10px] font-bold text-amber-700">Featured</span>
+              <span className="text-[12px] font-bold text-amber-700">Featured</span>
             </div>
           )}
           <div className="flex items-start gap-2.5">
@@ -1265,14 +1294,14 @@ function PassPreview({
                 {pass.name || <span className="text-muted-foreground/50">Pass Name</span>}
               </p>
               {pass.code && (
-                <p className="mt-0.5 text-[10.5px] font-mono font-medium text-muted-foreground">
+                <p className="mt-0.5 text-[12px] font-mono font-medium text-muted-foreground">
                   {pass.code}
                 </p>
               )}
             </div>
           </div>
           {pass.type !== 'paid' && (
-            <span className="mt-2 inline-block rounded-full bg-emerald-100 px-2 py-0.5 text-[10.5px] font-semibold capitalize text-emerald-700">
+            <span className="mt-2 inline-block rounded-full bg-emerald-100 px-2 py-0.5 text-[12px] font-semibold capitalize text-emerald-700">
               {pass.type.replace('_', ' ')}
             </span>
           )}
@@ -1291,18 +1320,18 @@ function PassPreview({
             )}
           </div>
           {hasEarlyBird && (
-            <div className="mt-1 flex items-center gap-1.5 text-[11px] font-semibold text-emerald-600">
+            <div className="mt-1 flex items-center gap-1.5 text-[12px] font-semibold text-emerald-600">
               <Tag className="size-3" aria-hidden />
               Early Bird: {formatINR(pass.earlyBirdPrice ?? 0)}
             </div>
           )}
           {!pass.unlimited && pass.quantity !== null && (
-            <p className="mt-1 text-[11px] text-muted-foreground">
+            <p className="mt-1 text-[12px] text-muted-foreground">
               {pass.quantity.toLocaleString('en-IN')} seats available
             </p>
           )}
           {pass.unlimited && (
-            <p className="mt-1 flex items-center gap-1 text-[11px] text-muted-foreground">
+            <p className="mt-1 flex items-center gap-1 text-[12px] text-muted-foreground">
               <Zap className="size-3 text-emerald-500" aria-hidden />
               Unlimited seats
             </p>
@@ -1319,7 +1348,7 @@ function PassPreview({
         {/* Benefits */}
         {allBenefits.length > 0 && (
           <div className="px-5 py-4">
-            <p className="mb-2 text-[10.5px] font-semibold uppercase tracking-wider text-muted-foreground">
+            <p className="mb-2 text-[12px] font-semibold uppercase tracking-wider text-muted-foreground">
               Includes
             </p>
             <ul className="space-y-1.5">
@@ -1333,7 +1362,7 @@ function PassPreview({
               ))}
             </ul>
             {allBenefits.length > 5 && (
-              <p className="mt-1.5 text-[11.5px] font-medium text-primary">
+              <p className="mt-1.5 text-[13px] font-medium text-primary">
                 + {allBenefits.length - 5} more benefits
               </p>
             )}
@@ -1345,7 +1374,7 @@ function PassPreview({
           pass.raceDetails.category || pass.raceDetails.minAge !== null || pass.raceDetails.maxAge !== null
         ) && (
           <div className="border-t border-border px-5 py-3">
-            <p className="mb-1.5 flex items-center gap-1.5 text-[10.5px] font-semibold uppercase tracking-wider text-muted-foreground">
+            <p className="mb-1.5 flex items-center gap-1.5 text-[12px] font-semibold uppercase tracking-wider text-muted-foreground">
               <Timer className="size-3" aria-hidden />
               {sportCfg.sectionLabel}
             </p>
@@ -1373,7 +1402,7 @@ function PassPreview({
 
         {/* Visibility */}
         <div className="border-t border-border px-5 py-3">
-          <div className="flex items-center gap-2 text-[11.5px] text-muted-foreground">
+          <div className="flex items-center gap-2 text-[13px] text-muted-foreground">
             {pass.visibility === 'public'
               ? <Globe className="size-3.5 shrink-0" aria-hidden />
               : pass.visibility === 'private'
@@ -1398,13 +1427,13 @@ function PassPreview({
       {/* Quick templates */}
       <div className="rounded-xl border border-border bg-card p-4 shadow-sm">
         <p className="mb-1 text-[12px] font-semibold text-foreground">Quick Templates</p>
-        <p className="mb-3 text-[11px] text-muted-foreground">Use templates to save time</p>
+        <p className="mb-3 text-[12px] text-muted-foreground">Use templates to save time</p>
         <div className="grid grid-cols-2 gap-1.5">
           {subtypeCfg.templates.map(t => (
             <button
               key={t.name}
               type="button"
-              className="rounded-lg border border-border bg-card px-2 py-2 text-left text-[11.5px] font-medium text-foreground transition-colors hover:border-primary/30 hover:bg-primary/[0.03] hover:text-primary"
+              className="rounded-lg border border-border bg-card px-2 py-2 text-left text-[13px] font-medium text-foreground transition-colors hover:border-primary/30 hover:bg-primary/[0.03] hover:text-primary"
             >
               {t.name}
             </button>
@@ -1414,8 +1443,8 @@ function PassPreview({
 
       {/* Help */}
       <div className="rounded-xl border border-primary/10 bg-primary/[0.04] px-4 py-3">
-        <p className="mb-0.5 text-[11.5px] font-semibold text-foreground">Tip</p>
-        <p className="text-[11px] leading-relaxed text-muted-foreground">
+        <p className="mb-0.5 text-[13px] font-semibold text-foreground">Tip</p>
+        <p className="text-[12px] leading-relaxed text-muted-foreground">
           {subtypeCfg.contextTip}
         </p>
       </div>
@@ -1452,6 +1481,9 @@ export function AddPassEditor({
   )
   const scrollRef = useRef<HTMLDivElement>(null)
   const isEditing = Boolean(editingPass)
+  // Global early-bird master switch (Business Configuration). When off, the
+  // early-bird pricing section is disabled in the pass editor.
+  const earlyBirdFlag = useFeatureFlags().earlyBird
 
   useEffect(() => {
     if (isOpen) {
@@ -1484,11 +1516,23 @@ export function AddPassEditor({
   const hasName     = pass.name.trim().length > 0
   const needsPrice  = pass.type === 'paid' && !isFreeEvent
   const hasPrice    = pass.price > 0
-  const canSave     = hasName && (!needsPrice || hasPrice)
+
+  // Early-bird validation (only when the feature is on and the pass is priced).
+  // Rules: discount must be > 0 and <= the regular price, and a cutoff date is
+  // required so the discount has a defined expiry (after which it falls back to
+  // the regular price). Enforced here so a mispriced early bird can't be saved.
+  const ebOn          = EARLY_BIRD_ENABLED && earlyBirdFlag && needsPrice && hasPrice && pass.earlyBirdEnabled
+  const ebPriceErr    = ebOn && !(typeof pass.earlyBirdPrice === 'number'
+                                  && pass.earlyBirdPrice > 0
+                                  && pass.earlyBirdPrice <= pass.price)
+  const ebDateErr     = ebOn && !pass.earlyBirdEndDate.trim()
+
+  const canSave     = hasName && (!needsPrice || hasPrice) && !ebPriceErr && !ebDateErr
   const showPriceErr = needsPrice && !hasPrice && hasName
 
   const handleSave = () => {
     if (!hasName)    { setActiveTab('basic');   return }
+    // Every price/early-bird blocker now lives on the Pricing tab.
     if (!canSave)    { setActiveTab('pricing'); return }
     onSave({ ...pass, status: pass.status })
     onClose()
@@ -1533,7 +1577,7 @@ export function AddPassEditor({
                 <p className="text-[14.5px] font-bold text-foreground">
                   {isEditing ? 'Edit Pass / Ticket' : 'Add New Pass / Ticket'}
                 </p>
-                <p className="text-[11.5px] text-muted-foreground">
+                <p className="text-[13px] text-muted-foreground">
                   {isEditing ? 'Update this pass for your event' : 'Create a new pass or ticket type for your event'}
                 </p>
               </div>
@@ -1574,7 +1618,7 @@ export function AddPassEditor({
               {/* Form */}
               <div className="min-w-0 flex-1 p-5 xl:pr-3">
                 {activeTab === 'basic'    && <TabBasic    pass={pass} onChange={handleChange} eventTypeId={eventTypeId} eventSubtype={pass.eventSubtype} isFreeEvent={isFreeEvent} />}
-                {activeTab === 'pricing'  && <TabPricing  pass={pass} onChange={handleChange} isFreeEvent={isFreeEvent} showPriceErr={showPriceErr} />}
+                {activeTab === 'pricing'  && <TabPricing  pass={pass} onChange={handleChange} isFreeEvent={isFreeEvent} showPriceErr={showPriceErr} ebPriceErr={ebPriceErr} ebDateErr={ebDateErr} />}
                 {activeTab === 'period'   && <TabPeriod   pass={pass} onChange={handleChange} />}
                 {activeTab === 'benefits' && (
                   <TabBenefits pass={pass} onChange={handleChange} eventTypeId={eventTypeId} eventSubtype={pass.eventSubtype} />
@@ -1603,8 +1647,12 @@ export function AddPassEditor({
                 {/* Right: Save as Draft + Save Pass */}
                 <div className="flex items-center gap-2">
                   {!canSave && (
-                    <p className="hidden text-[11.5px] text-muted-foreground sm:block">
-                      {!hasName ? 'Enter a pass name to save' : 'Enter a valid ticket price.'}
+                    <p className="hidden text-[13px] text-muted-foreground sm:block">
+                      {!hasName          ? 'Enter a pass name to save'
+                        : (needsPrice && !hasPrice) ? 'Enter a valid ticket price.'
+                        : ebPriceErr       ? 'Fix the early bird price to save.'
+                        : ebDateErr        ? 'Set an early bird end date to save.'
+                        : 'Enter a valid ticket price.'}
                     </p>
                   )}
                   {onSaveDraft && (

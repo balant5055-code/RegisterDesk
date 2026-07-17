@@ -62,10 +62,10 @@ export interface PassSummary {
 const EASE = [0.22, 1, 0.36, 1] as const
 
 const inputCls =
-  'h-9 w-full rounded-lg border border-border bg-background px-3 text-[12.5px] text-foreground placeholder:text-muted-foreground/60 outline-none transition-colors focus:border-primary/50 focus:ring-2 focus:ring-primary/20'
+  'h-9 w-full rounded-lg border border-border bg-background px-3 text-[14px] text-foreground placeholder:text-muted-foreground/60 outline-none transition-colors focus:border-primary/50 focus:ring-2 focus:ring-primary/20'
 
-const labelCls = 'mb-1 block text-[12px] font-medium text-foreground'
-const hintCls  = 'mt-1 text-[11px] text-muted-foreground'
+const labelCls = 'mb-1 block text-[13px] font-medium text-foreground'
+const hintCls  = 'mt-1 text-[13px] text-muted-foreground'
 
 type Tab = 'template' | 'fields' | 'settings' | 'logic'
 
@@ -96,8 +96,8 @@ function Toggle({ checked, onChange, label, desc }: { checked: boolean; onChange
   return (
     <div className="flex items-center justify-between gap-4">
       <div className="min-w-0">
-        <p className="text-[12.5px] font-medium text-foreground">{label}</p>
-        {desc && <p className="text-[11.5px] leading-snug text-muted-foreground">{desc}</p>}
+        <p className="text-[14px] font-medium text-foreground">{label}</p>
+        {desc && <p className="text-[13px] leading-snug text-muted-foreground">{desc}</p>}
       </div>
       <button
         type="button"
@@ -121,7 +121,7 @@ function Toggle({ checked, onChange, label, desc }: { checked: boolean; onChange
 function FieldTypeBadge({ type }: { type: FieldType }) {
   const label = FIELD_TYPES.find(t => t.id === type)?.label ?? type
   return (
-    <span className="rounded-full bg-muted/60 px-2 py-0.5 text-[10.5px] font-medium text-muted-foreground">
+    <span className="rounded-full bg-muted/60 px-2 py-0.5 text-[12px] font-medium text-muted-foreground">
       {label}
     </span>
   )
@@ -234,7 +234,7 @@ function TemplateTab({
       <SectionCard>
         <div className="flex flex-col items-center gap-2 py-8 text-center">
           <FileText className="size-8 text-muted-foreground/30" aria-hidden />
-          <p className="text-[12.5px] font-semibold text-foreground">No templates found</p>
+          <p className="text-[14px] font-semibold text-foreground">No templates found</p>
           <p className="text-[12px] text-muted-foreground">Add fields manually in the Fields tab.</p>
         </div>
       </SectionCard>
@@ -271,15 +271,15 @@ function TemplateTab({
                   <ClipboardList className={cn('size-3.5', isSelected ? 'text-primary' : 'text-muted-foreground')} aria-hidden />
                 </div>
                 {isSelected && (
-                  <span className="rounded-full bg-primary px-2 py-0.5 text-[10px] font-bold text-primary-foreground">
+                  <span className="rounded-full bg-primary px-2 py-0.5 text-[12px] font-bold text-primary-foreground">
                     Active
                   </span>
                 )}
               </div>
-              <p className={cn('mt-1.5 text-[12.5px] font-semibold', isSelected ? 'text-foreground' : 'text-foreground/80')}>
+              <p className={cn('mt-1.5 text-[14px] font-semibold', isSelected ? 'text-foreground' : 'text-foreground/80')}>
                 {t.label}
               </p>
-              <p className="text-[11.5px] leading-snug text-muted-foreground">{t.description}</p>
+              <p className="text-[13px] leading-snug text-muted-foreground">{t.description}</p>
             </button>
           )
         })}
@@ -351,26 +351,26 @@ function FieldsTab({
             </span>
             <FieldTypeBadge type={field.type} />
             {field.section && field.section !== 'basic' && (
-              <span className="rounded-full bg-violet-50 px-1.5 py-px text-[10px] font-medium text-violet-600">{field.section}</span>
+              <span className="rounded-full bg-violet-50 px-1.5 py-px text-[12px] font-medium text-violet-600">{field.section}</span>
             )}
             {Array.isArray(field.passVisibility) && field.passVisibility.length > 0 && (
-              <span className="rounded-full bg-sky-50 px-1.5 py-px text-[10px] font-medium text-sky-600">
+              <span className="rounded-full bg-sky-50 px-1.5 py-px text-[12px] font-medium text-sky-600">
                 {field.passVisibility.length} pass{field.passVisibility.length !== 1 ? 'es' : ''}
               </span>
             )}
             {Array.isArray(field.passVisibility) && field.passVisibility.length === 0 && (
-              <span className="rounded-full bg-amber-50 px-1.5 py-px text-[10px] font-medium text-amber-600">no pass</span>
+              <span className="rounded-full bg-amber-50 px-1.5 py-px text-[12px] font-medium text-amber-600">no pass</span>
             )}
           </div>
         </div>
 
         <div className="flex w-[52px] justify-center">
-          <span className={cn('rounded-full px-2 py-px text-[10.5px] font-semibold', field.required ? 'bg-rose-50 text-rose-600' : 'bg-muted text-muted-foreground')}>
+          <span className={cn('rounded-full px-2 py-px text-[12px] font-semibold', field.required ? 'bg-rose-50 text-rose-600' : 'bg-muted text-muted-foreground')}>
             {field.required ? 'Req' : 'Opt'}
           </span>
         </div>
         <div className="flex w-[52px] justify-center">
-          <span className={cn('rounded-full px-2 py-px text-[10.5px] font-semibold', field.visible ? 'bg-emerald-50 text-emerald-600' : 'bg-muted text-muted-foreground')}>
+          <span className={cn('rounded-full px-2 py-px text-[12px] font-semibold', field.visible ? 'bg-emerald-50 text-emerald-600' : 'bg-muted text-muted-foreground')}>
             {field.visible ? 'Show' : 'Hide'}
           </span>
         </div>
@@ -379,9 +379,9 @@ function FieldsTab({
           {isDel ? (
             <div className="flex items-center gap-1">
               <button type="button" onClick={() => { onDeleteField(field.id, sectionId); setDelFieldConfirmKey(null) }}
-                className="rounded bg-red-500 px-2 py-0.5 text-[10.5px] font-semibold text-white hover:bg-red-600">Delete</button>
+                className="rounded bg-red-500 px-2 py-0.5 text-[12px] font-semibold text-white hover:bg-red-600">Delete</button>
               <button type="button" onClick={() => setDelFieldConfirmKey(null)}
-                className="rounded px-1.5 py-0.5 text-[10.5px] text-muted-foreground hover:bg-muted/50">✕</button>
+                className="rounded px-1.5 py-0.5 text-[13px] text-muted-foreground hover:bg-muted/50">✕</button>
             </div>
           ) : (
             <>
@@ -453,16 +453,16 @@ function FieldsTab({
                   <p className="flex-1 truncate text-[13px] font-semibold text-foreground">{section.title}</p>
                 )}
 
-                <span className="shrink-0 rounded-full bg-muted/60 px-2 py-0.5 text-[10.5px] font-medium text-muted-foreground">
+                <span className="shrink-0 rounded-full bg-muted/60 px-2 py-0.5 text-[12px] font-medium text-muted-foreground">
                   {section.fields.length} field{section.fields.length !== 1 ? 's' : ''}
                 </span>
 
                 {isDelSec ? (
                   <div className="flex items-center gap-1">
                     <button type="button" onClick={() => { onDeleteSection(section.id); setDelSectionConfirmId(null) }}
-                      className="rounded bg-red-500 px-2 py-0.5 text-[10.5px] font-semibold text-white hover:bg-red-600">Delete</button>
+                      className="rounded bg-red-500 px-2 py-0.5 text-[12px] font-semibold text-white hover:bg-red-600">Delete</button>
                     <button type="button" onClick={() => setDelSectionConfirmId(null)}
-                      className="rounded px-1.5 py-0.5 text-[10.5px] text-muted-foreground hover:bg-muted/50">✕</button>
+                      className="rounded px-1.5 py-0.5 text-[13px] text-muted-foreground hover:bg-muted/50">✕</button>
                   </div>
                 ) : (
                   <div className="flex items-center gap-0.5">
@@ -493,9 +493,9 @@ function FieldsTab({
               {/* Field column headers (only if fields exist) */}
               {section.fields.length > 0 && (
                 <div className="grid grid-cols-[1fr_auto_auto_auto] gap-2 border-b border-border/40 bg-muted/[0.02] px-4 py-1.5">
-                  <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Field</p>
-                  <p className="w-[52px] text-center text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Req</p>
-                  <p className="w-[52px] text-center text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Vis</p>
+                  <p className="text-[12px] font-semibold uppercase tracking-wider text-muted-foreground">Field</p>
+                  <p className="w-[52px] text-center text-[12px] font-semibold uppercase tracking-wider text-muted-foreground">Req</p>
+                  <p className="w-[52px] text-center text-[12px] font-semibold uppercase tracking-wider text-muted-foreground">Vis</p>
                   <p className="w-[80px]" />
                 </div>
               )}
@@ -532,7 +532,7 @@ function FieldsTab({
         <div className="flex gap-2">
           <input
             autoFocus
-            className="h-9 flex-1 rounded-lg border border-primary/50 bg-background px-3 text-[12.5px] text-foreground outline-none focus:ring-2 focus:ring-primary/20"
+            className="h-9 flex-1 rounded-lg border border-primary/50 bg-background px-3 text-[14px] text-foreground outline-none focus:ring-2 focus:ring-primary/20"
             placeholder="Section title, e.g. Medical Information…"
             value={newSectionTitle}
             onChange={e => setNewSectionTitle(e.target.value)}
@@ -587,7 +587,7 @@ function ModeCard({
       )}
     >
       <div className="flex items-center justify-between gap-2">
-        <p className={cn('text-[12.5px] font-semibold', selected ? 'text-foreground' : 'text-foreground/80')}>
+        <p className={cn('text-[14px] font-semibold', selected ? 'text-foreground' : 'text-foreground/80')}>
           {label}
         </p>
         <div className={cn(
@@ -597,7 +597,7 @@ function ModeCard({
           {selected && <div className="size-[8px] rounded-full bg-white" />}
         </div>
       </div>
-      {desc && <p className="text-[11.5px] leading-snug text-muted-foreground">{desc}</p>}
+      {desc && <p className="text-[13px] leading-snug text-muted-foreground">{desc}</p>}
     </button>
   )
 }
@@ -717,7 +717,7 @@ function SettingsTab({
                 />
               </div>
               {approvalModeSource === 'synced' && (
-                <p className="mt-2 text-[11px] text-muted-foreground">
+                <p className="mt-2 text-[12px] text-muted-foreground">
                   Approval mode is locked to the Access Control setting from Step 3.
                 </p>
               )}
@@ -773,7 +773,7 @@ function SettingsTab({
 
           {/* Status flow display */}
           <div className="rounded-lg border border-border/60 bg-muted/[0.03] px-4 py-3">
-            <p className="mb-2 text-[10.5px] font-semibold uppercase tracking-wider text-muted-foreground">
+            <p className="mb-2 text-[12px] font-semibold uppercase tracking-wider text-muted-foreground">
               Registration Status Flow
             </p>
             <div className="flex flex-wrap items-center gap-1.5">
@@ -786,18 +786,18 @@ function SettingsTab({
               ].map(({ s }, i, arr) => (
                 <div key={s} className="flex items-center gap-1">
                   <span className={cn(
-                    'rounded-full px-2 py-0.5 text-[10.5px] font-medium',
+                    'rounded-full px-2 py-0.5 text-[12px] font-medium',
                     s === 'Confirmed' || s === 'Checked In'  ? 'bg-emerald-50 text-emerald-700'
                     : s === 'Pending Approval'                ? 'bg-amber-50 text-amber-700'
                     : 'bg-muted text-muted-foreground',
                   )}>
                     {s}
                   </span>
-                  {i < arr.length - 1 && <span className="text-[10px] text-muted-foreground/40">→</span>}
+                  {i < arr.length - 1 && <span className="text-[12px] text-muted-foreground/40">→</span>}
                 </div>
               ))}
             </div>
-            <p className="mt-1.5 text-[10.5px] text-muted-foreground">
+            <p className="mt-1.5 text-[13px] text-muted-foreground">
               Also: <span className="text-rose-500 font-medium">Rejected</span>
               {', '}
               <span className="font-medium text-muted-foreground">Cancelled</span>
@@ -1037,7 +1037,7 @@ function LogicTab({
         <SectionCard>
           <div className="flex flex-col items-center gap-2 py-8 text-center">
             <Zap className="size-8 text-muted-foreground/20" aria-hidden />
-            <p className="text-[12.5px] font-semibold text-foreground">No fields to connect</p>
+            <p className="text-[14px] font-semibold text-foreground">No fields to connect</p>
             <p className="text-[12px] text-muted-foreground max-w-[220px]">
               Add at least two fields in the Sections & Fields tab to create conditional rules.
             </p>
@@ -1055,7 +1055,7 @@ function LogicTab({
               ].map(({ label, value, className }) => (
                 <div key={label} className="rounded-xl border border-border bg-card px-3 py-2.5 text-center shadow-sm">
                   <p className={cn('text-[18px] font-bold', className)}>{value}</p>
-                  <p className="text-[10.5px] text-muted-foreground">{label}</p>
+                  <p className="text-[13px] text-muted-foreground">{label}</p>
                 </div>
               ))}
             </div>
@@ -1078,7 +1078,7 @@ function LogicTab({
                   >
                     {/* Rule number + enabled indicator */}
                     <div className="mt-0.5 flex shrink-0 flex-col items-center gap-1">
-                      <span className="text-[10px] font-semibold text-muted-foreground/50">{idx + 1}</span>
+                      <span className="text-[12px] font-semibold text-muted-foreground/50">{idx + 1}</span>
                       <span className={cn(
                         'size-[7px] rounded-full',
                         enabled ? 'bg-emerald-500' : 'bg-muted-foreground/25',
@@ -1091,7 +1091,7 @@ function LogicTab({
                         {ruleDescription(rule)}
                       </p>
                       {stale && (
-                        <div className="mt-1 flex items-center gap-1 text-[11px] text-amber-600">
+                        <div className="mt-1 flex items-center gap-1 text-[12px] text-amber-600">
                           <AlertTriangle className="size-3 shrink-0" aria-hidden />
                           References a deleted field — update or remove this rule
                         </div>
@@ -1103,11 +1103,11 @@ function LogicTab({
                       {isDel ? (
                         <>
                           <button type="button" onClick={() => deleteRule(rule.id)}
-                            className="rounded bg-red-500 px-2 py-0.5 text-[10.5px] font-semibold text-white hover:bg-red-600">
+                            className="rounded bg-red-500 px-2 py-0.5 text-[12px] font-semibold text-white hover:bg-red-600">
                             Delete
                           </button>
                           <button type="button" onClick={() => setDelConfirmId(null)}
-                            className="rounded px-1.5 py-0.5 text-[10.5px] text-muted-foreground hover:bg-muted/50">
+                            className="rounded px-1.5 py-0.5 text-[13px] text-muted-foreground hover:bg-muted/50">
                             ✕
                           </button>
                         </>
@@ -1231,7 +1231,7 @@ function RuleEditModal({ rule, fields, allRules, onSave, onCancel }: {
 
             {/* WHEN block */}
             <div className="rounded-xl border border-border bg-card p-4 shadow-sm">
-              <p className="mb-3 text-[11px] font-bold uppercase tracking-widest text-primary">When</p>
+              <p className="mb-3 text-[12px] font-bold uppercase tracking-widest text-primary">When</p>
               <div className="flex flex-col gap-3">
                 <div>
                   <label className={labelCls}>Source Field</label>
@@ -1241,7 +1241,7 @@ function RuleEditModal({ rule, fields, allRules, onSave, onCancel }: {
                     {fields.map(f => <option key={f.id} value={f.id}>{f.label}</option>)}
                   </select>
                   {srcDeleted && (
-                    <p className="mt-1 flex items-center gap-1 text-[11px] text-amber-600">
+                    <p className="mt-1 flex items-center gap-1 text-[12px] text-amber-600">
                       <AlertTriangle className="size-3 shrink-0" /> This field has been deleted
                     </p>
                   )}
@@ -1283,7 +1283,7 @@ function RuleEditModal({ rule, fields, allRules, onSave, onCancel }: {
 
             {/* THEN block */}
             <div className="rounded-xl border border-border bg-card p-4 shadow-sm">
-              <p className="mb-3 text-[11px] font-bold uppercase tracking-widest text-primary">Then</p>
+              <p className="mb-3 text-[12px] font-bold uppercase tracking-widest text-primary">Then</p>
               <div className="flex flex-col gap-3">
                 <div>
                   <label className={labelCls}>Action</label>
@@ -1315,7 +1315,7 @@ function RuleEditModal({ rule, fields, allRules, onSave, onCancel }: {
                     }
                   </select>
                   {tgtDeleted && (
-                    <p className="mt-1 flex items-center gap-1 text-[11px] text-amber-600">
+                    <p className="mt-1 flex items-center gap-1 text-[12px] text-amber-600">
                       <AlertTriangle className="size-3 shrink-0" /> This field has been deleted
                     </p>
                   )}
@@ -1337,7 +1337,7 @@ function RuleEditModal({ rule, fields, allRules, onSave, onCancel }: {
             {(isCircular || draft.sourceFieldId === draft.targetFieldId) && (
               <div className="flex items-start gap-2 rounded-lg border border-amber-200/60 bg-amber-50/50 px-3 py-2.5">
                 <AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-amber-500" aria-hidden />
-                <p className="text-[11.5px] leading-relaxed text-amber-700">
+                <p className="text-[13px] leading-relaxed text-amber-700">
                   {draft.sourceFieldId === draft.targetFieldId
                     ? 'Source and target field cannot be the same.'
                     : 'This rule creates a circular dependency and cannot be saved.'}
@@ -1484,7 +1484,7 @@ function FieldEditModal({ field, isNew, onSave, onCancel, passes = [], sectionId
                   <div className="mb-2 flex flex-col gap-1">
                     {draft.options.map(opt => (
                       <div key={opt} className="flex items-center justify-between gap-2 rounded-lg border border-border bg-muted/[0.03] px-3 py-1.5">
-                        <span className="text-[12.5px] text-foreground">{opt}</span>
+                        <span className="text-[14px] text-foreground">{opt}</span>
                         <button type="button" onClick={() => removeOption(opt)}
                           className="flex size-5 items-center justify-center rounded text-muted-foreground/40 hover:bg-red-50 hover:text-red-500">
                           <X className="size-3.5" aria-hidden />
@@ -1514,14 +1514,14 @@ function FieldEditModal({ field, isNew, onSave, onCancel, passes = [], sectionId
             {/* Pass Visibility */}
             <div className="flex flex-col gap-2.5 rounded-lg border border-border/60 bg-muted/[0.03] px-4 py-3">
               <div>
-                <p className="text-[12.5px] font-semibold text-foreground">Pass Visibility</p>
-                <p className="mt-0.5 text-[11.5px] text-muted-foreground">Choose which passes show this field.</p>
+                <p className="text-[14px] font-semibold text-foreground">Pass Visibility</p>
+                <p className="mt-0.5 text-[13px] text-muted-foreground">Choose which passes show this field.</p>
               </div>
 
               {passes.length === 0 ? (
                 <div className="flex items-start gap-2 rounded-lg border border-amber-200/60 bg-amber-50/50 px-3 py-2.5">
                   <Info className="mt-0.5 size-3.5 shrink-0 text-amber-500" aria-hidden />
-                  <p className="text-[11.5px] leading-relaxed text-muted-foreground">
+                  <p className="text-[13px] leading-relaxed text-muted-foreground">
                     No passes defined yet. Add passes in Step&nbsp;4 to enable per-pass field visibility.
                   </p>
                 </div>
@@ -1536,8 +1536,8 @@ function FieldEditModal({ field, isNew, onSave, onCancel, passes = [], sectionId
                       className="mt-0.5 size-[14px] cursor-pointer accent-primary"
                     />
                     <div>
-                      <p className="text-[12.5px] font-medium text-foreground">All Passes</p>
-                      <p className="text-[11.5px] text-muted-foreground">This field appears for every pass type</p>
+                      <p className="text-[14px] font-medium text-foreground">All Passes</p>
+                      <p className="text-[13px] text-muted-foreground">This field appears for every pass type</p>
                     </div>
                   </label>
 
@@ -1550,8 +1550,8 @@ function FieldEditModal({ field, isNew, onSave, onCancel, passes = [], sectionId
                       className="mt-0.5 size-[14px] cursor-pointer accent-primary"
                     />
                     <div>
-                      <p className="text-[12.5px] font-medium text-foreground">Specific Passes</p>
-                      <p className="text-[11.5px] text-muted-foreground">Show only for selected passes below</p>
+                      <p className="text-[14px] font-medium text-foreground">Specific Passes</p>
+                      <p className="text-[13px] text-muted-foreground">Show only for selected passes below</p>
                     </div>
                   </label>
 
@@ -1574,12 +1574,12 @@ function FieldEditModal({ field, isNew, onSave, onCancel, passes = [], sectionId
                               }}
                               className="size-[14px] cursor-pointer accent-primary"
                             />
-                            <span className="text-[12.5px] text-foreground">{pass.name}</span>
+                            <span className="text-[14px] text-foreground">{pass.name}</span>
                           </label>
                         )
                       })}
                       {passes.length > 0 && (draft.passVisibility as string[]).length === 0 && (
-                        <p className="text-[11px] text-amber-600">Select at least one pass.</p>
+                        <p className="text-[12px] text-amber-600">Select at least one pass.</p>
                       )}
                     </div>
                   )}
@@ -1642,7 +1642,7 @@ function FormSummaryPanel({
     <div className="flex items-center justify-between gap-2">
       <p className="text-[12px] text-muted-foreground">{label}</p>
       <span className={cn(
-        'min-w-[28px] rounded-full px-2 py-0.5 text-center text-[11px] font-bold',
+        'min-w-[28px] rounded-full px-2 py-0.5 text-center text-[12px] font-bold',
         accent ? 'bg-primary/10 text-primary' : 'bg-muted text-muted-foreground',
       )}>{value}</span>
     </div>
@@ -1706,10 +1706,10 @@ function FormSummaryPanel({
                 <div key={pass.id} className="flex items-center justify-between gap-2">
                   <div className="flex items-center gap-1.5 min-w-0">
                     <Ticket className="size-3 shrink-0 text-muted-foreground/50" aria-hidden />
-                    <p className="truncate text-[11.5px] text-foreground">{pass.name}</p>
+                    <p className="truncate text-[13px] text-foreground">{pass.name}</p>
                   </div>
                   <span className={cn(
-                    'shrink-0 rounded-full px-2 py-px text-[10.5px] font-semibold',
+                    'shrink-0 rounded-full px-2 py-px text-[12px] font-semibold',
                     count > 0 ? 'bg-sky-50 text-sky-600' : 'bg-muted text-muted-foreground',
                   )}>
                     {count} field{count !== 1 ? 's' : ''}
@@ -1725,7 +1725,7 @@ function FormSummaryPanel({
       {staleRules > 0 && (
         <div className="flex items-start gap-2 rounded-xl border border-amber-200/60 bg-amber-50/50 px-3 py-2.5">
           <AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-amber-500" aria-hidden />
-          <p className="text-[11.5px] leading-relaxed text-amber-700">
+          <p className="text-[13px] leading-relaxed text-amber-700">
             {staleRules} rule{staleRules !== 1 ? 's reference' : ' references'} deleted fields. Open Conditional Logic to fix.
           </p>
         </div>
@@ -1769,8 +1769,8 @@ function FormSummaryPanel({
                 },
               ].map(({ label, badge, cls }) => (
                 <div key={label} className="flex items-center justify-between gap-2">
-                  <p className="text-[11.5px] text-muted-foreground">{label}</p>
-                  <span className={cn('rounded-full px-2 py-0.5 text-[10.5px] font-semibold', cls)}>{badge}</span>
+                  <p className="text-[13px] text-muted-foreground">{label}</p>
+                  <span className={cn('rounded-full px-2 py-0.5 text-[12px] font-semibold', cls)}>{badge}</span>
                 </div>
               ))}
               {/* Boolean indicators */}
@@ -1784,7 +1784,7 @@ function FormSummaryPanel({
               ].map(({ label, on }) => (
                 <div key={label} className="flex items-center gap-2">
                   <span className={cn('size-1.5 shrink-0 rounded-full', on ? 'bg-emerald-500' : 'bg-muted-foreground/20')} />
-                  <p className={cn('text-[11.5px]', on ? 'text-foreground' : 'text-muted-foreground/50')}>{label}</p>
+                  <p className={cn('text-[13px]', on ? 'text-foreground' : 'text-muted-foreground/50')}>{label}</p>
                 </div>
               ))}
             </div>
@@ -1798,7 +1798,7 @@ function FormSummaryPanel({
 // ─── Form Preview Modal ───────────────────────────────────────────────────────
 
 function PreviewFieldInput({ field }: { field: FormField }) {
-  const base = 'w-full rounded-lg border border-border bg-muted/20 px-3 py-2 text-[12.5px] text-foreground/50 outline-none'
+  const base = 'w-full rounded-lg border border-border bg-muted/20 px-3 py-2 text-[14px] text-foreground/50 outline-none'
   const { type, label, placeholder, helperText, options, required } = field
 
   const lbl = (
@@ -1860,7 +1860,7 @@ function PreviewFieldInput({ field }: { field: FormField }) {
   if (type === 'file') return (
     <div>
       {lbl}
-      <div className={cn(base, 'flex items-center justify-center py-5 border-dashed text-[11.5px]')}>
+      <div className={cn(base, 'flex items-center justify-center py-5 border-dashed text-[13px]')}>
         Click to upload or drag file here
       </div>
       {helperText && <p className={hintCls}>{helperText}</p>}
@@ -1902,7 +1902,7 @@ function LivePreviewField({
 }) {
   const { type, label, placeholder, helperText, options } = field
   const base = cn(
-    'w-full rounded-lg border border-border bg-background px-3 py-2 text-[12.5px] text-foreground outline-none transition-colors',
+    'w-full rounded-lg border border-border bg-background px-3 py-2 text-[14px] text-foreground outline-none transition-colors',
     disabled
       ? 'cursor-not-allowed bg-muted/30 opacity-50'
       : 'focus:border-primary/50 focus:ring-2 focus:ring-primary/20',
@@ -1911,7 +1911,7 @@ function LivePreviewField({
     <label className="mb-1 flex items-center gap-1.5 text-[12px] font-medium text-foreground">
       {label}
       {required && <span className="text-red-400">*</span>}
-      {disabled && <span className="ml-1 text-[10.5px] font-normal text-muted-foreground/50">(disabled)</span>}
+      {disabled && <span className="ml-1 text-[12px] font-normal text-muted-foreground/50">(disabled)</span>}
     </label>
   )
 
@@ -1980,7 +1980,7 @@ function LivePreviewField({
   if (type === 'file') return (
     <div>
       {lbl}
-      <div className={cn(base, 'flex items-center justify-center py-5 border-dashed text-[11.5px] text-muted-foreground/50 cursor-not-allowed')}>
+      <div className={cn(base, 'flex items-center justify-center py-5 border-dashed text-[13px] text-muted-foreground/50 cursor-not-allowed')}>
         Click to upload or drag file here
       </div>
       {helperText && <p className={hintCls}>{helperText}</p>}
@@ -2056,7 +2056,7 @@ function FormPreviewModal({
             </div>
             <div>
               <p className="text-[14px] font-bold text-foreground">Registration Form Preview</p>
-              <p className="text-[11.5px] text-muted-foreground">
+              <p className="text-[13px] text-muted-foreground">
                 Interactive — fill fields to test conditional rules
               </p>
             </div>
@@ -2071,14 +2071,14 @@ function FormPreviewModal({
         {passes.length > 0 && (
           <div className="shrink-0 border-b border-border px-6 py-2.5">
             <div className="flex flex-wrap items-center gap-2">
-              <div className="flex items-center gap-1.5 text-[11.5px] font-medium text-muted-foreground shrink-0">
+              <div className="flex items-center gap-1.5 text-[13px] font-medium text-muted-foreground shrink-0">
                 <Ticket className="size-3.5 shrink-0" aria-hidden />
                 Pass:
               </div>
               {[{ id: null, name: 'All Passes' }, ...passes].map(p => (
                 <button key={String(p.id)} type="button" onClick={() => setSelectedPassId(p.id)}
                   className={cn(
-                    'rounded-full border px-2.5 py-[3px] text-[11.5px] font-medium transition-colors',
+                    'rounded-full border px-2.5 py-[3px] text-[13px] font-medium transition-colors',
                     selectedPassId === p.id
                       ? 'border-primary bg-primary text-primary-foreground'
                       : 'border-border text-muted-foreground hover:border-primary/40 hover:text-foreground',
@@ -2095,7 +2095,7 @@ function FormPreviewModal({
           <div className="shrink-0 border-b border-border/60 bg-primary/[0.03] px-6 py-2">
             <div className="flex items-center gap-2">
               <Zap className="size-3 shrink-0 text-primary/60" aria-hidden />
-              <p className="text-[11.5px] text-muted-foreground">
+              <p className="text-[13px] text-muted-foreground">
                 <span className="font-semibold text-primary">{activeRuleCount}</span>
                 {' '}of {form.conditionalRules.filter(r => r.enabled !== false).length} rules{' '}
                 currently active
@@ -2124,7 +2124,7 @@ function FormPreviewModal({
                     {/* Section header */}
                     <div className="mb-3 flex items-center gap-2">
                       <div className="h-px flex-1 bg-border" />
-                      <span className="shrink-0 rounded-full border border-border bg-muted/30 px-2.5 py-0.5 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                      <span className="shrink-0 rounded-full border border-border bg-muted/30 px-2.5 py-0.5 text-[12px] font-semibold uppercase tracking-wider text-muted-foreground">
                         {section.title}
                       </span>
                       <div className="h-px flex-1 bg-border" />
@@ -2176,7 +2176,7 @@ function FormPreviewModal({
             className={cn(buttonVariants({ variant: 'primary' }), 'w-full cursor-not-allowed opacity-60')}>
             Submit Registration
           </button>
-          <p className="mt-2 text-center text-[11px] text-muted-foreground">
+          <p className="mt-2 text-center text-[12px] text-muted-foreground">
             Preview only — submit is disabled
           </p>
         </div>
@@ -2247,7 +2247,7 @@ function TemplateReplaceModal({
               </div>
             </div>
           )}
-          <p className="text-[12.5px] text-muted-foreground">
+          <p className="text-[13px] text-muted-foreground">
             Applying{' '}
             <span className="font-semibold text-foreground">"{template.label}"</span>
             {' '}will generate new sections and fields. Choose how to handle your existing content.
@@ -2259,12 +2259,12 @@ function TemplateReplaceModal({
           <button type="button" onClick={onReplaceAll}
             className={cn(buttonVariants({ variant: 'primary' }), 'w-full gap-2')}>
             Replace Everything
-            <span className="text-[11px] opacity-75">fields, sections &amp; rules</span>
+            <span className="text-[12px] opacity-75">fields, sections &amp; rules</span>
           </button>
           <button type="button" onClick={onReplaceFieldsOnly}
             className={cn(buttonVariants({ variant: 'outline' }), 'w-full gap-2')}>
             Replace Sections &amp; Fields Only
-            <span className="text-[11px] text-muted-foreground">keep rules &amp; settings</span>
+            <span className="text-[12px] text-muted-foreground">keep rules &amp; settings</span>
           </button>
           <button type="button" onClick={onCancel}
             className={cn(buttonVariants({ variant: 'outline' }), 'w-full text-muted-foreground')}>
@@ -2584,12 +2584,12 @@ export function RegistrationFormBuilder({
                   <Icon className="size-3.5" aria-hidden />
                   {tab.label}
                   {tab.id === 'fields' && form.sections.length > 0 && (
-                    <span className="rounded-full bg-primary/10 px-1.5 py-px text-[10px] font-bold text-primary">
+                    <span className="rounded-full bg-primary/10 px-1.5 py-px text-[12px] font-bold text-primary">
                       {form.sections.length}
                     </span>
                   )}
                   {tab.id === 'logic' && form.conditionalRules.length > 0 && (
-                    <span className="rounded-full bg-primary/10 px-1.5 py-px text-[10px] font-bold text-primary">
+                    <span className="rounded-full bg-primary/10 px-1.5 py-px text-[12px] font-bold text-primary">
                       {form.conditionalRules.length}
                     </span>
                   )}

@@ -201,10 +201,11 @@ const sportsCore = (): FormField[] => [
   fOpt('Gender',                 'radio',    { options: ['Male', 'Female', 'Other / Prefer not to say'] }),
   blood(),
   tshirt(),
-  fOpt('Emergency Contact Name', 'text'),
-  fOpt('Emergency Contact Number', 'mobile'),
+  f   ('Emergency Contact Name',   'text'),
+  f   ('Emergency Contact Number', 'mobile'),
   fOpt('Medical Conditions / Allergies', 'textarea', { helperText: 'Optional — share any conditions the medical team should know' }),
   f   ('Medical Consent', 'checkbox', true, { options: ['I confirm I am medically fit to participate in this event'] }),
+  f   ('Sports Waiver',   'checkbox', true, { options: ['I have read and agree to the event waiver and release of liability'] }),
 ]
 
 // ─── Event-type field set builders ────────────────────────────────────────────
@@ -288,12 +289,13 @@ const sportsSections = (raceExtra: FormField[] = []): FormSection[] => [
   makeSection('Medical Information', [
     blood(),
     tshirt(),
-    fOpt('Emergency Contact Name',   'text'),
-    fOpt('Emergency Contact Number', 'mobile'),
+    f   ('Emergency Contact Name',   'text'),
+    f   ('Emergency Contact Number', 'mobile'),
     fOpt('Medical Conditions / Allergies', 'textarea', { helperText: 'Optional — share any conditions the medical team should know' }),
   ], 2),
   makeSection('Terms & Consent', [
     f('Medical Consent', 'checkbox', true, { options: ['I confirm I am medically fit to participate in this event'] }),
+    f('Sports Waiver',   'checkbox', true, { options: ['I have read and agree to the event waiver and release of liability'] }),
   ], 3),
 ]
 
@@ -308,12 +310,13 @@ const teamSportSections = (teamExtra: FormField[] = []): FormSection[] => [
   makeSection('Medical Information', [
     blood(),
     tshirt(),
-    fOpt('Emergency Contact Name',   'text'),
-    fOpt('Emergency Contact Number', 'mobile'),
+    f   ('Emergency Contact Name',   'text'),
+    f   ('Emergency Contact Number', 'mobile'),
     fOpt('Medical Conditions / Allergies', 'textarea', { helperText: 'Optional — share any conditions the medical team should know' }),
   ], 2),
   makeSection('Terms & Consent', [
     f('Medical Consent', 'checkbox', true, { options: ['I confirm I am medically fit to participate in this event'] }),
+    f('Sports Waiver',   'checkbox', true, { options: ['I have read and agree to the event waiver and release of liability'] }),
   ], 3),
 ]
 
@@ -328,6 +331,20 @@ const expoSections = (companyExtra: FormField[] = []): FormSection[] => [
   makeSection('Contact Person',     core(), 0),
   makeSection('Company Information',[...org(), fOpt('Visitor Type', 'dropdown', { options: ['Buyer', 'Seller', 'Visitor', 'Exhibitor', 'Media', 'Investor'] }), fOpt('Area of Interest', 'multiselect', { options: ['Technology', 'Manufacturing', 'Healthcare', 'Education', 'Retail', 'Finance', 'Other'] }), ...companyExtra], 1),
   makeSection('Terms & Consent',    [...gst()], 2),
+]
+
+// Exhibition MVP sections — clean structure for trade shows / startup expos.
+// Company Name is optional in the base form; server enforces required for Exhibitor/Sponsor passes.
+const exhibitionSections = (extra: FormField[] = []): FormSection[] => [
+  makeSection('Contact Person',        core(), 0),
+  makeSection('Professional Details',  [
+    fOpt('Company Name',     'text',     { helperText: 'Required for Exhibitor and Sponsor passes' }),
+    fOpt('Designation',      'text'),
+    fOpt('Company Website',  'url',      { placeholder: 'https://example.com' }),
+    fOpt('Industry',         'dropdown', { options: ['Technology', 'Healthcare', 'Manufacturing', 'Education', 'Finance', 'Retail', 'Real Estate', 'Automotive', 'Media & Entertainment', 'FMCG', 'Energy', 'Other'] }),
+    ...extra,
+  ], 1),
+  makeSection('Terms & Consent',       [], 2),
 ]
 
 const meetupSections = (profileExtra: FormField[] = []): FormSection[] => [
@@ -417,6 +434,24 @@ const EXPO_PASS_GROUPS: PassFieldGroup[] = [
   },
 ]
 
+// Pass groups for Exhibition MVP (Visitor / Exhibitor / Sponsor / Media / VIP)
+const EXHIBITION_PASS_GROUPS: PassFieldGroup[] = [
+  {
+    // Exhibitor and Sponsor passes require Company Name — server enforces this on submit
+    passNameHints: ['exhibitor', 'sponsor'],
+    fields: () => [
+      fOpt('GST Number',       'text',        { section: 'billing', helperText: 'Optional — for GST invoice' }),
+      fOpt('Product Category', 'multiselect', { options: ['Technology', 'Healthcare', 'FMCG', 'Industrial', 'Education', 'Other'] }),
+    ],
+  },
+  {
+    passNameHints: ['media'],
+    fields: () => [
+      fOpt('Publication / Channel', 'text', { helperText: 'Name of your media organization' }),
+    ],
+  },
+]
+
 const SPORTS_RUN_PASS_GROUPS: PassFieldGroup[] = [
   {
     passNameHints: ['5k', '5 km', 'fun run', 'fun'],
@@ -478,6 +513,8 @@ const TEMPLATES: FormTemplateConfig[] = [
   { id: 'expo_visitor',    label: 'Expo Visitor',           description: 'General visitor and buyer form',              eventType: 'exhibition', subtypes: ['fair', 'product', 'auto', 'education', 'property'], fields: () => expoFields(), sections: () => expoSections(),  defaultRules: [], passGroups: EXPO_PASS_GROUPS },
   { id: 'expo_exhibitor',  label: 'Exhibitor Registration', description: 'Booth and exhibitor details form',            eventType: 'exhibition', subtypes: ['exhibitor'],                                    fields: () => expoFields([fOpt('Booth Number / Size', 'text'), fOpt('Product Category', 'multiselect', { options: ['Technology', 'Healthcare', 'FMCG', 'Industrial', 'Education', 'Other'] })]), sections: () => expoSections([fOpt('Booth Number / Size', 'text'), fOpt('Product Category', 'multiselect', { options: ['Technology', 'Healthcare', 'FMCG', 'Industrial', 'Education', 'Other'] })]), defaultRules: [], passGroups: EXPO_PASS_GROUPS },
   { id: 'expo_default',    label: 'Exhibition Registration',description: 'Standard exhibition registration form',       eventType: 'exhibition', subtypes: [],                                              fields: () => expoFields(), sections: () => expoSections(),  defaultRules: [], passGroups: EXPO_PASS_GROUPS },
+  // Exhibition MVP — supports Visitor / Exhibitor / Sponsor / Media / VIP pass types
+  { id: 'exhibition_mvp',  label: 'Exhibition (Visitor · Exhibitor · Sponsor · Media · VIP)', description: 'Full-featured exhibition form for trade shows and expos', eventType: 'exhibition', subtypes: ['startup', 'business', 'tech', 'art', 'health', 'food', 'design', 'gaming', 'automobile'], fields: () => [...core(), fOpt('Company Name', 'text'), fOpt('Designation', 'text'), fOpt('Company Website', 'url', { placeholder: 'https://example.com' }), fOpt('Industry', 'dropdown', { options: ['Technology', 'Healthcare', 'Manufacturing', 'Education', 'Finance', 'Retail', 'Real Estate', 'Automotive', 'Media & Entertainment', 'FMCG', 'Energy', 'Other'] })], sections: () => exhibitionSections(), defaultRules: [], passGroups: EXHIBITION_PASS_GROUPS },
 
   // ── Sports ────────────────────────────────────────────────────────────────────
   { id: 'sports_run',      label: 'Running Registration',   description: 'Marathon, 5K and fun run registration',      eventType: 'sports', subtypes: ['marathon', 'running', 'run'],       fields: () => sportsFields([fOpt('Running Category', 'dropdown', { options: ['5K', '10K', 'Half Marathon (21K)', 'Full Marathon (42K)', 'Ultra Marathon', 'Fun Run'] })]), sections: () => sportsSections([fOpt('Running Category', 'dropdown', { options: ['5K', '10K', 'Half Marathon (21K)', 'Full Marathon (42K)', 'Ultra Marathon', 'Fun Run'] })]), defaultRules: [], passGroups: SPORTS_RUN_PASS_GROUPS },

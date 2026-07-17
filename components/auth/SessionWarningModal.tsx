@@ -1,9 +1,11 @@
 'use client'
 
+import { useEffect, useRef } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { AlertCircle, LogOut, RefreshCw } from 'lucide-react'
 import { buttonVariants } from '@/components/ui'
 import { cn } from '@/lib/utils/cn'
+import { useFocusTrap } from '@/lib/hooks/useFocusTrap'
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -30,10 +32,24 @@ export function SessionWarningModal({
   onStaySignedIn,
   onLogout,
 }: SessionWarningModalProps) {
+  // GA-7D S1: reuse the shared focus trap (trap + restore) and autofocus the safe,
+  // non-destructive action so Enter keeps the user signed in. Escape also = stay
+  // signed in. role/aria-modal/aria-live were already present.
+  const trapRef = useFocusTrap<HTMLDivElement>(open)
+  const stayRef = useRef<HTMLButtonElement>(null)
+  useEffect(() => {
+    if (!open) return
+    const id  = setTimeout(() => stayRef.current?.focus(), 30)   // wins over the trap's first-focus
+    const key = (e: KeyboardEvent) => { if (e.key === 'Escape') { e.preventDefault(); onStaySignedIn() } }
+    document.addEventListener('keydown', key)
+    return () => { clearTimeout(id); document.removeEventListener('keydown', key) }
+  }, [open, onStaySignedIn])
+
   return (
     <AnimatePresence>
       {open && (
         <motion.div
+          ref={trapRef}
           key="session-warning-backdrop"
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
@@ -92,6 +108,7 @@ export function SessionWarningModal({
                 Sign Out
               </button>
               <button
+                ref={stayRef}
                 type="button"
                 onClick={onStaySignedIn}
                 className={cn(buttonVariants({ variant: 'primary' }), 'flex-1 gap-2')}

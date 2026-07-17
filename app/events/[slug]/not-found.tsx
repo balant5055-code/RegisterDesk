@@ -1,6 +1,6 @@
 import Link from 'next/link'
 import { CalendarX } from 'lucide-react'
-import { Navbar }         from '@/components/layout/navbar'
+import { MarketingNavbar } from '@/components/marketing/navigation/MarketingNavbar'
 import { Container }      from '@/components/ui/Container'
 import { buttonVariants } from '@/components/ui/button'
 import { ROUTES }         from '@/config/navigation'
@@ -8,7 +8,7 @@ import { ROUTES }         from '@/config/navigation'
 export default function EventNotFound() {
   return (
     <div className="flex min-h-screen flex-col bg-background">
-      <Navbar />
+      <MarketingNavbar />
       <Container className="flex flex-1 flex-col items-center justify-center py-20 text-center">
         <div className="flex size-20 items-center justify-center rounded-full bg-muted">
           <CalendarX className="size-9 text-muted-foreground" aria-hidden />

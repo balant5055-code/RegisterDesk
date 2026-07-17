@@ -17,9 +17,13 @@ import {
   getCertificateByRegistrationId,
   createCertificateRecord,
   incrementDownloadCount,
+  getSettings,
 }                                            from '@/lib/certificates/firestore'
+import { defaultCertificateSettings }        from '@/lib/certificates/types'
 import { generateCertificatePdf }            from '@/lib/certificates/pdf'
 import { generateCertificateId }             from '@/lib/certificates/id'
+import { getClientIp }                       from '@/lib/rateLimit'
+import { RATE_POLICY, checkPolicy }          from '@/lib/rateLimit/policies'
 import type { RegistrationDocument }         from '@/lib/registrations/types'
 
 type Params = { params: Promise<{ registrationId: string }> }
@@ -28,7 +32,7 @@ const APP_URL = (process.env.NEXT_PUBLIC_APP_URL ?? 'https://registerdesk.in').r
 
 export interface CertificateEligibilityResponse {
   eligible: false
-  reason:   'not_enabled' | 'checkin_required' | 'not_confirmed' | 'not_found'
+  reason:   'not_enabled' | 'checkin_required' | 'not_confirmed' | 'not_found' | 'refunded' | 'downloads_disabled' | 'verification_required'
 }
 
 function fmtDate(iso: string): string {
@@ -43,7 +47,16 @@ function toISO(val: unknown): string | null {
   return null
 }
 
-export async function GET(_req: NextRequest, { params }: Params): Promise<NextResponse> {
+export async function GET(req: NextRequest, { params }: Params): Promise<NextResponse> {
+  // Per-IP throttle: this route renders a PDF (and may scan drafts) on every hit.
+  const rl = checkPolicy(getClientIp(req), RATE_POLICY.pdfDownload)
+  if (rl.limited) {
+    return NextResponse.json(
+      { error: 'Too many requests. Please try again shortly.' },
+      { status: 429, headers: { 'Retry-After': String(rl.retryAfter) } },
+    )
+  }
+
   const { registrationId } = await params
 
   // Load registration
@@ -55,6 +68,11 @@ export async function GET(_req: NextRequest, { params }: Params): Promise<NextRe
 
   if (reg.status !== 'confirmed') {
     return NextResponse.json({ eligible: false, reason: 'not_confirmed' } satisfies CertificateEligibilityResponse, { status: 403 })
+  }
+
+  // P7.1: a refunded registration (status stays 'confirmed') is not eligible.
+  if (reg.paymentStatus === 'refunded') {
+    return NextResponse.json({ eligible: false, reason: 'refunded' } satisfies CertificateEligibilityResponse, { status: 403 })
   }
 
   // Load draft to get eventId — need to find the organizer's draft for this event
@@ -89,6 +107,22 @@ export async function GET(_req: NextRequest, { params }: Params): Promise<NextRe
 
   if (template.type === 'completion' && !reg.checkedIn) {
     return NextResponse.json({ eligible: false, reason: 'checkin_required' } satisfies CertificateEligibilityResponse, { status: 403 })
+  }
+
+  // P7.1: enforce the organizer's download settings on this attendee route too
+  // (no bypass). This is an attendee-facing endpoint, so the organizer-bypass of
+  // the /file route does not apply here.
+  const download = (await getSettings(eventId))?.download ?? defaultCertificateSettings().download
+  if (!download.enabled || !download.allowAttendee) {
+    return NextResponse.json({ eligible: false, reason: 'downloads_disabled' } satisfies CertificateEligibilityResponse, { status: 403 })
+  }
+  if (download.requireVerification) {
+    const token  = req.nextUrl.searchParams.get('token') ?? ''
+    const record = await getCertificateByRegistrationId(registrationId)
+    const recToken = (record as { verificationToken?: string | null } | null)?.verificationToken ?? null
+    if (!recToken || token !== recToken) {
+      return NextResponse.json({ eligible: false, reason: 'verification_required' } satisfies CertificateEligibilityResponse, { status: 403 })
+    }
   }
 
   // Find existing or create new certificate record

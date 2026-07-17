@@ -9,10 +9,14 @@
 // resend_email — resends ticket email to each attendee
 
 import { NextRequest, NextResponse }      from 'next/server'
+import { releaseRegistrationSessions, restoreRegistrationSessions } from '@/lib/sessions/allocation'
+import { captureError }                    from '@/lib/monitoring/sentry'
 import { FieldValue }                      from 'firebase-admin/firestore'
-import { adminDb, adminAuth }              from '@/lib/firebase/admin'
+import { adminDb }              from '@/lib/firebase/admin'
+import { authorizeWorkspace }              from '@/lib/team/workspace'
 import { signTicketToken }                 from '@/lib/tickets/generate'
-import { getEmailProvider, fmtEmailDate }  from '@/lib/email'
+import { fmtEmailDate }                     from '@/lib/email'
+import { notificationEngine, NotificationType, NotificationChannel } from '@/lib/notifications'
 import type { RegistrationDocument, AuditAction } from '@/lib/registrations/types'
 
 // ─── Response types ───────────────────────────────────────────────────────────
@@ -44,15 +48,10 @@ export async function POST(
     NextResponse.json({ success: false, processed: 0, succeeded: 0, failed: 0, error, results: [] }, { status })
 
   // ── 1. Auth ──────────────────────────────────────────────────────────────
-  const token = (req.headers.get('authorization') ?? '').replace(/^Bearer /, '')
-  if (!token) return empty('Unauthorized', 401)
-
-  let uid: string
-  try {
-    uid = (await adminAuth.verifyIdToken(token)).uid
-  } catch {
-    return empty('Invalid or expired token', 401)
-  }
+  const authz = await authorizeWorkspace(req, 'registrations')
+  if (!authz.ok) return empty(authz.error ?? 'Unauthorized', authz.status)
+  const uid       = authz.workspaceUid    // authorization / ownership scope
+  const callerUid = authz.callerUid       // attribution: the actual operator
 
   // ── 2. Parse body ────────────────────────────────────────────────────────
   let action: BulkAction
@@ -92,11 +91,15 @@ export async function POST(
     if (!snap.exists) { results.push({ id, success: false, reason: 'Not found' }); continue }
     const reg = snap.data() as RegistrationDocument
     if (reg.organizerUid !== uid) { results.push({ id, success: false, reason: 'Forbidden' }); continue }
-    if (action === 'check_in' && reg.checkedIn)              { results.push({ id, success: false, reason: 'Already checked in' }); continue }
-    if (action === 'check_in' && reg.status === 'cancelled') { results.push({ id, success: false, reason: 'Registration is cancelled' }); continue }
-    if (action === 'cancel'   && reg.status === 'cancelled') { results.push({ id, success: false, reason: 'Already cancelled' }); continue }
-    if (action === 'restore'  && reg.status !== 'cancelled') { results.push({ id, success: false, reason: 'Not cancelled' }); continue }
-    if (action === 'resend_email' && reg.status === 'cancelled') { results.push({ id, success: false, reason: 'Registration is cancelled' }); continue }
+    if (action === 'check_in' && reg.checkedIn)                        { results.push({ id, success: false, reason: 'Already checked in' }); continue }
+    if (action === 'check_in' && reg.status === 'cancelled')           { results.push({ id, success: false, reason: 'Registration is cancelled' }); continue }
+    if (action === 'check_in' && reg.status === 'pending')             { results.push({ id, success: false, reason: 'Registration is pending approval' }); continue }
+    if (action === 'check_in' && reg.paymentStatus === 'refunded')     { results.push({ id, success: false, reason: 'Registration has been refunded' }); continue }
+    if (action === 'cancel'   && reg.status === 'cancelled')           { results.push({ id, success: false, reason: 'Already cancelled' }); continue }
+    if (action === 'restore'  && reg.status !== 'cancelled')           { results.push({ id, success: false, reason: 'Not cancelled' }); continue }
+    if (action === 'resend_email' && reg.status === 'cancelled')       { results.push({ id, success: false, reason: 'Registration is cancelled' }); continue }
+    if (action === 'resend_email' && reg.status === 'rejected')        { results.push({ id, success: false, reason: 'Registration has been rejected' }); continue }
+    if (action === 'resend_email' && reg.paymentStatus === 'refunded') { results.push({ id, success: false, reason: 'Registration has been refunded' }); continue }
     eligible.push({ id, data: reg })
   }
 
@@ -105,12 +108,65 @@ export async function POST(
     return NextResponse.json({ success: true, processed: registrationIds.length, succeeded: 0, failed, results })
   }
 
+  // ── 5b. P1-C: Best-effort capacity pre-check for bulk restore ─────────────
+  // Loads live event + counter docs, then walks eligible items in order,
+  // accumulating in-batch additions to detect per-event and per-pass overflow
+  // before the batch write.  Not transactionally safe (small TOCTOU window)
+  // but closes the same gap that individual restoreRegistration() closes.
+  let toProcess = eligible
+  if (action === 'restore') {
+    const uniqueSlugs = [...new Set(eligible.map(e => e.data.eventSlug))]
+    const evtSnaps = await Promise.all(uniqueSlugs.map(s => adminDb.collection('events').doc(s).get()))
+    const ctrSnaps = await Promise.all(uniqueSlugs.map(s => adminDb.collection('registrationCounters').doc(s).get()))
+    const evtMap = new Map<string, Record<string, unknown>>()
+    const ctrMap = new Map<string, { totalCount?: number; passCounts?: Record<string, number> }>()
+    for (let ci = 0; ci < uniqueSlugs.length; ci++) {
+      const slug = uniqueSlugs[ci]!
+      const evtSnap = evtSnaps[ci]!
+      const ctrSnap = ctrSnaps[ci]!
+      if (evtSnap.exists) evtMap.set(slug, evtSnap.data() as Record<string, unknown>)
+      if (ctrSnap.exists) ctrMap.set(slug, ctrSnap.data() as { totalCount?: number; passCounts?: Record<string, number> })
+    }
+    const batchTotals = new Map<string, number>()
+    const batchPasses = new Map<string, number>()
+    const capacityPassed: typeof eligible = []
+    for (const item of eligible) {
+      const { id, data: reg } = item
+      const evt = evtMap.get(reg.eventSlug)
+      const ctr = ctrMap.get(reg.eventSlug)
+      const eventCapacity = (evt?.totalCapacity as number | null | undefined) ?? null
+      const currentTotal  = (ctr?.totalCount ?? 0) + (batchTotals.get(reg.eventSlug) ?? 0)
+      if (eventCapacity !== null && currentTotal >= eventCapacity) {
+        results.push({ id, success: false, reason: 'Event is at capacity' })
+        continue
+      }
+      const rawPricing = evt?.pricing as Record<string, unknown> | undefined
+      const rawPasses  = Array.isArray(rawPricing?.passes) ? (rawPricing!.passes as Record<string, unknown>[]) : []
+      const livePass   = rawPasses.find(p => p.id === reg.passId)
+      const passCapacity = livePass?.unlimited === true ? null
+        : typeof livePass?.quantity === 'number' ? livePass.quantity : null
+      const passKey    = `${reg.eventSlug}:${reg.passId}`
+      const currentPass = ((ctr?.passCounts ?? {})[reg.passId] ?? 0) + (batchPasses.get(passKey) ?? 0)
+      if (passCapacity !== null && currentPass >= passCapacity) {
+        results.push({ id, success: false, reason: 'Pass is at capacity' })
+        continue
+      }
+      capacityPassed.push(item)
+      batchTotals.set(reg.eventSlug, (batchTotals.get(reg.eventSlug) ?? 0) + 1)
+      batchPasses.set(passKey, (batchPasses.get(passKey) ?? 0) + 1)
+    }
+    toProcess = capacityPassed
+    if (toProcess.length === 0) {
+      const failed = results.filter(r => !r.success).length
+      return NextResponse.json({ success: true, processed: registrationIds.length, succeeded: 0, failed, results })
+    }
+  }
+
   // ── 6. Execute ────────────────────────────────────────────────────────────
 
   // ── Resend email (async per-item) ─────────────────────────────────────────
   if (action === 'resend_email') {
-    const provider = getEmailProvider()
-    if (!provider) {
+    if (!notificationEngine.isAvailable(NotificationChannel.EMAIL)) {
       const errResults = registrationIds.map(id => ({ id, success: false, reason: 'Email provider not configured' }))
       return NextResponse.json({ success: false, processed: registrationIds.length, succeeded: 0, failed: registrationIds.length, error: 'Email provider not configured', results: errResults }, { status: 503 })
     }
@@ -138,7 +194,7 @@ export async function POST(
       eligible.map(async ({ id, data: reg }) => {
         const pdfToken = signTicketToken(id)
         const pdfUrl   = `${baseUrl}/api/tickets/${id}/pdf${pdfToken ? `?token=${encodeURIComponent(pdfToken)}` : ''}`
-        const result   = await provider.sendTicketEmail({
+        const result   = await notificationEngine.send(NotificationType.TICKET_RESENT, {
           to:             reg.attendee.email,
           attendeeName:   reg.attendee.name,
           eventName:      reg.eventName,
@@ -176,18 +232,18 @@ export async function POST(
   // ── Batch write actions ───────────────────────────────────────────────────
   const batch = adminDb.batch()
   const now   = FieldValue.serverTimestamp()
-  let confirmedToCancelledCount = 0
+  const confirmedCancels: { eventSlug: string; passId: string }[] = []
 
-  for (const { id, data: reg } of eligible) {
+  for (const { id, data: reg } of toProcess) {
     const ref = adminDb.collection('registrations').doc(id)
     if (action === 'check_in') {
       batch.update(ref, {
-        checkedIn: true, checkedInAt: now, checkedInBy: uid,
-        checkedInSource: 'bulk', updatedAt: now,
+        checkedIn: true, checkedInAt: now, checkedInBy: callerUid,
+        checkedInWorkspaceUid: uid, checkedInSource: 'bulk', updatedAt: now,
       })
     } else if (action === 'cancel') {
       batch.update(ref, { status: 'cancelled', updatedAt: now })
-      if (reg.status === 'confirmed') confirmedToCancelledCount++
+      if (reg.status === 'confirmed') confirmedCancels.push({ eventSlug: reg.eventSlug, passId: reg.passId })
     } else if (action === 'restore') {
       batch.update(ref, { status: 'confirmed', updatedAt: now })
     }
@@ -201,30 +257,79 @@ export async function POST(
   }
 
   // ── Counter updates (atomic increments outside batch) ──────────────────
-  const eventSlug = eligible[0].data.eventSlug
+  // All three counter cases group by eventSlug so multi-event batches are
+  // handled correctly and passCounts stays in sync with totalCount.
   if (action === 'check_in') {
-    adminDb.collection('registrationCounters').doc(eventSlug)
-      .set({ checkedInCount: FieldValue.increment(eligible.length) }, { merge: true })
-      .catch(err => console.error('[bulk] checkedInCount update error:', err))
-  } else if (action === 'cancel' && confirmedToCancelledCount > 0) {
-    adminDb.collection('registrationCounters').doc(eventSlug)
-      .update({ totalCount: FieldValue.increment(-confirmedToCancelledCount) })
-      .catch(err => console.error('[bulk] totalCount decrement error:', err))
+    const byEvent = new Map<string, number>()
+    for (const { data: reg } of toProcess) byEvent.set(reg.eventSlug, (byEvent.get(reg.eventSlug) ?? 0) + 1)
+    for (const [slug, count] of byEvent) {
+      adminDb.collection('registrationCounters').doc(slug)
+        .set({ checkedInCount: FieldValue.increment(count) }, { merge: true })
+        .catch(err => console.error('[bulk] checkedInCount update error:', err))
+    }
+  } else if (action === 'cancel' && confirmedCancels.length > 0) {
+    const byEvent = new Map<string, { total: number; passes: Record<string, number> }>()
+    for (const { eventSlug: slug, passId } of confirmedCancels) {
+      const entry = byEvent.get(slug) ?? { total: 0, passes: {} }
+      entry.total++
+      entry.passes[passId] = (entry.passes[passId] ?? 0) + 1
+      byEvent.set(slug, entry)
+    }
+    for (const [slug, { total, passes }] of byEvent) {
+      const update: Record<string, unknown> = {
+        totalCount: FieldValue.increment(-total),
+        updatedAt:  FieldValue.serverTimestamp(),
+      }
+      for (const [passId, count] of Object.entries(passes)) {
+        update[`passCounts.${passId}`] = FieldValue.increment(-count)
+      }
+      adminDb.collection('registrationCounters').doc(slug)
+        .update(update)
+        .catch(err => console.error('[bulk] counter decrement error:', err))
+    }
   } else if (action === 'restore') {
-    adminDb.collection('registrationCounters').doc(eventSlug)
-      .update({ totalCount: FieldValue.increment(eligible.length) })
-      .catch(err => console.error('[bulk] totalCount increment error:', err))
+    const byEvent = new Map<string, { total: number; passes: Record<string, number> }>()
+    for (const { data: reg } of toProcess) {
+      const entry = byEvent.get(reg.eventSlug) ?? { total: 0, passes: {} }
+      entry.total++
+      entry.passes[reg.passId] = (entry.passes[reg.passId] ?? 0) + 1
+      byEvent.set(reg.eventSlug, entry)
+    }
+    for (const [slug, { total, passes }] of byEvent) {
+      const update: Record<string, unknown> = {
+        totalCount: FieldValue.increment(total),
+        updatedAt:  FieldValue.serverTimestamp(),
+      }
+      for (const [passId, count] of Object.entries(passes)) {
+        update[`passCounts.${passId}`] = FieldValue.increment(count)
+      }
+      adminDb.collection('registrationCounters').doc(slug)
+        .set(update, { merge: true })
+        .catch(err => console.error('[bulk] counter increment error:', err))
+    }
+  }
+
+  // ── P1-1: session-allocation sync (post-commit, idempotent; reconciliation
+  //    cron is the backstop for any that fail) ────────────────────────────────
+  if (action === 'cancel') {
+    for (const { id } of toProcess) {
+      void releaseRegistrationSessions(id).catch(err => captureError(err, { scope: 'session_reconciliation', detail: 'bulk cancel release failed', registrationId: id }))
+    }
+  } else if (action === 'restore') {
+    for (const { id } of toProcess) {
+      void restoreRegistrationSessions(id).catch(err => captureError(err, { scope: 'session_reconciliation', detail: 'bulk restore failed (may be SESSION_FULL)', registrationId: id }))
+    }
   }
 
   // ── Audit (fire-and-forget) ───────────────────────────────────────────────
   const auditAction: AuditAction = action === 'check_in' ? 'checked_in' : action === 'cancel' ? 'cancelled' : 'restored'
-  void writeBulkAudit(eligible.map(e => e.id), auditAction, uid)
+  void writeBulkAudit(toProcess.map(e => e.id), auditAction, uid)
 
-  for (const { id } of eligible) results.push({ id, success: true })
+  for (const { id } of toProcess) results.push({ id, success: true })
   const failed = results.filter(r => !r.success).length
   return NextResponse.json({
     success: true, processed: registrationIds.length,
-    succeeded: eligible.length, failed, results,
+    succeeded: toProcess.length, failed, results,
   })
 }
 

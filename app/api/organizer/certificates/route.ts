@@ -4,7 +4,7 @@
 // newest-first. Used by the Communications > Certificates dashboard page.
 
 import { NextRequest, NextResponse }        from 'next/server'
-import { adminAuth }                        from '@/lib/firebase/admin'
+import { authorizeWorkspace }               from '@/lib/team/workspace'
 import { getCertificatesByOrganizerUid }    from '@/lib/certificates/firestore'
 import type { SerializedCertificateRecord } from '@/lib/certificates/types'
 
@@ -22,15 +22,9 @@ function toISO(val: unknown): string | null {
 }
 
 export async function GET(req: NextRequest): Promise<NextResponse> {
-  const token = (req.headers.get('authorization') ?? '').replace(/^Bearer /, '')
-  if (!token) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-
-  let uid: string
-  try {
-    uid = (await adminAuth.verifyIdToken(token)).uid
-  } catch {
-    return NextResponse.json({ error: 'Invalid token' }, { status: 401 })
-  }
+  const authz = await authorizeWorkspace(req, 'certificates')
+  if (!authz.ok) return NextResponse.json({ error: authz.error }, { status: authz.status })
+  const uid = authz.workspaceUid
 
   const records = await getCertificatesByOrganizerUid(uid, 100)
 

@@ -6,7 +6,9 @@
 
 import { NextRequest, NextResponse }  from 'next/server'
 import { FieldValue }                  from 'firebase-admin/firestore'
-import { adminDb, adminAuth }          from '@/lib/firebase/admin'
+import { adminDb }          from '@/lib/firebase/admin'
+import { writeCheckinDelta }            from '@/lib/firebase/firestore/registrationCounters'
+import { authorizeWorkspace }           from '@/lib/team/workspace'
 import { writeAuditEntry }              from '@/lib/firebase/firestore/registrations'
 import type { RegistrationDocument }   from '@/lib/registrations/types'
 
@@ -20,15 +22,10 @@ export async function POST(
   context: { params: Promise<{ registrationId: string }> },
 ): Promise<NextResponse<UndoCheckInResponse>> {
   // ── 1. Auth ────────────────────────────────────────────────────────────────
-  const token = (req.headers.get('authorization') ?? '').replace(/^Bearer /, '')
-  if (!token) return NextResponse.json({ success: false, error: 'Unauthorized' }, { status: 401 })
-
-  let uid: string
-  try {
-    uid = (await adminAuth.verifyIdToken(token)).uid
-  } catch {
-    return NextResponse.json({ success: false, error: 'Invalid or expired token' }, { status: 401 })
-  }
+  const authz = await authorizeWorkspace(req, 'registrations')
+  if (!authz.ok) return NextResponse.json({ success: false, error: authz.error }, { status: authz.status })
+  const uid = authz.workspaceUid
+  const callerUid = authz.callerUid
 
   const { registrationId } = await context.params
   const regRef = adminDb.collection('registrations').doc(registrationId)
@@ -62,12 +59,11 @@ export async function POST(
       updatedAt:       FieldValue.serverTimestamp(),
     })
 
-    const counterRef = adminDb.collection('registrationCounters').doc(reg.eventSlug)
-    txn.set(counterRef, { checkedInCount: FieldValue.increment(-1) }, { merge: true })
+    writeCheckinDelta(txn, reg.eventSlug, registrationId, reg.passId, -1)   // GA-5 S3: same shard as the check-in
   })
 
   // ── 5. Audit (fire-and-forget) ─────────────────────────────────────────────
-  writeAuditEntry(registrationId, 'check_in_undone', uid, 'organizer').catch(err =>
+  writeAuditEntry(registrationId, 'check_in_undone', callerUid, 'organizer', uid).catch(err =>
     console.error(`[undo-checkin] audit error for ${registrationId}:`, err),
   )
 
