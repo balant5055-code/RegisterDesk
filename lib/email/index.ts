@@ -21,6 +21,21 @@ import {
   AWS_REGION, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, SES_FROM_EMAIL, SES_FROM_NAME,
 } from '@/lib/env'
 
+// RD-ENV-ARCH-03 — the SES credential validation lives HERE (the email subsystem
+// boundary) rather than in the shared lib/env.ts, so a half-configured static
+// credential pair fails only when the email module loads — never unrelated routes.
+// A sender configured with only one half of a static credential pair is almost
+// certainly a misconfiguration — fail fast rather than silently falling back to the
+// default credential chain and getting auth errors on the first send. Skipped during
+// `next build`.
+if (process.env.NEXT_PHASE !== 'phase-production-build' && SES_FROM_EMAIL &&
+    Boolean(AWS_ACCESS_KEY_ID) !== Boolean(AWS_SECRET_ACCESS_KEY)) {
+  throw new Error(
+    '[env] AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY must be set together. ' +
+    'Provide both for static credentials, or neither to use an attached IAM role.',
+  )
+}
+
 // The active provider identifier, recorded on email logs.
 export const EMAIL_PROVIDER_NAME = 'ses'
 

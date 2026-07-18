@@ -20,6 +20,28 @@ import { UPSTASH_REDIS_REST_URL, UPSTASH_REDIS_REST_TOKEN } from '@/lib/env'
 import { captureError } from '@/lib/monitoring/sentry'
 import { checkRateLimit } from '@/lib/rateLimit'
 
+// RD-ENV-ARCH-03 — Upstash is the RATE-LIMITER's dependency, so its "required in
+// production" enforcement lives HERE (the rate-limiter boundary) rather than in the
+// shared lib/env.ts. A missing Upstash config therefore fails only rate-limited
+// endpoints at init, not OTP/payments/dashboard. The in-memory fallback below is
+// unchanged. Production is detected exactly as env.ts did (VERCEL_ENV in true
+// production, else NODE_ENV); skipped during `next build`.
+const _isBuildPhase     = process.env.NEXT_PHASE === 'phase-production-build'
+const _vercelEnv        = (process.env.VERCEL_ENV ?? '').trim()
+const _isRealProduction = _vercelEnv
+  ? _vercelEnv === 'production'
+  : process.env.NODE_ENV === 'production'
+
+if (!_isBuildPhase && _isRealProduction && (!UPSTASH_REDIS_REST_URL || !UPSTASH_REDIS_REST_TOKEN)) {
+  throw new Error(
+    '[env] UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN are required in ' +
+    'production. Without them, rate limiting falls back to a per-instance in-memory ' +
+    'counter that does NOT enforce limits across serverless instances — payment, ' +
+    'OTP and API-key abuse protections would be ineffective.\n' +
+    '  Hint: create a database at console.upstash.com (Redis) and copy the REST URL + token.',
+  )
+}
+
 export interface DistributedRateLimitOptions {
   key:           string   // unique identity, e.g. `verify-payment:<ip>`
   limit:         number   // max requests per window

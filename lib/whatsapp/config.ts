@@ -14,6 +14,32 @@ import {
 } from '@/lib/env'
 import { getIntegrationConfig } from '@/lib/config/resolveIntegrationConfig'
 
+// RD-ENV-ARCH-03 — the Meta partial-config validation lives HERE (the WhatsApp
+// subsystem boundary) rather than in the shared lib/env.ts, so partially-set META_*
+// vars fail only when the WhatsApp module loads — never unrelated routes. Setting ANY
+// core var opts in and requires the full set; we fail fast with the specific missing
+// variables rather than erroring on first use. Skipped during `next build`.
+const _metaRequired: Record<string, string> = {
+  META_APP_ID,
+  META_APP_SECRET,
+  META_ACCESS_TOKEN,
+  META_PHONE_NUMBER_ID,
+  META_BUSINESS_ACCOUNT_ID,
+  META_WEBHOOK_VERIFY_TOKEN,
+}
+if (process.env.NEXT_PHASE !== 'phase-production-build' && Object.values(_metaRequired).some(Boolean)) {
+  const missing = Object.entries(_metaRequired).filter(([, v]) => !v).map(([k]) => k)
+  if (missing.length) {
+    throw new Error(
+      `[env] WhatsApp (Meta Cloud API) is partially configured. Missing: ${missing.join(', ')}.\n` +
+      '  Once any META_* variable is set, all of META_APP_ID, META_APP_SECRET, ' +
+      'META_ACCESS_TOKEN, META_PHONE_NUMBER_ID, META_BUSINESS_ACCOUNT_ID and ' +
+      'META_WEBHOOK_VERIFY_TOKEN are required.\n' +
+      '  Hint: Meta App Dashboard → WhatsApp → API Setup. Leave all unset to disable WhatsApp.',
+    )
+  }
+}
+
 export interface MetaConfig {
   appId:              string
   appSecret:          string
