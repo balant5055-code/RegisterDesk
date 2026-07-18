@@ -57,7 +57,7 @@ export default function FeaturesGrid() {
       <div
         aria-hidden
         className="pointer-events-none absolute left-1/2 top-0 h-[420px] w-[820px] -translate-x-1/2 rounded-full blur-[130px]"
-        style={{ background: 'radial-gradient(circle, rgba(229,39,126,0.06), transparent 70%)' }}
+        style={{ background: 'radial-gradient(circle, rgb(var(--primary-rgb) / 0.06), transparent 70%)' }}
       />
 
       <div className="mx-auto max-w-7xl px-6 lg:px-8">
@@ -102,7 +102,7 @@ export default function FeaturesGrid() {
                   <div
                     aria-hidden
                     className="pointer-events-none absolute inset-0 opacity-0 transition-opacity duration-300 group-hover:opacity-100"
-                    style={{ background: 'radial-gradient(120% 100% at 100% 0%, rgba(229,39,126,0.05), transparent 60%)' }}
+                    style={{ background: 'radial-gradient(120% 100% at 100% 0%, rgb(var(--primary-rgb) / 0.05), transparent 60%)' }}
                   />
 
                   {/* Icon container */}

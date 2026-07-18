@@ -11,7 +11,7 @@
 // CRON_SECRET is unset.
 
 import { NextRequest, NextResponse } from 'next/server'
-import { retryPendingDonationFinancials } from '@/lib/donations/donationReconciliation'
+import { retryPendingDonationFinancials, recoverUncreditedDonations } from '@/lib/donations/donationReconciliation'
 import { isAuthorizedCron, cronUnauthorized } from '@/lib/cron/auth'
 import { captureFinancialError, flushMonitoring } from '@/lib/monitoring/sentry'
 import { recordCronExecution } from '@/lib/monitoring/cronMetrics'
@@ -23,7 +23,11 @@ async function handle(req: NextRequest): Promise<NextResponse> {
   if (!isAuthorizedCron(req)) return cronUnauthorized()
   let ok = false, detail = ''
   try {
-    const result = await retryPendingDonationFinancials(100)
+    const credits = await retryPendingDonationFinancials(100)
+    // RD-PAY-GA-01B — self-heal successful donations missing their ptx_ ledger (the hard-kill
+    // window that leaves no reconciliation record). Idempotent + recency-window bounded.
+    const ledgerSweep = await recoverUncreditedDonations(500)
+    const result = { credits, ledgerSweep }
     ok = true; detail = JSON.stringify(result)
     return NextResponse.json(result)
   } catch (err) {

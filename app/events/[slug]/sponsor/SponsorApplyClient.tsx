@@ -2,6 +2,7 @@
 
 import { useState }    from 'react'
 import Link            from 'next/link'
+import { TextLink } from '@/components/ui'
 import { Building2, CheckCircle, ArrowLeft, Loader2 } from 'lucide-react'
 
 interface Props {
@@ -75,7 +76,7 @@ export default function SponsorApplyClient({ slug, eventName, enabled, closingDa
             ? `The deadline for sponsorship applications for ${eventName} has passed.`
             : `Sponsorship opportunities for ${eventName} are not currently open.`}
         </p>
-        <Link href={`/events/${slug}`} className="text-[13px] text-primary hover:underline">← Back to event</Link>
+        <TextLink href={`/events/${slug}`}>← Back to event</TextLink>
       </div>
     )
   }
@@ -90,7 +91,7 @@ export default function SponsorApplyClient({ slug, eventName, enabled, closingDa
         <p className="max-w-md text-[14px] text-muted-foreground">
           Thank you for your interest in sponsoring <strong>{eventName}</strong>. We&apos;ll review your application and reach out soon.
         </p>
-        <Link href={`/events/${slug}`} className="text-[13px] text-primary hover:underline">← Back to event</Link>
+        <TextLink href={`/events/${slug}`}>← Back to event</TextLink>
       </div>
     )
   }

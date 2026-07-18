@@ -136,7 +136,9 @@ export async function GET(
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
       try {
-        controller.enqueue(encoder.encode(COLS.map(csvEscape).join(',')))
+        // Lead with a UTF-8 BOM so Excel renders non-ASCII names (Tamil/Hindi/₹)
+        // correctly — parity with tableToCsv (lib/reports/csv.ts).
+        controller.enqueue(encoder.encode('﻿' + COLS.map(csvEscape).join(',')))
         let cursor: FirebaseFirestore.QueryDocumentSnapshot | undefined
         for (;;) {
           const q    = cursor ? baseQuery.startAfter(cursor).limit(BATCH_SIZE) : baseQuery.limit(BATCH_SIZE)

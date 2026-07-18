@@ -176,7 +176,11 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       tagline:            typeof info.tagline  === 'string' ? info.tagline : null,
       startDate:          typeof sched.startDate === 'string' ? sched.startDate : null,
       endDate:            typeof sched.endDate   === 'string' ? sched.endDate   : null,
-      bannerUrl:          typeof media.coverBanner === 'string' ? media.coverBanner : null,
+      // coverBanner is a MediaAsset { source, value } — read .value like the
+      // dashboard + single-event routes do (a bare-string read is always null).
+      bannerUrl:          typeof (media.coverBanner as Record<string, unknown> | undefined)?.value === 'string'
+        ? ((media.coverBanner as Record<string, unknown>).value as string)
+        : null,
       eventType:          typeof d.eventType    === 'string' ? d.eventType    : null,
       campaignType:       typeof d.campaignType === 'string' ? d.campaignType : null,
       isFreeEvent:        isFree,

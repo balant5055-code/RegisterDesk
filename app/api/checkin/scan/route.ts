@@ -67,13 +67,20 @@ export async function POST(req: NextRequest): Promise<NextResponse<CheckInResult
   // ── Parse body ────────────────────────────────────────────────────────────
   let ticketCode: string
   let source: string | undefined
+  let expectedEventSlug: string | undefined
   try {
-    const body = await req.json() as { ticketCode?: unknown; source?: unknown }
+    const body = await req.json() as { ticketCode?: unknown; source?: unknown; eventSlug?: unknown }
     if (typeof body.ticketCode !== 'string' || !body.ticketCode.trim()) {
       return NextResponse.json({ success: false, error: 'MISSING_TICKET_CODE' }, { status: 400 })
     }
     ticketCode = body.ticketCode.trim().toUpperCase()
     source     = typeof body.source === 'string' ? body.source.trim() : undefined
+    // Optional (backward-compatible): the gate the operator is running. When
+    // present, the scanned ticket must belong to THIS event — otherwise a ticket
+    // for another of the same organizer's events would open this gate.
+    expectedEventSlug = typeof body.eventSlug === 'string' && body.eventSlug.trim()
+      ? body.eventSlug.trim()
+      : undefined
   } catch {
     return NextResponse.json({ success: false, error: 'INVALID_BODY' }, { status: 400 })
   }
@@ -97,6 +104,15 @@ export async function POST(req: NextRequest): Promise<NextResponse<CheckInResult
   // ── Ownership check (never trust client for this) ─────────────────────────
   if (reg.organizerUid !== uid) {
     return NextResponse.json({ success: false, error: 'UNAUTHORIZED' }, { status: 403 })
+  }
+
+  // ── Event-scope check ─────────────────────────────────────────────────────
+  // A ticket only admits at its OWN event's gate. Cross-organizer is already
+  // blocked above; this closes the same-organizer cross-event case (an Event B
+  // ticket must not open the Event A gate). Mirrors the event-scoped offline
+  // cache and the session check-in EVENT_MISMATCH guard.
+  if (expectedEventSlug && reg.eventSlug !== expectedEventSlug) {
+    return NextResponse.json({ success: false, error: 'WRONG_EVENT' }, { status: 422 })
   }
 
   // ── Registration status and payment eligibility ──────────────────────────

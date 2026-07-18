@@ -54,20 +54,24 @@ export async function POST(req: NextRequest, ctx: RouteContext): Promise<NextRes
   const { id } = await ctx.params
 
   const docRef = adminDb.collection('failedRefunds').doc(id)
-  const snap   = await docRef.get()
-  if (!snap.exists) {
-    return NextResponse.json({ error: 'Failed refund not found' }, { status: 404 })
-  }
 
-  const data = snap.data() as FailedRefundDoc
-  if (data.status !== 'open') {
-    return NextResponse.json(
-      { error: `Cannot retry a refund in status '${data.status}'` },
-      { status: 409 },
-    )
-  }
+  // Atomically CLAIM the retry (open → retrying) BEFORE calling Razorpay, so a
+  // concurrent retry (double-click / two admins) cannot BOTH read 'open' and both
+  // fire a gateway refund (H-2 double-refund). A non-'open' record aborts here;
+  // the gateway is reverted to 'open' below if the Razorpay call itself fails.
+  const claim = await adminDb.runTransaction<
+    { ok: true; data: FailedRefundDoc } | { ok: false; status: number; error: string }
+  >(async txn => {
+    const fresh = await txn.get(docRef)
+    if (!fresh.exists) return { ok: false, status: 404, error: 'Failed refund not found' }
+    const d = fresh.data() as FailedRefundDoc
+    if (d.status !== 'open') return { ok: false, status: 409, error: `Cannot retry a refund in status '${d.status}'` }
+    txn.update(docRef, { status: 'retrying', updatedAt: FieldValue.serverTimestamp() })
+    return { ok: true, data: d }
+  })
+  if (!claim.ok) return NextResponse.json({ error: claim.error }, { status: claim.status })
 
-  const { paymentId, amountPaise, orderId, registrationId } = data
+  const { paymentId, amountPaise, orderId, registrationId } = claim.data
 
   // ── Call Razorpay ──────────────────────────────────────────────────────────
 
@@ -82,6 +86,8 @@ export async function POST(req: NextRequest, ctx: RouteContext): Promise<NextRes
     refundId = refund.id
   } catch (err) {
     captureFinancialError(err, { scope: 'failed-refunds.retry_razorpay_failed', id, paymentId })
+    // Release the claim so the record can be retried again.
+    await docRef.update({ status: 'open', updatedAt: FieldValue.serverTimestamp() }).catch(() => {})
     return NextResponse.json(
       { error: 'Razorpay refund failed. Verify the payment ID is in a refundable state.' },
       { status: 502 },

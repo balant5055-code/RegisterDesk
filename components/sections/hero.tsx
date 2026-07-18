@@ -105,12 +105,12 @@ function AnalyticsChart() {
     <svg viewBox="0 0 300 92" fill="none" className="h-[92px] w-full" preserveAspectRatio="none" aria-hidden>
       <defs>
         <linearGradient id="rd-area" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%"   stopColor="#e5277e" stopOpacity="0.22" />
-          <stop offset="100%" stopColor="#e5277e" stopOpacity="0" />
+          <stop offset="0%"   style={{ stopColor: 'var(--primary)', stopOpacity: 0.22 }} />
+          <stop offset="100%" style={{ stopColor: 'var(--primary)', stopOpacity: 0 }} />
         </linearGradient>
         <linearGradient id="rd-line" x1="0" y1="0" x2="1" y2="0">
-          <stop offset="0%"   stopColor="#fb5a6a" />
-          <stop offset="100%" stopColor="#e5277e" />
+          <stop offset="0%"   style={{ stopColor: 'var(--primary-from)' }} />
+          <stop offset="100%" style={{ stopColor: 'var(--primary)' }} />
         </linearGradient>
       </defs>
       <path
@@ -159,7 +159,7 @@ function EventOSComposition() {
       {/* Brand glow behind the stack */}
       <div
         className="pointer-events-none absolute left-1/2 top-1/2 -z-10 h-[360px] w-[360px] -translate-x-1/2 -translate-y-1/2 rounded-full blur-[90px]"
-        style={{ background: 'radial-gradient(circle, rgba(229,39,126,0.18), transparent 70%)' }}
+        style={{ background: 'radial-gradient(circle, rgb(var(--primary-rgb) / 0.18), transparent 70%)' }}
       />
 
       {/* ── Main: Dashboard Analytics ─────────────────────────────────────── */}
@@ -307,11 +307,11 @@ export default function HeroSection() {
         <div className="absolute inset-0 bg-gradient-to-b from-white via-white to-slate-50" />
         <div
           className="absolute -left-32 -top-24 h-[480px] w-[480px] rounded-full blur-[120px]"
-          style={{ background: 'radial-gradient(circle, rgba(251,90,106,0.14), transparent 70%)' }}
+          style={{ background: 'radial-gradient(circle, rgb(var(--primary-from-rgb) / 0.14), transparent 70%)' }}
         />
         <div
           className="absolute -right-24 top-32 h-[520px] w-[520px] rounded-full blur-[120px]"
-          style={{ background: 'radial-gradient(circle, rgba(229,39,126,0.12), transparent 70%)' }}
+          style={{ background: 'radial-gradient(circle, rgb(var(--primary-rgb) / 0.12), transparent 70%)' }}
         />
         <div
           className="absolute inset-0 opacity-[0.5]"

@@ -12,6 +12,8 @@ import { adminAuth, adminDb } from '@/lib/firebase/admin'
 import { notificationEngine, NotificationType, NotificationChannel } from '@/lib/notifications'
 import { verifyCode } from '@/lib/otp'
 import { getSecurityConfig } from '@/lib/config/resolveSecurityConfig'
+import { getClientIp } from '@/lib/rateLimit'
+import { checkDistributedRateLimit } from '@/lib/rateLimit/redis'
 import type { DecodedIdToken } from 'firebase-admin/auth'
 
 // Trust score granted for email verification (adds to the 20-point base)
@@ -50,109 +52,100 @@ export async function POST(req: Request): Promise<NextResponse> {
     return NextResponse.json({ error: 'INVALID_CODE_FORMAT' }, { status: 400 })
   }
 
-  // ── Load OTP request ────────────────────────────────────────────────────────
+  // ── Per-account throttle (RD-AUTH-GA-01) — defense-in-depth on top of the atomic
+  //    attempts cap below. Mirrors the attendee verify route. Keyed by uid+IP.
+  const ip = getClientIp(req)
+  const rl = await checkDistributedRateLimit({ key: `organizer-otp-verify:${uid}:${ip}`, limit: 30, windowSeconds: 60 * 60 })
+  if (!rl.allowed) {
+    return NextResponse.json({ error: 'RATE_LIMITED' }, { status: 429 })
+  }
+
   const otpRef  = adminDb.collection('otpRequests').doc(otpId)
-  const otpSnap = await otpRef.get()
+  const userRef = adminDb.collection('users').doc(uid)
 
-  if (!otpSnap.exists) {
-    return NextResponse.json({ error: 'OTP_NOT_FOUND' }, { status: 404 })
-  }
+  // ── Atomic verify (RD-AUTH-GA-01) ────────────────────────────────────────────
+  // The attempts gate + code check + attempts-increment / mark-verified all run in ONE
+  // transaction, so concurrent requests against the same OTP can NEVER bypass the cap
+  // (the previous non-atomic read→gate→update let N racers each pass the stale gate and
+  // collapse to one increment, defeating the lockout). Firestore requires all reads
+  // before writes, so both docs are read up front; the profile self-heal (RD-AUTH-OTP-02)
+  // stays atomic with marking the OTP verified.
+  type VerifyOutcome =
+    | { kind: 'not_found' }
+    | { kind: 'forbidden' }
+    | { kind: 'already' }
+    | { kind: 'expired' }
+    | { kind: 'max' }
+    | { kind: 'invalid'; attemptsLeft: number }
+    | { kind: 'ok'; recipient: string }
 
-  const otp = otpSnap.data()!
+  const outcome = await adminDb.runTransaction<VerifyOutcome>(async (tx) => {
+    // READS FIRST (Firestore transaction rule).
+    const [otpSnapT, userSnapT] = await Promise.all([tx.get(otpRef), tx.get(userRef)])
+    if (!otpSnapT.exists) return { kind: 'not_found' }
+    const otp = otpSnapT.data()!
 
-  // UID mismatch — someone else's OTP
-  if (otp.uid !== uid) {
-    return NextResponse.json({ error: 'FORBIDDEN' }, { status: 403 })
-  }
+    if (otp.uid !== uid)      return { kind: 'forbidden' }
+    if (otp.verified === true) return { kind: 'already' }
 
-  // Already verified
-  if (otp.verified === true) {
-    return NextResponse.json({ error: 'ALREADY_VERIFIED' }, { status: 400 })
-  }
+    const expiresAt = (otp.expiresAt as { toMillis?(): number; getTime?(): number })
+    const expiresMs = expiresAt?.toMillis?.() ?? (expiresAt as unknown as Date)?.getTime?.() ?? 0
+    if (Date.now() > expiresMs) return { kind: 'expired' }
 
-  // Expired
-  const expiresAt = (otp.expiresAt as { toMillis?(): number; getTime?(): number })
-  const expiresMs = expiresAt?.toMillis?.() ?? (expiresAt as unknown as Date)?.getTime?.() ?? 0
-  if (Date.now() > expiresMs) {
-    return NextResponse.json({ error: 'EXPIRED' }, { status: 400 })
-  }
+    const attempts = (otp.attempts as number) ?? 0
+    if (attempts >= sec.otpMaxAttempts) return { kind: 'max' }
 
-  // Max attempts reached
-  const attempts = (otp.attempts as number) ?? 0
-  if (attempts >= sec.otpMaxAttempts) {
-    return NextResponse.json({ error: 'MAX_ATTEMPTS_REACHED' }, { status: 400 })
-  }
+    // WRITES.
+    if (!verifyCode(code, otp.salt as string, otp.codeHash as string)) {
+      tx.update(otpRef, { attempts: FieldValue.increment(1) })
+      return { kind: 'invalid', attemptsLeft: sec.otpMaxAttempts - (attempts + 1) }
+    }
 
-  // ── Verify code ─────────────────────────────────────────────────────────────
-  const isValid = verifyCode(code, otp.salt as string, otp.codeHash as string)
-
-  if (!isValid) {
-    const newAttempts = attempts + 1
-    await otpRef.update({ attempts: newAttempts })
-    const attemptsLeft = sec.otpMaxAttempts - newAttempts
-    return NextResponse.json(
-      { error: 'INVALID_CODE', attemptsLeft },
-      { status: 400 },
-    )
-  }
-
-  // ── Mark OTP as verified ─────────────────────────────────────────────────────
-  const batch = adminDb.batch()
-
-  batch.update(otpRef, {
-    verified:   true,
-    verifiedAt: FieldValue.serverTimestamp(),
+    // Valid — mark verified + self-heal the organizer profile atomically.
+    tx.update(otpRef, { verified: true, verifiedAt: FieldValue.serverTimestamp() })
+    if (userSnapT.exists) {
+      tx.update(userRef, {
+        emailVerified: true,           // backward-compat flat field
+        'verification.email.verified':      true,
+        'verification.email.verifiedAt':    FieldValue.serverTimestamp(),
+        'verification.email.verifiedMethod': 'otp',
+        'trust.level':  'email_verified',
+        'trust.score':  EMAIL_VERIFIED_SCORE,
+        'trust.badges': FieldValue.arrayUnion('email'),
+        updatedAt:      FieldValue.serverTimestamp(),
+      })
+    } else {
+      // Orphaned signup: create the COMPLETE canonical profile (RD-AUTH-OTP-02) with
+      // verification applied. organizationName unknown here → empty (editable in Settings).
+      const email = decoded.email ?? (otp.recipient as string | undefined) ?? ''
+      const name  = (decoded.name as string | undefined) ?? (email ? email.split('@')[0] : '')
+      tx.set(userRef, {
+        uid,
+        name,
+        email,
+        organizationName: '',
+        role:             'organizer',
+        emailVerified:    true,
+        verification: { email: { verified: true, verifiedAt: FieldValue.serverTimestamp(), verifiedMethod: 'otp' } },
+        trust: { level: 'email_verified', score: EMAIL_VERIFIED_SCORE, badges: FieldValue.arrayUnion('email') },
+        createdAt: FieldValue.serverTimestamp(),
+        updatedAt: FieldValue.serverTimestamp(),
+      }, { merge: true })
+    }
+    return { kind: 'ok', recipient: (otp.recipient as string | undefined) ?? '' }
   })
 
-  // ── Update organizer document (self-heal an orphaned signup) ─────────────────
-  // The profile is normally created client-side right after Firebase Auth signup
-  // (createOrganizerProfile → users/{uid}). Those are two independent operations; if
-  // the second never landed, the Auth user exists WITHOUT a Firestore profile and a
-  // bare update() throws NOT_FOUND (RD-AUTH-OTP-01). So:
-  //   • profile EXISTS  → apply the verification fields exactly as before (no change);
-  //   • profile MISSING → create the COMPLETE canonical profile (same shape as
-  //     createOrganizerProfile) with the verification state already applied, so no
-  //     partial organizer document is ever produced.
-  const userRef  = adminDb.collection('users').doc(uid)
-  const userSnap = await userRef.get()
-
-  if (userSnap.exists) {
-    batch.update(userRef, {
-      emailVerified: true,           // backward-compat flat field
-      'verification.email.verified':      true,
-      'verification.email.verifiedAt':    FieldValue.serverTimestamp(),
-      'verification.email.verifiedMethod': 'otp',
-      'trust.level':  'email_verified',
-      'trust.score':  EMAIL_VERIFIED_SCORE,
-      'trust.badges': FieldValue.arrayUnion('email'),
-      updatedAt:      FieldValue.serverTimestamp(),
-    })
-  } else {
-    // Orphaned signup: build the canonical organizer profile (mirrors
-    // createOrganizerProfile) WITH verification applied. Values are sourced from the
-    // verified token / OTP request; organizationName is unknown here so it stays empty
-    // (schema-consistent) and is editable later from Settings. merge:true keeps the
-    // write idempotent against a concurrent profile creation.
-    const email = decoded.email ?? (otp.recipient as string | undefined) ?? ''
-    const name  = (decoded.name as string | undefined) ?? (email ? email.split('@')[0] : '')
-    batch.set(userRef, {
-      uid,
-      name,
-      email,
-      organizationName: '',
-      role:             'organizer',
-      emailVerified:    true,
-      verification: { email: { verified: true, verifiedAt: FieldValue.serverTimestamp(), verifiedMethod: 'otp' } },
-      trust: { level: 'email_verified', score: EMAIL_VERIFIED_SCORE, badges: FieldValue.arrayUnion('email') },
-      createdAt: FieldValue.serverTimestamp(),
-      updatedAt: FieldValue.serverTimestamp(),
-    }, { merge: true })
+  switch (outcome.kind) {
+    case 'not_found': return NextResponse.json({ error: 'OTP_NOT_FOUND' }, { status: 404 })
+    case 'forbidden': return NextResponse.json({ error: 'FORBIDDEN' }, { status: 403 })
+    case 'already':   return NextResponse.json({ error: 'ALREADY_VERIFIED' }, { status: 400 })
+    case 'expired':   return NextResponse.json({ error: 'EXPIRED' }, { status: 400 })
+    case 'max':       return NextResponse.json({ error: 'MAX_ATTEMPTS_REACHED' }, { status: 400 })
+    case 'invalid':   return NextResponse.json({ error: 'INVALID_CODE', attemptsLeft: outcome.attemptsLeft }, { status: 400 })
   }
 
-  await batch.commit()
-
-  // ── Set Firebase Auth emailVerified = true ───────────────────────────────────
-  // Done after the batch so the Firestore state is always consistent even if
+  // ── outcome.kind === 'ok' — Firebase Auth emailVerified = true ───────────────
+  // Done after the transaction so the Firestore state is always consistent even if
   // the Admin Auth update has transient issues.
   try {
     await adminAuth.updateUser(uid, { emailVerified: true })
@@ -166,7 +159,7 @@ export async function POST(req: Request): Promise<NextResponse> {
     if (notificationEngine.isAvailable(NotificationChannel.EMAIL)) {
       const userDoc = await userRef.get()
       const name    = (userDoc.data()?.name as string | undefined) ?? ''
-      const email   = (userDoc.data()?.email as string | undefined) ?? (otp.recipient as string)
+      const email   = (userDoc.data()?.email as string | undefined) ?? outcome.recipient
       const orgName = (userDoc.data()?.organizationName as string | undefined) ?? ''
       void notificationEngine.send(NotificationType.ACCOUNT_WELCOME, { to: email, name, orgName }).catch(() => {})
     }

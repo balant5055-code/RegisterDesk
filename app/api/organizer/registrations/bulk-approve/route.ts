@@ -20,7 +20,16 @@ import { signTicketToken }                from '@/lib/tickets/generate'
 import { fmtEmailDate } from '@/lib/email'
 import { notificationEngine, NotificationType, NotificationChannel } from '@/lib/notifications'
 import { writeEmailLog }                  from '@/lib/email-logs/write'
+import {
+  approveRegistration,
+  RegistrationNotFoundError, UnauthorizedCancellationError,
+  NotPendingError, CapacityBlocksApprovalError,
+} from '@/lib/firebase/firestore/registrations'
 import type { RegistrationDocument, AuditAction } from '@/lib/registrations/types'
+
+// Sequential per-id approval keeps counter contention off a single event's
+// counter doc; ≤200 admin-triggered approvals fit comfortably in the budget.
+export const maxDuration = 60
 
 // ─── Response type ────────────────────────────────────────────────────────────
 
@@ -52,36 +61,48 @@ export async function POST(req: NextRequest): Promise<NextResponse<BulkApproveRe
     if (!Array.isArray(body.registrationIds) || body.registrationIds.length === 0) {
       return empty('registrationIds must be a non-empty array', 400)
     }
-    registrationIds = (body.registrationIds as unknown[])
-      .slice(0, 200)
-      .filter((id): id is string => typeof id === 'string')
+    // De-dup BEFORE the cap so a duplicated id can't be processed twice.
+    registrationIds = [...new Set(
+      (body.registrationIds as unknown[]).filter((id): id is string => typeof id === 'string'),
+    )].slice(0, 200)
   } catch {
     return empty('Invalid request body', 400)
   }
 
-  // ── 3. Load registrations ──────────────────────────────────────────────────
+  // ── 3. Load registrations (for the confirmation-email payload) ─────────────
   const regSnaps = await Promise.all(
     registrationIds.map(id => adminDb.collection('registrations').doc(id).get()),
   )
+  const regById = new Map<string, RegistrationDocument>()
+  regSnaps.forEach((snap, i) => {
+    if (snap.exists) regById.set(registrationIds[i], snap.data() as RegistrationDocument)
+  })
 
-  // ── 4. Filter: ownership + must be pending ─────────────────────────────────
+  // ── 4. Approve each via the canonical transactional service ────────────────
+  // approveRegistration enforces ownership + status==='pending' + EVENT/PASS
+  // CAPACITY (manual-approval doesn't reserve at creation) and maintains the
+  // counter (totalCount/passCounts up, pendingCount down) atomically + exactly
+  // once. Reusing it keeps bulk-approve identical to single-approve — the prior
+  // hand-rolled batch skipped the capacity guard and pendingCount, and could
+  // double-count. Sequential to avoid contending one event's counter doc.
   const eligible: Array<{ id: string; data: RegistrationDocument }> = []
   const results:  { id: string; success: boolean; reason?: string }[] = []
 
-  for (let i = 0; i < registrationIds.length; i++) {
-    const id   = registrationIds[i]
-    const snap = regSnaps[i]
-    if (!snap.exists) {
-      results.push({ id, success: false, reason: 'Not found' }); continue
+  for (const id of registrationIds) {
+    try {
+      await approveRegistration(id, uid)
+      const data = regById.get(id)
+      if (data) eligible.push({ id, data })
+      results.push({ id, success: true })
+    } catch (err) {
+      let reason = 'Approval failed'
+      if      (err instanceof RegistrationNotFoundError)     reason = 'Not found'
+      else if (err instanceof UnauthorizedCancellationError) reason = 'Forbidden'
+      else if (err instanceof NotPendingError)               reason = 'Not pending'
+      else if (err instanceof CapacityBlocksApprovalError)   reason = err.reason === 'PASS_CAPACITY_FULL' ? 'Pass full' : 'Event full'
+      else console.error('[bulk-approve] approve error:', { id, err })
+      results.push({ id, success: false, reason })
     }
-    const reg = snap.data() as RegistrationDocument
-    if (reg.organizerUid !== uid) {
-      results.push({ id, success: false, reason: 'Forbidden' }); continue
-    }
-    if (reg.status !== 'pending') {
-      results.push({ id, success: false, reason: 'Not pending' }); continue
-    }
-    eligible.push({ id, data: reg })
   }
 
   if (eligible.length === 0) {
@@ -89,57 +110,13 @@ export async function POST(req: NextRequest): Promise<NextResponse<BulkApproveRe
     return NextResponse.json({ success: true, processed: registrationIds.length, succeeded: 0, failed, results })
   }
 
-  // ── 5. Batch update: status → confirmed ────────────────────────────────────
-  const batch = adminDb.batch()
-  const now   = FieldValue.serverTimestamp()
-  for (const { id } of eligible) {
-    batch.update(adminDb.collection('registrations').doc(id), {
-      status: 'confirmed', updatedAt: now,
-    })
-  }
-  try {
-    await batch.commit()
-  } catch (err) {
-    console.error('[bulk-approve] batch commit error:', err)
-    return NextResponse.json({
-      success:   false,
-      processed: registrationIds.length,
-      succeeded: 0,
-      failed:    registrationIds.length,
-      error:     'Database error. Please try again.',
-      results:   [],
-    }, { status: 500 })
-  }
-
-  // ── 6. Counter update — totalCount + passCounts per pass ─────────────────
-  // Group by eventSlug then passId so passCounts stays in sync with totalCount.
-  const countByEvent = new Map<string, { total: number; passes: Record<string, number> }>()
-  for (const { data: reg } of eligible) {
-    const entry = countByEvent.get(reg.eventSlug) ?? { total: 0, passes: {} }
-    entry.total++
-    entry.passes[reg.passId] = (entry.passes[reg.passId] ?? 0) + 1
-    countByEvent.set(reg.eventSlug, entry)
-  }
-  for (const [slug, { total, passes }] of countByEvent) {
-    const update: Record<string, unknown> = {
-      totalCount: FieldValue.increment(total),
-      updatedAt:  FieldValue.serverTimestamp(),
-    }
-    for (const [passId, count] of Object.entries(passes)) {
-      update[`passCounts.${passId}`] = FieldValue.increment(count)
-    }
-    adminDb.collection('registrationCounters').doc(slug)
-      .set(update, { merge: true })
-      .catch(err => console.error('[bulk-approve] counter update error:', err))
-  }
-
-  // ── 7. Confirmation emails (fire-and-forget) ───────────────────────────────
+  // ── 5. Confirmation emails (fire-and-forget) ───────────────────────────────
   void sendBulkApprovalEmails(eligible)
 
-  // ── 8. Audit (fire-and-forget) ─────────────────────────────────────────────
+  // ── 6. Audit (fire-and-forget) ─────────────────────────────────────────────
   void writeBulkAudit(eligible.map(e => e.id), 'approved', callerUid, uid)
 
-  for (const { id } of eligible) results.push({ id, success: true })
+  // (per-item results were already recorded in the approval loop above)
   const failed = results.filter(r => !r.success).length
   return NextResponse.json({
     success:   true,

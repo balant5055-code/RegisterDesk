@@ -25,14 +25,8 @@ import {
   type DonationDocument,
 } from '@/lib/donations/types'
 import { generateSequentialReceiptNumber } from '@/lib/donations/receiptSequence'
-import { calculateFee }                    from '@/lib/fees/engine'
-import { getFeePlanForOrganizer }           from '@/lib/billing/feeEngine'
-import { resolveFeeConfig }                from '@/lib/fees/resolveFeeConfig'
-import {
-  recordPlatformTransactionAndCredit,
-  type PlatformTransactionData,
-  type RevenueCreditInput,
-} from '@/lib/firebase/firestore/platformTransactions'
+import { recordPlatformTransactionAndCredit } from '@/lib/firebase/firestore/platformTransactions'
+import { buildDonationLedgerAndCredit }       from '@/lib/donations/donationLedger'
 import { recordDonationFinancialReconciliation } from '@/lib/donations/donationReconciliation'
 import { enqueueWebhook }                  from '@/lib/integrations/webhooks'
 import { crmRecordDonation }               from '@/lib/crm/service'
@@ -365,46 +359,19 @@ export async function completeDonation(
   //    retry. recordPlatformTransactionAndCredit is atomic AND idempotent on
   //    `ptx_${donationId}`, so the browser-verify, webhook and cron paths credit
   //    EXACTLY ONCE regardless of order/overlap.
-  const feePlan = await getFeePlanForOrganizer(extras.organizerUid)
-  const feeConfig = await resolveFeeConfig('donation', feePlan.planTier)
-  const feeResult = calculateFee({
-    transactionType:  'donation',
-    grossAmountPaise: extras.amountPaise,
-    feeModel:         'organizer_pays',
-    config:           feeConfig,
+  // Build via the SHARED helper (also used by the donation recovery sweep — RD-PAY-GA-01B
+  // — so both paths post an identical, deterministic ptx_<donationId> entry).
+  const { ledger, credit } = await buildDonationLedgerAndCredit({
+    donationId:   input.donationId,
+    organizerUid: extras.organizerUid,
+    campaignSlug: extras.campaignSlug,
+    donorName:    extras.donorName,
+    donorEmail:   extras.donorEmail,
+    isAnonymous:  extras.isAnonymous,
+    amountPaise:  extras.amountPaise,
+    paymentId:    input.razorpayPaymentId,
+    orderId:      input.razorpayOrderId,
   })
-
-  const ledger: PlatformTransactionData = {
-    id:                      `ptx_${input.donationId}`,
-    type:                    'donation',
-    category:                'donation',
-    organizerUid:            extras.organizerUid,
-    entityId:                extras.campaignSlug,
-    entityType:              'campaign',
-    sourceId:                input.donationId,
-    sourceType:              'donation',
-    payerName:               extras.isAnonymous ? 'Anonymous' : extras.donorName,
-    payerEmail:              extras.donorEmail,
-    grossAmountPaise:        extras.amountPaise,
-    platformFeeBasePaise:    feeResult.platformFeeBasePaise,
-    platformFeeGstPaise:     feeResult.platformFeeGstPaise,
-    platformFeeTotalPaise:   feeResult.platformFeeTotalPaise,
-    gatewayFeeEstimatePaise: feeResult.gatewayFeeEstimatePaise,
-    netSettlementPaise:      feeResult.netSettlementPaise,
-    feeModel:                'organizer_pays',
-    planTier:                feePlan.planTier,
-    feeConfigId:             feePlan.feeConfigId,
-    currency:                'INR',
-    gateway:                 'razorpay',
-    gatewayPaymentId:        input.razorpayPaymentId,
-    gatewayOrderId:          input.razorpayOrderId,
-  }
-  const credit: RevenueCreditInput = {
-    organizerUid:       extras.organizerUid,
-    grossAmountPaise:   extras.amountPaise,
-    feesTotalPaise:     feeResult.platformFeeTotalPaise + feeResult.gatewayFeeEstimatePaise,
-    netSettlementPaise: feeResult.netSettlementPaise,
-  }
   try {
     await recordPlatformTransactionAndCredit(ledger, credit)
   } catch (financialErr) {

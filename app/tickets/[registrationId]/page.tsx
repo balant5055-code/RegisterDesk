@@ -126,7 +126,7 @@ export default async function TicketPage({ params }: PageProps) {
           <span className="text-[13px] font-bold text-foreground">RegisterDesk</span>
           <Link
             href={`/api/tickets/${registrationId}/pdf${pdfToken ? `?token=${pdfToken}` : ''}`}
-            className="rounded-lg bg-primary px-3 py-1.5 text-[12px] font-semibold text-white hover:bg-[#bf1868]"
+            className="rounded-lg bg-primary px-3 py-1.5 text-[12px] font-semibold text-white hover:bg-[var(--primary-hover)]"
           >
             Download PDF
           </Link>
@@ -159,7 +159,7 @@ export default async function TicketPage({ params }: PageProps) {
               </div>
             </div>
           ) : (
-            <div className="flex h-24 items-end bg-gradient-to-br from-[#fb5a6a]/30 via-[#e5277e]/20 to-transparent px-4 pb-3">
+            <div className="flex h-24 items-end bg-gradient-to-br from-[var(--primary-from)]/30 via-[var(--primary)]/20 to-transparent px-4 pb-3">
               <p className="text-[18px] font-extrabold text-foreground">{reg.eventName}</p>
             </div>
           )}

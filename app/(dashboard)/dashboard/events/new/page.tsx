@@ -630,7 +630,7 @@ function Stepper({
                     isCompleted
                       ? 'bg-emerald-500'
                       : isCurrent
-                      ? 'bg-primary shadow-[0_0_0_3px_rgba(229,39,126,0.15)]'
+                      ? 'bg-primary shadow-[0_0_0_3px_rgb(var(--primary-rgb)_/_0.15)]'
                       : 'border border-border bg-card',
                   )}
                 >
@@ -3586,7 +3586,7 @@ function PassesSection({
           <button
             type="button"
             onClick={onAddNew}
-            className="flex items-center gap-2 rounded-xl bg-primary px-5 py-2.5 text-[13px] font-semibold text-primary-foreground transition-colors hover:bg-[#bf1868]"
+            className="flex items-center gap-2 rounded-xl bg-primary px-5 py-2.5 text-[13px] font-semibold text-primary-foreground transition-colors hover:bg-[var(--primary-hover)]"
           >
             <Plus className="size-4" aria-hidden />
             Add First Pass

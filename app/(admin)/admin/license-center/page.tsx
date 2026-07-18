@@ -13,6 +13,7 @@ import { useCallback, useEffect, useState } from 'react'
 import Link from 'next/link'
 import { auth } from '@/lib/firebase/auth'
 import { cn } from '@/lib/utils/cn'
+import { IconButton } from '@/components/ui'
 import {
   Loader2, RefreshCw, KeyRound, Gift, IndianRupee, Ticket, TrendingUp, ScrollText,
   ShieldCheck, ExternalLink, X, PlusCircle, PauseCircle, PlayCircle,
@@ -345,7 +346,7 @@ function LicenseDrawer({ eventId, onClose, onChanged }: { eventId: string; onClo
       <div className="h-full w-full max-w-xl overflow-y-auto bg-card p-5 shadow-xl" onClick={e => e.stopPropagation()}>
         <div className="mb-4 flex items-center justify-between">
           <h2 className="text-[16px] font-semibold text-foreground">License management</h2>
-          <button onClick={onClose} className="rounded-md p-1 text-muted-foreground hover:bg-muted"><X className="size-4" /></button>
+          <IconButton onClick={onClose}><X className="size-4" /></IconButton>
         </div>
         {err && <div className="mb-3"><ErrorBanner>{err}</ErrorBanner></div>}
         {!row ? <CenterSpin /> : (
@@ -571,7 +572,7 @@ function CouponCreateDialog({ onClose, onCreated }: { onClose: () => void; onCre
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={onClose}>
       <div className="w-full max-w-md rounded-2xl bg-card p-5 shadow-xl" onClick={e => e.stopPropagation()}>
-        <div className="mb-4 flex items-center justify-between"><h2 className="text-[16px] font-semibold text-foreground">New license coupon</h2><button onClick={onClose} className="rounded-md p-1 text-muted-foreground hover:bg-muted"><X className="size-4" /></button></div>
+        <div className="mb-4 flex items-center justify-between"><h2 className="text-[16px] font-semibold text-foreground">New license coupon</h2><IconButton onClick={onClose}><X className="size-4" /></IconButton></div>
         {err && <div className="mb-3"><ErrorBanner>{err}</ErrorBanner></div>}
         <div className="space-y-3 text-[13px]">
           <Field label="Code"><input value={code} onChange={e => setCode(e.target.value.toUpperCase())} placeholder="SUMMER2026" className={inputCls} /></Field>
@@ -629,7 +630,7 @@ function CouponDrawer({ code, onClose, onChanged }: { code: string; onClose: () 
   return (
     <div className="fixed inset-0 z-50 flex justify-end bg-black/50" onClick={onClose}>
       <div className="h-full w-full max-w-lg overflow-y-auto bg-card p-5 shadow-xl" onClick={e => e.stopPropagation()}>
-        <div className="mb-4 flex items-center justify-between"><h2 className="text-[16px] font-semibold text-foreground">Coupon {code}</h2><button onClick={onClose} className="rounded-md p-1 text-muted-foreground hover:bg-muted"><X className="size-4" /></button></div>
+        <div className="mb-4 flex items-center justify-between"><h2 className="text-[16px] font-semibold text-foreground">Coupon {code}</h2><IconButton onClick={onClose}><X className="size-4" /></IconButton></div>
         {err && <div className="mb-3"><ErrorBanner>{err}</ErrorBanner></div>}
         {!c ? <CenterSpin /> : (
           <div className="space-y-4 text-[13.5px]">

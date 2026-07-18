@@ -15,6 +15,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { listActiveJobs }            from '@/lib/jobs/kernel'
 import { isAuthorizedCron, cronUnauthorized } from '@/lib/cron/auth'
 import { withCronMetrics } from '@/lib/cron/withMetrics'
+import { captureError, flushMonitoring } from '@/lib/monitoring/sentry'
 import {
   processPrintPackageChunk, PRINT_PACKAGE_JOBS, type PrintPackageJob,
 } from '@/lib/printAssets/packageJob'
@@ -41,10 +42,12 @@ async function handle(req: NextRequest): Promise<NextResponse> {
       outcomes.push({ jobId: job.jobId, status: r.status, processed: r.processed, reason: r.reason })
     } catch (err) {
       console.error('[cron/print-packaging] job error:', { jobId: job.jobId, err })
+      captureError(err, { scope: 'cron.print_packaging', area: 'print', jobId: job.jobId })
       outcomes.push({ jobId: job.jobId, status: 'error', processed: 0, reason: err instanceof Error ? err.message : 'error' })
     }
   }
 
+  await flushMonitoring()   // deliver captured events before the serverless run ends
   return NextResponse.json({ scanned: jobs.length, durationMs: Date.now() - start, jobs: outcomes })
 }
 

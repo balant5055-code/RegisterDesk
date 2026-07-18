@@ -13,6 +13,7 @@ import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { auth } from '@/lib/firebase/auth'
 import { cn } from '@/lib/utils/cn'
+import { IconButton } from '@/components/ui'
 import {
   Search, X, Loader2, Building2, CalendarDays, KeyRound, Pin, PinOff,
   CornerDownLeft, Clock, LayoutGrid, ArrowRight,
@@ -295,7 +296,7 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
             aria-label="Search organizers, events, licenses, coupons and admin pages"
             className="w-full bg-transparent py-3.5 text-[14px] text-foreground outline-none placeholder:text-muted-foreground" />
           {loading && <Loader2 className="size-4 animate-spin text-muted-foreground" aria-hidden />}
-          <button onClick={onClose} aria-label="Close search" className="rounded-md p-1 text-muted-foreground hover:bg-muted"><X className="size-4" /></button>
+          <IconButton onClick={onClose} aria-label="Close search"><X className="size-4" /></IconButton>
         </div>
 
         {/* Screen-reader status: loading + result count announced politely. */}

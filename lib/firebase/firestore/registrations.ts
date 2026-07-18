@@ -7,6 +7,7 @@ import {
   TicketCodeCollisionError,
 }                             from '@/lib/registrations/ticketCode'
 import { buildCounterIncrement, writeCheckinDelta } from '@/lib/firebase/firestore/registrationCounters'
+import { deriveStoredEventCapacity } from '@/lib/registrations/capacity'
 import { buildQrValue }          from '@/lib/tickets/generate'
 import { enqueueWebhook }        from '@/lib/integrations/webhooks'
 import { crmRecordRegistration } from '@/lib/crm/service'
@@ -220,7 +221,7 @@ export async function createRegistration(
           throw new DuplicateRegistrationError('DUPLICATE_MOBILE')
         }
 
-        const eventCapacity = eventData?.totalCapacity ?? null
+        const eventCapacity = deriveStoredEventCapacity(eventData)
 
         // P1-E: Re-read pass capacity from the live, transaction-locked event doc.
         // input.passCapacity was captured before the transaction in submit/route.ts
@@ -551,7 +552,7 @@ export async function restoreRegistration(
     const passCount  = (counterData?.passCounts ?? {})[reg.passId] ?? 0
 
     // Event-level capacity check
-    const eventCapacity = eventData?.totalCapacity ?? null
+    const eventCapacity = deriveStoredEventCapacity(eventData)
     if (eventCapacity !== null && totalCount >= eventCapacity) {
       throw new CapacityBlocksRestoreError('EVENT_CAPACITY_FULL')
     }
@@ -759,7 +760,7 @@ export async function approveRegistration(
     const passCount  = (counterData?.passCounts ?? {})[reg.passId] ?? 0
 
     // Event-level capacity check
-    const eventCapacity = eventData?.totalCapacity ?? null
+    const eventCapacity = deriveStoredEventCapacity(eventData)
     if (eventCapacity !== null && totalCount >= eventCapacity) {
       throw new CapacityBlocksApprovalError('EVENT_CAPACITY_FULL')
     }

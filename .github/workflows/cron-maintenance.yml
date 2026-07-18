@@ -1,0 +1,66 @@
+# RD-OPS-GA-02B — Group D: heavy reconciliation + settlement + maintenance (daily).
+#
+# Runs once daily at an off-peak hour, STRICTLY SEQUENTIAL:
+#   global-reconciliation -> session-reconciliation -> release-funds -> storage-cleanup
+# The two reconcilers are single-instance (RD-OPS-GA-01 F6: their counter repairs use
+# absolute overwrites that must not race live traffic) — the concurrency group +
+# cancel-in-progress:false guarantee one run at a time.
+#
+# curl --max-time note: global-/session-reconciliation have a 300s server budget
+# (maxDuration=300). A 65s client timeout would abort curl MID-RUN and --retry would
+# fire a SECOND invocation while the first is still executing server-side — a
+# forbidden concurrent reconciliation. So those two use --max-time 320 (> the 300s
+# budget) to wait for completion; the 60s endpoints keep --max-time 65.
+name: Cron - Group D (maintenance, daily)
+
+on:
+  schedule:
+    - cron: '0 2 * * *'
+  workflow_dispatch: {}
+
+permissions: {}
+
+concurrency:
+  group: cron-maintenance
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      CRON_BASE_URL: ${{ secrets.CRON_BASE_URL }}
+      CRON_SECRET: ${{ secrets.CRON_SECRET }}
+    steps:
+      - name: Preflight (secrets present)
+        run: |
+          test -n "$CRON_BASE_URL" || { echo "::error::CRON_BASE_URL secret is not set"; exit 1; }
+          test -n "$CRON_SECRET"   || { echo "::error::CRON_SECRET secret is not set"; exit 1; }
+
+      - name: global-reconciliation
+        continue-on-error: true
+        run: |
+          curl -sS -X POST "$CRON_BASE_URL/api/cron/global-reconciliation" \
+            -H "Authorization: Bearer $CRON_SECRET" \
+            --retry 2 --retry-delay 5 --max-time 320 --fail-with-body
+
+      - name: session-reconciliation
+        continue-on-error: true
+        run: |
+          curl -sS -X POST "$CRON_BASE_URL/api/cron/session-reconciliation" \
+            -H "Authorization: Bearer $CRON_SECRET" \
+            --retry 2 --retry-delay 5 --max-time 320 --fail-with-body
+
+      - name: release-funds
+        continue-on-error: true
+        run: |
+          curl -sS -X POST "$CRON_BASE_URL/api/cron/release-funds" \
+            -H "Authorization: Bearer $CRON_SECRET" \
+            --retry 2 --retry-delay 5 --max-time 65 --fail-with-body
+
+      - name: storage-cleanup
+        continue-on-error: true
+        run: |
+          curl -sS -X POST "$CRON_BASE_URL/api/cron/storage-cleanup" \
+            -H "Authorization: Bearer $CRON_SECRET" \
+            --retry 2 --retry-delay 5 --max-time 65 --fail-with-body

@@ -16,6 +16,9 @@ export type { PageHeaderProps }                 from './PageHeader'
 // ─── Buttons ──────────────────────────────────────────────────────────────────
 export { Button, buttonVariants }               from './button'
 export type { ButtonProps, ButtonVariant, ButtonSize } from './button'
+export { IconButton }                           from './IconButton'
+export { TextLink }                             from './TextLink'
+export type { TextLinkProps }                   from './TextLink'
 
 // ─── Cards ────────────────────────────────────────────────────────────────────
 export { Card }                                 from './card'

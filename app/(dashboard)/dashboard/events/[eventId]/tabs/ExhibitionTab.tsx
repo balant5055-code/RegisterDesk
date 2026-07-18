@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { Loader2, AlertCircle, RefreshCw, Building2, Users, Star, Tv2, Crown } from 'lucide-react'
 import { cn } from '@/lib/utils/cn'
+import { TextLink } from '@/components/ui'
 import type { ExhibitionKpiResponse } from '@/app/api/organizer/events/[eventId]/exhibition/route'
 
 interface ExhibitionTabProps {
@@ -68,7 +69,7 @@ export default function ExhibitionTab({ eventId, token }: ExhibitionTabProps) {
       <div className="flex flex-col items-center justify-center gap-3 py-20 text-center">
         <AlertCircle className="size-6 text-destructive" />
         <p className="text-[14px] text-muted-foreground">{error}</p>
-        <button onClick={load} className="text-[13px] text-primary hover:underline">Retry</button>
+        <TextLink onClick={load}>Retry</TextLink>
       </div>
     )
   }

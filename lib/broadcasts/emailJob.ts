@@ -31,7 +31,14 @@ import type { RegistrationDocument } from '@/lib/registrations/types'
 
 export const EMAIL_BROADCAST_JOBS = 'emailBroadcastJobs'
 
-const EB_PAGE_SIZE = 50
+// A page must finish within the lease (and the route's maxDuration=60), else the
+// worker is killed mid-page, the chunk never commits, and every tick re-processes
+// the same page (a wedge) — relying on the best-effort `sent` flag to avoid dup
+// emails. Sends run sequentially and each is bounded by SES_TIMEOUT_MS (20s), so
+// worst-case page = EB_PAGE_SIZE × 20s; 2 × 20s = 40s stays under the 60s lease.
+// (Mirrors the whatsappJob WAB_PAGE_SIZE sizing; the F1 kernel fencing separately
+// blocks any double-commit if the invariant is ever violated.)
+const EB_PAGE_SIZE = 2
 const EB_BUDGET_MS = 45_000
 const EB_LEASE_MS  = 60_000
 

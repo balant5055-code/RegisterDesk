@@ -11,7 +11,6 @@
 // misconfiguration fails only that feature, never unrelated routes (e.g. OTP no
 // longer fails because Razorpay is in test mode):
 //   • Razorpay keys + live-key rule → lib/razorpay/client.ts
-//   • Upstash-in-production          → lib/rateLimit/redis.ts
 //   • SES paired credentials         → lib/email/index.ts
 //   • Meta partial config            → lib/whatsapp/config.ts
 //   • CRON_SECRET-in-production      → lib/cron/auth.ts (RD-CRON-ARCH-02)
@@ -76,14 +75,8 @@ export const CRON_SECRET = optional('CRON_SECRET')
 // WITHOUT crashing the rest of the app. isAuthorizedCron() still rejects every cron
 // request when the secret is unset.
 
-// ─── Upstash Redis — distributed rate limiting (P1-2) ────────────────────────
-// REST endpoint + token for the serverless Redis used by lib/rateLimit/redis.ts.
-// MANDATORY in real production, but that "required in production" enforcement lives in
-// lib/rateLimit/redis.ts (RD-ENV-ARCH-03) — the rate-limiter boundary — so a missing
-// Upstash config fails only rate-limited endpoints, not OTP/payments/dashboard.
-// Preview/development fall back to the in-memory limiter when these are unset.
-export const UPSTASH_REDIS_REST_URL   = optional('UPSTASH_REDIS_REST_URL').replace(/\/$/, '')
-export const UPSTASH_REDIS_REST_TOKEN = optional('UPSTASH_REDIS_REST_TOKEN')
+// Rate limiting is served by the in-process fixed-window limiter (lib/rateLimit.ts);
+// Upstash Redis was removed (RD-REDIS-REMOVE) — no Redis env vars are required.
 
 // ─── Category A — HMAC secrets ───────────────────────────────────────────────
 // Required: ticket PDF tokens, receipt PDF tokens, and unsubscribe link tokens

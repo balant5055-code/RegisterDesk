@@ -34,10 +34,13 @@ const variantShadow: Record<CardVariant, string> = {
   modal:    'shadow-xl',
 }
 
+// Padding consumes the semantic card tokens (styles/tokens.css). Values are
+// identical to the former p-*/sm:p-* utilities (base + sm: breakpoint preserved),
+// so responsive behaviour and rendered output are pixel-identical.
 const variantPadding: Record<CardVariant, string> = {
-  default:  'p-4 sm:p-5',
-  elevated: 'p-5 sm:p-6',
-  modal:    'p-6 sm:p-7',
+  default:  'p-[var(--card-px-default)]  sm:p-[var(--card-px-default-sm)]',
+  elevated: 'p-[var(--card-px-elevated)] sm:p-[var(--card-px-elevated-sm)]',
+  modal:    'p-[var(--card-px-modal)]    sm:p-[var(--card-px-modal-sm)]',
 }
 
 // ─── Component ───────────────────────────────────────────────────────────────

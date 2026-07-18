@@ -16,7 +16,7 @@ import type { HeroSectionContent } from '@/lib/marketing/types'
 const EASE: [number, number, number, number] = [0.16, 1, 0.3, 1]
 
 // RegisterDesk brand gradient (#fb5a6a → #e5277e — matches --primary-gradient).
-const GRADIENT = 'bg-[linear-gradient(90deg,#fb5a6a,#e5277e)]'
+const GRADIENT = 'bg-[linear-gradient(90deg,var(--primary-from),var(--primary))]'
 
 // Only these words carry the brand gradient; the rest stays solid #0F172A.
 const GRADIENT_WORDS = new Set(['registration', 'settlement'])

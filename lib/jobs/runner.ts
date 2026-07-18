@@ -91,6 +91,7 @@ export async function runJobChunk<J extends Job, Ctx, Item>(
   let cursor    = job.cursor
   let processed = 0
   let status: JobStatus = 'processing'
+  let leaseTag  = lease.leaseTag   // fencing token; renewed by each commitChunk
 
   // Process page-by-page, committing after each page, until the time budget is
   // spent, the job is exhausted, or cancellation is observed at commit.
@@ -114,7 +115,7 @@ export async function runJobChunk<J extends Job, Ctx, Item>(
     await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, worker))
 
     const finished = !hasMore
-    status = await commitChunk(config.collection, jobId, {
+    const commit = await commitChunk(config.collection, jobId, {
       deltaProcessed: items.length,
       deltaSucceeded: succeeded,
       deltaFailed:    failed,
@@ -122,8 +123,16 @@ export async function runJobChunk<J extends Job, Ctx, Item>(
       lastError,
       finished,
       leaseMs:        config.leaseMs,
+      expectedLeaseTag: leaseTag,
     })
 
+    // Lost the lease (a co-driver re-leased after ours expired): the commit was
+    // rejected with no mutation. Stop and let the current owner continue from the
+    // last committed cursor — never commit stale progress on top of it.
+    if (commit.fenced) { status = commit.status; break }
+
+    status    = commit.status
+    leaseTag  = commit.leaseTag
     cursor    = nextCursor
     processed += items.length
 

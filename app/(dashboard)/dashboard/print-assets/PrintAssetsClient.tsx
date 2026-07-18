@@ -5,7 +5,7 @@ import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { auth } from '@/lib/firebase/auth'
 import { useToast } from '@/components/ui/Toast'
-import { PageHeader, buttonVariants, EmptyState } from '@/components/ui'
+import { PageHeader, buttonVariants, EmptyState, IconButton } from '@/components/ui'
 import { cn } from '@/lib/utils/cn'
 import {
   Plus, Printer, Copy, Pencil, Trash2, Eye, X, Loader2, Search, LayoutTemplate,
@@ -459,7 +459,7 @@ function Modal({ title, onClose, children }: { title: string; onClose: () => voi
       <div className="w-full max-w-lg rounded-2xl border border-border bg-card p-5 shadow-xl" onClick={e => e.stopPropagation()}>
         <div className="mb-4 flex items-center justify-between">
           <h3 className="text-[16px] font-bold text-foreground">{title}</h3>
-          <button type="button" onClick={onClose} aria-label="Close" className="rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground"><X className="size-4" /></button>
+          <IconButton type="button" onClick={onClose} aria-label="Close" className="hover:text-foreground"><X className="size-4" /></IconButton>
         </div>
         {children}
       </div>

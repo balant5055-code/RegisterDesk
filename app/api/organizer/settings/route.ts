@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { adminAuth, adminDb }       from '@/lib/firebase/admin'
 import { FieldValue }               from 'firebase-admin/firestore'
 import { verifyCaller }             from '@/lib/team/access'
+import { validColor, validImageUrl } from '@/lib/branding/service'
 import { RATE_POLICY, checkPolicy } from '@/lib/rateLimit/policies'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -93,6 +94,11 @@ export async function PATCH(req: NextRequest) {
 
   switch (body.section) {
     case 'organization':
+      // Validate the branding image URL to the same https-only contract setBranding
+      // enforces — this route must not be a validation bypass (RD-ORG-GA-04 F3).
+      if (body.data.logoUrl != null && !validImageUrl(body.data.logoUrl)) {
+        return NextResponse.json({ error: 'logoUrl must be a valid https image URL.' }, { status: 400 })
+      }
       update = {
         organizationName:                   body.data.organizationName,
         'organizationProfile.website':      body.data.website,
@@ -103,6 +109,16 @@ export async function PATCH(req: NextRequest) {
       }
       break
     case 'branding':
+      // Same validation contract as setBranding (https image URLs, #RRGGBB colour).
+      if (body.data.certSignatureUrl != null && !validImageUrl(body.data.certSignatureUrl)) {
+        return NextResponse.json({ error: 'certSignatureUrl must be a valid https image URL.' }, { status: 400 })
+      }
+      if (body.data.emailHeaderUrl != null && !validImageUrl(body.data.emailHeaderUrl)) {
+        return NextResponse.json({ error: 'emailHeaderUrl must be a valid https image URL.' }, { status: 400 })
+      }
+      if (body.data.primaryColor != null && !validColor(body.data.primaryColor)) {
+        return NextResponse.json({ error: 'primaryColor must be a hex colour (#RRGGBB).' }, { status: 400 })
+      }
       update = {
         'branding.certSignatureUrl': body.data.certSignatureUrl,
         'branding.emailHeaderUrl':   body.data.emailHeaderUrl,

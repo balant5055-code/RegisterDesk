@@ -5,6 +5,7 @@ import Link                                 from 'next/link'
 import { auth }                             from '@/lib/firebase/auth'
 import { cn }                               from '@/lib/utils/cn'
 import { Loader2, X, ShieldOff, ShieldCheck, Ban, Eye, LayoutGrid } from 'lucide-react'
+import { IconButton } from '@/components/ui'
 import { useConfirm } from '@/components/ui/ConfirmDialog'
 import {
   AdminToolbar, StatusPill, TableFrame, THead, Th, TBody, Tr, Td, TableStateRow,
@@ -248,7 +249,7 @@ function OrganizerDetailModal({ uid, onClose }: { uid: string; onClose: () => vo
       <div className="w-full max-w-lg rounded-2xl bg-card p-5 shadow-xl" onClick={e => e.stopPropagation()}>
         <div className="mb-4 flex items-center justify-between">
           <h2 className="text-[16px] font-semibold text-foreground">Organizer detail</h2>
-          <button onClick={onClose} className="rounded-md p-1 text-muted-foreground hover:bg-muted"><X className="size-4" /></button>
+          <IconButton onClick={onClose}><X className="size-4" /></IconButton>
         </div>
 
         {error ? (

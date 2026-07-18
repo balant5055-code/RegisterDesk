@@ -21,6 +21,7 @@ import type { Job }      from '@/lib/jobs/types'
 import { getMetaProvider, resolveWhatsAppTemplateByType, hasWhatsAppTemplate } from '@/lib/whatsapp'
 import type { WhatsAppProvider, WhatsAppTemplateType } from '@/lib/whatsapp'
 import { writeEmailLog }     from '@/lib/email-logs/write'
+import { validatePhoneNumber } from '@/lib/communication/phone'
 import { logBroadcastAction } from '@/lib/broadcasts/audit'
 import { finalizeBroadcast } from './finalize'
 import type { FinalizeCampaign, FinalizeRecipient } from './finalize'
@@ -28,7 +29,13 @@ import type { RegistrationDocument } from '@/lib/registrations/types'
 
 export const WHATSAPP_BROADCAST_JOBS = 'whatsappBroadcastJobs'
 
-const WAB_PAGE_SIZE = 50
+// The runner renews the lease only at commitChunk (once per page), so a page must
+// never take longer than the lease — otherwise the lease expires mid-page, a
+// concurrent cron re-leases at the un-advanced cursor, and both drivers re-send the
+// same recipients (duplicate WhatsApp messages, H1). Sends run sequentially and each
+// is bounded by metaApiTimeoutMs (default 10s), so worst-case page time is
+// WAB_PAGE_SIZE × 10s; 5 × 10s = 50s stays safely under the 60s lease.
+const WAB_PAGE_SIZE = 5
 const WAB_BUDGET_MS = 45_000
 const WAB_LEASE_MS  = 60_000
 
@@ -174,13 +181,30 @@ export function whatsAppBroadcastStrategy(): JobStrategy<WhatsAppBroadcastJob, W
     async processItem(item, job, ctx) {
       if (item.sent) return { ok: true }
 
+      // Validate + normalize the recipient phone (adds the country code) exactly like
+      // the transactional WhatsApp paths — a raw/bare number is rejected or misrouted
+      // by Meta. Invalid numbers are logged failed and never sent (charged 0), never
+      // handed to Meta.
+      const phoneCheck = validatePhoneNumber(item.phone)
+      if (!phoneCheck.valid) {
+        void writeEmailLog({
+          organizerUid: job.organizerUid, eventId: job.eventId, eventSlug: job.eventSlug, eventName: job.eventName,
+          templateKey: 'broadcast', channel: 'whatsapp', provider: 'meta', campaignId: job.campaignId,
+          recipientEmail: item.email, recipientName: item.name, recipientPhone: item.phone,
+          subject: job.subject, status: 'failed', registrationId: item.registrationId,
+          error: `Invalid phone number: ${phoneCheck.reason}`, costPaise: 0,
+        })
+        return { ok: false, error: `Invalid phone: ${phoneCheck.reason}` }
+      }
+      const normalizedPhone = phoneCheck.normalizedPhone as string
+
       const vars: Record<string, string> = {
         ...ctx.staticVars,
         attendeeName: item.name,
         eventName:    ctx.eventName,
         ticketCode:   item.ticketCode ?? '',
       }
-      const resolved = resolveWhatsAppTemplateByType(ctx.templateType, item.phone, vars, { languageCode: ctx.languageCode })
+      const resolved = resolveWhatsAppTemplateByType(ctx.templateType, normalizedPhone, vars, { languageCode: ctx.languageCode })
 
       let status: 'sent' | 'failed' = 'failed'
       let errorMsg: string | undefined

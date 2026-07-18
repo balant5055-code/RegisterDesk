@@ -175,7 +175,7 @@ function AttendeeCard({
           <button
             type="button"
             onClick={() => onCheckIn(reg)}
-            className="flex items-center gap-1.5 rounded-xl bg-primary px-4 py-2 text-[14px] font-semibold text-white transition-transform active:scale-95 hover:bg-[#bf1868]"
+            className="flex items-center gap-1.5 rounded-xl bg-primary px-4 py-2 text-[14px] font-semibold text-white transition-transform active:scale-95 hover:bg-[var(--primary-hover)]"
           >
             <CheckCircle2 className="size-3.5" aria-hidden />
             Check In

@@ -1,10 +1,14 @@
-// In-process sliding-window rate limiter using a module-level Map.
+// In-process fixed-window rate limiter using a module-level Map.
 //
-// TRADE-OFF: Each Lambda / Edge function instance maintains its own counter.
-// This effectively blocks a single attacker hammering one instance but does NOT
-// stop distributed attacks spread across many instances.  For distributed rate
-// limiting replace this module with @upstash/ratelimit backed by a Redis
-// instance and call it from Next.js middleware.
+// This is the SINGLE rate-limit backend for the platform (RD-REDIS-REMOVE). It is used
+// directly (checkRateLimit / checkPolicy) and via the distributed-limiter adapter
+// (lib/rateLimit/redis.ts), which now delegates here.
+//
+// TRADE-OFF: Each Lambda / Edge function instance maintains its own counter. This blocks
+// a single attacker hammering one instance but does NOT enforce a single global limit
+// across many instances. That breadth is intentionally traded away — the money/OTP
+// chokepoints are additionally protected by Firestore (payment idempotency + signature
+// verification; per-email OTP attempt counters), so correctness never depends on it.
 
 interface Window {
   count:       number

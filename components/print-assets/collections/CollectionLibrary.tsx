@@ -9,7 +9,7 @@ import { useMemo, useState } from 'react'
 import { auth } from '@/lib/firebase/auth'
 import { cn } from '@/lib/utils/cn'
 import { useToast } from '@/components/ui/Toast'
-import { buttonVariants } from '@/components/ui'
+import { buttonVariants, IconButton } from '@/components/ui'
 import { X, ArrowLeft, Loader2, Sparkles, Check, Layers } from 'lucide-react'
 import { PRINT_COLLECTIONS, getCollection, recommendCollection } from '@/lib/printAssets/collections'
 import { PRINT_ASSET_TYPE_LABELS } from '@/lib/printAssets/types'
@@ -77,7 +77,7 @@ export function CollectionLibrary({ events, onClose, onImported }: {
             <h3 className="flex items-center gap-1.5 text-[16px] font-bold text-foreground"><Sparkles className="size-4 text-primary" /> {collection ? collection.name : 'Professional Collections'}</h3>
             <p className="text-[12px] text-muted-foreground">{collection ? collection.description : 'Start from a professionally designed collection instead of a blank canvas.'}</p>
           </div>
-          <button onClick={onClose} aria-label="Close" className="rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground"><X className="size-4" /></button>
+          <IconButton onClick={onClose} aria-label="Close" className="hover:text-foreground"><X className="size-4" /></IconButton>
         </div>
 
         {/* ── Library grid ── */}

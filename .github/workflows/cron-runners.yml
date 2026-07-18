@@ -1,0 +1,97 @@
+# RD-OPS-GA-02B — Group A: queue runners (user-facing background jobs).
+#
+# Drives the lease+cursor job runners (broadcasts, certificates, reports, prints,
+# imports, bulk). Every endpoint is idempotent and fencing-protected (RD-OPS-GA-01),
+# so overlapping or repeated ticks can never double-execute. Endpoints are triggered
+# SEQUENTIALLY in the approved order (producers before their drivers). Each step is
+# continue-on-error so one endpoint's transient failure never blocks the rest; curl
+# retries transient errors itself, and authoritative job-health surfaces via the app's
+# ops-alerts cron + Sentry (not this scheduler).
+name: Cron - Group A (runners, every 5 min)
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch: {}
+
+permissions: {}
+
+concurrency:
+  group: cron-runners
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      CRON_BASE_URL: ${{ secrets.CRON_BASE_URL }}
+      CRON_SECRET: ${{ secrets.CRON_SECRET }}
+    steps:
+      - name: Preflight (secrets present)
+        run: |
+          test -n "$CRON_BASE_URL" || { echo "::error::CRON_BASE_URL secret is not set"; exit 1; }
+          test -n "$CRON_SECRET"   || { echo "::error::CRON_SECRET secret is not set"; exit 1; }
+
+      - name: broadcasts (start due scheduled campaigns)
+        continue-on-error: true
+        run: |
+          curl -sS -X POST "$CRON_BASE_URL/api/cron/broadcasts" \
+            -H "Authorization: Bearer $CRON_SECRET" \
+            --retry 2 --retry-delay 5 --max-time 65 --fail-with-body
+
+      - name: email-broadcasts
+        continue-on-error: true
+        run: |
+          curl -sS -X POST "$CRON_BASE_URL/api/cron/email-broadcasts" \
+            -H "Authorization: Bearer $CRON_SECRET" \
+            --retry 2 --retry-delay 5 --max-time 65 --fail-with-body
+
+      - name: whatsapp-broadcasts
+        continue-on-error: true
+        run: |
+          curl -sS -X POST "$CRON_BASE_URL/api/cron/whatsapp-broadcasts" \
+            -H "Authorization: Bearer $CRON_SECRET" \
+            --retry 2 --retry-delay 5 --max-time 65 --fail-with-body
+
+      - name: print-generation
+        continue-on-error: true
+        run: |
+          curl -sS -X POST "$CRON_BASE_URL/api/cron/print-generation" \
+            -H "Authorization: Bearer $CRON_SECRET" \
+            --retry 2 --retry-delay 5 --max-time 65 --fail-with-body
+
+      - name: print-packaging
+        continue-on-error: true
+        run: |
+          curl -sS -X POST "$CRON_BASE_URL/api/cron/print-packaging" \
+            -H "Authorization: Bearer $CRON_SECRET" \
+            --retry 2 --retry-delay 5 --max-time 65 --fail-with-body
+
+      - name: certificate-jobs
+        continue-on-error: true
+        run: |
+          curl -sS -X POST "$CRON_BASE_URL/api/cron/certificate-jobs" \
+            -H "Authorization: Bearer $CRON_SECRET" \
+            --retry 2 --retry-delay 5 --max-time 65 --fail-with-body
+
+      - name: registration-import
+        continue-on-error: true
+        run: |
+          curl -sS -X POST "$CRON_BASE_URL/api/cron/registration-import" \
+            -H "Authorization: Bearer $CRON_SECRET" \
+            --retry 2 --retry-delay 5 --max-time 65 --fail-with-body
+
+      - name: registration-bulk
+        continue-on-error: true
+        run: |
+          curl -sS -X POST "$CRON_BASE_URL/api/cron/registration-bulk" \
+            -H "Authorization: Bearer $CRON_SECRET" \
+            --retry 2 --retry-delay 5 --max-time 65 --fail-with-body
+
+      - name: report-exports
+        continue-on-error: true
+        run: |
+          curl -sS -X POST "$CRON_BASE_URL/api/cron/report-exports" \
+            -H "Authorization: Bearer $CRON_SECRET" \
+            --retry 2 --retry-delay 5 --max-time 65 --fail-with-body

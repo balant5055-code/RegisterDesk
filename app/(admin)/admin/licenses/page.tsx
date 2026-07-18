@@ -11,6 +11,7 @@ import { useCallback, useEffect, useState } from 'react'
 import Link from 'next/link'
 import { auth } from '@/lib/firebase/auth'
 import { cn } from '@/lib/utils/cn'
+import { IconButton } from '@/components/ui'
 import {
   Loader2, X, Eye, Download, KeyRound, PauseCircle, PlayCircle, XCircle,
   ArrowUpCircle, ArrowDownCircle, IndianRupee, Users, ToggleRight, BadgeCheck,
@@ -349,7 +350,7 @@ function LicenseDetailModal({ eventId, onClose, onChanged }: {
       <div className="h-full w-full max-w-xl overflow-y-auto bg-card p-5 shadow-xl" onClick={e => e.stopPropagation()}>
         <div className="mb-4 flex items-center justify-between">
           <h2 className="text-[16px] font-semibold text-foreground">License detail</h2>
-          <button onClick={onClose} className="rounded-md p-1 text-muted-foreground hover:bg-muted"><X className="size-4" /></button>
+          <IconButton onClick={onClose}><X className="size-4" /></IconButton>
         </div>
 
         {error && <div className="mb-3"><ErrorBanner>{error}</ErrorBanner></div>}

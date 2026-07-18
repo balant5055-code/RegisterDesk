@@ -6,7 +6,7 @@ import type { ReactNode } from 'react'
 import { cn } from '@/lib/utils/cn'
 
 // The RegisterDesk brand gradient utility (#fb5a6a → #e5277e — matches --primary-gradient).
-export const BRAND_GRADIENT = 'bg-[linear-gradient(90deg,#fb5a6a,#e5277e)]'
+export const BRAND_GRADIENT = 'bg-[linear-gradient(90deg,var(--primary-from),var(--primary))]'
 
 export function Eyebrow({ children, className }: { children: ReactNode; className?: string }) {
   return (

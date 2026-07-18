@@ -26,7 +26,7 @@ export function PlatformHero({ hero }: { hero: PlatformHeroConfig }) {
   return (
     <section aria-labelledby="platform-hero-heading" className="relative overflow-hidden bg-white pt-8 pb-4 sm:pt-10 lg:pt-14">
       {/* Soft brand backdrop */}
-      <div aria-hidden className="pointer-events-none absolute inset-x-0 top-0 -z-10 h-[560px] bg-[radial-gradient(80%_60%_at_50%_0%,rgba(229,39,126,0.10),transparent_70%)]" />
+      <div aria-hidden className="pointer-events-none absolute inset-x-0 top-0 -z-10 h-[560px] bg-[radial-gradient(80%_60%_at_50%_0%,rgb(var(--primary-rgb)_/_0.10),transparent_70%)]" />
 
       <div className={MARKETING_CONTAINER.page}>
         <div className="mx-auto max-w-3xl text-center">

@@ -70,12 +70,11 @@ Legend: ⛔ blocks launch · ⚠️ required before scaling · ✅ verify
 | 4.2 | WhatsApp templates approved in Meta Business Manager | ⚠️ | Comms |
 | 4.3 | **Awareness:** WhatsApp is foundation-only — no message is routed to WhatsApp yet. Do NOT advertise WhatsApp delivery until wiring is complete. Leave all `META_*` unset to keep the channel disabled. | ✅ | Comms |
 
-## 5. Upstash Redis (rate limiting)
+## 5. Rate limiting
 
 | # | Item | Sev | Owner |
 |---|------|-----|-------|
-| 5.1 | `UPSTASH_REDIS_REST_URL` + `UPSTASH_REDIS_REST_TOKEN` set — **mandatory in true production** (startup fails without them) | ⛔ | Platform |
-| 5.2 | Verify distributed rate-limits active on payment verify, OTP, order create | ✅ | Platform |
+| 5.1 | No setup required — rate limiting is served by the built-in in-process limiter (`lib/rateLimit.ts`). **Upstash Redis was removed (RD-REDIS-REMOVE); no Redis account or env vars are needed.** Money/OTP correctness is guaranteed by Firestore (payment idempotency + signatures; per-email OTP attempt counters), independent of rate limiting. | ✅ | Platform |
 
 ## 6. Vercel Cron
 
@@ -130,6 +129,6 @@ Legend: ⛔ blocks launch · ⚠️ required before scaling · ✅ verify
 1. Deploy Firestore **indexes** (1.5) — reminders depend on it.
 2. Register **both** Razorpay webhooks (2.5).
 3. `CRON_SECRET` + Vercel **Pro** (6.1, 6.2).
-4. `UPSTASH_*` (5.1) + all required env (2.x, 3.3, 7.1, 8.1).
+4. All required env (2.x, 3.3, 7.1, 8.1). *(No Redis/Upstash — removed.)*
 5. Firestore **backups** enabled (10.1).
 6. SES out of sandbox (3.2).

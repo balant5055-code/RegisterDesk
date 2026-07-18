@@ -9,7 +9,7 @@
 // the credit can be retried out of band. Retry is idempotent because
 // recordPlatformTransactionAndCredit is keyed on the ledger doc id.
 
-import { FieldValue } from 'firebase-admin/firestore'
+import { FieldValue, Timestamp } from 'firebase-admin/firestore'
 import { adminDb }    from '@/lib/firebase/admin'
 import { captureFinancialError } from '@/lib/monitoring/sentry'
 import {
@@ -18,6 +18,8 @@ import {
   type PlatformTransactionData,
   type RevenueCreditInput,
 } from '@/lib/firebase/firestore/platformTransactions'
+import { buildRegistrationLedgerAndCredit } from '@/lib/payments/registrationLedger'
+import type { PaymentIntentRecord } from '@/lib/firebase/firestore/paymentIntents'
 
 const COLLECTION = 'registrationFinancialReconciliation'
 const REFUND_REVERSAL_COLLECTION = 'refundLedgerReconciliation'
@@ -171,6 +173,115 @@ export async function retryPendingRegistrationFinancials(limitN = 100): Promise<
   }
 
   return { scanned: snap.size, resolved, stillPending }
+}
+
+// ─── Post-commit ledger self-heal (RD-PAY-GA-01A) ──────────────────────────────
+//
+// The retry drainer above handles the case where the post-commit credit failed with a
+// TRANSIENT error (a reconciliation record was written). It does NOT cover the residual
+// hard-kill window: if the process dies between the registration commit and the credit —
+// AND before the catch writes the reconciliation record — there is no record to drain, so
+// a paid registration is left uncredited and invisible (wallet reconciliation compares the
+// wallet against Σ platformTransactions, and BOTH are absent, so it detects no mismatch).
+//
+// This forward, cursor-bounded sweep is the promised re-derivation (see the header note
+// above): it walks paymentIntents in createdAt order and repairs ONLY a `paid` intent whose
+// deterministic ptx_<registrationId> is missing, reusing the SAME shared ledger build and
+// the SAME idempotent recordPlatformTransactionAndCredit. It writes NOTHING else — no
+// ticket, registration, receipt, counter, or duplicate ledger/credit is ever created.
+
+// Sweep window: re-scan intents created in the last LOOKBACK, skipping the most recent
+// GRACE so an in-flight post-commit credit is never mistaken for a gap. A recency-window
+// RE-SCAN (NOT a forward cursor) is deliberate: a forward cursor advancing over a
+// still-`created` intent would permanently skip it if it settled AND gapped later. Re-
+// scanning re-examines every intent while it stays in the window, so a late-settled gap is
+// always caught. Cost stays bounded by the window + limit; the daily global-reconciliation
+// wallet audit is the final backstop for anything beyond the window at extreme volume.
+const LEDGER_SWEEP_LOOKBACK_MS = 48 * 60 * 60 * 1000
+const LEDGER_SWEEP_GRACE_MS    = 5 * 60 * 1000
+
+export interface LedgerSweepResult {
+  scanned:    number   // intents read this page
+  candidates: number   // paid, positive-amount registrations examined
+  recovered:  number   // missing ledgers credited directly
+  enqueued:   number   // credit deferred to the retry drainer on transient failure
+  alreadyOk:  number   // candidates whose ptx_ already existed
+}
+
+/**
+ * Detects & repairs paid registrations missing their platform-transaction ledger.
+ * Idempotent and safe to run repeatedly/concurrently: the existence pre-check + the
+ * idempotent recordPlatformTransactionAndCredit (ptx_<registrationId> gate) guarantee no
+ * double credit; a transient failure is handed to the existing reconciliation drainer.
+ */
+export async function recoverUncreditedRegistrations(limitN = 500): Promise<LedgerSweepResult> {
+  const now = Date.now()
+  // Newest-first range on the single (auto-indexed) createdAt field — no composite index,
+  // no persisted cursor. Re-examined every run so a gap on a late-settled intent is caught.
+  const snap = await adminDb.collection('paymentIntents')
+    .where('createdAt', '>=', Timestamp.fromMillis(now - LEDGER_SWEEP_LOOKBACK_MS))
+    .where('createdAt', '<=', Timestamp.fromMillis(now - LEDGER_SWEEP_GRACE_MS))
+    .orderBy('createdAt', 'desc')
+    .limit(limitN)
+    .get()
+  if (snap.empty) return { scanned: 0, candidates: 0, recovered: 0, enqueued: 0, alreadyOk: 0 }
+
+  // Only PAID registrations with a positive amount post a ledger (free events do not).
+  const candidates = snap.docs
+    .map(d => d.data() as PaymentIntentRecord)
+    .filter(i => i.status === 'paid' && typeof i.registrationId === 'string' && !!i.registrationId && (i.amount ?? 0) > 0)
+
+  let recovered = 0, enqueued = 0, alreadyOk = 0
+
+  if (candidates.length > 0) {
+    // Cheap batch existence check — only the missing ones are recovered.
+    const ptxRefs  = candidates.map(i => adminDb.collection('platformTransactions').doc(`ptx_${i.registrationId}`))
+    const ptxSnaps = await adminDb.getAll(...ptxRefs)
+    const missing  = candidates.filter((_, idx) => !ptxSnaps[idx].exists)
+    alreadyOk = candidates.length - missing.length
+
+    for (const intent of missing) {
+      const registrationId = intent.registrationId as string
+      let bundle
+      try {
+        bundle = await buildRegistrationLedgerAndCredit({
+          registrationId,
+          organizerUid:     intent.organizerUid,
+          eventSlug:        intent.eventSlug,
+          attendeeName:     intent.attendee?.name ?? '',
+          attendeeEmail:    intent.attendee?.email ?? '',
+          grossAmountPaise: intent.amount,
+          paymentId:        intent.paymentId ?? '',
+          orderId:          intent.orderId,
+        })
+      } catch (buildErr) {
+        captureFinancialError(buildErr, { scope: 'ledgerSweep.build_failed', registrationId, orderId: intent.orderId })
+        continue   // daily global-reconciliation wallet audit remains the final backstop
+      }
+      try {
+        await recordPlatformTransactionAndCredit(bundle.ledger, bundle.credit)   // idempotent
+        recovered++
+        captureFinancialError('registration_ledger_self_healed', {
+          scope:  'ledgerSweep.recovered',
+          detail: 'paid registration was missing its ptx_ ledger + credit — recovered',
+          registrationId, orderId: intent.orderId,
+        })
+      } catch (recordErr) {
+        // Transient — hand off to the existing idempotent drainer (retryPendingRegistrationFinancials).
+        await recordRegistrationFinancialReconciliation({
+          registrationId,
+          orderId:   intent.orderId,
+          paymentId: intent.paymentId ?? '',
+          ledger:    bundle.ledger,
+          credit:    bundle.credit,
+          error:     recordErr instanceof Error ? recordErr.message : 'ledger_sweep_credit_failed',
+        })
+        enqueued++
+      }
+    }
+  }
+
+  return { scanned: snap.size, candidates: candidates.length, recovered, enqueued, alreadyOk }
 }
 
 /**

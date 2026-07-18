@@ -97,7 +97,7 @@ const CATEGORIES = [
 ]
 
 const WHY_FEATURES = [
-  { icon: QrCode,    title: 'QR Check-In',       desc: 'Lightning-fast entry scanning with live attendance tracking.',      gradient: 'from-[#fb5a6a] to-[#e5277e]' },
+  { icon: QrCode,    title: 'QR Check-In',       desc: 'Lightning-fast entry scanning with live attendance tracking.',      gradient: 'from-[var(--primary-from)] to-[var(--primary)]' },
   { icon: Shield,    title: 'Secure Payments',    desc: 'Razorpay-powered payments with full encryption and fraud guard.',   gradient: 'from-blue-500 to-blue-700' },
   { icon: Award,     title: 'Certificates',       desc: 'Automatically generate and send branded certificates to attendees.', gradient: 'from-amber-500 to-orange-500' },
   { icon: Mail,      title: 'Communications',     desc: 'Reach attendees via Email, WhatsApp, and SMS from one dashboard.',  gradient: 'from-emerald-500 to-teal-600' },
@@ -316,7 +316,7 @@ function EventPlaceholderGradient({ eventType }: { eventType: string | null }) {
     community:   'from-amber-600 to-orange-700',
   }
   const key = (eventType ?? '').toLowerCase()
-  const g   = gradients[key] ?? 'from-[#fb5a6a] to-[#e5277e]'
+  const g   = gradients[key] ?? 'from-[var(--primary-from)] to-[var(--primary)]'
   return (
     <div className={cn('h-full w-full bg-gradient-to-br', g, 'flex items-center justify-center')}>
       <Ticket className="size-12 text-white/30" />
@@ -591,9 +591,9 @@ function HeroSection({
     <section className="relative overflow-hidden bg-white pt-12 pb-10">
       {/* Gradient orb decorations */}
       <div className="pointer-events-none absolute inset-0">
-        <div className="absolute -top-40 -right-40 h-[700px] w-[700px] rounded-full bg-gradient-to-br from-[#fb5a6a]/12 to-[#e5277e]/8 blur-[130px]" />
-        <div className="absolute -bottom-20 -left-40 h-[600px] w-[600px] rounded-full bg-gradient-to-tr from-[#e5277e]/8 to-[#fb5a6a]/6 blur-[120px]" />
-        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 h-[400px] w-[800px] rounded-full bg-gradient-to-r from-transparent via-[#fb5a6a]/4 to-transparent blur-[100px]" />
+        <div className="absolute -top-40 -right-40 h-[700px] w-[700px] rounded-full bg-gradient-to-br from-[var(--primary-from)]/12 to-[var(--primary)]/8 blur-[130px]" />
+        <div className="absolute -bottom-20 -left-40 h-[600px] w-[600px] rounded-full bg-gradient-to-tr from-[var(--primary)]/8 to-[var(--primary-from)]/6 blur-[120px]" />
+        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 h-[400px] w-[800px] rounded-full bg-gradient-to-r from-transparent via-[var(--primary-from)]/4 to-transparent blur-[100px]" />
       </div>
 
       {/* Floating event preview cards */}
@@ -650,7 +650,7 @@ function HeroSection({
             className="mt-3 text-[32px] font-bold leading-[1.1] tracking-tight text-foreground sm:text-[40px] lg:text-[48px] lg:whitespace-nowrap"
           >
             Discover{' '}
-            <span className="bg-gradient-to-r from-[#fb5a6a] via-[#e5277e] to-[#c4116a] bg-clip-text text-transparent">
+            <span className="bg-gradient-to-r from-[var(--primary-from)] via-[var(--primary)] to-[var(--primary-deep)] bg-clip-text text-transparent">
               Extraordinary
             </span>
             {' '}Events
@@ -1428,10 +1428,10 @@ function WhySection() {
       <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
         <ScrollSection>
           <div className="mb-6 text-center">
-            <p className="text-[var(--fs-2xs)] font-bold uppercase tracking-widest text-[#fb5a6a] mb-1.5">Why RegisterDesk</p>
+            <p className="text-[var(--fs-2xs)] font-bold uppercase tracking-widest text-[var(--primary-from)] mb-1.5">Why RegisterDesk</p>
             <h2 className="text-[20px] font-semibold tracking-tight sm:text-[24px]">
               Everything you need to run
-              <span className="bg-gradient-to-r from-[#fb5a6a] to-[#e5277e] bg-clip-text text-transparent"> exceptional events</span>
+              <span className="bg-gradient-to-r from-[var(--primary-from)] to-[var(--primary)] bg-clip-text text-transparent"> exceptional events</span>
             </h2>
             <p className="mt-1.5 text-[var(--fs-sm)] text-white/60 max-w-2xl mx-auto">
               From discovery to check-in, RegisterDesk handles every step of the event journey with precision.

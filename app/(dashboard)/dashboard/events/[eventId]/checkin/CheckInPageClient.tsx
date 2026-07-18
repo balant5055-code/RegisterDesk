@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react'
 import Link                     from 'next/link'
+import { TextLink } from '@/components/ui'
 import { onAuthStateChanged }   from 'firebase/auth'
 import { auth }                 from '@/lib/firebase/auth'
 import { cn }                   from '@/lib/utils/cn'
@@ -43,9 +44,9 @@ export default function CheckInPageClient({ eventId }: { eventId: string }) {
       <div className="flex min-h-screen flex-col items-center justify-center gap-4 p-6 text-center">
         <AlertCircle className="size-10 text-destructive" />
         <p className="text-[15px] font-semibold">{error}</p>
-        <Link href={`/dashboard/events/${eventId}`} className="text-[13px] text-primary hover:underline">
+        <TextLink href={`/dashboard/events/${eventId}`}>
           ← Back to Event
-        </Link>
+        </TextLink>
       </div>
     )
   }

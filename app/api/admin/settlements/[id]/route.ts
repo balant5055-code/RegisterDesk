@@ -105,12 +105,23 @@ export async function PATCH(req: NextRequest, { params }: Ctx): Promise<NextResp
     if (!(await isPayoutProfileVerified(d.organizerUid))) {
       return NextResponse.json({ error: PAYOUT_PROFILE_UNVERIFIED_MESSAGE }, { status: 422 })
     }
-    await settlementRef.update({
-      status:     'approved',
-      approvedAt: FieldValue.serverTimestamp(),
-      updatedAt:  FieldValue.serverTimestamp(),
-      ...(adminNote ? { adminNote } : {}),
+    // Flip pending → approved inside a transaction that RE-READS status, so a
+    // concurrent reject (which atomically releases the payout hold) is never
+    // silently clobbered back to 'approved' (M-1). Mirrors the reject/paid txns.
+    const flipped = await adminDb.runTransaction(async tx => {
+      const fresh = await tx.get(settlementRef)
+      if (!fresh.exists || (fresh.data() as SettlementRequestDoc).status !== 'pending') return false
+      tx.update(settlementRef, {
+        status:     'approved',
+        approvedAt: FieldValue.serverTimestamp(),
+        updatedAt:  FieldValue.serverTimestamp(),
+        ...(adminNote ? { adminNote } : {}),
+      })
+      return true
     })
+    if (!flipped) {
+      return NextResponse.json({ error: 'This settlement was just updated by another action. Refresh and try again.' }, { status: 409 })
+    }
 
     void (async () => {
       try {

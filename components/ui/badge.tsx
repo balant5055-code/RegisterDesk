@@ -41,7 +41,7 @@ export function Badge({
       className={cn(
         'inline-flex items-center',
         'rounded-full',
-        'px-2.5 py-0.5',
+        'px-[var(--badge-px)] py-[var(--badge-py)]',
         'text-[13px] font-medium',
         'whitespace-nowrap',
         variantClasses[variant],

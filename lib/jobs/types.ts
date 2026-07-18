@@ -37,4 +37,19 @@ export interface ChunkCommit {
   lastError:      string | null
   finished:       boolean          // no more items remain
   leaseMs:        number
+  // Fencing token: the lockedUntil (ms) this worker holds. commitChunk rejects the
+  // commit if the doc's current lockedUntil differs — i.e. a co-driver re-leased
+  // after this worker's lease expired — so a stale worker can never double-apply
+  // counts/cursor/onComplete.
+  expectedLeaseTag: number
+}
+
+/** Result of committing one page. `fenced` = the worker lost the lease (no mutation
+ *  happened); the runner must stop and let the current owner continue. `leaseTag` is
+ *  the doc's lockedUntil (ms) after the commit — thread it into the next page's
+ *  `expectedLeaseTag`. */
+export interface ChunkResult {
+  status:   JobStatus
+  leaseTag: number
+  fenced:   boolean
 }

@@ -92,6 +92,7 @@ function logComm(
 async function deductWhatsAppCharge(args: WhatsAppConfirmationArgs, costPaise: number): Promise<void> {
   const walletRef = adminDb.doc(`organizerWallets/${args.organizerUid}`)
   const ledgerRef = adminDb.collection('walletTransactions').doc(`whatsapp_${args.registrationId}`)
+  const walletCfg = await getWalletConfig()
 
   await adminDb.runTransaction(async (txn) => {
     const ledgerSnap = await txn.get(ledgerRef)
@@ -100,6 +101,10 @@ async function deductWhatsAppCharge(args: WhatsAppConfirmationArgs, costPaise: n
     const walletSnap = await txn.get(walletRef)
     const balance    = walletSnap.exists ? ((walletSnap.data() as OrganizerWallet).balancePaise ?? 0) : 0
     const newBalance = balance - costPaise
+    // RD-PAY-GA-01B — re-check the balance INSIDE the txn (the caller's pre-check is a
+    // TOCTOU with concurrent charges). Never drive the wallet negative: the message was
+    // already sent best-effort, so on insufficient funds we skip the charge (platform absorbs).
+    if (!walletCfg.allowNegativeBalance && balance < costPaise) return
 
     txnDeductWallet(txn, args.organizerUid, costPaise)
     txn.set(ledgerRef, {

@@ -6,6 +6,7 @@ import {
   CERTIFICATE_TYPES, CERTIFICATE_TYPE_LABELS, CERTIFICATE_JOB_STATUS_LABELS,
 } from '@/lib/certificates/constants'
 import { cn } from '@/lib/utils/cn'
+import { IconButton } from '@/components/ui'
 import { Toggle, ErrorBox, Badge, FieldLabel, selectCls, btnGhost } from './ui'
 import type { CertApi } from './api'
 import type { CertificateType, CertificateJobScope, SerializedCertificateJob } from '@/lib/certificates/types'
@@ -122,7 +123,7 @@ export default function IssueBulkPanel({ api }: { api: CertApi }) {
         <div className="rounded-xl border border-border bg-card p-5">
           <div className="mb-3 flex items-center justify-between">
             <h3 className="text-[14px] font-semibold text-foreground">{picker === 'single' ? 'Pick an attendee' : 'Select attendees'}</h3>
-            <button type="button" className="rounded-md p-1 text-muted-foreground hover:bg-muted" onClick={() => setPicker(null)}><X className="size-4" /></button>
+            <IconButton type="button" onClick={() => setPicker(null)}><X className="size-4" /></IconButton>
           </div>
           {!attendees ? <Loader2 className="size-5 animate-spin text-muted-foreground" /> : attendees.length === 0 ? (
             <p className="text-[13px] text-muted-foreground">No confirmed attendees.</p>

@@ -158,9 +158,18 @@ service cloud.firestore {
     match /users/{userId} {
       allow read: if request.auth != null && request.auth.uid == userId;
 
-      // Owner may create their own profile doc (createOrganizerProfile, run once
-      // right after Auth signup with the initial role/verification/trust defaults).
-      allow create: if request.auth != null && request.auth.uid == userId;
+      // Owner may create their own profile doc (createOrganizerProfile, run once right
+      // after Auth signup). Constrained to the canonical initial shape so a client can't
+      // forge server-owned identity/moderation/trust fields at create time (RD-AUTH-GA-01;
+      // mirrors the update guard below). The Admin SDK (verify-otp self-heal) bypasses
+      // rules, so recovery is unaffected.
+      allow create: if request.auth != null
+        && request.auth.uid == userId
+        && request.resource.data.role == 'organizer'
+        && request.resource.data.emailVerified == false
+        && request.resource.data.verification.email.verified == false
+        && request.resource.data.trust.score == 0
+        && !('accountStatus' in request.resource.data);
 
       // Owner may update their editable profile fields, but NOT server-owned
       // moderation / identity / trust fields. Those are written exclusively by the
@@ -175,7 +184,14 @@ service cloud.firestore {
         && !request.resource.data.diff(resource.data)
             .affectedKeys()
             .hasAny(['role', 'accountStatus', 'statusReason', 'statusUpdatedAt',
-                     'statusUpdatedBy', 'emailVerified', 'verification', 'trust']);
+                     'statusUpdatedBy', 'emailVerified', 'verification', 'trust',
+                     // Server-owned — written ONLY by the branding/domain services via
+                     // the Admin SDK. Guarding them stops a client SDK from forging a
+                     // 'verified' custom domain (bypassing DNS + plan checks, squatting a
+                     // victim's domain) or writing unvalidated / plan-gated branding
+                     // directly on its own user doc (RD-ORG-GA-04 F1/F2).
+                     'branding', 'customDomain', 'customDomainStatus',
+                     'customDomainSslStatus', 'customDomainToken', 'customDomainVerifiedAt']);
 
       // ── Event drafts ──────────────────────────────────────────────────────────
       // Clients may read and update wizard fields freely.
@@ -190,12 +206,19 @@ service cloud.firestore {
           && request.resource.data.status == 'draft'
           && request.resource.data.communicationBilling == null;
 
-        // Allow updating wizard fields, but block the server-controlled fields
+        // Allow updating wizard fields, but block the server-controlled lifecycle /
+        // moderation / billing fields. `lifecycleStatus` MUST be here (RD-EVENT-GA-02A):
+        // deriveLifecycleStatus reads it first, so a client that could forge it would
+        // control the `from` state of a lifecycle transition (resurrecting an
+        // archived/cancelled event to public without admin review) and the free-tier
+        // active-event count. The Admin SDK (server transitions) bypasses rules.
         allow update: if request.auth != null
           && request.auth.uid == userId
           && !request.resource.data.diff(resource.data)
               .affectedKeys()
-              .hasAny(['status', 'communicationBilling', 'publishedAt']);
+              .hasAny(['status', 'lifecycleStatus', 'communicationBilling', 'publishedAt',
+                       'cancelledAt', 'cancelledBy', 'cancelReason', 'archivedAt',
+                       'unpublishedAt', 'completedAt', 'reviewStatus', 'approvedAt', 'rejectedAt']);
       }
 
       // ── Campaign drafts ───────────────────────────────────────────────────────

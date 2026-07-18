@@ -147,7 +147,7 @@ function EventCard({
     : null
 
   const revenueDisplay = event.isFreeEvent ? 'Free' : fmtINR(event.estimatedRevenue)
-  const GRADIENT       = 'bg-gradient-to-br from-[#fb5a6a]/25 via-[#e5277e]/15 to-transparent'
+  const GRADIENT       = 'bg-gradient-to-br from-[var(--primary-from)]/25 via-[var(--primary)]/15 to-transparent'
   const isReadOnly     = ls === 'archived' || ls === 'completed' || ls === 'cancelled'
   const isDraft        = ls === 'draft'
 
@@ -299,7 +299,7 @@ function EventCard({
       <div className="flex items-center gap-2 border-t border-border px-4 py-3">
         <Link
           href={`/dashboard/events/${event.draftId}`}
-          className="inline-flex h-[34px] flex-1 items-center justify-center rounded-lg bg-primary px-3 text-[14px] font-semibold text-white transition-colors hover:bg-[#bf1868]"
+          className="inline-flex h-[34px] flex-1 items-center justify-center rounded-lg bg-primary px-3 text-[14px] font-semibold text-white transition-colors hover:bg-[var(--primary-hover)]"
         >
           {isReadOnly ? 'View' : isDraft ? 'Continue Setup' : 'Manage'}
         </Link>

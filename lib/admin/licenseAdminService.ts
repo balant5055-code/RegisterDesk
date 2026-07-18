@@ -33,8 +33,11 @@ import {
 import { getLicenseCatalog, type LicenseCatalog } from '@/lib/licensing/resolveCatalog'
 import { resolveEffectiveEventLicense, OVERRIDABLE_FEATURE_KEYS } from '@/lib/licensing/adminLicense'
 import { capacityPlanForRegistrationLimit } from '@/lib/registrations/capacity'
-import { creditWallet } from '@/lib/firebase/firestore/wallet'
-import { razorpay } from '@/lib/razorpay/client'
+import { atomicWalletCredit } from '@/lib/firebase/firestore/wallet'
+// RD-ENV-ARCH-05 — Razorpay is NOT statically imported here. This service is imported by
+// admin READ paths (license list/detail, Event360, governance, timeline, export) that
+// must never initialize/validate Razorpay. The gateway client is lazy-loaded only at the
+// single payment-execution point (the 'refund' action), so read paths stay Razorpay-free.
 import { logAdminAction } from '@/lib/admin/audit'
 import type { AdminAuditAction } from '@/lib/admin/auditConstants'
 import type {
@@ -604,21 +607,42 @@ export async function applyLicenseAction(
       let walletCreditedPaise = 0
 
       if (doc.orderId) {
-        const orderRef  = adminDb.doc(`${LICENSE_ORDERS_COLLECTION}/${doc.orderId}`)
-        const orderSnap = await orderRef.get()
-        const order     = orderSnap.exists ? (orderSnap.data() as Record<string, unknown>) : null
-        if (order?.status === 'refunded') throw new LicenseActionError('Order already refunded', 409)
-        const paymentId = typeof order?.razorpayPaymentId === 'string' ? order.razorpayPaymentId : null
-        const gatewayAmount = typeof order?.amountPaise === 'number' ? order.amountPaise : 0
-        if (paymentId && gatewayAmount > 0) {
+        const orderRef = adminDb.doc(`${LICENSE_ORDERS_COLLECTION}/${doc.orderId}`)
+
+        // Atomically CLAIM the order (→ 'refunding') BEFORE the gateway refund so two
+        // concurrent refunds (double-click / two admins) cannot both fire
+        // razorpay.payments.refund (H-1 double gateway refund). An already
+        // refunded/refunding order aborts here; the F-1 ledger guard (line 604) blocks
+        // re-refund after completion. Only paid orders carry a paymentId, so the
+        // failure-revert to 'paid' below is always the correct prior state.
+        const claim = await adminDb.runTransaction<{ paymentId: string | null; gatewayAmount: number }>(async txn => {
+          const s = await txn.get(orderRef)
+          const o = s.exists ? (s.data() as Record<string, unknown>) : null
+          if (o && (o.status === 'refunded' || o.status === 'refunding')) {
+            throw new LicenseActionError('Order already refunded', 409)
+          }
+          if (o) txn.update(orderRef, { status: 'refunding', updatedAt: FieldValue.serverTimestamp() })
+          return {
+            paymentId:     typeof o?.razorpayPaymentId === 'string' ? o.razorpayPaymentId : null,
+            gatewayAmount: typeof o?.amountPaise === 'number' ? o.amountPaise : 0,
+          }
+        })
+
+        if (claim.paymentId && claim.gatewayAmount > 0) {
           try {
-            await razorpay.payments.refund(paymentId, {
-              amount: gatewayAmount, speed: 'optimum',
+            // Lazy-load the Razorpay client ONLY when a real gateway refund executes, so
+            // this module never initializes/validates Razorpay on any read path.
+            const { razorpay } = await import('@/lib/razorpay/client')
+            await razorpay.payments.refund(claim.paymentId, {
+              amount: claim.gatewayAmount, speed: 'optimum',
               notes: { kind: 'license_refund', eventId },
               receipt: `lrfnd_${eventId}`.slice(0, 40),
             })
             gatewayRefunded = true
           } catch (e) {
+            // Release the claim so a retry is possible (a crash mid-flight leaves it
+            // 'refunding' — reconciled manually, never a silent double refund).
+            await orderRef.set({ status: 'paid', updatedAt: FieldValue.serverTimestamp() }, { merge: true }).catch(() => {})
             throw new LicenseActionError(`Razorpay refund failed: ${e instanceof Error ? e.message : 'unknown error'}`, 502)
           }
         }
@@ -629,17 +653,19 @@ export async function applyLicenseAction(
       const draftId = doc.orderId?.startsWith('lic_') ? doc.orderId.slice(4) : eventId
       const chargeSnap = await adminDb.doc(`walletTransactions/license_${draftId}`).get()
       const walletUsed = chargeSnap.exists ? ((chargeSnap.data() as { amountPaise?: number }).amountPaise ?? 0) : 0
-      if (walletUsed > 0) {
-        await creditWallet(organizerUid, walletUsed)
-        walletCreditedPaise = walletUsed
-      }
-      // Idempotency + audit ledger entry for the refund itself.
-      await refundLedgerRef.set({
-        organizerUid, type: 'license_refund', amountPaise: walletCreditedPaise,
+
+      // Credit-back + the refund ledger entry commit as ONE idempotent transaction
+      // keyed on the deterministic license_refund_<eventId> doc (F-1): a concurrent
+      // second refund (wallet-only license, no gateway guard) or a crash-retry can
+      // never double-credit, and the balance can never drift from the ledger. When
+      // walletUsed is 0 the credit is a no-op but the audit ledger entry is still
+      // recorded. Mirrors atomicTopupCredit.
+      const { credited } = await atomicWalletCredit(organizerUid, walletUsed, refundLedgerRef, {
+        organizerUid, type: 'license_refund',
         status: 'completed', referenceType: 'license', referenceId: eventId,
         description: `License refund — ${eventId}`, gatewayRefunded, metadata: { reason },
-        createdAt: FieldValue.serverTimestamp(),
-      }, { merge: true })
+      })
+      if (credited) walletCreditedPaise = walletUsed
 
       await writeOverlay(eventId, { ...overlay, lifecycle: 'cancelled' }, adminUid)
 

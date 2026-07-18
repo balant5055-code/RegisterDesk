@@ -9,7 +9,7 @@
 // when CRON_SECRET is unset.
 
 import { NextRequest, NextResponse } from 'next/server'
-import { retryPendingRegistrationFinancials, retryPendingRefundLedgerReversals } from '@/lib/payments/registrationReconciliation'
+import { retryPendingRegistrationFinancials, retryPendingRefundLedgerReversals, recoverUncreditedRegistrations } from '@/lib/payments/registrationReconciliation'
 import { isAuthorizedCron, cronUnauthorized } from '@/lib/cron/auth'
 import { captureFinancialError, flushMonitoring } from '@/lib/monitoring/sentry'
 import { recordCronExecution } from '@/lib/monitoring/cronMetrics'
@@ -21,9 +21,12 @@ async function handle(req: NextRequest): Promise<NextResponse> {
   if (!isAuthorizedCron(req)) return cronUnauthorized()
   let ok = false, detail = ''
   try {
-    const credits  = await retryPendingRegistrationFinancials(100)
+    const credits   = await retryPendingRegistrationFinancials(100)
     const reversals = await retryPendingRefundLedgerReversals(100)
-    const result = { credits, reversals }
+    // RD-PAY-GA-01A — self-heal paid registrations missing their ptx_ ledger (the residual
+    // hard-kill window that leaves no reconciliation record). Idempotent + cursor-bounded.
+    const ledgerSweep = await recoverUncreditedRegistrations(500)
+    const result = { credits, reversals, ledgerSweep }
     ok = true; detail = JSON.stringify(result)
     return NextResponse.json(result)
   } catch (err) {

@@ -110,12 +110,13 @@ failure modes and the operator actions.
   captured payments reconcile via webhook/cron. Verify no `suspiciousPayments`
   accumulated.
 
-### B.8 Redis (Upstash) outage
-- **Automatic:** distributed rate-limits fail **closed** on the sensitive money
-  paths (payment verify, OTP) — requests are rejected rather than un-throttled.
-  Some public validators fail open by design.
-- **Operator:** restore Upstash quickly — a prolonged outage blocks payment
-  verification. Confirm `UPSTASH_*` env is correct.
+### B.8 Rate limiting
+- **Automatic:** rate limiting is served entirely in-process (`lib/rateLimit.ts`) —
+  there is **no external cache/Redis** to fail (Upstash was removed, RD-REDIS-REMOVE).
+  Limits are enforced per serverless instance. Money/OTP correctness does not depend on
+  it: payments are signature-verified + idempotent (Firestore), and OTP attempts are
+  capped per email in Firestore.
+- **Operator:** none — no Redis service, account, or env var to monitor.
 
 ### B.9 Storage (Firebase Storage) outage
 - **Automatic:** certificate generation/upload throws and is retried by the

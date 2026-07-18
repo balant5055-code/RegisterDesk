@@ -2,6 +2,23 @@
   "indexes": [
 
     {
+      "collectionGroup": "donations",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "organizerUid", "order": "ASCENDING"  },
+        { "fieldPath": "campaignSlug", "order": "ASCENDING"  },
+        { "fieldPath": "createdAt",    "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "events",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "lifecycleStatus", "order": "ASCENDING"  },
+        { "fieldPath": "publishedAt",     "order": "DESCENDING" }
+      ]
+    },
+    {
       "collectionGroup": "registrations",
       "queryScope": "COLLECTION",
       "fields": [

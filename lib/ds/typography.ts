@@ -3,7 +3,7 @@
 // Single source of truth for typography ROLES. Reusable components consume a
 // semantic role instead of choosing font sizes/weights ad hoc — pages and shared
 // components never make raw typography decisions (no scattered text-[12.5px],
-// text-sm, or text-[var(--fs-*)]).
+// text-sm, or the raw --fs-2xs … --fs-5xl tokens).
 //
 // Each role composes ONLY typography concerns: the token-backed `text-fs-*`
 // font-size utilities (generated from --fs-* via @theme in globals.css) plus

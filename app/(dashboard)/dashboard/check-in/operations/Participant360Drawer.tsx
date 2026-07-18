@@ -20,7 +20,7 @@ import Link from 'next/link'
 import { auth } from '@/lib/firebase/auth'
 import { cn } from '@/lib/utils/cn'
 import { useToast } from '@/components/ui/Toast'
-import { buttonVariants, EmptyState } from '@/components/ui'
+import { buttonVariants, EmptyState, IconButton } from '@/components/ui'
 import {
   X, UserCheck, Undo2, TicketCheck, IdCard, Award, Send, ExternalLink, Loader2,
   Download, Printer, ScanLine, Clock, CreditCard,
@@ -155,7 +155,7 @@ export function Participant360Drawer({ reg, eventId, token, onClose, onChanged }
               <Pill tone="bg-muted text-muted-foreground">{reg.paymentStatus}</Pill>
             </div>
           </div>
-          <button onClick={onClose} aria-label="Close" className="rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground"><X className="size-4" /></button>
+          <IconButton onClick={onClose} aria-label="Close" className="hover:text-foreground"><X className="size-4" /></IconButton>
         </div>
 
         {/* ── Quick Actions ── */}

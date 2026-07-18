@@ -64,9 +64,13 @@ export async function POST(
     if (!Array.isArray(body.registrationIds) || body.registrationIds.length === 0) {
       return empty('registrationIds must be a non-empty array', 400)
     }
-    registrationIds = (body.registrationIds as unknown[])
-      .slice(0, 200)
-      .filter((id): id is string => typeof id === 'string')
+    // De-duplicate BEFORE slicing (RD-EVENT-GA-02B): the counter deltas below sum one
+    // entry per id, so a duplicated id would double-decrement/increment the counter for a
+    // single registration (driving totalCount negative → transient oversell). Unique ids
+    // also make the 200 cap count real registrations, not repeats.
+    registrationIds = [...new Set(
+      (body.registrationIds as unknown[]).filter((id): id is string => typeof id === 'string'),
+    )].slice(0, 200)
   } catch {
     return empty('Invalid request body', 400)
   }

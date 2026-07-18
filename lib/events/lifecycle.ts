@@ -79,7 +79,14 @@ export async function applyLifecycleTransition(
     eventUpdate.completedAt = now
   }
   if (action === 'archive') {
+    // Legacy binary status = "not live" (mirrors unpublish/restore) so every
+    // `status === 'published'` reader (events-list card, dashboard health item)
+    // stops treating an archived event as published. lifecycleStatus stays the
+    // authoritative field; dashboard totals key on publishedAt, so they are
+    // unaffected (an archived event keeps its publishedAt).
+    draftUpdate.status      = 'draft'
     draftUpdate.archivedAt  = now
+    eventUpdate.status      = 'draft'
     eventUpdate.archivedAt  = now
   }
   if (action === 'restore') {

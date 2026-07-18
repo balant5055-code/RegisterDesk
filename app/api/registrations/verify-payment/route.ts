@@ -26,6 +26,7 @@ import {
   TicketCodeCollisionError,
 }                                     from '@/lib/registrations/ticketCode'
 import { buildCounterIncrement }      from '@/lib/firebase/firestore/registrationCounters'
+import { deriveStoredEventCapacity }  from '@/lib/registrations/capacity'
 import { checkRegistrationGate }      from '@/lib/registrations/gate'
 import {
   CapacityExceededError,
@@ -39,11 +40,9 @@ import { checkDistributedRateLimit }     from '@/lib/rateLimit/redis'
 import { sendConfirmationEmail }          from '@/lib/registrations/sendConfirmationEmail'
 import { notifyPaymentReceived }          from '@/lib/notifications/inbox/notify'
 import type { PaymentIntentRecord }   from '@/lib/firebase/firestore/paymentIntents'
-import { calculateFee }               from '@/lib/fees/engine'
-import { getFeePlanForOrganizer }      from '@/lib/billing/feeEngine'
-import { resolveFeeConfig }           from '@/lib/fees/resolveFeeConfig'
-import { recordPlatformTransactionAndCredit, type PlatformTransactionData } from '@/lib/firebase/firestore/platformTransactions'
+import { recordPlatformTransactionAndCredit } from '@/lib/firebase/firestore/platformTransactions'
 import { recordRegistrationFinancialReconciliation }                         from '@/lib/payments/registrationReconciliation'
+import { buildRegistrationLedgerAndCredit }  from '@/lib/payments/registrationLedger'
 import { validateInviteCode }         from '@/app/api/registrations/validate-invite-code/route'
 
 // ─── Request / response shapes ────────────────────────────────────────────────
@@ -375,7 +374,7 @@ export async function POST(
           ? null
           : typeof livePass.quantity === 'number' ? livePass.quantity : null
 
-        const eventCapacity = (eventData?.totalCapacity as number | null | undefined) ?? null
+        const eventCapacity = deriveStoredEventCapacity(eventData)
 
         // GA-7C P1-4: read the base counter only when a capacity limit actually gates
         // this paid registration (same rationale as createRegistration). Uncapped paid
@@ -444,7 +443,7 @@ export async function POST(
         }
 
         txn.set(regRef, regDoc)
-        txn.set(counterRef, buildCounterIncrement(intent.eventSlug, intent.passId), { merge: true })
+        txn.set(counterRef, buildCounterIncrement(intent.eventSlug, intent.passId, { amountPaise: intent.amount }), { merge: true })
         txn.update(intentRef, {
           status:         'paid',
           registrationId,
@@ -495,45 +494,19 @@ export async function POST(
         // new registration. A client retry after the transaction commits finds the
         // intent already 'paid', sets txnWasNoOp = true, and skips this block.
         if (intent.amount > 0) {
-          const feePlan = await getFeePlanForOrganizer(intent.organizerUid)
-          const feeConfig = await resolveFeeConfig('event_registration', feePlan.planTier)
-          const feeResult = calculateFee({
-            transactionType:  'event_registration',
+          // Build the ledger + credit via the SHARED helper (also used by the recovery
+          // sweep — RD-PAY-GA-01A — so both paths post an identical, deterministic
+          // ptx_<registrationId> entry).
+          const { ledger, credit } = await buildRegistrationLedgerAndCredit({
+            registrationId:   finalRegistrationId,
+            organizerUid:     intent.organizerUid,
+            eventSlug:        intent.eventSlug,
+            attendeeName:     intent.attendee.name,
+            attendeeEmail:    intent.attendee.email,
             grossAmountPaise: intent.amount,
-            feeModel:         'organizer_pays',
-            config:           feeConfig,
+            paymentId:        razorpay_payment_id,
+            orderId:          razorpay_order_id,
           })
-          const ledger: PlatformTransactionData = {
-            id:                      `ptx_${finalRegistrationId}`,
-            type:                    'event_registration',
-            category:                'ticketed',
-            organizerUid:            intent.organizerUid,
-            entityId:                intent.eventSlug,
-            entityType:              'event',
-            sourceId:                finalRegistrationId,
-            sourceType:              'registration',
-            payerName:               intent.attendee.name,
-            payerEmail:              intent.attendee.email,
-            grossAmountPaise:        intent.amount,
-            platformFeeBasePaise:    feeResult.platformFeeBasePaise,
-            platformFeeGstPaise:     feeResult.platformFeeGstPaise,
-            platformFeeTotalPaise:   feeResult.platformFeeTotalPaise,
-            gatewayFeeEstimatePaise: feeResult.gatewayFeeEstimatePaise,
-            netSettlementPaise:      feeResult.netSettlementPaise,
-            feeModel:                'organizer_pays',
-            planTier:                feePlan.planTier,
-            feeConfigId:             feePlan.feeConfigId,
-            currency:                'INR',
-            gateway:                 'razorpay',
-            gatewayPaymentId:        razorpay_payment_id,
-            gatewayOrderId:          razorpay_order_id,
-          }
-          const credit = {
-            organizerUid:       intent.organizerUid,
-            grossAmountPaise:   intent.amount,
-            feesTotalPaise:     feeResult.platformFeeTotalPaise + feeResult.gatewayFeeEstimatePaise,
-            netSettlementPaise: feeResult.netSettlementPaise,
-          }
           // POST-COMMIT: the registration is already durable. The atomic
           // ledger+credit is idempotent; if it throws (transient Firestore
           // error) we MUST NOT refund or fail the intent — instead persist a

@@ -28,6 +28,44 @@ export function txnDeductWallet(
   }, { merge: true })
 }
 
+// ─── Idempotent credit + ledger (for non-topup credits, e.g. license refunds) ──
+
+/**
+ * Atomically credits the wallet AND writes an idempotent ledger entry in ONE
+ * transaction, keyed by the caller-supplied deterministic `ledgerRef`. If that
+ * ledger doc already exists the credit is a no-op (`credited: false`), so a
+ * concurrent second call or a crash-retry can never double-credit and the balance
+ * can never drift from Σ(ledger). Mirrors atomicTopupCredit for credits that don't
+ * originate from a walletTopups doc. The helper stamps `amountPaise`, the running
+ * `balancePaise`, and `createdAt` — the caller supplies the rest of the entry.
+ */
+export async function atomicWalletCredit(
+  uid:         string,
+  amountPaise: number,
+  ledgerRef:   FirebaseFirestore.DocumentReference,
+  ledgerData:  Record<string, unknown>,
+): Promise<{ newBalance: number; credited: boolean }> {
+  const wRef = walletRef(uid)
+  return adminDb.runTransaction(async txn => {
+    const [ledgerSnap, walletSnap] = await Promise.all([txn.get(ledgerRef), txn.get(wRef)])
+    const current = walletSnap.exists ? ((walletSnap.data() as OrganizerWallet).balancePaise ?? 0) : 0
+    if (ledgerSnap.exists) return { newBalance: current, credited: false }   // idempotent — no writes
+    const updated = current + amountPaise
+    txn.set(wRef, {
+      balancePaise: updated,
+      currency:     'INR',
+      updatedAt:    FieldValue.serverTimestamp(),
+    }, { merge: true })
+    txn.set(ledgerRef, {
+      ...ledgerData,
+      amountPaise,
+      balancePaise: updated,
+      createdAt:    FieldValue.serverTimestamp(),
+    })
+    return { newBalance: updated, credited: true }
+  })
+}
+
 // ─── Top-up (called after Razorpay payment verified) ─────────────────────────
 
 export async function creditWallet(uid: string, amountPaise: number): Promise<number> {

@@ -111,7 +111,10 @@ function buildMime(args: {
 
   const topHeaders: string[] = [
     `From: ${from}`,
-    `To: ${to}`,
+    // Strip CR/LF so a recipient address can never inject extra headers (BCC /
+    // header splitting) — self-defending at the MIME boundary instead of relying on
+    // every caller to validate. Subject/From/custom headers are already guarded.
+    `To: ${to.replace(/[\r\n]/g, '')}`,
     `Subject: ${encodeHeaderWord(subject)}`,
     'MIME-Version: 1.0',
   ]

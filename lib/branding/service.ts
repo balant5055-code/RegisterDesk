@@ -52,9 +52,9 @@ export interface BrandingPatch {
 
 export type SetBrandingResult = { ok: true; branding: Branding } | { ok: false; error: string }
 
-function validColor(v: unknown): v is string { return typeof v === 'string' && HEX_COLOR_RE.test(v) }
+export function validColor(v: unknown): v is string { return typeof v === 'string' && HEX_COLOR_RE.test(v) }
 // Safe image URL: https only (Firebase Storage / CDN). Rejects data:/javascript:/http.
-function validImageUrl(v: unknown): v is string {
+export function validImageUrl(v: unknown): v is string {
   return typeof v === 'string' && /^https:\/\/[^\s]+$/i.test(v) && v.length <= 1000
 }
 

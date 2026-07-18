@@ -46,15 +46,15 @@ export function Dialog({ open, onClose, title, children, footer, size = 'md', cl
         className={cn('relative z-10 w-full rounded-2xl border border-border bg-card shadow-xl', SIZES[size])}
       >
         {title && (
-          <div className="flex items-start justify-between gap-3 border-b border-border px-5 py-4">
+          <div className="flex items-start justify-between gap-3 border-b border-border px-[var(--modal-px)] py-[var(--modal-py)]">
             <h2 id="rd-dialog-title" className="text-[15px] font-semibold text-foreground">{title}</h2>
             <button type="button" onClick={onClose} aria-label="Close" className="rounded-lg p-1 text-muted-foreground hover:bg-muted">
               <X className="size-4" />
             </button>
           </div>
         )}
-        <div className="px-5 py-4">{children}</div>
-        {footer && <div className="flex justify-end gap-2 border-t border-border px-5 py-3">{footer}</div>}
+        <div className="px-[var(--modal-px)] py-[var(--modal-py)]">{children}</div>
+        {footer && <div className="flex justify-end gap-2 border-t border-border px-[var(--modal-px)] py-[var(--modal-py-footer)]">{footer}</div>}
       </div>
     </div>,
     document.body,

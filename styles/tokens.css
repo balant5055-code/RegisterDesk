@@ -66,7 +66,7 @@
   --fw-strong:  600;   /* buttons, card titles, badges     */
   --fw-heading: 700;   /* section headings, hero headings  */
 
-  /* ── Typography scale (use via text-[var(--fs-*)]) ─────────────────────── */
+  /* ── Typography scale — tokens --fs-2xs … --fs-5xl ────────────────────── */
   --fs-2xs:   11px;    /* overlines, timestamps, axis labels                  */
   --fs-xs:    12px;    /* badges, pill counts, uppercase col heads            */
   --fs-sm:    13px;    /* helper text, secondary labels, subtle copy          */
@@ -79,7 +79,7 @@
   --fs-4xl:   40px;    /* hero headings (mobile-to-tablet)                    */
   --fs-5xl:   48px;    /* display headings (large breakpoints)                */
 
-  /* ── Display scale — responsive, clamp-based (use via text-[var(--fs-display-*)]) */
+  /* ── Display scale — responsive, clamp-based tokens --fs-display-sm/md/lg */
   --fs-display-sm: clamp(1.75rem, 3vw, 2.5rem);   /* section headings        */
   --fs-display-md: clamp(2.25rem, 4vw, 3.25rem);  /* page / large headings   */
   --fs-display-lg: clamp(2.75rem, 5vw, 4.25rem);  /* hero display            */
@@ -175,25 +175,59 @@
   /* ── Radius (V2 adds xs; sm…full already defined above) ── */
   --radius-xs: 0.125rem;                                  /* 2px */
 
-  /* ── Component tokens ── */
-  --button-height-sm: 2.25rem;   /* 36px (h-9)  */
-  --button-height-md: 2.5rem;    /* 40px (h-10) */
-  --button-height-lg: 2.75rem;   /* 44px (h-11) */
-  --button-padding-x: 1rem;      /* px-4 */
-  --button-radius:    var(--radius-lg);
-  --button-shadow:    var(--shadow-sm);
+  /* ── Component tokens (RD-DS-V3.1) ─────────────────────────────────────────
+     Structural dimensions for the shared components/ui/* primitives, aligned
+     1:1 with the ACTUAL Tailwind utilities each primitive renders today — so
+     consuming them is pixel-identical. Color, radius, shadow and font-size are
+     deliberately NOT re-declared per component: those already flow from the
+     primitives through Tailwind theme utilities (bg-*, rounded-*, shadow-*,
+     text-fs-*) which resolve to the tokens above. Only the spacing-scale values
+     (height / padding / gap / width) lacked a semantic home — this is it. */
 
-  --input-height: 2.75rem;       /* 44px (h-11) */
-  --input-radius: var(--radius-xl);
-  --input-border: var(--border);
+  /* Buttons — matches components/ui/button.tsx sizeClasses exactly */
+  --button-height-xs: 1.75rem;   /* h-7  */
+  --button-height-sm: 2.25rem;   /* h-9  (navbar CTA source of truth) */
+  --button-height-md: 2.5rem;    /* h-10 */
+  --button-height-lg: 2.75rem;   /* h-11 */
+  --button-height-xl: 3.5rem;    /* h-14 */
+  --button-px-xs: 0.625rem;      /* px-2.5 */
+  --button-px-sm: 1rem;          /* px-4   */
+  --button-px-md: 1rem;          /* px-4   */
+  --button-px-lg: 1.25rem;       /* px-5   */
+  --button-px-xl: 1.75rem;       /* px-7   */
+  --button-gap-xs: 0.25rem;      /* gap-1   */
+  --button-gap-sm: 0.375rem;     /* gap-1.5 */
+  --button-gap-md: 0.5rem;       /* gap-2   */
+  --button-gap-lg: 0.5rem;       /* gap-2   */
+  --button-gap-xl: 0.625rem;     /* gap-2.5 */
+  --button-radius: var(--radius-lg);  /* primary/gradient; other variants keep rounded-xl base */
+  --button-shadow: var(--shadow-sm);  /* legacy alias — unchanged */
 
-  --card-padding: 1.5rem;        /* 24px (p-6) */
-  --card-radius:  var(--radius-2xl);
-  --card-shadow:  var(--shadow-sm);
+  /* Select / combobox trigger — components/ui/CustomSelect.tsx */
+  --select-height: 2.5rem;       /* h-10   */
+  --select-px:     0.875rem;     /* px-3.5 */
+  --input-radius:  var(--radius-xl);   /* legacy alias — unchanged */
+  --input-border:  var(--border);      /* legacy alias — unchanged */
 
-  --badge-padding-x: 0.625rem;   /* px-2.5 */
-  --badge-height:    1.5rem;     /* 24px */
-  --badge-radius:    var(--radius-full);
+  /* Cards — per-variant padding matches components/ui/card.tsx (base + sm:) */
+  --card-px-default:    1rem;    /* p-4    */
+  --card-px-default-sm: 1.25rem; /* sm:p-5 */
+  --card-px-elevated:   1.25rem; /* p-5    */
+  --card-px-elevated-sm:1.5rem;  /* sm:p-6 */
+  --card-px-modal:      1.5rem;  /* p-6    */
+  --card-px-modal-sm:   1.75rem; /* sm:p-7 */
+  --card-radius: var(--radius-2xl);   /* legacy alias — unchanged */
+  --card-shadow: var(--shadow-sm);    /* legacy alias — unchanged */
+
+  /* Badges / chips — components/ui/badge.tsx (StatusChip wraps Badge) */
+  --badge-px: 0.625rem;          /* px-2.5 */
+  --badge-py: 0.125rem;          /* py-0.5 */
+  --badge-radius: var(--radius-full);
+
+  /* Modal / dialog padding — components/ui/Dialog.tsx */
+  --modal-px:        1.25rem;    /* px-5 */
+  --modal-py:        1rem;       /* py-4 (header / body) */
+  --modal-py-footer: 0.75rem;    /* py-3 (footer)        */
 
   /* ── Typography roles (size only → the fs scale; wired to text-* utilities) ── */
   --type-display-xl:  var(--fs-display-lg);

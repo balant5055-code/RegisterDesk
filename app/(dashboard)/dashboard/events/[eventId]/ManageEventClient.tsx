@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback } from 'react'
 import Link                                  from 'next/link'
+import { TextLink } from '@/components/ui'
 import { onAuthStateChanged, onIdTokenChanged } from 'firebase/auth'
 import { auth }                              from '@/lib/firebase/auth'
 import { cn }                               from '@/lib/utils/cn'
@@ -184,7 +185,7 @@ export default function ManageEventClient({ eventId, initialTab }: { eventId: st
           <AlertCircle className="size-6 text-destructive" />
         </div>
         <p className="text-[15px] font-semibold">{error}</p>
-        <Link href="/dashboard/events" className="text-[13px] text-primary hover:underline">← Back to Events</Link>
+        <TextLink href="/dashboard/events">← Back to Events</TextLink>
       </div>
     )
   }

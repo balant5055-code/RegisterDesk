@@ -17,6 +17,11 @@ export interface EventAnalytics {
   eventName:      string
   lifecycleStatus: string | null
   publishedAt:    string | null
+  // True when this event has MORE than CAP registrations, so every scan-derived
+  // figure below is computed from only the first CAP and under-reports. Surfaced so
+  // the UI + exports disclose the limit instead of silently under-counting — parity
+  // with the finance reports' `truncated` flag (RD-EVENT-GA-02E).
+  truncated:      boolean
   kpis: {
     revenuePaise: number; registrations: number; paid: number; free: number; pending: number
     cancelled: number; refunded: number; checkedIn: number
@@ -69,7 +74,11 @@ export async function getEventAnalytics(eventId: string): Promise<{ analytics: E
   const capacity = typeof ev.totalCapacity === 'number' ? ev.totalCapacity : null
 
   // ── Registrations (bounded to this event) ──
-  const regSnap = await adminDb.collection('registrations').where('eventSlug', '==', eventId).limit(CAP).get()
+  // Fetch CAP+1 so we can DETECT truncation exactly (like the finance fetchCapped),
+  // then iterate only the first CAP so every derived count stays bounded.
+  const regSnap   = await adminDb.collection('registrations').where('eventSlug', '==', eventId).limit(CAP + 1).get()
+  const truncated = regSnap.size > CAP
+  const regDocs   = truncated ? regSnap.docs.slice(0, CAP) : regSnap.docs
 
   const days = lastNDays(30)
   const regByDay = new Map<string, number>(days.map(d => [d.key, 0]))
@@ -83,7 +92,7 @@ export async function getEventAnalytics(eventId: string): Promise<{ analytics: E
   let revenuePaise = 0, paid = 0, free = 0, pending = 0, cancelled = 0, refunded = 0, confirmed = 0, checkedIn = 0
   let refundsPaise = 0, couponDiscountPaise = 0
 
-  for (const d of regSnap.docs) {
+  for (const d of regDocs) {
     const r = d.data() as Record<string, unknown>
     const status = String(r.status ?? '')
     const pay = String(r.paymentStatus ?? '')
@@ -118,7 +127,7 @@ export async function getEventAnalytics(eventId: string): Promise<{ analytics: E
     }
   }
 
-  const registrations = regSnap.size
+  const registrations = regDocs.length
   const conversionPct = registrations > 0 ? Math.round((paid / registrations) * 100) : 0
   const capacityUsedPct = capacity ? Math.min(100, Math.round((confirmed / capacity) * 100)) : 0
   const remaining = capacity ? Math.max(0, capacity - confirmed) : null
@@ -208,6 +217,7 @@ export async function getEventAnalytics(eventId: string): Promise<{ analytics: E
     eventId, eventName,
     lifecycleStatus: typeof ev.lifecycleStatus === 'string' ? ev.lifecycleStatus : null,
     publishedAt: tsISO(ev.publishedAt),
+    truncated,
     kpis: {
       revenuePaise, registrations, paid, free, pending, cancelled, refunded, checkedIn,
       conversionPct, capacity, capacityUsedPct, remaining,

@@ -17,6 +17,7 @@ import { NextRequest, NextResponse, after } from 'next/server'
 import { adminDb }              from '@/lib/firebase/admin'
 import { resolveAdminUid }      from '@/lib/admin/auth'
 import { applyLifecycleTransition } from '@/lib/events/lifecycle'
+import { logAdminAction }        from '@/lib/admin/audit'
 import { ensureCounterExists }  from '@/lib/firebase/firestore/registrationCounters'
 import { sendEventReviewEmail } from '@/lib/events/reviewNotifications'
 import type { EventReviewMeta } from '@/types/events'
@@ -91,6 +92,15 @@ export async function POST(req: NextRequest, { params }: Ctx): Promise<NextRespo
   if (!result.success) {
     return NextResponse.json({ success: false, error: result.error }, { status: result.statusCode })
   }
+
+  // Immutable admin audit trail — approve/reject/request_changes previously left NO
+  // record of which admin acted (applyLifecycleTransition only audits archive/restore).
+  const auditAction = action === 'approve' ? 'event.approved'
+    : action === 'reject' ? 'event.rejected' : 'event.changes_requested'
+  void logAdminAction({
+    adminUid, action: auditAction, entityType: 'event', entityId: slug,
+    metadata: { organizerUid: uid, draftId, reason: review?.rejectionReason, comment: review?.changesComment },
+  }).catch(() => { /* audit must never block the review */ })
 
   // Side-effects (best-effort; never block the response).
   const eventName = eventNameOf(ev)

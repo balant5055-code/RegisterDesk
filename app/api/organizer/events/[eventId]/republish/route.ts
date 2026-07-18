@@ -8,7 +8,7 @@
 // licenseOrder, no new eventLicense). The shared publish validation is reused —
 // not duplicated — before the transition.
 
-import { NextRequest, NextResponse } from 'next/server'
+import { NextRequest, NextResponse, after } from 'next/server'
 import { adminDb }              from '@/lib/firebase/admin'
 import { authorizeWorkspace }   from '@/lib/team/workspace'
 import { applyLifecycleTransition, deriveLifecycleStatus } from '@/lib/events/lifecycle'
@@ -100,7 +100,10 @@ export async function POST(req: NextRequest, { params }: Ctx): Promise<NextRespo
   // review notification; appears to admin exactly like a resubmitted event).
   const info      = (d.eventDetails as Record<string, unknown> | undefined)?.info as Record<string, unknown> | undefined
   const eventName = typeof info?.name === 'string' ? info.name : 'Your event'
-  void sendEventReviewEmail({ organizerUid: uid, eventName, kind: 'resubmitted', eventId })
+  // Schedule via after() (not a dangling void) so the email + organizer WhatsApp
+  // complete after the response instead of being cut off when the route returns —
+  // matches the publish/review sites (reviewNotifications header requirement).
+  after(() => sendEventReviewEmail({ organizerUid: uid, eventName, kind: 'resubmitted', eventId }))
 
   return NextResponse.json(
     { success: true, lifecycleStatus: result.lifecycleStatus },

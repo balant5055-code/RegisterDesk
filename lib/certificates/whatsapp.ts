@@ -37,11 +37,16 @@ export interface CertificateWhatsAppArgs {
 async function deductCertWhatsApp(args: CertificateWhatsAppArgs, costPaise: number): Promise<void> {
   const walletRef = adminDb.doc(`organizerWallets/${args.organizerUid}`)
   const ledgerRef = adminDb.collection('walletTransactions').doc(`cert_whatsapp_${args.certificateId}`)
+  const walletCfg = await getWalletConfig()
   await adminDb.runTransaction(async txn => {
     const ledgerSnap = await txn.get(ledgerRef)
     if (ledgerSnap.exists) return   // already charged — idempotent no-op
     const walletSnap = await txn.get(walletRef)
     const balance    = walletSnap.exists ? ((walletSnap.data() as OrganizerWallet).balancePaise ?? 0) : 0
+    // RD-PAY-GA-01B — re-check the balance INSIDE the txn (the caller's pre-check is a
+    // TOCTOU with concurrent charges). Never drive the wallet negative: the message was
+    // already sent best-effort, so on insufficient funds we skip the charge (platform absorbs).
+    if (!walletCfg.allowNegativeBalance && balance < costPaise) return
     txnDeductWallet(txn, args.organizerUid, costPaise)
     txn.set(ledgerRef, {
       organizerUid:  args.organizerUid,

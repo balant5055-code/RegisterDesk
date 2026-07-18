@@ -86,7 +86,7 @@ export default function PlatformPage() {
         <section aria-labelledby="platform-cta-heading" className={cn('bg-white', SECTION_SPACING.default)}>
           <div className={cn(MARKETING_CONTAINER.page, 'rd-reveal')}>
             <div className="relative overflow-hidden rounded-3xl border border-border/60 bg-muted/30 px-6 py-14 text-center sm:px-12">
-              <div aria-hidden className="pointer-events-none absolute inset-x-0 top-0 -z-10 h-40 bg-[radial-gradient(60%_120%_at_50%_0%,rgba(229,39,126,0.06),transparent)]" />
+              <div aria-hidden className="pointer-events-none absolute inset-x-0 top-0 -z-10 h-40 bg-[radial-gradient(60%_120%_at_50%_0%,rgb(var(--primary-rgb)_/_0.06),transparent)]" />
               <h2 id="platform-cta-heading" className="mx-auto max-w-2xl text-[var(--fs-2xl)] font-bold tracking-tight text-foreground sm:text-[var(--fs-3xl)]">
                 Run every event from one platform
               </h2>

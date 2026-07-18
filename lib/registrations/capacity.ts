@@ -21,6 +21,30 @@ export function resolveTotalCapacity(plan: CapacityPlan): number | null {
 }
 
 /**
+ * Effective event capacity for a STORED event doc read RAW inside a transaction (the
+ * confirm/restore/approve/webhook paths use txn.get, NOT getEventBySlug, so they don't
+ * get its legacy back-fill). This mirrors that back-fill so the atomic gate agrees with
+ * the pre-check gate (RD-EVENT-GA-02B): a number is used as-is; an EXPLICIT `null` means
+ * unlimited; an ABSENT `totalCapacity` (legacy/unstamped doc) is derived from
+ * `capacityPlan`, else from `pricing.eventType` (free→100, paid→null). Without this, a
+ * legacy capped event reads as uncapped in the confirm txn and can OVERSELL, because the
+ * base-counter read + gate are skipped for a null (uncapped) capacity.
+ */
+export function deriveStoredEventCapacity(eventData: {
+  totalCapacity?: unknown
+  capacityPlan?:  unknown
+  pricing?:       unknown
+} | null | undefined): number | null {
+  const tc = eventData?.totalCapacity
+  if (typeof tc === 'number') return tc
+  if (tc === null) return null                          // explicit unlimited
+  const plan = eventData?.capacityPlan                  // absent totalCapacity → legacy derive
+  if (typeof plan === 'string') return resolveTotalCapacity(plan as CapacityPlan)
+  const isPaid = (eventData?.pricing as Record<string, unknown> | null)?.eventType !== 'free'
+  return isPaid ? null : 100
+}
+
+/**
  * Maps an Event License registration limit (from the license tier's
  * `limits.maxRegistrations`) to the capacity bucket that enforces it, so an event's
  * enforced capacity is driven by its purchased license — the single source of truth.

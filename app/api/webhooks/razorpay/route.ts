@@ -32,6 +32,7 @@ import {
   TicketCodeCollisionError,
 }                                     from '@/lib/registrations/ticketCode'
 import { buildCounterIncrement }      from '@/lib/firebase/firestore/registrationCounters'
+import { deriveStoredEventCapacity }  from '@/lib/registrations/capacity'
 import { checkRegistrationGate }      from '@/lib/registrations/gate'
 import {
   CapacityExceededError,
@@ -563,7 +564,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         }
 
         // Capacity check
-        const eventCapacity = (eventData?.totalCapacity as number | null | undefined) ?? null
+        const eventCapacity = deriveStoredEventCapacity(eventData)
         const totalCount    = counterData?.totalCount ?? 0
         const passCount     = (counterData?.passCounts ?? {})[intent.passId] ?? 0
 

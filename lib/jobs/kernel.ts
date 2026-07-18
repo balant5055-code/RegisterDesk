@@ -12,10 +12,10 @@
 
 import { FieldValue, Timestamp } from 'firebase-admin/firestore'
 import { adminDb } from '@/lib/firebase/admin'
-import type { Job, JobStatus, LeaseReason, ChunkCommit } from './types'
+import type { Job, JobStatus, LeaseReason, ChunkCommit, ChunkResult } from './types'
 
 // Re-export the generic job types so importers can pull types + kernel from one place.
-export type { Job, JobStatus, JobCounts, LeaseReason, ChunkCommit } from './types'
+export type { Job, JobStatus, JobCounts, LeaseReason, ChunkCommit, ChunkResult } from './types'
 
 const jobsCol = (collection: string) => adminDb.collection(collection)
 
@@ -74,7 +74,7 @@ export async function leaseJob<T extends Job = Job>(
   collection: string,
   jobId:      string,
   leaseMs:    number,
-): Promise<{ proceed: true; job: T } | { proceed: false; reason: LeaseReason }> {
+): Promise<{ proceed: true; job: T; leaseTag: number } | { proceed: false; reason: LeaseReason }> {
   const ref = jobsCol(collection).doc(jobId)
   return adminDb.runTransaction(async tx => {
     const snap = await tx.get(ref)
@@ -90,13 +90,17 @@ export async function leaseJob<T extends Job = Job>(
       return { proceed: false as const, reason: 'busy' as const }
     }
 
+    // The lease tag IS the lockedUntil we set here — commitChunk fences on it so a
+    // worker whose lease was later stolen (this value overwritten by a re-lease)
+    // cannot commit.
+    const leaseTag = now + leaseMs
     tx.update(ref, {
       status:      'processing',
       startedAt:   job.startedAt ?? FieldValue.serverTimestamp(),
-      lockedUntil: Timestamp.fromMillis(now + leaseMs),
+      lockedUntil: Timestamp.fromMillis(leaseTag),
       updatedAt:   FieldValue.serverTimestamp(),
     })
-    return { proceed: true as const, job: { ...job, status: 'processing' } as T }
+    return { proceed: true as const, job: { ...job, status: 'processing' } as T, leaseTag }
   })
 }
 
@@ -106,15 +110,29 @@ export async function leaseJob<T extends Job = Job>(
  * interrupted page is re-processed (idempotently) without double-counting.
  * Respects cancellation requested mid-page. Returns the post-commit status.
  */
-export async function commitChunk(collection: string, jobId: string, c: ChunkCommit): Promise<JobStatus> {
+export async function commitChunk(collection: string, jobId: string, c: ChunkCommit): Promise<ChunkResult> {
   const ref = jobsCol(collection).doc(jobId)
   return adminDb.runTransaction(async tx => {
     const snap = await tx.get(ref)
-    if (!snap.exists) return 'failed' as const
+    if (!snap.exists) return { status: 'failed' as const, leaseTag: 0, fenced: true }
     const job = snap.data() as Job
+
+    // ── Fencing ──────────────────────────────────────────────────────────────
+    // Only the worker holding the CURRENT lease may commit. If lockedUntil no longer
+    // matches the tag this worker leased with, a co-driver re-leased after this
+    // worker's lease expired (slow page > lease) — reject the commit with NO
+    // mutation so counts/cursor/status/onComplete never double-apply. The re-driver
+    // continues from the last committed cursor (re-processing the page is safe: the
+    // same idempotent-per-item contract that already covers crash recovery).
+    const currentTag = job.lockedUntil instanceof Timestamp ? job.lockedUntil.toMillis() : 0
+    if (currentTag !== c.expectedLeaseTag) {
+      return { status: job.status, leaseTag: currentTag, fenced: true }
+    }
 
     const cancelled = job.status === 'cancelled'
     const status: JobStatus = cancelled ? 'cancelled' : c.finished ? 'completed' : 'processing'
+    const terminal = cancelled || c.finished
+    const newTag   = terminal ? 0 : Date.now() + c.leaseMs
 
     tx.update(ref, {
       'counts.processed': FieldValue.increment(c.deltaProcessed),
@@ -123,11 +141,11 @@ export async function commitChunk(collection: string, jobId: string, c: ChunkCom
       cursor:      c.cursor,
       error:       c.lastError ?? job.error ?? null,
       status,
-      lockedUntil: cancelled || c.finished ? null : Timestamp.fromMillis(Date.now() + c.leaseMs),
+      lockedUntil: terminal ? null : Timestamp.fromMillis(newTag),
       updatedAt:   FieldValue.serverTimestamp(),
       completedAt: c.finished && !cancelled ? FieldValue.serverTimestamp() : (job.completedAt ?? null),
     })
-    return status
+    return { status, leaseTag: newTag, fenced: false }
   })
 }
 

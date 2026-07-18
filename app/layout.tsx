@@ -32,18 +32,43 @@ export const metadata: Metadata = {
   title: TITLE,
   description: DESC,
   applicationName: NAME,
+
+  icons: {
+    icon: [
+      { url: '/favicon.ico' },
+      {
+        url: '/favicon/favicon-96x96.png',
+        sizes: '96x96',
+        type: 'image/png',
+      },
+    ],
+    apple: '/favicon/apple-touch-icon.png',
+  },
+
+  manifest: '/favicon/site.webmanifest',
+
   openGraph: {
-    type: 'website',
-    siteName: NAME,
-    url: BASE_URL,
-    title: TITLE,
-    description: DESC,
-  },
+  type: 'website',
+  siteName: NAME,
+  url: BASE_URL,
+  title: TITLE,
+  description: DESC,
+  images: [
+    {
+      url: '/og-image.png',
+      width: 1200,
+      height: 630,
+      alt: `${NAME} - Event Registration Platform`,
+    },
+  ],
+},
+
   twitter: {
-    card: 'summary_large_image',
-    title: NAME,
-    description: DESC,
-  },
+  card: 'summary_large_image',
+  title: NAME,
+  description: DESC,
+  images: ['/og-image.png'],
+},
 }
 
 // GA-7D S2: `viewport-fit=cover` so iOS populates env(safe-area-inset-*), which the
@@ -53,6 +78,7 @@ export const viewport: Viewport = {
   width: 'device-width',
   initialScale: 1,
   viewportFit: 'cover',
+  themeColor: '#e5277e',
 }
 
 export default function RootLayout({

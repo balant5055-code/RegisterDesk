@@ -307,7 +307,7 @@ function SidebarContent({
                         >
                           {active && (
                             <span
-                              className="absolute inset-y-[7px] left-0 w-[3px] rounded-r-full bg-primary shadow-[0_0_8px_rgba(229,39,126,0.4)]"
+                              className="absolute inset-y-[7px] left-0 w-[3px] rounded-r-full bg-primary shadow-[0_0_8px_rgb(var(--primary-rgb)_/_0.4)]"
                               aria-hidden
                             />
                           )}
@@ -361,7 +361,7 @@ function SidebarContent({
                                           className={cn(
                                             'size-1.5 shrink-0 rounded-full transition-all',
                                             childActive
-                                              ? 'bg-primary shadow-[0_0_5px_rgba(229,39,126,0.5)]'
+                                              ? 'bg-primary shadow-[0_0_5px_rgb(var(--primary-rgb)_/_0.5)]'
                                               : 'bg-muted-foreground/25',
                                           )}
                                           aria-hidden
@@ -404,7 +404,7 @@ function SidebarContent({
                   >
                     {active && (
                       <span
-                        className="absolute inset-y-2 left-0 w-[3px] rounded-r-full bg-primary shadow-[0_0_8px_rgba(229,39,126,0.4)]"
+                        className="absolute inset-y-2 left-0 w-[3px] rounded-r-full bg-primary shadow-[0_0_8px_rgb(var(--primary-rgb)_/_0.4)]"
                         aria-hidden
                       />
                     )}

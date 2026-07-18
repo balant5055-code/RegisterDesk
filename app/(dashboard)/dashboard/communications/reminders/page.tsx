@@ -12,6 +12,7 @@ import { auth } from '@/lib/firebase/auth'
 import { cn } from '@/lib/utils/cn'
 import { useConfirm } from '@/components/ui/ConfirmDialog'
 import { Loader2, ArrowLeft, Bell, Plus, X, CalendarClock } from 'lucide-react'
+import { IconButton } from '@/components/ui'
 import type { ReminderRow, ReminderAnalytics } from '@/lib/reminders/types'
 
 const rupees = (p: number) => `₹${(p / 100).toLocaleString('en-IN')}`
@@ -204,7 +205,7 @@ function NewReminderForm({ events, onClose, onCreated }: { events: EventOpt[]; o
     <div className="rounded-2xl border border-border bg-card p-5">
       <div className="mb-3 flex items-center justify-between">
         <h2 className="flex items-center gap-2 text-[15px] font-bold text-foreground"><CalendarClock className="size-4 text-primary" /> New custom reminder</h2>
-        <button onClick={onClose} className="rounded-md p-1 text-muted-foreground hover:bg-muted"><X className="size-4" /></button>
+        <IconButton onClick={onClose}><X className="size-4" /></IconButton>
       </div>
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         <label className="text-[12px] font-medium text-foreground">Audience

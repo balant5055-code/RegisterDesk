@@ -28,6 +28,11 @@ export async function GET(
   if (!job || job.organizerUid !== ctx.workspaceUid) {
     return NextResponse.json({ error: 'Export not found' }, { status: 404 })
   }
+  // A cancelled job may still carry an `output` (cancelJob does not clear it), so
+  // gate on status too — a cancelled export must not remain downloadable.
+  if (job.status === 'cancelled') {
+    return NextResponse.json({ error: 'This export was cancelled.' }, { status: 410 })
+  }
   if (!job.output) {
     return NextResponse.json({ error: 'Export is not ready yet' }, { status: 409 })
   }

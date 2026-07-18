@@ -21,7 +21,7 @@ export function CTABackground() {
   return (
     <div
       aria-hidden
-      className="pointer-events-none absolute left-1/2 top-1/2 -z-10 h-72 w-full max-w-2xl -translate-x-1/2 -translate-y-1/2 rounded-full bg-[radial-gradient(closest-side,rgba(229,39,126,0.08),transparent)]"
+      className="pointer-events-none absolute left-1/2 top-1/2 -z-10 h-72 w-full max-w-2xl -translate-x-1/2 -translate-y-1/2 rounded-full bg-[radial-gradient(closest-side,rgb(var(--primary-rgb)_/_0.08),transparent)]"
     />
   )
 }

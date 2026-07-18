@@ -16,6 +16,9 @@ function toTables(a: EventAnalytics): ReportTable[] {
   return [
     {
       id: 'summary', title: 'Summary',
+      // Disclose the CAP truncation in-file (the serializer appends a "limited to N
+      // records" note) so a large-event export never silently under-reports.
+      truncated: a.truncated,
       columns: [{ key: 'metric', label: 'Metric', type: 'text' }, { key: 'value', label: 'Value', type: 'number' }],
       rows: [
         { metric: 'Registrations', value: k.registrations },

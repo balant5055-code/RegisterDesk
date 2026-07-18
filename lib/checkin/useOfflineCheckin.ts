@@ -103,7 +103,7 @@ export function useOfflineCheckin({ eventSlug, token, onSynced }: Params): Offli
           res = await fetch('/api/checkin/scan', {
             method: 'POST',
             headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
-            body: JSON.stringify({ ticketCode: item.ticketCode, source: 'offline-sync' }),
+            body: JSON.stringify({ ticketCode: item.ticketCode, source: 'offline-sync', eventSlug: item.eventSlug }),
           })
         } catch {
           break  // network dropped mid-sync — leave the rest pending for next time

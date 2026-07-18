@@ -15,7 +15,7 @@ import {
   CERTIFICATE_SCHEMA_VERSION,
 } from './types'
 import * as jobKernel from '@/lib/jobs/kernel'
-import type { ChunkCommit, LeaseReason } from '@/lib/jobs/kernel'
+import type { ChunkCommit, LeaseReason, ChunkResult } from '@/lib/jobs/kernel'
 // Re-export the generic job types so existing importers of './firestore' keep working.
 export type { ChunkCommit, LeaseReason } from '@/lib/jobs/kernel'
 import type {
@@ -831,10 +831,22 @@ export async function sweepStaleCertificateClaims(
   return { scanned: snap.size, deleted, skipped }
 }
 
-/** Create a generated certificate record. Keyed by certificateId. */
+/**
+ * Create a generated certificate record. Keyed by certificateId.
+ *
+ * Uses `.create()` (not `.set()`) so a certificateId collision FAILS LOUD instead
+ * of silently overwriting an existing attendee's certificate (RD-EVENT-GA-02D F1).
+ * The id is random (RDC-{year}-{6}); the deterministic claim only makes it unique
+ * per (event, registration, type) tuple — NOT globally across the flat collection —
+ * so at scale a birthday collision with another tuple's id is possible. The single
+ * caller (generateCertificate, owned path) only reaches here when no record exists
+ * for this tuple, so the only way the doc can already exist is a cross-tuple id
+ * collision: rejecting it preserves the existing certificate, and the caller's
+ * releaseCertificateClaim + rethrow lets a retry reserve a fresh id.
+ */
 export async function createCertificate(input: CertificateInput): Promise<Certificate> {
   const ref = certificatesCol().doc(input.certificateId)
-  await ref.set({
+  await ref.create({
     ...input,
     status:           'generated',
     downloadCount:    0,
@@ -1041,7 +1053,7 @@ export async function leaseJob(
 }
 
 /** Atomically commits one page of progress (delegates to the shared job kernel). */
-export async function commitChunk(jobId: string, c: ChunkCommit): Promise<CertificateJob['status']> {
+export async function commitChunk(jobId: string, c: ChunkCommit): Promise<ChunkResult> {
   return jobKernel.commitChunk(COLLECTIONS.JOBS, jobId, c)
 }
 

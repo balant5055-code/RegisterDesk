@@ -1,0 +1,73 @@
+# RD-OPS-GA-02B — Group B: financial recovery + retry + time-sensitive dispatch.
+#
+# Self-healing safety nets (uncredited registrations/donations, unapplied top-ups,
+# failed webhook re-drive) plus reminder dispatch and operator-alert delivery. Every
+# endpoint is idempotent (deterministic ledger keys / status-guarded claims), so
+# repeated ticks never double-apply. Triggered SEQUENTIALLY, money paths first.
+name: Cron - Group B (recovery, every 10 min)
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch: {}
+
+permissions: {}
+
+concurrency:
+  group: cron-recovery
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      CRON_BASE_URL: ${{ secrets.CRON_BASE_URL }}
+      CRON_SECRET: ${{ secrets.CRON_SECRET }}
+    steps:
+      - name: Preflight (secrets present)
+        run: |
+          test -n "$CRON_BASE_URL" || { echo "::error::CRON_BASE_URL secret is not set"; exit 1; }
+          test -n "$CRON_SECRET"   || { echo "::error::CRON_SECRET secret is not set"; exit 1; }
+
+      - name: registration-reconciliation
+        continue-on-error: true
+        run: |
+          curl -sS -X POST "$CRON_BASE_URL/api/cron/registration-reconciliation" \
+            -H "Authorization: Bearer $CRON_SECRET" \
+            --retry 2 --retry-delay 5 --max-time 65 --fail-with-body
+
+      - name: donation-reconciliation
+        continue-on-error: true
+        run: |
+          curl -sS -X POST "$CRON_BASE_URL/api/cron/donation-reconciliation" \
+            -H "Authorization: Bearer $CRON_SECRET" \
+            --retry 2 --retry-delay 5 --max-time 65 --fail-with-body
+
+      - name: wallet-reconciliation
+        continue-on-error: true
+        run: |
+          curl -sS -X POST "$CRON_BASE_URL/api/cron/wallet-reconciliation" \
+            -H "Authorization: Bearer $CRON_SECRET" \
+            --retry 2 --retry-delay 5 --max-time 65 --fail-with-body
+
+      - name: webhooks
+        continue-on-error: true
+        run: |
+          curl -sS -X POST "$CRON_BASE_URL/api/cron/webhooks" \
+            -H "Authorization: Bearer $CRON_SECRET" \
+            --retry 2 --retry-delay 5 --max-time 65 --fail-with-body
+
+      - name: reminders
+        continue-on-error: true
+        run: |
+          curl -sS -X POST "$CRON_BASE_URL/api/cron/reminders" \
+            -H "Authorization: Bearer $CRON_SECRET" \
+            --retry 2 --retry-delay 5 --max-time 65 --fail-with-body
+
+      - name: ops-alerts
+        continue-on-error: true
+        run: |
+          curl -sS -X POST "$CRON_BASE_URL/api/cron/ops-alerts" \
+            -H "Authorization: Bearer $CRON_SECRET" \
+            --retry 2 --retry-delay 5 --max-time 65 --fail-with-body

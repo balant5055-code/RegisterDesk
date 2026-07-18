@@ -164,6 +164,19 @@ export async function POST(req: NextRequest): Promise<NextResponse<PostBroadcast
         if (typeof v === 'string') waVariables[k] = v
       }
     }
+    // Every required template variable must be satisfiable — either auto-supplied
+    // per recipient (attendeeName/eventName/ticketCode) or provided as a non-blank
+    // static variable. Otherwise the resolver fails EVERY recipient at send time while
+    // the campaign is still charged upfront (M4). Reject at create instead.
+    const PER_RECIPIENT_VARS = new Set(['attendeeName', 'eventName', 'ticketCode'])
+    const unsatisfiable = def.requiredVariables.filter(k =>
+      !PER_RECIPIENT_VARS.has(k) && !(typeof waVariables[k] === 'string' && waVariables[k].trim() !== ''))
+    if (unsatisfiable.length) {
+      return NextResponse.json(
+        { success: false, error: `This template needs variable(s) the broadcast can't fill: ${unsatisfiable.join(', ')}. Provide them, or pick a template that uses attendee name, event name, or ticket code.` },
+        { status: 400 },
+      )
+    }
     waTemplateType = templateType
     storedSubject  = `WhatsApp · ${def.templateName}`
   }

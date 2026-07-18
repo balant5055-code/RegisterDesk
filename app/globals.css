@@ -75,8 +75,8 @@
      Registers the styles/tokens.css --fs-* design tokens under Tailwind's
      --text-* theme namespace so they generate real font-size utilities
      (text-fs-2xs … text-fs-5xl / text-fs-display-*) that compile to
-     `font-size: var(--fs-*)`. Previously the scale had no named utility, so the
-     only way to reference it was the arbitrary `text-[var(--fs-*)]` form, which
+     `font-size: var(--fs-2xs)` … `var(--fs-5xl)`. Previously the scale had no named
+     utility, so the only way to reference it was an arbitrary `text-` color value, which
      Tailwind's dual-purpose `text-*` resolver treats as a COLOR (invalid) — the
      font-size was silently dropped. `@theme inline` keeps styles/tokens.css as
      the single source of truth (no duplicated values emitted). Deliberately NO

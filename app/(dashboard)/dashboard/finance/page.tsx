@@ -272,8 +272,8 @@ export default function FinancePage() {
       value: formatCompactINR(w?.lifetimeFeesPaise ?? 0),
       sub:   'Includes gateway fees',
       icon:  CreditCard,
-      color: 'text-[#fb5a6a]',
-      bg:    'bg-[#fb5a6a]/[0.09]',
+      color: 'text-[var(--primary-from)]',
+      bg:    'bg-[var(--primary-from)]/[0.09]',
     },
     {
       label: 'Net Earnings',

@@ -26,7 +26,7 @@ export function PlatformHero() {
 
   return (
     <section aria-labelledby="platform-hero-heading" className="relative overflow-hidden bg-white pt-8 pb-4 sm:pt-10 lg:pt-14">
-      <div aria-hidden className="pointer-events-none absolute inset-x-0 top-0 -z-10 h-[420px] bg-[radial-gradient(60%_60%_at_50%_0%,rgba(229,39,126,0.07),transparent)]" />
+      <div aria-hidden className="pointer-events-none absolute inset-x-0 top-0 -z-10 h-[420px] bg-[radial-gradient(60%_60%_at_50%_0%,rgb(var(--primary-rgb)_/_0.07),transparent)]" />
 
       <div className="mx-auto w-full max-w-7xl px-4 sm:px-6 lg:px-8">
         <div className="mx-auto max-w-3xl text-center">

@@ -26,6 +26,10 @@ export const AUDIT_ACTIONS = [
   'event.taken_down',
   'event.restored',
   'event.under_review',
+  // Event review (admin approve / reject / request changes)
+  'event.approved',
+  'event.rejected',
+  'event.changes_requested',
   // Campaign moderation
   'campaign.taken_down',
   'campaign.restored',

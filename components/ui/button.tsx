@@ -19,9 +19,9 @@ const variantClasses: Record<ButtonVariant, string> = {
   // rounded-lg + font-semibold override the base rounded-xl + font-medium via twMerge.
   primary:
     'bg-primary text-white font-semibold rounded-lg ' +
-    'shadow-[0_2px_12px_rgba(229,39,126,0.28)] ' +
+    'shadow-[0_2px_12px_rgb(var(--primary-rgb)_/_0.28)] ' +
     'transition-all duration-200 ' +
-    'hover:-translate-y-px hover:shadow-[0_4px_20px_rgba(229,39,126,0.42)] ' +
+    'hover:-translate-y-px hover:shadow-[0_4px_20px_rgb(var(--primary-rgb)_/_0.42)] ' +
     'active:translate-y-0 active:scale-[0.98]',
   secondary:
     'bg-secondary text-secondary-foreground hover:bg-secondary-hover',
@@ -37,12 +37,16 @@ const variantClasses: Record<ButtonVariant, string> = {
 // sm matches the navbar CTA exactly: h-9 px-4 text-sm.
 // Other sizes remain unchanged from their original proportions.
 
+// Structural dimensions consume the semantic component tokens (styles/tokens.css).
+// Values are token-for-token identical to the former h-*/px-*/gap-* utilities, so
+// output is pixel-identical; twMerge still groups these arbitrary utilities with
+// their named counterparts, so caller className overrides behave exactly as before.
 const sizeClasses: Record<ButtonSize, string> = {
-  xs: 'h-7  px-2.5 text-xs     gap-1',
-  sm: 'h-9  px-4   text-sm     gap-1.5',
-  md: 'h-10 px-4   text-sm     gap-2',
-  lg: 'h-11 px-5   text-sm     gap-2',
-  xl: 'h-14 px-7   text-[15px] gap-2.5',
+  xs: 'h-[var(--button-height-xs)] px-[var(--button-px-xs)] text-xs     gap-[var(--button-gap-xs)]',
+  sm: 'h-[var(--button-height-sm)] px-[var(--button-px-sm)] text-sm     gap-[var(--button-gap-sm)]',
+  md: 'h-[var(--button-height-md)] px-[var(--button-px-md)] text-sm     gap-[var(--button-gap-md)]',
+  lg: 'h-[var(--button-height-lg)] px-[var(--button-px-lg)] text-sm     gap-[var(--button-gap-lg)]',
+  xl: 'h-[var(--button-height-xl)] px-[var(--button-px-xl)] text-[15px] gap-[var(--button-gap-xl)]',
 }
 
 const spinnerSizeClasses: Record<ButtonSize, string> = {

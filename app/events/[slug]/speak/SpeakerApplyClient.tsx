@@ -2,6 +2,7 @@
 
 import { useState }              from 'react'
 import Link                      from 'next/link'
+import { TextLink } from '@/components/ui'
 import { Mic, CheckCircle, ArrowLeft, Loader2 } from 'lucide-react'
 
 interface Props {
@@ -75,7 +76,7 @@ export default function SpeakerApplyClient({ slug, eventName, enabled, closingDa
             ? `The deadline for speaker applications for ${eventName} has passed.`
             : `Speaker applications are not currently open for ${eventName}.`}
         </p>
-        <Link href={`/events/${slug}`} className="text-[13px] text-primary hover:underline">← Back to event</Link>
+        <TextLink href={`/events/${slug}`}>← Back to event</TextLink>
       </div>
     )
   }
@@ -91,7 +92,7 @@ export default function SpeakerApplyClient({ slug, eventName, enabled, closingDa
         <p className="max-w-md text-[14px] text-muted-foreground">
           Thanks for applying to speak at <strong>{eventName}</strong>. We&apos;ll review your application and get back to you by email.
         </p>
-        <Link href={`/events/${slug}`} className="text-[13px] text-primary hover:underline">← Back to event</Link>
+        <TextLink href={`/events/${slug}`}>← Back to event</TextLink>
       </div>
     )
   }

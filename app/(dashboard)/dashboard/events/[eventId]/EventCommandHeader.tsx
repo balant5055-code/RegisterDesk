@@ -164,7 +164,7 @@ export default function EventCommandHeader({ event, eventId, token, onSuccess }:
           <div className="absolute inset-0 bg-gradient-to-t from-black/50 to-transparent" />
         </div>
       ) : (
-        <div className="h-14 w-full bg-gradient-to-br from-[#fb5a6a]/15 via-[#e5277e]/8 to-transparent" />
+        <div className="h-14 w-full bg-gradient-to-br from-[var(--primary-from)]/15 via-[var(--primary)]/8 to-transparent" />
       )}
 
       {/* Content */}

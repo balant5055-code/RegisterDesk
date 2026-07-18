@@ -198,7 +198,7 @@ export default function AudienceGrid() {
                       {isActive && (
                         <motion.span
                           layoutId="pillBg"
-                          className="absolute inset-0 rounded-full shadow-[0_2px_10px_rgba(229,39,126,0.28)]"
+                          className="absolute inset-0 rounded-full shadow-[0_2px_10px_rgb(var(--primary-rgb)_/_0.28)]"
                           style={{ backgroundImage: 'var(--primary-gradient)' }}
                           transition={{ type: 'spring', stiffness: 380, damping: 32 }}
                         />

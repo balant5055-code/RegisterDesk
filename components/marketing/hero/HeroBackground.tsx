@@ -6,7 +6,7 @@ export function HeroBackground() {
   return (
     <div
       aria-hidden
-      className="pointer-events-none absolute inset-0 -z-10 bg-[radial-gradient(55%_45%_at_50%_0%,rgba(229,39,126,0.03),transparent_70%)]"
+      className="pointer-events-none absolute inset-0 -z-10 bg-[radial-gradient(55%_45%_at_50%_0%,rgb(var(--primary-rgb)_/_0.03),transparent_70%)]"
     />
   )
 }

@@ -161,7 +161,7 @@ export default function BrandingPage() {
             <div>
               <p className="mb-2 text-[12px] font-semibold uppercase tracking-wide text-muted-foreground">Preview</p>
               <div className="overflow-hidden rounded-xl border border-border">
-                <div className="px-4 py-3" style={{ background: b.primaryColor && HEX.test(b.primaryColor) ? b.primaryColor : '#e5277e' }}>
+                <div className="px-4 py-3" style={{ background: b.primaryColor && HEX.test(b.primaryColor) ? b.primaryColor : 'var(--primary)' }}>
                   <span className="text-[11px] font-bold uppercase tracking-widest text-white opacity-90">{b.companyName || 'RegisterDesk'}</span>
                 </div>
                 <div className="space-y-2 bg-white p-4">

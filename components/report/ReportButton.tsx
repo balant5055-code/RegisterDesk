@@ -4,6 +4,7 @@ import { useState } from 'react'
 import { Flag, X, Loader2, CheckCircle2 } from 'lucide-react'
 import { auth } from '@/lib/firebase/auth'
 import { cn }   from '@/lib/utils/cn'
+import { IconButton } from '@/components/ui'
 import type { ReportTargetType } from '@/lib/admin/reportTypes'
 
 const REASONS = [
@@ -92,7 +93,7 @@ function ReportModal({ targetType, targetId, onClose }: {
       <div className="w-full max-w-md rounded-2xl bg-card p-5 shadow-xl" onClick={e => e.stopPropagation()}>
         <div className="mb-4 flex items-center justify-between">
           <h2 className="text-[16px] font-semibold text-foreground">Report this {targetType}</h2>
-          <button onClick={onClose} className="rounded-md p-1 text-muted-foreground hover:bg-muted" aria-label="Close"><X className="size-4" /></button>
+          <IconButton onClick={onClose} aria-label="Close"><X className="size-4" /></IconButton>
         </div>
 
         {done ? (

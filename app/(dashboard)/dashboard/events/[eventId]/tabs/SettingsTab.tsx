@@ -416,7 +416,7 @@ export default function SettingsTab({ event, eventId, token, onSuccess }: Settin
                 <X className="size-3.5" aria-hidden /> Cancel
               </button>
               <button type="button" onClick={handleSave} disabled={saving}
-                className="flex items-center gap-1.5 rounded-xl bg-primary px-4 py-2 text-[14px] font-semibold text-white hover:bg-[#bf1868] disabled:opacity-50">
+                className="flex items-center gap-1.5 rounded-xl bg-primary px-4 py-2 text-[14px] font-semibold text-white hover:bg-[var(--primary-hover)] disabled:opacity-50">
                 {saving ? <Loader2 className="size-3.5 animate-spin" aria-hidden /> : <Check className="size-3.5" aria-hidden />}
                 {saving ? 'Saving…' : 'Save Changes'}
               </button>

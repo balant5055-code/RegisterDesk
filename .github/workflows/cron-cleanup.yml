@@ -1,0 +1,36 @@
+# RD-OPS-GA-02B — Group C: light cleanup (hourly).
+#
+# Sweeps orphaned certificate claims (>15-min TTL). Age is re-checked inside the
+# delete transaction, so the sweep is idempotent and safe to run repeatedly.
+name: Cron - Group C (cleanup, hourly)
+
+on:
+  schedule:
+    - cron: '0 * * * *'
+  workflow_dispatch: {}
+
+permissions: {}
+
+concurrency:
+  group: cron-cleanup
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      CRON_BASE_URL: ${{ secrets.CRON_BASE_URL }}
+      CRON_SECRET: ${{ secrets.CRON_SECRET }}
+    steps:
+      - name: Preflight (secrets present)
+        run: |
+          test -n "$CRON_BASE_URL" || { echo "::error::CRON_BASE_URL secret is not set"; exit 1; }
+          test -n "$CRON_SECRET"   || { echo "::error::CRON_SECRET secret is not set"; exit 1; }
+
+      - name: certificate-claims
+        continue-on-error: true
+        run: |
+          curl -sS -X POST "$CRON_BASE_URL/api/cron/certificate-claims" \
+            -H "Authorization: Bearer $CRON_SECRET" \
+            --retry 2 --retry-delay 5 --max-time 65 --fail-with-body

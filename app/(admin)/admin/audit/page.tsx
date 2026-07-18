@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { auth }                             from '@/lib/firebase/auth'
 import { cn }                               from '@/lib/utils/cn'
 import { Loader2, X, Search }               from 'lucide-react'
+import { IconButton }                       from '@/components/ui'
 import {
   AdminToolbar, StatusPill, TableFrame, THead, Th, TBody, Tr, Td, TableStateRow,
   LoadMoreButton, ErrorBanner,
@@ -242,7 +243,7 @@ function AuditDetailDrawer({ item, onClose }: { item: AuditLogItem; onClose: () 
       <div className="h-full w-full max-w-md overflow-y-auto bg-card p-5 shadow-xl" onClick={e => e.stopPropagation()}>
         <div className="mb-4 flex items-center justify-between">
           <h2 className="text-[16px] font-semibold text-foreground">Audit entry</h2>
-          <button onClick={onClose} className="rounded-md p-1 text-muted-foreground hover:bg-muted" aria-label="Close"><X className="size-4" /></button>
+          <IconButton onClick={onClose} aria-label="Close"><X className="size-4" /></IconButton>
         </div>
 
         <dl className="space-y-3 text-[13.5px]">

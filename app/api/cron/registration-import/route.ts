@@ -19,6 +19,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { listActiveJobs }            from '@/lib/jobs/kernel'
 import { isAuthorizedCron, cronUnauthorized } from '@/lib/cron/auth'
 import { withCronMetrics } from '@/lib/cron/withMetrics'
+import { captureError, flushMonitoring } from '@/lib/monitoring/sentry'
 import {
   processRegistrationImportChunk, REGISTRATION_IMPORT_JOBS, type RegistrationImportJob,
 } from '@/lib/registrations/importJob'
@@ -52,10 +53,12 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     } catch (err) {
       // One job's failure must not stop the driver.
       console.error('[cron/registration-import] job error:', { jobId: job.jobId, err })
+      captureError(err, { scope: 'cron.registration_import', area: 'registration', jobId: job.jobId })
       outcomes.push({ jobId: job.jobId, status: 'error', processed: 0, reason: err instanceof Error ? err.message : 'error' })
     }
   }
 
+  await flushMonitoring()   // deliver captured events before the serverless run ends
   return NextResponse.json({ scanned: jobs.length, durationMs: Date.now() - start, jobs: outcomes })
 }
 

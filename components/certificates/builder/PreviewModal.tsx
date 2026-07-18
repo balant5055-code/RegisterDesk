@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import { Loader2, X, AlertCircle, ExternalLink } from 'lucide-react'
+import { IconButton } from '@/components/ui'
 import type { CertificateLayout } from '@/lib/certificates/types'
 
 interface Props {
@@ -61,7 +62,7 @@ export default function PreviewModal({ eventId, templateId, token, layout, onClo
                 <ExternalLink className="size-3.5" /> Open in new tab
               </a>
             )}
-            <button type="button" onClick={onClose} className="rounded-md p-1 text-muted-foreground hover:bg-muted"><X className="size-4" /></button>
+            <IconButton type="button" onClick={onClose}><X className="size-4" /></IconButton>
           </div>
         </div>
         <div className="relative flex-1 bg-muted/40">

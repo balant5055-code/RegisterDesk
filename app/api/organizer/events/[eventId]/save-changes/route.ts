@@ -88,6 +88,31 @@ export async function POST(
   checkField('onlinePlatform', draftOnline.platform,    liveOnline.platform)
   checkField('onlineMeetingUrl', draftOnline.meetingUrl, liveOnline.meetingUrl)
 
+  // ── 3b. Pricing integrity guard (parity with PATCH /edit) ─────────────────
+  // /edit blocks lowering a pass capacity below its sold count on a published
+  // event (edit/route.ts RangeError). save-changes pushes the whole draft.pricing
+  // to the live doc, so without the same check it is a bypass — a capacity below
+  // sold would over-report availability / drive remaining-seats negative. Enforce
+  // the identical invariant here, reading the authoritative per-pass sold counter.
+  const draftPasses = Array.isArray((d.pricing as Record<string, unknown> | null)?.passes)
+    ? ((d.pricing as Record<string, unknown>).passes as Record<string, unknown>[])
+    : []
+  if (draftPasses.length > 0) {
+    const counterSnap = await adminDb.collection('registrationCounters').doc(slug).get()
+    const passCounts  = (counterSnap.data()?.passCounts ?? {}) as Record<string, number>
+    for (const pass of draftPasses) {
+      const pid  = typeof pass.id === 'string' ? pass.id : ''
+      const sold = passCounts[pid] ?? 0
+      const qty  = pass.unlimited === true ? null : (typeof pass.quantity === 'number' ? pass.quantity : null)
+      if (qty !== null && qty < sold) {
+        return NextResponse.json(
+          { success: false, error: `Pass "${typeof pass.name === 'string' ? pass.name : pid}" capacity (${qty}) cannot be less than its sold count (${sold}).` },
+          { status: 400 },
+        )
+      }
+    }
+  }
+
   // ── 4. Batch write: touch draft + sync all content fields to live event ───
   try {
     const ts    = FieldValue.serverTimestamp()

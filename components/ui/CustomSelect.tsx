@@ -100,7 +100,7 @@ export function CustomSelect({
         onClick={() => !disabled && setOpen(o => !o)}
         onKeyDown={handleTriggerKey}
         className={cn(
-          'flex h-10 w-full items-center justify-between rounded-xl border bg-background px-3.5 text-[13.5px] text-left outline-none transition-colors disabled:cursor-not-allowed disabled:opacity-50',
+          'flex h-[var(--select-height)] w-full items-center justify-between rounded-xl border bg-background px-[var(--select-px)] text-[13.5px] text-left outline-none transition-colors disabled:cursor-not-allowed disabled:opacity-50',
           open
             ? 'border-primary/60 ring-2 ring-primary/20'
             : 'border-border hover:border-muted-foreground/40',

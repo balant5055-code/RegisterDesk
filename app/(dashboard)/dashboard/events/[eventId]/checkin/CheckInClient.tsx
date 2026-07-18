@@ -41,6 +41,7 @@ function ResultCard({ result }: { result: CheckInResult }) {
       REGISTRATION_REFUNDED:         'This registration has been refunded and cannot be checked in.',
       REGISTRATION_PENDING:          'This registration is pending approval and cannot be checked in.',
       EVENT_NOT_ACCEPTING_CHECKINS:  'This event is not currently accepting check-ins.',
+      WRONG_EVENT:                   'This ticket belongs to a different event.',
       UNAUTHORIZED:                  'You do not have permission to check in for this event.',
       MISSING_TICKET_CODE:           'Please enter a ticket code.',
       INVALID_BODY:                  'Invalid request.',
@@ -176,7 +177,7 @@ export default function CheckInClient({
       const res  = await fetch('/api/checkin/scan', {
         method:  'POST',
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-        body:    JSON.stringify({ ticketCode, source: mode }),
+        body:    JSON.stringify({ ticketCode, source: mode, eventSlug: slug }),
       })
       const data = await res.json() as CheckInResult
       setResult(data)
@@ -387,7 +388,7 @@ export default function CheckInClient({
             <button
               type="submit"
               disabled={loading || !code.trim()}
-              className="flex items-center gap-2 rounded-xl bg-primary px-5 py-3 text-[14px] font-semibold text-white disabled:opacity-50 hover:bg-[#bf1868]"
+              className="flex items-center gap-2 rounded-xl bg-primary px-5 py-3 text-[14px] font-semibold text-white disabled:opacity-50 hover:bg-[var(--primary-hover)]"
             >
               {loading
                 ? <Loader2 className="size-4 animate-spin" aria-hidden />
@@ -397,7 +398,7 @@ export default function CheckInClient({
             </button>
           </form>
           <p className="mt-3 text-center text-[13px] text-muted-foreground">
-            Type the attendee's ticket code and press Check In.
+            Type the attendee&apos;s ticket code and press Check In.
           </p>
         </div>
       )}
@@ -432,7 +433,7 @@ export default function CheckInClient({
           <button
             type="button"
             onClick={handleReset}
-            className="flex w-full items-center justify-center gap-2 rounded-xl bg-primary px-4 py-3.5 text-[14px] font-semibold text-white hover:bg-[#bf1868]"
+            className="flex w-full items-center justify-center gap-2 rounded-xl bg-primary px-4 py-3.5 text-[14px] font-semibold text-white hover:bg-[var(--primary-hover)]"
           >
             <RotateCcw className="size-4" aria-hidden />
             {mode === 'qr' ? 'Scan Next Ticket' : 'Enter Next Ticket'}
