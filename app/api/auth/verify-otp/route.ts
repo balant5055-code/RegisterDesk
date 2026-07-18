@@ -104,18 +104,50 @@ export async function POST(req: Request): Promise<NextResponse> {
     verifiedAt: FieldValue.serverTimestamp(),
   })
 
-  // ── Update organizer document ────────────────────────────────────────────────
-  const userRef = adminDb.collection('users').doc(uid)
-  batch.update(userRef, {
-    emailVerified: true,           // backward-compat flat field
-    'verification.email.verified':      true,
-    'verification.email.verifiedAt':    FieldValue.serverTimestamp(),
-    'verification.email.verifiedMethod': 'otp',
-    'trust.level':  'email_verified',
-    'trust.score':  EMAIL_VERIFIED_SCORE,
-    'trust.badges': FieldValue.arrayUnion('email'),
-    updatedAt:      FieldValue.serverTimestamp(),
-  })
+  // ── Update organizer document (self-heal an orphaned signup) ─────────────────
+  // The profile is normally created client-side right after Firebase Auth signup
+  // (createOrganizerProfile → users/{uid}). Those are two independent operations; if
+  // the second never landed, the Auth user exists WITHOUT a Firestore profile and a
+  // bare update() throws NOT_FOUND (RD-AUTH-OTP-01). So:
+  //   • profile EXISTS  → apply the verification fields exactly as before (no change);
+  //   • profile MISSING → create the COMPLETE canonical profile (same shape as
+  //     createOrganizerProfile) with the verification state already applied, so no
+  //     partial organizer document is ever produced.
+  const userRef  = adminDb.collection('users').doc(uid)
+  const userSnap = await userRef.get()
+
+  if (userSnap.exists) {
+    batch.update(userRef, {
+      emailVerified: true,           // backward-compat flat field
+      'verification.email.verified':      true,
+      'verification.email.verifiedAt':    FieldValue.serverTimestamp(),
+      'verification.email.verifiedMethod': 'otp',
+      'trust.level':  'email_verified',
+      'trust.score':  EMAIL_VERIFIED_SCORE,
+      'trust.badges': FieldValue.arrayUnion('email'),
+      updatedAt:      FieldValue.serverTimestamp(),
+    })
+  } else {
+    // Orphaned signup: build the canonical organizer profile (mirrors
+    // createOrganizerProfile) WITH verification applied. Values are sourced from the
+    // verified token / OTP request; organizationName is unknown here so it stays empty
+    // (schema-consistent) and is editable later from Settings. merge:true keeps the
+    // write idempotent against a concurrent profile creation.
+    const email = decoded.email ?? (otp.recipient as string | undefined) ?? ''
+    const name  = (decoded.name as string | undefined) ?? (email ? email.split('@')[0] : '')
+    batch.set(userRef, {
+      uid,
+      name,
+      email,
+      organizationName: '',
+      role:             'organizer',
+      emailVerified:    true,
+      verification: { email: { verified: true, verifiedAt: FieldValue.serverTimestamp(), verifiedMethod: 'otp' } },
+      trust: { level: 'email_verified', score: EMAIL_VERIFIED_SCORE, badges: FieldValue.arrayUnion('email') },
+      createdAt: FieldValue.serverTimestamp(),
+      updatedAt: FieldValue.serverTimestamp(),
+    }, { merge: true })
+  }
 
   await batch.commit()
 
