@@ -543,7 +543,7 @@ export const BUSINESS_CONFIG_DEFAULTS: BusinessConfigSections = {
     // a stored config override wins at runtime. One source of truth for the base URL.
     baseUrl:         (process.env.NEXT_PUBLIC_BASE_URL ?? process.env.NEXT_PUBLIC_APP_URL ?? 'https://registerdesk.in').replace(/\/$/, ''),
     logoUrl:         '/logo/logo-registerdesk.png',
-    ogImageUrl:      '/marketing/og/default.png',
+    ogImageUrl:      '/og-image.png',
     defaultFromName: 'RegisterDesk',
     defaultReplyTo:  '',
     defaultCountry:  'IN',
