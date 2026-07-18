@@ -12,6 +12,30 @@ import crypto from 'crypto'
 import { NextResponse } from 'next/server'
 import { CRON_SECRET } from '@/lib/env'
 
+// RD-CRON-ARCH-02 — the "CRON_SECRET is required in production" fail-fast lives HERE,
+// in the cron-only auth helper (imported exclusively by /api/cron/* routes), instead
+// of in the shared lib/env.ts. So a missing CRON_SECRET fails ONLY cron endpoints at
+// init (fail-closed + loud), while login / OTP / email / payments — which import
+// lib/env.ts but not this module — keep working. Production is detected exactly as
+// env.ts does (VERCEL_ENV in true production, else NODE_ENV), and skipped during
+// `next build` (NEXT_PHASE) so CI/CD without secrets still compiles.
+const _isBuildPhase     = process.env.NEXT_PHASE === 'phase-production-build'
+const _vercelEnv        = (process.env.VERCEL_ENV ?? '').trim()
+const _isRealProduction = _vercelEnv
+  ? _vercelEnv === 'production'
+  : process.env.NODE_ENV === 'production'
+
+if (!_isBuildPhase && _isRealProduction && !CRON_SECRET) {
+  throw new Error(
+    '[env] CRON_SECRET is required in production. Without it, every scheduled ' +
+    '(cron) job is rejected (fail-closed) and background processing — payment / ' +
+    'donation / wallet reconciliation, webhook delivery, and ' +
+    'scheduled broadcasts — silently stops.\n' +
+    '  Hint: generate with node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'hex\'))" ' +
+    'then set it in your production secrets AND in the Vercel Cron configuration.',
+  )
+}
+
 function timingSafeEqualStr(a: string, b: string): boolean {
   const ab = Buffer.from(a)
   const bb = Buffer.from(b)

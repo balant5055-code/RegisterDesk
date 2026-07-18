@@ -60,30 +60,21 @@ export const CERT_FONT_BOLD_URL    = optional('CERT_FONT_BOLD_URL')
 // requests (fail-closed) so they can never be triggered anonymously.
 export const CRON_SECRET = optional('CRON_SECRET')
 
-// CRON_SECRET is MANDATORY in real production (P0-5): without it every cron is
-// rejected (fail-closed) and ALL background processing silently stops —
-// reconciliation (payment/donation/wallet), webhook delivery and
-// scheduled broadcasts. We fail fast at startup so this can never ship silently.
+// CRON_SECRET is MANDATORY in real production (P0-5), but that requirement is now
+// enforced in lib/cron/auth.ts — which is imported ONLY by the /api/cron/* routes —
+// rather than here (RD-CRON-ARCH-02). A missing CRON_SECRET therefore disables cron
+// endpoints (fail-closed) WITHOUT crashing the rest of the app (login, OTP, payments,
+// dashboard) that merely imports this shared env module. isAuthorizedCron() still
+// rejects every cron request when the secret is unset.
 //
 // Vercel sets NODE_ENV=production for PREVIEW deployments too, so we key off
 // VERCEL_ENV when present to enforce only in TRUE production — preview and
-// development keep working without CRON_SECRET (requirement 3). Self-hosted
-// (no VERCEL_ENV) falls back to NODE_ENV.
+// development keep working without the mandatory secrets. Self-hosted (no VERCEL_ENV)
+// falls back to NODE_ENV. (_isRealProduction is used by the Upstash check below.)
 const _vercelEnv = (process.env.VERCEL_ENV ?? '').trim()
 const _isRealProduction = _vercelEnv
   ? _vercelEnv === 'production'
   : process.env.NODE_ENV === 'production'
-
-if (!isBuildPhase && _isRealProduction && !CRON_SECRET) {
-  throw new Error(
-    '[env] CRON_SECRET is required in production. Without it, every scheduled ' +
-    '(cron) job is rejected (fail-closed) and background processing — payment / ' +
-    'donation / wallet reconciliation, webhook delivery, and ' +
-    'scheduled broadcasts — silently stops.\n' +
-    '  Hint: generate with node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'hex\'))" ' +
-    'then set it in your production secrets AND in the Vercel Cron configuration.',
-  )
-}
 
 // ─── Upstash Redis — distributed rate limiting (P1-2) ────────────────────────
 // REST endpoint + token for the serverless Redis used by lib/rateLimit/redis.ts.
