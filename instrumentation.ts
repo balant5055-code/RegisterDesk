@@ -3,5 +3,5 @@ export async function register() {
   // this prevents import errors if the Edge runtime also loads this file.
   if (process.env.NEXT_RUNTIME === 'nodejs') {
     await import('./lib/env')
-  }
+  } 
 }
