@@ -1,13 +1,15 @@
 'use client'
 
 import { motion } from 'framer-motion'
-import { XCircle, CheckCircle, Lock, Clock3, Calendar, MapPin, Globe, Ticket, Clock, AlarmClock, Languages, Shirt } from 'lucide-react'
+import { Calendar, MapPin, Globe, Ticket, Clock, AlarmClock, Languages, Shirt } from 'lucide-react'
 import type { EventDetailProps } from '@/app/events/[slug]/EventDetailClient'
+import { LinkedCampaignSection } from '@/app/events/[slug]/EventDetailClient'
+import { EventInfoSection } from '@/components/event-templates/shared/ui/EventInfoSection'
 import type { ConferenceDetails } from '@/components/wizard/eventDetailsConfig'
-import { EventPageLayout }       from '@/components/event-templates/shared/ui/EventPageLayout'
-import { StickyMobileCTA }       from '@/components/event-templates/shared/registration/StickyMobileCTA'
+import { EventDetailsFramework } from '@/components/event-templates/EventDetailsFramework'
 import { AddToCalendarButton }   from '@/components/event-templates/shared/ui/AddToCalendarButton'
 import { ConferenceHero }        from './ConferenceHero'
+import { TicketsPreviewBar }     from '@/components/event-templates/shared/registration/TicketsPreviewBar'
 import { ConferenceHighlights }  from './ConferenceHighlights'
 import { ConferenceSpeakers }    from './ConferenceSpeakers'
 import { ConferenceNetworking }  from './ConferenceNetworking'
@@ -19,6 +21,7 @@ import { ConferenceOrganizer }   from './ConferenceOrganizer'
 import { ConferenceFAQ }         from './ConferenceFAQ'
 import { PromoVideoSection }     from '@/components/event-templates/shared/media/PromoVideoSection'
 import { SharedGallery }        from '@/components/event-templates/shared/media/SharedGallery'
+import { passDisplayPrice }     from '@/components/event-templates/shared/utils/format'
 
 // ─── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -42,7 +45,7 @@ function fmtINR(n: number) {
 
 export function ConferenceTemplate(props: EventDetailProps) {
   const {
-    slug, lifecycleStatus: ls, cancelReason,
+    slug,
     registrationOpen, regClosedMessage,
     title, tagline, description,
     bannerUrl, promoVideoUrl,
@@ -64,7 +67,7 @@ export function ConferenceTemplate(props: EventDetailProps) {
   const tracks = td?.tracks ?? []
 
   const activePasses   = passes.filter(p => p.status !== 'inactive')
-  const minPrice       = activePasses.length > 0 ? Math.min(...activePasses.map(p => p.price)) : 0
+  const minPrice       = activePasses.length > 0 ? Math.min(...activePasses.map(p => passDisplayPrice(p))) : 0
   const totalAttendees = Object.values(availability)[0]?.eventTotalCount ?? 0
 
   const locationLabel = venueType === 'online'
@@ -74,49 +77,14 @@ export function ConferenceTemplate(props: EventDetailProps) {
     : venueType === 'online' ? 'Online' : 'Hybrid'
 
   return (
-    <EventPageLayout eventType={props.eventType} title={props.title}>
-
-      {/* ── Lifecycle banners ──────────────────────────────────────────────── */}
-      {ls === 'cancelled' && (
-        <div className="border-b border-red-200 bg-red-50 px-5 py-2.5">
-          <div className="mx-auto flex max-w-7xl items-center gap-2.5">
-            <XCircle className="size-4 shrink-0 text-red-500" aria-hidden />
-            <p className="text-xs font-bold text-red-700">
-              This event has been cancelled.{cancelReason && ` ${cancelReason}`}
-            </p>
-          </div>
-        </div>
-      )}
-      {ls === 'completed' && (
-        <div className="border-b border-sky-200 bg-sky-50 px-5 py-2.5">
-          <div className="mx-auto flex max-w-7xl items-center gap-2.5">
-            <CheckCircle className="size-4 shrink-0 text-sky-500" aria-hidden />
-            <p className="text-xs font-semibold text-sky-700">
-              This event has concluded. Thank you to all our attendees!
-            </p>
-          </div>
-        </div>
-      )}
-      {ls === 'registration_closed' && (
-        <div className="border-b border-amber-200 bg-amber-50 px-5 py-2.5">
-          <div className="mx-auto flex max-w-7xl items-center gap-2.5">
-            <Lock className="size-4 shrink-0 text-amber-500" aria-hidden />
-            <p className="text-xs font-semibold text-amber-700">
-              Registrations are currently closed for this event.
-            </p>
-          </div>
-        </div>
-      )}
-      {ls === 'postponed' && (
-        <div className="border-b border-orange-200 bg-orange-50 px-5 py-2.5">
-          <div className="mx-auto flex max-w-7xl items-center gap-2.5">
-            <Clock3 className="size-4 shrink-0 text-orange-500" aria-hidden />
-            <p className="text-xs font-semibold text-orange-700">
-              This event has been postponed.
-            </p>
-          </div>
-        </div>
-      )}
+    <EventDetailsFramework
+      props={props}
+      eventType={props.eventType}
+      shell="page-layout"
+      lifecycleTone="light"
+      completedMessage="This event has concluded. Thank you to all our attendees!"
+      registrationTargetId="tickets"
+    >
 
       {/* ── 1. Hero ─────────────────────────────────────────────────────────── */}
       <ConferenceHero
@@ -139,6 +107,9 @@ export function ConferenceTemplate(props: EventDetailProps) {
         totalAttendees={totalAttendees}
         showAttendeeCount={showAttendeeCount}
       />
+
+      {/* Compact registration preview (03B.3 additive) — early tickets visibility, no reorder. */}
+      <TicketsPreviewBar passes={passes} isFreeEvent={isFreeEvent} registrationOpen={registrationOpen} targetId="tickets" />
 
       {/* ── 2. Quick facts strip ────────────────────────────────────────────── */}
       <div className="border-b border-gray-100 bg-gray-50">
@@ -283,14 +254,20 @@ export function ConferenceTemplate(props: EventDetailProps) {
       />
 
       {/* ── Sticky mobile CTA ─────────────────────────────────────────────── */}
-      <StickyMobileCTA
-        visible={true}
-        title={title}
-        isFreeEvent={isFreeEvent}
-        passes={passes}
-        registrationOpen={registrationOpen}
+      <EventInfoSection
+        language={props.language}
+        dressCode={props.dressCode}
+        timezone={props.timezone}
+        venueType={props.venueType}
+        online={props.online}
+        refundWindow={props.refundWindow}
+        refundPolicyUrl={props.refundPolicyUrl}
       />
 
-    </EventPageLayout>
+      {props.linkedCampaign && (
+        <LinkedCampaignSection campaign={props.linkedCampaign} eventSlug={slug} />
+      )}
+
+    </EventDetailsFramework>
   )
 }

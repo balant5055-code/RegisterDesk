@@ -1,8 +1,7 @@
 'use client'
 
 import { useState, useEffect, useMemo, useRef } from 'react'
-import { onAuthStateChanged }                    from 'firebase/auth'
-import { auth }                                  from '@/lib/firebase/auth'
+import { useAuth }                              from '@/components/auth/AuthProvider'
 import Link                                      from 'next/link'
 import {
   BarChart3, CalendarDays, Users, TrendingUp, TrendingDown,
@@ -393,45 +392,51 @@ export default function ReportsHubPage() {
   // Plan gate — advanced reports is a Pro+ feature. null = unknown (loading).
   const [advancedReports, setAdvancedReports] = useState<boolean | null>(null)
 
-  useEffect(() => {
-    // Show full loading spinner only on first load; not on explicit refresh
-    if (events.length === 0) setLoading(true)
-    setError(null)
+  const { user, getToken } = useAuth()
 
-    const unsub = onAuthStateChanged(auth, async user => {
+  useEffect(() => {
+    if (user === undefined) return
+    let cancelled = false
+    const run = async () => {
+      // Show full loading spinner only on first load; not on explicit refresh
+      if (events.length === 0) setLoading(true)
+      setError(null)
+
       if (!user) { setLoading(false); return }
       try {
-        const token   = await user.getIdToken()
+        const token   = await getToken()
+        if (cancelled || !token) return
         const headers = { Authorization: `Bearer ${token}` }
         // Entitlement check first — gate the page before loading analytics data.
         try {
           const entRes = await fetch('/api/organizer/entitlements', { headers, cache: 'no-store' })
           if (entRes.ok) {
             const ent = await entRes.json() as { features?: { advancedReports?: boolean } }
-            setAdvancedReports(ent.features?.advancedReports ?? false)
-          } else { setAdvancedReports(false) }
-        } catch { setAdvancedReports(false) }
+            if (!cancelled) setAdvancedReports(ent.features?.advancedReports ?? false)
+          } else { if (!cancelled) setAdvancedReports(false) }
+        } catch { if (!cancelled) setAdvancedReports(false) }
         const [evRes, regRes] = await Promise.all([
           fetch('/api/organizer/events',        { headers }),
           fetch('/api/organizer/registrations', { headers }),
         ])
         if (!evRes.ok) throw new Error('Failed to load events')
         const evData = await evRes.json() as EventsListResponse
+        if (cancelled) return
         setEvents(evData.events)
         if (regRes.ok) {
           const regData = await regRes.json() as AllRegistrationsResponse
-          setRegistrations(regData.registrations)
+          if (!cancelled) setRegistrations(regData.registrations)
         }
       } catch (e) {
-        setError(e instanceof Error ? e.message : 'Error loading analytics')
+        if (!cancelled) setError(e instanceof Error ? e.message : 'Error loading analytics')
       } finally {
-        setLoading(false)
-        setRefreshing(false)
+        if (!cancelled) { setLoading(false); setRefreshing(false) }
       }
-    })
-    return unsub
+    }
+    run()
+    return () => { cancelled = true }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [refreshKey])
+  }, [user, getToken, refreshKey])
 
   function handleRefresh() {
     setRefreshing(true)

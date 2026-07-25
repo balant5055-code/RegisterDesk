@@ -8,12 +8,15 @@
 
 import { businessConfig } from '@/lib/config/businessConfigService'
 import { resolveFeeConfig } from './resolveFeeConfig'
+import { resolvePlatformPricing } from '@/lib/platform/pricing/resolver'
 import type { PublicFeesConfig } from './publicFeesShared'
 
 export async function getPublicFeesConfig(): Promise<PublicFeesConfig> {
-  const [section, resolved] = await Promise.all([
+  const [section, resolved, platform] = await Promise.all([
     businessConfig.getSection('fees'),
     resolveFeeConfig('event_registration', 'starter'),
+    // RD-PAYMENT-02 Phase 7: never throws (falls back to defaults, flag = false).
+    resolvePlatformPricing(),
   ])
   return {
     platformFeePercent:     resolved.platformFeePercentBps / 100,
@@ -25,5 +28,6 @@ export async function getPublicFeesConfig(): Promise<PublicFeesConfig> {
     feeCollectionMethod:    section.feeCollectionMethod,
     platformFeeDisplayName: section.platformFeeDisplayName,
     gstDescription:         section.gstDescription,
+    pricingEngineEnabled:   platform.features.pricingEngineEnabled,
   }
 }

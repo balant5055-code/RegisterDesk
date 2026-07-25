@@ -4,6 +4,7 @@ import Link from 'next/link'
 import { motion } from 'framer-motion'
 import { Calendar, MapPin, ArrowRight, Building2, Users, Layers } from 'lucide-react'
 import type { PassPublic } from '@/components/event-templates/types'
+import { passDisplayPrice } from '@/components/event-templates/shared/utils/format'
 import type { PhysicalVenueConfig } from '@/components/wizard/eventDetailsConfig'
 
 // ─── Helpers ───────────────────────────────────────────────────────────────────
@@ -20,6 +21,13 @@ function fmtINR(n: number) {
   return new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 0 }).format(n)
 }
 
+function fmtTime(t: string) {
+  if (!t) return ''
+  const [h, m] = t.split(':').map(Number)
+  const dt = new Date(); dt.setHours(h!, m ?? 0, 0)
+  return dt.toLocaleTimeString('en-IN', { hour: 'numeric', minute: '2-digit', hour12: true })
+}
+
 // ─── Props ─────────────────────────────────────────────────────────────────────
 
 export interface ExhibitionHeroProps {
@@ -28,6 +36,7 @@ export interface ExhibitionHeroProps {
   eventSubtype?:     string
   bannerUrl:         string
   startDate:         string
+  startTime?:        string
   endDate:           string
   venueName:         string
   physical?:         PhysicalVenueConfig
@@ -38,23 +47,28 @@ export interface ExhibitionHeroProps {
   isFreeEvent:       boolean
   passes:            PassPublic[]
   slug:              string
+  // M4: whether the #floor-plan section actually renders, so the no-passes fallback
+  // CTA never scrolls to a section that isn't there.
+  hasFloorPlan?:     boolean
 }
 
 // ─── Component ─────────────────────────────────────────────────────────────────
 
 export function ExhibitionHero({
   title, tagline, eventSubtype, bannerUrl,
-  startDate, endDate, venueName, physical,
+  startDate, startTime, endDate, venueName, physical,
   exhibitorCount, totalAttendees, showAttendeeCount,
   registrationOpen, isFreeEvent, passes, slug,
+  hasFloorPlan = false,
 }: ExhibitionHeroProps) {
   const activePasses = passes.filter(p => p.status !== 'inactive')
-  const minPrice     = activePasses.length > 0 ? Math.min(...activePasses.map(p => p.price)) : 0
+  const minPrice     = activePasses.length > 0 ? Math.min(...activePasses.map(p => passDisplayPrice(p))) : 0
   const locationText = physical?.city ? `${venueName}, ${physical.city}` : venueName
 
   const dateLabel = endDate && endDate !== startDate
     ? `${fmtDate(startDate)} – ${fmtDate(endDate)}`
     : fmtDate(startDate)
+  const timeLabel = startTime ? fmtTime(startTime) : ''
 
   const priceLabel = isFreeEvent || minPrice === 0 ? 'Free Entry' : `From ${fmtINR(minPrice)}`
 
@@ -107,7 +121,7 @@ export function ExhibitionHero({
                 <div className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-teal-50">
                   <Calendar className="size-3.5 text-teal-600" aria-hidden />
                 </div>
-                <span className="font-medium">{dateLabel}</span>
+                <span className="font-medium">{dateLabel}{timeLabel ? ` · ${timeLabel}` : ''}</span>
               </div>
               {locationText && (
                 <div className="flex items-center gap-3 text-sm text-gray-600">
@@ -153,10 +167,15 @@ export function ExhibitionHero({
                   <span className="text-sm font-medium text-gray-400">{priceLabel}</span>
                 </>
               ) : activePasses.length > 0 ? (
-                <span className="inline-flex items-center rounded-full bg-gray-100 px-5 py-2.5 text-sm font-semibold text-gray-500">
-                  Registration Closed
-                </span>
-              ) : (
+                <>
+                  <span className="inline-flex items-center rounded-full bg-gray-100 px-5 py-2.5 text-sm font-semibold text-gray-500">
+                    Registration Closed
+                  </span>
+                  {!isFreeEvent && minPrice > 0 && (
+                    <span className="text-sm font-medium text-gray-400">{priceLabel}</span>
+                  )}
+                </>
+              ) : hasFloorPlan ? (
                 <Link
                   href="#floor-plan"
                   className="inline-flex items-center gap-2 rounded-full bg-teal-600 px-7 py-3.5 text-[0.9375rem] font-bold text-white transition-all hover:bg-teal-700"
@@ -164,6 +183,10 @@ export function ExhibitionHero({
                   Explore Exhibition
                   <ArrowRight className="size-4" aria-hidden />
                 </Link>
+              ) : (
+                <span className="inline-flex items-center rounded-full bg-gray-100 px-5 py-2.5 text-sm font-semibold text-gray-500">
+                  Registration opening soon
+                </span>
               )}
             </motion.div>
 

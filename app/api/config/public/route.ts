@@ -11,7 +11,7 @@
 // (version/audit/history).
 
 import { NextResponse } from 'next/server'
-import { getLicenseCatalog } from '@/lib/licensing/resolveCatalog'
+import { getLicenseCatalog, getLicenseCatalogV2 } from '@/lib/licensing/resolveCatalog'
 import { getCommunicationConfig } from '@/lib/communications/resolveCommunicationConfig'
 import { getWalletConfig } from '@/lib/wallet/resolveWalletConfig'
 import { getSettlementConfig } from '@/lib/settlements/resolveSettlementConfig'
@@ -22,8 +22,11 @@ import { getIntegrationConfig } from '@/lib/config/resolveIntegrationConfig'
 import { getPublicFeesConfig } from '@/lib/fees/resolvePublicFeesConfig'
 
 export async function GET(): Promise<NextResponse> {
-  const [licenseCatalog, communication, wallet, settlements, featureFlags, branding, security, integrations, fees] = await Promise.all([
+  // RD-LICENSE-01B Phase 3A: `licenseCatalogV2` is emitted ADDITIVELY alongside the
+  // existing `licenseCatalog` (V1) — existing consumers read `licenseCatalog` unchanged.
+  const [licenseCatalog, licenseCatalogV2, communication, wallet, settlements, featureFlags, branding, security, integrations, fees] = await Promise.all([
     getLicenseCatalog(),
+    getLicenseCatalogV2(),
     getCommunicationConfig(),
     getWalletConfig(),
     getSettlementConfig(),
@@ -35,7 +38,7 @@ export async function GET(): Promise<NextResponse> {
   ])
   // Infinity license limits serialize to null via JSON; the client revives them.
   return NextResponse.json(
-    { config: { licenseCatalog, communication, wallet, settlements, featureFlags, branding, security, integrations, fees } },
+    { config: { licenseCatalog, licenseCatalogV2, communication, wallet, settlements, featureFlags, branding, security, integrations, fees } },
     { headers: { 'Cache-Control': 'no-store' } },
   )
 }

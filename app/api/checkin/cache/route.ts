@@ -59,12 +59,17 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   const slug = req.nextUrl.searchParams.get('slug')?.trim()
   if (!slug) return NextResponse.json({ error: 'MISSING_SLUG' }, { status: 400 })
 
-  // Ownership enforced by the compound filter (organizerUid + eventSlug) — reuses
-  // the existing (organizerUid, eventSlug) composite index.
+  // Ownership enforced by the compound filter (organizerUid + eventSlug). RD-ORGANIZER-02 P1:
+  // order by registeredAt desc so truncation past MAX_CACHE is DETERMINISTIC (the newest
+  // MAX_CACHE registrations) rather than an arbitrary index slice, and project only the
+  // fields the cache payload needs (no full-document reads). Uses the existing
+  // (organizerUid, eventSlug, registeredAt DESC) composite index. Payload shape unchanged.
   const snap = await adminDb
     .collection('registrations')
     .where('organizerUid', '==', uid)
     .where('eventSlug', '==', slug)
+    .orderBy('registeredAt', 'desc')
+    .select('ticketCode', 'attendee.name', 'passName', 'eventSlug', 'status', 'paymentStatus', 'checkedIn', 'checkedInAt')
     .limit(MAX_CACHE + 1)
     .get()
 

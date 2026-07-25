@@ -23,7 +23,7 @@ import {
   licenseOrderConverter, licenseHistoryConverter,
   type LicenseOrderDoc, type LicenseHistoryDoc,
 } from '@/lib/licensing/schema'
-import type { EventLicenseTier } from '@/lib/licensing/eventLicense'
+import type { AnyEventLicenseTier } from '@/lib/licensing/eventLicense'
 import type { OrganizerWallet } from '@/types/events'
 
 const now = () => FieldValue.serverTimestamp() as unknown as FirebaseFirestore.Timestamp
@@ -56,7 +56,7 @@ export function deriveLicenseCharge(
 export interface ActivateLicenseOrderInput {
   eventId:           string
   uid:               string
-  tier:              EventLicenseTier
+  tier:              AnyEventLicenseTier
   licenseName:       string             // def.name — ledger/history description
   basePricePaise:    number             // def.licensePricePaise — coupon-free fallback
   persisted:         LicenseOrderDoc | null

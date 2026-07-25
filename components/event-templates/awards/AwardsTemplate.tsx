@@ -2,10 +2,12 @@
 
 import { XCircle, CheckCircle, Lock, Clock3, Calendar, MapPin, AlarmClock, Languages, Shirt } from 'lucide-react'
 import type { EventDetailProps } from '@/app/events/[slug]/EventDetailClient'
+import { LinkedCampaignSection } from '@/app/events/[slug]/EventDetailClient'
+import { EventInfoSection } from '@/components/event-templates/shared/ui/EventInfoSection'
 import type { AwardsDetails } from '@/components/wizard/eventDetailsConfig'
-import { EventPageLayout }     from '@/components/event-templates/shared/ui/EventPageLayout'
-import { StickyMobileCTA }     from '@/components/event-templates/shared/registration/StickyMobileCTA'
+import { EventDetailsFramework } from '@/components/event-templates/EventDetailsFramework'
 import { AwardsHero }          from './AwardsHero'
+import { TicketsPreviewBar }   from '@/components/event-templates/shared/registration/TicketsPreviewBar'
 import { AwardCategories }     from './AwardCategories'
 import { AwardsNominees }      from './AwardsNominees'
 import { AwardsJudges }        from './AwardsJudges'
@@ -53,7 +55,13 @@ export function AwardsTemplate(props: EventDetailProps) {
   const hasCeremony    = hasSchedule || !!td?.ceremonyFormat?.trim()
 
   return (
-    <EventPageLayout eventType={props.eventType} title={title}>
+    <EventDetailsFramework
+      props={props}
+      eventType={props.eventType}
+      shell="page-layout"
+      lifecycleTone="none"
+      registrationTargetId="tickets"
+    >
 
       {/* ── Lifecycle banners ────────────────────────────────────────────────── */}
       {ls === 'cancelled' && (
@@ -104,6 +112,7 @@ export function AwardsTemplate(props: EventDetailProps) {
         eventSubtype={props.eventSubtype}
         bannerUrl={bannerUrl}
         startDate={startDate}
+        startTime={props.startTime}
         endDate={endDate}
         venueName={venueName}
         physical={physical}
@@ -114,6 +123,9 @@ export function AwardsTemplate(props: EventDetailProps) {
         categoryCount={categories.length}
         judgesCount={judges.length}
       />
+
+      {/* Compact registration preview (03B.3 additive, dark) — early tickets visibility, no reorder. */}
+      <TicketsPreviewBar passes={passes} isFreeEvent={isFreeEvent} registrationOpen={registrationOpen} targetId="tickets" variant="dark" />
 
       {/* ── 1b. Add to Calendar ─────────────────────────────────────────────── */}
       {startDate && (
@@ -259,14 +271,20 @@ export function AwardsTemplate(props: EventDetailProps) {
       )}
 
       {/* ── Sticky mobile CTA ────────────────────────────────────────────────── */}
-      <StickyMobileCTA
-        visible={true}
-        title={title}
-        isFreeEvent={isFreeEvent}
-        passes={passes}
-        registrationOpen={registrationOpen}
+      <EventInfoSection
+        language={props.language}
+        dressCode={props.dressCode}
+        timezone={props.timezone}
+        venueType={props.venueType}
+        online={props.online}
+        refundWindow={props.refundWindow}
+        refundPolicyUrl={props.refundPolicyUrl}
       />
 
-    </EventPageLayout>
+      {props.linkedCampaign && (
+        <LinkedCampaignSection campaign={props.linkedCampaign} eventSlug={slug} />
+      )}
+
+    </EventDetailsFramework>
   )
 }

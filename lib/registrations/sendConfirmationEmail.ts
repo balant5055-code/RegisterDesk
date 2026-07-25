@@ -16,6 +16,7 @@ import { signTicketToken }                 from '@/lib/tickets/generate'
 import { signReceiptToken }                from '@/lib/receipts/token'
 import { writeEmailLog }                   from '@/lib/email-logs/write'
 import { generateIcs }                     from '@/lib/calendar/ics'
+import { loadOrganizerEmailBranding, resolveEmailBranding } from '@/lib/email/branding'
 import { sendWhatsAppConfirmation }         from './sendWhatsAppConfirmation'
 
 // ─── Args ─────────────────────────────────────────────────────────────────────
@@ -104,6 +105,14 @@ export async function sendConfirmationEmail(args: ConfirmationEmailArgs): Promis
     } catch { /* ICS generation failure must not break email sending */ }
   }
 
+  // RD-PRODUCT-01C — white-label the confirmation email with the organizer's saved
+  // branding. Absent/disabled → undefined → default RegisterDesk shell (unchanged).
+  const eventLogo = ((rawDetails.media as Record<string, unknown> | null)?.logo as Record<string, unknown> | null)?.value
+  const branding = resolveEmailBranding(
+    await loadOrganizerEmailBranding(organizerUid),
+    { logoUrl: typeof eventLogo === 'string' ? eventLogo : null },
+  )
+
   let emailStatus: 'sent' | 'failed' = 'failed'
   let emailFailureReason: string | undefined
 
@@ -112,6 +121,7 @@ export async function sendConfirmationEmail(args: ConfirmationEmailArgs): Promis
       to:             attendeeEmail,
       attendeeName,
       eventName,
+      branding,
       eventDate:      fmtEmailDate(startDate) || startDate,
       eventTime:      startTime  || undefined,
       venueName:      venueName  || undefined,

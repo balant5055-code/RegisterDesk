@@ -2,8 +2,7 @@
 
 import { Suspense, useEffect, useState } from 'react'
 import Link                              from 'next/link'
-import { onAuthStateChanged }            from 'firebase/auth'
-import { auth }                          from '@/lib/firebase/auth'
+import { useAuth }                       from '@/components/auth/AuthProvider'
 import { ExternalLink, Heart, Loader2 }  from 'lucide-react'
 import { DashboardCard }                 from '@/components/dashboard/DashboardCard'
 import { Skeleton }                      from '@/components/dashboard/Skeleton'
@@ -39,22 +38,29 @@ function CampaignsContent() {
   const [campaigns, setCampaigns] = useState<CampaignSummary[] | null>(null)
   const [error,     setError]     = useState<string | null>(null)
 
+  const { user, getToken } = useAuth()
+
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, async user => {
+    if (user === undefined) return
+    let cancelled = false
+    const run = async () => {
       if (!user) return
       try {
-        const token = await user.getIdToken()
+        const token = await getToken()
+        if (cancelled || !token) return
         const res   = await fetch('/api/organizer/campaigns', {
           headers: { Authorization: `Bearer ${token}` },
         })
         if (!res.ok) throw new Error('Failed to load')
-        setCampaigns(await res.json() as CampaignSummary[])
+        const data = await res.json() as CampaignSummary[]
+        if (!cancelled) setCampaigns(data)
       } catch {
-        setError('Could not load your campaigns.')
+        if (!cancelled) setError('Could not load your campaigns.')
       }
-    })
-    return unsub
-  }, [])
+    }
+    run()
+    return () => { cancelled = true }
+  }, [user, getToken])
 
   if (!campaigns && !error) {
     return (

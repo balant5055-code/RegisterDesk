@@ -9,7 +9,7 @@
 //   GET …/timeline   → merged chronological trail (lazy)
 // All MUTATIONS reuse existing admin routes — no new mutation logic here.
 
-import type { EventLicenseTier } from '@/lib/licensing/eventLicense'
+import type { AnyEventLicenseTier } from '@/lib/licensing/eventLicense'
 import type { AccountStatus } from '@/lib/admin/organizerTypes'
 
 // ─── Health Panel ───────────────────────────────────────────────────────────
@@ -53,10 +53,10 @@ export interface Organizer360Overview {
   }
   team: { memberCount: number; inviteCount: number }
   entitlements: {
-    effectiveTier:        EventLicenseTier
+    effectiveTier:        AnyEventLicenseTier
     source:               'event_license' | 'admin_override' | 'fallback'
     activeLicensedEvents: number
-    overrideTier:         EventLicenseTier | null
+    overrideTier:         AnyEventLicenseTier | null
   }
   events: { total: number; published: number; campaigns: number }
   registrations: { total: number; checkedIn: number; sampledEvents: number; truncated: boolean }
@@ -132,7 +132,7 @@ export interface Organizer360Business {
   settlements: { id: string; amountPaise: number; status: string; requestedAt: string | null }[]
   revenue: { licenseRevenuePaise: number; eventRevenuePaise: number }
   entitlements: {
-    effectiveTier:        EventLicenseTier
+    effectiveTier:        AnyEventLicenseTier
     source:               string
     activeLicensedEvents: number
     features:             { key: string; enabled: boolean }[]
@@ -162,7 +162,7 @@ export interface Organizer360TeamMember {
 
 export interface Organizer360Governance {
   audit:       Organizer360AuditEntry[]
-  overrides:   { entitlementOverrideTier: EventLicenseTier | null; source: string; effectiveTier: EventLicenseTier }
+  overrides:   { entitlementOverrideTier: AnyEventLicenseTier | null; source: string; effectiveTier: AnyEventLicenseTier }
   features:    { key: string; enabled: boolean }[]
   team:        Organizer360TeamMember[]
 }

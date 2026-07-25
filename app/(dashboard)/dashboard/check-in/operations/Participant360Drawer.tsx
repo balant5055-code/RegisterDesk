@@ -26,6 +26,7 @@ import {
   Download, Printer, ScanLine, Clock, CreditCard,
 } from 'lucide-react'
 import { useFocusTrap } from '@/lib/hooks/useFocusTrap'
+import { registrationStatusCls } from '@/lib/ui/statusColors'
 import ParticipantWorkspace360 from '@/app/(dashboard)/dashboard/events/[eventId]/registrations/ParticipantWorkspace360'
 import type { SerializedRegistration } from '@/app/api/organizer/events/[eventId]/registrations/route'
 import type { PrintTemplate } from '@/lib/printAssets/types'
@@ -151,7 +152,7 @@ export function Participant360Drawer({ reg, eventId, token, onClose, onChanged }
             <p className="truncate text-[12px] text-muted-foreground">{reg.ticketCode || reg.id} · {reg.passName}{category !== '—' ? ` · ${category}` : ''}</p>
             <div className="mt-1 flex flex-wrap gap-1">
               <Pill tone={reg.checkedIn ? 'bg-emerald-100 text-emerald-700' : 'bg-muted text-muted-foreground'}>{reg.checkedIn ? 'Checked in' : 'Not checked in'}</Pill>
-              <Pill tone="bg-muted text-muted-foreground">{reg.status}</Pill>
+              <Pill tone={registrationStatusCls[reg.status] ?? 'bg-muted text-muted-foreground'}>{reg.status}</Pill>
               <Pill tone="bg-muted text-muted-foreground">{reg.paymentStatus}</Pill>
             </div>
           </div>

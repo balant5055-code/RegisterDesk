@@ -30,7 +30,7 @@ export function registrationCancelledTemplate(
     </p>
   `
 
-  return { subject, html: emailShell(subject, body) }
+  return { subject, html: emailShell(subject, body, undefined, p.branding) }
 }
 
 function esc(s: string): string {

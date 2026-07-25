@@ -2,11 +2,13 @@
 
 import { XCircle, CheckCircle, Lock, Clock3, AlarmClock, Languages, Shirt } from 'lucide-react'
 import type { EventDetailProps } from '@/app/events/[slug]/EventDetailClient'
+import { LinkedCampaignSection } from '@/app/events/[slug]/EventDetailClient'
+import { EventInfoSection } from '@/components/event-templates/shared/ui/EventInfoSection'
 import type { CulturalDetails } from '@/components/wizard/eventDetailsConfig'
-import { EventPageLayout }         from '@/components/event-templates/shared/ui/EventPageLayout'
-import { StickyMobileCTA }         from '@/components/event-templates/shared/registration/StickyMobileCTA'
+import { EventDetailsFramework }   from '@/components/event-templates/EventDetailsFramework'
 import { AddToCalendarButton }     from '@/components/event-templates/shared/ui/AddToCalendarButton'
 import { CulturalHero }            from './CulturalHero'
+import { TicketsPreviewBar }       from '@/components/event-templates/shared/registration/TicketsPreviewBar'
 import { CulturalPerformers }      from './CulturalPerformers'
 import { CulturalLineup }          from './CulturalLineup'
 import { CulturalHighlights }      from './CulturalHighlights'
@@ -54,7 +56,13 @@ export function CulturalTemplate(props: EventDetailProps) {
   const activePasses   = passes.filter(p => p.status !== 'inactive')
 
   return (
-    <EventPageLayout eventType={props.eventType} title={title}>
+    <EventDetailsFramework
+      props={props}
+      eventType={props.eventType}
+      shell="page-layout"
+      lifecycleTone="none"
+      registrationTargetId="tickets"
+    >
 
       {/* ── Lifecycle banners ────────────────────────────────────────────────── */}
       {ls === 'cancelled' && (
@@ -105,6 +113,7 @@ export function CulturalTemplate(props: EventDetailProps) {
         eventSubtype={props.eventSubtype}
         bannerUrl={bannerUrl}
         startDate={startDate}
+        startTime={props.startTime}
         endDate={endDate}
         venueName={venueName}
         physical={physical}
@@ -113,7 +122,11 @@ export function CulturalTemplate(props: EventDetailProps) {
         passes={passes}
         slug={slug}
         performerCount={performers.length}
+        hasLineup={hasLineup}
       />
+
+      {/* Compact registration preview (03B.3 additive, dark) — early tickets visibility, no reorder. */}
+      <TicketsPreviewBar passes={passes} isFreeEvent={isFreeEvent} registrationOpen={registrationOpen} targetId="tickets" variant="dark" />
 
       {/* ── 1b. Add to Calendar ─────────────────────────────────────────────── */}
       {startDate && (
@@ -252,14 +265,20 @@ export function CulturalTemplate(props: EventDetailProps) {
       )}
 
       {/* ── Sticky mobile CTA ────────────────────────────────────────────────── */}
-      <StickyMobileCTA
-        visible={true}
-        title={title}
-        isFreeEvent={isFreeEvent}
-        passes={passes}
-        registrationOpen={registrationOpen}
+      <EventInfoSection
+        language={props.language}
+        dressCode={props.dressCode}
+        timezone={props.timezone}
+        venueType={props.venueType}
+        online={props.online}
+        refundWindow={props.refundWindow}
+        refundPolicyUrl={props.refundPolicyUrl}
       />
 
-    </EventPageLayout>
+      {props.linkedCampaign && (
+        <LinkedCampaignSection campaign={props.linkedCampaign} eventSlug={slug} />
+      )}
+
+    </EventDetailsFramework>
   )
 }

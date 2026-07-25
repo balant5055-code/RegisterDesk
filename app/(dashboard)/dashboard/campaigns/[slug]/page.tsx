@@ -3,8 +3,8 @@
 import { Suspense, useEffect, useState } from 'react'
 import Link                              from 'next/link'
 import { useParams }                     from 'next/navigation'
-import { onAuthStateChanged }            from 'firebase/auth'
 import { auth }                          from '@/lib/firebase/auth'
+import { useAuth }                        from '@/components/auth/AuthProvider'
 import {
   ArrowLeft,
   Award,
@@ -328,30 +328,36 @@ function PageSkeleton() {
 // ─── Main content ─────────────────────────────────────────────────────────────
 
 function CampaignDashboardContent({ slug }: { slug: string }) {
+  const { user, getToken } = useAuth()
   const [data,      setData]      = useState<CampaignDashboardData | null>(null)
   const [error,     setError]     = useState<string | null>(null)
   const [exporting, setExporting] = useState(false)
 
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, async user => {
+    if (user === undefined) return
+    let cancelled = false
+    const run = async () => {
       if (!user) return
       try {
-        const token = await user.getIdToken()
+        const token = await getToken()
+        if (cancelled || !token) return
         const res   = await fetch(`/api/organizer/campaigns/${slug}`, {
           headers: { Authorization: `Bearer ${token}` },
         })
         if (!res.ok) {
           const body = await res.json().catch(() => ({ error: 'Request failed' }))
-          setError((body as { error?: string }).error ?? 'Failed to load campaign data')
+          if (!cancelled) setError((body as { error?: string }).error ?? 'Failed to load campaign data')
           return
         }
+        if (cancelled) return
         setData(await res.json() as CampaignDashboardData)
       } catch {
-        setError('Could not load campaign data. Please try again.')
+        if (!cancelled) setError('Could not load campaign data. Please try again.')
       }
-    })
-    return unsub
-  }, [slug])
+    }
+    run()
+    return () => { cancelled = true }
+  }, [user, getToken, slug])
 
   async function handleExport() {
     setExporting(true)

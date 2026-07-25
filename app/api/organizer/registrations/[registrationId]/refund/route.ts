@@ -1,7 +1,14 @@
 // POST /api/organizer/registrations/[registrationId]/refund
 //
 // Issues a full Razorpay refund for a paid registration.
-// Idempotent: a second call on an already-refunded registration returns 409.
+//
+// Idempotent by construction (RD-REGISTRATIONS-01 Phase 2 / H2): the same logical
+// refund request executes AT MOST ONE gateway refund. Three layers cooperate:
+//   1. an already-'refunded' registration returns its RECORDED outcome (retry → same result);
+//   2. a transactional 'paid' → 'refund_pending' claim blocks concurrent double-refund;
+//   3. before creating a Razorpay refund the route asks Razorpay whether this payment is
+//      already refunded and REUSES that refund — so a retry after a lost/timed-out response
+//      can never issue a SECOND gateway refund.
 
 import { NextRequest, NextResponse }    from 'next/server'
 import { FieldValue }                   from 'firebase-admin/firestore'
@@ -9,7 +16,7 @@ import { adminDb }           from '@/lib/firebase/admin'
 import { authorizeWorkspace }           from '@/lib/team/workspace'
 import { razorpay }                     from '@/lib/razorpay/client'
 import { updatePaymentIntentRefund }    from '@/lib/firebase/firestore/paymentIntents'
-import { writeAuditEntry }              from '@/lib/firebase/firestore/registrations'
+import { writeAuditEntry, loadOwnedRegistration } from '@/lib/firebase/firestore/registrations'
 import { reversePlatformTransactionAndDebit } from '@/lib/firebase/firestore/platformTransactions'
 import { recordRefundLedgerReconciliation } from '@/lib/payments/registrationReconciliation'
 import { checkRateLimit }               from '@/lib/rateLimit'
@@ -23,6 +30,23 @@ export interface RefundRegistrationResponse {
   refundId?:    string
   refundAmount?: number
   error?:        string
+}
+
+// H2 idempotency: returns the id of an existing non-failed Razorpay refund of the given
+// amount for a payment, or null if none exists. Lets the caller REUSE a refund a prior
+// (timed-out) attempt already created instead of issuing a second gateway refund. On lookup
+// failure returns null and falls through to create — the transactional claim + revert-on-error
+// still guard concurrency, so this can only ever ADD safety, never remove it.
+async function findExistingRefund(paymentId: string, amount: number): Promise<string | null> {
+  try {
+    const res   = await razorpay.payments.fetchMultipleRefund(paymentId)
+    const items = Array.isArray(res?.items) ? res.items : []
+    const match = items.find(r => r.amount === amount && r.status !== 'failed')
+    return match?.id ?? null
+  } catch (err) {
+    console.error('[refund] existing-refund lookup failed:', { paymentId, err })
+    return null
+  }
 }
 
 export async function POST(
@@ -54,24 +78,23 @@ export async function POST(
     return NextResponse.json({ success: false, error: 'registrationId is required' }, { status: 400 })
   }
 
-  // ── 2. Load registration ───────────────────────────────────────────────────
-  const regRef  = adminDb.collection('registrations').doc(registrationId)
-  const regSnap = await regRef.get()
-  if (!regSnap.exists) {
-    return NextResponse.json({ success: false, error: 'Registration not found' }, { status: 404 })
-  }
-
-  const reg = regSnap.data() as RegistrationDocument
-  if (reg.organizerUid !== uid) {
-    return NextResponse.json({ success: false, error: 'Forbidden' }, { status: 403 })
-  }
+  // ── 2. Load registration + ownership (canonical resolver, M7) ──────────────
+  const owned = await loadOwnedRegistration(registrationId, uid)
+  if (!owned.ok) return NextResponse.json({ success: false, error: owned.error }, { status: owned.status })
+  const reg    = owned.reg
+  const regRef = adminDb.collection('registrations').doc(registrationId)
 
   // ── 3. Guard: only paid registrations can be refunded ─────────────────────
+  // Idempotent retry (H2): an ALREADY-refunded registration returns its recorded
+  // outcome (persisted at step 7) rather than an error — a duplicate request (double
+  // click, browser retry, refresh after a lost response) resolves to the same completed
+  // refund, never a second one. No gateway call is made.
   if (reg.paymentStatus === 'refunded') {
-    return NextResponse.json(
-      { success: false, error: 'Registration has already been refunded' },
-      { status: 409 },
-    )
+    return NextResponse.json({
+      success:      true,
+      refundId:     typeof reg.refundId     === 'string' ? reg.refundId     : undefined,
+      refundAmount: typeof reg.refundAmount  === 'number' ? reg.refundAmount : undefined,
+    })
   }
   if (reg.paymentStatus === 'refund_pending') {
     return NextResponse.json(
@@ -137,13 +160,24 @@ export async function POST(
   // deterministic receipt for deduplication on the Razorpay dashboard.
   let refundId: string
   try {
-    const refund = await razorpay.payments.refund(paymentId, {
-      amount:  refundAmount,
-      speed:   'optimum',
-      notes:   { registrationId, reason: 'organizer_initiated' },
-      receipt: `rfnd_${registrationId}`.slice(0, 40),
-    })
-    refundId = refund.id
+    // Idempotency (H2): a PRIOR attempt for this payment may have already created a
+    // Razorpay refund whose HTTP response was lost (timeout/proxy), after which step 5's
+    // catch reverted the registration to 'paid' and the caller retried. Before creating a
+    // NEW refund, ask Razorpay whether this payment already carries a matching refund and
+    // reuse it — so a retry can never issue a SECOND gateway refund. Reuses the existing
+    // razorpay.payments.fetchMultipleRefund read API (no Razorpay integration change).
+    const existingRefundId = await findExistingRefund(paymentId, refundAmount)
+    if (existingRefundId) {
+      refundId = existingRefundId
+    } else {
+      const refund = await razorpay.payments.refund(paymentId, {
+        amount:  refundAmount,
+        speed:   'optimum',
+        notes:   { registrationId, reason: 'organizer_initiated' },
+        receipt: `rfnd_${registrationId}`.slice(0, 40),
+      })
+      refundId = refund.id
+    }
   } catch (err) {
     console.error('[refund] Razorpay API error:', { registrationId, paymentId, err })
     // Revert to 'paid' so the organizer can retry — refund_pending would block future attempts.

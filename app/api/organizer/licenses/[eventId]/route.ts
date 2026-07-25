@@ -14,10 +14,11 @@ import {
   type EventLicenseDoc,
 } from '@/lib/licensing/schema'
 import {
-  isEventLicenseTier, isUnlimited, nextEventLicenseTier,
-  type EventLicenseFeature,
+  isValidTierForVersion, isUnlimited,
+  type EventLicenseFeature, type AnyEventLicenseTier,
 } from '@/lib/licensing/eventLicense'
-import { getLicenseCatalog } from '@/lib/licensing/resolveCatalog'
+import { getLicenseCatalog, getLicenseCatalogV2 } from '@/lib/licensing/resolveCatalog'
+import { pickVersionedDefinition, resolveLicenseEntryForVersion } from '@/lib/licensing/licenseCatalogShared'
 import { resolveEffectiveEventLicense } from '@/lib/licensing/adminLicense'
 import {
   FEATURE_LABELS,
@@ -69,18 +70,21 @@ export async function GET(
     return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
   }
 
-  const tier = isEventLicenseTier(doc.tier) ? doc.tier : 'starter'
+  // RD-LICENSE-01B Phase 3C.1 — resolve the display def by the license's stored version.
+  const version = typeof doc.version === 'number' && doc.version >= 1 ? doc.version : 1
+  const tier    = isValidTierForVersion(doc.tier, version) ? doc.tier : 'starter'
 
-  const [eventSnap, counterSnap, orderSnap, chargeSnap, historySnap, catalog] = await Promise.all([
+  const [eventSnap, counterSnap, orderSnap, chargeSnap, historySnap, catalog, catalogV2] = await Promise.all([
     adminDb.doc(`events/${eventId}`).get(),
     adminDb.doc(`registrationCounters/${eventId}`).get(),
     doc.orderId ? adminDb.doc(`${LICENSE_ORDERS_COLLECTION}/${doc.orderId}`).get() : Promise.resolve(null),
     adminDb.doc(`walletTransactions/license_${doc.orderId?.startsWith('lic_') ? doc.orderId.slice(4) : eventId}`).get(),
     adminDb.collection(LICENSE_HISTORY_COLLECTION).where('eventId', '==', eventId).limit(200).get(),
     getLicenseCatalog(),
+    getLicenseCatalogV2(),
   ])
 
-  const baseDef = catalog[tier]
+  const baseDef = pickVersionedDefinition(catalog, catalogV2, tier, version)
   const eff     = resolveEffectiveEventLicense(baseDef, doc.status, doc.amountPaise ?? 0, doc.admin)
   const overlay = doc.admin
 
@@ -140,15 +144,17 @@ export async function GET(
     .filter(t => t.action !== 'note')
     .sort((a, b) => (b.createdAt ?? '').localeCompare(a.createdAt ?? ''))
 
-  // ── Upgrade option (hidden at Enterprise / top tier) ──
-  const next = nextEventLicenseTier(tier)
-  const upgrade = next ? {
-    nextTier:             next,
-    nextTierName:         catalog[next].name,
+  // ── Upgrade option (hidden at Enterprise / top tier) — version-aware next tier ──
+  const entry   = resolveLicenseEntryForVersion(catalog, catalogV2, tier, version)
+  const nextDef = entry.nextTier ? pickVersionedDefinition(catalog, catalogV2, entry.nextTier, version) : null
+  const upgrade = entry.nextTier && nextDef ? {
+    // entry.nextTier is produced by the version-aware resolver → a valid tier for this version.
+    nextTier:             entry.nextTier as AnyEventLicenseTier,
+    nextTierName:         entry.nextTierName ?? nextDef.name,
     currentPricePaise:    baseDef.licensePricePaise,
-    nextPricePaise:       catalog[next].licensePricePaise,
-    priceDifferencePaise: Math.max(0, catalog[next].licensePricePaise - baseDef.licensePricePaise),
-    benefits:             catalog[next].featureList,
+    nextPricePaise:       nextDef.licensePricePaise,
+    priceDifferencePaise: Math.max(0, nextDef.licensePricePaise - baseDef.licensePricePaise),
+    benefits:             nextDef.featureList,
   } : null
 
   const detail: LicenseCenterDetail = {

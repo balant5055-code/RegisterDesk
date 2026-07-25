@@ -2,11 +2,14 @@
 
 import Link from 'next/link'
 import { motion } from 'framer-motion'
+import { buildRegisterHref } from '@/lib/events/registerHref'
 import { CheckCircle2, Clock, Users, Lock, ArrowRight, ShieldCheck, Zap } from 'lucide-react'
 import { cn } from '@/lib/utils/cn'
 import type { PassAvailability } from '@/lib/registrations/types'
 import type { PassPublic } from '@/components/event-templates/types'
 import { AvailabilityBadge } from '@/components/event-templates/shared/registration/AvailabilityBadge'
+import { passDisplayPrice } from '@/components/event-templates/shared/utils/format'
+import { organizerFeaturedPassId } from '@/components/event-templates/shared/utils/featuredPass'
 
 // ─── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -44,6 +47,8 @@ export function ConferenceTickets({
     return true
   })
 
+  // 03B.3: honour the organizer's explicit featured pass; else the prior positional default.
+  const flaggedId   = organizerFeaturedPassId(visible)
   const featuredIdx = visible.length <= 1 ? 0
     : visible.length === 2 ? 1
     : Math.floor(visible.length / 2)
@@ -98,7 +103,7 @@ export function ConferenceTickets({
               {visible.map((pass, idx) => {
                 const avail    = availability[pass.id]
                 const soldOut  = avail?.status === 'sold_out'
-                const featured = idx === featuredIdx && !soldOut
+                const featured = (flaggedId ? pass.id === flaggedId : idx === featuredIdx) && !soldOut
                 const isFree   = isFreeEvent || pass.price === 0
 
                 return (
@@ -163,7 +168,7 @@ export function ConferenceTickets({
                           'text-[2.5rem] font-black leading-none tabular-nums tracking-tight',
                           isFree ? 'text-emerald-600' : 'text-gray-950',
                         )}>
-                          {isFree ? 'Free' : fmtINR(pass.price)}
+                          {isFree ? 'Free' : fmtINR(passDisplayPrice(pass))}
                         </p>
                         {!isFree && (
                           <p className="mt-1.5 text-[11px] text-gray-400">incl. all taxes</p>
@@ -213,7 +218,7 @@ export function ConferenceTickets({
                           </span>
                         ) : (
                           <Link
-                            href={`/events/${slug}/register?passId=${encodeURIComponent(pass.id)}`}
+                            href={buildRegisterHref(slug, pass.id)}
                             className={cn(
                               'flex w-full items-center justify-center gap-2 rounded-xl py-3.5 text-[0.9375rem] font-bold transition-all duration-200 active:scale-[0.97]',
                               featured

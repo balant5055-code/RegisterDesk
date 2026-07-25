@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from 'next'
 import { Geist } from 'next/font/google'
 import { BASE_URL } from '@/lib/env'
 import { BUSINESS_CONFIG_DEFAULTS } from '@/lib/config/businessConfig'
+import { AuthProvider } from '@/components/auth/AuthProvider'
 import './globals.css'
 import 'swiper/css'
 import 'swiper/css/pagination'
@@ -89,7 +90,9 @@ export default function RootLayout({
       lang="en"
       className={`${geist.variable} h-full antialiased`}
     >
-      <body className="min-h-full flex flex-col">{children}</body>
+      <body className="min-h-full flex flex-col">
+        <AuthProvider>{children}</AuthProvider>
+      </body>
     </html>
   )
 }

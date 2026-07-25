@@ -40,6 +40,7 @@ function ResultCard({ result }: { result: CheckInResult }) {
       REGISTRATION_CANCELLED:        'This registration has been cancelled.',
       REGISTRATION_REFUNDED:         'This registration has been refunded and cannot be checked in.',
       REGISTRATION_PENDING:          'This registration is pending approval and cannot be checked in.',
+      REGISTRATION_REJECTED:         'This registration was rejected and cannot be checked in.',
       EVENT_NOT_ACCEPTING_CHECKINS:  'This event is not currently accepting check-ins.',
       WRONG_EVENT:                   'This ticket belongs to a different event.',
       UNAUTHORIZED:                  'You do not have permission to check in for this event.',
@@ -49,7 +50,9 @@ function ResultCard({ result }: { result: CheckInResult }) {
       NETWORK_ERROR:                 'Network error. Check your connection and try again.',
     }
     return (
-      <div className="flex items-start gap-3 rounded-xl border border-red-200 bg-red-50 p-4">
+      // RD-ORGANIZER-02 P1: announce the outcome to screen-reader operators (assertive for
+      // failures incl. rejected/cancelled/pending/refunded — their message is in `msg`).
+      <div role="alert" aria-live="assertive" className="flex items-start gap-3 rounded-xl border border-red-200 bg-red-50 p-4">
         <XCircle className="mt-0.5 size-5 shrink-0 text-red-500" aria-hidden />
         <div>
           <p className="text-[13.5px] font-semibold text-red-700">Check-in Failed</p>
@@ -67,7 +70,7 @@ function ResultCard({ result }: { result: CheckInResult }) {
 
   if (result.alreadyCheckedIn) {
     return (
-      <div className="flex items-start gap-3 rounded-xl border border-amber-200 bg-amber-50 p-4">
+      <div role="status" aria-live="polite" className="flex items-start gap-3 rounded-xl border border-amber-200 bg-amber-50 p-4">
         <AlertCircle className="mt-0.5 size-5 shrink-0 text-amber-500" aria-hidden />
         <div>
           <p className="text-[13.5px] font-semibold text-amber-800">Already Checked In</p>
@@ -82,7 +85,7 @@ function ResultCard({ result }: { result: CheckInResult }) {
   }
 
   return (
-    <div className="flex items-start gap-3 rounded-xl border border-emerald-200 bg-emerald-50 p-4">
+    <div role="status" aria-live="polite" className="flex items-start gap-3 rounded-xl border border-emerald-200 bg-emerald-50 p-4">
       <CheckCircle2 className="mt-0.5 size-5 shrink-0 text-emerald-500" aria-hidden />
       <div>
         <p className="text-[13.5px] font-semibold text-emerald-800">Check-in Successful!</p>
@@ -308,7 +311,7 @@ export default function CheckInClient({
         <div className="h-2 overflow-hidden rounded-full bg-muted">
           <div
             className={cn(
-              'h-full rounded-full transition-all duration-500',
+              'h-full rounded-full transition-all duration-500 motion-reduce:transition-none',
               attendanceRate >= 80
                 ? 'bg-emerald-500'
                 : attendanceRate >= 50 ? 'bg-primary' : 'bg-amber-500',
@@ -357,7 +360,7 @@ export default function CheckInClient({
         <div className="overflow-hidden rounded-xl border border-border bg-card p-4">
           {loading ? (
             <div className="flex flex-col items-center justify-center gap-3 py-20">
-              <Loader2 className="size-9 animate-spin text-primary" aria-hidden />
+              <Loader2 className="size-9 animate-spin text-primary motion-reduce:animate-none" aria-hidden />
               <p className="text-[13px] font-medium text-muted-foreground">Processing scan…</p>
             </div>
           ) : (

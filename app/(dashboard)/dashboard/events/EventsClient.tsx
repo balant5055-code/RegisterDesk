@@ -1,9 +1,9 @@
 'use client'
 
-import { useState, useEffect, useMemo, useRef } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import Link from 'next/link'
-import { onAuthStateChanged } from 'firebase/auth'
 import { auth }               from '@/lib/firebase/auth'
+import { useAuth }            from '@/components/auth/AuthProvider'
 import { cn }                 from '@/lib/utils/cn'
 import {
   Calendar, Users, TrendingUp, MoreHorizontal, ExternalLink,
@@ -16,6 +16,7 @@ import { ErrorState } from '@/components/dashboard/EmptyState'
 import { useConfirm } from '@/components/ui/ConfirmDialog'
 import type { EventListItem, EventsListResponse } from '@/app/api/organizer/events/route'
 import type { EventLifecycleStatus } from '@/types/events'
+import type { EventListingTabKey } from '@/lib/events/listingTabs'
 import { eventLifecycleMeta } from '@/lib/ui/statusColors'
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -45,12 +46,10 @@ const GRID_CLASS =
   'grid grid-cols-1 gap-4 sm:grid-cols-2 sm:gap-5 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5'
 
 // ─── Tab definition ───────────────────────────────────────────────────────────
-// Active    : published | registration_closed  (currently live events)
-// Published : published only                  (open for new registrations)
-// Drafts    : draft
-// Archived  : completed | cancelled | archived
-
-type TabKey = 'active' | 'published' | 'drafts' | 'archived'
+// The lifecycle→tab mapping is the SERVER's responsibility now (lib/events/listingTabs.ts):
+// the listing API filters authoritatively over the WHOLE dataset, so the client only holds
+// server-matched events and never re-buckets loaded pages (RD-EVENTS-01 Phase 2 / H2).
+type TabKey = EventListingTabKey
 
 const TABS: { key: TabKey; label: string }[] = [
   { key: 'active',    label: 'Active'    },
@@ -58,25 +57,6 @@ const TABS: { key: TabKey; label: string }[] = [
   { key: 'drafts',    label: 'Drafts'    },
   { key: 'archived',  label: 'Archived'  },
 ]
-
-// An event may appear in multiple tabs (e.g. published → both 'active' and 'published')
-function tabsForEvent(ls: EventLifecycleStatus): TabKey[] {
-  switch (ls) {
-    case 'published':            return ['active', 'published']
-    case 'registration_closed':  return ['active']
-    case 'pending_review':       return ['active']
-    case 'changes_requested':    return ['drafts']
-    case 'draft':                return ['drafts']
-    case 'completed':
-    case 'cancelled':
-    case 'archived':             return ['archived']
-    // Recognition only (Phase L2): a taken-offline event is inactive, NOT a draft.
-    // Grouped with archived so it can never fall into the 'drafts' default. Never
-    // emitted yet — this is provisional and will be revisited when the state ships.
-    case 'unpublished':          return ['archived']
-    default:                     return ['drafts']
-  }
-}
 
 // Page-size options for the pager. Reuses the API's existing `limit` parameter.
 const PAGE_SIZE_OPTIONS = [5, 10, 20, 50] as const
@@ -416,47 +396,77 @@ const EMPTY: Record<TabKey, { icon: LucideIcon; title: string; desc: string; act
 // ─── Main Component ───────────────────────────────────────────────────────────
 
 export default function EventsClient() {
+  const { user, getToken } = useAuth()
   const [events,    setEvents]    = useState<EventListItem[]>([])
   const [loading,   setLoading]   = useState(true)
   const [error,     setError]     = useState<string | null>(null)
   const [activeTab, setActiveTab] = useState<TabKey>('active')
-  const [search,    setSearch]    = useState('')
+  const [search,          setSearch]          = useState('')
+  const [debouncedSearch, setDebouncedSearch] = useState('')
   const [cursor,      setCursor]      = useState<string | null>(null)
   const [hasMore,     setHasMore]     = useState(false)
   const [loadingMore, setLoadingMore] = useState(false)
 
-  // Pager state. `page` is a display window over the client-filtered list; the
-  // data itself is still fetched purely via Firestore cursor pagination below.
+  // Pager state. `page` is a display window over the events the SERVER returned for the
+  // current (tab, search) query — the server already filtered them authoritatively.
   const [pageSize, setPageSize] = useState<number>(DEFAULT_PAGE_SIZE)
   const [page,     setPage]     = useState(0)
+  const autoSwitchedRef = useRef(false)
 
+  // Debounce the search box so a server scan isn't launched on every keystroke.
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, async user => {
-      if (!user) { setError('You must be signed in to view events.'); setLoading(false); return }
+    const t = setTimeout(() => setDebouncedSearch(search.trim()), 350)
+    return () => clearTimeout(t)
+  }, [search])
+
+  // Authoritative first page: refires whenever the query key (tab, search, size, auth)
+  // changes. The server applies tab + search over the WHOLE organizer dataset, so the
+  // browser only ever holds server-matched events — no client-side "loaded pages only"
+  // filtering, no false-negative "no events match" (RD-EVENTS-01 Phase 2 / H2).
+  useEffect(() => {
+    if (user === undefined) return
+    let cancelled = false
+    // All state updates live inside this async callback (never synchronously in the
+    // effect body) — the fetch drives them after awaits.
+    const run = async () => {
+      if (user === null) {
+        setError('You must be signed in to view events.')
+        setLoading(false)
+        return
+      }
+      setLoading(true)
+      setError(null)
       try {
-        const token = await user.getIdToken()
-        const res   = await fetch(`/api/organizer/events?limit=${DEFAULT_PAGE_SIZE}`, {
+        const token  = await getToken()
+        if (cancelled || !token) return
+        const params = new URLSearchParams({ limit: String(pageSize), tab: activeTab })
+        if (debouncedSearch) params.set('search', debouncedSearch)
+        const res = await fetch(`/api/organizer/events?${params.toString()}`, {
           headers: { Authorization: `Bearer ${token}` },
         })
         if (!res.ok) throw new Error(`HTTP ${res.status}`)
-        const json  = await res.json() as EventsListResponse
+        const json = await res.json() as EventsListResponse
+        if (cancelled) return
         setEvents(json.events)
         setCursor(json.nextCursor)
         setHasMore(Boolean(json.nextCursor))
-
-        // Auto-select Drafts if no active events
-        const hasActive = json.events.some(
-          e => e.lifecycleStatus === 'published' || e.lifecycleStatus === 'registration_closed',
-        )
-        if (!hasActive) setActiveTab('drafts')
+        setPage(0)
+        // One-time: if the default Active tab is authoritatively empty (no next page),
+        // fall back to Drafts — matching the previous first-load behavior.
+        if (!autoSwitchedRef.current && activeTab === 'active' && !debouncedSearch
+            && json.events.length === 0 && !json.nextCursor) {
+          autoSwitchedRef.current = true
+          setActiveTab('drafts')
+        }
       } catch (e) {
-        setError(e instanceof Error ? e.message : 'Failed to load events')
+        if (!cancelled) setError(e instanceof Error ? e.message : 'Failed to load events')
       } finally {
-        setLoading(false)
+        if (!cancelled) setLoading(false)
       }
-    })
-    return unsub
-  }, [])
+    }
+    run()
+    return () => { cancelled = true }
+  }, [user, getToken, activeTab, debouncedSearch, pageSize])
 
   async function handleDeleteDraft(draftId: string): Promise<void> {
     const user = auth.currentUser
@@ -488,15 +498,15 @@ export default function EventsClient() {
   // Returns the number of newly-added (de-duped) events so callers can decide
   // whether advancing the display page is meaningful.
   async function fetchNextPage(): Promise<number> {
-    const user = auth.currentUser
     if (!user || !cursor || loadingMore) return 0
     setLoadingMore(true)
     try {
-      const token = await user.getIdToken()
-      const res   = await fetch(
-        `/api/organizer/events?cursor=${encodeURIComponent(cursor)}&limit=${pageSize}`,
-        { headers: { Authorization: `Bearer ${token}` } },
-      )
+      const token  = await getToken()
+      const params = new URLSearchParams({ limit: String(pageSize), tab: activeTab, cursor })
+      if (debouncedSearch) params.set('search', debouncedSearch)
+      const res    = await fetch(`/api/organizer/events?${params.toString()}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const json = await res.json() as EventsListResponse
       // Count new rows against the currently-committed events (the functional
@@ -518,22 +528,11 @@ export default function EventsClient() {
     }
   }
 
-  // An event can appear in multiple tabs (published → active + published)
-  const buckets = useMemo(() => {
-    const map = new Map<TabKey, EventListItem[]>()
-    TABS.forEach(t => map.set(t.key, []))
-    events.forEach(e => {
-      tabsForEvent(e.lifecycleStatus).forEach(tab => {
-        map.get(tab)!.push(e)
-      })
-    })
-    return map
-  }, [events])
-
-  const q = search.trim().toLowerCase()
-  const visible = (buckets.get(activeTab) ?? []).filter(e =>
-    !q || e.name.toLowerCase().includes(q),
-  )
+  // The server already filtered by tab + search over the whole dataset, so everything
+  // loaded IS a match for the active query — no client-side re-bucketing / re-filtering
+  // and therefore no false-negative "no events match" (RD-EVENTS-01 Phase 2 / H2).
+  const visible   = events
+  const searching = debouncedSearch.length > 0
 
   const pageCount = Math.max(1, Math.ceil(visible.length / pageSize))
   // Clamp during render so a shrunk list (a delete, a tab/search change, or a
@@ -614,27 +613,16 @@ export default function EventsClient() {
           )}
         </div>
 
-        {/* Status chips */}
-        {!loading && events.length > 0 && (
-          <div className="flex flex-wrap gap-2">
-            {TABS.map(t => {
-              const count = buckets.get(t.key)?.length ?? 0
-              if (count === 0) return null
-              return (
-                <span key={t.key} className="rounded-full border border-border bg-card px-3 py-1 text-[13px] text-muted-foreground shadow-sm">
-                  <span className="font-semibold text-foreground">{count}</span> {t.label.toLowerCase()}
-                </span>
-              )
-            })}
-          </div>
-        )}
+        {/* Per-tab count chips were removed: authoritative global counts would require a
+            full-dataset scan / maintained counter (out of scope), and showing loaded-pages-only
+            counts would be fabrication (RD-EVENTS-01 Phase 2 / H2, deliverable D). The pager
+            below honestly reports the loaded window ("… of N loaded+"). */}
       </div>
 
       {/* Tabs — horizontally scrollable on narrow screens, never overflow the page */}
       <div className="border-b border-border">
         <nav className="-mb-px flex gap-0 overflow-x-auto" role="tablist">
           {TABS.map(t => {
-            const count  = buckets.get(t.key)?.length ?? 0
             const active = activeTab === t.key
             return (
               <button
@@ -650,14 +638,6 @@ export default function EventsClient() {
                 )}
               >
                 {t.label}
-                {count > 0 && (
-                  <span className={cn(
-                    'rounded-full px-2 py-0.5 text-[12px] font-semibold tabular-nums',
-                    active ? 'bg-primary/10 text-primary' : 'bg-muted text-muted-foreground',
-                  )}>
-                    {count}
-                  </span>
-                )}
               </button>
             )
           })}
@@ -669,7 +649,7 @@ export default function EventsClient() {
         <div className={GRID_CLASS}>
           {Array.from({ length: Math.min(pageSize, 10) }).map((_, i) => <SkeletonCard key={i} />)}
         </div>
-      ) : visible.length === 0 && q ? (
+      ) : visible.length === 0 && searching ? (
         <EmptyState
           icon={Search}
           title={`No events match "${search}"`}

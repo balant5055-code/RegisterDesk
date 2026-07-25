@@ -2,8 +2,8 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useParams } from 'next/navigation'
-import { onAuthStateChanged, type User } from 'firebase/auth'
-import { auth } from '@/lib/firebase/auth'
+import { type User } from 'firebase/auth'
+import { useAuth } from '@/components/auth/AuthProvider'
 import Link from 'next/link'
 import { cn } from '@/lib/utils/cn'
 import { useToast } from '@/components/ui/Toast'
@@ -24,6 +24,7 @@ const ACT: Record<CrmActivityType, { label: string; icon: React.ElementType; col
 
 export default function CrmContactPage() {
   const { showToast } = useToast()
+  const { user } = useAuth()
   const params = useParams<{ contactId: string }>()
   const contactId = params.contactId
   const userRef = useRef<User | null>(null)
@@ -54,10 +55,13 @@ export default function CrmContactPage() {
   }, [contactId])
 
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, u => { userRef.current = u; if (u) void load() })
-    return unsub
+    if (user === undefined) return
+    const run = async () => {
+      userRef.current = user; if (user) void load()
+    }
+    run()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [user])
 
   async function save() {
     const u = userRef.current

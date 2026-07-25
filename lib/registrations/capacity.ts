@@ -4,8 +4,10 @@ import type { CapacityPlan, CapacityPlanMeta, PassAvailability, AvailabilityStat
 
 export const CAPACITY_PLANS: Record<CapacityPlan, CapacityPlanMeta> = {
   free:      { label: 'Free Plan',    limit: 100   },
+  pack_200:  { label: '200 Pack',     limit: 200   },   // RD-LICENSE-01B — V2 Free (200)
   pack_500:  { label: '500 Pack',     limit: 500   },
   pack_1000: { label: '1,000 Pack',   limit: 1000  },
+  pack_2500: { label: '2,500 Pack',   limit: 2500  },   // RD-LICENSE-01B — V2 Professional (2,500)
   pack_5000: { label: '5,000 Pack',   limit: 5000  },
   unlimited: { label: 'Unlimited',    limit: null  },
 }
@@ -17,7 +19,12 @@ export const LOW_AVAILABILITY_THRESHOLD = 10
 
 /** Returns the total registrations allowed for a plan. null = unlimited. */
 export function resolveTotalCapacity(plan: CapacityPlan): number | null {
-  return CAPACITY_PLANS[plan]?.limit ?? CAPACITY_PLANS.free.limit
+  // A KNOWN plan returns its OWN limit — which is legitimately `null` for 'unlimited'.
+  // Only an UNKNOWN plan (a corrupt/legacy stored value cast to CapacityPlan) falls
+  // back to the Free cap. The previous `?? free.limit` wrongly treated 'unlimited''s
+  // null as "unknown", capping Enterprise/unlimited events at 100 (RD-GA-HOTFIX-01).
+  const meta = CAPACITY_PLANS[plan]
+  return meta ? meta.limit : CAPACITY_PLANS.free.limit
 }
 
 /**
@@ -48,12 +55,15 @@ export function deriveStoredEventCapacity(eventData: {
  * Maps an Event License registration limit (from the license tier's
  * `limits.maxRegistrations`) to the capacity bucket that enforces it, so an event's
  * enforced capacity is driven by its purchased license — the single source of truth.
- * The frozen license tiers map exactly (100→free, 1,000→pack_1000, 5,000→pack_5000,
- * Infinity→unlimited); any other value resolves to the smallest bucket that covers it.
+ * Both catalogs map EXACTLY: V1 (100→free, 1,000→pack_1000, 5,000→pack_5000, ∞→unlimited)
+ * and V2 (200→pack_200, 1,000→pack_1000, 2,500→pack_2500, 5,000→pack_5000, ∞→unlimited);
+ * any other value resolves to the smallest bucket that covers it. Historical V1 limits are
+ * unchanged — none is 200 or 2,500, so no existing event's bucket shifts (RD-LICENSE-01B).
  */
 export function capacityPlanForRegistrationLimit(maxRegistrations: number): CapacityPlan {
   if (!Number.isFinite(maxRegistrations)) return 'unlimited'
-  const ordered: CapacityPlan[] = ['free', 'pack_500', 'pack_1000', 'pack_5000']
+  // Ascending by limit — the new V2 buckets slot in so 200 and 2,500 map exactly.
+  const ordered: CapacityPlan[] = ['free', 'pack_200', 'pack_500', 'pack_1000', 'pack_2500', 'pack_5000']
   for (const plan of ordered) {
     const limit = CAPACITY_PLANS[plan].limit
     if (limit != null && maxRegistrations <= limit) return plan

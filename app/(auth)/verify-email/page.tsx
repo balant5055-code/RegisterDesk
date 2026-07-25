@@ -18,7 +18,17 @@ import { auth } from '@/lib/firebase/auth'
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const DIGITS = 6
-const RESEND_COOLDOWN = 60
+
+// RD-AUTH-01 Phase 5 (M-B): the resend cooldown is owned entirely by the SERVER
+// (getSecurityConfig().otpResendWaitSeconds + the hourly cap). The client no longer
+// hardcodes a cooldown — it derives the countdown from the send-otp response
+// (resendAfter on success; secondsLeft / resetInMinutes on 429), so there is one
+// canonical resend policy instead of disconnected client constants.
+function secondsUntil(iso: string | undefined): number {
+  if (!iso) return 0
+  const ms = new Date(iso).getTime() - Date.now()
+  return ms > 0 ? Math.ceil(ms / 1000) : 0
+}
 
 // ─── Error helpers ────────────────────────────────────────────────────────────
 
@@ -175,18 +185,26 @@ function VerifyEmailContent() {
         method:  'POST',
         headers: { Authorization: `Bearer ${token}` },
       })
-      if (res.ok) {
-        const { otpId } = await res.json() as { otpId: string }
-        setCurrentOtpId(otpId)
+      const body = await res.json().catch(() => ({})) as {
+        otpId?: string; resendAfter?: string; error?: string; secondsLeft?: number; resetInMinutes?: number
+      }
+      if (res.ok && body.otpId) {
+        setCurrentOtpId(body.otpId)
         setResendSent(true)
-        setCooldown(RESEND_COOLDOWN)
+        setCooldown(secondsUntil(body.resendAfter))   // server-owned cooldown
         setOtpError(null)
         setDigits(Array(DIGITS).fill(''))
         requestAnimationFrame(() => inputRefs.current[0]?.focus())
       } else {
-        const body = await res.json() as { error?: string }
+        // Cooldown comes from the server, never a hardcoded fallback: honor
+        // COOLDOWN_ACTIVE.secondsLeft / RATE_LIMITED.resetInMinutes (and resendAfter on
+        // a 502 where the OTP was created but delivery failed).
+        const serverCooldown =
+          typeof body.secondsLeft === 'number'    ? body.secondsLeft :
+          typeof body.resetInMinutes === 'number' ? body.resetInMinutes * 60 :
+          secondsUntil(body.resendAfter)
+        if (serverCooldown > 0) setCooldown(serverCooldown)
         setResendError(body.error ?? 'Failed to resend code. Please try again.')
-        setCooldown(30)
       }
     } catch {
       setResendError('Network error. Please try again.')

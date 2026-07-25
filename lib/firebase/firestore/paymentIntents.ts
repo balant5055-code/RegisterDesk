@@ -4,6 +4,7 @@
 
 import { FieldValue } from 'firebase-admin/firestore'
 import { adminDb }    from '@/lib/firebase/admin'
+import type { FeeBreakdownRecord } from '@/lib/fees/types'
 
 export type PaymentIntentStatus = 'created' | 'paid' | 'failed' | 'registration_failed'
 export type RefundStatus        = 'pending' | 'processed' | 'failed'
@@ -42,6 +43,11 @@ export interface PaymentIntentRecord {
   couponDocId?:    string        // Firestore doc ID in events/{slug}/coupons/{id}
   discountAmount?: number        // paise discount; amount already reflects the discount
   originalAmount?: number        // paise before discount
+  // RD-PAYMENT-02 Phase 1 — canonical fee breakdown for this order (incl. the ticket
+  // base, the attendee charge, and who bore each fee). ADDITIVE + OPTIONAL: absent on
+  // every prior intent; `amount` above remains the authoritative charged value and is
+  // untouched. Written from Phase 2 onward; nothing populates it yet.
+  financials?:     FeeBreakdownRecord
   createdAt:       unknown       // Firestore Timestamp
   updatedAt:       unknown       // Firestore Timestamp
 }

@@ -17,7 +17,7 @@ import {
   buildPricingPreviewPlans, PRICING_PREVIEW_HEADING, PRICING_PREVIEW_FOOTER,
   type PreviewPlanView,
 } from '@/content/marketing/pricing-preview'
-import { getLicenseCatalog } from '@/lib/licensing/resolveCatalog'
+import { getLicenseCatalogV2 } from '@/lib/licensing/resolveCatalog'
 
 export function PricingHighlights({ highlights }: { highlights: string[] }) {
   return (
@@ -48,7 +48,10 @@ export function PricingCard({ plan }: { plan: PreviewPlanView }) {
         )}
       </div>
 
-      <div className="mt-3 flex items-baseline gap-1">
+      <div className="mt-3 flex items-baseline gap-1.5">
+        {plan.regularPriceLabel && (
+          <span className="text-[var(--fs-base)] font-medium text-muted-foreground line-through">{plan.regularPriceLabel}</span>
+        )}
         <span className="text-[var(--fs-3xl)] font-bold text-foreground">{plan.priceLabel}</span>
         {plan.period && <span className="text-[var(--fs-base)] text-muted-foreground">{plan.period}</span>}
       </div>
@@ -91,8 +94,8 @@ export function PricingFooter() {
 }
 
 export async function PricingPreview() {
-  // Resolve the effective license catalog (defaults + config overrides) server-side.
-  const plans = buildPricingPreviewPlans(await getLicenseCatalog())
+  // Resolve the effective V2 license catalog (defaults + config overrides) server-side.
+  const plans = buildPricingPreviewPlans(await getLicenseCatalogV2())
   return (
     <SectionLayout background="white" labelledBy="pricing-heading">
       <SectionHeader

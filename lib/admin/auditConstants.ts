@@ -83,6 +83,11 @@ export const AUDIT_ACTIONS = [
   // GA-7E S1 — admin support workspace (resend on an attendee's behalf)
   'support.ticket_resent',
   'support.certificate_resent',
+  // RD-PRICING-01B — platform pricing engine settings
+  'platform_settings.updated',
+  // RD-PRICING-01D — per-event pricing override hierarchy
+  'pricing_override.set',
+  'pricing_override.cleared',
 ] as const
 
 export type AdminAuditAction = typeof AUDIT_ACTIONS[number]
@@ -104,6 +109,7 @@ export const AUDIT_ENTITY_TYPES = [
   'job',
   'registration',
   'certificate',
+  'platform_settings',
 ] as const
 
 export type AdminAuditEntityType = typeof AUDIT_ENTITY_TYPES[number]

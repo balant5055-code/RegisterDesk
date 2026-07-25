@@ -98,11 +98,18 @@ export interface EventEditPayload {
   keywords?:        string[]
   // Pass capacity updates
   passCapacityUpdates?: Array<{ passId: string; newCapacity: number | null }>
+  // RD-PRODUCT-01F — optional edit reason, recorded in version history (not a field edit).
+  reason?: string
 }
 
 export interface EventEditResponse {
   success: boolean
   error?:  string
+  // RD-PRODUCT-01F — post-publish edit metadata.
+  changedFields?:        string[]
+  impactfulFields?:      string[]
+  /** True when an attendee-impactful field (schedule/venue) changed → offer "Notify Attendees". */
+  notificationRequired?: boolean
 }
 
 // Written to events/{slug}/changeLog when impactful fields (schedule/venue) change

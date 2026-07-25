@@ -5,6 +5,7 @@ import { getEventBySlug }          from '@/lib/firebase/firestore/events'
 import { getRegistrationCounter }  from '@/lib/firebase/firestore/registrationCounters'
 import { isContentTakenDown }      from '@/lib/admin/moderation'
 import { computePassAvailability, resolveTotalCapacity } from './capacity'
+import { todayISOInTz } from './salesWindow'
 import type {
   RegistrationGateResult, RegistrationBlockReason, CapacityPlan,
 } from './types'
@@ -27,26 +28,8 @@ interface PassRecord {
 }
 
 // ─── Timezone-aware date helpers ──────────────────────────────────────────────
-
-/**
- * Returns today's date as 'YYYY-MM-DD' in the given IANA timezone.
- * Falls back to UTC when tz is empty or unrecognised.
- */
-function todayISOInTz(tz: string): string {
-  const zone = tz || 'UTC'
-  try {
-    return new Intl.DateTimeFormat('en-CA', {
-      timeZone: zone,
-      year: 'numeric', month: '2-digit', day: '2-digit',
-    }).format(new Date())
-  } catch {
-    // Unknown timezone string — degrade to UTC
-    return new Intl.DateTimeFormat('en-CA', {
-      timeZone: 'UTC',
-      year: 'numeric', month: '2-digit', day: '2-digit',
-    }).format(new Date())
-  }
-}
+// todayISOInTz now lives in ./salesWindow so the same date-only window logic backs
+// both the gate and the attendee-facing ticket cards (M2).
 
 /**
  * Converts a naive date + time string (stored in Firestore without tz info)

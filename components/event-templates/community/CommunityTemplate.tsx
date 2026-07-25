@@ -6,15 +6,17 @@ import {
   Calendar, MapPin, Globe, Ticket, Clock, AlarmClock, Languages, Shirt,
 } from 'lucide-react'
 import type { EventDetailProps } from '@/app/events/[slug]/EventDetailClient'
-import { EventPageLayout }     from '@/components/event-templates/shared/ui/EventPageLayout'
+import { LinkedCampaignSection } from '@/app/events/[slug]/EventDetailClient'
+import { EventInfoSection } from '@/components/event-templates/shared/ui/EventInfoSection'
+import { EventDetailsFramework } from '@/components/event-templates/EventDetailsFramework'
 import { AddToCalendarButton } from '@/components/event-templates/shared/ui/AddToCalendarButton'
 import type { CommunityDetails } from '@/components/wizard/eventDetailsConfig'
-import { StickyMobileCTA }   from '@/components/event-templates/shared/registration/StickyMobileCTA'
 import { PromoVideoSection } from '@/components/event-templates/shared/media/PromoVideoSection'
 import { SpeakersSection }   from '@/components/event-templates/shared/people/SpeakersSection'
 import { ConferenceSponsors } from '@/components/event-templates/conference/ConferenceSponsors'
 import { CommunityFAQ }      from './CommunityFAQ'
 import { CommunityHero }           from './CommunityHero'
+import { TicketsPreviewBar }       from '@/components/event-templates/shared/registration/TicketsPreviewBar'
 import { CommunityImpactNumbers }  from './CommunityImpactNumbers'
 import { CommunityProblemSection } from './CommunityProblemSection'
 import { CommunityMasonry }        from './CommunityMasonry'
@@ -23,6 +25,7 @@ import { CommunityEventJourney }   from './CommunityEventJourney'
 import { CommunityRegistration }   from './CommunityRegistration'
 import { CommunityVenue }          from './CommunityVenue'
 import { CommunityOrganizer }      from './CommunityOrganizer'
+import { passDisplayPrice }        from '@/components/event-templates/shared/utils/format'
 
 function fmtDate(d: string) {
   if (!d) return ''
@@ -42,7 +45,7 @@ export function CommunityTemplate(props: EventDetailProps) {
   const {
     slug, lifecycleStatus: ls, cancelReason,
     registrationOpen, regClosedMessage,
-    title, description,
+    description,
     bannerUrl, gallery,
     startDate, startTime, endDate,
     agenda,
@@ -66,7 +69,7 @@ export function CommunityTemplate(props: EventDetailProps) {
   const volunteerInstructions = td?.volunteerInstructions ?? ''
 
   const activePasses  = passes.filter(p => p.status !== 'inactive')
-  const minPrice      = activePasses.length > 0 ? Math.min(...activePasses.map(p => p.price)) : 0
+  const minPrice      = activePasses.length > 0 ? Math.min(...activePasses.map(p => passDisplayPrice(p))) : 0
   const locationLabel = venueType === 'online'
     ? 'Online Event'
     : physical?.city ? `${venueName}, ${physical.city}` : venueName
@@ -77,7 +80,13 @@ export function CommunityTemplate(props: EventDetailProps) {
   const hasCauseContent = causeInfo || campaignInfo || impactGoal || volunteerInstructions
 
   return (
-    <EventPageLayout eventType={props.eventType} title={props.title}>
+    <EventDetailsFramework
+      props={props}
+      eventType={props.eventType}
+      shell="page-layout"
+      lifecycleTone="none"
+      registrationTargetId="tickets"
+    >
 
       {/* ── Lifecycle banners ──────────────────────────────────────────────── */}
       {ls === 'cancelled' && (
@@ -139,6 +148,9 @@ export function CommunityTemplate(props: EventDetailProps) {
         totalAttendees={totalAttendees}
         showAttendeeCount={showAttendeeCount}
       />
+
+      {/* Compact registration preview (03B.3 additive) — early tickets visibility, no reorder. */}
+      <TicketsPreviewBar passes={passes} isFreeEvent={isFreeEvent} registrationOpen={registrationOpen} targetId="tickets" />
 
       {/* ── 2. Quick facts strip ───────────────────────────────────────────── */}
       <div className="border-b border-gray-100 bg-white">
@@ -305,13 +317,20 @@ export function CommunityTemplate(props: EventDetailProps) {
       />
 
       {/* ── Sticky mobile CTA ─────────────────────────────────────────────── */}
-      <StickyMobileCTA
-        visible={true}
-        title={title}
-        isFreeEvent={isFreeEvent}
-        passes={passes}
-        registrationOpen={registrationOpen}
+      <EventInfoSection
+        language={props.language}
+        dressCode={props.dressCode}
+        timezone={props.timezone}
+        venueType={props.venueType}
+        online={props.online}
+        refundWindow={props.refundWindow}
+        refundPolicyUrl={props.refundPolicyUrl}
       />
-    </EventPageLayout>
+
+      {props.linkedCampaign && (
+        <LinkedCampaignSection campaign={props.linkedCampaign} eventSlug={slug} />
+      )}
+
+    </EventDetailsFramework>
   )
 }

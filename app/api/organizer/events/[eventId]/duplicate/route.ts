@@ -54,10 +54,20 @@ export async function POST(
   }))
   const newPricing  = { ...srcPricing, passes: newPasses }
 
-  // ── 4. Create new draft document ──────────────────────────────────────────
-  const newRef = adminDb.collection(`users/${uid}/eventDrafts`).doc()
+  // ── 4. Create the new draft — IDEMPOTENT (M1) ─────────────────────────────
+  // A client-supplied idempotency key makes a double-submit / retry safe: the copy is
+  // created under a DETERMINISTIC id, exactly once, inside a transaction. A repeat call
+  // with the SAME key returns the SAME draftId instead of spawning another copy. Without
+  // a key (legacy callers) it falls back to a fresh auto-id — behavior unchanged.
+  let body: Record<string, unknown> | null = null
+  try { body = await req.json() } catch { body = null }
+  const rawKey  = typeof body?.idempotencyKey === 'string' ? body.idempotencyKey.trim() : ''
+  const idemKey = /^[A-Za-z0-9_-]{8,64}$/.test(rawKey) ? rawKey : null
 
-  await newRef.set({
+  const draftsCol = adminDb.collection(`users/${uid}/eventDrafts`)
+  const newRef    = idemKey ? draftsCol.doc(`dup_${idemKey}`) : draftsCol.doc()
+
+  const newDraft: Record<string, unknown> = {
     id:                 newRef.id,
     status:             'draft',
     lifecycleStatus:    'draft',
@@ -81,7 +91,18 @@ export async function POST(
     archivedAt:           null,
     createdAt:  FieldValue.serverTimestamp(),
     updatedAt:  FieldValue.serverTimestamp(),
-  })
+  }
+
+  if (idemKey) {
+    // Create-once: a repeat call finds the deterministic doc already present and no-ops,
+    // returning the same draftId (race-safe via the transactional read+write).
+    await adminDb.runTransaction(async txn => {
+      const existing = await txn.get(newRef)
+      if (!existing.exists) txn.set(newRef, newDraft)
+    })
+  } else {
+    await newRef.set(newDraft)
+  }
 
   return NextResponse.json({ success: true, draftId: newRef.id })
 }

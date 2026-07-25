@@ -11,8 +11,8 @@ import { verifyCaller }        from '@/lib/team/access'
 import { resolveWorkspaceUid } from '@/lib/team/workspace'
 import { getEventBySlug }      from '@/lib/firebase/firestore/events'
 import { adminDb }             from '@/lib/firebase/admin'
-import { isEventLicenseTier }  from '@/lib/licensing/eventLicense'
-import { getEffectiveLicenseDefinition } from '@/lib/licensing/resolveCatalog'
+import { CURRENT_LICENSE_VERSION, isValidTierForVersion } from '@/lib/licensing/eventLicense'
+import { getEffectiveDefinitionForVersion } from '@/lib/licensing/resolveCatalog'
 import {
   getLicenseCoupon, getLicenseCouponsConfig, countOrganizerCouponRedemptions,
   validateLicenseCoupon, normalizeCouponCode,
@@ -27,14 +27,16 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
   const eventId = typeof body.eventId === 'string' ? body.eventId.trim() : ''
   const code    = typeof body.couponCode === 'string' ? normalizeCouponCode(body.couponCode) : ''
-  if (!eventId || !isEventLicenseTier(body.tier) || !code) {
+  // The tier being previewed is a NEW purchase → validate + price against the current version.
+  if (!eventId || !isValidTierForVersion(body.tier, CURRENT_LICENSE_VERSION) || !code) {
     return NextResponse.json({ valid: false, message: 'eventId, tier and couponCode are required.' }, { status: 400 })
   }
   const tier = body.tier
   const ctx  = await resolveWorkspaceUid(caller.uid)
 
   // Effective (config-aware) base price + the event type (identity restriction).
-  const def = await getEffectiveLicenseDefinition(tier)
+  const def = await getEffectiveDefinitionForVersion(tier, CURRENT_LICENSE_VERSION)
+  if (!def) return NextResponse.json({ valid: false, message: 'Invalid tier.' }, { status: 400 })
   const pricePaise = def.licensePricePaise
   if (pricePaise <= 0) {
     return NextResponse.json({ valid: false, message: 'This license is already free.' }, { status: 200 })

@@ -7,8 +7,9 @@
 // recordPlatformTransactionAndCredit (keyed on the deterministic ptx_<donationId>).
 
 import { getFeePlanForOrganizer } from '@/lib/billing/feeEngine'
-import { resolveFeeConfig }       from '@/lib/fees/resolveFeeConfig'
+import { resolveFeeConfig, resolveEffectiveFeeModel } from '@/lib/fees/resolveFeeConfig'
 import { calculateFee }           from '@/lib/fees/engine'
+import { buildOrderPricingEvidence, resolveLedgerFinancials } from '@/lib/platform/pricing'
 import type { PlatformTransactionData, RevenueCreditInput } from '@/lib/firebase/firestore/platformTransactions'
 
 export interface DonationLedgerSource {
@@ -33,12 +34,30 @@ export interface DonationLedgerBundle {
 export async function buildDonationLedgerAndCredit(src: DonationLedgerSource): Promise<DonationLedgerBundle> {
   const feePlan   = await getFeePlanForOrganizer(src.organizerUid)
   const feeConfig = await resolveFeeConfig('donation', feePlan.planTier)
+  // RD-PAYMENT-02 Phase 2: resolve the fee model canonically instead of hardcoding it.
+  // Donations carry no fee-model candidate, so this resolves to organizer_pays — the
+  // calculation and persisted ledger are byte-identical to before.
+  const feeModel  = resolveEffectiveFeeModel({
+    organizerUid: src.organizerUid,
+    eventId:      src.campaignSlug,
+  })
   const feeResult = calculateFee({
     transactionType:  'donation',
     grossAmountPaise: src.amountPaise,
-    feeModel:         'organizer_pays',
+    feeModel,
     config:           feeConfig,
   })
+  // RD-PRICING-02B/02C: attach the pricing snapshot + shadow comparison, then resolve
+  // the authoritative financials snapshot-first (lib/fees is the automatic fallback).
+  // Additive + never-throws; the chosen values are provably equal to `feeResult` under
+  // the current commercial model (snapshot used only when its shadow matched production).
+  const evidence = await buildOrderPricingEvidence({
+    grossAmountPaise: src.amountPaise,
+    planTier:         feePlan.planTier,
+    feeConfig,
+    transactionType:  'donation',
+  })
+  const fin = resolveLedgerFinancials(feeResult, evidence)
   const ledger: PlatformTransactionData = {
     id:                      `ptx_${src.donationId}`,
     type:                    'donation',
@@ -51,24 +70,26 @@ export async function buildDonationLedgerAndCredit(src: DonationLedgerSource): P
     payerName:               src.isAnonymous ? 'Anonymous' : src.donorName,
     payerEmail:              src.donorEmail,
     grossAmountPaise:        src.amountPaise,
-    platformFeeBasePaise:    feeResult.platformFeeBasePaise,
-    platformFeeGstPaise:     feeResult.platformFeeGstPaise,
-    platformFeeTotalPaise:   feeResult.platformFeeTotalPaise,
-    gatewayFeeEstimatePaise: feeResult.gatewayFeeEstimatePaise,
-    netSettlementPaise:      feeResult.netSettlementPaise,
-    feeModel:                'organizer_pays',
+    platformFeeBasePaise:    fin.platformFeeBasePaise,
+    platformFeeGstPaise:     fin.platformFeeGstPaise,
+    platformFeeTotalPaise:   fin.platformFeeTotalPaise,
+    gatewayFeeEstimatePaise: fin.gatewayFeeEstimatePaise,
+    netSettlementPaise:      fin.netSettlementPaise,
+    feeModel,
     planTier:                feePlan.planTier,
     feeConfigId:             feePlan.feeConfigId,
     currency:                'INR',
     gateway:                 'razorpay',
     gatewayPaymentId:        src.paymentId,
     gatewayOrderId:          src.orderId,
+    pricingSource:           fin.source,
+    ...evidence,
   }
   const credit: RevenueCreditInput = {
     organizerUid:       src.organizerUid,
     grossAmountPaise:   src.amountPaise,
-    feesTotalPaise:     feeResult.platformFeeTotalPaise + feeResult.gatewayFeeEstimatePaise,
-    netSettlementPaise: feeResult.netSettlementPaise,
+    feesTotalPaise:     fin.platformFeeTotalPaise + fin.gatewayFeeEstimatePaise,
+    netSettlementPaise: fin.netSettlementPaise,
   }
   return { ledger, credit }
 }

@@ -2,7 +2,6 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
-import { onIdTokenChanged } from 'firebase/auth'
 import {
   ArrowLeft, ZoomIn, ZoomOut, Maximize, Grid3x3, Magnet,
   MousePointer2, Hand, Eye, Loader2, Check, AlertCircle, Monitor,
@@ -10,7 +9,7 @@ import {
   AlignStartVertical, AlignCenterVertical, AlignEndVertical,
   AlignStartHorizontal, AlignCenterHorizontal, AlignEndHorizontal,
 } from 'lucide-react'
-import { auth } from '@/lib/firebase/auth'
+import { useAuth } from '@/components/auth/AuthProvider'
 import { cn } from '@/lib/utils/cn'
 import ElementPalette from './ElementPalette'
 import BuilderCanvas  from './BuilderCanvas'
@@ -35,6 +34,8 @@ type SaveStatus = 'idle' | 'saving' | 'saved' | 'error'
 export default function BuilderClient({ eventId, templateId }: { eventId: string; templateId: string }) {
   const [token, setToken] = useState('')
   const [uid, setUid]     = useState('')
+
+  const { user, getToken } = useAuth()
 
   const [loading, setLoading] = useState(true)
   const [loadErr, setLoadErr] = useState<string | null>(null)
@@ -62,9 +63,20 @@ export default function BuilderClient({ eventId, templateId }: { eventId: string
   const [isMobile, setIsMobile] = useState(false)
 
   // ── Auth token ───────────────────────────────────────────────────────────────
-  useEffect(() => onIdTokenChanged(auth, async u => {
-    if (u) { setUid(u.uid); setToken(await u.getIdToken()) }
-  }), [])
+  useEffect(() => {
+    if (user === undefined) return
+    let cancelled = false
+    const run = async () => {
+      if (user) {
+        setUid(user.uid)
+        const t = await getToken()
+        if (cancelled || !t) return
+        setToken(t)
+      }
+    }
+    run()
+    return () => { cancelled = true }
+  }, [user, getToken])
 
   // ── Responsive (view-only on mobile) ──────────────────────────────────────────
   useEffect(() => {

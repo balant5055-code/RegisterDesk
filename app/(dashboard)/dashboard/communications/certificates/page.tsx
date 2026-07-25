@@ -2,8 +2,7 @@
 
 import { useState, useEffect }     from 'react'
 import { useRouter }               from 'next/navigation'
-import { onAuthStateChanged }      from 'firebase/auth'
-import { auth }                    from '@/lib/firebase/auth'
+import { useAuth }                 from '@/components/auth/AuthProvider'
 import { Award, Download, Mail, AlertCircle, Loader2, ExternalLink } from 'lucide-react'
 import type {
   OrganizerCertificatesResponse,
@@ -41,24 +40,31 @@ export default function CertificatesDashboardPage() {
   const [loading, setLoading] = useState(true)
   const [error,   setError]   = useState<string | null>(null)
 
+  const { user, getToken } = useAuth()
+
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, async user => {
+    if (user === undefined) return
+    let cancelled = false
+    const run = async () => {
       if (!user) { setLoading(false); return }
       try {
-        const token = await user.getIdToken()
+        const token = await getToken()
+        if (cancelled || !token) return
         const res   = await fetch('/api/organizer/certificates', {
           headers: { Authorization: `Bearer ${token}` },
         })
         if (!res.ok) throw new Error('Failed to load certificates')
+        if (cancelled) return
         setData(await res.json() as OrganizerCertificatesResponse)
       } catch (e) {
-        setError(e instanceof Error ? e.message : 'Failed to load certificates')
+        if (!cancelled) setError(e instanceof Error ? e.message : 'Failed to load certificates')
       } finally {
-        setLoading(false)
+        if (!cancelled) setLoading(false)
       }
-    })
-    return unsub
-  }, [])
+    }
+    run()
+    return () => { cancelled = true }
+  }, [user, getToken])
 
   const certs: SerializedCertificateRecord[] = data?.certificates ?? []
 

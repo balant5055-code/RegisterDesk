@@ -2,8 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import Link from 'next/link'
-import { onAuthStateChanged } from 'firebase/auth'
-import { auth }               from '@/lib/firebase/auth'
+import { useAuth }            from '@/components/auth/AuthProvider'
 import { cn }                 from '@/lib/utils/cn'
 import {
   AlertCircle, BadgeCheck, Building2, ChevronLeft,
@@ -148,28 +147,37 @@ export default function PayoutProfilePage() {
   // Track initial form to detect "first save" for the success message
   const savedOnce = useRef(false)
 
+  const { user, getToken } = useAuth()
+
   // ── Load ──────────────────────────────────────────────────────────────────
 
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, async user => {
+    if (user === undefined) return
+    let cancelled = false
+    const run = async () => {
       if (!user) { setProfile(null); return }
       try {
-        const t   = await user.getIdToken()
+        const t   = await getToken()
+        if (cancelled || !t) return
         setToken(t)
         const res = await fetch('/api/organizer/payout-profile', {
           headers: { Authorization: `Bearer ${t}` },
         })
         if (!res.ok) throw new Error(`HTTP ${res.status}`)
         const data = await res.json() as PayoutProfileGetResponse
+        if (cancelled) return
         setProfile(data.profile)
         if (data.profile) setForm(profileToForm(data.profile))
       } catch (e) {
-        setLoadError(e instanceof Error ? e.message : 'Failed to load payout profile.')
-        setProfile(null)
+        if (!cancelled) {
+          setLoadError(e instanceof Error ? e.message : 'Failed to load payout profile.')
+          setProfile(null)
+        }
       }
-    })
-    return unsub
-  }, [])
+    }
+    run()
+    return () => { cancelled = true }
+  }, [user, getToken])
 
   const setField = useCallback(<K extends keyof FormState>(key: K, val: FormState[K]) => {
     setForm(prev => ({ ...prev, [key]: val }))

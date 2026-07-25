@@ -150,6 +150,8 @@ function LogRow({
                 onClick={() => setExpanded(e => !e)}
                 className="flex items-center gap-1 text-[12px] text-muted-foreground hover:text-foreground"
                 title={expanded ? 'Hide error' : 'Show error'}
+                aria-label={expanded ? 'Hide error detail' : 'Show error detail'}
+                aria-expanded={expanded}
               >
                 {expanded ? <ChevronUp className="size-3.5" /> : <ChevronDown className="size-3.5" />}
               </button>
@@ -357,7 +359,7 @@ export function EmailLogsClient() {
 
         {loading && (
           <div className="flex items-center justify-center gap-3 py-16">
-            <Loader2 className="size-5 animate-spin text-muted-foreground" />
+            <Loader2 className="size-5 animate-spin text-muted-foreground motion-reduce:animate-none" />
             <p className="text-[14px] text-muted-foreground">Loading email logs…</p>
           </div>
         )}
@@ -396,6 +398,7 @@ export function EmailLogsClient() {
                   {['Email Type', 'Event', 'Recipient', 'Status', 'Sent At', ''].map(h => (
                     <th
                       key={h}
+                      scope="col"
                       className="py-3 pl-4 pr-3 text-left text-[12px] font-semibold uppercase tracking-[0.07em] text-muted-foreground first:pl-4 last:pr-4"
                     >
                       {h}

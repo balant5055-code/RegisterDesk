@@ -50,5 +50,5 @@ export function certificateTemplate(p: CertificateEmailParams): { subject: strin
     </p>
   `
 
-  return { subject, html: emailShell(subject, body) }
+  return { subject, html: emailShell(subject, body, undefined, p.branding) }
 }

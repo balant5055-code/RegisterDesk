@@ -16,6 +16,10 @@ export interface PublicFeesConfig {
   feeCollectionMethod:    FeeCollectionMethod
   platformFeeDisplayName: string
   gstDescription:         string
+  // RD-PAYMENT-02 Phase 7 — the platform pricing-engine gate, surfaced to the client so the
+  // Event Builder can offer the "Attendee Pays Fees" selection ONLY when it is active.
+  // Defaults false (dormant); resolved server-side from platformSettings.
+  pricingEngineEnabled:   boolean
 }
 
 // Representative starter platform rate used when no global override is set — mirrors
@@ -36,5 +40,6 @@ export function defaultPublicFeesConfig(): PublicFeesConfig {
     feeCollectionMethod:    f.feeCollectionMethod,
     platformFeeDisplayName: f.platformFeeDisplayName,
     gstDescription:         f.gstDescription,
+    pricingEngineEnabled:   false,   // dormant until resolved from platformSettings
   }
 }

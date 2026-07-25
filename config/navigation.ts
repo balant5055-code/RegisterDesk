@@ -4,7 +4,7 @@ import {
   LayoutDashboard, Activity, Building2, Wallet, BarChart3,
   AlertTriangle, ClipboardCheck, ShieldAlert, PlusCircle, Undo2,
   Globe, SlidersHorizontal, ArrowRightLeft, ScrollText, KeyRound, Bell, Radio,
-  Gauge, LifeBuoy, Search, Boxes, FileText,
+  Gauge, LifeBuoy, Search, Boxes, FileText, Receipt,
 } from 'lucide-react'
 
 // ─── Route constants ─────────────────────────────────────────────────────────
@@ -49,7 +49,9 @@ export const ROUTES = {
   // GA-2 command centers + support (added to grouped nav in GA-2 S7)
   ADMIN_OPERATIONS_CENTER:     '/admin/operations-center',
   ADMIN_PLATFORM_MONITOR:      '/admin/platform-monitor',
+  ADMIN_COMMUNICATION_CENTER:  '/admin/communication-center',
   ADMIN_LICENSE_CENTER:        '/admin/license-center',
+  ADMIN_PRICING_OPS:           '/admin/pricing-ops',
   ADMIN_SEARCH:                '/admin/search',
   ADMIN_SUPPORT:               '/admin/support',
 
@@ -106,48 +108,56 @@ export interface AdminNavGroup {
   items: AdminNavItem[]
 }
 
-/** Compact primary navigation — always-visible hero links in the top bar (md+).
- *  High-traffic destinations; the full grouped IA lives under "More ▼" below. */
-export const ADMIN_PRIMARY_NAV: AdminNavItem[] = [
-  { label: 'Dashboard',  href: ROUTES.ADMIN_DASHBOARD,        icon: LayoutDashboard, exact: true },
-  { label: 'Operations', href: ROUTES.ADMIN_OPERATIONS_CENTER, icon: Boxes },
-  { label: 'Organizers', href: ROUTES.ADMIN_ORGANIZERS,       icon: Building2 },
-  { label: 'Finance',    href: ROUTES.ADMIN_FINANCE,          icon: Wallet, exact: true },
-  { label: 'Support',    href: ROUTES.ADMIN_SUPPORT,          icon: LifeBuoy },
-]
-
 /**
- * Enterprise grouped navigation (GA-2 S7 consolidation). Replaces the ad-hoc
- * "More" groups with one coherent Information Architecture. Every item is an
- * EXISTING page — nothing is invented. Deep-link-only destinations (Organizer 360,
- * Event 360, Participant 360) are intentionally NOT listed here: they have no list
- * route and are reached from Organizers / Global Search / the Support workspace.
+ * RD-ADMIN-01 — Enterprise admin sidebar Information Architecture. THE single source
+ * of truth for the admin shell's left sidebar. One coherent, collapsible-group IA that
+ * scales to 100+ pages: every existing admin LIST page belongs to exactly one group,
+ * appears exactly once (no hero duplication), and nothing is orphaned. Add / reorder
+ * admin destinations here only — the layout renders these groups directly.
+ *
+ * Every item is an EXISTING page. Deep-link-only destinations (Organizer 360
+ * `/admin/organizers/[uid]`, Event 360 `/admin/events/[slug]`) are intentionally NOT
+ * listed — they are dynamic detail routes with no list index, reached from Organizers /
+ * Global Search / the Support workspace. `/admin/login` is an unauthenticated auth page,
+ * correctly excluded from the authenticated shell.
  */
-export const ADMIN_MORE_NAV: AdminNavGroup[] = [
+export const ADMIN_SIDEBAR_NAV: AdminNavGroup[] = [
+  {
+    label: 'Overview',
+    items: [
+      { label: 'Dashboard', href: ROUTES.ADMIN_DASHBOARD, icon: LayoutDashboard, exact: true },
+      { label: 'Analytics', href: ROUTES.ADMIN_ANALYTICS,  icon: BarChart3 },
+    ],
+  },
   {
     label: 'Operations',
     items: [
       { label: 'Operations Center', href: ROUTES.ADMIN_OPERATIONS_CENTER, icon: Boxes },
       { label: 'Platform Monitor',  href: ROUTES.ADMIN_PLATFORM_MONITOR,  icon: Gauge },
       { label: 'Operations Health', href: ROUTES.ADMIN_OPERATIONS,        icon: Activity },
-      { label: 'Analytics',         href: ROUTES.ADMIN_ANALYTICS,         icon: BarChart3 },
-      { label: 'Reports',           href: ROUTES.ADMIN_FINANCE_REPORTS,   icon: FileText },
-    ],
-  },
-  {
-    label: 'Organizations',
-    items: [
-      { label: 'Organizers', href: ROUTES.ADMIN_ORGANIZERS, icon: Building2 },
     ],
   },
   {
     label: 'Commerce',
     items: [
-      { label: 'Finance',        href: ROUTES.ADMIN_FINANCE,         icon: Wallet, exact: true },
-      { label: 'License Center', href: ROUTES.ADMIN_LICENSE_CENTER,  icon: KeyRound },
-      { label: 'Licenses',       href: ROUTES.ADMIN_LICENSES,        icon: KeyRound },
-      { label: 'Top-ups',        href: ROUTES.ADMIN_WALLET_TOPUPS,   icon: PlusCircle },
-      { label: 'Clawbacks',      href: ROUTES.ADMIN_CLAWBACKS,       icon: Undo2 },
+      { label: 'License Center',      href: ROUTES.ADMIN_LICENSE_CENTER, icon: KeyRound },
+      { label: 'Licenses',            href: ROUTES.ADMIN_LICENSES,       icon: KeyRound },
+      { label: 'Pricing Operations',  href: ROUTES.ADMIN_PRICING_OPS,    icon: Receipt },
+    ],
+  },
+  {
+    label: 'Finance',
+    items: [
+      { label: 'Finance',         href: ROUTES.ADMIN_FINANCE,         icon: Wallet, exact: true },
+      { label: 'Finance Reports', href: ROUTES.ADMIN_FINANCE_REPORTS, icon: FileText },
+      { label: 'Top-ups',         href: ROUTES.ADMIN_WALLET_TOPUPS,   icon: PlusCircle },
+      { label: 'Clawbacks',       href: ROUTES.ADMIN_CLAWBACKS,       icon: Undo2 },
+    ],
+  },
+  {
+    label: 'Organizers',
+    items: [
+      { label: 'Organizers', href: ROUTES.ADMIN_ORGANIZERS, icon: Building2 },
     ],
   },
   {
@@ -155,18 +165,24 @@ export const ADMIN_MORE_NAV: AdminNavGroup[] = [
     items: [
       { label: 'Approvals',  href: ROUTES.ADMIN_EVENT_APPROVALS, icon: ClipboardCheck },
       { label: 'Moderation', href: ROUTES.ADMIN_MODERATION,      icon: ShieldAlert },
-      { label: 'Audit Log',  href: ROUTES.ADMIN_AUDIT,           icon: ScrollText },
       { label: 'Incidents',  href: ROUTES.ADMIN_INCIDENTS,       icon: AlertTriangle },
+      { label: 'Audit Log',  href: ROUTES.ADMIN_AUDIT,           icon: ScrollText },
     ],
   },
   {
     label: 'Platform',
     items: [
-      { label: 'Communications', href: ROUTES.ADMIN_COMMUNICATIONS,       icon: Radio },
-      { label: 'Reminders',      href: ROUTES.ADMIN_REMINDERS,            icon: Bell },
-      { label: 'Domains',        href: ROUTES.ADMIN_DOMAINS,              icon: Globe },
-      { label: 'Configuration',  href: ROUTES.ADMIN_BUSINESS_CONFIG,      icon: SlidersHorizontal },
-      { label: 'ID Migration',   href: ROUTES.ADMIN_IDENTIFIER_MIGRATION, icon: ArrowRightLeft },
+      { label: 'Communication Center', href: ROUTES.ADMIN_COMMUNICATION_CENTER, icon: Radio },
+      { label: 'Communications',       href: ROUTES.ADMIN_COMMUNICATIONS,       icon: Radio },
+      { label: 'Reminders',            href: ROUTES.ADMIN_REMINDERS,            icon: Bell },
+      { label: 'Domains',              href: ROUTES.ADMIN_DOMAINS,              icon: Globe },
+    ],
+  },
+  {
+    label: 'System',
+    items: [
+      { label: 'Configuration', href: ROUTES.ADMIN_BUSINESS_CONFIG,      icon: SlidersHorizontal },
+      { label: 'ID Migration',  href: ROUTES.ADMIN_IDENTIFIER_MIGRATION, icon: ArrowRightLeft },
     ],
   },
   {
@@ -179,10 +195,9 @@ export const ADMIN_MORE_NAV: AdminNavGroup[] = [
 ]
 
 /** Flat, de-duplicated list of every admin destination (by href) — for active-state
- *  lookups. Hero links intentionally repeat inside their groups for quick access, so
- *  this helper collapses them to one entry per unique route. */
+ *  lookups and command-palette style enumeration. Derived from the ONE sidebar IA above. */
 export const ADMIN_ALL_NAV: AdminNavItem[] = (() => {
   const seen = new Set<string>()
-  return [...ADMIN_PRIMARY_NAV, ...ADMIN_MORE_NAV.flatMap(g => g.items)]
+  return ADMIN_SIDEBAR_NAV.flatMap(g => g.items)
     .filter(item => (seen.has(item.href) ? false : (seen.add(item.href), true)))
 })()

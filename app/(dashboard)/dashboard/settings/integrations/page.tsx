@@ -1,8 +1,8 @@
 'use client'
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { onAuthStateChanged, type User } from 'firebase/auth'
-import { auth } from '@/lib/firebase/auth'
+import { type User } from 'firebase/auth'
+import { useAuth } from '@/components/auth/AuthProvider'
 import { cn } from '@/lib/utils/cn'
 import { useToast } from '@/components/ui/Toast'
 import { useConfirm } from '@/components/ui/ConfirmDialog'
@@ -23,6 +23,8 @@ export default function IntegrationsPage() {
   const [deliveries, setDeliveries] = useState<WebhookDeliveryView[]>([])
   const [loading, setLoading] = useState(true)
   const [error,   setError]   = useState<string | null>(null)
+
+  const { user } = useAuth()
 
   const authedFetch = useCallback(async (path: string, init?: RequestInit) => {
     const u = userRef.current
@@ -49,13 +51,16 @@ export default function IntegrationsPage() {
   }, [authedFetch])
 
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, user => {
+    if (user === undefined) return
+    let cancelled = false
+    const run = async () => {
       userRef.current = user
       if (!user) { setError('You must be signed in.'); setLoading(false); return }
-      void reload()
-    })
-    return unsub
-  }, [reload])
+      if (!cancelled) void reload()
+    }
+    run()
+    return () => { cancelled = true }
+  }, [user, reload])
 
   if (loading) return <div className="flex justify-center py-20"><Loader2 className="size-6 animate-spin text-muted-foreground" /></div>
 

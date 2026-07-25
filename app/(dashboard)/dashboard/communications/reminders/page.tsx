@@ -86,7 +86,7 @@ export default function RemindersPage() {
     } catch (e) { setError(e instanceof Error ? e.message : 'Cancel failed') }
   }
 
-  if (loading) return <div className="flex justify-center py-20"><Loader2 className="size-6 animate-spin text-muted-foreground" /></div>
+  if (loading) return <div className="flex justify-center py-20"><Loader2 className="size-6 animate-spin text-muted-foreground motion-reduce:animate-none" /></div>
 
   return (
     <div className="space-y-6 p-5 sm:p-6">
@@ -126,13 +126,13 @@ export default function RemindersPage() {
         <table className="w-full min-w-[820px] text-[13px]">
           <thead>
             <tr className="border-b border-border bg-muted/40 text-left text-[12px] font-semibold text-muted-foreground">
-              <th className="px-3 py-2.5">Reminder</th>
-              <th className="px-3 py-2.5">Event</th>
-              <th className="px-3 py-2.5">Audience</th>
-              <th className="px-3 py-2.5">Send at</th>
-              <th className="px-3 py-2.5">Status</th>
-              <th className="px-3 py-2.5">Sent</th>
-              <th className="px-3 py-2.5 text-right">Actions</th>
+              <th scope="col" className="px-3 py-2.5">Reminder</th>
+              <th scope="col" className="px-3 py-2.5">Event</th>
+              <th scope="col" className="px-3 py-2.5">Audience</th>
+              <th scope="col" className="px-3 py-2.5">Send at</th>
+              <th scope="col" className="px-3 py-2.5">Status</th>
+              <th scope="col" className="px-3 py-2.5">Sent</th>
+              <th scope="col" className="px-3 py-2.5 text-right">Actions</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-border">

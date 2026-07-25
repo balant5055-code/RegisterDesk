@@ -195,19 +195,37 @@ export async function applyLifecycleTransition(
   const seo     = (details.seo as Record<string, unknown>) ?? {}
   const slug    = typeof seo.urlSlug === 'string' && seo.urlSlug ? seo.urlSlug : null
 
-  // ── 6. Atomic batch: update draft + published event doc ───────────────────
-  const batch = adminDb.batch()
-  batch.update(draftRef, draftUpdate)
-
-  if (slug) {
-    const eventRef  = adminDb.collection('events').doc(slug)
-    const eventSnap = await eventRef.get()
-    if (eventSnap.exists) {
-      batch.update(eventRef, eventUpdate)
+  // ── 6. Atomic commit (M3 — TOCTOU-safe) ───────────────────────────────────
+  // Re-read + re-validate the draft's lifecycle INSIDE a transaction before writing, so
+  // two concurrent transitions can't both pass validation against stale state and
+  // interleave into an illegal lifecycle. Firestore additionally aborts+retries if the
+  // draft (or the public event doc) changes between the transactional read and commit.
+  // Same state machine, same update payloads — only the blind batch became a transaction.
+  const eventRef = slug ? adminDb.collection('events').doc(slug) : null
+  const txnFailure = await adminDb.runTransaction(async (txn): Promise<TransitionResult | null> => {
+    const freshDraft = await txn.get(draftRef)
+    if (!freshDraft.exists) {
+      return { success: false, error: 'Event not found', statusCode: 404 }
     }
-  }
-
-  await batch.commit()
+    const freshStatus = deriveLifecycleStatus(freshDraft.data() as Record<string, unknown>)
+    if (!isValidTransition(freshStatus, newStatus)) {
+      return {
+        success:    false,
+        error:      `Cannot transition from '${freshStatus}' to '${newStatus}'`,
+        statusCode: 409,
+      }
+    }
+    // All reads must precede writes: read the public event doc before staging updates.
+    let eventExists = false
+    if (eventRef) {
+      const eventSnap = await txn.get(eventRef)
+      eventExists = eventSnap.exists
+    }
+    txn.update(draftRef, draftUpdate)
+    if (eventRef && eventExists) txn.update(eventRef, eventUpdate)
+    return null   // success — writes staged for commit
+  })
+  if (txnFailure) return txnFailure   // a concurrent change / precondition failed the transition
 
   // ── 7. Audit (fire-and-forget) — archive / restore only ───────────────────
   // Uses the existing organizer audit collection (teamAuditLogs), the same one the

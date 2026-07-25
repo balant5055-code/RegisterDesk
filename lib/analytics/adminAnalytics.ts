@@ -5,6 +5,7 @@
 
 import { AggregateField } from 'firebase-admin/firestore'
 import { adminDb } from '@/lib/firebase/admin'
+import { organizersQuery } from '@/lib/organizer/identity'
 
 export interface Point { label: string; value: number }
 
@@ -56,8 +57,8 @@ export async function getAdminAnalytics(): Promise<AdminAnalytics> {
   // ── Platform totals (aggregation only) ──
   const [organizers, publishedEvents, campaigns, totalRegistrations,
     lifetimeGrossPaise, lifetimeFeesPaise, lifetimeNetPaise, pendingSettlementPaise] = await Promise.all([
-    // Organizers = accounts with role 'organizer' (excludes admins / other roles).
-    countOf(adminDb.collection('users').where('role', '==', 'organizer')),
+    // Organizers = accounts with role 'organizer' (canonical: lib/organizer/identity).
+    countOf(organizersQuery(adminDb)),
     countOf(events.where('lifecycleStatus', '==', 'published')),
     countOf(adminDb.collection('donationCampaigns')),
     countOf(adminDb.collection('registrations')),

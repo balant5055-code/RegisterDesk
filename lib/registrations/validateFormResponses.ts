@@ -13,6 +13,7 @@
 
 import type {
   RegistrationFormDraft,
+  FormSection,
   FormField,
   ConditionalRule,
 } from '@/components/wizard/registrationFormConfig'
@@ -102,31 +103,82 @@ function passShowsField(field: FormField, passId: string): boolean {
   return Array.isArray(field.passVisibility) && field.passVisibility.includes(passId)
 }
 
-/**
- * Validates submitted form responses against the event's registration form.
- * Returns the FIRST validation error, or null when everything passes.
- *
- * Only fields the attendee actually saw are validated: filtered to this pass
- * (passVisibility) and to runtime-visible state (after conditional rules).
- */
-export function validateFormResponses(
-  form:      RegistrationFormDraft,
-  passId:    string,
-  responses: Record<string, unknown> | undefined,
-): FormValidationError | null {
-  const allFields = form.sections.flatMap(s => s.fields)
-  if (allFields.length === 0) return null
-
-  const rules: ConditionalRule[] = Array.isArray(form.conditionalRules) ? form.conditionalRules : []
-
-  // Build a string map of submitted values (the conditional evaluator and the
-  // client both operate on stringified values).
-  const values: Record<string, string> = {}
-  for (const f of allFields) {
-    values[f.id] = (responses?.[f.id] ?? '').toString()
+// Per-field format + explicit-rule check for a NON-EMPTY trimmed value.
+// Returns an error message (embedding the field label) or null. This is the ONE
+// place the rules live, so validateFormResponses (server, first error) and
+// collectFormErrors (client, all errors) can never diverge (RD-ATTENDEE-03A H3).
+function checkFieldValue(field: FormField, val: string): string | null {
+  switch (field.type) {
+    case 'email':
+      if (!isValidEmail(val)) return `${field.label} must be a valid email address`
+      break
+    case 'mobile':
+      if (!isValidPhone(val)) return `${field.label} must be a valid phone number`
+      break
+    case 'url':
+      if (!isValidUrl(val)) return `${field.label} must be a valid URL`
+      break
+    case 'number':
+      if (!Number.isFinite(Number(val))) return `${field.label} must be a number`
+      break
+    case 'dropdown':
+    case 'radio':
+      if (field.options.length > 0 && !isInOptions(val, field.options)) {
+        return `${field.label}: "${val}" is not a valid choice. Allowed values: ${field.options.join(', ')}.`
+      }
+      break
+    case 'yesno':
+      if (!isInOptions(val, ['Yes', 'No'])) return `${field.label} must be Yes or No`
+      break
+    default:
+      break
   }
 
+  const rule = field.validation ?? {}
+  const minLength = typeof rule.minLength === 'number' ? rule.minLength : null
+  const maxLength = typeof rule.maxLength === 'number' ? rule.maxLength : null
+  const min       = typeof rule.min === 'number' ? rule.min : null
+  const max       = typeof rule.max === 'number' ? rule.max : null
+  const pattern   = typeof rule.pattern === 'string' && rule.pattern ? rule.pattern : null
+
+  if (minLength !== null && val.length < minLength) return `${field.label} must be at least ${minLength} characters`
+  if (maxLength !== null && val.length > maxLength) return `${field.label} must be at most ${maxLength} characters`
+  if (min !== null || max !== null) {
+    const n = Number(val)
+    if (Number.isFinite(n)) {
+      if (min !== null && n < min) return `${field.label} must be at least ${min}`
+      if (max !== null && n > max) return `${field.label} must be at most ${max}`
+    }
+  }
+  if (pattern) {
+    try {
+      if (!new RegExp(pattern).test(val)) return `${field.label} is not in the expected format`
+    } catch {
+      // Invalid stored pattern — skip rather than reject a legitimate value.
+    }
+  }
+  return null
+}
+
+// Shared walk over the fields the attendee actually saw (filtered to this pass +
+// runtime-visible after conditional rules). `firstOnly` short-circuits for the server.
+function collectErrors(
+  sections:         FormSection[],
+  conditionalRules: ConditionalRule[] | undefined,
+  passId:           string,
+  responses:        Record<string, unknown> | undefined,
+  firstOnly:        boolean,
+): FormValidationError[] {
+  const allFields = sections.flatMap(s => s.fields)
+  if (allFields.length === 0) return []
+
+  const rules: ConditionalRule[] = Array.isArray(conditionalRules) ? conditionalRules : []
+
+  const values: Record<string, string> = {}
+  for (const f of allFields) values[f.id] = (responses?.[f.id] ?? '').toString()
+
   const states = computeFieldStates(allFields, rules, values)
+  const errors: FormValidationError[] = []
 
   for (const field of allFields) {
     if (!passShowsField(field, passId)) continue
@@ -137,91 +189,45 @@ export function validateFormResponses(
 
     if (!val) {
       if (st.required) {
-        return { fieldId: field.id, label: field.label, message: `${field.label} is required` }
+        errors.push({ fieldId: field.id, label: field.label, message: `${field.label} is required` })
+        if (firstOnly) return errors
       }
-      continue // optional + empty → nothing further to check
+      continue
     }
 
-    // ── Type-specific format checks ──────────────────────────────────────────
-    switch (field.type) {
-      case 'email':
-        if (!isValidEmail(val)) {
-          return { fieldId: field.id, label: field.label, message: `${field.label} must be a valid email address` }
-        }
-        break
-      case 'mobile':
-        if (!isValidPhone(val)) {
-          return { fieldId: field.id, label: field.label, message: `${field.label} must be a valid phone number` }
-        }
-        break
-      case 'url':
-        if (!isValidUrl(val)) {
-          return { fieldId: field.id, label: field.label, message: `${field.label} must be a valid URL` }
-        }
-        break
-      case 'number': {
-        const n = Number(val)
-        if (!Number.isFinite(n)) {
-          return { fieldId: field.id, label: field.label, message: `${field.label} must be a number` }
-        }
-        break
-      }
-      case 'dropdown':
-      case 'radio':
-        if (field.options.length > 0 && !isInOptions(val, field.options)) {
-          // Surface the allowed values AND what was entered, so the fix is obvious
-          // (both on the public form and in a bulk-import validation preview).
-          return {
-            fieldId: field.id,
-            label:   field.label,
-            message: `${field.label}: "${val}" is not a valid choice. Allowed values: ${field.options.join(', ')}.`,
-          }
-        }
-        break
-      case 'yesno':
-        if (!isInOptions(val, ['Yes', 'No'])) {
-          return { fieldId: field.id, label: field.label, message: `${field.label} must be Yes or No` }
-        }
-        break
-      default:
-        break
-    }
-
-    // ── Explicit validation rules configured by the builder (applied when set) ─
-    const rule = field.validation ?? {}
-    const minLength = typeof rule.minLength === 'number' ? rule.minLength : null
-    const maxLength = typeof rule.maxLength === 'number' ? rule.maxLength : null
-    const min       = typeof rule.min === 'number' ? rule.min : null
-    const max       = typeof rule.max === 'number' ? rule.max : null
-    const pattern   = typeof rule.pattern === 'string' && rule.pattern ? rule.pattern : null
-
-    if (minLength !== null && val.length < minLength) {
-      return { fieldId: field.id, label: field.label, message: `${field.label} must be at least ${minLength} characters` }
-    }
-    if (maxLength !== null && val.length > maxLength) {
-      return { fieldId: field.id, label: field.label, message: `${field.label} must be at most ${maxLength} characters` }
-    }
-    if (min !== null || max !== null) {
-      const n = Number(val)
-      if (Number.isFinite(n)) {
-        if (min !== null && n < min) {
-          return { fieldId: field.id, label: field.label, message: `${field.label} must be at least ${min}` }
-        }
-        if (max !== null && n > max) {
-          return { fieldId: field.id, label: field.label, message: `${field.label} must be at most ${max}` }
-        }
-      }
-    }
-    if (pattern) {
-      try {
-        if (!new RegExp(pattern).test(val)) {
-          return { fieldId: field.id, label: field.label, message: `${field.label} is not in the expected format` }
-        }
-      } catch {
-        // Invalid stored pattern — skip rather than reject a legitimate value.
-      }
+    const message = checkFieldValue(field, val)
+    if (message) {
+      errors.push({ fieldId: field.id, label: field.label, message })
+      if (firstOnly) return errors
     }
   }
 
-  return null
+  return errors
+}
+
+/**
+ * Validates submitted form responses against the event's registration form.
+ * Returns the FIRST validation error, or null when everything passes. Authoritative
+ * server gate. Only fields the attendee actually saw are validated.
+ */
+export function validateFormResponses(
+  form:      RegistrationFormDraft,
+  passId:    string,
+  responses: Record<string, unknown> | undefined,
+): FormValidationError | null {
+  return collectErrors(form.sections, form.conditionalRules, passId, responses, true)[0] ?? null
+}
+
+/**
+ * Client-facing twin of validateFormResponses: returns ALL errors (not just the
+ * first) using the IDENTICAL rules, so the on-form validation matches the server
+ * exactly with no duplicated logic (RD-ATTENDEE-03A H3).
+ */
+export function collectFormErrors(
+  sections:         FormSection[],
+  conditionalRules: ConditionalRule[] | undefined,
+  passId:           string,
+  responses:        Record<string, unknown> | undefined,
+): FormValidationError[] {
+  return collectErrors(sections, conditionalRules, passId, responses, false)
 }

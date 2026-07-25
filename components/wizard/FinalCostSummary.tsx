@@ -22,12 +22,14 @@ import {
 } from 'lucide-react'
 import { useCallback, useEffect, useState, type ReactNode } from 'react'
 import { cn } from '@/lib/utils/cn'
-import {
-  isUnlimited,
-  type EventLicenseTier,
-} from '@/lib/licensing/eventLicense'
-import { useLicenseCatalog } from '@/lib/licensing/licenseCatalogClient'
+import { isUnlimited, type AnyEventLicenseTier } from '@/lib/licensing/eventLicense'
+import { useCurrentLicenseCatalogView } from '@/lib/licensing/licenseCatalogClient'
 import { auth } from '@/lib/firebase/auth'
+import { isChannelImplemented } from '@/lib/communications/health/channels'
+
+// RD-COMMS-01 Phase 2: SMS has no delivery transport — it must never be priced or added
+// to the wallet estimate as if it will send.
+const SMS_AVAILABLE = isChannelImplemented('sms')
 
 const INR = new Intl.NumberFormat('en-IN', {
   style: 'currency', currency: 'INR', minimumFractionDigits: 0, maximumFractionDigits: 2,
@@ -36,7 +38,7 @@ const inr        = (rupees: number) => INR.format(rupees)
 const fromPaise  = (paise: number) => INR.format(paise / 100)
 
 export interface FinalCostSummaryProps {
-  tier:               EventLicenseTier
+  tier:               AnyEventLicenseTier
   isFreeEvent:        boolean
   walletBalancePaise: number | null
   walletLoading:      boolean
@@ -81,13 +83,14 @@ export function FinalCostSummary({
   needsWalletCheck, walletReady, onAddFunds,
   eventId, onCouponChange,
 }: FinalCostSummaryProps) {
-  const catalog      = useLicenseCatalog()
-  const def          = catalog[tier]
-  const maxReg       = def.limits.maxRegistrations
+  // RD-LICENSE-GA-03: resolve from the CURRENT-version view (V1 today, V2 after cutover).
+  const view         = useCurrentLicenseCatalogView()
+  const def          = view.find(e => e.tier === tier) ?? view[0]
+  const maxReg       = def.registrationLimit
   const regLimit     = isUnlimited(maxReg) ? 'Unlimited' : maxReg.toLocaleString('en-IN')
 
-  // ── License payment (Pay Now) — wallet-first split, mirrors the purchase route.
-  const payablePaise = def.contactSales ? null : def.licensePricePaise   // null = contact sales
+  // ── License payment (Pay Now) — wallet-first split, charges the OFFER price.
+  const payablePaise = def.contactSales ? null : def.licensePricePaise   // null = contact sales (licensePricePaise === offer)
   const balancePaise = walletBalancePaise ?? 0
   const payNowPaise  = payablePaise ?? 0
   const isPaid       = payNowPaise > 0
@@ -139,7 +142,7 @@ export function FinalCostSummary({
   // ── Communication (pay-as-you-use) — informational, never part of Pay Now.
   const commRupees   =
     (whatsappEnabled ? whatsappCostRupees : 0) +
-    (smsEnabled      ? smsCostRupees      : 0) +
+    (SMS_AVAILABLE && smsEnabled ? smsCostRupees : 0) +   // SMS has no transport → never estimated
     (certEnabled     ? certCostRupees     : 0)
   // ── Approval-flow timeline (display only). Free events skip the payment node.
   const timeline: Array<{ Icon: typeof Send; label: string; sub: string }> = [
@@ -190,8 +193,8 @@ export function FinalCostSummary({
           />
           <Row
             label={<span className="inline-flex items-center gap-1.5"><Smartphone className="size-3 text-muted-foreground/60" aria-hidden />SMS</span>}
-            value={smsEnabled ? inr(smsCostRupees) : 'Off'}
-            muted={!smsEnabled}
+            value={SMS_AVAILABLE ? (smsEnabled ? inr(smsCostRupees) : 'Off') : 'Unavailable'}
+            muted={!SMS_AVAILABLE || !smsEnabled}
           />
           <Row
             label={<span className="inline-flex items-center gap-1.5"><Award className="size-3 text-muted-foreground/60" aria-hidden />Certificates</span>}

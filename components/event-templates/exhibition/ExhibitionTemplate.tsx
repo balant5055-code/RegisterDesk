@@ -1,12 +1,14 @@
 'use client'
 
-import { XCircle, CheckCircle, Lock, Clock3, AlarmClock, Languages, Shirt, Building2, ExternalLink } from 'lucide-react'
+import { AlarmClock, Languages, Shirt, Building2, ExternalLink } from 'lucide-react'
 import type { EventDetailProps } from '@/app/events/[slug]/EventDetailClient'
+import { LinkedCampaignSection } from '@/app/events/[slug]/EventDetailClient'
+import { EventInfoSection } from '@/components/event-templates/shared/ui/EventInfoSection'
 import type { ExhibitionDetails } from '@/components/wizard/eventDetailsConfig'
-import { EventPageLayout }          from '@/components/event-templates/shared/ui/EventPageLayout'
-import { StickyMobileCTA }          from '@/components/event-templates/shared/registration/StickyMobileCTA'
+import { EventDetailsFramework }    from '@/components/event-templates/EventDetailsFramework'
 import { AddToCalendarButton }      from '@/components/event-templates/shared/ui/AddToCalendarButton'
 import { ExhibitionHero }           from './ExhibitionHero'
+import { TicketsPreviewBar }        from '@/components/event-templates/shared/registration/TicketsPreviewBar'
 import { ExhibitionExhibitors }     from './ExhibitionExhibitors'
 import { ExhibitionFloorPlan }      from './ExhibitionFloorPlan'
 import { ExhibitionCategories }     from './ExhibitionCategories'
@@ -25,7 +27,7 @@ import { SharedGallery }             from '@/components/event-templates/shared/m
 
 export function ExhibitionTemplate(props: EventDetailProps) {
   const {
-    slug, lifecycleStatus: ls, cancelReason,
+    slug,
     registrationOpen, regClosedMessage,
     title, tagline, description,
     bannerUrl, gallery, promoVideoUrl,
@@ -55,49 +57,17 @@ export function ExhibitionTemplate(props: EventDetailProps) {
   const hasActivePasses = passes.filter(p => p.status !== 'inactive').length > 0
 
   return (
-    <EventPageLayout eventType={props.eventType} title={title}>
-
-      {/* ── Lifecycle banners ────────────────────────────────────────────────── */}
-      {ls === 'cancelled' && (
-        <div className="border-b border-red-200 bg-red-50 px-5 py-2.5">
-          <div className="mx-auto flex max-w-7xl items-center gap-2.5">
-            <XCircle className="size-4 shrink-0 text-red-500" aria-hidden />
-            <p className="text-xs font-bold text-red-700">
-              This exhibition has been cancelled.{cancelReason && ` ${cancelReason}`}
-            </p>
-          </div>
-        </div>
-      )}
-      {ls === 'completed' && (
-        <div className="border-b border-sky-200 bg-sky-50 px-5 py-2.5">
-          <div className="mx-auto flex max-w-7xl items-center gap-2.5">
-            <CheckCircle className="size-4 shrink-0 text-sky-500" aria-hidden />
-            <p className="text-xs font-semibold text-sky-700">
-              This exhibition has concluded. Thank you for visiting!
-            </p>
-          </div>
-        </div>
-      )}
-      {ls === 'registration_closed' && (
-        <div className="border-b border-amber-200 bg-amber-50 px-5 py-2.5">
-          <div className="mx-auto flex max-w-7xl items-center gap-2.5">
-            <Lock className="size-4 shrink-0 text-amber-500" aria-hidden />
-            <p className="text-xs font-semibold text-amber-700">
-              Visitor registration is currently closed for this exhibition.
-            </p>
-          </div>
-        </div>
-      )}
-      {ls === 'postponed' && (
-        <div className="border-b border-orange-200 bg-orange-50 px-5 py-2.5">
-          <div className="mx-auto flex max-w-7xl items-center gap-2.5">
-            <Clock3 className="size-4 shrink-0 text-orange-500" aria-hidden />
-            <p className="text-xs font-semibold text-orange-700">
-              This exhibition has been postponed.
-            </p>
-          </div>
-        </div>
-      )}
+    <EventDetailsFramework
+      props={props}
+      eventType={props.eventType}
+      shell="page-layout"
+      lifecycleTone="light"
+      cancelledMessage="This exhibition has been cancelled."
+      completedMessage="This exhibition has concluded. Thank you for visiting!"
+      registrationClosedMessage="Visitor registration is currently closed for this exhibition."
+      postponedMessage="This exhibition has been postponed."
+      registrationTargetId="register"
+    >
 
       {/* ── 1. Hero ─────────────────────────────────────────────────────────── */}
       <ExhibitionHero
@@ -106,6 +76,7 @@ export function ExhibitionTemplate(props: EventDetailProps) {
         eventSubtype={props.eventSubtype}
         bannerUrl={bannerUrl}
         startDate={startDate}
+        startTime={props.startTime}
         endDate={endDate}
         venueName={venueName}
         physical={physical}
@@ -116,7 +87,11 @@ export function ExhibitionTemplate(props: EventDetailProps) {
         isFreeEvent={isFreeEvent}
         passes={passes}
         slug={slug}
+        hasFloorPlan={hasFloorPlan}
       />
+
+      {/* Compact registration preview (03B.3 additive) — early tickets visibility, no reorder. */}
+      <TicketsPreviewBar passes={passes} isFreeEvent={isFreeEvent} registrationOpen={registrationOpen} targetId="register" />
 
       {/* ── 1b. Add to Calendar ─────────────────────────────────────────────── */}
       {startDate && (
@@ -295,14 +270,20 @@ export function ExhibitionTemplate(props: EventDetailProps) {
       )}
 
       {/* ── Sticky mobile CTA ────────────────────────────────────────────────── */}
-      <StickyMobileCTA
-        visible={true}
-        title={title}
-        isFreeEvent={isFreeEvent}
-        passes={passes}
-        registrationOpen={registrationOpen}
+      <EventInfoSection
+        language={props.language}
+        dressCode={props.dressCode}
+        timezone={props.timezone}
+        venueType={props.venueType}
+        online={props.online}
+        refundWindow={props.refundWindow}
+        refundPolicyUrl={props.refundPolicyUrl}
       />
 
-    </EventPageLayout>
+      {props.linkedCampaign && (
+        <LinkedCampaignSection campaign={props.linkedCampaign} eventSlug={slug} />
+      )}
+
+    </EventDetailsFramework>
   )
 }

@@ -4,7 +4,7 @@
 // from registration coupons (events/{slug}/coupons), ticket pricing, donation
 // campaigns, and marketplace discounts — different collection, different code path.
 
-import type { EventLicenseTier } from '@/lib/licensing/eventLicense'
+import type { AnyEventLicenseTier } from '@/lib/licensing/eventLicense'
 
 export type LicenseCouponType = 'percentage' | 'fixed' | 'free'
 
@@ -14,7 +14,7 @@ export type LicenseCouponLifecycle =
   | 'draft' | 'scheduled' | 'active' | 'paused' | 'expired' | 'archived'
 
 export interface LicenseCouponRestrictions {
-  tiers:       EventLicenseTier[]   // empty ⇒ all tiers
+  tiers:       AnyEventLicenseTier[]   // empty ⇒ all tiers (V1 or V2 tier ids)
   eventTypes:  string[]             // empty ⇒ all event types
   // Reserved for future expansion (validated as absent-ok today).
   countries?:  string[]
@@ -83,7 +83,10 @@ export type LicenseCouponValidation =
 
 /** Context the pure validator needs — resolved by the caller (route). */
 export interface LicenseCouponContext {
-  tier:                 EventLicenseTier
+  // RD-LICENSE-GA-02: the tier being purchased may be V1 or V2. Coupon RESTRICTIONS
+  // (which tiers a coupon applies to) remain V1 until Wave 3; a V2 purchase simply won't
+  // match a V1-only restriction.
+  tier:                 AnyEventLicenseTier
   eventType:            string | null
   pricePaise:           number            // effective (config-aware) base price
   organizerRedemptions: number            // this organizer's prior paid redemptions of this code

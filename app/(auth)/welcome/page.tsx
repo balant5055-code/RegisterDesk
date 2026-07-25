@@ -16,7 +16,8 @@ import {
 import { Button, Card, StatusChip, ProgressBar } from '@/components/ui'
 import { MarketingLogo } from '@/components/marketing/MarketingLogo'
 import { ROUTES } from '@/config/navigation'
-import { auth } from '@/lib/firebase/auth'
+import { useAuth } from '@/components/auth/AuthProvider'
+import { resolveAuthGuard } from '@/lib/auth/authGuard'
 import type { DashboardData } from '@/app/api/organizer/dashboard/route'
 import type { PayoutProfileGetResponse } from '@/lib/payout/types'
 
@@ -92,6 +93,11 @@ export default function WelcomePage() {
   const router  = useRouter()
   const reduced = !!useReducedMotion()
 
+  // RD-AUTH-01 Phase 4 (H-C): auth from the shared AuthProvider + the ONE canonical
+  // guard resolver (same as the dashboard layout) — no synchronous auth.currentUser read.
+  const { user } = useAuth()
+  const guard    = resolveAuthGuard(user)
+
   const [name, setName]           = useState('')
   const [ready, setReady]         = useState(false)
   const [progress, setProgress]   = useState(0)
@@ -103,11 +109,17 @@ export default function WelcomePage() {
   const [cancelled, setCancelled] = useState(false)
   const headingRef = useRef<HTMLHeadingElement>(null)
 
-  // Genuine loading — waits on two real API calls, with a short premium floor.
+  // Canonical guard (RD-AUTH-01 Phase 4 / H-C): redirect only once auth has resolved,
+  // from the shared AuthProvider state — never auth.currentUser synchronously on mount.
   useEffect(() => {
-    const user = auth.currentUser
-    if (!user) { router.replace(ROUTES.LOGIN); return }
-    if (!user.emailVerified) { router.replace(ROUTES.VERIFY_EMAIL); return }
+    if (guard.redirect) router.replace(guard.redirect)
+  }, [guard.redirect, router])
+
+  // Genuine loading — waits on two real API calls, with a short premium floor. Runs only
+  // after the canonical guard authorizes (auth resolved + email verified); the loading
+  // screen below covers the resolving / redirecting window.
+  useEffect(() => {
+    if (guard.status !== 'authorized' || !user) return
     const first = user.displayName?.split(' ')[0] ?? user.email?.split('@')[0] ?? 'there'
 
     let alive = true
@@ -154,7 +166,7 @@ export default function WelcomePage() {
     }
     raf = requestAnimationFrame(tick)
     return () => { alive = false; cancelAnimationFrame(raf) }
-  }, [router, reduced])
+  }, [guard.status, user, reduced])
 
   // Focus the heading once revealed (a11y).
   useEffect(() => {

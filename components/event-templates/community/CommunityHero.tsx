@@ -7,6 +7,7 @@ import {
   ChevronDown, Link2, Download,
 } from 'lucide-react'
 import type { PassPublic } from '@/components/event-templates/types'
+import { passDisplayPrice } from '@/components/event-templates/shared/utils/format'
 import type { PhysicalVenueConfig } from '@/components/wizard/eventDetailsConfig'
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
@@ -97,7 +98,7 @@ export function CommunityHero({
   }, [calOpen])
 
   const active   = passes.filter(p => p.status !== 'inactive')
-  const minPrice = active.length > 0 ? Math.min(...active.map(p => p.price)) : 0
+  const minPrice = active.length > 0 ? Math.min(...active.map(p => passDisplayPrice(p))) : 0
   const loc      = venueType === 'online' ? 'Online' : physical?.city ?? venueName
   const priceTag = isFreeEvent ? 'Free' : `₹${minPrice.toLocaleString('en-IN')}`
 

@@ -5,7 +5,7 @@
 
 import { NextRequest, NextResponse } from 'next/server'
 import { adminDb }                   from '@/lib/firebase/admin'
-import { getRegistrationCounter }    from '@/lib/firebase/firestore/registrationCounters'
+import { getEventStats, sumConfirmedRevenueFromLedger } from '@/lib/firebase/firestore/registrationCounters'
 import { authorizeWorkspace }        from '@/lib/team/workspace'
 import { deriveLifecycleStatus }     from '@/lib/events/lifecycle'
 import { getFreeEventCapacity }      from '@/lib/licensing/resolveCatalog'
@@ -83,7 +83,7 @@ export interface EventDetailResponse {
   totalCapacity:    number | null
   totalRegistrations: number
   checkedInCount:   number
-  estimatedRevenue: number
+  estimatedRevenue: number   // paise — CANONICAL confirmed revenue (registrationCounters.revenuePaise / ledger fallback); field name kept for contract stability
   isFreeEvent:      boolean
   passes:           PassDetail[]
   publishedAt:      string | null
@@ -163,10 +163,15 @@ export async function GET(
   // Free-event capacity = the effective Starter registration limit (SSOT), not a literal.
   const freeCapacity = await getFreeEventCapacity()
 
-  // ── Load registration counter (GA-5 S3: summing reader folds attendance shards) ──
+  // ── Load registration counter + canonical revenue (RD-EVENTS-01 Phase 1 / H1) ──
+  // getEventStats folds attendance shards (checkedInCount) AND exposes the `complete`
+  // gate. Revenue = refund-stable registrationCounters.revenuePaise when complete, else
+  // the source-of-truth ledger sum — the SAME resolver/pattern the Dashboard uses,
+  // replacing the former Σ(pass.price × pass.sold) estimate.
   let counter: { totalCount: number; passCounts: Record<string, number>; checkedInCount: number } | null = null
+  let revenuePaise = 0
   if (slug) {
-    const cd = await getRegistrationCounter(slug)
+    const { counter: cd, complete } = await getEventStats(slug)
     if (cd) {
       counter = {
         totalCount:     cd.totalCount     ?? 0,
@@ -174,6 +179,7 @@ export async function GET(
         checkedInCount: cd.checkedInCount ?? 0,
       }
     }
+    revenuePaise = complete ? (cd?.revenuePaise ?? 0) : await sumConfirmedRevenueFromLedger(slug)
   }
 
   // ── Load donation counter (event_plus_donation only) ───────────────────────
@@ -208,7 +214,7 @@ export async function GET(
     }
   })
 
-  const estimatedRevenue = passes.reduce((sum, p) => sum + p.price * p.sold, 0)
+  // Revenue is resolved canonically above (revenuePaise); no Σ(pass.price × pass.sold).
 
   // ── Speakers — live at eventDetails.typeDetails.speakers ─────────────────────
   const rawSpeakers = Array.isArray(typeDet.speakers)
@@ -283,7 +289,7 @@ export async function GET(
     totalCapacity:    isFree ? freeCapacity : null,
     totalRegistrations: counter?.totalCount ?? 0,
     checkedInCount:   counter?.checkedInCount ?? 0,
-    estimatedRevenue,
+    estimatedRevenue: revenuePaise,
     isFreeEvent:      isFree,
     passes,
     publishedAt:      toIso(d.publishedAt),

@@ -1,8 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { onAuthStateChanged } from 'firebase/auth'
-import { auth } from '@/lib/firebase/auth'
+import { useAuth } from '@/components/auth/AuthProvider'
 import { Building2, UserCircle } from 'lucide-react'
 import { cn } from '@/lib/utils/cn'
 import type { WorkspaceInfoResponse } from '@/app/api/organizer/workspace/route'
@@ -14,19 +13,26 @@ const ROLE_LABEL: Record<string, string> = {
 // Top-bar chip showing which workspace the user is operating in. Owners see
 // "Personal Workspace"; team members see the organization name + a role badge.
 export function WorkspaceBanner() {
+  const { user, getToken } = useAuth()
   const [info, setInfo] = useState<WorkspaceInfoResponse | null>(null)
 
+  // RD-AUTH-01 Phase 1 (M-A): reacts to the shared auth state instead of a private
+  // onAuthStateChanged listener; same fetch, same non-critical behaviour.
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, async user => {
+    if (user === undefined) return                 // auth still resolving
+    let cancelled = false
+    const run = async () => {
       if (!user) { setInfo(null); return }
       try {
-        const token = await user.getIdToken()
+        const token = await getToken()
+        if (!token) return
         const res = await fetch('/api/organizer/workspace', { headers: { Authorization: `Bearer ${token}` }, cache: 'no-store' })
-        if (res.ok) setInfo(await res.json() as WorkspaceInfoResponse)
+        if (!cancelled && res.ok) setInfo(await res.json() as WorkspaceInfoResponse)
       } catch { /* banner is non-critical */ }
-    })
-    return unsub
-  }, [])
+    }
+    run()
+    return () => { cancelled = true }
+  }, [user, getToken])
 
   if (!info) return null
 

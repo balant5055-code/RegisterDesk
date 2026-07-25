@@ -14,7 +14,9 @@
 
 import {
   isEventLicenseTier,
+  isEventLicenseTierV2,
   type EventLicenseTier,
+  type EventLicenseTierV2,
   type EventLicenseFeature,
 } from '@/lib/licensing/eventLicense'
 
@@ -30,6 +32,25 @@ import {
 export interface LicenseTierOverride {
   name?:                   string
   licensePricePaise?:      number
+  transactionFeePercent?:  number
+  transactionFeeCapPaise?: number
+  maxRegistrations?:       number | null
+  maxTeamMembers?:         number | null
+  maxBroadcastRecipients?: number | null
+  features?:               Partial<Record<EventLicenseFeature, boolean>>
+  featureList?:            string[]
+}
+
+/**
+ * RD-LICENSE-01B — per-tier override for the V2 catalog. Same delta semantics as
+ * LicenseTierOverride, plus the regular/offer price split. Keyed by V2 tiers
+ * (free/starter/professional/business/enterprise). Additive + optional.
+ */
+export interface LicenseTierOverrideV2 {
+  name?:                   string
+  licensePricePaise?:      number   // charged price (kept === offerPricePaise)
+  regularPricePaise?:      number   // list / strike-through price
+  offerPricePaise?:        number   // charged price
   transactionFeePercent?:  number
   transactionFeeCapPaise?: number
   maxRegistrations?:       number | null
@@ -57,6 +78,9 @@ export interface LicensingConfig {
   defaultCurrency:  string   // ISO 4217, e.g. 'INR'
   purchasesEnabled: boolean  // master switch for self-serve license purchase
   tierOverrides:    Partial<Record<EventLicenseTier, LicenseTierOverride>>
+  // RD-LICENSE-01B — OPTIONAL V2 override layer (V2 catalog). Absent on existing config
+  // docs → resolves to the V2 code defaults. Never affects V1 resolution.
+  tierOverridesV2?: Partial<Record<EventLicenseTierV2, LicenseTierOverrideV2>>
   coupons:          LicenseCouponsConfig
 }
 
@@ -392,6 +416,7 @@ export const BUSINESS_CONFIG_DEFAULTS: BusinessConfigSections = {
     defaultCurrency:  'INR',
     purchasesEnabled: true,
     tierOverrides:    {},   // no overrides → tier definitions come from eventLicense.ts
+    tierOverridesV2:  {},   // RD-LICENSE-01B — no V2 overrides → V2 defs come from eventLicense.ts
     coupons: {
       enabled:               false,   // OFF by default — coupons are an opt-in enhancement
       maxPercentageDiscount: 100,
@@ -620,6 +645,38 @@ function validateTierOverride(tier: string, o: unknown, errors: string[]): void 
   }
 }
 
+/**
+ * RD-LICENSE-01B — validate a V2 per-tier override. Keyed by V2 tiers; supports the
+ * regular/offer split (offer must not exceed regular). Additive: only invoked when the
+ * optional `tierOverridesV2` map is present, so existing config docs are unaffected.
+ */
+function validateTierOverrideV2(tier: string, o: unknown, errors: string[]): void {
+  const p = `licensing.tierOverridesV2.${tier}`
+  if (!isEventLicenseTierV2(tier)) { errors.push(`licensing.tierOverridesV2 has unknown V2 tier '${tier}'`); return }
+  if (typeof o !== 'object' || o === null || Array.isArray(o)) { errors.push(`${p} must be an object`); return }
+  const ov = o as Record<string, unknown>
+  if ('name' in ov && !isStr(ov.name)) errors.push(`${p}.name must be a non-empty string`)
+  for (const k of ['licensePricePaise', 'regularPricePaise', 'offerPricePaise', 'transactionFeeCapPaise'] as const) {
+    if (k in ov && !isNonNegInt(ov[k])) errors.push(`${p}.${k} must be a non-negative integer`)
+  }
+  if ('transactionFeePercent' in ov && !(typeof ov.transactionFeePercent === 'number' && ov.transactionFeePercent >= 0 && ov.transactionFeePercent <= 100)) errors.push(`${p}.transactionFeePercent must be 0..100`)
+  if (isInt(ov.regularPricePaise) && isInt(ov.offerPricePaise) && (ov.offerPricePaise as number) > (ov.regularPricePaise as number)) {
+    errors.push(`${p}.offerPricePaise cannot exceed regularPricePaise`)
+  }
+  for (const k of ['maxRegistrations', 'maxTeamMembers', 'maxBroadcastRecipients'] as const) {
+    if (k in ov && !isNumOrNullNonNeg(ov[k])) errors.push(`${p}.${k} must be a non-negative number or null (unlimited)`)
+  }
+  if ('features' in ov) {
+    const f = ov.features
+    if (typeof f !== 'object' || f === null || Array.isArray(f) || Object.values(f).some(x => typeof x !== 'boolean')) {
+      errors.push(`${p}.features must be a map of booleans`)
+    }
+  }
+  if ('featureList' in ov && !(Array.isArray(ov.featureList) && ov.featureList.every(s => typeof s === 'string'))) {
+    errors.push(`${p}.featureList must be an array of strings`)
+  }
+}
+
 function validateLicensing(v: unknown): ConfigValidationResult {
   const c = v as Partial<LicensingConfig>
   const errors: string[] = []
@@ -630,6 +687,15 @@ function validateLicensing(v: unknown): ConfigValidationResult {
     errors.push('licensing.tierOverrides must be an object map')
   } else {
     for (const [tier, o] of Object.entries(overrides)) validateTierOverride(tier, o, errors)
+  }
+  // Additive: only validate V2 overrides when the optional map is present.
+  const overridesV2 = c?.tierOverridesV2
+  if (overridesV2 !== undefined) {
+    if (typeof overridesV2 !== 'object' || overridesV2 === null || Array.isArray(overridesV2)) {
+      errors.push('licensing.tierOverridesV2 must be an object map')
+    } else {
+      for (const [tier, o] of Object.entries(overridesV2)) validateTierOverrideV2(tier, o, errors)
+    }
   }
   const cp = c?.coupons as Partial<LicenseCouponsConfig> | undefined
   if (typeof cp !== 'object' || cp === null || Array.isArray(cp)) {
@@ -657,7 +723,9 @@ function channelChecks(ch: string, x: Partial<ChannelCommercialFields> | undefin
   ]
 }
 
-function validateCommunication(v: unknown): ConfigValidationResult {
+// Exported (RD-COMMS-01 Phase 3) so the communication configuration resolver can reuse the
+// SAME validator when merging organizer/event override layers — no duplicated validation.
+export function validateCommunication(v: unknown): ConfigValidationResult {
   const c = (typeof v === 'object' && v !== null ? v : {}) as Partial<CommunicationConfig>
   const e = c.email        as Partial<EmailCommunicationConfig>       | undefined
   const w = c.whatsapp     as Partial<WhatsappCommunicationConfig>    | undefined

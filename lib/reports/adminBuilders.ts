@@ -5,6 +5,7 @@
 import { adminDb } from '@/lib/firebase/admin'
 import type { ReportTable, ReportFilters, ReportRow } from '@/lib/reports/types'
 import { toMillis, rangeBounds } from '@/lib/reports/format'
+import { readReportFromLedgerData } from '@/lib/platform/pricing'
 
 const ADMIN_CAP = 10000
 
@@ -30,9 +31,10 @@ export async function computeAdminTotals(f: ReportFilters): Promise<AdminFinance
   for (const doc of txnSnap.docs.slice(0, ADMIN_CAP)) {
     const d = doc.data()
     if (!inRange(d.paidAt)) continue
-    gmv  += Number(d.grossAmountPaise ?? 0)
-    fees += Number(d.platformFeeTotalPaise ?? 0)
-    gst  += Number(d.platformFeeGstPaise ?? 0)
+    const fig = readReportFromLedgerData(d)   // RD-PRICING-02F: snapshot-first (== ledger)
+    gmv  += fig.grossAmountPaise
+    fees += fig.platformFeeTotalPaise
+    gst  += fig.platformFeeGstPaise
     count++
   }
 

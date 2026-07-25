@@ -215,6 +215,7 @@ function ConfirmDialog({
         role="dialog"
         aria-modal="true"
         aria-labelledby="send-campaign-title"
+        onKeyDown={e => { if (e.key === 'Escape') onCancel() }}
         className="pointer-events-auto w-full max-w-md rounded-2xl border border-border bg-card p-6 shadow-xl"
       >
         <div className="flex size-12 items-center justify-center rounded-2xl bg-primary/[0.1] mb-4">
@@ -902,7 +903,7 @@ function HistoryTab({
   if (loading) {
     return (
       <div className="flex items-center justify-center gap-3 rounded-2xl border border-border bg-card py-16">
-        <Loader2 className="size-5 animate-spin text-muted-foreground" />
+        <Loader2 className="size-5 animate-spin text-muted-foreground motion-reduce:animate-none" />
         <p className="text-[14px] text-muted-foreground">Loading campaigns…</p>
       </div>
     )
@@ -939,7 +940,7 @@ function HistoryTab({
           <thead>
             <tr className="border-b border-border bg-muted/30">
               {['Subject', 'Event', 'Audience', 'Recipients', 'Status', 'Sent At'].map(h => (
-                <th key={h} className="py-3 pl-4 pr-3 text-left text-[12px] font-semibold uppercase tracking-[0.07em] text-muted-foreground">
+                <th key={h} scope="col" className="py-3 pl-4 pr-3 text-left text-[12px] font-semibold uppercase tracking-[0.07em] text-muted-foreground">
                   {h}
                 </th>
               ))}
@@ -1172,6 +1173,7 @@ export function BroadcastsClient() {
             type="button"
             onClick={() => void loadHistory()}
             title="Refresh"
+            aria-label="Refresh broadcast history"
             className="ml-1 flex items-center justify-center rounded-lg p-2 text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
           >
             <RefreshCw className="size-3.5" />

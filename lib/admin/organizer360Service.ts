@@ -13,6 +13,7 @@
 // missing index/field degrades to a neutral signal instead of failing the request.
 
 import { adminDb } from '@/lib/firebase/admin'
+import { ORGANIZER_ROLE } from '@/lib/organizer/identity'
 import { getAttendanceShardSums } from '@/lib/firebase/firestore/registrationCounters'
 import { getWorkspaceEntitlements } from '@/lib/licensing/workspaceEntitlements'
 import { listTeam } from '@/lib/team/service'
@@ -189,7 +190,7 @@ export async function getOrganizer360Overview(uid: string): Promise<Organizer360
       name:             str(u.name) ?? '',
       email:            str(u.email) ?? '',
       organizationName: str(u.organizationName) ?? '',
-      role:             str(u.role) ?? 'organizer',
+      role:             str(u.role) ?? ORGANIZER_ROLE,
       phone:            str(u.phone),
       createdAt:        tsToISO(u.createdAt),
     },

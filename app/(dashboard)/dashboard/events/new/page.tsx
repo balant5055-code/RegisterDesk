@@ -3,11 +3,28 @@
 import { Fragment, useCallback, useEffect, useRef, useState } from 'react'
 import Link from 'next/link'
 import { useDraft } from '@/lib/hooks/useDraft'
+import { useUnsavedChangesWarning } from '@/lib/hooks/useUnsavedChangesWarning'
+import { SaveStatusIndicator } from '@/components/wizard/SaveStatusIndicator'
+import { DraftRecoveryPrompt } from '@/components/wizard/DraftRecoveryPrompt'
 import { useCampaignDraft } from '@/lib/hooks/useCampaignDraft'
+import { formatINR } from '@/lib/events/builder/format'
+import { computeFeePreview } from '@/lib/events/builder/feePreview'
+import {
+  type WizardStep, type StepViewProps, type VisibilityId,
+  type FeeModel, normalizeFeeModel,
+  type FeeBreakdown, type FeeRates, type StepSummary, type ReadinessReport,
+} from '@/lib/events/builder/types'
+import { EASE, WIZARD_STEPS } from '@/lib/events/builder/constants'
+import { Stepper } from '@/components/event-builder/Stepper'
+import { Step1View, type Step1State } from '@/components/event-builder/steps/Step1View'
+import { Step2View } from '@/components/event-builder/steps/Step2View'
+import { Step3View } from '@/components/event-builder/steps/Step3View'
+import { Step4View } from '@/components/event-builder/steps/Step4View'
+import { Step5View } from '@/components/event-builder/steps/Step5View'
+import { Step6View } from '@/components/event-builder/steps/Step6View'
+import { isChannelImplemented } from '@/lib/communications/health/channels'
 import {
   type CampaignType,
-  type DonationCampaignSubtype,
-  DONATION_SUBTYPE_LABELS,
   makeBlankCampaignDetailsDraft,
   isCampaignDetailsValid,
   getCampaignPublishBlockers,
@@ -20,7 +37,6 @@ import dynamic from 'next/dynamic'
 import { AnimatePresence, motion } from 'framer-motion'
 import {
   AlertCircle,
-  AlertTriangle,
   ArrowLeft,
   ArrowRight,
   ArrowUpDown,
@@ -28,51 +44,29 @@ import {
   Check,
   CheckCircle2,
   Calendar,
-  ChevronDown,
-  ChevronLeft,
-  ChevronRight,
-  ChevronUp,
   Clock,
-  Coffee,
   Copy,
-  Download,
   ExternalLink,
   Eye,
   FileSpreadsheet,
-  Gift,
   Globe,
-  GraduationCap,
-  Hash,
-  Headphones,
-  Heart,
   IndianRupee,
   Info,
-  Lightbulb,
-  Link2,
   Lock,
   Mail,
   MapPin,
   MoreHorizontal,
-  Music,
-  Pencil,
   Phone,
-  Plus,
   RefreshCw,
-  Search,
   Settings2,
   Shield,
-  Sparkles,
-  Store,
   Tag,
   Ticket,
-  Trash2,
   TrendingUp,
-  Trophy,
   Upload,
   UserCheck,
   Users,
   Wallet,
-  Wand2,
   X,
   XCircle,
   Zap,
@@ -80,21 +74,19 @@ import {
 import type { LucideIcon } from 'lucide-react'
 import { buttonVariants } from '@/components/ui'
 import { WizardFooter } from '@/components/wizard/WizardFooter'
-import { AddPassEditor, type EventPassFull, makeBlankPass } from '@/components/wizard/AddPassEditor'
-import type { PassSummary } from '@/components/wizard/RegistrationFormBuilder'
-import { makeBlankFormDraft, type RegistrationFormDraft, type FormField, type FormSection, type RegistrationRules } from '@/components/wizard/registrationFormConfig'
-import { getTemplate } from '@/lib/events/templateRegistry'
-import { makeBlankEventDetailsDraft, calcStepHealth, normalizeEventDetailsDraft, type EventDetailsDraft, type Speaker, type Sponsor, type AgendaSession, ONLINE_PLATFORM_LABELS, SPONSOR_TIER_LABELS, SESSION_TYPE_LABELS } from '@/components/wizard/eventDetailsConfig'
+import { type EventPassFull } from '@/components/wizard/AddPassEditor'
+import type { FormField, FormSection, RegistrationRules } from '@/components/wizard/registrationFormConfig'
+import { calcStepHealth, normalizeEventDetailsDraft, type EventDetailsDraft, type Speaker, type Sponsor, type AgendaSession, ONLINE_PLATFORM_LABELS, SPONSOR_TIER_LABELS, SESSION_TYPE_LABELS } from '@/components/wizard/eventDetailsConfig'
 import { ROUTES } from '@/config/navigation'
 import { cn } from '@/lib/utils/cn'
 import { auth } from '@/lib/firebase/auth'
 import { calculateCommunicationCost } from '@/lib/events/communicationCost'
 import { estimateCapacity }           from '@/lib/events/estimateCapacity'
-import { evaluatePublishRequirements, type PublishRequirement } from '@/lib/events/publishRequirements'
-import type { CommunicationCostResult, PublishApiResponse, WalletBalanceResponse, WalletTopupOrderResponse, WalletTopupVerifyResponse } from '@/types/events'
-import { isEventLicenseTier, type EventLicenseTier } from '@/lib/licensing/eventLicense'
-import { useLicenseCatalog } from '@/lib/licensing/licenseCatalogClient'
-import { useBranding } from '@/lib/config/brandingClient'
+import { evaluatePublishRequirements } from '@/lib/events/publishRequirements'
+import type { CommunicationCostResult, PublishApiResponse, PublishGovernanceInfo, WalletBalanceResponse, WalletTopupOrderResponse, WalletTopupVerifyResponse } from '@/types/events'
+import { CURRENT_LICENSE_VERSION, isValidTierForVersion, defaultLicenseTierForVersion, type AnyEventLicenseTier } from '@/lib/licensing/eventLicense'
+import { useCurrentLicenseCatalogView } from '@/lib/licensing/licenseCatalogClient'
+import type { LicenseCatalogEntryView } from '@/lib/licensing/licenseCatalogShared'
 import { useCommunicationConfig } from '@/lib/communications/communicationConfigClient'
 import { useFeesConfig } from '@/lib/fees/feesConfigClient'
 import type { PublicFeesConfig } from '@/lib/fees/publicFeesShared'
@@ -108,18 +100,10 @@ import { useToast } from '@/components/ui/Toast'
 const builderLoading = () => (
   <div className="flex items-center justify-center py-16 text-[13px] text-muted-foreground">Loading…</div>
 )
-const RegistrationFormBuilder = dynamic(
-  () => import('@/components/wizard/RegistrationFormBuilder').then(m => m.RegistrationFormBuilder), { loading: builderLoading },
-)
-const EventDetailsBuilder = dynamic(
-  () => import('@/components/wizard/EventDetailsBuilder').then(m => m.EventDetailsBuilder), { loading: builderLoading },
-)
 const LinkedCampaignStep = dynamic(
   () => import('@/components/wizard/LinkedCampaignStep').then(m => m.LinkedCampaignStep), { loading: builderLoading },
 )
-const TemplatePreviewPanel = dynamic(
-  () => import('@/components/wizard/TemplatePreviewPanel').then(m => m.TemplatePreviewPanel), { loading: builderLoading },
-)
+// TemplatePreviewPanel (Step-1-only dynamic import) → components/event-builder/steps/Step1View.tsx (RD-PRODUCT-01G Phase 5B).
 const LicenseCards = dynamic(
   () => import('@/components/wizard/LicenseCards').then(m => m.LicenseCards), { loading: builderLoading },
 )
@@ -134,21 +118,10 @@ const DonationSettingsBuilder = dynamic(
 )
 
 // --- Constants ----------------------------------------------------------------
+// EASE + WIZARD_STEPS → lib/events/builder/constants.ts (RD-PRODUCT-01G Phase 5).
 
-const EASE = [0.22, 1, 0.36, 1] as const
 
-interface WizardStep { name: string }
-
-const WIZARD_STEPS: WizardStep[] = [
-  { name: 'Event Type' },
-  { name: 'Visibility' },
-  { name: 'Access Control' },
-  { name: 'Passes & Pricing' },
-  { name: 'Form' },
-  { name: 'Details' },
-  { name: 'License' },
-  { name: 'Review' },
-]
+// WizardStep type extracted to lib/events/builder/types.ts (RD-PRODUCT-01G Phase 4).
 
 // event_plus_donation — inserts 'Fundraising' after Details, then 'License' before Review
 const FUNDRAISING_EVENT_WIZARD_STEPS: WizardStep[] = [
@@ -171,3158 +144,38 @@ const CAMPAIGN_WIZARD_STEPS: WizardStep[] = [
   { name: 'Review' },
 ]
 
-// Donation-only subtypes — replaces the ticket-based fundraising subtypes
-const DONATION_CAMPAIGN_SUBTYPES: Array<{ id: DonationCampaignSubtype; label: string }> = [
-  { id: 'medical',     label: DONATION_SUBTYPE_LABELS.medical },
-  { id: 'ngo',         label: DONATION_SUBTYPE_LABELS.ngo },
-  { id: 'disaster',    label: DONATION_SUBTYPE_LABELS.disaster },
-  { id: 'animal',      label: DONATION_SUBTYPE_LABELS.animal },
-  { id: 'education',   label: DONATION_SUBTYPE_LABELS.education },
-  { id: 'environment', label: DONATION_SUBTYPE_LABELS.environment },
-  { id: 'community',   label: DONATION_SUBTYPE_LABELS.community },
-  { id: 'other',       label: DONATION_SUBTYPE_LABELS.other },
-]
-
-// --- Step 1 constants ---------------------------------------------------------
-
-interface EventTypeOption {
-  id:            string
-  name:          string
-  description:   string
-  examples:      string
-  icon:          LucideIcon
-  iconBg:        string
-  iconColor:     string
-  hasDiscipline?: boolean
-}
-
-const EVENT_TYPES: EventTypeOption[] = [
-  {
-    id: 'conference',
-    name: 'Conference',
-    description: 'Large-scale meetings with speakers, sessions and attendees.',
-    examples: 'Business, Corporate, Rotary, Summit',
-    icon: Users,
-    iconBg: 'bg-violet-100',
-    iconColor: 'text-violet-600',
-  },
-  {
-    id: 'exhibition',
-    name: 'Exhibition & Expo',
-    description: 'Exhibitions, trade shows and product showcases.',
-    examples: 'Trade Show, Expo, Fair, Showcase',
-    icon: Store,
-    iconBg: 'bg-orange-100',
-    iconColor: 'text-orange-500',
-  },
-  {
-    id: 'sports',
-    name: 'Sports & Fitness',
-    description: 'Sports events, marathons, tournaments and fitness activities.',
-    examples: 'Marathon, Cycling, Cricket, Football, Tennis',
-    icon: Trophy,
-    iconBg: 'bg-green-100',
-    iconColor: 'text-green-600',
-    hasDiscipline: true,
-  },
-  {
-    id: 'workshop',
-    name: 'Workshop & Training',
-    description: 'Educational workshops, training programs and bootcamps.',
-    examples: 'Workshop, Training, Certification, Masterclass',
-    icon: GraduationCap,
-    iconBg: 'bg-blue-100',
-    iconColor: 'text-blue-600',
-  },
-  {
-    id: 'meetup',
-    name: 'Business Meetup',
-    description: 'Networking events and professional business gatherings.',
-    examples: 'Meetup, Networking, Startup, Investor',
-    icon: Coffee,
-    iconBg: 'bg-rose-100',
-    iconColor: 'text-rose-500',
-  },
-  {
-    id: 'community',
-    name: 'Community & Awareness',
-    description: 'Community programs, NGO activities and awareness campaigns.',
-    examples: 'Awareness, NGO, Volunteer, Social Impact',
-    icon: Heart,
-    iconBg: 'bg-emerald-100',
-    iconColor: 'text-emerald-600',
-  },
-  {
-    id: 'cultural',
-    name: 'Cultural & Entertainment',
-    description: 'Music, arts, cultural programs and entertainment events.',
-    examples: 'Concert, Festival, Show, DJ Night',
-    icon: Music,
-    iconBg: 'bg-purple-100',
-    iconColor: 'text-purple-600',
-  },
-  {
-    id: 'awards',
-    name: 'Awards & Recognition',
-    description: 'Award ceremonies and recognition programs.',
-    examples: 'Awards Night, Graduation, Excellence Awards',
-    icon: Award,
-    iconBg: 'bg-amber-100',
-    iconColor: 'text-amber-600',
-  },
-  {
-    id: 'fundraising',
-    name: 'Fundraising & Charity',
-    description: 'Donation drives and fundraising events.',
-    examples: 'Charity Run, Fundraiser, Donation Campaign',
-    icon: Gift,
-    iconBg: 'bg-pink-100',
-    iconColor: 'text-pink-600',
-  },
-  {
-    id: 'custom',
-    name: 'Custom Event',
-    description: 'Create a fully customized event experience.',
-    examples: 'Custom, Special Event, Hybrid Event',
-    icon: Wand2,
-    iconBg: 'bg-slate-100',
-    iconColor: 'text-slate-600',
-  },
-]
-
-// Config-driven secondary subtype options for each event type
-interface SubtypeOption { id: string; name: string }
-interface SubtypeConfig { label: string; hint: string; options: SubtypeOption[] }
-
-function sub(id: string, name: string): SubtypeOption { return { id, name } }
-
-const SUBTYPES_BY_EVENT_TYPE: Record<string, SubtypeConfig> = {
-  conference: {
-    label: 'Conference Style',
-    hint:  'Select the format that best describes your conference.',
-    options: [
-      sub('business',  'Business'),     sub('corporate', 'Corporate'),
-      sub('rotary',    'Rotary'),       sub('summit',    'Summit'),
-      sub('academic',  'Academic'),     sub('medical',   'Medical'),
-      sub('tech',      'Tech'),         sub('other',     'Other'),
-    ],
-  },
-  exhibition: {
-    label: 'Expo Type',
-    hint:  'What kind of exhibition or expo are you organising?',
-    options: [
-      sub('trade_show', 'Trade Show'),        sub('fair',       'Fair'),
-      sub('product',    'Product Showcase'),   sub('auto',       'Auto Expo'),
-      sub('education',  'Education Expo'),     sub('property',   'Property Expo'),
-      sub('other',      'Other'),
-    ],
-  },
-  sports: {
-    label: 'Sport Discipline',
-    hint:  'Select the specific sport or fitness discipline.',
-    options: [
-      sub('running',    'Running'),      sub('cycling',    'Cycling'),
-      sub('cricket',    'Cricket'),      sub('football',   'Football'),
-      sub('hockey',     'Hockey'),       sub('tennis',     'Tennis'),
-      sub('badminton',  'Badminton'),    sub('swimming',   'Swimming'),
-      sub('basketball', 'Basketball'),   sub('volleyball', 'Volleyball'),
-      sub('triathlon',  'Triathlon'),    sub('other',      'Other'),
-    ],
-  },
-  workshop: {
-    label: 'Training Type',
-    hint:  'What kind of workshop or training is this?',
-    options: [
-      sub('workshop',      'Workshop'),          sub('bootcamp',     'Bootcamp'),
-      sub('certification', 'Certification Course'), sub('masterclass', 'Masterclass'),
-      sub('seminar',       'Seminar'),           sub('live_training','Live Training'),
-      sub('other',         'Other'),
-    ],
-  },
-  meetup: {
-    label: 'Meetup Focus',
-    hint:  'What is the primary focus of this meetup?',
-    options: [
-      sub('networking', 'Networking'),    sub('startup',   'Startup Meetup'),
-      sub('investor',   'Investor Meetup'), sub('founder',  'Founder Circle'),
-      sub('corporate',  'Corporate Meetup'), sub('alumni',  'Alumni Meetup'),
-      sub('other',      'Other'),
-    ],
-  },
-  community: {
-    label: 'Cause Type',
-    hint:  'What cause or community program is this for?',
-    options: [
-      sub('awareness', 'Awareness'),      sub('ngo',       'NGO Event'),
-      sub('volunteer', 'Volunteer Program'), sub('donation', 'Donation Drive'),
-      sub('cleanup',   'Clean-up Drive'), sub('social',    'Social Impact'),
-      sub('other',     'Other'),
-    ],
-  },
-  cultural: {
-    label: 'Entertainment Type',
-    hint:  'What kind of cultural or entertainment event is this?',
-    options: [
-      sub('concert',   'Concert'),        sub('festival',  'Festival'),
-      sub('dance',     'Dance Show'),     sub('drama',     'Drama'),
-      sub('dj_night',  'DJ Night'),       sub('talent',    'Talent Show'),
-      sub('cultural',  'Cultural Program'), sub('other',   'Other'),
-    ],
-  },
-  awards: {
-    label: 'Recognition Type',
-    hint:  'What kind of recognition ceremony is this?',
-    options: [
-      sub('awards_night', 'Awards Night'),   sub('recognition',  'Recognition Ceremony'),
-      sub('graduation',   'Graduation'),     sub('felicitation', 'Felicitation'),
-      sub('excellence',   'Excellence Awards'), sub('summit',    'Summit Awards'),
-      sub('other',        'Other'),
-    ],
-  },
-  fundraising: {
-    label: 'Fundraising Type',
-    hint:  'What type of fundraising or charity event is this?',
-    options: [
-      sub('charity_run',    'Charity Run'),     sub('donation_drive', 'Donation Drive'),
-      sub('benefit_dinner', 'Benefit Dinner'),  sub('gala',           'Gala Night'),
-      sub('campaign',       'Campaign Event'),  sub('fundraiser',     'Fundraiser'),
-      sub('other',          'Other'),
-    ],
-  },
-}
-
-const BENEFITS = [
-  'Get a pre-built registration form',
-  'Recommended ticket types',
-  'Smart features for your event',
-  'Better attendee experience',
-] as const
-
-// --- Step 2 constants ---------------------------------------------------------
-
-export type VisibilityId = 'public' | 'private'
-
-interface VisibilityOption {
-  id:          VisibilityId
-  name:        string
-  badge:       { label: string; className: string }
-  description: string
-  features:    string[]
-  tip:         string
-  tipIcon:     LucideIcon
-  tipIconBg:   string
-  tipColor:    string
-  tipBg:       string
-  icon:        LucideIcon
-  iconBg:      string
-  iconColor:   string
-}
-
-const VISIBILITY_OPTIONS: VisibilityOption[] = [
-  {
-    id: 'public',
-    name: 'Public Event',
-    badge: { label: 'Recommended', className: 'bg-primary/10 text-primary' },
-    description: 'Anyone can find your event and register.',
-    features: [
-      'Visible in search results',
-      'Listed on event listing pages',
-      'Open registration for everyone',
-      'Shareable link works for anyone',
-    ],
-    tip:       'Best for conferences, workshops, expos and public programs.',
-    tipIcon:   Sparkles,
-    tipIconBg: 'bg-primary/15',
-    tipColor:  'text-primary',
-    tipBg:     'bg-primary/[0.05]',
-    icon:      Globe,
-    iconBg:    'bg-violet-100',
-    iconColor: 'text-violet-600',
-  },
-  {
-    id: 'private',
-    name: 'Private Event',
-    badge: { label: 'Invite Only', className: 'bg-emerald-50 text-emerald-700' },
-    description: 'Only invited people can access and register.',
-    features: [
-      'Not visible in search',
-      'Invite only via link or code',
-      'Restrict access to approved people',
-      'Great for member-only events',
-    ],
-    tip:       'Best for member events, internal meetings and private programs.',
-    tipIcon:   Shield,
-    tipIconBg: 'bg-emerald-100',
-    tipColor:  'text-emerald-600',
-    tipBg:     'bg-emerald-50/60',
-    icon:      Lock,
-    iconBg:    'bg-emerald-100',
-    iconColor: 'text-emerald-600',
-  },
-]
-
-const PUBLIC_REASONS = [
-  'Your event is open to all',
-  'You want more visibility',
-  'Anyone can register',
-  'You want to promote widely',
-] as const
-
-const PRIVATE_REASONS = [
-  'Only selected people can attend',
-  "It's a member-only event",
-  'You want to control access',
-  "You're hosting an internal event",
-] as const
-
-// --- Step 3 constants ---------------------------------------------------------
-
-export type AccessControlId =
-  | 'open'
-  | 'invite_code'
-  | 'approved_contacts'
-
-export type ConfirmationMode = 'auto' | 'manual'
-
-interface AccessControlOption {
-  id:          AccessControlId
-  name:        string
-  description: string
-  badge:       string
-  badgeColor:  string
-  badgeBg:     string
-  icon:        LucideIcon
-  iconBg:      string
-  iconColor:   string
-  experience:  readonly string[]
-}
-
-const ACCESS_CONTROL_OPTIONS: AccessControlOption[] = [
-  {
-    id:          'open',
-    name:        'Open to All (No Restriction)',
-    description: 'Anyone can find the event and register without any restrictions.',
-    badge:       'Best for public events',
-    badgeColor:  'text-violet-600',
-    badgeBg:     'bg-violet-50',
-    icon:        Globe,
-    iconBg:      'bg-violet-100',
-    iconColor:   'text-violet-600',
-    experience: [
-      'Event may be visible in search results',
-      'Anyone can access and register',
-      'No code or approval needed',
-      'You can change this anytime',
-    ],
-  },
-  {
-    id:          'invite_code',
-    name:        'Invite Code',
-    description: 'People need a valid invite code to access and register.',
-    badge:       'Code required',
-    badgeColor:  'text-orange-600',
-    badgeBg:     'bg-orange-50',
-    icon:        Hash,
-    iconBg:      'bg-orange-100',
-    iconColor:   'text-orange-500',
-    experience: [
-      'Event will not be visible in search results',
-      'Attendees must enter a valid invite code',
-      'No approval needed after code verification',
-      'You can change this anytime',
-    ],
-  },
-  {
-    id:          'approved_contacts',
-    name:        'Approved Contact List',
-    description: 'Only contacts on your approved list can access and register.',
-    badge:       'Verified contacts only',
-    badgeColor:  'text-blue-600',
-    badgeBg:     'bg-blue-50',
-    icon:        UserCheck,
-    iconBg:      'bg-blue-100',
-    iconColor:   'text-blue-600',
-    experience: [
-      'Only pre-approved contacts can register',
-      'Attendees are verified against your contact list',
-      'Manage your contact list in event settings',
-      'You can change this anytime',
-    ],
-  },
-]
-
-// --- Shared Stepper -----------------------------------------------------------
-
-function Stepper({
-  currentStep,
-  completedValues = [],
-  steps = WIZARD_STEPS,
-}: {
-  currentStep:      number
-  completedValues?: (string | undefined)[]
-  steps?:           WizardStep[]
-}) {
-  const totalSteps = steps.length
-
-  return (
-    <nav
-      aria-label="Event creation steps"
-      className="rounded-2xl border border-border bg-card px-5 py-4 shadow-[0_1px_4px_rgba(0,0,0,0.05)]"
-    >
-      {/* ── Mobile: step name + animated progress bar ────────────────── */}
-      <div className="sm:hidden">
-        <div className="mb-2 flex items-center justify-between">
-          <span className="text-[12.5px] font-semibold text-foreground">
-            {steps[currentStep]?.name}
-          </span>
-          <span className="text-[11px] tabular-nums text-muted-foreground">
-            {currentStep + 1}
-            <span className="mx-px text-muted-foreground/40">/</span>
-            {totalSteps}
-          </span>
-        </div>
-        <div className="relative h-[2px] overflow-hidden rounded-full bg-muted">
-          <motion.div
-            className="absolute inset-y-0 left-0 rounded-full bg-primary"
-            initial={false}
-            animate={{ width: `${((currentStep + 1) / totalSteps) * 100}%` }}
-            transition={{ duration: 0.45, ease: EASE }}
-          />
-        </div>
-      </div>
-
-      {/* ── Desktop / tablet: full-width single row, no overflow ─────── */}
-      {/* flex w-full replaces overflow-x-auto + min-w-max so all 7 steps
-          share the available width; connectors (flex-1 min-w-0) absorb
-          any extra space and can shrink to 0 on narrow viewports        */}
-      <div className="hidden w-full items-start sm:flex">
-        {steps.map((step, i) => {
-          const isCompleted    = i < currentStep
-          const isCurrent      = i === currentStep
-          const completedValue = completedValues[i]
-
-          return (
-            <Fragment key={step.name}>
-              {/* ── Connector ── */}
-              {i > 0 && (
-                <div
-                  aria-hidden
-                  className="relative mx-1.5 mt-[9px] h-px min-w-0 flex-1 overflow-hidden rounded-full bg-border"
-                >
-                  <motion.div
-                    className="absolute inset-y-0 left-0 rounded-full bg-emerald-400"
-                    initial={false}
-                    animate={{ width: isCompleted ? '100%' : '0%' }}
-                    transition={{ duration: 0.4, ease: EASE }}
-                  />
-                </div>
-              )}
-
-              {/* ── Step column ── */}
-              <div
-                className="flex shrink-0 flex-col items-center"
-                aria-current={isCurrent ? 'step' : undefined}
-              >
-                {/* Indicator — uniform 18 px so connector mt-[9px] aligns */}
-                <div
-                  className={cn(
-                    'flex size-[18px] items-center justify-center rounded-full transition-all duration-300',
-                    isCompleted
-                      ? 'bg-emerald-500'
-                      : isCurrent
-                      ? 'bg-primary shadow-[0_0_0_3px_rgb(var(--primary-rgb)_/_0.15)]'
-                      : 'border border-border bg-card',
-                  )}
-                >
-                  <AnimatePresence mode="wait" initial={false}>
-                    {isCompleted ? (
-                      <motion.span
-                        key="check"
-                        initial={{ scale: 0, opacity: 0 }}
-                        animate={{ scale: 1, opacity: 1 }}
-                        exit={{ scale: 0, opacity: 0 }}
-                        transition={{ type: 'spring', stiffness: 400, damping: 22 }}
-                      >
-                        <Check className="size-[9px] text-white" aria-hidden />
-                      </motion.span>
-                    ) : isCurrent ? (
-                      <motion.span
-                        key="active"
-                        className="size-[6px] rounded-full bg-white"
-                        initial={{ scale: 0, opacity: 0 }}
-                        animate={{ scale: 1, opacity: 1 }}
-                        exit={{ scale: 0, opacity: 0 }}
-                        transition={{ duration: 0.18 }}
-                      />
-                    ) : (
-                      <motion.span
-                        key="idle"
-                        className="size-[5px] rounded-full bg-muted-foreground/30"
-                        initial={{ scale: 0, opacity: 0 }}
-                        animate={{ scale: 1, opacity: 1 }}
-                        exit={{ scale: 0, opacity: 0 }}
-                        transition={{ duration: 0.18 }}
-                      />
-                    )}
-                  </AnimatePresence>
-                </div>
-
-                {/* Label */}
-                <div className="mt-1.5 flex flex-col items-center">
-                  <span
-                    className={cn(
-                      'whitespace-nowrap text-[10.5px] leading-none transition-colors duration-200',
-                      isCompleted
-                        ? 'font-medium text-emerald-600'
-                        : isCurrent
-                        ? 'font-bold text-foreground'
-                        : 'font-normal text-muted-foreground',
-                    )}
-                  >
-                    {step.name}
-                  </span>
-                  {isCompleted && completedValue && (
-                    <motion.span
-                      initial={{ opacity: 0, y: 2 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      transition={{ duration: 0.2 }}
-                      className="mt-0.5 max-w-[72px] truncate whitespace-nowrap text-[9.5px] leading-none text-muted-foreground"
-                    >
-                      {completedValue}
-                    </motion.span>
-                  )}
-                </div>
-              </div>
-            </Fragment>
-          )
-        })}
-      </div>
-    </nav>
-  )
-}
-
-// --- Step 1 components --------------------------------------------------------
-
-// --- Compact event type card --------------------------------------------------
-
-function EventTypeCard({
-  type,
-  selected,
-  onSelect,
-}: {
-  type:         EventTypeOption
-  selected:     boolean
-  onSelect:     (id: string) => void
-  recommended?: boolean
-}) {
-  return (
-    <motion.button
-      type="button"
-      onClick={() => onSelect(type.id)}
-      whileTap={{ scale: 0.993 }}
-      whileHover={
-        selected
-          ? {}
-          : { y: -1, transition: { duration: 0.15, ease: [0.22, 1, 0.36, 1] } }
-      }
-      aria-pressed={selected}
-      aria-label={`Select ${type.name}`}
-      className={cn(
-        'group relative flex w-full cursor-pointer items-center gap-4 rounded-xl border px-5 py-[15px] text-left',
-        'transition-[border-color,box-shadow,background-color] duration-200 ease-out',
-        selected
-          ? 'border-primary/50 bg-primary/[0.025] shadow-[0_0_0_2px_rgba(var(--tw-shadow-color,0,0,0),0),0_4px_20px_rgba(0,0,0,0.06)] ring-2 ring-primary/[0.12]'
-          : 'border-border bg-card shadow-[0_1px_3px_rgba(0,0,0,0.04)] hover:border-border-strong hover:shadow-[0_4px_14px_rgba(0,0,0,0.08)]',
-      )}
-    >
-      {/* Left accent bar on selection */}
-      <AnimatePresence>
-        {selected && (
-          <motion.span
-            key="accent"
-            initial={{ scaleY: 0, opacity: 0 }}
-            animate={{ scaleY: 1, opacity: 1 }}
-            exit={{ scaleY: 0, opacity: 0 }}
-            transition={{ duration: 0.18, ease: [0.22, 1, 0.36, 1] }}
-            className="pointer-events-none absolute left-2 top-1/2 h-6 w-[3px] -translate-y-1/2 rounded-full bg-primary"
-            aria-hidden
-          />
-        )}
-      </AnimatePresence>
-
-      {/* Icon */}
-      <div
-        className={cn(
-          'flex size-11 shrink-0 items-center justify-center rounded-xl transition-shadow duration-200',
-          type.iconBg,
-          selected && 'shadow-[0_2px_8px_rgba(0,0,0,0.10)]',
-        )}
-        aria-hidden
-      >
-        <type.icon className={cn('size-[20px]', type.iconColor)} />
-      </div>
-
-      {/* Content */}
-      <div className="min-w-0 flex-1">
-        <p className={cn(
-          'text-[13.5px] font-semibold leading-snug tracking-tight transition-colors duration-200',
-          selected ? 'text-foreground' : 'text-foreground/90 group-hover:text-foreground',
-        )}>
-          {type.name}
-        </p>
-        <p className="mt-0.5 line-clamp-2 text-[12px] leading-relaxed text-muted-foreground">
-          {type.description}
-        </p>
-      </div>
-
-      {/* Selection indicator */}
-      <span
-        className={cn(
-          'ml-1 flex size-5 shrink-0 items-center justify-center rounded-full transition-all duration-200',
-          selected
-            ? 'bg-primary shadow-[0_2px_6px_rgba(0,0,0,0.18)]'
-            : 'border border-border bg-card group-hover:border-border-strong',
-        )}
-        aria-hidden
-      >
-        <AnimatePresence>
-          {selected && (
-            <motion.span
-              key="check"
-              initial={{ scale: 0, opacity: 0 }}
-              animate={{ scale: 1, opacity: 1 }}
-              exit={{ scale: 0, opacity: 0 }}
-              transition={{ type: 'spring', stiffness: 500, damping: 25 }}
-            >
-              <Check className="size-3 text-white" />
-            </motion.span>
-          )}
-        </AnimatePresence>
-      </span>
-    </motion.button>
-  )
-}
-
-// --- Subtype selector (secondary section for ALL event types) -----------------
-
-function SubtypeSelector({
-  eventTypeId,
-  subtype,
-  customSubtype,
-  onSubtype,
-  onCustomSubtype,
-}: {
-  eventTypeId:     string
-  subtype:         string | null
-  customSubtype:   string
-  onSubtype:       (id: string) => void
-  onCustomSubtype: (v: string) => void
-}) {
-  const config       = SUBTYPES_BY_EVENT_TYPE[eventTypeId]
-  const isCustomType = eventTypeId === 'custom'
-  const isOther      = subtype === 'other'
-  const et           = EVENT_TYPES.find(e => e.id === eventTypeId)
-  const resolvedName =
-    isCustomType ? (customSubtype.trim() || null)
-    : isOther    ? (customSubtype.trim() || 'Other')
-    : config?.options.find(o => o.id === subtype)?.name ?? null
-
-  // Focus without scroll — avoids the browser's native scroll-to-focused-element behaviour
-  const customInputRef = useRef<HTMLInputElement>(null)
-  const otherInputRef  = useRef<HTMLInputElement>(null)
-
-  useEffect(() => {
-    if (isCustomType) customInputRef.current?.focus({ preventScroll: true })
-  }, [isCustomType, eventTypeId])
-
-  useEffect(() => {
-    if (isOther) otherInputRef.current?.focus({ preventScroll: true })
-  }, [isOther])
-
-  const inputCls =
-    'h-9 w-full rounded-lg border border-border bg-background px-3 text-[14px] text-foreground placeholder:text-muted-foreground/60 outline-none transition-colors focus:border-primary/50 focus:ring-2 focus:ring-primary/20'
-
-  return (
-    <motion.div
-      key={eventTypeId}
-      initial={{ opacity: 0, y: -6 }}
-      animate={{ opacity: 1, y: 0 }}
-      exit={{ opacity: 0, y: -6 }}
-      transition={{ duration: 0.2, ease: EASE }}
-      className="flex flex-col gap-3"
-    >
-      <div className="rounded-xl border border-border bg-card p-5 shadow-[0_1px_4px_rgba(0,0,0,0.05)]">
-        {/* Header */}
-        <div className="mb-3 flex items-center gap-2.5">
-          {et && (
-            <div className={cn('flex size-7 shrink-0 items-center justify-center rounded-lg', et.iconBg)}>
-              <et.icon className={cn('size-3.5', et.iconColor)} aria-hidden />
-            </div>
-          )}
-          <div className="min-w-0 flex-1">
-            {/* Brief accent highlight on first reveal */}
-            <div className="relative">
-              <motion.div
-                key={eventTypeId}
-                initial={{ opacity: 1 }}
-                animate={{ opacity: 0 }}
-                transition={{ delay: 0.3, duration: 0.8, ease: 'easeOut' }}
-                className="pointer-events-none absolute -inset-x-1 -inset-y-0.5 rounded bg-primary/10"
-                aria-hidden
-              />
-              {isCustomType ? (
-                <p className="relative text-[13px] font-semibold text-foreground">
-                  Custom Event Category
-                </p>
-              ) : (
-                <div className="relative flex items-center gap-1.5">
-                  <Sparkles className="size-[12px] shrink-0 text-muted-foreground/60" aria-hidden />
-                  <span className="text-[11px] font-semibold uppercase tracking-[0.1em] text-muted-foreground/60">
-                    Event Format
-                  </span>
-                  <span className="ml-0.5 text-[10px] text-red-500">*</span>
-                </div>
-              )}
-            </div>
-            <p className="text-[12px] text-muted-foreground">
-              {isCustomType
-                ? 'Describe your event type or create a custom category.'
-                : 'Choose the specific format for your event.'}
-            </p>
-          </div>
-        </div>
-
-        {/* Custom Event — text input (no autoFocus, uses ref) */}
-        {isCustomType ? (
-          <input
-            ref={customInputRef}
-            className={inputCls}
-            placeholder="e.g. Hybrid Conference, Product Launch, Speed Dating…"
-            value={customSubtype}
-            onChange={e => onCustomSubtype(e.target.value)}
-            maxLength={60}
-          />
-        ) : config ? (
-          <>
-            {/* Chip grid */}
-            <div
-              role="radiogroup"
-              aria-label={config.label}
-              className="flex flex-wrap gap-1.5"
-            >
-              {config.options.map(opt => {
-                const sel = subtype === opt.id
-                return (
-                  <button
-                    key={opt.id}
-                    type="button"
-                    aria-pressed={sel}
-                    onClick={() => onSubtype(opt.id)}
-                    className={cn(
-                      'flex items-center gap-1 rounded-full border px-3 py-[5px] text-[12px] font-medium transition-all duration-150',
-                      sel
-                        ? 'border-primary bg-primary text-white shadow-sm'
-                        : 'border-border bg-card text-foreground hover:border-border-strong hover:bg-muted/60',
-                    )}
-                  >
-                    {sel && <Check className="size-2.5 shrink-0" aria-hidden />}
-                    {opt.name}
-                  </button>
-                )
-              })}
-            </div>
-
-            {/* "Other" custom input — animated, no autoFocus */}
-            <AnimatePresence>
-              {isOther && (
-                <motion.div
-                  key="other-input"
-                  initial={{ opacity: 0, height: 0 }}
-                  animate={{ opacity: 1, height: 'auto' }}
-                  exit={{ opacity: 0, height: 0 }}
-                  transition={{ duration: 0.18, ease: EASE }}
-                  className="overflow-hidden"
-                >
-                  <div className="mt-3">
-                    <input
-                      ref={otherInputRef}
-                      className={inputCls}
-                      placeholder="Describe your event format…"
-                      value={customSubtype}
-                      onChange={e => onCustomSubtype(e.target.value)}
-                      maxLength={60}
-                    />
-                    <p className="mt-1 text-[12px] text-muted-foreground">
-                      e.g. 15K Run, Ultra Marathon, Product Demo Day…
-                    </p>
-                  </div>
-                </motion.div>
-              )}
-            </AnimatePresence>
-          </>
-        ) : null}
-      </div>
-
-      {/* Selection summary strip */}
-      {(resolvedName || (isCustomType && customSubtype.trim())) && (
-        <motion.div
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          className="flex items-center gap-2 rounded-lg border border-primary/20 bg-card px-3.5 py-2.5 shadow-[0_1px_3px_rgba(0,0,0,0.04)]"
-        >
-          <CheckCircle2 className="size-3.5 shrink-0 text-primary" aria-hidden />
-          <p className="min-w-0 truncate text-[14px] font-medium text-foreground">
-            {et?.name}
-            {resolvedName && (
-              <>
-                <ChevronRight className="mx-0.5 inline size-3.5 shrink-0 text-muted-foreground/60" aria-hidden />
-                <span className="text-primary">{resolvedName}</span>
-              </>
-            )}
-          </p>
-        </motion.div>
-      )}
-    </motion.div>
-  )
-}
-
-// --- Step 1 helper panel ------------------------------------------------------
-
-function Step1HelperPanel() {
-  return (
-    <aside
-      aria-label="Event creation help"
-      className="h-fit rounded-xl border border-border bg-card shadow-sm"
-    >
-      <div className="p-5">
-        <div className="mb-2 flex items-start gap-2">
-          <Sparkles className="mt-0.5 size-4 shrink-0 text-primary" aria-hidden />
-          <p className="text-[13px] font-semibold text-foreground">
-            Not sure which type to pick?
-          </p>
-        </div>
-        <p className="text-[12px] leading-relaxed text-muted-foreground">
-          Choose the closest match. Use "Custom Event" to build a fully custom experience from scratch.
-        </p>
-      </div>
-
-      <div className="border-t border-border" />
-
-      <div className="p-5">
-        <div className="mb-2 flex items-start gap-2">
-          <Headphones className="mt-0.5 size-4 shrink-0 text-foreground" aria-hidden />
-          <p className="text-[13px] font-semibold text-foreground">Need Help?</p>
-        </div>
-        <p className="mb-3.5 text-[12px] leading-relaxed text-muted-foreground">
-          We're here to help you create the perfect event.
-        </p>
-        {/* GA-7 S1: organizer-facing help docs are not yet published — the help
-            action is hidden rather than shipping a dead link. Restore with the
-            real docs URL once the guide exists. */}
-      </div>
-
-      <div className="border-t border-border" />
-
-      <div className="p-5">
-        <p className="mb-3 text-[13px] font-semibold text-primary">
-          Why choose the right type?
-        </p>
-        <ul className="space-y-2" aria-label="Benefits">
-          {BENEFITS.map(benefit => (
-            <li key={benefit} className="flex items-start gap-2">
-              <CheckCircle2 className="mt-0.5 size-3.5 shrink-0 text-primary" aria-hidden />
-              <span className="text-[12px] leading-snug text-muted-foreground">{benefit}</span>
-            </li>
-          ))}
-        </ul>
-      </div>
-    </aside>
-  )
-}
-
-// --- Step 2 components --------------------------------------------------------
-
-function RadioIndicator({ selected }: { selected: boolean }) {
-  return (
-    <div
-      aria-hidden
-      className={cn(
-        'flex size-[22px] items-center justify-center rounded-full border-2 transition-all duration-200',
-        selected ? 'border-primary bg-primary' : 'border-border bg-card',
-      )}
-    >
-      {selected && <div className="size-2.5 rounded-full bg-white" />}
-    </div>
-  )
-}
-
-function VisibilityCard({
-  option,
-  selected,
-  onSelect,
-}: {
-  option:   VisibilityOption
-  selected: boolean
-  onSelect: (id: VisibilityId) => void
-}) {
-  const TipIcon = option.tipIcon
-
-  return (
-    <motion.button
-      onClick={() => onSelect(option.id)}
-      whileTap={{ scale: 0.994 }}
-      aria-pressed={selected}
-      aria-label={`Select ${option.name}`}
-      className={cn(
-        'group relative flex cursor-pointer flex-col overflow-hidden rounded-xl border-[1.5px] bg-card text-left shadow-sm transition-all duration-200',
-        selected
-          ? 'border-primary shadow-md ring-1 ring-primary/10'
-          : 'border-border hover:border-primary/35 hover:shadow',
-      )}
-    >
-      <div className="absolute right-4 top-4">
-        <RadioIndicator selected={selected} />
-      </div>
-
-      <div className="flex flex-col items-center px-6 pb-5 pt-8 text-center">
-        <div
-          className={cn(
-            'flex size-[88px] items-center justify-center rounded-full transition-transform duration-200 group-hover:scale-[1.05]',
-            option.iconBg,
-          )}
-          aria-hidden
-        >
-          <option.icon className={cn('size-9', option.iconColor)} />
-        </div>
-
-        <p className="mt-5 text-[19px] font-bold text-foreground">{option.name}</p>
-
-        <span className={cn(
-          'mt-2 rounded-full px-3 py-0.5 text-[13px] font-semibold',
-          option.badge.className,
-        )}>
-          {option.badge.label}
-        </span>
-
-        <p className="mt-3 max-w-[260px] text-[13px] leading-relaxed text-muted-foreground">
-          {option.description}
-        </p>
-      </div>
-
-      <div className="mx-5 border-t border-border" />
-
-      <ul className="flex-1 space-y-3 px-6 py-5">
-        {option.features.map(feature => (
-          <li key={feature} className="flex items-center gap-3">
-            <div
-              className="flex size-[18px] shrink-0 items-center justify-center rounded-full bg-emerald-500"
-              aria-hidden
-            >
-              <Check className="size-2.5 text-white" />
-            </div>
-            <span className="text-[13px] text-foreground">{feature}</span>
-          </li>
-        ))}
-      </ul>
-
-      <div className={cn(
-        'flex items-start gap-3 border-t border-border px-5 py-4',
-        option.tipBg,
-      )}>
-        <div className={cn(
-          'flex size-7 shrink-0 items-center justify-center rounded-lg',
-          option.tipIconBg,
-        )}>
-          <TipIcon className={cn('size-3.5', option.tipColor)} aria-hidden />
-        </div>
-        <p className={cn('text-[13px] leading-relaxed', option.tipColor)}>
-          {option.tip}
-        </p>
-      </div>
-    </motion.button>
-  )
-}
-
-function Step2HelperPanel() {
-  const { supportEmail } = useBranding()
-  return (
-    <aside
-      aria-label="Visibility selection guide"
-      className="h-fit rounded-xl border border-border bg-card shadow-sm"
-    >
-      <div className="p-5">
-        <div className="mb-2 flex items-start gap-2">
-          <Lightbulb className="mt-0.5 size-4 shrink-0 text-amber-500" aria-hidden />
-          <p className="text-[13px] font-semibold text-foreground">
-            Not sure which one to choose?
-          </p>
-        </div>
-        <p className="text-[12px] leading-relaxed text-muted-foreground">
-          Here's a quick guide to help you decide.
-        </p>
-      </div>
-
-      <div className="border-t border-border" />
-
-      <div className="p-5">
-        <div className="mb-3 flex items-center gap-2">
-          <Globe className="size-4 shrink-0 text-primary" aria-hidden />
-          <p className="text-[13px] font-semibold text-foreground">Choose Public if:</p>
-        </div>
-        <ul className="space-y-2">
-          {PUBLIC_REASONS.map(reason => (
-            <li key={reason} className="flex items-start gap-2.5 text-[12px] text-muted-foreground">
-              <span
-                className="mt-[5px] h-[5px] w-[5px] shrink-0 rounded-full bg-muted-foreground/60"
-                aria-hidden
-              />
-              {reason}
-            </li>
-          ))}
-        </ul>
-      </div>
-
-      <div className="border-t border-border" />
-
-      <div className="p-5">
-        <div className="mb-3 flex items-center gap-2">
-          <Lock className="size-4 shrink-0 text-emerald-600" aria-hidden />
-          <p className="text-[13px] font-semibold text-foreground">Choose Private if:</p>
-        </div>
-        <ul className="space-y-2">
-          {PRIVATE_REASONS.map(reason => (
-            <li key={reason} className="flex items-start gap-2.5 text-[12px] text-muted-foreground">
-              <span
-                className="mt-[5px] h-[5px] w-[5px] shrink-0 rounded-full bg-muted-foreground/60"
-                aria-hidden
-              />
-              {reason}
-            </li>
-          ))}
-        </ul>
-      </div>
-
-      <div className="border-t border-border" />
-
-      <div className="p-5">
-        <div className="mb-1.5 flex items-center gap-2">
-          <Headphones className="size-4 shrink-0 text-foreground" aria-hidden />
-          <p className="text-[13px] font-semibold text-foreground">Need help?</p>
-        </div>
-        <p className="mb-3 text-[12px] leading-relaxed text-muted-foreground">
-          Our support team is here to assist you.
-        </p>
-        <Link
-          href={`mailto:${supportEmail}`}
-          className="inline-flex items-center gap-1 text-[14px] font-semibold text-primary hover:underline underline-offset-4"
-          aria-label="Contact support"
-        >
-          Contact Support
-          <ArrowRight className="size-3" aria-hidden />
-        </Link>
-      </div>
-    </aside>
-  )
-}
-
-// --- Step 3 components --------------------------------------------------------
-
-function AccessControlCard({
-  option,
-  selected,
-  onSelect,
-}: {
-  option:   AccessControlOption
-  selected: boolean
-  onSelect: (id: AccessControlId) => void
-}) {
-  return (
-    <motion.button
-      onClick={() => onSelect(option.id)}
-      whileTap={{ scale: 0.985 }}
-      aria-pressed={selected}
-      aria-label={`Select ${option.name}`}
-      className={cn(
-        'group relative flex cursor-pointer flex-col rounded-xl border-[1.5px] bg-card text-left shadow-sm transition-all duration-150',
-        selected
-          ? 'border-primary bg-primary/[0.02] shadow-md ring-1 ring-primary/10'
-          : 'border-border hover:border-primary/35 hover:bg-muted/[0.03] hover:shadow',
-      )}
-    >
-      {/* Header row: icon + title + radio */}
-      <div className="flex items-center gap-3 px-4 pb-2.5 pt-4">
-        <div
-          className={cn(
-            'flex size-[42px] shrink-0 items-center justify-center rounded-xl transition-transform duration-150 group-hover:scale-[1.05]',
-            option.iconBg,
-          )}
-          aria-hidden
-        >
-          <option.icon className={cn('size-[18px]', option.iconColor)} />
-        </div>
-
-        <p className="flex-1 text-[13px] font-bold leading-snug text-foreground">
-          {option.name}
-        </p>
-
-        <RadioIndicator selected={selected} />
-      </div>
-
-      {/* Description */}
-      <p className="line-clamp-2 px-4 pb-3 text-[13px] leading-relaxed text-muted-foreground">
-        {option.description}
-      </p>
-
-      {/* Badge footer */}
-      <div className="mt-auto border-t border-border/70 px-4 py-2.5">
-        <span
-          className={cn(
-            'inline-block rounded-md px-2 py-[3px] text-[12px] font-medium',
-            option.badgeBg,
-            option.badgeColor,
-          )}
-        >
-          {option.badge}
-        </span>
-      </div>
-    </motion.button>
-  )
-}
-
-function Step3SummaryPanel({
-  selectedOption,
-  visibilityLabel,
-  confirmationMode,
-  approvedContactsCount,
-}: {
-  selectedOption:        AccessControlOption | null
-  visibilityLabel:       string
-  confirmationMode:      ConfirmationMode
-  approvedContactsCount?: number
-}) {
-  const isPrivate    = visibilityLabel !== 'Public Event'
-  const VisIcon      = isPrivate ? Lock : Globe
-  const visIconBg    = isPrivate ? 'bg-emerald-100' : 'bg-violet-100'
-  const visIconColor = isPrivate ? 'text-emerald-600' : 'text-violet-600'
-  const displayLabel = visibilityLabel || 'Private Event'
-
-  const defaultExperience = [
-    'Select an access method to see details',
-    'Attendees will see the relevant options',
-    'Registration will follow the chosen rule',
-    'You can change this anytime',
-  ] as const
-
-  const experienceItems    = selectedOption?.experience ?? defaultExperience
-  const confirmOpt         = CONFIRMATION_OPTIONS.find(o => o.id === confirmationMode)!
-  const ConfirmIcon        = confirmOpt.icon
-
-  return (
-    <aside
-      aria-label="Access control summary"
-      className="h-fit rounded-xl border border-border bg-card shadow-sm"
-    >
-      {/* Panel header */}
-      <div className="border-b border-border px-4 py-3">
-        <p className="text-[14px] font-semibold text-foreground">
-          Your event access summary
-        </p>
-      </div>
-
-      {/* Visibility indicator */}
-      <div className="flex items-center gap-2.5 border-b border-border px-4 py-3">
-        <div className={cn('flex size-8 shrink-0 items-center justify-center rounded-lg', visIconBg)}>
-          <VisIcon className={cn('size-[15px]', visIconColor)} aria-hidden />
-        </div>
-        <div className="min-w-0">
-          <p className="text-[14px] font-semibold leading-tight text-primary">{displayLabel}</p>
-          <p className="mt-0.5 text-[12px] leading-snug text-muted-foreground">
-            Access restricted by selected method.
-          </p>
-        </div>
-      </div>
-
-      {/* Selected method */}
-      <div className="border-b border-border px-4 py-3">
-        <p className="mb-2 text-[12px] font-semibold uppercase tracking-wider text-muted-foreground">
-          Selected Method
-        </p>
-        {selectedOption ? (
-          <div className="flex items-center gap-2 rounded-lg border border-primary/20 bg-primary/[0.04] px-3 py-2">
-            <div className={cn(
-              'flex size-[22px] shrink-0 items-center justify-center rounded-full',
-              selectedOption.iconBg,
-            )}>
-              <selectedOption.icon className={cn('size-3', selectedOption.iconColor)} aria-hidden />
-            </div>
-            <div className="min-w-0 flex-1">
-              <p className="text-[12px] font-medium leading-tight text-foreground">
-                {selectedOption.name}
-              </p>
-              {selectedOption.id === 'approved_contacts' && approvedContactsCount !== undefined && (
-                <p className="mt-0.5 text-[12px] text-muted-foreground">
-                  {approvedContactsCount} contact{approvedContactsCount !== 1 ? 's' : ''} added
-                </p>
-              )}
-            </div>
-          </div>
-        ) : (
-          <div className="flex items-center rounded-lg border border-dashed border-border bg-muted/20 px-3 py-2">
-            <span className="text-[13px] text-muted-foreground/60">
-              Select an option above
-            </span>
-          </div>
-        )}
-      </div>
-
-      {/* What attendees will experience */}
-      <div className="border-b border-border px-4 py-3">
-        <p className="mb-2 text-[12px] font-semibold text-foreground">
-          What attendees will experience
-        </p>
-        <ul className="space-y-2">
-          {experienceItems.map((item, i) => (
-            <li key={i} className="flex items-start gap-2">
-              <CheckCircle2
-                className={cn(
-                  'mt-0.5 size-3 shrink-0 transition-colors',
-                  selectedOption
-                    ? i < experienceItems.length - 1
-                      ? 'text-primary'
-                      : 'text-muted-foreground/35'
-                    : 'text-muted-foreground/20',
-                )}
-                aria-hidden
-              />
-              <span className={cn(
-                'text-[13px] leading-snug',
-                selectedOption ? 'text-muted-foreground' : 'text-muted-foreground/45',
-              )}>
-                {item}
-              </span>
-            </li>
-          ))}
-        </ul>
-      </div>
-
-      {/* Registration confirmation */}
-      <div className="border-b border-border px-4 py-3">
-        <p className="mb-2 text-[12px] font-semibold uppercase tracking-wider text-muted-foreground">
-          Confirmation
-        </p>
-        <div className={cn(
-          'flex items-center gap-2.5 rounded-lg border px-3 py-2',
-          confirmationMode === 'auto'
-            ? 'border-emerald-200/60 bg-emerald-50/40'
-            : 'border-amber-200/60 bg-amber-50/40',
-        )}>
-          <div className={cn(
-            'flex size-[22px] shrink-0 items-center justify-center rounded-full',
-            confirmOpt.iconBg,
-          )}>
-            <ConfirmIcon className={cn('size-3', confirmOpt.iconColor)} aria-hidden />
-          </div>
-          <div className="min-w-0">
-            <p className="text-[12px] font-medium leading-tight text-foreground">
-              {confirmOpt.title}
-            </p>
-            <p className="text-[12px] text-muted-foreground">
-              {confirmationMode === 'auto'
-                ? 'Confirmed instantly after submission'
-                : 'Pending until manually reviewed'}
-            </p>
-          </div>
-        </div>
-      </div>
-
-      {/* Tip */}
-      <div className="border-b border-border px-4 py-3">
-        <div className="flex items-start gap-2 rounded-lg bg-muted/[0.06] px-3 py-2.5">
-          <Lightbulb className="mt-0.5 size-3 shrink-0 text-amber-500" aria-hidden />
-          <p className="text-[12px] leading-relaxed text-muted-foreground">
-            {confirmationMode === 'auto'
-              ? 'Auto Confirm works best for open or code-gated events with immediate payment.'
-              : 'Manual Approval gives you full control — ideal for exclusive or curated events.'}
-          </p>
-        </div>
-      </div>
-
-      {/* Need help */}
-      <div className="px-4 py-3">
-        <div className="mb-1 flex items-center gap-1.5">
-          <Headphones className="size-3.5 shrink-0 text-foreground" aria-hidden />
-          <p className="text-[12px] font-semibold text-foreground">Need help choosing?</p>
-        </div>
-        <p className="mb-2.5 text-[12px] leading-relaxed text-muted-foreground">
-          Learn more about access control options.
-        </p>
-        {/* GA-7 S1: help docs not yet published — action hidden until the guide exists. */}
-      </div>
-    </aside>
-  )
-}
-
-// --- Step 3 — Open to All detail panel ---------------------------------------
-
-const OPEN_BENEFITS = [
-  'Event may be visible in search results (based on visibility setting)',
-  'Anyone with the link can access and register',
-  'No invitation code or approval required',
-] as const
-
-const OPEN_EXPERIENCE = [
-  { icon: Search,  line1: 'Event may be discoverable', line2: 'in search results' },
-  { icon: Link2,   line1: 'Anyone can open the event', line2: 'page and register'  },
-  { icon: Users,   line1: 'Instant access to the',     line2: 'registration form'  },
-] as const
-
-function Step3OpenToAllPanel() {
-  return (
-    <motion.div
-      key="open-detail"
-      initial={{ opacity: 0, y: 6 }}
-      animate={{ opacity: 1, y: 0 }}
-      exit={{ opacity: 0, y: -4 }}
-      transition={{ duration: 0.2, ease: EASE }}
-      className="overflow-hidden rounded-xl border border-border bg-card shadow-sm"
-    >
-      <div className="grid sm:grid-cols-2">
-
-        {/* Left: icon + title + benefits + tip */}
-        <div className="p-5 sm:border-r sm:border-border">
-
-          {/* Icon + title + badge */}
-          <div className="flex items-start gap-3">
-            <div className="relative shrink-0">
-              <div className="flex size-11 items-center justify-center rounded-full bg-violet-100">
-                <Globe className="size-5 text-violet-600" aria-hidden />
-              </div>
-              <div
-                className="absolute -bottom-0.5 -right-0.5 flex size-[18px] items-center justify-center rounded-full bg-emerald-500"
-                aria-hidden
-              >
-                <Check className="size-2.5 text-white" />
-              </div>
-            </div>
-
-            <div>
-              <div className="flex flex-wrap items-center gap-2">
-                <p className="text-[14.5px] font-bold text-foreground">Open to All</p>
-                <span className="rounded-full bg-emerald-50 px-2 py-[2px] text-[12px] font-semibold text-emerald-600">
-                  Recommended
-                </span>
-              </div>
-              <p className="mt-0.5 text-[12px] leading-relaxed text-muted-foreground">
-                Anyone can find the event and register without any restrictions.
-              </p>
-            </div>
-          </div>
-
-          {/* Benefits */}
-          <ul className="mt-4 space-y-2.5">
-            {OPEN_BENEFITS.map(b => (
-              <li key={b} className="flex items-start gap-2.5">
-                <CheckCircle2 className="mt-0.5 size-[14px] shrink-0 text-primary" aria-hidden />
-                <span className="text-[14px] text-foreground">{b}</span>
-              </li>
-            ))}
-          </ul>
-
-          {/* Tip */}
-          <div className="mt-4 flex items-start gap-2.5 rounded-lg border border-primary/10 bg-primary/[0.04] px-3.5 py-3">
-            <Lightbulb className="mt-0.5 size-3.5 shrink-0 text-amber-500" aria-hidden />
-            <p className="text-[13px] leading-relaxed text-muted-foreground">
-              This is the best option for public events where you want maximum reach and easy registration.
-            </p>
-          </div>
-        </div>
-
-        {/* Right: what attendees will experience */}
-        <div className="p-5">
-          <p className="mb-4 text-[13px] font-semibold text-foreground">
-            What attendees will experience
-          </p>
-          <ul className="space-y-4">
-            {OPEN_EXPERIENCE.map(item => {
-              const Icon = item.icon
-              return (
-                <li key={item.line1} className="flex items-start gap-3">
-                  <div className="flex size-9 shrink-0 items-center justify-center rounded-full bg-primary/10">
-                    <Icon className="size-[17px] text-primary" aria-hidden />
-                  </div>
-                  <div>
-                    <p className="text-[14px] font-medium text-foreground">{item.line1}</p>
-                    <p className="text-[12px] text-muted-foreground">{item.line2}</p>
-                  </div>
-                </li>
-              )
-            })}
-          </ul>
-        </div>
-
-      </div>
-    </motion.div>
-  )
-}
-
-// --- Step 3 — Invite Code detail panel ---------------------------------------
-
-function generateInviteCode(): string {
-  const year  = new Date().getFullYear()
-  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ'
-  const extra = Array.from({ length: 2 }, () => chars[Math.floor(Math.random() * chars.length)]).join('')
-  return `EVENT${year}${extra}`
-}
-
-interface InviteCodeDraft {
-  code:             string
-  confirmCode:      string
-  description:      string
-  expiresAt:        string   // ISO date string or ''
-  maxUses:          string   // numeric string or '' for unlimited
-  caseSensitive:    boolean
-  oneUsePerEmail:   boolean
-  expireAfterStart: boolean
-}
-
-const DEFAULT_INVITE_CODE_DRAFT: InviteCodeDraft = {
-  code:             '',
-  confirmCode:      '',
-  description:      '',
-  expiresAt:        '',
-  maxUses:          '',
-  caseSensitive:    true,
-  oneUsePerEmail:   false,
-  expireAfterStart: false,
-}
-
-const INVITE_CODE_BENEFITS = [
-  'Access is restricted with a code',
-  'Only people with the correct code can register',
-  'Event will not appear in search results',
-  'No public listing or calendar visibility',
-  'No approval required after code verification',
-] as const
-
-function Step3InviteCodePanel({
-  draft,
-  onUpdate,
-}: {
-  draft:    InviteCodeDraft
-  onUpdate: (partial: Partial<InviteCodeDraft>) => void
-}) {
-  const inputCls =
-    'h-9 w-full rounded-lg border border-border bg-background px-3 text-[13px] text-foreground placeholder:text-muted-foreground/60 outline-none transition-colors focus:border-primary/50 focus:ring-2 focus:ring-primary/20'
-
-  const codeMatches = draft.code.length > 0 && draft.confirmCode.length > 0 && (
-    draft.caseSensitive
-      ? draft.code === draft.confirmCode
-      : draft.code.toLowerCase() === draft.confirmCode.toLowerCase()
-  )
-  const codeMismatch = draft.confirmCode.length > 0 && !codeMatches
-
-  const handleGenerate = () => {
-    const code = generateInviteCode()
-    onUpdate({ code, confirmCode: code })
-  }
-
-  return (
-    <motion.div
-      key="invite-code-detail"
-      initial={{ opacity: 0, y: 6 }}
-      animate={{ opacity: 1, y: 0 }}
-      exit={{ opacity: 0, y: -4 }}
-      transition={{ duration: 0.2, ease: EASE }}
-      className="overflow-hidden rounded-xl border border-border bg-card shadow-sm"
-    >
-      <div className="grid sm:grid-cols-2">
-
-        {/* Left: icon + title + benefits + tip */}
-        <div className="p-5 sm:border-r sm:border-border">
-
-          {/* Icon + title */}
-          <div className="flex items-start gap-3">
-            <div className="relative shrink-0">
-              <div className="flex size-11 items-center justify-center rounded-xl bg-orange-100">
-                <Hash className="size-5 text-orange-500" aria-hidden />
-              </div>
-              <div
-                className="absolute -bottom-0.5 -right-0.5 flex size-[18px] items-center justify-center rounded-full bg-primary"
-                aria-hidden
-              >
-                <Check className="size-2.5 text-white" />
-              </div>
-            </div>
-            <div>
-              <div className="flex flex-wrap items-center gap-2">
-                <p className="text-[14.5px] font-bold text-foreground">
-                  Invite Code (Code Required)
-                </p>
-                <span className="rounded-full bg-emerald-50 px-2 py-[2px] text-[12px] font-semibold text-emerald-600">
-                  Recommended
-                </span>
-              </div>
-              <p className="mt-0.5 text-[12px] leading-relaxed text-muted-foreground">
-                People must enter a valid invite code to access and register.
-              </p>
-            </div>
-          </div>
-
-          {/* Benefits */}
-          <ul className="mt-4 space-y-2.5">
-            {INVITE_CODE_BENEFITS.map(b => (
-              <li key={b} className="flex items-start gap-2.5">
-                <CheckCircle2 className="mt-0.5 size-[14px] shrink-0 text-primary" aria-hidden />
-                <span className="text-[14px] text-foreground">{b}</span>
-              </li>
-            ))}
-          </ul>
-
-          {/* Tip */}
-          <div className="mt-4 flex items-start gap-2.5 rounded-lg border border-primary/10 bg-primary/[0.04] px-3.5 py-3">
-            <Lightbulb className="mt-0.5 size-3.5 shrink-0 text-amber-500" aria-hidden />
-            <p className="text-[13px] leading-relaxed text-muted-foreground">
-              Great for private events, invite-only sessions, or exclusive programs where you want controlled access.
-            </p>
-          </div>
-        </div>
-
-        {/* Right: settings form */}
-        <div className="flex flex-col gap-3 p-5">
-          <p className="text-[13px] font-semibold text-foreground">Invite Code Settings</p>
-
-          {/* Invite Code + Generate */}
-          <div>
-            <label className="mb-1 flex items-center text-[12px] font-medium text-foreground">
-              Invite Code
-              <span className="ml-0.5 text-[12px] text-red-500" aria-hidden>*</span>
-            </label>
-            <div className="flex gap-2">
-              <input
-                type="text"
-                value={draft.code}
-                onChange={e => onUpdate({ code: e.target.value })}
-                placeholder="e.g., EVENT2026"
-                className={cn(inputCls, 'flex-1')}
-                aria-required
-                aria-label="Invite code"
-              />
-              <button
-                type="button"
-                onClick={handleGenerate}
-                className={cn(buttonVariants({ variant: 'outline', size: 'sm' }), 'shrink-0 gap-1.5')}
-                aria-label="Generate a random invite code"
-              >
-                <RefreshCw className="size-3" aria-hidden />
-                Generate Code
-              </button>
-            </div>
-          </div>
-
-          {/* Confirm Invite Code */}
-          <div>
-            <label className="mb-1 flex items-center text-[12px] font-medium text-foreground">
-              Confirm Invite Code
-              <span className="ml-0.5 text-[12px] text-red-500" aria-hidden>*</span>
-            </label>
-            <div className="relative">
-              <input
-                type="text"
-                value={draft.confirmCode}
-                onChange={e => onUpdate({ confirmCode: e.target.value })}
-                placeholder="Re-enter the code"
-                aria-required
-                aria-label="Confirm invite code"
-                className={cn(
-                  inputCls,
-                  'pr-9',
-                  codeMatches  && 'border-emerald-400 focus:border-emerald-400 focus:ring-emerald-200',
-                  codeMismatch && 'border-red-400   focus:border-red-400   focus:ring-red-100',
-                )}
-              />
-              {codeMatches && (
-                <CheckCircle2
-                  className="pointer-events-none absolute right-2.5 top-2.5 size-4 text-emerald-500"
-                  aria-hidden
-                />
-              )}
-              {codeMismatch && (
-                <XCircle
-                  className="pointer-events-none absolute right-2.5 top-2.5 size-4 text-red-400"
-                  aria-hidden
-                />
-              )}
-            </div>
-            {codeMismatch && (
-              <p className="mt-1 text-[12px] text-red-500" role="alert">Codes do not match</p>
-            )}
-          </div>
-
-          {/* Code Description */}
-          <div>
-            <label className="mb-1 flex items-center gap-1.5 text-[12px] font-medium text-foreground">
-              Code Description
-              <span className="text-[12px] font-normal text-muted-foreground">(Optional)</span>
-            </label>
-            <div className="relative">
-              <input
-                type="text"
-                value={draft.description}
-                onChange={e => onUpdate({ description: e.target.value.slice(0, 100) })}
-                placeholder="e.g., Early bird invitation code"
-                className={cn(inputCls, 'pr-14')}
-                aria-label="Code description"
-              />
-              <span className="pointer-events-none absolute right-3 top-2.5 text-[12px] text-muted-foreground">
-                {draft.description.length}/100
-              </span>
-            </div>
-          </div>
-
-          {/* Code Expiry + Max Uses */}
-          <div className="grid grid-cols-2 gap-2.5">
-            <div>
-              <label className="mb-1 flex items-center gap-1 text-[12px] font-medium text-foreground">
-                Code Expiry
-                <span className="text-[12px] font-normal text-muted-foreground">(Optional)</span>
-              </label>
-              <div className="relative">
-                <input
-                  type="date"
-                  value={draft.expiresAt}
-                  onChange={e => onUpdate({ expiresAt: e.target.value })}
-                  min={new Date().toISOString().split('T')[0]}
-                  className={cn(
-                    inputCls,
-                    'cursor-pointer pr-8',
-                    !draft.expiresAt && 'text-muted-foreground/60',
-                  )}
-                  aria-label="Code expiry date"
-                />
-                <Calendar
-                  className="pointer-events-none absolute right-2.5 top-2.5 size-3.5 text-muted-foreground"
-                  aria-hidden
-                />
-              </div>
-            </div>
-
-            <div>
-              <label className="mb-1 flex items-center gap-1 text-[12px] font-medium text-foreground">
-                Max Uses
-                <span className="text-[12px] font-normal text-muted-foreground">(Optional)</span>
-              </label>
-              <input
-                type="number"
-                value={draft.maxUses}
-                onChange={e => onUpdate({ maxUses: e.target.value })}
-                placeholder="Unlimited"
-                min={1}
-                className={inputCls}
-                aria-label="Maximum number of code uses"
-              />
-            </div>
-          </div>
-
-          {/* Checkboxes */}
-          <div className="space-y-1.5 pt-0.5">
-            <div className="grid grid-cols-2 gap-x-3">
-              <label className="flex cursor-pointer items-center gap-2">
-                <input
-                  type="checkbox"
-                  checked={draft.caseSensitive}
-                  onChange={e => onUpdate({ caseSensitive: e.target.checked })}
-                  className="size-[15px] cursor-pointer accent-primary"
-                />
-                <span className="text-[12px] text-foreground">Case sensitive code</span>
-              </label>
-              <label className="flex cursor-pointer items-center gap-2">
-                <input
-                  type="checkbox"
-                  checked={draft.oneUsePerEmail}
-                  onChange={e => onUpdate({ oneUsePerEmail: e.target.checked })}
-                  className="size-[15px] cursor-pointer accent-primary"
-                />
-                <span className="text-[12px] text-foreground">Limit to one use per email</span>
-              </label>
-            </div>
-            <label className="flex cursor-pointer items-center gap-2">
-              <input
-                type="checkbox"
-                checked={draft.expireAfterStart}
-                onChange={e => onUpdate({ expireAfterStart: e.target.checked })}
-                className="size-[15px] cursor-pointer accent-primary"
-              />
-              <span className="text-[12px] text-foreground">Expire after event start time</span>
-            </label>
-          </div>
-
-        </div>
-      </div>
-    </motion.div>
-  )
-}
-
-// --- Step 3 — Approved Contact List detail panel -----------------------------
-
-interface ApprovedContact {
-  id:           string
-  name:         string
-  mobileNumber: string
-  email:        string
-  memberId:     string
-  addedAt:      string  // ISO timestamp
-}
-
-const CONTACT_TEMPLATE_CSV =
-  'Name,Mobile Number,Email,Member ID\nJane Doe,+919876543210,jane@example.com,MEM001\n'
-
-const PAGE_SIZE = 5
-type SortCol = 'name' | 'email' | 'mobileNumber' | 'addedAt'
-
-function generateContactId(): string {
-  return Math.random().toString(36).slice(2, 10)
-}
-
-function parseCsvText(text: string): Record<string, string>[] {
-  const lines = text.split(/\r?\n/).filter(l => l.trim().length > 0)
-  if (lines.length < 2) return []
-  const headers = lines[0].split(',').map(h => h.replace(/^"|"$/g, '').trim().toLowerCase())
-  return lines.slice(1).map(line => {
-    const values: string[] = []
-    let cur = ''
-    let inQ = false
-    for (const ch of line) {
-      if (ch === '"') { inQ = !inQ }
-      else if (ch === ',' && !inQ) { values.push(cur); cur = '' }
-      else { cur += ch }
-    }
-    values.push(cur)
-    return Object.fromEntries(headers.map((h, i) => [h, (values[i] ?? '').replace(/^"|"$/g, '').trim()]))
-  })
-}
-
-function parseContactsFromRows(rows: Record<string, string>[]): ApprovedContact[] {
-  const now = new Date().toISOString()
-  return rows
-    .map(r => ({
-      id:           generateContactId(),
-      addedAt:      now,
-      name:         (r['name']          ?? '').trim(),
-      mobileNumber: (r['mobile number'] ?? r['mobile'] ?? r['phone number'] ?? r['phone'] ?? '').trim(),
-      email:        (r['email']         ?? '').trim(),
-      memberId:     (r['member id']     ?? r['member_id'] ?? r['memberid'] ?? '').trim(),
-    }))
-    .filter(c => c.mobileNumber.length > 0)
-}
-
-function Step3ApprovedContactListPanel({
-  contacts,
-  onUpdate,
-}: {
-  contacts: ApprovedContact[]
-  onUpdate: (contacts: ApprovedContact[]) => void
-}) {
-  // -- UI state
-  const [showForm,        setShowForm]        = useState(false)
-  const [form,            setForm]            = useState({ name: '', mobileNumber: '', email: '', memberId: '' })
-  const [mobileErr,       setMobileErr]       = useState('')
-  const [search,          setSearch]          = useState('')
-  const [showMoreMenu,    setShowMoreMenu]     = useState(false)
-  // -- Table state
-  const [sortCol,         setSortCol]         = useState<SortCol>('addedAt')
-  const [sortDir,         setSortDir]         = useState<'asc' | 'desc'>('desc')
-  const [page,            setPage]            = useState(1)
-  const [selectedIds,     setSelectedIds]     = useState<Set<string>>(new Set())
-  const [editingId,       setEditingId]       = useState<string | null>(null)
-  const [editForm,        setEditForm]        = useState({ name: '', mobileNumber: '', email: '', memberId: '' })
-  const [editMobileErr,   setEditMobileErr]   = useState('')
-  const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null)
-
-  const csvRef  = useRef<HTMLInputElement>(null)
-  const xlsxRef = useRef<HTMLInputElement>(null)
-
-  const inputCls     = 'h-9 w-full rounded-lg border border-border bg-background px-3 text-[14px] text-foreground placeholder:text-muted-foreground/60 outline-none transition-colors focus:border-primary/50 focus:ring-2 focus:ring-primary/20'
-  const editInputCls = 'h-7 w-full min-w-0 rounded border border-border bg-background px-2 text-[12px] text-foreground placeholder:text-muted-foreground/40 outline-none transition-colors focus:border-primary/60 focus:ring-1 focus:ring-primary/15'
-
-  // -- Derived
-  const q        = search.trim().toLowerCase()
-  const filtered = q
-    ? contacts.filter(c =>
-        c.name.toLowerCase().includes(q) ||
-        c.email.toLowerCase().includes(q) ||
-        c.mobileNumber.includes(q) ||
-        c.memberId.toLowerCase().includes(q)
-      )
-    : contacts
-
-  const getVal = (c: ApprovedContact): string => {
-    if (sortCol === 'name')         return c.name
-    if (sortCol === 'email')        return c.email
-    if (sortCol === 'mobileNumber') return c.mobileNumber
-    return c.addedAt
-  }
-
-  const sorted      = [...filtered].sort((a, b) => {
-    const cmp = getVal(a).localeCompare(getVal(b))
-    return sortDir === 'asc' ? cmp : -cmp
-  })
-  const totalPages  = Math.max(1, Math.ceil(sorted.length / PAGE_SIZE))
-  const curPage     = Math.min(page, totalPages)
-  const paginated   = sorted.slice((curPage - 1) * PAGE_SIZE, curPage * PAGE_SIZE)
-  const allPageSel  = paginated.length > 0 && paginated.every(c => selectedIds.has(c.id))
-  const somePageSel = paginated.some(c => selectedIds.has(c.id)) && !allPageSel
-  const bulkCount   = selectedIds.size
-
-  const pageNums: (number | '…')[] = (() => {
-    if (totalPages <= 6) return Array.from({ length: totalPages }, (_, i) => i + 1)
-    const arr: (number | '…')[] = [1]
-    if (curPage > 3) arr.push('…')
-    for (let i = Math.max(2, curPage - 1); i <= Math.min(totalPages - 1, curPage + 1); i++) arr.push(i)
-    if (curPage < totalPages - 2) arr.push('…')
-    arr.push(totalPages)
-    return arr
-  })()
-
-  const formatDate = (iso: string) => {
-    if (!iso) return '—'
-    try { return new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) }
-    catch { return '—' }
-  }
-
-  const triggerDownload = (content: string, filename: string) => {
-    const blob = new Blob([content], { type: 'text/csv;charset=utf-8;' })
-    const url  = URL.createObjectURL(blob)
-    const a    = Object.assign(document.createElement('a'), { href: url, download: filename })
-    document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url)
-  }
-
-  const exportList = (list: ApprovedContact[]) => {
-    if (!list.length) return
-    const hdr  = 'Name,Mobile Number,Email,Member ID,Added On'
-    const rows = list.map(c =>
-      `"${c.name}","${c.mobileNumber}","${c.email}","${c.memberId}","${formatDate(c.addedAt)}"`
-    )
-    triggerDownload([hdr, ...rows].join('\n'), 'contacts_export.csv')
-  }
-
-  // -- Sort
-  const handleSort = (col: SortCol) => {
-    if (sortCol === col) setSortDir(d => d === 'asc' ? 'desc' : 'asc')
-    else { setSortCol(col); setSortDir('asc') }
-    setPage(1)
-  }
-
-  // -- Selection
-  const toggleSelectPage = () => {
-    setSelectedIds(prev => {
-      const next = new Set(prev)
-      if (allPageSel) paginated.forEach(c => next.delete(c.id))
-      else paginated.forEach(c => next.add(c.id))
-      return next
-    })
-  }
-  const toggleSelect = (id: string) => {
-    setSelectedIds(prev => {
-      const next = new Set(prev)
-      if (next.has(id)) next.delete(id); else next.add(id)
-      return next
-    })
-  }
-
-  // -- Add
-  const handleAddSubmit = () => {
-    if (!form.mobileNumber.trim()) { setMobileErr('Mobile number is required'); return }
-    setMobileErr('')
-    onUpdate([...contacts, { id: generateContactId(), addedAt: new Date().toISOString(), ...form }])
-    setForm({ name: '', mobileNumber: '', email: '', memberId: '' })
-    setShowForm(false)
-  }
-
-  // -- Edit
-  const startEdit = (c: ApprovedContact) => {
-    setEditingId(c.id)
-    setEditForm({ name: c.name, mobileNumber: c.mobileNumber, email: c.email, memberId: c.memberId })
-    setEditMobileErr('')
-    setDeleteConfirmId(null)
-  }
-  const saveEdit = () => {
-    if (!editForm.mobileNumber.trim()) { setEditMobileErr('Required'); return }
-    onUpdate(contacts.map(c => c.id === editingId ? { ...c, ...editForm } : c))
-    setEditingId(null)
-  }
-  const cancelEdit = () => { setEditingId(null); setEditMobileErr('') }
-
-  // -- Delete
-  const handleDeleteConfirm = (id: string) => {
-    onUpdate(contacts.filter(c => c.id !== id))
-    setDeleteConfirmId(null)
-    setSelectedIds(prev => { const next = new Set(prev); next.delete(id); return next })
-  }
-
-  // -- Bulk
-  const handleBulkDelete = () => {
-    onUpdate(contacts.filter(c => !selectedIds.has(c.id)))
-    setSelectedIds(new Set())
-    setPage(1)
-  }
-
-  // -- CSV / Excel
-  const handleCsvChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0]
-    if (!file) return
-    const reader = new FileReader()
-    reader.onload = ev => {
-      const imported = parseContactsFromRows(parseCsvText(ev.target?.result as string))
-      if (imported.length) onUpdate([...contacts, ...imported])
-    }
-    reader.readAsText(file)
-    e.target.value = ''
-  }
-
-  const handleXlsxChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0]
-    if (!file) return
-    // readSheet returns Row[] (the first worksheet) without requiring a schema.
-    // read-excel-file v9 browser entry; safe to tree-shake server-only code.
-    const { readSheet } = await import('read-excel-file/browser')
-    const rows = await readSheet(file)
-    if (rows.length >= 2) {
-      const headers = rows[0].map(cell => String(cell ?? '').toLowerCase().trim())
-      const data    = rows.slice(1).map(row =>
-        Object.fromEntries(headers.map((h, i) => [h, String(row[i] ?? '').trim()]))
-      )
-      const imported = parseContactsFromRows(data)
-      if (imported.length) onUpdate([...contacts, ...imported])
-    }
-    e.target.value = ''
-  }
-
-  const handleClearAll = () => {
-    onUpdate([]); setSearch(''); setSelectedIds(new Set()); setShowMoreMenu(false); setPage(1)
-  }
-
-  // -- Sort icon helper
-  const SortIndicator = ({ col }: { col: SortCol }) => (
-    sortCol === col
-      ? sortDir === 'asc'
-        ? <ChevronUp   className="ml-1 inline size-3 text-primary" aria-hidden />
-        : <ChevronDown className="ml-1 inline size-3 text-primary" aria-hidden />
-      : <ArrowUpDown  className="ml-1 inline size-3 opacity-25" aria-hidden />
-  )
-
-  return (
-    <motion.div
-      key="approved-contact-detail"
-      initial={{ opacity: 0, y: 6 }}
-      animate={{ opacity: 1, y: 0 }}
-      exit={{ opacity: 0, y: -4 }}
-      transition={{ duration: 0.2, ease: EASE }}
-      className="overflow-hidden rounded-xl border border-border bg-card shadow-sm"
-    >
-
-      {/* -- Panel header -- */}
-      <div className="flex items-center gap-3 border-b border-border px-5 py-3.5">
-        <div className="flex size-8 shrink-0 items-center justify-center rounded-full bg-blue-100">
-          <UserCheck className="size-3.5 text-blue-600" aria-hidden />
-        </div>
-        <div className="min-w-0 flex-1">
-          <p className="text-[13px] font-bold text-foreground">Approved Contact List</p>
-          <p className="text-[13px] text-muted-foreground">Only contacts on this list can access and register.</p>
-        </div>
-        {contacts.length > 0 && (
-          <span className="shrink-0 rounded-full bg-blue-50 px-2.5 py-1 text-[12px] font-semibold text-blue-600">
-            {contacts.length} contact{contacts.length !== 1 ? 's' : ''}
-          </span>
-        )}
-      </div>
-
-      {/* -- Toolbar -- */}
-      <div className="flex flex-wrap items-center gap-2 border-b border-border px-5 py-2.5">
-        <button
-          type="button"
-          onClick={() => { setShowForm(f => !f); setMobileErr(''); setEditingId(null) }}
-          className={cn(buttonVariants({ variant: showForm ? 'primary' : 'outline', size: 'sm' }), 'gap-1.5')}
-          aria-expanded={showForm}
-        >
-          <Plus className="size-3.5" aria-hidden /> Add Contact
-        </button>
-
-        <button type="button" onClick={() => csvRef.current?.click()}
-          className={cn(buttonVariants({ variant: 'outline', size: 'sm' }), 'gap-1.5')}>
-          <Upload className="size-3.5" aria-hidden /> Import CSV
-        </button>
-        <input ref={csvRef} type="file" accept=".csv" className="hidden" onChange={handleCsvChange} />
-
-        <button type="button" onClick={() => xlsxRef.current?.click()}
-          className={cn(buttonVariants({ variant: 'outline', size: 'sm' }), 'gap-1.5')}>
-          <FileSpreadsheet className="size-3.5" aria-hidden /> Import Excel
-        </button>
-        <input ref={xlsxRef} type="file" accept=".xlsx,.xls" className="hidden" onChange={handleXlsxChange} />
-
-        {/* Search */}
-        <div className="relative ml-auto flex min-w-[140px] flex-1 sm:max-w-[210px]">
-          <Search className="pointer-events-none absolute left-2.5 top-2.5 size-3.5 text-muted-foreground/50" aria-hidden />
-          <input
-            type="text"
-            value={search}
-            onChange={e => { setSearch(e.target.value); setPage(1) }}
-            placeholder="Search contacts…"
-            className="h-9 w-full rounded-lg border border-border bg-background pl-8 pr-7 text-[14px] text-foreground placeholder:text-muted-foreground/50 outline-none transition-colors focus:border-primary/50 focus:ring-2 focus:ring-primary/20"
-          />
-          {search && (
-            <button type="button" onClick={() => { setSearch(''); setPage(1) }}
-              className="absolute right-2 top-2.5 text-muted-foreground/40 hover:text-foreground" aria-label="Clear search">
-              <X className="size-3.5" aria-hidden />
-            </button>
-          )}
-        </div>
-
-        {/* More actions */}
-        <div className="relative">
-          <button type="button" onClick={() => setShowMoreMenu(v => !v)}
-            className={cn(buttonVariants({ variant: 'outline', size: 'sm' }), 'gap-1')}
-            aria-haspopup="menu" aria-expanded={showMoreMenu}>
-            <MoreHorizontal className="size-3.5" aria-hidden />
-            More
-            <ChevronDown className="size-3" aria-hidden />
-          </button>
-          {showMoreMenu && (
-            <div className="absolute right-0 top-full z-20 mt-1 min-w-[148px] overflow-hidden rounded-lg border border-border bg-card shadow-md">
-              <button type="button" onClick={() => { exportList(contacts); setShowMoreMenu(false) }}
-                disabled={contacts.length === 0}
-                className="flex w-full items-center gap-2 px-3 py-2 text-left text-[14px] text-foreground hover:bg-muted/40 disabled:opacity-40">
-                <Download className="size-3.5 shrink-0 text-muted-foreground" aria-hidden /> Export CSV
-              </button>
-              <div className="h-px bg-border" />
-              <button type="button" onClick={handleClearAll} disabled={contacts.length === 0}
-                className="flex w-full items-center gap-2 px-3 py-2 text-left text-[13px] text-red-600 hover:bg-red-50 disabled:opacity-40">
-                <Trash2 className="size-3.5 shrink-0" aria-hidden /> Clear All
-              </button>
-            </div>
-          )}
-        </div>
-
-        <button type="button" onClick={() => triggerDownload(CONTACT_TEMPLATE_CSV, 'contact_list_template.csv')}
-          className={cn(buttonVariants({ variant: 'outline', size: 'sm' }), 'gap-1.5')}>
-          <Download className="size-3.5" aria-hidden /> Template
-        </button>
-      </div>
-
-      {/* -- Bulk action bar -- */}
-      <AnimatePresence>
-        {bulkCount > 0 && (
-          <motion.div
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: 'auto', opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
-            transition={{ duration: 0.15, ease: EASE }}
-            className="overflow-hidden border-b border-primary/20 bg-primary/[0.04]"
-          >
-            <div className="flex items-center gap-3 px-5 py-2">
-              <span className="text-[12px] font-semibold text-primary">
-                {bulkCount} selected
-              </span>
-              <div className="ml-auto flex items-center gap-2">
-                <button type="button" onClick={() => exportList(contacts.filter(c => selectedIds.has(c.id)))}
-                  className={cn(buttonVariants({ variant: 'outline', size: 'sm' }), 'h-7 gap-1.5 text-[13px]')}>
-                  <Download className="size-3" aria-hidden /> Export
-                </button>
-                <button type="button" onClick={handleBulkDelete}
-                  className={cn(buttonVariants({ variant: 'outline', size: 'sm' }), 'h-7 gap-1.5 border-red-200 text-[13px] text-red-600 hover:border-red-300 hover:bg-red-50')}>
-                  <Trash2 className="size-3" aria-hidden /> Delete
-                </button>
-                <button type="button" onClick={() => setSelectedIds(new Set())}
-                  className="text-[13px] text-muted-foreground hover:text-foreground">
-                  Clear
-                </button>
-              </div>
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      {/* -- Collapsible add-contact form -- */}
-      <AnimatePresence>
-        {showForm && (
-          <motion.div
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: 'auto', opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
-            transition={{ duration: 0.2, ease: EASE }}
-            className="overflow-hidden border-b border-border"
-          >
-            <div className="grid grid-cols-2 gap-3 bg-muted/[0.03] px-5 py-4 sm:grid-cols-4">
-              <div>
-                <label className="mb-1 block text-[13px] font-medium text-foreground">Name</label>
-                <input type="text" value={form.name}
-                  onChange={e => setForm(f => ({ ...f, name: e.target.value }))}
-                  placeholder="Full name" className={inputCls} />
-              </div>
-              <div>
-                <label className="mb-1 flex items-center text-[13px] font-medium text-foreground">
-                  Mobile Number <span className="ml-0.5 text-[12px] text-red-500" aria-hidden>*</span>
-                </label>
-                <input type="tel" value={form.mobileNumber}
-                  onChange={e => { setForm(f => ({ ...f, mobileNumber: e.target.value })); setMobileErr('') }}
-                  placeholder="+919876543210" aria-required
-                  className={cn(inputCls, mobileErr && 'border-red-400 focus:border-red-400 focus:ring-red-100')} />
-                {mobileErr && <p className="mt-1 text-[12px] text-red-500" role="alert">{mobileErr}</p>}
-              </div>
-              <div>
-                <label className="mb-1 flex items-center gap-1 text-[13px] font-medium text-foreground">
-                  Email <span className="text-[12px] font-normal text-muted-foreground">(Optional)</span>
-                </label>
-                <input type="email" value={form.email}
-                  onChange={e => setForm(f => ({ ...f, email: e.target.value }))}
-                  placeholder="email@example.com" className={inputCls} />
-              </div>
-              <div>
-                <label className="mb-1 flex items-center gap-1 text-[13px] font-medium text-foreground">
-                  Member ID <span className="text-[12px] font-normal text-muted-foreground">(Optional)</span>
-                </label>
-                <input type="text" value={form.memberId}
-                  onChange={e => setForm(f => ({ ...f, memberId: e.target.value }))}
-                  placeholder="MEM001" className={inputCls} />
-              </div>
-            </div>
-            <div className="flex items-center gap-2 border-t border-border/60 bg-muted/[0.03] px-5 py-3">
-              <button type="button" onClick={handleAddSubmit}
-                className={cn(buttonVariants({ variant: 'primary', size: 'sm' }), 'gap-1.5')}>
-                <Check className="size-3.5" aria-hidden /> Add to List
-              </button>
-              <button type="button"
-                onClick={() => { setShowForm(false); setMobileErr(''); setForm({ name: '', mobileNumber: '', email: '', memberId: '' }) }}
-                className={buttonVariants({ variant: 'outline', size: 'sm' })}>
-                Cancel
-              </button>
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      {/* -- Content: empty / search-empty / table -- */}
-      {contacts.length === 0 ? (
-
-        /* No contacts at all */
-        <div className="flex flex-col items-center gap-3 px-5 py-12 text-center">
-          <div className="flex size-14 items-center justify-center rounded-full bg-muted/40">
-            <Users className="size-6 text-muted-foreground/40" aria-hidden />
-          </div>
-          <div>
-            <p className="text-[13.5px] font-semibold text-foreground">No contacts yet</p>
-            <p className="mt-1 max-w-[260px] text-[12px] leading-relaxed text-muted-foreground/70">
-              Add contacts manually or import from CSV or Excel to build your approved list.
-            </p>
-          </div>
-          <div className="flex gap-2">
-            <button type="button" onClick={() => setShowForm(true)}
-              className={cn(buttonVariants({ variant: 'primary', size: 'sm' }), 'gap-1.5')}>
-              <Plus className="size-3.5" aria-hidden /> Add Contact
-            </button>
-            <button type="button" onClick={() => csvRef.current?.click()}
-              className={cn(buttonVariants({ variant: 'outline', size: 'sm' }), 'gap-1.5')}>
-              <Upload className="size-3.5" aria-hidden /> Import CSV
-            </button>
-          </div>
-        </div>
-
-      ) : sorted.length === 0 ? (
-
-        /* Search returns nothing */
-        <div className="flex flex-col items-center gap-2 py-9 text-center">
-          <Search className="size-5 text-muted-foreground/30" aria-hidden />
-          <p className="text-[13px] font-medium text-muted-foreground">
-            No results for &ldquo;{search}&rdquo;
-          </p>
-          <button type="button" onClick={() => setSearch('')}
-            className="text-[12px] text-primary hover:underline underline-offset-4">
-            Clear search
-          </button>
-        </div>
-
-      ) : (
-
-        /* Data table */
-        <div className="overflow-x-auto">
-          <table className="w-full text-left" aria-label="Approved contacts">
-            <thead>
-              <tr className="border-b border-border/70 bg-muted/[0.04]">
-                {/* Select-all */}
-                <th className="w-9 pl-5 pr-2 py-2.5">
-                  <input
-                    type="checkbox"
-                    checked={allPageSel}
-                    ref={el => { if (el) el.indeterminate = somePageSel }}
-                    onChange={toggleSelectPage}
-                    className="size-[14px] cursor-pointer accent-primary"
-                    aria-label="Select all on this page"
-                  />
-                </th>
-                {/* Row number */}
-                <th className="w-8 px-2 py-2.5 text-[12px] font-semibold uppercase tracking-wider text-muted-foreground">#</th>
-                {/* Sortable columns */}
-                {(
-                  [
-                    { label: 'Name',          col: 'name'         },
-                    { label: 'Email',         col: 'email'        },
-                    { label: 'Mobile Number', col: 'mobileNumber' },
-                    { label: 'Added On',      col: 'addedAt'      },
-                  ] as { label: string; col: SortCol }[]
-                ).map(({ label, col }) => (
-                  <th key={col}
-                    onClick={() => handleSort(col)}
-                    className="cursor-pointer select-none px-3 py-2.5 text-[12px] font-semibold uppercase tracking-wider text-muted-foreground transition-colors hover:text-foreground"
-                  >
-                    {label}
-                    <SortIndicator col={col} />
-                  </th>
-                ))}
-                {/* Actions */}
-                <th className="w-[90px] px-3 py-2.5" />
-              </tr>
-            </thead>
-            <tbody>
-              {paginated.map((c, i) => {
-                const isEditing  = editingId === c.id
-                const isDeleting = deleteConfirmId === c.id
-                const isSelected = selectedIds.has(c.id)
-                const rowNum     = (curPage - 1) * PAGE_SIZE + i + 1
-
-                /* -- Inline-edit row -- */
-                if (isEditing) {
-                  return (
-                    <tr key={c.id} className="border-b border-primary/20 bg-primary/[0.025]">
-                      <td className="pl-5 pr-2 py-2" />
-                      <td className="px-2 py-2 text-[12px] tabular-nums text-muted-foreground/50">{rowNum}</td>
-                      <td className="px-3 py-2">
-                        <input type="text" value={editForm.name}
-                          onChange={e => setEditForm(f => ({ ...f, name: e.target.value }))}
-                          placeholder="Name" className={editInputCls} />
-                      </td>
-                      <td className="px-3 py-2">
-                        <input type="email" value={editForm.email}
-                          onChange={e => setEditForm(f => ({ ...f, email: e.target.value }))}
-                          placeholder="Email" className={editInputCls} />
-                      </td>
-                      <td className="px-3 py-2">
-                        <input type="tel" value={editForm.mobileNumber}
-                          onChange={e => { setEditForm(f => ({ ...f, mobileNumber: e.target.value })); setEditMobileErr('') }}
-                          placeholder="Mobile" className={cn(editInputCls, editMobileErr && 'border-red-400')} />
-                        {editMobileErr && <p className="mt-0.5 text-[12px] text-red-500">{editMobileErr}</p>}
-                      </td>
-                      <td className="px-3 py-2 text-[12px] text-muted-foreground">{formatDate(c.addedAt)}</td>
-                      <td className="px-3 py-2">
-                        <div className="flex items-center gap-1">
-                          <button type="button" onClick={saveEdit}
-                            className="flex items-center gap-1 rounded px-2 py-1 text-[13px] font-medium text-emerald-600 hover:bg-emerald-50">
-                            <Check className="size-3" aria-hidden /> Save
-                          </button>
-                          <button type="button" onClick={cancelEdit}
-                            className="flex items-center gap-1 rounded px-2 py-1 text-[13px] text-muted-foreground hover:bg-muted/40">
-                            <X className="size-3" aria-hidden /> Cancel
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  )
-                }
-
-                /* -- Normal row -- */
-                return (
-                  <tr key={c.id} className={cn(
-                    'group border-b border-border/40 transition-colors last:border-0',
-                    isSelected  ? 'bg-primary/[0.025]' :
-                    isDeleting  ? 'bg-red-50/60'        :
-                                  'hover:bg-muted/[0.04]',
-                  )}>
-                    <td className="pl-5 pr-2 py-2.5">
-                      <input type="checkbox" checked={isSelected} onChange={() => toggleSelect(c.id)}
-                        className="size-[14px] cursor-pointer accent-primary" />
-                    </td>
-                    <td className="px-2 py-2.5 text-[12px] tabular-nums text-muted-foreground/55">{rowNum}</td>
-                    <td className="max-w-[130px] px-3 py-2.5">
-                      <span className="block truncate text-[14px] font-medium text-foreground">
-                        {c.name || <span className="text-muted-foreground/35">—</span>}
-                      </span>
-                    </td>
-                    <td className="max-w-[150px] px-3 py-2.5">
-                      <span className="block truncate text-[12px] text-muted-foreground">
-                        {c.email || <span className="text-muted-foreground/35">—</span>}
-                      </span>
-                    </td>
-                    <td className="px-3 py-2.5 font-mono text-[12px] text-foreground whitespace-nowrap">{c.mobileNumber}</td>
-                    <td className="px-3 py-2.5 text-[12px] text-muted-foreground whitespace-nowrap">{formatDate(c.addedAt)}</td>
-                    <td className="px-3 py-2.5">
-                      {isDeleting ? (
-                        <div className="flex items-center gap-1">
-                          <button type="button" onClick={() => handleDeleteConfirm(c.id)}
-                            className="rounded bg-red-500 px-2 py-0.5 text-[12px] font-semibold text-white hover:bg-red-600">
-                            Confirm
-                          </button>
-                          <button type="button" onClick={() => setDeleteConfirmId(null)}
-                            className="rounded px-2 py-0.5 text-[12px] text-muted-foreground hover:bg-muted/40">
-                            Cancel
-                          </button>
-                        </div>
-                      ) : (
-                        <div className="flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
-                          <button type="button" onClick={() => startEdit(c)}
-                            className="flex size-6 items-center justify-center rounded-md text-muted-foreground/50 hover:bg-primary/10 hover:text-primary"
-                            aria-label={`Edit ${c.name || c.mobileNumber}`}>
-                            <Pencil className="size-3.5" aria-hidden />
-                          </button>
-                          <button type="button" onClick={() => setDeleteConfirmId(c.id)}
-                            className="flex size-6 items-center justify-center rounded-md text-muted-foreground/50 hover:bg-red-50 hover:text-red-500"
-                            aria-label={`Delete ${c.name || c.mobileNumber}`}>
-                            <Trash2 className="size-3.5" aria-hidden />
-                          </button>
-                        </div>
-                      )}
-                    </td>
-                  </tr>
-                )
-              })}
-            </tbody>
-          </table>
-        </div>
-
-      )}
-
-      {/* -- Pagination -- */}
-      {contacts.length > 0 && totalPages > 1 && (
-        <div className="flex items-center justify-between border-t border-border/50 px-5 py-2.5">
-          <p className="text-[13px] text-muted-foreground">
-            {(curPage - 1) * PAGE_SIZE + 1}–{Math.min(curPage * PAGE_SIZE, sorted.length)} of {sorted.length}
-          </p>
-          <div className="flex items-center gap-1">
-            <button type="button" onClick={() => setPage(p => Math.max(1, p - 1))} disabled={curPage === 1}
-              className="flex size-7 items-center justify-center rounded-md border border-border text-muted-foreground hover:bg-muted/40 disabled:opacity-40"
-              aria-label="Previous page">
-              <ChevronLeft className="size-3.5" aria-hidden />
-            </button>
-            {pageNums.map((n, idx) =>
-              n === '…' ? (
-                <span key={`e${idx}`} className="w-7 text-center text-[12px] text-muted-foreground/50">…</span>
-              ) : (
-                <button key={n} type="button" onClick={() => setPage(n as number)}
-                  aria-label={`Page ${n}`} aria-current={curPage === n ? 'page' : undefined}
-                  className={cn(
-                    'flex size-7 items-center justify-center rounded-md text-[12px] font-medium transition-colors',
-                    curPage === n
-                      ? 'bg-primary text-primary-foreground'
-                      : 'text-muted-foreground hover:bg-muted/40',
-                  )}>
-                  {n}
-                </button>
-              )
-            )}
-            <button type="button" onClick={() => setPage(p => Math.min(totalPages, p + 1))} disabled={curPage === totalPages}
-              className="flex size-7 items-center justify-center rounded-md border border-border text-muted-foreground hover:bg-muted/40 disabled:opacity-40"
-              aria-label="Next page">
-              <ChevronRight className="size-3.5" aria-hidden />
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* -- Validation notice -- */}
-      <div className="flex items-start gap-2.5 border-t border-border/60 bg-amber-50/40 px-5 py-3">
-        <AlertCircle className="mt-0.5 size-3.5 shrink-0 text-amber-500" aria-hidden />
-        <div>
-          <p className="text-[13px] font-medium text-foreground">Validation at registration</p>
-          <p className="mt-0.5 text-[12px] leading-relaxed text-muted-foreground">
-            Mobile number is the primary match. Email and Member ID are optional secondary fields.
-            If not found:{' '}
-            <span className="font-medium text-foreground/80">
-              &ldquo;Your contact information is not approved for this event.&rdquo;
-            </span>
-          </p>
-        </div>
-      </div>
-
-    </motion.div>
-  )
-}
-
-// --- Step 3 — Registration Confirmation section -------------------------------
-
-interface ConfirmationOption {
-  id:          ConfirmationMode
-  title:       string
-  badge:       string
-  badgeColor:  string
-  badgeBg:     string
-  description: string
-  icon:        LucideIcon
-  iconBg:      string
-  iconColor:   string
-}
-
-const CONFIRMATION_OPTIONS: ConfirmationOption[] = [
-  {
-    id:          'auto',
-    title:       'Auto Confirm',
-    badge:       'Default',
-    badgeColor:  'text-emerald-600',
-    badgeBg:     'bg-emerald-50',
-    description: 'Registrations are confirmed immediately after successful submission and payment (if applicable).',
-    icon:        Zap,
-    iconBg:      'bg-emerald-100',
-    iconColor:   'text-emerald-600',
-  },
-  {
-    id:          'manual',
-    title:       'Manual Approval',
-    badge:       'Requires review',
-    badgeColor:  'text-amber-600',
-    badgeBg:     'bg-amber-50',
-    description: 'Registrations will remain pending until you or your team reviews and approves them.',
-    icon:        Clock,
-    iconBg:      'bg-amber-100',
-    iconColor:   'text-amber-600',
-  },
-]
-
-function RegistrationConfirmationSection({
-  mode,
-  onChange,
-}: {
-  mode:     ConfirmationMode
-  onChange: (m: ConfirmationMode) => void
-}) {
-  return (
-    <div className="mt-1">
-      {/* Section header */}
-      <div className="mb-3 flex items-center gap-3">
-        <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary/[0.09]">
-          <CheckCircle2 className="size-4 text-primary" aria-hidden />
-        </div>
-        <div>
-          <p className="text-[14px] font-bold text-foreground">Registration Confirmation</p>
-          <p className="mt-0.5 text-[13px] text-muted-foreground">
-            Choose how registrations will be confirmed.
-          </p>
-        </div>
-      </div>
-
-      {/* Cards */}
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-        {CONFIRMATION_OPTIONS.map(opt => {
-          const Icon     = opt.icon
-          const selected = mode === opt.id
-          return (
-            <motion.button
-              key={opt.id}
-              type="button"
-              onClick={() => onChange(opt.id)}
-              whileTap={{ scale: 0.985 }}
-              aria-pressed={selected}
-              aria-label={`Select ${opt.title}`}
-              className={cn(
-                'group relative flex cursor-pointer items-start gap-3 rounded-xl border-[1.5px] bg-card px-4 py-3.5 text-left shadow-sm transition-all duration-150',
-                selected
-                  ? 'border-primary bg-primary/[0.02] shadow-md ring-1 ring-primary/10'
-                  : 'border-border hover:border-primary/35 hover:bg-muted/[0.03] hover:shadow',
-              )}
-            >
-              <div
-                className={cn(
-                  'mt-0.5 flex size-9 shrink-0 items-center justify-center rounded-full transition-transform duration-150 group-hover:scale-[1.04]',
-                  opt.iconBg,
-                )}
-                aria-hidden
-              >
-                <Icon className={cn('size-4', opt.iconColor)} />
-              </div>
-
-              <div className="min-w-0 flex-1">
-                <div className="flex flex-wrap items-center gap-2">
-                  <p className="text-[13px] font-bold text-foreground">{opt.title}</p>
-                  <span className={cn(
-                    'rounded-full px-2 py-[2px] text-[12px] font-semibold',
-                    opt.badgeBg, opt.badgeColor,
-                  )}>
-                    {opt.badge}
-                  </span>
-                </div>
-                <p className="mt-1 text-[12px] leading-relaxed text-muted-foreground">
-                  {opt.description}
-                </p>
-              </div>
-
-              <div className="mt-0.5 shrink-0">
-                <RadioIndicator selected={selected} />
-              </div>
-            </motion.button>
-          )
-        })}
-      </div>
-    </div>
-  )
-}
-
-// --- State types --------------------------------------------------------------
-
-interface Step1State { eventType: string | null; subtype: string | null; customSubtype: string; campaignType: CampaignType | null }
-interface Step2State { visibility: VisibilityId | null }
-interface Step3State { accessControl: { type: AccessControlId } | null }
-
-// --- StepViewProps ------------------------------------------------------------
-
-interface StepViewProps {
-  currentStep:     number
-  completedValues: (string | undefined)[]
-  onNext:          (label?: string, data?: unknown) => void
-  onBack:          () => void
-  onSaveDraft?:    (data?: unknown) => void
-  initialData?:    Record<string, unknown> | null
-  onGoToStep?:     (step: number, fieldHint?: string) => void
-  focusHint?:      string
-  wizardSteps?:    WizardStep[]
-}
-
-// --- Campaign type intercept components ---------------------------------------
-
-function CampaignTypeSelector({
-  value,
-  onChange,
-}: {
-  value:    CampaignType | null
-  onChange: (ct: CampaignType) => void
-}) {
-  const options: Array<{
-    id:          CampaignType
-    label:       string
-    description: string
-    comingSoon?: boolean
-  }> = [
-    {
-      id:          'donation_only',
-      label:       'Donation Only',
-      description: 'Pure fundraising campaign with no tickets or event registration',
-    },
-    {
-      id:          'event_plus_donation',
-      label:       'Event + Donation',
-      description: 'Ticketed event with an optional donation component',
-    },
-    {
-      id:          'ticketed_fundraiser',
-      label:       'Ticketed Fundraiser',
-      description: 'Charity event with paid tickets (gala, benefit dinner, charity run)',
-      comingSoon:  true,
-    },
-  ]
-
-  return (
-    <motion.div
-      initial={{ opacity: 0, y: 6 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.25, ease: EASE }}
-      className="rounded-xl border border-border bg-card p-4 shadow-sm"
-    >
-      <p className="mb-3 text-[14px] font-semibold text-foreground">
-        How do you want to raise funds?
-      </p>
-      <div className="space-y-2.5">
-        {options.map(opt => (
-          <button
-            key={opt.id}
-            type="button"
-            disabled={opt.comingSoon}
-            onClick={() => !opt.comingSoon && onChange(opt.id)}
-            className={cn(
-              'relative flex w-full items-start gap-3 rounded-xl border-[1.5px] px-4 py-3 text-left transition-all duration-150',
-              value === opt.id
-                ? 'border-primary bg-primary/[0.03] shadow-sm'
-                : opt.comingSoon
-                ? 'cursor-not-allowed border-border bg-muted/20 opacity-60'
-                : 'border-border bg-card hover:border-primary/30 hover:bg-muted/[0.03]',
-            )}
-          >
-            <div className={cn('mt-0.5 flex size-[16px] shrink-0 items-center justify-center rounded-full border-2', value === opt.id ? 'border-primary bg-primary' : 'border-border')}>
-              {value === opt.id && <div className="size-[7px] rounded-full bg-white" />}
-            </div>
-            <div className="min-w-0 flex-1">
-              <div className="flex items-center gap-2">
-                <span className="text-[14px] font-medium text-foreground">{opt.label}</span>
-                {opt.comingSoon && (
-                  <span className="rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
-                    Coming soon
-                  </span>
-                )}
-              </div>
-              <p className="mt-0.5 text-[12.5px] text-muted-foreground">{opt.description}</p>
-            </div>
-          </button>
-        ))}
-      </div>
-    </motion.div>
-  )
-}
-
-function DonationSubtypeSelector({
-  subtype,
-  onSubtype,
-}: {
-  subtype:   DonationCampaignSubtype | null
-  onSubtype: (id: string) => void
-}) {
-  return (
-    <div className="rounded-xl border border-border bg-card p-4 shadow-sm">
-      <p className="mb-3 text-[14px] font-semibold text-foreground">
-        What is your cause?
-      </p>
-      <div className="flex flex-wrap gap-2">
-        {DONATION_CAMPAIGN_SUBTYPES.map(opt => (
-          <button
-            key={opt.id}
-            type="button"
-            onClick={() => onSubtype(opt.id)}
-            className={cn(
-              'flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-[13px] font-medium transition-all duration-150',
-              subtype === opt.id
-                ? 'border-primary bg-primary/[0.07] text-primary'
-                : 'border-border bg-card text-foreground/70 hover:border-primary/30',
-            )}
-          >
-            {subtype === opt.id && <Check className="size-[12px]" />}
-            {opt.label}
-          </button>
-        ))}
-      </div>
-    </div>
-  )
-}
-
-// --- Step 1 view --------------------------------------------------------------
-
-function Step1View({ currentStep, completedValues, onNext, onSaveDraft, initialData }: StepViewProps) {
-  const [step1, setStep1] = useState<Step1State>({
-    eventType:    (initialData?.eventType         as string | null)       ?? null,
-    subtype:      (initialData?.eventSubtype       as string | null)       ?? null,
-    customSubtype:(initialData?.customEventSubtype as string)              ?? '',
-    campaignType: (initialData?.campaignType       as CampaignType | null) ?? null,
-  })
-
-  const selectedType    = step1.eventType
-  const selectedSubtype = step1.subtype
-  const customSubtype   = step1.customSubtype
-  const campaignType    = step1.campaignType
-  const isCustomType    = selectedType === 'custom'
-  const isFundraising   = selectedType === 'fundraising'
-  const isOtherSubtype  = selectedSubtype === 'other'
-
-  const hasValidSubtype =
-    !selectedType ? false
-    : isCustomType ? true  // custom event can proceed without a subtype
-    // event_plus_donation is a ticketed event — no cause-category subtype required
-    : (isFundraising && campaignType === 'event_plus_donation') ? true
-    : selectedSubtype !== null && (!isOtherSubtype || customSubtype.trim().length > 0)
-
-  // Fundraising events require a campaign type selection before proceeding
-  const canProceed = selectedType !== null && hasValidSubtype
-    && (!isFundraising || campaignType !== null)
-
-  const subtypeSectionRef = useRef<HTMLDivElement>(null)
-
-  const handleSelectType = (id: string) =>
-    setStep1(prev => ({
-      eventType:    id,
-      subtype:      id !== prev.eventType ? null : prev.subtype,
-      customSubtype: id !== prev.eventType ? ''  : prev.customSubtype,
-      campaignType:  id !== prev.eventType ? null : prev.campaignType,
-    }))
-
-  useEffect(() => {
-    if (!selectedType) return
-    const timer = setTimeout(() => {
-      const el        = subtypeSectionRef.current
-      const scroller  = document.getElementById('main-content')
-      if (!el || !scroller) return
-
-      const MARGIN    = 24
-      const elRect        = el.getBoundingClientRect()
-      const scrollerRect  = scroller.getBoundingClientRect()
-      const visibleBottom = scrollerRect.bottom - MARGIN
-
-      const bottomOverflow = elRect.bottom - visibleBottom
-      if (bottomOverflow <= 0) return                         // already fully visible
-
-      // Cap scroll so the section title never scrolls above the visible top
-      const maxScroll = Math.max(0, elRect.top - scrollerRect.top - 16)
-      scroller.scrollBy({ top: Math.min(bottomOverflow, maxScroll), behavior: 'smooth' })
-    }, 340)
-    return () => clearTimeout(timer)
-  }, [selectedType])
-
-  const buildData = () => ({
-    eventType:    selectedType,
-    subtype:      selectedSubtype,
-    customSubtype: (isOtherSubtype || isCustomType) ? customSubtype.trim() : '',
-    campaignType:  isFundraising ? campaignType : null,
-  })
-
-  const handleNext = () => {
-    if (!canProceed) return
-    const name = EVENT_TYPES.find(et => et.id === selectedType)?.name ?? 'Custom Event'
-    onNext(name, buildData())
-  }
-
-  return (
-    <motion.div
-      initial={{ opacity: 0, y: 8 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.35, ease: EASE }}
-      className="flex min-h-full flex-col"
-    >
-      <Link
-        href={ROUTES.DASHBOARD_EVENTS}
-        className="mb-5 inline-flex items-center gap-1.5 text-[13px] font-medium text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary rounded"
-      >
-        <ArrowLeft className="size-4" aria-hidden />
-        Back to Dashboard
-      </Link>
-
-      <Stepper currentStep={currentStep} completedValues={completedValues} />
-
-      <div className="mt-6">
-        <h1 className="text-[22px] font-bold tracking-tight text-foreground">
-          Event Category
-        </h1>
-        <p className="mt-1 text-[13px] text-muted-foreground">
-          Choose the category that best represents your event.
-        </p>
-      </div>
-
-      <div
-        className="mt-5 grid flex-1 items-start gap-5 sm:mt-6 lg:grid-cols-[1fr_296px]"
-        aria-label="Event type selection"
-      >
-        {/* Left: cards grid + secondary selector */}
-        <div className="flex flex-col gap-4">
-          <div
-            role="group"
-            aria-label="Event types"
-            className="grid grid-cols-1 gap-2.5"
-          >
-            {EVENT_TYPES.map(et => (
-              <EventTypeCard
-                key={et.id}
-                type={et}
-                selected={selectedType === et.id}
-                onSelect={handleSelectType}
-                recommended={getTemplate(et.id)?.recommended}
-              />
-            ))}
-          </div>
-
-          {/* Mobile inline preview — shows below cards when a template is selected */}
-          <div className="lg:hidden">
-            <AnimatePresence mode="wait">
-              {selectedType && getTemplate(selectedType) && (
-                <motion.div
-                  key={`mobile-preview-${selectedType}`}
-                  initial={{ opacity: 0, height: 0 }}
-                  animate={{ opacity: 1, height: 'auto' }}
-                  exit={{ opacity: 0, height: 0 }}
-                  transition={{ duration: 0.25, ease: [0.22, 1, 0.36, 1] }}
-                  className="overflow-hidden"
-                >
-                  <TemplatePreviewPanel selectedTypeId={selectedType} />
-                </motion.div>
-              )}
-            </AnimatePresence>
-          </div>
-
-          {/* Secondary selector — subtype or campaign-type intercept */}
-          <AnimatePresence mode="wait">
-            {selectedType && (
-              <div ref={subtypeSectionRef} className="space-y-4">
-                {isFundraising ? (
-                  <>
-                    {/* Campaign type selector — replaces legacy fundraising subtypes */}
-                    <CampaignTypeSelector
-                      value={campaignType}
-                      onChange={ct =>
-                        setStep1(prev => ({ ...prev, campaignType: ct, subtype: null }))
-                      }
-                    />
-                    {/* Cause category selector — shown only for Donation Only campaigns */}
-                    <AnimatePresence>
-                      {campaignType === 'donation_only' && (
-                        <motion.div
-                          key="donation-subtypes"
-                          initial={{ opacity: 0, height: 0 }}
-                          animate={{ opacity: 1, height: 'auto' }}
-                          exit={{ opacity: 0, height: 0 }}
-                          transition={{ duration: 0.25, ease: EASE }}
-                          className="overflow-hidden"
-                        >
-                          <DonationSubtypeSelector
-                            subtype={selectedSubtype as DonationCampaignSubtype | null}
-                            onSubtype={id =>
-                              setStep1(prev => ({ ...prev, subtype: id }))
-                            }
-                          />
-                        </motion.div>
-                      )}
-                    </AnimatePresence>
-                  </>
-                ) : (
-                  <SubtypeSelector
-                    key={selectedType}
-                    eventTypeId={selectedType}
-                    subtype={selectedSubtype}
-                    customSubtype={customSubtype}
-                    onSubtype={id =>
-                      setStep1(prev => ({
-                        ...prev,
-                        subtype:      id,
-                        customSubtype: id !== 'other' ? '' : prev.customSubtype,
-                      }))
-                    }
-                    onCustomSubtype={v => setStep1(prev => ({ ...prev, customSubtype: v }))}
-                  />
-                )}
-              </div>
-            )}
-          </AnimatePresence>
-        </div>
-
-        {/* Desktop preview panel — sticky right column */}
-        <div className="hidden lg:block">
-          <TemplatePreviewPanel selectedTypeId={selectedType} />
-        </div>
-      </div>
-
-      <WizardFooter
-        cancelHref={ROUTES.DASHBOARD_EVENTS}
-        backLabel="Cancel"
-        onSaveDraft={onSaveDraft ? () => onSaveDraft(buildData()) : undefined}
-        onNext={handleNext}
-        isNextDisabled={!canProceed}
-        stepContext={`Step ${currentStep + 1} of ${WIZARD_STEPS.length} · ${WIZARD_STEPS[currentStep]?.name ?? ''}`}
-      />
-    </motion.div>
-  )
-}
-
-// --- Step 2 view --------------------------------------------------------------
-
-function Step2View({ currentStep, completedValues, onNext, onBack, onSaveDraft, initialData }: StepViewProps) {
-  const [step2, setStep2] = useState<Step2State>({
-    visibility: (initialData?.visibility as VisibilityId | null) ?? null,
-  })
-
-  const selectedVisibility = step2.visibility
-  const canProceed         = selectedVisibility !== null
-
-  const handleSelect = (id: VisibilityId) => setStep2({ visibility: id })
-  const handleNext   = () => {
-    if (!canProceed) return
-    onNext(
-      selectedVisibility === 'public' ? 'Public Event' : 'Private Event',
-      selectedVisibility,
-    )
-  }
-
-  return (
-    <motion.div
-      initial={{ opacity: 0, y: 8 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.35, ease: EASE }}
-      className="flex min-h-full flex-col"
-    >
-      <Link
-        href={ROUTES.DASHBOARD}
-        className="mb-5 inline-flex items-center gap-1.5 text-[13px] font-medium text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary rounded"
-      >
-        <ArrowLeft className="size-4" aria-hidden />
-        Back to Dashboard
-      </Link>
-
-      <Stepper currentStep={currentStep} completedValues={completedValues} />
-
-      <div className="mt-6">
-        <h1 className="text-[22px] font-bold tracking-tight text-foreground">
-          Choose Visibility
-        </h1>
-        <p className="mt-1 text-[13px] text-muted-foreground">
-          Decide who can find and register for your event.
-        </p>
-      </div>
-
-      <div className="mt-5 grid flex-1 items-start gap-5 lg:grid-cols-[1fr_256px]">
-        <div
-          role="group"
-          aria-label="Choose visibility"
-          className="grid grid-cols-1 gap-4 sm:grid-cols-2"
-        >
-          {VISIBILITY_OPTIONS.map(option => (
-            <VisibilityCard
-              key={option.id}
-              option={option}
-              selected={selectedVisibility === option.id}
-              onSelect={handleSelect}
-            />
-          ))}
-        </div>
-
-        <Step2HelperPanel />
-      </div>
-
-      <WizardFooter
-        onBack={onBack}
-        onSaveDraft={onSaveDraft ? () => onSaveDraft(step2.visibility) : undefined}
-        onNext={handleNext}
-        isNextDisabled={!canProceed}
-        stepContext={`Step ${currentStep + 1} of ${WIZARD_STEPS.length} · ${WIZARD_STEPS[currentStep]?.name ?? ''}`}
-      />
-    </motion.div>
-  )
-}
-
-// --- Step 3 view --------------------------------------------------------------
-
-function Step3View({ currentStep, completedValues, onNext, onBack, onSaveDraft, initialData }: StepViewProps) {
-  // Cast the saved access-control snapshot (may be null on first visit)
-  const savedAC = initialData as {
-    type?:             AccessControlId | null
-    confirmationMode?: ConfirmationMode
-    inviteCode?:       Partial<InviteCodeDraft> | null
-    approvedContacts?: ApprovedContact[]
-  } | null
-
-  const [step3, setStep3] = useState<Step3State>({
-    accessControl: savedAC?.type ? { type: savedAC.type } : null,
-  })
-  // Invite Code form draft — persists across type switches, restored from draft
-  const [inviteCodeDraft, setInviteCodeDraft] = useState<InviteCodeDraft>(
-    savedAC?.inviteCode
-      ? { ...DEFAULT_INVITE_CODE_DRAFT, ...savedAC.inviteCode }
-      : DEFAULT_INVITE_CODE_DRAFT,
-  )
-  // Approved contacts list — restored from draft
-  const [approvedContacts, setApprovedContacts] = useState<ApprovedContact[]>(
-    (savedAC?.approvedContacts as ApprovedContact[] | undefined) ?? [],
-  )
-  // Registration confirmation mode — restored from draft, defaults to auto
-  const [confirmationMode, setConfirmationMode] = useState<ConfirmationMode>(
-    savedAC?.confirmationMode ?? 'auto',
-  )
-
-  const handleUpdateInviteCode = (partial: Partial<InviteCodeDraft>) =>
-    setInviteCodeDraft(prev => ({ ...prev, ...partial }))
-
-  const selectedAccess  = step3.accessControl?.type ?? null
-  const canProceed      = selectedAccess !== null && (
-    selectedAccess !== 'approved_contacts' || approvedContacts.length > 0
-  )
-  const selectedOption  = ACCESS_CONTROL_OPTIONS.find(o => o.id === selectedAccess) ?? null
-  const visibilityLabel = completedValues[1] ?? ''
-
-  const handleSelect = (id: AccessControlId) => setStep3({ accessControl: { type: id } })
-
-  const handleNext = () => {
-    if (!canProceed) return
-    onNext(selectedOption?.name, {
-      type:             selectedAccess,
-      confirmationMode,
-      inviteCode:       selectedAccess === 'invite_code' ? inviteCodeDraft : null,
-      approvedContacts: selectedAccess === 'approved_contacts' ? approvedContacts : [],
-    })
-  }
-
-  return (
-    <motion.div
-      initial={{ opacity: 0, y: 8 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.35, ease: EASE }}
-      className="flex min-h-full flex-col"
-    >
-
-      {/* -- Back link -- */}
-      <Link
-        href={ROUTES.DASHBOARD}
-        className="mb-5 inline-flex items-center gap-1.5 text-[13px] font-medium text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary rounded"
-      >
-        <ArrowLeft className="size-4" aria-hidden />
-        Back to Dashboard
-      </Link>
-
-      {/* -- Stepper -- */}
-      <Stepper currentStep={currentStep} completedValues={completedValues} />
-
-      {/* -- Title -- */}
-      <div className="mt-5">
-        <h1 className="text-[22px] font-bold tracking-tight text-foreground">
-          Access Control
-        </h1>
-        <p className="mt-1 text-[13px] text-muted-foreground">
-          Choose how people can access and register for your event.
-        </p>
-      </div>
-
-      {/* -- Content: cards + summary panel -- */}
-      <div className="mt-4 grid flex-1 items-start gap-4 lg:grid-cols-[1fr_264px]">
-
-        {/* Left column: card grid + info strip */}
-        <div className="flex flex-col gap-3">
-          <div
-            role="group"
-            aria-label="Access control options"
-            className="grid grid-cols-1 gap-3 sm:grid-cols-3"
-          >
-            {ACCESS_CONTROL_OPTIONS.map(option => (
-              <AccessControlCard
-                key={option.id}
-                option={option}
-                selected={selectedAccess === option.id}
-                onSelect={handleSelect}
-              />
-            ))}
-          </div>
-
-          {/* Selected-option detail panel */}
-          <AnimatePresence>
-            {selectedAccess === 'open' && <Step3OpenToAllPanel />}
-            {selectedAccess === 'invite_code' && (
-              <Step3InviteCodePanel
-                draft={inviteCodeDraft}
-                onUpdate={handleUpdateInviteCode}
-              />
-            )}
-            {selectedAccess === 'approved_contacts' && (
-              <Step3ApprovedContactListPanel
-                contacts={approvedContacts}
-                onUpdate={setApprovedContacts}
-              />
-            )}
-          </AnimatePresence>
-
-          {/* Generic strip — shown when nothing is selected */}
-          {!selectedAccess && (
-            <div className="flex items-center gap-2.5 rounded-lg border border-border/60 bg-muted/[0.04] px-4 py-2.5">
-              <Lightbulb className="size-3.5 shrink-0 text-amber-500" aria-hidden />
-              <p className="text-[12px] leading-snug text-muted-foreground">
-                You can change the access control settings anytime from Event Settings after your event is created.
-              </p>
-            </div>
-          )}
-
-          {/* -- Section 2: Registration Confirmation (always visible) -- */}
-          <RegistrationConfirmationSection
-            mode={confirmationMode}
-            onChange={setConfirmationMode}
-          />
-        </div>
-
-        {/* Right column: summary panel */}
-        <Step3SummaryPanel
-          selectedOption={selectedOption}
-          visibilityLabel={visibilityLabel}
-          confirmationMode={confirmationMode}
-          approvedContactsCount={selectedAccess === 'approved_contacts' ? approvedContacts.length : undefined}
-        />
-      </div>
-
-      <WizardFooter
-        onBack={onBack}
-        onSaveDraft={onSaveDraft ? () => onSaveDraft({
-          type:             selectedAccess,
-          confirmationMode,
-          inviteCode:       selectedAccess === 'invite_code' ? inviteCodeDraft : null,
-          approvedContacts: selectedAccess === 'approved_contacts' ? approvedContacts : [],
-        }) : undefined}
-        onNext={handleNext}
-        isNextDisabled={!canProceed}
-        stepContext={`Step ${currentStep + 1} of ${WIZARD_STEPS.length} · ${WIZARD_STEPS[currentStep]?.name ?? ''}`}
-      />
-
-    </motion.div>
-  )
-}
+// DONATION_CAMPAIGN_SUBTYPES (Step-1-only) → components/event-builder/steps/Step1View.tsx (RD-PRODUCT-01G Phase 5B).
+
+// --- Step 1 constants + components + view → components/event-builder/steps/Step1View.tsx
+//     (EVENT_TYPES, SUBTYPES_BY_EVENT_TYPE, EventTypeCard, SubtypeSelector,
+//      CampaignTypeSelector, DonationSubtypeSelector, Step1State, Step1View — Phase 5B.)
+//     Step1HelperPanel + BENEFITS were removed as dead code (defined, never rendered).
+
+
+// --- Step 2 constants + components + view → components/event-builder/steps/Step2View.tsx
+//     (VISIBILITY_OPTIONS, VisibilityCard, Step2HelperPanel, Step2State, Step2View — RD-PRODUCT-01G
+//      Phase 6). RadioIndicator (shared with Step 3) → components/event-builder/RadioIndicator.tsx.
+//     VisibilityId type → lib/events/builder/types.ts; PUBLIC/PRIVATE_REASONS → builder/constants.ts.
+
+// --- Step 3 constants + components + view → components/event-builder/steps/Step3View.tsx
+//     (ACCESS_CONTROL_OPTIONS, CONFIRMATION_OPTIONS, AccessControlCard, Step3SummaryPanel,
+//      Step3OpenToAllPanel, Step3InviteCodePanel, Step3ApprovedContactListPanel,
+//      RegistrationConfirmationSection, invite-code helpers, Step3State, Step3View — Phase 7).
+//      Uses shared RadioIndicator + lib/events/builder/contacts (both imported, not duplicated).
 
 // --- Step 4: Passes & Pricing ------------------------------------------------
+//
+// Step4View + its Step-4-only chain (generatePassId, RegTypeCard, EventTypeSelectorSection,
+// PassesSection, RegistrationPeriodSection, AdvancedSettingsSection, Step4SummaryPanel) →
+// components/event-builder/steps/Step4View.tsx (RD-PRODUCT-01G Phase 8). The shared autosave
+// hook (useAutosaveEmit) → lib/events/builder/useAutosaveEmit.ts. Dead OPTIONAL_SERVICES was
+// removed. The fee-preview helpers + fee/services sections BELOW are consumed by Step 7 (not
+// Step 4), so they remain here until Step 7 is extracted.
 
-type EventPricingType = 'paid' | 'free'
-
-type EventPass = EventPassFull
-
-interface EventPricingDraft {
-  eventType:               EventPricingType
-  feeModel:                FeeModel
-  estimatedRegistrations:  number            // used only for simulation when unlimited passes exist
-  passes:                  EventPass[]
-  registrationOpenDate:    string
-  // Early bird is entirely pass-specific: pricing.passes[].earlyBirdEndDate.
-  // The former event-level earlyBirdEndDate was removed (LS3.2) — no consumer
-  // read it. Legacy drafts are migrated into the passes on load (see Step4View).
-  registrationEndDate:     string
-  showRemainingSeats:      boolean
-  whatsappEnabled:         boolean
-  smsEnabled:              boolean
-  certEnabled:             boolean
-  advancedSettings: {
-    taxes:     unknown[]
-    fees:      unknown[]
-    coupons:   unknown[]
-    discounts: unknown[]
-  }
-}
-
-const PASS_COLORS: { bg: string; color: string; dot: string }[] = [
-  { bg: 'bg-violet-100',  color: 'text-violet-600',  dot: 'bg-violet-500'  },
-  { bg: 'bg-blue-100',    color: 'text-blue-600',    dot: 'bg-blue-500'    },
-  { bg: 'bg-emerald-100', color: 'text-emerald-600', dot: 'bg-emerald-500' },
-  { bg: 'bg-orange-100',  color: 'text-orange-500',  dot: 'bg-orange-500'  },
-  { bg: 'bg-rose-100',    color: 'text-rose-600',    dot: 'bg-rose-500'    },
-  { bg: 'bg-purple-100',  color: 'text-purple-600',  dot: 'bg-purple-500'  },
-  { bg: 'bg-cyan-100',    color: 'text-cyan-600',    dot: 'bg-cyan-500'    },
-]
-
-function generatePassId(): string {
-  return 'pass_' + Math.random().toString(36).slice(2, 10)
-}
-
-const INR_FORMAT = new Intl.NumberFormat('en-IN', {
-  style:                 'currency',
-  currency:              'INR',
-  minimumFractionDigits: 0,
-  maximumFractionDigits: 2,
-})
-const formatINR = (n: number): string => INR_FORMAT.format(n)
-
-// --- Fee model types + calculator ---------------------------------------------
-
-type FeeModel = 'attendee_pays' | 'organizer_absorbs'
-
-interface FeeBreakdown {
-  ticketPrice:  number
-  platformFee:  number
-  gatewayFee:   number
-  gstOnFees:    number
-  totalFees:    number
-  attendeePays: number
-  organizerGets: number
-}
-
-// Display-only fee rates for the wizard preview, sourced from the runtime fee config
-// (useFeesConfig) — never hardcoded. Percentages are whole numbers (e.g. 2, 18). The
-// authoritative charge is always computed server-side via resolveFeeConfig.
-interface FeeRates { platformPercent: number; gatewayPercent: number; gstPercent: number }
-
-function calcFees(ticketPrice: number, model: FeeModel, rates: FeeRates): FeeBreakdown {
-  const pFee  = Math.round(ticketPrice * (rates.platformPercent / 100) * 100) / 100
-  const gFee  = Math.round(ticketPrice * (rates.gatewayPercent  / 100) * 100) / 100
-  const gst   = Math.round((pFee + gFee) * (rates.gstPercent / 100) * 100) / 100
-  const total = Math.round((pFee + gFee + gst)  * 100) / 100
-  if (model === 'attendee_pays') {
-    return { ticketPrice, platformFee: pFee, gatewayFee: gFee, gstOnFees: gst, totalFees: total, attendeePays: Math.round((ticketPrice + total) * 100) / 100, organizerGets: ticketPrice }
-  }
-  return { ticketPrice, platformFee: pFee, gatewayFee: gFee, gstOnFees: gst, totalFees: total, attendeePays: ticketPrice, organizerGets: Math.round((ticketPrice - total) * 100) / 100 }
-}
+// RD-PAYMENT-02 Phase 3: the fee-preview calculation moved to the ONE canonical adapter,
+// lib/events/builder/feePreview.ts (computeFeePreview), which routes through the canonical
+// engine (calculateFee) + resolveEffectiveFeeModel. The old page-local calcFees duplicated
+// the engine and diverged on the GST base (platform+gateway vs the engine's platform-only).
 
 // Maps the runtime public fee config to the wizard's display rates, honouring the
 // gateway/GST master switches (disabled → 0). Platform fee is the representative
@@ -3343,652 +196,6 @@ const FEE_MODEL_LABELS: Record<FeeModel, string> = {
 // --- Step 4 sub-components ----------------------------------------------------
 
 // Card used by EventTypeSelectorSection — self-contained popover for examples
-function RegTypeCard({
-  selected, onClick, icon: Icon, title, subtitle, description, examples, dividerClass,
-}: {
-  selected:     boolean
-  onClick:      () => void
-  icon:         LucideIcon
-  title:        string
-  subtitle:     string
-  description:  string
-  examples:     string[]
-  dividerClass: string
-}) {
-  const [infoOpen, setInfoOpen]   = useState(false)
-  const [coords, setCoords]       = useState({ top: 0, left: 0 })
-  const iconBtnRef                = useRef<HTMLButtonElement>(null)
-  const popoverDivRef             = useRef<HTMLDivElement>(null)
-
-  const openInfo = (e: React.MouseEvent) => {
-    e.stopPropagation()
-    if (!infoOpen && iconBtnRef.current) {
-      const r   = iconBtnRef.current.getBoundingClientRect()
-      const top = r.bottom + window.scrollY + 6
-      // clamp left so popover (208px wide) never overflows the right viewport edge
-      const left = Math.min(r.left + window.scrollX, window.innerWidth - 216)
-      setCoords({ top, left })
-    }
-    setInfoOpen(v => !v)
-  }
-
-  useEffect(() => {
-    if (!infoOpen) return
-    const close = (e: MouseEvent) => {
-      if (
-        iconBtnRef.current?.contains(e.target as Node) ||
-        popoverDivRef.current?.contains(e.target as Node)
-      ) return
-      setInfoOpen(false)
-    }
-    const dismiss = () => setInfoOpen(false)
-    document.addEventListener('mousedown', close)
-    window.addEventListener('scroll', dismiss, { passive: true })
-    window.addEventListener('resize', dismiss)
-    return () => {
-      document.removeEventListener('mousedown', close)
-      window.removeEventListener('scroll', dismiss)
-      window.removeEventListener('resize', dismiss)
-    }
-  }, [infoOpen])
-
-  return (
-    <>
-      {/* Fixed popover — position:fixed bypasses any ancestor overflow:hidden */}
-      <AnimatePresence>
-        {infoOpen && (
-          <motion.div
-            ref={popoverDivRef}
-            initial={{ opacity: 0, y: 4, scale: 0.96 }}
-            animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, y: 2, scale: 0.97 }}
-            transition={{ duration: 0.14 }}
-            style={{ position: 'fixed', top: coords.top, left: coords.left, zIndex: 9999 }}
-            className="w-52 rounded-xl border border-border bg-card p-4 shadow-xl"
-            onClick={e => e.stopPropagation()}
-          >
-            <p className="mb-2.5 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Best suited for</p>
-            <ul className="flex flex-col gap-2">
-              {examples.map(ex => (
-                <li key={ex} className="flex items-center gap-2 text-[13px] text-foreground">
-                  <span className="size-1.5 shrink-0 rounded-full bg-primary/50" aria-hidden />
-                  {ex}
-                </li>
-              ))}
-            </ul>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      <motion.div
-        whileHover={{ y: selected ? 0 : -2 }}
-        whileTap={{ scale: 0.998 }}
-        onClick={onClick}
-        role="button"
-        tabIndex={0}
-        aria-pressed={selected}
-        onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') onClick() }}
-        className={cn(
-          'relative cursor-pointer flex-col p-6 text-left transition-all duration-200 sm:p-7',
-          dividerClass,
-          selected
-            ? 'bg-primary/[0.04] shadow-md ring-2 ring-inset ring-primary/20'
-            : 'bg-card hover:shadow-lg',
-        )}
-      >
-        {selected && (
-          <span className="absolute inset-x-0 top-0 h-[3px]" style={{ backgroundImage: 'var(--primary-gradient)' }} aria-hidden />
-        )}
-
-        {/* Title row */}
-        <div className="mb-3 flex items-center gap-3">
-          <div className={cn(
-            'flex size-11 shrink-0 items-center justify-center rounded-xl transition-colors',
-            selected ? 'bg-primary/10' : 'bg-muted/50',
-          )}>
-            <Icon className={cn('size-5', selected ? 'text-primary' : 'text-muted-foreground/60')} aria-hidden />
-          </div>
-
-          <div className="flex min-w-0 flex-1 flex-col">
-            <div className="flex items-center gap-1.5">
-              <p className="text-[16px] font-bold text-foreground">{title}</p>
-              <button
-                ref={iconBtnRef}
-                type="button"
-                onClick={openInfo}
-                aria-label={`Examples for ${title}`}
-                className="flex items-center justify-center p-0.5 text-muted-foreground transition-colors hover:text-primary"
-              >
-                <Info className="size-4" aria-hidden />
-              </button>
-            </div>
-            <p className={cn('text-[12px] font-semibold', selected ? 'text-primary' : 'text-muted-foreground/60')}>{subtitle}</p>
-          </div>
-
-        <div className={cn(
-          'flex size-5 shrink-0 items-center justify-center rounded-full border-2 transition-all',
-          selected ? 'border-primary bg-primary' : 'border-border bg-background',
-        )}>
-          {selected && <Check className="size-3 text-primary-foreground" aria-hidden />}
-        </div>
-      </div>
-
-        {/* Description */}
-        <p className="text-[13px] leading-relaxed text-muted-foreground">{description}</p>
-      </motion.div>
-    </>
-  )
-}
-
-// Section 1: Registration Type — simple free / paid selector
-function EventTypeSelectorSection({
-  value,
-  onChange,
-}: {
-  value:    EventPricingType
-  onChange: (v: EventPricingType) => void
-}) {
-  return (
-    <div className="overflow-hidden rounded-2xl border border-border bg-card shadow-sm">
-      {/* Header */}
-      <div className="flex items-center gap-3 border-b border-border px-5 py-4 sm:px-6">
-        <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary/[0.09]">
-          <Ticket className="size-4 text-primary" aria-hidden />
-        </div>
-        <div>
-          <p className="text-[15px] font-bold tracking-tight text-foreground">Registration Type</p>
-          <p className="mt-0.5 text-[13px] text-muted-foreground">
-            Choose whether attendees will register for free or pay during registration.
-          </p>
-        </div>
-      </div>
-
-      {/* Two selection cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-2">
-        <RegTypeCard
-          selected={value === 'free'}
-          onClick={() => onChange('free')}
-          icon={Heart}
-          title="Free Registration"
-          subtitle="No payment required"
-          description="Attendees can register without making any payment."
-          examples={['Community Programs', 'Awareness Campaigns', 'NGO Events', 'School Functions', 'Free Workshops']}
-          dividerClass="border-b border-border/60 sm:border-b-0 sm:border-r"
-        />
-        <RegTypeCard
-          selected={value === 'paid'}
-          onClick={() => onChange('paid')}
-          icon={IndianRupee}
-          title="Paid Registration"
-          subtitle="Online payment at checkout"
-          description="Attendees must complete payment during registration."
-          examples={['Marathons', 'Conferences', 'Training Programs', 'Exhibitions', 'Fundraising Events']}
-          dividerClass=""
-        />
-      </div>
-    </div>
-  )
-}
-
-function PassesSection({
-  passes,
-  isFreeEvent,
-  onUpdate,
-  onAddNew,
-  onEdit,
-}: {
-  passes:      EventPass[]
-  isFreeEvent: boolean
-  onUpdate:    (passes: EventPass[]) => void
-  onAddNew:    () => void
-  onEdit:      (pass: EventPass) => void
-}) {
-  const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null)
-
-  const toggleStatus = (id: string) =>
-    onUpdate(passes.map(p =>
-      p.id === id ? { ...p, status: p.status === 'active' ? 'inactive' : 'active' } : p
-    ))
-
-  const handleDuplicate = (pass: EventPass) => {
-    const copy: EventPass = {
-      ...pass,
-      id:               generatePassId(),
-      name:             `${pass.name} (Copy)`,
-      status:           'inactive',
-      benefits:         [...pass.benefits],
-      customBenefits:   [...pass.customBenefits],
-      raceDetails:      pass.raceDetails ? { ...pass.raceDetails } : null,
-      advancedSettings: { ...pass.advancedSettings },
-    }
-    onUpdate([...passes, copy])
-  }
-
-  const handleDeleteConfirm = (id: string) => {
-    onUpdate(passes.filter(p => p.id !== id))
-    setDeleteConfirmId(null)
-  }
-
-  return (
-    <div>
-      {/* Table or empty state */}
-      {passes.length === 0 ? (
-        <div className="flex flex-col items-center gap-4 rounded-xl border border-dashed border-border bg-muted/[0.03] py-14 text-center">
-          <div className="flex size-14 items-center justify-center rounded-full bg-muted/40">
-            <Ticket className="size-6 text-muted-foreground/40" aria-hidden />
-          </div>
-          <div>
-            <p className="text-[13.5px] font-semibold text-foreground">No passes created yet</p>
-            <p className="mt-1 max-w-[260px] text-[12px] leading-relaxed text-muted-foreground/70">
-              Create your first pass to start accepting registrations.
-            </p>
-          </div>
-          <button
-            type="button"
-            onClick={onAddNew}
-            className="flex items-center gap-2 rounded-xl bg-primary px-5 py-2.5 text-[13px] font-semibold text-primary-foreground transition-colors hover:bg-[var(--primary-hover)]"
-          >
-            <Plus className="size-4" aria-hidden />
-            Add First Pass
-          </button>
-        </div>
-      ) : (
-        <div className="overflow-hidden rounded-xl border border-border bg-card shadow-sm">
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[680px] text-left" aria-label="Ticket passes">
-              <thead>
-                <tr className="border-b border-border/70 bg-muted/[0.04]">
-                  <th className="px-4 py-2.5 text-[12px] font-semibold uppercase tracking-wider text-muted-foreground">
-                    Pass Name
-                  </th>
-                  <th className="px-3 py-2.5 text-[12px] font-semibold uppercase tracking-wider text-muted-foreground">
-                    Price {!isFreeEvent && '(₹)'}
-                  </th>
-                  <th className="px-3 py-2.5 text-[12px] font-semibold uppercase tracking-wider text-muted-foreground">
-                    Qty / Seats
-                  </th>
-                  <th className="px-3 py-2.5 text-[12px] font-semibold uppercase tracking-wider text-muted-foreground">
-                    Early Bird (₹)
-                  </th>
-                  <th className="px-3 py-2.5 text-[12px] font-semibold uppercase tracking-wider text-muted-foreground">
-                    Sales End
-                  </th>
-                  <th className="px-3 py-2.5 text-[12px] font-semibold uppercase tracking-wider text-muted-foreground">
-                    Status
-                  </th>
-                  <th className="w-[88px] px-3 py-2.5" />
-                </tr>
-              </thead>
-              <tbody>
-                {passes.map((pass, i) => {
-                  const clr        = PASS_COLORS[i % PASS_COLORS.length]
-                  const isDeleting = deleteConfirmId === pass.id
-                  return (
-                    <tr
-                      key={pass.id}
-                      className={cn(
-                        'group border-b border-border/40 transition-colors last:border-0',
-                        isDeleting ? 'bg-red-50/60' : 'hover:bg-muted/[0.04]',
-                      )}
-                    >
-                      {/* Pass name + description */}
-                      <td className="px-4 py-3">
-                        <div className="flex items-center gap-3">
-                          <div className={cn('flex size-8 shrink-0 items-center justify-center rounded-lg', clr.bg)}>
-                            <Ticket className={cn('size-3.5', clr.color)} aria-hidden />
-                          </div>
-                          <div className="min-w-0">
-                            <p className="text-[14px] font-semibold leading-tight text-foreground">
-                              {pass.name}
-                            </p>
-                            <p className="mt-0.5 max-w-[180px] truncate text-[12px] leading-snug text-muted-foreground">
-                              {pass.description}
-                            </p>
-                          </div>
-                        </div>
-                      </td>
-                      {/* Price */}
-                      <td className="px-3 py-3">
-                        {isFreeEvent ? (
-                          <span className="inline-flex items-center rounded-full bg-emerald-50 px-2 py-[2px] text-[12px] font-semibold text-emerald-600">
-                            Free
-                          </span>
-                        ) : (
-                          <span className="text-[13px] font-bold text-foreground">{formatINR(pass.price)}</span>
-                        )}
-                      </td>
-                      {/* Quantity */}
-                      <td className="px-3 py-3 text-[14px] text-foreground">
-                        {pass.quantity !== null
-                          ? pass.quantity.toLocaleString('en-IN')
-                          : <span className="text-muted-foreground">Unlimited</span>
-                        }
-                      </td>
-                      {/* Early bird price */}
-                      <td className="px-3 py-3">
-                        {pass.earlyBirdEnabled && pass.earlyBirdPrice !== null ? (
-                          <span className="text-[14px] font-medium text-primary">
-                            {formatINR(pass.earlyBirdPrice)}
-                          </span>
-                        ) : (
-                          <span className="text-[12px] text-muted-foreground/40">—</span>
-                        )}
-                      </td>
-                      {/* Sales end date */}
-                      <td className="px-3 py-3 text-[12px] text-muted-foreground">
-                        {pass.salesEndDate
-                          ? new Date(pass.salesEndDate).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })
-                          : <span className="text-muted-foreground/40">—</span>
-                        }
-                      </td>
-                      {/* Status toggle */}
-                      <td className="px-3 py-3">
-                        <button
-                          type="button"
-                          onClick={() => toggleStatus(pass.id)}
-                          aria-label={`${pass.status === 'active' ? 'Deactivate' : 'Activate'} ${pass.name}`}
-                          className={cn(
-                            'inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[12px] font-semibold transition-colors',
-                            pass.status === 'active'
-                              ? 'bg-emerald-50 text-emerald-600 hover:bg-emerald-100'
-                              : 'bg-muted text-muted-foreground hover:bg-muted/70',
-                          )}
-                        >
-                          <span className={cn(
-                            'size-1.5 rounded-full',
-                            pass.status === 'active' ? 'bg-emerald-500' : 'bg-muted-foreground/40',
-                          )} />
-                          {pass.status === 'active' ? 'Active' : 'Inactive'}
-                        </button>
-                      </td>
-                      {/* Row actions */}
-                      <td className="px-3 py-3">
-                        {isDeleting ? (
-                          <div className="flex items-center gap-1">
-                            <button
-                              type="button"
-                              onClick={() => handleDeleteConfirm(pass.id)}
-                              className="rounded bg-red-500 px-2 py-0.5 text-[12px] font-semibold text-white hover:bg-red-600"
-                            >
-                              Confirm
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => setDeleteConfirmId(null)}
-                              className="rounded px-2 py-0.5 text-[12px] text-muted-foreground hover:bg-muted/40"
-                            >
-                              Cancel
-                            </button>
-                          </div>
-                        ) : (
-                          <div className="flex items-center gap-0.5 transition-opacity sm:opacity-0 sm:group-hover:opacity-100">
-                            <button
-                              type="button"
-                              onClick={() => onEdit(pass)}
-                              className="flex size-6 items-center justify-center rounded-md text-muted-foreground/50 hover:bg-primary/10 hover:text-primary"
-                              aria-label={`Edit ${pass.name}`}
-                            >
-                              <Pencil className="size-3.5" aria-hidden />
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => handleDuplicate(pass)}
-                              className="flex size-6 items-center justify-center rounded-md text-muted-foreground/50 hover:bg-muted/60 hover:text-foreground"
-                              aria-label={`Duplicate ${pass.name}`}
-                            >
-                              <Copy className="size-3.5" aria-hidden />
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => setDeleteConfirmId(pass.id)}
-                              className="flex size-6 items-center justify-center rounded-md text-muted-foreground/50 hover:bg-red-50 hover:text-red-500"
-                              aria-label={`Delete ${pass.name}`}
-                            >
-                              <Trash2 className="size-3.5" aria-hidden />
-                            </button>
-                          </div>
-                        )}
-                      </td>
-                    </tr>
-                  )
-                })}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
-
-      {/* Secondary add link — only shown when table already has entries */}
-      {passes.length > 0 && (
-        <button
-          type="button"
-          onClick={onAddNew}
-          className="mt-3 flex w-full items-center justify-center gap-1.5 rounded-lg border border-dashed border-border py-2 text-[12px] font-medium text-muted-foreground transition-colors hover:border-primary/40 hover:text-primary"
-        >
-          <Plus className="size-3.5" aria-hidden />
-          Add another pass
-        </button>
-      )}
-    </div>
-  )
-}
-
-// Section 4: Registration Schedule — timeline-style card
-function RegistrationPeriodSection({
-  draft,
-  onUpdate,
-}: {
-  draft:    EventPricingDraft
-  onUpdate: (partial: Partial<EventPricingDraft>) => void
-}) {
-  const inputCls =
-    'h-9 w-full rounded-lg border border-border bg-background px-3 text-[14px] text-foreground placeholder:text-muted-foreground/60 outline-none transition-colors focus:border-primary/50 focus:ring-2 focus:ring-primary/20'
-
-  const milestones = [
-    {
-      key:     'open' as const,
-      icon:    Zap,
-      label:   'Registration Opens',
-      hint:    'When attendees can start registering',
-      optional: false,
-      value:   draft.registrationOpenDate,
-      onChange:(v: string) => onUpdate({ registrationOpenDate: v }),
-      dotCls:  'bg-primary',
-      iconCls: 'bg-primary/10 text-primary',
-    },
-    // Early Bird Ends is intentionally NOT here — it is a pass-level field set in
-    // the pass editor (Pricing section), not an event-wide schedule milestone.
-    {
-      key:     'close' as const,
-      icon:    Lock,
-      label:   'Registration Closes',
-      hint:    'Last day attendees can register',
-      optional: false,
-      value:   draft.registrationEndDate,
-      onChange:(v: string) => onUpdate({ registrationEndDate: v }),
-      dotCls:  'bg-rose-400',
-      iconCls: 'bg-rose-50 text-rose-500',
-    },
-  ] as const
-
-  return (
-    <div className="overflow-hidden rounded-2xl border border-border bg-card shadow-sm">
-      {/* Header */}
-      <div className="border-b border-border px-5 py-4 sm:px-6">
-        <p className="text-[15px] font-bold tracking-tight text-foreground">Registration Schedule</p>
-        <p className="mt-0.5 text-[13px] text-muted-foreground">
-          Control when your event is open for registration.
-        </p>
-      </div>
-
-      {/* Timeline */}
-      <div className="px-5 py-5 sm:px-6">
-        <div className="flex flex-col gap-0">
-          {milestones.map(({ key, icon: Icon, label, hint, optional, value, onChange, dotCls, iconCls }, i, arr) => (
-            <div key={key} className="flex items-start gap-4">
-              {/* Dot + connector */}
-              <div className="flex flex-col items-center">
-                <div className={cn('flex size-9 shrink-0 items-center justify-center rounded-xl', iconCls)}>
-                  <Icon className="size-4" aria-hidden />
-                </div>
-                {i < arr.length - 1 && (
-                  <div className="my-1.5 w-px flex-1 bg-border/60" style={{ minHeight: '28px' }} />
-                )}
-              </div>
-
-              {/* Content */}
-              <div className={cn('min-w-0 flex-1', i < arr.length - 1 ? 'pb-5' : '')}>
-                <div className="mb-2 flex flex-wrap items-center gap-2">
-                  <label className="text-[13px] font-semibold text-foreground">{label}</label>
-                  {optional && (
-                    <span className="rounded-full bg-muted/60 px-2 py-0.5 text-[12px] font-medium text-muted-foreground">
-                      Optional
-                    </span>
-                  )}
-                  {value && (
-                    <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[12px] font-semibold text-primary">
-                      {new Date(value).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}
-                    </span>
-                  )}
-                </div>
-                <input
-                  type="date"
-                  value={value}
-                  onChange={e => onChange(e.target.value)}
-                  className={cn(inputCls, 'max-w-[220px]')}
-                  aria-label={label}
-                />
-                <p className="mt-1.5 text-[13px] text-muted-foreground">{hint}</p>
-              </div>
-            </div>
-          ))}
-        </div>
-
-        {/* Show remaining seats toggle */}
-        <div className="mt-5 flex items-center justify-between gap-4 rounded-xl border border-border/60 bg-muted/[0.04] px-4 py-3.5">
-          <div className="flex min-w-0 items-center gap-3">
-            <div className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-muted/50">
-              <Users className="size-4 text-muted-foreground" aria-hidden />
-            </div>
-            <div className="min-w-0">
-              <p className="text-[14px] font-semibold text-foreground">Show remaining seats</p>
-              <p className="text-[13px] text-muted-foreground">Encourages early registration by showing available capacity</p>
-            </div>
-          </div>
-          <button
-            type="button"
-            role="switch"
-            aria-checked={draft.showRemainingSeats}
-            onClick={() => onUpdate({ showRemainingSeats: !draft.showRemainingSeats })}
-            className={cn(
-              'relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary',
-              draft.showRemainingSeats ? 'bg-primary' : 'bg-muted-foreground/25',
-            )}
-          >
-            <span className={cn(
-              'inline-block size-[20px] rounded-full bg-white shadow-sm transition-transform duration-200',
-              draft.showRemainingSeats ? 'translate-x-5' : 'translate-x-0',
-            )} />
-          </button>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-function AdvancedSettingsSection({
-  isOpen,
-  onToggle,
-}: {
-  isOpen:   boolean
-  onToggle: () => void
-}) {
-  const ITEMS = [
-    {
-      icon:  Hash,
-      label: 'Taxes',
-      desc:  'Configure GST and applicable tax rates',
-      badge: '0 configured',
-    },
-    {
-      icon:  IndianRupee,
-      label: 'Convenience Fees',
-      desc:  'Platform and payment gateway fees',
-      badge: '0 configured',
-    },
-    {
-      icon:  Tag,
-      label: 'Coupons & Promo Codes',
-      desc:  'Discount codes for attendees',
-      badge: '0 active',
-    },
-    {
-      icon:  TrendingUp,
-      label: 'Group Discounts',
-      desc:  'Volume discounts for group registrations',
-      badge: '0 configured',
-    },
-  ]
-
-  return (
-    <div>
-      <button
-        type="button"
-        onClick={onToggle}
-        className="flex w-full items-center justify-between rounded-xl border border-border bg-card px-4 py-3.5 shadow-sm transition-colors hover:bg-muted/[0.03]"
-        aria-expanded={isOpen}
-      >
-        <div className="flex items-center gap-2.5">
-          <Settings2 className="size-4 text-muted-foreground" aria-hidden />
-          <p className="text-[13px] font-semibold text-foreground">Advanced Settings</p>
-          <span className="rounded-full bg-muted/60 px-2 py-[2px] text-[12px] font-medium text-muted-foreground">
-            Optional
-          </span>
-        </div>
-        <ChevronDown
-          className={cn('size-4 text-muted-foreground transition-transform duration-200', isOpen && 'rotate-180')}
-          aria-hidden
-        />
-      </button>
-
-      <AnimatePresence>
-        {isOpen && (
-          <motion.div
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: 'auto', opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
-            transition={{ duration: 0.2, ease: EASE }}
-            className="overflow-hidden"
-          >
-            <div className="grid grid-cols-1 gap-3 pt-3 sm:grid-cols-2">
-              {ITEMS.map(item => {
-                const Icon = item.icon
-                return (
-                  <button
-                    key={item.label}
-                    type="button"
-                    className="flex items-start gap-3 rounded-xl border border-border bg-card px-4 py-3.5 text-left shadow-sm transition-colors hover:border-border/80 hover:bg-muted/[0.04]"
-                  >
-                    <div className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted/40">
-                      <Icon className="size-3.5 text-muted-foreground" aria-hidden />
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <p className="text-[14px] font-semibold text-foreground">{item.label}</p>
-                      <p className="mt-0.5 text-[13px] text-muted-foreground">{item.desc}</p>
-                    </div>
-                    <span className="mt-0.5 shrink-0 rounded-full bg-muted/50 px-2 py-0.5 text-[12px] font-medium text-muted-foreground">
-                      {item.badge}
-                    </span>
-                  </button>
-                )
-              })}
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-    </div>
-  )
-}
 
 // --- Fee Breakdown Popover ---------------------------------------------------
 
@@ -4102,61 +309,86 @@ function FeeCollectionSection({
 }) {
   const feesCfg = useFeesConfig()
   const rates   = feeRatesFrom(feesCfg)
-  const apFees = calcFees(samplePrice, 'attendee_pays', rates)
-  const oaFees = calcFees(samplePrice, 'organizer_absorbs', rates)
+  // RD-PAYMENT-02 Phase 7: Attendee Pays becomes selectable ONLY when the pricing engine
+  // is active. While dormant (production default) it stays "Coming Soon" and any stored
+  // value normalizes to organizer_absorbs — byte-identical to before.
+  const engineEnabled = feesCfg.pricingEngineEnabled
+  const oaFees = computeFeePreview(samplePrice, 'organizer_absorbs', rates)
+  const apFees = engineEnabled ? computeFeePreview(samplePrice, 'attendee_pays', rates) : undefined
+  const effectiveModel = normalizeFeeModel(feeModel, engineEnabled)
 
-  const OPTIONS = [
+  type FeeOption = {
+    id:          FeeModel
+    label:       string
+    badge:       string | null
+    badgeCls:    string
+    desc:        string
+    supported:   boolean
+    fees?:       FeeBreakdown
+    summaryNote: string
+    summaryCls:  string
+  }
+  const OPTIONS: FeeOption[] = [
     {
-      id:      'attendee_pays' as FeeModel,
-      label:   'Attendee Pays Fees',
-      badge:   'Recommended',
-      badgeCls:'bg-emerald-100 text-emerald-700',
-      desc:    'Fees are added on top of your ticket price. You receive the full ticket value.',
-      fees:    apFees,
-      summaryNote: 'You receive the full amount',
-      summaryCls:  'text-emerald-700',
-    },
-    {
-      id:      'organizer_absorbs' as FeeModel,
+      id:      'organizer_absorbs',
       label:   'Organizer Absorbs Fees',
-      badge:   null as string | null,
-      badgeCls:'',
-      desc:    'Attendees pay only the ticket price. Platform fees are deducted from your payout.',
-      fees:    oaFees,
-      summaryNote: 'Fees deducted from your payout',
+      badge:   engineEnabled ? null : 'How it works',
+      badgeCls:'bg-emerald-100 text-emerald-700',
+      desc:    'Attendees pay only the ticket price. RegisterDesk platform fees are deducted from your payout.',
+      supported:   true,
+      fees:        oaFees,
+      summaryNote: 'Platform fees absorbed by you',
       summaryCls:  'text-amber-700',
     },
-  ] as const
+    {
+      id:      'attendee_pays',
+      label:   'Attendee Pays Fees',
+      badge:   engineEnabled ? null : 'Coming Soon',
+      badgeCls: engineEnabled ? '' : 'bg-muted text-muted-foreground',
+      desc:    engineEnabled
+        ? 'Platform fees are added on top of the ticket price so attendees cover them — you receive the full ticket value.'
+        : 'Add platform fees on top of the ticket price so attendees cover them. Not available yet — every event currently uses Organizer Absorbs Fees.',
+      supported:   engineEnabled,
+      fees:        apFees,
+      summaryNote: engineEnabled ? 'Attendees cover the fees' : 'Not available yet',
+      summaryCls:  engineEnabled ? 'text-emerald-700' : 'text-muted-foreground',
+    },
+  ]
 
   return (
     <div className="border-t border-border/60 px-5 pt-5 sm:px-6">
       <p className="mb-1 text-[13px] font-semibold text-foreground">Fee Collection Method</p>
       <p className="mb-4 text-[12px] text-muted-foreground">
-        Choose who pays RegisterDesk platform charges — based on a {formatINR(samplePrice)} ticket.
+        {engineEnabled
+          ? `Choose who covers RegisterDesk platform fees — shown on a ${formatINR(samplePrice)} ticket below.`
+          : `RegisterDesk platform fees are absorbed by you (the organizer). Attendees pay only the ticket price — shown on a ${formatINR(samplePrice)} ticket below.`}
       </p>
 
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         {OPTIONS.map(opt => {
-          const selected = feeModel === opt.id
+          const selected = opt.supported && effectiveModel === opt.id
           return (
             <motion.div
               key={opt.id}
               role="button"
-              tabIndex={0}
-              whileTap={{ scale: 0.985 }}
-              onClick={() => onChange(opt.id)}
+              tabIndex={opt.supported ? 0 : -1}
+              aria-disabled={!opt.supported}
+              whileTap={opt.supported ? { scale: 0.985 } : undefined}
+              onClick={() => { if (opt.supported) onChange(opt.id) }}
               onKeyDown={(e: React.KeyboardEvent) => {
-                if (e.key === 'Enter' || e.key === ' ') {
+                if (opt.supported && (e.key === 'Enter' || e.key === ' ')) {
                   e.preventDefault()
                   onChange(opt.id)
                 }
               }}
-              aria-pressed={selected}
+              aria-pressed={opt.supported ? selected : undefined}
               className={cn(
-                'group relative flex cursor-pointer flex-col rounded-xl border-[1.5px] bg-card p-4 text-left transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-1',
-                selected
-                  ? 'border-primary bg-primary/[0.02] ring-1 ring-primary/10'
-                  : 'border-border hover:border-primary/30 hover:shadow-sm',
+                'group relative flex flex-col rounded-xl border-[1.5px] bg-card p-4 text-left transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-1',
+                !opt.supported
+                  ? 'cursor-not-allowed border-dashed border-border/70 opacity-60'
+                  : selected
+                    ? 'cursor-pointer border-primary bg-primary/[0.02] ring-1 ring-primary/10'
+                    : 'cursor-pointer border-border hover:border-primary/30 hover:shadow-sm',
               )}
             >
               {/* Selected check */}
@@ -4187,25 +419,32 @@ function FeeCollectionSection({
               </div>
               <p className="mb-4 text-[13px] leading-relaxed text-muted-foreground">{opt.desc}</p>
 
-              {/* Embedded example with breakdown popovers */}
-              <div className="grid grid-cols-2 gap-2 rounded-xl border border-border/60 bg-muted/[0.04] p-3">
-                <div className="flex flex-col items-center gap-0.5 rounded-lg bg-background/80 px-2 py-2 text-center">
-                  <p className="text-[9.5px] font-semibold uppercase tracking-wider text-violet-500">Attendee Pays</p>
-                  <div className="flex items-center gap-0.5">
-                    <p className="text-[1.1rem] font-extrabold text-violet-700">{formatINR(opt.fees.attendeePays)}</p>
-                    <FeeBreakdownPopover fees={opt.fees} type="attendee" platformPercent={rates.platformPercent} gstPercent={rates.gstPercent} />
+              {/* Embedded example — shown only for the supported model. The Coming Soon
+                  card shows no numbers so it never implies attendee fee collection works. */}
+              {opt.supported && opt.fees ? (
+                <div className="grid grid-cols-2 gap-2 rounded-xl border border-border/60 bg-muted/[0.04] p-3">
+                  <div className="flex flex-col items-center gap-0.5 rounded-lg bg-background/80 px-2 py-2 text-center">
+                    <p className="text-[9.5px] font-semibold uppercase tracking-wider text-violet-500">Attendee Pays</p>
+                    <div className="flex items-center gap-0.5">
+                      <p className="text-[1.1rem] font-extrabold text-violet-700">{formatINR(opt.fees.attendeePays)}</p>
+                      <FeeBreakdownPopover fees={opt.fees} type="attendee" platformPercent={rates.platformPercent} gstPercent={rates.gstPercent} />
+                    </div>
+                    <p className="text-[12px] text-muted-foreground">at checkout</p>
                   </div>
-                  <p className="text-[12px] text-muted-foreground">at checkout</p>
-                </div>
-                <div className="flex flex-col items-center gap-0.5 rounded-lg bg-background/80 px-2 py-2 text-center">
-                  <p className="text-[9.5px] font-semibold uppercase tracking-wider text-emerald-600">You Receive</p>
-                  <div className="flex items-center gap-0.5">
-                    <p className="text-[1.1rem] font-extrabold text-emerald-700">{formatINR(opt.fees.organizerGets)}</p>
-                    <FeeBreakdownPopover fees={opt.fees} type="organizer" platformPercent={rates.platformPercent} gstPercent={rates.gstPercent} />
+                  <div className="flex flex-col items-center gap-0.5 rounded-lg bg-background/80 px-2 py-2 text-center">
+                    <p className="text-[9.5px] font-semibold uppercase tracking-wider text-emerald-600">You Receive</p>
+                    <div className="flex items-center gap-0.5">
+                      <p className="text-[1.1rem] font-extrabold text-emerald-700">{formatINR(opt.fees.organizerGets)}</p>
+                      <FeeBreakdownPopover fees={opt.fees} type="organizer" platformPercent={rates.platformPercent} gstPercent={rates.gstPercent} />
+                    </div>
+                    <p className="text-[12px] text-muted-foreground">per registration</p>
                   </div>
-                  <p className="text-[12px] text-muted-foreground">per registration</p>
                 </div>
-              </div>
+              ) : (
+                <div className="flex items-center justify-center rounded-xl border border-dashed border-border/60 bg-muted/[0.04] px-3 py-5 text-center">
+                  <p className="text-[12px] font-medium text-muted-foreground">Coming soon</p>
+                </div>
+              )}
 
               {/* Summary note */}
               <p className={cn('mt-2.5 text-[12px] font-medium', opt.summaryCls)}>
@@ -4221,133 +460,9 @@ function FeeCollectionSection({
 
 // --- Step 4: Summary Panel ----------------------------------------------------
 
-function Step4SummaryPanel({ pricing }: { pricing: EventPricingDraft }) {
-  const activePasses     = pricing.passes.filter(p => p.status === 'active')
-  const paidActivePasses = activePasses.filter(p => pricing.eventType === 'paid' && p.price > 0)
-  const freePasses       = activePasses.filter(p => pricing.eventType === 'free' || p.price === 0)
-  const hasUnlimited     = pricing.passes.some(p => p.unlimited)
-  const totalSeats       = hasUnlimited
-    ? null
-    : pricing.passes.reduce((s, p) => s + (p.quantity ?? 0), 0)
-
-  return (
-    <aside className="flex flex-col gap-3 lg:sticky lg:top-5">
-
-      {/* Pricing Summary */}
-      <div className="rounded-xl border border-border bg-card shadow-sm">
-        <div className="border-b border-border px-4 py-3">
-          <p className="text-[14px] font-semibold text-foreground">Pricing Summary</p>
-        </div>
-        <div className="flex flex-col gap-0 divide-y divide-border/40 px-4 py-1">
-          {([
-            { label: 'Total Passes',  val: String(pricing.passes.length) },
-            { label: 'Active Passes', val: String(activePasses.length)   },
-            { label: 'Paid Passes',   val: String(paidActivePasses.length), hidden: pricing.eventType !== 'paid' },
-            { label: 'Free Passes',   val: String(freePasses.length),       hidden: paidActivePasses.length === 0 && pricing.eventType === 'paid' },
-            {
-              label: 'Total Capacity',
-              val:   hasUnlimited
-                ? 'Unlimited'
-                : totalSeats != null && totalSeats > 0
-                ? totalSeats.toLocaleString('en-IN')
-                : '—',
-              valCls: hasUnlimited ? 'text-amber-600' : '',
-            },
-          ] as Array<{ label: string; val: string; valCls?: string; hidden?: boolean }>)
-            .filter(r => !r.hidden)
-            .map(({ label, val, valCls }) => (
-              <div key={label} className="flex items-center justify-between py-2.5">
-                <span className="text-[12px] text-muted-foreground">{label}</span>
-                <span className={cn('text-[12px] font-semibold', valCls ?? 'text-foreground')}>{val}</span>
-              </div>
-            ))}
-        </div>
-      </div>
-
-      {/* Event Preview */}
-      <div className="rounded-xl border border-border bg-card shadow-sm">
-        <div className="border-b border-border px-4 py-3">
-          <div className="flex items-center gap-1.5">
-            <Eye className="size-3.5 text-muted-foreground" aria-hidden />
-            <p className="text-[14px] font-semibold text-foreground">Event Preview</p>
-          </div>
-          <p className="mt-0.5 text-[12px] text-muted-foreground">How passes appear to attendees</p>
-        </div>
-        <div className="px-4 py-3">
-          <div className="overflow-hidden rounded-lg border border-border/60">
-            {/* Mini event header */}
-            <div className="bg-gradient-to-br from-primary/[0.08] to-primary/[0.04] px-3 py-3">
-              <p className="text-[12px] font-semibold text-foreground">Your Event Name</p>
-              <div className="mt-1 flex items-center gap-1.5 text-[12px] text-muted-foreground">
-                <Calendar className="size-3" aria-hidden />
-                <span>Date TBD · Venue TBD</span>
-              </div>
-            </div>
-
-            {/* Pass list preview */}
-            {pricing.passes.length > 0 ? (
-              <div className="divide-y divide-border/40">
-                {pricing.passes.slice(0, 3).map((pass, i) => (
-                  <div key={pass.id} className="flex items-center justify-between px-3 py-2">
-                    <div className="flex items-center gap-2">
-                      <span className={cn('size-2 rounded-full', PASS_COLORS[i % PASS_COLORS.length].dot)} />
-                      <span className="max-w-[110px] truncate text-[13px] font-medium text-foreground">
-                        {pass.name}
-                      </span>
-                    </div>
-                    <span className="text-[13px] font-bold text-primary">
-                      {pricing.eventType === 'free' ? 'Free' : formatINR(pass.price)}
-                    </span>
-                  </div>
-                ))}
-                {pricing.passes.length > 3 && (
-                  <p className="px-3 py-1.5 text-center text-[12px] text-muted-foreground">
-                    +{pricing.passes.length - 3} more pass{pricing.passes.length - 3 !== 1 ? 'es' : ''}
-                  </p>
-                )}
-              </div>
-            ) : (
-              <div className="px-3 py-5 text-center">
-                <p className="text-[13px] text-muted-foreground/60">No passes added yet</p>
-              </div>
-            )}
-
-            {/* Register CTA preview */}
-            <div className="border-t border-border/40 px-3 py-2.5">
-              <div className="rounded-lg bg-primary/10 py-2 text-center">
-                <p className="flex items-center gap-1 text-[13px] font-bold text-primary">
-                  Register Now <ArrowRight className="size-3" aria-hidden />
-                </p>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* Need help */}
-      <div className="rounded-xl border border-border bg-card px-4 py-3 shadow-sm">
-        <div className="mb-1 flex items-center gap-1.5">
-          <Headphones className="size-3.5 shrink-0 text-foreground" aria-hidden />
-          <p className="text-[12px] font-semibold text-foreground">Need help with pricing?</p>
-        </div>
-        <p className="mb-2.5 text-[12px] leading-relaxed text-muted-foreground">
-          Learn about ticket types, early bird pricing, and revenue best practices.
-        </p>
-        {/* GA-7 S1: pricing guide not yet published — action hidden until the guide exists. */}
-      </div>
-
-    </aside>
-  )
-}
 
 // --- Step 4: RegisterDesk Services & Pricing section -------------------------
 
-const OPTIONAL_SERVICES = [
-  { label: 'Email Notifications', badge: 'Included',  badgeCls: 'bg-emerald-100 text-emerald-700',                     desc: 'Confirmations & reminders' },
-  { label: 'WhatsApp',           badge: 'Optional',  badgeCls: 'bg-amber-100 text-amber-700',    cost: '₹0.10/msg', desc: 'Usage-based add-on'       },
-  { label: 'SMS',                badge: 'Optional',  badgeCls: 'bg-amber-100 text-amber-700',    cost: '₹0.15/msg', desc: 'Usage-based add-on'       },
-  { label: 'Certificates',       badge: 'Optional',  badgeCls: 'bg-blue-100 text-blue-700',                           desc: 'Digital certificate generation' },
-] as const
 
 // Section 2: Communication & Add-ons — selectable service cards
 type CommAddonValues = { whatsappEnabled: boolean; smsEnabled: boolean; certEnabled: boolean }
@@ -4375,7 +490,23 @@ function RegisterDeskServicesPricingSection({
     rate:     string | null
     rateNote: string | null
     example:  string | null
+    unavailable?: boolean
   }
+
+  // RD-COMMS-01 Phase 2B: SMS availability comes from the canonical capability SSOT — SMS
+  // has no transport, so its add-on is shown as Unavailable and cannot be toggled or priced.
+  const SMS_AVAILABLE = isChannelImplemented('sms')
+
+  // RD-EVENT-02 S1B (H2): per-message rates come from the SAME canonical pricing source the
+  // Final Cost Summary uses — the Business Configuration communication rates (seeded from
+  // lib/communications/pricing.ts). No hard-coded paise anywhere in this card.
+  const commConfig        = useCommunicationConfig()
+  const whatsappRatePaise = commConfig.whatsapp.pricePaise
+  const smsRatePaise      = commConfig.sms.pricePaise
+  // Illustrative scenario (display only): 100 attendees × 2 messages. The monetary total is
+  // derived from the canonical per-message rate so the rate and example can never diverge.
+  const rateLabel   = (paise: number) => `${formatINR(paise / 100)} per delivered message`
+  const exampleLine = (paise: number) => `100 attendees × 2 messages ≈ ${formatINR((100 * 2 * paise) / 100)}`
 
   const SERVICES: SvcDef[] = [
     {
@@ -4400,23 +531,24 @@ function RegisterDeskServicesPricingSection({
       desc:     isFreeEvent
         ? 'Recharge credits before sending messages'
         : 'Charges deducted from settlement amount',
-      rate:     '₹0.10 per delivered message',
+      rate:     rateLabel(whatsappRatePaise),
       rateNote: isFreeEvent ? 'Pre-paid credits required' : 'Deducted at settlement',
-      example:  '100 attendees × 2 messages ≈ ₹20',
+      example:  exampleLine(whatsappRatePaise),
     },
     {
       key:      'smsEnabled',
       Icon:     MoreHorizontal,
       label:    'SMS Notifications',
       always:   false,
-      badge:    'Optional',
-      badgeCls: 'bg-amber-100 text-amber-700',
-      desc:     isFreeEvent
-        ? 'Recharge credits before sending messages'
-        : 'Charges deducted from settlement amount',
-      rate:     '₹0.15 per delivered message',
-      rateNote: isFreeEvent ? 'Pre-paid credits required' : 'Deducted at settlement',
-      example:  '100 attendees × 2 messages ≈ ₹30',
+      badge:    SMS_AVAILABLE ? 'Optional' : 'Unavailable',
+      badgeCls: SMS_AVAILABLE ? 'bg-amber-100 text-amber-700' : 'bg-muted text-muted-foreground',
+      desc:     SMS_AVAILABLE
+        ? (isFreeEvent ? 'Recharge credits before sending messages' : 'Charges deducted from settlement amount')
+        : 'SMS delivery is not available yet — no messages are sent for this channel.',
+      rate:     SMS_AVAILABLE ? rateLabel(smsRatePaise) : null,
+      rateNote: SMS_AVAILABLE ? (isFreeEvent ? 'Pre-paid credits required' : 'Deducted at settlement') : null,
+      example:  SMS_AVAILABLE ? exampleLine(smsRatePaise) : null,
+      unavailable: !SMS_AVAILABLE,
     },
     {
       key:      'certEnabled',
@@ -4435,8 +567,8 @@ function RegisterDeskServicesPricingSection({
   const serviceRows = (
     <div className="divide-y divide-border/60">
       {SERVICES.map((svc) => {
-          const isOn   = svc.always || !!values[svc.key as keyof CommAddonValues]
-          const canTog = !svc.always
+          const isOn   = !svc.unavailable && (svc.always || !!values[svc.key as keyof CommAddonValues])
+          const canTog = !svc.always && !svc.unavailable
 
           return (
             <div
@@ -4548,396 +680,15 @@ function RegisterDeskServicesPricingSection({
 
 // --- Step 4 view --------------------------------------------------------------
 
-function Step4View({ currentStep, completedValues, onNext, onBack, onSaveDraft, initialData }: StepViewProps) {
-  const eventTypeId  = (initialData?.eventTypeId  as string | null) ?? null
-  const eventSubtype = (initialData?.eventSubtype as string | null) ?? null
 
-  const [pricing, setPricing] = useState<EventPricingDraft>(() => {
-    const savedRaw = initialData?.pricing as (EventPricingDraft & { earlyBirdEndDate?: unknown }) | null
-    if (savedRaw) {
-      // LS3.2 migration: the early-bird end date used to live at the event level
-      // (pricing.earlyBirdEndDate). It now belongs only to the pass
-      // (pricing.passes[].earlyBirdEndDate). Backfill any legacy value into
-      // early-bird-enabled passes that don't yet have their own date, then drop
-      // the legacy field so there is exactly one source of truth. No data loss.
-      const { earlyBirdEndDate: legacyEbEnd, ...saved } = savedRaw
-      const legacy = typeof legacyEbEnd === 'string' ? legacyEbEnd.trim() : ''
-      const passes = Array.isArray(saved.passes)
-        ? saved.passes.map(p =>
-            legacy && p.earlyBirdEnabled && !p.earlyBirdEndDate
-              ? { ...p, earlyBirdEndDate: legacy }
-              : p,
-          )
-        : saved.passes
-      return {
-        ...saved,
-        passes,
-        feeModel:               saved.feeModel               ?? 'attendee_pays',
-        estimatedRegistrations: saved.estimatedRegistrations ?? 100,
-        whatsappEnabled:        saved.whatsappEnabled        ?? false,
-        smsEnabled:             saved.smsEnabled             ?? false,
-        certEnabled:            saved.certEnabled            ?? false,
-      }
-    }
-    return {
-      eventType:              'paid',
-      feeModel:               'attendee_pays',
-      estimatedRegistrations: 100,
-      passes:                 [],
-      registrationOpenDate:   '',
-      registrationEndDate:    '',
-      showRemainingSeats:     true,
-      whatsappEnabled:        false,
-      smsEnabled:             false,
-      certEnabled:            false,
-      advancedSettings:       { taxes: [], fees: [], coupons: [], discounts: [] },
-    }
-  })
-  const [advancedOpen,  setAdvancedOpen]  = useState(false)
-  const [addPassOpen,   setAddPassOpen]   = useState(false)
-  const [editingPass,   setEditingPass]   = useState<EventPass | null>(null)
+// Step 5 view (Registration Form) → components/event-builder/steps/Step5View.tsx (RD-PRODUCT-01G
+// Phase 9). The RegistrationFormBuilder dynamic import moved with it (Step-5-only); the field
+// builder UI itself already lived in the shared components/wizard/RegistrationFormBuilder.
 
-  const updatePricing = (partial: Partial<EventPricingDraft>) =>
-    setPricing(prev => ({ ...prev, ...partial }))
-
-  const handleSavePass = (saved: EventPass) => {
-    if (editingPass) {
-      updatePricing({ passes: pricing.passes.map(p => p.id === saved.id ? saved : p) })
-    } else {
-      updatePricing({ passes: [...pricing.passes, saved] })
-    }
-    setEditingPass(null)
-  }
-
-  const handleEditPass = (pass: EventPass) => {
-    setEditingPass(pass)
-    setAddPassOpen(true)
-  }
-
-  const handleAddNew = () => {
-    setEditingPass(null)
-    setAddPassOpen(true)
-  }
-
-  return (
-    <motion.div
-      initial={{ opacity: 0, y: 8 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.35, ease: EASE }}
-      className="flex min-h-full flex-col"
-    >
-
-      {/* -- Back link -- */}
-      <Link
-        href={ROUTES.DASHBOARD}
-        className="mb-4 inline-flex items-center gap-1.5 text-[13px] font-medium text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary rounded"
-      >
-        <ArrowLeft className="size-4" aria-hidden />
-        Back to Dashboard
-      </Link>
-
-      {/* -- Stepper -- */}
-      <Stepper currentStep={currentStep} completedValues={completedValues} />
-
-      {/* -- Title -- */}
-      <div className="mt-4">
-        <h1 className="text-[22px] font-bold tracking-tight text-foreground">
-          Passes &amp; Pricing
-        </h1>
-        <p className="mt-1 text-[13px] text-muted-foreground">
-          Configure your plan, ticket types, and registration schedule.
-        </p>
-      </div>
-
-      {/* -- Main content -- */}
-      <div className="mt-4 grid flex-1 items-start gap-5 lg:grid-cols-[1fr_280px]">
-
-        {/* Left column — min-w-0 prevents the table from stretching the grid */}
-        <div className="flex min-w-0 flex-col gap-5">
-
-          {/* SECTION 1: RegisterDesk Plan */}
-          <EventTypeSelectorSection
-            value={pricing.eventType}
-            onChange={v => updatePricing({ eventType: v })}
-          />
-
-          {/* SECTION 2: Ticket Types & Pricing */}
-          {(() => {
-            const hasUnlimitedPass = pricing.passes.some(p => p.unlimited)
-            const totalCapacity    = hasUnlimitedPass
-              ? null
-              : pricing.passes.reduce((s, p) => s + (p.quantity ?? 0), 0)
-            return (
-          <div className="overflow-hidden rounded-2xl border border-border bg-card shadow-sm">
-            {/* Section header */}
-            <div className="border-b border-border px-5 py-4 sm:px-6">
-              <div className="flex items-center justify-between gap-3">
-                <div className="flex min-w-0 items-center gap-3">
-                  <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary/[0.09]">
-                    <Ticket className="size-4 text-primary" aria-hidden />
-                  </div>
-                  <div>
-                    <div className="flex flex-wrap items-center gap-2">
-                      <p className="text-[15px] font-bold tracking-tight text-foreground">Ticket Types &amp; Pricing</p>
-                      {hasUnlimitedPass ? (
-                        <span className="rounded-full bg-amber-100 px-2.5 py-0.5 text-[12px] font-semibold text-amber-700">
-                          Unlimited Capacity
-                        </span>
-                      ) : totalCapacity != null && totalCapacity > 0 ? (
-                        <span className="rounded-full bg-muted px-2.5 py-0.5 text-[12px] font-semibold text-muted-foreground">
-                          {totalCapacity.toLocaleString('en-IN')} Attendees
-                        </span>
-                      ) : null}
-                    </div>
-                    <p className="mt-0.5 text-[13px] text-muted-foreground">
-                      Create ticket categories with different pricing and limits.
-                    </p>
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  onClick={handleAddNew}
-                  className={cn(
-                    buttonVariants({ variant: 'outline' }),
-                    'shrink-0 gap-1.5 border-primary/30 text-primary hover:border-primary/60 hover:bg-primary/[0.03] text-[12px]',
-                  )}
-                >
-                  <Plus className="size-3.5" aria-hidden />
-                  Add Pass
-                </button>
-              </div>
-            </div>
-
-            {/* Passes table */}
-            <div className="px-5 py-5 sm:px-6">
-              <PassesSection
-                passes={pricing.passes}
-                isFreeEvent={pricing.eventType === 'free'}
-                onUpdate={passes => updatePricing({ passes })}
-                onAddNew={handleAddNew}
-                onEdit={handleEditPass}
-              />
-            </div>
-
-            {/* Spacer at bottom when section has content */}
-            <div className="h-5" />
-          </div>
-            )
-          })()}
-
-          {/* SECTION 3: Registration Schedule */}
-          <RegistrationPeriodSection
-            draft={pricing}
-            onUpdate={updatePricing}
-          />
-
-          {/* Advanced Settings */}
-          <AdvancedSettingsSection
-            isOpen={advancedOpen}
-            onToggle={() => setAdvancedOpen(v => !v)}
-          />
-
-        </div>
-
-        {/* Right column: summary panel */}
-        <Step4SummaryPanel pricing={pricing} />
-
-      </div>
-
-      {pricing.passes.length === 0 && (
-        <p className="mt-4 text-center text-[13px] font-medium text-amber-600">
-          At least one pass is required before continuing.
-        </p>
-      )}
-
-      <WizardFooter
-        onBack={onBack}
-        onSaveDraft={() => onSaveDraft?.(pricing)}
-        onNext={() => onNext('Passes & Pricing', pricing)}
-        isNextDisabled={pricing.passes.length === 0}
-        stepContext={`Step ${currentStep + 1} of ${WIZARD_STEPS.length} · ${WIZARD_STEPS[currentStep]?.name ?? ''}`}
-      />
-
-      {/* Add / Edit Pass editor overlay */}
-      <AddPassEditor
-        isOpen={addPassOpen}
-        onClose={() => { setAddPassOpen(false); setEditingPass(null) }}
-        onSave={handleSavePass}
-        editingPass={editingPass}
-        eventTypeId={eventTypeId}
-        eventSubtype={eventSubtype}
-        isFreeEvent={pricing.eventType === 'free'}
-      />
-
-    </motion.div>
-  )
-}
-
-// --- Step 5 view — Registration Form -----------------------------------------
-
-function Step5View({ currentStep, completedValues, onNext, onBack, onSaveDraft, initialData }: StepViewProps) {
-  const eventTypeId  = (initialData?.eventTypeId  as string | null) ?? null
-  const eventSubtype = (initialData?.eventSubtype as string | null) ?? null
-
-  const rawForm    = initialData?.registrationForm
-  const accessCtrl = initialData?.accessControl as { confirmationMode?: string } | null
-  const [form, setForm] = useState<RegistrationFormDraft>(() => {
-    if (rawForm != null) return rawForm as unknown as RegistrationFormDraft
-    const blank = makeBlankFormDraft()
-    if (accessCtrl?.confirmationMode === 'manual') {
-      blank.registrationRules = { ...blank.registrationRules, approvalMode: 'manual' }
-      blank.settings          = { ...blank.settings, requireApproval: true }
-    }
-    return blank
-  })
-
-  // Extract pass summaries from Step 4 pricing data for pass-linked field visibility.
-  const passes: PassSummary[] = (() => {
-    const pricing = initialData?.pricing as { passes?: EventPassFull[] } | null | undefined
-    return (pricing?.passes ?? [])
-      .filter(p => p.name.trim().length > 0)
-      .map(p => ({ id: p.id, name: p.name }))
-  })()
-
-  // A form is ready to proceed when a template is chosen OR at least one field exists.
-  const canProceed   = form.template.length > 0 || form.fields.length > 0
-  const [step5Error, setStep5Error] = useState<string | null>(null)
-
-  const handleNext = () => {
-    if (!canProceed) {
-      setStep5Error('Select a template or add at least one field before continuing.')
-      return
-    }
-    setStep5Error(null)
-    onNext('Registration Form', form)
-  }
-
-  return (
-    <motion.div
-      initial={{ opacity: 0, y: 8 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.35, ease: EASE }}
-      className="flex min-h-full flex-col"
-    >
-      {/* -- Back link -- */}
-      <Link
-        href={ROUTES.DASHBOARD}
-        className="mb-4 inline-flex items-center gap-1.5 text-[13px] font-medium text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary rounded"
-      >
-        <ArrowLeft className="size-4" aria-hidden />
-        Back to Dashboard
-      </Link>
-
-      {/* -- Stepper -- */}
-      <Stepper currentStep={currentStep} completedValues={completedValues} />
-
-      {/* -- Title -- */}
-      <div className="mt-4">
-        <h1 className="text-[22px] font-bold tracking-tight text-foreground">
-          Registration Form
-        </h1>
-        <p className="mt-1 text-[13px] text-muted-foreground">
-          Select a template and customise your attendee registration form.
-        </p>
-      </div>
-
-      {/* -- Builder -- */}
-      <div className="mt-4 flex-1">
-        <RegistrationFormBuilder
-          form={form}
-          onChange={f => { setForm(f); if (step5Error) setStep5Error(null) }}
-          eventTypeId={eventTypeId}
-          eventSubtype={eventSubtype}
-          passes={passes}
-          syncedApprovalMode={
-            accessCtrl?.confirmationMode === 'manual' || accessCtrl?.confirmationMode === 'auto'
-              ? (accessCtrl.confirmationMode as 'auto' | 'manual')
-              : null
-          }
-        />
-      </div>
-
-      {/* -- Validation banner -- */}
-      <AnimatePresence>
-        {step5Error && (
-          <motion.div
-            key="step5-error"
-            initial={{ opacity: 0, y: -4 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -4 }}
-            transition={{ duration: 0.2 }}
-            className="mt-3 flex items-center gap-2 rounded-lg border border-amber-200/60 bg-amber-50/60 px-3 py-2.5 text-[13px] text-amber-800"
-            role="alert"
-          >
-            <AlertTriangle className="size-4 shrink-0" aria-hidden />
-            {step5Error}
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      <WizardFooter
-        onBack={onBack}
-        onSaveDraft={() => onSaveDraft?.(form)}
-        onNext={handleNext}
-        stepContext={`Step ${currentStep + 1} of ${WIZARD_STEPS.length} · ${WIZARD_STEPS[currentStep]?.name ?? ''}`}
-      />
-    </motion.div>
-  )
-}
-
-// --- Step 6 view — Event Details & Communication -----------------------------
-
-function Step6View({ currentStep, completedValues, onNext, onBack, onSaveDraft, initialData, focusHint }: StepViewProps) {
-  const eventTypeId  = (initialData?.eventTypeId  as string | null) ?? null
-  const eventSubtype = (initialData?.eventSubtype as string | null) ?? null
-  const rawForm      = initialData?.eventDetails
-  const draftId      = (initialData?.draftId as string | null) ?? null
-  const uid          = auth.currentUser?.uid ?? null
-  const uploadContext = uid && draftId ? { uid, draftId } : undefined
-
-  const pricingPasses = (() => {
-    const pricing = initialData?.pricing as { passes?: EventPassFull[] } | null | undefined
-    return (pricing?.passes ?? [])
-      .filter((p: EventPassFull) => p.name.trim().length > 0)
-      .map((p: EventPassFull) => ({ id: p.id, name: p.name, price: p.price, type: p.type as 'paid'|'free' }))
-  })()
-
-  const [form, setForm] = useState<EventDetailsDraft>(() =>
-    // normalizeEventDetailsDraft deep-merges Firestore data with blank defaults,
-    // ensuring no nested sub-object is ever undefined regardless of schema drift.
-    rawForm != null ? normalizeEventDetailsDraft(rawForm) : makeBlankEventDetailsDraft()
-  )
-
-  return (
-    <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.35, ease: EASE }} className="flex flex-col">
-      <Link href={ROUTES.DASHBOARD} className="mb-4 inline-flex items-center gap-1.5 text-[13px] font-medium text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary rounded">
-        <ArrowLeft className="size-4" aria-hidden />Back to Dashboard
-      </Link>
-      <Stepper currentStep={currentStep} completedValues={completedValues} />
-      <div className="mt-4">
-        <h1 className="text-[22px] font-bold tracking-tight text-foreground">Event Details &amp; Communication</h1>
-        <p className="mt-1 text-[13px] text-muted-foreground">Configure your event page, venue, schedule, and attendee communication.</p>
-      </div>
-      <div className="mt-4">
-        <EventDetailsBuilder
-          form={form}
-          onChange={setForm}
-          eventTypeId={eventTypeId}
-          eventSubtype={eventSubtype}
-          pricingPasses={pricingPasses}
-          uploadContext={uploadContext}
-          focusHint={focusHint}
-        />
-      </div>
-      <WizardFooter
-        onBack={onBack}
-        onSaveDraft={() => onSaveDraft?.(form)}
-        onNext={() => onNext('Event Details', form)}
-        stepContext={`Step ${currentStep + 1} of ${WIZARD_STEPS.length} · ${WIZARD_STEPS[currentStep]?.name ?? ''}`}
-      />
-    </motion.div>
-  )
-}
+// Step 6 view (Event Details & Communication) → components/event-builder/steps/Step6View.tsx
+// (RD-PRODUCT-01G Phase 10). The EventDetailsBuilder dynamic import moved with it (Step-6-only);
+// the details + communication UI itself already lived in the shared components/wizard/
+// EventDetailsBuilder (PURE RELOCATION — comms/email/WhatsApp/SMS logic untouched).
 
 // --- Step 7 — Event Page Preview Modal ---------------------------------------
 
@@ -5843,7 +1594,7 @@ function CommercialAgreementModal({
   const basePrice = !isFreeEvent && passes.length > 0
     ? Math.min(...passes.map(p => p.price ?? 0))
     : 500
-  const fees = calcFees(basePrice, feeModel, feeRatesFrom(feesCfg))
+  const fees = computeFeePreview(basePrice, feeModel, feeRatesFrom(feesCfg))
 
   if (!open) return null
 
@@ -6168,37 +1919,119 @@ function PublishConfirmModal({
   )
 }
 
+// EA-4 S1 — identity-change confirmation. Shown ONLY when the publish endpoint returns a
+// moderate-drift warning (409 IDENTITY_CONFIRMATION_REQUIRED). Confirming re-submits through
+// the SAME publish path with confirmIdentityChange:true — it is not a separate publish flow.
+function IdentityConfirmModal({
+  open,
+  governance,
+  onConfirm,
+  onCancel,
+  isPublishing,
+}: {
+  open:         boolean
+  governance:   PublishGovernanceInfo
+  onConfirm:    () => void
+  onCancel:     () => void
+  isPublishing: boolean
+}) {
+  if (!open) return null
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-end justify-center p-0 sm:items-center sm:p-4"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Confirm event changes"
+    >
+      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={onCancel} aria-hidden />
+      <motion.div
+        initial={{ opacity: 0, y: 40 }}
+        animate={{ opacity: 1, y: 0 }}
+        exit={{ opacity: 0, y: 20 }}
+        transition={{ duration: 0.22, ease: EASE }}
+        className="relative z-10 w-full max-h-[90vh] overflow-y-auto rounded-t-2xl bg-card shadow-2xl sm:max-w-md sm:rounded-2xl"
+      >
+        {/* Header */}
+        <div className="flex items-center justify-between border-b border-border px-5 py-4">
+          <div className="flex items-center gap-3">
+            <div className="flex size-9 items-center justify-center rounded-full bg-amber-100">
+              <AlertCircle className="size-4.5 text-amber-600" aria-hidden />
+            </div>
+            <div>
+              <p className="text-[16px] font-bold text-foreground">Confirm event changes</p>
+              <p className="text-[13px] text-muted-foreground">This event was previously published.</p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={isPublishing}
+            className="flex size-7 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-muted/40"
+            aria-label="Close"
+          >
+            <X className="size-4" aria-hidden />
+          </button>
+        </div>
+
+        <div className="flex flex-col gap-4 px-5 py-5">
+          <p className="text-[13px] leading-relaxed text-muted-foreground">
+            You&apos;ve changed details that affect this event&apos;s identity. Publishing will update the
+            live event under its existing license. Review the changes before you continue.
+          </p>
+
+          {governance.changedFields.length > 0 && (
+            <div className="overflow-hidden rounded-xl border border-border bg-muted/[0.03]">
+              <div className="border-b border-border/40 px-4 py-2.5">
+                <p className="text-[12px] font-semibold uppercase tracking-wider text-muted-foreground">Changed fields</p>
+              </div>
+              <ul className="flex flex-col divide-y divide-border/40">
+                {governance.changedFields.map(field => (
+                  <li key={field} className="px-4 py-2.5 text-[13px] text-foreground">{field}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {/* Action buttons */}
+          <div className="flex gap-3 pb-1 pt-1">
+            <button
+              type="button"
+              onClick={onCancel}
+              disabled={isPublishing}
+              className={cn(buttonVariants({ variant: 'outline' }), 'flex-1')}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={onConfirm}
+              disabled={isPublishing}
+              className={cn(buttonVariants({ variant: 'primary' }), 'flex-1 gap-2', isPublishing && 'cursor-not-allowed opacity-50')}
+            >
+              {isPublishing ? (
+                <>
+                  <RefreshCw className="size-4 animate-spin" aria-hidden />
+                  Submitting…
+                </>
+              ) : (
+                <>
+                  <Zap className="size-4" aria-hidden />
+                  Confirm &amp; Publish
+                </>
+              )}
+            </button>
+          </div>
+        </div>
+      </motion.div>
+    </div>
+  )
+}
+
 // --- Step 7 view — Review & Publish ------------------------------------------
 
 
-interface StepCheck {
-  label:    string
-  passed:   boolean
-  required: boolean
-  detail?:  string
-}
-
-interface StepSummary {
-  index:  number
-  name:   string
-  icon:   LucideIcon
-  earned: number
-  max:    number
-  status: 'complete' | 'partial' | 'missing'
-  value?: string
-  checks: StepCheck[]
-}
-
-interface ReadinessReport {
-  score:        number
-  steps:        StepSummary[]
-  // Mandatory publish requirements — the SAME shared source the server uses.
-  // Drives both the Action Required list and canPublish (payment gate).
-  requirements: PublishRequirement[]
-  blockers:     string[]
-  warnings:     string[]
-  canPublish:   boolean
-}
+// StepCheck / StepSummary / ReadinessReport types → lib/events/builder/types.ts (RD-PRODUCT-01G Phase 4).
 
 function buildReadinessReport(
   eventTypeId:  string | null,
@@ -6369,7 +2202,7 @@ function FeeCollectionCard({
         <div>
           <p className="text-[15px] font-bold tracking-tight text-foreground">Fee Collection Method</p>
           <p className="mt-0.5 text-[13px] text-muted-foreground">
-            Choose how platform fees will be handled for this event.
+            How RegisterDesk platform fees are handled for this event.
           </p>
         </div>
       </div>
@@ -6389,9 +2222,9 @@ function Step7View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
   const pricingData  = (initialData?.pricing          as Record<string, unknown> | null) ?? null
   const formData     = (initialData?.registrationForm as Record<string, unknown> | null) ?? null
   const detailsData  = (initialData?.eventDetails     as EventDetailsDraft | null) ?? null
-  const reviewLicenseTier: EventLicenseTier = isEventLicenseTier(initialData?.licenseTier)
+  const reviewLicenseTier: AnyEventLicenseTier = isValidTierForVersion(initialData?.licenseTier, CURRENT_LICENSE_VERSION)
     ? initialData.licenseTier
-    : 'starter'
+    : defaultLicenseTierForVersion(CURRENT_LICENSE_VERSION)
 
   const isFreeEvent        = pricingData?.eventType === 'free'
   const isAlreadyPublished = draftStatus === 'published'
@@ -6429,6 +2262,10 @@ function Step7View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
   const termsFees = feesAcceptedAt !== null
 
   const [publishState,     setPublishState]     = useState<'idle' | 'publishing' | 'published'>('idle')
+  // EA-4 S1 identity governance: when the publish endpoint returns a moderate
+  // identity-change warning (409 IDENTITY_CONFIRMATION_REQUIRED), we surface the changed
+  // fields here and re-submit through the SAME publish path with confirmIdentityChange:true.
+  const [identityConfirm,  setIdentityConfirm]  = useState<PublishGovernanceInfo | null>(null)
   // Whether the submitted event went live ('published', auto mode) or is awaiting
   // admin approval ('pending_review', manual mode) — drives the success screen.
   const [submittedStatus,  setSubmittedStatus]  = useState<'published' | 'pending_review'>('published')
@@ -6445,8 +2282,12 @@ function Step7View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
     : termInfo && termsFees && consentFeeModel && consentTimeline)
 
   // ── Interactive state — initialized from draft, persisted via onSaveDraft ──
+  // RD-PAYMENT-02 Phase 7: normalize the stored fee model against the pricing-engine gate.
+  // Dormant (production default) → organizer_absorbs, identical to before; when active, an
+  // Attendee-Pays selection is honoured and persists across reloads.
+  const feeEngineEnabled = useFeesConfig().pricingEngineEnabled
   const [localFeeModel,  setLocalFeeModel]  = useState<FeeModel>(() =>
-    (pricingData?.feeModel as FeeModel | undefined) ?? 'attendee_pays')
+    normalizeFeeModel(pricingData?.feeModel, feeEngineEnabled))
   const [localWhatsapp, setLocalWhatsapp] = useState<boolean>(!!pricingData?.whatsappEnabled)
   const [localSms,      setLocalSms]      = useState<boolean>(!!pricingData?.smsEnabled)
   const [localCert,     setLocalCert]     = useState<boolean>(!!pricingData?.certEnabled)
@@ -6514,7 +2355,7 @@ function Step7View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
     setShowPublishConfirm(true)
   }, [allTermsAccepted, report.canPublish, publishState])
 
-  const handleConfirmPublish = useCallback(async () => {
+  const handleConfirmPublish = useCallback(async (confirmIdentityChange = false) => {
     if (publishState !== 'idle') return
     setPublishState('publishing')
     setShowPublishConfirm(false)
@@ -6527,7 +2368,7 @@ function Step7View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
           'Content-Type': 'application/json',
           ...(token ? { Authorization: `Bearer ${token}` } : {}),
         },
-        body: JSON.stringify({ draftId }),
+        body: JSON.stringify({ draftId, confirmIdentityChange }),
       })
 
       const json: PublishApiResponse = await res.json()
@@ -6558,6 +2399,19 @@ function Step7View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
         } else if (json.reason === 'INVALID_TIMEZONE') {
           showToast('The event timezone is invalid. Please select a valid timezone in Schedule settings.', 'error')
           setPublishState('idle')
+        } else if (json.reason === 'IDENTITY_CONFIRMATION_REQUIRED') {
+          // Moderate identity drift on an already-baselined event. Surface the changed
+          // fields and let the organizer confirm; confirming re-runs THIS same publish
+          // path with confirmIdentityChange:true (one authoritative confirmation sequence).
+          setPublishState('idle')
+          setIdentityConfirm(json.governance ?? {
+            decision: 'warn', level: 'moderate', changedFields: [],
+            requiresConfirmation: true, suggestDuplicate: false,
+          })
+        } else if (json.reason === 'IDENTITY_CHANGED') {
+          // Major identity drift — the server blocks republishing under the same license.
+          setPublishState('idle')
+          showToast(json.error ?? 'This event has changed too much to publish under the same license. Please duplicate it as a new event.', 'error')
         } else {
           showToast(json.error ?? 'Publish failed. Please try again.', 'error')
           setPublishState('idle')
@@ -6572,7 +2426,7 @@ function Step7View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
       showToast('Network error — check your connection and try again.', 'error')
       setPublishState('idle')
     }
-  }, [publishState, draftId, onNext, showToast])
+  }, [publishState, draftId, onNext, showToast, setIdentityConfirm])
 
   // ── Wallet top-up via Razorpay ─────────────────────────────────────────────
   const [topupLoading, setTopupLoading] = useState(false)
@@ -6656,8 +2510,8 @@ function Step7View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
 
   // ── License payment (F2.2) — wallet-first, then Razorpay for the remainder ──
   // Effective (config-aware) catalog so paid-tier detection matches the server.
-  const licenseCatalog = useLicenseCatalog()
-  const licenseDef     = licenseCatalog[reviewLicenseTier]
+  const licenseView    = useCurrentLicenseCatalogView()
+  const licenseDef: LicenseCatalogEntryView = licenseView.find(e => e.tier === reviewLicenseTier) ?? licenseView[0]
   const isPaidLicense  = licenseDef.licensePricePaise > 0
   // Every paid tier (Growth/Professional/Enterprise) goes through payment; Starter
   // (free) submits directly. undefined → 'Submit Event'.
@@ -6914,7 +2768,7 @@ function Step7View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
         <ArrowLeft className="size-4" aria-hidden />Back to Dashboard
       </Link>
 
-      <Stepper currentStep={currentStep} completedValues={completedValues} />
+      <Stepper currentStep={currentStep} completedValues={completedValues} steps={wizardSteps ?? WIZARD_STEPS} />
 
       {/* Header row with Preview button */}
       <div className="mt-4 flex items-start justify-between gap-3">
@@ -7376,7 +3230,7 @@ function Step7View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
           <PublishConfirmModal
             open={showPublishConfirm}
             onClose={() => setShowPublishConfirm(false)}
-            onConfirm={handleConfirmPublish}
+            onConfirm={() => { void handleConfirmPublish() }}
             report={report}
             eventName={eventName}
             eventTypeId={eventTypeId}
@@ -7385,6 +3239,18 @@ function Step7View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
             isFreeEvent={isFreeEvent}
             isPublishing={publishState === 'publishing'}
             feeModel={localFeeModel}
+          />
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {identityConfirm && (
+          <IdentityConfirmModal
+            open={!!identityConfirm}
+            governance={identityConfirm}
+            onCancel={() => setIdentityConfirm(null)}
+            onConfirm={() => { setIdentityConfirm(null); void handleConfirmPublish(true) }}
+            isPublishing={publishState === 'publishing'}
           />
         )}
       </AnimatePresence>
@@ -7836,12 +3702,12 @@ function LicenseStepView({
   onNext:          (label?: string, data?: unknown) => void
   onBack:          () => void
   steps:           WizardStep[]
-  selectedTier:    EventLicenseTier
-  onSelectLicense: (t: EventLicenseTier) => void
+  selectedTier:    AnyEventLicenseTier
+  onSelectLicense: (t: AnyEventLicenseTier) => void
 }) {
-  const [tier, setTier] = useState<EventLicenseTier>(selectedTier)
+  const [tier, setTier] = useState<AnyEventLicenseTier>(selectedTier)
   const [walletBalance, setWalletBalance] = useState<number | null>(null)
-  const licenseCatalog = useLicenseCatalog()
+  const licenseView = useCurrentLicenseCatalogView()
 
   useEffect(() => {
     let alive = true
@@ -7857,8 +3723,9 @@ function LicenseStepView({
     return () => { alive = false }
   }, [])
 
-  const select = (t: EventLicenseTier) => { setTier(t); onSelectLicense(t) }
-  const handleNext = () => { onSelectLicense(tier); onNext(`License: ${licenseCatalog[tier].name}`, tier) }
+  const select = (t: AnyEventLicenseTier) => { setTier(t); onSelectLicense(t) }
+  const tierName = (t: AnyEventLicenseTier): string => (licenseView.find(e => e.tier === t) ?? licenseView[0]).name
+  const handleNext = () => { onSelectLicense(tier); onNext(`License: ${tierName(tier)}`, tier) }
 
   return (
     <motion.div
@@ -7901,7 +3768,13 @@ function LicenseStepView({
 // --- Wizard -------------------------------------------------------------------
 
 export default function CreateEventWizard() {
-  const { draft, isLoading, createDraft, updateDraft } = useDraft()
+  const {
+    draft, isLoading, createDraft, updateDraft, autosaveDraft, flushNow, markPublished,
+    saveState, lastSavedAt, hasUnsavedChanges, conflict, resolveConflict,
+  } = useDraft()
+
+  // RD-PRODUCT-01B: warn on tab close/reload while a save is pending or in flight.
+  useUnsavedChangesWarning(hasUnsavedChanges, flushNow)
 
   // Buffers the Step 1 (category) and Step 2 (visibility) selections BEFORE any
   // Firestore document exists. These seed the deferred createDraft and let the
@@ -7948,6 +3821,13 @@ export default function CreateEventWizard() {
       const totalSteps = isEventPlusDonation ? FUNDRAISING_EVENT_WIZARD_STEPS.length : WIZARD_STEPS.length
       const nextStep   = Math.min(step + 1, totalSteps - 1)
       const newValues  = completedValues.map((v, i) => (i === step ? label : v))
+
+      // M1: a successful publish (signalled by the review step's 'Published' label from
+      // handleConfirmPublish) advances the server's authoritative updatedAt OUTSIDE the
+      // autosave path. Align the local draft baseline to it FIRST, so any snapshot the
+      // step-persist below writes carries the aligned (unknown) baseline — never a stale
+      // pre-publish value that would surface as a false conflict on reopen.
+      if (label === 'Published') markPublished()
 
       // Buffer Step 1/2 selections so they can seed the deferred createDraft
       // (and survive Back navigation) before any Firestore document exists.
@@ -8010,7 +3890,7 @@ export default function CreateEventWizard() {
 
       void updateDraft(payload)
     },
-    [currentStep, completedValues, createDraft, updateDraft, isEventPlusDonation, draft?.id, pending],
+    [currentStep, completedValues, createDraft, updateDraft, markPublished, isEventPlusDonation, draft?.id, pending],
   )
 
   const goBack = useCallback(
@@ -8077,6 +3957,21 @@ export default function CreateEventWizard() {
     [createDraft, updateDraft, isEventPlusDonation, draft?.id, pending],
   )
 
+  // RD-PRODUCT-01B: within-step autosave funnel — same step→payload mapping as
+  // saveDraft, but debounced via the hook. Only the major editing steps are wired;
+  // a draft always exists by the time these steps are reachable.
+  const autosave = useCallback(
+    (step: number, data: unknown) => {
+      if (!draft?.id) return
+      const payload: Record<string, unknown> = {}
+      if (step === 3) payload.pricing          = data
+      if (step === 4) payload.registrationForm = data
+      if (step === 5) payload.eventDetails     = data
+      if (Object.keys(payload).length) autosaveDraft(payload)
+    },
+    [autosaveDraft, draft?.id],
+  )
+
   // Loading skeleton — shown while draft is being fetched from Firestore
   if (!hydrated || isLoading) {
     return (
@@ -8094,13 +3989,16 @@ export default function CreateEventWizard() {
     )
   }
 
-  const sharedProps = { completedValues, onNext: goNext, onBack: goBack }
+  // RD-EVENT-02 S1D (H1): every step view must render the Stepper + footer against the SAME
+  // canonical step definition the parent navigates by, so the 9-step event_plus_donation
+  // workflow shows 9 steps on every step (not the default 8). One source of truth.
+  const sharedProps = { completedValues, onNext: goNext, onBack: goBack, wizardSteps: isEventPlusDonation ? FUNDRAISING_EVENT_WIZARD_STEPS : WIZARD_STEPS }
 
   // Selected Event License tier (F2.1) — defaults to Starter until the organizer chooses.
-  const selectedLicense: EventLicenseTier = isEventLicenseTier(draft?.licenseTier)
+  const selectedLicense: AnyEventLicenseTier = isValidTierForVersion(draft?.licenseTier, CURRENT_LICENSE_VERSION)
     ? draft.licenseTier
-    : 'starter'
-  const onSelectLicense = (t: EventLicenseTier) => { void updateDraft({ licenseTier: t }) }
+    : defaultLicenseTierForVersion(CURRENT_LICENSE_VERSION)
+  const onSelectLicense = (t: AnyEventLicenseTier) => { void updateDraft({ licenseTier: t }) }
 
   // When donation-only: step 0 shows event type selector; step 1+ hands off to DonationCampaignWizard
   if (isDonationOnly && currentStep >= 1) {
@@ -8118,6 +4016,11 @@ export default function CreateEventWizard() {
 
   return (
     <>
+      {/* RD-PRODUCT-01B — always-visible save status + draft recovery */}
+      <div className="sticky top-0 z-30 -mb-1 flex justify-end px-1 pt-0.5">
+        <SaveStatusIndicator state={saveState} lastSavedAt={lastSavedAt} />
+      </div>
+      {conflict && <DraftRecoveryPrompt conflict={conflict} onResolve={resolveConflict} />}
       {currentStep === 0 && (
         <Step1View
           currentStep={0}
@@ -8152,6 +4055,7 @@ export default function CreateEventWizard() {
           currentStep={3}
           {...sharedProps}
           onSaveDraft={data => saveDraft(3, data)}
+          onAutosave={data => autosave(3, data)}
           initialData={{ pricing: draft?.pricing ?? null, eventTypeId: draft?.eventType ?? null, eventSubtype: draft?.eventSubtype ?? null }}
         />
       )}
@@ -8160,6 +4064,7 @@ export default function CreateEventWizard() {
           currentStep={4}
           {...sharedProps}
           onSaveDraft={data => saveDraft(4, data)}
+          onAutosave={data => autosave(4, data)}
           initialData={{
             registrationForm: draft?.registrationForm ?? null,
             eventTypeId:      draft?.eventType        ?? null,
@@ -8175,6 +4080,7 @@ export default function CreateEventWizard() {
           {...sharedProps}
           focusHint={stepFocusHint}
           onSaveDraft={data => saveDraft(5, data)}
+          onAutosave={data => autosave(5, data)}
           initialData={{
             eventDetails: draft?.eventDetails ?? null,
             eventTypeId:  draft?.eventType    ?? null,

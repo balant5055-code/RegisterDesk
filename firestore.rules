@@ -106,6 +106,31 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
+    // RD-PRICING-01B platform pricing engine singleton — server-only (Admin SDK via
+    // GET/PATCH /api/admin/platform-settings). No client SDK access.
+    match /platformSettings/{docId} {
+      allow read, write: if false;
+    }
+
+    // RD-PRODUCT-01C organizer email white-label branding — server-only (Admin SDK via
+    // GET/PATCH /api/organizer/email-branding). No client SDK access.
+    match /emailBranding/{organizerUid} {
+      allow read, write: if false;
+    }
+
+    // RD-PRODUCT-01E organization tax profile (GSTIN/PAN/invoice config) — server-only
+    // (Admin SDK via GET/PATCH /api/organizer/tax-profile). No client SDK access.
+    match /taxProfile/{organizerUid} {
+      allow read, write: if false;
+    }
+
+    // RD-PRODUCT-01F post-publish edit version history — server-only (Admin SDK via
+    // /api/organizer/events/[eventId]/edit-history). Rules don't cascade to subcollections,
+    // so this needs its own explicit deny alongside the existing changeLog default-deny.
+    match /events/{slug}/editHistory/{recordId} {
+      allow read, write: if false;
+    }
+
     // Bank account details for organizer payouts.
     // Written by PUT /api/organizer/payout-profile (Admin SDK); read only via API.
     match /organizerPayoutProfiles/{docId} {

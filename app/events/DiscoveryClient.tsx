@@ -15,7 +15,7 @@ import {
   ChevronDown, Check, SlidersHorizontal, RotateCcw, ArrowUpDown, SearchX,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
-import type { PublicEventCard, PlatformStats } from '@/lib/firebase/firestore/publicEvents'
+import type { PublicEventCard, PlatformStats, DiscoveryData } from '@/lib/firebase/firestore/publicEvents'
 import { container } from '@/lib/ds/containers'
 import { SECTION_SPACING } from '@/lib/marketing/layout'
 import { SectionHeader, buttonVariants } from '@/components/ui'
@@ -28,8 +28,9 @@ const CUBIC: [number, number, number, number] = [0.25, 0.46, 0.45, 0.94]
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 interface DiscoveryClientProps {
-  initialEvents: PublicEventCard[]
-  initialStats:  PlatformStats
+  initialEvents:     PublicEventCard[]
+  initialStats:      PlatformStats
+  initialNextCursor: string | null
 }
 
 type DateRange = 'today' | 'week' | 'month' | null
@@ -209,25 +210,10 @@ function capitalize(s: string): string {
   return s ? s.charAt(0).toUpperCase() + s.slice(1) : s
 }
 
-// Client-side date-range predicate. Mirrors what a future Firestore query would do,
-// so the UI stays correct once the backend filter lands.
-function matchesDate(startDate: string | null, range: DateRange): boolean {
-  if (range === null) return true
-  if (!startDate) return false
-  const now = new Date(); now.setHours(0, 0, 0, 0)
-  const [y, m, d] = startDate.split('-').map(Number)
-  const ev = new Date(y, m - 1, d)
-  if (ev < now) return false
-  if (range === 'today') return ev.getTime() === now.getTime()
-  if (range === 'week') {
-    const end = new Date(now); end.setDate(end.getDate() + 7)
-    return ev <= end
-  }
-  // 'month' — remainder of the current calendar month
-  return ev.getFullYear() === now.getFullYear() && ev.getMonth() === now.getMonth()
-}
+// Date-range filtering now runs SERVER-SIDE over the whole published set (D-C1); see
+// matchesDateRange in lib/firebase/firestore/publicEvents.ts.
 
-// Sort a filtered list. 'recommended' preserves the server order (upcoming-first).
+// Sort a loaded page. 'recommended' preserves the server's canonical order (publishedAt desc).
 function sortEvents(events: PublicEventCard[], sort: SortKey): PublicEventCard[] {
   if (sort === 'recommended') return events
   const arr   = [...events]
@@ -1242,22 +1228,16 @@ function FilterBar({
 
 // ─── Categories Grid ──────────────────────────────────────────────────────────
 
+// RD-DISCOVERY-01 Phase 4 (M3): the per-category count badge was derived from the loaded
+// discovery page (under-reporting once the platform exceeds a page). Category FILTERING is
+// server-authoritative (Phase 1 / D-C1); a platform-wide per-category count has no O(1)
+// group-by source, so rather than page-derive it (the defect) or add another counting system,
+// the chip shows a neutral "Explore" CTA and remains a fully-working filter.
 function CategoriesSection({
-  events,
   onSelect,
 }: {
-  events:   PublicEventCard[]
   onSelect: (cat: string) => void
 }) {
-  const countMap = useMemo(() => {
-    const m = new Map<string, number>()
-    for (const e of events) {
-      const k = (e.eventType ?? '').toLowerCase()
-      if (k) m.set(k, (m.get(k) ?? 0) + 1)
-    }
-    return m
-  }, [events])
-
   return (
     <section className={cn('bg-muted/30', SECTION_SPACING.default)}>
       <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
@@ -1277,32 +1257,27 @@ function CategoriesSection({
           variants={staggerChildren}
           className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-5"
         >
-          {CATEGORIES.map(cat => {
-            const count = countMap.get(cat.key) ?? 0
-            return (
-              <motion.button
-                key={cat.key}
-                variants={scaleIn}
-                onClick={() => onSelect(cat.key)}
-                whileHover={{ y: -4, transition: { duration: 0.2 } }}
-                whileTap={{ scale: 0.97 }}
-                className="group relative cursor-pointer overflow-hidden rounded-2xl p-4 text-left shadow-sm transition-shadow hover:shadow-lg"
-              >
-                {/* Gradient background */}
-                <div className={cn('absolute inset-0 bg-gradient-to-br', cat.gradient, 'opacity-90 group-hover:opacity-100 transition-opacity')} />
-                {/* Shine overlay */}
-                <div className="absolute inset-0 bg-gradient-to-br from-white/20 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
+          {CATEGORIES.map(cat => (
+            <motion.button
+              key={cat.key}
+              variants={scaleIn}
+              onClick={() => onSelect(cat.key)}
+              whileHover={{ y: -4, transition: { duration: 0.2 } }}
+              whileTap={{ scale: 0.97 }}
+              className="group relative cursor-pointer overflow-hidden rounded-2xl p-4 text-left shadow-sm transition-shadow hover:shadow-lg"
+            >
+              {/* Gradient background */}
+              <div className={cn('absolute inset-0 bg-gradient-to-br', cat.gradient, 'opacity-90 group-hover:opacity-100 transition-opacity')} />
+              {/* Shine overlay */}
+              <div className="absolute inset-0 bg-gradient-to-br from-white/20 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
 
-                <div className="relative">
-                  <span className="text-2xl">{cat.emoji}</span>
-                  <p className="mt-2 text-[var(--fs-base)] font-bold text-white">{cat.label}</p>
-                  <p className="mt-0.5 text-[11.5px] font-medium text-white/75">
-                    {count > 0 ? `${count} event${count !== 1 ? 's' : ''}` : 'Explore'}
-                  </p>
-                </div>
-              </motion.button>
-            )
-          })}
+              <div className="relative">
+                <span className="text-2xl">{cat.emoji}</span>
+                <p className="mt-2 text-[var(--fs-base)] font-bold text-white">{cat.label}</p>
+                <p className="mt-0.5 text-[11.5px] font-medium text-white/75">Explore</p>
+              </div>
+            </motion.button>
+          ))}
         </motion.div>
       </div>
     </section>
@@ -1515,61 +1490,96 @@ function CTASection() {
 export function DiscoveryClient({
   initialEvents,
   initialStats,
+  initialNextCursor,
 }: DiscoveryClientProps) {
-  const [filters, setFilters] = useState<FilterState>(DEFAULT_FILTERS)
+  const [filters, setFilters]               = useState<FilterState>(DEFAULT_FILTERS)
+  const [events, setEvents]                 = useState<PublicEventCard[]>(initialEvents)
+  const [nextCursor, setNextCursor]         = useState<string | null>(initialNextCursor)
+  const [loading, setLoading]               = useState(false)   // server refetch on filter change
+  const [loadingMore, setLoadingMore]       = useState(false)
+  const [debouncedQuery, setDebouncedQuery] = useState('')
+  const didMount = useRef(false)
 
   const updateFilter = useCallback((patch: Partial<FilterState>) => {
     setFilters(prev => ({ ...prev, ...patch }))
   }, [])
 
-  // Unique city list from events
+  // Debounce the search box so a server query isn't launched on every keystroke.
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedQuery(filters.query.trim().toLowerCase()), 350)
+    return () => clearTimeout(t)
+  }, [filters.query])
+
+  // The server-authoritative query string (every filter EXCEPT sort, which is a view control).
+  const buildParams = useCallback((cursor: string | null): string => {
+    const p = new URLSearchParams({ limit: '48' })
+    if (debouncedQuery)          p.set('search',   debouncedQuery)
+    if (filters.category)        p.set('category', filters.category)
+    if (filters.city)            p.set('city',     filters.city)
+    if (filters.free   !== null) p.set('free',   String(filters.free))
+    if (filters.online !== null) p.set('online', String(filters.online))
+    if (filters.date)            p.set('date',     filters.date)
+    if (cursor)                  p.set('cursor',   cursor)
+    return p.toString()
+  }, [debouncedQuery, filters.category, filters.city, filters.free, filters.online, filters.date])
+
+  // Authoritative refetch whenever a server filter changes — the server filters the WHOLE
+  // published set and returns one page, so search/category/filters are complete at any scale
+  // (RD-DISCOVERY-01 / D-C1). The initial SSR page is already loaded, so the first run is skipped.
+  useEffect(() => {
+    if (!didMount.current) { didMount.current = true; return }
+    let cancelled = false
+    const run = async () => {
+      setLoading(true)
+      try {
+        const res = await fetch(`/api/events?${buildParams(null)}`, { cache: 'no-store' })
+        if (!res.ok) throw new Error(`HTTP ${res.status}`)
+        const json = await res.json() as DiscoveryData
+        if (cancelled) return
+        setEvents(json.events)
+        setNextCursor(json.nextCursor)
+      } catch {
+        if (!cancelled) { setEvents([]); setNextCursor(null) }
+      } finally {
+        if (!cancelled) setLoading(false)
+      }
+    }
+    run()
+    return () => { cancelled = true }
+  }, [buildParams])
+
+  // Append the next cursor page (same filters), gap-free / duplicate-free by slug.
+  const loadMore = useCallback(async () => {
+    if (!nextCursor || loadingMore) return
+    setLoadingMore(true)
+    try {
+      const res = await fetch(`/api/events?${buildParams(nextCursor)}`, { cache: 'no-store' })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const json = await res.json() as DiscoveryData
+      setEvents(prev => {
+        const seen = new Set(prev.map(e => e.slug))
+        return [...prev, ...json.events.filter(e => !seen.has(e.slug))]
+      })
+      setNextCursor(json.nextCursor)
+    } catch { /* keep the current page on failure */ }
+    finally { setLoadingMore(false) }
+  }, [nextCursor, loadingMore, buildParams])
+
+  // City dropdown options derive from the initial page (a convenience list; the city FILTER runs
+  // server-side). Hero metrics are platform-wide from the canonical resolver (D-H1), not page data.
   const cities = useMemo(() => {
     const set = new Set<string>()
     for (const e of initialEvents) if (e.city) set.add(e.city)
     return [...set].sort()
   }, [initialEvents])
 
-  // Unique organizers — used only for the hero trust-metrics row
-  const organizerCount = useMemo(() => {
-    const set = new Set<string>()
-    for (const e of initialEvents) if (e.organizerName) set.add(e.organizerName)
-    return set.size
-  }, [initialEvents])
-
-  // Top upcoming events power the decorative hero previews (already sorted upcoming-first)
+  // Top events power the decorative hero previews.
   const featuredEvents = useMemo(() => initialEvents.slice(0, 3), [initialEvents])
 
-  // Client-side filtering
-  const filteredEvents = useMemo(() => {
-    const q = filters.query.toLowerCase().trim()
-    return initialEvents.filter(e => {
-      if (q && !e.name.toLowerCase().includes(q) &&
-              !e.tagline.toLowerCase().includes(q) &&
-              !(e.city ?? '').toLowerCase().includes(q) &&
-              !(e.organizerName ?? '').toLowerCase().includes(q) &&
-              !(e.eventType ?? '').toLowerCase().includes(q)) return false
-      if (filters.category && (e.eventType ?? '').toLowerCase() !== filters.category) return false
-      if (filters.city && e.city !== filters.city) return false
-      if (filters.free !== null) {
-        const isFree = e.isFreeEvent || e.minPrice === 0
-        if (filters.free !== isFree) return false
-      }
-      if (filters.online !== null) {
-        const isOnline = e.venueType === 'online'
-        if (filters.online !== isOnline) return false
-      }
-      if (!matchesDate(e.startDate, filters.date)) return false
-      return true
-    })
-  }, [initialEvents, filters])
+  // The server already filtered over the whole dataset; `events` IS the result. Sort is a client
+  // view control over the loaded page(s); the canonical discovery order is the server's.
+  const sortedEvents = useMemo(() => sortEvents(events, filters.sort), [events, filters.sort])
 
-  // Sort the filtered set (recommended keeps the server's upcoming-first order)
-  const sortedEvents = useMemo(
-    () => sortEvents(filteredEvents, filters.sort),
-    [filteredEvents, filters.sort],
-  )
-
-  // Active filter means we skip categories and show results directly
   const hasActiveFilter = filters.query || filters.category || filters.city || filters.free !== null || filters.online !== null || !!filters.date
 
   return (
@@ -1582,7 +1592,7 @@ export function DiscoveryClient({
           stats={{
             events:        initialStats.totalEvents,
             registrations: initialStats.totalRegistrations,
-            organizers:    organizerCount,
+            organizers:    initialStats.totalOrganizers,
             cities:        initialStats.totalCities,
           }}
           onQueryChange={q => updateFilter({ query: q })}
@@ -1594,14 +1604,14 @@ export function DiscoveryClient({
           filters={filters}
           onChange={updateFilter}
           cities={cities}
-          resultCount={filteredEvents.length}
+          resultCount={sortedEvents.length}
         />
 
         <div className="pt-4 sm:pt-6">
           <div id="events-grid">
             <EventsGrid
               events={sortedEvents}
-              loading={false}
+              loading={loading}
               title={hasActiveFilter
                 ? `${sortedEvents.length} event${sortedEvents.length !== 1 ? 's' : ''} found`
                 : 'Upcoming Events'}
@@ -1609,11 +1619,22 @@ export function DiscoveryClient({
               onReset={() => updateFilter(FILTER_RESET)}
               onSuggestCategory={cat => updateFilter({ category: cat })}
             />
+            {nextCursor && !loading && (
+              <div className="flex justify-center pt-8">
+                <button
+                  type="button"
+                  onClick={loadMore}
+                  disabled={loadingMore}
+                  className="inline-flex items-center gap-2 rounded-2xl border-2 border-border px-8 py-3 text-[var(--fs-md)] font-semibold text-foreground transition-all hover:border-border-strong hover:bg-muted/40 disabled:opacity-50"
+                >
+                  {loadingMore ? 'Loading…' : 'Load more events'}
+                </button>
+              </div>
+            )}
           </div>
         </div>
 
         <CategoriesSection
-          events={initialEvents}
           onSelect={cat => { updateFilter({ category: cat }); document.getElementById('events-grid')?.scrollIntoView({ behavior: 'smooth' }) }}
         />
 

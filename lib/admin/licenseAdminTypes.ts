@@ -1,7 +1,7 @@
 // Client-safe types for the Admin License Management Console (RD-LIC-ADMIN-01).
 // NO firebase-admin / server imports — shared by the page and the API layer.
 
-import type { EventLicenseTier, EventLicenseFeature, EventLicenseLimitKey } from '@/lib/licensing/eventLicense'
+import type { AnyEventLicenseTier, EventLicenseFeature, EventLicenseLimitKey } from '@/lib/licensing/eventLicense'
 import type { LicenseAdminLifecycle } from '@/lib/licensing/schema'
 
 // Display status shown in the console = base status folded with the admin lifecycle.
@@ -18,7 +18,9 @@ export interface LicenseRow {
   organizerName:       string
   organizerEmail:      string
   organizationName:    string
-  tier:                EventLicenseTier
+  // RD-LICENSE-01B Phase 3C.1: stored tier (V1 or V2) + its version-aware display name.
+  tier:                AnyEventLicenseTier
+  tierName:            string
   displayStatus:       LicenseDisplayStatus
   lifecycle:           LicenseAdminLifecycle
   complimentary:       boolean
@@ -41,8 +43,8 @@ export interface LicenseListResponse {
 export interface LicenseTimelineEntry {
   id:        string
   action:    string
-  fromTier:  EventLicenseTier | null
-  toTier:    EventLicenseTier
+  fromTier:  AnyEventLicenseTier | null
+  toTier:    AnyEventLicenseTier
   source:    'self_serve' | 'admin' | 'system'
   actorUid:  string | null
   note:      string
@@ -94,8 +96,9 @@ export const LICENSE_ACTIONS_REQUIRING_REASON: LicenseAdminActionType[] = [
 export interface LicenseAdminActionRequest {
   action:        LicenseAdminActionType
   reason:        string
-  // action-specific payload (all optional; validated server-side per action)
-  tier?:         EventLicenseTier
+  // action-specific payload (all optional; validated server-side per action against
+  // CURRENT_LICENSE_VERSION). RD-LICENSE-GA-02: widened to accept a V2 grant/upgrade target.
+  tier?:         AnyEventLicenseTier
   complimentary?: boolean
   pricePaise?:   number
   limitKey?:     EventLicenseLimitKey

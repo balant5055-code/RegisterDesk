@@ -3,6 +3,8 @@
 import type { LucideIcon } from 'lucide-react'
 import { XCircle, CheckCircle, Lock, Clock3, Shield } from 'lucide-react'
 import type { EventDetailProps } from '@/app/events/[slug]/EventDetailClient'
+import { LinkedCampaignSection } from '@/app/events/[slug]/EventDetailClient'
+import { EventInfoSection } from '@/components/event-templates/shared/ui/EventInfoSection'
 import type { SportsRunningDetails, RaceCategory, TimelineItem, FaqItem } from '@/components/wizard/eventDetailsConfig'
 import { MarketingNavbar }       from '@/components/marketing/navigation/MarketingNavbar'
 import { MarketingFooter }       from '@/components/marketing/footer/MarketingFooter'
@@ -247,9 +249,23 @@ export function SportsTemplate(props: EventDetailProps) {
           contactHref={supportEmail?.trim() ? `mailto:${supportEmail}` : '#organizer'}
         />
 
-        {/* Persistent mobile CTA */}
+        <EventInfoSection
+          language={props.language}
+          dressCode={props.dressCode}
+          timezone={props.timezone}
+          venueType={props.venueType}
+          online={props.online}
+          refundWindow={props.refundWindow}
+          refundPolicyUrl={props.refundPolicyUrl}
+        />
+
+        {props.linkedCampaign && (
+          <LinkedCampaignSection campaign={props.linkedCampaign} eventSlug={slug} />
+        )}
+
+        {/* Registration CTA — self-gates on scroll (C4); persistent desktop pill (03B) */}
         <StickyMobileCTA
-          visible={true}
+          showDesktop
           title={title}
           isFreeEvent={isFreeEvent}
           passes={passes}

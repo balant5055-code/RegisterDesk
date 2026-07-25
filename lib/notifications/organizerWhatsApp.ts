@@ -7,7 +7,6 @@
 // log (emailLogs, channel='whatsapp'). Never throws: a WhatsApp failure must never
 // affect the business action or the email.
 
-import { adminDb } from '@/lib/firebase/admin'
 import {
   getMetaProvider,
   hasWhatsAppTemplate,
@@ -16,6 +15,7 @@ import {
 import { writeEmailLog } from '@/lib/email-logs/write'
 import { validatePhoneNumber } from '@/lib/communication/phone'
 import { getCommunicationConfig } from '@/lib/communications/resolveCommunicationConfig'
+import { resolveOrganizerRecipients } from '@/lib/organizer/recipients'
 import type { NotificationType } from './catalog'
 
 export interface OrganizerWhatsAppArgs {
@@ -27,19 +27,16 @@ export interface OrganizerWhatsAppArgs {
   eventName?:   string
 }
 
-// Resolve the organizer's WhatsApp number. Today the only stored organizer phone
-// is the org support phone (users/{uid}.organizationProfile.supportPhone).
+// Resolve the organizer's WhatsApp number via the ONE canonical recipient resolver
+// (RD-AUTH-02 Phase 4). The destination is the PRIVATE account mobile
+// (users/{uid}.mobile.e164) — NEVER organizationProfile.supportPhone (public, shown
+// to attendees). When no account mobile is on file the send skips gracefully
+// (Phase 10 backward-compat): existing organizers who never set an account mobile
+// simply receive no WhatsApp until they add one — the email still sends.
 async function resolveOrganizerPhone(organizerUid: string): Promise<{ phone: string; email: string; name: string } | null> {
-  const snap = await adminDb.collection('users').doc(organizerUid).get()
-  if (!snap.exists) return null
-  const d = snap.data() as {
-    email?: string
-    name?: string
-    organizationProfile?: { supportPhone?: string }
-  }
-  const phone = d.organizationProfile?.supportPhone?.trim()
-  if (!phone) return null
-  return { phone, email: d.email ?? '', name: d.name ?? '' }
+  const r = await resolveOrganizerRecipients(organizerUid)
+  if (!r.mobileE164) return null
+  return { phone: r.mobileE164, email: r.email, name: r.name }
 }
 
 // Mask a phone for logs — keep country code + last 4, hide the rest (no PII in logs).
@@ -91,8 +88,8 @@ export async function sendOrganizerWhatsApp(args: OrganizerWhatsAppArgs): Promis
     // ── STEP 3 (phone): organizer support phone on file? ───────────────────────
     const contact = await resolveOrganizerPhone(args.organizerUid)
     if (!contact) {
-      console.warn(`${T} STOP @ organizerWhatsApp.ts resolveOrganizerPhone(): organizer has NO organizationProfile.supportPhone → skipped`)
-      logResult(args, '', '', 'skipped', { error: 'Organizer has no support phone on file (Settings → Organization → Support Phone)' })
+      console.warn(`${T} STOP @ organizerWhatsApp.ts resolveOrganizerPhone(): organizer has NO private account mobile → skipped`)
+      logResult(args, '', '', 'skipped', { error: 'Organizer has no account mobile on file (Settings → Account → Account Mobile Number)' })
       return
     }
     console.info(`${T} STEP 3  Organizer phone resolved ✓ · ${maskPhone(contact.phone)}`)

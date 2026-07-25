@@ -10,13 +10,15 @@ import { cn } from '@/lib/utils/cn'
 import { Loader2, Search, ArrowRight } from 'lucide-react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
-import { nextEventLicenseTier, type EventLicenseTier } from '@/lib/licensing/eventLicense'
-import { useLicenseCatalog } from '@/lib/licensing/licenseCatalogClient'
+import { useLicenseEntryResolver } from '@/lib/licensing/licenseCatalogClient'
 
 interface LicenseRow {
   slug:              string
   eventName:         string
-  tier:              'starter' | 'growth' | 'professional' | 'enterprise'
+  // RD-LICENSE-01B Phase 3C: the STORED tier (V1 or V2), resolved for display against
+  // its `version`. A string, not a fixed union — so a V2 license renders without a crash.
+  tier:              string
+  version:           number
   status:            string
   maxRegistrations:  number | null
   used:              number
@@ -54,17 +56,20 @@ export default function LicensesTab() {
   const [loading, setLoading] = useState(true)
   const [error,   setError]   = useState<string | null>(null)
   const [query,   setQuery]   = useState('')
-  const [tierF,   setTierF]   = useState<'all' | LicenseRow['tier']>('all')
+  const [tierF,   setTierF]   = useState<'all' | string>('all')
   const [statusF, setStatusF] = useState<'all' | string>('all')
   const router = useRouter()
 
-  // Tier names + upgrade CTA from the effective (config-aware) catalog.
-  const catalog  = useLicenseCatalog()
-  const tierName = (tier: LicenseRow['tier']): string => catalog[tier].name
-  const upgradeCta = (tier: LicenseRow['tier']): { label: string; href?: string } | null => {
-    const next = nextEventLicenseTier(tier as EventLicenseTier)
-    return next ? { label: `Upgrade to ${catalog[next].name}` } : null
+  // Version-aware display: each license resolves against the catalog for ITS stored
+  // version (V1 today, V2 after cutover), so a historical 'growth' license never crashes.
+  const resolve  = useLicenseEntryResolver()
+  const tierName = (r: LicenseRow): string => resolve(r.tier, r.version).name
+  const upgradeCta = (r: LicenseRow): { label: string; href?: string } | null => {
+    const nextName = resolve(r.tier, r.version).nextTierName
+    return nextName ? { label: `Upgrade to ${nextName}` } : null
   }
+  // Filter options derived from the licenses actually present (no hardcoded tier list).
+  const tierOptions = Array.from(new Map(rows.map(r => [r.tier, tierName(r)] as const)))
 
   useEffect(() => {
     let alive = true
@@ -91,7 +96,7 @@ export default function LicensesTab() {
     if (statusF !== 'all' && r.status !== statusF) return false
     if (!q) return true
     return r.eventName.toLowerCase().includes(q)
-      || tierName(r.tier).toLowerCase().includes(q)
+      || tierName(r).toLowerCase().includes(q)
       || (r.orderId ?? '').toLowerCase().includes(q)
   })
 
@@ -127,12 +132,10 @@ export default function LicensesTab() {
                 className="w-full rounded-lg border border-border bg-background py-1.5 pl-8 pr-3 text-[13px] text-foreground"
               />
             </div>
-            <select value={tierF} onChange={e => setTierF(e.target.value as typeof tierF)} className="rounded-lg border border-border bg-background px-2 py-1.5 text-[13px]">
+            <select value={tierF} onChange={e => setTierF(e.target.value)} className="rounded-lg border border-border bg-background px-2 py-1.5 text-[13px]">
               <option value="all">All tiers</option>
-              <option value="starter">Starter</option>
-              <option value="growth">Growth</option>
-              <option value="professional">Professional</option>
-              <option value="enterprise">Enterprise</option>
+              {/* Phase 3C: labels resolved version-aware from the tiers actually present. */}
+              {tierOptions.map(([tier, name]) => <option key={tier} value={tier}>{name}</option>)}
             </select>
             <select value={statusF} onChange={e => setStatusF(e.target.value)} className="rounded-lg border border-border bg-background px-2 py-1.5 text-[13px]">
               <option value="all">All statuses</option>
@@ -156,14 +159,14 @@ export default function LicensesTab() {
               </thead>
               <tbody className="divide-y divide-border">
                 {filtered.map(r => {
-                  const cta = upgradeCta(r.tier)
+                  const cta = upgradeCta(r)
                   return (
                     <tr key={r.slug} className="cursor-pointer hover:bg-muted/20" onClick={() => router.push(licenseHref(r.slug))}>
                       <td className="px-3 py-2.5">
                         <div className="font-medium text-foreground">{r.eventName}</div>
                         <div className="text-[11.5px] text-muted-foreground">/{r.slug}</div>
                       </td>
-                      <td className="px-3 py-2.5"><span className="inline-flex rounded-full bg-muted px-2 py-0.5 text-[11.5px] font-semibold text-foreground">{tierName(r.tier)}</span></td>
+                      <td className="px-3 py-2.5"><span className="inline-flex rounded-full bg-muted px-2 py-0.5 text-[11.5px] font-semibold text-foreground">{tierName(r)}</span></td>
                       <td className="px-3 py-2.5"><StatusBadge status={r.status} /></td>
                       <td className="px-3 py-2.5 text-muted-foreground">{r.used.toLocaleString('en-IN')} / {regLabel(r.maxRegistrations)}{r.remaining != null && <span className="text-[11.5px]"> · {r.remaining.toLocaleString('en-IN')} left</span>}</td>
                       <td className="px-3 py-2.5 text-muted-foreground">{fmtDate(r.purchaseDate)}</td>
@@ -181,7 +184,7 @@ export default function LicensesTab() {
           {/* Mobile cards */}
           <div className="space-y-2.5 sm:hidden">
             {filtered.map(r => {
-              const cta = upgradeCta(r.tier)
+              const cta = upgradeCta(r)
               return (
                 <Link key={r.slug} href={licenseHref(r.slug)} className="block w-full rounded-xl border border-border bg-card p-3 text-left">
                   <div className="flex items-center justify-between gap-2">
@@ -189,7 +192,7 @@ export default function LicensesTab() {
                     <StatusBadge status={r.status} />
                   </div>
                   <div className="mt-1 flex items-center gap-2 text-[12px] text-muted-foreground">
-                    <span className="rounded-full bg-muted px-1.5 py-0.5 font-semibold text-foreground">{tierName(r.tier)}</span>
+                    <span className="rounded-full bg-muted px-1.5 py-0.5 font-semibold text-foreground">{tierName(r)}</span>
                     <span>{r.used.toLocaleString('en-IN')} / {regLabel(r.maxRegistrations)}</span>
                     <span className="ml-auto font-semibold text-foreground">{r.amountPaidPaise > 0 ? rupees(r.amountPaidPaise) : 'Free'}</span>
                   </div>

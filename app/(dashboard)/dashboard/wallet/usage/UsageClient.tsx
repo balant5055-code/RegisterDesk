@@ -1,8 +1,8 @@
 'use client'
 
 import { useEffect, useState }  from 'react'
-import { onAuthStateChanged }   from 'firebase/auth'
 import { auth }                 from '@/lib/firebase/auth'
+import { useAuth }              from '@/components/auth/AuthProvider'
 import { AlertCircle, RefreshCw, Mail, MessageSquare, MessagesSquare, Activity } from 'lucide-react'
 import { cn } from '@/lib/utils/cn'
 import { EmptyState, PageHeader } from '@/components/ui'
@@ -82,14 +82,17 @@ export function UsageClient() {
     }).catch(() => { setError('Auth error'); setLoading(false) })
   }
 
+  const { user } = useAuth()
+
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, user => {
-      if (user) load()
-      else { setError('Not authenticated'); setLoading(false) }
-    })
-    return unsub
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+    if (user === undefined) return
+    const run = async () => {
+      if (user) { load(); return }
+      setError('Not authenticated')
+      setLoading(false)
+    }
+    void run()
+  }, [user])
 
   const totalCost  = usage.reduce((s, u) => s + u.costPaise, 0)
   const totalQty   = usage.reduce((s, u) => s + u.quantity,  0)

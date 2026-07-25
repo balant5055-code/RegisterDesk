@@ -1,8 +1,8 @@
 'use client'
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { onAuthStateChanged, type User } from 'firebase/auth'
-import { auth } from '@/lib/firebase/auth'
+import { type User } from 'firebase/auth'
+import { useAuth } from '@/components/auth/AuthProvider'
 import Link from 'next/link'
 import { cn } from '@/lib/utils/cn'
 import { useToast } from '@/components/ui/Toast'
@@ -26,6 +26,7 @@ const fmtDate = (ms: number) => ms ? new Date(ms).toLocaleDateString('en-IN', { 
 export default function CrmPage() {
   const { showToast } = useToast()
   const { confirm } = useConfirm()
+  const { user } = useAuth()
   const userRef = useRef<User | null>(null)
   const [contacts, setContacts] = useState<CrmContactView[]>([])
   const [analytics, setAnalytics] = useState<CrmAnalytics | null>(null)
@@ -112,10 +113,13 @@ export default function CrmPage() {
   }
 
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, u => { userRef.current = u; if (u) void load() })
-    return unsub
+    if (user === undefined) return
+    const run = async () => {
+      userRef.current = user; if (user) void load()
+    }
+    run()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [user])
 
   // Re-query on filter change (search is applied via the Apply button / Enter).
   useEffect(() => {

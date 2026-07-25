@@ -9,6 +9,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { adminDb }                   from '@/lib/firebase/admin'
 import type { BroadcastAudience }    from '@/lib/broadcasts/types'
 import { authorizeWorkspace }        from '@/lib/team/workspace'
+import { resolveMaxRecipientsPerBroadcast } from '@/lib/broadcasts/limits'
 
 interface CountResponse {
   success: boolean
@@ -45,9 +46,14 @@ export async function POST(req: NextRequest): Promise<NextResponse<CountResponse
     query = query.where('status', '==', audience)
   }
 
-  // WhatsApp only reaches recipients with a phone number — count those.
+  // RD-ORGANIZER-04 P1-1: bound recipient counting so the preview never loads the whole
+  // collection. WhatsApp still needs per-doc phone presence (not expressible as an
+  // aggregate), so cap the projected load at cap+1; email uses an indexed count()
+  // aggregate (zero document reads).
+  const maxRecipients = await resolveMaxRecipientsPerBroadcast(uid)
+
   if (channel === 'whatsapp') {
-    const snap = await query.select('attendee').get()
+    const snap = await query.select('attendee').limit(maxRecipients + 1).get()
     let count = 0
     for (const d of snap.docs) {
       const phone = (d.data() as { attendee?: { phone?: string } }).attendee?.phone
@@ -56,7 +62,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<CountResponse
     return NextResponse.json({ success: true, count })
   }
 
-  // Email: fetch only doc refs (no field data) to minimize bandwidth.
-  const snap = await query.select('eventSlug').get()
-  return NextResponse.json({ success: true, count: snap.size })
+  // Email: exact count via an indexed aggregate — no documents transferred.
+  const agg = await query.count().get()
+  return NextResponse.json({ success: true, count: agg.data().count })
 }

@@ -1,8 +1,8 @@
 'use client'
 
 import { useCallback, useEffect, useState } from 'react'
-import { onAuthStateChanged }               from 'firebase/auth'
 import { auth }                             from '@/lib/firebase/auth'
+import { useAuth }                          from '@/components/auth/AuthProvider'
 import {
   Wallet, Mail, MessageSquare, MessagesSquare,
   TrendingUp, Plus, X, ChevronRight, Loader2,
@@ -13,6 +13,10 @@ import { Button, Card, PageHeader } from '@/components/ui'
 import { useFocusTrap } from '@/lib/hooks/useFocusTrap'
 import { useWalletConfig } from '@/lib/wallet/walletConfigClient'
 import type { WalletOverview } from '@/lib/wallet/types'
+import { isChannelImplemented } from '@/lib/communications/health/channels'
+
+// RD-COMMS-01 Phase 2: SMS has no delivery transport — its "sent" counter is always 0.
+const SMS_AVAILABLE = isChannelImplemented('sms')
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -371,13 +375,17 @@ export function WalletOverviewClient() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  const { user } = useAuth()
+
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, user => {
-      if (user) load(user.uid)
-      else { setError('Not authenticated'); setLoading(false) }
-    })
-    return unsub
-  }, [load])
+    if (user === undefined) return
+    const run = async () => {
+      if (user) { load(user.uid); return }
+      setError('Not authenticated')
+      setLoading(false)
+    }
+    void run()
+  }, [user, load])
 
   // Wallet policy (Business Configuration): enabled gate + low-balance warning.
   const wallet     = useWalletConfig()
@@ -452,8 +460,8 @@ export function WalletOverviewClient() {
           <StatCard
             icon={MessageSquare}
             label="SMS Sent"
-            value={formatNumber(overview.smsSent)}
-            sub="this month"
+            value={SMS_AVAILABLE ? formatNumber(overview.smsSent) : '—'}
+            sub={SMS_AVAILABLE ? 'this month' : 'Unavailable'}
             gradient="bg-gradient-to-br from-amber-500 to-orange-600"
           />
           <StatCard
@@ -486,7 +494,7 @@ export function WalletOverviewClient() {
       <div className="rounded-xl border border-border bg-muted/30 px-5 py-4">
         <p className="text-[13px] font-medium text-foreground">About your wallet</p>
         <p className="mt-0.5 text-[13px] text-muted-foreground">
-          Your wallet balance is used to pay for SMS, WhatsApp, and email communication charges.
+          Your wallet balance is used to pay for WhatsApp message charges. Email is free.
           Top-ups are processed securely via Razorpay.
         </p>
       </div>

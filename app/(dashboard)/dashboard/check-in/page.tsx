@@ -1,8 +1,7 @@
 'use client'
 
 import { useState, useEffect }   from 'react'
-import { onAuthStateChanged }    from 'firebase/auth'
-import { auth }                  from '@/lib/firebase/auth'
+import { useAuth }               from '@/components/auth/AuthProvider'
 import Link                      from 'next/link'
 import {
   ScanLine, CalendarDays, Users, AlertCircle,
@@ -113,25 +112,32 @@ export default function CheckInHubPage() {
   const [loading, setLoading] = useState(true)
   const [error,   setError]   = useState<string | null>(null)
 
+  const { user, getToken } = useAuth()
+
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, async user => {
+    if (user === undefined) return
+    let cancelled = false
+    const run = async () => {
       if (!user) { setLoading(false); return }
       try {
-        const token = await user.getIdToken()
+        const token = await getToken()
+        if (cancelled || !token) return
         const res   = await fetch('/api/organizer/events', {
           headers: { Authorization: `Bearer ${token}` },
         })
         if (!res.ok) throw new Error('Failed to load events')
         const data = await res.json() as EventsListResponse
+        if (cancelled) return
         setEvents(data.events)
       } catch (e) {
-        setError(e instanceof Error ? e.message : 'Error')
+        if (!cancelled) setError(e instanceof Error ? e.message : 'Error')
       } finally {
-        setLoading(false)
+        if (!cancelled) setLoading(false)
       }
-    })
-    return unsub
-  }, [])
+    }
+    run()
+    return () => { cancelled = true }
+  }, [user, getToken])
 
   // Only show check-in eligible events (published, reg_closed, or completed)
   const eligible = events.filter(e =>
@@ -185,7 +191,7 @@ export default function CheckInHubPage() {
 
         {loading && (
           <div className="flex items-center justify-center py-12">
-            <Loader2 className="size-6 animate-spin text-muted-foreground" />
+            <Loader2 className="size-6 animate-spin text-muted-foreground motion-reduce:animate-none" />
           </div>
         )}
 

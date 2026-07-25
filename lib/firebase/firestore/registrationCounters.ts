@@ -1,6 +1,6 @@
 // Server-only: Firebase Admin SDK.
 
-import { FieldValue }  from 'firebase-admin/firestore'
+import { FieldValue, AggregateField }  from 'firebase-admin/firestore'
 import type { Transaction, DocumentReference } from 'firebase-admin/firestore'
 import { adminDb }     from '@/lib/firebase/admin'
 import { EVENT_STATS_VERSION, type RegistrationCounter } from '@/lib/registrations/types'
@@ -113,6 +113,73 @@ export async function getEventStats(
   const counter = await getRegistrationCounter(eventSlug)
   const complete = !!counter && (counter.statsVersion ?? 0) >= EVENT_STATS_VERSION
   return { counter, complete }
+}
+
+/**
+ * RD-EVENTS-01 Phase 1 — the canonical source-of-truth CONFIRMED revenue for an event,
+ * recomputed from the ledger: Σ `amount` over CONFIRMED registrations. This is the SAME
+ * refund-stable definition the denormalized `revenuePaise` counter field maintains (a refund
+ * keeps status 'confirmed' and does not change `amount`), so a complete counter and this
+ * fallback reconcile to the identical figure. It is the ONE fallback used when a counter is
+ * not yet backfilled (getEventStats().complete === false) — mirroring the dashboard's reader
+ * (app/api/organizer/dashboard/route.ts) so Events, Dashboard and Finance never diverge.
+ * Never throws (returns 0 on aggregate failure). Served by the existing (eventSlug, status) index.
+ */
+export async function sumConfirmedRevenueFromLedger(eventSlug: string): Promise<number> {
+  const agg = await adminDb.collection('registrations')
+    .where('eventSlug', '==', eventSlug)
+    .where('status',    '==', 'confirmed')
+    .aggregate({ s: AggregateField.sum('amount') })
+    .get()
+    .catch(() => null)
+  return agg?.data().s ?? 0
+}
+
+export interface RegistrationStatusCounts {
+  total:      number
+  confirmed:  number
+  pending:    number
+  cancelled:  number
+  waitlisted: number
+  rejected:   number
+  checkedIn:  number
+}
+
+/**
+ * RD-REGISTRATIONS-01 Phase 4 (M8) — the ONE source-of-truth registration statistics
+ * fallback, used when a counter is not yet backfilled (getEventStats().complete === false).
+ * Computes the full status breakdown + checked-in via indexed count() aggregates that transfer
+ * ZERO documents — replacing the former per-registration projected scans. `checkedInAt` exists
+ * IFF a registration is checked in (check-in sets it, undo-checkin FieldValue.delete()s it), so
+ * ordering by it counts the checked-in exactly. Every aggregate is served by an EXISTING index
+ * ((organizerUid,eventSlug), (…,status), (…,checkedInAt)) — no new index. Shared by the
+ * per-event registrations LIST and the attendance dashboard so there is one implementation.
+ */
+export async function aggregateRegistrationStatusCounts(
+  organizerUid: string,
+  eventSlug:    string,
+): Promise<RegistrationStatusCounts> {
+  const base = adminDb.collection('registrations')
+    .where('organizerUid', '==', organizerUid)
+    .where('eventSlug',    '==', eventSlug)
+  const [total, confirmed, pending, cancelled, waitlisted, rejected, checkedIn] = await Promise.all([
+    base.count().get(),
+    base.where('status', '==', 'confirmed').count().get(),
+    base.where('status', '==', 'pending').count().get(),
+    base.where('status', '==', 'cancelled').count().get(),
+    base.where('status', '==', 'waitlisted').count().get(),
+    base.where('status', '==', 'rejected').count().get(),
+    base.orderBy('checkedInAt', 'desc').count().get(),
+  ])
+  return {
+    total:      total.data().count,
+    confirmed:  confirmed.data().count,
+    pending:    pending.data().count,
+    cancelled:  cancelled.data().count,
+    waitlisted: waitlisted.data().count,
+    rejected:   rejected.data().count,
+    checkedIn:  checkedIn.data().count,
+  }
 }
 
 // ─── Writes (used inside registration transaction) ────────────────────────────

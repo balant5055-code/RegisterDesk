@@ -709,7 +709,47 @@
       "order": "DESCENDING"
     }
   ]
-}
+},
+    {
+      "collectionGroup": "registrations",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "organizerUid", "order": "ASCENDING"  },
+        { "fieldPath": "eventSlug",    "order": "ASCENDING"  },
+        { "fieldPath": "status",       "order": "ASCENDING"  },
+        { "fieldPath": "registeredAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "registrations",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "organizerUid",  "order": "ASCENDING"  },
+        { "fieldPath": "eventSlug",     "order": "ASCENDING"  },
+        { "fieldPath": "paymentStatus", "order": "ASCENDING"  },
+        { "fieldPath": "registeredAt",  "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "registrations",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "organizerUid", "order": "ASCENDING"  },
+        { "fieldPath": "eventSlug",    "order": "ASCENDING"  },
+        { "fieldPath": "passId",       "order": "ASCENDING"  },
+        { "fieldPath": "registeredAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "registrations",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "organizerUid", "order": "ASCENDING"  },
+        { "fieldPath": "eventSlug",    "order": "ASCENDING"  },
+        { "fieldPath": "checkedIn",    "order": "ASCENDING"  },
+        { "fieldPath": "registeredAt", "order": "DESCENDING" }
+      ]
+    }
   ],
   
   "fieldOverrides": []

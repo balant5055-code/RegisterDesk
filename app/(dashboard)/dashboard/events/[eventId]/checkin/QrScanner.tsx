@@ -226,7 +226,7 @@ export default function QrScanner({ active, onCode }: Props) {
         {/* Starting overlay */}
         {starting && (
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-black/70 text-white">
-            <Loader2 className="size-8 animate-spin text-white/80" aria-hidden />
+            <Loader2 className="size-8 animate-spin text-white/80 motion-reduce:animate-none" aria-hidden />
             <p className="text-[13px]">Starting camera…</p>
           </div>
         )}

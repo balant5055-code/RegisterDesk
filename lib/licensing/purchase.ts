@@ -6,7 +6,7 @@
 // import is `import type`, so this module emits zero JavaScript. Nothing uses it
 // yet.
 
-import type { EventLicenseTier } from './eventLicense'
+import type { AnyEventLicenseTier } from './eventLicense'
 
 // ─── Enumerations ────────────────────────────────────────────────────────────────
 
@@ -67,7 +67,7 @@ export interface PurchaseReceipt {
   orderId:           string
   eventId:           string
   organizerUid:      string
-  tier:              EventLicenseTier
+  tier:              AnyEventLicenseTier
   amountPaise:       number
   currency:          'INR'
   method:            PurchaseMethod
@@ -82,7 +82,7 @@ export interface PurchaseReceipt {
 export interface PurchaseLicenseRequest {
   eventId:         string
   organizerUid:    string
-  tier:            EventLicenseTier
+  tier:            AnyEventLicenseTier
   method:          PurchaseMethod
   actorUid?:       string | null   // acting admin uid when method = 'admin'
   promotionCode?:  string
@@ -98,7 +98,7 @@ export type PurchaseLicenseResponse =
 export interface LicenseUpgradeRequest {
   eventId:         string
   organizerUid:    string
-  toTier:          EventLicenseTier
+  toTier:          AnyEventLicenseTier
   method:          PurchaseMethod
   actorUid?:       string | null
   idempotencyKey?: string
@@ -108,8 +108,8 @@ export type LicenseUpgradeResponse =
   | {
       ok:                   true
       status:               PurchaseStatus
-      fromTier:             EventLicenseTier
-      toTier:               EventLicenseTier
+      fromTier:             AnyEventLicenseTier
+      toTier:               AnyEventLicenseTier
       priceDifferencePaise: number   // pay-the-difference amount
       receipt:              PurchaseReceipt
       checkout?:            PurchaseCheckout

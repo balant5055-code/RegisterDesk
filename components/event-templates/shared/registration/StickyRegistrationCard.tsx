@@ -9,6 +9,7 @@ import type { PassAvailability } from '@/lib/registrations/types'
 import type { PassPublic } from '@/components/event-templates/types'
 import { AvailabilityBadge } from '@/components/event-templates/shared/registration/AvailabilityBadge'
 import { formatINR, formatDateShort, minPassPrice } from '@/components/event-templates/shared/utils/format'
+import { TAX_INCLUSIVE_NOTE_SHORT } from '@/lib/pricing/copy'
 
 const trustSignals = [
   { icon: <CheckCircle className="size-3 text-primary" aria-hidden />, text: 'Instant Confirmation' },
@@ -82,7 +83,7 @@ export function StickyRegistrationCard({
               {isFreeEvent || minPassPrice(passes) === 0 ? 'Free' : formatINR(minPassPrice(passes))}
             </p>
             {!isFreeEvent && minPassPrice(passes) > 0 && (
-              <p className="mt-0.5 text-[10px] text-muted-foreground">Incl. taxes</p>
+              <p className="mt-0.5 text-[10px] text-muted-foreground">{TAX_INCLUSIVE_NOTE_SHORT}</p>
             )}
 
             <div className="mt-2.5 flex items-center justify-between">

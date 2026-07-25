@@ -7,6 +7,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { AggregateField }            from 'firebase-admin/firestore'
 import { adminDb }                   from '@/lib/firebase/admin'
 import { resolveAdminUid }           from '@/lib/admin/auth'
+import { organizersQuery }           from '@/lib/organizer/identity'
 
 export interface AdminStats {
   organizerCount:        number
@@ -31,10 +32,10 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     pendingPaiseSnap,
     revenueSnap,
   ] = await Promise.all([
-    // Organizers = user accounts with role 'organizer' (set at signup). Excludes
-    // admins / any other role. Admin identity lives in custom claims / ADMIN_UIDS,
-    // never as role 'organizer', so a role filter is the correct account signal.
-    adminDb.collection('users').where('role', '==', 'organizer').count().get(),
+    // Organizers = user accounts with role 'organizer' (the canonical definition in
+    // lib/organizer/identity). Excludes admins / any other role. Admin identity lives in
+    // custom claims / ADMIN_UIDS, never as role 'organizer'.
+    organizersQuery(adminDb).count().get(),
     // "Published Events" counts only currently-published events — matching the
     // established convention in getAdminAnalytics (lifecycleStatus === 'published').
     adminDb.collection('events').where('lifecycleStatus', '==', 'published').count().get(),

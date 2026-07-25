@@ -4,6 +4,7 @@ import Link from 'next/link'
 import { motion } from 'framer-motion'
 import { Calendar, MapPin, ArrowRight, Award, Trophy } from 'lucide-react'
 import type { PassPublic } from '@/components/event-templates/types'
+import { passDisplayPrice } from '@/components/event-templates/shared/utils/format'
 import type { PhysicalVenueConfig } from '@/components/wizard/eventDetailsConfig'
 
 // ─── Helpers ───────────────────────────────────────────────────────────────────
@@ -20,6 +21,13 @@ function fmtINR(n: number) {
   return new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 0 }).format(n)
 }
 
+function fmtTime(t: string) {
+  if (!t) return ''
+  const [h, m] = t.split(':').map(Number)
+  const dt = new Date(); dt.setHours(h!, m ?? 0, 0)
+  return dt.toLocaleTimeString('en-IN', { hour: 'numeric', minute: '2-digit', hour12: true })
+}
+
 // ─── Props ─────────────────────────────────────────────────────────────────────
 
 export interface AwardsHeroProps {
@@ -28,6 +36,7 @@ export interface AwardsHeroProps {
   eventSubtype?:      string
   bannerUrl:          string
   startDate:          string
+  startTime?:         string
   endDate:            string
   venueName:          string
   physical?:          PhysicalVenueConfig
@@ -43,17 +52,18 @@ export interface AwardsHeroProps {
 
 export function AwardsHero({
   title, tagline, eventSubtype, bannerUrl,
-  startDate, endDate, venueName, physical,
+  startDate, startTime, endDate, venueName, physical,
   registrationOpen, isFreeEvent, passes, slug,
   categoryCount, judgesCount,
 }: AwardsHeroProps) {
   const active   = passes.filter(p => p.status !== 'inactive')
-  const minPrice = active.length > 0 ? Math.min(...active.map(p => p.price)) : 0
+  const minPrice = active.length > 0 ? Math.min(...active.map(p => passDisplayPrice(p))) : 0
   const locText  = physical?.city ? `${venueName}, ${physical.city}` : venueName
 
   const dateLabel = endDate && endDate !== startDate
     ? `${fmtDate(startDate)} – ${fmtDate(endDate)}`
     : fmtDate(startDate)
+  const timeLabel = startTime ? fmtTime(startTime) : ''
 
   const priceLabel = isFreeEvent || minPrice === 0 ? 'Free Attendance' : `From ${fmtINR(minPrice)}`
 
@@ -117,7 +127,7 @@ export function AwardsHero({
           {dateLabel && (
             <div className="flex items-center gap-2.5 text-sm text-zinc-400">
               <Calendar className="size-4 shrink-0 text-yellow-400/70" aria-hidden />
-              <span className="font-semibold text-zinc-300">{dateLabel}</span>
+              <span className="font-semibold text-zinc-300">{dateLabel}{timeLabel ? ` · ${timeLabel}` : ''}</span>
             </div>
           )}
           {locText && (
@@ -178,6 +188,9 @@ export function AwardsHero({
               <span className="inline-flex items-center rounded-full border border-zinc-700 bg-zinc-800 px-6 py-3 text-sm font-semibold text-zinc-400">
                 Registration Closed
               </span>
+              {!isFreeEvent && minPrice > 0 && (
+                <span className="text-sm font-medium text-zinc-500">{priceLabel}</span>
+              )}
               <Link
                 href="#nominate"
                 className="inline-flex items-center gap-2 rounded-full border border-yellow-400/30 bg-yellow-400/10 px-6 py-3 text-[0.875rem] font-bold text-yellow-400 transition-all hover:bg-yellow-400/15"

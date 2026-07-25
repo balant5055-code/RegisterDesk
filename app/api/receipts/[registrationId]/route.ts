@@ -16,6 +16,7 @@ import { getClientIp }                 from '@/lib/rateLimit'
 import { RATE_POLICY, checkPolicy }    from '@/lib/rateLimit/policies'
 import { verifyReceiptToken }          from '@/lib/receipts/token'
 import { generateReceiptPdf }          from '@/lib/receipts/pdf'
+import { buildAttendeeFeeBreakdown }   from '@/lib/fees/attendeeBreakdown'
 import type { RegistrationDocument }   from '@/lib/registrations/types'
 import type { PaymentIntentRecord }    from '@/lib/firebase/firestore/paymentIntents'
 
@@ -87,6 +88,9 @@ export async function GET(
   // ── Load payment intent for paymentId and transaction date ─────────────────
   let paymentId       = 'N/A'
   let transactionDate = 'N/A'
+  // RD-PAYMENT-05 B1: itemized fee lines from the canonical stored breakdown (attendee_pays
+  // only). The intent already carries `financials` — no extra read, no recomputation.
+  let feeLines: { label: string; paise: number }[] | undefined
 
   const piSnap = await adminDb
     .collection('paymentIntents')
@@ -99,6 +103,8 @@ export async function GET(
     paymentId = pi.paymentId ?? 'N/A'
     const piIso = toIso(pi.updatedAt)
     transactionDate = fmtTransactionDate(piIso)
+    const bd = buildAttendeeFeeBreakdown(pi.financials)
+    if (bd) feeLines = bd.lines
   }
 
   // ── Load event for organizer name ──────────────────────────────────────────
@@ -125,6 +131,7 @@ export async function GET(
     amountPaid:      reg.amount,
     paymentId,
     transactionDate,
+    ...(feeLines ? { feeLines } : {}),
   })
 
   return new NextResponse(Buffer.from(pdfBytes), {

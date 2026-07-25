@@ -1,8 +1,8 @@
 'use client'
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { onAuthStateChanged, type User } from 'firebase/auth'
-import { auth } from '@/lib/firebase/auth'
+import { type User } from 'firebase/auth'
+import { useAuth } from '@/components/auth/AuthProvider'
 import { cn } from '@/lib/utils/cn'
 import { useToast } from '@/components/ui/Toast'
 import { FileText, Loader2, Download, AlertCircle } from 'lucide-react'
@@ -33,6 +33,7 @@ function urlFor(def: ReportDef): string {
 
 export default function FinanceReportsPage() {
   const { showToast } = useToast()
+  const { user } = useAuth()   // RD-AUTH-01 Phase 1 (M-A): shared auth state
   const userRef = useRef<User | null>(null)
   const [kind,    setKind]    = useState<string>('transactions')
   const [from,    setFrom]    = useState(daysAgo(30))
@@ -81,10 +82,12 @@ export default function FinanceReportsPage() {
   }, [def, queryString])
 
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, u => { userRef.current = u; if (u) void loadPreview() })
-    return unsub
+    if (user === undefined) return
+    userRef.current = user
+    const run = async () => { if (user) void loadPreview() }
+    void run()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [user])
 
   // Reload when switching report type.
   useEffect(() => {

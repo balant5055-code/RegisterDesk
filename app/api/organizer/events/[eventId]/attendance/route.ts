@@ -10,7 +10,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { adminDb }                   from '@/lib/firebase/admin'
 import { authorizeWorkspace }        from '@/lib/team/workspace'
-import { getEventStats }             from '@/lib/firebase/firestore/registrationCounters'
+import { getEventStats, aggregateRegistrationStatusCounts } from '@/lib/firebase/firestore/registrationCounters'
 import type { RegistrationDocument } from '@/lib/registrations/types'
 
 // ─── Response types ───────────────────────────────────────────────────────────
@@ -82,6 +82,7 @@ interface CheckinRow {
   attendeeName:   string
   ticketCode:     string
   passName:       string
+  passId:         string
   checkedInAt:    string   // ISO ('' when unresolved)
 }
 
@@ -118,6 +119,36 @@ function buildCheckinViews(rows: CheckinRow[]): { recentCheckIns: RecentCheckIn[
   return { recentCheckIns, hourlyBuckets }
 }
 
+const RECENT_CHECKIN_CAP = 1000
+
+/**
+ * The ONE bounded, index-ordered recent-check-in window (newest RECENT_CHECKIN_CAP),
+ * shared by BOTH attendance read paths — the canonical (counter) path and the legacy
+ * fallback. A registration carries `checkedInAt` IFF it is checked in (check-in sets it,
+ * undo-checkin FieldValue.delete()s it), so ordering by `checkedInAt` yields exactly the
+ * recent checked-in registrations via the existing (organizerUid, eventSlug, checkedInAt)
+ * index. Projected (no full documents). Feeds recent check-ins + hourly buckets in both
+ * paths, and per-pass checked-in in the fallback.
+ */
+async function fetchRecentCheckinRows(uid: string, slug: string): Promise<CheckinRow[]> {
+  const ciSnap = await adminDb.collection('registrations')
+    .where('organizerUid', '==', uid).where('eventSlug', '==', slug)
+    .orderBy('checkedInAt', 'desc').limit(RECENT_CHECKIN_CAP)
+    .select('attendee.name', 'ticketCode', 'passName', 'passId', 'checkedInAt')
+    .get()
+  return ciSnap.docs.map(doc => {
+    const r = doc.data() as RegistrationDocument
+    return {
+      registrationId: doc.id,
+      attendeeName:   r.attendee?.name ?? '',
+      ticketCode:     r.ticketCode ?? '',
+      passName:       r.passName ?? '',
+      passId:         r.passId ?? '',
+      checkedInAt:    toISO(r.checkedInAt) ?? '',
+    }
+  })
+}
+
 // ─── Handler ──────────────────────────────────────────────────────────────────
 
 export async function GET(
@@ -125,7 +156,11 @@ export async function GET(
   context: { params: Promise<{ eventId: string }> },
 ): Promise<NextResponse<AttendanceDashboardResponse | { error: string }>> {
   // ── 1. Auth ────────────────────────────────────────────────────────────────
-  const authz = await authorizeWorkspace(req, 'events')
+  // RD-ORGANIZER-02 P1: the live attendance dashboard is an event-day read for gate
+  // operators, so it is gated by 'checkin' (held by checkin_staff/manager/admin/owner) —
+  // not 'events' (which locked the very role built for the gate out of this view). Tenant
+  // isolation is unchanged: the event is still resolved under the caller's own uid namespace.
+  const authz = await authorizeWorkspace(req, 'checkin')
   if (!authz.ok) return NextResponse.json({ error: authz.error }, { status: authz.status })
   const uid = authz.workspaceUid
 
@@ -194,49 +229,36 @@ export async function GET(
     const passCheckedIn = counter.passCheckedInCounts ?? {}
     passStats = passStatOf(id => passCounts[id] ?? 0, id => passCheckedIn[id] ?? 0)
 
-    // Recent check-ins + hourly buckets — one bounded, index-ordered query.
-    const RECENT_CHECKIN_CAP = 1000
-    const ciSnap = await adminDb.collection('registrations')
-      .where('organizerUid', '==', uid).where('eventSlug', '==', slug)
-      .orderBy('checkedInAt', 'desc').limit(RECENT_CHECKIN_CAP)
-      .select('attendee.name', 'ticketCode', 'passName', 'checkedInAt')
-      .get()
-    const rows: CheckinRow[] = ciSnap.docs.map(doc => {
-      const r = doc.data() as RegistrationDocument
-      return {
-        registrationId: doc.id,
-        attendeeName:   r.attendee?.name ?? '',
-        ticketCode:     r.ticketCode ?? '',
-        passName:       r.passName ?? '',
-        checkedInAt:    toISO(r.checkedInAt) ?? '',
-      }
-    })
+    // Recent check-ins + hourly buckets — the ONE bounded, index-ordered window.
+    const rows = await fetchRecentCheckinRows(uid, slug)
     ;({ recentCheckIns, hourlyBuckets } = buildCheckinViews(rows))
   } else {
-    // ── Fallback — full scan (unchanged legacy behaviour until backfilled) ─────
-    const regsSnap = await adminDb.collection('registrations')
-      .where('organizerUid', '==', uid).where('eventSlug', '==', slug).get()
-    const registrations = regsSnap.docs.map(doc => doc.data() as RegistrationDocument)
+    // ── Fallback (legacy / not-yet-backfilled events) — BOUNDED (RD-REGISTRATIONS-01
+    //    Phase 3 / H3). The former unbounded, unprojected full-collection scan is gone.
+    //    Summary counts now come from indexed count() aggregates that transfer ZERO
+    //    documents (all served by existing indexes: (organizerUid,eventSlug) and
+    //    (…,status) and (…,checkedInAt)); recent check-ins, hourly buckets and per-pass
+    //    checked-in come from the SAME bounded window the canonical path uses. No scan. ──
+    // Phase 4 (M8): the summary counts come from the ONE shared statistics fallback
+    // (aggregateRegistrationStatusCounts) that the registrations list also uses — a single
+    // fallback implementation. The recent/hourly/per-pass window is fetched in parallel.
+    const [counts, rows] = await Promise.all([
+      aggregateRegistrationStatusCounts(uid, slug),
+      fetchRecentCheckinRows(uid, slug),
+    ])
+    totalRegistrations     = counts.total
+    confirmedRegistrations = counts.confirmed
+    cancelledRegistrations = counts.cancelled
+    checkedInCount         = counts.checkedIn
 
-    totalRegistrations     = registrations.length
-    confirmedRegistrations = registrations.filter(r => r.status === 'confirmed').length
-    cancelledRegistrations = registrations.filter(r => r.status === 'cancelled').length
-    checkedInCount         = registrations.filter(r => r.checkedIn === true).length
+    // Per-pass checked-in from the bounded window (registered stays exact from the
+    // always-maintained counter). Exact for events within the window; a larger legacy
+    // event reflects the most-recent RECENT_CHECKIN_CAP check-ins — the same cap the
+    // recent/hourly widgets already document, and event-level checkedInCount stays exact.
+    const passCheckedInById = new Map<string, number>()
+    for (const r of rows) passCheckedInById.set(r.passId, (passCheckedInById.get(r.passId) ?? 0) + 1)
+    passStats = passStatOf(id => passCounts[id] ?? 0, id => passCheckedInById.get(id) ?? 0)
 
-    passStats = passStatOf(
-      id => passCounts[id] ?? 0,   // registered from the always-maintained counter
-      id => registrations.filter(r => r.passId === id && r.checkedIn === true).length,
-    )
-
-    const rows: CheckinRow[] = registrations
-      .filter(r => r.checkedIn && r.checkedInAt)
-      .map(r => ({
-        registrationId: r.id,
-        attendeeName:   r.attendee?.name ?? '',
-        ticketCode:     r.ticketCode ?? '',
-        passName:       r.passName ?? '',
-        checkedInAt:    toISO(r.checkedInAt) ?? '',
-      }))
     ;({ recentCheckIns, hourlyBuckets } = buildCheckinViews(rows))
   }
 

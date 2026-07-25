@@ -58,3 +58,27 @@ export function isEarlyBirdActive(pass: EarlyBirdPricingFields, nowMs: number): 
 export function resolveEffectivePriceRupees(pass: EarlyBirdPricingFields, nowMs: number): number {
   return isEarlyBirdActive(pass, nowMs) ? (pass.earlyBirdPrice as number) : pass.price
 }
+
+/**
+ * Effective price in integer PAISE for a raw stored pass record (the Firestore
+ * shape, unknown-typed) at `nowMs`. This is the ONE place the charge / coupon-preview
+ * boundaries turn a stored pass into the integer-paise base amount — early-bird while
+ * active, otherwise regular. Every server surface that needs the base amount (create-
+ * order, submit, validate-coupon) MUST call this instead of re-reading pass.price /
+ * earlyBird* fields inline, so the coupon preview and the charge can never diverge.
+ *
+ * Backward-compatible: a pass without early bird resolves to `Math.round(price*100)`,
+ * exactly the value these routes computed before.
+ */
+export function resolveEffectivePassPricePaise(pass: Record<string, unknown>, nowMs: number): number {
+  const rupees = resolveEffectivePriceRupees(
+    {
+      price:            typeof pass.price          === 'number' ? pass.price          : 0,
+      earlyBirdEnabled: pass.earlyBirdEnabled === true,
+      earlyBirdPrice:   typeof pass.earlyBirdPrice === 'number' ? pass.earlyBirdPrice : null,
+      earlyBirdEndDate: typeof pass.earlyBirdEndDate === 'string' ? pass.earlyBirdEndDate : undefined,
+    },
+    nowMs,
+  )
+  return Math.round(rupees * 100)
+}

@@ -1,21 +1,26 @@
 'use client'
 
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { onAuthStateChanged, sendPasswordResetEmail } from 'firebase/auth'
+import { sendPasswordResetEmail } from 'firebase/auth'
 import type { User } from 'firebase/auth'
 import { auth }                        from '@/lib/firebase/auth'
+import { useAuth }                     from '@/components/auth/AuthProvider'
 import { uploadOrganizerAsset }        from '@/lib/firebase/storage'
 import type { OrganizerSettings }      from '@/app/api/organizer/settings/route'
 import {
   Building2, Palette, CalendarDays, Bell, User as UserIcon,
   Upload, X, Check, Loader2, AlertCircle, ChevronDown,
   ShieldCheck, Globe, LogOut, Activity,
+  Link2, Mail, MessageSquare, Smartphone,
 } from 'lucide-react'
 import { VerifiedBadge } from '@/components/auth/VerifiedBadge'
 import { cn }                          from '@/lib/utils/cn'
 import { ImageCropperModal }           from '@/components/ui/ImageCropperModal'
 import type { CropConfig }             from '@/components/ui/ImageCropperModal'
 import { useToast }                    from '@/components/ui/Toast'
+import { PhoneField }                  from '@/components/auth'
+import { formatPhoneNumber }           from '@/lib/communication/phone'
+import { DEFAULT_DIAL_CODE, callingDigitsForDialCode } from '@/lib/communication/countryCodes'
 
 // ─── Primitive components ─────────────────────────────────────────────────────
 
@@ -129,6 +134,118 @@ function Toggle({
           )}
         />
       </button>
+    </div>
+  )
+}
+
+// ─── Settings group divider (RD-AUTH-03 Phase 3) ─────────────────────────────
+// A labelled divider that separates the PRIVATE Account area from the PUBLIC
+// Organization area. Presentation-only — reuses existing tokens, no redesign.
+function SettingsGroup({ title, subtitle }: { title: string; subtitle: string }) {
+  return (
+    <div className="flex items-end gap-4 pt-3">
+      <div className="min-w-0 shrink-0">
+        <h2 className="text-[12px] font-bold uppercase tracking-wider text-foreground">{title}</h2>
+        <p className="text-[12px] text-muted-foreground">{subtitle}</p>
+      </div>
+      <div className="mb-1.5 h-px flex-1 bg-border" aria-hidden />
+    </div>
+  )
+}
+
+// ─── Connected Accounts (RD-AUTH-03 Phase 4) ─────────────────────────────────
+// DISPLAY-ONLY view of the sign-in methods linked to this account. State is read
+// live from the Firebase user (user.providerData) — never duplicated, never a
+// secret. RD-AUTH-02 wired Google/Microsoft/Facebook linking; this shows the result.
+type ConnState = 'loading' | 'unavailable' | 'connected' | 'not-connected'
+
+function ConnStatusPill({ state }: { state: ConnState }) {
+  const meta: Record<ConnState, { label: string; cls: string }> = {
+    loading:         { label: 'Loading…',      cls: 'text-muted-foreground' },
+    unavailable:     { label: 'Unavailable',   cls: 'text-muted-foreground' },
+    connected:       { label: 'Connected',     cls: 'text-emerald-600' },
+    'not-connected': { label: 'Not connected', cls: 'text-muted-foreground' },
+  }
+  const m = meta[state]
+  return (
+    <span className={cn('inline-flex items-center gap-1.5 text-[12px] font-semibold', m.cls)}>
+      {state === 'connected'
+        ? <Check className="size-3.5" aria-hidden />
+        : <span className="inline-block size-1.5 rounded-full bg-muted-foreground/40" aria-hidden />}
+      {m.label}
+    </span>
+  )
+}
+
+function ConnectedAccounts({ user }: { user: User | null | undefined }) {
+  const rows = [
+    { key: 'password',      label: 'Email & Password' },
+    { key: 'google.com',    label: 'Google' },
+    { key: 'microsoft.com', label: 'Microsoft' },
+    { key: 'facebook.com',  label: 'Facebook' },
+  ]
+  const ids = new Set((user?.providerData ?? []).map(p => p.providerId))
+  const stateFor = (key: string): ConnState => {
+    if (user === undefined) return 'loading'
+    if (user === null)      return 'unavailable'
+    if (key === 'password') return ids.has('password') || !!user.email ? 'connected' : 'not-connected'
+    return ids.has(key) ? 'connected' : 'not-connected'
+  }
+
+  return (
+    <div className="rounded-xl border border-border bg-muted/20 px-4 py-4">
+      <div className="mb-3 flex items-center gap-2">
+        <Link2 className="size-4 shrink-0 text-primary" aria-hidden />
+        <p className="text-[13px] font-semibold text-foreground">Connected Accounts</p>
+      </div>
+      <ul className="space-y-2.5">
+        {rows.map(r => (
+          <li key={r.key} className="flex items-center justify-between gap-4">
+            <span className="text-[13px] font-medium text-foreground">{r.label}</span>
+            <ConnStatusPill state={stateFor(r.key)} />
+          </li>
+        ))}
+      </ul>
+      <p className="mt-3 text-[12px] text-muted-foreground">
+        Sign-in methods linked to your account. Add Google, Microsoft, or Facebook from the login screen.
+      </p>
+    </div>
+  )
+}
+
+// ─── Notification Preferences (RD-AUTH-03 Phase 5) ───────────────────────────
+// Placeholder ONLY — reflects real capability without new backend. Email + WhatsApp
+// exist (RD-AUTH-02); SMS/Push have no transport yet. Channel toggles are future work.
+function NotificationPreferences({ hasMobile }: { hasMobile: boolean }) {
+  const channels = [
+    { icon: Mail,          label: 'Email',    status: 'Active',      cls: 'text-emerald-600',      note: 'Approvals, settlements, receipts and security alerts.' },
+    { icon: MessageSquare, label: 'WhatsApp', status: hasMobile ? 'Active' : 'Add mobile', cls: hasMobile ? 'text-emerald-600' : 'text-amber-600', note: hasMobile ? 'Sent to your private account mobile.' : 'Add an Account Mobile Number above to enable.' },
+    { icon: Smartphone,    label: 'SMS',      status: 'Coming soon', cls: 'text-muted-foreground', note: 'Planned — no transport yet.' },
+    { icon: Bell,          label: 'Push',     status: 'Coming soon', cls: 'text-muted-foreground', note: 'Planned — no transport yet.' },
+  ]
+  return (
+    <div className="rounded-xl border border-border bg-muted/20 px-4 py-4">
+      <div className="mb-3 flex items-center gap-2">
+        <Bell className="size-4 shrink-0 text-primary" aria-hidden />
+        <p className="text-[13px] font-semibold text-foreground">Notification Preferences</p>
+      </div>
+      <ul className="space-y-3">
+        {channels.map(c => (
+          <li key={c.label} className="flex items-start justify-between gap-4">
+            <div className="flex items-start gap-2.5">
+              <c.icon className="mt-0.5 size-4 shrink-0 text-muted-foreground" aria-hidden />
+              <div>
+                <p className="text-[13px] font-medium text-foreground">{c.label}</p>
+                <p className="text-[12px] text-muted-foreground">{c.note}</p>
+              </div>
+            </div>
+            <span className={cn('shrink-0 text-[12px] font-semibold', c.cls)}>{c.status}</span>
+          </li>
+        ))}
+      </ul>
+      <p className="mt-3 text-[12px] text-muted-foreground">
+        Per-channel controls are coming soon. RegisterDesk always emails critical account notices.
+      </p>
     </div>
   )
 }
@@ -554,6 +671,7 @@ function AccountHealthPanel({
 
 export default function SettingsPage() {
   const { showToast } = useToast()
+  const { user, getToken } = useAuth()
   const userRef = useRef<User | null>(null)
 
   // Load state
@@ -593,6 +711,10 @@ export default function SettingsPage() {
   // Account
   const [accountName,  setAccountName]  = useState('')
   const [accountEmail, setAccountEmail] = useState('')
+  // RD-AUTH-02: PRIVATE account mobile — dial code + national number (edited),
+  // composed into E.164 on save. NOT the public organizationProfile.supportPhone.
+  const [accountMobileCode,     setAccountMobileCode]     = useState(DEFAULT_DIAL_CODE)
+  const [accountMobileNational, setAccountMobileNational] = useState('')
   const [resetSent,    setResetSent]    = useState(false)
   const [showDeleteZone,  setShowDeleteZone]  = useState(false)
   const [deleteConfirm,   setDeleteConfirm]   = useState('')
@@ -618,7 +740,9 @@ export default function SettingsPage() {
   // ─── Load settings ──────────────────────────────────────────────────────────
 
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, async user => {
+    if (user === undefined) return
+    let cancelled = false
+    const run = async () => {
       userRef.current = user
       if (!user) { setLoading(false); return }
 
@@ -635,12 +759,14 @@ export default function SettingsPage() {
       }
 
       try {
-        const token = await user.getIdToken()
+        const token = await getToken()
+        if (cancelled || !token) return
         const res   = await fetch('/api/organizer/settings', {
           headers: { Authorization: `Bearer ${token}` },
         })
         if (!res.ok) throw new Error('Could not load settings.')
         const { settings: s } = await res.json() as { settings: OrganizerSettings }
+        if (cancelled) return
 
         setOrgName(s.organizationName)
         setOrgWebsite(s.website)
@@ -663,14 +789,21 @@ export default function SettingsPage() {
         setCommCert(s.sendCertificateEmails)
         setAccountName(s.name)
         setAccountEmail(s.email)
+        // Split the stored E.164 back into dial code + national number for editing.
+        const code = s.mobileCountryCode || DEFAULT_DIAL_CODE
+        setAccountMobileCode(code)
+        setAccountMobileNational(
+          s.mobileE164 && s.mobileE164.startsWith(code) ? s.mobileE164.slice(code.length) : s.mobileE164,
+        )
       } catch (e) {
-        setLoadError(e instanceof Error ? e.message : 'Error loading settings.')
+        if (!cancelled) setLoadError(e instanceof Error ? e.message : 'Error loading settings.')
       } finally {
-        setLoading(false)
+        if (!cancelled) setLoading(false)
       }
-    })
-    return unsub
-  }, [])
+    }
+    run()
+    return () => { cancelled = true }
+  }, [user, getToken])
 
   // ─── Shared patch helper ────────────────────────────────────────────────────
 
@@ -769,7 +902,12 @@ export default function SettingsPage() {
   async function saveAccount() {
     markSaving('account', true)
     try {
-      await patch('account', { name: accountName })
+      // Compose canonical E.164 from the national number + selected dial code (blank
+      // clears the number). Sent to the PRIVATE account mobile, never Support Phone.
+      const mobileE164 = accountMobileNational.trim()
+        ? formatPhoneNumber(accountMobileNational, { defaultCallingCode: callingDigitsForDialCode(accountMobileCode) })
+        : ''
+      await patch('account', { name: accountName, mobileE164, mobileCountryCode: accountMobileCode })
       markSaved('account')
     } catch (e) { showToast(e instanceof Error ? e.message : 'Could not save account details. Please try again.', 'error') }
     finally { markSaving('account', false) }
@@ -829,8 +967,13 @@ export default function SettingsPage() {
       </div>
 
       {/* ═══════════════════════════════════════════════════════════════════════
-          1. Organization Profile
+          GROUP: Organization — PUBLIC (attendee-facing)
       ═══════════════════════════════════════════════════════════════════════ */}
+      <SettingsGroup
+        title="Organization"
+        subtitle="Public information shown to attendees"
+      />
+
       <Section
         icon={Building2}
         title="Organization Profile"
@@ -868,7 +1011,7 @@ export default function SettingsPage() {
             onChange={setOrgSupportEmail}
             type="email"
             placeholder="support@yourorg.com"
-            hint="Attendees will contact you at this address."
+            hint="Displayed publicly for attendee enquiries."
           />
           <TextInput
             label="Support Phone"
@@ -876,6 +1019,7 @@ export default function SettingsPage() {
             onChange={setOrgSupportPhone}
             type="tel"
             placeholder="+91 98765 43210"
+            hint="Displayed publicly on your event pages and tickets for attendees."
           />
         </div>
 
@@ -940,8 +1084,13 @@ export default function SettingsPage() {
       </Section>
 
       {/* ═══════════════════════════════════════════════════════════════════════
-          3. Event Defaults
+          GROUP: Workspace & Preferences (operational — neither identity nor public profile)
       ═══════════════════════════════════════════════════════════════════════ */}
+      <SettingsGroup
+        title="Workspace & Preferences"
+        subtitle="Defaults and tools for running your events"
+      />
+
       <Section
         icon={CalendarDays}
         title="Event Defaults"
@@ -1116,10 +1265,18 @@ export default function SettingsPage() {
         </a>
       </Section>
 
+      {/* ═══════════════════════════════════════════════════════════════════════
+          GROUP: Account — PRIVATE (organizer identity, RegisterDesk-only)
+      ═══════════════════════════════════════════════════════════════════════ */}
+      <SettingsGroup
+        title="Account"
+        subtitle="Your private identity — used only by RegisterDesk, never shown to attendees"
+      />
+
       <Section
         icon={UserIcon}
         title="Account"
-        description="Your personal account details"
+        description="Your private identity and sign-in — never shown to attendees"
       >
         <div className="grid gap-4 sm:grid-cols-2">
           <TextInput
@@ -1136,11 +1293,25 @@ export default function SettingsPage() {
           />
         </div>
 
+        {/* RD-AUTH-02: PRIVATE account mobile — the canonical destination for
+            RegisterDesk platform notifications. Distinct from Organization → Support
+            Phone (public/attendee-facing) which is edited in the Organization section. */}
+        <PhoneField
+          id="account-mobile"
+          label="Account Mobile Number"
+          countryCode={accountMobileCode}
+          onCountryCodeChange={setAccountMobileCode}
+          value={accountMobileNational}
+          onChange={setAccountMobileNational}
+          placeholder="98765 43210"
+          hint="Used for RegisterDesk notifications such as approvals, settlements, security alerts and WhatsApp notifications. This number is private."
+        />
+
         <SaveRow
           onSave={saveAccount}
           saving={!!saving.account}
           saved={!!saved.account}
-          label="Update Name"
+          label="Update Account"
         />
 
         {/* ── Password ── */}
@@ -1162,6 +1333,12 @@ export default function SettingsPage() {
             </button>
           </div>
         </div>
+
+        {/* ── Connected Accounts (RD-AUTH-03 Phase 4) ── */}
+        <ConnectedAccounts user={user} />
+
+        {/* ── Notification Preferences (RD-AUTH-03 Phase 5 — placeholder) ── */}
+        <NotificationPreferences hasMobile={!!accountMobileNational.trim()} />
 
         {/* ── Session Info ── */}
         <div className="rounded-xl border border-border bg-muted/20 px-4 py-4">

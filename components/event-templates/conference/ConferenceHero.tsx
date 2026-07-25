@@ -8,6 +8,7 @@ import {
   ArrowRight, Users, Mic2, Layers, ClipboardList,
 } from 'lucide-react'
 import type { PassPublic } from '@/components/event-templates/types'
+import { passDisplayPrice } from '@/components/event-templates/shared/utils/format'
 import type {
   PhysicalVenueConfig, Speaker, AgendaSession, ConferenceTrack,
 } from '@/components/wizard/eventDetailsConfig'
@@ -83,7 +84,7 @@ export function ConferenceHero({
 }: ConferenceHeroProps) {
 
   const activePasses  = passes.filter(p => p.status !== 'inactive')
-  const minPrice      = activePasses.length > 0 ? Math.min(...activePasses.map(p => p.price)) : 0
+  const minPrice      = activePasses.length > 0 ? Math.min(...activePasses.map(p => passDisplayPrice(p))) : 0
   const locationText  = venueType === 'online' ? 'Online Event'
     : physical?.city ? `${venueName}, ${physical.city}` : venueName
   const formatLabel   = venueType === 'physical' ? 'In-Person'
@@ -216,9 +217,14 @@ export function ConferenceHero({
                   <span className="text-sm font-medium text-gray-400">{priceLabel}</span>
                 </>
               ) : (
-                <span className="inline-flex items-center gap-2 rounded-full bg-gray-100 px-5 py-2.5 text-sm font-semibold text-gray-500">
-                  Registration Closed
-                </span>
+                <>
+                  <span className="inline-flex items-center gap-2 rounded-full bg-gray-100 px-5 py-2.5 text-sm font-semibold text-gray-500">
+                    Registration Closed
+                  </span>
+                  {!isFreeEvent && minPrice > 0 && (
+                    <span className="text-sm font-medium text-gray-400">{priceLabel}</span>
+                  )}
+                </>
               )}
             </motion.div>
 

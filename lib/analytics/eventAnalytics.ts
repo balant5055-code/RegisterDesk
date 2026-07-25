@@ -6,6 +6,7 @@
 // flags it so the UI shows "no data" instead of a fabricated number.
 
 import { adminDb } from '@/lib/firebase/admin'
+import { readReportFromLedgerData } from '@/lib/platform/pricing'
 import { COLLECTIONS as CERT_COLLECTIONS } from '@/lib/certificates/constants'
 
 const CAP = 5000
@@ -140,11 +141,14 @@ export async function getEventAnalytics(eventId: string): Promise<{ analytics: E
       let g = 0, pf = 0, gst = 0, gw = 0, net = 0
       for (const t of ptx.docs) {
         const x = t.data() as Record<string, number>
-        g   += x.grossAmountPaise ?? 0
-        pf  += x.platformFeeBasePaise ?? 0
-        gst += x.platformFeeGstPaise ?? 0
-        gw  += x.gatewayFeeActualPaise ?? x.gatewayFeeEstimatePaise ?? 0
-        net += x.netSettlementPaise ?? 0
+        // RD-PRICING-02F: snapshot-first (== ledger). Gateway keeps its ACTUAL-over-
+        // estimate preference; the estimate is sourced from the snapshot (== ledger).
+        const fig = readReportFromLedgerData(x)
+        g   += fig.grossAmountPaise
+        pf  += fig.platformFeeBasePaise
+        gst += fig.platformFeeGstPaise
+        gw  += x.gatewayFeeActualPaise ?? fig.gatewayFeeEstimatePaise
+        net += fig.netSettlementPaise
       }
       grossPaise = g || revenuePaise; platformFeePaise = pf; gstPaise = gst; gatewayFeePaise = gw; netPaise = net || revenuePaise
     }
@@ -219,7 +223,12 @@ export async function getEventAnalytics(eventId: string): Promise<{ analytics: E
     publishedAt: tsISO(ev.publishedAt),
     truncated,
     kpis: {
-      revenuePaise, registrations, paid, free, pending, cancelled, refunded, checkedIn,
+      // RD-PAYMENT-05 B2: report ORGANIZER revenue on the canonical ledger basis
+      // (grossPaise = Σ ticket base) so the headline Revenue KPI matches the Financial
+      // breakdown's Gross and the settlement figures — never the attendee charge. Under
+      // organizer_pays grossPaise === Σ amount (byte-identical); grossPaise already falls
+      // back to the registration-derived total when the ledger is unavailable.
+      revenuePaise: grossPaise, registrations, paid, free, pending, cancelled, refunded, checkedIn,
       conversionPct, capacity, capacityUsedPct, remaining,
       communicationSpendPaise: commCostPaise,
     },

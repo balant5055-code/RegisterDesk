@@ -11,6 +11,7 @@ import { FieldValue }              from 'firebase-admin/firestore'
 import { adminDb }                 from '@/lib/firebase/admin'
 import { notificationEngine, NotificationChannel } from '@/lib/notifications'
 import { getOrganiserSuppressionSet } from '@/lib/firebase/firestore/emailSuppressionList'
+import { resolveMaxRecipientsPerBroadcast } from '@/lib/broadcasts/limits'
 import { chargeAndStartCampaign, type StartResult } from '@/lib/communications/billing'
 import { logBroadcastAction }      from '@/lib/broadcasts/audit'
 import { getMetaProvider, hasWhatsAppTemplate } from '@/lib/whatsapp'
@@ -106,11 +107,14 @@ async function deliverEmailCampaign(
   if (c.emailJobId) { await processEmailBroadcastChunk(c.emailJobId); return }
 
   // Same audience query as before; drop addresses on the organizer's suppression list.
+  // RD-ORGANIZER-04 P1-1: the campaign already passed the create-time cap gate, so bound
+  // the snapshot load to cap+1 — never the whole collection into memory.
   let regsQuery = adminDb.collection('registrations')
     .where('organizerUid', '==', uid)
     .where('eventSlug',    '==', c.eventSlug) as FirebaseFirestore.Query
   if (c.audience !== 'all') regsQuery = regsQuery.where('status', '==', c.audience)
-  const regsSnap    = await regsQuery.get()
+  const maxRecipients = await resolveMaxRecipientsPerBroadcast(uid)
+  const regsSnap    = await regsQuery.limit(maxRecipients + 1).get()
   const suppression = await getOrganiserSuppressionSet(uid)
   const recipients: Recipient[] = regsSnap.docs
     .map(d => ({ id: d.id, data: d.data() as RegistrationDocument }))
@@ -160,7 +164,9 @@ async function deliverWhatsAppCampaign(
       .where('organizerUid', '==', uid)
       .where('eventSlug',    '==', c.eventSlug) as FirebaseFirestore.Query
     if (c.audience !== 'all') regsQuery = regsQuery.where('status', '==', c.audience)
-    const regsSnap = await regsQuery.get()
+    // RD-ORGANIZER-04 P1-1: bound the snapshot load to cap+1 (never the whole collection).
+    const maxRecipients = await resolveMaxRecipientsPerBroadcast(uid)
+    const regsSnap = await regsQuery.limit(maxRecipients + 1).get()
     const recipients: Recipient[] = regsSnap.docs
       .map(d => ({ id: d.id, data: d.data() as RegistrationDocument }))
       .filter(({ data }) => typeof data.attendee.phone === 'string' && data.attendee.phone.trim().length > 0)

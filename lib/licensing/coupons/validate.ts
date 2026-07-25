@@ -46,7 +46,8 @@ export function validateLicenseCoupon(
 
   // Restrictions.
   const r = coupon.restrictions
-  if (r.tiers.length > 0 && !r.tiers.includes(ctx.tier))       return fail('tier_not_allowed', 'This coupon does not apply to the selected license.')
+  // GA-02: compare as strings — a V2 purchase tier simply won't match a V1-only restriction.
+  if (r.tiers.length > 0 && !(r.tiers as readonly string[]).includes(ctx.tier)) return fail('tier_not_allowed', 'This coupon does not apply to the selected license.')
   if (r.eventTypes.length > 0 && (!ctx.eventType || !r.eventTypes.includes(ctx.eventType)))
     return fail('event_type_not_allowed', 'This coupon does not apply to this event type.')
 

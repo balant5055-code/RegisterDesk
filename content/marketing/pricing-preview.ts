@@ -6,39 +6,30 @@
 // registry below only chooses WHICH tiers to feature and supplies presentation
 // (tagline, highlight, CTA key).
 
+import { isUnlimited, type EventLicenseTierV2 } from '@/lib/licensing/eventLicense'
 import {
-  isUnlimited,
-  type EventLicenseTier,
-  type EventLicenseDefinition,
-} from '@/lib/licensing/eventLicense'
+  buildLicenseCatalogView, type LicenseCatalogV2, type LicenseCatalogEntryView,
+} from '@/lib/licensing/licenseCatalogShared'
 import type { CtaKey } from '@/lib/marketing/cta'
 
-// Formatters (presentation only — the NUMBERS come from the license definition).
+// Formatters (presentation only — the NUMBERS come from the V2 catalog view).
 const inr = (paise: number): string => `₹${Math.round(paise / 100).toLocaleString('en-IN')}`
 const lim = (n: number): string => (isUnlimited(n) ? 'Unlimited' : n.toLocaleString('en-IN'))
 
-function priceLabel(def: EventLicenseDefinition): string {
-  return def.licensePricePaise === 0 ? 'Free' : inr(def.licensePricePaise)
-}
-
-// One-time, per published event — never a recurring period.
-function period(def: EventLicenseDefinition): string | null {
-  return def.licensePricePaise === 0 ? null : '/event'
-}
-
-// Key highlights, derived from the license's real limit + feature matrix.
-function highlights(def: EventLicenseDefinition): string[] {
+// Key highlights, derived from the view's real limit + feature matrix.
+function highlights(v: LicenseCatalogEntryView): string[] {
   return [
-    `${lim(def.limits.maxRegistrations)} registrations`,
-    ...def.featureList.slice(0, 2),
-    `${def.transactionFeePercent}% transaction fee`,
+    `${lim(v.registrationLimit)} registrations`,
+    ...v.featureList.slice(0, 2),
+    `${v.transactionFeePercent}% transaction fee`,
   ]
 }
 
 export interface PreviewPlanView {
-  id:          EventLicenseTier
+  id:          EventLicenseTierV2
   name:        string
-  priceLabel:  string
+  priceLabel:  string          // charged / offer price
+  regularPriceLabel: string | null   // struck; null for ₹0 / no discount
   period:      string | null
   tagline:     string
   highlighted: boolean
@@ -47,29 +38,34 @@ export interface PreviewPlanView {
   href:        string
 }
 
-// Presentation selection only — which real license tiers the homepage features.
-interface PreviewConfig { id: EventLicenseTier; tagline: string; highlighted: boolean; ctaKey: CtaKey }
+// Presentation selection only — which real V2 tiers the homepage features (a curated
+// low / popular / high spread). Figures come from the catalog view, never from here.
+interface PreviewConfig { id: EventLicenseTierV2; tagline: string; highlighted: boolean; ctaKey: CtaKey }
 
 const PREVIEW_CONFIG: PreviewConfig[] = [
-  { id: 'starter',      tagline: 'For your first events.',      highlighted: false, ctaKey: 'startFree' },
-  { id: 'professional', tagline: 'For growing teams.',          highlighted: true,  ctaKey: 'startFree' },
-  { id: 'enterprise',   tagline: 'For large-scale operations.', highlighted: false, ctaKey: 'startFree' },
+  { id: 'free',       tagline: 'For your first events.',      highlighted: false, ctaKey: 'startFree' },
+  { id: 'business',   tagline: 'For growing teams.',          highlighted: true,  ctaKey: 'startFree' },
+  { id: 'enterprise', tagline: 'For large-scale operations.', highlighted: false, ctaKey: 'startFree' },
 ]
 
-// Build the homepage preview plans from the EFFECTIVE license catalog (code
-// defaults + config overrides). The caller resolves the catalog.
-export function buildPricingPreviewPlans(catalog: Record<EventLicenseTier, EventLicenseDefinition>): PreviewPlanView[] {
+// Build the homepage preview plans from the EFFECTIVE V2 catalog (code defaults + config
+// overrides). The caller resolves the catalog (server: getLicenseCatalogV2).
+export function buildPricingPreviewPlans(catalog: LicenseCatalogV2): PreviewPlanView[] {
+  const byTier = new Map(buildLicenseCatalogView(catalog).map(v => [v.tier, v]))
   return PREVIEW_CONFIG.map(c => {
-    const def = catalog[c.id]
+    const v       = byTier.get(c.id)!
+    const isFree  = v.offerPricePaise === 0
+    const hasDiscount = !isFree && v.regularPricePaise > v.offerPricePaise
     return {
       id: c.id,
-      name: def.name,
-      priceLabel: priceLabel(def),
-      period: period(def),
+      name: v.name,
+      priceLabel: isFree ? 'Free' : inr(v.offerPricePaise),
+      regularPriceLabel: hasDiscount ? inr(v.regularPricePaise) : null,
+      period: isFree ? null : '/event',
       tagline: c.tagline,
       highlighted: c.highlighted,
       ctaKey: c.ctaKey,
-      highlights: highlights(def),
+      highlights: highlights(v),
       href: '/pricing',
     }
   })

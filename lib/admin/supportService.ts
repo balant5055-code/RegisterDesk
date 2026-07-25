@@ -6,6 +6,7 @@
 
 import { Timestamp } from 'firebase-admin/firestore'
 import { adminDb } from '@/lib/firebase/admin'
+import { isOrganizer } from '@/lib/organizer/identity'
 import { ENGINES } from '@/lib/admin/operationsCenterService'
 import type { SupportOverview, SupportOrganizer, SupportEvent, SupportHealth } from '@/lib/admin/supportTypes'
 
@@ -29,11 +30,17 @@ function effectiveStatus(s: unknown): string {
 
 async function recentOrganizers(): Promise<SupportOrganizer[]> {
   try {
-    const snap = await adminDb.collection('users').orderBy('createdAt', 'desc').limit(6).get()
-    return snap.docs.map(d => {
-      const u = d.data() as Record<string, unknown>
-      return { uid: d.id, name: str(u.name) ?? '', email: str(u.email) ?? '', status: effectiveStatus(u.accountStatus), createdAt: tsToISO(u.createdAt) }
-    })
+    // Over-fetch, then apply the canonical isOrganizer() definition (M-C) so this list
+    // matches the organizer counts; slice to 6. (Every users doc is an organizer today,
+    // so this is behaviour-identical; the filter just keeps the definition consistent.)
+    const snap = await adminDb.collection('users').orderBy('createdAt', 'desc').limit(12).get()
+    return snap.docs
+      .filter(d => isOrganizer(d.data() as Record<string, unknown>))
+      .slice(0, 6)
+      .map(d => {
+        const u = d.data() as Record<string, unknown>
+        return { uid: d.id, name: str(u.name) ?? '', email: str(u.email) ?? '', status: effectiveStatus(u.accountStatus), createdAt: tsToISO(u.createdAt) }
+      })
   } catch { return [] }
 }
 

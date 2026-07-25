@@ -8,7 +8,7 @@ import type { BroadcastAudience, BroadcastChannel, BroadcastCampaign } from '@/l
 import type { RegistrationDocument }   from '@/lib/registrations/types'
 import { sanitizeBroadcastHtml }              from '@/lib/broadcasts/sanitize'
 import { getOrganiserSuppressionSet }  from '@/lib/firebase/firestore/emailSuppressionList'
-import { checkBroadcastLimits }        from '@/lib/broadcasts/limits'
+import { checkBroadcastLimits, resolveMaxRecipientsPerBroadcast } from '@/lib/broadcasts/limits'
 import { organizerStatusGuard }        from '@/lib/admin/organizerStatus'
 import { authorizeWorkspace }          from '@/lib/team/workspace'
 import { startBroadcastCampaign }      from '@/lib/broadcasts/send'
@@ -190,7 +190,16 @@ export async function POST(req: NextRequest): Promise<NextResponse<PostBroadcast
     regsQuery = regsQuery.where('status', '==', audience)
   }
 
-  const regsSnap = await regsQuery.get()
+  // RD-ORGANIZER-04 P1-1: gate audience size with an indexed count() aggregate (zero
+  // document reads) so an oversized audience is rejected WITHOUT loading the whole
+  // collection into memory; then load at most cap+1 docs for suppression + billing.
+  const maxRecipients = await resolveMaxRecipientsPerBroadcast(uid)
+  const audienceSize  = (await regsQuery.count().get()).data().count
+  if (audienceSize > maxRecipients) {
+    return NextResponse.json({ success: false, error: 'BROADCAST_TOO_LARGE' }, { status: 422 })
+  }
+
+  const regsSnap = await regsQuery.limit(maxRecipients + 1).get()
   const allRecipients = regsSnap.docs.map(d => ({
     id:   d.id,
     data: d.data() as RegistrationDocument,

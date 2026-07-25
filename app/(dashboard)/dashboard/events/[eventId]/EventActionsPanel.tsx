@@ -245,6 +245,12 @@ export default function EventActionsPanel({ event, token, onSuccess, mode = 'fla
   const [actionError, setActionError]   = useState<string | null>(null)
   const [dropdownOpen, setDropdownOpen] = useState(false)
   const dropdownRef                     = useRef<HTMLDivElement>(null)
+  // M1: one idempotency key per Duplicate intent — regenerated each time the modal opens,
+  // reused across double-clicks/retries so the server creates exactly one copy per intent.
+  const dupKeyRef                       = useRef<string | null>(null)
+  useEffect(() => {
+    if (modal === 'duplicate') dupKeyRef.current = crypto.randomUUID()
+  }, [modal])
 
   // Close dropdown on outside click
   useEffect(() => {
@@ -343,12 +349,14 @@ export default function EventActionsPanel({ event, token, onSuccess, mode = 'fla
   }
 
   async function handleDuplicate() {
+    if (loading) return   // ignore re-entrant clicks; the shared idem key covers the rest
     setLoading(true)
     setActionError(null)
     try {
       const res  = await fetch(`/api/organizer/events/${event.draftId}/duplicate`, {
         method:  'POST',
-        headers: { Authorization: `Bearer ${token}` },
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ idempotencyKey: dupKeyRef.current }),
       })
       const json = await res.json() as { success: boolean; draftId?: string; error?: string }
       if (json.success && json.draftId) {

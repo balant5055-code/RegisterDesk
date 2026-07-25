@@ -7,6 +7,12 @@ import { captureFinancialError } from '@/lib/monitoring/sentry'
 import { computeWalletDebit, buildRevenueCreditUpdate } from '@/lib/firebase/firestore/revenueWallets'
 import { reconcileSettlementHoldsAfterRefund } from '@/lib/settlements/reconcile'
 import { writeClawbackOnShortfall, recoverClawbacks, logClawbackEvent } from '@/lib/clawbacks/clawbackService'
+import {
+  resolveWalletSettlementPure,
+  recordWalletSettlementMetric,
+  recordWalletCreditMetric,
+  type WalletSettlementSource,
+} from '@/lib/platform/pricing'
 import type {
   PlatformTransactionDocument,
   PlatformTransactionStatus,
@@ -75,6 +81,10 @@ export async function recordPlatformTransactionAndCredit(
   // oldest first, bounded by the net amount. Best-effort, only on a real credit
   // (created:true); never blocks or fails the credit path.
   if (result.created) {
+    // RD-PRICING-02D: wallet-credit diagnostics. The credited value is already
+    // resolved snapshot-first at order time (02C · data.pricingSource); this only
+    // records which source fed the wallet. Metrics only — no value change.
+    recordWalletCreditMetric(data)
     await recoverClawbacks(credit.organizerUid, credit.netSettlementPaise).catch(() => {})
   }
   return result
@@ -144,10 +154,13 @@ export async function reversePlatformTransactionAndDebit(
   let reconcileUid: string | null = null   // set only when a hold lost its backing
   // Clawback recorded atomically inside the txn; audited after commit.
   let clawbackInfo: { clawbackId: string; outstandingPaise: number } | null = null
+  // RD-PRICING-02D: which source produced the reversal settlement (metric, post-commit).
+  let settlementSource: WalletSettlementSource = 'fallback'
 
   const result = await adminDb.runTransaction<ReverseAndDebitResult>(async tx => {
     reconcileUid = null   // reset per attempt (transactions may retry)
     clawbackInfo = null
+    settlementSource = 'fallback'
 
     const snap = await tx.get(txRef)
     if (!snap.exists) {
@@ -161,6 +174,14 @@ export async function reversePlatformTransactionAndDebit(
       return { found: true, reversed: false, debited: 0, insolvent: false }
     }
 
+    // RD-PRICING-02D: reverse EXACTLY what was credited, snapshot-first. The resolver
+    // guarantees `reversalNetPaise === data.netSettlementPaise` (the credited amount),
+    // so the debit is byte-identical to production; it only records WHERE the value
+    // came from. Pure (metric-free) so a transaction retry cannot double-count.
+    const settlement    = resolveWalletSettlementPure(data)
+    settlementSource    = settlement.source
+    const reversalNetPaise = settlement.netSettlementPaise
+
     // ── reads before writes ──
     const walletRef  = adminDb.collection('organizerRevenueWallets').doc(data.organizerUid)
     const walletSnap = await tx.get(walletRef)
@@ -170,9 +191,9 @@ export async function reversePlatformTransactionAndDebit(
 
     if (walletSnap.exists) {
       const wallet = walletSnap.data() as OrganizerRevenueWallet
-      const plan   = computeWalletDebit(wallet, data.netSettlementPaise)
+      const plan   = computeWalletDebit(wallet, reversalNetPaise)
       debited      = plan.totalDebited
-      insolvent    = plan.totalDebited < data.netSettlementPaise
+      insolvent    = plan.totalDebited < reversalNetPaise
 
       const newAvailable = wallet.availablePaise - plan.fromAvailable
       // INVARIANT: inTransitPaise must never exceed availablePaise, so a refund
@@ -190,7 +211,7 @@ export async function reversePlatformTransactionAndDebit(
         updatedAt:      FieldValue.serverTimestamp(),
       })
     } else {
-      insolvent = data.netSettlementPaise > 0   // no wallet to debit against
+      insolvent = reversalNetPaise > 0   // no wallet to debit against
     }
 
     // Durable clawback for the under-debit (atomic with the wallet debit + status
@@ -201,7 +222,7 @@ export async function reversePlatformTransactionAndDebit(
         organizerUid:        data.organizerUid,
         sourceType:          data.sourceType,
         sourceId:            data.sourceId,
-        reversalAmountPaise: data.netSettlementPaise,
+        reversalAmountPaise: reversalNetPaise,
         debitedPaise:        debited,
         reason:              newStatus === 'disputed' ? 'dispute' : 'refund',
       })
@@ -212,6 +233,10 @@ export async function reversePlatformTransactionAndDebit(
 
     return { found: true, reversed: true, debited, insolvent }
   })
+
+  // RD-PRICING-02D: record the reversal's settlement source ONCE, post-commit (only on
+  // a real reversal, so a retried/idempotent no-op never inflates the counters).
+  if (result.reversed) recordWalletSettlementMetric(settlementSource)
 
   if (result.reversed && result.insolvent) {
     captureFinancialError('wallet_under_debit', {

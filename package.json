@@ -10,6 +10,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "seed:demo": "npx tsx scripts/seed-demo-events.ts",
     "deploy:firebase": "firebase deploy --only firestore:rules,firestore:indexes,storage"
   },
@@ -45,6 +47,7 @@
     "eslint": "^9",
     "eslint-config-next": "16.2.7",
     "tailwindcss": "^4",
-    "typescript": "^5"
+    "typescript": "^5",
+    "vitest": "^4.1.10"
   }
 }

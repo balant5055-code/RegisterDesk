@@ -6,6 +6,8 @@ import { FieldValue }            from 'firebase-admin/firestore'
 import { adminDb }               from '@/lib/firebase/admin'
 import { logAdminAction }        from '@/lib/admin/audit'
 import { notificationEngine, NotificationType, NotificationChannel } from '@/lib/notifications'
+import { resolveOrganizerEmailIdentity } from '@/lib/organizer/emailIdentity'
+import { writeEmailLog }          from '@/lib/email-logs/write'
 import { emailShell, escHtml }   from '@/lib/email/templates/base'
 import { effectiveModerationStatus } from '@/lib/admin/moderation'
 import type { ModerationStatus }     from '@/lib/admin/moderation'
@@ -170,18 +172,50 @@ export function notifyOrganizerModeration(
   reason:       string,
 ): void {
   void (async () => {
+    // Base communication-log row shared by every outcome so NO path exits silently —
+    // every moderation-email attempt is traceable (RD-AUTH-02).
+    const logBase = {
+      organizerUid: organizerUid || '',
+      eventId:      '',
+      eventSlug:    '',
+      eventName:    title,
+      templateKey:  `moderation_${action}`,
+      provider:     'ses',
+      channel:      'email' as const,
+    }
     try {
-      if (!organizerUid) return
-      if (!notificationEngine.isAvailable(NotificationChannel.EMAIL)) return
-      const userSnap = await adminDb.doc(`users/${organizerUid}`).get()
-      if (!userSnap.exists) return
-      const user = userSnap.data() as { name?: string; email?: string }
-      if (!user.email) return
+      if (!organizerUid) {
+        void writeEmailLog({ ...logBase, recipientEmail: '', recipientName: '', subject: `Moderation: ${action}`, status: 'skipped', error: 'No organizer uid on moderated item' })
+        return
+      }
 
-      const { subject, body } = buildModerationEmail(kind, action, user.name ?? 'there', title, reason)
-      await notificationEngine.send(NotificationType.CUSTOM_EMAIL, { to: user.email, subject, html: emailShell(subject, body) })
+      // Canonical recipient resolution: Firestore profile first, Firebase Auth as the
+      // authoritative email-identity fallback when the profile is a phantom ancestor.
+      const identity = await resolveOrganizerEmailIdentity(organizerUid)
+      const { subject, body } = buildModerationEmail(kind, action, identity.name || 'there', title, reason)
+
+      if (!notificationEngine.isAvailable(NotificationChannel.EMAIL)) {
+        void writeEmailLog({ ...logBase, recipientEmail: identity.email, recipientName: identity.name, subject, status: 'skipped', error: 'Email provider not configured' })
+        return
+      }
+      if (!identity.email) {
+        void writeEmailLog({ ...logBase, recipientEmail: '', recipientName: identity.name, subject, status: 'skipped', error: `No email on file for organizer ${organizerUid} (Firestore profile + Auth record both empty)` })
+        return
+      }
+
+      const result = await notificationEngine.send(NotificationType.CUSTOM_EMAIL, { to: identity.email, subject, html: emailShell(subject, body) })
+      void writeEmailLog({
+        ...logBase,
+        recipientEmail:    identity.email,
+        recipientName:     identity.name,
+        subject,
+        status:            result.success ? 'sent' : 'failed',
+        providerMessageId: result.messageId,
+        error:             result.success ? undefined : result.error,
+      })
     } catch (err) {
       console.error('[email] moderation notification failed:', err)
+      void writeEmailLog({ ...logBase, recipientEmail: '', recipientName: '', subject: `Moderation: ${action}`, status: 'failed', error: err instanceof Error ? err.message : 'unknown error' })
     }
   })()
 }

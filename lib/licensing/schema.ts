@@ -10,9 +10,9 @@
 // so this module has no Firebase runtime import.
 
 import {
-  isEventLicenseTier,
   isEventLicenseStatus,
-  type EventLicenseTier,
+  isValidTierForVersion,
+  type AnyEventLicenseTier,
   type EventLicenseStatus,
   type EventLicenseFeature,
   type EventLicenseLimitKey,
@@ -34,13 +34,17 @@ type Timestamp = FirebaseFirestore.Timestamp
 export interface EventLicenseDoc {
   eventId:      string             // doc id (also stored for convenience)
   organizerUid: string
-  tier:         EventLicenseTier
+  // RD-LICENSE-01B: widened to AnyEventLicenseTier so the SAME doc shape can hold a V1
+  // tier (version 1) OR a V2 tier (version 2). The stored `version` selects the valid
+  // vocabulary; historical docs (V1 tiers) remain valid. Widening a union is additive —
+  // every existing narrowing guard (isEventLicenseTier(doc.tier) ? …) still works.
+  tier:         AnyEventLicenseTier
   status:       EventLicenseStatus // 'pending' until a paid order is captured; 'active' otherwise
   version:      LicenseVersion     // license schema version this event was issued under
   amountPaise:  number             // one-time license price paid; 0 for free (starter) / admin grant
   orderId:      string | null      // licenseOrders doc id, or null (free / admin grant)
   paidAt:       Timestamp | null
-  upgradedFrom: EventLicenseTier | null  // previous tier when this license was upgraded
+  upgradedFrom: AnyEventLicenseTier | null  // previous tier when this license was upgraded
   upgradedAt:   Timestamp | null
   createdAt:    Timestamp
   updatedAt:    Timestamp
@@ -89,8 +93,10 @@ export interface LicenseOrderDoc {
   orderId:           string            // doc id (also stored for convenience)
   eventId:           string
   organizerUid:      string
-  tier:              EventLicenseTier  // tier being purchased / upgraded to
-  fromTier:          EventLicenseTier | null  // set for upgrades (pay-the-difference)
+  // RD-LICENSE-GA-02: widened to AnyEventLicenseTier so a V2 order is representable.
+  // Orders carry no `version` — they are transient current-version artifacts.
+  tier:              AnyEventLicenseTier  // tier being purchased / upgraded to
+  fromTier:          AnyEventLicenseTier | null  // set for upgrades (pay-the-difference)
   purpose:           LicenseOrderPurpose
   amountPaise:       number
   currency:          'INR'
@@ -161,8 +167,10 @@ export interface LicenseHistoryDoc {
   eventId:      string
   organizerUid: string
   action:       LicenseHistoryAction
-  fromTier:     EventLicenseTier | null
-  toTier:       EventLicenseTier
+  // RD-LICENSE-01B — widened to AnyEventLicenseTier so a V2 license's history is
+  // representable. Historical (V1-tier) records remain valid; additive.
+  fromTier:     AnyEventLicenseTier | null
+  toTier:       AnyEventLicenseTier
   source:       LicenseHistorySource
   orderId:      string | null
   actorUid:     string | null     // acting admin/user uid when source = 'admin'
@@ -227,23 +235,35 @@ const isNonEmptyString = (v: unknown): v is string => typeof v === 'string' && v
 const isNonNegativeInt = (v: unknown): v is number =>
   typeof v === 'number' && Number.isInteger(v) && v >= 0
 
-/** Pure shape validation for an event license doc before it is written. */
+/**
+ * Pure shape validation for an event license doc before it is written.
+ * RD-LICENSE-01B: the tier is validated against the doc's `version` (version 1 → V1
+ * vocabulary, version 2 → V2 vocabulary). Version-DRIVEN — the tier name is never used
+ * to infer the version. Historical V1 writes are unaffected (v1 tiers still pass).
+ */
 export function validateEventLicense(input: Partial<EventLicenseDoc>): LicenseValidationResult {
   const errors: string[] = []
+  const version = typeof input.version === 'number' ? input.version : 1
   if (!isNonEmptyString(input.organizerUid))  errors.push('organizerUid is required')
-  if (!isEventLicenseTier(input.tier))         errors.push('tier is not a valid EventLicenseTier')
-  if (!isEventLicenseStatus(input.status))     errors.push('status is not a valid EventLicenseStatus')
   if (typeof input.version !== 'number' || input.version < 1) errors.push('version must be a positive integer')
+  if (!isValidTierForVersion(input.tier, version)) errors.push(`tier is not valid for license version ${version}`)
+  if (!isEventLicenseStatus(input.status))     errors.push('status is not a valid EventLicenseStatus')
   if (!isNonNegativeInt(input.amountPaise))    errors.push('amountPaise must be a non-negative integer')
   return { valid: errors.length === 0, errors }
 }
 
-/** Pure shape validation for a license order doc before it is written. */
+/**
+ * Pure shape validation for a license order doc before it is written.
+ * The tier is validated against the order's `version` when present (else V1), mirroring
+ * the license-doc rule so a V2 order carries a V2 tier. Additive — V1 orders unaffected.
+ */
 export function validateLicenseOrder(input: Partial<LicenseOrderDoc>): LicenseValidationResult {
   const errors: string[] = []
+  const version = typeof (input as { version?: unknown }).version === 'number'
+    ? (input as { version: number }).version : 1
   if (!isNonEmptyString(input.eventId))       errors.push('eventId is required')
   if (!isNonEmptyString(input.organizerUid))  errors.push('organizerUid is required')
-  if (!isEventLicenseTier(input.tier))        errors.push('tier is not a valid EventLicenseTier')
+  if (!isValidTierForVersion(input.tier, version)) errors.push(`tier is not valid for license version ${version}`)
   if (!isNonNegativeInt(input.amountPaise))   errors.push('amountPaise must be a non-negative integer')
   if (input.currency !== 'INR')               errors.push("currency must be 'INR'")
   return { valid: errors.length === 0, errors }

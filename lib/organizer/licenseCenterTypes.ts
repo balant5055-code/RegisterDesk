@@ -1,7 +1,7 @@
 // Client-safe types for the Organizer License Center (RD-LIC-ORG-01).
 // NO server imports — shared by the detail API route and the page.
 
-import type { EventLicenseTier, EventLicenseFeature } from '@/lib/licensing/eventLicense'
+import type { AnyEventLicenseTier, EventLicenseFeature } from '@/lib/licensing/eventLicense'
 
 export type LicenseCenterStatus = 'active' | 'pending' | 'suspended' | 'cancelled'
 export type LicenseCenterPayment = 'paid' | 'pending' | 'failed' | 'refunded' | 'free' | 'complimentary'
@@ -34,7 +34,7 @@ export interface LicenseBilling {
 }
 
 export interface LicenseUpgradeOption {
-  nextTier:               EventLicenseTier
+  nextTier:               AnyEventLicenseTier
   nextTierName:           string
   currentPricePaise:      number
   nextPricePaise:         number
@@ -47,7 +47,7 @@ export interface LicenseCenterDetail {
   eventName:    string
   eventStatus:  string | null
 
-  tier:         EventLicenseTier
+  tier:         AnyEventLicenseTier
   tierName:     string
   status:       LicenseCenterStatus
   payment:      LicenseCenterPayment

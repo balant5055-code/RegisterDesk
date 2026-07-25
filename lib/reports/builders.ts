@@ -12,6 +12,7 @@ import {
   REPORT_ROW_CAP,
 } from '@/lib/reports/types'
 import { toMillis, toISO, rangeBounds } from '@/lib/reports/format'
+import { readReportFromLedgerData } from '@/lib/platform/pricing'
 
 // ─── Shared fetch: indexed (organizerUid, timeField) query, capped ─────────────
 async function fetchCapped(
@@ -46,17 +47,18 @@ export async function buildTransactions(uid: string, f: ReportFilters): Promise<
     if (f.event && d.entityId !== f.event) continue
     if (f.campaign && d.entityId !== f.campaign) continue
     if (f.status && d.status !== f.status) continue
+    const fig = readReportFromLedgerData(d)   // RD-PRICING-02F: snapshot-first (== ledger)
     rows.push({
       paidAt:    toISO(d.paidAt),
       type:      String(d.type ?? ''),
       category:  String(d.category ?? ''),
       entity:    String(d.entityId ?? ''),
       payer:     String(d.payerName ?? ''),
-      gross:     Number(d.grossAmountPaise ?? 0),
-      fee:       Number(d.platformFeeTotalPaise ?? 0),
-      gst:       Number(d.platformFeeGstPaise ?? 0),
-      gateway:   Number(d.gatewayFeeEstimatePaise ?? 0),
-      net:       Number(d.netSettlementPaise ?? 0),
+      gross:     fig.grossAmountPaise,
+      fee:       fig.platformFeeTotalPaise,
+      gst:       fig.platformFeeGstPaise,
+      gateway:   fig.gatewayFeeEstimatePaise,
+      net:       fig.netSettlementPaise,
       status:    String(d.status ?? ''),
     })
   }
@@ -328,8 +330,9 @@ export async function buildGst(uid: string, f: ReportFilters): Promise<ReportTab
     const iso = toISO(d.paidAt)
     const month = iso ? iso.slice(0, 7) : 'undated'
     const b = buckets.get(month) ?? { taxable: 0, gst: 0, count: 0 }
-    b.taxable += Number(d.platformFeeBasePaise ?? 0)
-    b.gst     += Number(d.platformFeeGstPaise ?? 0)
+    const fig = readReportFromLedgerData(d)   // RD-PRICING-02F: snapshot-first (== ledger)
+    b.taxable += fig.platformFeeBasePaise
+    b.gst     += fig.platformFeeGstPaise
     b.count   += 1
     buckets.set(month, b)
   }
@@ -368,10 +371,11 @@ export async function buildPayoutStatement(uid: string, f: ReportFilters): Promi
   for (const doc of txn.docs) {
     const d = doc.data()
     if (!inRange(d.paidAt, fromMs, toMs)) continue
-    gross    += Number(d.grossAmountPaise ?? 0)
-    feesBase += Number(d.platformFeeBasePaise ?? 0)
-    gst      += Number(d.platformFeeGstPaise ?? 0)
-    gateway  += Number(d.gatewayFeeEstimatePaise ?? 0)
+    const fig = readReportFromLedgerData(d)   // RD-PRICING-02F: snapshot-first (== ledger)
+    gross    += fig.grossAmountPaise
+    feesBase += fig.platformFeeBasePaise
+    gst      += fig.platformFeeGstPaise
+    gateway  += fig.gatewayFeeEstimatePaise
     count++
   }
 

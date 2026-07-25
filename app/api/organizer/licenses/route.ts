@@ -13,15 +13,18 @@ import {
   EVENT_LICENSES_COLLECTION, LICENSE_ORDERS_COLLECTION,
 } from '@/lib/licensing/schema'
 import {
-  isEventLicenseTier, isUnlimited,
-  type EventLicenseTier,
+  isValidTierForVersion, isUnlimited,
+  type AnyEventLicenseTier, type LicenseVersion,
 } from '@/lib/licensing/eventLicense'
-import { getLicenseCatalog } from '@/lib/licensing/resolveCatalog'
+import { getLicenseCatalog, getLicenseCatalogV2 } from '@/lib/licensing/resolveCatalog'
+import { resolveLicenseEntryForVersion } from '@/lib/licensing/licenseCatalogShared'
 
 export interface OrganizerLicenseRow {
   slug:              string
   eventName:         string
-  tier:              EventLicenseTier
+  // RD-LICENSE-01B Phase 3C: tier is the STORED tier (V1 or V2) resolved against `version`.
+  tier:              AnyEventLicenseTier
+  version:           LicenseVersion   // license schema version — drives client-side display
   status:            string    // 'active' | 'pending_approval' | 'changes_requested' | 'rejected' | 'cancelled' | 'pending_payment'
   maxRegistrations:  number | null   // null = unlimited
   used:              number
@@ -95,17 +98,20 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   const walletMap = new Map<string, number>()
   ledgerSnaps.forEach((s) => { if (s.exists) walletMap.set(s.id, ((s.data() as { amountPaise?: number }).amountPaise) ?? 0) })
 
-  // Effective (config-aware) catalog for registration limits — one source of truth.
-  const catalog = await getLicenseCatalog()
+  // Effective (config-aware) V1 + V2 catalogs — a license resolves against the catalog
+  // for ITS stored version (Phase 3C), so historical V1 licenses and future V2 licenses
+  // both render correctly. One source of truth; no hardcoded limits.
+  const [catalog, catalogV2] = await Promise.all([getLicenseCatalog(), getLicenseCatalogV2()])
   const licenses: OrganizerLicenseRow[] = snap.docs.map((doc) => {
-    const d    = doc.data() as Record<string, unknown>
-    const tier = isEventLicenseTier(d.tier) ? d.tier : 'starter'
+    const d       = doc.data() as Record<string, unknown>
+    const version = typeof d.version === 'number' && d.version >= 1 ? d.version : 1
+    const tier    = isValidTierForVersion(d.tier, version) ? d.tier : 'starter'
     const ev   = eventMap.get(doc.id)
     const orderId = typeof d.orderId === 'string' ? d.orderId : null
     const order   = orderId ? orderMap.get(orderId) : undefined
     const draftId = orderId && orderId.startsWith('lic_') ? orderId.slice(4) : null
 
-    const maxReg = catalog[tier].limits.maxRegistrations
+    const maxReg = resolveLicenseEntryForVersion(catalog, catalogV2, tier, version).registrationLimit
     const used   = usedMap.get(doc.id) ?? 0
     const maxRegistrations = isUnlimited(maxReg) ? null : maxReg
 
@@ -114,6 +120,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       eventName:         typeof str(ev, 'eventDetails', 'info', 'name') === 'string'
         ? (str(ev, 'eventDetails', 'info', 'name') as string) : doc.id,
       tier,
+      version,
       status:            deriveStatus(ev, typeof d.status === 'string' ? d.status : 'active'),
       maxRegistrations,
       used,

@@ -4,6 +4,7 @@ import Link from 'next/link'
 import { motion } from 'framer-motion'
 import { Calendar, Monitor, Users, ArrowRight, Wifi, MapPin, Layers } from 'lucide-react'
 import type { PassPublic } from '@/components/event-templates/types'
+import { passDisplayPrice } from '@/components/event-templates/shared/utils/format'
 import type { Speaker } from '@/components/wizard/eventDetailsConfig'
 
 // ─── Helpers ───────────────────────────────────────────────────────────────────
@@ -18,6 +19,13 @@ function fmtDate(d: string) {
 
 function fmtINR(n: number) {
   return new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 0 }).format(n)
+}
+
+function fmtTime(t: string) {
+  if (!t) return ''
+  const [h, m] = t.split(':').map(Number)
+  const dt = new Date(); dt.setHours(h!, m ?? 0, 0)
+  return dt.toLocaleTimeString('en-IN', { hour: 'numeric', minute: '2-digit', hour12: true })
 }
 
 function daysBetween(start: string, end: string): number {
@@ -35,8 +43,11 @@ export interface WorkshopHeroProps {
   eventSubtype?:    string
   bannerUrl:        string
   startDate:        string
+  startTime?:       string
   endDate:          string
   venueType:        'physical' | 'online' | 'hybrid'
+  venueName?:       string
+  city?:            string
   registrationOpen: boolean
   isFreeEvent:      boolean
   passes:           PassPublic[]
@@ -49,12 +60,12 @@ export interface WorkshopHeroProps {
 
 export function WorkshopHero({
   title, tagline, eventSubtype, bannerUrl,
-  startDate, endDate, venueType,
+  startDate, startTime, endDate, venueType, venueName, city,
   registrationOpen, isFreeEvent, passes, slug,
   leadInstructor, batchSize,
 }: WorkshopHeroProps) {
   const activePasses = passes.filter(p => p.status !== 'inactive')
-  const minPrice     = activePasses.length > 0 ? Math.min(...activePasses.map(p => p.price)) : 0
+  const minPrice     = activePasses.length > 0 ? Math.min(...activePasses.map(p => passDisplayPrice(p))) : 0
   const priceLabel   = isFreeEvent || minPrice === 0 ? 'Free' : fmtINR(minPrice)
   const days         = daysBetween(startDate, endDate)
 
@@ -131,17 +142,33 @@ export function WorkshopHero({
               </motion.div>
             )}
 
-            {/* Start date */}
-            {startDate && (
-              <motion.p {...fi(0.18)} className="mb-6 flex items-center gap-2 text-sm text-gray-500">
-                <Calendar className="size-4 shrink-0 text-gray-400" aria-hidden />
-                <span>
-                  Starts <strong className="text-gray-800">{fmtDate(startDate)}</strong>
-                  {endDate && endDate !== startDate && (
-                    <> · Ends <strong className="text-gray-800">{fmtDate(endDate)}</strong></>
-                  )}
-                </span>
-              </motion.p>
+            {/* When + Where (03B.2 hero completeness — time + venue were missing) */}
+            {(startDate || venueType === 'online' || venueName?.trim()) && (
+              <motion.div {...fi(0.18)} className="mb-6 flex flex-col gap-2 text-sm text-gray-500">
+                {startDate && (
+                  <span className="flex items-center gap-2">
+                    <Calendar className="size-4 shrink-0 text-gray-400" aria-hidden />
+                    <span>
+                      Starts <strong className="text-gray-800">{fmtDate(startDate)}</strong>
+                      {startTime && <> · <strong className="text-gray-800">{fmtTime(startTime)}</strong></>}
+                      {endDate && endDate !== startDate && (
+                        <> · Ends <strong className="text-gray-800">{fmtDate(endDate)}</strong></>
+                      )}
+                    </span>
+                  </span>
+                )}
+                {venueType === 'online' ? (
+                  <span className="flex items-center gap-2">
+                    <Wifi className="size-4 shrink-0 text-gray-400" aria-hidden />
+                    <span className="text-gray-800">Online workshop</span>
+                  </span>
+                ) : venueName?.trim() ? (
+                  <span className="flex items-center gap-2">
+                    <MapPin className="size-4 shrink-0 text-gray-400" aria-hidden />
+                    <span className="text-gray-800">{city?.trim() ? `${venueName}, ${city}` : venueName}</span>
+                  </span>
+                ) : null}
+              </motion.div>
             )}
 
             <motion.div {...fi(0.19)} className="mb-6 h-px bg-gray-100" />
@@ -162,9 +189,15 @@ export function WorkshopHero({
                   )}
                 </>
               ) : (
-                <span className="inline-flex items-center rounded-full bg-gray-100 px-5 py-2.5 text-sm font-semibold text-gray-500">
-                  Enrollment Closed
-                </span>
+                <>
+                  <span className="inline-flex items-center rounded-full bg-gray-100 px-5 py-2.5 text-sm font-semibold text-gray-500">
+                    Enrollment Closed
+                  </span>
+                  {/* Keep price visible even when closed so the attendee still learns it (03B.2). */}
+                  {!isFreeEvent && minPrice > 0 && (
+                    <span className="text-sm font-medium text-gray-400">From {priceLabel}</span>
+                  )}
+                </>
               )}
             </motion.div>
 

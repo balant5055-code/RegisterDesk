@@ -24,8 +24,14 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   const limit  = Math.min(Math.max(parseInt(sp.get('limit') ?? '', 10) || 50, 1), 100)
   const cursor = sp.get('cursor')?.trim()
 
+  // RD-DISCOVERY-01 Phase 3 (D-H2): enforce the endpoint's documented "published events only"
+  // contract — the SAME visibility rule public discovery and the event-details page use. Without
+  // this, an events.read key received the organizer's draft/pending/unpublished/archived/cancelled
+  // events. Two equality filters + orderBy(documentId) are served by single-field indexes (no new
+  // composite index); the existing cursor strategy is unchanged.
   let q = adminDb.collection('events')
     .where('uid', '==', auth.organizerUid)
+    .where('lifecycleStatus', '==', 'published')
     .orderBy(FieldPath.documentId())
     .limit(limit + 1) as FirebaseFirestore.Query
   if (cursor) q = q.startAfter(cursor) as FirebaseFirestore.Query
@@ -43,7 +49,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       slug:            doc.id,
       name:            str(info.name) ?? '',
       eventType:       str(e.eventType),
-      lifecycleStatus: str(e.lifecycleStatus) ?? 'published',
+      lifecycleStatus: str(e.lifecycleStatus),   // stored value only; the query guarantees 'published'
       startDate:       str(sched.startDate),
       endDate:         str(sched.endDate),
       totalCapacity:   typeof e.totalCapacity === 'number' ? e.totalCapacity : null,

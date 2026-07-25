@@ -12,6 +12,7 @@
 import { NextRequest, NextResponse }        from 'next/server'
 import { authorizeWorkspace }               from '@/lib/team/workspace'
 import { adminDb }                          from '@/lib/firebase/admin'
+import { readFinanceFromLedger }            from '@/lib/platform/pricing'
 import type { PlatformTransactionDocument } from '@/lib/fees/types'
 
 export interface FinanceTransaction {
@@ -78,6 +79,9 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
 
   const transactions: FinanceTransaction[] = pageDocs.map(doc => {
     const d = doc.data() as PlatformTransactionDocument
+    // RD-PRICING-02E: source finance figures from the immutable snapshot (ledger
+    // fallback). Read-only; values are guaranteed byte-identical to the stored ledger.
+    const fig = readFinanceFromLedger(d)
     return {
       id:                      doc.id,
       type:                    d.type,
@@ -86,10 +90,10 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       entityType:              d.entityType,
       payerName:               d.payerName,
       payerEmail:              d.payerEmail,
-      grossAmountPaise:        d.grossAmountPaise,
-      platformFeeTotalPaise:   d.platformFeeTotalPaise,
-      gatewayFeeEstimatePaise: d.gatewayFeeEstimatePaise,
-      netSettlementPaise:      d.netSettlementPaise,
+      grossAmountPaise:        fig.grossAmountPaise,
+      platformFeeTotalPaise:   fig.platformFeeTotalPaise,
+      gatewayFeeEstimatePaise: fig.gatewayFeeEstimatePaise,
+      netSettlementPaise:      fig.netSettlementPaise,
       feeModel:                d.feeModel,
       status:                  d.status,
       paidAt:                  tsToISO(d.paidAt),

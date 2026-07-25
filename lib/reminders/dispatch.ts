@@ -5,7 +5,7 @@
 // communication code. Email is the live channel; the channel field is reserved for
 // WhatsApp/SMS once approved reminder templates exist.
 
-import { FieldValue, Timestamp } from 'firebase-admin/firestore'
+import { FieldValue, Timestamp, FieldPath } from 'firebase-admin/firestore'
 import { adminDb } from '@/lib/firebase/admin'
 import { notificationEngine, NotificationType, NotificationChannel } from '@/lib/notifications'
 import { writeEmailLog } from '@/lib/email-logs/write'
@@ -16,7 +16,7 @@ import { buildReminderContent } from './templates'
 import type { ReminderDocData, ReminderStatus } from './types'
 
 const REMINDERS = adminDb.collection('scheduledReminders')
-const MAX_RECIPIENTS = 2000   // per reminder dispatch (bounded per cron invocation)
+const REMINDER_PAGE = 500     // RD-ORGANIZER-04 P1-4: recipients paged this many at a time
 const WAVE = 20               // concurrent sends per wave (mirrors broadcast delivery)
 const SEND_LEASE_MS = 10 * 60 * 1000   // a 'sending' reminder older than this is presumed dead
 const DEFAULT_BUDGET_MS = 45_000       // stop claiming new work before the 60s function limit
@@ -52,31 +52,45 @@ async function finalize(id: string, status: ReminderStatus, counts: ReminderDocD
   }, { merge: true })
 }
 
-/** Resolve the recipient list for a reminder (attendees = confirmed registrations). */
-async function resolveRecipients(data: ReminderDocData): Promise<Recipient[]> {
-  if (data.audience === 'organizer') {
-    const snap = await adminDb.doc(`users/${data.organizerUid}`).get()
-    const u = snap.exists ? (snap.data() as Record<string, unknown>) : {}
-    const email = typeof u.email === 'string' ? u.email : ''
-    if (!email) return []
-    return [{ email, name: typeof u.name === 'string' ? u.name : (typeof u.organizationName === 'string' ? u.organizationName : '') }]
+/** Resolve the single organizer recipient for an organizer-audience reminder. */
+async function resolveOrganizerRecipients(data: ReminderDocData): Promise<Recipient[]> {
+  const snap = await adminDb.doc(`users/${data.organizerUid}`).get()
+  const u = snap.exists ? (snap.data() as Record<string, unknown>) : {}
+  const email = typeof u.email === 'string' ? u.email : ''
+  if (!email) return []
+  return [{ email, name: typeof u.name === 'string' ? u.name : (typeof u.organizationName === 'string' ? u.organizationName : '') }]
+}
+
+/** Send one reminder to a batch of recipients in concurrent WAVEs, logging each send.
+ *  Returns the sent/failed tally. Shared by the organizer and paged-attendee paths so the
+ *  send + log logic is not duplicated. */
+async function sendReminderWave(
+  recipients: Recipient[],
+  subject:    string,
+  html:       (r: Recipient) => string,
+  data:       ReminderDocData,
+): Promise<{ sent: number; failed: number }> {
+  let sent = 0, failed = 0
+  for (let i = 0; i < recipients.length; i += WAVE) {
+    const wave = recipients.slice(i, i + WAVE)
+    const results = await Promise.all(wave.map(async r => {
+      try {
+        const result = await notificationEngine.send(NotificationType.CUSTOM_EMAIL, { to: r.email, subject, html: html(r) })
+        void writeEmailLog({
+          organizerUid: data.organizerUid, eventId: data.eventId ?? '', eventSlug: data.eventId ?? '',
+          eventName: data.eventName, templateKey: 'event_reminder',
+          recipientEmail: r.email, recipientName: r.name, subject,
+          status: result.success ? 'sent' : 'failed', provider: EMAIL_PROVIDER_NAME, channel: 'email',
+          providerMessageId: result.messageId, error: result.success ? undefined : (result.errorDetail ?? result.error),
+        })
+        return result.success
+      } catch {
+        return false
+      }
+    }))
+    for (const ok of results) { if (ok) sent++; else failed++ }
   }
-  if (!data.eventId) return []
-  const snap = await adminDb.collection('registrations')
-    .where('eventSlug', '==', data.eventId)
-    .where('status', '==', 'confirmed')
-    .limit(MAX_RECIPIENTS)
-    .get()
-  const seen = new Set<string>()
-  const out: Recipient[] = []
-  for (const d of snap.docs) {
-    const r = d.data() as Record<string, unknown>
-    const email = (nested(r, 'attendee', 'email') as string) || ''
-    if (!email || seen.has(email.toLowerCase())) continue
-    seen.add(email.toLowerCase())
-    out.push({ email, name: (nested(r, 'attendee', 'name') as string) || '' })
-  }
-  return out
+  return { sent, failed }
 }
 
 /** Build the reminder content (subject/html) for this reminder, fetching event
@@ -178,38 +192,53 @@ export async function dispatchDueReminders(limit = 50, budgetMs = DEFAULT_BUDGET
     }
 
     try {
-      const recipients = await resolveRecipients(data)
-      if (recipients.length === 0) {
+      const { subject, html } = await buildContent(data)
+      let recipientTotal = 0, sent = 0, failed = 0
+
+      if (data.audience === 'organizer') {
+        const recips  = await resolveOrganizerRecipients(data)
+        recipientTotal = recips.length
+        const r = await sendReminderWave(recips, subject, html, data)
+        sent += r.sent; failed += r.failed
+      } else if (data.eventId) {
+        // RD-ORGANIZER-04 P1-4: page confirmed attendees with a cursor (REMINDER_PAGE at a
+        // time) and send each page — no 2,000 cap, no full-recipient-list memory spike.
+        // Cross-page dedup uses a lightweight email-only Set (not the registration docs).
+        const seen = new Set<string>()
+        let cursor: FirebaseFirestore.QueryDocumentSnapshot | undefined
+        for (;;) {
+          let q = adminDb.collection('registrations')
+            .where('eventSlug', '==', data.eventId)
+            .where('status',    '==', 'confirmed')
+            .orderBy(FieldPath.documentId())
+            .limit(REMINDER_PAGE)
+          if (cursor) q = q.startAfter(cursor)
+          const snap = await q.get()
+          if (snap.empty) break
+          const page: Recipient[] = []
+          for (const d of snap.docs) {
+            const r = d.data() as Record<string, unknown>
+            const email = (nested(r, 'attendee', 'email') as string) || ''
+            if (!email || seen.has(email.toLowerCase())) continue
+            seen.add(email.toLowerCase())
+            page.push({ email, name: (nested(r, 'attendee', 'name') as string) || '' })
+          }
+          recipientTotal += page.length
+          const r = await sendReminderWave(page, subject, html, data)
+          sent += r.sent; failed += r.failed
+          if (snap.size < REMINDER_PAGE) break
+          cursor = snap.docs[snap.docs.length - 1]
+        }
+      }
+
+      if (recipientTotal === 0) {
         await finalize(doc.id, 'skipped', { recipients: 0, sent: 0, failed: 0, skipped: 0 }, 'no_recipients')
         outcome.skipped++
         continue
       }
 
-      const { subject, html } = await buildContent(data)
-      let sent = 0, failed = 0
-
-      for (let i = 0; i < recipients.length; i += WAVE) {
-        const wave = recipients.slice(i, i + WAVE)
-        const results = await Promise.all(wave.map(async r => {
-          try {
-            const result = await notificationEngine.send(NotificationType.CUSTOM_EMAIL, { to: r.email, subject, html: html(r) })
-            void writeEmailLog({
-              organizerUid: data.organizerUid, eventId: data.eventId ?? '', eventSlug: data.eventId ?? '',
-              eventName: data.eventName, templateKey: 'event_reminder',
-              recipientEmail: r.email, recipientName: r.name, subject,
-              status: result.success ? 'sent' : 'failed', provider: EMAIL_PROVIDER_NAME, channel: 'email',
-              providerMessageId: result.messageId, error: result.success ? undefined : (result.errorDetail ?? result.error),
-            })
-            return result.success
-          } catch {
-            return false
-          }
-        }))
-        for (const ok of results) { if (ok) sent++; else failed++ }
-      }
-
       const status: ReminderStatus = sent === 0 ? 'failed' : failed > 0 ? 'partial' : 'sent'
-      await finalize(doc.id, status, { recipients: recipients.length, sent, failed, skipped: 0 })
+      await finalize(doc.id, status, { recipients: recipientTotal, sent, failed, skipped: 0 })
       if (status === 'failed') outcome.failed++; else outcome.dispatched++
     } catch (err) {
       // Single-attempt by design: a claimed fan-out is never re-sent (no duplicate

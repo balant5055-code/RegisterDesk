@@ -12,6 +12,7 @@
 
 import { useRef, useState } from 'react'
 import Link from 'next/link'
+import { buildRegisterHref } from '@/lib/events/registerHref'
 import { motion, useReducedMotion } from 'framer-motion'
 import {
   Users, CalendarClock, ShieldCheck, Zap, RotateCcw, ArrowRight, Check,
@@ -20,7 +21,7 @@ import type { LucideIcon } from 'lucide-react'
 import { cn } from '@/lib/utils/cn'
 import type { PassPublic } from '@/components/event-templates/types'
 import type { PassAvailability } from '@/lib/registrations/types'
-import { formatINR, formatDateShort } from '@/components/event-templates/shared/utils/format'
+import { formatINR, formatDateShort, passDisplayPrice } from '@/components/event-templates/shared/utils/format'
 import { SectionShell, SectionHeader } from '@/components/event-templates/shared/ui/framework'
 
 // ─── Data model ─────────────────────────────────────────────────────────────────
@@ -59,7 +60,7 @@ export function passesToChallenges(
       return {
         id:          p.id,
         name:        p.name.trim(),
-        price:       p.price,
+        price:       passDisplayPrice(p),
         isFree:      p.price === 0,
         description: p.description?.trim() || undefined,
         distance:    cat?.distance?.trim() || undefined,
@@ -130,7 +131,7 @@ export function ChallengeSelectionSection({
   }
 
   const canRegister = registrationOpen && !!selected && selected.selectable
-  const registerHref = selected ? `/events/${slug}/register?pass=${selected.id}` : '#'
+  const registerHref = selected ? buildRegisterHref(slug, selected.id) : '#'
 
   const trust = [
     { icon: ShieldCheck, label: 'Secure Registration' },

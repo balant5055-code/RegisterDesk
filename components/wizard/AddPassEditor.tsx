@@ -1424,22 +1424,9 @@ function PassPreview({
         </div>
       </div>
 
-      {/* Quick templates */}
-      <div className="rounded-xl border border-border bg-card p-4 shadow-sm">
-        <p className="mb-1 text-[12px] font-semibold text-foreground">Quick Templates</p>
-        <p className="mb-3 text-[12px] text-muted-foreground">Use templates to save time</p>
-        <div className="grid grid-cols-2 gap-1.5">
-          {subtypeCfg.templates.map(t => (
-            <button
-              key={t.name}
-              type="button"
-              className="rounded-lg border border-border bg-card px-2 py-2 text-left text-[13px] font-medium text-foreground transition-colors hover:border-primary/30 hover:bg-primary/[0.03] hover:text-primary"
-            >
-              {t.name}
-            </button>
-          ))}
-        </div>
-      </div>
+      {/* RD-PRODUCT-01D — the "Quick Templates" panel was removed: its buttons had no
+          onClick (dead controls). Phase 3 requires shown controls to work; wiring
+          template→pass prefill is deferred to a dedicated sprint. */}
 
       {/* Help */}
       <div className="rounded-xl border border-primary/10 bg-primary/[0.04] px-4 py-3">

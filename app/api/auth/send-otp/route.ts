@@ -32,7 +32,9 @@ export async function POST(req: Request): Promise<NextResponse> {
 
   let decoded: DecodedIdToken
   try {
-    decoded = await adminAuth.verifyIdToken(bearer)
+    // checkRevoked: true — consistent with the auth-critical verifiers (verifyCaller,
+    // resolveAdminUid) so a revoked session can't drive the email-verification flow.
+    decoded = await adminAuth.verifyIdToken(bearer, true)
   } catch {
     return NextResponse.json({ error: 'UNAUTHORIZED' }, { status: 401 })
   }

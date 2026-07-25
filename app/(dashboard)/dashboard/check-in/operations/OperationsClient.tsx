@@ -13,6 +13,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
 import { auth } from '@/lib/firebase/auth'
 import { cn } from '@/lib/utils/cn'
+import { registrationStatusCls } from '@/lib/ui/statusColors'
 import { useToast } from '@/components/ui/Toast'
 import { PageHeader, buttonVariants, EmptyState } from '@/components/ui'
 import {
@@ -146,7 +147,7 @@ export function OperationsClient() {
   }, [])
   const selReg = selected ? (regs ?? []).find(r => r.id === selected.id) ?? null : null
 
-  if (loading) return <div className="flex h-[60vh] items-center justify-center"><Loader2 className="size-6 animate-spin text-muted-foreground" /></div>
+  if (loading) return <div className="flex h-[60vh] items-center justify-center"><Loader2 className="size-6 animate-spin text-muted-foreground motion-reduce:animate-none" /></div>
 
   return (
     <div className="space-y-5 p-4 sm:p-6">
@@ -258,7 +259,7 @@ export function OperationsClient() {
                   {walkInRegs.map(r => (
                     <li key={r.id} className="flex items-center justify-between py-2 text-[13px]">
                       <span className="min-w-0"><span className="font-medium text-foreground">{r.attendee.name}</span><span className="ml-2 text-[12px] text-muted-foreground">{r.passName} · {r.ticketCode}</span></span>
-                      <span className={cn('shrink-0 rounded-full px-2 py-0.5 text-[11px] font-semibold', r.checkedIn ? 'bg-emerald-100 text-emerald-700' : 'bg-muted text-muted-foreground')}>{r.checkedIn ? 'Checked in' : r.status}</span>
+                      <span className={cn('shrink-0 rounded-full px-2 py-0.5 text-[11px] font-semibold capitalize', r.checkedIn ? 'bg-emerald-100 text-emerald-700' : (registrationStatusCls[r.status] ?? 'bg-muted text-muted-foreground'))}>{r.checkedIn ? 'Checked in' : r.status}</span>
                     </li>
                   ))}
                 </ul>
@@ -286,15 +287,15 @@ export function OperationsClient() {
                 <div className="rounded-2xl border border-border bg-card py-6"><EmptyState icon={Users} title="No participants match" description="Adjust the search or pass filter." /></div>
               ) : (
                 <div className="overflow-x-auto rounded-2xl border border-border bg-card">
-                  <table className="w-full min-w-[680px] text-left text-[13px]">
+                  <table role="table" className="w-full min-w-[680px] text-left text-[13px]">
                     <thead className="bg-muted/40 text-[12px] uppercase tracking-wide text-muted-foreground">
                       <tr>
-                        <th className="px-3 py-2.5">
+                        <th scope="col" className="px-3 py-2.5">
                           <input type="checkbox" aria-label="Select all"
                             checked={participants.length > 0 && participants.every(r => picked.has(r.id))}
                             onChange={e => setPicked(prev => { const nx = new Set(prev); if (e.target.checked) participants.forEach(r => nx.add(r.id)); else participants.forEach(r => nx.delete(r.id)); return nx })} />
                         </th>
-                        {['Name', 'Ticket', 'Pass', 'Status', 'Checked in'].map(h => <th key={h} className="px-4 py-2.5 font-semibold">{h}</th>)}
+                        {['Name', 'Ticket', 'Pass', 'Status', 'Checked in'].map(h => <th key={h} scope="col" className="px-4 py-2.5 font-semibold">{h}</th>)}
                       </tr>
                     </thead>
                     <tbody>
@@ -302,6 +303,7 @@ export function OperationsClient() {
                         <tr key={r.id} className={cn('border-t border-border hover:bg-muted/20', picked.has(r.id) && 'bg-primary/5')}>
                           <td className="px-3 py-2.5" onClick={e => e.stopPropagation()}>
                             <input type="checkbox" checked={picked.has(r.id)}
+                              aria-label={`Select ${r.attendee.name || r.ticketCode || r.id}`}
                               onChange={e => setPicked(prev => { const nx = new Set(prev); if (e.target.checked) nx.add(r.id); else nx.delete(r.id); return nx })} />
                           </td>
                           <td className="cursor-pointer px-4 py-2.5" onClick={() => void openParticipant(r.id)}><p className="font-medium text-foreground">{r.attendee.name || '—'}</p><p className="text-[11px] text-muted-foreground">{r.attendee.email}</p></td>
@@ -354,7 +356,7 @@ function Metric({ label, value, icon: Icon, tone }: { label: string; value: numb
   )
 }
 function Skeleton() {
-  return <div className="space-y-2">{[0, 1, 2].map(i => <div key={i} className="h-4 w-full animate-pulse rounded bg-muted" />)}</div>
+  return <div className="space-y-2">{[0, 1, 2].map(i => <div key={i} className="h-4 w-full animate-pulse rounded bg-muted motion-reduce:animate-none" />)}</div>
 }
 function Placeholder({ icon, title, description, cta }: { icon: LucideIcon; title: string; description: string; cta?: { href: string; label: string } }) {
   return (

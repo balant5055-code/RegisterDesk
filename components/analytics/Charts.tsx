@@ -14,10 +14,10 @@ const nf = (n: number) => n.toLocaleString('en-IN')
 
 // ─── Vertical bar chart (time series: registrations/day, revenue/day) ──────────
 
-export function Bars({ data, height = 120, format }: { data: ChartPoint[]; height?: number; format?: (n: number) => string }) {
+export function Bars({ data, height = 120, format, label }: { data: ChartPoint[]; height?: number; format?: (n: number) => string; label?: string }) {
   const max = Math.max(1, ...data.map(d => d.value))
   return (
-    <div className="w-full">
+    <div className="w-full" role={label ? 'img' : undefined} aria-label={label}>
       <div className="flex items-end gap-[3px]" style={{ height }}>
         {data.map((d, i) => (
           <div key={i} className="group relative flex flex-1 items-end" title={`${d.label}: ${format ? format(d.value) : nf(d.value)}`}>
@@ -41,10 +41,10 @@ export function Bars({ data, height = 120, format }: { data: ChartPoint[]; heigh
 
 // ─── Horizontal bars (breakdowns: pass sales, coupons) ─────────────────────────
 
-export function HBars({ data, format }: { data: ChartPoint[]; format?: (n: number) => string }) {
+export function HBars({ data, format, label }: { data: ChartPoint[]; format?: (n: number) => string; label?: string }) {
   const max = Math.max(1, ...data.map(d => d.value))
   return (
-    <ul className="space-y-2">
+    <ul className="space-y-2" role={label ? 'img' : undefined} aria-label={label}>
       {data.map((d, i) => (
         <li key={i}>
           <div className="mb-0.5 flex items-center justify-between gap-2 text-[12.5px]">
@@ -62,13 +62,13 @@ export function HBars({ data, format }: { data: ChartPoint[]; format?: (n: numbe
 
 // ─── Donut (payment status, distribution) ──────────────────────────────────────
 
-export function Donut({ segments, size = 132 }: { segments: ChartPoint[]; size?: number }) {
+export function Donut({ segments, size = 132, label }: { segments: ChartPoint[]; size?: number; label?: string }) {
   const total = segments.reduce((s, d) => s + d.value, 0)
   const r = size / 2 - 12
   const c = 2 * Math.PI * r
   let offset = 0
   return (
-    <div className="flex items-center gap-4">
+    <div className="flex items-center gap-4" role={label ? 'img' : undefined} aria-label={label}>
       <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} className="shrink-0">
         <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="currentColor" strokeWidth={12} className="text-muted" />
         {total > 0 && segments.map((d, i) => {

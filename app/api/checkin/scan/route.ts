@@ -21,6 +21,7 @@ import { checkRateLimit }               from '@/lib/rateLimit'
 import { enqueueWebhook }                from '@/lib/integrations/webhooks'
 import { crmRecordCheckIn }              from '@/lib/crm/service'
 import { consumeIdentifier }             from '@/lib/identifiers/engine'
+import { checkInBlockReason, type CheckInBlockReason } from '@/lib/registrations/checkinEligibility'
 import type { RegistrationDocument }    from '@/lib/registrations/types'
 
 // ─── Response types ───────────────────────────────────────────────────────────
@@ -116,22 +117,20 @@ export async function POST(req: NextRequest): Promise<NextResponse<CheckInResult
   }
 
   // ── Registration status and payment eligibility ──────────────────────────
-  if (reg.status === 'cancelled') {
-    return NextResponse.json({ success: false, error: 'REGISTRATION_CANCELLED' }, { status: 422 })
-  }
-
-  // P1-2: Pending registrations (manual approval not yet granted) must not be
-  // admitted. Only 'confirmed' registrations are eligible; 'pending' means the
-  // organizer has not reviewed or approved the application yet.
-  if (reg.status === 'pending') {
-    return NextResponse.json({ success: false, error: 'REGISTRATION_PENDING' }, { status: 422 })
-  }
-
-  // P1-1: Refunded registrations retain status:'confirmed' because the refund
-  // flow updates only paymentStatus. Checking paymentStatus here closes the gap
-  // that would otherwise allow a refunded attendee to enter the event.
-  if (reg.paymentStatus === 'refunded') {
-    return NextResponse.json({ success: false, error: 'REGISTRATION_REFUNDED' }, { status: 422 })
+  // RD-ORGANIZER-01 P0-1: use the ONE canonical eligibility rule shared with the
+  // bulk / canonical checkInRegistration path (lib/registrations/checkinEligibility).
+  // This closes the prior gap where a `rejected` registration was admitted at the QR
+  // gate while the bulk path blocked it. Cancelled/pending/refunded keep their exact
+  // error codes; rejected now returns REGISTRATION_REJECTED.
+  const blockReason = checkInBlockReason(reg)
+  if (blockReason) {
+    const errorByReason: Record<CheckInBlockReason, string> = {
+      CANCELLED: 'REGISTRATION_CANCELLED',
+      PENDING:   'REGISTRATION_PENDING',
+      REJECTED:  'REGISTRATION_REJECTED',
+      REFUNDED:  'REGISTRATION_REFUNDED',
+    }
+    return NextResponse.json({ success: false, error: errorByReason[blockReason] }, { status: 422 })
   }
 
   // ── Already checked in ────────────────────────────────────────────────────

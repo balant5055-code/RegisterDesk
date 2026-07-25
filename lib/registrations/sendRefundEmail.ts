@@ -10,6 +10,7 @@
 import { adminDb }                   from '@/lib/firebase/admin'
 import { notificationEngine, NotificationType, NotificationChannel } from '@/lib/notifications'
 import { writeEmailLog }             from '@/lib/email-logs/write'
+import { loadOrganizerEmailBranding, resolveEmailBranding } from '@/lib/email/branding'
 import type { RegistrationDocument } from './types'
 
 export async function sendRefundEmail(registrationId: string): Promise<void> {
@@ -25,6 +26,7 @@ export async function sendRefundEmail(registrationId: string): Promise<void> {
   }
 
   let emailStatus: 'sent' | 'failed' = 'failed'
+  const branding = resolveEmailBranding(await loadOrganizerEmailBranding(reg.organizerUid))   // RD-PRODUCT-01C
 
   try {
     const result = await notificationEngine.send(NotificationType.REFUND_SUCCESS, {
@@ -35,6 +37,7 @@ export async function sendRefundEmail(registrationId: string): Promise<void> {
       passName:     reg.passName,
       refundAmount: reg.refundAmount,
       refundId:     reg.refundId,
+      branding,
     })
     emailStatus = result.success ? 'sent' : 'failed'
     if (!result.success) {

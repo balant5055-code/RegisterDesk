@@ -3,8 +3,7 @@
 import { useState, useEffect } from 'react'
 import Link                     from 'next/link'
 import { TextLink } from '@/components/ui'
-import { onAuthStateChanged }   from 'firebase/auth'
-import { auth }                 from '@/lib/firebase/auth'
+import { useAuth }              from '@/components/auth/AuthProvider'
 import { cn }                   from '@/lib/utils/cn'
 import { ChevronLeft, AlertCircle, Loader2, ExternalLink } from 'lucide-react'
 import CheckInClient            from './CheckInClient'
@@ -18,25 +17,32 @@ export default function CheckInPageClient({ eventId }: { eventId: string }) {
   const [loading, setLoading] = useState(true)
   const [error,   setError]   = useState<string | null>(null)
 
+  const { user, getToken } = useAuth()
+
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, async user => {
+    if (user === undefined) return
+    let cancelled = false
+    const run = async () => {
       if (!user) { setError('You must be signed in.'); setLoading(false); return }
       try {
-        const tok  = await user.getIdToken()
+        const tok  = await getToken()
+        if (cancelled || !tok) return
         setToken(tok)
         const res  = await fetch(`/api/organizer/events/${eventId}`, {
           headers: { Authorization: `Bearer ${tok}` },
         })
         if (!res.ok) throw new Error(`HTTP ${res.status}`)
+        if (cancelled) return
         setEvent(await res.json() as EventDetailResponse)
       } catch (e) {
-        setError(e instanceof Error ? e.message : 'Failed to load event')
+        if (!cancelled) setError(e instanceof Error ? e.message : 'Failed to load event')
       } finally {
-        setLoading(false)
+        if (!cancelled) setLoading(false)
       }
-    })
-    return unsub
-  }, [eventId])
+    }
+    run()
+    return () => { cancelled = true }
+  }, [user, getToken, eventId])
 
   // ── Error ──────────────────────────────────────────────────────────────────
   if (!loading && error) {
@@ -93,7 +99,7 @@ export default function CheckInPageClient({ eventId }: { eventId: string }) {
         {/* Loading */}
         {loading && (
           <div className="flex items-center justify-center gap-3 py-20">
-            <Loader2 className="size-5 animate-spin text-primary" />
+            <Loader2 className="size-5 animate-spin text-primary motion-reduce:animate-none" />
             <span className="text-[13px] text-muted-foreground">Loading event…</span>
           </div>
         )}

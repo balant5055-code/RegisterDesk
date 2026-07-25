@@ -2,10 +2,13 @@
 
 import Link from 'next/link'
 import { motion } from 'framer-motion'
+import { buildRegisterHref } from '@/lib/events/registerHref'
 import { CheckCircle2, ArrowRight, Lock, Infinity, AlertCircle, Crown } from 'lucide-react'
 import type { PassPublic } from '@/components/event-templates/types'
 import type { PassAvailability } from '@/lib/registrations/types'
 import { AvailabilityBadge } from '@/components/event-templates/shared/registration/AvailabilityBadge'
+import { passDisplayPrice } from '@/components/event-templates/shared/utils/format'
+import { organizerFeaturedPassId } from '@/components/event-templates/shared/utils/featuredPass'
 
 // ─── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -53,7 +56,7 @@ export function AwardsTickets({
 
   if (!visible.length) return null
 
-  const featuredId  = detectFeatured(visible)
+  const featuredId  = organizerFeaturedPassId(visible) ?? detectFeatured(visible)
   const hasMultiple = visible.length > 1
 
   const gridClass = visible.length === 1
@@ -151,7 +154,7 @@ export function AwardsTickets({
                     <span className={`text-[2rem] font-black leading-none ${
                       isFeatured ? 'text-yellow-400' : 'text-white'
                     }`}>
-                      {isFree ? 'Free' : fmtINR(pass.price)}
+                      {isFree ? 'Free' : fmtINR(passDisplayPrice(pass))}
                     </span>
                     {!isFree && (
                       <span className="ml-1.5 text-[12px] font-medium text-zinc-500">/ seat</span>
@@ -190,7 +193,7 @@ export function AwardsTickets({
 
                   {canBuy ? (
                     <Link
-                      href={`/e/${slug}/register?pass=${pass.id}`}
+                      href={buildRegisterHref(slug, pass.id)}
                       className={`mt-3 flex items-center justify-center gap-2 rounded-xl px-5 py-3 text-[0.9rem] font-bold transition-all duration-200 active:scale-[0.98] ${
                         isFeatured
                           ? 'bg-yellow-400 text-zinc-950 hover:bg-yellow-300 shadow-[0_4px_20px_-4px_rgba(234,179,8,0.4)]'

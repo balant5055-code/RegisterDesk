@@ -8,7 +8,7 @@
 // before any writes occur.
 
 import type {
-  EventLicenseTier,
+  AnyEventLicenseTier,
   EventLicenseStatus,
   EventLicenseDefinition,
 } from './eventLicense'
@@ -20,7 +20,7 @@ export type PublishLicenseFailureCode =
   | 'INVALID_LICENSE'
 
 export interface PublishLicenseContext {
-  intendedTier:  EventLicenseTier
+  intendedTier:  AnyEventLicenseTier   // RD-LICENSE-GA-02: V1 or V2 tier (validated by price, name-agnostic)
   licenseStatus: EventLicenseStatus | null   // null = no license document stored yet
   // The EFFECTIVE (config-resolved) definition for the intended tier. The caller
   // resolves it (via lib/licensing/resolveCatalog) and passes the fields this pure

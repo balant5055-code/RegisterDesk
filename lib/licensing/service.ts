@@ -11,10 +11,11 @@
 // state remain placeholders until later phases.
 
 import {
-  EVENT_LICENSE_TIERS,
-  getEventLicenseDefinition,
-  isEventLicenseTier,
-  type EventLicenseTier,
+  CURRENT_LICENSE_VERSION,
+  isUnlimited,
+  isValidTierForVersion,
+  resolveVersionedLicenseDefinition,
+  type AnyEventLicenseTier,
   type LicenseVersion,
 } from './eventLicense'
 import type {
@@ -40,7 +41,7 @@ import type {
 export interface CreateLicenseInput {
   eventId:      string
   organizerUid: string
-  tier:         EventLicenseTier
+  tier:         AnyEventLicenseTier
   version?:     LicenseVersion   // defaults to CURRENT_LICENSE_VERSION in the impl
 }
 
@@ -65,7 +66,7 @@ export interface ArchiveLicenseInput {
  */
 export interface LicensePreparationContext {
   eventExists: boolean
-  currentTier: EventLicenseTier | null   // null = event has no license yet
+  currentTier: AnyEventLicenseTier | null   // null = event has no license yet
   // Effective (config-resolved) price for the requested tier. When supplied it is
   // authoritative; when omitted the service falls back to the eventLicense.ts code
   // default, so existing callers keep working unchanged.
@@ -94,7 +95,7 @@ export class EventLicenseService {
     const errors: string[] = []
     let failureReason: PurchaseFailureReason | undefined
 
-    if (!isEventLicenseTier(request.tier)) {
+    if (!isValidTierForVersion(request.tier, CURRENT_LICENSE_VERSION)) {
       errors.push(`Invalid license tier: ${String(request.tier)}`)
       failureReason = failureReason ?? 'invalid_tier'
     }
@@ -122,7 +123,7 @@ export class EventLicenseService {
     const errors: string[] = []
     let failureReason: PurchaseFailureReason | undefined
 
-    if (!isEventLicenseTier(request.toTier)) {
+    if (!isValidTierForVersion(request.toTier, CURRENT_LICENSE_VERSION)) {
       errors.push(`Invalid target tier: ${String(request.toTier)}`)
       failureReason = failureReason ?? 'invalid_tier'
     }
@@ -135,7 +136,7 @@ export class EventLicenseService {
     if (current === null) {
       errors.push(`Event '${request.eventId}' has no license to upgrade`)
       failureReason = failureReason ?? 'unknown'
-    } else if (isEventLicenseTier(request.toTier)) {
+    } else if (isValidTierForVersion(request.toTier, CURRENT_LICENSE_VERSION)) {
       if (request.toTier === current) {
         errors.push(`Event '${request.eventId}' is already on the '${current}' tier`)
         failureReason = failureReason ?? 'already_licensed'
@@ -153,9 +154,11 @@ export class EventLicenseService {
    * For an upgrade to Enterprise (contact-sales, price 0) this yields 0 — the
    * caller treats a contact-sales target as custom pricing.
    */
-  calculateUpgradePrice(fromTier: EventLicenseTier, toTier: EventLicenseTier): number {
-    const fromPaise = getEventLicenseDefinition(fromTier).licensePricePaise
-    const toPaise   = getEventLicenseDefinition(toTier).licensePricePaise
+  calculateUpgradePrice(fromTier: AnyEventLicenseTier, toTier: AnyEventLicenseTier): number {
+    // Resolved against CURRENT_LICENSE_VERSION (a purchase/upgrade happens in the current
+    // version). At version 1 this equals the previous getEventLicenseDefinition price.
+    const fromPaise = resolveVersionedLicenseDefinition(fromTier, CURRENT_LICENSE_VERSION)?.licensePricePaise ?? 0
+    const toPaise   = resolveVersionedLicenseDefinition(toTier, CURRENT_LICENSE_VERSION)?.licensePricePaise ?? 0
     return Math.max(0, toPaise - fromPaise)
   }
 
@@ -178,7 +181,7 @@ export class EventLicenseService {
       }
     }
 
-    const amountPaise = context.pricePaise ?? getEventLicenseDefinition(request.tier).licensePricePaise
+    const amountPaise = context.pricePaise ?? (resolveVersionedLicenseDefinition(request.tier, CURRENT_LICENSE_VERSION)?.licensePricePaise ?? 0)
     const receipt     = this.buildReceipt(request.eventId, request.organizerUid, request.tier, amountPaise, request.method)
     const checkout    = this.buildCheckout(request.method, amountPaise)
 
@@ -223,16 +226,21 @@ export class EventLicenseService {
 
   // ─── Pure helpers ─────────────────────────────────────────────────────────────
 
-  /** Ordinal rank of a tier along Starter → Growth → Professional → Enterprise. */
-  private tierRank(tier: EventLicenseTier): number {
-    return EVENT_LICENSE_TIERS.indexOf(tier)
+  /**
+   * Cross-version tier rank for the upgrade/downgrade check — by resolved registration
+   * limit (unlimited = highest). For V1 tiers this preserves the exact Starter → Growth →
+   * Professional → Enterprise order (V1 limits are strictly monotonic), and extends to V2.
+   */
+  private tierRank(tier: AnyEventLicenseTier): number {
+    const m = resolveVersionedLicenseDefinition(tier, CURRENT_LICENSE_VERSION)?.limits.maxRegistrations ?? 0
+    return isUnlimited(m) ? Number.MAX_SAFE_INTEGER : m
   }
 
   /** Build an in-memory (not-yet-persisted) purchase receipt. */
   private buildReceipt(
     eventId: string,
     organizerUid: string,
-    tier: EventLicenseTier,
+    tier: AnyEventLicenseTier,
     amountPaise: number,
     method: PurchaseMethod,
   ): PurchaseReceipt {

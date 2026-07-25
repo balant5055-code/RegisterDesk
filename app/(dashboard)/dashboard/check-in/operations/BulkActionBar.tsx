@@ -25,6 +25,7 @@ import {
 import type { SerializedRegistration } from '@/app/api/organizer/events/[eventId]/registrations/route'
 import type { PrintTemplate } from '@/lib/printAssets/types'
 import { csvCell } from '@/lib/utils/csv'
+import { useFocusTrap } from '@/lib/hooks/useFocusTrap'
 
 interface ConfirmState { title: string; body: React.ReactNode; confirmLabel: string; onConfirm: () => void }
 
@@ -41,6 +42,8 @@ export function BulkActionBar({ eventId, selectedIds, regs, onClear, onRefresh }
   const [busy, setBusy] = useState('')
   const [progress, setProgress] = useState('')
   const [confirm, setConfirm] = useState<ConfirmState | null>(null)
+  // RD-ORGANIZER-02 P1: trap focus in the confirm modal while it is open + restore on close.
+  const confirmRef = useFocusTrap<HTMLDivElement>(!!confirm)
   const [templates, setTemplates] = useState<PrintTemplate[] | null>(null)
   const [badgeTpl, setBadgeTpl] = useState('')
   const [jobLink, setJobLink] = useState<{ href: string; label: string } | null>(null)
@@ -166,8 +169,16 @@ export function BulkActionBar({ eventId, selectedIds, regs, onClear, onRefresh }
 
       {confirm && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={() => setConfirm(null)}>
-          <div className="w-full max-w-md rounded-2xl border border-border bg-card p-5 shadow-xl" onClick={e => e.stopPropagation()}>
-            <h3 className="mb-2 text-[16px] font-bold text-foreground">{confirm.title}</h3>
+          <div
+            ref={confirmRef}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="bab-confirm-title"
+            onKeyDown={e => { if (e.key === 'Escape') setConfirm(null) }}
+            className="w-full max-w-md rounded-2xl border border-border bg-card p-5 shadow-xl"
+            onClick={e => e.stopPropagation()}
+          >
+            <h3 id="bab-confirm-title" className="mb-2 text-[16px] font-bold text-foreground">{confirm.title}</h3>
             <div className="text-[13.5px] text-muted-foreground">{confirm.body}</div>
             <div className="mt-5 flex justify-end gap-2">
               <button onClick={() => setConfirm(null)} className={buttonVariants({ variant: 'outline', size: 'sm' })}>Cancel</button>

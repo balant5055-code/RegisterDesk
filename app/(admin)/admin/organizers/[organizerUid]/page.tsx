@@ -23,7 +23,7 @@ import { StatusPill, ErrorBanner } from '@/components/admin'
 import type { PillTone } from '@/components/admin'
 import { useConfirm } from '@/components/ui/ConfirmDialog'
 import { HBars } from '@/components/analytics/Charts'
-import { EVENT_LICENSE_TIERS, type EventLicenseTier } from '@/lib/licensing/eventLicense'
+import { currentLicenseTierIds, isValidTierForVersion, CURRENT_LICENSE_VERSION } from '@/lib/licensing/eventLicense'
 import type {
   Organizer360Overview, Organizer360Response, Organizer360Operations,
   Organizer360Business, Organizer360Governance, Organizer360Timeline,
@@ -521,10 +521,10 @@ function GovernanceWorkspace({ uid, o, onChanged }: {
 
   async function setOverride() {
     const cur = gov?.overrides.entitlementOverrideTier
-    const v = (await prompt({ title: 'Entitlement override', message: `Override tier (${EVENT_LICENSE_TIERS.join(' / ')}), or "clear":`, placeholder: cur ?? 'clear' }))?.trim()
+    const v = (await prompt({ title: 'Entitlement override', message: `Override tier (${currentLicenseTierIds().join(' / ')}), or "clear":`, placeholder: cur ?? 'clear' }))?.trim()
     if (!v) return
     const clearing = v.toLowerCase() === 'clear'
-    if (!clearing && !EVENT_LICENSE_TIERS.includes(v as EventLicenseTier)) { setErr('Invalid tier'); return }
+    if (!clearing && !isValidTierForVersion(v, CURRENT_LICENSE_VERSION)) { setErr('Invalid tier'); return }
     if (!(await confirm({ message: clearing ? 'Clear the entitlement override?' : `Set entitlement override to "${v}"? This can only raise entitlements.`, tone: clearing ? undefined : 'danger' }))) return
     setBusy('override'); setErr(null)
     try {

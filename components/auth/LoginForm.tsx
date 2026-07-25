@@ -7,6 +7,7 @@ import { Button } from '@/components/ui'
 import { AuthField } from './AuthField'
 import { PasswordField } from './PasswordField'
 import { SocialLoginRow } from './SocialLoginRow'
+import type { SocialProviderKey } from '@/lib/firebase/auth/social'
 
 // ─── LoginForm ──────────────────────────────────────────────────────────────
 // PURE PRESENTATION. Email + password + loading + error + submit + optional
@@ -30,9 +31,12 @@ export interface LoginFormProps {
   remember?:           boolean
   onRememberChange?:   (v: boolean) => void
   footer?:             ReactNode
-  /** Render the (disabled) social sign-in row. Opt-in so it stays on the
-   *  organizer panel and off the admin login. */
+  /** Render the social sign-in row. Opt-in so it stays on the organizer panel and
+   *  off the admin login. */
   showSocial?:         boolean
+  /** Social handlers — forwarded to SocialLoginRow when showSocial is true. */
+  onSocialSelect?:     (key: SocialProviderKey) => void
+  socialLoadingKey?:   SocialProviderKey | null
 }
 
 export function LoginForm({
@@ -51,6 +55,8 @@ export function LoginForm({
   onRememberChange,
   footer,
   showSocial = false,
+  onSocialSelect,
+  socialLoadingKey = null,
 }: LoginFormProps) {
   return (
     <form onSubmit={onSubmit} noValidate>
@@ -124,7 +130,7 @@ export function LoginForm({
 
       {showSocial && (
         <div className="mt-4">
-          <SocialLoginRow />
+          <SocialLoginRow onSelect={onSocialSelect} loadingKey={socialLoadingKey} />
         </div>
       )}
 

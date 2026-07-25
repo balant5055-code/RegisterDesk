@@ -11,6 +11,11 @@ import {
 } from 'lucide-react'
 import { buttonVariants } from '@/components/ui'
 import { cn } from '@/lib/utils/cn'
+import { isChannelImplemented } from '@/lib/communications/health/channels'
+
+// RD-COMMS-01 Phase 2B: channel availability comes from the canonical capability SSOT. SMS
+// has no transport, so it is never offered as a selectable confirmation/reminder channel.
+const SMS_AVAILABLE = isChannelImplemented('sms')
 import {
   type EventDetailsDraft, type EventInfo, type MediaConfig,
   type VenueConfig, type VenueMaps, type PhysicalVenueConfig,
@@ -419,7 +424,7 @@ function Tab3Organizer({ form, update }: { form: EventDetailsDraft; update: (p: 
             <div><label className={labelCls}>Organizer Email <span className="text-red-500">*</span></label><input type="email" className={inputCls} value={form.organizer.email} onChange={e => uo({ email: e.target.value })} placeholder="organizer@example.com" /></div>
           </div>
           <div className="grid gap-3 sm:grid-cols-2">
-            <div><label className={labelCls}>Phone</label><input type="tel" className={inputCls} value={form.organizer.phone} onChange={e => uo({ phone: e.target.value })} placeholder="+91 9800000000" /></div>
+            <div><label className={labelCls}>Organizer Mobile (WhatsApp)</label><input type="tel" className={inputCls} value={form.organizer.phone} onChange={e => uo({ phone: e.target.value })} placeholder="+91 9800000000" /></div>
             <div><label className={labelCls}>Website</label><input type="url" className={inputCls} value={form.organizer.website} onChange={e => uo({ website: e.target.value })} placeholder="https://your-org.com" /></div>
           </div>
           <ImageAssetInput label="Organizer Logo" value={form.organizer.logoUrl} onChange={v => uo({ logoUrl: v })} hint="Square PNG / JPG — 300 × 300 px recommended" shape="square" maxDim={600} targetKB={150} />
@@ -483,21 +488,13 @@ function Tab4Communication({ form, update }: { form: EventDetailsDraft; update: 
   const CHANNELS: { id: CommChannel; label: string }[] = [
     { id: 'email',    label: 'Email'    },
     { id: 'whatsapp', label: 'WhatsApp' },
-    { id: 'sms',      label: 'SMS'      },
+    ...(SMS_AVAILABLE ? [{ id: 'sms' as CommChannel, label: 'SMS' }] : []),
   ]
 
   const toggleChannel = (ch: CommChannel) => {
     const cur = form.communication.confirmation.channels
     ucf({ channels: cur.includes(ch) ? cur.filter(c => c !== ch) : [...cur, ch] })
   }
-
-  const toggleReminderChannel = (ruleId: string, ch: CommChannel) => {
-    uc({ reminders: form.communication.reminders.map(r => r.id === ruleId ? {
-      ...r, channels: r.channels.includes(ch) ? r.channels.filter(c => c !== ch) : [...r.channels, ch]
-    } : r)})
-  }
-
-  const REMINDER_LABELS: Record<string, string> = { '7d': '7 Days Before', '3d': '3 Days Before', '1d': '1 Day Before', '2h': '2 Hours Before', custom: 'Custom' }
 
   return (
     <div className="flex flex-col gap-3">
@@ -522,32 +519,23 @@ function Tab4Communication({ form, update }: { form: EventDetailsDraft; update: 
         </div>
       </SectionCard>
 
-      <SectionCard title="Reminder Schedule">
-        <div className="flex flex-col gap-2">
-          {form.communication.reminders.map(rule => (
-            <div key={rule.id} className="flex flex-wrap items-center gap-3 rounded-lg border border-border/60 bg-muted/[0.03] px-3 py-2.5">
-              <Toggle checked={rule.enabled} onChange={v => uc({ reminders: form.communication.reminders.map(r => r.id === rule.id ? { ...r, enabled: v } : r) })} label={rule.timing === 'custom' ? `${rule.customHours ?? '?'}h Before` : REMINDER_LABELS[rule.timing] ?? rule.timing} />
-              {rule.timing === 'custom' && (
-                <input type="number" min={1} className={cn(inputCls, 'h-7 w-20')} value={rule.customHours ?? ''} onChange={e => uc({ reminders: form.communication.reminders.map(r => r.id === rule.id ? { ...r, customHours: Number(e.target.value) } : r) })} placeholder="hrs" />
-              )}
-              <div className="ml-auto flex items-center gap-1.5">
-                {CHANNELS.map(ch => {
-                  const on = rule.channels.includes(ch.id)
-                  return (
-                    <button key={ch.id} type="button" onClick={() => toggleReminderChannel(rule.id, ch.id)}
-                      className={cn('rounded-full border px-2 py-0.5 text-[12px] font-medium transition-colors', on ? 'border-primary bg-primary/10 text-primary' : 'border-border/50 text-muted-foreground/60 hover:border-primary/30')}>
-                      {ch.label}
-                    </button>
-                  )
-                })}
-                <button type="button" onClick={() => uc({ reminders: form.communication.reminders.filter(r => r.id !== rule.id) })} className="ml-1 flex size-5 items-center justify-center rounded text-muted-foreground/40 hover:bg-red-50 hover:text-red-500"><Trash2 className="size-3" aria-hidden /></button>
-              </div>
-            </div>
-          ))}
-          <button type="button" onClick={() => uc({ reminders: [...form.communication.reminders, { id: Math.random().toString(36).slice(2), enabled: true, timing: 'custom', customHours: 24, channels: ['email'] }] })}
-            className={cn(buttonVariants({ variant: 'outline', size: 'sm' }), 'w-full gap-1.5 border-dashed border-primary/30 text-primary/70')}>
-            <Plus className="size-3" aria-hidden />Add Custom Reminder
-          </button>
+      {/* RD-EVENT-02 S1C (H3): custom reminder scheduling is not consumed by the production
+          reminder engine (lib/reminders/scheduler.ts materializes only platform auto-reminders,
+          never communication.reminders). The builder is therefore shown as an informational,
+          non-editable "Coming Soon" section so the UI never implies a schedule is active. */}
+      <SectionCard
+        title="Reminder Schedule"
+        action={<span className="rounded-full bg-muted px-2 py-0.5 text-[12px] font-semibold text-muted-foreground">Coming Soon</span>}
+      >
+        <div className="flex items-start gap-3 rounded-xl border border-border/60 bg-muted/[0.03] px-4 py-3.5">
+          <Clock className="mt-0.5 size-4 shrink-0 text-muted-foreground/60" aria-hidden />
+          <div>
+            <p className="text-[13px] font-semibold text-foreground">Custom reminder scheduling isn&apos;t available yet</p>
+            <p className="mt-0.5 text-[12px] leading-relaxed text-muted-foreground">
+              Scheduling your own reminder messages before an event is coming soon. Custom reminder
+              schedules are not sent automatically yet, so there&apos;s nothing to configure here for now.
+            </p>
+          </div>
         </div>
       </SectionCard>
 
@@ -556,7 +544,7 @@ function Tab4Communication({ form, update }: { form: EventDetailsDraft; update: 
         <div>
           <p className="text-[13px] font-semibold text-blue-900">Advanced Communication Settings</p>
           <p className="mt-0.5 text-[12px] leading-relaxed text-blue-700">
-            Default notification templates will be used during registration and reminders. You can customise email templates, WhatsApp templates, SMS templates, and certificates from the <span className="font-medium">Communications</span> module after the event is created.
+            Default notification templates will be used during registration and reminders. You can customise email templates, WhatsApp templates, and certificates from the <span className="font-medium">Communications</span> module after the event is created.
           </p>
         </div>
       </div>
@@ -1273,13 +1261,13 @@ function SummaryPanel({ form, eventTypeId, eventSubtype, tab6Config, onPreview, 
       <div className="rounded-xl border border-border bg-card p-4 shadow-sm">
         <p className="mb-2 text-[12px] font-semibold uppercase tracking-wider text-muted-foreground">Communication</p>
         <div className="flex flex-wrap gap-1.5">
-          {(['email','whatsapp','sms'] as CommChannel[]).map(ch => {
+          {(['email','whatsapp','sms'] as CommChannel[]).filter(ch => ch !== 'sms' || SMS_AVAILABLE).map(ch => {
             const on = form.communication.confirmation.channels.includes(ch)
             return <span key={ch} className={cn('rounded-full px-2 py-0.5 text-[12px] font-semibold capitalize', on ? 'bg-primary/10 text-primary' : 'bg-muted text-muted-foreground/50')}>{ch}</span>
           })}
           {form.communication.confirmation.calendarInvite && <span className="rounded-full bg-blue-50 px-2 py-0.5 text-[12px] font-semibold text-blue-600">Calendar ICS</span>}
         </div>
-        <p className="mt-2 text-[12px] text-muted-foreground">{form.communication.reminders.filter(r => r.enabled).length} active reminder{form.communication.reminders.filter(r => r.enabled).length !== 1 ? 's' : ''}</p>
+        <p className="mt-2 text-[12px] text-muted-foreground">Reminder scheduling — coming soon</p>
       </div>
     </div>
   )

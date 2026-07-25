@@ -40,7 +40,7 @@ export function registrationTemplate(p: RegistrationEmailParams): { subject: str
     </p>
   `
 
-  return { subject, html: emailShell(subject, body) }
+  return { subject, html: emailShell(subject, body, undefined, p.branding) }
 }
 
 // Minimal XSS protection for interpolated values in the template body

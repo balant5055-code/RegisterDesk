@@ -7,7 +7,7 @@
 //   4. Status is written only after successful validation.
 
 import { NextRequest, NextResponse, after } from 'next/server'
-import { FieldValue }    from 'firebase-admin/firestore'
+import { FieldValue, FieldPath } from 'firebase-admin/firestore'
 import { adminDb } from '@/lib/firebase/admin'
 import { authorizeWorkspace } from '@/lib/team/workspace'
 import { organizerStatusGuard }  from '@/lib/admin/organizerStatus'
@@ -19,10 +19,12 @@ import type { LinkedCampaignDraft }   from '@/lib/campaigns/linkedCampaignConfig
 import { EVENT_LICENSES_COLLECTION, LICENSE_ORDERS_COLLECTION, eventLicenseConverter } from '@/lib/licensing/schema'
 import {
   CURRENT_LICENSE_VERSION,
-  isEventLicenseTier,
-  type EventLicenseTier,
+  isValidTierForVersion,
+  defaultLicenseTierForVersion,
+  type AnyEventLicenseTier,
 } from '@/lib/licensing/eventLicense'
-import { getLicenseCatalog } from '@/lib/licensing/resolveCatalog'
+import { getLicenseCatalog, getLicenseCatalogV2 } from '@/lib/licensing/resolveCatalog'
+import { pickVersionedDefinition } from '@/lib/licensing/licenseCatalogShared'
 import { validatePublishEligibility } from '@/lib/licensing/publishValidation'
 import { getPublishingMode }          from '@/lib/platform/publishing'
 import { sendEventReviewEmail }        from '@/lib/events/reviewNotifications'
@@ -126,12 +128,18 @@ export async function POST(req: NextRequest): Promise<NextResponse<PublishApiRes
   // (Growth/Professional/Enterprise) without a matching paid order is rejected.
   // Starter needs no payment. Every paid tier — Enterprise included — uses the
   // identical purchase flow; there is no contact-sales or admin-grant path.
-  const selectedTier: EventLicenseTier = isEventLicenseTier(draft.licenseTier) ? draft.licenseTier : 'starter'
-  // Resolve the EFFECTIVE (config-aware) catalog once — used for paid-tier gating,
-  // publish capacity, and the publish-eligibility check below.
-  const catalog      = await getLicenseCatalog()
-  const selectedDef  = catalog[selectedTier]
-  const isPaidTier   = !selectedDef.contactSales && selectedDef.licensePricePaise > 0   // growth / professional / enterprise
+  // RD-LICENSE-GA-02: NEW licenses are written under the CURRENT license version. The tier
+  // is validated + resolved against CURRENT_LICENSE_VERSION (never inferred by name), and a
+  // fallback stamps that version's free tier. At version 1 this is byte-for-byte identical
+  // to the previous V1-only path (isValidTierForVersion(t,1)===isEventLicenseTier(t),
+  // defaultLicenseTierForVersion(1)==='starter', pickVersionedDefinition(…,1)===catalog[tier]).
+  const currentVersion = CURRENT_LICENSE_VERSION
+  const [v1Catalog, v2Catalog] = await Promise.all([getLicenseCatalog(), getLicenseCatalogV2()])
+  const defFor = (tier: string) => pickVersionedDefinition(v1Catalog, v2Catalog, tier, currentVersion)
+  const selectedTier: AnyEventLicenseTier = isValidTierForVersion(draft.licenseTier, currentVersion)
+    ? draft.licenseTier : defaultLicenseTierForVersion(currentVersion)
+  const selectedDef  = defFor(selectedTier)
+  const isPaidTier   = !selectedDef.contactSales && selectedDef.licensePricePaise > 0
 
   const orderRef  = adminDb.collection(LICENSE_ORDERS_COLLECTION).doc(`lic_${draftId}`)
   const orderSnap = await orderRef.get()
@@ -146,7 +154,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<PublishApiRes
     )
   }
 
-  const resolvedTier: EventLicenseTier = (isPaidTier && hasPaidOrder) ? selectedTier : 'starter'
+  const resolvedTier: AnyEventLicenseTier = (isPaidTier && hasPaidOrder) ? selectedTier : defaultLicenseTierForVersion(currentVersion)
   const resolvedOrderId     = hasPaidOrder ? `lic_${draftId}` : null
   const resolvedAmountPaise = hasPaidOrder && typeof order?.amountPaise === 'number' ? order.amountPaise : 0
 
@@ -185,19 +193,38 @@ export async function POST(req: NextRequest): Promise<NextResponse<PublishApiRes
   //    (licensePricePaise === 0), NOT a hardcoded tier name, so an admin price/config
   //    override flows through. Counts the organizer's currently-LIVE free-tier events
   //    (archived ones free the slot), reusing deriveLifecycleStatus + the rule. ─
-  const isFreeTier = (t: EventLicenseTier): boolean => catalog[t].licensePricePaise === 0
+  const isFreeTier = (t: string): boolean => defFor(t).licensePricePaise === 0
   if (isFreeTier(resolvedTier)) {
     const LIVE = new Set(['published', 'pending_review', 'registration_closed'])
-    const draftsSnap = await adminDb.collection(`users/${uid}/eventDrafts`).limit(500).get()
-    const activeStarters = draftsSnap.docs.filter(ds => {
-      if (ds.id === draftId) return false
-      const dd = ds.data() as Record<string, unknown>
-      const tier = isEventLicenseTier(dd.licenseTier) ? dd.licenseTier : 'starter'
-      return isFreeTier(tier) && LIVE.has(deriveLifecycleStatus(dd))
-    }).length
+    // M4: the "one active event" rule blocks as soon as ONE other live free-tier event
+    // exists (validatePublishEligibility fails at count >= 1). Scan the organizer's drafts
+    // in batches — ordered by document id, which needs no composite index — applying the
+    // SAME per-doc filter as before, and stop at the first match. This is correct for any
+    // number of drafts; the previous single .limit(500) could miss a live free event past
+    // the 500th doc (wrongly allowing a second free event). Behaviour is identical for
+    // organizers within the old 500-doc window.
+    const draftsCol = adminDb.collection(`users/${uid}/eventDrafts`)
+    const SCAN_BATCH = 500
+    let hasOtherActiveFreeEvent = false
+    let cursor: FirebaseFirestore.QueryDocumentSnapshot | null = null
+    for (;;) {
+      let q = draftsCol.orderBy(FieldPath.documentId()).limit(SCAN_BATCH)
+      if (cursor) q = q.startAfter(cursor)
+      const page = await q.get()
+      for (const ds of page.docs) {
+        if (ds.id === draftId) continue
+        const dd = ds.data() as Record<string, unknown>
+        const tier = isValidTierForVersion(dd.licenseTier, currentVersion) ? dd.licenseTier : defaultLicenseTierForVersion(currentVersion)
+        if (isFreeTier(tier) && LIVE.has(deriveLifecycleStatus(dd))) { hasOtherActiveFreeEvent = true; break }
+      }
+      if (hasOtherActiveFreeEvent || page.size < SCAN_BATCH) break
+      cursor = page.docs[page.docs.length - 1]
+    }
+    // Only the >= 1 threshold is consulted, so presence (0 or 1) is behaviourally exact.
+    const activeStarters = hasOtherActiveFreeEvent ? 1 : 0
     const starterCheck = validatePublishEligibility({
       intendedTier: resolvedTier, licenseStatus: 'active',
-      definition: catalog[resolvedTier], starterActiveEventCount: activeStarters,
+      definition: defFor(resolvedTier), starterActiveEventCount: activeStarters,
     })
     if (!starterCheck.ok) {
       return NextResponse.json({ canPublish: false, error: starterCheck.message }, { status: 403 })
@@ -223,7 +250,13 @@ export async function POST(req: NextRequest): Promise<NextResponse<PublishApiRes
   // source of truth), NOT by free-vs-paid event type. The license's maxRegistrations
   // maps to the enforcing capacity bucket. Only new publishes get tier-derived
   // capacity; already-published events keep their stored capacityPlan (grandfathered).
-  const licenseMaxRegistrations = catalog[resolvedTier].limits.maxRegistrations
+  //
+  // RD-LICENSE-GA-04: the tier→limit lookup resolves from the version-aware effective
+  // license definition (defFor, config-overlaid) — so a V2 tier (Free 200, Professional
+  // 2,500, Business 5,000) maps to the correct capacity bucket. At version 1 this equals
+  // the previous getLicenseCatalog() value byte-for-byte; it no longer routes through the
+  // dormant pricing engine's V1-only tier map (pricingEngineEnabled stays false).
+  const licenseMaxRegistrations = defFor(resolvedTier).limits.maxRegistrations
   const capacityPlan  = capacityPlanForRegistrationLimit(licenseMaxRegistrations)
   const totalCapacity = resolveTotalCapacity(capacityPlan)
 
@@ -342,7 +375,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<PublishApiRes
       // Event License eligibility — validation only; throws to abort before writes.
       // The resolved tier is either Starter (free) or a paid tier backed by a
       // verified paid order, so it is treated as active.
-      const licenseCheck = validatePublishEligibility({ intendedTier: resolvedTier, licenseStatus: 'active', definition: catalog[resolvedTier] })
+      const licenseCheck = validatePublishEligibility({ intendedTier: resolvedTier, licenseStatus: 'active', definition: defFor(resolvedTier) })
       if (!licenseCheck.ok) {
         const err = new Error(licenseCheck.message)
         err.name  = licenseCheck.code

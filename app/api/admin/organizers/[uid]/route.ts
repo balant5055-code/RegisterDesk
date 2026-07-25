@@ -9,6 +9,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { adminDb }                   from '@/lib/firebase/admin'
 import { resolveAdminUid }           from '@/lib/admin/auth'
 import { setOrganizerAccountStatus, organizerActionRequiresReason } from '@/lib/admin/organizerService'
+import { ORGANIZER_ROLE }             from '@/lib/organizer/identity'
 import type {
   AccountStatus,
   AdminOrganizerDetail,
@@ -65,7 +66,7 @@ export async function GET(req: NextRequest, ctx: RouteContext): Promise<NextResp
       name:             typeof u.name === 'string' ? u.name : '',
       email:            typeof u.email === 'string' ? u.email : '',
       organizationName: typeof u.organizationName === 'string' ? u.organizationName : '',
-      role:             typeof u.role === 'string' ? u.role : 'organizer',
+      role:             typeof u.role === 'string' ? u.role : ORGANIZER_ROLE,
       accountStatus:    effectiveStatus(u.accountStatus as AccountStatus | undefined),
       statusReason:     typeof u.statusReason === 'string' ? u.statusReason : null,
       statusUpdatedAt:  tsToISO(u.statusUpdatedAt),

@@ -3,8 +3,8 @@
 import { Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import Link from 'next/link'
 import { useSearchParams, useRouter } from 'next/navigation'
-import { onAuthStateChanged, type User } from 'firebase/auth'
-import { auth } from '@/lib/firebase/auth'
+import { type User } from 'firebase/auth'
+import { useAuth } from '@/components/auth/AuthProvider'
 import { Loader2, ShieldCheck, CheckCircle2, XCircle } from 'lucide-react'
 
 type Phase = 'loading' | 'need-auth' | 'accepting' | 'done' | 'error'
@@ -18,6 +18,7 @@ function AcceptInner() {
   const [phase,   setPhase]   = useState<Phase>(() => (token ? 'loading' : 'error'))
   const [message, setMessage] = useState(() => (token ? '' : 'This invitation link is invalid.'))
   const userRef = useRef<User | null>(null)
+  const { user } = useAuth()   // RD-AUTH-01 Phase 1 (M-A): shared auth state
 
   const accept = useCallback(async (user: User) => {
     setPhase('accepting')
@@ -38,14 +39,15 @@ function AcceptInner() {
   }, [token, router])
 
   useEffect(() => {
-    if (!token) return   // phase already 'error' from initializer — no setState here
-    const unsub = onAuthStateChanged(auth, user => {
-      userRef.current = user
+    if (!token) return          // phase already 'error' from initializer — no setState here
+    if (user === undefined) return   // auth still resolving
+    userRef.current = user
+    const run = async () => {
       if (!user) { setPhase('need-auth'); return }
       void accept(user)
-    })
-    return unsub
-  }, [token, accept])
+    }
+    void run()
+  }, [token, user, accept])
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-background p-4">

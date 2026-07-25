@@ -20,11 +20,17 @@ import {
   type SecurityConfig,
   type IntegrationsConfig,
 } from '@/lib/config/businessConfig'
-import { defaultLicenseCatalog, reviveCatalog, type LicenseCatalog } from '@/lib/licensing/licenseCatalogShared'
+import {
+  defaultLicenseCatalog, reviveCatalog, defaultLicenseCatalogV2, reviveCatalogV2,
+  type LicenseCatalog, type LicenseCatalogV2,
+} from '@/lib/licensing/licenseCatalogShared'
 import { defaultPublicFeesConfig, type PublicFeesConfig } from '@/lib/fees/publicFeesShared'
 
 export interface BusinessConfigValue {
   licenseCatalog: LicenseCatalog
+  // RD-LICENSE-01B Phase 3A — V2 catalog, additive. Present on every value; existing
+  // consumers that read `licenseCatalog` are unaffected.
+  licenseCatalogV2: LicenseCatalogV2
   communication:  CommunicationConfig
   wallet:         WalletConfig
   settlements:    SettlementsConfig
@@ -40,7 +46,8 @@ export interface BusinessConfigValue {
 // Code-default snapshot — computed once with a stable identity, so a hook used
 // outside the provider doesn't return a new object every render.
 const CODE_DEFAULTS = {
-  licenseCatalog: defaultLicenseCatalog(),
+  licenseCatalog:   defaultLicenseCatalog(),
+  licenseCatalogV2: defaultLicenseCatalogV2(),
   communication:  BUSINESS_CONFIG_DEFAULTS.communication,
   wallet:         BUSINESS_CONFIG_DEFAULTS.wallet,
   settlements:    BUSINESS_CONFIG_DEFAULTS.settlements,
@@ -52,7 +59,8 @@ const CODE_DEFAULTS = {
 }
 
 interface RawPublicConfig {
-  licenseCatalog?: unknown
+  licenseCatalog?:   unknown
+  licenseCatalogV2?: unknown
   communication?:  CommunicationConfig
   wallet?:         WalletConfig
   settlements?:    SettlementsConfig
@@ -77,7 +85,8 @@ async function fetchPublicConfig(): Promise<BusinessConfigData> {
     const c = body.config
     if (!c) return CODE_DEFAULTS
     return {
-      licenseCatalog: reviveCatalog(c.licenseCatalog),
+      licenseCatalog:   reviveCatalog(c.licenseCatalog),
+      licenseCatalogV2: reviveCatalogV2(c.licenseCatalogV2),
       communication:  c.communication ?? CODE_DEFAULTS.communication,
       wallet:         c.wallet        ?? CODE_DEFAULTS.wallet,
       settlements:    c.settlements   ?? CODE_DEFAULTS.settlements,

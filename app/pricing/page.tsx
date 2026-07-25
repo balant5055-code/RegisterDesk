@@ -13,7 +13,7 @@ import { getCta } from '@/lib/marketing/cta'
 import { MarketingPageLayout } from '@/components/marketing/layout/MarketingPageLayout'
 import { PlatformHero, PlatformSection, PlatformCTA } from '@/components/marketing/platform'
 import { buildPricingTiers } from '@/content/marketing/pricing'
-import { getLicenseCatalog } from '@/lib/licensing/resolveCatalog'
+import { getLicenseCatalogV2 } from '@/lib/licensing/resolveCatalog'
 import { buildMetadata, organizationJsonLd, softwareAppJsonLd, breadcrumbJsonLd } from '@/lib/marketing/seo'
 
 export const metadata: Metadata = buildMetadata({
@@ -28,8 +28,8 @@ export default async function PricingPage() {
     softwareAppJsonLd(),
     breadcrumbJsonLd([{ name: 'Home', path: '/' }, { name: 'Pricing', path: '/pricing' }]),
   ]
-  // Resolve the effective license catalog (defaults + config overrides) server-side.
-  const PRICING_TIERS = buildPricingTiers(await getLicenseCatalog())
+  // Resolve the effective V2 license catalog (defaults + config overrides) server-side.
+  const PRICING_TIERS = buildPricingTiers(await getLicenseCatalogV2())
 
   return (
     <>
@@ -45,7 +45,7 @@ export default async function PricingPage() {
         />
 
         <PlatformSection id="plans" eyebrow="Licenses" title="Choose your license" subtitle="Every license includes the core event platform and unlimited email." background="white">
-          <ul className="grid gap-6 md:grid-cols-2 lg:grid-cols-4">
+          <ul className="grid gap-6 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
             {PRICING_TIERS.map(tier => {
               const cta = getCta(tier.ctaKey)
               return (
@@ -62,7 +62,10 @@ export default async function PricingPage() {
                         </span>
                       )}
                     </div>
-                    <div className="mt-3 flex items-baseline gap-1">
+                    <div className="mt-3 flex items-baseline gap-1.5">
+                      {tier.regularPriceLabel && (
+                        <span className="text-[var(--fs-base)] font-medium text-muted-foreground line-through">{tier.regularPriceLabel}</span>
+                      )}
                       <span className="text-[var(--fs-3xl)] font-bold text-foreground">{tier.priceLabel}</span>
                       {tier.period && <span className="text-[var(--fs-base)] text-muted-foreground">{tier.period}</span>}
                     </div>

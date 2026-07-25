@@ -10,6 +10,7 @@ import { FieldValue }               from 'firebase-admin/firestore'
 import { adminDb }                   from '@/lib/firebase/admin'
 import { notificationEngine, NotificationType, NotificationChannel } from '@/lib/notifications'
 import { writeEmailLog }             from '@/lib/email-logs/write'
+import { loadOrganizerEmailBranding, resolveEmailBranding } from '@/lib/email/branding'
 import type { RegistrationDocument } from './types'
 
 export async function sendCancellationEmail(
@@ -24,6 +25,7 @@ export async function sendCancellationEmail(
 
   let emailStatus: 'sent' | 'failed' = 'failed'
   let emailFailureReason: string | undefined
+  const branding = resolveEmailBranding(await loadOrganizerEmailBranding(reg.organizerUid))   // RD-PRODUCT-01C
 
   try {
     const result = await notificationEngine.send(NotificationType.REGISTRATION_CANCELLED, {
@@ -32,6 +34,7 @@ export async function sendCancellationEmail(
       eventName:    reg.eventName,
       ticketCode:   reg.ticketCode,
       reason,
+      branding,
     })
     emailStatus = result.success ? 'sent' : 'failed'
     if (!result.success) {

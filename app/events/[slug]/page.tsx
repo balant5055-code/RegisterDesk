@@ -8,6 +8,8 @@ import ReportButton                  from '@/components/report/ReportButton'
 import { getRegistrationCounter }   from '@/lib/firebase/firestore/registrationCounters'
 import { getCampaignBySlug, getCampaignCounter } from '@/lib/firebase/firestore/campaigns'
 import { computeEventAvailability } from '@/lib/registrations/availability'
+import { resolveEffectivePriceRupees } from '@/lib/pricing/earlyBird'
+import { todayISOInTz, resolvePassSaleState } from '@/lib/registrations/salesWindow'
 import type { PassAvailability, CapacityPlan } from '@/lib/registrations/types'
 import type {
   EventDetailsDraft,
@@ -162,12 +164,35 @@ function buildJsonLd(
     offers: passes.map(pass => ({
       '@type':       'Offer',
       name:          pass.name,
-      price:         pass.price,
+      price:         pass.effectivePrice ?? pass.price,
       priceCurrency: 'INR',
       availability:  'https://schema.org/InStock',
       url:           `${BASE_URL}/events/${slug}`,
     })),
   }
+}
+
+// C2 + M2: stamp each public pass with (a) its effective early-bird display price and
+// (b) its sales-window state, both resolved via the ONE canonical resolver at a single
+// `now`/`today`. Lives outside the render body (like extractPasses on the register page)
+// so the impure Date.now()/new Date() reads aren't evaluated during component render.
+// `price` stays the regular price; display surfaces read `effectivePrice` / `saleState`.
+function withEffectivePrices(passes: PassPublic[], tz: string): PassPublic[] {
+  const now      = Date.now()
+  const todayISO = todayISOInTz(tz)
+  return passes.map(p => ({
+    ...p,
+    effectivePrice: resolveEffectivePriceRupees(
+      {
+        price:            typeof p.price === 'number' ? p.price : 0,
+        earlyBirdEnabled: p.earlyBirdEnabled === true,
+        earlyBirdPrice:   typeof p.earlyBirdPrice === 'number' ? p.earlyBirdPrice : null,
+        earlyBirdEndDate: typeof p.earlyBirdEndDate === 'string' ? p.earlyBirdEndDate : undefined,
+      },
+      now,
+    ),
+    saleState: resolvePassSaleState(p, todayISO),
+  }))
 }
 
 // ─── Page ─────────────────────────────────────────────────────────────────────
@@ -307,6 +332,7 @@ export default async function EventPage({ params }: PageProps) {
   // ── Additional info ────────────────────────────────────────────────────────
   const promoVideoUrl    = ed.media?.promoVideoUrl?.trim()       || ''
   const doorsOpenTime    = ed.schedule?.doorsOpenTime?.trim()    || ''
+  const timezone         = (ed.schedule?.timezone as string | undefined)?.trim() || ''
 
   // ── Organizer ──────────────────────────────────────────────────────────────
   const organizer = ed.organizer
@@ -341,8 +367,14 @@ export default async function EventPage({ params }: PageProps) {
   // ── Passes ─────────────────────────────────────────────────────────────────
   const isFreeEvent = pricing?.eventType === 'free'
   const rawPasses   = Array.isArray(pricing?.passes) ? (pricing!.passes as PassPublic[]) : []
-  const passes: PassPublic[] = rawPasses.filter(
-    p => !!(p.name?.trim()) && p.visibility !== 'private' && p.visibility !== 'invite_only',
+  // C2: resolve the effective (early-bird-aware) display price ONCE, server-side (in
+  // withEffectivePrices), so every event-details surface shows the same amount the
+  // checkout charges (create-order uses the same canonical resolver). Baked into the
+  // payload — no client Date.now() — so there's no hydration drift at the cutoff.
+  const eventTz = (ed.schedule?.timezone as string | undefined)?.trim() || 'UTC'
+  const passes: PassPublic[] = withEffectivePrices(
+    rawPasses.filter(p => !!(p.name?.trim()) && p.visibility !== 'private' && p.visibility !== 'invite_only'),
+    eventTz,
   )
 
   // ── Availability ───────────────────────────────────────────────────────────
@@ -364,6 +396,7 @@ export default async function EventPage({ params }: PageProps) {
   const termsUrl        = ed.support?.termsUrl?.trim()           || ''
   const refundPolicyUrl = ed.support?.refundPolicyUrl?.trim()    || ''
   const privacyPolicyUrl = ed.support?.privacyPolicyUrl?.trim()  || ''
+  const refundWindow     = ed.support?.refundWindow ?? null
 
   // ── JSON-LD ────────────────────────────────────────────────────────────────
   const jsonLd = buildJsonLd(slug, ed, passes)
@@ -431,6 +464,8 @@ export default async function EventPage({ params }: PageProps) {
         termsUrl={termsUrl}
         refundPolicyUrl={refundPolicyUrl}
         privacyPolicyUrl={privacyPolicyUrl}
+        timezone={timezone}
+        refundWindow={refundWindow}
         linkedCampaign={linkedCampaign}
         exhibitorDirectory={exhibitorDirectory}
         speakerApplicationsOpen={speakerApplicationsOpen}

@@ -3,21 +3,36 @@
 // Bulk operations on up to 200 registrations at once.
 // Body: { action: BulkAction, registrationIds: string[] }
 //
-// check_in    — marks registrations as checked in; updates checkedInCount
-// cancel      — cancels registrations; decrements totalCount for confirmed ones
-// restore     — restores cancelled registrations to confirmed; increments totalCount
-// resend_email — resends ticket email to each attendee
+// check_in     — checks registrations in (attendance shard + passCheckedInCounts)
+// cancel       — cancels registrations (counters, revenue, claims, sessions)
+// restore      — restores cancelled registrations (capacity-checked)
+// resend_email — resends the ticket email to each attendee
+//
+// RD-REGISTRATIONS-01 Phase 1 (H1): every mutating action is ORCHESTRATION ONLY —
+// it delegates to the certified canonical transactional helper (checkInRegistration /
+// cancelRegistration / restoreRegistration), exactly as bulk-approve / bulk-reject do.
+// The route no longer hand-rolls registration writes or counter math, so the helpers'
+// ownership, lifecycle validation, idempotency, capacity checks, attendance shards,
+// passCheckedInCounts, revenuePaise, pending/cancelled counters, registrationClaims
+// cleanup and session release all apply — atomically and exactly once per item. This
+// closes H1 and M1–M4 by construction. (resend_email keeps its own path — Phase 2.)
 
 import { NextRequest, NextResponse }      from 'next/server'
-import { releaseRegistrationSessions, restoreRegistrationSessions } from '@/lib/sessions/allocation'
-import { captureError }                    from '@/lib/monitoring/sentry'
 import { FieldValue }                      from 'firebase-admin/firestore'
-import { adminDb }              from '@/lib/firebase/admin'
+import { adminDb }                         from '@/lib/firebase/admin'
 import { authorizeWorkspace }              from '@/lib/team/workspace'
-import { signTicketToken }                 from '@/lib/tickets/generate'
-import { fmtEmailDate }                     from '@/lib/email'
-import { notificationEngine, NotificationType, NotificationChannel } from '@/lib/notifications'
+import { notificationEngine, NotificationChannel } from '@/lib/notifications'
+import { resendRegistrationTicketEmail }   from '@/lib/registrations/resendTicketEmail'
+import {
+  cancelRegistration, restoreRegistration, checkInRegistration,
+  RegistrationNotFoundError, UnauthorizedCancellationError,
+  AlreadyCancelledError, NotCancelledError, CapacityBlocksRestoreError, CheckInNotAllowedError,
+} from '@/lib/firebase/firestore/registrations'
 import type { RegistrationDocument, AuditAction } from '@/lib/registrations/types'
+
+// Sequential per-id delegation keeps counter contention off a single event's counter
+// doc; ≤200 admin-triggered operations fit comfortably in the budget (matches bulk-approve).
+export const maxDuration = 60
 
 // ─── Response types ───────────────────────────────────────────────────────────
 
@@ -64,10 +79,8 @@ export async function POST(
     if (!Array.isArray(body.registrationIds) || body.registrationIds.length === 0) {
       return empty('registrationIds must be a non-empty array', 400)
     }
-    // De-duplicate BEFORE slicing (RD-EVENT-GA-02B): the counter deltas below sum one
-    // entry per id, so a duplicated id would double-decrement/increment the counter for a
-    // single registration (driving totalCount negative → transient oversell). Unique ids
-    // also make the 200 cap count real registrations, not repeats.
+    // De-duplicate BEFORE slicing so a duplicated id is processed once (the canonical
+    // helpers are idempotent, but de-dup also makes the 200 cap count real ids).
     registrationIds = [...new Set(
       (body.registrationIds as unknown[]).filter((id): id is string => typeof id === 'string'),
     )].slice(0, 200)
@@ -75,269 +88,122 @@ export async function POST(
     return empty('Invalid request body', 400)
   }
 
-  // ── 3. Verify event ownership ────────────────────────────────────────────
+  // ── 3. Verify event ownership (path event must belong to the caller) ──────
   const { eventId } = await context.params
   const draftSnap = await adminDb.doc(`users/${uid}/eventDrafts/${eventId}`).get()
   if (!draftSnap.exists) return empty('Event not found', 404)
 
-  // ── 4. Load all registrations ─────────────────────────────────────────────
-  const regSnaps = await Promise.all(
-    registrationIds.map(id => adminDb.collection('registrations').doc(id).get()),
-  )
-
-  // ── 5. Filter by ownership + eligibility ─────────────────────────────────
-  const eligible: Array<{ id: string; data: RegistrationDocument }> = []
-  const results:  BulkActionResult[] = []
-
-  for (let i = 0; i < registrationIds.length; i++) {
-    const id   = registrationIds[i]
-    const snap = regSnaps[i]
-    if (!snap.exists) { results.push({ id, success: false, reason: 'Not found' }); continue }
-    const reg = snap.data() as RegistrationDocument
-    if (reg.organizerUid !== uid) { results.push({ id, success: false, reason: 'Forbidden' }); continue }
-    if (action === 'check_in' && reg.checkedIn)                        { results.push({ id, success: false, reason: 'Already checked in' }); continue }
-    if (action === 'check_in' && reg.status === 'cancelled')           { results.push({ id, success: false, reason: 'Registration is cancelled' }); continue }
-    if (action === 'check_in' && reg.status === 'pending')             { results.push({ id, success: false, reason: 'Registration is pending approval' }); continue }
-    if (action === 'check_in' && reg.paymentStatus === 'refunded')     { results.push({ id, success: false, reason: 'Registration has been refunded' }); continue }
-    if (action === 'cancel'   && reg.status === 'cancelled')           { results.push({ id, success: false, reason: 'Already cancelled' }); continue }
-    if (action === 'restore'  && reg.status !== 'cancelled')           { results.push({ id, success: false, reason: 'Not cancelled' }); continue }
-    if (action === 'resend_email' && reg.status === 'cancelled')       { results.push({ id, success: false, reason: 'Registration is cancelled' }); continue }
-    if (action === 'resend_email' && reg.status === 'rejected')        { results.push({ id, success: false, reason: 'Registration has been rejected' }); continue }
-    if (action === 'resend_email' && reg.paymentStatus === 'refunded') { results.push({ id, success: false, reason: 'Registration has been refunded' }); continue }
-    eligible.push({ id, data: reg })
-  }
-
-  if (eligible.length === 0) {
-    const failed = results.filter(r => !r.success).length
-    return NextResponse.json({ success: true, processed: registrationIds.length, succeeded: 0, failed, results })
-  }
-
-  // ── 5b. P1-C: Best-effort capacity pre-check for bulk restore ─────────────
-  // Loads live event + counter docs, then walks eligible items in order,
-  // accumulating in-batch additions to detect per-event and per-pass overflow
-  // before the batch write.  Not transactionally safe (small TOCTOU window)
-  // but closes the same gap that individual restoreRegistration() closes.
-  let toProcess = eligible
-  if (action === 'restore') {
-    const uniqueSlugs = [...new Set(eligible.map(e => e.data.eventSlug))]
-    const evtSnaps = await Promise.all(uniqueSlugs.map(s => adminDb.collection('events').doc(s).get()))
-    const ctrSnaps = await Promise.all(uniqueSlugs.map(s => adminDb.collection('registrationCounters').doc(s).get()))
-    const evtMap = new Map<string, Record<string, unknown>>()
-    const ctrMap = new Map<string, { totalCount?: number; passCounts?: Record<string, number> }>()
-    for (let ci = 0; ci < uniqueSlugs.length; ci++) {
-      const slug = uniqueSlugs[ci]!
-      const evtSnap = evtSnaps[ci]!
-      const ctrSnap = ctrSnaps[ci]!
-      if (evtSnap.exists) evtMap.set(slug, evtSnap.data() as Record<string, unknown>)
-      if (ctrSnap.exists) ctrMap.set(slug, ctrSnap.data() as { totalCount?: number; passCounts?: Record<string, number> })
-    }
-    const batchTotals = new Map<string, number>()
-    const batchPasses = new Map<string, number>()
-    const capacityPassed: typeof eligible = []
-    for (const item of eligible) {
-      const { id, data: reg } = item
-      const evt = evtMap.get(reg.eventSlug)
-      const ctr = ctrMap.get(reg.eventSlug)
-      const eventCapacity = (evt?.totalCapacity as number | null | undefined) ?? null
-      const currentTotal  = (ctr?.totalCount ?? 0) + (batchTotals.get(reg.eventSlug) ?? 0)
-      if (eventCapacity !== null && currentTotal >= eventCapacity) {
-        results.push({ id, success: false, reason: 'Event is at capacity' })
-        continue
-      }
-      const rawPricing = evt?.pricing as Record<string, unknown> | undefined
-      const rawPasses  = Array.isArray(rawPricing?.passes) ? (rawPricing!.passes as Record<string, unknown>[]) : []
-      const livePass   = rawPasses.find(p => p.id === reg.passId)
-      const passCapacity = livePass?.unlimited === true ? null
-        : typeof livePass?.quantity === 'number' ? livePass.quantity : null
-      const passKey    = `${reg.eventSlug}:${reg.passId}`
-      const currentPass = ((ctr?.passCounts ?? {})[reg.passId] ?? 0) + (batchPasses.get(passKey) ?? 0)
-      if (passCapacity !== null && currentPass >= passCapacity) {
-        results.push({ id, success: false, reason: 'Pass is at capacity' })
-        continue
-      }
-      capacityPassed.push(item)
-      batchTotals.set(reg.eventSlug, (batchTotals.get(reg.eventSlug) ?? 0) + 1)
-      batchPasses.set(passKey, (batchPasses.get(passKey) ?? 0) + 1)
-    }
-    toProcess = capacityPassed
-    if (toProcess.length === 0) {
-      const failed = results.filter(r => !r.success).length
-      return NextResponse.json({ success: true, processed: registrationIds.length, succeeded: 0, failed, results })
-    }
-  }
-
-  // ── 6. Execute ────────────────────────────────────────────────────────────
-
-  // ── Resend email (async per-item) ─────────────────────────────────────────
+  // ── 4. resend_email — orchestration ONLY (RD-REGISTRATIONS-01 Phase 4 / M5). Each send
+  //      delegates to the shared resendRegistrationTicketEmail service (the ONE resend path,
+  //      also used by the single-item + admin routes), which applies the eligibility guards,
+  //      fetches EACH registration's OWN event details (fixing the former cross-event mixup),
+  //      sends via the notification engine and persists emailStatus. The route only resolves
+  //      ownership and aggregates results. ──
   if (action === 'resend_email') {
     if (!notificationEngine.isAvailable(NotificationChannel.EMAIL)) {
       const errResults = registrationIds.map(id => ({ id, success: false, reason: 'Email provider not configured' }))
       return NextResponse.json({ success: false, processed: registrationIds.length, succeeded: 0, failed: registrationIds.length, error: 'Email provider not configured', results: errResults }, { status: 503 })
     }
 
-    const draft   = draftSnap.data() as Record<string, unknown>
-    const rawDet  = draft.eventDetails as Record<string, unknown> | null
-    const rawSeo  = rawDet?.seo      as Record<string, unknown> | null
-    const sched   = rawDet?.schedule as Record<string, unknown> | null
-    const startDate = typeof sched?.startDate === 'string' ? sched.startDate : ''
-    const startTime = typeof sched?.startTime === 'string' ? sched.startTime : ''
-    const venueRaw  = rawDet?.venue  as Record<string, unknown> | null
-    const venueType = typeof venueRaw?.type === 'string' ? venueRaw.type : ''
-    const physical  = venueRaw?.physical as Record<string, unknown> | null
-    const online    = venueRaw?.online   as Record<string, unknown> | null
-    const venueName = venueType === 'online'
-      ? (typeof online?.platform === 'string' ? online.platform : 'Online')
-      : (typeof physical?.name   === 'string' ? physical.name   : '')
-    const venueCity = venueType !== 'online'
-      ? (typeof physical?.city   === 'string' ? physical.city   : '')
-      : ''
-    const baseUrl = process.env.NEXT_PUBLIC_APP_URL ?? ''
-    void rawSeo  // slug not needed for email sending
-
-    const emailResults = await Promise.allSettled(
-      eligible.map(async ({ id, data: reg }) => {
-        const pdfToken = signTicketToken(id)
-        const pdfUrl   = `${baseUrl}/api/tickets/${id}/pdf${pdfToken ? `?token=${encodeURIComponent(pdfToken)}` : ''}`
-        const result   = await notificationEngine.send(NotificationType.TICKET_RESENT, {
-          to:             reg.attendee.email,
-          attendeeName:   reg.attendee.name,
-          eventName:      reg.eventName,
-          eventDate:      fmtEmailDate(startDate) || startDate,
-          eventTime:      startTime  || undefined,
-          venueName:      venueName  || undefined,
-          venueCity:      venueCity  || undefined,
-          ticketCode:     reg.ticketCode,
-          passName:       reg.passName,
-          registrationId: id,
-          ticketPageUrl:  `${baseUrl}/tickets/${id}`,
-          pdfDownloadUrl: pdfUrl,
-        })
-        if (!result.success) throw new Error(result.error ?? 'Email delivery failed')
-        adminDb.collection('registrations').doc(id).update({
-          emailStatus: 'sent', emailSentAt: FieldValue.serverTimestamp(),
-        }).catch(err => console.error(`[bulk] emailStatus update error for ${id}:`, err))
-      }),
+    // Ownership filter (the shared helper handles eligibility + send + persistence).
+    const regSnaps = await Promise.all(
+      registrationIds.map(id => adminDb.collection('registrations').doc(id).get()),
     )
+    const results: BulkActionResult[] = []
+    const owned:   string[] = []
+    for (let i = 0; i < registrationIds.length; i++) {
+      const id   = registrationIds[i]
+      const snap = regSnaps[i]
+      if (!snap.exists) { results.push({ id, success: false, reason: 'Not found' }); continue }
+      const reg = snap.data() as RegistrationDocument
+      if (reg.organizerUid !== uid) { results.push({ id, success: false, reason: 'Forbidden' }); continue }
+      owned.push(id)
+    }
 
-    let succeeded = 0
-    emailResults.forEach((r, i) => {
-      const { id } = eligible[i]
-      if (r.status === 'fulfilled') { results.push({ id, success: true }); succeeded++ }
-      else results.push({ id, success: false, reason: r.reason instanceof Error ? r.reason.message : 'Failed' })
+    const sendResults = await Promise.all(owned.map(id => resendRegistrationTicketEmail(id)))
+    const succeededIds: string[] = []
+    owned.forEach((id, i) => {
+      const r = sendResults[i]
+      if (r.ok) { results.push({ id, success: true }); succeededIds.push(id) }
+      else       results.push({ id, success: false, reason: r.error })
     })
 
-    const succeededEmailIds = eligible.filter((_, i) => emailResults[i].status === 'fulfilled').map(e => e.id)
-    if (succeededEmailIds.length > 0) void writeBulkAudit(succeededEmailIds, 'email_resent', uid)
+    if (succeededIds.length > 0) void writeBulkAudit(succeededIds, 'email_resent', uid)
 
     const failed = results.filter(r => !r.success).length
-    return NextResponse.json({ success: true, processed: registrationIds.length, succeeded, failed, results })
+    return NextResponse.json({ success: true, processed: registrationIds.length, succeeded: succeededIds.length, failed, results })
   }
 
-  // ── Batch write actions ───────────────────────────────────────────────────
-  const batch = adminDb.batch()
-  const now   = FieldValue.serverTimestamp()
-  const confirmedCancels: { eventSlug: string; passId: string }[] = []
+  // ── 5. check_in / cancel / restore — orchestration ONLY (RD-REGISTRATIONS-01
+  //      Phase 1 / H1). Delegate each id to the canonical transactional helper and
+  //      capture per-item success/failure, exactly like bulk-approve / bulk-reject.
+  //      Each helper enforces ownership + lifecycle + capacity + idempotency and
+  //      maintains every counter / shard / claim / session atomically. Sequential
+  //      to avoid contending one event's counter doc. ──
+  const results: BulkActionResult[] = []
+  const succeededIds: string[] = []
 
-  for (const { id, data: reg } of toProcess) {
-    const ref = adminDb.collection('registrations').doc(id)
-    if (action === 'check_in') {
-      batch.update(ref, {
-        checkedIn: true, checkedInAt: now, checkedInBy: callerUid,
-        checkedInWorkspaceUid: uid, checkedInSource: 'bulk', updatedAt: now,
-      })
-    } else if (action === 'cancel') {
-      batch.update(ref, { status: 'cancelled', updatedAt: now })
-      if (reg.status === 'confirmed') confirmedCancels.push({ eventSlug: reg.eventSlug, passId: reg.passId })
-    } else if (action === 'restore') {
-      batch.update(ref, { status: 'confirmed', updatedAt: now })
-    }
-  }
-
-  try {
-    await batch.commit()
-  } catch (err) {
-    console.error('[bulk] batch commit error:', err)
-    return NextResponse.json({ success: false, processed: registrationIds.length, succeeded: 0, failed: registrationIds.length, error: 'Database error. Please try again.', results: [] }, { status: 500 })
-  }
-
-  // ── Counter updates (atomic increments outside batch) ──────────────────
-  // All three counter cases group by eventSlug so multi-event batches are
-  // handled correctly and passCounts stays in sync with totalCount.
-  if (action === 'check_in') {
-    const byEvent = new Map<string, number>()
-    for (const { data: reg } of toProcess) byEvent.set(reg.eventSlug, (byEvent.get(reg.eventSlug) ?? 0) + 1)
-    for (const [slug, count] of byEvent) {
-      adminDb.collection('registrationCounters').doc(slug)
-        .set({ checkedInCount: FieldValue.increment(count) }, { merge: true })
-        .catch(err => console.error('[bulk] checkedInCount update error:', err))
-    }
-  } else if (action === 'cancel' && confirmedCancels.length > 0) {
-    const byEvent = new Map<string, { total: number; passes: Record<string, number> }>()
-    for (const { eventSlug: slug, passId } of confirmedCancels) {
-      const entry = byEvent.get(slug) ?? { total: 0, passes: {} }
-      entry.total++
-      entry.passes[passId] = (entry.passes[passId] ?? 0) + 1
-      byEvent.set(slug, entry)
-    }
-    for (const [slug, { total, passes }] of byEvent) {
-      const update: Record<string, unknown> = {
-        totalCount: FieldValue.increment(-total),
-        updatedAt:  FieldValue.serverTimestamp(),
+  for (const id of registrationIds) {
+    try {
+      if (action === 'check_in') {
+        const outcome = await checkInRegistration(id, uid, { byUid: callerUid, workspaceUid: uid, source: 'bulk' })
+        if (outcome.status === 'already_checked_in') {
+          results.push({ id, success: false, reason: 'Already checked in' })
+          continue
+        }
+      } else if (action === 'cancel') {
+        await cancelRegistration(id, uid)
+      } else { // restore
+        await restoreRegistration(id, uid)
       }
-      for (const [passId, count] of Object.entries(passes)) {
-        update[`passCounts.${passId}`] = FieldValue.increment(-count)
-      }
-      adminDb.collection('registrationCounters').doc(slug)
-        .update(update)
-        .catch(err => console.error('[bulk] counter decrement error:', err))
-    }
-  } else if (action === 'restore') {
-    const byEvent = new Map<string, { total: number; passes: Record<string, number> }>()
-    for (const { data: reg } of toProcess) {
-      const entry = byEvent.get(reg.eventSlug) ?? { total: 0, passes: {} }
-      entry.total++
-      entry.passes[reg.passId] = (entry.passes[reg.passId] ?? 0) + 1
-      byEvent.set(reg.eventSlug, entry)
-    }
-    for (const [slug, { total, passes }] of byEvent) {
-      const update: Record<string, unknown> = {
-        totalCount: FieldValue.increment(total),
-        updatedAt:  FieldValue.serverTimestamp(),
-      }
-      for (const [passId, count] of Object.entries(passes)) {
-        update[`passCounts.${passId}`] = FieldValue.increment(count)
-      }
-      adminDb.collection('registrationCounters').doc(slug)
-        .set(update, { merge: true })
-        .catch(err => console.error('[bulk] counter increment error:', err))
+      results.push({ id, success: true })
+      succeededIds.push(id)
+    } catch (err) {
+      results.push({ id, success: false, reason: mapActionError(action, err) })
     }
   }
 
-  // ── P1-1: session-allocation sync (post-commit, idempotent; reconciliation
-  //    cron is the backstop for any that fail) ────────────────────────────────
-  if (action === 'cancel') {
-    for (const { id } of toProcess) {
-      void releaseRegistrationSessions(id).catch(err => captureError(err, { scope: 'session_reconciliation', detail: 'bulk cancel release failed', registrationId: id }))
-    }
-  } else if (action === 'restore') {
-    for (const { id } of toProcess) {
-      void restoreRegistrationSessions(id).catch(err => captureError(err, { scope: 'session_reconciliation', detail: 'bulk restore failed (may be SESSION_FULL)', registrationId: id }))
-    }
+  // ── Audit (fire-and-forget) — only the ids that actually transitioned. ──────
+  if (succeededIds.length > 0) {
+    const auditAction: AuditAction = action === 'check_in' ? 'checked_in' : action === 'cancel' ? 'cancelled' : 'restored'
+    void writeBulkAudit(succeededIds, auditAction, uid)
   }
 
-  // ── Audit (fire-and-forget) ───────────────────────────────────────────────
-  const auditAction: AuditAction = action === 'check_in' ? 'checked_in' : action === 'cancel' ? 'cancelled' : 'restored'
-  void writeBulkAudit(toProcess.map(e => e.id), auditAction, uid)
-
-  for (const { id } of toProcess) results.push({ id, success: true })
   const failed = results.filter(r => !r.success).length
   return NextResponse.json({
-    success: true, processed: registrationIds.length,
-    succeeded: toProcess.length, failed, results,
+    success:   true,
+    processed: registrationIds.length,
+    succeeded: succeededIds.length,
+    failed,
+    results,
   })
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+// Maps a canonical-helper error to the same per-item reason string the route
+// returned before, so the client-facing result shape is unchanged.
+function mapActionError(action: Exclude<BulkAction, 'resend_email'>, err: unknown): string {
+  if (err instanceof RegistrationNotFoundError)     return 'Not found'
+  if (err instanceof UnauthorizedCancellationError) return 'Forbidden'
+  if (action === 'cancel') {
+    if (err instanceof AlreadyCancelledError) return 'Already cancelled'
+  } else if (action === 'restore') {
+    if (err instanceof NotCancelledError)          return 'Not cancelled'
+    if (err instanceof CapacityBlocksRestoreError) return err.reason === 'PASS_CAPACITY_FULL' ? 'Pass is at capacity' : 'Event is at capacity'
+  } else { // check_in
+    if (err instanceof CheckInNotAllowedError) {
+      switch (err.reason) {
+        case 'CANCELLED': return 'Registration is cancelled'
+        case 'PENDING':   return 'Registration is pending approval'
+        case 'REJECTED':  return 'Registration has been rejected'
+        case 'REFUNDED':  return 'Registration has been refunded'
+      }
+    }
+  }
+  console.error('[bulk] action error:', { action, err })
+  return action === 'check_in' ? 'Check-in failed' : action === 'cancel' ? 'Cancellation failed' : 'Restore failed'
+}
 
 async function writeBulkAudit(ids: string[], action: AuditAction, uid: string): Promise<void> {
   try {

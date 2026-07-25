@@ -14,8 +14,17 @@ import {
   setCurrentEvent, replaceAttendees, getAttendee, markLocalCheckedIn,
   countAttendees, enqueue, getQueueByStatus, updateQueueItem, isQueued, countByStatus,
 } from '@/lib/checkin/offlineDb'
+import { checkInBlockReason, type CheckInBlockReason } from '@/lib/registrations/checkinEligibility'
 import type { CacheResponse } from '@/app/api/checkin/cache/route'
 import type { CheckInResult } from '@/app/api/checkin/scan/route'
+
+// Offline pre-check → scan error codes (the authoritative gate is /api/checkin/scan on replay).
+const OFFLINE_BLOCK_ERROR: Record<CheckInBlockReason, string> = {
+  CANCELLED: 'REGISTRATION_CANCELLED',
+  PENDING:   'REGISTRATION_PENDING',
+  REJECTED:  'REGISTRATION_REJECTED',
+  REFUNDED:  'REGISTRATION_REFUNDED',
+}
 
 interface Params { eventSlug: string; token: string; onSynced?: () => void }
 
@@ -69,9 +78,10 @@ export function useOfflineCheckin({ eventSlug, token, onSynced }: Params): Offli
     const code = ticketCode.trim().toUpperCase()
     const att  = await getAttendee(code)
     if (!att) return { success: false, error: 'TICKET_NOT_FOUND' }
-    if (att.status === 'cancelled')        return { success: false, error: 'REGISTRATION_CANCELLED' }
-    if (att.status === 'pending')          return { success: false, error: 'REGISTRATION_PENDING' }
-    if (att.paymentStatus === 'refunded')  return { success: false, error: 'REGISTRATION_REFUNDED' }
+    // RD-ORGANIZER-01 P0-1: same canonical eligibility rule as the online scan/bulk paths
+    // (adds the previously-missing `rejected` gate). Server scan re-validates on replay.
+    const blockReason = checkInBlockReason(att)
+    if (blockReason) return { success: false, error: OFFLINE_BLOCK_ERROR[blockReason] }
 
     const attendee = { name: att.attendeeName, passName: att.passName }
     if (att.checkedIn || await isQueued(code)) {

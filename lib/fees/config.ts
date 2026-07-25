@@ -43,6 +43,21 @@ const FALLBACK: Record<PlatformPlanTier, Record<PlatformTransactionCategory, Fee
     donation:     { platformFeePercentBps:  50, platformFeeFixedPaise:   0, platformFeeMinPaise:   0, platformFeeMaxPaise: 20000, gatewayFeePercentBps: 200, gatewayFeeFixedPaise: 0, gstRatePercent: 18 },
     subscription: { platformFeePercentBps: 100, platformFeeFixedPaise:   0, platformFeeMinPaise:   0, platformFeeMaxPaise: 50000, gatewayFeePercentBps: 200, gatewayFeeFixedPaise: 0, gstRatePercent: 18 },
   },
+  // RD-LICENSE-GA-01 — Licensing V2 rate rows. The V2 Professional (2,500) and Business
+  // (5,000) tiers both carry the SAME 1% / ₹500-cap economics as the legacy `pro` row
+  // (per lib/licensing/eventLicense.ts V2_DEFINITIONS transactionFeePercent), so these are
+  // copies of `pro`. Distinct rows (not aliases) so each tier's rate can diverge later
+  // without touching the other. NOT a fee-formula change.
+  professional: {
+    ticketed:     { platformFeePercentBps: 100, platformFeeFixedPaise:   0, platformFeeMinPaise:   0, platformFeeMaxPaise: 50000, gatewayFeePercentBps: 200, gatewayFeeFixedPaise: 0, gstRatePercent: 18 },
+    donation:     { platformFeePercentBps:  50, platformFeeFixedPaise:   0, platformFeeMinPaise:   0, platformFeeMaxPaise: 20000, gatewayFeePercentBps: 200, gatewayFeeFixedPaise: 0, gstRatePercent: 18 },
+    subscription: { platformFeePercentBps: 100, platformFeeFixedPaise:   0, platformFeeMinPaise:   0, platformFeeMaxPaise: 50000, gatewayFeePercentBps: 200, gatewayFeeFixedPaise: 0, gstRatePercent: 18 },
+  },
+  business: {
+    ticketed:     { platformFeePercentBps: 100, platformFeeFixedPaise:   0, platformFeeMinPaise:   0, platformFeeMaxPaise: 50000, gatewayFeePercentBps: 200, gatewayFeeFixedPaise: 0, gstRatePercent: 18 },
+    donation:     { platformFeePercentBps:  50, platformFeeFixedPaise:   0, platformFeeMinPaise:   0, platformFeeMaxPaise: 20000, gatewayFeePercentBps: 200, gatewayFeeFixedPaise: 0, gstRatePercent: 18 },
+    subscription: { platformFeePercentBps: 100, platformFeeFixedPaise:   0, platformFeeMinPaise:   0, platformFeeMaxPaise: 50000, gatewayFeePercentBps: 200, gatewayFeeFixedPaise: 0, gstRatePercent: 18 },
+  },
   // Enterprise — wires the EXISTING F.1 plan rate (0.5%, ₹200 cap) into the fee
   // engine. Single negotiated rate across categories (plans.ts defines one
   // transactionFeePercent + cap for enterprise). Not a pricing change.

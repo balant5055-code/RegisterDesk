@@ -18,8 +18,8 @@ import { authorizeWorkspace }    from '@/lib/team/workspace'
 import { razorpay }              from '@/lib/razorpay/client'
 import { flagSuspiciousPayment } from '@/lib/payments/flagSuspicious'
 import { RazorpayDonationGateway } from '@/lib/razorpay/donationGateway'
-import { isEventLicenseTier } from '@/lib/licensing/eventLicense'
-import { getEffectiveLicenseDefinition } from '@/lib/licensing/resolveCatalog'
+import { CURRENT_LICENSE_VERSION, isValidTierForVersion } from '@/lib/licensing/eventLicense'
+import { getEffectiveDefinitionForVersion } from '@/lib/licensing/resolveCatalog'
 import { LICENSE_ORDERS_COLLECTION, licenseOrderConverter } from '@/lib/licensing/schema'
 import { deriveLicenseCharge, activateLicenseOrder, refundExhaustedCouponRemainder } from '@/lib/licensing/finalizeLicensePurchase'
 import { notificationEngine, NotificationType, NotificationChannel } from '@/lib/notifications'
@@ -40,10 +40,13 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
   const eventId = typeof body.eventId === 'string' ? body.eventId.trim() : ''
   if (!eventId) return NextResponse.json({ error: 'eventId is required' }, { status: 400 })
-  if (!isEventLicenseTier(body.tier)) return NextResponse.json({ error: 'Invalid tier' }, { status: 400 })
+  // A checkout confirm is a NEW purchase completion → validate + price against the CURRENT
+  // license version. At version 1 this is identical to the previous V1-only path.
+  if (!isValidTierForVersion(body.tier, CURRENT_LICENSE_VERSION)) return NextResponse.json({ error: 'Invalid tier' }, { status: 400 })
   const tier = body.tier
 
-  const def = await getEffectiveLicenseDefinition(tier)
+  const def = await getEffectiveDefinitionForVersion(tier, CURRENT_LICENSE_VERSION)
+  if (!def) return NextResponse.json({ error: 'Invalid tier' }, { status: 400 })
   if (def.contactSales || def.licensePricePaise === 0) {
     return NextResponse.json({ error: 'This tier does not require payment' }, { status: 400 })
   }

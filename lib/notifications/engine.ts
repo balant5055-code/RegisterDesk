@@ -21,13 +21,19 @@ import type { EmailResult } from '@/lib/email/provider'
 import { NotificationChannel } from './channels'
 import {
   NOTIFICATION_META,
-  type NotificationType,
+  NotificationType,
   type NotificationPayloadMap,
 } from './catalog'
 import { EMAIL_DISPATCHERS, type EmailDispatcher } from './dispatchers'
 import { resolveProvider } from './providerResolver'
 import { getNotificationHooks, type NotificationContext, type NotificationHooks } from './hooks'
 import { getCommunicationConfig } from '@/lib/communications/resolveCommunicationConfig'
+
+// RD-ORGANIZER-04 P1-3: bulk send types run their own resumable job/wave machinery and are
+// single-attempt by design — only TRANSACTIONAL emails get automatic bounded retry.
+const NON_RETRY_TYPES = new Set<NotificationType>([NotificationType.BROADCAST, NotificationType.CUSTOM_EMAIL])
+const MAX_SEND_ATTEMPTS = 3
+const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))
 
 function channelForType(type: NotificationType): NotificationChannel {
   return NOTIFICATION_META[type]?.channel ?? NotificationChannel.EMAIL
@@ -87,14 +93,27 @@ class NotificationEngine {
       return result
     }
 
-    try {
-      const dispatch = EMAIL_DISPATCHERS[type] as EmailDispatcher<T>
-      const result = await dispatch(provider, payload)
-      await runHook('afterSend', h => h.afterSend?.(ctx, result))
-      return result
-    } catch (err) {
-      await runHook('onError', h => h.onError?.(ctx, err))
-      throw err   // preserve pre-engine propagation semantics
+    const dispatch = EMAIL_DISPATCHERS[type] as EmailDispatcher<T>
+
+    // RD-ORGANIZER-04 P1-3: bounded retry/backoff for TRANSACTIONAL email only. A send
+    // either succeeds, returns { success:false } (SES rejected — not sent), or throws (not
+    // sent), so retrying never duplicates a delivered email. Bulk types keep their
+    // single-attempt-by-design behaviour. Hooks fire once, on the final outcome.
+    const retryable = channel === NotificationChannel.EMAIL && !NON_RETRY_TYPES.has(type)
+    for (let attempt = 1; ; attempt++) {
+      try {
+        const result = await dispatch(provider, payload)
+        if (result.success || !retryable || attempt >= MAX_SEND_ATTEMPTS) {
+          await runHook('afterSend', h => h.afterSend?.(ctx, result))
+          return result
+        }
+      } catch (err) {
+        if (!retryable || attempt >= MAX_SEND_ATTEMPTS) {
+          await runHook('onError', h => h.onError?.(ctx, err))
+          throw err   // preserve pre-engine propagation semantics
+        }
+      }
+      await sleep(200 * 2 ** (attempt - 1))   // 200ms, then 400ms
     }
   }
 }

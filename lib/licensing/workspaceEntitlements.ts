@@ -12,13 +12,16 @@
 
 import { adminDb } from '@/lib/firebase/admin'
 import { EVENT_LICENSES_COLLECTION } from './schema'
-import { getEffectiveLicenseDefinition } from './resolveCatalog'
+import { getLicenseCatalog, getLicenseCatalogV2, type LicenseCatalog, type LicenseCatalogV2 } from './resolveCatalog'
+import { pickVersionedDefinition } from './licenseCatalogShared'
 import {
-  EVENT_LICENSE_TIERS,
   DEFAULT_EVENT_LICENSE_TIER,
   isEventLicenseTier,
+  isValidTierForVersion,
   isUnlimited,
   type EventLicenseTier,
+  type AnyEventLicenseTier,
+  type LicenseVersion,
   type EventLicenseFeature,
   type EventLicenseLimitKey,
   type EventLicenseDefinition,
@@ -28,7 +31,8 @@ export type WorkspaceEntitlementSource = 'event_license' | 'admin_override' | 'f
 
 export interface WorkspaceEntitlements {
   uid:              string
-  effectiveTier:    EventLicenseTier
+  effectiveTier:    AnyEventLicenseTier   // may be a V1 OR V2 tier (whichever the license is stamped with)
+  effectiveVersion: LicenseVersion        // schema version of the effective license (drives fee/def resolution)
   source:           WorkspaceEntitlementSource
   definition:       EventLicenseDefinition
   features:         Record<EventLicenseFeature, boolean>
@@ -36,7 +40,20 @@ export interface WorkspaceEntitlements {
   activeEventCount: number                 // # active licensed events feeding this result
 }
 
-const tierRank = (t: EventLicenseTier): number => EVENT_LICENSE_TIERS.indexOf(t)
+/**
+ * RD-LICENSE-GA-01 — cross-version "highest active license" rank. Ranks by resolved
+ * registration LIMIT (unlimited = highest). This is the ONE ranking strategy for both
+ * vocabularies: for a V1-only workspace it is byte-for-byte identical to the legacy
+ * `EVENT_LICENSE_TIERS.indexOf` order, because V1 limits are strictly monotonic with tier
+ * rank (starter 100 < growth 1,000 < professional 5,000 < enterprise ∞); for V2 it orders
+ * Free 200 < Starter 1,000 < Professional 2,500 < Business 5,000 < Enterprise ∞. Ties
+ * (only possible ACROSS versions, e.g. V1 growth 1,000 vs V2 starter 1,000) break by the
+ * higher license price. Never infers from the tier name.
+ */
+function limitRank(def: EventLicenseDefinition): number {
+  const m = def.limits.maxRegistrations
+  return isUnlimited(m) ? Number.MAX_SAFE_INTEGER : m
+}
 
 /**
  * Admin comp/override tier. Stored at users/{uid}.entitlementOverrideTier; only a
@@ -53,59 +70,76 @@ async function readAdminOverrideTier(uid: string): Promise<EventLicenseTier | nu
 }
 
 /**
- * Highest ACTIVE event-license tier across the organizer's events, plus the count
- * of active licensed events. Reads eventLicenses where organizerUid == uid and
- * filters status === 'active' in memory (single-field index only — no composite).
+ * Highest ACTIVE event-license across the organizer's events (by resolved registration
+ * limit — see limitRank), plus its stored `version` and the count of active licensed
+ * events. Reads eventLicenses where organizerUid == uid and filters status === 'active'
+ * in memory (single-field index only — no composite). RD-LICENSE-GA-01: version-aware —
+ * a license is kept when its tier is valid FOR ITS STORED VERSION (V1 or V2), so a V2
+ * license is NEVER silently dropped, and it is resolved against the correct catalog.
  */
-async function readHighestActiveLicense(uid: string): Promise<{ tier: EventLicenseTier | null; count: number }> {
+async function readHighestActiveLicense(
+  uid: string, v1: LicenseCatalog, v2: LicenseCatalogV2,
+): Promise<{ tier: AnyEventLicenseTier | null; version: LicenseVersion; count: number }> {
   try {
     const qs = await adminDb.collection(EVENT_LICENSES_COLLECTION)
       .where('organizerUid', '==', uid)
       .limit(1000)
       .get()
-    let highest: EventLicenseTier | null = null
+    let best: { tier: AnyEventLicenseTier; version: LicenseVersion; limit: number; price: number } | null = null
     let count = 0
     for (const d of qs.docs) {
-      const data = d.data() as { tier?: unknown; status?: unknown; admin?: { lifecycle?: unknown } }
+      const data = d.data() as { tier?: unknown; status?: unknown; version?: unknown; admin?: { lifecycle?: unknown } }
       if (data.status !== 'active') continue
       // RD-LIC-ADMIN-01: an admin-suspended/cancelled license no longer feeds the
       // workspace's effective entitlements (applies immediately, no redeploy).
       if (data.admin?.lifecycle === 'suspended' || data.admin?.lifecycle === 'cancelled') continue
-      if (!isEventLicenseTier(data.tier)) continue
+      const version: LicenseVersion = typeof data.version === 'number' && data.version >= 1 ? data.version : 1
+      if (!isValidTierForVersion(data.tier, version)) continue   // version-driven (was V1-only)
       count++
-      if (highest === null || tierRank(data.tier) > tierRank(highest)) highest = data.tier
+      const def   = pickVersionedDefinition(v1, v2, data.tier, version)
+      const limit = limitRank(def)
+      const price = def.licensePricePaise
+      if (best === null || limit > best.limit || (limit === best.limit && price > best.price)) {
+        best = { tier: data.tier, version, limit, price }
+      }
     }
-    return { tier: highest, count }
+    return best ? { tier: best.tier, version: best.version, count } : { tier: null, version: 1, count }
   } catch {
-    return { tier: null, count: 0 }   // fail safe: most-restrictive
+    return { tier: null, version: 1, count: 0 }   // fail safe: most-restrictive
   }
 }
 
 /**
- * Resolve the workspace's effective entitlements. Effective tier = the higher of
- * the highest active event license and any admin override; falls back to the
- * most-restrictive tier (Starter) when the workspace has no active license.
+ * Resolve the workspace's effective entitlements. Effective license = the higher (by
+ * registration limit) of the highest active event license and any admin override; falls
+ * back to the most-restrictive tier (Starter) when the workspace has no active license.
+ * Version-aware: the effective definition is resolved against the catalog for the effective
+ * license's stored version, so V1 and V2 licenses both resolve correctly.
  */
 export async function getWorkspaceEntitlements(uid: string): Promise<WorkspaceEntitlements> {
-  const [override, active] = await Promise.all([readAdminOverrideTier(uid), readHighestActiveLicense(uid)])
+  const [v1, v2] = await Promise.all([getLicenseCatalog(), getLicenseCatalogV2()])
+  const [override, active] = await Promise.all([readAdminOverrideTier(uid), readHighestActiveLicense(uid, v1, v2)])
 
-  let effectiveTier: EventLicenseTier
-  let source: WorkspaceEntitlementSource
-  if (override !== null && (active.tier === null || tierRank(override) >= tierRank(active.tier))) {
-    effectiveTier = override
-    source        = 'admin_override'
+  // The admin override tier is a V1 tier (users/{uid}.entitlementOverrideTier), version 1.
+  const overrideDef = override !== null ? pickVersionedDefinition(v1, v2, override, 1) : null
+  const activeDef   = active.tier !== null ? pickVersionedDefinition(v1, v2, active.tier, active.version) : null
+
+  let effectiveTier:    AnyEventLicenseTier
+  let effectiveVersion: LicenseVersion
+  let source:           WorkspaceEntitlementSource
+  if (override !== null && overrideDef !== null && (activeDef === null || limitRank(overrideDef) >= limitRank(activeDef))) {
+    effectiveTier = override; effectiveVersion = 1; source = 'admin_override'
   } else if (active.tier !== null) {
-    effectiveTier = active.tier
-    source        = 'event_license'
+    effectiveTier = active.tier; effectiveVersion = active.version; source = 'event_license'
   } else {
-    effectiveTier = DEFAULT_EVENT_LICENSE_TIER
-    source        = 'fallback'
+    effectiveTier = DEFAULT_EVENT_LICENSE_TIER; effectiveVersion = 1; source = 'fallback'
   }
 
-  const definition = await getEffectiveLicenseDefinition(effectiveTier)
+  const definition = pickVersionedDefinition(v1, v2, effectiveTier, effectiveVersion)
   return {
     uid,
     effectiveTier,
+    effectiveVersion,
     source,
     definition,
     features:         definition.features,
@@ -119,7 +153,7 @@ export async function getWorkspaceEntitlements(uid: string): Promise<WorkspaceEn
 // Drop-in replacements for the removed subscription primitives (requireFeature /
 // requireLimit). Same result shape; the tier is now an EventLicenseTier.
 
-export interface FeatureCheck { ok: boolean; status: number; error: string; tier: EventLicenseTier }
+export interface FeatureCheck { ok: boolean; status: number; error: string; tier: AnyEventLicenseTier }
 
 /**
  * Gate a boolean feature. Returns 402 (Payment Required) when the workspace's
@@ -134,7 +168,7 @@ export async function requireFeature(uid: string, feature: EventLicenseFeature):
   }
 }
 
-export interface LimitCheck { ok: boolean; status: number; error: string; limit: number; tier: EventLicenseTier }
+export interface LimitCheck { ok: boolean; status: number; error: string; limit: number; tier: AnyEventLicenseTier }
 
 /**
  * Resolve a numeric limit, optionally checking a requested total against it.

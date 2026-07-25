@@ -16,10 +16,15 @@ import {
   isWalletCredit, walletTxnTypeLabel, walletTxnStatusMeta, channelMeta,
 } from '@/lib/finance/txnMeta'
 import type { WalletOverview, WalletTransaction, CommunicationUsage } from '@/lib/wallet/types'
+import { isChannelImplemented } from '@/lib/communications/health/channels'
 
 const CHANNEL_ICON: Record<string, LucideIcon> = {
   mail: Mail, 'message-square': MessageSquare, 'messages-square': MessagesSquare,
 }
+
+// RD-COMMS-01 Phase 2: SMS has no delivery transport (canonical capability SSOT), so its
+// "sent this month" counter is structurally always 0 — show its true availability instead.
+const SMS_AVAILABLE = isChannelImplemented('sms')
 
 interface Props {
   overview:     WalletOverview | null
@@ -35,7 +40,7 @@ export function CommunicationWalletPanel({ overview, transactions, usage, loadin
     { label: 'Comms balance',   value: formatCompactINR(overview?.balancePaise ?? 0),        sub: 'Prepaid credits',   icon: Wallet },
     { label: 'This-month spend', value: formatCompactINR(overview?.thisMonthSpendPaise ?? 0), sub: 'Current cycle',      icon: TrendingDown },
     { label: 'Emails',          value: String(overview?.emailsSent ?? 0),                     sub: 'Sent this month',   icon: Mail },
-    { label: 'SMS',             value: String(overview?.smsSent ?? 0),                        sub: 'Sent this month',   icon: MessageSquare },
+    { label: 'SMS',             value: SMS_AVAILABLE ? String(overview?.smsSent ?? 0) : '—',   sub: SMS_AVAILABLE ? 'Sent this month' : 'Unavailable', icon: MessageSquare },
     { label: 'WhatsApp',        value: String(overview?.whatsappSent ?? 0),                   sub: 'Sent this month',   icon: MessagesSquare },
   ]
 

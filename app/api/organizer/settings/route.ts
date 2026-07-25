@@ -4,6 +4,7 @@ import { FieldValue }               from 'firebase-admin/firestore'
 import { verifyCaller }             from '@/lib/team/access'
 import { validColor, validImageUrl } from '@/lib/branding/service'
 import { RATE_POLICY, checkPolicy } from '@/lib/rateLimit/policies'
+import { validatePhoneNumber }      from '@/lib/communication/phone'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -26,6 +27,12 @@ export interface OrganizerSettings {
   sendCertificateEmails:        boolean
   name:  string
   email: string
+  // RD-AUTH-02: PRIVATE organizer account mobile (users/{uid}.mobile). NOT the
+  // public organizationProfile.supportPhone. `mobileVerified` is read-only here
+  // (flipped by a future phone-OTP flow).
+  mobileE164:        string
+  mobileCountryCode: string
+  mobileVerified:    boolean
 }
 
 // ─── Auth helper ──────────────────────────────────────────────────────────────
@@ -70,6 +77,9 @@ export async function GET(req: NextRequest) {
     sendCertificateEmails:        (d.communications as Record<string, boolean> | undefined)?.sendCertificateEmails        ?? true,
     name:  (d.name  as string) ?? '',
     email: (d.email as string) ?? '',
+    mobileE164:        (d.mobile as Record<string, unknown> | undefined)?.e164        as string  ?? '',
+    mobileCountryCode: (d.mobile as Record<string, unknown> | undefined)?.countryCode as string  ?? '',
+    mobileVerified:    (d.mobile as Record<string, unknown> | undefined)?.verified    as boolean ?? false,
   }
 
   return NextResponse.json({ settings })
@@ -82,7 +92,7 @@ type PatchBody =
   | { section: 'branding';       data: { certSignatureUrl: string | null; emailHeaderUrl: string | null; primaryColor: string } }
   | { section: 'eventDefaults';  data: { defaultTimezone: string; defaultCurrency: string; defaultRegistrationClose: string; defaultVisibility: string } }
   | { section: 'communications'; data: { sendRegistrationConfirmation: boolean; sendEventUpdates: boolean; sendEventCancellation: boolean; sendCertificateEmails: boolean } }
-  | { section: 'account';        data: { name: string } }
+  | { section: 'account';        data: { name: string; mobileE164?: string; mobileCountryCode?: string } }
 
 export async function PATCH(req: NextRequest) {
   const uid = await requireUid(req)
@@ -144,9 +154,25 @@ export async function PATCH(req: NextRequest) {
         updatedAt: FieldValue.serverTimestamp(),
       }
       break
-    case 'account':
+    case 'account': {
       update = { name: body.data.name, updatedAt: FieldValue.serverTimestamp() }
+      // RD-AUTH-02: the PRIVATE account mobile lives on users/{uid}.mobile — written
+      // here via dotted paths so `verified`/`verifiedAt` for a FUTURE phone-OTP flow
+      // stay intact. A blank value clears the number (disables platform WhatsApp for
+      // the account); a non-blank value must be a valid E.164 number.
+      if (body.data.mobileE164 !== undefined) {
+        const e164 = (body.data.mobileE164 ?? '').trim()
+        if (e164 && !validatePhoneNumber(e164).valid) {
+          return NextResponse.json({ error: 'Enter a valid mobile number.' }, { status: 400 })
+        }
+        update['mobile.e164']        = e164
+        update['mobile.countryCode'] = (body.data.mobileCountryCode ?? '').trim()
+        // A changed number is unverified until re-verified (no phone OTP yet → false).
+        update['mobile.verified']    = false
+        update['mobile.verifiedAt']  = null
+      }
       break
+    }
     default:
       return NextResponse.json({ error: 'Unknown section' }, { status: 400 })
   }

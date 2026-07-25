@@ -12,6 +12,7 @@ import { buildQrValue }          from '@/lib/tickets/generate'
 import { enqueueWebhook }        from '@/lib/integrations/webhooks'
 import { crmRecordRegistration } from '@/lib/crm/service'
 import { readSessionSnaps, applyReleaseWrites, applyRestoreWrites } from '@/lib/sessions/allocation'
+import { checkInBlockReason } from '@/lib/registrations/checkinEligibility'
 import type { RegistrationDocument, AuditEntry, AuditAction, AuditActorType } from '@/lib/registrations/types'
 import type { CouponDocument } from '@/lib/coupons/types'
 
@@ -401,6 +402,32 @@ export async function createRegistration(
   return { registrationId, ticketCode }
 }
 
+// ─── Ownership resolution ───────────────────────────────────────────────────
+
+export type OwnedRegistrationResult =
+  | { ok: true;  reg: RegistrationDocument }
+  | { ok: false; status: number; error: string }
+
+/**
+ * RD-REGISTRATIONS-01 Phase 4 (M7) — the ONE registration-ownership resolver. Loads a single
+ * registration and verifies it belongs to the caller's workspace (`organizerUid === uid`),
+ * returning the registration or a typed 404/403. This is the canonical reg-load + ownership
+ * guard for routes that act on a single registration OUTSIDE the transactional lifecycle
+ * helpers (cancel/restore/checkIn/approve/reject already enforce the SAME check inside their
+ * transactions). Reused by the refund, undo-checkin and resend-email routes so the guard is
+ * defined in exactly one place.
+ */
+export async function loadOwnedRegistration(
+  registrationId: string,
+  organizerUid:   string,
+): Promise<OwnedRegistrationResult> {
+  const snap = await adminDb.collection('registrations').doc(registrationId).get()
+  if (!snap.exists) return { ok: false, status: 404, error: 'Registration not found' }
+  const reg = snap.data() as RegistrationDocument
+  if (reg.organizerUid !== organizerUid) return { ok: false, status: 403, error: 'Forbidden' }
+  return { ok: true, reg }
+}
+
 // ─── Cancellation ─────────────────────────────────────────────────────────────
 
 /**
@@ -625,10 +652,9 @@ export async function checkInRegistration(
     if (reg.organizerUid !== organizerUid) throw new UnauthorizedCancellationError()
     if (reg.checkedIn) return { status: 'already_checked_in' }   // idempotent — no counter change
 
-    if (reg.status === 'cancelled')       throw new CheckInNotAllowedError('CANCELLED')
-    if (reg.status === 'pending')         throw new CheckInNotAllowedError('PENDING')
-    if (reg.status === 'rejected')        throw new CheckInNotAllowedError('REJECTED')
-    if (reg.paymentStatus === 'refunded') throw new CheckInNotAllowedError('REFUNDED')
+    // RD-ORGANIZER-01 P0-1: canonical eligibility (shared with the QR scan route).
+    const blockReason = checkInBlockReason(reg)
+    if (blockReason) throw new CheckInNotAllowedError(blockReason)
 
     const now = FieldValue.serverTimestamp()
     txn.update(regRef, {
@@ -642,6 +668,54 @@ export async function checkInRegistration(
     writeCheckinDelta(txn, reg.eventSlug, registrationId, reg.passId, 1)   // GA-5 S3: sharded attendance write
     return { status: 'checked_in' }
   })
+}
+
+// ─── Un-check-in (canonical) ────────────────────────────────────────────────────
+
+export type UncheckInOutcome = { status: 'unchecked' | 'not_checked_in' }
+
+/**
+ * RD-ORGANIZER-02 P1: the ONE canonical un-check-in. Both undo entry points (the
+ * ticketCode-based /api/checkin/undo and the id-based organizer undo-checkin route) call
+ * this so the transaction, counter reversal (same shard as the check-in), idempotency, and
+ * audit behaviour are identical. Previously each route hand-rolled the transaction and only
+ * one wrote an audit entry. Re-reads inside the transaction (double-undo safe); returns
+ * `not_checked_in` idempotently when there is nothing to undo. Never called inside another
+ * transaction. Route-level policy (rate-limit, event-lifecycle gate, permission) stays in
+ * the routes — this owns only the state mutation + audit.
+ */
+export async function uncheckInRegistration(
+  registrationId: string,
+  organizerUid:   string,
+  opts:           { byUid: string; workspaceUid: string },
+): Promise<UncheckInOutcome> {
+  const regRef = adminDb.collection('registrations').doc(registrationId)
+
+  const outcome = await adminDb.runTransaction<UncheckInOutcome>(async txn => {
+    const snap = await txn.get(regRef)
+    if (!snap.exists) throw new RegistrationNotFoundError()
+    const reg = snap.data() as RegistrationDocument
+    if (reg.organizerUid !== organizerUid) throw new UnauthorizedCancellationError()
+    if (!reg.checkedIn) return { status: 'not_checked_in' }   // idempotent — nothing to undo
+
+    txn.update(regRef, {
+      checkedIn:       false,
+      checkedInAt:     FieldValue.delete(),
+      checkedInBy:     FieldValue.delete(),
+      checkedInSource: FieldValue.delete(),
+      updatedAt:       FieldValue.serverTimestamp(),
+    })
+    writeCheckinDelta(txn, reg.eventSlug, registrationId, reg.passId, -1)   // same shard as the check-in
+    return { status: 'unchecked' }
+  })
+
+  // Identical audit behaviour for every undo entry point (fire-and-forget) — only when a
+  // check-in was actually reverted.
+  if (outcome.status === 'unchecked') {
+    writeAuditEntry(registrationId, 'check_in_undone', opts.byUid, 'organizer', opts.workspaceUid)
+      .catch(err => console.error(`[uncheckInRegistration] audit error for ${registrationId}:`, err))
+  }
+  return outcome
 }
 
 // ─── Audit log ────────────────────────────────────────────────────────────────

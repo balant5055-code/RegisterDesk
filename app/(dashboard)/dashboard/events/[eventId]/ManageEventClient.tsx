@@ -3,8 +3,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import Link                                  from 'next/link'
 import { TextLink } from '@/components/ui'
-import { onAuthStateChanged, onIdTokenChanged } from 'firebase/auth'
-import { auth }                              from '@/lib/firebase/auth'
+import { useAuth }                           from '@/components/auth/AuthProvider'
 import { cn }                               from '@/lib/utils/cn'
 import { AlertCircle, ChevronLeft }         from 'lucide-react'
 import type { EventDetailResponse }      from '@/app/api/organizer/events/[eventId]/route'
@@ -87,7 +86,12 @@ function TabSkeleton() {
 export default function ManageEventClient({ eventId, initialTab }: { eventId: string; initialTab?: string }) {
   const [event,      setEvent]     = useState<EventDetailResponse | null>(null)
   const [regData,    setRegData]   = useState<RegistrationsApiResponse | null>(null)
-  const [token,      setToken]     = useState<string>('')
+  // RD-AUTH-01 Phase 1 (M-A): identity + token come from the shared provider. `token`
+  // is derived from the provider's reactive token, so it stays fresh across Firebase's
+  // silent hourly refresh (replacing the old local onIdTokenChanged listener) and every
+  // child tab that receives it keeps working past the 1-hour mark.
+  const { user, token: authToken, getToken } = useAuth()
+  const token = authToken ?? ''
   const [loading,    setLoading]   = useState(true)
   const [error,      setError]     = useState<string | null>(null)
   // Seed from the deep-link (?tab=) when valid; otherwise Home (Phase H.4.2).
@@ -115,34 +119,29 @@ export default function ManageEventClient({ eventId, initialTab }: { eventId: st
   }, [eventId])
 
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, async user => {
+    if (user === undefined) return
+    let cancelled = false
+    const run = async () => {
       if (!user) { setError('You must be signed in.'); setLoading(false); return }
       try {
-        const tok = await user.getIdToken()
-        setToken(tok)
+        const tok = await getToken()
+        if (cancelled || !tok) return
         await fetchData(tok)
       } catch (e) {
-        setError(e instanceof Error ? e.message : 'Failed to load event')
+        if (!cancelled) setError(e instanceof Error ? e.message : 'Failed to load event')
       } finally {
-        setLoading(false)
+        if (!cancelled) setLoading(false)
       }
-    })
-    return unsub
-  }, [fetchData])
+    }
+    run()
+    return () => { cancelled = true }
+  }, [user, getToken, fetchData])
 
-  // ── Keep token fresh for long-running sessions ──────────────────────────────
-  // Firebase silently refreshes the ID token ~5 min before its 1-hour expiry,
-  // firing onIdTokenChanged. Without this subscription the token stored in state
-  // would expire, causing 401s on lifecycle actions (close reg, cancel, etc.)
-  // taken after the user has been on the page for ~1 hour.
-  useEffect(() => {
-    const unsub = onIdTokenChanged(auth, async (u) => {
-      if (!u) return
-      const refreshedToken = await u.getIdToken()
-      setToken(refreshedToken)
-    })
-    return unsub
-  }, [])
+  // ── Token stays fresh for long-running sessions ─────────────────────────────
+  // Firebase silently refreshes the ID token ~5 min before its 1-hour expiry. The
+  // shared AuthProvider owns the single onIdTokenChanged listener and re-derives
+  // `token` above on each refresh, so lifecycle actions (close reg, cancel, etc.)
+  // taken after ~1 hour on the page still carry a valid token — no local listener.
 
   // ── Command Palette bridge (Phase H.4.2) ────────────────────────────────────
   // The palette can switch tabs on THIS already-mounted page (no navigation) and
@@ -276,7 +275,7 @@ export default function ManageEventClient({ eventId, initialTab }: { eventId: st
                 )
             )}
             {activeTab === 'passes' && <PassesTab passes={event.passes} />}
-            {activeTab === 'coupons' && <CouponsTab eventId={eventId} token={token} />}
+            {activeTab === 'coupons' && <CouponsTab eventId={eventId} token={token} passes={event.passes} />}
             {activeTab === 'waitlist' && <WaitlistTab eventId={eventId} token={token} />}
             {activeTab === 'conference' && <ConferenceTab eventId={eventId} token={token} />}
             {activeTab === 'sports'       && <SportsTab      eventId={eventId} token={token} />}

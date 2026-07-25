@@ -45,17 +45,15 @@ import { sendRefundEmail }            from '@/lib/registrations/sendRefundEmail'
 import {
   reversePlatformTransactionAndDebit,
   recordPlatformTransactionAndCredit,
-  type PlatformTransactionData,
 }                                     from '@/lib/firebase/firestore/platformTransactions'
 import { recordRegistrationFinancialReconciliation } from '@/lib/payments/registrationReconciliation'
-import { calculateFee }               from '@/lib/fees/engine'
-import { getFeePlanForOrganizer }      from '@/lib/billing/feeEngine'
-import { resolveFeeConfig }           from '@/lib/fees/resolveFeeConfig'
+import { buildRegistrationLedgerAndCredit } from '@/lib/payments/registrationLedger'
 import type { PaymentIntentRecord }   from '@/lib/firebase/firestore/paymentIntents'
 import { flagSuspiciousPayment }      from '@/lib/payments/flagSuspicious'
 import { captureFinancialError, captureWebhookError } from '@/lib/monitoring/sentry'
 import { LICENSE_ORDERS_COLLECTION, licenseOrderConverter } from '@/lib/licensing/schema'
-import { getEffectiveLicenseDefinition } from '@/lib/licensing/resolveCatalog'
+import { getEffectiveDefinitionForVersion } from '@/lib/licensing/resolveCatalog'
+import { CURRENT_LICENSE_VERSION } from '@/lib/licensing/eventLicense'
 import { activateLicenseOrder, refundExhaustedCouponRemainder } from '@/lib/licensing/finalizeLicensePurchase'
 import { releaseRegistrationSessions } from '@/lib/sessions/allocation'
 import { RAZORPAY_WEBHOOK_SECRET }    from '@/lib/env'
@@ -276,7 +274,10 @@ async function recoverLicensePaymentCaptured(
       return true
     }
 
-    const def = await getEffectiveLicenseDefinition(persisted.tier)
+    // `persisted` is a stored license ORDER (no version field, current-version artifact) →
+    // resolve its tier against CURRENT_LICENSE_VERSION. Identical at version 1.
+    const def = await getEffectiveDefinitionForVersion(persisted.tier, CURRENT_LICENSE_VERSION)
+    if (!def) { console.error(`[webhook] license activation: unresolved tier ${String(persisted.tier)}`); return false }
     const activation = await activateLicenseOrder({
       eventId:           persisted.eventId,
       uid:               persisted.organizerUid,
@@ -667,45 +668,23 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         // the intent is already 'paid' and the inner transaction no-ops (txnWasNoOp = true),
         // so this block is skipped and verify-payment's ledger entry / wallet credit stand.
         if (intent.amount > 0) {
-          const feePlan = await getFeePlanForOrganizer(intent.organizerUid)
-          const feeConfig = await resolveFeeConfig('event_registration', feePlan.planTier)
-          const feeResult = calculateFee({
-            transactionType:  'event_registration',
+          // RD-PAYMENT-02 Phase 2: build via the ONE canonical registration-ledger builder
+          // (was a verbatim inline duplicate). Identical `{ ledger, credit }` for identical
+          // inputs — the same deterministic `ptx_<registrationId>` key, same fee resolution
+          // (organizer_pays by default), same snapshot/shadow path — so recovery and the
+          // verify-payment happy path can never diverge.
+          const { ledger, credit } = await buildRegistrationLedgerAndCredit({
+            registrationId,
+            organizerUid:     intent.organizerUid,
+            eventSlug:        intent.eventSlug,
+            attendeeName:     intent.attendee.name,
+            attendeeEmail:    intent.attendee.email,
             grossAmountPaise: intent.amount,
-            feeModel:         'organizer_pays',
-            config:           feeConfig,
+            paymentId,
+            orderId,
+            // RD-PAYMENT-02 Phase 7: same canonical breakdown the verify path uses.
+            financials:       intent.financials,
           })
-          const ledger: PlatformTransactionData = {
-            id:                      `ptx_${registrationId}`,
-            type:                    'event_registration',
-            category:                'ticketed',
-            organizerUid:            intent.organizerUid,
-            entityId:                intent.eventSlug,
-            entityType:              'event',
-            sourceId:                registrationId,
-            sourceType:              'registration',
-            payerName:               intent.attendee.name,
-            payerEmail:              intent.attendee.email,
-            grossAmountPaise:        intent.amount,
-            platformFeeBasePaise:    feeResult.platformFeeBasePaise,
-            platformFeeGstPaise:     feeResult.platformFeeGstPaise,
-            platformFeeTotalPaise:   feeResult.platformFeeTotalPaise,
-            gatewayFeeEstimatePaise: feeResult.gatewayFeeEstimatePaise,
-            netSettlementPaise:      feeResult.netSettlementPaise,
-            feeModel:                'organizer_pays',
-            planTier:                feePlan.planTier,
-            feeConfigId:             feePlan.feeConfigId,
-            currency:                'INR',
-            gateway:                 'razorpay',
-            gatewayPaymentId:        paymentId,
-            gatewayOrderId:          orderId,
-          }
-          const credit = {
-            organizerUid:       intent.organizerUid,
-            grossAmountPaise:   intent.amount,
-            feesTotalPaise:     feeResult.platformFeeTotalPaise + feeResult.gatewayFeeEstimatePaise,
-            netSettlementPaise: feeResult.netSettlementPaise,
-          }
           // Atomic + idempotent: shares the `ptx_${registrationId}` key with
           // verify-payment, so whichever path runs first credits exactly once.
           // Registration is already created — never refund; on failure persist a

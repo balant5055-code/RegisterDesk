@@ -1,14 +1,25 @@
 // GET /api/organizer/events/[eventId]/registrations
 //
-// Query params:
-//   limit  — 25 | 50 | 100 (default 50); ignored when all=true
-//   cursor — registration doc ID to start after (server-side cursor pagination)
-//   all    — 'true' to load full dataset (capped at 2000) for search/filter mode
+// Query params (all OPTIONAL — omitting them preserves the original behaviour):
+//   limit    — 25 | 50 | 100 (default 50); ignored when all=true
+//   cursor   — registration doc ID to start after (server-side cursor pagination)
+//   all      — 'true' to load full dataset (capped at 2000) — legacy client-filter mode
+//   RD-ORGANIZER-01 P0-2 — server-side filter / sort / search (indexed, cursor-paginated):
+//   status   — registration status equality filter
+//   payment  — paymentStatus equality filter
+//   passId   — passId equality filter
+//   checkin  — 'yes' → checkedIn==true (see note: 'no' is NOT server-filtered because the
+//              field is absent on never-checked-in docs — the client refines that case)
+//   from,to  — registeredAt date range (YYYY-MM-DD, inclusive)
+//   dir      — 'asc' | 'desc' sort on registeredAt (default 'desc')
+//   q        — EXACT lookup: ticket code (RD-…) or email. Firestore has no substring
+//              search; partial-name matching stays a client refinement over the page.
 
 import { NextRequest, NextResponse } from 'next/server'
+import { Timestamp }      from 'firebase-admin/firestore'
 import { adminDb }        from '@/lib/firebase/admin'
 import { authorizeWorkspace } from '@/lib/team/workspace'
-import { getEventStats } from '@/lib/firebase/firestore/registrationCounters'
+import { getEventStats, aggregateRegistrationStatusCounts } from '@/lib/firebase/firestore/registrationCounters'
 import type { RegistrationDocument }  from '@/lib/registrations/types'
 
 // ─── Serialized shape (Timestamps → ISO strings) ──────────────────────────────
@@ -119,6 +130,16 @@ export async function GET(
   const pageSize = [25, 50, 100].includes(rawLimit) ? rawLimit : 50
   const cursor   = params.get('cursor') ?? null
 
+  // P0-2 — server-side filter / sort / exact-search inputs (all optional).
+  const statusF  = params.get('status')  ?? ''
+  const paymentF = params.get('payment') ?? ''
+  const passF    = params.get('passId')  ?? ''
+  const checkinF = params.get('checkin') ?? ''       // 'yes' → checkedIn==true (see header note)
+  const fromF    = params.get('from')    ?? ''
+  const toF      = params.get('to')      ?? ''
+  const dir: 'asc' | 'desc' = params.get('dir') === 'asc' ? 'asc' : 'desc'
+  const q        = (params.get('q') ?? '').trim()
+
   // ── 7. Stats — O(1) from the per-event statistics doc (EA-2 S1) ────────────
   // The status breakdown is served from registrationCounters/{slug} instead of
   // scanning every registration on each page load. Falls back to the former
@@ -137,52 +158,86 @@ export async function GET(
     stats.checkedIn  = counter.checkedInCount ?? 0
     stats.total      = stats.confirmed + stats.pending + stats.cancelled + stats.rejected + stats.waitlisted
   } else {
-    // Fallback: projected scan (two equality filters, auto single-field index).
-    const statsSnap = await adminDb
-      .collection('registrations')
-      .where('organizerUid', '==', uid)
-      .where('eventSlug',    '==', slug)
-      .select('status', 'checkedIn')
-      .get()
-    for (const doc of statsSnap.docs) {
-      const d = doc.data() as { status?: string; checkedIn?: boolean }
-      stats.total++
-      if      (d.status === 'confirmed')  stats.confirmed++
-      else if (d.status === 'pending')    stats.pending++
-      else if (d.status === 'cancelled')  stats.cancelled++
-      else if (d.status === 'waitlisted') stats.waitlisted++
-      else if (d.status === 'rejected')   stats.rejected++
-      if (d.checkedIn) stats.checkedIn++
-    }
+    // Fallback (not-yet-backfilled) — the ONE shared statistics fallback: indexed count()
+    // aggregates that transfer zero documents (RD-REGISTRATIONS-01 Phase 4 / M8), replacing
+    // the former per-registration projected scan. Same source of truth, same values.
+    const c = await aggregateRegistrationStatusCounts(uid, slug)
+    stats.total      = c.total
+    stats.confirmed  = c.confirmed
+    stats.pending    = c.pending
+    stats.cancelled  = c.cancelled
+    stats.waitlisted = c.waitlisted
+    stats.rejected   = c.rejected
+    stats.checkedIn  = c.checkedIn
   }
-
-  // ── 8. Registrations query ─────────────────────────────────────────────────
-  // Requires composite index: (organizerUid ASC, eventSlug ASC, registeredAt DESC)
-  const baseQuery = adminDb
-    .collection('registrations')
-    .where('organizerUid', '==', uid)
-    .where('eventSlug',    '==', slug)
-    .orderBy('registeredAt', 'desc')
 
   let registrations: SerializedRegistration[]
   let hasMore    = false
   let nextCursor: string | null = null
 
+  // ── 8a. Exact search (ticket code / email) — bypasses pagination + filters ──
+  // Firestore has no substring search, so `q` is an EXACT lookup that finds a specific
+  // attendee at any scale. ticketCode is globally unique (single-field indexed) and email
+  // uses the existing (eventSlug, attendee.email) index; ownership is re-verified in memory.
+  // A free-text (name) `q` falls through to the filtered/paginated path for client refinement.
+  const looksLikeTicket = /^rd[-_ ]?[a-z0-9]/i.test(q) || /^[a-z0-9]{6,}$/i.test(q)
+  if (q && q.includes('@')) {
+    const snap = await adminDb.collection('registrations')
+      .where('eventSlug', '==', slug).where('attendee.email', '==', q.toLowerCase())
+      .limit(50).get()
+    registrations = snap.docs.map(serializeDoc).filter(r => r.organizerUid === uid)
+    return NextResponse.json({ registrations, eventName, eventSlug: slug, passes, fieldLabels, stats, hasMore: false, nextCursor: null, totalCount: stats.total })
+  }
+  if (q && looksLikeTicket) {
+    const code = q.replace(/\s+/g, '').toUpperCase()
+    const snap = await adminDb.collection('registrations').where('ticketCode', '==', code).limit(5).get()
+    registrations = snap.docs.map(serializeDoc).filter(r => r.organizerUid === uid && r.eventSlug === slug)
+    return NextResponse.json({ registrations, eventName, eventSlug: slug, passes, fieldLabels, stats, hasMore: false, nextCursor: null, totalCount: stats.total })
+  }
+
+  // ── 8b. Filtered + sorted + cursor-paginated query (indexed) ────────────────
+  // Optional equality/range filters are applied server-side so filtered browsing
+  // paginates over the WHOLE matching set (never a capped client slice). Composite
+  // indexes: (organizerUid, eventSlug, <status|paymentStatus|passId|checkedIn>, registeredAt).
+  // Any uncovered combination falls back to the base (organizerUid, eventSlug, registeredAt)
+  // index and the client refines the remainder over the page — never a large fetch, never a 500.
+  function buildQuery(applyFilters: boolean): FirebaseFirestore.Query {
+    let query: FirebaseFirestore.Query = adminDb.collection('registrations')
+      .where('organizerUid', '==', uid).where('eventSlug', '==', slug)
+    if (applyFilters) {
+      if (statusF)            query = query.where('status', '==', statusF)
+      if (paymentF)           query = query.where('paymentStatus', '==', paymentF)
+      if (passF)              query = query.where('passId', '==', passF)
+      if (checkinF === 'yes') query = query.where('checkedIn', '==', true)
+      if (fromF) { const d = new Date(`${fromF}T00:00:00`);     if (!Number.isNaN(d.getTime())) query = query.where('registeredAt', '>=', Timestamp.fromDate(d)) }
+      if (toF)   { const d = new Date(`${toF}T23:59:59.999`);   if (!Number.isNaN(d.getTime())) query = query.where('registeredAt', '<=', Timestamp.fromDate(d)) }
+    }
+    return query.orderBy('registeredAt', dir)
+  }
+
+  async function runPaged(base: FirebaseFirestore.Query): Promise<FirebaseFirestore.QuerySnapshot> {
+    if (allMode) return base.limit(2000).get()
+    let pageQuery = base.limit(pageSize + 1)
+    if (cursor) {
+      const cursorDoc = await adminDb.collection('registrations').doc(cursor).get()
+      if (cursorDoc.exists) pageQuery = base.startAfter(cursorDoc).limit(pageSize + 1)
+    }
+    return pageQuery.get()
+  }
+
+  let snap: FirebaseFirestore.QuerySnapshot
+  try {
+    snap = await runPaged(buildQuery(true))
+  } catch {
+    // Missing composite index for this rare filter combination → degrade to the base
+    // indexed query; the client's refinement covers the remaining predicates.
+    snap = await runPaged(buildQuery(false))
+  }
+
   if (allMode) {
-    // Full-load mode for search/filter — cap at 2000 docs
-    const snap = await baseQuery.limit(2000).get()
     registrations = snap.docs.map(serializeDoc)
     hasMore = snap.size === 2000
   } else {
-    // Cursor-based paginated mode
-    let pageQuery = baseQuery.limit(pageSize + 1)
-    if (cursor) {
-      const cursorDoc = await adminDb.collection('registrations').doc(cursor).get()
-      if (cursorDoc.exists) {
-        pageQuery = baseQuery.startAfter(cursorDoc).limit(pageSize + 1)
-      }
-    }
-    const snap = await pageQuery.get()
     hasMore    = snap.size > pageSize
     const docs = hasMore ? snap.docs.slice(0, pageSize) : snap.docs
     nextCursor = hasMore ? docs[docs.length - 1].id : null

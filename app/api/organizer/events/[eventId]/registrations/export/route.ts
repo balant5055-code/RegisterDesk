@@ -7,6 +7,7 @@
 //          Waiver Accepted (yes/no), Checked In
 
 import { NextRequest, NextResponse } from 'next/server'
+import { Timestamp }                 from 'firebase-admin/firestore'
 import { adminDb }                   from '@/lib/firebase/admin'
 import { authorizeWorkspaceDownload } from '@/lib/team/workspace'
 import { csvCell as csvEscape }        from '@/lib/utils/csv'
@@ -125,12 +126,22 @@ export async function GET(
   }
 
   // ── Stream the CSV page-by-page (bounded memory; no whole-collection load) ──
-  const BATCH_SIZE = 1_000
-  const baseQuery = adminDb
+  // RD-ORGANIZER-01 P0-3: apply the SAME server-side filters as the table so the export
+  // covers exactly the filtered set (streamed, uncapped) — not just the loaded rows.
+  // Same composite indexes as the list route; asc order is served from the DESC index.
+  const p = req.nextUrl.searchParams
+  let baseQuery: FirebaseFirestore.Query = adminDb
     .collection('registrations')
     .where('organizerUid', '==', uid)
     .where('eventSlug',    '==', slug)
-    .orderBy('registeredAt', 'asc')
+  const exStatus = p.get('status'); if (exStatus) baseQuery = baseQuery.where('status', '==', exStatus)
+  const exPay    = p.get('payment'); if (exPay)   baseQuery = baseQuery.where('paymentStatus', '==', exPay)
+  const exPass   = p.get('passId'); if (exPass)   baseQuery = baseQuery.where('passId', '==', exPass)
+  if (p.get('checkin') === 'yes')   baseQuery = baseQuery.where('checkedIn', '==', true)
+  const exFrom = p.get('from'); if (exFrom) { const dt = new Date(`${exFrom}T00:00:00`);    if (!Number.isNaN(dt.getTime())) baseQuery = baseQuery.where('registeredAt', '>=', Timestamp.fromDate(dt)) }
+  const exTo   = p.get('to');   if (exTo)   { const dt = new Date(`${exTo}T23:59:59.999`);  if (!Number.isNaN(dt.getTime())) baseQuery = baseQuery.where('registeredAt', '<=', Timestamp.fromDate(dt)) }
+  baseQuery = baseQuery.orderBy('registeredAt', 'asc')
+  const BATCH_SIZE = 1_000
 
   const encoder = new TextEncoder()
   const stream = new ReadableStream<Uint8Array>({

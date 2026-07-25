@@ -4,6 +4,7 @@ import Link from 'next/link'
 import { motion } from 'framer-motion'
 import { Calendar, MapPin, ArrowRight, Sparkles } from 'lucide-react'
 import type { PassPublic } from '@/components/event-templates/types'
+import { passDisplayPrice } from '@/components/event-templates/shared/utils/format'
 import type { PhysicalVenueConfig } from '@/components/wizard/eventDetailsConfig'
 
 // ─── Helpers ───────────────────────────────────────────────────────────────────
@@ -20,6 +21,13 @@ function fmtINR(n: number) {
   return new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 0 }).format(n)
 }
 
+function fmtTime(t: string) {
+  if (!t) return ''
+  const [h, m] = t.split(':').map(Number)
+  const dt = new Date(); dt.setHours(h!, m ?? 0, 0)
+  return dt.toLocaleTimeString('en-IN', { hour: 'numeric', minute: '2-digit', hour12: true })
+}
+
 // ─── Props ─────────────────────────────────────────────────────────────────────
 
 export interface CulturalHeroProps {
@@ -28,6 +36,7 @@ export interface CulturalHeroProps {
   eventSubtype?:     string
   bannerUrl:         string
   startDate:         string
+  startTime?:        string
   endDate:           string
   venueName:         string
   physical?:         PhysicalVenueConfig
@@ -36,23 +45,27 @@ export interface CulturalHeroProps {
   passes:            PassPublic[]
   slug:              string
   performerCount:    number
+  // M4: whether the #lineup section actually renders, so the no-passes fallback CTA
+  // never scrolls to a section that isn't there.
+  hasLineup?:        boolean
 }
 
 // ─── Component ─────────────────────────────────────────────────────────────────
 
 export function CulturalHero({
   title, tagline, eventSubtype, bannerUrl,
-  startDate, endDate, venueName, physical,
+  startDate, startTime, endDate, venueName, physical,
   registrationOpen, isFreeEvent, passes, slug,
-  performerCount,
+  performerCount, hasLineup = false,
 }: CulturalHeroProps) {
   const active   = passes.filter(p => p.status !== 'inactive')
-  const minPrice = active.length > 0 ? Math.min(...active.map(p => p.price)) : 0
+  const minPrice = active.length > 0 ? Math.min(...active.map(p => passDisplayPrice(p))) : 0
   const locText  = physical?.city ? `${venueName}, ${physical.city}` : venueName
 
   const dateLabel = endDate && endDate !== startDate
     ? `${fmtDate(startDate)} – ${fmtDate(endDate)}`
     : fmtDate(startDate)
+  const timeLabel = startTime ? fmtTime(startTime) : ''
 
   const priceLabel = isFreeEvent || minPrice === 0 ? 'Free Entry' : `From ${fmtINR(minPrice)}`
 
@@ -118,7 +131,7 @@ export function CulturalHero({
           {dateLabel && (
             <div className="flex items-center gap-2.5 text-sm text-white/70">
               <Calendar className="size-4 shrink-0 text-amber-400" aria-hidden />
-              <span className="font-medium">{dateLabel}</span>
+              <span className="font-medium">{dateLabel}{timeLabel ? ` · ${timeLabel}` : ''}</span>
             </div>
           )}
           {locText && (
@@ -153,10 +166,15 @@ export function CulturalHero({
               <span className="text-sm font-medium text-white/50">{priceLabel}</span>
             </>
           ) : active.length > 0 ? (
-            <span className="inline-flex items-center rounded-full border border-white/20 bg-white/10 px-6 py-3 text-sm font-semibold text-white/60 backdrop-blur-sm">
-              Tickets Closed
-            </span>
-          ) : (
+            <>
+              <span className="inline-flex items-center rounded-full border border-white/20 bg-white/10 px-6 py-3 text-sm font-semibold text-white/60 backdrop-blur-sm">
+                Tickets Closed
+              </span>
+              {!isFreeEvent && minPrice > 0 && (
+                <span className="text-sm font-medium text-white/50">{priceLabel}</span>
+              )}
+            </>
+          ) : hasLineup ? (
             <Link
               href="#lineup"
               className="inline-flex items-center gap-2.5 rounded-full bg-amber-400 px-7 py-3.5 text-[0.9375rem] font-black text-gray-950 transition-all hover:bg-amber-300"
@@ -164,6 +182,10 @@ export function CulturalHero({
               See Lineup
               <ArrowRight className="size-4" aria-hidden />
             </Link>
+          ) : (
+            <span className="inline-flex items-center rounded-full border border-white/20 bg-white/10 px-6 py-3 text-sm font-semibold text-white/60 backdrop-blur-sm">
+              Tickets opening soon
+            </span>
           )}
         </motion.div>
 

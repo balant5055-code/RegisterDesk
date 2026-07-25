@@ -1,17 +1,20 @@
 // /tickets/[registrationId]
 //
-// Public attendee ticket page.  Secured by the non-guessable UUID — knowing
-// the URL is equivalent to presenting the ticket.  Never shows financial data.
+// Public attendee ticket page.  Secured by the non-guessable UUID — knowing the URL is
+// equivalent to presenting the ticket.  Shows no financial figures inline; a paid receipt
+// is offered only as a signed, gated download (same trust model as the ticket PDF).
 
 import type { Metadata }     from 'next'
 import { notFound }          from 'next/navigation'
 import Link                  from 'next/link'
-import { Calendar, MapPin, Check } from 'lucide-react'
+import { Calendar, MapPin, Clock, Check } from 'lucide-react'
 import QRCode                from 'qrcode'
 import { adminDb }           from '@/lib/firebase/admin'
 import { getEventBySlug }    from '@/lib/firebase/firestore/events'
 import { buildQrValue, signTicketToken } from '@/lib/tickets/generate'
+import { signReceiptToken }  from '@/lib/receipts/token'
 import { getTemplate }       from '@/lib/certificates/firestore'
+import { TicketActions, type TicketCalendar } from './TicketActions'
 import type { RegistrationDocument } from '@/lib/registrations/types'
 import type { EventDetailsDraft }    from '@/components/wizard/eventDetailsConfig'
 
@@ -88,10 +91,51 @@ export default async function TicketPage({ params }: PageProps) {
     : (ed?.venue?.physical?.name ?? '')
   const venueCity  = venueType !== 'online' ? (ed?.venue?.physical?.city ?? '') : ''
 
+  // H-6: full address, organizer, directions + contact targets, calendar, receipt (paid).
+  const physical      = ed?.venue?.physical
+  const fullAddress   = venueType !== 'online'
+    ? [physical?.addressLine1, physical?.addressLine2, physical?.city, physical?.state, physical?.pincode].filter(Boolean).join(', ')
+    : ''
+  const organizerName = ed?.organizer?.name?.trim() ?? ''
+  const directionsUrl = venueType !== 'online'
+    ? (physical?.mapsLink?.trim()
+        || (fullAddress ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent([physical?.name, fullAddress].filter(Boolean).join(', '))}` : null))
+    : null
+  const orgEmail       = ed?.organizer?.email?.trim() || ed?.support?.supportEmail?.trim() || ''
+  const orgPhone       = ed?.organizer?.phone?.trim() || ed?.support?.supportPhone?.trim() || ''
+  const contactHref    = orgEmail ? `mailto:${orgEmail}` : orgPhone ? `tel:${orgPhone}` : null
+  const contactIsEmail = !!orgEmail
+
+  const baseUrl   = process.env.NEXT_PUBLIC_APP_URL ?? ''
+  const shareUrl  = `${baseUrl}/tickets/${registrationId}`
+  const pdfUrl    = `/api/tickets/${registrationId}/pdf${pdfToken ? `?token=${pdfToken}` : ''}`
+  const isPaid    = reg.paymentStatus === 'paid' && (reg.amount ?? 0) > 0
+  const receiptUrl = isPaid
+    ? `${baseUrl}/api/receipts/${registrationId}?token=${encodeURIComponent(signReceiptToken(registrationId))}`
+    : null
+  const calendar: TicketCalendar | null = startDate
+    ? {
+        startDate,
+        endDate:   ed?.schedule?.endDate ?? startDate,
+        startTime,
+        endTime,
+        location:  (venueType === 'online' || venueType === 'hybrid')
+          ? (ed?.venue?.online?.platform ? `${ed.venue.online.platform} (Online)` : 'Online')
+          : [venueName, venueCity].filter(Boolean).join(', '),
+      }
+    : null
+
   const registeredAt = toIso(reg.registeredAt)
   const checkedInAt  = toIso(reg.checkedInAt)
 
-  const isCancelled = reg.status === 'cancelled'
+  const isCancelled  = reg.status === 'cancelled'
+  const statusLabel  = reg.status === 'confirmed' ? 'Confirmed'
+    : reg.status === 'cancelled' ? 'Cancelled'
+      : reg.status === 'pending' ? 'Pending'
+        : reg.status === 'waitlisted' ? 'Waitlisted'
+          : reg.status === 'rejected' ? 'Not approved'
+            : reg.status
+  const timeLabel = startTime ? `${startTime}${endTime ? `–${endTime}` : ''}` : ''
 
   // ── Certificate eligibility ───────────────────────────────────────────────
   // Find eventId by scanning organizer drafts for matching slug
@@ -119,17 +163,11 @@ export default async function TicketPage({ params }: PageProps) {
 
   // ── Render ────────────────────────────────────────────────────────────────
   return (
-    <div className="min-h-screen bg-[#f7f8fa] font-sans">
-      {/* Header strip */}
-      <div className="border-b border-border bg-white px-4 py-3">
-        <div className="mx-auto flex max-w-lg items-center justify-between">
+    <div className="min-h-screen bg-[#f7f8fa] font-sans print:bg-white">
+      {/* Header strip (chrome — hidden when printing) */}
+      <div className="border-b border-border bg-white px-4 py-3 print:hidden">
+        <div className="mx-auto flex max-w-lg items-center">
           <span className="text-[13px] font-bold text-foreground">RegisterDesk</span>
-          <Link
-            href={`/api/tickets/${registrationId}/pdf${pdfToken ? `?token=${pdfToken}` : ''}`}
-            className="rounded-lg bg-primary px-3 py-1.5 text-[12px] font-semibold text-white hover:bg-[var(--primary-hover)]"
-          >
-            Download PDF
-          </Link>
         </div>
       </div>
 
@@ -144,7 +182,7 @@ export default async function TicketPage({ params }: PageProps) {
         )}
 
         {/* ── Ticket card ───────────────────────────────────────────────── */}
-        <div className={`overflow-hidden rounded-2xl border border-border bg-white shadow-md ${isCancelled ? 'opacity-70' : ''}`}>
+        <div className={`overflow-hidden rounded-2xl border border-border bg-white shadow-md print:break-inside-avoid print:shadow-none ${isCancelled ? 'opacity-70' : ''}`}>
 
           {/* Banner */}
           {bannerUrl ? (
@@ -153,23 +191,28 @@ export default async function TicketPage({ params }: PageProps) {
               <img src={bannerUrl} alt="" className="h-full w-full object-cover" />
               <div className="absolute inset-0 bg-gradient-to-t from-black/60 to-transparent" />
               <div className="absolute bottom-3 left-4 right-4">
-                <p className="text-[18px] font-extrabold leading-snug text-white drop-shadow">
+                <h1 className="text-[18px] font-extrabold leading-snug text-white drop-shadow">
                   {reg.eventName}
-                </p>
+                </h1>
               </div>
             </div>
           ) : (
             <div className="flex h-24 items-end bg-gradient-to-br from-[var(--primary-from)]/30 via-[var(--primary)]/20 to-transparent px-4 pb-3">
-              <p className="text-[18px] font-extrabold text-foreground">{reg.eventName}</p>
+              <h1 className="text-[18px] font-extrabold text-foreground">{reg.eventName}</h1>
             </div>
           )}
 
-          {/* Date + venue */}
+          {/* Date + time + venue (quick glance) */}
           {(startDate || venueName) && (
-            <div className="flex flex-wrap gap-x-5 gap-y-1 border-b border-border px-5 py-3">
+            <div className="flex flex-wrap gap-x-5 gap-y-1.5 border-b border-border px-5 py-3">
               {startDate && (
                 <span className="inline-flex items-center gap-1.5 text-[12.5px] text-muted-foreground">
-                  <Calendar className="size-3.5 shrink-0" aria-hidden /> {fmt(startDate)}{startTime ? ` · ${startTime}` : ''}{endTime ? `–${endTime}` : ''}
+                  <Calendar className="size-3.5 shrink-0" aria-hidden /> {fmt(startDate)}
+                </span>
+              )}
+              {timeLabel && (
+                <span className="inline-flex items-center gap-1.5 text-[12.5px] text-muted-foreground">
+                  <Clock className="size-3.5 shrink-0" aria-hidden /> {timeLabel}
                 </span>
               )}
               {venueName && (
@@ -189,11 +232,11 @@ export default async function TicketPage({ params }: PageProps) {
               </span>
             )}
 
-            {/* QR code — inline SVG, server-generated */}
+            {/* QR code — inline SVG, server-generated (unchanged QR logic) */}
             <div
               className="overflow-hidden rounded-xl border border-border bg-white p-3 shadow-sm"
-              // eslint-disable-next-line react/no-danger
               dangerouslySetInnerHTML={{ __html: qrSvg }}
+              role="img"
               aria-label={`QR code for ticket ${reg.ticketCode}`}
             />
 
@@ -212,22 +255,21 @@ export default async function TicketPage({ params }: PageProps) {
             <span className="absolute -right-8 top-1/2 size-4 -translate-y-1/2 rounded-full bg-[#f7f8fa]" />
           </div>
 
-          {/* Attendee details */}
-          <div className="grid grid-cols-2 gap-x-6 gap-y-4 px-5 py-5">
-            <Detail label="Attendee"  value={reg.attendee.name} />
-            <Detail label="Pass"      value={reg.passName} />
-            <Detail label="Status"    value={
-              reg.status === 'confirmed' ? 'Confirmed'
-              : reg.status === 'cancelled' ? 'Cancelled'
-              : reg.status === 'pending'  ? 'Pending'
-              : reg.status
-            } />
+          {/* Ticket details (semantic definition list) */}
+          <dl className="grid grid-cols-1 gap-x-6 gap-y-4 px-5 py-5 sm:grid-cols-2">
+            <Detail label="Attendee"        value={reg.attendee.name} />
+            <Detail label="Pass"            value={reg.passName} />
+            <Detail label="Status"          value={statusLabel} />
+            {organizerName && <Detail label="Organizer" value={organizerName} />}
+            {fullAddress   && <Detail label="Address" value={fullAddress} full />}
+            <Detail label="Registration ID" value={registrationId} mono full />
+            <Detail label="Ticket ID"       value={reg.ticketCode} mono />
             {registeredAt && (
               <Detail label="Registered" value={new Date(registeredAt).toLocaleDateString('en-IN', {
                 day: 'numeric', month: 'short', year: 'numeric',
               })} />
             )}
-          </div>
+          </dl>
 
           {/* Footer */}
           <div className="border-t border-border bg-muted/20 px-5 py-3 text-center">
@@ -237,6 +279,20 @@ export default async function TicketPage({ params }: PageProps) {
             </p>
           </div>
         </div>
+
+        {/* Action centre (H-6) */}
+        <TicketActions
+          eventName={reg.eventName}
+          eventSlug={reg.eventSlug}
+          pdfUrl={pdfUrl}
+          receiptUrl={receiptUrl}
+          directionsUrl={directionsUrl}
+          contactHref={contactHref}
+          contactIsEmail={contactIsEmail}
+          shareUrl={shareUrl}
+          calendar={calendar}
+          cancelled={isCancelled}
+        />
 
         {/* Certificate section */}
         {certEnabled && (
@@ -264,7 +320,7 @@ export default async function TicketPage({ params }: PageProps) {
                   </p>
                   <a
                     href={`/api/certificates/download/${registrationId}`}
-                    className="inline-flex items-center justify-center gap-2 rounded-xl bg-primary px-5 py-2.5 text-[13px] font-semibold text-white transition-opacity hover:opacity-90"
+                    className="inline-flex items-center justify-center gap-2 rounded-xl bg-primary px-5 py-2.5 text-[13px] font-semibold text-primary-foreground transition-opacity hover:opacity-90"
                   >
                     {/* Download icon inline */}
                     <svg className="size-4" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" aria-hidden>
@@ -286,8 +342,8 @@ export default async function TicketPage({ params }: PageProps) {
           </div>
         )}
 
-        {/* Back to event link */}
-        <div className="mt-5 text-center">
+        {/* Back to event link (chrome — hidden when printing) */}
+        <div className="mt-5 text-center print:hidden">
           <Link
             href={`/events/${reg.eventSlug}`}
             className="text-[13px] text-primary hover:underline"
@@ -302,13 +358,15 @@ export default async function TicketPage({ params }: PageProps) {
 
 // ─── Small helper ─────────────────────────────────────────────────────────────
 
-function Detail({ label, value }: { label: string; value: string }) {
+function Detail({ label, value, full, mono }: { label: string; value: string; full?: boolean; mono?: boolean }) {
   return (
-    <div>
-      <p className="text-[10.5px] font-semibold uppercase tracking-wider text-muted-foreground">
+    <div className={full ? 'sm:col-span-2' : ''}>
+      <dt className="text-[10.5px] font-semibold uppercase tracking-wider text-muted-foreground">
         {label}
-      </p>
-      <p className="mt-0.5 text-[13.5px] font-medium text-foreground">{value}</p>
+      </dt>
+      <dd className={`mt-0.5 text-[13.5px] font-medium text-foreground${mono ? ' break-all font-mono text-[11.5px]' : ''}`}>
+        {value}
+      </dd>
     </div>
   )
 }

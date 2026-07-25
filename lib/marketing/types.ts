@@ -18,8 +18,11 @@ export interface SecurityItem { iconKey: MarketingIconKey; title: string; descri
 export interface PricingTier {
   id:          string
   name:        string
-  priceLabel:  string          // e.g. "Free", "₹999", "Custom"
-  period:      string | null   // e.g. "/month", null for free/custom
+  priceLabel:  string          // the CHARGED (offer) price, highlighted — e.g. "Free", "₹999"
+  // RD-LICENSE-01B Phase 3B — the strike-through REGULAR price, present only when a real
+  // discount applies (regular > offer and not free). null → render no strike-through.
+  regularPriceLabel?: string | null
+  period:      string | null   // e.g. "/event", null for free/custom
   tagline:     string
   highlighted: boolean
   ctaKey:      CtaKey

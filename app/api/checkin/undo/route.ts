@@ -10,9 +10,8 @@
 //   4. Double-undo prevention: re-read inside transaction; no-op if already false.
 
 import { NextRequest, NextResponse }  from 'next/server'
-import { FieldValue }                  from 'firebase-admin/firestore'
 import { adminDb }                     from '@/lib/firebase/admin'
-import { writeCheckinDelta }           from '@/lib/firebase/firestore/registrationCounters'
+import { uncheckInRegistration }       from '@/lib/firebase/firestore/registrations'
 import { authorizeWorkspace }          from '@/lib/team/workspace'
 import { getEventCheckInStatus }       from '@/lib/checkin/eventStatus'
 import { checkRateLimit }              from '@/lib/rateLimit'
@@ -32,7 +31,8 @@ export async function POST(req: NextRequest): Promise<NextResponse<CheckInUndoRe
   // ── Auth ──────────────────────────────────────────────────────────────────
   const authz = await authorizeWorkspace(req, 'checkin')
   if (!authz.ok) return NextResponse.json({ success: false, error: authz.error }, { status: authz.status })
-  const uid = authz.workspaceUid
+  const uid       = authz.workspaceUid
+  const callerUid = authz.callerUid
 
   // ── Rate limit: 60 undos per minute per organizer UID ─────────────────────
   const rl = checkRateLimit(uid, 'checkin-undo', 60, 60 * 1000)
@@ -75,7 +75,6 @@ export async function POST(req: NextRequest): Promise<NextResponse<CheckInUndoRe
 
   const regDoc = regSnap.docs[0]!
   const reg    = regDoc.data() as RegistrationDocument
-  const regRef = regDoc.ref
 
   // ── Ownership check ───────────────────────────────────────────────────────
   if (reg.organizerUid !== uid) {
@@ -93,25 +92,8 @@ export async function POST(req: NextRequest): Promise<NextResponse<CheckInUndoRe
     return NextResponse.json({ success: false, error: 'NOT_CHECKED_IN' }, { status: 422 })
   }
 
-  // ── Atomically revert check-in ────────────────────────────────────────────
-  await adminDb.runTransaction(async txn => {
-    // Re-read inside transaction — double-undo guard
-    const freshSnap = await txn.get(regRef)
-    const fresh     = freshSnap.data() as RegistrationDocument
-    if (!fresh.checkedIn) return  // already undone — idempotent
-
-    txn.update(regRef, {
-      checkedIn:       false,
-      checkedInAt:     FieldValue.delete(),
-      checkedInBy:     FieldValue.delete(),
-      checkedInSource: FieldValue.delete(),
-      updatedAt:       FieldValue.serverTimestamp(),
-    })
-
-    // Reverse attendance counters (event-level + per-pass) atomically. The
-    // registration's checkedIn flag (re-read above) guards against undo-below-zero.
-    writeCheckinDelta(txn, reg.eventSlug, regRef.id, reg.passId, -1)   // GA-5 S3: same shard as the check-in
-  })
+  // ── Atomically revert check-in — canonical helper (transaction + counter + audit) ──
+  await uncheckInRegistration(regDoc.id, uid, { byUid: callerUid, workspaceUid: uid })
 
   return NextResponse.json({
     success:  true,

@@ -9,6 +9,7 @@ import Link                    from 'next/link'
 import { getEventBySlug }      from '@/lib/firebase/firestore/events'
 import { resolveEffectivePriceRupees } from '@/lib/pricing/earlyBird'
 import { checkRegistrationGate, GATE_REASON_LABELS } from '@/lib/registrations/gate'
+import { buildRegisterHref }   from '@/lib/events/registerHref'
 import { RegisterClient }      from './RegisterClient'
 import { WaitlistJoinClient }  from './WaitlistJoinClient'
 import type {
@@ -64,17 +65,6 @@ function extractPasses(pricing: Record<string, unknown> | null): PassPublic[] {
         description: typeof p.description === 'string' ? p.description : undefined,
       }
     })
-}
-
-function filterFieldsForPass(form: RegistrationFormDraft, passId: string): FormSection[] {
-  return form.sections.map(section => ({
-    ...section,
-    fields: section.fields.filter(field => {
-      if (!field.visible) return false
-      if (field.passVisibility === 'all') return true
-      return Array.isArray(field.passVisibility) && field.passVisibility.includes(passId)
-    }),
-  })).filter(s => s.fields.length > 0)
 }
 
 // ─── Blocked state UI ─────────────────────────────────────────────────────────
@@ -138,7 +128,7 @@ function PassSelectionScreen({
         {passes.map(pass => (
           <Link
             key={pass.id}
-            href={`/events/${eventSlug}/register?passId=${pass.id}`}
+            href={buildRegisterHref(eventSlug, pass.id)}
             className="group flex items-center justify-between rounded-xl border border-border bg-card p-4 shadow-sm transition-all hover:border-primary/40 hover:shadow-md"
           >
             <div className="min-w-0">
@@ -231,7 +221,9 @@ export default async function RegisterPage({
   let conditionalRules: ConditionalRule[] = []
 
   if (form?.sections?.length) {
-    sections         = filterFieldsForPass(form, passId)
+    // H-7: hand the FULL section set to the client (all passes' fields); RegisterClient
+    // filters per the selected pass + field visibility so the pass can be switched in-form.
+    sections         = form.sections
     conditionalRules = (form.conditionalRules ?? []) as ConditionalRule[]
   }
 
@@ -301,13 +293,14 @@ export default async function RegisterPage({
       venueName={venueName}
       venueCity={venueCity}
       venueType={venueType}
-      pass={{
-        id:           pass.id,
-        name:         pass.name,
-        price:        pass.price,
-        regularPrice: pass.regularPrice,
-        isFree:       pass.isFree,
-      }}
+      passes={passes.map(p => ({
+        id:           p.id,
+        name:         p.name,
+        price:        p.price,
+        regularPrice: p.regularPrice,
+        isFree:       p.isFree,
+      }))}
+      initialPassId={pass.id}
       sections={sections}
       conditionalRules={conditionalRules}
       approvalMode={approvalMode}

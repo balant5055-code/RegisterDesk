@@ -26,7 +26,7 @@ import { StatusPill, ErrorBanner } from '@/components/admin'
 import type { PillTone } from '@/components/admin'
 import { useConfirm } from '@/components/ui/ConfirmDialog'
 import { Bars, HBars, Donut, Funnel } from '@/components/analytics/Charts'
-import { EVENT_LICENSE_TIERS, type EventLicenseTier } from '@/lib/licensing/eventLicense'
+import { currentLicenseTierIds, isValidTierForVersion, CURRENT_LICENSE_VERSION, type AnyEventLicenseTier } from '@/lib/licensing/eventLicense'
 import type {
   Event360Overview, Event360Response, Event360Analytics, Event360Governance,
   Event360Timeline, Event360TimelineEntry, HealthIndicator, HealthLevel,
@@ -540,8 +540,8 @@ function GovernanceWorkspace({ slug, o, onChanged }: {
   }
 
   async function promptTier(action: 'upgrade' | 'downgrade') {
-    const tier = (await prompt({ title: 'Select tier', message: `Target tier (${EVENT_LICENSE_TIERS.join(' / ')}):`, placeholder: EVENT_LICENSE_TIERS.join(' / ') }))?.trim() as EventLicenseTier
-    if (!EVENT_LICENSE_TIERS.includes(tier)) { if (tier) setErr('Invalid tier'); return }
+    const tier = (await prompt({ title: 'Select tier', message: `Target tier (${currentLicenseTierIds().join(' / ')}):`, placeholder: currentLicenseTierIds().join(' / ') }))?.trim() as AnyEventLicenseTier
+    if (!isValidTierForVersion(tier, CURRENT_LICENSE_VERSION)) { if (tier) setErr('Invalid tier'); return }
     await withReason(action, { tier })
   }
 

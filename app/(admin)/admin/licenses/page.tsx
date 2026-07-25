@@ -23,7 +23,7 @@ import {
 } from '@/components/admin'
 import type { PillTone } from '@/components/admin'
 import { useConfirm } from '@/components/ui/ConfirmDialog'
-import { EVENT_LICENSE_TIERS, type EventLicenseTier } from '@/lib/licensing/eventLicense'
+import { currentLicenseTierIds, isValidTierForVersion, CURRENT_LICENSE_VERSION, type AnyEventLicenseTier } from '@/lib/licensing/eventLicense'
 import type {
   LicenseRow, LicenseListResponse, LicenseDetail, LicenseDisplayStatus,
   LicensePaymentStatus, LicenseAdminActionType, LicenseAdminActionRequest,
@@ -184,7 +184,7 @@ export default function AdminLicensesPage() {
               </Td>
               <Td>
                 <span className="inline-flex items-center gap-1.5 capitalize">
-                  {r.tier}
+                  {r.tierName}
                   {r.complimentary && <StatusPill tone="accent">comp</StatusPill>}
                   {r.hasOverrides && !r.complimentary && <StatusPill tone="info">override</StatusPill>}
                 </span>
@@ -301,8 +301,8 @@ function LicenseDetailModal({ eventId, onClose, onChanged }: {
   }
 
   async function promptTier(action: 'upgrade' | 'downgrade' | 'grant') {
-    const tier = (await prompt({ title: 'Select tier', message: `Target tier (${EVENT_LICENSE_TIERS.join(' / ')}):`, placeholder: EVENT_LICENSE_TIERS.join(' / ') }))?.trim() as EventLicenseTier
-    if (!EVENT_LICENSE_TIERS.includes(tier)) { if (tier) setError('Invalid tier'); return }
+    const tier = (await prompt({ title: 'Select tier', message: `Target tier (${currentLicenseTierIds().join(' / ')}):`, placeholder: currentLicenseTierIds().join(' / ') }))?.trim() as AnyEventLicenseTier
+    if (!isValidTierForVersion(tier, CURRENT_LICENSE_VERSION)) { if (tier) setError('Invalid tier'); return }
     if (action === 'grant') {
       const comp = await confirm({ title: 'Grant type', message: 'Complimentary (free) grant?', confirmLabel: 'Complimentary', cancelLabel: 'Normal grant' })
       await withReason('grant', { tier, complimentary: comp })
@@ -369,7 +369,7 @@ function LicenseDetailModal({ eventId, onClose, onChanged }: {
               <div className="mt-2 flex flex-wrap items-center gap-2">
                 <StatusBadge status={row.displayStatus} />
                 <PaymentBadge status={row.paymentStatus} />
-                <StatusPill tone="neutral">{row.tier}</StatusPill>
+                <StatusPill tone="neutral">{row.tierName}</StatusPill>
                 {row.complimentary && <StatusPill tone="accent">complimentary</StatusPill>}
                 <StatusPill tone="neutral">{row.source}</StatusPill>
               </div>

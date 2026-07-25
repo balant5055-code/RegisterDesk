@@ -13,7 +13,7 @@ import { writeClawbackOnShortfall, logClawbackEvent } from '@/lib/clawbacks/claw
 import { enqueueWebhook }        from '@/lib/integrations/webhooks'
 import { crmRecordRefund }       from '@/lib/crm/service'
 import { captureFinancialError } from '@/lib/monitoring/sentry'
-import type { OrganizerRevenueWallet }      from '@/lib/fees/types'
+import type { OrganizerRevenueWallet, FeeModel } from '@/lib/fees/types'
 import type { PlatformTransactionDocument } from '@/lib/fees/types'
 import type {
   DonationDocument,
@@ -31,6 +31,18 @@ export function proportionalReversal(grossPaise: number, netPaise: number, refun
   if (grossPaise <= 0 || netPaise <= 0 || refundPaise <= 0) return 0
   const raw = Math.round((netPaise * refundPaise) / grossPaise)
   return Math.min(Math.max(raw, 0), netPaise)
+}
+
+/**
+ * The fee model a reversal ledger entry records — the ORIGINAL transaction's canonical
+ * feeModel, never a hardcoded value (RD-PAYMENT-02 Phase 5 / CERT-D5). Legacy transactions
+ * that predate the stored field fall back to organizer_pays, so their reversal is
+ * byte-identical to the previous hardcode.
+ */
+export function reversalFeeModel(
+  origPtx: Pick<PlatformTransactionDocument, 'feeModel'> | null | undefined,
+): FeeModel {
+  return origPtx?.feeModel ?? 'organizer_pays'
 }
 
 // ─── Record creation (idempotent by refundId) ────────────────────────────────
@@ -174,6 +186,11 @@ export async function applyDonationRefundAccounting(refundId: string): Promise<A
     // reverses HISTORICAL stored fee values, never the organizer's current plan.
     const origPlanTier    = origPtx?.planTier    ?? 'starter'
     const origFeeConfigId = origPtx?.feeConfigId ?? 'fallback'
+    // RD-PAYMENT-02 Phase 5 (CERT-D5): the reversal records the ORIGINAL transaction's fee
+    // model — never a hardcoded 'organizer_pays'. Read from the parent ledger's persisted
+    // feeModel (the canonical value Phase 2 writes). Legacy transactions without a stored
+    // feeModel default to organizer_pays, so their reversal stays byte-identical to today.
+    const origFeeModel    = reversalFeeModel(origPtx)
 
     const alreadyRefunded = donation.refundedAmountPaise ?? 0
     const fullRefund      = alreadyRefunded + refundAmount >= gross
@@ -243,7 +260,7 @@ export async function applyDonationRefundAccounting(refundId: string): Promise<A
       platformFeeTotalPaise:   0,
       gatewayFeeEstimatePaise: 0,
       netSettlementPaise:      -reversalNet,
-      feeModel:            'organizer_pays',
+      feeModel:            origFeeModel,
       planTier:            origPlanTier,
       feeConfigId:         origFeeConfigId,
       currency:            'INR',
@@ -253,6 +270,10 @@ export async function applyDonationRefundAccounting(refundId: string): Promise<A
       status:              'refunded',
       parentTransactionId: `ptx_${refund.donationId}`,
       refundId,
+      // Preserve the ORIGINAL transaction's canonical breakdown (financialVersion +
+      // feeModel + fee split) on the reversal for auditability. Absent for legacy
+      // transactions that predate the financials field — reversal stays as today.
+      ...(origPtx?.financials ? { financials: origPtx.financials } : {}),
       paidAt:              FieldValue.serverTimestamp(),
       createdAt:           FieldValue.serverTimestamp(),
       updatedAt:           FieldValue.serverTimestamp(),

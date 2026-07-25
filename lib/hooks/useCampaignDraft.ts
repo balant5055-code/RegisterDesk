@@ -1,8 +1,8 @@
 'use client'
 
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { onAuthStateChanged } from 'firebase/auth'
 import { auth } from '@/lib/firebase/auth'
+import { useAuth } from '@/components/auth/AuthProvider'
 import {
   createCampaignDraft,
   loadCampaignDraft,
@@ -37,6 +37,7 @@ interface UseCampaignDraftOptions {
  * Used when the user changes campaign type from the event wizard step 0.
  */
 export function useCampaignDraft(opts?: UseCampaignDraftOptions) {
+  const { user } = useAuth()                        // RD-AUTH-01 Phase 1 (M-A): shared auth state
   const [draft,     setDraft]     = useState<CampaignDraftDocument | null>(null)
   const [isLoading, setIsLoading] = useState(true)
 
@@ -60,7 +61,9 @@ export function useCampaignDraft(opts?: UseCampaignDraftOptions) {
   }), [opts?.campaignType, opts?.eventSubtype])
 
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async user => {
+    if (user === undefined) return                    // auth still resolving
+    let cancelled = false
+    const run = async () => {
       if (!user) {
         setIsLoading(false)
         return
@@ -79,6 +82,7 @@ export function useCampaignDraft(opts?: UseCampaignDraftOptions) {
         if (storedId) {
           console.log('[useCampaignDraft] branch: load existing | uid:', user.uid, '| draftId:', storedId)
           const existing = await loadCampaignDraft(user.uid, storedId)
+          if (cancelled) return
           // Only restore if draft is unpublished and matches the requested campaign type
           if (existing && existing.status !== 'published') {
             // If opts specify a subtype and it differs, create fresh draft
@@ -104,20 +108,22 @@ export function useCampaignDraft(opts?: UseCampaignDraftOptions) {
           eventSubtype: opts?.eventSubtype,
         })
         console.log('[useCampaignDraft] created new draft | draftId:', newId)
+        if (cancelled) return
         localStorage.setItem(CAMPAIGN_DRAFT_KEY, newId)
         draftIdRef.current = newId
         setDraft(blankDraft(newId))
       } catch (err) {
         console.error('[useCampaignDraft] FAILED | uid:', user.uid, '| storedId:', storedId, '| err:', err)
       } finally {
-        setIsLoading(false)
+        if (!cancelled) setIsLoading(false)
       }
-    })
+    }
 
-    return () => unsubscribe()
+    run()
+    return () => { cancelled = true }
   // opts are read once on mount — intentionally not in deps to avoid re-runs
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [user])
 
   /** Merges payload into Firestore and applies an optimistic local update. */
   const updateDraft = useCallback(async (payload: CampaignDraftPayload) => {
@@ -150,7 +156,7 @@ export function useCampaignDraft(opts?: UseCampaignDraftOptions) {
     } catch (err) {
       console.error('[useCampaignDraft] resetDraft failed:', err)
     }
-  }, [opts?.campaignType, opts?.eventSubtype, blankDraft])
+  }, [opts, blankDraft])
 
   return { draft, isLoading, updateDraft, resetDraft }
 }

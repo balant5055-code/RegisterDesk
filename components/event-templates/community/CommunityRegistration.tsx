@@ -2,12 +2,14 @@
 
 import Link from 'next/link'
 import { motion } from 'framer-motion'
+import { buildRegisterHref } from '@/lib/events/registerHref'
 import {
   ArrowRight, CheckCircle2, Lock, Sparkles, Users, Clock, ShieldCheck,
 } from 'lucide-react'
 import type { PassPublic } from '@/components/event-templates/types'
 import type { PassAvailability } from '@/lib/registrations/types'
-import { formatINR, formatDateShort } from '@/components/event-templates/shared/utils/format'
+import { formatINR, formatDateShort, passDisplayPrice } from '@/components/event-templates/shared/utils/format'
+import { organizerFeaturedPassId } from '@/components/event-templates/shared/utils/featuredPass'
 
 const PASS_ACCENTS = [
   'from-rose-400 to-pink-500',
@@ -31,6 +33,8 @@ export function CommunityRegistration({
     if (p.hideWhenSoldOut && availability[p.id]?.status === 'sold_out') return false
     return true
   })
+  // 03B.3: honour the organizer's explicit featured pass; else the prior positional default.
+  const flaggedId = organizerFeaturedPassId(visiblePasses)
 
   const singleFreePass =
     registrationOpen &&
@@ -134,7 +138,7 @@ export function CommunityRegistration({
                 )}
 
                 <Link
-                  href={`/events/${slug}/register?passId=${encodeURIComponent(visiblePasses[0]!.id)}`}
+                  href={buildRegisterHref(slug, visiblePasses[0]!.id)}
                   className="group mt-7 inline-flex items-center gap-2 rounded-full px-7 py-3 text-[0.875rem] font-bold text-white shadow-sm transition-all hover:opacity-90 hover:shadow-md active:scale-[0.98]"
                   style={{ backgroundImage: 'var(--primary-gradient)' }}
                 >
@@ -174,7 +178,7 @@ export function CommunityRegistration({
                 const avail    = availability[pass.id]
                 const soldOut  = avail?.status === 'sold_out'
                 const isFree   = isFreeEvent || pass.price === 0
-                const featured = idx === 0 && visiblePasses.length > 1
+                const featured = (flaggedId ? pass.id === flaggedId : idx === 0) && visiblePasses.length > 1
                 const gradient = PASS_ACCENTS[idx % PASS_ACCENTS.length]!
 
                 return (
@@ -214,7 +218,7 @@ export function CommunityRegistration({
                         <p className={`text-[1.875rem] font-black leading-none ${
                           isFree ? 'text-emerald-600' : 'text-gray-900'
                         }`}>
-                          {isFree ? 'Free' : formatINR(pass.price)}
+                          {isFree ? 'Free' : formatINR(passDisplayPrice(pass))}
                         </p>
                         {pass.showRemainingSeats && avail?.remaining != null && !soldOut && (
                           <p className="mt-1.5 flex items-center justify-center gap-1 text-[0.75rem] text-gray-400">
@@ -259,7 +263,7 @@ export function CommunityRegistration({
                           </span>
                         ) : featured ? (
                           <Link
-                            href={`/events/${slug}/register?passId=${encodeURIComponent(pass.id)}`}
+                            href={buildRegisterHref(slug, pass.id)}
                             className="group flex w-full items-center justify-center gap-2 rounded-xl py-2.5 text-[0.8125rem] font-bold text-white shadow-sm transition-all hover:opacity-90 hover:shadow-md active:scale-[0.98]"
                             style={{ backgroundImage: 'var(--primary-gradient)' }}
                           >
@@ -268,7 +272,7 @@ export function CommunityRegistration({
                           </Link>
                         ) : (
                           <Link
-                            href={`/events/${slug}/register?passId=${encodeURIComponent(pass.id)}`}
+                            href={buildRegisterHref(slug, pass.id)}
                             className="group flex w-full items-center justify-center gap-2 rounded-xl bg-gray-900 py-2.5 text-[0.8125rem] font-bold text-white shadow-sm transition-all hover:bg-gray-800 hover:shadow-md active:scale-[0.98]"
                           >
                             {isFree ? 'Join Free' : 'Register Now'}

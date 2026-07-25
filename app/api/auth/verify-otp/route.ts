@@ -11,6 +11,7 @@ import { FieldValue }         from 'firebase-admin/firestore'
 import { adminAuth, adminDb } from '@/lib/firebase/admin'
 import { notificationEngine, NotificationType, NotificationChannel } from '@/lib/notifications'
 import { verifyCode } from '@/lib/otp'
+import { ORGANIZER_ROLE } from '@/lib/organizer/identity'
 import { getSecurityConfig } from '@/lib/config/resolveSecurityConfig'
 import { getClientIp } from '@/lib/rateLimit'
 import { checkDistributedRateLimit } from '@/lib/rateLimit/redis'
@@ -26,7 +27,9 @@ export async function POST(req: Request): Promise<NextResponse> {
 
   let decoded: DecodedIdToken
   try {
-    decoded = await adminAuth.verifyIdToken(bearer)
+    // checkRevoked: true — consistent with the auth-critical verifiers (verifyCaller,
+    // resolveAdminUid) so a revoked session can't complete email verification.
+    decoded = await adminAuth.verifyIdToken(bearer, true)
   } catch {
     return NextResponse.json({ error: 'UNAUTHORIZED' }, { status: 401 })
   }
@@ -124,7 +127,7 @@ export async function POST(req: Request): Promise<NextResponse> {
         name,
         email,
         organizationName: '',
-        role:             'organizer',
+        role:             ORGANIZER_ROLE,
         emailVerified:    true,
         verification: { email: { verified: true, verifiedAt: FieldValue.serverTimestamp(), verifiedMethod: 'otp' } },
         trust: { level: 'email_verified', score: EMAIL_VERIFIED_SCORE, badges: FieldValue.arrayUnion('email') },

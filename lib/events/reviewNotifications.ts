@@ -5,10 +5,10 @@
 // this module no longer knows any email content. Never throws: failures are
 // logged and must never interrupt the review action.
 
-import { adminDb }             from '@/lib/firebase/admin'
 import { notificationEngine, NotificationType, NotificationChannel } from '@/lib/notifications'
 import { sendOrganizerWhatsApp } from '@/lib/notifications/organizerWhatsApp'
 import { writeEmailLog }         from '@/lib/email-logs/write'
+import { resolveOrganizerEmailIdentity } from '@/lib/organizer/emailIdentity'
 import { notifyEventReviewed }   from '@/lib/notifications/inbox/notify'
 
 export type ReviewNotificationKind =
@@ -61,14 +61,35 @@ export async function sendEventReviewEmail(args: ReviewNotificationArgs): Promis
   })
 
   const emailTask = (async () => {
+    const type = KIND_TO_TYPE[args.kind]
+    // Base communication-log row shared by every outcome (sent / failed / skipped) so
+    // NO path exits silently — every attempt is traceable in the Communication Center.
+    const logBase = {
+      organizerUid: args.organizerUid,
+      eventId:      '',
+      eventSlug:    '',
+      eventName:    args.eventName,
+      templateKey:  type,
+      subject:      `Event review: ${args.kind}`,
+      provider:     'ses',
+      channel:      'email' as const,
+    }
     try {
-      if (!notificationEngine.isAvailable(NotificationChannel.EMAIL)) return
-      const snap  = await adminDb.doc(`users/${args.organizerUid}`).get()
-      const email = (snap.data() as { email?: unknown } | undefined)?.email
-      if (typeof email !== 'string' || !email) return
-      const type   = KIND_TO_TYPE[args.kind]
+      // Canonical recipient resolution: Firestore profile first, Firebase Auth as the
+      // authoritative email-identity fallback when the profile is a phantom ancestor.
+      const identity = await resolveOrganizerEmailIdentity(args.organizerUid)
+
+      if (!notificationEngine.isAvailable(NotificationChannel.EMAIL)) {
+        void writeEmailLog({ ...logBase, recipientEmail: identity.email, recipientName: identity.name, status: 'skipped', error: 'Email provider not configured' })
+        return
+      }
+      if (!identity.email) {
+        void writeEmailLog({ ...logBase, recipientEmail: '', recipientName: identity.name, status: 'skipped', error: `No email on file for organizer ${args.organizerUid} (Firestore profile + Auth record both empty)` })
+        return
+      }
+
       const result = await notificationEngine.send(type, {
-        to:        email,
+        to:        identity.email,
         eventName: args.eventName,
         reason:    args.reason,
         comment:   args.comment,
@@ -76,22 +97,16 @@ export async function sendEventReviewEmail(args: ReviewNotificationArgs): Promis
       // PART 9: record the organizer email in the unified communication log
       // (channel='email') so it appears in the Communication Center alongside WhatsApp.
       void writeEmailLog({
-        organizerUid:      args.organizerUid,
-        eventId:           '',
-        eventSlug:         '',
-        eventName:         args.eventName,
-        templateKey:       type,
-        recipientEmail:    email,
-        recipientName:     '',
-        subject:           `Event review: ${args.kind}`,
+        ...logBase,
+        recipientEmail:    identity.email,
+        recipientName:     identity.name,
         status:            result.success ? 'sent' : 'failed',
-        provider:          'ses',
-        channel:           'email',
         providerMessageId: result.messageId,
         error:             result.success ? undefined : result.error,
       })
     } catch (err) {
       console.error('[reviewNotifications] failed to send review email:', err)
+      void writeEmailLog({ ...logBase, recipientEmail: '', recipientName: '', status: 'failed', error: err instanceof Error ? err.message : 'unknown error' })
     }
   })()
 

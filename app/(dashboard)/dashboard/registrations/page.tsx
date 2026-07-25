@@ -2,14 +2,15 @@
 
 import { Suspense, useState, useEffect, useMemo, useRef } from 'react'
 import { useSearchParams, useRouter }   from 'next/navigation'
-import { onAuthStateChanged }           from 'firebase/auth'
 import { auth }                         from '@/lib/firebase/auth'
+import { useAuth }                       from '@/components/auth/AuthProvider'
 import Link                             from 'next/link'
 import {
   Search, X, Users, CheckCircle2, XCircle,
   Clock, Loader2, Ticket, ChevronDown,
 } from 'lucide-react'
 import { cn }                           from '@/lib/utils/cn'
+import { registrationStatusCls }        from '@/lib/ui/statusColors'
 import { PageHeader, EmptyState }       from '@/components/ui'
 import { ErrorState }                   from '@/components/dashboard/EmptyState'
 import type { AllRegistrationsResponse } from '@/app/api/organizer/registrations/route'
@@ -36,17 +37,14 @@ function fmtDate(iso: string | null): string {
   })
 }
 
+// RD-ORGANIZER-01 P1: use the canonical status→hue map (lib/ui/statusColors) instead of a
+// local table that had drifted (waitlisted rendered sky, not the reconciled amber; rejected
+// missing). One source of truth shared with the per-event registrations table.
 function StatusBadge({ status }: { status: string }) {
-  const cls: Record<string, string> = {
-    confirmed:  'bg-emerald-100 text-emerald-700',
-    cancelled:  'bg-red-100 text-red-600',
-    pending:    'bg-amber-100 text-amber-700',
-    waitlisted: 'bg-sky-100 text-sky-700',
-  }
   return (
     <span className={cn(
       'inline-flex rounded-full px-2.5 py-0.5 text-[12px] font-semibold capitalize',
-      cls[status] ?? 'bg-muted text-muted-foreground',
+      registrationStatusCls[status] ?? 'bg-muted text-muted-foreground',
     )}>
       {status}
     </span>
@@ -240,6 +238,8 @@ function RegistrationsHubContent() {
     ? statusParam : 'all'
   const eventId      = searchParams.get('eventId') ?? null
 
+  const { user, getToken } = useAuth()
+
   const [data,          setData]          = useState<AllRegistrationsResponse | null>(null)
   const [loading,       setLoading]       = useState(true)
   const [error,         setError]         = useState<string | null>(null)
@@ -268,12 +268,15 @@ function RegistrationsHubContent() {
 
   // ── Load registrations — re-runs whenever the event filter changes ─────────
   useEffect(() => {
-    setLoading(true)
-    setError(null)
-    const unsub = onAuthStateChanged(auth, async user => {
+    if (user === undefined) return
+    let cancelled = false
+    const run = async () => {
+      setLoading(true)
+      setError(null)
       if (!user) { setLoading(false); return }
       try {
-        const token = await user.getIdToken()
+        const token = await getToken()
+        if (cancelled || !token) return
         const url   = eventId
           ? `/api/organizer/registrations?eventId=${encodeURIComponent(eventId)}`
           : '/api/organizer/registrations'
@@ -281,15 +284,17 @@ function RegistrationsHubContent() {
           headers: { Authorization: `Bearer ${token}` },
         })
         if (!res.ok) throw new Error('Failed to load registrations')
+        if (cancelled) return
         setData(await res.json() as AllRegistrationsResponse)
       } catch (e) {
-        setError(e instanceof Error ? e.message : 'Error')
+        if (!cancelled) setError(e instanceof Error ? e.message : 'Error')
       } finally {
-        setLoading(false)
+        if (!cancelled) setLoading(false)
       }
-    })
-    return unsub
-  }, [eventId])
+    }
+    run()
+    return () => { cancelled = true }
+  }, [user, getToken, eventId])
 
   const filtered = useMemo((): SerializedRegistration[] => {
     let regs = data?.registrations ?? []

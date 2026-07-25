@@ -38,6 +38,20 @@ export type BroadcastLimitResult =
   | { ok: true }
   | { ok: false; code: BroadcastLimitCode; status: 422 | 429 }
 
+// ─── Cap resolver (shared) ──────────────────────────────────────────────────────
+
+/**
+ * RD-ORGANIZER-04 P1-1: the effective per-broadcast recipient cap for `uid` (admin
+ * override or default). Used to BOUND recipient discovery — an indexed count() aggregate
+ * gates oversized audiences and every doc load is capped at this value + 1, so a broadcast
+ * never loads an entire registration collection into memory. One organizerLimits doc read.
+ */
+export async function resolveMaxRecipientsPerBroadcast(uid: string): Promise<number> {
+  const snap = await adminDb.doc(`organizerLimits/${uid}`).get()
+  const o    = snap.exists ? (snap.data() as OrganizerLimitsDoc) : null
+  return o?.recipientsPerBroadcast ?? DEFAULT_MAX_RECIPIENTS_PER_BROADCAST
+}
+
 // ─── Guard ────────────────────────────────────────────────────────────────────
 
 /**

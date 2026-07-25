@@ -1,12 +1,14 @@
 'use client'
 
-import { XCircle, CheckCircle, Lock, Clock3, AlarmClock, Languages, Shirt } from 'lucide-react'
+import { AlarmClock, Languages, Shirt } from 'lucide-react'
 import type { EventDetailProps } from '@/app/events/[slug]/EventDetailClient'
+import { LinkedCampaignSection } from '@/app/events/[slug]/EventDetailClient'
+import { EventInfoSection } from '@/components/event-templates/shared/ui/EventInfoSection'
 import type { WorkshopDetails as WorkshopDetailsData } from '@/components/wizard/eventDetailsConfig'
-import { EventPageLayout }      from '@/components/event-templates/shared/ui/EventPageLayout'
-import { StickyMobileCTA }      from '@/components/event-templates/shared/registration/StickyMobileCTA'
+import { EventDetailsFramework } from '@/components/event-templates/EventDetailsFramework'
 import { AddToCalendarButton }  from '@/components/event-templates/shared/ui/AddToCalendarButton'
 import { WorkshopHero }         from './WorkshopHero'
+import { TicketsPreviewBar }    from '@/components/event-templates/shared/registration/TicketsPreviewBar'
 import { WorkshopInstructor }   from './WorkshopInstructor'
 import { WorkshopLearning }     from './WorkshopLearning'
 import { WorkshopCurriculum }   from './WorkshopCurriculum'
@@ -25,7 +27,7 @@ import { SharedGallery }        from '@/components/event-templates/shared/media/
 
 export function WorkshopTemplate(props: EventDetailProps) {
   const {
-    slug, lifecycleStatus: ls, cancelReason,
+    slug,
     registrationOpen, regClosedMessage,
     title, tagline, description,
     bannerUrl, gallery, promoVideoUrl,
@@ -53,49 +55,17 @@ export function WorkshopTemplate(props: EventDetailProps) {
   const hasLearning      = learningOutcomes.length > 0 || td?.prerequisites?.trim() || td?.materialsIncluded?.trim() || td?.softwareRequired?.trim()
 
   return (
-    <EventPageLayout eventType={props.eventType} title={title}>
-
-      {/* ── Lifecycle banners ────────────────────────────────────────────────── */}
-      {ls === 'cancelled' && (
-        <div className="border-b border-red-200 bg-red-50 px-5 py-2.5">
-          <div className="mx-auto flex max-w-7xl items-center gap-2.5">
-            <XCircle className="size-4 shrink-0 text-red-500" aria-hidden />
-            <p className="text-xs font-bold text-red-700">
-              This workshop has been cancelled.{cancelReason && ` ${cancelReason}`}
-            </p>
-          </div>
-        </div>
-      )}
-      {ls === 'completed' && (
-        <div className="border-b border-sky-200 bg-sky-50 px-5 py-2.5">
-          <div className="mx-auto flex max-w-7xl items-center gap-2.5">
-            <CheckCircle className="size-4 shrink-0 text-sky-500" aria-hidden />
-            <p className="text-xs font-semibold text-sky-700">
-              This workshop has concluded. Thank you for participating!
-            </p>
-          </div>
-        </div>
-      )}
-      {ls === 'registration_closed' && (
-        <div className="border-b border-amber-200 bg-amber-50 px-5 py-2.5">
-          <div className="mx-auto flex max-w-7xl items-center gap-2.5">
-            <Lock className="size-4 shrink-0 text-amber-500" aria-hidden />
-            <p className="text-xs font-semibold text-amber-700">
-              Enrollment is currently closed for this workshop.
-            </p>
-          </div>
-        </div>
-      )}
-      {ls === 'postponed' && (
-        <div className="border-b border-orange-200 bg-orange-50 px-5 py-2.5">
-          <div className="mx-auto flex max-w-7xl items-center gap-2.5">
-            <Clock3 className="size-4 shrink-0 text-orange-500" aria-hidden />
-            <p className="text-xs font-semibold text-orange-700">
-              This workshop has been postponed.
-            </p>
-          </div>
-        </div>
-      )}
+    <EventDetailsFramework
+      props={props}
+      eventType={props.eventType}
+      shell="page-layout"
+      lifecycleTone="light"
+      cancelledMessage="This workshop has been cancelled."
+      completedMessage="This workshop has concluded. Thank you for participating!"
+      registrationClosedMessage="Enrollment is currently closed for this workshop."
+      postponedMessage="This workshop has been postponed."
+      registrationTargetId="enroll"
+    >
 
       {/* ── 1. Hero ─────────────────────────────────────────────────────────── */}
       <WorkshopHero
@@ -104,8 +74,11 @@ export function WorkshopTemplate(props: EventDetailProps) {
         eventSubtype={props.eventSubtype}
         bannerUrl={bannerUrl}
         startDate={startDate}
+        startTime={props.startTime}
         endDate={endDate}
         venueType={venueType}
+        venueName={venueName}
+        city={physical?.city}
         registrationOpen={registrationOpen}
         isFreeEvent={isFreeEvent}
         passes={passes}
@@ -113,6 +86,9 @@ export function WorkshopTemplate(props: EventDetailProps) {
         leadInstructor={leadInstructor}
         batchSize={td?.batchSize}
       />
+
+      {/* Compact registration preview (03B.3 additive) — early tickets visibility, no reorder. */}
+      <TicketsPreviewBar passes={passes} isFreeEvent={isFreeEvent} registrationOpen={registrationOpen} targetId="enroll" />
 
       {/* ── 1b. Add to Calendar ─────────────────────────────────────────────── */}
       {startDate && (
@@ -254,14 +230,20 @@ export function WorkshopTemplate(props: EventDetailProps) {
       />
 
       {/* ── Sticky mobile CTA ────────────────────────────────────────────────── */}
-      <StickyMobileCTA
-        visible={true}
-        title={title}
-        isFreeEvent={isFreeEvent}
-        passes={passes}
-        registrationOpen={registrationOpen}
+      <EventInfoSection
+        language={props.language}
+        dressCode={props.dressCode}
+        timezone={props.timezone}
+        venueType={props.venueType}
+        online={props.online}
+        refundWindow={props.refundWindow}
+        refundPolicyUrl={props.refundPolicyUrl}
       />
 
-    </EventPageLayout>
+      {props.linkedCampaign && (
+        <LinkedCampaignSection campaign={props.linkedCampaign} eventSlug={slug} />
+      )}
+
+    </EventDetailsFramework>
   )
 }

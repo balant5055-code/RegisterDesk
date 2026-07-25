@@ -11,6 +11,7 @@ import {
   SessionError, type EventSessionDoc, type SessionStatus,
 } from '@/lib/sessions/types'
 import { overlaps, firstOverlap } from '@/lib/sessions/conflict'
+import { checkInBlockReason } from '@/lib/registrations/checkinEligibility'
 
 const newId = () => crypto.randomUUID()
 
@@ -239,15 +240,14 @@ export async function sessionCheckIn(opts: { workspaceUid: string; sessionId: st
     if (sess.eventSlug !== reg.eventSlug) throw new SessionError('EVENT_MISMATCH')
     if (ciSnap.exists) return { alreadyCheckedIn: true }   // idempotent
 
-    // Eligibility (server-side, P6.1): only attendees who are checked in to the
-    // event and hold a live, non-refunded registration may record session
-    // attendance. A cancelled/pending/rejected/refunded reg never qualifies, and
-    // the checkedIn guard also blocks anyone not admitted at the event gate.
-    if (reg.status === 'cancelled' || reg.status === 'pending' || reg.status === 'rejected') {
-      throw new SessionError('REGISTRATION_INELIGIBLE', reg.status)
-    }
-    if (reg.paymentStatus === 'refunded') {
-      throw new SessionError('REGISTRATION_INELIGIBLE', 'refunded')
+    // Eligibility (server-side): only attendees admitted at the event gate and holding a
+    // live, non-refunded registration may record session attendance. RD-ORGANIZER-02 P1:
+    // the admission rule comes from the ONE canonical checkInBlockReason (shared with the
+    // QR scan / bulk / offline paths) — the lowercased reason preserves the prior detail
+    // string (cancelled|pending|rejected|refunded). The checkedIn guard is session-specific.
+    const blockReason = checkInBlockReason({ status: reg.status ?? '', paymentStatus: reg.paymentStatus ?? null })
+    if (blockReason) {
+      throw new SessionError('REGISTRATION_INELIGIBLE', blockReason.toLowerCase())
     }
     if (reg.checkedIn !== true) {
       throw new SessionError('REGISTRATION_INELIGIBLE', 'not_checked_in')

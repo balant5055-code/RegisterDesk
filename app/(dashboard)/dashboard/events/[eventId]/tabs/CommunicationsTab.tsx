@@ -4,7 +4,12 @@ import { Mail, MessageCircle, Phone, CheckCircle2, Info, Wallet } from 'lucide-r
 import { cn } from '@/lib/utils/cn'
 import { calculateCommunicationCost } from '@/lib/events/communicationCost'
 import { useCommunicationConfig } from '@/lib/communications/communicationConfigClient'
+import { isChannelImplemented } from '@/lib/communications/health/channels'
 import type { EventDetailResponse } from '@/app/api/organizer/events/[eventId]/route'
+
+// RD-COMMS-01 Phase 2B: SMS availability comes from the canonical capability SSOT. SMS has
+// no transport, so it can never be "Active" — it renders as Unavailable and is never priced.
+const SMS_AVAILABLE = isChannelImplemented('sms')
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -95,11 +100,12 @@ function CostEstimate({
   whatsappRatePaise:  number
   smsRatePaise:       number
 }) {
-  if (!whatsappEnabled && !smsEnabled) return null
+  const smsBillable = SMS_AVAILABLE && smsEnabled   // SMS has no transport → never estimated
+  if (!whatsappEnabled && !smsBillable) return null
 
   // Rates come from the resolved Business Configuration so this preview matches what
   // is actually charged at send time (never a hardcoded per-message rate).
-  const cost = calculateCommunicationCost({ estimatedCapacity, whatsappEnabled, smsEnabled, whatsappRatePaise, smsRatePaise })
+  const cost = calculateCommunicationCost({ estimatedCapacity, whatsappEnabled, smsEnabled: smsBillable, whatsappRatePaise, smsRatePaise })
 
   return (
     <div className="overflow-hidden rounded-xl border border-border bg-card">
@@ -123,7 +129,7 @@ function CostEstimate({
             <span className="font-medium text-foreground">{formatINR(cost.whatsappCost)}</span>
           </div>
         )}
-        {smsEnabled && (
+        {smsBillable && (
           <div className="flex items-center justify-between px-4 py-2.5 text-[14px]">
             <span className="text-muted-foreground">SMS ({ratePerMsg(smsRatePaise)})</span>
             <span className="font-medium text-foreground">{formatINR(cost.smsCost)}</span>
@@ -161,7 +167,7 @@ export default function CommunicationsTab({ event }: Props) {
   const isFreeEvent     = event.isFreeEvent
   const whatsappEnabled = !!(pricing?.whatsappEnabled as boolean | undefined)
   const smsEnabled      = !!(pricing?.smsEnabled      as boolean | undefined)
-  const hasCommChannels = whatsappEnabled || smsEnabled
+  const hasCommChannels = whatsappEnabled || (SMS_AVAILABLE && smsEnabled)
 
   const estimatedCapacity = (event.totalCapacity ?? event.totalRegistrations) || 100
 
@@ -202,7 +208,7 @@ export default function CommunicationsTab({ event }: Props) {
             />
           )}
 
-          {smsEnabled ? (
+          {SMS_AVAILABLE && smsEnabled ? (
             <ChannelRow
               icon={Phone}
               label="SMS Notifications"
@@ -215,8 +221,10 @@ export default function CommunicationsTab({ event }: Props) {
             <ChannelRow
               icon={Phone}
               label="SMS Notifications"
-              desc="Not enabled for this event. Configure in event settings to activate."
-              badge="Not enabled"
+              desc={SMS_AVAILABLE
+                ? 'Not enabled for this event. Configure in event settings to activate.'
+                : 'SMS delivery is not available yet — no messages are sent for this channel.'}
+              badge={SMS_AVAILABLE ? 'Not enabled' : 'Unavailable'}
               badgeCls="bg-muted text-muted-foreground"
               enabled={false}
             />

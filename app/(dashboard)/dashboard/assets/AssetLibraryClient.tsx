@@ -6,9 +6,8 @@
 // routes; it renders no certificates and owns no rendering/storage engine.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { onIdTokenChanged } from 'firebase/auth'
 import { Loader2, Upload, Trash2, Search, FolderPlus } from 'lucide-react'
-import { auth } from '@/lib/firebase/auth'
+import { useAuth } from '@/components/auth/AuthProvider'
 import { cn } from '@/lib/utils/cn'
 import { useToast } from '@/components/ui/Toast'
 import { uploadOrganizerLibraryAsset } from '@/lib/firebase/storage'
@@ -21,8 +20,12 @@ const CATEGORY_LABEL: Record<AssetCategory, string> = {
 
 export default function AssetLibraryClient() {
   const { showToast } = useToast()
-  const [token, setToken] = useState('')
-  const [uid, setUid]     = useState('')
+  // RD-AUTH-01 Phase 1 (M-A): identity + token come from the shared provider. `token`
+  // stays fresh across Firebase's silent hourly refresh via the provider's reactive
+  // token (no local onIdTokenChanged listener), so `load` re-runs on refresh as before.
+  const { user, token: authToken } = useAuth()
+  const token = authToken ?? ''          // '' until resolved / when signed out
+  const uid   = user?.uid ?? ''
   const [assets, setAssets] = useState<SerializedOrganizerAsset[]>([])
   const [loading, setLoading] = useState(true)
   const [uploading, setUploading] = useState(false)
@@ -31,10 +34,6 @@ export default function AssetLibraryClient() {
   const [q, setQ] = useState('')
   const [uploadCategory, setUploadCategory] = useState<AssetCategory>('image')
   const fileRef = useRef<HTMLInputElement>(null)
-
-  useEffect(() => onIdTokenChanged(auth, async u => {
-    if (u) { setUid(u.uid); setToken(await u.getIdToken()) }
-  }), [])
 
   const load = useCallback(async () => {
     if (!token) return

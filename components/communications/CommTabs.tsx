@@ -7,11 +7,13 @@
 
 import { useEffect, useState, type ReactNode } from 'react'
 import { auth } from '@/lib/firebase/auth'
+import { isChannelImplemented } from '@/lib/communications/health/channels'
 import {
   Loader2, Mail, MessageSquare, Phone, Megaphone, Bell, CheckCircle2, XCircle,
   Clock, Wallet, TrendingUp, Percent,
 } from 'lucide-react'
 import { MetricCard } from '@/components/dashboard/MetricCard'
+import { useFocusTrap } from '@/lib/hooks/useFocusTrap'
 import { Bars, Donut, HBars, type ChartPoint } from '@/components/analytics/Charts'
 import { NOTIFICATION_META, NotificationType, isOrganizerNotification } from '@/lib/notifications/catalog'
 import { WHATSAPP_TEMPLATE_REGISTRY } from '@/lib/whatsapp/registry'
@@ -51,6 +53,10 @@ function useLoaded<T>(loader: () => Promise<T>): { data: T | null; loading: bool
 
 // ─── Shared shapes (from existing endpoints) ───────────────────────────────────
 
+// RD-COMMS-01 Phase 2B: SMS availability comes from the canonical capability SSOT, not
+// local assumptions — SMS has no transport, so its counters/costs are structurally zero.
+const SMS_AVAILABLE = isChannelImplemented('sms')
+
 interface WalletOverview { balancePaise: number; emailsSent: number; smsSent: number; whatsappSent: number; thisMonthSpendPaise: number }
 interface ReminderAnalytics { scheduled: number; sent: number; failed: number; skipped: number; cancelled: number; recipients: number; costPaise: number }
 interface CommRow { id: string; createdAt: string | null; channel: string; status: string; notificationType?: string; templateKey?: string; costPaise?: number; error?: string }
@@ -65,7 +71,7 @@ function Section({ title, children, action }: { title: string; children: ReactNo
     </div>
   )
 }
-function Loading() { return <div className="flex justify-center py-16"><Loader2 className="size-6 animate-spin text-muted-foreground" /></div> }
+function Loading() { return <div className="flex justify-center py-16"><Loader2 className="size-6 animate-spin text-muted-foreground motion-reduce:animate-none" /></div> }
 
 // ─── Overview tab ───────────────────────────────────────────────────────────────
 
@@ -97,7 +103,7 @@ export function CommOverview() {
       <section className="grid grid-cols-2 gap-3 sm:grid-cols-4 xl:grid-cols-6">
         <MetricCard label="Emails sent" value={String(wallet.emailsSent)} hint="This month" icon={Mail} iconColor="text-primary" iconBg="bg-primary/10" />
         <MetricCard label="WhatsApp sent" value={String(wallet.whatsappSent)} hint="This month" icon={MessageSquare} iconColor="text-emerald-700" iconBg="bg-emerald-50" />
-        <MetricCard label="SMS sent" value={String(wallet.smsSent)} hint="This month" icon={Phone} iconColor="text-sky-700" iconBg="bg-sky-50" />
+        <MetricCard label="SMS sent" value={SMS_AVAILABLE ? String(wallet.smsSent) : '—'} hint={SMS_AVAILABLE ? 'This month' : 'Unavailable'} icon={Phone} iconColor="text-sky-700" iconBg="bg-sky-50" />
         <MetricCard label="Broadcasts" value={String(broadcasts.length)} icon={Megaphone} iconColor="text-violet-700" iconBg="bg-violet-50" />
         <MetricCard label="Scheduled reminders" value={String(reminders.scheduled)} icon={Bell} iconColor="text-amber-700" iconBg="bg-amber-50" />
         <MetricCard label="Delivered" value={String(delivered)} icon={CheckCircle2} iconColor="text-emerald-700" iconBg="bg-emerald-50" />
@@ -150,9 +156,9 @@ export function CommAnalytics() {
 
   return (
     <div className="grid gap-4 lg:grid-cols-2">
-      <Section title="Daily sends (14d)"><Bars data={days.map(d => ({ label: d.label, value: dailyMap.get(d.key) ?? 0 }))} /></Section>
-      <Section title="Channel split"><Donut segments={toPoints(channelMap)} /></Section>
-      <Section title="Most used templates">{templateMap.size ? <HBars data={toPoints(templateMap).slice(0, 8)} /> : <p className="text-[13px] text-muted-foreground">No sends yet.</p>}</Section>
+      <Section title="Daily sends (14d)"><Bars label="Daily sends over the last 14 days" data={days.map(d => ({ label: d.label, value: dailyMap.get(d.key) ?? 0 }))} /></Section>
+      <Section title="Channel split"><Donut label="Sends by channel" segments={toPoints(channelMap)} /></Section>
+      <Section title="Most used templates">{templateMap.size ? <HBars label="Most used templates" data={toPoints(templateMap).slice(0, 8)} /> : <p className="text-[13px] text-muted-foreground">No sends yet.</p>}</Section>
       <div className="space-y-4">
         <Section title="Delivery">
           <div className="grid grid-cols-3 gap-3 text-center">
@@ -202,7 +208,7 @@ export function CommBilling() {
       <section className="grid grid-cols-2 gap-3 sm:grid-cols-3">
         <MetricCard label="Email cost" value={rupees(byChannel.get('email') ?? 0)} icon={Mail} iconColor="text-primary" iconBg="bg-primary/10" />
         <MetricCard label="WhatsApp cost" value={rupees(byChannel.get('whatsapp') ?? 0)} icon={MessageSquare} iconColor="text-emerald-700" iconBg="bg-emerald-50" />
-        <MetricCard label="SMS cost" value={rupees(byChannel.get('sms') ?? 0)} icon={Phone} iconColor="text-sky-700" iconBg="bg-sky-50" />
+        <MetricCard label="SMS cost" value={SMS_AVAILABLE ? rupees(byChannel.get('sms') ?? 0) : '—'} hint={SMS_AVAILABLE ? undefined : 'Unavailable'} icon={Phone} iconColor="text-sky-700" iconBg="bg-sky-50" />
         <MetricCard label="Monthly spend" value={rupees(monthly)} icon={Wallet} iconColor="text-amber-700" iconBg="bg-amber-50" />
         <MetricCard label="Lifetime spend" value={rupees(lifetime)} icon={Wallet} iconColor="text-slate-700" iconBg="bg-slate-100" />
         <MetricCard label="Wallet balance" value={rupees(wallet.balancePaise)} icon={Wallet} iconColor="text-emerald-700" iconBg="bg-emerald-50" href="/dashboard/wallet" />
@@ -216,6 +222,7 @@ export function CommBilling() {
 
 export function TemplateCenter() {
   const [preview, setPreview] = useState<{ subject: string; body: string } | null>(null)
+  const previewRef = useFocusTrap<HTMLDivElement>(!!preview)   // P1-6: trap + restore focus
 
   // Organizer workspace lists ONLY organizer-scoped templates; platform lifecycle
   // templates remain in the registry but are hidden here (future Admin surfaces them).
@@ -266,7 +273,15 @@ export function TemplateCenter() {
 
       {preview && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={() => setPreview(null)}>
-          <div className="max-h-[85vh] w-full max-w-lg overflow-y-auto rounded-2xl bg-card p-4 shadow-xl" onClick={e => e.stopPropagation()}>
+          <div
+            ref={previewRef}
+            role="dialog"
+            aria-modal="true"
+            aria-label="Template preview"
+            onKeyDown={e => { if (e.key === 'Escape') setPreview(null) }}
+            className="max-h-[85vh] w-full max-w-lg overflow-y-auto rounded-2xl bg-card p-4 shadow-xl"
+            onClick={e => e.stopPropagation()}
+          >
             <p className="mb-2 text-[13px] font-bold text-foreground">{preview.subject}</p>
             <iframe title="preview" srcDoc={preview.body} className="h-[480px] w-full rounded-lg border border-border bg-white" />
             <button onClick={() => setPreview(null)} className="mt-3 w-full rounded-lg border border-border py-2 text-[13px] font-medium text-foreground hover:bg-muted">Close</button>

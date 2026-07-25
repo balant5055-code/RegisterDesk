@@ -5,6 +5,7 @@ import { Tag, Plus, Pencil, Trash2, Check, X, Loader2, ToggleLeft, ToggleRight }
 import { cn } from '@/lib/utils/cn'
 import { useConfirm } from '@/components/ui/ConfirmDialog'
 import type { CouponType } from '@/lib/coupons/types'
+import type { PassDetail } from '@/app/api/organizer/events/[eventId]/route'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -31,6 +32,9 @@ interface FormState {
   validFrom:   string
   validUntil:  string
   maxUses:     string
+  // RD-PRODUCT-01D: restrict the coupon to specific passes (empty = all passes).
+  // Backend already supports this (lib/coupons/validate.ts + the coupons route).
+  applicablePassIds: string[]
 }
 
 const BLANK: FormState = {
@@ -42,6 +46,7 @@ const BLANK: FormState = {
   validFrom:   '',
   validUntil:  '',
   maxUses:     '',
+  applicablePassIds: [],
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -62,14 +67,22 @@ function CouponForm({
   onSave,
   onCancel,
   saving,
+  passes,
 }: {
   initial:  FormState
   onSave:   (f: FormState) => void
   onCancel: () => void
   saving:   boolean
+  passes:   PassDetail[]
 }) {
   const [f, setF] = useState<FormState>(initial)
   const set = (k: keyof FormState, v: string | boolean) => setF(p => ({ ...p, [k]: v }))
+  const togglePass = (id: string) => setF(p => ({
+    ...p,
+    applicablePassIds: p.applicablePassIds.includes(id)
+      ? p.applicablePassIds.filter(x => x !== id)
+      : [...p.applicablePassIds, id],
+  }))
 
   const labelCls = 'block text-[13px] font-medium text-foreground mb-1'
   const inputCls = 'w-full rounded-lg border border-border bg-background px-3 py-2 text-[13px] focus:outline-none focus:ring-2 focus:ring-primary/40'
@@ -177,6 +190,33 @@ function CouponForm({
         />
         <label htmlFor="coupon-active" className="text-[13px] text-foreground">Active</label>
       </div>
+
+      {/* RD-PRODUCT-01D — per-pass restriction (backend-supported; empty = all passes) */}
+      {passes.length > 0 && (
+        <div>
+          <label className={labelCls}>Applies to passes</label>
+          <p className="mb-1.5 text-[12px] text-muted-foreground">Leave all unselected to apply this coupon to every pass.</p>
+          <div className="flex flex-wrap gap-1.5">
+            {passes.map(p => {
+              const on = f.applicablePassIds.includes(p.id)
+              return (
+                <button
+                  key={p.id}
+                  type="button"
+                  onClick={() => togglePass(p.id)}
+                  aria-pressed={on}
+                  className={cn(
+                    'rounded-lg border px-2.5 py-1 text-[12px] transition-colors',
+                    on ? 'border-primary bg-primary/10 text-primary' : 'border-border text-muted-foreground hover:bg-muted',
+                  )}
+                >
+                  {p.name}
+                </button>
+              )
+            })}
+          </div>
+        </div>
+      )}
 
       <div className="flex gap-2 pt-1">
         <button
@@ -320,9 +360,11 @@ function CouponCard({
 export default function CouponsTab({
   eventId,
   token,
+  passes = [],
 }: {
   eventId: string
   token:   string
+  passes?: PassDetail[]
 }) {
   const [coupons,   setCoupons]   = useState<CouponRow[]>([])
   const [loading,   setLoading]   = useState(true)
@@ -364,6 +406,7 @@ export default function CouponsTab({
       validFrom:  f.validFrom  || null,
       validUntil: f.validUntil || null,
       maxUses:    f.maxUses ? parseInt(f.maxUses, 10) : null,
+      applicablePassIds: f.applicablePassIds,
     }
   }
 
@@ -432,6 +475,7 @@ export default function CouponsTab({
       validFrom:  coupon.validFrom  ?? '',
       validUntil: coupon.validUntil ?? '',
       maxUses:    coupon.maxUses != null ? String(coupon.maxUses) : '',
+      applicablePassIds: coupon.applicablePassIds ?? [],
     }
   }
 
@@ -480,6 +524,7 @@ export default function CouponsTab({
           onSave={handleCreate}
           onCancel={() => { setAdding(false); setSaveErr(null) }}
           saving={saving}
+          passes={passes}
         />
       )}
 
@@ -510,6 +555,7 @@ export default function CouponsTab({
                 onSave={f => handleUpdate(coupon.id, f)}
                 onCancel={() => { setEditingId(null); setSaveErr(null) }}
                 saving={saving}
+                passes={passes}
               />
             ) : (
               <CouponCard

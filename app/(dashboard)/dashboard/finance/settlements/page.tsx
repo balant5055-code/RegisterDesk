@@ -11,8 +11,7 @@
 
 import { useCallback, useEffect, useState } from 'react'
 import Link from 'next/link'
-import { onAuthStateChanged } from 'firebase/auth'
-import { auth } from '@/lib/firebase/auth'
+import { useAuth } from '@/components/auth/AuthProvider'
 import { ArrowLeft, Clock, DollarSign, Download, Loader2, Send, Truck, Wallet } from 'lucide-react'
 import { cn } from '@/lib/utils/cn'
 import { Card, ErrorState } from '@/components/ui'
@@ -27,6 +26,7 @@ import type { PayoutProfileGetResponse, PayoutProfileSummary } from '@/lib/payou
 import type { SettlementRequestSummary, SettlementsApiResponse } from '@/lib/settlements/types'
 
 export default function SettlementCenterPage() {
+  const { user, getToken } = useAuth()
   const [overview,    setOverview]    = useState<FinanceOverview | null>(null)
   const [settlements, setSettlements] = useState<SettlementRequestSummary[]>([])
   const [profile,     setProfile]     = useState<PayoutProfileSummary | null>(null)
@@ -46,14 +46,17 @@ export default function SettlementCenterPage() {
   }, [])
 
   useEffect(() => {
-    // State resets happen inside the (async) auth callback, never synchronously
+    if (user === undefined) return
+    let cancelled = false
+    // State resets happen inside the (async) run(), never synchronously
     // in the effect body — loading defaults to true on first mount.
-    const unsub = onAuthStateChanged(auth, async user => {
+    const run = async () => {
       setLoading(true)
       setError(null)
       if (!user) { setLoading(false); return }
       try {
-        const t = await user.getIdToken(retryKey > 0)
+        const t = await getToken(retryKey > 0)
+        if (cancelled || !t) return
         setToken(t)
         const [finRes, setRes, payRes] = await Promise.all([
           fetch('/api/organizer/finance',        { headers: { Authorization: `Bearer ${t}` } }),
@@ -66,17 +69,19 @@ export default function SettlementCenterPage() {
           setRes.ok ? setRes.json() as Promise<SettlementsApiResponse> : Promise.resolve({ requests: [] } as SettlementsApiResponse),
           payRes.ok ? payRes.json() as Promise<PayoutProfileGetResponse> : Promise.resolve({ profile: null } as PayoutProfileGetResponse),
         ])
+        if (cancelled) return
         setOverview(finData)
         setSettlements(setData.requests)
         setProfile(payData.profile)
       } catch (e) {
-        setError(e instanceof Error ? e.message : 'Failed to load settlement data.')
+        if (!cancelled) setError(e instanceof Error ? e.message : 'Failed to load settlement data.')
       } finally {
-        setLoading(false)
+        if (!cancelled) setLoading(false)
       }
-    })
-    return unsub
-  }, [retryKey])
+    }
+    run()
+    return () => { cancelled = true }
+  }, [user, getToken, retryKey])
 
   const handleSubmit = useCallback(async (amountPaise: number) => {
     const res = await fetch('/api/organizer/settlements', {

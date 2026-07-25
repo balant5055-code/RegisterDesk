@@ -1,15 +1,29 @@
 import {
   getFirestore,
   doc,
+  getDoc,
   setDoc,
   serverTimestamp,
 } from 'firebase/firestore'
 import { firebaseApp } from '../config'
+import { ORGANIZER_ROLE } from '@/lib/organizer/identity'
 
 export const db = getFirestore(firebaseApp)
 
+// ─── organizerProfileExists ───────────────────────────────────────────────────
+// True when the canonical /users/{uid} profile doc already exists. Used by the
+// signup recovery path (RD-AUTH-01 H-A) to tell an ORPHANED Auth account (Auth user
+// created, but the profile write never completed) apart from a genuinely complete,
+// pre-existing account. Reads only the owner's own doc (allowed by firestore.rules).
+
+export async function organizerProfileExists(uid: string): Promise<boolean> {
+  const snap = await getDoc(doc(db, 'users', uid))
+  return snap.exists()
+}
+
 // ─── createOrganizerProfile ───────────────────────────────────────────────────
-// Writes the initial organizer document to /organizers/{uid}.
+// Writes the initial organizer document to /users/{uid} (the one canonical identity
+// doc — there is no separate /organizers collection).
 // Called immediately after Firebase Auth user creation.
 
 export async function createOrganizerProfile(
@@ -18,6 +32,13 @@ export async function createOrganizerProfile(
     name:             string
     email:            string
     organizationName: string
+    // RD-AUTH-02 Phase 1: the PRIVATE organizer account mobile — the canonical
+    // destination for RegisterDesk platform notifications (WhatsApp/SMS, security,
+    // recovery). This is NOT organizationProfile.supportPhone (public/attendee-facing)
+    // and NOT eventDetails.organizer.phone. Optional so social sign-ups and legacy
+    // callers that don't collect it still create a valid profile (backward-compatible).
+    mobileE164?:        string
+    mobileCountryCode?: string
   },
 ): Promise<void> {
   await setDoc(doc(db, 'users', uid), {
@@ -25,7 +46,15 @@ export async function createOrganizerProfile(
     name:             data.name,
     email:            data.email,
     organizationName: data.organizationName,
-    role:             'organizer',
+    // Account-level (PRIVATE) contact. `verified` is false until phone OTP lands
+    // (RD-AUTH-02 leaves the architecture ready; no OTP is introduced yet).
+    mobile: {
+      e164:        data.mobileE164 ?? '',
+      countryCode: data.mobileCountryCode ?? '',
+      verified:    false,
+      verifiedAt:  null,
+    },
+    role:             ORGANIZER_ROLE,
     emailVerified:    false,
     verification: {
       email: {

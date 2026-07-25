@@ -1,12 +1,15 @@
 import Link from 'next/link'
 import { Lock, Ticket, Users, Clock, CheckCircle2, ShieldCheck, ArrowRight } from 'lucide-react'
+import { buildRegisterHref } from '@/lib/events/registerHref'
 import { cn } from '@/lib/utils/cn'
 import { buttonVariants } from '@/components/ui/button'
 import type { PassAvailability } from '@/lib/registrations/types'
 import type { PassPublic } from '@/components/event-templates/types'
 import { SectionWrapper } from '@/components/event-templates/shared/ui/SectionWrapper'
 import { AvailabilityBadge } from '@/components/event-templates/shared/registration/AvailabilityBadge'
-import { formatINR, formatDateShort } from '@/components/event-templates/shared/utils/format'
+import { formatINR, formatDateShort, passDisplayPrice } from '@/components/event-templates/shared/utils/format'
+import { organizerFeaturedPassId } from '@/components/event-templates/shared/utils/featuredPass'
+import { TAX_INCLUSIVE_NOTE } from '@/lib/pricing/copy'
 
 export function TicketSection({ passes, isFreeEvent, slug, availability, registrationOpen, closedMessage }: {
   passes:           PassPublic[]
@@ -21,6 +24,8 @@ export function TicketSection({ passes, isFreeEvent, slug, availability, registr
     if (p.hideWhenSoldOut && availability[p.id]?.status === 'sold_out') return false
     return true
   })
+  // 03B.3: highlight the organizer's explicit featured pass; else the first pass (prior default).
+  const flaggedId = organizerFeaturedPassId(visiblePasses)
 
   return (
     <SectionWrapper
@@ -28,7 +33,7 @@ export function TicketSection({ passes, isFreeEvent, slug, availability, registr
       title={isFreeEvent ? 'Registration' : 'Ticket Categories'}
       subtitle={
         registrationOpen && !isFreeEvent && visiblePasses.length > 0
-          ? 'All prices include taxes'
+          ? TAX_INCLUSIVE_NOTE
           : undefined
       }
     >
@@ -52,23 +57,26 @@ export function TicketSection({ passes, isFreeEvent, slug, availability, registr
         <>
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
             {visiblePasses.map((pass, idx) => {
-              const avail   = availability[pass.id]
-              const soldOut = avail?.status === 'sold_out'
-              const isPopular = idx === 0 && visiblePasses.length > 1
+              const avail     = availability[pass.id]
+              const soldOut   = avail?.status === 'sold_out'
+              const scheduled = pass.saleState === 'scheduled'
+              const ended     = pass.saleState === 'ended'
+              const unavailable = soldOut || scheduled || ended
+              const isPopular = (flaggedId ? pass.id === flaggedId : idx === 0) && visiblePasses.length > 1
 
               return (
                 <div
                   key={pass.id}
                   className={cn(
                     'relative flex flex-col rounded-2xl border bg-card transition-all duration-200',
-                    soldOut
+                    unavailable
                       ? 'border-border opacity-60'
                       : isPopular
                         ? 'border-primary/50 shadow-[var(--shadow-brand-md)]'
                         : 'border-border hover:border-primary/30 hover:shadow-[var(--shadow-md)]',
                   )}
                 >
-                  {isPopular && !soldOut && (
+                  {isPopular && !unavailable && (
                     <div
                       className="absolute -top-3 left-1/2 -translate-x-1/2 rounded-full px-3 py-0.5 text-[10px] font-bold text-white"
                       style={{ backgroundImage: 'var(--primary-gradient)' }}
@@ -94,18 +102,24 @@ export function TicketSection({ passes, isFreeEvent, slug, availability, registr
                         'text-xl font-bold leading-none tabular-nums',
                         isFreeEvent || pass.price === 0 ? 'text-emerald-600' : 'text-foreground',
                       )}>
-                        {isFreeEvent || pass.price === 0 ? 'Free' : formatINR(pass.price)}
+                        {isFreeEvent || pass.price === 0 ? 'Free' : formatINR(passDisplayPrice(pass))}
                       </p>
                     </div>
 
                     <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-                      {pass.showRemainingSeats && avail?.remaining != null && !soldOut && (
+                      {pass.showRemainingSeats && avail?.remaining != null && !unavailable && (
                         <span className="flex items-center gap-1">
                           <Users className="size-3 shrink-0" aria-hidden />
                           {avail.remaining.toLocaleString('en-IN')} seats left
                         </span>
                       )}
-                      {pass.salesEndDate && !soldOut && (
+                      {scheduled && pass.salesStartDate && (
+                        <span className="flex items-center gap-1">
+                          <Clock className="size-3 shrink-0" aria-hidden />
+                          Starts {formatDateShort(pass.salesStartDate)}
+                        </span>
+                      )}
+                      {pass.salesEndDate && !unavailable && (
                         <span className="flex items-center gap-1">
                           <Clock className="size-3 shrink-0" aria-hidden />
                           Ends {formatDateShort(pass.salesEndDate)}
@@ -127,16 +141,20 @@ export function TicketSection({ passes, isFreeEvent, slug, availability, registr
                     <div className="flex-1" />
 
                     <div className="mt-3">
-                      {soldOut ? (
+                      {unavailable ? (
                         <span className={cn(
                           buttonVariants({ variant: 'outline', size: 'md' }),
                           'w-full cursor-not-allowed opacity-40',
                         )}>
-                          Sold Out
+                          {soldOut
+                            ? 'Sold Out'
+                            : scheduled
+                              ? `Sales start ${pass.salesStartDate ? formatDateShort(pass.salesStartDate) : 'soon'}`
+                              : 'Sales ended'}
                         </span>
                       ) : (
                         <Link
-                          href={`/events/${slug}/register?passId=${encodeURIComponent(pass.id)}`}
+                          href={buildRegisterHref(slug, pass.id)}
                           className={cn(buttonVariants({ variant: 'primary', size: 'sm' }), 'w-full gap-1.5')}
                         >
                           Register Now

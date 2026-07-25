@@ -1,9 +1,10 @@
 'use client'
 
 import { useEffect, useRef, useState, type ReactNode } from 'react'
-import { onAuthStateChanged, type User } from 'firebase/auth'
-import { auth } from '@/lib/firebase/auth'
+import { type User } from 'firebase/auth'
+import { useAuth } from '@/components/auth/AuthProvider'
 import { cn } from '@/lib/utils/cn'
+import { isChannelImplemented } from '@/lib/communications/health/channels'
 import Link from 'next/link'
 import {
   Loader2, CreditCard, Wallet, Ticket, Plus, ArrowRight, Activity,
@@ -29,6 +30,7 @@ const rupees  = (p: number) => `₹${(p / 100).toLocaleString('en-IN')}`
 const fmtDate = (iso: string | null) => iso ? new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) : '—'
 
 export default function BillingPage() {
+  const { user } = useAuth()
   const userRef = useRef<User | null>(null)
   const [tab,          setTab]          = useState<Tab>('overview')
   const [overview,     setOverview]     = useState<WalletOverview | null>(null)
@@ -52,13 +54,14 @@ export default function BillingPage() {
   }
 
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, user => {
+    if (user === undefined) return
+    const run = async () => {
       userRef.current = user
       if (!user) { setError('You must be signed in.'); setLoading(false); return }
       reload().catch(e => setError(e instanceof Error ? e.message : 'Failed to load')).finally(() => setLoading(false))
-    })
-    return unsub
-  }, [])
+    }
+    run()
+  }, [user])
 
   if (loading) return <div className="flex justify-center py-20"><Loader2 className="size-6 animate-spin text-muted-foreground" /></div>
   if (error)   return <div className="p-6"><div className="rounded-xl border border-destructive/30 bg-destructive/5 px-4 py-3 text-[13.5px] text-destructive">{error}</div></div>
@@ -66,7 +69,9 @@ export default function BillingPage() {
   const activeLicenses  = licenses.filter(l => l.status === 'active').length
   const pendingLicenses = licenses.filter(l => l.status === 'pending_approval').length
   const purchases       = licenses.filter(l => l.amountPaidPaise > 0).length
-  const commUsage       = (overview?.emailsSent ?? 0) + (overview?.smsSent ?? 0) + (overview?.whatsappSent ?? 0)
+  // SMS has no transport (canonical capability SSOT) → its count is structurally 0 and is
+  // excluded from usage; kept in the sum only if SMS ever becomes available.
+  const commUsage       = (overview?.emailsSent ?? 0) + (isChannelImplemented('sms') ? (overview?.smsSent ?? 0) : 0) + (overview?.whatsappSent ?? 0)
 
   return (
     <div className="space-y-6 p-5 sm:p-6">
@@ -176,7 +181,7 @@ export default function BillingPage() {
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
             <Kpi icon={<Mail className="size-4" />}          label="Emails sent"       value={overview?.emailsSent ?? 0} />
             <Kpi icon={<MessageSquare className="size-4" />} label="WhatsApp messages" value={overview?.whatsappSent ?? 0} />
-            <Kpi icon={<Phone className="size-4" />}         label="SMS"               value={overview?.smsSent ?? 0} />
+            <Kpi icon={<Phone className="size-4" />}         label="SMS"               value={isChannelImplemented('sms') ? (overview?.smsSent ?? 0) : 'Unavailable'} />
           </div>
         </div>
       )}

@@ -10,8 +10,7 @@
 
 import { useCallback, useEffect, useState } from 'react'
 import Link from 'next/link'
-import { onAuthStateChanged } from 'firebase/auth'
-import { auth } from '@/lib/firebase/auth'
+import { useAuth } from '@/components/auth/AuthProvider'
 import { ArrowLeft, Loader2 } from 'lucide-react'
 import { ErrorState } from '@/components/ui'
 import { RevenueWalletSummary } from '@/components/dashboard/finance/RevenueWalletSummary'
@@ -38,13 +37,18 @@ export default function WalletLedgerPage() {
   const [usage, setUsage] = useState<CommunicationUsage[]>([])
   const [exportingComms, setExportingComms] = useState(false)
 
+  const { user, getToken } = useAuth()
+
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, async user => {
+    if (user === undefined) return
+    let cancelled = false
+    const run = async () => {
       setLoading(true)
       setError(null)
       if (!user) { setLoading(false); return }
       try {
-        const t = await user.getIdToken(retryKey > 0)
+        const t = await getToken(retryKey > 0)
+        if (cancelled || !t) return
         setToken(t)
         const h = { Authorization: `Bearer ${t}` }
         const [finRes, ovRes, txRes, usRes] = await Promise.all([
@@ -53,6 +57,7 @@ export default function WalletLedgerPage() {
           fetch('/api/organizer/wallet/transactions?limit=100', { headers: h }),
           fetch('/api/organizer/wallet/usage?limit=200',        { headers: h }),
         ])
+        if (cancelled) return
 
         // Revenue section (gated on 'transactions').
         if (finRes.ok) { setOverview(await finRes.json() as FinanceOverview); setRevenueOk(true) }
@@ -70,13 +75,14 @@ export default function WalletLedgerPage() {
 
         if (!finRes.ok && !ovRes.ok) setError('You don’t have permission to view financial data.')
       } catch (e) {
-        setError(e instanceof Error ? e.message : 'Failed to load wallet data.')
+        if (!cancelled) setError(e instanceof Error ? e.message : 'Failed to load wallet data.')
       } finally {
-        setLoading(false)
+        if (!cancelled) setLoading(false)
       }
-    })
-    return unsub
-  }, [retryKey])
+    }
+    run()
+    return () => { cancelled = true }
+  }, [user, getToken, retryKey])
 
   const handleExportComms = useCallback(async () => {
     if (!token || exportingComms) return

@@ -8,11 +8,9 @@
 // service (reused by the admin support route). This route keeps auth + ownership + audit.
 
 import { NextRequest, NextResponse }  from 'next/server'
-import { adminDb }                     from '@/lib/firebase/admin'
 import { authorizeWorkspace }          from '@/lib/team/workspace'
-import { writeAuditEntry }             from '@/lib/firebase/firestore/registrations'
+import { writeAuditEntry, loadOwnedRegistration } from '@/lib/firebase/firestore/registrations'
 import { resendRegistrationTicketEmail } from '@/lib/registrations/resendTicketEmail'
-import type { RegistrationDocument }   from '@/lib/registrations/types'
 
 export interface ResendEmailResponse {
   success: boolean
@@ -31,15 +29,9 @@ export async function POST(
 
   const { registrationId } = await context.params
 
-  // ── 2. Ownership check ──────────────────────────────────────────────────────
-  const regSnap = await adminDb.collection('registrations').doc(registrationId).get()
-  if (!regSnap.exists) {
-    return NextResponse.json({ success: false, error: 'Registration not found' }, { status: 404 })
-  }
-  const reg = regSnap.data() as RegistrationDocument
-  if (reg.organizerUid !== uid) {
-    return NextResponse.json({ success: false, error: 'Forbidden' }, { status: 403 })
-  }
+  // ── 2. Ownership (canonical resolver, M7) ───────────────────────────────────
+  const owned = await loadOwnedRegistration(registrationId, uid)
+  if (!owned.ok) return NextResponse.json({ success: false, error: owned.error }, { status: owned.status })
 
   // ── 3. Send (shared service: guards + engine + persist) ─────────────────────
   const result = await resendRegistrationTicketEmail(registrationId)

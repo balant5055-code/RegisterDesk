@@ -11,6 +11,7 @@ import {
 } from 'lucide-react'
 import { auth } from '@/lib/firebase/auth'
 import { PageHeader, Card, Badge } from '@/components/ui'
+import { useFocusTrap } from '@/lib/hooks/useFocusTrap'
 import { cn } from '@/lib/utils/cn'
 import type { CommRow } from '@/app/api/organizer/communications/route'
 
@@ -256,7 +257,7 @@ export default function CommunicationCenterPage() {
           <div className="px-4 py-10 text-center text-[13px] text-rose-600">{error}</div>
         ) : loading ? (
           <div className="flex items-center justify-center gap-2 px-4 py-12 text-[13px] text-muted-foreground">
-            <RefreshCw className="size-4 animate-spin" aria-hidden />Loading…
+            <RefreshCw className="size-4 animate-spin motion-reduce:animate-none" aria-hidden />Loading…
           </div>
         ) : filtered.length === 0 ? (
           <div className="px-4 py-12 text-center text-[13px] text-muted-foreground">No notifications match the current filters.</div>
@@ -265,14 +266,14 @@ export default function CommunicationCenterPage() {
             <table className="w-full min-w-[820px] text-left">
               <thead>
                 <tr className="border-b border-border/60 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground/70">
-                  <th className="px-4 py-2.5">Date</th>
-                  <th className="px-4 py-2.5">Event</th>
-                  <th className="px-4 py-2.5">Recipient</th>
-                  <th className="px-4 py-2.5">Type</th>
-                  <th className="px-4 py-2.5">Channel</th>
-                  <th className="px-4 py-2.5">Status</th>
-                  <th className="px-4 py-2.5">Cost</th>
-                  <th className="px-4 py-2.5"></th>
+                  <th scope="col" className="px-4 py-2.5">Date</th>
+                  <th scope="col" className="px-4 py-2.5">Event</th>
+                  <th scope="col" className="px-4 py-2.5">Recipient</th>
+                  <th scope="col" className="px-4 py-2.5">Type</th>
+                  <th scope="col" className="px-4 py-2.5">Channel</th>
+                  <th scope="col" className="px-4 py-2.5">Status</th>
+                  <th scope="col" className="px-4 py-2.5">Cost</th>
+                  <th scope="col" className="px-4 py-2.5"></th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-border/40">
@@ -335,6 +336,7 @@ function UsageCard({ title, tag, tagTone, primary, sub }: {
 // ─── SECTION 4 — Details drawer ─────────────────────────────────────────────
 
 function DetailsDrawer({ row, onClose }: { row: CommRow; onClose: () => void }) {
+  const panelRef = useFocusTrap<HTMLDivElement>()   // P1-6: trap Tab + restore focus on close
   const rowItem = (label: string, value: React.ReactNode) => (
     <div className="flex items-start justify-between gap-4 py-2.5">
       <dt className="shrink-0 text-[12px] text-muted-foreground">{label}</dt>
@@ -342,9 +344,9 @@ function DetailsDrawer({ row, onClose }: { row: CommRow; onClose: () => void }) 
     </div>
   )
   return (
-    <div className="fixed inset-0 z-50 flex justify-end" role="dialog" aria-modal="true">
+    <div className="fixed inset-0 z-50 flex justify-end" role="dialog" aria-modal="true" aria-label="Notification details">
       <div className="absolute inset-0 bg-black/30" onClick={onClose} aria-hidden />
-      <div className="relative flex h-full w-full max-w-md flex-col overflow-y-auto border-l border-border bg-card shadow-xl">
+      <div ref={panelRef} onKeyDown={e => { if (e.key === 'Escape') onClose() }} className="relative flex h-full w-full max-w-md flex-col overflow-y-auto border-l border-border bg-card shadow-xl">
         <div className="flex items-center justify-between border-b border-border px-5 py-4">
           <div>
             <p className="text-[14px] font-bold text-foreground">Notification Details</p>

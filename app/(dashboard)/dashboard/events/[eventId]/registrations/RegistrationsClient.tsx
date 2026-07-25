@@ -2,8 +2,7 @@
 
 import { useState, useEffect, useMemo, useRef } from 'react'
 import { useSearchParams }           from 'next/navigation'
-import { onAuthStateChanged }    from 'firebase/auth'
-import { auth }                  from '@/lib/firebase/auth'
+import { useAuth }               from '@/components/auth/AuthProvider'
 import Link                      from 'next/link'
 import { cn }                    from '@/lib/utils/cn'
 import { csvCell as csvEscape }  from '@/lib/utils/csv'
@@ -114,6 +113,14 @@ function auditActionColor(action: string): string {
   }
 }
 
+// RD-ORGANIZER-01 P0-2: an EXACT lookup the server resolves at any scale (email or an
+// RD ticket code). Everything else is a free-text NAME query — Firestore has no substring
+// search, so those stay a client refinement over the loaded window (no regression).
+function isExactSearch(q: string): boolean {
+  const s = q.trim()
+  return s.includes('@') || /^rd[-_ ]?[a-z0-9]{4,}$/i.test(s)
+}
+
 function exportToCsv(rows: SerializedRegistration[], slug: string, fieldLabels: Record<string, string>) {
   const formFieldIds = Object.keys(fieldLabels)
   const headers = [
@@ -152,18 +159,6 @@ function exportToCsv(rows: SerializedRegistration[], slug: string, fieldLabels: 
   a.download = `registrations-${slug}-${new Date().toISOString().slice(0, 10)}.csv`
   a.click()
   URL.revokeObjectURL(url)
-}
-
-function recomputeStats(registrations: SerializedRegistration[]) {
-  return {
-    total:      registrations.length,
-    confirmed:  registrations.filter(r => r.status === 'confirmed').length,
-    pending:    registrations.filter(r => r.status === 'pending').length,
-    cancelled:  registrations.filter(r => r.status === 'cancelled').length,
-    waitlisted: registrations.filter(r => r.status === 'waitlisted').length,
-    rejected:   registrations.filter(r => r.status === 'rejected').length,
-    checkedIn:  registrations.filter(r => r.checkedIn).length,
-  }
 }
 
 // ─── Stat Card ────────────────────────────────────────────────────────────────
@@ -277,6 +272,9 @@ function RegistrationDrawer({
 }) {
   const formResponses = reg.attendee.formResponses as Record<string, unknown> | null | undefined
   const { confirm } = useConfirm()
+  // RD-ORGANIZER-01 P0-4: trap Tab within the drawer, focus the first control on open, and
+  // restore focus to the trigger on close (the shared hook the ConfirmDialog already uses).
+  const drawerRef = useFocusTrap<HTMLDivElement>()
 
   // ── Local state (updates immediately after actions) ───────────────────────
   const [localStatus,        setLocalStatus]        = useState(reg.status)
@@ -677,6 +675,8 @@ function RegistrationDrawer({
 
       {/* Panel */}
       <div
+        ref={drawerRef}
+        onKeyDown={e => { if (e.key === 'Escape') { e.stopPropagation(); onClose() } }}
         className="fixed inset-y-0 right-0 z-50 flex w-full max-w-md flex-col border-l border-border bg-background shadow-2xl"
         role="dialog"
         aria-modal
@@ -1271,6 +1271,7 @@ function RegistrationDrawer({
 
 export function RegistrationsClient({ eventId }: { eventId: string }) {
   const searchParams = useSearchParams()
+  const { user, getToken } = useAuth()
 
   // ── Core state ────────────────────────────────────────────────────────────
   const [data,          setData]          = useState<RegistrationsApiResponse | null>(null)
@@ -1324,6 +1325,20 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
 
   // ── Fetch ─────────────────────────────────────────────────────────────────
 
+  // RD-ORGANIZER-01 P0-2/P0-3: the STRUCTURED server-side filters, shared by the list
+  // fetch and the streaming CSV export so both cover exactly the same filtered set.
+  // ('not checked in' + free-text name are client refinements — see the fetch effect.)
+  function serverFilterParams(): URLSearchParams {
+    const p = new URLSearchParams()
+    if (statusFilter)  p.set('status',  statusFilter)
+    if (paymentFilter) p.set('payment', paymentFilter)
+    if (passFilter)    p.set('passId',  passFilter)
+    if (checkinFilter === 'checked_in') p.set('checkin', 'yes')
+    if (dateFrom) p.set('from', dateFrom)
+    if (dateTo)   p.set('to',   dateTo)
+    return p
+  }
+
   async function doFetch(opts: { cursor?: string | null; allMode?: boolean; limit?: number } = {}) {
     const token = authTokenRef.current
     if (!token) return
@@ -1331,7 +1346,10 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
     setPageLoading(true)
     setSelectedIds(new Set())
     try {
-      const p = new URLSearchParams()
+      const p = serverFilterParams()
+      const qTrim = debouncedSearch.trim()
+      if (qTrim) p.set('q', qTrim)                       // exact email/ticket resolved server-side
+      if (sortKey === 'registeredAt') p.set('dir', sortDir)   // server-side sort on the indexed field
       if (allMode) { p.set('all', 'true') }
       else         { p.set('limit', String(limit)); if (cursor) p.set('cursor', cursor) }
       const res = await fetch(`/api/organizer/events/${eventId}/registrations?${p}`, {
@@ -1358,25 +1376,31 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
   // ── Auth + initial load ────────────────────────────────────────────────────
 
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, async user => {
+    if (user === undefined) return
+    let cancelled = false
+    const run = async () => {
       if (!user) {
         setError('You must be signed in to view registrations.')
         setLoading(false)
         return
       }
       try {
-        const token = await user.getIdToken()
+        const token = await getToken()
+        if (cancelled || !token) return
         setAuthToken(token)
         authTokenRef.current = token
         await doFetch({ allMode: false, limit: 50 })
       } catch (e) {
-        setError(e instanceof Error ? e.message : 'Failed to load registrations')
-        setLoading(false)
+        if (!cancelled) {
+          setError(e instanceof Error ? e.message : 'Failed to load registrations')
+          setLoading(false)
+        }
       }
-    })
-    return unsub
+    }
+    run()
+    return () => { cancelled = true }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [eventId])
+  }, [user, getToken, eventId])
 
   // ── Search debounce ────────────────────────────────────────────────────────
 
@@ -1386,17 +1410,23 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
   }, [search])
 
   // ── Filter-change re-fetch ─────────────────────────────────────────────────
-  // Skips initial mount. Loads all records when any filter is active; paginates otherwise.
+  // RD-ORGANIZER-01 P0-2: structured filters + exact search + sort now run SERVER-SIDE with
+  // cursor pagination over the WHOLE matching set (no 2000-row ceiling). Only two predicates
+  // Firestore cannot express keep the bounded-window load for client refinement: a free-text
+  // NAME query (no substring search) and 'not checked in' (the field is absent on
+  // never-checked-in docs). Skips the initial mount.
 
   useEffect(() => {
     if (isFirstFilterRun.current) { isFirstFilterRun.current = false; return }
     if (!authTokenRef.current) return
-    const anyActive = !!(debouncedSearch || passFilter || statusFilter || checkinFilter || paymentFilter || dateFrom || dateTo)
     setCursorStack([])
-    if (anyActive) { doFetch({ allMode: true }) }
-    else           { doFetch({ allMode: false, limit: pageSize }) }
+    const qTrim      = debouncedSearch.trim()
+    const nameSearch = qTrim.length > 0 && !isExactSearch(qTrim)
+    const clientOnly = nameSearch || checkinFilter === 'not_checked_in'
+    if (clientOnly) doFetch({ allMode: true })
+    else            doFetch({ allMode: false, limit: pageSize })
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [debouncedSearch, passFilter, statusFilter, checkinFilter, paymentFilter, dateFrom, dateTo])
+  }, [debouncedSearch, passFilter, statusFilter, checkinFilter, paymentFilter, dateFrom, dateTo, sortKey, sortDir])
 
   // ── Handle drawer updates ──────────────────────────────────────────────────
 
@@ -1502,12 +1532,12 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
   if (loading) {
     return (
       <div className="p-6">
-        <div className="mb-6 h-7 w-48 animate-pulse rounded-lg bg-muted" />
+        <div className="mb-6 h-7 w-48 animate-pulse rounded-lg bg-muted motion-reduce:animate-none" />
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-          {[1, 2, 3, 4].map(i => <div key={i} className="h-20 animate-pulse rounded-xl bg-muted" />)}
+          {[1, 2, 3, 4].map(i => <div key={i} className="h-20 animate-pulse rounded-xl bg-muted motion-reduce:animate-none" />)}
         </div>
-        <div className="mt-6 h-10 animate-pulse rounded-xl bg-muted" />
-        <div className="mt-3 h-64 animate-pulse rounded-xl bg-muted" />
+        <div className="mt-6 h-10 animate-pulse rounded-xl bg-muted motion-reduce:animate-none" />
+        <div className="mt-3 h-64 animate-pulse rounded-xl bg-muted motion-reduce:animate-none" />
       </div>
     )
   }
@@ -1689,15 +1719,15 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
         const statusText: Record<string, string> = { pending: 'Queued', processing: 'Processing', completed: 'Completed', failed: 'Failed', cancelled: 'Cancelled' }
         return (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-            <div className="w-full max-w-md rounded-2xl border border-border bg-card p-5 shadow-xl">
+            <div role="dialog" aria-modal="true" aria-labelledby="bulkjob-title" className="w-full max-w-md rounded-2xl border border-border bg-card p-5 shadow-xl">
               <div className="mb-3 flex items-center justify-between">
-                <h3 className="text-[15px] font-bold text-foreground">Bulk {verb}</h3>
+                <h3 id="bulkjob-title" className="text-[15px] font-bold text-foreground">Bulk {verb}</h3>
                 <span className="rounded-full bg-muted px-2 py-0.5 text-[12px] font-semibold text-muted-foreground">{statusText[j.status] ?? j.status}</span>
               </div>
               <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
-                <div className="h-full rounded-full bg-primary transition-all" style={{ width: `${pct}%` }} />
+                <div className="h-full rounded-full bg-primary transition-all motion-reduce:transition-none" style={{ width: `${pct}%` }} />
               </div>
-              <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[12px] text-muted-foreground tabular-nums">
+              <div aria-live="polite" className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[12px] text-muted-foreground tabular-nums">
                 <span>Processed {j.counts.processed}/{total} ({pct}%)</span>
                 <span className="text-emerald-600">✓ {j.counts.succeeded} {doneLabel.toLowerCase()}</span>
                 <span className="text-rose-600">✗ {j.counts.failed} failed</span>
@@ -1744,8 +1774,14 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
           </button>
           <button
             type="button"
-            onClick={() => exportToCsv(filtered, eventSlug, fieldLabels)}
-            disabled={filtered.length === 0}
+            onClick={() => {
+              // RD-ORGANIZER-01 P0-3: stream the FULL filtered set from the existing export
+              // endpoint (bounded server memory) — no longer a client CSV of the loaded page.
+              const p = serverFilterParams()
+              if (authToken) p.set('token', authToken)
+              window.location.href = `/api/organizer/events/${eventId}/registrations/export?${p.toString()}`
+            }}
+            disabled={totalCount === 0}
             className="flex shrink-0 items-center gap-2 rounded-xl border border-border bg-card px-4 py-2 text-[13px] font-semibold text-foreground shadow-sm hover:bg-muted/50 disabled:opacity-40"
           >
             <Download className="size-4" aria-hidden />
@@ -2046,7 +2082,7 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
         <div className="relative">
           {pageLoading && (
             <div className="absolute inset-0 z-10 flex items-center justify-center rounded-2xl bg-background/60 backdrop-blur-[1px]">
-              <Loader2 className="size-7 animate-spin text-primary" aria-hidden />
+              <Loader2 className="size-7 animate-spin text-primary motion-reduce:animate-none" aria-hidden />
             </div>
           )}
 
@@ -2106,7 +2142,7 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
               <table className="w-full text-[13px]" role="table">
                 <thead>
                   <tr className="border-b border-border/60 bg-muted/[0.03]">
-                    <th className="w-10 px-3 py-3">
+                    <th scope="col" className="w-10 px-3 py-3">
                       <input
                         type="checkbox"
                         checked={filtered.length > 0 && filtered.every(r => selectedIds.has(r.id))}
@@ -2128,12 +2164,14 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
                     ].map(({ key, label }) => (
                       <th
                         key={label || 'actions'}
+                        scope="col"
+                        aria-sort={key ? (sortKey === key ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none') : undefined}
                         className="px-4 py-3 text-left text-[12px] font-semibold uppercase tracking-wider text-muted-foreground"
                       >
                         {key ? (
                           <button type="button" onClick={() => toggleSort(key)} className="flex items-center gap-1 hover:text-foreground">
                             {label}
-                            <span className="text-muted-foreground/30">
+                            <span className="text-muted-foreground/30" aria-hidden>
                               {sortKey === key ? (sortDir === 'asc' ? '↑' : '↓') : '↕'}
                             </span>
                           </button>

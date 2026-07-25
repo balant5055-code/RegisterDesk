@@ -14,19 +14,22 @@ import { Undo2, RotateCcw } from 'lucide-react'
 import {
   CONFIG_SECTION_REGISTRY,
   BUSINESS_CONFIG_DEFAULTS,
-  type LicenseTierOverride,
+  type LicenseTierOverrideV2,
 } from '@/lib/config/businessConfig'
 import {
-  EVENT_LICENSE_TIERS,
-  getEventLicenseDefinition,
+  EVENT_LICENSE_TIERS_V2,
+  getEventLicenseDefinitionV2,
   isUnlimited,
-  type EventLicenseTier,
+  type EventLicenseTierV2,
   type EventLicenseFeature,
 } from '@/lib/licensing/eventLicense'
 
+// RD-LICENSE-GA-03: edits the approved Licensing V2 catalog (5 tiers, regular + offer
+// prices) via `tierOverridesV2`. The legacy V1 `tierOverrides` (Growth) editor is removed;
+// V1 overrides remain in the config for historical resolution but are no longer UI-editable.
 type SectionDraft   = Record<string, unknown>
-type OverrideMap    = Partial<Record<EventLicenseTier, LicenseTierOverride>>
-const FEATURE_KEYS  = Object.keys(getEventLicenseDefinition('starter').features) as EventLicenseFeature[]
+type OverrideMap    = Partial<Record<EventLicenseTierV2, LicenseTierOverrideV2>>
+const FEATURE_KEYS  = Object.keys(getEventLicenseDefinitionV2('free').features) as EventLicenseFeature[]
 const toDraft = (v: unknown): SectionDraft => JSON.parse(JSON.stringify(v ?? {})) as SectionDraft
 
 function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
@@ -52,13 +55,13 @@ export function LicensingEditor({
   const validation = useMemo(() => CONFIG_SECTION_REGISTRY.licensing.validate(draft), [draft])
   const dirty      = useMemo(() => JSON.stringify(draft) !== JSON.stringify(published), [draft, published])
 
-  const overrides = (draft.tierOverrides && typeof draft.tierOverrides === 'object' && !Array.isArray(draft.tierOverrides) ? draft.tierOverrides : {}) as OverrideMap
+  const overrides = (draft.tierOverridesV2 && typeof draft.tierOverridesV2 === 'object' && !Array.isArray(draft.tierOverridesV2) ? draft.tierOverridesV2 : {}) as OverrideMap
   const setTop = (key: 'defaultCurrency' | 'purchasesEnabled', value: unknown) => onDraftChange({ ...draft, [key]: value })
-  const setOverride = (tier: EventLicenseTier, patch: Partial<LicenseTierOverride>) => {
+  const setOverride = (tier: EventLicenseTierV2, patch: Partial<LicenseTierOverrideV2>) => {
     const next: OverrideMap = { ...overrides, [tier]: { ...(overrides[tier] ?? {}), ...patch } }
-    onDraftChange({ ...draft, tierOverrides: next })
+    onDraftChange({ ...draft, tierOverridesV2: next })
   }
-  const setFeature = (tier: EventLicenseTier, f: EventLicenseFeature, on: boolean) => {
+  const setFeature = (tier: EventLicenseTierV2, f: EventLicenseFeature, on: boolean) => {
     const cur = overrides[tier] ?? {}
     setOverride(tier, { features: { ...(cur.features ?? {}), [f]: on } })
   }
@@ -89,12 +92,13 @@ export function LicensingEditor({
           </label>
         </div>
 
-        {/* Per-tier overrides */}
-        {EVENT_LICENSE_TIERS.map(tier => {
-          const base = getEventLicenseDefinition(tier)
+        {/* Per-tier overrides — Licensing V2 (Free / Starter / Professional / Business / Enterprise) */}
+        {EVENT_LICENSE_TIERS_V2.map(tier => {
+          const base = getEventLicenseDefinitionV2(tier)
           const ov   = overrides[tier] ?? {}
-          const effName  = ov.name ?? base.name
-          const effPrice = ov.licensePricePaise ?? base.licensePricePaise
+          const effName    = ov.name ?? base.name
+          const effRegular = ov.regularPricePaise ?? base.regularPricePaise
+          const effOffer   = ov.offerPricePaise ?? base.offerPricePaise
           const effReg   = ov.maxRegistrations === undefined ? base.limits.maxRegistrations : (ov.maxRegistrations === null ? Infinity : ov.maxRegistrations)
           const unlimited = isUnlimited(effReg)
           const effFeatures = { ...base.features, ...(ov.features ?? {}) }
@@ -102,14 +106,18 @@ export function LicensingEditor({
           return (
             <div key={tier} className="rounded-lg border border-border/70 p-3">
               <p className="mb-2 text-[12px] font-semibold uppercase tracking-wide text-muted-foreground">{base.name}</p>
-              <div className="grid grid-cols-1 gap-x-4 gap-y-2.5 sm:grid-cols-3">
+              <div className="grid grid-cols-1 gap-x-4 gap-y-2.5 sm:grid-cols-2 lg:grid-cols-4">
                 <label className="flex flex-col gap-1">
                   <span className="text-[11.5px] text-muted-foreground">Name</span>
                   <input value={effName} onChange={e => setOverride(tier, { name: e.target.value })} className={inputCls} />
                 </label>
                 <label className="flex flex-col gap-1">
-                  <span className="text-[11.5px] text-muted-foreground">Price (paise)</span>
-                  <input type="number" value={Number.isFinite(effPrice) ? String(effPrice) : ''} onChange={e => setOverride(tier, { licensePricePaise: e.target.value === '' ? NaN : Number(e.target.value) })} className={inputCls} />
+                  <span className="text-[11.5px] text-muted-foreground">Regular price (paise)</span>
+                  <input type="number" value={Number.isFinite(effRegular) ? String(effRegular) : ''} onChange={e => setOverride(tier, { regularPricePaise: e.target.value === '' ? NaN : Number(e.target.value) })} className={inputCls} />
+                </label>
+                <label className="flex flex-col gap-1">
+                  <span className="text-[11.5px] text-muted-foreground">Offer price (paise, charged)</span>
+                  <input type="number" value={Number.isFinite(effOffer) ? String(effOffer) : ''} onChange={e => { const v = e.target.value === '' ? NaN : Number(e.target.value); setOverride(tier, { offerPricePaise: v, licensePricePaise: v }) }} className={inputCls} />
                 </label>
                 <div className="flex flex-col gap-1">
                   <span className="text-[11.5px] text-muted-foreground">Max registrations</span>

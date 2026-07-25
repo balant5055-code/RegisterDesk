@@ -1,5 +1,6 @@
 // Server-only: Firebase Admin SDK reads — never import from client components.
 
+import { cache }   from 'react'
 import { adminDb } from '@/lib/firebase/admin'
 import type { CapacityPlan, PlanType } from '@/lib/registrations/types'
 import type { RegistrationFormDraft } from '@/components/wizard/registrationFormConfig'
@@ -45,7 +46,10 @@ export interface PublishedEvent {
 
 // ─── Reads ────────────────────────────────────────────────────────────────────
 
-export async function getEventBySlug(slug: string): Promise<PublishedEvent | null> {
+// RD-DISCOVERY-01 Phase 4 (M1): React cache() memoizes this read within a single request, so
+// the event-details page's two callers (generateMetadata + the page component) share ONE
+// events/{slug} document read instead of two. Same resolver, same result — no behavior change.
+export const getEventBySlug = cache(async (slug: string): Promise<PublishedEvent | null> => {
   const snap = await adminDb.collection('events').doc(slug).get()
   if (!snap.exists) return null
   const raw  = snap.data() as Record<string, unknown>
@@ -67,4 +71,4 @@ export async function getEventBySlug(slug: string): Promise<PublishedEvent | nul
   // Back-fill linkedCampaignSlug — absent on events published before fundraising support.
   data.linkedCampaignSlug = data.linkedCampaignSlug ?? undefined
   return data
-}
+})

@@ -8,7 +8,8 @@
 //   5. Capacity double-checked inside the transaction (closes TOCTOU race).
 
 import { NextRequest, NextResponse } from 'next/server'
-import { adminAuth, adminDb }       from '@/lib/firebase/admin'
+import { adminAuth }                from '@/lib/firebase/admin'
+import { checkDuplicateRegistration } from '@/lib/registrations/duplicateCheck'
 import { checkRegistrationGate }    from '@/lib/registrations/gate'
 import { getEventBySlug }           from '@/lib/firebase/firestore/events'
 import {
@@ -24,8 +25,10 @@ import { checkRateLimit, getClientIp } from '@/lib/rateLimit'
 import { validateInviteCode }       from '@/app/api/registrations/validate-invite-code/route'
 import { sendConfirmationEmail }    from '@/lib/registrations/sendConfirmationEmail'
 import { validateCoupon }           from '@/lib/coupons/validate'
-import { resolveEffectivePriceRupees } from '@/lib/pricing/earlyBird'
+import { resolveEffectivePassPricePaise } from '@/lib/pricing/earlyBird'
 import { validateFormResponses }     from '@/lib/registrations/validateFormResponses'
+import { resolveAttendeeIdentity }   from '@/lib/registrations/attendeeIdentity'
+import type { IdentityField }        from '@/lib/registrations/attendeeIdentity'
 import type { RegistrationRules } from '@/components/wizard/registrationFormConfig'
 
 // ─── Request / response shapes ────────────────────────────────────────────────
@@ -107,16 +110,16 @@ export async function POST(
     )
   }
 
-  const { slug, passId, attendee, formResponses, idempotencyKey, inviteCode, couponCode } = body
+  const { slug, passId, formResponses, idempotencyKey, inviteCode, couponCode } = body
 
-  if (!slug || !passId || !attendee?.name?.trim() || !attendee?.email?.trim()) {
+  if (!slug || !passId || !body.attendee?.name?.trim() || !body.attendee?.email?.trim()) {
     return NextResponse.json(
       { success: false, error: 'slug, passId, attendee.name and attendee.email are required' },
       { status: 400 },
     )
   }
 
-  if (!isValidEmail(attendee.email)) {
+  if (!isValidEmail(body.attendee.email)) {
     return NextResponse.json(
       { success: false, error: 'Invalid email address' },
       { status: 400 },
@@ -179,6 +182,19 @@ export async function POST(
     }
   }
 
+  // ── 6b. Canonical attendee identity (RD-ATTENDEE-03A C1) ──────────────────
+  // Derive the stored identity from the submitted responses via the ONE shared
+  // resolver (the same one the client used to build the request), so the server is
+  // authoritative and registration/ticket/confirmation share one identity model.
+  // Falls back to the client-sent values, so this never yields a worse result.
+  const identityFields = ((registrationForm?.sections ?? []) as { fields: IdentityField[] }[]).flatMap(s => s.fields)
+  const identity = resolveAttendeeIdentity(identityFields, (formResponses ?? {}) as Record<string, string>)
+  const attendee = {
+    name:  (identity.name  || body.attendee.name).trim(),
+    email: (identity.email || body.attendee.email).trim().toLowerCase(),
+    phone: (identity.phone || body.attendee.phone || '').trim() || undefined,
+  }
+
   // ── 7. Resolve event name for denormalization ──────────────────────────────
   const rawDetails = event.eventDetails as Record<string, unknown>
   const rawInfo    = rawDetails?.info as Record<string, unknown> | null
@@ -235,55 +251,28 @@ export async function POST(
     )
   }
 
-  // ── 7b. Enforce limitPerEmail ──────────────────────────────────────────────
-  if (regRules?.limitPerEmail) {
-    const normEmail = attendee.email.trim().toLowerCase()
-    try {
-      const dupSnap = await adminDb
-        .collection('registrations')
-        .where('eventSlug',      '==', slug)
-        .where('attendee.email', '==', normEmail)
-        .limit(1)
-        .get()
-      if (dupSnap.docs.some(d => d.data().status !== 'cancelled')) {
-        return NextResponse.json(
-          { success: false, reason: 'DUPLICATE_EMAIL', error: 'A registration with this email address already exists.' },
-          { status: 409 },
-        )
-      }
-    } catch (err) {
-      console.warn('[submit] limitPerEmail query failed (missing index?):', err)
-      // Degrade gracefully — allow registration rather than block on index error
-    }
-  }
-
-  // ── 7c. Enforce limitPerMobile ─────────────────────────────────────────────
+  // ── 7b. Enforce limitPerMobile requires a phone ────────────────────────────
   // When the organizer enables phone-uniqueness, phone becomes required.
   // Allowing a blank phone would let attendees bypass the constraint entirely.
-  if (regRules?.limitPerMobile) {
-    if (!attendee.phone?.trim()) {
-      return NextResponse.json(
-        { success: false, reason: 'PHONE_REQUIRED', error: 'A phone number is required to register for this event.' },
-        { status: 400 },
-      )
-    }
-    const normPhone = attendee.phone.trim()
-    try {
-      const dupSnap = await adminDb
-        .collection('registrations')
-        .where('eventSlug',      '==', slug)
-        .where('attendee.phone', '==', normPhone)
-        .limit(1)
-        .get()
-      if (dupSnap.docs.some(d => d.data().status !== 'cancelled')) {
-        return NextResponse.json(
-          { success: false, reason: 'DUPLICATE_MOBILE', error: 'A registration with this mobile number already exists.' },
-          { status: 409 },
-        )
-      }
-    } catch (err) {
-      console.warn('[submit] limitPerMobile query failed (missing index?):', err)
-    }
+  if (regRules?.limitPerMobile && !attendee.phone?.trim()) {
+    return NextResponse.json(
+      { success: false, reason: 'PHONE_REQUIRED', error: 'A phone number is required to register for this event.' },
+      { status: 400 },
+    )
+  }
+
+  // ── 7c. Duplicate check via the ONE shared helper (H2) ─────────────────────
+  const dup = await checkDuplicateRegistration({
+    slug,
+    email:          attendee.email,
+    phone:          attendee.phone,
+    limitPerEmail:  regRules?.limitPerEmail  ?? false,
+    limitPerMobile: regRules?.limitPerMobile ?? false,
+  })
+  if (dup.duplicate) {
+    return dup.field === 'mobile'
+      ? NextResponse.json({ success: false, reason: 'DUPLICATE_MOBILE', error: 'A registration with this mobile number already exists.' }, { status: 409 })
+      : NextResponse.json({ success: false, reason: 'DUPLICATE_EMAIL', error: 'A registration with this email address already exists.' }, { status: 409 })
   }
 
   // Canonical source: accessControl.confirmationMode (set in Step 3, always written).
@@ -301,16 +290,10 @@ export async function POST(
   // Effective price mirrors create-order: early-bird price while active, else
   // regular. A paid pass stays paid whether or not early bird is active, so the
   // "paid passes must use the payment flow" guard below is unaffected.
-  const priceRupees   = resolveEffectivePriceRupees(
-    {
-      price:            typeof pass.price === 'number' ? pass.price : 0,
-      earlyBirdEnabled: pass.earlyBirdEnabled === true,
-      earlyBirdPrice:   typeof pass.earlyBirdPrice === 'number' ? pass.earlyBirdPrice : null,
-      earlyBirdEndDate: typeof pass.earlyBirdEndDate === 'string' ? pass.earlyBirdEndDate : undefined,
-    },
-    Date.now(),
-  )
-  const originalPaise = Math.round(priceRupees * 100)
+  // Effective base amount (integer paise) via the ONE canonical resolver — early-bird
+  // while active, else regular. Mirrors create-order so a paid-pass-discounted-to-zero
+  // coupon re-validates against the identical base.
+  const originalPaise = resolveEffectivePassPricePaise(pass, Date.now())
 
   let couponInfo: {
     couponDocId:    string
@@ -340,7 +323,7 @@ export async function POST(
       discountAmount: couponResult.discountPaise!,
       originalAmount: originalPaise,
     }
-  } else if (priceRupees > 0) {
+  } else if (originalPaise > 0) {
     // Paid pass without a coupon should not come through the submit (free) flow
     return NextResponse.json(
       { success: false, error: 'Paid passes must use the payment flow.' },

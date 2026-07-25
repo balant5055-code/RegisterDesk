@@ -27,10 +27,13 @@ export const metadata: Metadata = {
 }
 
 export default async function EventsDiscoveryPage() {
-  const { events, stats } = await listPublishedEvents(48).catch(() => ({
-    events: [],
-    stats:  { totalEvents: 0, totalRegistrations: 0, totalCities: 0 },
+  // First page (48) — keeps the initial render + hero stats identical to before; discovery is
+  // now cursor-paginated so events beyond the first page are reachable (RD-DISCOVERY-01 / D-C1).
+  const { events, stats, nextCursor } = await listPublishedEvents({ limit: 48 }).catch(() => ({
+    events:     [],
+    stats:      { totalEvents: 0, totalRegistrations: 0, totalCities: 0, totalOrganizers: 0 },
+    nextCursor: null,
   }))
 
-  return <DiscoveryClient initialEvents={events} initialStats={stats} />
+  return <DiscoveryClient initialEvents={events} initialStats={stats} initialNextCursor={nextCursor} />
 }

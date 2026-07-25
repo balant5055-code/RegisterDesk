@@ -9,8 +9,25 @@ import { adminDb }         from '@/lib/firebase/admin'
 import { getRegistration } from '@/lib/firebase/firestore/registrations'
 import { buildQrValue, signTicketToken } from '@/lib/tickets/generate'
 import { signReceiptToken }              from '@/lib/receipts/token'
+import { getStoredAttendeeFinancials }   from '@/lib/fees/storedFinancials'
+import { buildAttendeeFeeBreakdown }     from '@/lib/fees/attendeeBreakdown'
 import type { EventDetailsDraft }        from '@/components/wizard/eventDetailsConfig'
 import { SuccessClient, type CalendarData } from './SuccessClient'
+
+// Server-side display formatters (deterministic → passed as strings, no hydration risk).
+function fmtDateLabel(d: string): string {
+  const [y, m, day] = d.split('-').map(Number)
+  if (!y || !m || !day) return d
+  return new Date(y, m - 1, day).toLocaleDateString('en-IN', {
+    weekday: 'short', day: 'numeric', month: 'short', year: 'numeric',
+  })
+}
+function fmtTimeLabel(t: string): string {
+  const [h, m] = t.split(':').map(Number)
+  if (Number.isNaN(h)) return t
+  const dt = new Date(2000, 0, 1, h, m ?? 0)
+  return dt.toLocaleTimeString('en-IN', { hour: 'numeric', minute: '2-digit', hour12: true })
+}
 
 export default async function RegistrationSuccessPage({
   params,
@@ -36,7 +53,7 @@ export default async function RegistrationSuccessPage({
   const qrSvg   = await QRCode.toString(qrValue, {
     type:   'svg',
     margin: 1,
-    width:  180,
+    width:  220,   // M-2: consistent QR sizing across ticket surfaces (matches /tickets)
     color:  { dark: '#000000', light: '#ffffff' },
   })
 
@@ -50,32 +67,74 @@ export default async function RegistrationSuccessPage({
     ? `${baseUrl}/api/receipts/${id}?token=${encodeURIComponent(signReceiptToken(id))}`
     : null
 
-  // Load event data for Add To Calendar — non-critical, falls back gracefully
-  let calendarData: CalendarData | undefined = undefined
+  // RD-PAYMENT-05 B1: itemize the charge from the canonical stored financials (attendee_pays
+  // only; null for organizer_absorbs / free). Never recomputed — read from the ledger entry.
+  const feeBreakdown = isPaidRegistration
+    ? buildAttendeeFeeBreakdown(await getStoredAttendeeFinancials(id))
+    : null
+
+  // H-1: amount actually paid (registration.amount is in paise). Free ⇒ no charge line.
+  const amountLabel = isPaidRegistration
+    ? `₹${Math.round((amount ?? 0) / 100).toLocaleString('en-IN')}`
+    : null
+
+  // H-1/H-5: load the event once and derive the display summary + action targets.
+  // Non-critical — every field falls back to null and the page still renders.
+  let calendarData:   CalendarData | undefined = undefined
+  let dateLabel:      string | null = null
+  let timeLabel:      string | null = null
+  let venueLabel:     string | null = null
+  let eventTypeLabel: string | null = null
+  let directionsUrl:  string | null = null
+  let organizerEmail: string | null = null
+  let organizerPhone: string | null = null
   try {
     const eventSnap = await adminDb.collection('events').doc(slug).get()
     if (eventSnap.exists) {
-      const ed       = (eventSnap.data() as Record<string, unknown>).eventDetails as EventDetailsDraft | null
+      const raw      = eventSnap.data() as Record<string, unknown>
+      const ed       = raw.eventDetails as EventDetailsDraft | null
+      const et       = typeof raw.eventType === 'string' ? raw.eventType : null
+      eventTypeLabel = et && et !== 'custom' ? et.charAt(0).toUpperCase() + et.slice(1) : null
+
       const schedule = ed?.schedule
       const venue    = ed?.venue
+      const support  = ed?.support
+      const venueType = venue?.type ?? 'physical'
+      const physical  = venue?.physical
+      const online    = venue?.online
+
       const startDate = schedule?.startDate ?? ''
       if (startDate) {
         const endDate   = schedule?.endDate   ?? startDate
         const startTime = schedule?.startTime ?? ''
         const endTime   = schedule?.endTime   ?? ''
-        const venueType = venue?.type ?? 'physical'
-        const physical  = venue?.physical
-        const online    = venue?.online
-        let location = ''
-        if (venueType === 'online' || venueType === 'hybrid') {
-          location = online?.platform ? `${online.platform} (Online)` : 'Online'
-        } else {
-          location = [physical?.name, physical?.city].filter(Boolean).join(', ')
-        }
+        dateLabel = fmtDateLabel(startDate) + (endDate && endDate !== startDate ? ` – ${fmtDateLabel(endDate)}` : '')
+        timeLabel = startTime ? fmtTimeLabel(startTime) + (endTime ? ` – ${fmtTimeLabel(endTime)}` : '') : null
+
+        const location = (venueType === 'online' || venueType === 'hybrid')
+          ? (online?.platform ? `${online.platform} (Online)` : 'Online')
+          : [physical?.name, physical?.city].filter(Boolean).join(', ')
         calendarData = { startDate, endDate, startTime, endTime, location }
       }
+
+      if (venueType === 'online') {
+        venueLabel = online?.platform ? `Online · ${online.platform}` : 'Online event'
+      } else {
+        venueLabel = [physical?.name, physical?.city].filter(Boolean).join(', ') || physical?.addressLine1 || null
+        const mapsLink = physical?.mapsLink?.trim()
+        if (mapsLink) {
+          directionsUrl = mapsLink
+        } else {
+          const q = [physical?.name, physical?.addressLine1, physical?.addressLine2, physical?.city, physical?.state, physical?.pincode]
+            .filter(Boolean).join(', ')
+          if (q) directionsUrl = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(q)}`
+        }
+      }
+
+      organizerEmail = support?.supportEmail?.trim() || null
+      organizerPhone = support?.supportPhone?.trim() || null
     }
-  } catch { /* Calendar data is non-critical */ }
+  } catch { /* Event summary is non-critical */ }
 
   return (
     <SuccessClient
@@ -92,6 +151,16 @@ export default async function RegistrationSuccessPage({
       receiptUrl={receiptUrl}
       eventSlug={slug}
       calendarData={calendarData}
+      amountLabel={amountLabel}
+      dateLabel={dateLabel}
+      timeLabel={timeLabel}
+      venueLabel={venueLabel}
+      eventTypeLabel={eventTypeLabel}
+      directionsUrl={directionsUrl}
+      organizerEmail={organizerEmail}
+      organizerPhone={organizerPhone}
+      shareUrl={`${baseUrl}/events/${slug}`}
+      feeBreakdown={feeBreakdown}
     />
   )
 }

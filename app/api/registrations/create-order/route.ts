@@ -9,7 +9,8 @@
 //   5. Payment intent written to Firestore (with authoritative amount) before returning.
 
 import { NextRequest, NextResponse } from 'next/server'
-import { adminAuth, adminDb }        from '@/lib/firebase/admin'
+import { adminAuth }                 from '@/lib/firebase/admin'
+import { checkDuplicateRegistration } from '@/lib/registrations/duplicateCheck'
 import { captureFinancialError }     from '@/lib/monitoring/sentry'
 import { checkRegistrationGate }     from '@/lib/registrations/gate'
 import { getEventBySlug }            from '@/lib/firebase/firestore/events'
@@ -18,10 +19,19 @@ import { razorpay, RAZORPAY_KEY_ID } from '@/lib/razorpay/client'   // C1: throw
 import { getClientIp } from '@/lib/rateLimit'
 import { checkDistributedRateLimit } from '@/lib/rateLimit/redis'
 import { validateCoupon }            from '@/lib/coupons/validate'
-import { resolveEffectivePriceRupees } from '@/lib/pricing/earlyBird'
+import { resolveEffectivePassPricePaise } from '@/lib/pricing/earlyBird'
+import { resolveAttendeeIdentity }   from '@/lib/registrations/attendeeIdentity'
+import type { IdentityField }        from '@/lib/registrations/attendeeIdentity'
 import { validateInviteCode }        from '@/app/api/registrations/validate-invite-code/route'
 import { validateFormResponses }     from '@/lib/registrations/validateFormResponses'
 import type { RegistrationRules } from '@/components/wizard/registrationFormConfig'
+// RD-PAYMENT-02 Phase 4 — feature-gated canonical charge amount.
+import { resolvePlatformPricing }    from '@/lib/platform/pricing/resolver'
+import { resolveCheckoutCharge }     from '@/lib/fees/checkoutCharge'
+import { resolveFeeConfig }          from '@/lib/fees/resolveFeeConfig'
+import { getFeePlanForOrganizer }    from '@/lib/billing/feeEngine'
+import { builderFeeModelToEngine, normalizeFeeModel } from '@/lib/events/builder/types'
+import type { FeeConfig, FeeBreakdownRecord } from '@/lib/fees/types'
 
 // ─── Request / response shapes ────────────────────────────────────────────────
 
@@ -96,15 +106,15 @@ export async function POST(
     return NextResponse.json({ error: 'Invalid request body' }, { status: 400 })
   }
 
-  const { slug, passId, attendee, formResponses, couponCode, inviteCode } = body
+  const { slug, passId, formResponses, couponCode, inviteCode } = body
 
-  if (!slug || !passId || !attendee?.name?.trim() || !attendee?.email?.trim()) {
+  if (!slug || !passId || !body.attendee?.name?.trim() || !body.attendee?.email?.trim()) {
     return NextResponse.json(
       { error: 'slug, passId, attendee.name and attendee.email are required' },
       { status: 400 },
     )
   }
-  if (!isValidEmail(attendee.email)) {
+  if (!isValidEmail(body.attendee.email)) {
     return NextResponse.json({ error: 'Invalid email address' }, { status: 400 })
   }
 
@@ -128,20 +138,12 @@ export async function POST(
   const pass = passes.find(p => p.id === passId)
   if (!pass) return NextResponse.json({ error: 'Pass not found' }, { status: 404 })
 
-  // Server-authoritative price: the early-bird price while active (before its
-  // cutoff), otherwise the regular price. Resolved from the stored pass only —
-  // the client amount is never trusted. Backward-compatible: passes without
-  // early bird resolve to their regular price unchanged.
-  const priceRupees = resolveEffectivePriceRupees(
-    {
-      price:            typeof pass.price === 'number' ? pass.price : 0,
-      earlyBirdEnabled: pass.earlyBirdEnabled === true,
-      earlyBirdPrice:   typeof pass.earlyBirdPrice === 'number' ? pass.earlyBirdPrice : null,
-      earlyBirdEndDate: typeof pass.earlyBirdEndDate === 'string' ? pass.earlyBirdEndDate : undefined,
-    },
-    Date.now(),
-  )
-  if (priceRupees === 0) {
+  // Server-authoritative base amount (integer paise): the early-bird price while active
+  // (before its cutoff), otherwise the regular price. Resolved from the stored pass only
+  // via the ONE canonical resolver — the client amount is never trusted. Backward-
+  // compatible: passes without early bird resolve to Math.round(price*100) unchanged.
+  const originalAmountPaise = resolveEffectivePassPricePaise(pass, Date.now())
+  if (originalAmountPaise === 0) {
     return NextResponse.json(
       { error: 'This pass is free. Use /api/registrations/submit instead.' },
       { status: 400 },
@@ -164,30 +166,23 @@ export async function POST(
     )
   }
 
-  const normEmail = attendee.email.trim().toLowerCase()
-
-  if (regRules?.limitPerEmail) {
-    try {
-      const dupSnap = await adminDb
-        .collection('registrations')
-        .where('eventSlug',      '==', slug)
-        .where('attendee.email', '==', normEmail)
-        .limit(1)
-        .get()
-      if (dupSnap.docs.some(d => d.data().status !== 'cancelled')) {
-        return NextResponse.json(
-          { error: 'A registration with this email address already exists.', reason: 'DUPLICATE_EMAIL' },
-          { status: 409 },
-        )
-      }
-    } catch (err) {
-      console.warn('[create-order] limitPerEmail query failed (missing index?):', err)
-    }
+  // Canonical attendee identity (RD-ATTENDEE-03A C1): derive the authoritative stored
+  // identity from the submitted responses via the ONE shared resolver (the same the
+  // client used), falling back to the client-sent values. Dedup + payment-intent +
+  // ticket all read this single model.
+  const identityFields = ((registrationForm?.sections ?? []) as { fields: IdentityField[] }[]).flatMap(s => s.fields)
+  const identity = resolveAttendeeIdentity(identityFields, (formResponses ?? {}) as Record<string, string>)
+  const attendee = {
+    name:  (identity.name  || body.attendee.name).trim(),
+    email: (identity.email || body.attendee.email).trim().toLowerCase(),
+    phone: (identity.phone || body.attendee.phone || '').trim() || undefined,
   }
+
+  const normEmail = attendee.email.trim().toLowerCase()
 
   // P0-4: Phone required when limitPerMobile is active. Without this guard an
   // attendee who omits their phone bypasses the uniqueness rule entirely. Mirrors
-  // the enforcement already present in submit/route.ts:272-277.
+  // the enforcement already present in submit/route.ts.
   if (regRules?.limitPerMobile && !attendee.phone?.trim()) {
     return NextResponse.json(
       { error: 'A phone number is required to register for this event.', reason: 'PHONE_REQUIRED' },
@@ -195,24 +190,19 @@ export async function POST(
     )
   }
 
-  if (regRules?.limitPerMobile && attendee.phone?.trim()) {
-    const normPhone = attendee.phone.trim()
-    try {
-      const dupSnap = await adminDb
-        .collection('registrations')
-        .where('eventSlug',      '==', slug)
-        .where('attendee.phone', '==', normPhone)
-        .limit(1)
-        .get()
-      if (dupSnap.docs.some(d => d.data().status !== 'cancelled')) {
-        return NextResponse.json(
-          { error: 'A registration with this mobile number already exists.', reason: 'DUPLICATE_MOBILE' },
-          { status: 409 },
-        )
-      }
-    } catch (err) {
-      console.warn('[create-order] limitPerMobile query failed (missing index?):', err)
-    }
+  // H2: authoritative duplicate check via the ONE shared helper (also used by the
+  // pre-payment pre-check and submit) — never charge a user for a duplicate.
+  const dup = await checkDuplicateRegistration({
+    slug,
+    email:          attendee.email,
+    phone:          attendee.phone,
+    limitPerEmail:  regRules?.limitPerEmail  ?? false,
+    limitPerMobile: regRules?.limitPerMobile ?? false,
+  })
+  if (dup.duplicate) {
+    return dup.field === 'mobile'
+      ? NextResponse.json({ error: 'A registration with this mobile number already exists.', reason: 'DUPLICATE_MOBILE' }, { status: 409 })
+      : NextResponse.json({ error: 'A registration with this email address already exists.', reason: 'DUPLICATE_EMAIL' }, { status: 409 })
   }
 
   // ── 5c. Invite code validation (P0-1) ─────────────────────────────────────
@@ -246,7 +236,7 @@ export async function POST(
   const eventName  = typeof rawInfo?.name === 'string' ? rawInfo.name : 'Event'
 
   // ── 7.5. Validate and apply coupon (server-side — never trust client price) ─
-  const originalAmountPaise = Math.round(priceRupees * 100)
+  // originalAmountPaise resolved above (canonical early-bird base).
   let   finalAmountPaise    = originalAmountPaise
   let   couponDocId: string | undefined
   let   discountAmount: number | undefined
@@ -278,8 +268,34 @@ export async function POST(
     }
   }
 
+  // ── 7.6. RD-PAYMENT-02 Phase 4: canonical charge amount (feature-gated) ─────
+  // pricingEngineEnabled is the ONLY activation switch. resolvePlatformPricing never
+  // throws (falls back to defaults, flag = false), so reading it can't break checkout.
+  // When OFF: no fee-config I/O runs and resolveCheckoutCharge returns finalAmountPaise
+  //   unchanged, with no breakdown — byte-identical to production.
+  // When ON: organizer_pays charges the ticket (chargeAmountPaise === finalAmountPaise);
+  //   customer_pays charges ticket + fees. Every current event maps to organizer_pays
+  //   (normalizeFeeModel keeps attendee_pays "Coming Soon"), so activating the flag does
+  //   NOT change any charge today — it only starts persisting the additive breakdown.
+  const platformSettings = await resolvePlatformPricing()
+  let feeConfig: FeeConfig | undefined
+  if (platformSettings.features.pricingEngineEnabled) {
+    const feePlan = await getFeePlanForOrganizer(event.uid)
+    feeConfig = await resolveFeeConfig('event_registration', feePlan.planTier)
+  }
+  const charge = resolveCheckoutCharge({
+    pricingEngineEnabled: platformSettings.features.pricingEngineEnabled,
+    finalAmountPaise,
+    eventFeeModel: builderFeeModelToEngine(
+      normalizeFeeModel(rawPricing?.feeModel, platformSettings.features.pricingEngineEnabled),
+    ),
+    feeConfig,
+    context: { organizerUid: event.uid, eventId: slug },
+  })
+  const amountPaise: number = charge.amountPaise
+  const financials: FeeBreakdownRecord | undefined = charge.financials
+
   // ── 8. Create Razorpay order (never trust client amount) ───────────────────
-  const amountPaise = finalAmountPaise
   const receipt     = `rd_${Date.now()}`   // max 40 chars
 
   let orderId: string
@@ -327,6 +343,9 @@ export async function POST(
         discountAmount,
         originalAmount: originalAmountPaise,
       } : {}),
+      // RD-PAYMENT-02 Phase 4 — canonical fee breakdown (present only when the pricing
+      // engine is enabled). Additive; `amount` above is unchanged and remains the charge.
+      ...(financials ? { financials } : {}),
     })
   } catch (err) {
     captureFinancialError(err, { scope: 'create-order.intent_write_failed', detail: 'orphaned Razorpay order', orderId, eventSlug: slug, passId, amount: amountPaise })
@@ -341,5 +360,10 @@ export async function POST(
     amount:   amountPaise,
     currency: 'INR',
     keyId:    RAZORPAY_KEY_ID,
+    // RD-PAYMENT-05 B1: return the canonical fee breakdown so the checkout can show the
+    // attendee EXACTLY what they will pay before Razorpay opens. Present only when the
+    // pricing engine ran (attendee_pays); absent under organizer_pays → response unchanged.
+    // financials.chargeAmountPaise === amount above (same object) → display == order == ledger.
+    ...(financials ? { financials } : {}),
   })
 }

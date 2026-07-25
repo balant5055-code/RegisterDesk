@@ -3,7 +3,10 @@
 
 // ─── Capacity Plan ────────────────────────────────────────────────────────────
 
-export type CapacityPlan = 'free' | 'pack_500' | 'pack_1000' | 'pack_5000' | 'unlimited'
+// RD-LICENSE-01B: pack_200 + pack_2500 added additively for the V2 catalog's Free (200)
+// and Professional (2,500) registration limits. Historical plans are unchanged.
+export type CapacityPlan =
+  | 'free' | 'pack_200' | 'pack_500' | 'pack_1000' | 'pack_2500' | 'pack_5000' | 'unlimited'
 
 // free_event  → default capacityPlan='free'      (100 limit, upgradeable via packs)
 // paid_event  → default capacityPlan='unlimited'  (no cap by default)

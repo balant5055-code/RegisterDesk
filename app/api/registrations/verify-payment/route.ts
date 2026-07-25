@@ -443,7 +443,12 @@ export async function POST(
         }
 
         txn.set(regRef, regDoc)
-        txn.set(counterRef, buildCounterIncrement(intent.eventSlug, intent.passId, { amountPaise: intent.amount }), { merge: true })
+        // RD-PAYMENT-05 B2: the counter tracks ORGANIZER revenue (ticket base), the same
+        // canonical basis the ledger/wallet/finance use — NOT the attendee charge. Under
+        // organizer_pays ticketBasePaise === intent.amount (byte-identical); under
+        // customer_pays (attendee_pays) it strips the attendee-borne fees so the dashboard
+        // revenue matches finance/settlement instead of overstating by the fees.
+        txn.set(counterRef, buildCounterIncrement(intent.eventSlug, intent.passId, { amountPaise: intent.financials?.ticketBasePaise ?? intent.amount }), { merge: true })
         txn.update(intentRef, {
           status:         'paid',
           registrationId,
@@ -506,6 +511,9 @@ export async function POST(
             grossAmountPaise: intent.amount,
             paymentId:        razorpay_payment_id,
             orderId:          razorpay_order_id,
+            // RD-PAYMENT-02 Phase 7: prefer the canonical breakdown persisted at checkout.
+            // Absent for legacy/organizer_pays intents → the builder uses the legacy path.
+            financials:       intent.financials,
           })
           // POST-COMMIT: the registration is already durable. The atomic
           // ledger+credit is idempotent; if it throws (transient Firestore

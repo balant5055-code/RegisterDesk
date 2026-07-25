@@ -14,11 +14,16 @@ import {
   type LicenseCouponDoc, type LicenseCouponType, type LicenseCouponLifecycle,
 } from '@/lib/licensing/coupons'
 import { LICENSE_ORDERS_COLLECTION } from '@/lib/licensing/schema'
-import { isEventLicenseTier, type EventLicenseTier } from '@/lib/licensing/eventLicense'
+import { isEventLicenseTier, isEventLicenseTierV2, type AnyEventLicenseTier } from '@/lib/licensing/eventLicense'
 
 export class CouponAdminError extends Error {
   constructor(message: string, public readonly status = 400) { super(message); this.name = 'CouponAdminError' }
 }
+
+// RD-LICENSE-GA-03: a coupon may restrict to V1 OR V2 tiers (both vocabularies), so tier
+// restrictions are no longer V1-only. A V2 purchase matches a V2 restriction; historical
+// V1 coupons keep working.
+const isAnyLicenseTier = (t: unknown): t is AnyEventLicenseTier => isEventLicenseTier(t) || isEventLicenseTierV2(t)
 
 const col = () => adminDb.collection(LICENSE_COUPONS_COLLECTION)
 
@@ -48,7 +53,7 @@ function validateNew(input: CouponInput): void {
   }
   if (input.activatesAt !== undefined && !isIso(input.activatesAt)) throw new CouponAdminError('activatesAt must be an ISO date or null')
   if (input.expiresAt !== undefined && !isIso(input.expiresAt)) throw new CouponAdminError('expiresAt must be an ISO date or null')
-  if (input.tiers && input.tiers.some(t => !isEventLicenseTier(t))) throw new CouponAdminError('tiers contains an invalid license tier')
+  if (input.tiers && input.tiers.some(t => !isAnyLicenseTier(t))) throw new CouponAdminError('tiers contains an invalid license tier')
 }
 
 function docFromInput(code: string, input: CouponInput, createdBy: string): LicenseCouponDoc {
@@ -65,7 +70,7 @@ function docFromInput(code: string, input: CouponInput, createdBy: string): Lice
     usageLimit:        input.usageLimit ?? null,
     perOrganizerLimit: input.perOrganizerLimit ?? null,
     currentUses:      0,
-    restrictions:     { tiers: (input.tiers ?? []).filter(isEventLicenseTier) as EventLicenseTier[], eventTypes: input.eventTypes ?? [] },
+    restrictions:     { tiers: (input.tiers ?? []).filter(isAnyLicenseTier), eventTypes: input.eventTypes ?? [] },
     enabled:          input.enabled ?? false,
     paused:           false,
     archived:         false,
@@ -133,7 +138,7 @@ export async function updateCoupon(code: string, input: CouponInput, adminUid: s
   const editable: (keyof CouponInput)[] = ['description', 'type', 'value', 'maxDiscountPaise', 'minPurchasePaise', 'maxPurchasePaise', 'activatesAt', 'expiresAt', 'usageLimit', 'perOrganizerLimit', 'enabled', 'priority', 'stackable', 'visibility', 'campaign', 'internalNotes']
   for (const k of editable) if (input[k] !== undefined) patch[k] = input[k]
   if (input.tiers !== undefined || input.eventTypes !== undefined) {
-    patch.restrictions = { tiers: (input.tiers ?? cur.restrictions.tiers).filter(isEventLicenseTier), eventTypes: input.eventTypes ?? cur.restrictions.eventTypes }
+    patch.restrictions = { tiers: (input.tiers ?? cur.restrictions.tiers).filter(isAnyLicenseTier), eventTypes: input.eventTypes ?? cur.restrictions.eventTypes }
   }
   await ref.set(patch, { merge: true })
   await audit(adminUid, 'license_coupon.updated', cur.code, reason, { fields: Object.keys(patch) })

@@ -1,13 +1,12 @@
 import type { ReactNode } from 'react'
+import { Loader2 } from 'lucide-react'
+import type { SocialProviderKey } from '@/lib/firebase/auth/social'
 
 // ─── SocialLoginRow ───────────────────────────────────────────────────────────
-// Presentation-only social sign-in row: a divider + three equal outline buttons.
-//
-// RegisterDesk has NO OAuth wired (no GoogleAuthProvider / signInWithPopup
-// anywhere), and this refinement pass must not touch auth logic. So these are
-// DISABLED "coming soon" placeholders — visible for layout parity but non-
-// interactive, so nothing pretends to work. When OAuth lands, remove `disabled`
-// and wire each provider's onClick; the markup stays.
+// Social sign-in row: a divider + three equal outline buttons (Google / Microsoft /
+// Facebook). RD-AUTH-02 Phases 7–9 wired these to real OAuth — each button invokes
+// `onSelect(key)`; the page owns the popup + linking flow. Presentation-only: no
+// Firebase here. When `onSelect` is absent the buttons render disabled (defensive).
 
 const GoogleIcon = (
   <svg viewBox="0 0 24 24" className="size-4" fill="currentColor" aria-hidden="true">
@@ -27,14 +26,23 @@ const FacebookIcon = (
   </svg>
 )
 
-const PROVIDERS: { name: string; icon: ReactNode }[] = [
-  { name: 'Google',    icon: GoogleIcon    },
-  { name: 'Microsoft', icon: MicrosoftIcon },
-  { name: 'Facebook',  icon: FacebookIcon  },
+const PROVIDERS: { key: SocialProviderKey; name: string; icon: ReactNode }[] = [
+  { key: 'google',    name: 'Google',    icon: GoogleIcon    },
+  { key: 'microsoft', name: 'Microsoft', icon: MicrosoftIcon },
+  { key: 'facebook',  name: 'Facebook',  icon: FacebookIcon  },
 ]
 
+export interface SocialLoginRowProps {
+  /** Invoked with the chosen provider. Absent → buttons render disabled. */
+  onSelect?:   (key: SocialProviderKey) => void
+  /** The provider whose popup is currently in flight (shows a spinner). */
+  loadingKey?: SocialProviderKey | null
+}
+
 // No outer margin — the parent form's vertical rhythm owns the gap above/below.
-export function SocialLoginRow() {
+export function SocialLoginRow({ onSelect, loadingKey = null }: SocialLoginRowProps) {
+  const anyLoading = loadingKey != null
+
   return (
     <div className="space-y-2.5">
       {/* Divider — OR */}
@@ -44,24 +52,27 @@ export function SocialLoginRow() {
         <span className="h-px flex-1 bg-border" />
       </div>
 
-      {/* Three equal outline buttons — icons left, disabled placeholders */}
+      {/* Three equal outline buttons — icons left */}
       <div className="grid grid-cols-3 gap-3">
-        {PROVIDERS.map(({ name, icon }) => (
-          <button
-            key={name}
-            type="button"
-            disabled
-            title={`${name} sign-in — coming soon`}
-            aria-label={`${name} sign-in — coming soon`}
-            className="inline-flex h-11 cursor-not-allowed items-center justify-center gap-2 rounded-lg border border-border bg-background text-sm font-medium text-muted-foreground opacity-60"
-          >
-            {icon}
-            <span className="hidden sm:inline">{name}</span>
-          </button>
-        ))}
+        {PROVIDERS.map(({ key, name, icon }) => {
+          const isLoading = loadingKey === key
+          const disabled  = !onSelect || anyLoading
+          return (
+            <button
+              key={key}
+              type="button"
+              disabled={disabled}
+              onClick={() => onSelect?.(key)}
+              title={`Continue with ${name}`}
+              aria-label={`Continue with ${name}`}
+              className="inline-flex h-11 items-center justify-center gap-2 rounded-lg border border-border bg-background text-sm font-medium text-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {isLoading ? <Loader2 className="size-4 animate-spin" aria-hidden /> : icon}
+              <span className="hidden sm:inline">{name}</span>
+            </button>
+          )
+        })}
       </div>
-
-      <p className="text-center text-[12px] text-muted-foreground/80">Social sign-in coming soon</p>
     </div>
   )
 }

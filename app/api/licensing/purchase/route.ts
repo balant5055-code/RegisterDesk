@@ -21,8 +21,8 @@ import { getWalletConfig }     from '@/lib/wallet/resolveWalletConfig'
 import { razorpay, RAZORPAY_KEY_ID } from '@/lib/razorpay/client'
 import { createEventLicenseService, type LicensePreparationContext } from '@/lib/licensing/service'
 import { EVENT_LICENSES_COLLECTION, LICENSE_ORDERS_COLLECTION, licenseOrderConverter, type LicenseOrderDoc } from '@/lib/licensing/schema'
-import { isEventLicenseTier, type EventLicenseTier } from '@/lib/licensing/eventLicense'
-import { getEffectiveLicenseDefinition } from '@/lib/licensing/resolveCatalog'
+import { CURRENT_LICENSE_VERSION, isValidTierForVersion, type AnyEventLicenseTier } from '@/lib/licensing/eventLicense'
+import { getEffectiveDefinitionForVersion } from '@/lib/licensing/resolveCatalog'
 import { activateLicenseOrder, refundExhaustedCouponRemainder } from '@/lib/licensing/finalizeLicensePurchase'
 import {
   getLicenseCoupon, getLicenseCouponsConfig, countOrganizerCouponRedemptions,
@@ -54,12 +54,15 @@ function statusForFailure(reason: PurchaseFailureReason): number {
   }
 }
 
-/** Read the current license tier for an event (null when unlicensed). Read-only. */
-async function readCurrentLicenseTier(eventId: string): Promise<EventLicenseTier | null> {
+/** Read the current license tier for an event (null when unlicensed). Read-only.
+ *  RD-LICENSE-GA-02: a license DOC carries a `version` — validate its tier against that
+ *  stored version (V1 or V2), so a historical V1 license and a future V2 one both resolve. */
+async function readCurrentLicenseTier(eventId: string): Promise<AnyEventLicenseTier | null> {
   const snap = await adminDb.collection(EVENT_LICENSES_COLLECTION).doc(eventId).get()
   if (!snap.exists) return null
-  const tier = (snap.data() as { tier?: unknown }).tier
-  return isEventLicenseTier(tier) ? tier : null
+  const data = snap.data() as { tier?: unknown; version?: unknown }
+  const version = typeof data.version === 'number' && data.version >= 1 ? data.version : 1
+  return isValidTierForVersion(data.tier, version) ? data.tier : null
 }
 
 /**
@@ -71,7 +74,7 @@ async function readCurrentLicenseTier(eventId: string): Promise<EventLicenseTier
 async function createLicenseRazorpayOrder(args: {
   eventId:      string
   organizerUid: string
-  tier:         EventLicenseTier
+  tier:         AnyEventLicenseTier
   amountPaise:  number
 }): Promise<string> {
   const order = await razorpay.orders.create({
@@ -151,13 +154,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const request: PurchaseLicenseRequest = {
     eventId,
     organizerUid: ctx.workspaceUid,
-    tier:         body.tier as EventLicenseTier,   // validated inside the service
+    tier:         body.tier as AnyEventLicenseTier,   // validated inside the service
     method:       'razorpay',
   }
-  // Resolve the EFFECTIVE (config-aware) price so the charge reflects any admin
-  // override. Invalid tiers fall through to the service's validation.
-  const effectivePricePaise = isEventLicenseTier(body.tier)
-    ? (await getEffectiveLicenseDefinition(body.tier)).licensePricePaise
+  // Resolve the EFFECTIVE (config-aware) price for the CURRENT license version so the
+  // charge reflects any admin override. Invalid tiers fall through to the service's
+  // validation. At version 1 this equals the previous getEffectiveLicenseDefinition price.
+  const effectivePricePaise = isValidTierForVersion(body.tier, CURRENT_LICENSE_VERSION)
+    ? (await getEffectiveDefinitionForVersion(body.tier, CURRENT_LICENSE_VERSION))?.licensePricePaise
     : undefined
   const context: LicensePreparationContext = {
     eventExists: exists,
@@ -200,8 +204,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     if (existing?.status === 'created' && existing.razorpayOrderId) {
       const remainder = Math.max(0, existing.razorpayAmountPaise ?? 0)
       const capturedPaymentId = await findCapturedLicensePayment(existing.razorpayOrderId, remainder)
-      if (capturedPaymentId && isEventLicenseTier(existing.tier)) {
-        const rdef = await getEffectiveLicenseDefinition(existing.tier)
+      // `existing` is a stored license ORDER (transient current-version artifact, no
+      // version field) → resolve its tier against CURRENT_LICENSE_VERSION.
+      const rdef = isValidTierForVersion(existing.tier, CURRENT_LICENSE_VERSION)
+        ? await getEffectiveDefinitionForVersion(existing.tier, CURRENT_LICENSE_VERSION) : null
+      if (capturedPaymentId && rdef) {
         const act = await activateLicenseOrder({
           eventId, uid: ctx.workspaceUid, tier: existing.tier, licenseName: rdef.name,
           basePricePaise: rdef.licensePricePaise, persisted: existing,

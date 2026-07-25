@@ -29,6 +29,11 @@ export interface ReceiptData {
   gstNumber?:      string    // organizer GSTIN, e.g. "27AADCB2230M1ZT"
   gstRate?:        number    // e.g. 18 (for 18%)
   taxableAmount?:  number    // paise — amount before tax (for breakdown)
+
+  // RD-PAYMENT-05 B1: attendee fee breakdown lines (attendee_pays only). Each is a
+  // canonical stored paise value; rendered as a "CHARGE BREAKDOWN" table above ISSUED BY.
+  // Absent for organizer_absorbs / free → receipt renders exactly as before.
+  feeLines?: { label: string; paise: number }[]
 }
 
 // ─── Page constants ───────────────────────────────────────────────────────────
@@ -249,6 +254,23 @@ export async function generateReceiptPdf(data: ReceiptData): Promise<Uint8Array>
     thickness: 0.4, color: C_LTGREY,
   })
   y -= 24
+
+  // ── Charge breakdown (RD-PAYMENT-05 B1 — attendee_pays only) ─────────────────
+  // Itemizes the exact charge from the canonical stored fee lines. Total === amountPaid.
+  if (data.feeLines && data.feeLines.length > 0) {
+    page.drawText('CHARGE BREAKDOWN', {
+      x: M, y: y + 10,
+      size: 7.5, font: fontB, color: C_PRIMARY, opacity: 0.9,
+    })
+    y -= 6
+    for (const line of data.feeLines) drawRow(line.label, fmtINR(line.paise))
+    drawRow('Total Paid', fmtINR(data.amountPaid))
+    page.drawLine({
+      start: { x: M, y: y + 6 }, end: { x: W - M, y: y + 6 },
+      thickness: 0.4, color: C_LTGREY,
+    })
+    y -= 24
+  }
 
   // ── Organizer ────────────────────────────────────────────────────────────────
   page.drawText('ISSUED BY', {

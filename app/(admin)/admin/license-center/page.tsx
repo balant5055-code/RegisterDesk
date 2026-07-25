@@ -27,7 +27,7 @@ import {
 import type { PillTone } from '@/components/admin'
 import { useConfirm } from '@/components/ui/ConfirmDialog'
 import { Bars, HBars } from '@/components/analytics/Charts'
-import { EVENT_LICENSE_TIERS, type EventLicenseTier } from '@/lib/licensing/eventLicense'
+import { currentLicenseTierIds, isValidTierForVersion, CURRENT_LICENSE_VERSION, type AnyEventLicenseTier } from '@/lib/licensing/eventLicense'
 import type {
   LicenseRow, LicenseListResponse, LicenseDetail,
   LicenseAdminActionType, LicenseAdminActionRequest,
@@ -276,7 +276,7 @@ function LicensesWorkspace() {
                   <tr key={r.eventId} className="border-b border-border/60">
                     <td className="px-4 py-2"><div className="max-w-[200px] truncate font-medium text-foreground">{r.eventName}</div><div className="max-w-[200px] truncate text-[11px] text-muted-foreground">{r.eventId}</div></td>
                     <td className="px-4 py-2"><div className="max-w-[150px] truncate text-foreground">{r.organizerName || '—'}</div><div className="max-w-[150px] truncate text-[11px] text-muted-foreground">{r.organizerEmail}</div></td>
-                    <td className="px-4 py-2 capitalize">{r.tier}{r.complimentary && <StatusPill tone="accent">comp</StatusPill>}</td>
+                    <td className="px-4 py-2 capitalize">{r.tierName}{r.complimentary && <StatusPill tone="accent">comp</StatusPill>}</td>
                     <td className="px-4 py-2"><StatusPill tone={r.displayStatus === 'active' ? 'success' : r.displayStatus === 'pending' ? 'warning' : 'danger'}>{r.displayStatus}</StatusPill></td>
                     <td className="px-4 py-2 text-right tabular-nums">{r.registrationLimit === null ? `${num(r.used)}/∞` : `${num(r.used)}/${num(r.registrationLimit)}`}</td>
                     <td className="px-4 py-2 text-right tabular-nums">{rupees(r.amountPaidPaise)}</td>
@@ -326,8 +326,8 @@ function LicenseDrawer({ eventId, onClose, onChanged }: { eventId: string; onClo
     await act(action, { ...extra, reason })
   }
   async function promptTier(action: 'upgrade' | 'downgrade') {
-    const tier = (await prompt({ title: 'Select tier', message: `Target tier (${EVENT_LICENSE_TIERS.join(' / ')}):`, placeholder: EVENT_LICENSE_TIERS.join(' / ') }))?.trim() as EventLicenseTier
-    if (!EVENT_LICENSE_TIERS.includes(tier)) { if (tier) setErr('Invalid tier'); return }
+    const tier = (await prompt({ title: 'Select tier', message: `Target tier (${currentLicenseTierIds().join(' / ')}):`, placeholder: currentLicenseTierIds().join(' / ') }))?.trim() as AnyEventLicenseTier
+    if (!isValidTierForVersion(tier, CURRENT_LICENSE_VERSION)) { if (tier) setErr('Invalid tier'); return }
     await withReason(action, { tier })
   }
   async function promptDays(action: 'extendExpiry' | 'reduceExpiry') {
@@ -356,7 +356,7 @@ function LicenseDrawer({ eventId, onClose, onChanged }: { eventId: string; onClo
               <p className="text-[12px] text-muted-foreground">{row.eventId}</p>
               <div className="mt-2 flex flex-wrap items-center gap-2">
                 <StatusPill tone={row.displayStatus === 'active' ? 'success' : row.displayStatus === 'pending' ? 'warning' : 'danger'}>{row.displayStatus}</StatusPill>
-                <StatusPill tone="neutral">{row.tier}</StatusPill>
+                <StatusPill tone="neutral">{row.tierName}</StatusPill>
                 {row.hasOverrides && <StatusPill tone="info">overrides</StatusPill>}
               </div>
               <div className="mt-2 flex flex-wrap gap-2">

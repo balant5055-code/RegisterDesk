@@ -15,11 +15,13 @@
 import { businessConfig } from '@/lib/config/businessConfigService'
 import { getDefaultFeeConfig, getTransactionCategory } from './config'
 import type { FeeConfig, PlatformPlanTier, PlatformTransactionType } from './types'
+import type { FeeResolutionContext } from './feeModelResolution'
 
-export interface FeeResolutionContext {
-  organizerUid?: string   // reserved for a future organizer-override layer
-  eventId?:      string   // reserved for a future event-override layer
-}
+// RD-PAYMENT-02 Phase 3: the fee-model resolver, its default, and FeeResolutionContext now
+// live in the PURE feeModelResolution module (client- and server-safe). Re-exported here so
+// every existing server importer of this module keeps its import path unchanged.
+export type { FeeResolutionContext } from './feeModelResolution'
+export { DEFAULT_FEE_MODEL, resolveEffectiveFeeModel } from './feeModelResolution'
 
 export async function resolveFeeConfig(
   type: PlatformTransactionType,

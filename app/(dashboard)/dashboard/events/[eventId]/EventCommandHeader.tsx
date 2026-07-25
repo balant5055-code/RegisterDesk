@@ -194,7 +194,7 @@ export default function EventCommandHeader({ event, eventId, token, onSuccess }:
         <div className="flex flex-wrap gap-2">
           <KpiPill label="Registrations" value={event.totalRegistrations.toLocaleString('en-IN')} highlight />
           {!event.isFreeEvent && (
-            <KpiPill label="Est. Revenue" value={formatINR(event.estimatedRevenue)} />
+            <KpiPill label="Revenue" value={formatINR(event.estimatedRevenue)} />
           )}
           <KpiPill label="Checked In" value={event.checkedInCount.toLocaleString('en-IN')} />
           {fillRate !== null && (

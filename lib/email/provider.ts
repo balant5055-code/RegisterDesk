@@ -3,7 +3,13 @@
 // swapping providers (Resend → SES → SendGrid) requires only a provider
 // implementation change and zero business-logic changes.
 
+import type { EmailBranding } from './templates/base'
+
 export type EmailStatus = 'pending' | 'sent' | 'failed'
+
+// RD-PRODUCT-01C — optional white-label branding for attendee-facing emails. Resolved
+// from the organizer's Email Settings in the send path; absent → default shell.
+export type WithBranding<T> = T & { branding?: EmailBranding }
 
 // ─── OTP / Auth email params ──────────────────────────────────────────────────
 
@@ -37,6 +43,7 @@ export interface RegistrationEmailParams {
   receiptDownloadUrl?: string  // absolute URL to /api/receipts/{registrationId}?token=... (paid only)
   /** Raw ICS text — when present, attached as calendar-invite.ics in the email. */
   icsContent?:    string
+  branding?:      EmailBranding   // RD-PRODUCT-01C white-label (covers ticket via alias)
 }
 
 // Ticket re-delivery email — same shape as registration confirmation
@@ -74,6 +81,7 @@ export interface CertificateEmailParams {
     filename:      string
     contentBase64: string
   }
+  branding?:       EmailBranding   // RD-PRODUCT-01C white-label
 }
 
 // ─── Result ───────────────────────────────────────────────────────────────────
@@ -106,6 +114,7 @@ export interface RegistrationCancelledEmailParams {
   eventName:    string
   ticketCode:   string
   reason?:      string
+  branding?:    EmailBranding   // RD-PRODUCT-01C white-label
 }
 
 export interface RefundConfirmationEmailParams {
@@ -116,6 +125,7 @@ export interface RefundConfirmationEmailParams {
   passName:     string
   refundAmount: number   // paise
   refundId:     string
+  branding?:    EmailBranding   // RD-PRODUCT-01C white-label
 }
 
 // ─── Waitlist email params ────────────────────────────────────────────────────

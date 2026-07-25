@@ -10,15 +10,14 @@ import {
   LogOut,
   Menu,
   Moon,
-  Plus,
   Search,
   Settings,
   Sun,
-  User,
 } from 'lucide-react'
-import type { User as FirebaseUser } from 'firebase/auth'
-import { onAuthStateChanged, onIdTokenChanged, signOut } from 'firebase/auth'
+import { signOut } from 'firebase/auth'
 import { auth } from '@/lib/firebase/auth'
+import { useAuth } from '@/components/auth/AuthProvider'
+import { resolveAuthGuard } from '@/lib/auth/authGuard'
 import { Sidebar } from '@/components/dashboard/Sidebar'
 import { WorkspaceBanner } from '@/components/dashboard/WorkspaceBanner'
 import { SessionGuard } from '@/components/auth/SessionGuard'
@@ -29,7 +28,6 @@ import { cn } from '@/lib/utils/cn'
 import { ToastProvider } from '@/components/ui/Toast'
 import { ConfirmProvider } from '@/components/ui/ConfirmDialog'
 import { BusinessConfigProvider } from '@/lib/config/BusinessConfigProvider'
-import { buttonVariants } from '@/components/ui'
 import { CommandPalette } from '@/components/dashboard/CommandPalette'
 import { openCommandPalette } from '@/lib/commandPalette/bridge'
 import { NotificationBell } from '@/components/dashboard/NotificationBell'
@@ -172,9 +170,11 @@ function useDropdown() {
 
 // ─── ProfileMenu ──────────────────────────────────────────────────────────────
 
+// RD-UX-01: "My Profile" was removed — it and "Settings" both resolved to
+// /dashboard/settings (no separate personal-account route exists), so two menu
+// items opened the identical page. Account/profile controls live inside Settings.
 const PROFILE_MENU = [
-  { label: 'My Profile', icon: User,     href: ROUTES.DASHBOARD_SETTINGS },
-  { label: 'Settings',   icon: Settings, href: ROUTES.DASHBOARD_SETTINGS },
+  { label: 'Settings', icon: Settings, href: ROUTES.DASHBOARD_SETTINGS },
 ] as const
 
 interface ProfileMenuProps {
@@ -204,10 +204,10 @@ function ProfileMenu({ displayName, email, initial, emailVerified }: ProfileMenu
         aria-label="Open profile menu"
         aria-expanded={open}
         aria-haspopup="menu"
-        className="flex items-center gap-1 rounded-md p-0.5 transition-opacity hover:opacity-85 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+        className="flex items-center gap-1 rounded-md transition-opacity hover:opacity-85 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
       >
         <div
-          className="flex size-[30px] items-center justify-center rounded-full text-[12px] font-bold text-primary-foreground"
+          className="flex size-8 items-center justify-center rounded-full text-[12px] font-bold text-primary-foreground"
           style={{ backgroundImage: 'var(--primary-gradient)' }}
           aria-hidden
         >
@@ -295,13 +295,16 @@ function DashboardHeader({ onMenuClick, displayName, email, initial, emailVerifi
   return (
     <header
       role="banner"
-      className="flex h-[58px] shrink-0 items-center gap-3 border-b border-border bg-card px-4 md:px-5"
+      /* RD-UX-01: h-16 matches the sidebar's logo header (Sidebar.tsx h-[64px]) so
+         the top bar and sidebar share one continuous bottom border — previously the
+         h-[58px] top bar sat 6px above the sidebar header edge. */
+      className="flex h-16 shrink-0 items-center gap-3 border-b border-border bg-card px-4 md:px-5"
     >
       {/* Mobile hamburger (< md) */}
       <button
         onClick={onMenuClick}
         aria-label="Open navigation menu"
-        className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary md:hidden"
+        className="flex size-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary md:hidden"
       >
         <Menu className="size-[18px]" aria-hidden />
       </button>
@@ -321,58 +324,53 @@ function DashboardHeader({ onMenuClick, displayName, email, initial, emailVerifi
 
       <div className="flex-1" />
 
-      {/* Quick Create (desktop) */}
-      <Link
-        href={ROUTES.NEW_EVENT}
-        className={cn(buttonVariants({ variant: 'gradient', size: 'sm' }), 'hidden md:inline-flex')}
-        style={{ backgroundImage: 'var(--primary-gradient)' }}
-        aria-label="Create new event"
-      >
-        <Plus className="size-3.5" aria-hidden />
-        <span>Create Event</span>
-      </Link>
-
-      {/* Global search entry point (Phase H.4.2 — opens the Global Command
-          Palette). Scope: events, participants, registrations, CRM, certificates,
-          settlements, broadcasts, donations, identifiers. Also reachable via
-          Ctrl/⌘+K anywhere in the workspace. */}
-      <button
-        type="button"
-        onClick={openCommandPalette}
-        aria-label="Open command palette — search events, participants, registrations, CRM, certificates, settlements, broadcasts, donations, identifiers"
-        aria-keyshortcuts="Control+K Meta+K"
-        className={cn(
-          'relative hidden h-8 w-44 items-center rounded-lg border border-border bg-muted pl-8 pr-10 text-left text-[14px] text-muted-foreground sm:flex',
-          'transition-colors duration-150 hover:border-primary/40 hover:bg-card focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/25',
-        )}
-      >
-        <Search
-          className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground"
-          aria-hidden
-        />
-        <span>Search workspace…</span>
-        <kbd
-          aria-hidden
-          className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 rounded border border-border bg-card px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground"
+      {/* RD-UX-01: right action group — one flex cluster so search, notifications,
+          theme and avatar share a consistent gap and a uniform 32px (h-8) height,
+          vertically centred. The duplicate "Create Event" button that used to sit
+          here was removed (the dashboard hero CTA and the sidebar nav item remain). */}
+      <div className="flex items-center gap-1.5 sm:gap-2">
+        {/* Global search entry point (Phase H.4.2 — opens the Global Command
+            Palette). Scope: events, participants, registrations, CRM, certificates,
+            settlements, broadcasts, donations, identifiers. Also reachable via
+            Ctrl/⌘+K anywhere in the workspace. */}
+        <button
+          type="button"
+          onClick={openCommandPalette}
+          aria-label="Open command palette — search events, participants, registrations, CRM, certificates, settlements, broadcasts, donations, identifiers"
+          aria-keyshortcuts="Control+K Meta+K"
+          className={cn(
+            'relative hidden h-8 w-44 items-center rounded-lg border border-border bg-muted pl-8 pr-10 text-left text-[14px] text-muted-foreground sm:flex',
+            'transition-colors duration-150 hover:border-primary/40 hover:bg-card focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/25',
+          )}
         >
-          ⌘K
-        </kbd>
-      </button>
+          <Search
+            className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground"
+            aria-hidden
+          />
+          <span>Search workspace…</span>
+          <kbd
+            aria-hidden
+            className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 rounded border border-border bg-card px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground"
+          >
+            ⌘K
+          </kbd>
+        </button>
 
-      <NotificationBell />
+        <NotificationBell />
 
-      <button
-        onClick={toggle}
-        aria-label={isDark ? 'Switch to light mode' : 'Switch to dark mode'}
-        className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
-      >
-        {isDark
-          ? <Sun  className="size-[18px]" aria-hidden />
-          : <Moon className="size-[18px]" aria-hidden />
-        }
-      </button>
+        <button
+          onClick={toggle}
+          aria-label={isDark ? 'Switch to light mode' : 'Switch to dark mode'}
+          className="flex size-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+        >
+          {isDark
+            ? <Sun  className="size-[18px]" aria-hidden />
+            : <Moon className="size-[18px]" aria-hidden />
+          }
+        </button>
 
-      <ProfileMenu displayName={displayName} email={email} initial={initial} emailVerified={emailVerified} />
+        <ProfileMenu displayName={displayName} email={email} initial={initial} emailVerified={emailVerified} />
+      </div>
     </header>
   )
 }
@@ -397,42 +395,21 @@ function AuthLoadingScreen() {
 // ─── Layout ───────────────────────────────────────────────────────────────────
 
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
-  // undefined = still resolving, null = not signed in, User = signed in
-  const [user,        setUser]        = useState<FirebaseUser | null | undefined>(undefined)
+  // RD-AUTH-01 Phase 1 (M-A): the user comes from the ONE shared AuthProvider
+  // (undefined = resolving, null = signed out, User = signed in) — no layout-local
+  // Firebase listener. The provider owns the single onAuthStateChanged/onIdTokenChanged.
+  const { user } = useAuth()
   const [sidebarOpen, setSidebarOpen] = useState(false)
 
-  // ── Auth state & token refresh ─────────────────────────────────────────────
+  // ── Route guard (RD-AUTH-01 Phase 4 / H-C) ──────────────────────────────────
+  // Navigation is decided by the ONE canonical resolver (shared with /welcome):
+  // signed out → login; verified-required → OTP page. It never redirects before auth
+  // has resolved. (emailVerified is flipped by adminAuth.updateUser after OTP; the
+  // client cache is refreshed by auth.currentUser.reload() on that page.)
+  const guard = resolveAuthGuard(user)
   useEffect(() => {
-    // onAuthStateChanged fires immediately with the cached state — no round-trip.
-    const unsubAuth = onAuthStateChanged(auth, (u) => {
-      // Not signed in → hard redirect (replaces history, clears React state)
-      if (!u) {
-        window.location.replace(ROUTES.LOGIN)
-        return
-      }
-      // Signed in but email not verified → send to OTP page
-      // emailVerified is set to true by adminAuth.updateUser after OTP success,
-      // and the client cache is refreshed by auth.currentUser.reload() on that page.
-      if (!u.emailVerified) {
-        window.location.replace(ROUTES.VERIFY_EMAIL)
-        return
-      }
-      setUser(u)
-    })
-
-    // onIdTokenChanged fires whenever Firebase silently refreshes the ID token
-    // (~every 1 hour). The token itself is managed by child components via
-    // auth.currentUser.getIdToken(); this subscription exists to detect
-    // auth-state invalidation between normal onAuthStateChanged events.
-    const unsubToken = onIdTokenChanged(auth, (u) => {
-      if (!u) window.location.replace(ROUTES.LOGIN)
-    })
-
-    return () => {
-      unsubAuth()
-      unsubToken()
-    }
-  }, [])
+    if (guard.redirect) window.location.replace(guard.redirect)
+  }, [guard.redirect])
 
   // ── Derived user display data ──────────────────────────────────────────────
   const displayName   = user?.displayName ?? user?.email?.split('@')[0] ?? 'Organizer'
@@ -441,9 +418,9 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const emailVerified = user?.emailVerified ?? false
 
   // ── Loading & redirect states ──────────────────────────────────────────────
-  if (user === undefined)        return <AuthLoadingScreen />  // auth resolving
-  if (user === null)             return <AuthLoadingScreen />  // redirect to login in flight
-  if (!user.emailVerified)       return <AuthLoadingScreen />  // redirect to verify-email in flight
+  // Any non-authorized status (resolving, or a redirect in flight) shows the loading
+  // screen — same behaviour as the previous three explicit returns.
+  if (guard.status !== 'authorized') return <AuthLoadingScreen />
 
   return (
     <ToastProvider>

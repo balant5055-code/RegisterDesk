@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { cn }                                        from '@/lib/utils/cn'
+import { registrationStatusCls }                     from '@/lib/ui/statusColors'
 import {
   Search, X, Loader2, CheckCircle2, AlertCircle,
   XCircle, UserSearch, Clock, RotateCcw,
@@ -31,13 +32,13 @@ interface UndoAction {
 
 // ─── Status meta ──────────────────────────────────────────────────────────────
 
+// RD-ORGANIZER-02 P1: colours come from the ONE canonical registration-status map
+// (lib/ui/statusColors) — the prior local table drifted (waitlisted rendered sky, not the
+// reconciled amber) and omitted rejected. Label is just the capitalised status.
 function statusMeta(s: string): { label: string; cls: string } {
-  switch (s) {
-    case 'confirmed':  return { label: 'Confirmed',  cls: 'bg-emerald-100 text-emerald-700' }
-    case 'pending':    return { label: 'Pending',    cls: 'bg-amber-100 text-amber-700'     }
-    case 'cancelled':  return { label: 'Cancelled',  cls: 'bg-red-100 text-red-600'         }
-    case 'waitlisted': return { label: 'Waitlisted', cls: 'bg-sky-100 text-sky-700'         }
-    default:           return { label: s,            cls: 'bg-muted text-muted-foreground'  }
+  return {
+    label: s ? s.charAt(0).toUpperCase() + s.slice(1) : s,
+    cls:   registrationStatusCls[s] ?? 'bg-muted text-muted-foreground',
   }
 }
 
@@ -375,7 +376,7 @@ export default function AttendeeSearch({ eventId, token, onCheckedIn, onUndid }:
         />
         {loading && (
           <Loader2
-            className="absolute right-3.5 top-1/2 size-4 -translate-y-1/2 animate-spin text-muted-foreground"
+            className="absolute right-3.5 top-1/2 size-4 -translate-y-1/2 animate-spin text-muted-foreground motion-reduce:animate-none"
             aria-hidden
           />
         )}

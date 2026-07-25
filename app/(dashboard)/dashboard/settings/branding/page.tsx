@@ -1,8 +1,8 @@
 'use client'
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { onAuthStateChanged, type User } from 'firebase/auth'
-import { auth } from '@/lib/firebase/auth'
+import { type User } from 'firebase/auth'
+import { useAuth } from '@/components/auth/AuthProvider'
 import { uploadOrganizerAsset } from '@/lib/firebase/storage'
 import { useConfirm } from '@/components/ui/ConfirmDialog'
 import { cn } from '@/lib/utils/cn'
@@ -13,6 +13,7 @@ import type { DomainConfig, CustomDomainStatus } from '@/lib/domains/types'
 const HEX = /^#[0-9a-fA-F]{6}$/
 
 export default function BrandingPage() {
+  const { user } = useAuth()
   const userRef = useRef<User | null>(null)
   const { confirm } = useConfirm()
   const [gated,   setGated]   = useState<boolean | null>(null)   // null=loading, false=no whiteLabel
@@ -53,13 +54,14 @@ export default function BrandingPage() {
   }, [authedFetch])
 
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, user => {
+    if (user === undefined) return
+    const run = async () => {
       userRef.current = user
       if (!user) { setLoading(false); setGated(false); return }
       void loadAll()
-    })
-    return unsub
-  }, [loadAll])
+    }
+    run()
+  }, [user, loadAll])
 
   async function saveBranding() {
     if (!branding) return

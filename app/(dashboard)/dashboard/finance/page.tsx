@@ -1,8 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useState } from 'react'
-import { onAuthStateChanged }               from 'firebase/auth'
-import { auth }                             from '@/lib/firebase/auth'
+import { useAuth }                          from '@/components/auth/AuthProvider'
 import {
   ArrowDownLeft, BarChart3,
   Clock, CreditCard, DollarSign,
@@ -119,6 +118,8 @@ export default function FinancePage() {
 
   const handleRetry = useCallback(() => setRetryKey(k => k + 1), [])
 
+  const { user, getToken } = useAuth()
+
   // ── Fetch settlements (used both on initial load and after POST) ───────────
 
   const fetchSettlements = useCallback(async (tok: string) => {
@@ -139,14 +140,17 @@ export default function FinancePage() {
   // ── Initial load: overview + settlements in parallel ──────────────────────
 
   useEffect(() => {
-    setLoadingPage(true)
-    setLoadingSettle(true)
-    setError(null)
+    if (user === undefined) return
+    let cancelled = false
+    const run = async () => {
+      setLoadingPage(true)
+      setLoadingSettle(true)
+      setError(null)
 
-    const unsub = onAuthStateChanged(auth, async user => {
       if (!user) { setLoadingPage(false); setLoadingSettle(false); return }
       try {
-        const t = await user.getIdToken(retryKey > 0)
+        const t = await getToken(retryKey > 0)
+        if (cancelled || !t) return
         setToken(t)
 
         const [overviewRes, settlementsRes, payoutRes] = await Promise.all([
@@ -165,18 +169,19 @@ export default function FinancePage() {
             ? payoutRes.json() as Promise<PayoutProfileGetResponse>
             : Promise.resolve({ profile: null } as PayoutProfileGetResponse),
         ])
+        if (cancelled) return
         setOverview(overviewData)
         setSettlements(settlementsData.requests)
         setHasPayoutProfile(payoutData.profile !== null)
       } catch (e) {
-        setError(e instanceof Error ? e.message : 'Failed to load finance data.')
+        if (!cancelled) setError(e instanceof Error ? e.message : 'Failed to load finance data.')
       } finally {
-        setLoadingPage(false)
-        setLoadingSettle(false)
+        if (!cancelled) { setLoadingPage(false); setLoadingSettle(false) }
       }
-    })
-    return unsub
-  }, [retryKey])
+    }
+    run()
+    return () => { cancelled = true }
+  }, [user, getToken, retryKey])
 
   // ── Fetch transactions (re-runs on filter change) ────────────────────────
 
@@ -212,10 +217,13 @@ export default function FinancePage() {
 
   useEffect(() => {
     if (!token) return
-    setTransactions([])
-    setCursor(null)
-    setHasMore(false)
-    fetchTransactions(token, filter, false, null)
+    const run = async () => {
+      setTransactions([])
+      setCursor(null)
+      setHasMore(false)
+      fetchTransactions(token, filter, false, null)
+    }
+    void run()
   }, [token, filter, fetchTransactions])
 
   const handleLoadMore = useCallback(() => {

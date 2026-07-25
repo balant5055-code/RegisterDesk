@@ -23,14 +23,17 @@ import {
   type LicenseHistoryAction,
 } from '@/lib/licensing/schema'
 import {
-  EVENT_LICENSE_TIERS,
   CURRENT_LICENSE_VERSION,
   isEventLicenseTier,
+  isEventLicenseTierV2,
+  isValidTierForVersion,
+  defaultLicenseTierForVersion,
   isUnlimited,
-  type EventLicenseTier,
+  type AnyEventLicenseTier,
   type EventLicenseFeature,
 } from '@/lib/licensing/eventLicense'
-import { getLicenseCatalog, type LicenseCatalog } from '@/lib/licensing/resolveCatalog'
+import { getLicenseCatalog, getLicenseCatalogV2, type LicenseCatalog, type LicenseCatalogV2 } from '@/lib/licensing/resolveCatalog'
+import { pickVersionedDefinition } from '@/lib/licensing/licenseCatalogShared'
 import { resolveEffectiveEventLicense, OVERRIDABLE_FEATURE_KEYS } from '@/lib/licensing/adminLicense'
 import { capacityPlanForRegistrationLimit } from '@/lib/registrations/capacity'
 import { atomicWalletCredit } from '@/lib/firebase/firestore/wallet'
@@ -76,7 +79,8 @@ function nested(obj: unknown, ...keys: string[]): unknown {
   return cur
 }
 
-const tierRank = (t: EventLicenseTier): number => EVENT_LICENSE_TIERS.indexOf(t)
+// RD-LICENSE-GA-02: tier rank is now cross-version (by registration limit), resolved
+// locally inside applyLicenseAction where both catalogs are on hand — see `rankOf`.
 
 const licenseRef = (eventId: string) => adminDb.collection(EVENT_LICENSES_COLLECTION).doc(eventId)
 
@@ -138,10 +142,14 @@ interface RowJoins {
   used?:       number
 }
 
-function buildRow(doc: EventLicenseDoc, catalog: LicenseCatalog, joins: RowJoins): LicenseRow {
-  const tier    = isEventLicenseTier(doc.tier) ? doc.tier : 'starter'
+function buildRow(doc: EventLicenseDoc, catalog: LicenseCatalog, catalogV2: LicenseCatalogV2, joins: RowJoins): LicenseRow {
+  // RD-LICENSE-01B Phase 3C.1 — resolve the DISPLAY def by the license's stored version
+  // (V1 tier → V1 catalog, V2 tier → V2 catalog); never crashes on a cross-version tier.
+  const version = typeof doc.version === 'number' && doc.version >= 1 ? doc.version : 1
+  const tier: AnyEventLicenseTier = isValidTierForVersion(doc.tier, version) ? doc.tier : 'starter'
   const overlay = readOverlay(doc)
-  const eff     = resolveEffectiveEventLicense(catalog[tier], doc.status, doc.amountPaise ?? 0, doc.admin)
+  const baseDef = pickVersionedDefinition(catalog, catalogV2, tier, version)
+  const eff     = resolveEffectiveEventLicense(baseDef, doc.status, doc.amountPaise ?? 0, doc.admin)
   const maxReg  = eff.definition.limits.maxRegistrations
 
   const ev = joins.event
@@ -162,6 +170,7 @@ function buildRow(doc: EventLicenseDoc, catalog: LicenseCatalog, joins: RowJoins
     organizerEmail:      typeof org?.email === 'string' ? (org.email as string) : '',
     organizationName:    typeof org?.organizationName === 'string' ? (org.organizationName as string) : '',
     tier,
+    tierName:            baseDef.name,   // version-aware display name (V1 or V2)
     displayStatus:       displayStatus(doc.status, overlay.lifecycle),
     lifecycle:           overlay.lifecycle,
     complimentary:       overlay.complimentary,
@@ -204,12 +213,13 @@ export async function listLicenses(opts: {
   const orgUids    = [...new Set(pageDocs.map(d => (d.data() as EventLicenseDoc).organizerUid).filter(Boolean))]
   const orderIds   = pageDocs.map(d => (d.data() as EventLicenseDoc).orderId).filter((o): o is string => !!o)
 
-  const [eventSnaps, orgSnaps, counterSnaps, orderSnaps, catalog] = await Promise.all([
+  const [eventSnaps, orgSnaps, counterSnaps, orderSnaps, catalog, catalogV2] = await Promise.all([
     adminDb.getAll(...eventIds.map(id => adminDb.doc(`events/${id}`))),
     orgUids.length ? adminDb.getAll(...orgUids.map(u => adminDb.doc(`users/${u}`))) : Promise.resolve([]),
     adminDb.getAll(...eventIds.map(id => adminDb.doc(`registrationCounters/${id}`))),
     orderIds.length ? adminDb.getAll(...orderIds.map(o => adminDb.doc(`${LICENSE_ORDERS_COLLECTION}/${o}`))) : Promise.resolve([]),
     getLicenseCatalog(),
+    getLicenseCatalogV2(),
   ])
 
   const eventMap = new Map<string, Record<string, unknown>>()
@@ -223,7 +233,7 @@ export async function listLicenses(opts: {
 
   let items = pageDocs.map(d => {
     const doc = { ...(d.data() as EventLicenseDoc), eventId: d.id }
-    return buildRow(doc, catalog, {
+    return buildRow(doc, catalog, catalogV2, {
       event:     eventMap.get(d.id),
       organizer: orgMap.get(doc.organizerUid),
       order:     doc.orderId ? orderMap.get(doc.orderId) : undefined,
@@ -260,17 +270,18 @@ export async function getLicenseDetail(eventId: string): Promise<LicenseDetail |
   if (!snap.exists) return null
   const doc = { ...(snap.data() as EventLicenseDoc), eventId }
 
-  const [eventSnap, orgSnap, counterSnap, orderSnap, historySnap, catalog] = await Promise.all([
+  const [eventSnap, orgSnap, counterSnap, orderSnap, historySnap, catalog, catalogV2] = await Promise.all([
     adminDb.doc(`events/${eventId}`).get(),
     adminDb.doc(`users/${doc.organizerUid}`).get(),
     adminDb.doc(`registrationCounters/${eventId}`).get(),
     doc.orderId ? adminDb.doc(`${LICENSE_ORDERS_COLLECTION}/${doc.orderId}`).get() : Promise.resolve(null),
     adminDb.collection(LICENSE_HISTORY_COLLECTION).where('eventId', '==', eventId).limit(200).get(),
     getLicenseCatalog(),
+    getLicenseCatalogV2(),
   ])
 
   const order = orderSnap?.exists ? (orderSnap.data() as Record<string, unknown>) : undefined
-  const row = buildRow(doc, catalog, {
+  const row = buildRow(doc, catalog, catalogV2, {
     event:     eventSnap.exists ? (eventSnap.data() as Record<string, unknown>) : undefined,
     organizer: orgSnap.exists ? (orgSnap.data() as Record<string, unknown>) : undefined,
     order,
@@ -283,8 +294,9 @@ export async function getLicenseDetail(eventId: string): Promise<LicenseDetail |
       return {
         id:        d.id,
         action:    typeof h.action === 'string' ? h.action : 'unknown',
-        fromTier:  isEventLicenseTier(h.fromTier) ? h.fromTier : null,
-        toTier:    isEventLicenseTier(h.toTier) ? h.toTier : doc.tier,
+        // History spans versions — accept either vocabulary (no version stored per entry).
+        fromTier:  (isEventLicenseTier(h.fromTier) || isEventLicenseTierV2(h.fromTier)) ? h.fromTier as AnyEventLicenseTier : null,
+        toTier:    (isEventLicenseTier(h.toTier) || isEventLicenseTierV2(h.toTier)) ? h.toTier as AnyEventLicenseTier : doc.tier,
         source:    (h.source === 'admin' || h.source === 'system') ? h.source : 'self_serve',
         actorUid:  typeof h.actorUid === 'string' ? h.actorUid : null,
         note:      typeof h.note === 'string' ? h.note : '',
@@ -376,7 +388,9 @@ async function resolveDraftId(slug: string): Promise<string | null> {
 /** Write an immutable licenseHistory entry (never overwrites — always appends). */
 async function appendHistory(entry: {
   eventId: string; organizerUid: string; action: LicenseHistoryAction
-  fromTier: EventLicenseTier | null; toTier: EventLicenseTier
+  // RD-LICENSE-01B — widened to match the widened LicenseHistoryDoc (type-only; the values
+  // written are unchanged — the admin service still produces V1 tiers under version 1).
+  fromTier: AnyEventLicenseTier | null; toTier: AnyEventLicenseTier
   actorUid: string; note: string; reason: string; before?: unknown; after?: unknown
   orderId?: string | null
 }): Promise<void> {
@@ -445,13 +459,21 @@ export async function applyLicenseAction(
   const snap = await licenseRef(eventId).get()
   const doc  = snap.exists ? { ...(snap.data() as EventLicenseDoc), eventId } : null
 
-  const catalog = await getLicenseCatalog()
+  // RD-LICENSE-GA-02: resolve BOTH catalogs; NEW writes (grant/upgrade target) resolve at
+  // CURRENT_LICENSE_VERSION, a stored license doc resolves at its own version. rankOf is the
+  // cross-version tier rank (by registration limit). At version 1 all of this is identical.
+  const [catalog, catalogV2] = await Promise.all([getLicenseCatalog(), getLicenseCatalogV2()])
+  const defFor = (t: string, v: number) => pickVersionedDefinition(catalog, catalogV2, t, v)
+  const rankOf = (t: string, v: number): number => {
+    const m = defFor(t, v).limits.maxRegistrations
+    return isUnlimited(m) ? Number.MAX_SAFE_INTEGER : m
+  }
   const respond = (extra?: Partial<LicenseAdminActionResponse>): LicenseAdminActionResponse =>
     ({ ok: true, eventId, action, ...extra })
 
   // ── grant — create a comp/free license for an event that has none ──
   if (action === 'grant') {
-    if (!isEventLicenseTier(req.tier)) throw new LicenseActionError('A valid tier is required to grant a license')
+    if (!isValidTierForVersion(req.tier, CURRENT_LICENSE_VERSION)) throw new LicenseActionError('A valid tier is required to grant a license')
     if (doc && readOverlay(doc).lifecycle === 'active' && doc.status === 'active') {
       throw new LicenseActionError('Event already has an active license — use override/upgrade instead of grant', 409)
     }
@@ -484,7 +506,7 @@ export async function applyLicenseAction(
       createdAt: doc?.createdAt ?? FieldValue.serverTimestamp(),
       updatedAt: FieldValue.serverTimestamp(),
     }, { merge: true })
-    await syncEventCapacity(eventId, catalog[req.tier].limits.maxRegistrations)
+    await syncEventCapacity(eventId, defFor(req.tier, CURRENT_LICENSE_VERSION).limits.maxRegistrations)
     await appendHistory({
       eventId, organizerUid, action: 'granted', fromTier: doc?.tier ?? null, toTier: req.tier,
       actorUid: adminUid, note: complimentary ? 'Complimentary license granted' : 'License granted', reason,
@@ -497,7 +519,9 @@ export async function applyLicenseAction(
   // Every other action requires an existing license.
   if (!doc) throw new LicenseActionError('No license exists for this event', 404)
   const organizerUid = doc.organizerUid
-  const tier = isEventLicenseTier(doc.tier) ? doc.tier : 'starter'
+  // Stored license doc → resolve its tier against ITS stored version (V1 or V2).
+  const storedVersion = typeof doc.version === 'number' && doc.version >= 1 ? doc.version : 1
+  const tier: AnyEventLicenseTier = isValidTierForVersion(doc.tier, storedVersion) ? doc.tier : defaultLicenseTierForVersion(storedVersion)
   const overlay = readOverlay(doc)
 
   switch (action) {
@@ -559,17 +583,19 @@ export async function applyLicenseAction(
     // ── Tier change ──
     case 'upgrade':
     case 'downgrade': {
-      if (!isEventLicenseTier(req.tier)) throw new LicenseActionError('A valid target tier is required')
+      // The upgrade/downgrade TARGET is a NEW tier → validate against CURRENT_LICENSE_VERSION.
+      if (!isValidTierForVersion(req.tier, CURRENT_LICENSE_VERSION)) throw new LicenseActionError('A valid target tier is required')
       const target = req.tier
       if (target === tier) throw new LicenseActionError(`License is already on the ${tier} tier`, 409)
-      if (action === 'upgrade' && tierRank(target) < tierRank(tier)) throw new LicenseActionError('Upgrade target must be a higher tier', 409)
-      if (action === 'downgrade' && tierRank(target) > tierRank(tier)) throw new LicenseActionError('Downgrade target must be a lower tier', 409)
+      // Cross-version rank by registration limit (target at current version, current at stored).
+      if (action === 'upgrade' && rankOf(target, CURRENT_LICENSE_VERSION) < rankOf(tier, storedVersion)) throw new LicenseActionError('Upgrade target must be a higher tier', 409)
+      if (action === 'downgrade' && rankOf(target, CURRENT_LICENSE_VERSION) > rankOf(tier, storedVersion)) throw new LicenseActionError('Downgrade target must be a lower tier', 409)
       await licenseRef(eventId).set({
         tier: target, upgradedFrom: tier, upgradedAt: FieldValue.serverTimestamp(), updatedAt: FieldValue.serverTimestamp(),
       }, { merge: true })
       // Effective limit for the new tier (respect an existing maxRegistrations override).
       const overrideMax = overlay.limitOverrides.maxRegistrations
-      const effMax = overrideMax === undefined ? catalog[target].limits.maxRegistrations
+      const effMax = overrideMax === undefined ? defFor(target, CURRENT_LICENSE_VERSION).limits.maxRegistrations
         : overrideMax === null ? Number.POSITIVE_INFINITY : overrideMax
       await syncEventCapacity(eventId, effMax)
       break
@@ -594,7 +620,7 @@ export async function applyLicenseAction(
         status: 'active', version: CURRENT_LICENSE_VERSION, updatedAt: FieldValue.serverTimestamp(),
       }, { merge: true })
       await writeOverlay(eventId, { ...overlay, lifecycle: 'active' }, adminUid)
-      await syncEventCapacity(eventId, catalog[tier].limits.maxRegistrations)
+      await syncEventCapacity(eventId, defFor(tier, storedVersion).limits.maxRegistrations)
       break
     }
 
@@ -770,7 +796,7 @@ export async function applyLicenseAction(
   await appendHistory({
     eventId, organizerUid, action: HISTORY_ACTION[action],
     fromTier: (action === 'upgrade' || action === 'downgrade') ? tier : null,
-    toTier: (action === 'upgrade' || action === 'downgrade') ? (req.tier as EventLicenseTier) : tier,
+    toTier: (action === 'upgrade' || action === 'downgrade') ? (req.tier ?? tier) : tier,
     actorUid: adminUid, note: `${action} by admin`, reason,
     before: { tier, lifecycle: overlay.lifecycle, priceOverride: overlay.pricePaiseOverride, limits: overlay.limitOverrides, features: overlay.featureOverrides },
     after: clean(req),

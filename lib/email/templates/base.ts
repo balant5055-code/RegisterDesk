@@ -7,9 +7,19 @@ export interface EmailBranding {
   companyName?:              string | null
   primaryColor?:             string | null   // hex; tints the header bar
   hideRegisterDeskBranding?: boolean         // hides the "Powered by RegisterDesk" footer
+  // RD-PRODUCT-01C — extended white-label fields (all optional, all with fallbacks).
+  logoUrl?:                  string | null   // organization / event logo shown in the header
+  secondaryColor?:           string | null   // hex; used for footer accents
+  website?:                  string | null   // absolute URL, shown in the footer
+  supportEmail?:             string | null
+  supportPhone?:             string | null
+  copyright?:                string | null   // e.g. "© 2026 Acme Events"
+  footerText?:               string | null   // free-text line above the copyright
 }
 
 const HEX = /^#[0-9a-fA-F]{6}$/
+const isHex = (v?: string | null): v is string => !!v && HEX.test(v)
+const isHttp = (v?: string | null): v is string => !!v && /^https?:\/\//i.test(v)
 
 /**
  * Wraps `bodyHtml` in the standard RegisterDesk email shell.
@@ -25,8 +35,27 @@ export function emailShell(subject: string, bodyHtml: string, unsubscribeUrl?: s
     ? `\n            <br>\n            <span style="font-size:11px;color:#9ca3af;display:block;margin-top:6px;">\n              Don&apos;t want these emails?\n              <a href="${escAttr(unsubscribeUrl)}" style="color:#9ca3af;text-decoration:underline;">Unsubscribe</a>\n            </span>`
     : ''
 
-  const headerColor = branding?.primaryColor && HEX.test(branding.primaryColor) ? branding.primaryColor : '#e5277e'
+  const headerColor = isHex(branding?.primaryColor) ? branding!.primaryColor! : '#e5277e'
   const headerLabel = branding?.companyName?.trim() || 'RegisterDesk'
+  // Header: prefer the organization/event logo; fall back to the uppercase label.
+  const headerInner = isHttp(branding?.logoUrl)
+    ? `<img src="${escAttr(branding!.logoUrl!)}" alt="${escAttr(headerLabel)}" height="28" style="height:28px;max-height:28px;width:auto;display:block;border:0;" />`
+    : `<span style="font-size:11px;font-weight:700;color:#fff;letter-spacing:0.14em;text-transform:uppercase;opacity:0.9;">${escHtml(headerLabel)}</span>`
+
+  const accent = isHex(branding?.secondaryColor) ? branding!.secondaryColor! : '#9ca3af'
+  // Organizer footer lines (company / free text / contact / copyright) — each rendered
+  // only when supplied, so the default (no branding) footer is unchanged.
+  const contactBits = [
+    isHttp(branding?.website) ? `<a href="${escAttr(branding!.website!)}" style="color:${accent};text-decoration:none;">${escHtml(branding!.website!.replace(/^https?:\/\//, ''))}</a>` : '',
+    branding?.supportEmail ? `<a href="mailto:${escAttr(branding.supportEmail)}" style="color:${accent};text-decoration:none;">${escHtml(branding.supportEmail)}</a>` : '',
+    branding?.supportPhone ? `<span style="color:${accent};">${escHtml(branding.supportPhone)}</span>` : '',
+  ].filter(Boolean).join(' &nbsp;·&nbsp; ')
+  const orgFooter = [
+    branding?.footerText ? `<div style="font-size:11.5px;color:#6b7280;margin-bottom:4px;">${escHtml(branding.footerText)}</div>` : '',
+    contactBits ? `<div style="font-size:11.5px;margin-bottom:4px;">${contactBits}</div>` : '',
+    branding?.copyright ? `<div style="font-size:11px;color:#9ca3af;margin-bottom:4px;">${escHtml(branding.copyright)}</div>` : '',
+  ].filter(Boolean).join('')
+
   const poweredBy   = branding?.hideRegisterDeskBranding
     ? ''
     : `\n            <span style="font-size:11.5px;color:#9ca3af;">\n              Powered by <a href="https://registerdesk.in" style="color:#9ca3af;text-decoration:none;">RegisterDesk</a>\n            </span>`
@@ -47,7 +76,7 @@ export function emailShell(subject: string, bodyHtml: string, unsubscribeUrl?: s
         <!-- ── Header ── -->
         <tr>
           <td style="background:${headerColor};border-radius:12px 12px 0 0;padding:20px 28px;">
-            <span style="font-size:11px;font-weight:700;color:#fff;letter-spacing:0.14em;text-transform:uppercase;opacity:0.9;">${escHtml(headerLabel)}</span>
+            ${headerInner}
           </td>
         </tr>
 
@@ -60,7 +89,7 @@ export function emailShell(subject: string, bodyHtml: string, unsubscribeUrl?: s
 
         <!-- ── Footer ── -->
         <tr>
-          <td style="background:#f9fafb;border:1px solid #e5e7eb;border-top:none;border-radius:0 0 12px 12px;padding:14px 28px;text-align:center;">${poweredBy}${unsubscribeFooter}
+          <td style="background:#f9fafb;border:1px solid #e5e7eb;border-top:none;border-radius:0 0 12px 12px;padding:14px 28px;text-align:center;">${orgFooter}${poweredBy}${unsubscribeFooter}
           </td>
         </tr>
 

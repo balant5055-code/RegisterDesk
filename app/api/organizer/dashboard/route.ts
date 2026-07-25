@@ -8,10 +8,11 @@ import { NextRequest, NextResponse } from 'next/server'
 import { AggregateField }            from 'firebase-admin/firestore'
 import { adminDb }                   from '@/lib/firebase/admin'
 import { authorizeAnyWorkspace }     from '@/lib/team/workspace'
+import { ensureOrganizerProfile }    from '@/lib/organizer/ensureProfile'
 import { deriveLifecycleStatus }     from '@/lib/events/lifecycle'
 import { getWalletBalance }          from '@/lib/firebase/firestore/wallet'
-import { getFeePlanForOrganizer }    from '@/lib/billing/feeEngine'
 import { getFreeEventCapacity }      from '@/lib/licensing/resolveCatalog'
+import type { OrganizerRevenueWallet } from '@/lib/fees/types'
 import { EVENT_STATS_VERSION }       from '@/lib/registrations/types'
 import type { RegistrationDocument, RegistrationCounter } from '@/lib/registrations/types'
 
@@ -102,6 +103,8 @@ export interface DashboardData {
     todayRevenuePaise:  number
     todayRegistrations: number
     todayCheckins:      number
+    monthRevenuePaise:  number   // current calendar month-to-date (confirmed)
+    monthRegistrations: number   // current calendar month-to-date (confirmed)
   }
   alerts:     DashboardAlert[]
   settlement: {
@@ -113,7 +116,11 @@ export interface DashboardData {
   }
   activity:   DashboardActivity[]
   events:     DashboardEvent[]
-  trendDays:  { date: string; count: number }[]   // 90 entries, oldest → newest
+  trendDays:  { date: string; count: number; revenuePaise: number }[]   // 90 entries, oldest → newest
+  // Recent-window (≤90d) breakdowns — derived from the SAME bounded registration
+  // read that powers trendDays/today; no extra Firestore reads. Empty ⇒ charts degrade.
+  passDistribution:   { label: string; count: number }[]   // top passes by confirmed registrations
+  registrationStatus: { label: string; count: number }[]   // recent registrations by status
   communications: {
     emailsSent:        number
     emailsSentToday:   number
@@ -139,6 +146,39 @@ export interface DashboardData {
   actionEvents:        DashboardActionEvent[]
 }
 
+// ─── Organizer event enumeration ──────────────────────────────────────────────
+// RD-DASHBOARD-01 Phase 4 (H4): enumerate the organizer's ENTIRE eventDrafts
+// collection deterministically, removing the former .limit(500) correctness ceiling
+// that silently dropped an organizer's 501st+ event from every derived total.
+//
+// It keeps the EXACT query the dashboard already used — orderBy('updatedAt','desc'),
+// same single-field index — and simply pages through it with a DocumentSnapshot cursor
+// (startAfter) until the collection is exhausted. Because the ordering field and its
+// implicit __name__ tiebreak are unchanged, the returned sequence is byte-for-byte the
+// same order the old single page produced (a draft missing updatedAt was excluded then
+// and still is), so downstream ordering (alerts, event cards, the action list) and every
+// derived count/sum are identical for organizers within the old 500-event window. Larger
+// organizers are simply no longer truncated. No new index, no second event source; reads
+// stay bounded to PAGE_SIZE per round-trip.
+const DRAFTS_PAGE_SIZE = 500
+async function fetchAllOrganizerDrafts(
+  uid: string,
+): Promise<FirebaseFirestore.QueryDocumentSnapshot[]> {
+  const col = adminDb.collection(`users/${uid}/eventDrafts`)
+  const docs: FirebaseFirestore.QueryDocumentSnapshot[] = []
+  let cursor: FirebaseFirestore.QueryDocumentSnapshot | null = null
+  for (;;) {
+    let q = col.orderBy('updatedAt', 'desc').limit(DRAFTS_PAGE_SIZE)
+    if (cursor) q = q.startAfter(cursor)
+    const page = await q.get()
+    docs.push(...page.docs)
+    // A short page means the collection is exhausted (a full page continues).
+    if (page.size < DRAFTS_PAGE_SIZE) break
+    cursor = page.docs[page.docs.length - 1]
+  }
+  return docs
+}
+
 // ─── Handler ──────────────────────────────────────────────────────────────────
 
 export async function GET(req: NextRequest): Promise<NextResponse> {
@@ -156,17 +196,23 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   // activity feed — is served by a BOUNDED recent window; the two refund-sensitive
   // / all-time scalar figures (settlement gross, emails sent, today's check-ins)
   // are served by indexed aggregates that transfer no documents.
+  // RD-DASHBOARD-01 Phase 3 (H3): the last two unbounded scans — today's emailLogs
+  // and all sent/partial broadcastCampaigns — are now indexed count()/sum() aggregates
+  // too. Every batch-1 read is now a document lookup, an aggregate, or a bounded query.
   const cutoff90         = new Date(Date.now() - 90 * 86_400_000)
   const RECENT_WINDOW_CAP = 5000
   const regsCol          = adminDb.collection('registrations')
 
   const [
-    draftsSnap, recentRegsSnap, recentCheckinsSnap, profileSnap, emailLogsSnap, broadcastsSnap,
-    walletBalancePaise, walletTxnsSnap, feePlan, grossAgg, emailsSentAgg, todayCheckinsAgg,
+    draftDocs, recentRegsSnap, recentCheckinsSnap, profileSnap,
+    emailsSentTodayAgg, emailsFailedTodayAgg, broadcastsAgg,
+    walletBalancePaise, walletTxnsSnap, revenueWalletSnap, emailsSentAgg, todayCheckinsAgg,
   ] = await Promise.all([
-    // LS1: bound the drafts scan (an organizer's own events are naturally few;
-    // 500 covers any realistic account without changing the computed output).
-    adminDb.collection(`users/${uid}/eventDrafts`).orderBy('updatedAt', 'desc').limit(500).get(),
+    // RD-DASHBOARD-01 Phase 4 (H4): complete, deterministic enumeration of the
+    // organizer's events (replaces the former .limit(500) ceiling). Same order/index
+    // as before, just uncapped — see fetchAllOrganizerDrafts. Still one entry in this
+    // parallel batch; internally it pages with a cursor, bounded per round-trip.
+    fetchAllOrganizerDrafts(uid),
     // Bounded recent window (projected): powers trendDays (90 days), today's
     // registration/revenue numbers, and the registration activity feed. Capped at
     // RECENT_WINDOW_CAP most-recent rows so cost tracks recent velocity, never
@@ -182,28 +228,44 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       .select('checkedInAt', 'eventName', 'passName', 'attendee.name', 'attendee.email')
       .get(),
     adminDb.collection('users').doc(uid).get(),
+    // RD-DASHBOARD-01 Phase 3 (H3): today's email counts come from indexed count()
+    // aggregates — split by the SAME status partitions the scan used (sent|delivered
+    // vs failed) — instead of transferring every log document for the day. Two queries
+    // because Firestore cannot group two different status filters into one aggregate;
+    // both are served by the existing (organizerUid, status, createdAt) index, transfer
+    // no documents, and stay O(1) regardless of daily email volume.
     adminDb.collection('emailLogs')
       .where('organizerUid', '==', uid)
+      .where('status', 'in', ['sent', 'delivered'])
       .where('createdAt', '>=', todayStart)
-      .get(),
+      .count().get().catch(() => null),
+    adminDb.collection('emailLogs')
+      .where('organizerUid', '==', uid)
+      .where('status', '==', 'failed')
+      .where('createdAt', '>=', todayStart)
+      .count().get().catch(() => null),
+    // RD-DASHBOARD-01 Phase 3 (H3): campaign count + recipients reached come from ONE
+    // aggregate (count + sum) over the SAME status in [sent,partial] filter the scan
+    // used — no longer transferring every campaign ever sent. successCount is always
+    // written (0 at creation, actual at finalize) for these statuses, so
+    // sum('successCount') equals the former Σ(successCount ?? recipientCount ?? 0)
+    // exactly. Served by the existing (organizerUid, status) index; transfers no docs.
     adminDb.collection('broadcastCampaigns')
       .where('organizerUid', '==', uid)
       .where('status', 'in', ['sent', 'partial'])
-      .select('recipientCount', 'successCount')
-      .get(),
+      .aggregate({ campaigns: AggregateField.count(), reached: AggregateField.sum('successCount') })
+      .get().catch(() => null),
     getWalletBalance(uid),
     adminDb.collection('walletTransactions')
       .where('organizerUid', '==', uid)
       .orderBy('createdAt', 'desc')
       .limit(12)
       .get(),
-    // D.1: fee plan joins batch 1 so it runs in parallel instead of blocking
-    // sequentially after the batch (same result, one fewer serial round trip).
-    getFeePlanForOrganizer(uid),
-    // Settlement gross = Σ amount over CONFIRMED + PAID (refund-sensitive, so not
-    // denormalized). One indexed sum aggregate — no document transfer.
-    regsCol.where('organizerUid', '==', uid).where('status', '==', 'confirmed').where('paymentStatus', '==', 'paid')
-      .aggregate({ s: AggregateField.sum('amount') }).get().catch(() => null),
+    // RD-DASHBOARD-01 Phase 1 (H1): the settlement summary sources GROSS / FEES / NET from
+    // the canonical revenue wallet (organizerRevenueWallets) — the SAME single source of
+    // truth /dashboard/finance uses — replacing the inline Σamount + rate×gross estimate.
+    // One O(1) doc read replaces the sum aggregate + the fee-plan fetch.
+    adminDb.doc(`organizerRevenueWallets/${uid}`).get(),
     // All-time emails sent (was derived from the full scan) — one indexed count.
     regsCol.where('organizerUid', '==', uid).where('emailStatus', '==', 'sent')
       .count().get().catch(() => null),
@@ -212,8 +274,16 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       .count().get().catch(() => null),
   ])
 
-  const profile    = profileSnap.exists ? (profileSnap.data() ?? {}) : {}
-  const drafts     = draftsSnap.docs.map(d => ({ id: d.id, ...d.data() }) as Record<string, unknown>)
+  // RD-AUTH-02: the single organizer-session boot endpoint is the safest place to
+  // guarantee the canonical /users/{uid} profile exists. Idempotent + piggybacks the
+  // read above, so the self-heal write fires ONLY when the profile is genuinely missing
+  // (an orphaned/legacy account whose profile write never completed).
+  let profile: Record<string, unknown> = profileSnap.exists ? (profileSnap.data() ?? {}) : {}
+  if (!profileSnap.exists) {
+    const healed = await ensureOrganizerProfile(uid)
+    if (healed) profile = healed
+  }
+  const drafts     = draftDocs.map(d => ({ id: d.id, ...d.data() }) as Record<string, unknown>)
   // Bounded, projected recent registrations (NOT the full history).
   const recentRegs = recentRegsSnap.docs.map(d => d.data() as RegistrationDocument)
 
@@ -297,6 +367,20 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   const todayRegs       = todayConfirmed.length
   const todayRevPaise   = todayConfirmed.reduce((s, r) => s + (r.amount ?? 0), 0)
   const todayCheckins   = todayCheckinsAgg?.data().count ?? 0
+
+  // Month-to-date (current calendar month) from the SAME bounded window. Because the
+  // current month is always the newest slice, it is fully covered by the recent-window
+  // cap unless a single month exceeds RECENT_WINDOW_CAP — the same fidelity contract the
+  // today/trend numbers already carry. No extra read.
+  const monthStart = new Date()
+  monthStart.setDate(1)
+  monthStart.setHours(0, 0, 0, 0)
+  const monthConfirmed  = confirmedRecent.filter(r => {
+    const d = tsToDate(r.registeredAt)
+    return d !== null && d >= monthStart
+  })
+  const monthRegs     = monthConfirmed.length
+  const monthRevPaise = monthConfirmed.reduce((s, r) => s + (r.amount ?? 0), 0)
 
   // ── Alerts ─────────────────────────────────────────────────────────────────
 
@@ -382,22 +466,25 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     })
   })
 
-  // ── Settlement ─────────────────────────────────────────────────────────────
+  // ── Settlement — CANONICAL (RD-DASHBOARD-01 Phase 1 / H1) ────────────────────
+  // Gross / fees / net come straight from the organizer's revenue wallet
+  // (organizerRevenueWallets) — the same materialized rollups /dashboard/finance reads —
+  // so the dashboard and the finance page can never diverge. No inline Σamount, no
+  // rate×gross estimate, no gross−fees derivation: gateway fees + GST are already folded
+  // into lifetimeFeesPaise, and refunds are already netted into the stored rollups.
+  const rw = revenueWalletSnap.exists ? (revenueWalletSnap.data() as OrganizerRevenueWallet) : null
+  const grossPaise       = rw?.lifetimeGrossPaise ?? 0
+  const platformFeePaise = rw?.lifetimeFeesPaise  ?? 0   // platform + gateway + GST (canonical)
+  const netPayoutPaise   = rw?.lifetimeNetPaise    ?? 0
+  // Effective total-fee rate derived FROM the canonical figures (not an estimate).
+  const platformFeeRateBps = grossPaise > 0 ? Math.round((platformFeePaise / grossPaise) * 10_000) : 0
 
-  const grossPaise = grossAgg?.data().s ?? 0
-
-  // F.5: derive the platform fee rate from the organizer's ACTIVE plan (single
-  // source of truth) rather than the wallet's denormalized tier. Estimate only —
-  // the actual per-transaction fee (with fixed/min/cap) is computed at charge time.
-  // `feePlan` is fetched in batch 1 above (parallelized).
-  const platformFeeRateBps   = Math.round(feePlan.transactionFeePercent * 100)
-  const platformFeePaise     = Math.round(grossPaise * platformFeeRateBps / 10_000)
-
+  // Communication billing is a SEPARATE concern (comms wallet), surfaced on the
+  // Communication usage card — never mixed into the revenue settlement figures above.
   const communicationCostPaise = drafts.reduce((s, d) => {
     const b = d.communicationBilling as Record<string, unknown> | null | undefined
     return (b?.status === 'paid' && typeof b.amount === 'number') ? s + b.amount : s
   }, 0)
-  const netPayoutPaise = Math.max(0, grossPaise - platformFeePaise - communicationCostPaise)
 
   // ── Activity Feed ──────────────────────────────────────────────────────────
 
@@ -478,38 +565,68 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
 
   // ── Trend Data (90-day daily buckets) ──────────────────────────────────────
 
-  const trendMap = new Map<string, number>()
+  const trendCount = new Map<string, number>()
+  const trendRev   = new Map<string, number>()
 
   // Seed all 90 days with 0 (oldest → newest)
   for (let i = 89; i >= 0; i--) {
-    const d = new Date(Date.now() - i * 86_400_000)
-    trendMap.set(ymd(d), 0)
+    const k = ymd(new Date(Date.now() - i * 86_400_000))
+    trendCount.set(k, 0)
+    trendRev.set(k, 0)
   }
 
-  // Bucketed from the bounded recent window (cutoff90 declared in batch 1).
+  // Bucketed from the bounded recent window (cutoff90 declared in batch 1). Count AND
+  // confirmed revenue per day come from the same pass — powers both trend charts.
   confirmedRecent.forEach(r => {
     const d = tsToDate(r.registeredAt)
     if (!d || d < cutoff90) return
     const k = ymd(d)
-    if (trendMap.has(k)) trendMap.set(k, (trendMap.get(k) ?? 0) + 1)
+    if (trendCount.has(k)) {
+      trendCount.set(k, (trendCount.get(k) ?? 0) + 1)
+      trendRev.set(k,   (trendRev.get(k)   ?? 0) + (r.amount ?? 0))
+    }
   })
 
-  const trendDays = Array.from(trendMap.entries()).map(([date, count]) => ({ date, count }))
+  const trendDays = Array.from(trendCount.entries())
+    .map(([date, count]) => ({ date, count, revenuePaise: trendRev.get(date) ?? 0 }))
+
+  // ── Recent-window breakdowns (pass distribution + registration status) ─────────
+  // Both derived from the already-loaded recent window — no extra reads. Pass
+  // distribution counts confirmed registrations by pass; status counts every recent
+  // registration by lifecycle status. Empty arrays ⇒ the client charts degrade.
+  const passCount = new Map<string, number>()
+  confirmedRecent.forEach(r => {
+    const label = (r.passName ?? '').trim() || 'General'
+    passCount.set(label, (passCount.get(label) ?? 0) + 1)
+  })
+  const passDistribution = Array.from(passCount.entries())
+    .map(([label, count]) => ({ label, count }))
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 6)
+
+  const REG_STATUS_ORDER = ['confirmed', 'pending', 'waitlisted', 'cancelled', 'rejected']
+  const statusCount = new Map<string, number>()
+  recentRegs.forEach(r => {
+    const s = typeof r.status === 'string' && r.status ? r.status : 'unknown'
+    statusCount.set(s, (statusCount.get(s) ?? 0) + 1)
+  })
+  const registrationStatus = REG_STATUS_ORDER
+    .filter(s => statusCount.has(s))
+    .map(s => ({ label: s.charAt(0).toUpperCase() + s.slice(1), count: statusCount.get(s) ?? 0 }))
 
   // ── Communications ─────────────────────────────────────────────────────────
 
   const emailsSent        = emailsSentAgg?.data().count ?? 0
-  const todayLogs         = emailLogsSnap.docs.map(d => d.data() as { status?: string })
-  const emailsSentToday   = todayLogs.filter(l => l.status === 'sent' || l.status === 'delivered').length
-  const emailsFailedToday = todayLogs.filter(l => l.status === 'failed').length
+  // Today's email counts: indexed count() aggregates (H3) — identical status partitions
+  // to the former per-doc scan (sent|delivered vs failed), now O(1) in daily volume.
+  const emailsSentToday   = emailsSentTodayAgg?.data().count   ?? 0
+  const emailsFailedToday = emailsFailedTodayAgg?.data().count ?? 0
 
-  let campaignsSent     = 0
-  let recipientsReached = 0
-  broadcastsSnap.docs.forEach(doc => {
-    const d = doc.data() as { recipientCount?: number; successCount?: number }
-    campaignsSent++
-    recipientsReached += d.successCount ?? d.recipientCount ?? 0
-  })
+  // Campaign totals: one count+sum aggregate (H3). sum('successCount') equals the former
+  // Σ(successCount ?? recipientCount ?? 0) because successCount is always written (0 at
+  // creation, actual at finalize) for sent/partial campaigns.
+  const campaignsSent     = broadcastsAgg?.data().campaigns ?? 0
+  const recipientsReached = broadcastsAgg?.data().reached   ?? 0
 
   const communications = {
     emailsSent,
@@ -620,6 +737,8 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       todayRevenuePaise:  todayRevPaise,
       todayRegistrations: todayRegs,
       todayCheckins:      todayCheckins,
+      monthRevenuePaise:  monthRevPaise,
+      monthRegistrations: monthRegs,
     },
     alerts,
     settlement: {
@@ -632,6 +751,8 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     activity,
     events,
     trendDays,
+    passDistribution,
+    registrationStatus,
     communications,
     healthScore,
     walletBalancePaise,

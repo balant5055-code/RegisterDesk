@@ -30,9 +30,18 @@ export function formatINR(amount: number): string {
   }).format(amount)
 }
 
+// C2: the price to DISPLAY for a pass — its server-resolved early-bird effective
+// price when present, otherwise the regular price. This is the ONE display accessor;
+// every event-details surface (ticket cards, "from ₹" hero, sticky, JSON-LD) reads it
+// so the amount shown always matches the amount the checkout charges. Pure field read
+// (no Date.now()) — the early-bird resolution already happened server-side.
+export function passDisplayPrice(pass: PassPublic): number {
+  return pass.effectivePrice ?? pass.price
+}
+
 export function minPassPrice(passes: PassPublic[]): number {
   const active = passes.filter(p => p.status !== 'inactive')
-  return active.length > 0 ? Math.min(...active.map(p => p.price ?? 0)) : 0
+  return active.length > 0 ? Math.min(...active.map(p => passDisplayPrice(p) ?? 0)) : 0
 }
 
 // ─── Video embed normalisation ────────────────────────────────────────────────

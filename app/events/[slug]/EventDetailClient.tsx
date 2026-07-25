@@ -25,6 +25,7 @@ import type {
   SportsRunningDetails, WorkshopDetails, FundraisingDetails,
   ExhibitionDetails, CommunityDetails, CulturalDetails,
   ExperienceItem, TimelineItem, GalleryItem, FaqItem,
+  RefundWindow,
 } from '@/components/wizard/eventDetailsConfig'
 import { ONLINE_PLATFORM_LABELS } from '@/components/wizard/eventDetailsConfig'
 import type { PassAvailability } from '@/lib/registrations/types'
@@ -42,6 +43,7 @@ import { StickyRegistrationCard }   from '@/components/event-templates/shared/re
 import { AboutSection }      from '@/components/event-templates/shared/ui/AboutSection'
 import { VenueSection }      from '@/components/event-templates/shared/venue/VenueSection'
 import { FAQSection }        from '@/components/event-templates/shared/faq/FAQSection'
+import { EventInfoSection }  from '@/components/event-templates/shared/ui/EventInfoSection'
 import { StickyMobileCTA }         from '@/components/event-templates/shared/registration/StickyMobileCTA'
 import { AddToCalendarButton }     from '@/components/event-templates/shared/ui/AddToCalendarButton'
 
@@ -93,6 +95,8 @@ export interface EventDetailProps {
   faq?:              FaqItem[]
   language:         string
   dressCode:        string
+  timezone?:        string
+  refundWindow?:    RefundWindow | null
   faqUrl:           string
   supportEmail:     string
   supportPhone:     string
@@ -446,7 +450,11 @@ function CulturalSection({ td }: { td: CulturalDetails }) {
 
 // ─── Linked donation campaign section ────────────────────────────────────────
 
-function LinkedCampaignSection({
+// RD-ATTENDEE-01 Phase 1B: exported so the 7 dedicated templates can render the linked
+// donation campaign too (previously only this fallback did → donations silently vanished
+// on community/conference/sports/workshop/exhibition/cultural/awards events). Self-
+// contained, token-based section — safe to drop into any template's section list.
+export function LinkedCampaignSection({
   campaign,
   eventSlug,
 }: {
@@ -869,8 +877,6 @@ export function EventDetailClient(props: EventDetailProps) {
                 )}
 
                 {/* Ticket categories — full section in left column */}
-                {/* [DEBUG] Layer 2 — passes reaching EventDetailClient */}
-                {console.log('[EVENT PASSES] Layer 2 — EventDetailClient passes count:', passes.length, passes.map(p => ({ name: p.name, visibility: p.visibility, status: p.status }))) as unknown as null}
                 <TicketSection
                   passes={passes}
                   isFreeEvent={isFreeEvent}
@@ -931,6 +937,17 @@ export function EventDetailClient(props: EventDetailProps) {
                   <OrganizerSection organizer={organizer} showSocial={showSocial} />
                 )}
 
+                {/* Good to know — shared logistics (language, dress code, timezone, online, refunds) */}
+                <EventInfoSection
+                  language={props.language}
+                  dressCode={props.dressCode}
+                  timezone={props.timezone}
+                  venueType={props.venueType}
+                  online={props.online}
+                  refundWindow={props.refundWindow}
+                  refundPolicyUrl={props.refundPolicyUrl}
+                />
+
                 {/* FAQ / Support */}
                 <FAQSection
                   faqUrl={faqUrl}
@@ -973,6 +990,7 @@ export function EventDetailClient(props: EventDetailProps) {
         isFreeEvent={isFreeEvent}
         passes={passes}
         registrationOpen={registrationOpen}
+        targetId="tickets"
       />
     </div>
   )

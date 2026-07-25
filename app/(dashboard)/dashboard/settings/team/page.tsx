@@ -1,8 +1,8 @@
 'use client'
 
 import { useEffect, useRef, useState, useCallback } from 'react'
-import { onAuthStateChanged, type User } from 'firebase/auth'
-import { auth } from '@/lib/firebase/auth'
+import { type User } from 'firebase/auth'
+import { useAuth } from '@/components/auth/AuthProvider'
 import { useToast } from '@/components/ui/Toast'
 import { useConfirm } from '@/components/ui/ConfirmDialog'
 import { cn } from '@/lib/utils/cn'
@@ -34,6 +34,8 @@ export default function TeamPage() {
   const [inviteRole,  setInviteRole]  = useState<TeamRole>('manager')
   const [inviting,    setInviting]    = useState(false)
 
+  const { user } = useAuth()
+
   const authedFetch = useCallback(async (path: string, init?: RequestInit) => {
     const user = userRef.current
     if (!user) throw new Error('Not signed in.')
@@ -56,13 +58,16 @@ export default function TeamPage() {
   }, [authedFetch])
 
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, user => {
+    if (user === undefined) return
+    let cancelled = false
+    const run = async () => {
       userRef.current = user
       if (!user) { setError('You must be signed in.'); setLoading(false); return }
-      void reload()
-    })
-    return unsub
-  }, [reload])
+      if (!cancelled) void reload()
+    }
+    run()
+    return () => { cancelled = true }
+  }, [user, reload])
 
   async function handleInvite(e: React.FormEvent) {
     e.preventDefault()

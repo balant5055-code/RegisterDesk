@@ -2,10 +2,12 @@
 
 import Link from 'next/link'
 import { motion } from 'framer-motion'
+import { buildRegisterHref } from '@/lib/events/registerHref'
 import { CheckCircle2, ArrowRight, Lock, Infinity, AlertCircle } from 'lucide-react'
 import type { PassPublic } from '@/components/event-templates/types'
 import type { PassAvailability } from '@/lib/registrations/types'
 import { AvailabilityBadge } from '@/components/event-templates/shared/registration/AvailabilityBadge'
+import { passDisplayPrice } from '@/components/event-templates/shared/utils/format'
 
 // ─── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -143,7 +145,7 @@ export function WorkshopEnrollment({
                     <span className={`text-[2rem] font-black leading-none ${
                       isFeatured ? 'text-blue-600' : 'text-gray-950'
                     }`}>
-                      {isFree ? 'Free' : fmtINR(pass.price)}
+                      {isFree ? 'Free' : fmtINR(passDisplayPrice(pass))}
                     </span>
                   </div>
 
@@ -181,7 +183,7 @@ export function WorkshopEnrollment({
                   {/* CTA */}
                   {canEnroll ? (
                     <Link
-                      href={`/e/${slug}/register?pass=${pass.id}`}
+                      href={buildRegisterHref(slug, pass.id)}
                       className={`mt-3 flex items-center justify-center gap-2 rounded-xl px-5 py-3 text-[0.9rem] font-bold transition-all duration-200 active:scale-[0.98] ${
                         isFeatured
                           ? 'bg-blue-600 text-white hover:bg-blue-700'
