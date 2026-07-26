@@ -35,6 +35,7 @@ Legend: ⛔ blocks launch · ⚠️ required before scaling · ✅ verify
 | # | Item | Sev | Owner |
 |---|------|-----|-------|
 | 2.1 | `RAZORPAY_KEY_ID` is a **live** key (`rzp_live_*`) — startup refuses test keys in production | ⛔ | Finance |
+| 2.1a | `ALLOW_RAZORPAY_TEST_IN_PRODUCTION` is **unset / false** — the RD-PAYMENT-01 dev escape hatch MUST be removed before launch (with it `=true`, production accepts test keys and real transactions would silently void) | ⛔ | Finance |
 | 2.2 | `RAZORPAY_KEY_SECRET` set (server-only) | ⛔ | Finance |
 | 2.3 | `RAZORPAY_WEBHOOK_SECRET` set | ⛔ | Finance |
 | 2.4 | `NEXT_PUBLIC_RAZORPAY_KEY_ID` set (client checkout) — **silent checkout failure if missing** | ⛔ | Finance |
