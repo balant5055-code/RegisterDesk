@@ -420,7 +420,7 @@ function ComposeTab({
         />
       )}
 
-      <div className="grid gap-5 lg:grid-cols-[1fr_420px]">
+      <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_420px]">
 
         {/* ── Left: compose form ── */}
         <div className="rounded-2xl border border-border bg-card">

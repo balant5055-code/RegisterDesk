@@ -23,7 +23,7 @@ export function WorkshopCertificate({ eventTitle }: WorkshopCertificateProps) {
     <section className="bg-white py-12 sm:py-16">
       <div className="mx-auto max-w-5xl px-4 sm:px-6 lg:px-8">
 
-        <div className="grid items-center gap-8 lg:grid-cols-[1fr_380px]">
+        <div className="grid items-center gap-8 lg:grid-cols-[minmax(0,1fr)_380px]">
 
           {/* Left — Info */}
           <div>

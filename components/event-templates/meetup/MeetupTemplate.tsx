@@ -7,7 +7,7 @@
 
 import type { LucideIcon } from 'lucide-react'
 import { Sparkles, Rocket, Users2 } from 'lucide-react'
-import type { EventDetailProps } from '@/app/events/[slug]/EventDetailClient'
+import type { EventDetailProps } from '@/components/event-templates/types'
 import { EventDetailsFramework } from '@/components/event-templates/EventDetailsFramework'
 import { SectionShell, SectionHeader } from '@/components/event-templates/shared/ui/framework'
 import type { MeetupFounderDetails, MeetupCorporateDetails, MeetupAlumniDetails } from '@/components/wizard/eventDetailsConfig'

@@ -61,7 +61,7 @@ export function ExhibitionVenue({ venueName, physical, venueMaps }: ExhibitionVe
           </h2>
         </motion.div>
 
-        <div className="grid gap-6 lg:grid-cols-[1fr_300px]">
+        <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_300px]">
 
           {/* Left — venue info */}
           <motion.div

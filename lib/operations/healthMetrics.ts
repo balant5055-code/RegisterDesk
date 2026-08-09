@@ -84,6 +84,10 @@ const CRON_NAMES = [
   'registration-import', 'registration-bulk',
   'whatsapp-broadcasts', 'email-broadcasts', 'report-exports',
   'print-generation', 'print-packaging', 'ops-alerts', 'storage-cleanup',
+  // MC-05 — Media Credits financial reconciliation (grants + refund payouts).
+  'media-credit-reconciliation',
+  // MC-06D — upload-session reclamation (seal → settle → reservation cleanup).
+  'media-credit-sessions',
 ]
 
 // GA-7E S1: expected execution interval per cron (from vercel.json schedules), used to
@@ -99,6 +103,8 @@ const CRON_INTERVAL_MS: Record<string, number> = {
   'certificate-claims': 15 * MIN, 'reminders': 15 * MIN, 'ops-alerts': 15 * MIN,
   'release-funds': 60 * MIN,
   'session-reconciliation': 24 * 60 * MIN, 'global-reconciliation': 24 * 60 * MIN, 'storage-cleanup': 24 * 60 * MIN,
+  'media-credit-reconciliation': 10 * MIN,
+  'media-credit-sessions': 10 * MIN,
 }
 // A cron is STALE when its last success is older than 2× its interval + a 5-min grace
 // (tolerates an occasional skipped run without false-positiving). A never-recorded cron is
@@ -112,6 +118,10 @@ function isStale(name: string, lastSuccessMs: number, now: number): boolean {
 const CRITICAL_STALE_CRONS = new Set([
   'wallet-reconciliation', 'registration-reconciliation', 'donation-reconciliation',
   'session-reconciliation', 'global-reconciliation', 'release-funds', 'webhooks',
+  // Staleness here means organizers are owed credits or payouts that nothing is retrying.
+  'media-credit-reconciliation',
+  // Staleness here means upload sessions are holding credits nothing will ever release.
+  'media-credit-sessions',
 ])
 
 const DATA_INTEGRITY_WINDOW_MS = 48 * 60 * 60 * 1000

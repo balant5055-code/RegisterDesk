@@ -212,7 +212,7 @@ export default function BrandingPage() {
                     <p className="mb-2 text-[12px] font-semibold text-muted-foreground">Add these DNS records at your registrar:</p>
                     <div className="space-y-1.5">
                       {domain.records.map((r, i) => (
-                        <div key={i} className="grid grid-cols-[60px_1fr] gap-2 font-mono text-[12px]">
+                        <div key={i} className="grid grid-cols-[60px_minmax(0,1fr)] gap-2 font-mono text-[12px]">
                           <span className="font-semibold text-foreground">{r.type}</span>
                           <span className="break-all text-muted-foreground"><span className="text-foreground">{r.name}</span> → {r.value}</span>
                         </div>

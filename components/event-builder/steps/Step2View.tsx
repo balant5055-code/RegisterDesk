@@ -34,6 +34,7 @@ import type { LucideIcon } from 'lucide-react'
 import { WizardFooter } from '@/components/wizard/WizardFooter'
 import { Stepper } from '@/components/event-builder/Stepper'
 import { RadioIndicator } from '@/components/event-builder/RadioIndicator'
+import { validateStep } from '@/lib/events/builder/stepValidation'
 import { EASE, WIZARD_STEPS, PUBLIC_REASONS, PRIVATE_REASONS } from '@/lib/events/builder/constants'
 import type { StepViewProps, VisibilityId } from '@/lib/events/builder/types'
 import { ROUTES } from '@/config/navigation'
@@ -284,7 +285,7 @@ export function Step2View({ currentStep, completedValues, onNext, onBack, onSave
   })
 
   const selectedVisibility = step2.visibility
-  const canProceed         = selectedVisibility !== null
+  const canProceed         = validateStep('visibility', { selectedVisibility }).valid
 
   const handleSelect = (id: VisibilityId) => setStep2({ visibility: id })
   const handleNext   = () => {
@@ -321,7 +322,7 @@ export function Step2View({ currentStep, completedValues, onNext, onBack, onSave
         </p>
       </div>
 
-      <div className="mt-5 grid flex-1 items-start gap-5 lg:grid-cols-[1fr_256px]">
+      <div className="mt-5 grid flex-1 items-start gap-5 lg:grid-cols-[minmax(0,1fr)_256px]">
         <div
           role="group"
           aria-label="Choose visibility"

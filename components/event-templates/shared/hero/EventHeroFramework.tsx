@@ -2,50 +2,50 @@
 
 // EventHeroFramework — the shared event hero, owned once for every template.
 //
-// Composition: a two-column hero on a strict 12-column grid.
+// RD-ST4.5 (Phase 3) — rebuilt around ONE decision, not two competing columns.
 //
-//   Overline (full width) — registration status · discipline, placed ABOVE the grid so
-//     both columns start at the title block (the poster aligns to the title, not the
-//     status pill).
-//   Left (7 cols) — identity (icon · title · tagline) → date/venue → countdown → action
-//     row, in a single natural top-down flow (gap-based, no distribution) so the CTA sits
-//     immediately after the countdown with no floating gap.
-//   Right (5 cols) — the collectible poster, top-aligned with the title block.
-//   Trust strip (full width) — price · trust, ~24px below the grid.
+// The audit that drove this (ST4.2 OB-1/OB-2, plus a fresh read of the old markup):
 //
-// The poster shows the ENTIRE artwork (object-contain, matted, never clipped) with View
-// / Download built into the frame (DS Button + shared ImageLightbox dialog). Breadcrumb
-// lives in its own row above the hero, owned by the template shell.
+//   • The POSTER outranked everything. It was the largest object, the only full-colour
+//     one, the only elevated one — and it had no max-height, so hero height was set by
+//     whatever aspect ratio the organiser uploaded. A 9:16 poster produced a ~800px
+//     column against a ~280px content column, pushing the price and every trust signal
+//     below the fold on desktop and ~1050px down on mobile.
+//   • PRICE was rank 7 of 7 — 13px text in a bottom strip, separated from the CTA by the
+//     full height of the poster.
+//   • The COUNTDOWN sat between the venue and the CTA, splitting the decision path.
+//   • The TRUST strip sat under a divider at the very bottom, reading as a footer rather
+//     than as reassurance at the point of decision.
+//   • CLUTTER: a 48px event-type badge repeating what the kicker already said; a second
+//     poster affordance ("View Poster") next to the click-to-open poster itself.
+//
+// Composition now:
+//
+//   Overline   — registration status · event type. Rank 1, one line, one chip each.
+//   Left (7)   — title → tagline → a <dl> metadata group (when / where / distances /
+//                closes) → secondary actions → organiser attribution.
+//   Right (5)  — THE REGISTRATION PANEL: capped poster, price, countdown, seats, the one
+//                primary CTA, and the trust row. One card, one decision.
+//   Mobile     — the panel's decision block is ordered BEFORE the poster, so price and
+//                CTA land in the first screen instead of below the artwork.
+//
+// Unchanged by contract: the clock, the phase state machine, the countdown maths, the
+// share/copy/download actions, the poster lightbox, and every href the caller supplies.
 //
 // Time model: a shared client clock via useSyncExternalStore — `now` is null on the
 // server and first paint (countdown shows "––"), so SSR and hydration agree, then it
 // ticks. Phase + countdown are pure-derived in render (no effects, no layout shift).
 
-import { createElement, useEffect, useRef, useState, useSyncExternalStore } from 'react'
+import { createElement, useCallback, useEffect, useRef, useState } from 'react'
 import Link from 'next/link'
 import { motion, useReducedMotion } from 'framer-motion'
-import { ArrowRight, Share2, Copy, Check, Maximize2, Download, MoreHorizontal, ChevronDown } from 'lucide-react'
+import { ArrowRight, Share2, Copy, Check, Download, MoreHorizontal, ChevronDown, BadgeCheck, Users } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { cn } from '@/lib/utils/cn'
 import { AddToCalendarButton } from '@/components/event-templates/shared/ui/AddToCalendarButton'
 import { ImageLightbox } from '@/components/event-templates/shared/ui/ImageLightbox'
-import { Button } from '@/components/ui/button'
-import { EASE, hoverLift } from '@/components/event-templates/shared/ui/framework'
-
-const pad2 = (n: number) => String(n).padStart(2, '0')
-
-// ── shared once-per-second clock (module-scoped; one interval for all heroes) ──
-let clockMs: number | null = null
-function subscribeClock(cb: () => void): () => void {
-  clockMs = Date.now()
-  const seed = typeof queueMicrotask !== 'undefined' ? queueMicrotask : (f: () => void) => setTimeout(f, 0)
-  seed(cb)
-  const id = setInterval(() => { clockMs = Date.now(); cb() }, 1000)
-  return () => clearInterval(id)
-}
-function useNow(): number | null {
-  return useSyncExternalStore(subscribeClock, () => clockMs, () => null)
-}
+import { EASE, EVENT_CONTAINER, CARD, TYPE } from '@/components/event-templates/shared/ui/framework'
+import { pad2, useEventClock } from '@/components/event-templates/shared/hero/useEventClock'
 
 // ─── Public contract ─────────────────────────────────────────────────────────────
 
@@ -54,20 +54,24 @@ export interface HeroCalendar {
   startTime: string; endTime: string; location: string; description: string; slug: string
 }
 
-export interface HeroEssential { icon?: LucideIcon; text: string }
+/** One metadata row. `label` turns it into a real <dt>/<dd> pair (grouped, readable). */
+export interface HeroEssential { icon?: LucideIcon; label?: string; text: string }
+
+/** One trust signal. The icon carries meaning — do not default them all to a tick. */
+export interface HeroTrustItem { icon?: LucideIcon; label: string }
 
 export interface EventHeroFrameworkProps {
   kicker?:  string
   title:    string
   tagline?: string
-  /** Event-type icon for the identity badge (derived from the type registry by the caller) */
+  /** Event-type icon — rendered small, inside the kicker chip (was a 48px badge). */
   icon?:    LucideIcon
   bannerUrl?: string
 
   /** Small status marker above the title (omit to hide) */
   status?: { label: string; tone?: 'open' | 'muted' }
 
-  /** Date / time / venue rows, pre-formatted by the caller */
+  /** Date / venue / distance rows, pre-formatted by the caller */
   essentials: HeroEssential[]
 
   /** Timing — the framework owns the lifecycle countdown from these */
@@ -85,65 +89,34 @@ export interface EventHeroFrameworkProps {
   primary?:     { label: string; href: string }
   calendar?:    HeroCalendar
 
-  /** Trust row */
-  priceLabel?: string
-  trust?:      string[]
+  /** Registration panel — price split so the amount can carry the visual weight. */
+  pricing?:     { amount: string; caption?: string }
+  /** e.g. "240 spots left". Caller decides when this is honest; omit for unlimited. */
+  seatsLabel?:  string
+  /** Organiser attribution (hierarchy rank 9). */
+  organizer?:   { name: string; verified?: boolean }
+  /** Trust row (hierarchy rank 10). */
+  trust?:       HeroTrustItem[]
 }
 
-type Phase = 'cancelled' | 'completed' | 'live' | 'closing' | 'upcoming' | 'closed'
 
 // ─── Component ───────────────────────────────────────────────────────────────────
 
 export function EventHeroFramework({
   kicker, title, tagline, icon, bannerUrl, status, essentials, timing,
-  primary, calendar, priceLabel, trust = [],
+  primary, calendar, pricing, seatsLabel, organizer, trust = [],
 }: EventHeroFrameworkProps) {
   const reduce = useReducedMotion()
-  const now    = useNow()
   const [copied,  setCopied]        = useState(false)
   const [posterOpen, setPosterOpen] = useState(false)
   const [moreOpen, setMoreOpen]     = useState(false)
-  const moreRef = useRef<HTMLDivElement>(null)
+  const moreRef    = useRef<HTMLDivElement>(null)
+  const moreBtnRef = useRef<HTMLButtonElement>(null)
+  const headingId  = 'event-hero-title'
 
-  const { startDate, startTime = '', endDate = '', registrationOpen, salesCloseDate = '', lifecycleStatus, startLabel } = timing
+  const { phase, cd, showTimer, heading, statusWord, srLabel: cdSr } = useEventClock(timing)
 
-  const phase: Phase = (() => {
-    if (lifecycleStatus === 'cancelled') return 'cancelled'
-    if (lifecycleStatus === 'completed') return 'completed'
-    if (now === null) return registrationOpen ? 'upcoming' : 'closed'
-    const d = new Date(now)
-    const today = `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`
-    const end = endDate || startDate
-    if (end && today > end) return 'completed'
-    if (startDate && today >= startDate && (!end || today <= end)) return 'live'
-    if (!registrationOpen) return 'closed'
-    if (salesCloseDate && salesCloseDate >= today) {
-      const days = Math.ceil((new Date(`${salesCloseDate}T23:59:59`).getTime() - now) / 86_400_000)
-      if (days <= 3) return 'closing'
-    }
-    return 'upcoming'
-  })()
-
-  const targetMs =
-    phase === 'upcoming' ? new Date(`${startDate}T${startTime || '00:00'}:00`).getTime()
-      : phase === 'closing' ? new Date(`${salesCloseDate}T23:59:59`).getTime()
-        : NaN
-  const cd = (now !== null && !Number.isNaN(targetMs))
-    ? (() => {
-        const ts = Math.max(0, Math.floor((targetMs - now) / 1000))
-        return { d: Math.floor(ts / 86400), h: Math.floor((ts % 86400) / 3600), m: Math.floor((ts % 3600) / 60) }
-      })()
-    : null
-
-  const showTimer = phase === 'upcoming' || phase === 'closing'
-  const heading   = phase === 'closing' ? 'Registration closes in' : (startLabel ?? 'Starts in')
-  const statusWord =
-    phase === 'live' ? 'Happening now'
-      : phase === 'completed' ? 'Event concluded'
-        : phase === 'cancelled' ? 'Event cancelled'
-          : phase === 'closed' ? 'Registration closed' : ''
-  const cdSr = showTimer && cd ? `${heading} ${cd.d} days, ${cd.h} hours, ${cd.m} minutes` : statusWord
-
+  // ── actions — UNCHANGED ──
   const onShare = async () => {
     if (typeof window === 'undefined') return
     const url = window.location.href
@@ -165,6 +138,11 @@ export function EventHeroFramework({
     } catch { /* ignored */ }
   }
 
+  const closeMore = useCallback((restoreFocus: boolean) => {
+    setMoreOpen(false)
+    if (restoreFocus) moreBtnRef.current?.focus()
+  }, [])
+
   // Close the More menu on outside click (mirrors the AddToCalendarButton idiom).
   useEffect(() => {
     if (!moreOpen) return
@@ -175,11 +153,26 @@ export function EventHeroFramework({
     return () => document.removeEventListener('mousedown', handler)
   }, [moreOpen])
 
+  // A11y: the menu had role="menu" but no keyboard model. Escape closes and returns
+  // focus to the trigger; Arrow keys move between items; Home/End jump.
+  const onMenuKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (e.key === 'Escape') { e.preventDefault(); closeMore(true); return }
+    if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(e.key)) return
+    const items = Array.from(moreRef.current?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? [])
+    if (items.length === 0) return
+    e.preventDefault()
+    const i = items.indexOf(document.activeElement as HTMLElement)
+    const to = e.key === 'ArrowDown' ? (i + 1) % items.length
+      : e.key === 'ArrowUp' ? (i - 1 + items.length) % items.length
+        : e.key === 'Home' ? 0 : items.length - 1
+    items[to]?.focus()
+  }
+
   // One shared shape for every secondary control so the group aligns perfectly.
   const SECONDARY_BTN =
-    'inline-flex h-10 items-center gap-2 rounded-full border border-border/80 bg-card px-4 text-[13.5px] font-semibold text-foreground transition-colors hover:border-foreground/30 hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40'
+    'inline-flex h-9 items-center gap-2 rounded-full border border-border/80 bg-card px-4 text-fs-sm font-semibold text-foreground transition-colors hover:border-foreground/30 hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40'
   const MENU_ITEM =
-    'flex w-full items-center gap-2.5 px-3.5 py-2.5 text-left text-[13px] font-medium text-foreground transition-colors hover:bg-muted/60'
+    'flex w-full items-center gap-2.5 px-3.5 py-2.5 text-left text-fs-sm font-medium text-foreground transition-colors hover:bg-muted/60 focus-visible:bg-muted/60 focus-visible:outline-none'
 
   const rise = (delay: number) => reduce
     ? {}
@@ -188,111 +181,213 @@ export function EventHeroFramework({
 
   const cdSegments = [{ v: cd?.d, l: 'Days' }, { v: cd?.h, l: 'Hrs' }, { v: cd?.m, l: 'Min' }]
   const posterName = `${title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '') || 'event'}-poster`
+  const hasPoster  = !!bannerUrl?.trim()
+  const hasPanel   = !!(pricing || primary || showTimer || statusWord || hasPoster || trust.length > 0)
 
   return (
-    <section aria-label="Event overview" className="relative overflow-hidden border-b border-border/60 bg-white">
-      <div className="mx-auto max-w-7xl px-5 py-7 sm:px-8 sm:py-8 lg:px-8 lg:py-10">
+    <section aria-labelledby={headingId} className="relative overflow-hidden border-b border-border/60 bg-white">
+      <div className={cn(EVENT_CONTAINER, 'py-7 sm:py-8 lg:py-10')}>
 
-        {/* ── Overline: registration status · discipline (full width, above the grid so
-               both columns start at the title, not the status pill) ── */}
+        {/* ── Rank 1 · Registration status · event type ────────────────────────── */}
         {(status || kicker) && (
-          <motion.div {...rise(0.04)}>
-            <div className="inline-flex items-center gap-2.5 rounded-full border border-border/70 bg-card px-3.5 py-1.5 shadow-sm">
-              {status && (
-                <span className="inline-flex items-center gap-2 text-[11px] font-semibold text-foreground">
-                  <span className={cn('size-1.5 rounded-full', status.tone === 'open' ? 'bg-primary' : 'bg-muted-foreground/50')} aria-hidden />
-                  {status.label}
-                </span>
-              )}
-              {status && kicker && <span aria-hidden className="h-3 w-px bg-border" />}
-              {kicker && (
-                <span className="text-[11px] font-bold uppercase tracking-[0.14em] text-primary">{kicker}</span>
-              )}
-            </div>
+          <motion.div {...rise(0.04)} className="flex flex-wrap items-center gap-2">
+            {status && (
+              <span className={cn(
+                'inline-flex items-center gap-2 rounded-full px-3 py-1 text-fs-2xs font-bold',
+                status.tone === 'open'
+                  ? 'bg-primary/10 text-primary ring-1 ring-primary/20'
+                  : 'bg-muted text-muted-foreground ring-1 ring-border',
+              )}>
+                <span className={cn('size-1.5 rounded-full', status.tone === 'open' ? 'bg-primary' : 'bg-muted-foreground/60')} aria-hidden />
+                {status.label}
+              </span>
+            )}
+            {kicker && (
+              <span className="inline-flex items-center gap-1.5 rounded-full border border-border/70 bg-card px-3 py-1 text-fs-2xs font-bold uppercase tracking-[0.14em] text-muted-foreground">
+                {icon && createElement(icon, { className: 'size-3.5 text-primary', 'aria-hidden': true })}
+                {kicker}
+              </span>
+            )}
           </motion.div>
         )}
 
-        {/* ── 12-column grid · left content (7) · poster (5) · top-aligned ── */}
-        <div className="mt-5 grid grid-cols-1 items-start gap-8 lg:grid-cols-12 lg:gap-12">
+        {/* ── Ranks 2 & 3 · title + description, full width above the split ────── */}
+        <motion.div {...rise(0.1)} className="mt-6 flex flex-col gap-2.5">
+          <h1 id={headingId} className="max-w-4xl text-[clamp(28px,2.7vw,38px)] font-bold leading-[1.08] tracking-[-0.02em] text-foreground">
+            {title}
+          </h1>
+          {tagline && (
+            <p className="max-w-2xl text-[clamp(15px,1.2vw,17px)] leading-relaxed text-muted-foreground">{tagline}</p>
+          )}
+        </motion.div>
 
-          {/* Left content — identity → date/venue → countdown → CTA (natural flow) */}
-          <div className="flex flex-col gap-6 lg:col-span-7">
+        {/* ── The split · narrative (7) · registration panel (5) ────────────────
+             The PANEL is first in the DOM on purpose. On mobile that puts price and
+             the CTA immediately under the title instead of below the whole metadata
+             block, and it fixes the focus order — the primary action is now the first
+             control a keyboard user reaches, not the third. Explicit column starts
+             restore the visual left/right arrangement on lg without reordering DOM. */}
+        <div className="mt-7 grid grid-cols-1 items-start gap-8 lg:grid-cols-12 lg:gap-12">
 
-            {/* Event identity — icon badge · name (animated underline) · tagline */}
-            <motion.div {...rise(0.1)} className="flex flex-wrap items-center gap-x-4 gap-y-2.5">
-              {icon && (
-                <span className="flex size-12 shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary ring-1 ring-primary/15">
-                  {createElement(icon, { className: 'size-6', 'aria-hidden': true })}
-                </span>
-              )}
+          {/* ═══ THE REGISTRATION PANEL — DOM-first, visually right on lg ═══════ */}
+          {hasPanel && (
+            <motion.div {...rise(0.15)} className="lg:col-span-5 lg:col-start-8 lg:row-start-1">
+              <div className={cn(CARD, 'flex flex-col overflow-hidden shadow-lg shadow-black/[0.05]')}>
 
-              <div className="flex flex-col gap-1.5">
-                <h1 className="text-[clamp(28px,2.7vw,38px)] font-bold leading-[1.08] tracking-[-0.02em] text-foreground">
-                  {title}
-                </h1>
-                {tagline && (
-                  <span className="text-[clamp(14px,1.2vw,16px)] font-medium text-muted-foreground">{tagline}</span>
-                )}
+                {/* Decision block */}
+                <div className="order-1 flex flex-col gap-4 p-5 lg:order-2">
+
+                  {/* Rank 5 · price */}
+                  {pricing && (
+                    <div className="flex items-baseline gap-2">
+                      {pricing.caption && <span className={TYPE.label}>{pricing.caption}</span>}
+                      <span className="text-fs-2xl font-bold tracking-tight text-foreground">{pricing.amount}</span>
+                    </div>
+                  )}
+
+                  {/* Rank 8 · countdown (or the terminal lifecycle word) */}
+                  {(showTimer || statusWord) && (
+                    <div
+                      className={cn(pricing ? 'border-t border-border/50 pt-4' : 'rounded-xl bg-muted/40 px-4 py-3')}
+                      {...(showTimer ? { role: 'timer', 'aria-label': cdSr } : {})}
+                    >
+                      {showTimer ? (
+                        <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
+                          <span className={TYPE.label}>{heading}</span>
+                          <span aria-hidden className="flex items-baseline gap-3 tabular-nums">
+                            {cdSegments.map(({ v, l }) => (
+                              <span key={l} className="flex items-baseline gap-0.5">
+                                <span className="text-fs-lg font-bold leading-none tracking-tight text-foreground">{v == null ? '––' : pad2(v)}</span>
+                                <span className="text-fs-2xs font-semibold lowercase text-muted-foreground">{l.charAt(0).toLowerCase()}</span>
+                              </span>
+                            ))}
+                          </span>
+                        </div>
+                      ) : (
+                        <span className="inline-flex items-center gap-2 text-fs-sm font-semibold text-muted-foreground">
+                          {phase === 'live' && !reduce && <span className="size-2 rounded-full bg-primary motion-safe:animate-pulse" aria-hidden />}
+                          {statusWord}
+                        </span>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Seats remaining — only when the caller can state it honestly */}
+                  {seatsLabel && (
+                    <p className="inline-flex items-center gap-2 text-fs-sm font-medium text-muted-foreground">
+                      <Users className="size-4 shrink-0 text-primary/70" aria-hidden />{seatsLabel}
+                    </p>
+                  )}
+
+                  {/* Rank 4 · the ONE primary CTA — the only gradient in the hero */}
+                  {primary && (
+                    <Link
+                      href={primary.href}
+                      className="group inline-flex h-12 w-full items-center justify-center gap-2 rounded-xl text-fs-md font-bold text-white shadow-sm transition-transform duration-200 hover:-translate-y-0.5 active:translate-y-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 focus-visible:ring-offset-2 motion-reduce:transform-none"
+                      style={{ backgroundImage: 'var(--primary-gradient)' }}
+                    >
+                      {primary.label}
+                      <ArrowRight className="size-4 transition-transform group-hover:translate-x-1 motion-reduce:transform-none" aria-hidden />
+                    </Link>
+                  )}
+
+                  {/* Rank 10 · trust — at the decision point, not in a page footer */}
+                  {trust.length > 0 && (
+                    <ul className="flex flex-wrap items-center gap-x-4 gap-y-2 border-t border-border/50 pt-4">
+                      {trust.map(t => (
+                        <li key={t.label} className="inline-flex items-center gap-1.5 text-fs-2xs font-medium text-muted-foreground">
+                          {t.icon
+                            ? createElement(t.icon, { className: 'size-3.5 shrink-0 text-primary/70', 'aria-hidden': true })
+                            : <Check className="size-3.5 shrink-0 text-primary/70" aria-hidden />}
+                          {t.label}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+
+                {/* Poster — capped so hero height no longer depends on the uploaded
+                    aspect ratio (ST42-O01). On mobile it is ordered AFTER the decision
+                    block so price + CTA land in the first screen (ST42-OB-2). */}
+                <div className="order-2 border-t border-border/50 p-3 lg:order-1 lg:border-b lg:border-t-0">
+                  {hasPoster ? (
+                    <button
+                      type="button"
+                      onClick={() => setPosterOpen(true)}
+                      aria-label={`View ${title} poster full screen`}
+                      className="group block w-full overflow-hidden rounded-xl bg-muted/30 outline-none focus-visible:ring-2 focus-visible:ring-primary/50 focus-visible:ring-offset-2"
+                    >
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img
+                        src={bannerUrl}
+                        alt={`${title} event poster`}
+                        fetchPriority="high"
+                        decoding="async"
+                        className="mx-auto block max-h-[240px] w-auto max-w-full object-contain transition-transform duration-500 ease-out group-hover:scale-[1.02] motion-reduce:transform-none sm:max-h-[300px] lg:max-h-[340px]"
+                      />
+                    </button>
+                  ) : (
+                    <div className="aspect-[16/9] w-full rounded-xl" style={{ backgroundImage: 'var(--primary-gradient)' }} aria-hidden />
+                  )}
+                </div>
               </div>
             </motion.div>
+          )}
 
-            {/* Date · venue — immediately below the subtitle */}
+          {/* ═══ Narrative · metadata → secondary actions → organiser ═══════════ */}
+          <div className="flex flex-col gap-7 lg:col-span-7 lg:col-start-1 lg:row-start-1">
+
+            {/* Ranks 6/7 · metadata — a real definition list, grouped and labelled.
+                Falls back to a plain list when a caller supplies unlabelled rows, so
+                a <dd> is never emitted without its <dt>. */}
             {essentials.length > 0 && (
-              <motion.div {...rise(0.16)} className="flex flex-col gap-2">
-                {essentials.map((e, i) => (
-                  <div key={i} className="flex items-center gap-2.5 text-[14px] font-medium text-foreground/85">
-                    {e.icon && <e.icon className="size-4 shrink-0 text-primary/70" aria-hidden />}
-                    <span>{e.text}</span>
-                  </div>
-                ))}
-              </motion.div>
-            )}
-
-            {/* Countdown — follows date/venue */}
-            {(showTimer || statusWord) && (
-              <motion.div {...rise(0.2)} {...(showTimer ? { role: 'timer', 'aria-label': cdSr } : {})}>
-                {showTimer ? (
-                  <div className="flex items-center gap-2.5">
-                    <span className="text-[10.5px] font-semibold uppercase tracking-[0.16em] text-muted-foreground/70">{heading}</span>
-                    <span aria-hidden className="flex items-baseline gap-2.5 tabular-nums">
-                      {cdSegments.map(({ v, l }) => (
-                        <span key={l} className="flex items-baseline gap-0.5">
-                          <span className="text-[18px] font-bold leading-none tracking-tight text-foreground">{v == null ? '––' : pad2(v)}</span>
-                          <span className="text-[11px] font-semibold lowercase text-muted-foreground">{l.charAt(0).toLowerCase()}</span>
-                        </span>
-                      ))}
-                    </span>
-                  </div>
+              <motion.div {...rise(0.16)}>
+                {essentials.every(e => !!e.label) ? (
+                  <dl className="grid gap-x-8 gap-y-5 sm:grid-cols-2">
+                    {essentials.map((e, i) => (
+                      <div key={i} className="flex items-start gap-3">
+                        {e.icon && (
+                          <span className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+                            <e.icon className="size-4" aria-hidden />
+                          </span>
+                        )}
+                        <div className="min-w-0">
+                          <dt className={TYPE.label}>{e.label}</dt>
+                          <dd className="mt-0.5 text-fs-base font-semibold text-foreground">{e.text}</dd>
+                        </div>
+                      </div>
+                    ))}
+                  </dl>
                 ) : (
-                  <span className="inline-flex items-center gap-2 text-[13px] font-semibold text-muted-foreground">
-                    {phase === 'live' && !reduce && <span className="size-2 rounded-full bg-primary motion-safe:animate-pulse" aria-hidden />}
-                    {statusWord}
-                  </span>
+                  <ul className="grid gap-x-8 gap-y-5 sm:grid-cols-2">
+                    {essentials.map((e, i) => (
+                      <li key={i} className="flex items-start gap-3">
+                        {e.icon && (
+                          <span className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+                            <e.icon className="size-4" aria-hidden />
+                          </span>
+                        )}
+                        <span className="min-w-0 text-fs-base font-semibold text-foreground">{e.text}</span>
+                      </li>
+                    ))}
+                  </ul>
                 )}
               </motion.div>
             )}
 
-            {/* Action row — immediately follows the countdown; one baseline */}
-            <motion.div {...rise(0.26)} className="flex flex-wrap items-center gap-2.5">
-              {primary && (
-                <Link
-                  href={primary.href}
-                  className="group inline-flex h-10 items-center gap-2 rounded-full px-6 text-[14px] font-bold text-white shadow-sm transition-transform duration-200 hover:-translate-y-0.5 active:translate-y-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 focus-visible:ring-offset-2"
-                  style={{ backgroundImage: 'var(--primary-gradient)' }}
-                >
-                  {primary.label}
-                  <ArrowRight className="size-4 transition-transform group-hover:translate-x-1" aria-hidden />
-                </Link>
-              )}
-              {calendar && <AddToCalendarButton {...calendar} label="Calendar" className={SECONDARY_BTN} />}
+            {/* Secondary actions — deliberately after the primary CTA in the DOM */}
+            <motion.div {...rise(0.24)} className="flex flex-wrap items-center gap-2.5">
+              {calendar && <AddToCalendarButton {...calendar} label="Add to Calendar" className={SECONDARY_BTN} />}
 
-              {/* More — progressive disclosure for secondary actions */}
-              <div ref={moreRef} className="relative inline-block">
+              {/* More — progressive disclosure for the low-frequency actions */}
+              <div ref={moreRef} className="relative inline-block" onKeyDown={onMenuKeyDown}>
                 <button
+                  ref={moreBtnRef}
                   type="button"
                   onClick={() => setMoreOpen(v => !v)}
-                  aria-haspopup="true"
+                  aria-haspopup="menu"
                   aria-expanded={moreOpen}
+                  aria-label="More actions"
                   className={SECONDARY_BTN}
                 >
                   <MoreHorizontal className="size-4" aria-hidden />More
@@ -300,8 +395,8 @@ export function EventHeroFramework({
                 </button>
 
                 {moreOpen && (
-                  <div role="menu" className="absolute left-0 z-50 mt-2 min-w-[196px] overflow-hidden rounded-xl border border-border bg-card shadow-lg">
-                    <button type="button" role="menuitem" onClick={() => { onShare(); setMoreOpen(false) }} className={MENU_ITEM}>
+                  <div role="menu" aria-label="More actions" className="absolute left-0 z-50 mt-2 min-w-[196px] overflow-hidden rounded-xl border border-border bg-card shadow-lg">
+                    <button type="button" role="menuitem" onClick={() => { onShare(); closeMore(false) }} className={MENU_ITEM}>
                       <Share2 className="size-4 shrink-0 text-muted-foreground" aria-hidden />Share
                     </button>
                     <div className="border-t border-border" />
@@ -309,7 +404,7 @@ export function EventHeroFramework({
                       {copied ? <Check className="size-4 shrink-0 text-primary" aria-hidden /> : <Copy className="size-4 shrink-0 text-muted-foreground" aria-hidden />}
                       {copied ? 'Link copied' : 'Copy Link'}
                     </button>
-                    {bannerUrl?.trim() && (
+                    {hasPoster && (
                       <>
                         <div className="border-t border-border" />
                         <a
@@ -318,7 +413,7 @@ export function EventHeroFramework({
                           download={posterName}
                           target="_blank"
                           rel="noopener noreferrer"
-                          onClick={() => setMoreOpen(false)}
+                          onClick={() => closeMore(false)}
                           className={MENU_ITEM}
                         >
                           <Download className="size-4 shrink-0 text-muted-foreground" aria-hidden />Download Poster
@@ -329,62 +424,26 @@ export function EventHeroFramework({
                 )}
               </div>
             </motion.div>
-          </div>
 
-          {/* Poster (5 cols) — top-aligned with the title block */}
-          <motion.div {...rise(0.15)} className="lg:col-span-5">
-            <motion.div
-              whileHover={hoverLift(reduce, -5)}
-              transition={{ duration: 0.3, ease: EASE }}
-              className="group mx-auto flex w-full max-w-xs flex-col rounded-2xl border border-border/50 bg-card p-2.5 shadow-lg shadow-black/[0.06] ring-1 ring-black/[0.02] transition-shadow duration-300 hover:shadow-xl hover:shadow-black/10 sm:max-w-sm lg:max-w-md lg:mx-0"
-            >
-              <div className="overflow-hidden rounded-xl bg-muted/30">
-                {bannerUrl?.trim() ? (
-                  // eslint-disable-next-line @next/next/no-img-element
-                  <img
-                    src={bannerUrl}
-                    alt={`${title} event poster`}
-                    fetchPriority="high"
-                    decoding="async"
-                    className="block h-auto w-full object-contain transition-transform duration-500 ease-out group-hover:scale-[1.02] motion-reduce:transform-none"
-                  />
-                ) : (
-                  <div className="aspect-[4/5] w-full" style={{ backgroundImage: 'var(--primary-gradient)' }} aria-hidden />
+            {/* Rank 9 · organiser attribution */}
+            {organizer?.name?.trim() && (
+              <motion.div {...rise(0.28)} className="flex items-center gap-2 border-t border-border/60 pt-5 text-fs-sm text-muted-foreground">
+                <span>Hosted by <span className="font-semibold text-foreground">{organizer.name}</span></span>
+                {organizer.verified && (
+                  <span className="inline-flex items-center gap-1 rounded-full bg-primary/10 px-2 py-0.5 text-fs-2xs font-bold text-primary">
+                    <BadgeCheck className="size-3.5" aria-hidden />Verified
+                  </span>
                 )}
-              </div>
-
-              {bannerUrl?.trim() && (
-                <div className="mt-3 px-0.5 pb-0.5">
-                  <Button type="button" variant="outline" size="sm" onClick={() => setPosterOpen(true)} className="w-full">
-                    <Maximize2 className="size-4" aria-hidden />View Poster
-                  </Button>
-                </div>
-              )}
-            </motion.div>
-          </motion.div>
-
+              </motion.div>
+            )}
+          </div>
         </div>
-
-        {/* ── Trust strip — sits ~24px below the hero content, full width ── */}
-        {(priceLabel || trust.length > 0) && (
-          <motion.div {...rise(0.3)} className="mt-6 border-t border-border/60 pt-6">
-            <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-[12px] text-muted-foreground">
-              {priceLabel && <span className="text-[13px] font-semibold text-foreground">{priceLabel}</span>}
-              {priceLabel && trust.length > 0 && <span aria-hidden className="h-3.5 w-px bg-border" />}
-              {trust.map(t => (
-                <span key={t} className="inline-flex items-center gap-1.5">
-                  <Check className="size-3.5 text-primary/70" aria-hidden />{t}
-                </span>
-              ))}
-            </div>
-          </motion.div>
-        )}
       </div>
 
-      {bannerUrl?.trim() && (
+      {hasPoster && (
         <ImageLightbox
           open={posterOpen}
-          src={bannerUrl}
+          src={bannerUrl!}
           alt={`${title} event poster`}
           onClose={() => setPosterOpen(false)}
           downloadHref={bannerUrl}

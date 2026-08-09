@@ -55,7 +55,7 @@ export function ConferenceOrganizer({
             </p>
           </div>
 
-          <div className="grid gap-0 sm:grid-cols-[1fr_auto]">
+          <div className="grid gap-0 sm:grid-cols-[minmax(0,1fr)_auto]">
 
             {/* Left: profile */}
             <div className="flex flex-wrap items-start gap-5 p-6 sm:p-8">

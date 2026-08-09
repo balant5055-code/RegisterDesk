@@ -14,7 +14,10 @@ export default defineConfig({
   },
   test: {
     environment: 'node',
-    include: ['tests/**/*.test.ts'],
+    // RD-STORAGE-01: feature modules may keep their tests beside their code
+    // (features/<module>/tests/), which is what the platform-storage module does. The
+    // repo-wide tests/ directory is unchanged and still the home for cross-cutting suites.
+    include: ['tests/**/*.test.ts', 'features/**/tests/**/*.test.ts'],
     setupFiles: ['./tests/setup.ts'],
     globals: false,
     clearMocks: true,

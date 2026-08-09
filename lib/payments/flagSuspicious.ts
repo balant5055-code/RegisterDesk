@@ -10,7 +10,9 @@ import { adminDb }    from '@/lib/firebase/admin'
 import { captureFinancialError } from '@/lib/monitoring/sentry'
 
 export interface SuspiciousPaymentInput {
-  source:               'registration' | 'donation' | 'wallet_topup' | 'license'
+  // 'media_credits' added by MC-04. Purely additive: nothing switches on this union, and
+  // the operations runbook reads the collection without discriminating on source.
+  source:               'registration' | 'donation' | 'wallet_topup' | 'license' | 'media_credits'
   reason:               string            // e.g. 'amount_mismatch', 'amount_or_order_mismatch'
   paymentId?:           string
   orderId?:             string

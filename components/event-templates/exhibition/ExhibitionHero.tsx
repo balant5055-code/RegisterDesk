@@ -87,7 +87,7 @@ export function ExhibitionHero({
     <section className="bg-white">
       <div className="mx-auto max-w-7xl px-4 pb-0 pt-10 sm:px-6 sm:pt-14 lg:px-8">
 
-        <div className="grid items-center gap-8 lg:grid-cols-[1fr_45%] lg:gap-12">
+        <div className="grid items-center gap-8 lg:grid-cols-[minmax(0,1fr)_45%] lg:gap-12">
 
           {/* ── Left ── */}
           <div className="order-2 lg:order-1">

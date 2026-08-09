@@ -96,6 +96,11 @@ export interface EmailResult {
   // httpStatusCode). SERVER-ONLY: intended for server logs and the Communication
   // Log (emailLogs) — MUST NOT be returned to a client.
   errorDetail?: string
+  // RD-LAUNCH-05 — true when the send was skipped because the recipient is on the
+  // suppression list (hard bounce / complaint / unsubscribe). Distinguishes a
+  // deliberate non-send from a delivery FAILURE, so callers and the Communication Log
+  // can tell "we chose not to send" from "SES rejected it".
+  suppressed?: boolean
 }
 
 // ─── Registration lifecycle email params ──────────────────────────────────────

@@ -22,51 +22,29 @@ required('RAZORPAY_KEY_SECRET',    'Obtain from Razorpay Dashboard → Settings 
 required('RAZORPAY_WEBHOOK_SECRET', 'Set a webhook secret in Razorpay Dashboard → Settings → Webhooks, then copy it here.')
 
 // ─── Live-key enforcement in production ──────────────────────────────────────
-// By default, production (NODE_ENV=production) REQUIRES a live key (rzp_live_*);
-// test keys (rzp_test_*) are rejected at startup. Development (NODE_ENV!=production)
-// always accepts BOTH test and live keys — this block simply never runs there.
+// Production (NODE_ENV=production) REQUIRES a live key (rzp_live_*); test keys
+// (rzp_test_*) are rejected at startup. Development (NODE_ENV!=production) always
+// accepts BOTH test and live keys — this block simply never runs there.
 //
-// ⚠️  DEVELOPMENT-ONLY ESCAPE HATCH (RD-PAYMENT-01)
-// This flag exists ONLY so RegisterDesk can run Razorpay TEST keys on the
-// production domain WHILE STILL UNDER DEVELOPMENT, before public launch. Setting
-//     ALLOW_RAZORPAY_TEST_IN_PRODUCTION=true
-// permits rzp_test_* in production. It changes ONLY this key-prefix check — no
-// payment creation, signature verification, webhook, checkout, wallet, refund, or
-// licensing logic is affected in any way.
+// RD-LAUNCH-07: the ALLOW_RAZORPAY_TEST_IN_PRODUCTION escape hatch has been REMOVED.
+// It existed only so test keys could run on the production domain while the platform
+// was pre-launch (RD-PAYMENT-01), and its own note required deletion before launch:
+// once real money flows, a test key in production silently voids real transactions —
+// attendees see confirmed registrations and receipts for payments that never settled.
 //
-// 🚨  MUST be removed or set to false BEFORE public launch. Once real money flows,
-// a test key in production would silently void real transactions. The flag is
-// fail-safe: only an explicit truthy value opts in; missing / '' / 'false' / any
-// other value keeps the strict live-key requirement — so existing deployments are
-// unchanged.
-//
-// Parse is tolerant of surrounding whitespace and letter-case (RD-PAYMENT-01
-// verification): a value entered in a hosting dashboard often arrives as "true\n",
-// " true ", or "TRUE". A strict `=== 'true'` match silently dropped those and kept
-// rejecting test keys even though the operator had enabled the flag — this is the
-// root cause of the reported "still throws with ALLOW_RAZORPAY_TEST_IN_PRODUCTION=true".
-const allowTestFlag = (process.env.ALLOW_RAZORPAY_TEST_IN_PRODUCTION ?? '').trim().toLowerCase()
-const allowTestInProduction = allowTestFlag === 'true' || allowTestFlag === '1'
-console.log('=== RAZORPAY ENV DEBUG ===')
-console.log({
-  NODE_ENV: process.env.NODE_ENV,
-  NEXT_PHASE: process.env.NEXT_PHASE,
-  ALLOW_RAZORPAY_TEST_IN_PRODUCTION:
-    process.env.ALLOW_RAZORPAY_TEST_IN_PRODUCTION,
-  allowTestInProduction,
-})
+// There is now no way to opt out. Setting the old variable has no effect; a non-live
+// key in production fails loudly at startup, which is the correct failure mode — a
+// deployment that refuses to boot is recoverable in minutes, whereas taking test
+// payments for real customers is not.
 if (
   process.env.NEXT_PHASE !== 'phase-production-build' &&
   process.env.NODE_ENV === 'production' &&
-  !allowTestInProduction &&
   RAZORPAY_KEY_ID &&
   !RAZORPAY_KEY_ID.startsWith('rzp_live_')
 ) {
   throw new Error(
     '[env] RAZORPAY_KEY_ID must be a live key (rzp_live_*) in production. ' +
-    'Test keys (rzp_test_*) are not allowed in production environments. ' +
-    'During pre-launch development only, set ALLOW_RAZORPAY_TEST_IN_PRODUCTION=true ' +
-    'to permit test keys — this MUST be removed before public launch.',
+    'Test keys (rzp_test_*) are not allowed in production environments.',
   )
 }
 

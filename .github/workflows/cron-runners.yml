@@ -95,3 +95,35 @@ jobs:
           curl -sS -X POST "$CRON_BASE_URL/api/cron/report-exports" \
             -H "Authorization: Bearer $CRON_SECRET" \
             --retry 2 --retry-delay 5 --max-time 65 --fail-with-body
+
+      # MS-BULK-01 — Media Studio bulk batches (delete / move / visibility over a gallery
+      # or album), plus the reclamation sweep that follows them. This group's header has
+      # always named "bulk" among the runners it drives, but the step was never added, so
+      # every batch an organizer queued sat at `pending` forever: `/api/cron/media-jobs`
+      # appears in no schedule at all, and the only other way to drain one is the
+      # platform-admin Maintenance page.
+      #
+      # Group A rather than the daily maintenance group: a bulk delete is a user-facing
+      # action someone is waiting on, and it is fenced and idempotent like every other
+      # runner here, so a 5-minute tick is safe to repeat.
+      - name: media-jobs (bulk batches + reclamation)
+        continue-on-error: true
+        run: |
+          curl -sS -X POST "$CRON_BASE_URL/api/cron/media-jobs" \
+            -H "Authorization: Bearer $CRON_SECRET" \
+            --retry 2 --retry-delay 5 --max-time 65 --fail-with-body
+
+      # RD-MS-CLOSURE-01 — AI job queue (bib detection). `/api/cron/ai-jobs` was the ONLY
+      # cron route in the repository with no schedule anywhere: the route shipped with
+      # RD-AI-01 and the workflow step was never added.
+      #
+      # Harmless today because no AI provider is configured, so the queue is always empty.
+      # It stops being harmless the moment one is — every queued job would sit at `pending`
+      # forever, which is precisely the bug MS-BULK-01 found in media-jobs directly above.
+      # Scheduling it now costs nothing and removes the trap.
+      - name: ai-jobs (bib detection queue)
+        continue-on-error: true
+        run: |
+          curl -sS -X POST "$CRON_BASE_URL/api/cron/ai-jobs" \
+            -H "Authorization: Bearer $CRON_SECRET" \
+            --retry 2 --retry-delay 5 --max-time 65 --fail-with-body

@@ -34,7 +34,7 @@ function PillarCard({ pillar }: { pillar: WhyPillarDef }) {
 
         <h3 className="mt-6 text-[16px] font-semibold leading-snug text-foreground">{pillar.title}</h3>
         <p className={`${typography.body} mt-2 text-muted-foreground`}>{pillar.description}</p>
-        <span className="mt-auto inline-flex items-center gap-1.5 self-start pt-6 text-[var(--fs-base)] font-semibold text-primary">
+        <span className="mt-auto inline-flex items-center gap-1.5 self-start pt-6 text-fs-base font-semibold text-primary">
           Learn more <ArrowRight className="size-4 transition-transform duration-[220ms] group-hover:translate-x-1" aria-hidden />
         </span>
       </Link>

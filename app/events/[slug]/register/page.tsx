@@ -10,13 +10,35 @@ import { getEventBySlug }      from '@/lib/firebase/firestore/events'
 import { resolveEffectivePriceRupees } from '@/lib/pricing/earlyBird'
 import { checkRegistrationGate, GATE_REASON_LABELS } from '@/lib/registrations/gate'
 import { buildRegisterHref }   from '@/lib/events/registerHref'
+import type { Metadata }       from 'next'
+import { buildMetadata }       from '@/lib/marketing/seo'
 import { RegisterClient }      from './RegisterClient'
+import { PassPrice }          from './PassPrice'
+import { ageRangeLabel }      from '@/lib/registrations/ageEligibility'
 import { WaitlistJoinClient }  from './WaitlistJoinClient'
 import type {
   FormSection,
   ConditionalRule,
   RegistrationFormDraft,
 } from '@/components/wizard/registrationFormConfig'
+
+// RD-LAUNCH-07 — registration links are shared constantly (WhatsApp, Slack, DMs) and
+// previously produced a preview with no title, description or image at all. Built from
+// the event the page already loads, so no extra read is introduced.
+export async function generateMetadata(
+  { params }: { params: Promise<{ slug: string }> },
+): Promise<Metadata> {
+  const { slug } = await params
+  const event = await getEventBySlug(slug)
+  const name  = typeof (event?.eventDetails as { info?: { name?: string } } | null)?.info?.name === 'string'
+    ? (event!.eventDetails as { info: { name: string } }).info.name
+    : 'Event'
+  return buildMetadata({
+    title:       `Register — ${name} | RegisterDesk`,
+    description: `Complete your registration for ${name}.`,
+    path:        `/events/${slug}/register`,
+  })
+}
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -30,6 +52,12 @@ interface PassPublic {
   quantity:     number | null
   status:       string
   description?: string
+  // RD-RT1.0: already present on the pricing doc; surfaced so the registration
+  // arrival can show "Registration closes". No new query, no schema change.
+  salesEndDate?: string
+  // RD-RT3.2.2: per-pass age limits set in the pass editor (raceDetails).
+  minAge?:       number | null
+  maxAge?:       number | null
 }
 
 // ─── Pass extraction ──────────────────────────────────────────────────────────
@@ -63,6 +91,14 @@ function extractPasses(pricing: Record<string, unknown> | null): PassPublic[] {
         quantity:    typeof p.quantity === 'number' ? p.quantity : null,
         status:      String(p.status ?? 'active'),
         description: typeof p.description === 'string' ? p.description : undefined,
+        salesEndDate: typeof p.salesEndDate === 'string' ? p.salesEndDate : undefined,
+        ...(() => {
+          const rd = p.raceDetails as Record<string, unknown> | null | undefined
+          return {
+            minAge: typeof rd?.minAge === 'number' ? rd.minAge : null,
+            maxAge: typeof rd?.maxAge === 'number' ? rd.maxAge : null,
+          }
+        })(),
       }
     })
 }
@@ -87,11 +123,11 @@ function BlockedScreen({
           <path strokeLinecap="round" strokeLinejoin="round" d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636" />
         </svg>
       </div>
-      <h1 className="text-[20px] font-bold text-foreground">Registration Unavailable</h1>
-      <p className="mt-2 max-w-sm text-[14px] text-muted-foreground">{label}</p>
+      <h1 className="text-fs-lg font-bold text-foreground">Registration Unavailable</h1>
+      <p className="mt-2 max-w-sm text-fs-base text-muted-foreground">{label}</p>
       <Link
         href={`/events/${eventSlug}`}
-        className="mt-6 rounded-xl bg-primary px-6 py-2.5 text-[13px] font-semibold text-primary-foreground hover:opacity-90"
+        className="mt-6 rounded-xl bg-primary px-6 py-2.5 text-fs-sm font-semibold text-primary-foreground hover:opacity-90"
       >
         Back to Event
       </Link>
@@ -119,9 +155,9 @@ function PassSelectionScreen({
   return (
     <div className="mx-auto max-w-lg px-4 py-12">
       <div className="mb-8 text-center">
-        <p className="text-[12px] font-semibold uppercase tracking-wider text-primary">Register for</p>
-        <h1 className="mt-1 text-[22px] font-bold text-foreground">{eventName}</h1>
-        <p className="mt-1 text-[14px] text-muted-foreground">Select a pass to continue</p>
+        <p className="text-fs-xs font-semibold uppercase tracking-wider text-primary">Register for</p>
+        <h1 className="mt-1 text-fs-xl font-bold text-foreground">{eventName}</h1>
+        <p className="mt-1 text-fs-base text-muted-foreground">Select a pass to continue</p>
       </div>
 
       <div className="flex flex-col gap-3">
@@ -132,21 +168,26 @@ function PassSelectionScreen({
             className="group flex items-center justify-between rounded-xl border border-border bg-card p-4 shadow-sm transition-all hover:border-primary/40 hover:shadow-md"
           >
             <div className="min-w-0">
-              <p className="text-[14px] font-semibold text-foreground">{pass.name}</p>
+              <p className="text-fs-base font-semibold text-foreground">{pass.name}</p>
               {pass.description && (
-                <p className="mt-0.5 truncate text-[12.5px] text-muted-foreground">{pass.description}</p>
+                <p className="mt-0.5 truncate text-fs-xs text-muted-foreground">{pass.description}</p>
               )}
               {!pass.unlimited && pass.quantity !== null && (
-                <p className="mt-1 text-[11.5px] text-muted-foreground">{pass.quantity} seats</p>
+                <p className="mt-1 text-fs-2xs text-muted-foreground">{pass.quantity} seats</p>
+              )}
+              {/* RD-RT3.2.3: eligibility at the FIRST place a pass is chosen, so an
+                  age problem is visible before any form is filled in. */}
+              {ageRangeLabel({ minAge: pass.minAge ?? null, maxAge: pass.maxAge ?? null }) && (
+                <p className="mt-1 text-fs-2xs font-medium text-muted-foreground">
+                  Age {ageRangeLabel({ minAge: pass.minAge ?? null, maxAge: pass.maxAge ?? null })}
+                </p>
               )}
             </div>
             <div className="ml-4 shrink-0 text-right">
-              <p className="text-[15px] font-bold text-foreground">
-                {pass.isFree || pass.price === 0
-                  ? 'Free'
-                  : `₹${pass.price.toLocaleString('en-IN')}`}
-              </p>
-              <p className="mt-0.5 text-[11px] text-primary opacity-0 transition-opacity group-hover:opacity-100">
+              {/* RD-RT3.2.2: the picker printed a bare price, hiding an active
+                  early-bird discount at the very first place it is shown. */}
+              <PassPrice price={pass.price} regularPrice={pass.regularPrice} isFree={pass.isFree} />
+              <p className="mt-0.5 text-fs-2xs text-primary opacity-0 transition-opacity group-hover:opacity-100">
                 Select →
               </p>
             </div>
@@ -270,6 +311,11 @@ export default async function RegisterPage({
     ? (typeof rawPhysical?.city   === 'string' ? rawPhysical.city   : '')
     : ''
 
+  // RD-RT3.0: policy URLs for the review step, off the document already fetched above.
+  const rawSupport      = rawDetails?.support as Record<string, unknown> | null
+  const termsUrl        = typeof rawSupport?.termsUrl === 'string' ? rawSupport.termsUrl : ''
+  const refundPolicyUrl = typeof rawSupport?.refundPolicyUrl === 'string' ? rawSupport.refundPolicyUrl : ''
+
   const regRules = (form as RegistrationFormDraft | null)?.registrationRules
 
   // Canonical source for approval mode: accessControl.confirmationMode (set in Step 3).
@@ -299,6 +345,9 @@ export default async function RegisterPage({
         price:        p.price,
         regularPrice: p.regularPrice,
         isFree:       p.isFree,
+        salesEndDate: p.salesEndDate,
+        minAge:       p.minAge,
+        maxAge:       p.maxAge,
       }))}
       initialPassId={pass.id}
       sections={sections}
@@ -306,6 +355,8 @@ export default async function RegisterPage({
       approvalMode={approvalMode}
       requireLogin={regRules?.requireLogin ?? false}
       requiresInviteCode={requiresInviteCode}
+      termsUrl={termsUrl}
+      refundPolicyUrl={refundPolicyUrl}
     />
   )
 }

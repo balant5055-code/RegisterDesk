@@ -64,15 +64,15 @@ export default async function PricingPage() {
                     </div>
                     <div className="mt-3 flex items-baseline gap-1.5">
                       {tier.regularPriceLabel && (
-                        <span className="text-[var(--fs-base)] font-medium text-muted-foreground line-through">{tier.regularPriceLabel}</span>
+                        <span className="text-fs-base font-medium text-muted-foreground line-through">{tier.regularPriceLabel}</span>
                       )}
-                      <span className="text-[var(--fs-3xl)] font-bold text-foreground">{tier.priceLabel}</span>
-                      {tier.period && <span className="text-[var(--fs-base)] text-muted-foreground">{tier.period}</span>}
+                      <span className="text-fs-3xl font-bold text-foreground">{tier.priceLabel}</span>
+                      {tier.period && <span className="text-fs-base text-muted-foreground">{tier.period}</span>}
                     </div>
-                    <p className="mt-1 text-[var(--fs-sm)] text-muted-foreground">{tier.tagline}</p>
+                    <p className="mt-1 text-fs-sm text-muted-foreground">{tier.tagline}</p>
                     <ul className="mt-4 flex-1 space-y-2">
                       {tier.features.map((f, i) => (
-                        <li key={i} className="flex items-start gap-2 text-[var(--fs-sm)] text-muted-foreground">
+                        <li key={i} className="flex items-start gap-2 text-fs-sm text-muted-foreground">
                           <Check className="mt-0.5 size-3.5 shrink-0 text-primary" aria-hidden />
                           {f}
                         </li>

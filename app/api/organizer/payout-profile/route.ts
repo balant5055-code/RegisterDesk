@@ -16,6 +16,11 @@ import type {
   PayoutProfileSummary,
 } from '@/lib/payout/types'
 import { encryptPii, decryptPii } from '@/lib/payout/encryption'
+import { isValidGstin } from '@/lib/validators/gstin'
+import {
+  buildHistoryRecord, snapshotFromDoc, type PayoutSnapshot,
+} from '@/lib/payout/historyRecord'
+import { stageHistoryRecord } from '@/lib/payout/history'
 
 // ─── Validation patterns ──────────────────────────────────────────────────────
 
@@ -109,7 +114,11 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
   const ifscCode          = str(body.ifscCode).toUpperCase()
   const upiId             = str(body.upiId)
   const panNumber         = str(body.panNumber).toUpperCase()
-  const gstNumber         = str(body.gstNumber)
+  // RD-FINANCE-TAX-CLEANUP-01 · upper-cased like `panNumber` and `ifscCode` above.
+  // A GSTIN is canonically upper-case and the validator is case-sensitive, so without this
+  // a lowercase value sent directly to the API (the form already upper-cases) would newly
+  // be REJECTED where it used to save — a bigger behaviour change than normalising it.
+  const gstNumber         = str(body.gstNumber).toUpperCase()
 
   // ── Validation ────────────────────────────────────────────────────────────
 
@@ -139,6 +148,17 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
     errs.panNumber = 'PAN number is required.'
   else if (!PAN_RE.test(panNumber))
     errs.panNumber = 'Invalid PAN. Format: ABCDE1234F'
+
+  // RD-FINANCE-TAX-CLEANUP-01 · the GSTIN an organizer can ACTUALLY fill in.
+  //
+  // This field has always been reachable in the payout form and stored unvalidated, while a
+  // correct GSTIN validator sat on `organizationTaxProfile.gstin` — a field no UI reaches.
+  // Same validator now, imported from lib/validators/gstin.ts, so there is one pattern.
+  //
+  // OPTIONAL, unchanged: the field is only checked when the organizer supplies one, and an
+  // empty GST number still saves exactly as before (`gstNumber || null`).
+  if (gstNumber && !isValidGstin(gstNumber))
+    errs.gstNumber = 'Invalid GSTIN. Format: 29ABCDE1234F1Z5'
 
   if (Object.keys(errs).length > 0)
     return NextResponse.json({ error: 'Validation failed', fields: errs }, { status: 422 })
@@ -173,7 +193,48 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
     updatedAt:     now,
   }
 
-  await docRef.set(docData)
+  // ═══ RD-FINANCE-CLOSURE-02 · the change and its audit record commit TOGETHER ═══
+  //
+  // A BATCH, deliberately, not a transaction:
+  //
+  //   • The write needs no locked read. `existing` is read above only to preserve
+  //     `createdAt` and to diff the fields; nothing about the outcome depends on that read
+  //     still being current at commit time. A transaction would add a read set and retries
+  //     to buy a guarantee this operation does not need.
+  //   • A batch IS atomic across documents. Both writes land or neither does, which is the
+  //     property that matters: a saved payout change can never exist without its record.
+  //   • Concurrent PUTs from the same owner are last-write-wins on the profile (unchanged
+  //     behaviour) and produce TWO history rows — which is correct. An append-only log
+  //     should record both attempts, not collapse them.
+  //
+  // The diff is computed on DECRYPTED values: `encryptPii` uses a random IV, so comparing
+  // stored ciphertext would report every field as changed on every save.
+  const after: PayoutSnapshot = {
+    accountHolderName,
+    payoutMethod:  payoutMethod as PayoutMethod,
+    bankName:      payoutMethod === 'bank' ? bankName : null,
+    accountNumber: payoutMethod === 'bank' ? accountNumber : null,
+    ifscCode:      payoutMethod === 'bank' ? ifscCode : null,
+    upiId:         payoutMethod === 'upi'  ? upiId : null,
+    panNumber,
+    gstNumber:     gstNumber || null,
+  }
+
+  const batch = adminDb.batch()
+  batch.set(docRef, docData)
+  stageHistoryRecord(batch, buildHistoryRecord({
+    organizerUid: uid,
+    // The ACTOR is the human who made the call, which is not the workspace for a team
+    // member. Only the owner can reach this handler today, but recording `callerUid`
+    // rather than `uid` means the trail stays correct if that ever changes.
+    actorUid:     authz.callerUid,
+    before:       existingData ? snapshotFromDoc(existingData) : null,
+    after,
+    wasVerified:  existingData?.isVerified === true,
+    requestIp:    req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ?? null,
+    userAgent:    req.headers.get('user-agent'),
+  }))
+  await batch.commit()
 
   // Re-read to get server-resolved timestamps
   const saved    = await docRef.get()

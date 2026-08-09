@@ -1,10 +1,11 @@
 'use client'
 
-import { useState, useCallback, useMemo, useEffect, useRef, Fragment } from 'react'
+import { useState, useCallback, useMemo, useEffect, useRef } from 'react'
 import { useRouter }              from 'next/navigation'
 import { useAuth }                from '@/components/auth/AuthProvider'
-import { motion }                 from 'framer-motion'
-import { Calendar, MapPin, Globe, ShieldCheck, Zap, RotateCcw, Check, AlertTriangle } from 'lucide-react'
+// RD-RT1.0: framer-motion, Fragment and the event-meta icons left with the presentation
+// components that moved to ./RegistrationUI — this module no longer renders them.
+import { ShieldCheck, RotateCcw, Check, AlertTriangle } from 'lucide-react'
 import { cn }                     from '@/lib/utils/cn'
 import { buildRegisterHref }      from '@/lib/events/registerHref'
 import { buttonVariants }         from '@/components/ui/button'
@@ -12,9 +13,28 @@ import { CustomSelect }           from '@/components/ui/CustomSelect'
 import type { FormSection, FormField, ConditionalRule, FieldType } from '@/components/wizard/registrationFormConfig'
 import { resolveAttendeeIdentity } from '@/lib/registrations/attendeeIdentity'
 import { collectFormErrors } from '@/lib/registrations/validateFormResponses'
+import { resolveDobField, ageRangeLabel } from '@/lib/registrations/ageEligibility'
 import { TAX_INCLUSIVE_NOTE } from '@/lib/pricing/copy'
 import type { FeeBreakdownRecord } from '@/lib/fees/types'
 import { buildAttendeeFeeBreakdown, formatPaise, type AttendeeFeeBreakdown } from '@/lib/fees/attendeeBreakdown'
+// RD-RT1.0: the presentation layer now lives in RegistrationUI. Logic stays here.
+import {
+  RegistrationHeader, StepWizard, JourneyStepper, FormSectionCard, SummaryPanel, PassSwitcher,
+  estimateMinutes, type EventIdentity, type SummaryPricing,
+} from './RegistrationUI'
+// RD-RT2.0: one visual system for every control.
+import {
+  FieldShell, FieldError, FIELD_HINT, controlCls, textareaCls,
+  RadioOption, CheckOption, TogglePill, ErrorSummary,
+} from './formControls'
+import { PassPrice } from './PassPrice'
+// RD-RT3.5: the recovery surface for the existing draft mechanism.
+import { RecoveryBanner, AutosaveStatus, RecoveryReassurance } from './RecoveryUI'
+// RD-RT3.0: the pre-payment review experience.
+import {
+  RegistrationReview, isReviewReady,
+  type ReviewAnswerGroup, type ReviewConsent, type ReviewParticipant,
+} from './RegistrationReview'
 
 // ─── Razorpay checkout (loaded dynamically from checkout.razorpay.com) ─────────
 
@@ -76,6 +96,11 @@ interface PassInfo {
   price:        number   // effective price (early-bird while active, else regular)
   regularPrice: number   // regular price — shown struck through when early bird is active
   isFree:       boolean
+  /** RD-RT1.0: drives "Registration closes". Already on the pricing doc. */
+  salesEndDate?: string
+  /** RD-RT3.2.2: eligibility window from the pass editor. null = unbounded. */
+  minAge?:      number | null
+  maxAge?:      number | null
 }
 
 export interface RegisterClientProps {
@@ -96,6 +121,9 @@ export interface RegisterClientProps {
   approvalMode:       'auto' | 'manual'
   requireLogin:       boolean
   requiresInviteCode: boolean
+  /** RD-RT3.0: policy URLs for the review consent rows. Empty string = not published. */
+  termsUrl?:          string
+  refundPolicyUrl?:   string
 }
 
 type FieldState = { visible: boolean; required: boolean; disabled: boolean }
@@ -145,11 +173,9 @@ function computeFieldStates(
 
 // ─── Field Renderer ───────────────────────────────────────────────────────────
 
-const inputCls =
-  'h-10 w-full rounded-xl border border-border bg-background px-3.5 text-[13.5px] text-foreground placeholder:text-muted-foreground/50 outline-none transition-colors focus:border-primary/60 focus:ring-2 focus:ring-primary/20'
-const labelCls = 'mb-1.5 block text-[13px] font-medium text-foreground'
-const hintCls  = 'mt-1 text-[11.5px] text-muted-foreground'
-const errorCls = 'mt-1 text-[11.5px] text-destructive'
+// RD-RT2.0: the hand-set control classes moved to ./formControls, which owns ONE
+// surface for every control (and adds the error/hover/read-only states the inputs
+// never had). Nothing about field behaviour changed.
 
 // C-2: an element whose focus opens the on-screen keyboard (so the mobile checkout bar
 // can step out of the keyboard's way). CustomSelect is a div-combobox, not a native
@@ -208,9 +234,13 @@ function nativeInputProps(field: FormField): NativeInputProps {
 
 // H9: the ids a field's control should be described by — its helper text and/or its
 // (assertive) error — so screen readers announce both.
+//
+// RD-RT2.0: helper text now sits ABOVE the control and stays visible when a field
+// fails, so guidance and failure are announced together instead of the hint being
+// swapped out for the error.
 function describedBy(id: string, helperText: string, error: string | undefined): string | undefined {
   const ids: string[] = []
-  if (helperText && !error) ids.push(`${id}-hint`)
+  if (helperText) ids.push(`${id}-hint`)
   if (error) ids.push(`${id}-error`)
   return ids.length ? ids.join(' ') : undefined
 }
@@ -236,28 +266,19 @@ function FieldRenderer({
   const disabled = state.disabled
   const req      = state.required
 
-  const labelEl = (
-    <label htmlFor={id} className={labelCls}>
-      {label}
-      {req && <span className="ml-1 text-destructive" aria-hidden>*</span>}
-    </label>
-  )
-  // Groups (radio/checkbox/multiselect) have no single input, so their name is an
-  // id'd span referenced by the group's aria-labelledby (H9).
-  const groupLabelEl = (
-    <span id={`${id}-label`} className={labelCls}>
-      {label}
-      {req && <span className="ml-1 text-destructive" aria-hidden>*</span>}
-    </span>
-  )
-  // Errors are assertive live regions so screen readers announce them (H9).
-  const errorEl = error ? <p id={`${id}-error`} role="alert" className={errorCls}>{error}</p> : null
+  const hintId  = `${id}-hint`
+  const errorId = `${id}-error`
+  // Shared shell props — one label → hint → control → message rhythm for every branch.
+  const shell = {
+    label, required: req, hintId, errorId,
+    hint:  helperText || undefined,
+    error: error || undefined,
+  }
 
   // ── Textarea ────────────────────────────────────────────────────────────────
   if (type === 'textarea' || type === 'address') {
     return (
-      <div>
-        {labelEl}
+      <FieldShell {...shell} htmlFor={id}>
         <textarea
           id={id}
           rows={3}
@@ -268,21 +289,18 @@ function FieldRenderer({
           value={value}
           onChange={e => onChange(id, e.target.value)}
           onBlur={() => onBlur?.(id)}
-          className="w-full resize-y rounded-xl border border-border bg-background px-3.5 py-2.5 text-[13.5px] text-foreground placeholder:text-muted-foreground/50 outline-none transition-colors focus:border-primary/60 focus:ring-2 focus:ring-primary/20 disabled:opacity-50"
+          className={textareaCls(!!error)}
           aria-invalid={!!error}
           aria-describedby={describedBy(id, helperText, error)}
         />
-        {helperText && !error && <p id={`${id}-hint`} className={hintCls}>{helperText}</p>}
-        {errorEl}
-      </div>
+      </FieldShell>
     )
   }
 
   // ── Dropdown / Select ───────────────────────────────────────────────────────
   if (type === 'dropdown') {
     return (
-      <div>
-        {labelEl}
+      <FieldShell {...shell} htmlFor={id}>
         <CustomSelect
           id={id}
           value={value}
@@ -293,20 +311,19 @@ function FieldRenderer({
           aria-invalid={!!error}
           aria-describedby={describedBy(id, helperText, error)}
         />
-        {helperText && !error && <p id={`${id}-hint`} className={hintCls}>{helperText}</p>}
-        {errorEl}
-      </div>
+      </FieldShell>
     )
   }
 
   // ── Radio ───────────────────────────────────────────────────────────────────
+  // Selectable cards. The native radios stay in the DOM (sr-only), so grouping,
+  // arrow-key roving and screen-reader semantics remain the browser's.
   if (type === 'radio' || type === 'yesno') {
     const opts = type === 'yesno' ? ['Yes', 'No'] : options
     return (
-      <div>
-        {groupLabelEl}
+      <FieldShell {...shell} asSpan labelId={`${id}-label`}>
         <div
-          className="mt-1 flex flex-wrap gap-2"
+          className="grid gap-2 sm:grid-cols-2"
           role="radiogroup"
           aria-labelledby={`${id}-label`}
           aria-required={req || undefined}
@@ -314,63 +331,52 @@ function FieldRenderer({
           aria-describedby={describedBy(id, helperText, error)}
         >
           {opts.map(opt => (
-            <label
+            <RadioOption
               key={opt}
-              className="flex cursor-pointer items-center gap-2 rounded-lg border border-border px-3 py-2 text-[13px] transition-colors has-[:checked]:border-primary has-[:checked]:bg-primary/[0.04]"
-            >
-              <input
-                type="radio"
-                name={id}
-                value={opt}
-                checked={value === opt}
-                disabled={disabled}
-                onChange={() => onChange(id, opt)}
-                className="accent-primary"
-              />
-              {opt}
-            </label>
+              name={id}
+              option={opt}
+              checked={value === opt}
+              disabled={disabled}
+              onSelect={() => onChange(id, opt)}
+            />
           ))}
         </div>
-        {helperText && !error && <p id={`${id}-hint`} className={hintCls}>{helperText}</p>}
-        {errorEl}
-      </div>
+      </FieldShell>
     )
   }
 
   // ── Checkbox (single consent or group) ───────────────────────────────────
   if (type === 'checkbox') {
     if (options.length === 0) {
+      // Single consent. The hint and error now carry the ids `aria-describedby`
+      // already pointed at, and the error is an assertive live region like every
+      // other field's — both were missing on this branch alone.
       return (
         <div>
-          <label className="flex cursor-pointer items-start gap-3">
-            <input
-              id={id}
-              type="checkbox"
-              disabled={disabled}
-              required={req}
-              aria-required={req || undefined}
-              aria-invalid={!!error}
-              aria-describedby={describedBy(id, helperText, error)}
-              checked={value === 'true'}
-              onChange={e => onChange(id, e.target.checked ? 'true' : '')}
-              className="mt-0.5 size-4 shrink-0 cursor-pointer accent-primary"
-            />
-            <span className="text-[13px] text-foreground">
-              {label}
-              {req && <span className="ml-1 text-destructive" aria-hidden>*</span>}
-            </span>
-          </label>
-          {helperText && !error && <p className={hintCls}>{helperText}</p>}
-          {error && <p className={errorCls}>{error}</p>}
+          <CheckOption
+            id={id}
+            checked={value === 'true'}
+            disabled={disabled}
+            onToggle={next => onChange(id, next ? 'true' : '')}
+          >
+            {label}
+            {req && (
+              <>
+                <span className="ml-1 text-destructive" aria-hidden>*</span>
+                <span className="sr-only"> (required)</span>
+              </>
+            )}
+          </CheckOption>
+          {helperText && <p id={hintId} className={cn(FIELD_HINT, 'mt-1.5')}>{helperText}</p>}
+          {error && <FieldError id={errorId}>{error}</FieldError>}
         </div>
       )
     }
     const selected = value ? value.split(',').map(s => s.trim()) : []
     return (
-      <div>
-        {groupLabelEl}
+      <FieldShell {...shell} asSpan labelId={`${id}-label`}>
         <div
-          className="mt-1 flex flex-col gap-2"
+          className="flex flex-col gap-2"
           role="group"
           aria-labelledby={`${id}-label`}
           aria-describedby={describedBy(id, helperText, error)}
@@ -378,27 +384,22 @@ function FieldRenderer({
           {options.map(opt => {
             const checked = selected.includes(opt)
             return (
-              <label key={opt} className="flex cursor-pointer items-start gap-2.5 text-[13px]">
-                <input
-                  type="checkbox"
-                  disabled={disabled}
-                  checked={checked}
-                  onChange={() => {
-                    const next = checked
-                      ? selected.filter(s => s !== opt)
-                      : [...selected, opt]
-                    onChange(id, next.join(', '))
-                  }}
-                  className="mt-0.5 size-4 shrink-0 cursor-pointer accent-primary"
-                />
-                {opt}
-              </label>
+              <CheckOption
+                key={opt}
+                option={opt}
+                checked={checked}
+                disabled={disabled}
+                onToggle={() => {
+                  const next = checked
+                    ? selected.filter(s => s !== opt)
+                    : [...selected, opt]
+                  onChange(id, next.join(', '))
+                }}
+              />
             )
           })}
         </div>
-        {helperText && !error && <p id={`${id}-hint`} className={hintCls}>{helperText}</p>}
-        {errorEl}
-      </div>
+      </FieldShell>
     )
   }
 
@@ -406,10 +407,9 @@ function FieldRenderer({
   if (type === 'multiselect') {
     const selected = value ? value.split(',').map(s => s.trim()) : []
     return (
-      <div>
-        {groupLabelEl}
+      <FieldShell {...shell} asSpan labelId={`${id}-label`}>
         <div
-          className="mt-1 flex flex-wrap gap-2"
+          className="flex flex-wrap gap-2"
           role="group"
           aria-labelledby={`${id}-label`}
           aria-describedby={describedBy(id, helperText, error)}
@@ -417,39 +417,31 @@ function FieldRenderer({
           {options.map(opt => {
             const checked = selected.includes(opt)
             return (
-              <button
+              <TogglePill
                 key={opt}
-                type="button"
+                option={opt}
+                checked={checked}
                 disabled={disabled}
-                aria-pressed={checked}
-                onClick={() => {
+                onToggle={() => {
                   const next = checked
                     ? selected.filter(s => s !== opt)
                     : [...selected, opt]
                   onChange(id, next.join(', '))
                 }}
-                className={cn(
-                  'rounded-full border px-3 py-1 text-[12.5px] font-medium transition-colors disabled:opacity-50',
-                  checked
-                    ? 'border-primary bg-primary/10 text-primary'
-                    : 'border-border bg-card text-foreground hover:border-primary/40',
-                )}
-              >
-                {opt}
-              </button>
+              />
             )
           })}
         </div>
-        {helperText && !error && <p id={`${id}-hint`} className={hintCls}>{helperText}</p>}
-        {errorEl}
-      </div>
+      </FieldShell>
     )
   }
 
   // ── Default: text / email / tel / number / date / time / url / country / state / city ──
+  // NOTE: `file` also lands here. It has no dedicated branch and renders as a text
+  // input — see the RT2.0 report. A real uploader needs storage logic, which this
+  // sprint excludes, so the behaviour is deliberately left unchanged.
   return (
-    <div>
-      {labelEl}
+    <FieldShell {...shell} htmlFor={id}>
       <input
         id={id}
         type={inputTypeFor(type)}
@@ -460,14 +452,12 @@ function FieldRenderer({
         value={value}
         onChange={e => onChange(id, e.target.value)}
         onBlur={() => onBlur?.(id)}
-        className={inputCls + (disabled ? ' opacity-50' : '')}
+        className={controlCls(!!error)}
         aria-invalid={!!error}
         aria-describedby={describedBy(id, helperText, error)}
         {...nativeInputProps(field)}
       />
-      {helperText && !error && <p id={`${id}-hint`} className={hintCls}>{helperText}</p>}
-      {errorEl}
-    </div>
+    </FieldShell>
   )
 }
 
@@ -475,6 +465,8 @@ function FieldRenderer({
 
 function SectionBlock({
   section,
+  index,
+  complete,
   fieldStates,
   values,
   errors,
@@ -482,6 +474,10 @@ function SectionBlock({
   onBlur,
 }: {
   section:     FormSection
+  /** 1-based ordinal for the group header chip — presentation only. */
+  index:       number
+  /** RD-RT3.3: every required field in this section is filled. */
+  complete:    boolean
   fieldStates: Map<string, FieldState>
   values:      Record<string, string>
   errors:      Record<string, string>
@@ -494,362 +490,35 @@ function SectionBlock({
   })
   if (visibleFields.length === 0) return null
 
+  // RD-RT1.0: the card shell moved to FormSectionCard so every logical group shares one
+  // rhythm. Field selection, ordering and rendering are untouched.
   return (
-    <section className="overflow-hidden rounded-2xl border border-border bg-card shadow-sm">
-      {section.title && (
-        <div className="border-b border-border/60 bg-muted/[0.03] px-5 py-3.5">
-          {/* M-4: section titles are proper headings for screen-reader structure */}
-          <h2 className="text-[14px] font-semibold text-foreground">{section.title}</h2>
-          {section.description && (
-            <p className="mt-0.5 text-[12.5px] text-muted-foreground">{section.description}</p>
-          )}
-        </div>
-      )}
-      <div className="flex flex-col gap-4 px-5 py-5">
-        {visibleFields.map(field => (
-          <FieldRenderer
-            key={field.id}
-            field={field}
-            state={fieldStates.get(field.id) ?? { visible: true, required: field.required, disabled: false }}
-            value={values[field.id] ?? ''}
-            error={errors[field.id]}
-            onChange={onChange}
-            onBlur={onBlur}
-          />
-        ))}
-      </div>
-    </section>
+    <FormSectionCard title={section.title} description={section.description} index={index} complete={complete}>
+      {visibleFields.map(field => (
+        <FieldRenderer
+          key={field.id}
+          field={field}
+          state={fieldStates.get(field.id) ?? { visible: true, required: field.required, disabled: false }}
+          value={values[field.id] ?? ''}
+          error={errors[field.id]}
+          onChange={onChange}
+          onBlur={onBlur}
+        />
+      ))}
+    </FormSectionCard>
   )
 }
 
-// ─── Progress Indicator ───────────────────────────────────────────────────────
-
-function ProgressIndicator({
-  sections,
-  activeIdx,
-  completedCount,
-}: {
-  sections:       FormSection[]
-  activeIdx:      number   // -1 = all complete
-  completedCount: number
-}) {
-  if (sections.length <= 1) return null
-  const total      = sections.length
-  const allDone    = activeIdx === -1
-  const activeStep = allDone ? total - 1 : activeIdx
-
-  return (
-    <div className="mb-6">
-      <div className="mb-3 flex items-center justify-between">
-        <p className="text-[13.5px] font-semibold text-foreground">
-          {allDone
-            ? sections[total - 1]?.title ?? `Step ${total}`
-            : sections[activeStep]?.title ?? `Step ${activeStep + 1}`}
-        </p>
-        <p className="text-[12px] font-medium text-muted-foreground">
-          {allDone ? total : completedCount} of {total} complete
-        </p>
-      </div>
-
-      <div className="flex items-center">
-        {sections.map((s, i) => {
-          const done   = allDone || i < activeIdx
-          const active = !allDone && i === activeIdx
-          return (
-            <Fragment key={s.id}>
-              {/* Step dot */}
-              <div
-                className={cn(
-                  'relative z-10 flex size-6 shrink-0 items-center justify-center rounded-full border-2 text-[10px] font-bold transition-all duration-300',
-                  done
-                    ? 'border-primary bg-primary text-white'
-                    : active
-                      ? 'border-primary bg-background text-primary shadow-[0_0_0_3px_hsl(var(--primary)/0.12)]'
-                      : 'border-border bg-background text-muted-foreground/50',
-                )}
-                aria-label={`Step ${i + 1}${done ? ' (complete)' : active ? ' (current)' : ''}`}
-              >
-                {done ? <Check className="size-3" aria-hidden /> : i + 1}
-              </div>
-
-              {/* Connector line */}
-              {i < total - 1 && (
-                <div className="relative h-0.5 flex-1 bg-border">
-                  <motion.div
-                    className="absolute inset-y-0 left-0 bg-primary"
-                    initial={{ width: '0%' }}
-                    animate={{ width: done ? '100%' : '0%' }}
-                    transition={{ duration: 0.4, ease: [0.4, 0, 0.2, 1] }}
-                  />
-                </div>
-              )}
-            </Fragment>
-          )
-        })}
-      </div>
-    </div>
-  )
-}
-
-// ─── Summary Card ─────────────────────────────────────────────────────────────
+// ─── Coupon state ─────────────────────────────────────────────────────────────
+// RD-RT1.0: ProgressIndicator, SummaryCard, TrustBadges and PassSwitcher moved to
+// ./RegistrationUI as StepWizard, SummaryPanel and PassSwitcher. Only their markup
+// changed — every input they receive is computed here, exactly as before.
 
 interface CouponState {
   code:          string
   discountPaise: number
   finalPaise:    number
   description:   string
-}
-
-function SummaryCard({
-  eventName,
-  bannerUrl,
-  venueName,
-  venueCity,
-  venueType,
-  startDate,
-  startTime,
-  passName,
-  isPaid,
-  price,
-  regularPrice,
-  couponApplied,
-}: {
-  eventName:     string
-  bannerUrl:     string
-  venueName:     string
-  venueCity:     string
-  venueType:     string
-  startDate:     string | null
-  startTime:     string | null
-  passName:      string
-  isPaid:        boolean
-  price:         number          // rupees (effective)
-  regularPrice:  number          // rupees (regular, for early-bird strikethrough)
-  couponApplied: CouponState | null
-}) {
-  function fmtDate(d: string | null) {
-    if (!d) return ''
-    try {
-      return new Date(d).toLocaleDateString('en-IN', {
-        weekday: 'short', day: 'numeric', month: 'long', year: 'numeric',
-      })
-    } catch { return d }
-  }
-  function fmtTime(t: string | null) {
-    if (!t) return ''
-    try {
-      const [h, m] = t.split(':').map(Number)
-      const dt = new Date(); dt.setHours(h, m ?? 0, 0)
-      return dt.toLocaleTimeString('en-IN', { hour: 'numeric', minute: '2-digit', hour12: true })
-    } catch { return t }
-  }
-
-  const dateStr    = fmtDate(startDate)
-  const timeStr    = fmtTime(startTime)
-  const isOnline   = venueType === 'online'
-  const venueLabel = isOnline
-    ? (venueName || 'Online Event')
-    : [venueName, venueCity].filter(Boolean).join(', ') || null
-
-  const originalPrice = price
-  const finalPrice    = couponApplied ? couponApplied.finalPaise / 100 : price
-  const discount      = couponApplied ? couponApplied.discountPaise / 100 : 0
-  // Early bird is active when the effective price is below the regular price.
-  // Suppressed while a coupon is applied (the coupon strikethrough takes over).
-  const isEarlyBird   = isPaid && !couponApplied && regularPrice > price
-
-  const priceDisplay = !isPaid
-    ? 'Free'
-    : couponApplied
-      ? couponApplied.finalPaise === 0 ? 'Free' : `₹${finalPrice.toLocaleString('en-IN')}`
-      : `₹${originalPrice.toLocaleString('en-IN')}`
-
-  return (
-    <div className="overflow-hidden rounded-2xl border border-border bg-card shadow-sm">
-
-      {/* Banner or fallback header */}
-      {bannerUrl ? (
-        <div className="relative aspect-[16/7] overflow-hidden">
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img src={bannerUrl} alt="" className="h-full w-full object-cover" />
-          <div className="absolute inset-0 bg-gradient-to-t from-black/65 to-transparent" />
-          <div className="absolute bottom-0 left-0 right-0 p-4">
-            <p className="text-[14px] font-bold leading-snug text-white drop-shadow">{eventName}</p>
-          </div>
-        </div>
-      ) : (
-        <div className="border-b border-border bg-gradient-to-br from-primary/[0.08] to-primary/[0.03] px-4 py-3.5">
-          <p className="text-[15px] font-bold text-foreground">{eventName}</p>
-        </div>
-      )}
-
-      <div className="divide-y divide-border/50">
-
-        {/* Pass + price */}
-        <div className="px-4 py-4">
-          <div className="flex items-start justify-between gap-3">
-            <div className="min-w-0">
-              <p className="text-[10.5px] font-semibold uppercase tracking-wider text-muted-foreground">Pass</p>
-              <p className="mt-0.5 text-[13.5px] font-semibold text-foreground">{passName}</p>
-            </div>
-            <div className="shrink-0 text-right">
-              {isPaid && couponApplied ? (
-                <>
-                  <p className="text-[12px] text-muted-foreground line-through">
-                    ₹{originalPrice.toLocaleString('en-IN')}
-                  </p>
-                  <p className={cn(
-                    'text-[16px] font-bold',
-                    couponApplied.finalPaise === 0 ? 'text-emerald-600' : 'text-emerald-600',
-                  )}>
-                    {priceDisplay}
-                  </p>
-                </>
-              ) : isEarlyBird ? (
-                <>
-                  <p className="text-[12px] text-muted-foreground line-through">
-                    ₹{regularPrice.toLocaleString('en-IN')}
-                  </p>
-                  <p className="text-[16px] font-bold text-emerald-600">{priceDisplay}</p>
-                  <p className="text-[11px] font-semibold uppercase tracking-wide text-emerald-600">Early bird</p>
-                </>
-              ) : (
-                <p className="text-[16px] font-bold text-foreground">{priceDisplay}</p>
-              )}
-            </div>
-          </div>
-        </div>
-
-        {/* Date + venue */}
-        {(dateStr || venueLabel) && (
-          <div className="space-y-2.5 px-4 py-3.5">
-            {dateStr && (
-              <div className="flex items-start gap-2.5 text-[12.5px]">
-                <Calendar className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" aria-hidden />
-                <span className="text-foreground">
-                  {dateStr}
-                  {timeStr && <span className="text-muted-foreground"> · {timeStr}</span>}
-                </span>
-              </div>
-            )}
-            {venueLabel && (
-              <div className="flex items-start gap-2.5 text-[12.5px]">
-                {isOnline
-                  ? <Globe  className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" aria-hidden />
-                  : <MapPin className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" aria-hidden />
-                }
-                <span className="text-foreground">{venueLabel}</span>
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* Coupon breakdown */}
-        {isPaid && couponApplied && (
-          <div className="bg-emerald-50/70 px-4 py-3.5">
-            <div className="space-y-1.5 text-[12.5px]">
-              <div className="flex justify-between text-muted-foreground">
-                <span>Original price</span>
-                <span>₹{originalPrice.toLocaleString('en-IN')}</span>
-              </div>
-              <div className="flex justify-between text-emerald-700">
-                <span className="flex items-center gap-1.5">
-                  Discount
-                  <span className="rounded bg-emerald-100 px-1 py-0.5 font-mono text-[10px] font-bold">
-                    {couponApplied.code}
-                  </span>
-                </span>
-                <span>−₹{discount.toLocaleString('en-IN')}</span>
-              </div>
-              <div className="flex justify-between border-t border-emerald-200/80 pt-1.5 font-semibold text-foreground">
-                <span>Total</span>
-                <span className="text-emerald-700">{priceDisplay}</span>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* M3: tax messaging consistent with Event Details / ticket cards */}
-        {isPaid && (
-          <div className="px-4 py-2.5 text-[11.5px] text-muted-foreground">{TAX_INCLUSIVE_NOTE}</div>
-        )}
-
-        {/* Razorpay trust note */}
-        <div className="flex items-center gap-2 px-4 py-3 text-[11.5px] text-muted-foreground">
-          <ShieldCheck className="size-3.5 shrink-0 text-emerald-600" aria-hidden />
-          <span>Secured by Razorpay</span>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-// ─── Trust Badges ─────────────────────────────────────────────────────────────
-
-function TrustBadges({ isPaid }: { isPaid: boolean }) {
-  return (
-    <div className="mt-5 rounded-xl border border-border/50 bg-muted/[0.03] px-4 py-3.5">
-      <div className="flex flex-col gap-2">
-        {isPaid && (
-          <div className="flex items-center gap-2.5 text-[12px] text-muted-foreground">
-            <ShieldCheck className="size-3.5 shrink-0 text-emerald-600" aria-hidden />
-            <span>Secure payment processed by Razorpay</span>
-          </div>
-        )}
-        <div className="flex items-center gap-2.5 text-[12px] text-muted-foreground">
-          <Zap className="size-3.5 shrink-0 text-primary" aria-hidden />
-          <span>Ticket delivered instantly to your email</span>
-        </div>
-        <div className="flex items-center gap-2.5 text-[12px] text-muted-foreground">
-          <RotateCcw className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
-          <span>Refund policy set by the event organiser</span>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-// ─── Pass switcher (H-7) ────────────────────────────────────────────────────────
-
-function PassSwitcher({ passes, selectedId, onSelect, switching }: {
-  passes:     PassInfo[]
-  selectedId: string
-  onSelect:   (id: string) => void
-  switching:  boolean
-}) {
-  return (
-    <div className="mb-6" role="radiogroup" aria-label="Select your pass">
-      <p className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Your pass</p>
-      <div className="flex flex-col gap-2">
-        {passes.map(p => {
-          const active = p.id === selectedId
-          const price  = p.isFree || p.price === 0 ? 'Free' : `₹${p.price.toLocaleString('en-IN')}`
-          return (
-            <button
-              key={p.id}
-              type="button"
-              role="radio"
-              aria-checked={active}
-              disabled={switching}
-              onClick={() => onSelect(p.id)}
-              className={cn(
-                'flex items-center justify-between gap-3 rounded-xl border px-4 py-3 text-left transition-colors disabled:opacity-60',
-                active ? 'border-primary bg-primary/[0.04] ring-1 ring-primary/20' : 'border-border bg-card hover:border-primary/40',
-              )}
-            >
-              <span className="flex min-w-0 items-center gap-2.5">
-                <span className={cn('flex size-4 shrink-0 items-center justify-center rounded-full border', active ? 'border-primary' : 'border-border')}>
-                  {active && <span className="size-2 rounded-full bg-primary" aria-hidden />}
-                </span>
-                <span className="truncate text-[13.5px] font-semibold text-foreground">{p.name}</span>
-              </span>
-              <span className="shrink-0 text-[13.5px] font-bold text-foreground">{price}</span>
-            </button>
-          )
-        })}
-      </div>
-    </div>
-  )
 }
 
 // ─── Main Component ───────────────────────────────────────────────────────────
@@ -870,6 +539,8 @@ export function RegisterClient({
   approvalMode,
   requireLogin,
   requiresInviteCode,
+  termsUrl,
+  refundPolicyUrl,
 }: RegisterClientProps) {
   const router = useRouter()
 
@@ -911,11 +582,25 @@ export function RegisterClient({
     attendee:  { name: string; email: string; phone?: string }
     breakdown: AttendeeFeeBreakdown
   } | null>(null)
+  // RD-RT3.1: which stage of the journey is on screen. 'payment' is Razorpay (a modal)
+  // and 'success' is a route, so only these two are rendered stages.
+  const [step, setStep] = useState<'form' | 'review'>('form')
+  // RD-RT3.0: review consent. Lives here — not inside the review — so the review CTA
+  // and the sticky-summary CTA are gated by exactly ONE condition. Never persisted.
+  const [consent, setConsent] = useState<ReviewConsent>({ info: false, terms: false, refund: false })
   // C-2: the mobile checkout bar steps aside while a keyboard field is focused.
   const [fieldFocused, setFieldFocused] = useState(false)
   const formRef = useRef<HTMLFormElement>(null)
+  // RD-RT3.3: focus target for the grouped error summary.
+  const errorSummaryRef = useRef<HTMLDivElement>(null)
   // M-4: brief "Draft saved" confirmation after the autosave settles.
-  const [draftSaved, setDraftSaved] = useState(false)
+  // RD-RT3.5 — recovery state. `pendingDraft` holds a draft that was FOUND but not yet
+  // applied: restoring is now a decision, so "Start Over" genuinely starts over instead
+  // of undoing a restore that already happened.
+  const [pendingDraft, setPendingDraft] = useState<Record<string, string> | null>(null)
+  const [savedAt,      setSavedAt]      = useState<number | null>(null)
+  const [saving,       setSaving]       = useState(false)
+  const [online,       setOnline]       = useState(true)
   const savedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   // C2: persist entered answers per-EVENT (not per-pass) so changing the selected pass —
@@ -937,9 +622,13 @@ export function RegisterClient({
         const validIds = new Set(fullFields.map(f => f.id))  // keep values for ALL passes' fields (H-7 switch)
         const filtered: Record<string, string> = {}
         for (const [k, v] of Object.entries(parsed)) {
-          if (validIds.has(k) && typeof v === 'string') filtered[k] = v
+          // A value whose field no longer exists on this event is dropped here, so a
+          // form the organiser has since edited can never restore into stale fields.
+          if (validIds.has(k) && typeof v === 'string' && v.trim()) filtered[k] = v
         }
-        if (!cancelled && Object.keys(filtered).length > 0) setValues(filtered)
+        // RD-RT3.5: OFFER the draft instead of applying it. Nothing is written to
+        // `values` until the attendee chooses Continue.
+        if (!cancelled && Object.keys(filtered).length > 0) setPendingDraft(filtered)
       } catch { /* ignore corrupt / unavailable storage */ }
     }
     void run()
@@ -952,20 +641,52 @@ export function RegisterClient({
     } catch { /* ignore quota / disabled storage */ }
   }, [values, storageKey])
 
-  // M-4: show a small "Draft saved" note ~0.6s after the last edit (debounced, not per keystroke).
+  // M-4 / RD-RT3.5: "Saving…" while the debounce is in flight, then a timestamp the
+  // status line turns into "Saved just now" / "Saved 2 minutes ago". Same 600ms debounce
+  // as before — this records WHEN the existing save happened, it does not save again.
   useEffect(() => {
     if (Object.keys(values).length === 0) return
+    if (savedTimerRef.current) clearTimeout(savedTimerRef.current)
+    savedTimerRef.current = setTimeout(() => setSaving(true), 0)
     const t = setTimeout(() => {
-      setDraftSaved(true)
-      if (savedTimerRef.current) clearTimeout(savedTimerRef.current)
-      savedTimerRef.current = setTimeout(() => setDraftSaved(false), 1600)
+      setSaving(false)
+      setSavedAt(Date.now())
     }, 600)
     return () => clearTimeout(t)
   }, [values])
 
+  // RD-RT3.5 — connectivity. The draft itself is written to sessionStorage, which needs
+  // no network, so autosave already works offline; what actually breaks offline is
+  // SUBMITTING. The indicator exists to set that expectation, never to block editing.
+  useEffect(() => {
+    const sync = () => setOnline(navigator.onLine)
+    const raf  = requestAnimationFrame(sync)   // deferred out of the effect body
+    window.addEventListener('online', sync)
+    window.addEventListener('offline', sync)
+    return () => {
+      cancelAnimationFrame(raf)
+      window.removeEventListener('online', sync)
+      window.removeEventListener('offline', sync)
+    }
+  }, [])
+
   const clearSavedForm = useCallback(() => {
     try { sessionStorage.removeItem(storageKey) } catch { /* ignore */ }
   }, [storageKey])
+
+  // RD-RT3.5 — the two recovery decisions. Both use the EXISTING draft mechanism.
+  const resumeDraft = useCallback(() => {
+    // Draft first, current values second: anything already typed while the banner was
+    // on screen wins, so resuming can never overwrite live input.
+    setValues(v => ({ ...(pendingDraft ?? {}), ...v }))
+    setPendingDraft(null)
+  }, [pendingDraft])
+
+  const discardDraft = useCallback(() => {
+    clearSavedForm()
+    setPendingDraft(null)
+    setValues({})
+  }, [clearSavedForm])
 
   const isPaid = !pass.isFree && (pass.price ?? 0) > 0
 
@@ -1126,17 +847,61 @@ export function RegisterClient({
         const s = fieldStates.get(f.id)
         return s?.visible !== false && (s?.required ?? f.required)
       })
+      // RD-RT3.2.3 ISSUE 2: a section with a visible ERROR is not complete, even when
+      // every required box has something in it. An ineligible date of birth is filled in
+      // — it is just wrong — and the stepper claiming that section is done while Review
+      // refuses to open is exactly the contradiction this removes.
+      const hasVisibleError = section.fields.some(
+        f => errors[f.id] && fieldStates.get(f.id)?.visible !== false,
+      )
+      if (hasVisibleError) return false
       if (visibleRequired.length === 0) return true
       return visibleRequired.every(f => (values[f.id] ?? '').trim() !== '')
     })
-  }, [passSections, fieldStates, values])
+  }, [passSections, fieldStates, values, errors])
 
   const activeStepIdx    = sectionCompleteness.findIndex(c => !c)  // -1 = all done
   const completedCount   = sectionCompleteness.filter(Boolean).length
 
+  // RD-RT3.2.2: age limits for the SELECTED pass, measured on the EVENT date. Memoised so
+  // it is a stable dependency, and rebuilt when the pass changes — switching pass
+  // re-checks eligibility against that pass's window. Null limits mean unbounded, and the
+  // rule is skipped entirely, so events without age limits behave exactly as before.
+  const eligibility = useMemo(
+    () => ({ eventDate: startDate, minAge: pass.minAge ?? null, maxAge: pass.maxAge ?? null }),
+    [startDate, pass.minAge, pass.maxAge],
+  )
+
+  // The birth-date field, resolved once through the SAME canonical resolver the
+  // validator uses — so "which field is the DOB" has exactly one answer.
+  const dobFieldId = useMemo(() => resolveDobField(allFields)?.id ?? null, [allFields])
+
+  /** This pass's age window, e.g. '12–17 years' / '18+'. Null when unrestricted. */
+  const passAgeLabel = ageRangeLabel({ minAge: pass.minAge ?? null, maxAge: pass.maxAge ?? null })
+
+  // RD-RT3.2.3 ISSUE 2: switching pass re-runs eligibility immediately. `eligibility` is
+  // memoised on the pass's limits, so this fires only when the window actually changes —
+  // not on every render — and only when a date of birth has been entered.
+  useEffect(() => {
+    if (!dobFieldId || !(values[dobFieldId] ?? '').trim()) return
+    const raf = requestAnimationFrame(() => {
+      const msg = collectFormErrors(sections, conditionalRules, selectedPassId, values, eligibility)
+        .find(e => e.fieldId === dobFieldId)?.message
+      setErrors(prev => {
+        if (prev[dobFieldId] === msg) return prev          // no-op → no re-render
+        const next = { ...prev }
+        if (msg) next[dobFieldId] = msg
+        else delete next[dobFieldId]
+        return next
+      })
+    })
+    return () => cancelAnimationFrame(raf)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [eligibility, selectedPassId, dobFieldId])
+
   // H-3: validate ONE field against the shared server rules (identical messages).
   function validateField(id: string, vals: Record<string, string>) {
-    const found = collectFormErrors(sections, conditionalRules, selectedPassId, vals)
+    const found = collectFormErrors(sections, conditionalRules, selectedPassId, vals, eligibility)
     const msg   = found.find(e => e.fieldId === id)?.message
     setErrors(prev => {
       const next = { ...prev }
@@ -1157,19 +922,25 @@ export function RegisterClient({
     // H-3: correct-as-you-type — only re-check a field that is ALREADY showing an error
     // (so a fix clears instantly), never introduce a new error while first typing.
     setErrors(prev => {
-      if (!prev[id]) return prev
-      const msg  = collectFormErrors(sections, conditionalRules, selectedPassId, nextValues).find(e => e.fieldId === id)?.message
+      // RD-RT3.2.3 ISSUE 1: the date of birth is checked on EVERY change, not only when
+      // it is already showing an error. Age eligibility is decided by one pick from a
+      // date control — there is no "still typing" state to protect, and discovering it
+      // at Review is exactly the failure this closes. Every other field keeps the
+      // original correct-as-you-type rule.
+      const isDob = id === dobFieldId
+      if (!prev[id] && !isDob) return prev
+      const msg  = collectFormErrors(sections, conditionalRules, selectedPassId, nextValues, eligibility).find(e => e.fieldId === id)?.message
       const next = { ...prev }
       if (msg) next[id] = msg
       else delete next[id]
       return next
     })
-  }, [values, sections, conditionalRules, selectedPassId])
+  }, [values, sections, conditionalRules, selectedPassId, eligibility, dobFieldId])
 
   // H3: validate with the SAME rules the server enforces (collectFormErrors), so a
   // form that passes here can't be rejected server-side for a rule the client skipped.
   function validate(): boolean {
-    const found = collectFormErrors(sections, conditionalRules, selectedPassId, values)
+    const found = collectFormErrors(sections, conditionalRules, selectedPassId, values, eligibility)
     const newErrors: Record<string, string> = {}
     for (const e of found) newErrors[e.fieldId] = e.message
     setErrors(newErrors)
@@ -1213,6 +984,9 @@ export function RegisterClient({
       })
     } catch {
       // Cancelled or failed → recovery card (retry reuses THIS order).
+      // RD-RT3.1: the recovery card renders inside the form, so step back to it —
+      // otherwise a cancelled payment would leave the retry action unreachable.
+      setStep('form')
       setPaymentRecovery({ order, attendee })
       return
     }
@@ -1246,6 +1020,8 @@ export function RegisterClient({
 
   // RD-PAYMENT-05 B1: attendee confirmed the itemized charge → open Razorpay for the SAME
   // already-created order (no new create-order, no duplicate). Total shown === order.amount.
+  // Second confirmation, unchanged from RD-PAYMENT-05 B1: the canonical amount has been
+  // shown and accepted, so Razorpay may open.
   async function confirmAndPay(): Promise<void> {
     const fc = feeConfirm
     if (!fc || submitting) return
@@ -1259,18 +1035,43 @@ export function RegisterClient({
     }
   }
 
-  async function handleSubmit(e: React.FormEvent) {
+  // RD-RT3.1: the form no longer submits straight through. It validates — unchanged —
+  // and hands over to the Review step. Every registration now takes the same route,
+  // paid or free, so Review is a stage of the journey rather than a payment panel.
+  function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
     setSubmitError(null)
     setPaymentRecovery(null)
     if (!validate()) {
-      // H9: move both scroll AND keyboard/AT focus to the first invalid control.
-      const firstError = document.querySelector('[aria-invalid="true"]')
-      firstError?.scrollIntoView({ behavior: 'smooth', block: 'center' })
-      if (firstError instanceof HTMLElement) firstError.focus({ preventScroll: true })
+      // H9 + RD-RT3.3: focus moves to the grouped summary, which names EVERY problem and
+      // links to each field — more useful than landing on the first one with no idea how
+      // many follow. Falls back to the original first-invalid-control behaviour if the
+      // summary has not painted yet.
+      requestAnimationFrame(() => {
+        const summary = errorSummaryRef.current
+        if (summary) {
+          summary.scrollIntoView({ behavior: 'smooth', block: 'center' })
+          summary.focus({ preventScroll: true })
+          return
+        }
+        const firstError = document.querySelector('[aria-invalid="true"]')
+        firstError?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+        if (firstError instanceof HTMLElement) firstError.focus({ preventScroll: true })
+      })
       return
     }
+    setConsent({ info: false, terms: false, refund: false })
+    setStep('review')
+    window.scrollTo({ top: 0, behavior: 'smooth' })
+  }
 
+  // Everything below this line is the ORIGINAL handleSubmit body, moved verbatim: the
+  // duplicate precheck, the create-order call, the RD-PAYMENT-05 B1 fee confirmation and
+  // the free-registration submit. No request, payload, ordering or branch changed — only
+  // the moment it is invoked, which is now the Review step's confirm action.
+  async function finaliseRegistration(): Promise<void> {
+    if (submitting) return
+    setSubmitError(null)
     setSubmitting(true)
     const headers: Record<string, string> = { 'Content-Type': 'application/json' }
     if (authToken) headers['Authorization'] = `Bearer ${authToken}`
@@ -1333,6 +1134,9 @@ export function RegisterClient({
         // is unchanged: open Razorpay directly via runPayment.
         const breakdown = buildAttendeeFeeBreakdown(orderJson.financials)
         if (breakdown) {
+          // RD-RT3.0: every review starts unconfirmed. Without this, a cancelled payment
+          // followed by a re-submit would land on the review with the boxes still ticked.
+          setConsent({ info: false, terms: false, refund: false })
           setFeeConfirm({ order, attendee, breakdown })
           return
         }
@@ -1373,14 +1177,14 @@ export function RegisterClient({
               <path strokeLinecap="round" strokeLinejoin="round" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" />
             </svg>
           </div>
-          <h2 className="text-[20px] font-bold text-foreground">Invite Only</h2>
-          <p className="mt-2 text-[14px] text-muted-foreground">
+          <h2 className="text-fs-lg font-bold text-foreground">Invite Only</h2>
+          <p className="mt-2 text-fs-base text-muted-foreground">
             This event requires an invite code to register.
           </p>
         </div>
 
         <div className="rounded-2xl border border-border bg-card p-6 shadow-sm">
-          <label htmlFor="invite-code" className="mb-1.5 block text-[13px] font-medium text-foreground">
+          <label htmlFor="invite-code" className="mb-1.5 block text-fs-sm font-medium text-foreground">
             Invite Code
           </label>
           <input
@@ -1391,11 +1195,11 @@ export function RegisterClient({
             value={inviteCodeInput}
             onChange={e => { setInviteCodeInput(e.target.value); setInviteCodeError(null) }}
             onKeyDown={e => { if (e.key === 'Enter') void handleVerifyInviteCode() }}
-            className="h-10 w-full rounded-xl border border-border bg-background px-3.5 text-[13.5px] text-foreground placeholder:text-muted-foreground/50 outline-none transition-colors focus:border-primary/60 focus:ring-2 focus:ring-primary/20"
+            className="h-10 w-full rounded-xl border border-border bg-background px-3.5 text-fs-sm text-foreground placeholder:text-muted-foreground/50 outline-none transition-colors focus:border-primary/60 focus:ring-2 focus:ring-primary/20"
             aria-invalid={!!inviteCodeError}
           />
           {inviteCodeError && (
-            <p role="alert" className="mt-1.5 text-[12px] text-destructive">{inviteCodeError}</p>
+            <p role="alert" className="mt-1.5 text-fs-xs text-destructive">{inviteCodeError}</p>
           )}
           <button
             type="button"
@@ -1428,8 +1232,8 @@ export function RegisterClient({
             <path strokeLinecap="round" strokeLinejoin="round" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
           </svg>
         </div>
-        <h2 className="text-[20px] font-bold text-foreground">Sign in to Register</h2>
-        <p className="mt-2 max-w-sm text-[14px] text-muted-foreground">
+        <h2 className="text-fs-lg font-bold text-foreground">Sign in to Register</h2>
+        <p className="mt-2 max-w-sm text-fs-base text-muted-foreground">
           The organiser requires you to be signed in before registering for this event.
         </p>
         <a
@@ -1451,66 +1255,225 @@ export function RegisterClient({
         : `₹${(couponApplied.finalPaise / 100).toLocaleString('en-IN')}`
       : `₹${pass.price.toLocaleString('en-IN')}`
 
+  // RD-RT1.0 — presentation-only derivations. Every value below is formatting over
+  // state that already existed; no new source, no new request, no pricing maths.
+  const isFreeCheckout   = !isPaid || couponApplied?.finalPaise === 0
+  const ctaLabel         = isFreeCheckout ? 'Complete Registration' : `Pay ${priceLabel}`
+  const processingLabel  = isFreeCheckout ? 'Submitting…' : 'Processing…'
+
+  const fmtDay = (d: string | null) => {
+    if (!d) return ''
+    try {
+      return new Date(d).toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'long', year: 'numeric' })
+    } catch { return d }
+  }
+  const fmtClock = (t: string | null | undefined) => {
+    if (!t) return ''
+    try {
+      const [h, m] = t.split(':').map(Number)
+      const dt = new Date(); dt.setHours(h, m ?? 0, 0)
+      return dt.toLocaleTimeString('en-IN', { hour: 'numeric', minute: '2-digit', hour12: true })
+    } catch { return t }
+  }
+  const fmtShort = (d: string) => {
+    try {
+      return new Date(d).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })
+    } catch { return d }
+  }
+
+  const isOnlineVenue = venueType === 'online'
+  const identity: EventIdentity = {
+    eventSlug,
+    eventName,
+    bannerUrl:  bannerUrl ?? '',
+    dateLabel:  fmtDay(startDate),
+    timeLabel:  fmtClock(startTime),
+    venueLabel: isOnlineVenue
+      ? (venueName || 'Online event')
+      : ([venueName, venueCity].filter(Boolean).join(', ') || null),
+    isOnline:   isOnlineVenue,
+    // Only when the organiser actually set a sales end date on this pass.
+    closesLabel: pass.salesEndDate?.trim() ? fmtShort(pass.salesEndDate.trim()) : null,
+  }
+
+  // Early bird is active when the effective price is below the regular price, and is
+  // suppressed while a coupon applies (the coupon strikethrough takes over) — the exact
+  // rule the previous SummaryCard used.
+  const isEarlyBird = isPaid && !couponApplied && pass.regularPrice > pass.price
+  const summaryPricing: SummaryPricing = {
+    isPaid,
+    priceLabel,
+    strikeLabel: isPaid && couponApplied
+      ? `₹${pass.price.toLocaleString('en-IN')}`
+      : isEarlyBird ? `₹${pass.regularPrice.toLocaleString('en-IN')}` : null,
+    discountLabel: couponApplied
+      ? `−₹${(couponApplied.discountPaise / 100).toLocaleString('en-IN')}`
+      : null,
+    couponCode:  couponApplied?.code ?? null,
+    isEarlyBird,
+    taxNote:     isPaid ? TAX_INCLUSIVE_NOTE : null,
+  }
+
+  // Derived from the real number of fields the attendee must fill — not a stored value.
+  const estimateLabel = estimateMinutes(
+    passSections.reduce(
+      (n, s) => n + s.fields.filter(f => fieldStates.get(f.id)?.visible !== false).length,
+      0,
+    ),
+  )
+
+  // RD-RT3.0 — the attendee's own answers, grouped by the ORGANISER'S sections. The
+  // grouping is theirs ("Personal", "Emergency Contact", …), not one we invented, and
+  // only visible fields with a non-empty value appear. Formatting over existing state:
+  // nothing is fetched, recomputed or transformed.
+  // RD-RT3.3: the grouped error list, in FORM ORDER (not error-insertion order), so the
+  // summary reads top-to-bottom like the page. Derived from the existing `errors` map —
+  // no second validation pass.
+  const errorList = passSections
+    .flatMap(sec => sec.fields)
+    .filter(f => errors[f.id] && fieldStates.get(f.id)?.visible !== false)
+    .map(f => ({ id: f.id, label: f.label, message: errors[f.id]! }))
+
+  function focusField(id: string) {
+    const el = document.getElementById(id)
+    el?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    if (el instanceof HTMLElement) el.focus({ preventScroll: true })
+  }
+
+  // ONE definition of "may proceed", shared by the review CTA and the sticky-summary
+  // CTA so the summary can never become an ungated second path to payment.
+  const reviewReady = isReviewReady(consent, termsUrl, refundPolicyUrl)
+
+  // RD-RT3.1: mirrors the EXISTING branch in finaliseRegistration verbatim
+  // (`!pass.isFree && effectivePricePaise > 0`). Read only — the decision itself is
+  // still made inside finaliseRegistration and was not touched.
+  const effectivePaiseNow = couponApplied ? couponApplied.finalPaise : Math.round((pass.price ?? 0) * 100)
+  const paymentRequired   = !pass.isFree && effectivePaiseNow > 0
+
+  const reviewGroups: ReviewAnswerGroup[] = passSections
+    .map(section => ({
+      title: section.title?.trim() || 'Details',
+      items: section.fields
+        .filter(f => fieldStates.get(f.id)?.visible !== false && (values[f.id] ?? '').trim())
+        .map(f => ({ id: f.id, label: f.label, value: values[f.id]! .trim() })),
+    }))
+    .filter(g => g.items.length > 0)
+
+  // ONE participant today. Shaped as a list so group registration is additive — see
+  // ReviewParticipant. Identity comes from the same resolveAttendeeIdentity the
+  // submission uses, so the review can never show a different person than it submits.
+  const reviewIdentity  = resolveAttendeeIdentity(allFields, values)
+  const reviewParticipants: ReviewParticipant[] = [{
+    id:     'primary',
+    name:   reviewIdentity.name,
+    email:  reviewIdentity.email,
+    phone:  reviewIdentity.phone,
+    groups: reviewGroups,
+  }]
+
   // ── Main layout ────────────────────────────────────────────────────────────
   return (
-    <div className="mx-auto max-w-4xl px-4 pb-28 pt-8 lg:py-12">{/* pb-28 (mobile) clears the sticky checkout bar */}
+    // RD-RT1.0: the page now sits on the Event Details page container (max-w-7xl,
+    // px-4/6/8) instead of max-w-4xl, so registration continues the same measure the
+    // attendee just left. pb-28 (mobile) clears the sticky checkout bar.
+    <div className="mx-auto w-full max-w-7xl px-4 pb-28 pt-6 sm:px-6 lg:px-8 lg:pb-16 lg:pt-8">
 
-      {/* Mobile compact summary header */}
-      <div className="mb-5 overflow-hidden rounded-xl border border-border bg-card shadow-sm lg:hidden">
-        {bannerUrl && (
-          <div className="relative aspect-[21/6] overflow-hidden">
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img src={bannerUrl} alt="" className="h-full w-full object-cover" />
-            <div className="absolute inset-0 bg-gradient-to-r from-black/70 to-black/30" />
-            <div className="absolute inset-0 flex items-center px-4">
-              <p className="text-[15px] font-bold text-white drop-shadow-sm">{eventName}</p>
-            </div>
-          </div>
-        )}
-        <div className={cn('flex items-center justify-between px-4 py-3', bannerUrl && 'border-t border-border/50')}>
-          {!bannerUrl && (
-            <p className="mr-3 min-w-0 truncate text-[14px] font-bold text-foreground">{eventName}</p>
-          )}
-          {bannerUrl && (
-            <p className="mr-3 min-w-0 truncate text-[13.5px] font-medium text-muted-foreground">{pass.name}</p>
-          )}
-          {!bannerUrl && (
-            <p className="text-[13px] shrink-0 text-muted-foreground">{pass.name}</p>
-          )}
-          <p className="shrink-0 text-[15px] font-bold text-foreground">{priceLabel}</p>
-        </div>
-      </div>
+      {/* RD-RT3.2: compact checkout header (~110px) in place of the 350px poster hero.
+          Poster, pass, date, venue, closing and the trust statements all moved into the
+          sticky summary — relocated, not removed. Owns the page <h1>. */}
+      <RegistrationHeader
+        eventSlug={eventSlug}
+        eventName={eventName}
+        estimate={estimateLabel}
+      />
 
-      {/* Two-column layout */}
-      <div className="lg:grid lg:grid-cols-[minmax(0,1fr)_340px] lg:items-start lg:gap-10">
+      {/* RD-RT3.1: ONE journey, shown for every registration. Payment renders as
+          "not required" rather than vanishing when nothing is due. */}
+      <JourneyStepper current={step} paymentRequired={paymentRequired} />
 
-        {/* LEFT: Progress + form */}
+      {/* 65 / 35 — the registration experience beside a sticky summary. */}
+      {/* RD-RT3.2.1: `lg:items-start` was removed on purpose. It set align-items:start,
+          which shrank the right grid item to its content height — so the sticky child
+          exactly filled its containing block and had ZERO travel distance, which is why
+          it never appeared to stick. With the default `stretch`, the right column spans
+          the row height set by the (taller) form column and the sticky child can move
+          within it. Native CSS only; no scroll listeners. */}
+      <div className="lg:grid lg:grid-cols-[minmax(0,65fr)_minmax(0,35fr)] lg:gap-8">
+
+        {/* LEFT: review, or progress + form.
+            RD-RT3.0: during review the form is replaced rather than appended to, so the
+            attendee confirms one screen instead of scrolling past every field again.
+            `values` lives in component state (and the session draft), so unmounting the
+            form loses nothing and "Edit Registration" restores it exactly. */}
         <div>
+        {step === 'review' ? (
+          <RegistrationReview
+            identity={identity}
+            passName={pass.name}
+            passPriceLabel={priceLabel}
+            strikeLabel={summaryPricing.strikeLabel}
+            passAgeLabel={passAgeLabel}
+            approvalMode={approvalMode}
+            participants={reviewParticipants}
+            paymentRequired={paymentRequired}
+            pricing={{
+              // Server-canonical once create-order has answered (RD-PAYMENT-05 B1);
+              // until then, the pass price the page already displays.
+              lines: feeConfirm
+                ? feeConfirm.breakdown.lines
+                : paymentRequired ? [{ label: 'Registration fee', paise: effectivePaiseNow }] : [],
+              totalPaise: feeConfirm ? feeConfirm.breakdown.totalPaise : effectivePaiseNow,
+              discount:   couponApplied
+                ? { code: couponApplied.code, label: `−₹${(couponApplied.discountPaise / 100).toLocaleString('en-IN')}` }
+                : null,
+              authoritative: !!feeConfirm,
+            }}
+            termsUrl={termsUrl}
+            refundPolicyUrl={refundPolicyUrl}
+            submitting={submitting}
+            consent={consent}
+            onConsent={(key, value) => setConsent(c => ({ ...c, [key]: value }))}
+            ready={reviewReady}
+            onProceed={() => void (feeConfirm ? confirmAndPay() : finaliseRegistration())}
+            onEdit={() => {
+              setConsent({ info: false, terms: false, refund: false })
+              setFeeConfirm(null)
+              setStep('form')
+            }}
+          />
+        ) : (
+        <>
           {/* H-7: in-form pass switcher — change pass without losing entered data */}
           {passes.length > 1 && (
             <PassSwitcher
-              passes={passes}
+              passes={passes.map(p => ({
+                ...p,
+                ageLabel: ageRangeLabel({ minAge: p.minAge ?? null, maxAge: p.maxAge ?? null }),
+              }))}
               selectedId={selectedPassId}
               onSelect={switchPass}
               switching={couponRevalidating}
             />
           )}
 
-          <ProgressIndicator
+          <StepWizard
             sections={passSections}
             activeIdx={activeStepIdx}
             completedCount={completedCount}
           />
 
-          {/* M-4: autosave confirmation (space reserved to avoid layout shift) */}
-          <div className="mb-3 flex h-4 items-center justify-end" aria-live="polite">
-            {draftSaved && (
-              <span className="inline-flex items-center gap-1 text-[11px] font-medium text-muted-foreground">
-                <Check className="size-3 text-emerald-600" aria-hidden />
-                Draft saved
-              </span>
-            )}
-          </div>
+          {/* RD-RT3.5: the draft is OFFERED, never applied behind the attendee's back. */}
+          {pendingDraft && (
+            <RecoveryBanner
+              fieldCount={Object.keys(pendingDraft).length}
+              onResume={resumeDraft}
+              onDiscard={discardDraft}
+            />
+          )}
+
+          {/* M-4 / RD-RT3.5: autosave + connectivity. Height reserved either way, so the
+              text changing never shifts the form. */}
+          <AutosaveStatus savedAt={savedAt} saving={saving} online={online} />
 
           <form
             ref={formRef}
@@ -1519,11 +1482,15 @@ export function RegisterClient({
             onFocusCapture={e => { if (isKeyboardField(e.target)) setFieldFocused(true) }}
             onBlurCapture={e => { if (!isKeyboardField(e.relatedTarget)) setFieldFocused(false) }}
           >
+            <ErrorSummary errors={errorList} onJump={focusField} innerRef={errorSummaryRef} />
+
             <div className="flex flex-col gap-4">
-              {passSections.map(section => (
+              {passSections.map((section, i) => (
                 <SectionBlock
                   key={section.id}
                   section={section}
+                  index={i + 1}
+                  complete={sectionCompleteness[i] ?? false}
                   fieldStates={fieldStates}
                   values={values}
                   errors={errors}
@@ -1536,7 +1503,7 @@ export function RegisterClient({
             {/* Coupon input — only for paid passes without applied coupon */}
             {isPaid && !couponApplied && (
               <div className="mt-5">
-                <p className="mb-1.5 text-[13px] font-medium text-foreground">Have a coupon code?</p>
+                <p className="mb-1.5 text-fs-sm font-medium text-foreground">Have a coupon code?</p>
                 <div className="flex gap-2">
                   <input
                     type="text"
@@ -1544,7 +1511,9 @@ export function RegisterClient({
                     onChange={e => { setCouponInput(e.target.value.toUpperCase()); setCouponError(null) }}
                     onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); void handleApplyCoupon() } }}
                     placeholder="Enter code"
-                    className="flex-1 rounded-lg border border-border bg-background px-3 py-2 font-mono text-[13px] uppercase tracking-widest placeholder:normal-case placeholder:tracking-normal focus:outline-none focus:ring-2 focus:ring-primary/40"
+                    aria-invalid={!!couponError}
+                    aria-describedby={couponError ? "coupon-error" : undefined}
+                    className={cn(controlCls(!!couponError), "flex-1 font-mono uppercase tracking-widest placeholder:normal-case placeholder:tracking-normal")}
                     disabled={couponChecking}
                   />
                   <button
@@ -1556,9 +1525,7 @@ export function RegisterClient({
                     {couponChecking ? 'Checking…' : 'Apply'}
                   </button>
                 </div>
-                {couponError && (
-                  <p role="alert" className="mt-1.5 text-[12px] text-destructive">{couponError}</p>
-                )}
+                {couponError && <FieldError id="coupon-error">{couponError}</FieldError>}
               </div>
             )}
 
@@ -1568,19 +1535,19 @@ export function RegisterClient({
                 <div>
                   <div className="flex items-center gap-1.5">
                     <Check className="size-3.5 text-emerald-600" aria-hidden />
-                    <span className="font-mono text-[12.5px] font-bold text-emerald-700">{couponApplied.code}</span>
+                    <span className="font-mono text-fs-xs font-bold text-emerald-700">{couponApplied.code}</span>
                     {couponApplied.description && (
-                      <span className="text-[12px] text-emerald-600">{couponApplied.description}</span>
+                      <span className="text-fs-xs text-emerald-600">{couponApplied.description}</span>
                     )}
                   </div>
-                  <p className="mt-0.5 text-[11.5px] text-emerald-600">
+                  <p className="mt-0.5 text-fs-2xs text-emerald-600">
                     −₹{(couponApplied.discountPaise / 100).toLocaleString('en-IN')} discount applied
                   </p>
                 </div>
                 <button
                   type="button"
                   onClick={handleRemoveCoupon}
-                  className="ml-3 shrink-0 text-[11.5px] font-medium text-emerald-700 hover:underline"
+                  className="ml-3 shrink-0 text-fs-2xs font-medium text-emerald-700 hover:underline"
                 >
                   Remove
                 </button>
@@ -1589,7 +1556,7 @@ export function RegisterClient({
 
             {/* Approval mode note */}
             {approvalMode === 'manual' && (
-              <div className="mt-5 rounded-xl border border-amber-200/60 bg-amber-50/50 px-4 py-3 text-[12.5px] text-amber-700">
+              <div className="mt-5 rounded-xl border border-amber-200/60 bg-amber-50/50 px-4 py-3 text-fs-xs text-amber-700">
                 Your registration will be reviewed before confirmation. You will be notified by email once approved.
               </div>
             )}
@@ -1601,9 +1568,11 @@ export function RegisterClient({
                 <div className="flex items-start gap-3">
                   <AlertTriangle className="mt-0.5 size-5 shrink-0 text-amber-600" aria-hidden />
                   <div className="min-w-0">
-                    <p className="text-[14px] font-bold text-foreground">Payment not completed</p>
-                    <p className="mt-0.5 text-[12.5px] leading-relaxed text-muted-foreground">
-                      Your payment wasn&apos;t completed and you have not been charged. Your details are saved — retry the payment, or go back to review your registration.
+                    <p className="text-fs-base font-bold text-foreground">Payment wasn&apos;t completed</p>
+                    <p className="mt-0.5 text-fs-xs leading-relaxed text-muted-foreground">
+                      You have <strong className="font-semibold text-foreground">not been charged</strong>, and your
+                      registration details are saved. You can safely resume payment — it reuses the same order, so
+                      you will never be charged twice.
                     </p>
                   </div>
                 </div>
@@ -1627,95 +1596,92 @@ export function RegisterClient({
                   </button>
                 </div>
               </div>
-            ) : feeConfirm ? (
-              /* RD-PAYMENT-05 B1: itemized charge shown from canonical server financials.
-                 Total === order.amount === Razorpay === ledger. Explicit confirm to pay. */
-              <div role="group" aria-label="Confirm payment amount" className="mt-4 rounded-2xl border border-border bg-card p-4 shadow-sm sm:p-5">
-                <p className="text-[14px] font-bold text-foreground">Review your payment</p>
-                <p className="mt-0.5 text-[12.5px] leading-relaxed text-muted-foreground">
-                  Platform fees are added on top of the ticket price. Here&apos;s exactly what you&apos;ll pay.
-                </p>
-                <dl className="mt-3 space-y-1.5">
-                  {feeConfirm.breakdown.lines.map(l => (
-                    <div key={l.label} className="flex items-center justify-between text-[13px]">
-                      <dt className="text-muted-foreground">{l.label}</dt>
-                      <dd className="tabular-nums text-foreground">{formatPaise(l.paise)}</dd>
-                    </div>
-                  ))}
-                  <div className="mt-1 flex items-center justify-between border-t border-border pt-2">
-                    <dt className="text-[13.5px] font-bold text-foreground">Total payable</dt>
-                    <dd className="text-[15px] font-bold tabular-nums text-foreground">{formatPaise(feeConfirm.breakdown.totalPaise)}</dd>
-                  </div>
-                </dl>
-                <div className="mt-4 flex flex-col gap-2 sm:flex-row">
-                  <button
-                    type="button"
-                    onClick={() => void confirmAndPay()}
-                    disabled={submitting}
-                    className={cn(buttonVariants({ variant: 'primary', size: 'md' }), 'flex-1 gap-1.5')}
-                  >
-                    <ShieldCheck className="size-4" aria-hidden />
-                    {submitting ? 'Processing…' : `Confirm & Pay ${formatPaise(feeConfirm.breakdown.totalPaise)}`}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setFeeConfirm(null)}
-                    disabled={submitting}
-                    className={cn(buttonVariants({ variant: 'outline', size: 'md' }), 'flex-1')}
-                  >
-                    Back
-                  </button>
-                </div>
-              </div>
             ) : submitError ? (
               /* Submit error — assertive live region so failures are announced */
-              <div role="alert" className="mt-4 rounded-xl border border-destructive/20 bg-destructive/[0.04] px-4 py-3 text-[13px] text-destructive">
+              <div role="alert" className="mt-4 rounded-xl border border-destructive/20 bg-destructive/[0.04] px-4 py-3 text-fs-sm text-destructive">
                 {submitError}
               </div>
             ) : null}
 
-            {/* Trust badges */}
-            <TrustBadges isPaid={isPaid} />
+            {/* RD-RT1.0: the standalone TrustBadges block is gone — its three claims now
+                sit in the arrival header (before the form) and the summary panel (beside
+                it), so trust is established on arrival rather than after scrolling. Same
+                three statements, still gated on `isPaid`; nothing added. */}
 
-            {/* Submit button — hidden while the recovery card or fee-confirm owns the action */}
+            {/* RD-RT3.2: the in-form submit button is gone — it was a THIRD copy of the
+                primary action (sticky summary on desktop, sticky bar below lg). One
+                primary action per breakpoint now.
+
+                This hidden submit stays so the form keeps a default button: pressing
+                Enter in a text field still submits, exactly as before. `hidden` also
+                keeps it out of the accessibility tree, so nothing is double-announced.
+                The visible CTAs call formRef.current.requestSubmit(), which never needed
+                a button at all. */}
             {!paymentRecovery && !feeConfirm && (
               <>
-                <button
-                  type="submit"
-                  disabled={submitting}
-                  className={cn(buttonVariants({ variant: 'primary', size: 'lg' }), 'mt-4 w-full')}
-                >
-                  {submitting
-                    ? (!isPaid || couponApplied?.finalPaise === 0 ? 'Submitting…' : 'Processing Payment…')
-                    : !isPaid || couponApplied?.finalPaise === 0
-                      ? 'Complete Registration →'
-                      : `Pay ${priceLabel} & Register →`}
+                <button type="submit" hidden aria-hidden tabIndex={-1} disabled={submitting}>
+                  Continue to review
                 </button>
 
-                <p className="mt-3 text-center text-[11px] text-muted-foreground">
+                <p className="mt-5 text-center text-fs-2xs text-muted-foreground">
                   By registering, you agree to the event organiser&apos;s terms and conditions.
                 </p>
+
+                {/* RD-RT3.5: quiet reassurance, precise about scope — the draft lives in
+                    this browser, not in an account. */}
+                <RecoveryReassurance />
               </>
             )}
           </form>
+        </>
+        )}
         </div>
 
-        {/* RIGHT: Sticky summary card (desktop only) */}
+        {/* RIGHT: sticky summary — the desktop checkout surface. It carries the pass,
+            the price, the primary action and the security note, and stays visible while
+            the form scrolls, so the CTA is always reachable without rendering a third
+            copy of the price in a floating bar. */}
         <div className="hidden lg:block">
-          <div className="sticky top-6">
-            <SummaryCard
-              eventName={eventName}
-              bannerUrl={bannerUrl}
-              venueName={venueName}
-              venueCity={venueCity}
-              venueType={venueType}
-              startDate={startDate}
-              startTime={startTime}
+          {/* RD-RT3.3: bounded to the viewport and scrollable internally, so a summary
+              taller than the screen no longer hides its own CTA. Overflow lives on the
+              STICKY element itself, never an ancestor, so stickiness is unaffected. */}
+          <div className="sticky top-6 max-h-[calc(100vh-3rem)] overflow-y-auto overscroll-contain">
+            <SummaryPanel
+              identity={identity}
               passName={pass.name}
-              isPaid={isPaid}
-              price={pass.price}
-              regularPrice={pass.regularPrice}
-              couponApplied={couponApplied}
+              pricing={summaryPricing}
+              action={paymentRecovery ? undefined : step === 'review' ? (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => void (feeConfirm ? confirmAndPay() : finaliseRegistration())}
+                    disabled={submitting || !reviewReady}
+                    className={cn(buttonVariants({ variant: 'primary', size: 'md' }), 'w-full gap-1.5')}
+                  >
+                    <ShieldCheck className="size-4" aria-hidden />
+                    {submitting ? 'Processing…' : paymentRequired ? 'Proceed to Secure Payment' : 'Complete Registration'}
+                  </button>
+                  <p className="mt-2.5 flex items-center justify-center gap-1.5 text-fs-2xs text-muted-foreground">
+                    <ShieldCheck className="size-3 shrink-0 text-emerald-600" aria-hidden />
+                    Encrypted payment via Razorpay
+                  </p>
+                </>
+              ) : (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => formRef.current?.requestSubmit()}
+                    disabled={submitting}
+                    className={cn(buttonVariants({ variant: 'primary', size: 'md' }), 'w-full')}
+                  >
+                    {submitting ? processingLabel : ctaLabel}
+                  </button>
+                  <p className="mt-2.5 flex items-center justify-center gap-1.5 text-fs-2xs text-muted-foreground">
+                    <ShieldCheck className="size-3 shrink-0 text-emerald-600" aria-hidden />
+                    {isPaid ? 'Encrypted payment via Razorpay' : 'Your details are sent securely'}
+                  </p>
+                </>
+              )}
             />
           </div>
         </div>
@@ -1725,26 +1691,49 @@ export function RegisterClient({
       {/* C-2: mobile-only sticky checkout bar (Total + Pay). Desktop keeps the right-column
           sticky SummaryCard — this is `lg:hidden`, so the desktop summary is never duplicated.
           Steps aside while a keyboard field is focused; clears the iOS safe-area inset. */}
-      {!paymentRecovery && !feeConfirm && (
+      {/* RD-RT3.0: the bar now also serves the review step, showing the confirmed total
+          and the SAME consent-gated proceed action. It stays hidden during payment
+          recovery, where the recovery card owns the action. */}
+      {!paymentRecovery && (
         <div className={cn(
           'fixed inset-x-0 bottom-0 z-40 border-t border-border bg-card/95 px-4 pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] shadow-[0_-4px_20px_rgb(0_0_0/0.08)] backdrop-blur-md lg:hidden',
           fieldFocused && 'hidden',
         )}>
           <div className="mx-auto flex max-w-lg items-center justify-between gap-4">
             <div className="min-w-0">
-              <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Total</p>
-              <p className="text-[17px] font-bold leading-tight text-foreground">{priceLabel}</p>
+              <p className="text-fs-2xs font-semibold uppercase tracking-wider text-muted-foreground">Total</p>
+              <p className="text-fs-lg font-bold leading-tight text-foreground">
+                {feeConfirm
+                  ? formatPaise(feeConfirm.breakdown.totalPaise)
+                  : couponApplied
+                    ? priceLabel
+                    : <PassPrice price={pass.price} regularPrice={pass.regularPrice} isFree={pass.isFree} align="left" size="sm" showBadge={false} />}
+              </p>
+              <p className="sr-only">
+                {step === 'review' ? 'Review your registration before confirming' : 'Total for this registration'}
+              </p>
             </div>
-            <button
-              type="button"
-              onClick={() => formRef.current?.requestSubmit()}
-              disabled={submitting}
-              className={cn(buttonVariants({ variant: 'primary', size: 'lg' }), 'min-w-[52%]')}
-            >
-              {submitting
-                ? (!isPaid || couponApplied?.finalPaise === 0 ? 'Submitting…' : 'Processing…')
-                : (!isPaid || couponApplied?.finalPaise === 0 ? 'Complete Registration' : `Pay ${priceLabel}`)}
-            </button>
+            {step === 'review' ? (
+              <button
+                type="button"
+                onClick={() => void (feeConfirm ? confirmAndPay() : finaliseRegistration())}
+                disabled={submitting || !reviewReady}
+                className={cn(buttonVariants({ variant: 'primary', size: 'lg' }), 'min-w-[52%]')}
+              >
+                {submitting ? 'Processing…' : paymentRequired ? 'Proceed to Pay' : 'Complete'}
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => formRef.current?.requestSubmit()}
+                disabled={submitting}
+                className={cn(buttonVariants({ variant: 'primary', size: 'lg' }), 'min-w-[52%]')}
+              >
+                {submitting
+                  ? (!isPaid || couponApplied?.finalPaise === 0 ? 'Submitting…' : 'Processing…')
+                  : (!isPaid || couponApplied?.finalPaise === 0 ? 'Complete Registration' : `Pay ${priceLabel}`)}
+              </button>
+            )}
           </div>
         </div>
       )}

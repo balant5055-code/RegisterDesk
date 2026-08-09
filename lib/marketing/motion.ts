@@ -40,6 +40,21 @@ export const stagger: Variants = {
 export const VIEWPORT_ONCE = { once: true, amount: 0.3 } as const
 
 /**
+ * Interaction motion — hover · keyboard focus · press.
+ *
+ * Centralized so no component invents its own lift distance or press scale.
+ * Deliberately tiny (2px / 0.5%): the surface should feel responsive, never
+ * bouncy. Consumers must gate these on `useReducedMotion()` — see MotionLink,
+ * which is the shared consumer for link/row surfaces.
+ */
+export const INTERACTION = {
+  hover: { y: -2 },
+  focus: { y: -2 },
+  tap:   { y: 0, scale: 0.995 },
+  transition: { duration: DURATION.micro, ease },
+} as const
+
+/**
  * REDUCED_MOTION_NOTE: section components must read `useReducedMotion()` from
  * framer-motion and, when true, render the final state with no y-offset / parallax
  * (apply `show` immediately, skip `hidden`). The animation budget is one hero

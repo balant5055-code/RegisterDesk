@@ -21,6 +21,8 @@ import {
 import { StatusPill } from '@/components/admin'
 import type { PillTone } from '@/components/admin'
 import type { LucideIcon } from 'lucide-react'
+// RD-ADMIN-CLOSURE-01 · the ONE admin IA. This file no longer keeps a copy of it.
+import { ADMIN_SIDEBAR_NAV } from '@/config/navigation'
 import type { AdminOrganizerSummary, AdminOrganizersListResponse } from '@/lib/admin/organizerTypes'
 import type { LicenseRow, LicenseListResponse } from '@/lib/admin/licenseAdminTypes'
 import type { CouponView, CouponListResponse } from '@/lib/admin/licenseCenterTypes'
@@ -47,36 +49,40 @@ const GROUP_ICON: Record<ResultGroup, LucideIcon> = {
   Organizers: Building2, Events: CalendarDays, Commerce: KeyRound, Navigation: LayoutGrid,
 }
 
-// ─── Static navigation (the "commands"/quick-links — navigation only) ──────────
+// ─── Navigation, DERIVED from the sidebar IA ──────────────────────────────────
+//
+// ═══ WHY THIS IS NOT A LIST ANY MORE ═════════════════════════════════════════
+// RD-ADMIN-IA-01 found ⌘K knew only 15 of 26 admin destinations. Media Credits — the whole
+// refund, grant and reconciliation console — was among the 11 it could not find, along with
+// Incidents, Support, Clawbacks, Top-ups, Pricing Operations, Finance Reports, Reminders,
+// Communication Center, ID Migration and Global Search itself.
+//
+// The cause was not an oversight in any one sprint: this file kept its OWN hand-maintained
+// copy of the admin map, so every page added since it was written silently missed the
+// palette. `ADMIN_ALL_NAV` already existed in config/navigation.ts and is documented there
+// as being "for active-state lookups and command-palette style enumeration" — the single
+// source of truth was built and then not used.
+//
+// Deriving from it means a page added to the sidebar is findable in ⌘K and on Global Search
+// the same day, with no second edit and nothing to forget.
 
 interface NavItem { title: string; subtitle: string; href: string; keywords: string }
-export const GLOBAL_NAV: { section: string; items: NavItem[] }[] = [
-  { section: 'Platform', items: [
-    { title: 'Admin Dashboard', subtitle: 'Platform overview', href: '/admin/dashboard', keywords: 'home overview stats' },
-    { title: 'Platform Monitoring', subtitle: 'Health dashboard', href: '/admin/platform-monitor', keywords: 'health monitor infrastructure services' },
-    { title: 'Analytics', subtitle: 'Platform analytics', href: '/admin/analytics', keywords: 'charts revenue growth' },
-  ] },
-  { section: 'Operations', items: [
-    { title: 'Operations Center', subtitle: 'Background jobs / NOC', href: '/admin/operations-center', keywords: 'jobs noc queue print certificate import export' },
-    { title: 'Operations Health', subtitle: 'Cron & recovery', href: '/admin/operations', keywords: 'cron recovery health alerts' },
-    { title: 'Communications', subtitle: 'Email / WhatsApp', href: '/admin/communications', keywords: 'email whatsapp broadcast' },
-  ] },
-  { section: 'Commerce', items: [
-    { title: 'License & Coupon Center', subtitle: 'Command center', href: '/admin/license-center', keywords: 'license coupon orders expiry override' },
-    { title: 'Licenses', subtitle: 'License console', href: '/admin/licenses', keywords: 'license grant' },
-    { title: 'Finance', subtitle: 'Finance console', href: '/admin/finance', keywords: 'settlement payout revenue' },
-  ] },
-  { section: 'Governance', items: [
-    { title: 'Audit Log', subtitle: 'Admin audit trail', href: '/admin/audit', keywords: 'audit security actions' },
-    { title: 'Moderation', subtitle: 'Events & campaigns', href: '/admin/moderation', keywords: 'moderation takedown report' },
-    { title: 'Event Approvals', subtitle: 'Review queue', href: '/admin/event-approvals', keywords: 'approve review pending' },
-    { title: 'Organizers', subtitle: 'Organizer accounts', href: '/admin/organizers', keywords: 'organizer users accounts' },
-    { title: 'Business Configuration', subtitle: 'Runtime settings', href: '/admin/business-configuration', keywords: 'config settings fees licensing' },
-    { title: 'Domains', subtitle: 'Custom domains', href: '/admin/domains', keywords: 'domain dns custom' },
-  ] },
-]
 
-const ALL_NAV: (NavItem & { section: string })[] = GLOBAL_NAV.flatMap(g => g.items.map(i => ({ ...i, section: g.section })))
+export const GLOBAL_NAV: { section: string; items: NavItem[] }[] = ADMIN_SIDEBAR_NAV.map(g => ({
+  // The palette's sections ARE the sidebar's groups, so the two surfaces describe the
+  // platform with the same words.
+  section: g.label,
+  items: g.items.map(i => ({
+    title:    i.label,
+    subtitle: i.description ?? '',
+    href:     i.href,
+    // Lower-cased once here because `navResults` matches against a lower-cased query.
+    keywords: (i.keywords ?? '').toLowerCase(),
+  })),
+}))
+
+const ALL_NAV: (NavItem & { section: string })[] =
+  GLOBAL_NAV.flatMap(g => g.items.map(i => ({ ...i, section: g.section })))
 
 function navResults(q: string): SearchResult[] {
   const ql = q.trim().toLowerCase()

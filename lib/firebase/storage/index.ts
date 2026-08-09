@@ -1,8 +1,9 @@
 import {
   getStorage, ref,
-  uploadBytes, uploadBytesResumable, getDownloadURL,
+  uploadBytes, uploadBytesResumable, getDownloadURL, connectStorageEmulator,
 } from 'firebase/storage'
 import { firebaseApp } from '@/lib/firebase/config'
+import { connectOnce, EMULATOR_HOST, EMULATOR_PORTS } from '@/lib/firebase/emulator'
 
 export type AssetType = 'logo' | 'banner' | 'gallery'
 // GA-6 S4 adds brand-kit slots (one per type, overwrite-in-place) — additive.
@@ -12,7 +13,11 @@ export type OrganizerAssetType =
 
 let _storage: ReturnType<typeof getStorage> | null = null
 function store() {
-  if (!_storage) _storage = getStorage(firebaseApp)
+  if (!_storage) {
+    _storage = getStorage(firebaseApp)
+    // RD-EVENT-16 — no-op unless the emulator flag is set.
+    connectOnce('storage', () => connectStorageEmulator(_storage!, EMULATOR_HOST, EMULATOR_PORTS.storage))
+  }
   return _storage
 }
 

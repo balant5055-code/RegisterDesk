@@ -43,7 +43,7 @@ function WorkspaceCard({ item }: { item: WorkspaceItemDef }) {
           <h3 className="text-[16px] font-semibold text-foreground">{item.title}</h3>
         </div>
         <p className={`${typography.body} mt-2 line-clamp-2 text-muted-foreground`}>{item.description}</p>
-        <span className="mt-3 inline-flex items-center gap-1 text-[var(--fs-base)] font-semibold text-primary">
+        <span className="mt-3 inline-flex items-center gap-1 text-fs-base font-semibold text-primary">
           Open {item.title} <ArrowRight className="size-3.5 transition-transform duration-[220ms] group-hover:translate-x-0.5" aria-hidden />
         </span>
       </div>

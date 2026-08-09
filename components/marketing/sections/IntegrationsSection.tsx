@@ -40,10 +40,10 @@ function Chip({ chip }: { chip: IntegrationChip }) {
       className="flex h-10 list-none items-center gap-2 rounded-full border border-border/60 bg-white px-[18px] shadow-sm transition-all duration-200 hover:-translate-y-0.5 hover:border-primary/30 hover:shadow-md"
     >
       <Icon className="size-4 shrink-0 text-muted-foreground" strokeWidth={1.8} aria-hidden />
-      <span className="text-[var(--fs-base)] font-medium text-foreground">{chip.name}</span>
+      <span className="text-fs-base font-medium text-foreground">{chip.name}</span>
       <span className="ml-1 flex items-center gap-1.5">
         <span className={cn('size-1.5 rounded-full', live ? 'bg-emerald-500' : 'bg-muted-foreground/40')} aria-hidden />
-        <span className={cn('text-[var(--fs-xs)] font-medium', live ? 'text-emerald-600' : 'text-muted-foreground')}>
+        <span className={cn('text-fs-xs font-medium', live ? 'text-emerald-600' : 'text-muted-foreground')}>
           {live ? 'Live' : 'Coming soon'}
         </span>
       </span>

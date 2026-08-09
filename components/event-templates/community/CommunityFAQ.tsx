@@ -74,7 +74,7 @@ export function CommunityFAQ({
           </h2>
         </motion.div>
 
-        <div className="grid gap-8 lg:grid-cols-[1fr_260px]">
+        <div className="grid gap-8 lg:grid-cols-[minmax(0,1fr)_260px]">
 
           {/* Accordion */}
           {faqs.length > 0 && (

@@ -20,6 +20,7 @@ import { ONLINE_PLATFORM_LABELS } from '@/components/wizard/eventDetailsConfig'
 import { TemplateRouter } from '@/components/event-templates/TemplateRouter'
 import type { PassPublic } from '@/components/event-templates/types'
 import { getBrandingConfig } from '@/lib/config/resolveBrandingConfig'
+import { EventResultsBanner } from '@/features/race-operations/components/public/EventResultsBanner'
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
@@ -403,6 +404,9 @@ export default async function EventPage({ params }: PageProps) {
 
   return (
     <>
+      {/* RD-RESULTS-PUBLIC-FIX-01 · shown only when this event has published results. */}
+      <EventResultsBanner eventSlug={slug} />
+
       <script
         type="application/ld+json"
         dangerouslySetInnerHTML={{
@@ -421,6 +425,7 @@ export default async function EventPage({ params }: PageProps) {
         title={title}
         tagline={tagline}
         description={description}
+        shortDesc={shortDesc}
         bannerUrl={bannerUrl}
         logoUrl={logoUrl}
         gallery={gallery}

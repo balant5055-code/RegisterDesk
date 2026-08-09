@@ -9,7 +9,7 @@ import {
   Ticket, CreditCard, ScanLine, IdCard, CalendarClock, Award, Users, Mail,
   Wallet, Banknote, BarChart3, Plug, Webhook, ShieldCheck, Globe, Building2,
   Trophy, GraduationCap, HeartHandshake, Megaphone, Lock, Zap, FileCheck2,
-  LayoutDashboard, QrCode, Repeat, Landmark, ReceiptText, Network,
+  LayoutDashboard, QrCode, Repeat, Landmark, ReceiptText, Network, LifeBuoy,
 } from 'lucide-react'
 
 export const MARKETING_ICONS = {
@@ -42,6 +42,7 @@ export const MARKETING_ICONS = {
   invoice:       ReceiptText,
   verify:        FileCheck2,
   fast:          Zap,
+  support:       LifeBuoy,
 } as const satisfies Record<string, LucideIcon>
 
 export type MarketingIconKey = keyof typeof MARKETING_ICONS

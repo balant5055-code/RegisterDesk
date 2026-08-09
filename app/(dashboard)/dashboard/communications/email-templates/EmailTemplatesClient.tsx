@@ -367,7 +367,7 @@ export function EmailTemplatesClient() {
       )}
 
       {loadState === 'loaded' && (
-        <div className="grid gap-5 lg:grid-cols-[280px_1fr]">
+        <div className="grid gap-5 lg:grid-cols-[280px_minmax(0,1fr)]">
 
           {/* ── Left: template selector ── */}
           <aside className="space-y-4">

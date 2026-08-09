@@ -12,7 +12,7 @@ export interface AuthHeaderProps {
 export function AuthHeader({ title, subtitle }: AuthHeaderProps) {
   return (
     <div className="mb-6">
-      <h2 className="text-[var(--fs-xl)] font-bold leading-tight tracking-tight text-foreground">
+      <h2 className="text-fs-xl font-bold leading-tight tracking-tight text-foreground">
         {title}
       </h2>
       {subtitle && (

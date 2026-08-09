@@ -35,7 +35,7 @@ export function PlatformHero({ hero }: { hero: PlatformHeroConfig }) {
           <h1 id="platform-hero-heading" className={cn(marketingType.hero, 'mt-5 text-foreground')}>
             {hero.headline}
           </h1>
-          <p className="mx-auto mt-5 max-w-2xl text-[var(--fs-lg)] leading-relaxed text-muted-foreground">
+          <p className="mx-auto mt-5 max-w-2xl text-fs-lg leading-relaxed text-muted-foreground">
             {hero.subheadline}
           </p>
           <div className="mt-8 flex flex-wrap items-center justify-center gap-3">

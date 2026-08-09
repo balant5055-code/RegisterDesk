@@ -66,7 +66,7 @@ export function AwardsVenue({ venueName, physical, venueMaps }: AwardsVenueProps
           </h2>
         </motion.div>
 
-        <div className="grid gap-6 lg:grid-cols-[1fr_260px]">
+        <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_260px]">
 
           {/* Left */}
           <div className="space-y-4">

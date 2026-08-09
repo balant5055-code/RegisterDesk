@@ -64,7 +64,7 @@ export function ScreenshotFrame({ screenshot, variant, alt, className }: Screens
         />
       </div>
       {screenshot.title && (
-        <figcaption className="px-3 py-2 text-[var(--fs-xs)] text-muted-foreground">{screenshot.title}</figcaption>
+        <figcaption className="px-3 py-2 text-fs-xs text-muted-foreground">{screenshot.title}</figcaption>
       )}
     </figure>
   )

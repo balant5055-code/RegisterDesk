@@ -19,7 +19,7 @@ import type { FaqItem } from '@/lib/marketing/types'
 export function FAQItem({ item }: { item: FaqItem }) {
   return (
     <details className="group border-b border-border/60 py-4">
-      <summary className="flex cursor-pointer list-none items-center justify-between gap-4 rounded text-[var(--fs-md)] font-medium text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary [&::-webkit-details-marker]:hidden">
+      <summary className="flex cursor-pointer list-none items-center justify-between gap-4 rounded text-fs-md font-medium text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary [&::-webkit-details-marker]:hidden">
         {item.question}
         <ChevronDown className="size-4 shrink-0 text-muted-foreground transition-transform group-open:rotate-180" aria-hidden />
       </summary>
@@ -28,7 +28,7 @@ export function FAQItem({ item }: { item: FaqItem }) {
         {item.href && (
           <Link
             href={item.href}
-            className="mt-2 inline-flex items-center gap-1 rounded text-[var(--fs-sm)] font-medium text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+            className="mt-2 inline-flex items-center gap-1 rounded text-fs-sm font-medium text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
           >
             Learn more <ArrowRight className="size-3" aria-hidden />
           </Link>

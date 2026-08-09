@@ -8,13 +8,20 @@ import {
   signInWithEmailAndPassword,
   signOut,
   sendPasswordResetEmail,
+  connectAuthEmulator,
 } from 'firebase/auth'
 import type { User } from 'firebase/auth'
 import { FirebaseError } from 'firebase/app'
 import { firebaseApp } from '../config'
+import { connectOnce, EMULATOR_HOST, EMULATOR_PORTS } from '../emulator'
 import { createOrganizerProfile, organizerProfileExists } from '../firestore'
 
 export const auth = getAuth(firebaseApp)
+
+// RD-EVENT-16 — no-op unless NEXT_PUBLIC_FIREBASE_EMULATOR === 'true'. Must run before any
+// sign-in call, which module scope guarantees.
+connectOnce('auth', () =>
+  connectAuthEmulator(auth, `http://${EMULATOR_HOST}:${EMULATOR_PORTS.auth}`, { disableWarnings: true }))
 
 // ─── applySessionPersistence ──────────────────────────────────────────────────
 // The SINGLE session-persistence decision (RD-AUTH-01 H-B). This is the ONLY place

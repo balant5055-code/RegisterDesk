@@ -6,8 +6,11 @@
 // icon), so both new templates reuse ONE hero implementation. All hero composition and
 // interaction live in EventHeroFramework; this only translates event data into it.
 
-import { Calendar, MapPin, Globe } from 'lucide-react'
+import { Calendar, MapPin, Globe, ShieldCheck, Zap } from 'lucide-react'
+import { cn } from '@/lib/utils/cn'
+import { EVENT_CONTAINER } from '@/components/event-templates/shared/ui/framework'
 import { EventHeroFramework } from '@/components/event-templates/shared/hero/EventHeroFramework'
+import type { HeroEssential, HeroTrustItem } from '@/components/event-templates/shared/hero/EventHeroFramework'
 import { formatDate, formatTime, formatINR, minPassPrice } from '@/components/event-templates/shared/utils/format'
 import { buildEventBreadcrumbs } from '@/lib/events/breadcrumbs'
 import { getTemplate } from '@/lib/events/templateRegistry'
@@ -33,6 +36,8 @@ export interface EventHeroProps {
   isFreeEvent:        boolean
   passes:             PassPublic[]
   organizerVerified?: boolean
+  /** Organiser name — hierarchy rank 9 ("Hosted by …"). */
+  organizerName?:     string
   /** Anchor the primary CTA scrolls to — the template's registration section id. */
   registerHref?:      string
 }
@@ -43,7 +48,7 @@ export function EventHero(props: EventHeroProps) {
     startDate, startTime = '', endDate = '', endTime = '',
     venueType, venueName, city,
     lifecycleStatus, registrationOpen, isFreeEvent, passes,
-    organizerVerified, registerHref = '#tickets',
+    organizerVerified, organizerName, registerHref = '#tickets',
   } = props
 
   const activePasses = passes.filter(p => p.status !== 'inactive')
@@ -58,13 +63,20 @@ export function EventHero(props: EventHeroProps) {
   const whenLine  = [startDate && formatDate(startDate), startTime && formatTime(startTime)].filter(Boolean).join(' · ')
   const whereLine = venueType === 'online' ? 'Online event' : [venueName, city].filter(Boolean).join(', ')
   const essentials = [
-    whenLine  && { icon: Calendar, text: whenLine },
-    whereLine && { icon: venueType === 'online' ? Globe : MapPin, text: whereLine },
-  ].filter(Boolean) as { icon: typeof Calendar; text: string }[]
+    whenLine  && { icon: Calendar, label: 'When',  text: whenLine },
+    whereLine && { icon: venueType === 'online' ? Globe : MapPin, label: 'Where', text: whereLine },
+  ].filter(Boolean) as HeroEssential[]
 
-  const trust = ['Secure Registration', organizerVerified ? 'Verified Organizer' : ''].filter(Boolean)
-  const priceLabel = canRegister
-    ? (isFreeEvent || minPrice === 0 ? 'Free entry' : `From ${formatINR(minPrice)}`)
+  // "Verified Organizer" is not repeated here — it renders on the organiser
+  // attribution line, and the hierarchy forbids duplicated information.
+  const trust: HeroTrustItem[] = [
+    { icon: ShieldCheck, label: 'Secure Registration' },
+    { icon: Zap,         label: 'Instant Confirmation' },
+  ]
+
+  const isFree = isFreeEvent || minPrice === 0
+  const pricing = canRegister
+    ? (isFree ? { amount: 'Free entry' } : { caption: 'From', amount: formatINR(minPrice) })
     : undefined
 
   const crumbs = buildEventBreadcrumbs(eventType, title)
@@ -72,7 +84,8 @@ export function EventHero(props: EventHeroProps) {
   return (
     <>
       <div className="border-b border-border/60 bg-white">
-        <div className="mx-auto max-w-7xl px-5 py-3 sm:px-8 lg:px-8">
+        {/* ST41-C01: same padding scale as every section (was px-5 / sm:px-8). */}
+        <div className={cn(EVENT_CONTAINER, 'py-3')}>
           <Breadcrumbs items={crumbs} />
         </div>
       </div>
@@ -93,7 +106,8 @@ export function EventHero(props: EventHeroProps) {
           title, startDate, endDate: endDate || startDate, startTime, endTime,
           location: whereLine, description: tagline ?? '', slug,
         } : undefined}
-        priceLabel={priceLabel}
+        pricing={pricing}
+        organizer={organizerName?.trim() ? { name: organizerName.trim(), verified: organizerVerified } : undefined}
         trust={trust}
       />
     </>

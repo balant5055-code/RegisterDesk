@@ -1,8 +1,8 @@
 'use client'
 
 import { AlarmClock, Languages, Shirt, Building2, ExternalLink } from 'lucide-react'
-import type { EventDetailProps } from '@/app/events/[slug]/EventDetailClient'
-import { LinkedCampaignSection } from '@/app/events/[slug]/EventDetailClient'
+import type { EventDetailProps } from '@/components/event-templates/types'
+import { LinkedCampaignSection } from '@/components/event-templates/shared/donation/LinkedCampaignSection'
 import { EventInfoSection } from '@/components/event-templates/shared/ui/EventInfoSection'
 import type { ExhibitionDetails } from '@/components/wizard/eventDetailsConfig'
 import { EventDetailsFramework }    from '@/components/event-templates/EventDetailsFramework'

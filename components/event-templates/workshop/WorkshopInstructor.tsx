@@ -47,7 +47,7 @@ export function WorkshopInstructor({ trainers }: WorkshopInstructorProps) {
           transition={{ duration: 0.45, ease: [0.25, 0, 0, 1] }}
           className="overflow-hidden rounded-2xl border border-gray-100 bg-white"
         >
-          <div className="grid sm:grid-cols-[200px_1fr] lg:grid-cols-[240px_1fr]">
+          <div className="grid sm:grid-cols-[200px_minmax(0,1fr)] lg:grid-cols-[240px_minmax(0,1fr)]">
 
             {/* Photo */}
             <div className="flex items-start justify-center bg-gray-50 p-6 sm:block sm:p-0">

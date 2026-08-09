@@ -1,8 +1,8 @@
 'use client'
 
 import { AlarmClock, Languages, Shirt } from 'lucide-react'
-import type { EventDetailProps } from '@/app/events/[slug]/EventDetailClient'
-import { LinkedCampaignSection } from '@/app/events/[slug]/EventDetailClient'
+import type { EventDetailProps } from '@/components/event-templates/types'
+import { LinkedCampaignSection } from '@/components/event-templates/shared/donation/LinkedCampaignSection'
 import { EventInfoSection } from '@/components/event-templates/shared/ui/EventInfoSection'
 import type { WorkshopDetails as WorkshopDetailsData } from '@/components/wizard/eventDetailsConfig'
 import { EventDetailsFramework } from '@/components/event-templates/EventDetailsFramework'
@@ -230,12 +230,12 @@ export function WorkshopTemplate(props: EventDetailProps) {
       />
 
       {/* ── Sticky mobile CTA ────────────────────────────────────────────────── */}
+      {/* RD-ST15.0: venueType/online deliberately NOT passed — VenueSection above already
+          renders the online block, so passing it here would print it twice. */}
       <EventInfoSection
         language={props.language}
         dressCode={props.dressCode}
         timezone={props.timezone}
-        venueType={props.venueType}
-        online={props.online}
         refundWindow={props.refundWindow}
         refundPolicyUrl={props.refundPolicyUrl}
       />

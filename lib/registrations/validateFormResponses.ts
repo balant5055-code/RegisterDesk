@@ -11,12 +11,22 @@
 // always agree on which fields are shown/required — a visible registration is
 // never rejected for a field the attendee never saw.
 
+import { ageEligibilityError, resolveDobField, type AgeLimits } from './ageEligibility'
 import type {
   RegistrationFormDraft,
   FormSection,
   FormField,
   ConditionalRule,
 } from '@/components/wizard/registrationFormConfig'
+
+/**
+ * RD-RT3.2.2: optional age-eligibility context. Absent → age is not checked, so every
+ * existing caller keeps its exact previous behaviour.
+ */
+export interface EligibilityContext extends AgeLimits {
+  /** The event start date (YYYY-MM-DD). Age is measured on this date, never today. */
+  eventDate: string | null | undefined
+}
 
 export interface FormValidationError {
   fieldId: string
@@ -168,6 +178,7 @@ function collectErrors(
   passId:           string,
   responses:        Record<string, unknown> | undefined,
   firstOnly:        boolean,
+  eligibility?:     EligibilityContext,
 ): FormValidationError[] {
   const allFields = sections.flatMap(s => s.fields)
   if (allFields.length === 0) return []
@@ -202,6 +213,20 @@ function collectErrors(
     }
   }
 
+  // RD-RT3.2.2 — age eligibility. Applied through the SAME error channel as every other
+  // rule, so it focuses the field, blocks review, blocks payment and blocks submission
+  // without a second validation system. Only checked when the field is visible.
+  if (eligibility) {
+    const dobField = resolveDobField(allFields)
+    if (dobField && states.get(dobField.id)?.visible !== false) {
+      const message = ageEligibilityError(values[dobField.id] ?? '', eligibility.eventDate, eligibility)
+      if (message) {
+        errors.push({ fieldId: dobField.id, label: dobField.label, message })
+        if (firstOnly) return errors
+      }
+    }
+  }
+
   return errors
 }
 
@@ -214,8 +239,9 @@ export function validateFormResponses(
   form:      RegistrationFormDraft,
   passId:    string,
   responses: Record<string, unknown> | undefined,
+  eligibility?: EligibilityContext,
 ): FormValidationError | null {
-  return collectErrors(form.sections, form.conditionalRules, passId, responses, true)[0] ?? null
+  return collectErrors(form.sections, form.conditionalRules, passId, responses, true, eligibility)[0] ?? null
 }
 
 /**
@@ -223,11 +249,45 @@ export function validateFormResponses(
  * first) using the IDENTICAL rules, so the on-form validation matches the server
  * exactly with no duplicated logic (RD-ATTENDEE-03A H3).
  */
+/**
+ * RD-RT4.0 — strip everything that is not a configured field.
+ *
+ * `validateFormResponses` only ever iterates the CONFIGURED fields, so any extra key an
+ * attacker adds to `formResponses` passed validation untouched and was then written to
+ * Firestore verbatim by both registration routes. That is an unbounded write primitive
+ * on the registration document.
+ *
+ * Both routes now store the output of this function instead of the raw body. Unknown
+ * keys are dropped rather than rejected: a form the organiser edited mid-session can
+ * legitimately leave a stale key in a client's memory, and failing that attendee's
+ * submission would be a worse outcome than ignoring the key. Nothing unknown reaches
+ * storage either way.
+ *
+ * Values are coerced to string and length-capped, so a known field cannot be used to
+ * write an oversized document either.
+ */
+const MAX_RESPONSE_CHARS = 5_000
+
+export function sanitizeFormResponses(
+  sections:  FormSection[],
+  responses: Record<string, unknown> | undefined,
+): Record<string, string> {
+  const known = new Set(sections.flatMap(s => s.fields).map(f => f.id))
+  const clean: Record<string, string> = {}
+  for (const [key, raw] of Object.entries(responses ?? {})) {
+    if (!known.has(key)) continue
+    if (raw === null || raw === undefined) continue
+    clean[key] = String(raw).slice(0, MAX_RESPONSE_CHARS)
+  }
+  return clean
+}
+
 export function collectFormErrors(
   sections:         FormSection[],
   conditionalRules: ConditionalRule[] | undefined,
   passId:           string,
   responses:        Record<string, unknown> | undefined,
+  eligibility?:     EligibilityContext,
 ): FormValidationError[] {
-  return collectErrors(sections, conditionalRules, passId, responses, false)
+  return collectErrors(sections, conditionalRules, passId, responses, false, eligibility)
 }

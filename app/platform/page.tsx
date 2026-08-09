@@ -68,11 +68,11 @@ export default function PlatformPage() {
                           <Icon className="size-5 text-primary" aria-hidden />
                         </span>
                       )}
-                      <span className="text-[var(--fs-xs)] font-semibold tabular-nums text-muted-foreground/40">{String(idx + 1).padStart(2, '0')}</span>
+                      <span className="text-fs-xs font-semibold tabular-nums text-muted-foreground/40">{String(idx + 1).padStart(2, '0')}</span>
                     </div>
-                    <h3 className="mt-5 text-[var(--fs-md)] font-semibold text-foreground">{item.title}</h3>
-                    {item.description && <p className="mt-2 flex-1 text-[var(--fs-base)] leading-relaxed text-muted-foreground">{item.description}</p>}
-                    <span className="mt-4 inline-flex items-center gap-1 text-[var(--fs-sm)] font-medium text-primary">
+                    <h3 className="mt-5 text-fs-md font-semibold text-foreground">{item.title}</h3>
+                    {item.description && <p className="mt-2 flex-1 text-fs-base leading-relaxed text-muted-foreground">{item.description}</p>}
+                    <span className="mt-4 inline-flex items-center gap-1 text-fs-sm font-medium text-primary">
                       Explore <ArrowRight className="size-3 transition-transform group-hover:translate-x-0.5" aria-hidden />
                     </span>
                   </Link>
@@ -87,10 +87,10 @@ export default function PlatformPage() {
           <div className={cn(MARKETING_CONTAINER.page, 'rd-reveal')}>
             <div className="relative overflow-hidden rounded-3xl border border-border/60 bg-muted/30 px-6 py-14 text-center sm:px-12">
               <div aria-hidden className="pointer-events-none absolute inset-x-0 top-0 -z-10 h-40 bg-[radial-gradient(60%_120%_at_50%_0%,rgb(var(--primary-rgb)_/_0.06),transparent)]" />
-              <h2 id="platform-cta-heading" className="mx-auto max-w-2xl text-[var(--fs-2xl)] font-bold tracking-tight text-foreground sm:text-[var(--fs-3xl)]">
+              <h2 id="platform-cta-heading" className="mx-auto max-w-2xl text-fs-2xl font-bold tracking-tight text-foreground sm:text-fs-3xl">
                 Run every event from one platform
               </h2>
-              <p className="mx-auto mt-4 max-w-xl text-[var(--fs-md)] leading-relaxed text-muted-foreground">
+              <p className="mx-auto mt-4 max-w-xl text-fs-md leading-relaxed text-muted-foreground">
                 Start free and explore the whole platform.
               </p>
               <div className="mt-8 flex flex-wrap items-center justify-center gap-3">

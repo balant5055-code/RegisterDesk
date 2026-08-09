@@ -80,12 +80,12 @@ function CauseCard({ campaign }: { campaign: CampaignListItem }) {
         {/* Badges */}
         <div className="absolute left-3 top-3 flex flex-wrap gap-1.5">
           {subtype && (
-            <span className="rounded-full bg-white/90 px-2.5 py-0.5 text-[var(--fs-2xs)] font-semibold text-primary shadow-sm backdrop-blur-sm">
+            <span className="rounded-full bg-white/90 px-2.5 py-0.5 text-fs-2xs font-semibold text-primary shadow-sm backdrop-blur-sm">
               {subtype}
             </span>
           )}
           {campaign.is80G && (
-            <span className="flex items-center gap-1 rounded-full bg-emerald-600/90 px-2.5 py-0.5 text-[var(--fs-2xs)] font-semibold text-white shadow-sm backdrop-blur-sm">
+            <span className="flex items-center gap-1 rounded-full bg-emerald-600/90 px-2.5 py-0.5 text-fs-2xs font-semibold text-white shadow-sm backdrop-blur-sm">
               <Shield className="size-3" aria-hidden />
               80G
             </span>
@@ -95,7 +95,7 @@ function CauseCard({ campaign }: { campaign: CampaignListItem }) {
         {/* Urgency badge */}
         {(isEnding || ended) && (
           <div className={cn(
-            'absolute right-3 top-3 rounded-full px-2.5 py-0.5 text-[var(--fs-2xs)] font-bold shadow-sm',
+            'absolute right-3 top-3 rounded-full px-2.5 py-0.5 text-fs-2xs font-bold shadow-sm',
             ended
               ? 'bg-slate-700/90 text-white'
               : 'bg-red-600/90 text-white',
@@ -113,7 +113,7 @@ function CauseCard({ campaign }: { campaign: CampaignListItem }) {
             {campaign.title}
           </h3>
           {campaign.tagline && (
-            <p className="mt-0.5 line-clamp-1 text-[var(--fs-sm)] text-muted-foreground">
+            <p className="mt-0.5 line-clamp-1 text-fs-sm text-muted-foreground">
               {campaign.tagline}
             </p>
           )}
@@ -126,7 +126,7 @@ function CauseCard({ campaign }: { campaign: CampaignListItem }) {
               {formatRupees(campaign.totalRaisedPaise)}
             </span>
             {campaign.showGoalAmount && campaign.goalRupees && (
-              <span className="text-[var(--fs-xs)] text-muted-foreground">
+              <span className="text-fs-xs text-muted-foreground">
                 of ₹{campaign.goalRupees.toLocaleString('en-IN')} goal
               </span>
             )}
@@ -156,7 +156,7 @@ function CauseCard({ campaign }: { campaign: CampaignListItem }) {
         </div>
 
         {/* Stats row */}
-        <div className="flex items-center gap-3 text-[var(--fs-xs)] text-muted-foreground">
+        <div className="flex items-center gap-3 text-fs-xs text-muted-foreground">
           <span className="flex items-center gap-1">
             <Users className="size-3.5" aria-hidden />
             {campaign.donorCount.toLocaleString('en-IN')} donors
@@ -169,7 +169,7 @@ function CauseCard({ campaign }: { campaign: CampaignListItem }) {
         </div>
 
         {/* Organizer */}
-        <p className="text-[var(--fs-xs)] text-muted-foreground truncate">
+        <p className="text-fs-xs text-muted-foreground truncate">
           by <span className="font-medium text-foreground/80">{campaign.organizerName}</span>
           {campaign.beneficiaryName && campaign.beneficiaryName !== campaign.organizerName && (
             <>
@@ -184,7 +184,7 @@ function CauseCard({ campaign }: { campaign: CampaignListItem }) {
         <Link
           href={`/campaign/${campaign.slug}`}
           className={cn(
-            'flex w-full items-center justify-center gap-2 rounded-xl py-2.5 text-[var(--fs-base)] font-semibold transition-all duration-150',
+            'flex w-full items-center justify-center gap-2 rounded-xl py-2.5 text-fs-base font-semibold transition-all duration-150',
             ended
               ? 'border border-border bg-muted text-muted-foreground cursor-not-allowed'
               : 'bg-primary text-primary-foreground hover:bg-primary/90 active:scale-[0.98]',
@@ -267,7 +267,7 @@ export function CausesClient({ campaigns }: Props) {
                 type="button"
                 onClick={() => setSort(opt.key)}
                 className={cn(
-                  'rounded-lg px-3 py-1.5 text-[var(--fs-xs)] font-medium transition-all',
+                  'rounded-lg px-3 py-1.5 text-fs-xs font-medium transition-all',
                   sort === opt.key
                     ? 'bg-background text-foreground shadow-sm'
                     : 'text-muted-foreground hover:text-foreground',
@@ -295,14 +295,14 @@ export function CausesClient({ campaigns }: Props) {
               onClick={() => setActiveSubtype(activeSubtype === key ? null : key)}
             >
               {DONATION_SUBTYPE_LABELS[key]}
-              <span className="ml-1.5 text-[var(--fs-2xs)] opacity-60">{count}</span>
+              <span className="ml-1.5 text-fs-2xs opacity-60">{count}</span>
             </FilterChip>
           )
         })}
       </div>
 
       {/* ── Result count ─────────────────────────────────────────────────────── */}
-      <p className="mt-5 text-[var(--fs-sm)] text-muted-foreground">
+      <p className="mt-5 text-fs-sm text-muted-foreground">
         {filtered.length === 0
           ? 'No causes match your filters.'
           : filtered.length === campaigns.length

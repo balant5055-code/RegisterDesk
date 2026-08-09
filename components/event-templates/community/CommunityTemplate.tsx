@@ -5,8 +5,8 @@ import {
   XCircle, CheckCircle, Lock, Clock3,
   Calendar, MapPin, Globe, Ticket, Clock, AlarmClock, Languages, Shirt,
 } from 'lucide-react'
-import type { EventDetailProps } from '@/app/events/[slug]/EventDetailClient'
-import { LinkedCampaignSection } from '@/app/events/[slug]/EventDetailClient'
+import type { EventDetailProps } from '@/components/event-templates/types'
+import { LinkedCampaignSection } from '@/components/event-templates/shared/donation/LinkedCampaignSection'
 import { EventInfoSection } from '@/components/event-templates/shared/ui/EventInfoSection'
 import { EventDetailsFramework } from '@/components/event-templates/EventDetailsFramework'
 import { AddToCalendarButton } from '@/components/event-templates/shared/ui/AddToCalendarButton'
@@ -238,7 +238,7 @@ export function CommunityTemplate(props: EventDetailProps) {
               whileInView={{ opacity: 1, y: 0 }}
               viewport={{ once: true, amount: 0.1 }}
               transition={{ duration: 0.55 }}
-              className="grid gap-8 lg:grid-cols-[200px_1fr]"
+              className="grid gap-8 lg:grid-cols-[200px_minmax(0,1fr)]"
             >
               <div className="lg:pt-1">
                 <div className="mb-3 h-0.5 w-8" style={{ backgroundImage: 'var(--primary-gradient)' }} />
@@ -317,12 +317,12 @@ export function CommunityTemplate(props: EventDetailProps) {
       />
 
       {/* ── Sticky mobile CTA ─────────────────────────────────────────────── */}
+      {/* RD-ST15.0: venueType/online deliberately NOT passed — CommunityVenue above already
+          renders the online block, so passing it here would print it twice. */}
       <EventInfoSection
         language={props.language}
         dressCode={props.dressCode}
         timezone={props.timezone}
-        venueType={props.venueType}
-        online={props.online}
         refundWindow={props.refundWindow}
         refundPolicyUrl={props.refundPolicyUrl}
       />

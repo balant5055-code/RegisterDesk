@@ -33,7 +33,7 @@ export function PlatformSection({ id, eyebrow, title, subtitle, children }: {
             {title}
           </h2>
           {subtitle && (
-            <p className="mt-4 text-[var(--fs-lg)] leading-relaxed text-muted-foreground">{subtitle}</p>
+            <p className="mt-4 text-fs-lg leading-relaxed text-muted-foreground">{subtitle}</p>
           )}
         </div>
         <div className="mt-14">{children}</div>

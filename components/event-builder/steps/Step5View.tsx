@@ -24,6 +24,7 @@ import { AnimatePresence, motion } from 'framer-motion'
 import { AlertTriangle, ArrowLeft } from 'lucide-react'
 import { WizardFooter } from '@/components/wizard/WizardFooter'
 import { Stepper } from '@/components/event-builder/Stepper'
+import { validateStep } from '@/lib/events/builder/stepValidation'
 import { EASE, WIZARD_STEPS } from '@/lib/events/builder/constants'
 import type { StepViewProps } from '@/lib/events/builder/types'
 import { useAutosaveEmit } from '@/lib/events/builder/useAutosaveEmit'
@@ -66,8 +67,10 @@ export function Step5View({ currentStep, completedValues, onNext, onBack, onSave
       .map(p => ({ id: p.id, name: p.name }))
   })()
 
-  // A form is ready to proceed when a template is chosen OR at least one field exists.
-  const canProceed   = form.template.length > 0 || form.fields.length > 0
+  // Ready when a template is chosen OR at least one field exists — rule in the contract.
+  const canProceed   = validateStep('form', {
+    templateCount: form.template.length, fieldCount: form.fields.length,
+  }).valid
   const [step5Error, setStep5Error] = useState<string | null>(null)
 
   const handleNext = () => {

@@ -9,7 +9,8 @@ import { ArrowRight } from 'lucide-react'
 import { cn } from '@/lib/utils/cn'
 import type { ExperienceItem } from '@/components/wizard/eventDetailsConfig'
 import {
-  SectionShell, SectionHeader, CARD, CARD_HOVER, reveal, hoverLift, renderIcon,
+  SectionShell, SectionHeader, CARD, CARD_HOVER, reveal, hoverLift, renderIcon, CARD_PAD,
+  TYPE, ICON_TILE, GRID_GAP,
 } from '@/components/event-templates/shared/ui/framework'
 
 const HEX = /^#[0-9a-f]{6}$/i
@@ -34,7 +35,7 @@ function ExperienceCard({ item, reduce, grouped }: { item: ExperienceItem; reduc
   const inner = (
     <>
       {badge && (
-        <span className="absolute right-3 top-3 z-10 rounded-full bg-primary/10 px-2.5 py-0.5 text-[11px] font-bold text-primary">{badge}</span>
+        <span className="absolute right-3 top-3 z-10 rounded-full bg-primary/10 px-2.5 py-0.5 text-fs-2xs font-bold text-primary">{badge}</span>
       )}
 
       {hasImg && (
@@ -45,10 +46,10 @@ function ExperienceCard({ item, reduce, grouped }: { item: ExperienceItem; reduc
         </div>
       )}
 
-      <div className="flex flex-1 flex-col p-5">
+      <div className={cn("flex flex-1 flex-col", CARD_PAD)}>
         {iconEl && (
           <span
-            className="mb-3.5 inline-flex size-11 items-center justify-center rounded-xl bg-primary/10 text-primary"
+            className={cn('mb-3.5', ICON_TILE)}
             style={tint ? { backgroundColor: `${tint}1a`, color: tint } : undefined}
           >
             {iconEl}
@@ -56,15 +57,15 @@ function ExperienceCard({ item, reduce, grouped }: { item: ExperienceItem; reduc
         )}
 
         {grouped
-          ? <h4 className="text-[15.5px] font-bold leading-snug text-foreground">{item.title}</h4>
-          : <h3 className="text-[15.5px] font-bold leading-snug text-foreground">{item.title}</h3>}
+          ? <h4 className={TYPE.cardTitle}>{item.title}</h4>
+          : <h3 className={TYPE.cardTitle}>{item.title}</h3>}
 
         {item.description?.trim() && (
-          <p className="mt-1.5 line-clamp-2 text-[13px] leading-relaxed text-muted-foreground">{item.description}</p>
+          <p className={cn('mt-1.5 line-clamp-2', TYPE.cardBody)}>{item.description}</p>
         )}
 
         {link && (
-          <span className="mt-3 inline-flex items-center gap-1 text-[13px] font-semibold text-primary">
+          <span className="mt-3 inline-flex items-center gap-1 text-fs-sm font-semibold text-primary">
             {item.cta?.trim() || 'Learn more'}
             <ArrowRight className="size-3.5 transition-transform duration-150 group-hover:translate-x-0.5 motion-reduce:transform-none" aria-hidden />
           </span>
@@ -127,9 +128,9 @@ export function ExperienceSection({
         {groups.map(group => (
           <div key={group.category ?? '_'}>
             {group.category && (
-              <h3 className="mb-4 text-[13px] font-bold uppercase tracking-[0.14em] text-muted-foreground">{group.category}</h3>
+              <h3 className={cn('mb-4', TYPE.groupLabel)}>{group.category}</h3>
             )}
-            <div className={cn('grid gap-5', gridClasses(group.items.length))}>
+            <div className={cn('grid', GRID_GAP, gridClasses(group.items.length))}>
               {group.items.map((item, i) => (
                 <motion.div key={item.id} {...reveal(reduce, Math.min(i, 5) * 0.05)}>
                   <ExperienceCard item={item} reduce={reduce} grouped={grouped} />

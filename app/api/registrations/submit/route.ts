@@ -26,7 +26,8 @@ import { validateInviteCode }       from '@/app/api/registrations/validate-invit
 import { sendConfirmationEmail }    from '@/lib/registrations/sendConfirmationEmail'
 import { validateCoupon }           from '@/lib/coupons/validate'
 import { resolveEffectivePassPricePaise } from '@/lib/pricing/earlyBird'
-import { validateFormResponses }     from '@/lib/registrations/validateFormResponses'
+import { validateFormResponses, sanitizeFormResponses } from '@/lib/registrations/validateFormResponses'
+import { resolveServerEligibility }  from '@/lib/registrations/ageEligibility'
 import { resolveAttendeeIdentity }   from '@/lib/registrations/attendeeIdentity'
 import type { IdentityField }        from '@/lib/registrations/attendeeIdentity'
 import type { RegistrationRules } from '@/components/wizard/registrationFormConfig'
@@ -172,8 +173,18 @@ export async function POST(
   // per-type formats (email/phone/url/number), option membership, and any
   // configured rules — the same rules the builder/client enforce.
   const registrationForm = event.registrationForm
+
+  // RD-RT4.0 — strip anything that is not a configured field BEFORE validating or
+  // storing. Unknown keys previously flowed straight through to the registration
+  // document because the validator only ever iterates configured fields.
+  const safeResponses = sanitizeFormResponses(registrationForm?.sections ?? [], formResponses)
+
   if (registrationForm?.sections?.length) {
-    const validationError = validateFormResponses(registrationForm, passId, formResponses)
+    // RD-RT4.0 — age eligibility is now enforced HERE, not just in the browser. The
+    // limits come from the server-loaded pass and the event's own start date, through
+    // the same `ageEligibilityError` the client calls — one implementation, two callers.
+    const eligibility = resolveServerEligibility(event.eventDetails as Record<string, unknown>, pass)
+    const validationError = validateFormResponses(registrationForm, passId, safeResponses, eligibility)
     if (validationError) {
       return NextResponse.json(
         { success: false, error: validationError.message },
@@ -188,7 +199,7 @@ export async function POST(
   // authoritative and registration/ticket/confirmation share one identity model.
   // Falls back to the client-sent values, so this never yields a worse result.
   const identityFields = ((registrationForm?.sections ?? []) as { fields: IdentityField[] }[]).flatMap(s => s.fields)
-  const identity = resolveAttendeeIdentity(identityFields, (formResponses ?? {}) as Record<string, string>)
+  const identity = resolveAttendeeIdentity(identityFields, safeResponses)
   const attendee = {
     name:  (identity.name  || body.attendee.name).trim(),
     email: (identity.email || body.attendee.email).trim().toLowerCase(),
@@ -215,7 +226,7 @@ export async function POST(
         if (fld.id && fld.label) fieldLabelMap[fld.id] = fld.label
       }
     }
-    const fr = (formResponses ?? {}) as Record<string, string>
+    const fr = safeResponses
     function pickByLabel(pattern: RegExp): string | null {
       for (const [id, lbl] of Object.entries(fieldLabelMap)) {
         if (pattern.test(lbl)) return fr[id]?.trim() || null
@@ -344,7 +355,8 @@ export async function POST(
         name:          attendee.name.trim(),
         email:         attendee.email.trim().toLowerCase(),
         phone:         attendee.phone?.trim() || undefined,
-        formResponses: formResponses as Record<string, unknown>,
+        // RD-RT4.0: sanitised — unknown keys can never reach the registration document.
+        formResponses: safeResponses as Record<string, unknown>,
       },
       uid,
       // H2: pass rule flags so claim docs are written inside the transaction,

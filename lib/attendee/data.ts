@@ -81,6 +81,62 @@ export async function listAttendeeRegistrations(
   return { items, nextCursor: hasMore ? pageDocs[pageDocs.length - 1].id : null }
 }
 
+// ─── Event identity (RD-RUNNER-01) ───────────────────────────────────────────
+
+/**
+ * Who this attendee is AT ONE EVENT.
+ *
+ * Added here, not in a feature module, because this file's contract is the reason it works:
+ * every query is scoped to the session-derived email and there is no by-id access path, so
+ * ownership is enforced by the query itself.
+ *
+ * THE SECURITY PROPERTY: the bib is READ, never accepted. A caller cannot ask for "bib 137"
+ * — they can only ask for "my photos", and the platform decides which bib that is. Bib
+ * numbers are printed on the public leaderboard, so a bib supplied by a caller would be no
+ * authentication at all.
+ *
+ * Only a CONFIRMED registration counts. Draft, pending, waitlisted, cancelled and rejected
+ * registrations are not an identity at this event.
+ */
+export interface AttendeeEventIdentity {
+  registrationId: string
+  organizerUid:   string
+  eventSlug:      string
+  eventName:      string
+  /** Null when the organizer has not assigned one — nothing can be matched without it. */
+  bibNumber:      string | null
+}
+
+export async function findAttendeeEventIdentity(
+  normalizedEmail: string, eventSlug: string,
+): Promise<AttendeeEventIdentity | null> {
+  if (!normalizedEmail || !eventSlug) return null
+
+  const snap = await adminDb.collection('registrations')
+    .where('attendee.email', '==', normalizedEmail)
+    .where('eventSlug',      '==', eventSlug)
+    .where('status',         '==', 'confirmed')
+    // One person can hold more than one confirmed entry at an event (a relay leg, a second
+    // distance). The first WITH A BIB is used; the cap keeps a pathological account bounded.
+    .limit(10)
+    .get()
+
+  if (snap.empty) return null
+
+  const rows = snap.docs.map(d => {
+    const r = d.data() as RegistrationDocument & { organizerUid?: string }
+    return {
+      registrationId: d.id,
+      organizerUid:   typeof r.organizerUid === 'string' ? r.organizerUid : '',
+      eventSlug:      r.eventSlug ?? eventSlug,
+      eventName:      r.eventName ?? '',
+      bibNumber:      typeof r.bibNumber === 'string' && r.bibNumber !== '' ? r.bibNumber : null,
+    }
+  }).filter(r => r.organizerUid !== '')
+
+  return rows.find(r => r.bibNumber !== null) ?? rows[0] ?? null
+}
+
 // ─── Tickets (derived from confirmed registrations) ──────────────────────────
 
 export interface AttendeeTicket {

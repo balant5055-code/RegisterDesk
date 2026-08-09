@@ -1,4 +1,11 @@
 // ─── Layout ───────────────────────────────────────────────────────────────────
+// RD-RESPONSIVE-02 — shared responsive layout primitives. Strings, not components: a page
+// adopts them by import, and a page that has not is unaffected.
+export {
+  PAGE_STACK, WORKSPACE_GRID, CONTENT_COLUMN, RAIL_COLUMN,
+  RAIL_WIDTH_SM, RAIL_WIDTH_MD, RAIL_WIDTH_LG,
+} from './layout'
+
 export { Container }                            from './Container'
 
 // ─── Navigation ───────────────────────────────────────────────────────────────

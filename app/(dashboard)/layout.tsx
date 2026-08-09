@@ -429,6 +429,17 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     {/* GA-7D S2: h-dvh (dynamic viewport) instead of h-screen(=100vh) so the bottom
         of the internally-scrolling shell — incl. the sticky wizard footer — isn't
         pushed under the mobile browser's address bar. */}
+    {/* RD-EVENT-19 — skip link. Measured: a keyboard user landing on any dashboard page
+        traversed 12 sidebar stops before reaching page content, on every navigation. Placed
+        FIRST in DOM order so it is the first tab stop; visually hidden until focused, so
+        nothing changes for pointer users. Fixed here rather than in the wizard because the
+        sidebar precedes content on every dashboard route. */}
+    <a
+      href="#main-content"
+      className="sr-only focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:z-[100] focus:rounded-lg focus:bg-background focus:px-4 focus:py-2 focus:text-sm focus:font-medium focus:text-foreground focus:shadow-lg focus:outline-none focus:ring-2 focus:ring-primary"
+    >
+      Skip to main content
+    </a>
     <div className="flex h-dvh overflow-hidden bg-background">
       <Sidebar
         open={sidebarOpen}
@@ -449,7 +460,8 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         <main
           id="main-content"
           role="main"
-          className="flex-1 overflow-y-auto px-4 py-5 md:px-5 lg:px-6 lg:py-6"
+          tabIndex={-1}
+          className="flex-1 overflow-y-auto px-4 py-5 md:px-5 lg:px-6 lg:py-6 focus:outline-none"
         >
           {children}
         </main>

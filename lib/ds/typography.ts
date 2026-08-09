@@ -6,7 +6,7 @@
 // text-sm, or the raw --fs-2xs … --fs-5xl tokens).
 //
 // Each role composes ONLY typography concerns: the token-backed `text-fs-*`
-// font-size utilities (generated from --fs-* via @theme in globals.css) plus
+// font-size utilities (generated from the font-size tokens via @theme in globals.css) plus
 // weight, tracking, and leading. Roles never encode color, spacing, or layout —
 // those stay on the component/page and merge in via cn().
 //

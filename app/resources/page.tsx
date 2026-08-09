@@ -61,7 +61,7 @@ export default function ResourcesPage() {
                     )}
                     <h3 className={cn(typography.cardTitle, 'mt-5 text-foreground')}>{item.title}</h3>
                     {item.description && <p className={`${typography.body} mt-2 text-muted-foreground`}>{item.description}</p>}
-                    <span className="mt-4 inline-flex items-center gap-1 text-[var(--fs-sm)] font-medium text-primary">
+                    <span className="mt-4 inline-flex items-center gap-1 text-fs-sm font-medium text-primary">
                       Open <ArrowRight className="size-3" aria-hidden />
                     </span>
                   </Card>

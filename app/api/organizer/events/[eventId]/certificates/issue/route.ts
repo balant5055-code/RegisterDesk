@@ -21,6 +21,8 @@ import { isCertificateType }         from '@/lib/certificates/validation'
 import { serializeCertificate }      from '@/lib/certificates/types'
 import type { RegistrationDocument } from '@/lib/registrations/types'
 import type { CertificateType }      from '@/lib/certificates/types'
+// RD-RACEOPS-01 (D3): supplies the race values for {{distance}}/{{finishTime}}/{{position}}.
+import { resolveCertificateRaceResult } from '@/features/race-operations/services/certificateResults'
 
 type Params = { params: Promise<{ eventId: string }> }
 
@@ -126,6 +128,18 @@ export async function POST(req: NextRequest, { params }: Params): Promise<NextRe
     }
   }
 
+  // ── Race result (RD-RACEOPS-01 · approved decision D3) ─────────────────────
+  // {{distance}}, {{finishTime}} and {{position}} have always existed in the placeholder
+  // registry but were hardcoded to '' here, so they rendered blank on every certificate.
+  // The resolver reads the PUBLISHED Official Snapshot only, and returns empty strings when
+  // the event has no published results — so behaviour for a non-race event is unchanged.
+  // It never throws: certificate issuance is never blocked by a results lookup.
+  const raceResult = await resolveCertificateRaceResult({
+    eventSlug: slug,
+    passId:    reg.passId,
+    bibNumber: reg.bibNumber,
+  })
+
   // ── Generate ───────────────────────────────────────────────────────────────
   try {
     const { certificate, created } = await generateCertificate({
@@ -142,9 +156,9 @@ export async function POST(req: NextRequest, { params }: Params): Promise<NextRe
         attendeeEmail:  reg.attendee.email,
         ticketCode:     reg.ticketCode ?? '',
         bibNumber:      reg.bibNumber ?? '',
-        distance:       '',
-        finishTime:     '',
-        position:       '',
+        distance:       raceResult.distance,
+        finishTime:     raceResult.finishTime,
+        position:       raceResult.position,
         category:       reg.bibCategory ?? '',
       },
       certificateType: assignedType,

@@ -1,8 +1,8 @@
 'use client'
 
 import { XCircle, CheckCircle, Lock, Clock3, Calendar, MapPin, AlarmClock, Languages, Shirt } from 'lucide-react'
-import type { EventDetailProps } from '@/app/events/[slug]/EventDetailClient'
-import { LinkedCampaignSection } from '@/app/events/[slug]/EventDetailClient'
+import type { EventDetailProps } from '@/components/event-templates/types'
+import { LinkedCampaignSection } from '@/components/event-templates/shared/donation/LinkedCampaignSection'
 import { EventInfoSection } from '@/components/event-templates/shared/ui/EventInfoSection'
 import type { AwardsDetails } from '@/components/wizard/eventDetailsConfig'
 import { EventDetailsFramework } from '@/components/event-templates/EventDetailsFramework'

@@ -17,9 +17,12 @@ function tsToDate(ts: unknown): Date {
 const STATIC_PATHS: Array<[string, number]> = [
   ['',                       1.0],
   ['/events',                0.9],
+  // RD-RESULTS-PUBLIC-FIX-01 · the results index. The per-race URLs below are dynamic.
+  ['/results',               0.8],
   ['/causes',                0.8],
   ['/pricing',               0.7],
   ['/platform',              0.7],
+  ['/support',               0.6],
   ['/about',                 0.5],
   ['/contact',               0.5],
   ['/resources',             0.5],
@@ -27,6 +30,7 @@ const STATIC_PATHS: Array<[string, number]> = [
   ['/privacy',               0.3],
   ['/terms',                 0.3],
   ['/refund-policy',         0.3],
+  ['/cookie-policy',         0.3],
   ['/platform/api',          0.4],
   ['/platform/payments',     0.4],
   ['/platform/registration', 0.4],
@@ -75,6 +79,49 @@ export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
         priority: 0.8,
       })
     }
+    // ═══ RD-RESULTS-PUBLIC-FIX-01 · published race results ═══════════════
+    // Read from the SNAPSHOT collection filtered on `status == "live"` — the same gate
+    // every public results page applies. A draft, a superseded version and a cancelled
+    // import therefore cannot reach the sitemap, and no second rule decides it.
+    //
+    // Both URL shapes are emitted from ONE read: the snapshot carries the event slug and
+    // the race slug, so the event-level page and its races come from the same document.
+    // Event URLs are de-duplicated because an event with four races has four snapshots.
+    const snapshots = await adminDb.collection('raceResultSnapshots')
+      .where('status', '==', 'live')
+      .select('eventSlug', 'passSlug', 'publishedAt')
+      .limit(5000)
+      .get()
+
+    const seenEvents = new Set()
+    for (const d of snapshots.docs) {
+      const data = d.data()
+      const eventSlug = typeof data.eventSlug === 'string' ? data.eventSlug : ''
+      const passSlug  = typeof data.passSlug  === 'string' ? data.passSlug  : ''
+      if (!eventSlug || !passSlug) continue
+
+      const lastModified = tsToDate(data.publishedAt)
+
+      if (!seenEvents.has(eventSlug)) {
+        seenEvents.add(eventSlug)
+        dynamicEntries.push({
+          url: `${BASE_URL}/results/${eventSlug}`,
+          lastModified,
+          // Results stop changing once published — a correction is rare, unlike an event
+          // page whose details move until race day.
+          changeFrequency: 'monthly',
+          priority: 0.7,
+        })
+      }
+
+      dynamicEntries.push({
+        url: `${BASE_URL}/results/${eventSlug}/${passSlug}`,
+        lastModified,
+        changeFrequency: 'monthly',
+        priority: 0.7,
+      })
+    }
+
     for (const d of campaigns.docs) {
       const data = d.data() as { updatedAt?: unknown }
       dynamicEntries.push({

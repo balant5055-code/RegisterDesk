@@ -401,7 +401,7 @@ function EventCard({
 
           {/* Bottom-right — price */}
           <span className={cn(
-            'absolute bottom-3 right-3 rounded-full px-2.5 py-1 text-[var(--fs-xs)] font-bold shadow-sm backdrop-blur-sm',
+            'absolute bottom-3 right-3 rounded-full px-2.5 py-1 text-fs-xs font-bold shadow-sm backdrop-blur-sm',
             isFree ? 'bg-emerald-500/95 text-white' : 'bg-white/95 text-foreground',
           )}>
             {priceLabel(event)}
@@ -604,7 +604,7 @@ function HeroSection({
             <div className="flex items-center gap-2.5">
               <span className="text-2xl">{item.emoji}</span>
               <div>
-                <p className="line-clamp-1 text-[var(--fs-xs)] font-bold text-foreground leading-tight">{item.label}</p>
+                <p className="line-clamp-1 text-fs-xs font-bold text-foreground leading-tight">{item.label}</p>
                 <p className="text-[10.5px] text-muted-foreground">{item.sub}</p>
               </div>
             </div>
@@ -622,7 +622,7 @@ function HeroSection({
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.5 }}
           >
-            <span className="inline-flex items-center gap-2 rounded-full border border-primary/20 bg-primary/[0.06] px-4 py-1.5 text-[var(--fs-sm)] font-semibold text-primary">
+            <span className="inline-flex items-center gap-2 rounded-full border border-primary/20 bg-primary/[0.06] px-4 py-1.5 text-fs-sm font-semibold text-primary">
               <span className="size-1.5 rounded-full bg-primary animate-pulse" />
               India&apos;s Premium Event Platform
             </span>
@@ -647,7 +647,7 @@ function HeroSection({
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.55, delay: 0.25 }}
-            className="mt-2 text-[var(--fs-base)] leading-relaxed text-muted-foreground sm:text-[16px]"
+            className="mt-2 text-fs-base leading-relaxed text-muted-foreground sm:text-[16px]"
           >
             Find conferences, workshops, marathons, and experiences that inspire,
             connect, and transform.
@@ -671,7 +671,7 @@ function HeroSection({
                 value={query}
                 onChange={e => onQueryChange(e.target.value)}
                 placeholder="Search events, cities, organizers…"
-                className="flex-1 bg-transparent px-3 py-4 text-[var(--fs-md)] text-foreground placeholder:text-muted-foreground/50 outline-none"
+                className="flex-1 bg-transparent px-3 py-4 text-fs-md text-foreground placeholder:text-muted-foreground/50 outline-none"
                 autoComplete="off"
               />
               {query && (
@@ -1243,7 +1243,7 @@ function CategoriesSection({
       <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
         <ScrollSection>
           <div className="mb-4 text-center">
-            <p className="text-[var(--fs-2xs)] font-semibold uppercase tracking-widest text-primary mb-1">Browse By Category</p>
+            <p className="text-fs-2xs font-semibold uppercase tracking-widest text-primary mb-1">Browse By Category</p>
             <h2 className="text-[20px] font-semibold tracking-tight text-foreground sm:text-[22px]">
               Find Your Next Experience
             </h2>
@@ -1273,7 +1273,7 @@ function CategoriesSection({
 
               <div className="relative">
                 <span className="text-2xl">{cat.emoji}</span>
-                <p className="mt-2 text-[var(--fs-base)] font-bold text-white">{cat.label}</p>
+                <p className="mt-2 text-fs-base font-bold text-white">{cat.label}</p>
                 <p className="mt-0.5 text-[11.5px] font-medium text-white/75">Explore</p>
               </div>
             </motion.button>
@@ -1311,10 +1311,10 @@ function EventsGrid({
               <SearchX className="size-7 text-muted-foreground/50" aria-hidden />
             </div>
 
-            <h3 className="mt-4 text-[var(--fs-lg)] font-semibold text-foreground">
+            <h3 className="mt-4 text-fs-lg font-semibold text-foreground">
               No events match your filters
             </h3>
-            <p className="mx-auto mt-1.5 max-w-xs text-[var(--fs-base)] leading-relaxed text-muted-foreground">
+            <p className="mx-auto mt-1.5 max-w-xs text-fs-base leading-relaxed text-muted-foreground">
               Try removing a filter or explore one of these popular categories instead.
             </p>
 
@@ -1403,12 +1403,12 @@ function WhySection() {
       <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
         <ScrollSection>
           <div className="mb-6 text-center">
-            <p className="text-[var(--fs-2xs)] font-bold uppercase tracking-widest text-[var(--primary-from)] mb-1.5">Why RegisterDesk</p>
+            <p className="text-fs-2xs font-bold uppercase tracking-widest text-[var(--primary-from)] mb-1.5">Why RegisterDesk</p>
             <h2 className="text-[20px] font-semibold tracking-tight sm:text-[24px]">
               Everything you need to run
               <span className="bg-gradient-to-r from-[var(--primary-from)] to-[var(--primary)] bg-clip-text text-transparent"> exceptional events</span>
             </h2>
-            <p className="mt-1.5 text-[var(--fs-sm)] text-white/60 max-w-2xl mx-auto">
+            <p className="mt-1.5 text-fs-sm text-white/60 max-w-2xl mx-auto">
               From discovery to check-in, RegisterDesk handles every step of the event journey with precision.
             </p>
           </div>
@@ -1432,7 +1432,7 @@ function WhySection() {
                 <f.icon className="size-5 text-white" />
               </div>
               <h3 className="text-fs-base font-semibold text-white">{f.title}</h3>
-              <p className="mt-1.5 text-[var(--fs-sm)] leading-relaxed text-white/55">{f.desc}</p>
+              <p className="mt-1.5 text-fs-sm leading-relaxed text-white/55">{f.desc}</p>
             </motion.div>
           ))}
         </motion.div>
@@ -1453,26 +1453,26 @@ function CTASection() {
             <div className="pointer-events-none absolute -top-16 -right-16 h-64 w-64 rounded-full bg-white/10 blur-2xl" />
             <div className="pointer-events-none absolute -bottom-16 -left-16 h-64 w-64 rounded-full bg-white/10 blur-2xl" />
 
-            <p className="relative text-[var(--fs-2xs)] font-bold uppercase tracking-widest text-white/70 mb-2">
+            <p className="relative text-fs-2xs font-bold uppercase tracking-widest text-white/70 mb-2">
               Get Started Today
             </p>
             <h2 className="relative text-[22px] font-semibold tracking-tight text-white sm:text-[26px]">
               Ready to host your event?
             </h2>
-            <p className="relative mt-2.5 text-[var(--fs-sm)] text-white/80 max-w-xl mx-auto">
+            <p className="relative mt-2.5 text-fs-sm text-white/80 max-w-xl mx-auto">
               Join thousands of organizers who trust RegisterDesk to run flawless events — from 50 to 50,000 attendees.
             </p>
             <div className="relative mt-7 flex flex-col items-center gap-4 sm:flex-row sm:justify-center">
               <Link
                 href="/dashboard/events/new/visibility"
-                className="flex items-center gap-2 rounded-2xl bg-white px-8 py-3.5 text-[var(--fs-md)] font-bold text-primary shadow-sm transition-all hover:shadow-md hover:scale-[1.02] active:scale-[0.98]"
+                className="flex items-center gap-2 rounded-2xl bg-white px-8 py-3.5 text-fs-md font-bold text-primary shadow-sm transition-all hover:shadow-md hover:scale-[1.02] active:scale-[0.98]"
               >
                 <Zap className="size-5" />
                 Create Your Event — Free
               </Link>
               <Link
                 href="/events"
-                className="flex items-center gap-2 rounded-2xl border-2 border-white/30 px-8 py-3.5 text-[var(--fs-md)] font-semibold text-white transition-all hover:border-white/60 hover:bg-white/10"
+                className="flex items-center gap-2 rounded-2xl border-2 border-white/30 px-8 py-3.5 text-fs-md font-semibold text-white transition-all hover:border-white/60 hover:bg-white/10"
               >
                 Explore Events
                 <ArrowRight className="size-5" />
@@ -1625,7 +1625,7 @@ export function DiscoveryClient({
                   type="button"
                   onClick={loadMore}
                   disabled={loadingMore}
-                  className="inline-flex items-center gap-2 rounded-2xl border-2 border-border px-8 py-3 text-[var(--fs-md)] font-semibold text-foreground transition-all hover:border-border-strong hover:bg-muted/40 disabled:opacity-50"
+                  className="inline-flex items-center gap-2 rounded-2xl border-2 border-border px-8 py-3 text-fs-md font-semibold text-foreground transition-all hover:border-border-strong hover:bg-muted/40 disabled:opacity-50"
                 >
                   {loadingMore ? 'Loading…' : 'Load more events'}
                 </button>

@@ -14,15 +14,12 @@ import { motion, AnimatePresence, useReducedMotion } from 'framer-motion'
 import { Play, X, ChevronLeft, ChevronRight, ZoomIn, ZoomOut, Camera, MapPin, Film } from 'lucide-react'
 import { cn } from '@/lib/utils/cn'
 import { getVideoEmbed } from '@/components/event-templates/shared/utils/format'
-import type { GalleryItem, MediaAsset } from '@/components/wizard/eventDetailsConfig'
-import { SectionShell, SectionHeader } from '@/components/event-templates/shared/ui/framework'
+import type { GalleryItem } from '@/components/wizard/eventDetailsConfig'
+import { SectionShell, EventSectionHeader, BRAND_GRADIENT, type SectionBg } from '@/components/event-templates/shared/ui/framework'
 
-// ── legacy adapter (temporary) ──
-export function mediaToGallery(assets: MediaAsset[] | undefined): GalleryItem[] {
-  return (assets ?? [])
-    .filter(a => a?.value?.trim())
-    .map((a, i) => ({ id: `m_${i}`, url: a.value, enabled: true, type: 'image' as const }))
-}
+// ── legacy adapter ──
+// ST41-I01: moved to shared/media/galleryModel.ts (directive-free) so Server Components
+// can call it. Import mediaToGallery from there, not from this module.
 
 // ── media kind detection ──
 type Kind = 'image' | 'youtube' | 'vimeo' | 'video'
@@ -49,17 +46,108 @@ const typeChip = (item: GalleryItem): string => {
   return { video: 'Video', reel: 'Reel', drone: 'Drone', poster: 'Poster', banner: 'Banner' }[t] ?? ''
 }
 
-// Reserved-aspect masonry rhythm (fixed row height → no CLS). Featured overrides.
-const SPAN = ['row-span-2', '', 'sm:col-span-2', '', 'row-span-2', 'sm:col-span-2 row-span-2', '', 'row-span-2']
+// ── Editorial composition (RD-ST11.0) ───────────────────────────────────────────
+// The grid used to cycle an eight-entry SPAN array over `auto-rows` with
+// `grid-auto-flow: dense`. Two faults: tile size had no relationship to the image (so
+// sizing read as random, and nothing was the focal point), and `dense` back-fills gaps
+// — which reorders the gallery away from the organiser's ordering AND away from
+// DOM/focus order.
+//
+// It is now a fixed editorial composition, identical for every event:
+//
+//   ┌───────────────────────────┬─────────────┐
+//   │                           │  support 1  │   feature  col-span-8, landscape
+//   │        F E A T U R E      ├─────────────┤   supports col-span-4, stacked
+//   │                           │  support 2  │
+//   └───────────────────────────┴─────────────┘
+//   ┌───────────┬───────────┬───────────┐
+//   │   rest    │   rest    │   rest    │         rest     col-span-4, equal cards
+//   └───────────┴───────────┴───────────┘
+//
+// The supporting column is a 1fr/1fr grid stretched to the feature's height, so the two
+// stacked tiles always divide it exactly — the composition can never go ragged, at any
+// container width. Every tile reserves its box via aspect-ratio (or, for the stacked
+// pair, via the definite row height), so nothing shifts as images decode.
+const GAP = 'gap-3 sm:gap-4'
+
+// Aspect per role. Mobile keeps 4/3 — the least-cropping ratio, so faces survive at
+// phone widths; the landscape ratios only apply once there is width to justify them.
+const FEATURE_ASPECT = 'aspect-[4/3] sm:aspect-[16/9]'
+const CARD_ASPECT    = 'aspect-[4/3] sm:aspect-[16/9]'
+// Stacked pair: ratio on small screens, definite height from the 1fr rows on desktop.
+const STACK_ASPECT   = 'aspect-[4/3] sm:aspect-[16/9] lg:aspect-auto lg:h-full lg:min-h-0'
+
+// ── One tile ────────────────────────────────────────────────────────────────────
+// One presentation for every role — the role only supplies span and aspect, so radius,
+// elevation, hover and focus behaviour can never drift between the feature and a card.
+function Tile({ item, index, total, span, aspect, onOpen }: {
+  item:   GalleryItem
+  index:  number
+  total:  number
+  span:   string
+  aspect: string
+  onOpen: (index: number, el: HTMLElement) => void
+}) {
+  const kind  = kindOf(item)
+  const thumb = thumbFor(item, kind)
+  const chip  = typeChip(item)
+
+  return (
+    <button
+      type="button"
+      onClick={e => onOpen(index, e.currentTarget)}
+      aria-label={`Open ${item.title?.trim() || (kind === 'image' ? 'image' : 'video')} ${index + 1} of ${total}`}
+      className={cn(
+        'group relative overflow-hidden rounded-2xl bg-muted shadow-sm outline-none',
+        'transition-shadow duration-300 hover:shadow-lg',
+        'focus-visible:ring-2 focus-visible:ring-primary/60 focus-visible:ring-offset-2',
+        span, aspect,
+      )}
+    >
+      {thumb ? (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img
+          src={thumb}
+          alt={item.alt?.trim() || item.title?.trim() || ''}
+          loading="lazy"
+          decoding="async"
+          className="absolute inset-0 size-full object-cover transition-transform duration-500 ease-out group-hover:scale-[1.03] motion-reduce:transform-none"
+        />
+      ) : (
+        <div className={cn('absolute inset-0 flex items-center justify-center', BRAND_GRADIENT)}>
+          <Film className="size-8 text-white/40" aria-hidden />
+        </div>
+      )}
+
+      <div className="absolute inset-0 bg-gradient-to-t from-black/50 via-transparent to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100" />
+
+      {kind !== 'image' && (
+        <span className="absolute left-1/2 top-1/2 flex size-12 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full bg-black/45 text-white backdrop-blur-sm transition-transform duration-300 group-hover:scale-110 motion-reduce:transform-none">
+          <Play className="size-5 translate-x-0.5" aria-hidden />
+        </span>
+      )}
+      {chip && (
+        <span className="absolute left-3 top-3 rounded-full bg-black/55 px-2 py-0.5 text-fs-2xs font-bold uppercase tracking-wide text-white backdrop-blur-sm">{chip}</span>
+      )}
+      {item.title?.trim() && (
+        <span className="absolute inset-x-4 bottom-3.5 line-clamp-1 text-left text-fs-sm font-semibold text-white opacity-0 transition-opacity duration-300 group-hover:opacity-100">
+          {item.title}
+        </span>
+      )}
+    </button>
+  )
+}
 
 export interface GalleryShowcaseProps {
   items:     GalleryItem[]
   eyebrow?:  string
   title?:    string
   subtitle?: string
+  /** RD-ST5.2 P0.2 — band background, chosen by the template. Defaults to the previous value. */
+  bg?:       SectionBg
 }
 
-export function GalleryShowcase({ items, eyebrow = 'Gallery', title = 'Moments From the Event', subtitle }: GalleryShowcaseProps) {
+export function GalleryShowcase({ items, eyebrow = 'Gallery', title = 'Moments From the Event', subtitle, bg = 'white' }: GalleryShowcaseProps) {
   const reduce = useReducedMotion()
   const [open, setOpen] = useState<number | null>(null)
   const [zoom, setZoom] = useState(false)
@@ -111,59 +199,66 @@ export function GalleryShowcase({ items, eyebrow = 'Gallery', title = 'Moments F
   const active = open !== null ? tiles[open] : null
   const activeKind = active ? kindOf(active) : 'image'
 
+  // Roles are assigned by position, so the organiser's ordering decides the focal point:
+  // whatever they featured (or ordered first) becomes the feature image.
+  const feature  = tiles[0]
+  const supports = tiles.slice(1, 3)
+  const rest     = tiles.slice(3)
+
+  const openAt = (index: number, el: HTMLElement) => { openerRef.current = el; setZoom(false); setOpen(index) }
+
   return (
-    <SectionShell id="gallery" maxW="6xl">
+    <SectionShell id="gallery" maxW="6xl" bg={bg}>
 
-        <SectionHeader eyebrow={eyebrow} title={title} subtitle={subtitle} />
+        <EventSectionHeader eyebrow={eyebrow} title={title} description={subtitle} />
 
-        {/* reserved-aspect masonry */}
-        <div className="grid auto-rows-[9rem] grid-cols-2 gap-3 [grid-auto-flow:dense] sm:auto-rows-[10rem] sm:grid-cols-3 lg:grid-cols-4">
-          {tiles.map((item, i) => {
-            const kind  = kindOf(item)
-            const thumb = thumbFor(item, kind)
-            const chip  = typeChip(item)
-            const span  = item.featured ? 'col-span-2 row-span-2' : SPAN[i % SPAN.length]
-            return (
-              <button
-                key={item.id}
-                type="button"
-                onClick={e => { openerRef.current = e.currentTarget; setZoom(false); setOpen(i) }}
-                aria-label={`Open ${item.title?.trim() || (kind === 'image' ? 'image' : 'video')} ${i + 1} of ${tiles.length}`}
-                className={cn('group relative overflow-hidden rounded-xl bg-muted outline-none focus-visible:ring-2 focus-visible:ring-primary/60 focus-visible:ring-offset-2', span)}
+        <div className={cn('flex flex-col', GAP)}>
+
+          {/* ── Feature composition — 8 / 4 on desktop, stacked on mobile ── */}
+          <div className={cn('flex flex-col lg:grid lg:grid-cols-12', GAP)}>
+            <Tile
+              item={feature} index={0} total={tiles.length}
+              // A gallery of one has no supporting column, so the feature takes the
+              // full width rather than leaving a third of the row empty.
+              span={supports.length > 0 ? 'lg:col-span-8' : 'lg:col-span-12'}
+              aspect={FEATURE_ASPECT}
+              onOpen={openAt}
+            />
+
+            {supports.length > 0 && (
+              // Mobile: the 2-up row directly under the feature. Desktop: the supporting
+              // column, its 1fr rows stretched to exactly the feature's height.
+              <div
+                className={cn(
+                  'grid grid-cols-2 lg:col-span-4 lg:grid-cols-1', GAP,
+                  supports.length === 2 ? 'lg:grid-rows-2' : 'lg:grid-rows-1',
+                )}
               >
-                {thumb ? (
-                  // eslint-disable-next-line @next/next/no-img-element
-                  <img
-                    src={thumb}
-                    alt={item.alt?.trim() || item.title?.trim() || ''}
-                    loading="lazy"
-                    decoding="async"
-                    className="absolute inset-0 h-full w-full object-cover transition-transform duration-300 ease-out group-hover:scale-[1.04] motion-reduce:transform-none"
+                {supports.map((item, i) => (
+                  <Tile
+                    key={item.id}
+                    item={item} index={i + 1} total={tiles.length}
+                    span="" aspect={STACK_ASPECT}
+                    onOpen={openAt}
                   />
-                ) : (
-                  <div className="absolute inset-0 flex items-center justify-center" style={{ backgroundImage: 'var(--primary-gradient)' }}>
-                    <Film className="size-8 text-white/40" aria-hidden />
-                  </div>
-                )}
+                ))}
+              </div>
+            )}
+          </div>
 
-                <div className="absolute inset-0 bg-gradient-to-t from-black/45 via-transparent to-transparent opacity-0 transition-opacity duration-200 group-hover:opacity-100" />
-
-                {kind !== 'image' && (
-                  <span className="absolute left-1/2 top-1/2 flex size-11 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full bg-black/45 text-white backdrop-blur-sm transition-transform duration-200 group-hover:scale-110">
-                    <Play className="size-5 translate-x-0.5" aria-hidden />
-                  </span>
-                )}
-                {chip && (
-                  <span className="absolute left-2.5 top-2.5 rounded-full bg-black/55 px-2 py-0.5 text-[10.5px] font-bold uppercase tracking-wide text-white backdrop-blur-sm">{chip}</span>
-                )}
-                {item.title?.trim() && (
-                  <span className="absolute inset-x-2.5 bottom-2.5 line-clamp-1 text-left text-[12.5px] font-semibold text-white opacity-0 transition-opacity duration-200 group-hover:opacity-100">
-                    {item.title}
-                  </span>
-                )}
-              </button>
-            )
-          })}
+          {/* ── Supporting content — equal cards, same size as the stacked pair ── */}
+          {rest.length > 0 && (
+            <div className={cn('grid grid-cols-2 lg:grid-cols-12', GAP)}>
+              {rest.map((item, i) => (
+                <Tile
+                  key={item.id}
+                  item={item} index={i + 3} total={tiles.length}
+                  span="lg:col-span-4" aspect={CARD_ASPECT}
+                  onOpen={openAt}
+                />
+              ))}
+            </div>
+          )}
         </div>
 
       {/* ── lightbox ── */}
@@ -186,7 +281,7 @@ export function GalleryShowcase({ items, eyebrow = 'Gallery', title = 'Moments F
             >
               {/* top bar */}
               <div className="flex items-center justify-between px-4 py-3 text-white/80">
-                <span className="text-[13px] font-medium tabular-nums">{open! + 1} / {tiles.length}</span>
+                <span className="text-fs-sm font-medium tabular-nums">{open! + 1} / {tiles.length}</span>
                 <div className="flex items-center gap-1">
                   {activeKind === 'image' && (
                     <button type="button" onClick={() => setZoom(z => !z)} aria-label={zoom ? 'Zoom out' : 'Zoom in'}
@@ -253,9 +348,9 @@ export function GalleryShowcase({ items, eyebrow = 'Gallery', title = 'Moments F
               {/* caption */}
               {(active.title?.trim() || active.description?.trim() || active.photographer?.trim() || active.location?.trim() || active.date?.trim() || (active.tags?.length ?? 0) > 0 || active.copyright?.trim()) && (
                 <div className="mx-auto w-full max-w-3xl px-4 pb-5 pt-1 text-center text-white">
-                  {active.title?.trim() && <p className="text-[15px] font-semibold">{active.title}</p>}
-                  {active.description?.trim() && <p className="mt-1 text-[13px] text-white/70">{active.description}</p>}
-                  <div className="mt-2 flex flex-wrap items-center justify-center gap-x-4 gap-y-1 text-[12px] text-white/55">
+                  {active.title?.trim() && <p className="text-fs-md font-semibold">{active.title}</p>}
+                  {active.description?.trim() && <p className="mt-1 text-fs-sm text-white/70">{active.description}</p>}
+                  <div className="mt-2 flex flex-wrap items-center justify-center gap-x-4 gap-y-1 text-fs-xs text-white/55">
                     {active.photographer?.trim() && <span className="inline-flex items-center gap-1.5"><Camera className="size-3.5" aria-hidden />{active.photographer}</span>}
                     {active.location?.trim() && <span className="inline-flex items-center gap-1.5"><MapPin className="size-3.5" aria-hidden />{active.location}</span>}
                     {active.date?.trim() && <span>{active.date}</span>}
@@ -264,7 +359,7 @@ export function GalleryShowcase({ items, eyebrow = 'Gallery', title = 'Moments F
                   {active.tags && active.tags.length > 0 && (
                     <div className="mt-2 flex flex-wrap justify-center gap-1.5">
                       {active.tags.filter(Boolean).map(tag => (
-                        <span key={tag} className="rounded-full bg-white/10 px-2 py-0.5 text-[11px] font-medium text-white/70">#{tag}</span>
+                        <span key={tag} className="rounded-full bg-white/10 px-2 py-0.5 text-fs-2xs font-medium text-white/70">#{tag}</span>
                       ))}
                     </div>
                   )}

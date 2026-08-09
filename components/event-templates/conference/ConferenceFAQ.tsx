@@ -70,7 +70,7 @@ export function ConferenceFAQ({ faqUrl, supportEmail, supportPhone, termsUrl, re
           </h2>
         </motion.div>
 
-        <div className="grid gap-10 lg:grid-cols-[1fr_280px]">
+        <div className="grid gap-10 lg:grid-cols-[minmax(0,1fr)_280px]">
 
           {/* Accordion */}
           {faqs.length > 0 && (

@@ -2,7 +2,7 @@ import { clsx, type ClassValue } from 'clsx'
 import { extendTailwindMerge } from 'tailwind-merge'
 
 // LS2.1B — Teach tailwind-merge about the project's custom font-size utilities
-// (text-fs-*, generated from the --fs-* design tokens via @theme in globals.css).
+// (the text-fs utilities, generated from the font-size design tokens via @theme).
 // Without this, twMerge lumps `text-fs-*` into the same ambiguous `text-*` bucket
 // as text colors and DROPS the font-size whenever a color class is present in the
 // same cn() call — silently losing the size. Registering them under the font-size
@@ -12,6 +12,7 @@ const FONT_SIZE_UTILITIES = [
   'fs-2xs', 'fs-xs', 'fs-sm', 'fs-base', 'fs-md', 'fs-lg', 'fs-xl',
   'fs-2xl', 'fs-3xl', 'fs-4xl', 'fs-5xl',
   'fs-display-sm', 'fs-display-md', 'fs-display-lg',
+  'fs-input',
 ]
 
 const twMerge = extendTailwindMerge({

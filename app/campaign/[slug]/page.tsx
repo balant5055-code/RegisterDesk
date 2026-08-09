@@ -166,7 +166,7 @@ export default async function CampaignPage({ params }: PageProps) {
           Back
         </Link>
 
-        <div className="lg:grid lg:grid-cols-[1fr_380px] lg:gap-10 xl:gap-14">
+        <div className="lg:grid lg:grid-cols-[minmax(0,1fr)_380px] lg:gap-10 xl:gap-14">
 
           {/* ── Left column ───────────────────────────────────────────────────── */}
           <div className="flex flex-col gap-8">

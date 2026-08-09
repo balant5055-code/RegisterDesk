@@ -1,0 +1,82 @@
+# RD-EVENT-16 — Event Builder performance profiling in CI.
+#
+# Runs entirely against the Firebase Emulator Suite: no production project, no service
+# account, no external service is contacted. The only secrets-free inputs are `.env.emulator`
+# and the deterministic seed.
+#
+# Manual dispatch by default. Making this a required PR check is a deliberate follow-up
+# decision — profiling durations are machine-dependent, and a shared CI runner is noisier
+# than a developer's laptop. COUNT metrics (commits, stringify calls, localStorage writes)
+# are the ones worth gating on; see docs/RD-EVENT-14-PROFILING-AUTOMATION.md §6.
+
+name: Event Builder Profiling
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Weekly drift check. Cheap, and catches a regression before it compounds.
+    - cron: '0 3 * * 1'
+
+jobs:
+  profile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # The Firestore and Storage emulators are JVM processes. Without Java the suite
+      # fails at startup with "Could not spawn `java -version`".
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'   # firebase-tools 15 requires 21+; 17 fails at emulator startup
+
+      - run: npm ci
+
+      - run: npx playwright install --with-deps chromium
+
+      - name: Start emulators
+        run: |
+          npx --yes firebase-tools emulators:start \
+            --project demo-registerdesk --only auth,firestore,storage &
+          npx --yes wait-on tcp:9099 tcp:8080 tcp:9199 --timeout 120000
+
+      - name: Seed deterministic data
+        run: npm run emu:seed
+
+      # `--profile` is REQUIRED: React only records actualDuration in a profiling build.
+      # A plain build reports every duration as 0 while still appearing to succeed.
+      - name: Build (React profiling enabled)
+        run: npm run emu:build
+
+      - name: Serve
+        run: |
+          npm run emu:serve &
+          npx --yes wait-on http://localhost:3187/login --timeout 120000
+
+      - name: Capture profiles
+        run: npm run emu:profile
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: profiling-results
+          path: e2e/.results/
+          retention-days: 90
+
+      # Compares against a committed baseline when one exists. Non-blocking until a
+      # baseline is established on this hardware — see the note at the top of this file.
+      - name: Compare against baseline
+        continue-on-error: true
+        run: |
+          if [ -d docs/baselines/ci ]; then
+            npm run profile:compare docs/baselines/ci e2e/.results/current
+          else
+            echo "No CI baseline committed yet — skipping comparison."
+          fi

@@ -10,23 +10,29 @@
 import type { FooterColumn, FooterLink, SocialLink, FooterTrustItem } from '@/lib/marketing/types'
 import { PRIMARY_NAV } from './navigation'
 
+// iconKey is carried straight through from the nav registry — the footer shows the
+// SAME icon the mega-menu shows for that destination, and never picks its own.
 function navColumn(menuId: string): FooterColumn {
   const menu = PRIMARY_NAV.find(m => m.id === menuId)
-  const links: FooterLink[] = (menu?.groups ?? []).flatMap(g => g.items).map(it => ({ label: it.title, href: it.href }))
+  const links: FooterLink[] = (menu?.groups ?? [])
+    .flatMap(g => g.items)
+    .map(it => ({ label: it.title, href: it.href, iconKey: it.iconKey }))
   return { id: menuId, title: menu?.title ?? menuId, links }
 }
 
 const platformColumn = navColumn('platform')
-platformColumn.links.push({ label: 'Pricing', href: '/pricing' })
+// Pricing is a top-level nav entry with no icon of its own, so the key is stated here.
+platformColumn.links.push({ label: 'Pricing', href: '/pricing', iconKey: 'invoice' })
 
 // Phase V1.0.A — footer keeps only Platform, Solutions, Company, Legal. Company
 // is explicit (About/Contact/Security are now top-level nav, not a dropdown).
 const companyColumn: FooterColumn = {
   id: 'company', title: 'Company',
   links: [
-    { label: 'About',    href: '/about' },
-    { label: 'Contact',  href: '/contact' },
-    { label: 'Security', href: '/security' },
+    { label: 'About',    href: '/about',    iconKey: 'corporate' },
+    { label: 'Contact',  href: '/contact',  iconKey: 'communications' },
+    { label: 'Support',  href: '/support',  iconKey: 'support' },
+    { label: 'Security', href: '/security', iconKey: 'security' },
   ],
 }
 
@@ -51,12 +57,15 @@ export const FOOTER_LEGAL: FooterLink[] = [
   { label: 'Privacy',       href: '/privacy' },
   { label: 'Terms',         href: '/terms' },
   { label: 'Refund Policy', href: '/refund-policy' },
+  { label: 'Cookie Policy', href: '/cookie-policy' },
 ]
 
+// No ctaKey / secondaryCtaKey: the footer no longer repeats "Start free" and
+// "Book a demo". Those are the navbar's permanent job on every page, so the footer
+// copies bought nothing — and they were the only reason the brand zone needed to be
+// a card. Removed here rather than left unread, so the registry has no dead fields.
 export const FOOTER_BRAND = {
   description: 'The complete Event Operations Platform for registrations, payments, check-in, certificates and attendee management.',
-  ctaKey:          'startFree',
-  secondaryCtaKey: 'bookDemo',
   contactHref: '/contact',
   contactEmail: process.env.NEXT_PUBLIC_SUPPORT_EMAIL ?? null,
 } as const

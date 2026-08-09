@@ -9,6 +9,7 @@
 
 import { NextRequest, NextResponse } from 'next/server'
 import { checkRegistrationGate, GATE_REASON_LABELS } from '@/lib/registrations/gate'
+import { checkRateLimit, getClientIp } from '@/lib/rateLimit'
 import type { RegistrationGateResult } from '@/lib/registrations/types'
 
 interface GateApiResponse extends RegistrationGateResult {
@@ -16,6 +17,18 @@ interface GateApiResponse extends RegistrationGateResult {
 }
 
 export async function GET(req: NextRequest): Promise<NextResponse<GateApiResponse>> {
+  // RD-LAUNCH-07: the only public registration endpoint with no limiter. It performs a
+  // Firestore read per call and discloses live availability, so an unbounded caller can
+  // both amplify reads and poll capacity. The ceiling is deliberately high — the event
+  // page and the register form both call it legitimately during a normal visit.
+  const rl = checkRateLimit(getClientIp(req), 'gate', 120, 60 * 1000)
+  if (rl.limited) {
+    return NextResponse.json(
+      { allowed: false, reason: 'EVENT_NOT_FOUND', message: 'Too many requests. Please try again shortly.' },
+      { status: 429, headers: { 'Retry-After': String(Math.ceil((rl.resetAt - Date.now()) / 1000)) } },
+    )
+  }
+
   const { searchParams } = req.nextUrl
 
   const slug   = searchParams.get('slug')?.trim()  ?? ''

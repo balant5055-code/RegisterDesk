@@ -15,6 +15,7 @@
   /* Full gradient strings — used via CSS overrides, not Tailwind utilities  */
   --primary-gradient:       linear-gradient(90deg, #fb5a6a 0%, #e5277e 100%);
   --primary-gradient-hover: linear-gradient(90deg, #ea4858 0%, #bf1868 100%);
+  
 
   /* ── Brand: Secondary ───────────────────────────────────── */
   --secondary:            #475569; /* slate-600 — secondary actions           */
@@ -79,6 +80,12 @@
   --fs-4xl:   40px;    /* hero headings (mobile-to-tablet)                    */
   --fs-5xl:   48px;    /* display headings (large breakpoints)                */
 
+  /* Form controls on small screens. iOS Safari auto-zooms the viewport when a
+     focused input's font-size is below 16px, so touch-width controls step up to
+     this token and drop back to --fs-base from the sm breakpoint (see
+     components/ui/field.tsx). It is a control-only size — not a body step.     */
+  --fs-input: 16px;
+
   /* ── Display scale — responsive, clamp-based tokens --fs-display-sm/md/lg */
   --fs-display-sm: clamp(1.75rem, 3vw, 2.5rem);   /* section headings        */
   --fs-display-md: clamp(2.25rem, 4vw, 3.25rem);  /* page / large headings   */
@@ -120,6 +127,41 @@
   --brand-primary-active: var(--primary-hover);           /* no distinct active today */
   --brand-gradient:       var(--primary-gradient);
   --brand-gradient-hover: var(--primary-gradient-hover);
+
+  /* ── Logo palette ──────────────────────────────────────────────────────────
+     SAMPLED from public/logo/logo-registerdesk.png (decoded pixel values, not an
+     eyeballed approximation):
+       #021246  the "REGISTER" wordmark navy
+       #6204e3  the gradient START — R monogram and the left edge of "DESK"
+       #f61e7d  the gradient END   — the right edge of "DESK"
+     The logo's gradient runs VIOLET → PINK.
+
+     Note this disagrees with --primary-from (#fb5a6a, coral): coral appears
+     nowhere in the logo. These tokens exist so surfaces that must match the
+     wordmark can do so exactly; reconciling the app-wide brand gradient with the
+     logo is a separate, deliberate decision because it restyles every CTA. */
+  --brand-navy:       #021246;
+  --brand-violet:     #6204e3;
+  --brand-pink:       #f61e7d;
+  --brand-navy-rgb:     2 18  70;
+  --brand-violet-rgb:  98  4 227;
+  --brand-pink-rgb:   246 30 125;
+
+  /* Marketing footer canvas.
+     The band is a COOL NEAR-WHITE, not a colour field. Brand appears only as a
+     whisper in two opposite corners — violet top-left, pink bottom-right, the
+     logo's own endpoints in its own order — and dies out well before the middle,
+     so the footer reads as a lit white surface rather than tinted paper.
+
+     The tint alphas are deliberately tiny (~0.04). An earlier revision ran them at
+     0.10 with 0.18 orbs on top, which flooded the whole band pink-lavender: at
+     these areas — a full-width band plus two 30rem blurs — even a few points of
+     alpha covers thousands of square pixels, and washes read far heavier than the
+     number suggests. Raise these with care. */
+  --footer-gradient:
+    linear-gradient(160deg, rgb(var(--brand-violet-rgb) / 0.045) 0%, transparent 34%),
+    linear-gradient(320deg, rgb(var(--brand-pink-rgb)   / 0.040) 0%, transparent 38%),
+    linear-gradient(180deg, #FFFFFF 0%, #FBFCFE 46%, rgb(var(--brand-navy-rgb) / 0.055) 100%);
 
   /* ── Text ── */
   --text-primary:   var(--foreground);                    /* headings / primary copy */
@@ -248,8 +290,78 @@
   --type-caption:     var(--fs-xs);
   --type-overline:    var(--fs-2xs);
 
+  /* ── Brand channels (RD-ST5.6) ────────────────────────────────────────────
+     Space-separated RGB channels for the brand hexes above, so translucent
+     surfaces can be composed as rgb(var(--primary-rgb) / <alpha>) instead of
+     re-typing the hex. Values mirror --primary / --primary-from / --info. */
+  --primary-rgb:      229 39 126;   /* #e5277e */
+  --primary-from-rgb: 251 90 106;   /* #fb5a6a */
+  --info-rgb:         232 121 160;  /* #e879a0 */
+
   /* ── Scrollbar (tokenised; was hardcoded in globals.css) ── */
   --scrollbar-thumb: #D1D5DB;
+
+  /* ═══ RD-ST5.1 — VIEWPORT-ADAPTIVE PUBLIC EVENT HERO ══════════════════════
+     The hero must fit the first viewport on desktop, so it needs to know what
+     the chrome above it costs. These are the ONE source for that arithmetic.
+     ─────────────────────────────────────────────────────────────────────── */
+
+  /* Marketing navbar height. MarketingNavbar renders the bar AND its in-flow
+     spacer from this, so the value can never drift between the two. */
+  --nav-h: 4rem;                    /* 64px */
+  /* Public event breadcrumb band: py-3 (24px) + a 13px/18px line. */
+  --crumb-h: 2.625rem;              /* 42px */
+
+  /* Vertical space actually available to the hero below the chrome.
+     svh (small viewport height) excludes mobile browser UI, so the hero never
+     hides behind a collapsing toolbar. */
+  /* RD-ST5.3: the breadcrumb moved INSIDE the hero, so it is no longer subtracted
+     here — the hero box now contains it. --crumb-h stays as the row height token. */
+  --hero-avail: calc(100svh - var(--nav-h));
+
+  /* Target hero height — ~86% of the available viewport, floored so it never
+     collapses on very short windows and capped so it stops growing on tall
+     monitors (that cap is what keeps proportions identical at 1440p+). */
+  --hero-h: clamp(30rem, calc(var(--hero-avail) * 0.86), 52rem);
+
+  /* Every internal dimension scales from the SAME viewport basis, so type,
+     spacing, poster and countdown compress together rather than fighting.
+     min(vw, vh) keeps wide-but-short laptops honest; the clamp floor/ceiling
+     keeps phones readable and large monitors from ballooning. */
+  --hero-py:        clamp(0.75rem,  2vh,               2.5rem);
+  --hero-gap:       clamp(0.5rem,   1.7vh,             1.5rem);
+  --hero-gap-tight: clamp(0.375rem, 1vh,              0.75rem);
+  --hero-title:     clamp(2rem,    min(5vw, 5.6vh),   4.25rem);
+  --hero-tagline:   clamp(1.05rem, min(2.3vw, 2.7vh), 2rem);
+  --hero-digit:     clamp(1rem,    min(2.1vw, 2.4vh),  1.625rem);
+  --hero-price:     clamp(1.5rem,  min(2.6vw, 3.2vh), 2.25rem);
+  --hero-poster-h:  clamp(5rem,     14vh,              12rem);
+  --hero-card-pad:  clamp(0.625rem, 1.6vh,             1.25rem);
+
+  /* Hero description: a FIXED block, so copy length can never move the hero.
+     The line count is part of the viewport budget — two lines normally, one on
+     short screens — and the reserve always includes the Read More row, so the
+     trigger appearing shifts nothing. */
+  --hero-desc-lines: 2;
+  --hero-desc-h:     calc(var(--hero-desc-lines) * 1.625 * var(--fs-md) + 1.5rem);
+}
+
+/* Navbar grows at the same breakpoints it always did — values unchanged. */
+@media (min-width: 768px)  { :root { --nav-h: 68px } }
+@media (min-width: 1024px) { :root { --nav-h: 72px } }
+
+/* Short-viewport tier. Below ~800px of viewport height the registration card's
+   non-scaling controls (CTA, trust row, secondary buttons) dominate its height, so
+   proportional vh scaling alone can no longer recover the difference. This tier
+   compresses the parts that CAN give — poster band, card padding, block rhythm —
+   without shrinking any touch target or hiding any content. */
+@media (max-height: 800px) {
+  :root {
+    --hero-poster-h:   clamp(4.5rem, 9.5vh, 8rem);
+    --hero-card-pad:   0.625rem;
+    --hero-gap:        clamp(0.4rem, 1.4vh, 1rem);
+    --hero-desc-lines: 1;
+  }
 }
 
 /* ─── Dark mode overrides ─────────────────────────────────────────────────────

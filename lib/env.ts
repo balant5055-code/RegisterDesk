@@ -170,6 +170,27 @@ export const BASE_URL = optional('NEXT_PUBLIC_BASE_URL', 'https://registerdesk.i
 
 // Sentry DSN for error monitoring. Optional — when unset, lib/monitoring/sentry.ts
 // degrades to console.error only (never throws, never blocks business logic).
+// ─── Platform Storage — Cloudflare R2 (RD-STORAGE-01) ────────────────────────
+// OPTIONAL here by design, per the ownership rule at the top of this file: storage is a
+// FEATURE, so a missing R2 credential must fail storage only — never boot, never an OTP
+// login, never a payment. Validation lives at the subsystem boundary:
+//   features/platform-storage/providers/cloudflare-r2/config.ts
+// R2_PUBLIC_URL is intentionally not required: a bucket with no public domain is a valid
+// (stricter) setup in which every object is private or signed.
+export const R2_ACCOUNT_ID        = optional('R2_ACCOUNT_ID')
+export const R2_BUCKET            = optional('R2_BUCKET')
+export const R2_ACCESS_KEY_ID     = optional('R2_ACCESS_KEY_ID')
+export const R2_SECRET_ACCESS_KEY = optional('R2_SECRET_ACCESS_KEY')
+export const R2_PUBLIC_URL        = optional('R2_PUBLIC_URL')
+
+// ─── AI pipeline (RD-AI-01) ──────────────────────────────────────────────────
+// Whether a finished photo upload automatically enters the AI queue. OPTIONAL and
+// FAIL-SAFE OFF: an AI inference is metered, so analysing every uploaded photo must be a
+// deliberate deployment decision rather than something that switches itself on the day a
+// provider is added. Read at the subsystem boundary (features/ai/services/aiQueue.ts).
+// Provider credentials are NOT here — each provider validates its own at its own boundary.
+export const AI_AUTO_ANALYZE_ON_UPLOAD = optional('AI_AUTO_ANALYZE_ON_UPLOAD')
+
 export const SENTRY_DSN = optional('SENTRY_DSN')
 
 // GA-7E S1 — out-of-band critical-alert channel (independent of SES). A generic JSON

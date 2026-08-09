@@ -74,14 +74,14 @@ export function PageHeader({
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
-            <h1 className="text-[var(--fs-2xl)] font-bold tracking-tight text-foreground">
+            <h1 className="text-fs-2xl font-bold tracking-tight text-foreground">
               {title}
             </h1>
             {status?.map((s, i) => (
               <span
                 key={`${s.label}-${i}`}
                 className={cn(
-                  'rounded-full px-2 py-0.5 text-[var(--fs-2xs)] font-semibold ring-1',
+                  'rounded-full px-2 py-0.5 text-fs-2xs font-semibold ring-1',
                   TONE[s.tone ?? 'neutral'],
                 )}
               >
@@ -90,12 +90,12 @@ export function PageHeader({
             ))}
           </div>
           {subtitle && (
-            <p className="mt-0.5 text-[var(--fs-sm)] text-muted-foreground">
+            <p className="mt-0.5 text-fs-sm text-muted-foreground">
               {subtitle}
             </p>
           )}
           {lastUpdated && (
-            <p className="mt-0.5 text-[var(--fs-2xs)] text-muted-foreground/70">
+            <p className="mt-0.5 text-fs-2xs text-muted-foreground/70">
               {lastUpdated}
             </p>
           )}

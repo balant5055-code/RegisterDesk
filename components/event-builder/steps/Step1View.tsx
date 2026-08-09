@@ -42,6 +42,7 @@ import {
 import type { LucideIcon } from 'lucide-react'
 import { WizardFooter } from '@/components/wizard/WizardFooter'
 import { Stepper } from '@/components/event-builder/Stepper'
+import { validateStep } from '@/lib/events/builder/stepValidation'
 import { EASE, WIZARD_STEPS } from '@/lib/events/builder/constants'
 import type { StepViewProps } from '@/lib/events/builder/types'
 import { getTemplate } from '@/lib/events/templateRegistry'
@@ -711,22 +712,36 @@ export function Step1View({ currentStep, completedValues, onNext, onSaveDraft, i
     : (isFundraising && campaignType === 'event_plus_donation') ? true
     : selectedSubtype !== null && (!isOtherSubtype || customSubtype.trim().length > 0)
 
-  // Fundraising events require a campaign type selection before proceeding
-  const canProceed = selectedType !== null && hasValidSubtype
-    && (!isFundraising || campaignType !== null)
+  // The rule (incl. "fundraising requires a campaign type") lives in the shared contract.
+  const canProceed = validateStep('eventType', {
+    selectedType, hasValidSubtype, isFundraising, campaignType,
+  }).valid
 
   const subtypeSectionRef = useRef<HTMLDivElement>(null)
 
-  const handleSelectType = (id: string) =>
+  // RD-EVENT-18 — distinguishes "the organizer just picked a type" from "a saved type was
+  // hydrated from the draft". The reveal-scroll below is correct for the first and wrong for
+  // the second, and `[selectedType]` alone cannot tell them apart.
+  const userPickedTypeRef = useRef(false)
+
+  const handleSelectType = (id: string) => {
+    userPickedTypeRef.current = true
     setStep1(prev => ({
       eventType:    id,
       subtype:      id !== prev.eventType ? null : prev.subtype,
       customSubtype: id !== prev.eventType ? ''  : prev.customSubtype,
       campaignType:  id !== prev.eventType ? null : prev.campaignType,
     }))
+  }
 
+  // Reveals the format chips after a selection — ONLY after a real selection.
+  //
+  // This effect is keyed on `selectedType`, which is also set when an existing draft
+  // hydrates. Resuming a draft therefore ran the scroll on mount and dropped the organizer
+  // ~530px down the page, past the Stepper, the step heading and the first four categories.
+  // The scroll itself is good UX; running it on hydration was not.
   useEffect(() => {
-    if (!selectedType) return
+    if (!selectedType || !userPickedTypeRef.current) return
     const timer = setTimeout(() => {
       const el        = subtypeSectionRef.current
       const scroller  = document.getElementById('main-content')
@@ -787,7 +802,7 @@ export function Step1View({ currentStep, completedValues, onNext, onSaveDraft, i
       </div>
 
       <div
-        className="mt-5 grid flex-1 items-start gap-5 sm:mt-6 lg:grid-cols-[1fr_296px]"
+        className="mt-5 grid flex-1 items-start gap-5 sm:mt-6 lg:grid-cols-[minmax(0,1fr)_296px]"
         aria-label="Event type selection"
       >
         {/* Left: cards grid + secondary selector */}

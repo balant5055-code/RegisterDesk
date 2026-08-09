@@ -156,7 +156,7 @@ export default function ProgramsPanel({ api }: { api: CertApi }) {
               </div>
             </div>
 
-            <div className="grid gap-2 sm:grid-cols-[auto_1fr] sm:items-center">
+            <div className="grid gap-2 sm:grid-cols-[auto_minmax(0,1fr)] sm:items-center">
               <span className="text-[12px] font-semibold uppercase tracking-wide text-muted-foreground">When</span>
               <div className="flex flex-wrap items-center gap-2">
                 <input list="cert-fields" className={cn(inputCls, 'h-8 w-40')} placeholder="field" value={r.field} onChange={e => patchRule(i, { field: e.target.value })} />

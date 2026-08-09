@@ -11,52 +11,95 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { collection, query, orderBy, limit, onSnapshot } from 'firebase/firestore'
-import { db }   from '@/lib/firebase/firestore'
+import { db } from '@/lib/firebase/firestore'
 import { auth } from '@/lib/firebase/auth'
-import type { NotificationView, NotificationFeedResponse } from '@/lib/notifications/inbox/types'
+import type {
+  NotificationView,
+  NotificationFeedResponse,
+} from '@/lib/notifications/inbox/types'
 
 async function authHeaders(): Promise<Record<string, string> | null> {
   const user = auth.currentUser
   if (!user) return null
-  return { Authorization: `Bearer ${await user.getIdToken()}` }
+
+  return {
+    Authorization: `Bearer ${await user.getIdToken()}`,
+  }
 }
 
 export interface NotificationQuery {
-  cursor?:   string | null
+  cursor?: string | null
   category?: string | null
-  eventId?:  string | null
-  q?:        string | null
-  unread?:   boolean
-  limit?:    number
+  eventId?: string | null
+  q?: string | null
+  unread?: boolean
+  limit?: number
 }
 
-const EMPTY_FEED: NotificationFeedResponse = { notifications: [], nextCursor: null, unreadCount: 0 }
+const EMPTY_FEED: NotificationFeedResponse = {
+  notifications: [],
+  nextCursor: null,
+  unreadCount: 0,
+}
 
-export async function fetchNotifications(params: NotificationQuery = {}): Promise<NotificationFeedResponse> {
+export async function fetchNotifications(
+  params: NotificationQuery = {},
+): Promise<NotificationFeedResponse> {
   const headers = await authHeaders()
   if (!headers) return EMPTY_FEED
+
   const sp = new URLSearchParams()
-  if (params.cursor)   sp.set('cursor', params.cursor)
+
+  if (params.cursor) sp.set('cursor', params.cursor)
   if (params.category) sp.set('category', params.category)
-  if (params.eventId)  sp.set('eventId', params.eventId)
-  if (params.q)        sp.set('q', params.q)
-  if (params.unread)   sp.set('unread', 'true')
-  if (params.limit)    sp.set('limit', String(params.limit))
-  const res = await fetch(`/api/organizer/notifications?${sp.toString()}`, { headers })
-  if (!res.ok) return EMPTY_FEED
-  return await res.json() as NotificationFeedResponse
+  if (params.eventId) sp.set('eventId', params.eventId)
+  if (params.q) sp.set('q', params.q)
+  if (params.unread) sp.set('unread', 'true')
+  if (params.limit) sp.set('limit', String(params.limit))
+
+  try {
+    const res = await fetch(
+      `/api/organizer/notifications?${sp.toString()}`,
+      {
+        headers,
+      },
+    )
+
+    if (!res.ok) return EMPTY_FEED
+
+    return (await res.json()) as NotificationFeedResponse
+  } catch (error) {
+    // Ignore aborted requests (navigation / Strict Mode / unmount)
+    if (
+      error instanceof DOMException &&
+      error.name === 'AbortError'
+    ) {
+      return EMPTY_FEED
+    }
+
+    console.error('Failed to fetch notifications', error)
+    return EMPTY_FEED
+  }
 }
 
 export async function markNotificationRead(id: string): Promise<void> {
   const headers = await authHeaders()
   if (!headers) return
-  await fetch(`/api/organizer/notifications/${id}/read`, { method: 'POST', headers })
+
+  await fetch(`/api/organizer/notifications/${id}/read`, {
+    method: 'POST',
+    headers,
+  })
 }
 
 export async function markAllNotificationsRead(): Promise<void> {
   const headers = await authHeaders()
   if (!headers) return
-  await fetch('/api/organizer/notifications/read-all', { method: 'POST', headers })
+
+  await fetch('/api/organizer/notifications/read-all', {
+    method: 'POST',
+    headers,
+  })
 }
 
 // ─── Bell hook (recent + unread badge, live for the owner) ────────────────────
@@ -64,35 +107,54 @@ export async function markAllNotificationsRead(): Promise<void> {
 const BELL_LIMIT = 20
 
 export interface UseNotifications {
-  recent:      NotificationView[]
+  recent: NotificationView[]
   unreadCount: number
-  loading:     boolean
-  markRead:    (id: string) => Promise<void>
+  loading: boolean
+  markRead: (id: string) => Promise<void>
   markAllRead: () => Promise<void>
-  refresh:     () => void
+  refresh: () => void
 }
 
 export function useNotifications(): UseNotifications {
-  const [recent, setRecent]           = useState<NotificationView[]>([])
+  const [recent, setRecent] = useState<NotificationView[]>([])
   const [unreadCount, setUnreadCount] = useState(0)
-  const [loading, setLoading]         = useState(true)
+  const [loading, setLoading] = useState(true)
+
   const mounted = useRef(true)
 
   const refresh = useCallback(async () => {
-    const feed = await fetchNotifications({ limit: BELL_LIMIT })
-    if (!mounted.current) return
-    setRecent(feed.notifications)
-    setUnreadCount(feed.unreadCount)
-    setLoading(false)
+    try {
+      const feed = await fetchNotifications({
+        limit: BELL_LIMIT,
+      })
+
+      if (!mounted.current) return
+
+      setRecent(feed.notifications)
+      setUnreadCount(feed.unreadCount)
+    } finally {
+      if (mounted.current) {
+        setLoading(false)
+      }
+    }
   }, [])
 
   // Initial load + refresh when the tab regains focus.
   useEffect(() => {
     mounted.current = true
+
     void refresh()
-    const onFocus = () => { void refresh() }
+
+    const onFocus = () => {
+      void refresh()
+    }
+
     window.addEventListener('focus', onFocus)
-    return () => { mounted.current = false; window.removeEventListener('focus', onFocus) }
+
+    return () => {
+      mounted.current = false
+      window.removeEventListener('focus', onFocus)
+    }
   }, [refresh])
 
   // Owner real-time: a change to the newest inbox docs triggers a refetch.
@@ -100,29 +162,75 @@ export function useNotifications(): UseNotifications {
   useEffect(() => {
     const user = auth.currentUser
     if (!user) return
-    const qy = query(collection(db, 'users', user.uid, 'notifications'), orderBy('createdAt', 'desc'), limit(5))
+
+    const qy = query(
+      collection(db, 'users', user.uid, 'notifications'),
+      orderBy('createdAt', 'desc'),
+      limit(5),
+    )
+
     let first = true
+
     const unsub = onSnapshot(
       qy,
-      () => { if (first) { first = false; return } void refresh() },
-      () => { /* offline / rules — API path still works, ignore */ },
+      () => {
+        if (first) {
+          first = false
+          return
+        }
+
+        void refresh()
+      },
+      () => {
+        // Offline / rules — API path still works, ignore.
+      },
     )
+
     return unsub
   }, [refresh])
 
-  const markRead = useCallback(async (id: string) => {
-    setRecent(prev => prev.map(n => (n.id === id ? { ...n, read: true } : n)))
-    setUnreadCount(c => Math.max(0, c - 1))
-    await markNotificationRead(id)
-    void refresh()
-  }, [refresh])
+  const markRead = useCallback(
+    async (id: string) => {
+      setRecent(prev =>
+        prev.map(n =>
+          n.id === id
+            ? { ...n, read: true }
+            : n,
+        ),
+      )
+
+      setUnreadCount(c => Math.max(0, c - 1))
+
+      await markNotificationRead(id)
+
+      void refresh()
+    },
+    [refresh],
+  )
 
   const markAllRead = useCallback(async () => {
-    setRecent(prev => prev.map(n => ({ ...n, read: true })))
+    setRecent(prev =>
+      prev.map(n => ({
+        ...n,
+        read: true,
+      })),
+    )
+
     setUnreadCount(0)
+
     await markAllNotificationsRead()
+
     void refresh()
   }, [refresh])
 
-  return { recent, unreadCount, loading, markRead, markAllRead, refresh: () => { void refresh() } }
+  return {
+    recent,
+    unreadCount,
+    loading,
+    markRead,
+    markAllRead,
+    refresh: () => {
+      void refresh()
+    },
+  }
 }

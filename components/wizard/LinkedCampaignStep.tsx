@@ -17,8 +17,8 @@ import {
   makeBlankLinkedCampaignDraft,
   validateLinkedCampaign,
   validateLinkedCampaignCore,
-  isLinkedCampaignNavigationValid,
 } from '@/lib/campaigns/linkedCampaignConfig'
+import { validateStep } from '@/lib/events/builder/stepValidation'
 
 // Mirrors WizardStep in page.tsx (not exported from there)
 interface WizardStep { name: string }
@@ -480,7 +480,8 @@ export function LinkedCampaignStep({
         onNext={handleNext}
         onSaveDraft={handleSave}
         nextLabel="Continue to Review"
-        isNextDisabled={showErrors && !isLinkedCampaignNavigationValid(draft)}
+        // Deferred gate: validity alone must not disable Continue on a first visit.
+        isNextDisabled={showErrors && !validateStep('fundraising', { draft }).valid}
         stepContext={stepContext}
       />
     </motion.div>

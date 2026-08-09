@@ -24,6 +24,8 @@ import {
 import { buildAssignmentContext, evaluateRule } from './assignment'
 import type { CertificateJob, CertificateTemplateDoc } from './types'
 import type { RegistrationDocument } from '@/lib/registrations/types'
+// RD-RACEOPS-01 (D3): supplies the race values for {{distance}}/{{finishTime}}/{{position}}.
+import { resolveCertificateRaceResult } from '@/features/race-operations/services/certificateResults'
 
 // Event-level fields resolved once per process() call from the event draft.
 export interface JobEventContext {
@@ -158,6 +160,16 @@ async function generateForReg(
     return { ok: false, error: `Registration ${reg.id} not confirmed` }
   }
 
+  // RD-RACEOPS-01 (approved decision D3): resolve the published race result so
+  // {{distance}}/{{finishTime}}/{{position}} render real values instead of blanks. Reads the
+  // PUBLISHED Official Snapshot only, returns empty strings when there are no published
+  // results, and never throws — so a non-race event's certificates are unchanged.
+  const raceResult = await resolveCertificateRaceResult({
+    eventSlug: ctx.eventSlug,
+    passId:    reg.passId,
+    bibNumber: reg.bibNumber,
+  })
+
   try {
     const { certificate } = await generateCertificate({
       input: {
@@ -173,9 +185,9 @@ async function generateForReg(
         attendeeEmail:  reg.attendee.email,
         ticketCode:     reg.ticketCode ?? '',
         bibNumber:      reg.bibNumber ?? '',
-        distance:       '',
-        finishTime:     '',
-        position:       '',
+        distance:       raceResult.distance,
+        finishTime:     raceResult.finishTime,
+        position:       raceResult.position,
         category:       reg.bibCategory ?? '',
       },
       certificateType: job.certificateType,

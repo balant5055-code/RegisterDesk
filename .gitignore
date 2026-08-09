@@ -39,3 +39,20 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# RD-EVENT-14 — profiling artefacts (sessions + captured runs, never committed)
+e2e/.auth/
+e2e/.results/
+test-results/
+playwright-report/
+
+# RD-EVENT-16 — emulator runtime data
+firebase-debug.log
+firestore-debug.log
+ui-debug.log
+.emulator-data/
+e2e/.shots/
+.next-emulator/
+
+# Firebase service account credentials
+registerdesk-c91a3-firebase-adminsdk-fbsvc-7124b9379b.json

@@ -11,14 +11,14 @@ import { buttonVariants } from '@/components/ui/button'
 
 export default function GlobalRouteError({ error, reset }: { error: Error & { digest?: string }; reset: () => void }) {
   useEffect(() => {
-    // Safe logging — message + digest only.
-    console.error('[app/error]', error.message, error.digest ?? '')
-  }, [error])
+  console.error('[app/error]', error)
+  console.error(error.stack)
+}, [error])
 
   return (
     <div className="flex min-h-[60vh] flex-col items-center justify-center bg-background px-6 py-16 text-center">
       <div className="mx-auto max-w-md">
-        <h1 className="text-[var(--fs-2xl)] font-bold tracking-tight text-foreground sm:text-[var(--fs-3xl)]">
+        <h1 className="text-fs-2xl font-bold tracking-tight text-foreground sm:text-fs-3xl">
           Something went wrong
         </h1>
         <p className="mt-3 text-[15px] leading-relaxed text-muted-foreground">

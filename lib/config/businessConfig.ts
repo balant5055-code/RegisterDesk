@@ -372,7 +372,154 @@ export interface SecurityConfig {
 }
 
 /** The full modular configuration — one object, nine sections. */
+// ─── Media Studio (RD-MEDIA-08) ───────────────────────────────────────────────
+//
+// EVERY Media Studio limit lives here. Nothing in features/media-studio or
+// features/public-gallery may hardcode one; they read the resolved value from
+// lib/config/resolveMediaConfig.ts.
+//
+// The numbers below are DEFAULTS, not policy. A Super Admin edits them through the existing
+// generic business-config endpoint — this section registers like every other one, so it
+// needed no new admin route and no new admin logic.
+
+/** Quantitative caps. `null` means unlimited. */
+export interface MediaLimitsConfig {
+  /** Photos an event may hold in total, across every gallery. */
+  maxPhotosPerEvent:      number | null
+  /** Files an organizer may queue or scan for duplicates in one request. */
+  maxUploadBatchSize:     number
+  /** Largest single stored rendition. Bounded by the storage layer's own ceiling. */
+  maxUploadFileSizeBytes: number
+  maxGalleriesPerEvent:   number
+  maxAlbumsPerGallery:    number
+}
+
+/** Behavioural defaults a workspace inherits when it has not chosen its own. */
+export interface MediaDefaultsConfig {
+  defaultCompressionProfileId: string
+  generateThumbnail:      boolean
+  generateMedium:         boolean
+  keepOriginal:           boolean
+  defaultVisibility:      'PUBLIC' | 'SIGNED_URL'
+  /** Seconds a signed media URL stays valid. */
+  signedUrlExpirySeconds: number
+  /** Master switch for /events/{slug}/gallery. Off ⇒ no event has a public gallery. */
+  publicGalleryEnabled:   boolean
+}
+
+/**
+ * MC-01 · Media Credits policy.
+ *
+ * Attached to `MediaStudioConfig` — the SECTION — and deliberately NOT to
+ * `MediaOverridableConfig`.
+ *
+ * WHY NOT the overridable union: `mergeMediaLayers` builds its result by looping
+ * `OVERRIDABLE_KEYS`. Widening the union without widening that array would make the
+ * resolver's RETURN TYPE promise fields it never copies — present to the compiler, absent at
+ * runtime. Credits are therefore GLOBAL-ONLY in MC-01, and `resolveMediaConfig` and
+ * `mergeMediaLayers` are untouched, exactly as the sprint requires.
+ *
+ * NOTE FOR MC-02: `OVERRIDABLE_KEYS` in mediaLimitLayers.ts is also the ORGANIZER-writable
+ * set (app/api/organizer/media-studio/overrides/route.ts). Business rule 8 forbids
+ * organizers changing pricing, so the pricing keys below must NOT be added to that array
+ * without a second, narrower allow-list. MC-01 therefore adds them to the config TYPE and
+ * to validation, but deliberately NOT to OVERRIDABLE_KEYS.
+ */
+export interface MediaCreditsConfig {
+  /** Master switch. FALSE ⇒ credits are inert and the upload path is untouched. */
+  creditsEnabled:       boolean
+  /** Credits charged per stored photo. */
+  creditsPerPhoto:      number
+  /** Price of one credit, in paise. */
+  creditUnitPricePaise: number
+  refundsEnabled:       boolean
+  /** Days after purchase within which a refund may be requested. */
+  refundWindowDays:     number
+  /** Smallest purchasable quantity. */
+  minCreditPurchase:    number
+
+  // ─── MC-05 · Refund service charge ────────────────────────────────────────
+  // What the platform keeps when a purchase is refunded. Admin-only, like every other
+  // pricing key: an organizer must not be able to reduce the charge on their own refund.
+  /** How the charge is computed. `percent_plus_fixed` applies both. */
+  refundServiceChargeMethod:     'percent' | 'fixed' | 'percent_plus_fixed'
+  /** Whole percent of the purchase amount. Ignored when the method is `fixed`. */
+  refundServiceChargePercent:    number
+  /** Flat paise. Ignored when the method is `percent`. */
+  refundServiceChargeFixedPaise: number
+  /** A refund returning less than this is refused as not worth processing. */
+  minRefundablePaise:            number
+
+  // ─── MC-11 · Refund policy ────────────────────────────────────────────────
+  // Every threshold the refund engine applies now lives here. Nothing about HOW a refund is
+  // computed changed — these bound WHICH requests are accepted.
+  //
+  // Three rules the brief asked to make configurable are deliberately absent, because each
+  // would remove a financial invariant rather than tune one:
+  //   • partial refunds       — the ledger does not attribute consumption to a purchase lot,
+  //                             so a part-refund price is unknowable without a second
+  //                             counting system (see refundService's header).
+  //   • unused-credits-only   — turning it off would refund credits already spent.
+  //   • admin-approval-always — turning it off would pay out with no human decision.
+  // They are fixed policy and the config editor states them as such.
+  /**
+   * Smallest purchase, in CREDITS, that may be refunded at all. 0 disables the check.
+   *
+   * Separate from `minRefundablePaise`: that one bounds the money returned, this one bounds
+   * the size of the purchase. A 5-credit purchase can be worth refunding at ₹100/credit and
+   * not worth it at ₹1/credit, and an operator should be able to say so in either unit.
+   */
+  minRefundCredits:              number
+  /** Largest refund one request may return, in paise. 0 means no ceiling. */
+  maxRefundPerRequestPaise:      number
+  /**
+   * Days a `requested` refund may sit before the sweep rejects it. 0 disables auto-rejection.
+   *
+   * Rejection touches no wallet and no ledger — it is the one refund transition that moves no
+   * money — so an automatic one cannot cost anybody anything.
+   */
+  refundAutoRejectDays:          number
+  /** Whether the organizer must give a reason. */
+  refundReasonRequired:          boolean
+  /** Whether an admin must write a note when approving or rejecting. */
+  refundNoteRequired:            boolean
+}
+
+/** Anything a licence tier or a single event may override. */
+export type MediaOverridableConfig = MediaLimitsConfig & MediaDefaultsConfig
+
+/**
+ * The Media Studio section.
+ *
+ * `tierLimits` is the LICENCE layer. It is keyed by the V2 licence tiers
+ * (free/starter/professional/business/enterprise) and holds DELTAS — an absent key means
+ * "inherit the global value", exactly like `licensing.tierOverridesV2`.
+ *
+ * Deliberately NOT stored on the licence catalog: `EventLicenseDefinitionV2.limits` is a
+ * frozen shape, and putting media limits there would mean editing the licensing model to
+ * change a photo cap. Keeping them here means the licence system is only ever READ.
+ */
+export interface MediaStudioConfig extends MediaOverridableConfig, MediaCreditsConfig {
+  tierLimits: Partial<Record<EventLicenseTierV2, Partial<MediaOverridableConfig>>>
+
+  /**
+   * RD-MS-CLOSURE-01 · platform master switch for photo branding.
+   *
+   * GLOBAL ONLY, and deliberately NOT in `MediaOverridableConfig`. Every other branding
+   * decision already belongs to the organizer — which artwork, whether it is enabled for
+   * their event, when to remove it. This is the platform's, and an organizer being able to
+   * override a platform kill switch would make it not a kill switch.
+   *
+   * Off means: no new branding is applied at import, and the Branding page says why. Photos
+   * already imported are UNAFFECTED — their overlay is baked into the stored bytes and there
+   * is nothing to switch off. That is the honest behaviour, and the copy says so rather than
+   * implying existing photos change.
+   */
+  brandingEnabled: boolean
+}
+
 export interface BusinessConfigSections {
+  mediaStudio:   MediaStudioConfig
   licensing:     LicensingConfig
   communication: CommunicationConfig
   wallet:        WalletConfig
@@ -400,7 +547,7 @@ export interface StoredBusinessConfig extends BusinessConfigSections {
 
 export const CONFIG_SECTION_KEYS: BusinessConfigSectionKey[] = [
   'licensing', 'communication', 'wallet', 'fees', 'settlements',
-  'branding', 'featureFlags', 'integrations', 'security',
+  'branding', 'featureFlags', 'integrations', 'security', 'mediaStudio',
 ]
 
 // ─── Code defaults (faithful to current in-code constants) ──────────────────────
@@ -561,7 +708,10 @@ export const BUSINESS_CONFIG_DEFAULTS: BusinessConfigSections = {
   branding: {
     platformName:    'RegisterDesk',
     platformTagline: 'The Event Operations Platform',
-    legalName:       'RegisterDesk',
+    // RD-LAUNCH-03 — the registered operating entity. RegisterDesk stays the public
+    // product brand everywhere; this is the legal person behind it, and is the ONE
+    // source for every ownership statement (see lib/marketing/ownership.ts).
+    legalName:       'VARDHINI PRIME ENTERPRISES',
     supportEmail:    'support@registerdesk.in',
     supportPhone:    '',
     // Env seeds the default deployment URL (NEXT_PUBLIC_* are inlined at build);
@@ -591,6 +741,58 @@ export const BUSINESS_CONFIG_DEFAULTS: BusinessConfigSections = {
     metaApiTimeoutMs: 10_000,
     emailProvider:    'ses',
   },
+  // RD-MEDIA-08 — faithful to the constants these replaced, so adding the section changed
+  // no behaviour: 50 MB (platform-storage event-photo-original), 2000 (the duplicate-scan
+  // cap), 200/200 (the gallery and album list caps), and DEFAULT_MEDIA_SETTINGS.
+  mediaStudio: {
+    maxPhotosPerEvent:      500,
+    maxUploadBatchSize:     2_000,
+    maxUploadFileSizeBytes: 50 * 1024 * 1024,
+    maxGalleriesPerEvent:   200,
+    maxAlbumsPerGallery:    200,
+    defaultCompressionProfileId: 'balanced',
+    generateThumbnail:      true,
+    generateMedium:         true,
+    keepOriginal:           true,
+    defaultVisibility:      'PUBLIC',
+    signedUrlExpirySeconds: 900,
+    publicGalleryEnabled:   true,
+    // Every tier is listed EXPLICITLY, even where it equals the global value, so a Super
+    // Admin editing one tier never has to reason about which ones are inheriting.
+    // RD-MS-CLOSURE-01 — photo branding. ON by default, because it is a shipped feature
+    // organizers already use; this exists to be turned OFF during an incident.
+    brandingEnabled:      true,
+    // MC-01 — Media Credits. `creditsEnabled: false` is the fail-safe: with it off, no
+    // credit code is reachable and Media Studio behaves exactly as it did before MC-01.
+    // The two prices are PLACEHOLDERS pending a business decision (see the MC-01 report).
+    creditsEnabled:       false,
+    creditsPerPhoto:      1,
+    creditUnitPricePaise: 100,
+    refundsEnabled:       false,
+    refundWindowDays:     30,
+    minCreditPurchase:    1,
+    // MC-05 — PLACEHOLDERS pending a business decision, same status as creditUnitPricePaise.
+    // 10% is a plausible payment-processing recovery, not an approved number.
+    refundServiceChargeMethod:     'percent',
+    refundServiceChargePercent:    10,
+    refundServiceChargeFixedPaise: 0,
+    minRefundablePaise:            100,   // ₹1
+    // MC-11 · Defaults chosen to change NOTHING about today's behaviour: every threshold is
+    // off, and the two booleans match what the code already hardcoded.
+    minRefundCredits:              0,      // no minimum
+    maxRefundPerRequestPaise:      0,      // no ceiling
+    refundAutoRejectDays:          0,      // never auto-reject
+    refundReasonRequired:          true,   // matches the existing hardcoded check
+    refundNoteRequired:            false,  // matches today: the admin note is optional
+    tierLimits: {
+      free:         { maxPhotosPerEvent: 50 },
+      starter:      { maxPhotosPerEvent: 500 },
+      professional: { maxPhotosPerEvent: 2_000 },
+      business:     { maxPhotosPerEvent: 3_000 },
+      enterprise:   { maxPhotosPerEvent: 5_000 },
+    },
+  } satisfies MediaStudioConfig,
+
   security: {
     otpDigits:                 6,
     otpTtlSeconds:             600,
@@ -965,6 +1167,108 @@ function validateSecurity(v: unknown): ConfigValidationResult {
   ])
 }
 
+function validateMediaStudio(v: unknown): ConfigValidationResult {
+  const c = v as Partial<MediaStudioConfig>
+  const errors: [boolean, string][] = [
+    [c?.maxPhotosPerEvent === null || (isInt(c?.maxPhotosPerEvent) && (c!.maxPhotosPerEvent as number) > 0),
+      'mediaStudio.maxPhotosPerEvent must be a positive integer or null (unlimited)'],
+    [isInt(c?.maxUploadBatchSize) && (c!.maxUploadBatchSize as number) > 0,
+      'mediaStudio.maxUploadBatchSize must be a positive integer'],
+    [isInt(c?.maxUploadFileSizeBytes) && (c!.maxUploadFileSizeBytes as number) > 0,
+      'mediaStudio.maxUploadFileSizeBytes must be a positive integer'],
+    [isInt(c?.maxGalleriesPerEvent) && (c!.maxGalleriesPerEvent as number) > 0,
+      'mediaStudio.maxGalleriesPerEvent must be a positive integer'],
+    [isInt(c?.maxAlbumsPerGallery) && (c!.maxAlbumsPerGallery as number) > 0,
+      'mediaStudio.maxAlbumsPerGallery must be a positive integer'],
+    [typeof c?.defaultCompressionProfileId === 'string' && c.defaultCompressionProfileId.length > 0,
+      'mediaStudio.defaultCompressionProfileId must be a non-empty string'],
+    [typeof c?.generateThumbnail === 'boolean', 'mediaStudio.generateThumbnail must be a boolean'],
+    [typeof c?.generateMedium === 'boolean',    'mediaStudio.generateMedium must be a boolean'],
+    [typeof c?.keepOriginal === 'boolean',      'mediaStudio.keepOriginal must be a boolean'],
+    [c?.defaultVisibility === 'PUBLIC' || c?.defaultVisibility === 'SIGNED_URL',
+      'mediaStudio.defaultVisibility must be PUBLIC or SIGNED_URL'],
+    [isInt(c?.signedUrlExpirySeconds) && (c!.signedUrlExpirySeconds as number) > 0,
+      'mediaStudio.signedUrlExpirySeconds must be a positive integer'],
+    [typeof c?.publicGalleryEnabled === 'boolean', 'mediaStudio.publicGalleryEnabled must be a boolean'],
+    // MC-01 — Media Credits policy.
+    [typeof c?.creditsEnabled === 'boolean', 'mediaStudio.creditsEnabled must be a boolean'],
+    [isInt(c?.creditsPerPhoto) && (c!.creditsPerPhoto as number) > 0,
+      'mediaStudio.creditsPerPhoto must be a positive integer'],
+    [isInt(c?.creditUnitPricePaise) && (c!.creditUnitPricePaise as number) > 0,
+      'mediaStudio.creditUnitPricePaise must be a positive integer'],
+    [typeof c?.refundsEnabled === 'boolean', 'mediaStudio.refundsEnabled must be a boolean'],
+    [isInt(c?.refundWindowDays) && (c!.refundWindowDays as number) > 0,
+      'mediaStudio.refundWindowDays must be a positive integer'],
+    [isInt(c?.minCreditPurchase) && (c!.minCreditPurchase as number) > 0,
+      'mediaStudio.minCreditPurchase must be a positive integer'],
+
+    // MC-05 — refund service charge. The percent is bounded at 100 because a charge above
+    // the purchase amount would compute a negative refund, and the organizer would appear
+    // to owe money for asking.
+    [['percent', 'fixed', 'percent_plus_fixed'].includes(c?.refundServiceChargeMethod as string),
+      'mediaStudio.refundServiceChargeMethod must be percent, fixed or percent_plus_fixed'],
+    [isInt(c?.refundServiceChargePercent)
+      && (c!.refundServiceChargePercent as number) >= 0
+      && (c!.refundServiceChargePercent as number) <= 100,
+      'mediaStudio.refundServiceChargePercent must be an integer between 0 and 100'],
+    [isInt(c?.refundServiceChargeFixedPaise) && (c!.refundServiceChargeFixedPaise as number) >= 0,
+      'mediaStudio.refundServiceChargeFixedPaise must be a non-negative integer'],
+    // MC-11
+    [isNonNegInt(c?.minRefundCredits),
+      'mediaStudio.minRefundCredits must be a non-negative integer'],
+    [isNonNegInt(c?.maxRefundPerRequestPaise),
+      'mediaStudio.maxRefundPerRequestPaise must be a non-negative integer (paise)'],
+    [isNonNegInt(c?.refundAutoRejectDays),
+      'mediaStudio.refundAutoRejectDays must be a non-negative integer (days)'],
+    [typeof c?.refundReasonRequired === 'boolean',
+      'mediaStudio.refundReasonRequired must be a boolean'],
+    [typeof c?.refundNoteRequired === 'boolean',
+      'mediaStudio.refundNoteRequired must be a boolean'],
+    [isInt(c?.minRefundablePaise) && (c!.minRefundablePaise as number) >= 0,
+      'mediaStudio.minRefundablePaise must be a non-negative integer'],
+    [c?.tierLimits === undefined || (typeof c.tierLimits === 'object' && c.tierLimits !== null),
+      'mediaStudio.tierLimits must be an object'],
+  ]
+
+  // Per-tier deltas are validated too: an admin typo that set a tier's cap to -1 would
+  // otherwise pass here and be clamped silently at resolution time.
+  for (const [tier, delta] of Object.entries(c?.tierLimits ?? {})) {
+    const d = delta as Partial<MediaOverridableConfig> | undefined
+    if (!d) continue
+    if (d.maxPhotosPerEvent !== undefined) {
+      errors.push([
+        d.maxPhotosPerEvent === null || (isInt(d.maxPhotosPerEvent) && d.maxPhotosPerEvent > 0),
+        `mediaStudio.tierLimits.${tier}.maxPhotosPerEvent must be a positive integer or null`,
+      ])
+    }
+    for (const key of ['maxUploadBatchSize', 'maxUploadFileSizeBytes', 'maxGalleriesPerEvent', 'maxAlbumsPerGallery', 'signedUrlExpirySeconds'] as const) {
+      if (d[key] !== undefined) {
+        errors.push([isInt(d[key]) && (d[key] as number) > 0, `mediaStudio.tierLimits.${tier}.${key} must be a positive integer`])
+      }
+    }
+    // RD-MS-CLOSURE-01 · the rendition booleans are settable per tier now, so they are
+    // validated per tier too. Without this a delta of `"false"` — the string a hand-edited
+    // payload would carry — would store, resolve as truthy, and silently keep generating a
+    // rendition the tier was configured not to store.
+    for (const key of ['keepOriginal', 'generateMedium', 'generateThumbnail', 'defaultVisibility', 'publicGalleryEnabled'] as const) {
+      if (d[key] === undefined) continue
+      if (key === 'defaultVisibility') {
+        errors.push([
+          d[key] === 'PUBLIC' || d[key] === 'SIGNED_URL',
+          `mediaStudio.tierLimits.${tier}.defaultVisibility must be PUBLIC or SIGNED_URL`,
+        ])
+      } else {
+        errors.push([
+          typeof d[key] === 'boolean',
+          `mediaStudio.tierLimits.${tier}.${key} must be true or false`,
+        ])
+      }
+    }
+  }
+
+  return collect(errors)
+}
+
 /** Per-section registry: code default + validator. */
 export const CONFIG_SECTION_REGISTRY: {
   [K in BusinessConfigSectionKey]: {
@@ -981,6 +1285,7 @@ export const CONFIG_SECTION_REGISTRY: {
   featureFlags:  { default: BUSINESS_CONFIG_DEFAULTS.featureFlags,  validate: validateFeatureFlags },
   integrations:  { default: BUSINESS_CONFIG_DEFAULTS.integrations,  validate: validateIntegrations },
   security:      { default: BUSINESS_CONFIG_DEFAULTS.security,      validate: validateSecurity },
+  mediaStudio:   { default: BUSINESS_CONFIG_DEFAULTS.mediaStudio,   validate: validateMediaStudio },
 }
 
 /** Validate a full or partial config object, section by section. */
@@ -1065,5 +1370,6 @@ export function resolveBusinessConfig(
     featureFlags:  resolveSection('featureFlags',  stored, overrides),
     integrations:  resolveSection('integrations',  stored, overrides),
     security:      resolveSection('security',      stored, overrides),
+    mediaStudio:   resolveSection('mediaStudio',   stored, overrides),
   }
 }

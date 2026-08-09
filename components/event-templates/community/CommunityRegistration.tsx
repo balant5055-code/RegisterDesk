@@ -110,7 +110,7 @@ export function CommunityRegistration({
             {/* Top accent bar */}
             <div className="h-1 w-full bg-gradient-to-r from-rose-400 to-violet-500" />
 
-            <div className="grid gap-0 lg:grid-cols-[1fr_auto]">
+            <div className="grid gap-0 lg:grid-cols-[minmax(0,1fr)_auto]">
               {/* Left — invitation content */}
               <div className="p-7 sm:p-8">
                 <p className="mb-1 text-[10px] font-bold uppercase tracking-[0.18em] text-emerald-600">

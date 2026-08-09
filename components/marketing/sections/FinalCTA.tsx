@@ -50,10 +50,10 @@ export function CTATrust({ labels }: { labels: string[] }) {
   if (labels.length === 0) return null
   return (
     <div>
-      <p className="text-[var(--fs-2xs)] font-semibold uppercase tracking-[0.12em] text-muted-foreground/50">Built for</p>
+      <p className="text-fs-2xs font-semibold uppercase tracking-[0.12em] text-muted-foreground/50">Built for</p>
       <ul className="mt-2 flex flex-wrap items-center justify-center gap-x-5 gap-y-1" aria-label="Organizer types">
         {labels.map(label => (
-          <li key={label} className="text-[var(--fs-sm)] text-muted-foreground">{label}</li>
+          <li key={label} className="text-fs-sm text-muted-foreground">{label}</li>
         ))}
       </ul>
     </div>
@@ -77,7 +77,7 @@ export function FinalCTA() {
         </div>
 
         {FINAL_CTA.supportText && (
-          <p className="mt-3 text-[var(--fs-sm)] text-muted-foreground">{FINAL_CTA.supportText}</p>
+          <p className="mt-3 text-fs-sm text-muted-foreground">{FINAL_CTA.supportText}</p>
         )}
 
         <div className="mt-10">

@@ -35,7 +35,7 @@ export function PlatformHero() {
           <h1 id="platform-hero-heading" className={cn(marketingType.hero, 'mt-5 text-foreground')}>
             {PLATFORM_HERO.headline}
           </h1>
-          <p className="mx-auto mt-5 max-w-2xl text-[var(--fs-lg)] leading-relaxed text-muted-foreground">
+          <p className="mx-auto mt-5 max-w-2xl text-fs-lg leading-relaxed text-muted-foreground">
             {PLATFORM_HERO.subheadline}
           </p>
           <div className="mt-8 flex flex-wrap items-center justify-center gap-3">
@@ -74,7 +74,7 @@ export function PlatformPhilosophy() {
       />
       <div className="mx-auto mt-6 max-w-2xl space-y-4 text-center">
         {PLATFORM_PHILOSOPHY.body.map((para, i) => (
-          <p key={i} className="text-[var(--fs-md)] leading-relaxed text-muted-foreground">{para}</p>
+          <p key={i} className="text-fs-md leading-relaxed text-muted-foreground">{para}</p>
         ))}
       </div>
     </SectionLayout>

@@ -20,7 +20,9 @@ import {
   Home, CalendarDays, Plus, Ticket, ScanLine, Award, Megaphone, FileText,
   Mail, Users, Heart, DollarSign, Wallet, BarChart3, UserCog, Palette, Plug,
   ReceiptText, Settings, BookOpen, LifeBuoy, Bug, IdCard, CalendarClock, Wrench, Printer, Images,
+  Flag, Camera,
 } from 'lucide-react'
+import { ROUTES } from '@/config/navigation'
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -148,6 +150,50 @@ export const WORKSPACE_NAV: WorkspaceNavSection[] = [
         children: [
           { label: 'Check-in Hub', href: '/dashboard/check-in' },
           { label: 'Operations Center', href: '/dashboard/check-in/operations' },
+        ],
+      },
+      // RD-RACEOPS-01 — Race Operations. Sits in Operations alongside Check-in and
+      // Print Assets: all three are on-the-ground event execution. `href` points at a
+      // REAL hub page, which matters because the collapsed (72px) sidebar renders each
+      // group as a single icon linking straight to group.href.
+      //
+      // The Certificates child deliberately points at the EXISTING certificates route
+      // rather than a Race-Operations-owned page — Race Operations links to that module,
+      // it does not reimplement it. A useful side effect: navHrefEnabled() in
+      // Sidebar.tsx already returns flags.certificates for any href containing
+      // '/certificates', so this child auto-hides when the platform flag is off.
+      {
+        key: 'race-operations', label: 'Race Operations', icon: Flag, href: ROUTES.RACE_OPS,
+        children: [
+          { label: 'Publish Results', href: ROUTES.RACE_OPS_PUBLISH_RESULTS },
+          { label: 'Finisher Badges', href: ROUTES.RACE_OPS_BADGES          },
+          { label: 'Certificates',    href: ROUTES.DASHBOARD_CERTIFICATES   },
+          { label: 'History',         href: ROUTES.RACE_OPS_HISTORY         },
+        ],
+      },
+      // RD-MEDIA-01 — Media Studio. A PLATFORM module (bulk photo import, galleries,
+      // albums, processing, storage), not a Race Operations feature. It sits in Operations
+      // because it is on-the-ground event execution, like Check-in and Print Assets.
+      // `href` points at a REAL hub page: the collapsed 72px sidebar links each group
+      // straight to group.href.
+      {
+        key: 'media-studio', label: 'Media Studio', icon: Camera, href: ROUTES.MEDIA_STUDIO,
+        children: [
+          { label: 'Import Media',    href: ROUTES.MEDIA_STUDIO_IMPORT     },
+          { label: 'Galleries',       href: ROUTES.MEDIA_STUDIO_GALLERIES  },
+          { label: 'Albums',          href: ROUTES.MEDIA_STUDIO_ALBUMS     },
+          { label: 'Processing Jobs', href: ROUTES.MEDIA_STUDIO_PROCESSING },
+          { label: 'Photo Branding',  href: ROUTES.MEDIA_STUDIO_BRANDING   },
+          { label: 'Storage Usage',   href: ROUTES.MEDIA_STUDIO_STORAGE    },
+          // MC-10A. Paying for media belongs to the module that spends it, not to Billing —
+          // Billing is RegisterDesk's own licences and invoices. MC-08.1 registered Credits
+          // in ROUTES and on the hub tile grid but missed THIS list, which is the actual
+          // left sidebar, so the page was reachable only by opening the hub first.
+          { label: 'Credits',         href: ROUTES.MEDIA_STUDIO_CREDITS    },
+          { label: 'Settings',        href: ROUTES.MEDIA_STUDIO_SETTINGS   },
+          // RD-MEDIA-05. Listed for everyone; the page itself explains that running
+          // maintenance is a platform-admin action, and the API enforces it.
+          { label: 'Maintenance',     href: ROUTES.MEDIA_STUDIO_MAINTENANCE },
         ],
       },
       {

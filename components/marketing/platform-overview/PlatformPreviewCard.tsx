@@ -11,7 +11,7 @@ export function PlatformPreviewCard({ title, action, className, children }: {
     <div className={cn('rounded-xl border border-border/60 bg-white p-3', className)}>
       {(title || action) && (
         <div className="mb-2.5 flex items-center justify-between gap-2">
-          {title && <span className="text-[var(--fs-xs)] font-semibold text-foreground">{title}</span>}
+          {title && <span className="text-fs-xs font-semibold text-foreground">{title}</span>}
           {action}
         </div>
       )}

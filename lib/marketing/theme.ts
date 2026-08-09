@@ -35,4 +35,4 @@ export type SurfaceBand = keyof typeof SURFACES
 export const brandGradientStyle = { backgroundImage: 'var(--primary-gradient)' } as const
 
 /** Eyebrow / overline class (brand, uppercase) — reused by SectionHeader. */
-export const EYEBROW_CLASS = 'text-[var(--fs-xs)] font-semibold uppercase tracking-[0.08em] text-primary'
+export const EYEBROW_CLASS = 'text-fs-xs font-semibold uppercase tracking-[0.08em] text-primary'

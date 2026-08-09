@@ -30,7 +30,7 @@ export default function EventPageLoading() {
 
       {/* Body skeleton */}
       <Container className="py-8 sm:py-10">
-        <div className="lg:grid lg:grid-cols-[1fr_360px] lg:gap-8">
+        <div className="lg:grid lg:grid-cols-[minmax(0,1fr)_360px] lg:gap-8">
           {/* Left */}
           <div className="flex flex-col gap-10">
             {/* Venue */}

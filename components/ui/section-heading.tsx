@@ -57,7 +57,7 @@ export function SectionHeading({
               'inline-flex items-center rounded-full',
               'border border-border',
               'px-2.5 py-0.5',
-              'text-[var(--fs-xs)] font-medium text-primary',
+              'text-fs-xs font-medium text-primary',
               !isCenter && 'self-start',
             )}
           >
@@ -67,15 +67,15 @@ export function SectionHeading({
 
         <Tag
           className={cn(
-            'text-[var(--fs-2xl)] font-bold tracking-tight text-foreground',
-            'sm:text-[var(--fs-3xl)]',
+            'text-fs-2xl font-bold tracking-tight text-foreground',
+            'sm:text-fs-3xl',
           )}
         >
           {title}
         </Tag>
 
         {description && (
-          <p className="max-w-prose text-[var(--fs-md)] leading-relaxed text-muted-foreground">
+          <p className="max-w-prose text-fs-md leading-relaxed text-muted-foreground">
             {description}
           </p>
         )}

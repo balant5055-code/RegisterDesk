@@ -132,8 +132,11 @@ async function parseTemplateFile(file: File, eventId: string, eventSlug: string)
 
   let sheets: { sheet: string; data: (string | number | boolean | null)[][] }[]
   try {
-    const readXlsxFile = (await import('read-excel-file/browser')).default
-    sheets = (await readXlsxFile(file)) as typeof sheets
+    // RD-RESULTS-XLSX-01 · the app's one workbook reader — same library, plus the OOXML
+    // inline-string repair. A template filled in with Excel emits inline strings, and
+    // an empty or formatted cell used to fail the entire import.
+    const { readWorkbookSheets } = await import('@/lib/xlsx/readWorkbook')
+    sheets = (await readWorkbookSheets(file)) as typeof sheets
   } catch (error) {
     logParserException('read-workbook', error)
     return { ok: false, error: describeWorkbookError(error) }

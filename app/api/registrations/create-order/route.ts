@@ -23,7 +23,8 @@ import { resolveEffectivePassPricePaise } from '@/lib/pricing/earlyBird'
 import { resolveAttendeeIdentity }   from '@/lib/registrations/attendeeIdentity'
 import type { IdentityField }        from '@/lib/registrations/attendeeIdentity'
 import { validateInviteCode }        from '@/app/api/registrations/validate-invite-code/route'
-import { validateFormResponses }     from '@/lib/registrations/validateFormResponses'
+import { validateFormResponses, sanitizeFormResponses } from '@/lib/registrations/validateFormResponses'
+import { resolveServerEligibility }  from '@/lib/registrations/ageEligibility'
 import type { RegistrationRules } from '@/components/wizard/registrationFormConfig'
 // RD-PAYMENT-02 Phase 4 — feature-gated canonical charge amount.
 import { resolvePlatformPricing }    from '@/lib/platform/pricing/resolver'
@@ -170,8 +171,11 @@ export async function POST(
   // identity from the submitted responses via the ONE shared resolver (the same the
   // client used), falling back to the client-sent values. Dedup + payment-intent +
   // ticket all read this single model.
+  // RD-RT4.0 — strip anything that is not a configured field before it is validated,
+  // used for identity, or stored on the payment intent.
+  const safeResponses  = sanitizeFormResponses(registrationForm?.sections ?? [], formResponses)
   const identityFields = ((registrationForm?.sections ?? []) as { fields: IdentityField[] }[]).flatMap(s => s.fields)
-  const identity = resolveAttendeeIdentity(identityFields, (formResponses ?? {}) as Record<string, string>)
+  const identity = resolveAttendeeIdentity(identityFields, safeResponses)
   const attendee = {
     name:  (identity.name  || body.attendee.name).trim(),
     email: (identity.email || body.attendee.email).trim().toLowerCase(),
@@ -221,7 +225,10 @@ export async function POST(
   // Full validation (conditional + required + per-type formats + configured
   // rules) — the same rules the builder/client enforce — before charging.
   if (registrationForm?.sections?.length) {
-    const validationError = validateFormResponses(registrationForm, passId, formResponses)
+    // RD-RT4.0 — age eligibility enforced before any charge is created, from the
+    // server-loaded pass + event date, through the same shared rule the client uses.
+    const eligibility = resolveServerEligibility(event.eventDetails as Record<string, unknown>, pass)
+    const validationError = validateFormResponses(registrationForm, passId, safeResponses, eligibility)
     if (validationError) {
       return NextResponse.json(
         { error: validationError.message },
@@ -333,7 +340,8 @@ export async function POST(
         name:          attendee.name.trim(),
         email:         normEmail,
         phone:         attendee.phone?.trim() || undefined,
-        formResponses: formResponses as Record<string, unknown>,
+        // RD-RT4.0: sanitised — unknown keys never reach the payment intent either.
+        formResponses: safeResponses as Record<string, unknown>,
       },
       uid,
       ...(inviteCode?.trim() ? { inviteCode: inviteCode.trim() } : {}),

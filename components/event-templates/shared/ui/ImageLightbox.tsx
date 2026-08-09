@@ -10,7 +10,7 @@
 
 import { useEffect, useRef } from 'react'
 import { motion, AnimatePresence, useReducedMotion } from 'framer-motion'
-import { X, Download } from 'lucide-react'
+import { X, Download, ChevronLeft, ChevronRight } from 'lucide-react'
 
 export interface ImageLightboxProps {
   open:          boolean
@@ -19,9 +19,33 @@ export interface ImageLightboxProps {
   onClose:       () => void
   downloadHref?: string
   downloadName?: string
+  /**
+   * RD-MEDIA-10 — optional sequence navigation.
+   *
+   * Supply both to get arrows, ←/→ keys and a counter. Supply neither (the Event Details
+   * case) and the viewer behaves exactly as it did before they existed.
+   */
+  onPrev?:       () => void
+  onNext?:       () => void
+  /** 1-based position, shown only when a total is also given. */
+  index?:        number
+  total?:        number
+  /**
+   * RD-MEDIA-11 — take over the download control.
+   *
+   * Supplied, the button calls this instead of being an anchor. The public gallery needs
+   * that because its download route 302s to another origin, where the `download` attribute
+   * is ignored and the browser navigates to the image instead of saving it.
+   *
+   * Absent (every Event Details call site), the anchor renders exactly as before.
+   */
+  onDownload?:   () => void
 }
 
-export function ImageLightbox({ open, src, alt = '', onClose, downloadHref, downloadName }: ImageLightboxProps) {
+export function ImageLightbox({
+  open, src, alt = '', onClose, downloadHref, downloadName,
+  onPrev, onNext, index, total, onDownload,
+}: ImageLightboxProps) {
   const reduce    = useReducedMotion()
   const dialogRef = useRef<HTMLDivElement>(null)
   const openerRef = useRef<Element | null>(null)
@@ -35,6 +59,10 @@ export function ImageLightbox({ open, src, alt = '', onClose, downloadHref, down
 
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') { e.preventDefault(); onClose() }
+      // Only bound when a caller supplied navigation — a single-image viewer must not
+      // swallow arrow keys the page may be using.
+      else if (e.key === 'ArrowLeft'  && onPrev) { e.preventDefault(); onPrev() }
+      else if (e.key === 'ArrowRight' && onNext) { e.preventDefault(); onNext() }
       else if (e.key === 'Tab') {
         const f = dialogRef.current?.querySelectorAll<HTMLElement>('button,[href],[tabindex]:not([tabindex="-1"])')
         if (!f || f.length === 0) return
@@ -50,7 +78,7 @@ export function ImageLightbox({ open, src, alt = '', onClose, downloadHref, down
       clearTimeout(t)
       ;(openerRef.current as HTMLElement | null)?.focus?.()
     }
-  }, [open, onClose])
+  }, [open, onClose, onPrev, onNext])
 
   return (
     <AnimatePresence>
@@ -71,26 +99,62 @@ export function ImageLightbox({ open, src, alt = '', onClose, downloadHref, down
             onClick={e => e.stopPropagation()}
           >
             {/* top bar */}
-            <div className="flex items-center justify-end gap-1 px-4 py-3">
+            <div className="flex items-center justify-between gap-1 px-4 py-3">
+              <p className="min-w-0 truncate text-[13px] text-white/70">
+                {typeof index === 'number' && typeof total === 'number'
+                  ? `${index} of ${total}`
+                  : ''}
+              </p>
+              <div className="flex items-center gap-1">
               {downloadHref && (
-                <a
-                  href={downloadHref} download={downloadName} target="_blank" rel="noopener noreferrer"
-                  aria-label="Download image"
-                  className="flex size-10 items-center justify-center rounded-full text-white/80 transition-colors hover:bg-white/10 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/60"
-                >
-                  <Download className="size-5" aria-hidden />
-                </a>
+                onDownload ? (
+                  // A button, not an anchor: the caller saves the bytes itself, so there is
+                  // no navigation to suppress and nothing opens in a new tab.
+                  <button
+                    type="button"
+                    onClick={onDownload}
+                    aria-label="Download image"
+                    className="flex size-10 items-center justify-center rounded-full text-white/80 transition-colors hover:bg-white/10 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/60"
+                  >
+                    <Download className="size-5" aria-hidden />
+                  </button>
+                ) : (
+                  <a
+                    href={downloadHref} download={downloadName} target="_blank" rel="noopener noreferrer"
+                    aria-label="Download image"
+                    className="flex size-10 items-center justify-center rounded-full text-white/80 transition-colors hover:bg-white/10 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/60"
+                  >
+                    <Download className="size-5" aria-hidden />
+                  </a>
+                )
               )}
               <button
                 type="button" onClick={onClose} aria-label="Close"
                 className="flex size-10 items-center justify-center rounded-full text-white/80 transition-colors hover:bg-white/10 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/60"
               >
                 <X className="size-5" aria-hidden />
-              </button>
+                </button>
+              </div>
             </div>
 
             {/* image */}
-            <div className="flex flex-1 items-center justify-center overflow-hidden px-4 pb-6">
+            <div className="relative flex flex-1 items-center justify-center overflow-hidden px-4 pb-6 sm:px-14">
+              {onPrev && (
+                <button
+                  type="button" onClick={onPrev} aria-label="Previous image"
+                  className="absolute left-1 z-10 flex size-11 items-center justify-center rounded-full bg-black/40 text-white/90 transition-colors hover:bg-black/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/60 sm:left-3"
+                >
+                  <ChevronLeft className="size-6" aria-hidden />
+                </button>
+              )}
+              {onNext && (
+                <button
+                  type="button" onClick={onNext} aria-label="Next image"
+                  className="absolute right-1 z-10 flex size-11 items-center justify-center rounded-full bg-black/40 text-white/90 transition-colors hover:bg-black/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/60 sm:right-3"
+                >
+                  <ChevronRight className="size-6" aria-hidden />
+                </button>
+              )}
               <motion.div
                 key={src}
                 initial={reduce ? false : { opacity: 0, scale: 0.96 }} animate={{ opacity: 1, scale: 1 }}

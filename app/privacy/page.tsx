@@ -2,6 +2,7 @@
 
 import type { Metadata } from 'next'
 import { LegalPage } from '@/components/marketing/legal/LegalPage'
+import { OWNERSHIP_SENTENCE } from '@/lib/marketing/ownership'
 import { buildMetadata, organizationJsonLd, breadcrumbJsonLd } from '@/lib/marketing/seo'
 
 export const metadata: Metadata = buildMetadata({
@@ -19,7 +20,7 @@ export default function PrivacyPage() {
     <>
     <LegalPage
       title="Privacy Policy"
-      intro="This policy explains what information RegisterDesk collects, how we use it, and the choices you have. It applies to organizers who use the platform and to attendees who register through events run on it."
+      intro={`${OWNERSHIP_SENTENCE} This policy explains what information RegisterDesk collects, how we use it, and the choices you have. It applies to organizers who use the platform and to attendees who register through events run on it.`}
       sections={[
         { heading: 'Information we collect', body: [
           'Account information you provide when you sign up, such as your name and email address.',

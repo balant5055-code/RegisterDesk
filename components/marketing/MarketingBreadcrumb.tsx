@@ -18,6 +18,7 @@ const LABELS: Record<string, string> = {
   pricing:         'Pricing',
   about:           'About',
   security:        'Security',
+  support:         'Support',
   contact:         'Contact',
   resources:       'Resources',
   events:          'Events',
@@ -25,6 +26,7 @@ const LABELS: Record<string, string> = {
   privacy:         'Privacy Policy',
   terms:           'Terms of Service',
   'refund-policy': 'Refund Policy',
+  'cookie-policy': 'Cookie Policy',
 }
 
 // Intermediate crumbs are links only for paths that are real index pages.

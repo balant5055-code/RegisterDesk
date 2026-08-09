@@ -67,11 +67,11 @@ function StepCard({ step, index }: { step: ParticipantStepDef; index: number }) 
         <div className="flex flex-1 flex-col px-5 pb-5">
           <span className="inline-flex items-center gap-2 self-start rounded-full border border-border/60 bg-white px-2.5 py-1 shadow-sm">
             <Icon className="size-4 text-primary" strokeWidth={1.8} aria-hidden />
-            <span className="text-[var(--fs-xs)] font-semibold text-foreground">Step {index + 1}</span>
+            <span className="text-fs-xs font-semibold text-foreground">Step {index + 1}</span>
           </span>
           <h3 className="mt-3 text-[16px] font-semibold text-foreground">{step.title}</h3>
           <p className={`${typography.body} mt-2 line-clamp-2 text-muted-foreground`}>{step.description}</p>
-          <span className="mt-auto inline-flex items-center gap-1 self-start pt-4 text-[var(--fs-base)] font-semibold text-primary">
+          <span className="mt-auto inline-flex items-center gap-1 self-start pt-4 text-fs-base font-semibold text-primary">
             Learn more <ArrowRight className="size-3.5 transition-transform duration-[220ms] group-hover:translate-x-0.5" aria-hidden />
           </span>
         </div>

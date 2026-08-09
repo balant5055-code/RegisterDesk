@@ -15,7 +15,13 @@ function relativeTime(ms: number, now: number): string {
   const m = Math.round(s / 60)
   if (m < 60)  return `${m} min${m === 1 ? '' : 's'} ago`
   const h = Math.round(m / 60)
-  return `${h} hr${h === 1 ? '' : 's'} ago`
+  if (h < 24)  return `${h} hr${h === 1 ? '' : 's'} ago`
+  // RD-EVENT-18 — roll up past a day. The chain previously stopped at hours, so a draft
+  // resumed after a long gap read "5025 hrs ago", which is technically true and unreadable.
+  const d = Math.round(h / 24)
+  if (d < 30)  return `${d} day${d === 1 ? '' : 's'} ago`
+  const mo = Math.round(d / 30)
+  return `${mo} month${mo === 1 ? '' : 's'} ago`
 }
 
 export function SaveStatusIndicator({

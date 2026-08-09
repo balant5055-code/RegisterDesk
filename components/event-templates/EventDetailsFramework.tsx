@@ -1,5 +1,3 @@
-'use client'
-
 // RD-ATTENDEE-01 Phase 2 / 2B — the ONE shared Event Details FRAMEWORK.
 //
 // It owns the page chrome (shell), the lifecycle banner, the sticky CTA, and — for the
@@ -9,34 +7,43 @@
 //     sections from props (used by Meetup, Team Sports). Chrome = MarketingNavbar+Footer.
 //   • SHELL: `children` provided. The template supplies its own bespoke hero + sections
 //     (used by the legacy templates that keep their distinct look); the framework still
-//     owns the shell (EventPageLayout), the lifecycle banner and the sticky CTA. This
+//     owns the shell (EventPageShell), the lifecycle banner and the sticky CTA. This
 //     removes the duplicated scaffold WITHOUT changing any template's appearance —
 //     bespoke content passes through verbatim; the lifecycle banner is reproduced
 //     byte-for-byte via `lifecycleTone` (or left in the children via 'none').
 //
 // This file introduces NO new visual design. It only relocates duplicated orchestration.
+//
+// RD-ST4.3: no 'use client'. The framework has no hooks and no state, so it stays a
+// Server Component when its caller is one (SportsTemplate) and is compiled into the
+// client graph unchanged for the templates that are still 'use client' (ST41-I01).
+// Page chrome now comes from the ONE canonical EventPageShell (ST42-T02).
 
 import type { ReactNode } from 'react'
 import type { LucideIcon } from 'lucide-react'
 import { XCircle, CheckCircle, Lock, Clock3 } from 'lucide-react'
-import type { EventDetailProps } from '@/app/events/[slug]/EventDetailClient'
-import { LinkedCampaignSection } from '@/app/events/[slug]/EventDetailClient'
+import type { EventDetailProps } from '@/components/event-templates/types'
+import { LinkedCampaignSection } from '@/components/event-templates/shared/donation/LinkedCampaignSection'
 import { EventInfoSection } from '@/components/event-templates/shared/ui/EventInfoSection'
-import { MarketingNavbar } from '@/components/marketing/navigation/MarketingNavbar'
-import { MarketingFooter } from '@/components/marketing/footer/MarketingFooter'
-import { EventPageLayout } from '@/components/event-templates/shared/ui/EventPageLayout'
+import { EventPageShell } from '@/components/event-templates/shared/ui/EventPageShell'
 import { StickyMobileCTA } from '@/components/event-templates/shared/registration/StickyMobileCTA'
-import { SectionShell, SectionHeader } from '@/components/event-templates/shared/ui/framework'
+import {
+  SectionShell, EventSectionHeader, EVENT_CONTAINER, STRIP_PY, TYPE,
+} from '@/components/event-templates/shared/ui/framework'
+import { cn } from '@/lib/utils/cn'
 import { EventHero } from '@/components/event-templates/shared/hero/EventHero'
 import { TicketSection } from '@/components/event-templates/shared/registration/TicketSection'
 import { VenueShowcase } from '@/components/event-templates/shared/venue/VenueShowcase'
 import { OrganizerShowcase } from '@/components/event-templates/shared/people/OrganizerShowcase'
 import { SpeakersSection } from '@/components/event-templates/shared/people/SpeakersSection'
-import { GalleryShowcase, mediaToGallery } from '@/components/event-templates/shared/media/GalleryShowcase'
-import { FAQShowcase, legacyFaqToItems } from '@/components/event-templates/shared/faq/FAQShowcase'
+import { GalleryShowcase } from '@/components/event-templates/shared/media/GalleryShowcase'
+import { mediaToGallery } from '@/components/event-templates/shared/media/galleryModel'
+import { FAQShowcase } from '@/components/event-templates/shared/faq/FAQShowcase'
+import { legacyFaqToItems } from '@/components/event-templates/shared/faq/faqModel'
 import { SponsorsShowcase } from '@/components/event-templates/shared/sponsors/SponsorsShowcase'
 import { PromoVideoSection } from '@/components/event-templates/shared/media/PromoVideoSection'
-import { JourneySection, agendaToTimeline } from '@/components/event-templates/shared/journey/JourneySection'
+import { JourneySection } from '@/components/event-templates/shared/journey/JourneySection'
+import { agendaToTimeline } from '@/components/event-templates/shared/journey/journeyModel'
 
 // ─── Lifecycle banner ───────────────────────────────────────────────────────────
 // 'standard' = the tokenised slim band used by the composed showcase templates.
@@ -46,12 +53,15 @@ import { JourneySection, agendaToTimeline } from '@/components/event-templates/s
 //              bespoke banner inline in their children).
 export type LifecycleTone = 'standard' | 'light' | 'none'
 
+// RD-ST4.4: both bars now sit on the ONE page container and the ONE strip rhythm, so a
+// lifecycle notice starts its content at exactly the same x as every section below it
+// (they previously used max-w-6xl / px-5 respectively — ST41-C02).
 function StandardBar({ icon: Icon, children }: { icon: LucideIcon; children: ReactNode }) {
   return (
     <div className="border-b border-border/60 bg-muted/40">
-      <div className="mx-auto flex max-w-6xl items-center gap-2.5 px-4 py-2.5 sm:px-6 lg:px-8">
+      <div className={cn(EVENT_CONTAINER, STRIP_PY, 'flex items-center gap-2.5')}>
         <Icon className="size-4 shrink-0 text-primary" aria-hidden />
-        <p className="text-[12.5px] font-semibold text-foreground">{children}</p>
+        <p className="text-fs-xs font-semibold text-foreground">{children}</p>
       </div>
     </div>
   )
@@ -61,10 +71,10 @@ function LightBar({ icon: Icon, border, bg, dot, text, bold, children }: {
   icon: LucideIcon; border: string; bg: string; dot: string; text: string; bold?: boolean; children: ReactNode
 }) {
   return (
-    <div className={`border-b ${border} ${bg} px-5 py-2.5`}>
-      <div className="mx-auto flex max-w-7xl items-center gap-2.5">
-        <Icon className={`size-4 shrink-0 ${dot}`} aria-hidden />
-        <p className={`text-xs ${bold ? 'font-bold' : 'font-semibold'} ${text}`}>{children}</p>
+    <div className={cn('border-b', border, bg)}>
+      <div className={cn(EVENT_CONTAINER, STRIP_PY, 'flex items-center gap-2.5')}>
+        <Icon className={cn('size-4 shrink-0', dot)} aria-hidden />
+        <p className={cn('text-fs-xs', bold ? 'font-bold' : 'font-semibold', text)}>{children}</p>
       </div>
     </div>
   )
@@ -112,6 +122,11 @@ export interface EventDetailsFrameworkProps {
   registrationClosedMessage?: string
   postponedMessage?:          string
   registrationTargetId?: string
+  /** RD-ST6.0 — opt OUT of the framework-level floating CTA. Templates whose
+   *  registration section owns a selection-aware sticky bar set this to false so the
+   *  page never shows two competing register actions. Defaults to true; every other
+   *  template is unaffected. */
+  showStickyCta?:        boolean
   /** SHELL mode: the template's own bespoke hero + sections. Omit for COMPOSED mode. */
   children?:             ReactNode
   // COMPOSED-mode config (ignored in shell mode):
@@ -166,6 +181,7 @@ function ComposedBody({
         isFreeEvent={isFreeEvent}
         passes={passes}
         organizerVerified={Boolean((organizer as { verified?: boolean } | null | undefined)?.verified)}
+        organizerName={organizer?.name}
         registerHref={`#${registrationTargetId}`}
       />
 
@@ -185,15 +201,15 @@ function ComposedBody({
       )}
 
       {description?.trim() && (
-        <SectionShell id="about" maxW="3xl" bg="muted">
-          <SectionHeader eyebrow={aboutEyebrow} title={aboutTitle} />
-          <p className="whitespace-pre-line text-[15px] leading-relaxed text-muted-foreground">{description}</p>
+        <SectionShell id="about" measure="prose" bg="muted">
+          <EventSectionHeader eyebrow={aboutEyebrow} title={aboutTitle} />
+          <p className={cn('whitespace-pre-line', TYPE.sectionDesc)}>{description}</p>
         </SectionShell>
       )}
 
       {slots?.afterAbout}
 
-      <PromoVideoSection promoVideoUrl={promoVideoUrl} className="border-b border-border/60 bg-white py-14 sm:py-16" />
+      <PromoVideoSection promoVideoUrl={promoVideoUrl} />
 
       {journeyItems.length > 0 && (
         <JourneySection items={journeyItems} eventType={eventType} eyebrow={scheduleEyebrow} title={scheduleTitle} subtitle={scheduleSubtitle} />
@@ -222,12 +238,14 @@ function ComposedBody({
 
       {showSponsors && <SponsorsShowcase items={sponsors} />}
 
+      {/* RD-ST15.0: venueType/online deliberately NOT passed — VenueShowcase above already
+
+          renders the online block, so passing it here would print it twice. */}
+
       <EventInfoSection
         language={props.language}
         dressCode={props.dressCode}
         timezone={props.timezone}
-        venueType={props.venueType}
-        online={props.online}
         refundWindow={props.refundWindow}
         refundPolicyUrl={props.refundPolicyUrl}
       />
@@ -247,7 +265,7 @@ export function EventDetailsFramework(config: EventDetailsFrameworkProps) {
     completedMessage = 'This event has concluded. Thank you to all who attended!',
     registrationClosedMessage = 'Registrations are currently closed for this event.',
     postponedMessage = 'This event has been postponed.',
-    registrationTargetId = 'tickets', children,
+    registrationTargetId = 'tickets', showStickyCta = true, children,
   } = config
 
   const lifecycle = (
@@ -264,7 +282,7 @@ export function EventDetailsFramework(config: EventDetailsFrameworkProps) {
 
   // C4 + 03B: the CTA self-gates on scroll (no overlap) and adds a persistent DESKTOP
   // quick-register pill so the buried tickets section always stays one click away.
-  const sticky = (
+  const sticky = !showStickyCta ? null : (
     <StickyMobileCTA
       showDesktop
       title={props.title}
@@ -278,19 +296,11 @@ export function EventDetailsFramework(config: EventDetailsFrameworkProps) {
   const body = children ?? <ComposedBody {...config} />
   const content = <>{lifecycle}{body}{sticky}</>
 
-  if (shell === 'page-layout') {
-    return (
-      <EventPageLayout eventType={props.eventType} title={props.title}>
-        {content}
-      </EventPageLayout>
-    )
-  }
-
+  // ST42-T02 — ONE shell. Both chrome layouts live in EventPageShell; the framework no
+  // longer inlines a shell of its own and no longer references navbar/footer directly.
   return (
-    <>
-      <MarketingNavbar />
-      <main>{content}</main>
-      <MarketingFooter />
-    </>
+    <EventPageShell variant={shell} eventType={props.eventType} title={props.title}>
+      {content}
+    </EventPageShell>
   )
 }

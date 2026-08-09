@@ -34,7 +34,7 @@ export function PlatformSwitcher({ modules, active, panelId, onActivate, classNa
               tabIndex={isActive ? 0 : -1}
               onClick={() => onActivate(m.id)}
               onFocus={() => onActivate(m.id)}
-              className="relative inline-flex items-center gap-2 rounded-full px-4 py-2 text-[var(--fs-base)] font-medium transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+              className="relative inline-flex items-center gap-2 rounded-full px-4 py-2 text-fs-base font-medium transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
             >
               {isActive && (
                 <motion.span

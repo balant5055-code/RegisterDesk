@@ -1,9 +1,7 @@
 'use client'
 
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect, useCallback } from 'react'
 import dynamic                          from 'next/dynamic'
-import { onSnapshot, doc }              from 'firebase/firestore'
-import { db }                           from '@/lib/firebase/firestore/index'
 import { cn }                           from '@/lib/utils/cn'
 import {
   Search, QrCode, CheckCircle2, XCircle, AlertCircle,
@@ -11,6 +9,7 @@ import {
   Wifi, WifiOff, Database, RefreshCw, CloudUpload, UserPlus,
 } from 'lucide-react'
 import type { CheckInResult } from '@/app/api/checkin/scan/route'
+import type { AttendanceDashboardResponse } from '@/app/api/organizer/events/[eventId]/attendance/route'
 import { useOfflineCheckin }    from '@/lib/checkin/useOfflineCheckin'
 import AttendeeSearch           from './AttendeeSearch'
 import WalkInForm               from './WalkInForm'
@@ -21,6 +20,15 @@ const QrScanner = dynamic(() => import('./QrScanner'), { ssr: false })
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 type Mode = 'qr' | 'manual' | 'search' | 'walkin'
+
+/**
+ * RD-CHECKIN-COUNTER-FIX-01 · how often the attendance summary is re-read.
+ *
+ * 30s is deliberately modest. It exists so a SECOND operator's check-ins appear without a
+ * manual refresh — the reason the old Firestore listener was realtime — not to make this
+ * device's own scans feel live; those refresh immediately on success.
+ */
+const ATTENDANCE_POLL_MS = 30_000
 
 interface Props {
   eventId:   string
@@ -116,6 +124,9 @@ export default function CheckInClient({
   const [mode,          setMode]          = useState<Mode>('qr')
   const [scannerActive, setScannerActive] = useState(true)
   const [offlineQueued, setOfflineQueued] = useState(false)
+  // RD-CHECKIN-COUNTER-FIX-01 · true once an attendance refresh has failed, so the numbers
+  // on screen are labelled as possibly out of date rather than presented as current.
+  const [countsStale,   setCountsStale]   = useState(false)
 
   const inputRef = useRef<HTMLInputElement>(null)
 
@@ -134,20 +145,57 @@ export default function CheckInClient({
     if (mode === 'manual') setTimeout(() => inputRef.current?.focus(), 80)
   }, [mode])
 
-  // Real-time attendance counter from Firestore
+  // ═══ RD-CHECKIN-COUNTER-FIX-01 · authoritative attendance ═══════════════════
+  //
+  // This used to be `onSnapshot(doc(db, 'registrationCounters', slug))`. That was wrong
+  // twice over:
+  //
+  //   1. `registrationCounters` is denied to the client SDK (firestore.rules), and the
+  //      listener's only error path was a console.error — so it failed invisibly.
+  //   2. Even permitted, it read the BASE document. Since GA-5 S3 every gate check-in
+  //      increments a distributed shard (`registrationCounters/{slug}/attendanceShards/{k}`)
+  //      and never the base, so `base.checkedInCount` does not move for any event published
+  //      since. The counter would have been permitted and still frozen.
+  //
+  // The attendance endpoint folds those shards server-side (getEventStats →
+  // getRegistrationCounter → foldAttendanceShards), is tenant-isolated and gated on the
+  // existing `checkin` permission. It is the authoritative source, so the client reads it
+  // instead of Firestore. The client now has NO direct Firestore access to counters.
+  //
+  // `confirmedRegistrations`, not `totalRegistrations`: the base counter's `totalCount`
+  // (what this component displayed before, and what the server props still supply) counts
+  // CONFIRMED registrations, and the endpoint's own `attendanceRate` uses the same base.
+  // Picking the other field would make the number jump on the first refresh.
+  const refreshAttendance = useCallback(async () => {
+    // Offline: the API is unreachable by definition, and the optimistic local count plus
+    // the offline queue are what the operator should see. Not an error state.
+    if (!offline.online) return
+    try {
+      const res = await fetch(`/api/organizer/events/${eventId}/attendance`, {
+        headers: { Authorization: `Bearer ${token}` },
+        cache:   'no-store',
+      })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const data = await res.json() as AttendanceDashboardResponse
+      setLiveCheckedIn(data.checkedInCount)
+      setLiveTotal(data.confirmedRegistrations)
+      setCountsStale(false)
+    } catch {
+      // Never zero the numbers on failure — the last known values (server-rendered at
+      // mount, then optimistic) stay on screen and are labelled as possibly out of date.
+      setCountsStale(true)
+    }
+  }, [eventId, token, offline.online])
+
+  // Other operators and other devices check people in at the same gate, which is what the
+  // realtime listener existed for. A modest poll preserves that without a socket. No fetch
+  // on mount: `totalRegistrations` / `checkedInCount` arrive as props from
+  // GET /api/organizer/events/[eventId], which folds the same shards — already correct.
   useEffect(() => {
-    if (!slug) return
-    return onSnapshot(
-      doc(db, 'registrationCounters', slug),
-      snap => {
-        if (!snap.exists()) return
-        const d = snap.data()
-        if (typeof d.checkedInCount === 'number') setLiveCheckedIn(d.checkedInCount)
-        if (typeof d.totalCount     === 'number') setLiveTotal(d.totalCount)
-      },
-      err => console.error('[checkin] counter listener error:', err),
-    )
-  }, [slug])
+    if (!offline.online) return
+    const id = window.setInterval(() => { void refreshAttendance() }, ATTENDANCE_POLL_MS)
+    return () => window.clearInterval(id)
+  }, [refreshAttendance, offline.online])
 
   const attendanceRate = liveTotal > 0
     ? Math.round((liveCheckedIn / liveTotal) * 100)
@@ -184,7 +232,13 @@ export default function CheckInClient({
       })
       const data = await res.json() as CheckInResult
       setResult(data)
-      if (data.success && !data.alreadyCheckedIn) setLiveCheckedIn(n => n + 1)
+      if (data.success && !data.alreadyCheckedIn) {
+        // Existing optimistic bump kept — it makes the gate feel instant. The refresh
+        // immediately after replaces it with the server's shard-folded truth, so the
+        // optimistic value is never what the operator ends up trusting.
+        setLiveCheckedIn(n => n + 1)
+        void refreshAttendance()
+      }
     } catch {
       try { await runOffline(ticketCode) }
       catch { setResult({ success: false, error: 'NETWORK_ERROR' }) }
@@ -324,6 +378,18 @@ export default function CheckInClient({
           <span>{liveCheckedIn} checked in</span>
           <span>{liveTotal - liveCheckedIn} remaining</span>
         </div>
+
+        {/* RD-CHECKIN-COUNTER-FIX-01 · honest degraded state.
+            The numbers above are never zeroed on failure — they are the last known good
+            values — so the failure mode is STALENESS, and that is what this says. The
+            previous listener failed to console.error and told the operator nothing. */}
+        {countsStale && offline.online && (
+          <p role="status" className="mt-2 flex items-center gap-1.5 text-[11.5px] text-amber-700">
+            <AlertCircle className="size-3.5 shrink-0" aria-hidden />
+            Attendance count unavailable — showing the last known figures. Other operators&rsquo;
+            check-ins may be missing.
+          </p>
+        )}
       </div>
 
       {/* Mode toggle */}
@@ -412,15 +478,19 @@ export default function CheckInClient({
           <AttendeeSearch
             eventId={eventId}
             token={token}
-            onCheckedIn={() => setLiveCheckedIn(n => n + 1)}
-            onUndid={() => setLiveCheckedIn(n => Math.max(0, n - 1))}
+            onCheckedIn={() => { setLiveCheckedIn(n => n + 1); void refreshAttendance() }}
+            onUndid={() => { setLiveCheckedIn(n => Math.max(0, n - 1)); void refreshAttendance() }}
           />
         </div>
       )}
 
       {/* ── Walk-In registration panel ── */}
       {mode === 'walkin' && (
-        <WalkInForm slug={slug} token={token} onRegistered={() => setLiveCheckedIn(n => n + 1)} />
+        <WalkInForm
+          slug={slug}
+          token={token}
+          onRegistered={() => { setLiveCheckedIn(n => n + 1); void refreshAttendance() }}
+        />
       )}
 
       {/* ── Result card + reset ── */}

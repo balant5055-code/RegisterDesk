@@ -63,7 +63,7 @@ export function CulturalVenue({ venueName, physical, venueMaps }: CulturalVenueP
           </h2>
         </motion.div>
 
-        <div className="grid gap-6 lg:grid-cols-[1fr_280px]">
+        <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_280px]">
 
           {/* Left */}
           <div className="space-y-5">

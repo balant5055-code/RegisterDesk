@@ -4,6 +4,8 @@ import { useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { X, Images, ChevronLeft, ChevronRight } from 'lucide-react'
 import type { MediaAsset } from '@/components/wizard/eventDetailsConfig'
+import { cn } from '@/lib/utils/cn'
+import { SECTION_PY, EVENT_CONTAINER } from '@/components/event-templates/shared/ui/framework'
 
 // ─── Props ─────────────────────────────────────────────────────────────────────
 
@@ -40,9 +42,11 @@ export function SharedGallery({
 
   const isDark = variant === 'dark'
 
+  // RD-ST4.4: was py-14/sm:py-18 (dark) vs py-16/sm:py-20 (light) — two off-rhythm
+  // section paddings. Both now use the ONE section rhythm; only spacing changed.
   return (
-    <section id="gallery" className={isDark ? 'bg-gray-950 py-14 sm:py-18' : 'bg-white py-16 sm:py-20'}>
-      <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
+    <section id="gallery" className={cn(SECTION_PY, isDark ? 'bg-gray-950' : 'bg-white')}>
+      <div className={EVENT_CONTAINER}>
 
         {/* Header */}
         <motion.div
@@ -53,7 +57,7 @@ export function SharedGallery({
           className="mb-8"
         >
           <p
-            className="mb-2 text-[11px] font-bold uppercase tracking-[0.22em]"
+            className="mb-2 text-[11px] font-bold uppercase tracking-[0.14em]"
             style={{ color: accentColor }}
           >
             Gallery

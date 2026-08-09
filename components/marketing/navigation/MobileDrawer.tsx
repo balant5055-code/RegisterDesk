@@ -12,8 +12,10 @@ import Link from 'next/link'
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion'
 import { X, ChevronDown } from 'lucide-react'
 import { cn } from '@/lib/utils/cn'
+import { fs, typography } from '@/lib/ds/typography'
 import { MARKETING_ICONS } from '@/lib/marketing/icons'
 import { EASE } from '@/lib/marketing/motion'
+import { MarketingLogo } from '@/components/marketing/MarketingLogo'
 import { NavCTA, NAV_ICONS } from './NavAtoms'
 import type { NavMenu } from '@/lib/marketing/types'
 
@@ -21,11 +23,15 @@ function MobileSection({ menu, onNavigate }: { menu: NavMenu; onNavigate: () => 
   const [open, setOpen] = useState(false)
   const Icon = NAV_ICONS[menu.id]
 
+  // Row chrome is shared between the direct-link and the accordion-trigger forms so
+  // the two never drift apart visually.
+  const ROW = 'flex w-full items-center gap-3 rounded-xl px-3 py-3.5 text-left font-semibold text-foreground transition-colors hover:bg-primary/[0.05] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary'
+  const ROW_ICON = 'flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary/[0.08] ring-1 ring-inset ring-primary/10'
+
   if (menu.href && !menu.groups) {
     return (
-      <Link href={menu.href} onClick={onNavigate}
-        className="flex items-center gap-3 rounded-xl px-3 py-3.5 text-[16px] font-semibold text-foreground hover:bg-muted/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary">
-        {Icon && <Icon className="size-[18px] text-muted-foreground" strokeWidth={1.8} aria-hidden />}
+      <Link href={menu.href} onClick={onNavigate} className={cn(ROW, typography.bodyLarge, 'leading-none')}>
+        {Icon && <span className={ROW_ICON}><Icon className="size-4 text-primary" strokeWidth={1.8} aria-hidden /></span>}
         {menu.title}
       </Link>
     )
@@ -34,19 +40,19 @@ function MobileSection({ menu, onNavigate }: { menu: NavMenu; onNavigate: () => 
   return (
     <div>
       <button type="button" aria-expanded={open} onClick={() => setOpen(o => !o)}
-        className="flex w-full items-center gap-3 rounded-xl px-3 py-3.5 text-left text-[16px] font-semibold text-foreground hover:bg-muted/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary">
-        {Icon && <Icon className="size-[18px] text-muted-foreground" strokeWidth={1.8} aria-hidden />}
+        className={cn(ROW, typography.bodyLarge, 'leading-none')}>
+        {Icon && <span className={ROW_ICON}><Icon className="size-4 text-primary" strokeWidth={1.8} aria-hidden /></span>}
         <span className="flex-1">{menu.title}</span>
-        <ChevronDown className={cn('size-4 transition-transform', open && 'rotate-180')} aria-hidden />
+        <ChevronDown className={cn('size-4 text-muted-foreground transition-transform', open && 'rotate-180')} aria-hidden />
       </button>
       {open && (
-        <div className="space-y-0.5 pb-2 pl-3">
+        <div className="space-y-0.5 pb-2 pl-6">
           {(menu.groups ?? []).flatMap(g => g.items).map(it => {
-            const Icon = it.iconKey ? MARKETING_ICONS[it.iconKey] : null
+            const ItemIcon = it.iconKey ? MARKETING_ICONS[it.iconKey] : null
             return (
               <Link key={it.id} href={it.href} onClick={onNavigate}
-                className="flex items-center gap-3 rounded-lg px-3 py-3 text-[15px] text-muted-foreground hover:bg-muted/50 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary">
-                {Icon && <Icon className="size-4 shrink-0 text-muted-foreground" aria-hidden />}
+                className={cn(fs.md, 'flex items-center gap-3 rounded-lg px-3 py-2.5 text-muted-foreground transition-colors hover:bg-primary/[0.05] hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary')}>
+                {ItemIcon && <ItemIcon className="size-4 shrink-0 text-muted-foreground/70" aria-hidden />}
                 {it.title}
               </Link>
             )
@@ -88,16 +94,15 @@ export function MobileDrawer({ open, onClose, menus }: { open: boolean; onClose:
           transition={{ duration: 0.25, ease: EASE }}
           className="fixed inset-0 z-[110] flex flex-col overflow-x-hidden bg-white lg:hidden"
         >
-          {/* Top: logo + close */}
-          <div className="flex h-16 items-center justify-between px-4 sm:px-6">
-            <Link href="/" onClick={onClose} aria-label="RegisterDesk home" className="flex items-center gap-2">
-              <span className="flex size-8 items-center justify-center rounded-[9px] text-primary-foreground ring-1 ring-primary/20" style={{ backgroundImage: 'var(--primary-gradient)' }}>
-                <span className="text-[11px] font-extrabold tracking-[0.1em]">RD</span>
-              </span>
-              <span className="text-[15px] font-bold tracking-tight text-foreground">Register<span className="text-muted-foreground/70">Desk</span></span>
-            </Link>
+          {/* Top: logo + close.
+              This used to hand-build its own lockup — a gradient "RD" tile plus a
+              two-tone "RegisterDesk" text mark — which matched neither the real
+              wordmark nor anything else in the product. It is the SHARED
+              MarketingLogo now, so the drawer shows the actual brand. */}
+          <div className="flex h-16 items-center justify-between border-b border-border/60 px-4 sm:px-6">
+            <MarketingLogo className="h-7 w-auto" />
             <button onClick={onClose} aria-label="Close menu"
-              className="rounded-xl p-2 text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary">
+              className="rounded-full p-2 text-muted-foreground transition-colors hover:bg-foreground/[0.06] hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary">
               <X className="size-6" aria-hidden />
             </button>
           </div>

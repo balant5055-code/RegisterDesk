@@ -8,6 +8,7 @@ import type { Metadata } from 'next'
 import { typography } from '@/lib/ds/typography'
 import { MarketingPageLayout } from '@/components/marketing/layout/MarketingPageLayout'
 import { PlatformHero, PlatformSection, CapabilityGrid, PlatformCTA } from '@/components/marketing/platform'
+import { OWNERSHIP_SENTENCE } from '@/lib/marketing/ownership'
 import { buildMetadata, organizationJsonLd, breadcrumbJsonLd } from '@/lib/marketing/seo'
 
 export const metadata: Metadata = buildMetadata({
@@ -51,6 +52,14 @@ export default function AboutPage() {
               { iconKey: 'crm',       title: 'For every organizer',   description: 'Sports, conferences, schools, corporate, NGOs, and communities.' },
             ]}
           />
+        </PlatformSection>
+
+        {/* RD-LAUNCH-03 — who operates the platform. Placed after the story rather than
+            inside it: the company narrative is unchanged, this is the legal footnote. */}
+        <PlatformSection id="operator" eyebrow="Company" title="Who operates RegisterDesk" background="muted">
+          <p className="mx-auto max-w-2xl text-center text-[15px] leading-relaxed text-muted-foreground">
+            {OWNERSHIP_SENTENCE}
+          </p>
         </PlatformSection>
 
         <PlatformCTA

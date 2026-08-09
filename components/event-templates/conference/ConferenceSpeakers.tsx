@@ -96,7 +96,7 @@ function KeynoteSpeakerCard({ speaker, sessionTitle }: { speaker: Speaker; sessi
       transition={{ duration: 0.5, ease: [0.25, 0, 0, 1] }}
       className="overflow-hidden rounded-3xl border border-gray-100 bg-gradient-to-br from-gray-50 to-white shadow-[0_8px_40px_-12px_rgba(0,0,0,0.12)]"
     >
-      <div className="grid sm:grid-cols-[220px_1fr] lg:grid-cols-[300px_1fr]">
+      <div className="grid sm:grid-cols-[220px_minmax(0,1fr)] lg:grid-cols-[300px_minmax(0,1fr)]">
 
         {/* Photo */}
         <div className="overflow-hidden bg-gray-100">

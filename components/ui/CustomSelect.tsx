@@ -32,6 +32,12 @@ export function CustomSelect({
   const [query,       setQuery]       = useState('')
   const [highlighted, setHighlighted] = useState(-1)
 
+  // RD-RT3.2.2 BUG 2 (cause B): the panel was hard-coded to open downward with a fixed
+  // max-height, so near the bottom of the viewport it ran past the fold. It now measures
+  // the space actually available and flips up — or shrinks — to stay fully on screen.
+  const [placement, setPlacement] = useState<'down' | 'up'>('down')
+  const [maxHeight, setMaxHeight] = useState<number | null>(null)
+
   const containerRef = useRef<HTMLDivElement>(null)
   const searchRef    = useRef<HTMLInputElement>(null)
   const listRef      = useRef<HTMLUListElement>(null)
@@ -47,6 +53,37 @@ export function CustomSelect({
     const idx = filtered.indexOf(value)
     setHighlighted(idx >= 0 ? idx : 0)
   // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open])
+
+  // Collision detection — native measurement, no positioning library and no portal.
+  // Runs on open and keeps up with scroll/resize while open, so a list opened mid-page
+  // stays correct if the page moves under it.
+  useEffect(() => {
+    if (!open) return
+
+    function place() {
+      const rect = containerRef.current?.getBoundingClientRect()
+      if (!rect) return
+      const GAP = 8
+      const below = window.innerHeight - rect.bottom - GAP
+      const above = rect.top - GAP
+      // Flip only when there is genuinely more room above — never flip into less space.
+      const up = below < 220 && above > below
+      setPlacement(up ? 'up' : 'down')
+      // Never taller than the space available, never so short it is unusable.
+      setMaxHeight(Math.max(140, Math.min(320, up ? above : below)))
+    }
+
+    // rAF-deferred: this repo's `react-hooks/set-state-in-effect` rule forbids setting
+    // state synchronously in an effect body.
+    const raf = requestAnimationFrame(place)
+    window.addEventListener('resize', place)
+    window.addEventListener('scroll', place, true)
+    return () => {
+      cancelAnimationFrame(raf)
+      window.removeEventListener('resize', place)
+      window.removeEventListener('scroll', place, true)
+    }
   }, [open])
 
   useEffect(() => {
@@ -117,7 +154,12 @@ export function CustomSelect({
       </button>
 
       {open && (
-        <div className="absolute left-0 right-0 top-[calc(100%+4px)] z-50 overflow-hidden rounded-xl border border-border bg-card shadow-lg">
+        <div
+          className={cn(
+            "absolute left-0 right-0 z-50 flex flex-col overflow-hidden rounded-xl border border-border bg-card shadow-lg",
+            placement === "up" ? "bottom-[calc(100%+4px)]" : "top-[calc(100%+4px)]",
+          )}
+        >
           {showSearch && (
             <div className="border-b border-border/50 px-2 py-2">
               <div className="flex items-center gap-2 rounded-lg border border-border bg-background px-2.5 py-1.5">
@@ -139,7 +181,8 @@ export function CustomSelect({
             ref={listRef}
             role="listbox"
             aria-label="Options"
-            className="max-h-52 overflow-y-auto py-1"
+            className="overflow-y-auto py-1"
+            style={{ maxHeight: maxHeight ?? 208 }}
           >
             {filtered.length === 0 ? (
               <li className="px-3.5 py-2.5 text-[13px] text-muted-foreground">No results</li>

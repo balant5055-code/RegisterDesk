@@ -28,7 +28,7 @@ export function LegalPage({ title, intro, sections }: { title: string; intro: st
           ))}
         </div>
 
-        <p className="mt-12 border-t border-border/60 pt-6 text-[var(--fs-sm)] text-muted-foreground">
+        <p className="mt-12 border-t border-border/60 pt-6 text-fs-sm text-muted-foreground">
           We may update this policy from time to time; the latest version published on this page always applies.
         </p>
       </article>

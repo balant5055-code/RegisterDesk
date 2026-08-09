@@ -4,11 +4,16 @@ import {
   getDoc,
   setDoc,
   serverTimestamp,
+  connectFirestoreEmulator,
 } from 'firebase/firestore'
 import { firebaseApp } from '../config'
+import { connectOnce, EMULATOR_HOST, EMULATOR_PORTS } from '../emulator'
 import { ORGANIZER_ROLE } from '@/lib/organizer/identity'
 
 export const db = getFirestore(firebaseApp)
+
+// RD-EVENT-16 — no-op unless the emulator flag is set. Must run before the first read.
+connectOnce('firestore', () => connectFirestoreEmulator(db, EMULATOR_HOST, EMULATOR_PORTS.firestore))
 
 // ─── organizerProfileExists ───────────────────────────────────────────────────
 // True when the canonical /users/{uid} profile doc already exists. Used by the

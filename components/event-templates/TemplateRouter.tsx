@@ -1,5 +1,5 @@
-import { EventDetailClient }   from '@/app/events/[slug]/EventDetailClient'
-import type { EventDetailProps } from '@/app/events/[slug]/EventDetailClient'
+import { EventDetailClient }   from '@/components/event-templates/fallback/EventDetailClient'
+import type { EventDetailProps } from '@/components/event-templates/types'
 import { CommunityTemplate }  from './community/CommunityTemplate'
 import { ConferenceTemplate } from './conference/ConferenceTemplate'
 import { SportsTemplate }     from './sports/SportsTemplate'

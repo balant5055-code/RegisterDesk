@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import Link from 'next/link'
 import { useAuth }            from '@/components/auth/AuthProvider'
 import { cn }                 from '@/lib/utils/cn'
+import { PayoutHistoryPanel } from './PayoutHistoryPanel'
 import {
   AlertCircle, BadgeCheck, Building2, ChevronLeft,
   CreditCard, Loader2, Save, ShieldAlert, Smartphone,
@@ -143,6 +144,10 @@ export default function PayoutProfilePage() {
   const [saveError,   setSaveError]   = useState<string | null>(null)
   const [saving,      setSaving]      = useState(false)
   const [savedAt,     setSavedAt]     = useState<string | null>(null)
+  // RD-FINANCE-CLOSURE-02 · bumped on every successful save so the read-only history
+  // panel refetches. A counter, not a timestamp: two saves inside the same minute must
+  // still be two distinct values.
+  const [historyVersion, setHistoryVersion] = useState(0)
 
   // Track initial form to detect "first save" for the success message
   const savedOnce = useRef(false)
@@ -225,6 +230,7 @@ export default function PayoutProfilePage() {
       setForm(profileToForm(data.profile))
       setSavedAt(new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }))
       savedOnce.current = true
+      setHistoryVersion(v => v + 1)
     } catch {
       setSaveError('Network error — please try again.')
     } finally {
@@ -457,6 +463,11 @@ export default function PayoutProfilePage() {
           </div>
         </div>
       </form>
+
+      {/* RD-FINANCE-CLOSURE-02 · read-only audit trail. A sibling of the form, not part
+          of it — the form's fields, validation and save flow are untouched. `savedAt`
+          changes on every successful save, so the panel reloads itself when one lands. */}
+      <PayoutHistoryPanel reloadKey={historyVersion} />
     </div>
   )
 }

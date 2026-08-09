@@ -39,6 +39,9 @@ export interface EventListItem {
   endDate:            string | null
   bannerUrl:          string | null
   eventType:          string | null
+  /** RD-MEDIA-02: already stored on the draft; projected so consumers can resolve an
+   *  event-type template (e.g. gallery suggestions) without a second read. Additive. */
+  eventSubtype:       string | null
   campaignType:       string | null
   isFreeEvent:        boolean
   totalCapacity:      number | null
@@ -267,6 +270,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
         ? ((media.coverBanner as Record<string, unknown>).value as string)
         : null,
       eventType:          typeof d.eventType    === 'string' ? d.eventType    : null,
+      eventSubtype:       typeof d.eventSubtype === 'string' ? d.eventSubtype : null,
       campaignType:       typeof d.campaignType === 'string' ? d.campaignType : null,
       isFreeEvent:        isFree,
       // Real capacity: sum of pass capacities; null when any pass is unlimited

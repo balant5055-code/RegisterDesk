@@ -2559,7 +2559,7 @@ export function RegistrationFormBuilder({
     })
 
   return (
-    <div className="grid items-start gap-4 lg:grid-cols-[1fr_260px]">
+    <div className="grid items-start gap-4 lg:grid-cols-[minmax(0,1fr)_260px]">
 
       {/* ── Left: builder ── */}
       <div className="flex min-w-0 flex-col gap-4">

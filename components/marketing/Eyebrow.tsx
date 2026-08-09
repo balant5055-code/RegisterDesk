@@ -12,7 +12,7 @@ export function Eyebrow({ children, className }: { children: ReactNode; classNam
   return (
     <span
       className={cn(
-        'inline-flex h-9 items-center gap-2 rounded-full border border-border/60 bg-white px-4 text-[var(--fs-xs)] font-bold uppercase tracking-[0.18em] text-primary shadow-sm',
+        'inline-flex h-9 items-center gap-2 rounded-full border border-border/60 bg-white px-4 text-fs-xs font-bold uppercase tracking-[0.18em] text-primary shadow-sm',
         className,
       )}
     >

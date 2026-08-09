@@ -72,7 +72,7 @@ function AdminBrandPanel() {
             <ShieldCheck className="size-3.5" aria-hidden />
             Platform Administration
           </span>
-          <h1 className="text-[var(--fs-3xl)] font-bold leading-[1.15] tracking-tight text-primary-foreground xl:text-[var(--fs-4xl)]">
+          <h1 className="text-fs-3xl font-bold leading-[1.15] tracking-tight text-primary-foreground xl:text-fs-4xl">
             Platform control,
             <br />
             secured.

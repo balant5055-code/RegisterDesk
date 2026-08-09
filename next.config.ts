@@ -6,6 +6,10 @@ import type { NextConfig } from 'next'
 
 const isDev = process.env.NODE_ENV === 'development'
 
+// RD-EVENT-17 — same explicit opt-in as lib/firebase/emulator.ts. Fail-safe off: anything
+// other than the exact string 'true' leaves the production CSP untouched.
+const useEmulator = process.env.NEXT_PUBLIC_FIREBASE_EMULATOR === 'true'
+
 // ─── Content-Security-Policy ─────────────────────────────────────────────────
 //
 // Key decisions:
@@ -42,15 +46,30 @@ const isDev = process.env.NODE_ENV === 'development'
 
 function buildCSP(): string {
   const connectSrc = [
-    "'self'",
-    'https://*.googleapis.com',
-    'https://*.firebaseio.com',
-    'wss://*.firebaseio.com',
-    'https://api.razorpay.com',
-    'https://lumberjack.razorpay.com',
-    // Fast Refresh / Turbopack WebSocket (dev only)
-    ...(isDev ? ['ws://localhost:*', 'ws://127.0.0.1:*'] : []),
-  ]
+  "'self'",
+  'https://*.googleapis.com',
+  'https://*.firebaseio.com',
+  'wss://*.firebaseio.com',
+
+  // Cloudflare R2 uploads
+  'https://*.r2.cloudflarestorage.com',
+
+  'https://api.razorpay.com',
+  'https://lumberjack.razorpay.com',
+
+  ...(isDev ? ['ws://localhost:*', 'ws://127.0.0.1:*'] : []),
+
+  // RD-EVENT-17 — Firebase Emulator Suite (auth 9099, firestore 8080, storage 9199).
+  //
+  // The emulators are served over PLAIN HTTP on a loopback port, which `'self'` and the
+  // https://*.googleapis.com entries above do not cover, so every SDK call is refused by
+  // connect-src. This is not a dev-only concern: profiling runs a PRODUCTION build against
+  // the emulators, so it cannot be gated on `isDev`.
+  //
+  // Gated on the same explicit opt-in flag as the SDK wiring, so a real production build —
+  // where the variable is unset or 'false' — emits a byte-identical CSP.
+  ...(useEmulator ? ['http://127.0.0.1:9099', 'http://127.0.0.1:8080', 'http://127.0.0.1:9199', 'ws://127.0.0.1:*'] : []),
+]
 
   const scriptSrc = [
     "'self'",
@@ -111,7 +130,46 @@ const securityHeaders = [
 
 // ─── Next.js config ───────────────────────────────────────────────────────────
 
+/**
+ * RD-MEDIA-01 — allows next/image to render photos served from object storage.
+ *
+ * The hostname comes from R2_PUBLIC_URL because it is deployment-specific. A malformed or
+ * absent value yields an EMPTY list rather than a wildcard: failing closed keeps the
+ * image allow-list meaningful, and an unconfigured deployment simply cannot serve photos —
+ * which is the correct outcome, not a security hole.
+ */
+function r2RemotePattern(): NonNullable<NonNullable<NextConfig['images']>['remotePatterns']> {
+  const raw = (process.env.R2_PUBLIC_URL ?? '').trim()
+  if (!raw) return []
+  try {
+    const url = new URL(raw)
+    if (url.protocol !== 'https:') return []
+    return [{ protocol: 'https', hostname: url.hostname, port: '', pathname: '/**' }]
+  } catch {
+    return []
+  }
+}
+
 const nextConfig: NextConfig = {
+  // RD-EVENT-29 — build isolation for the emulator profile.
+  //
+  // THE TRAP THIS REMOVES: `next start` reads its build manifest once, at boot. Running a
+  // plain `npm run build` afterwards replaces `.next` underneath the already-running
+  // emulator server, which then serves chunk filenames that no longer exist — every JS
+  // request 500s with `text/plain`, the page server-renders but never hydrates, and the
+  // login button silently does nothing. It presents as an auth failure and is not one.
+  //
+  // This cost real debugging time in RD-EVENT-17, 25, 28 and 29. Options considered:
+  //   B (stop `build` clobbering) — needs a guard on the standard build. Rejected: it
+  //     touches the production path to fix a dev-only problem.
+  //   C (always rebuild before verifying) — a convention, not a mechanism. It is exactly
+  //     the convention that was already documented and still forgotten four times.
+  //   A (separate output dir) — chosen. The two builds can no longer occupy the same
+  //     directory, so the collision is impossible rather than merely discouraged.
+  //
+  // Production is untouched: with `NEXT_DIST_DIR` unset this is `.next`, byte-identical to
+  // before. Only `.env.emulator` sets it.
+  distDir: process.env.NEXT_DIST_DIR ?? '.next',
   images: {
     // Trusted image providers only. Kept in sync with APPROVED_IMAGE_HOSTS in
     // lib/utils/imageUrl.ts. Google cached thumbnails (encrypted-tbn0.gstatic.com)
@@ -122,6 +180,11 @@ const nextConfig: NextConfig = {
       { protocol: 'https', hostname: 'storage.googleapis.com',         port: '', pathname: '/**' },
       { protocol: 'https', hostname: 'res.cloudinary.com',             port: '', pathname: '/**' },
       { protocol: 'https', hostname: 'images.unsplash.com',            port: '', pathname: '/**' },
+      // RD-MEDIA-01: the object-storage public domain, read from R2_PUBLIC_URL at build
+      // time. Derived rather than hardcoded because the hostname is deployment-specific —
+      // a self-hosted CDN, an r2.dev subdomain, or a custom domain. When the variable is
+      // unset the entry is omitted entirely, so the allow-list never grows a bogus host.
+      ...r2RemotePattern(),
     ],
   },
 

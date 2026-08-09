@@ -1458,7 +1458,7 @@ export function EventDetailsBuilder({
     : 'Speaker'
 
   return (
-    <div className="grid items-start gap-4 lg:grid-cols-[1fr_260px]">
+    <div className="grid items-start gap-4 lg:grid-cols-[minmax(0,1fr)_260px]">
       <div className="flex min-w-0 flex-col gap-4">
         <div className="overflow-hidden rounded-xl border border-border bg-card shadow-sm">
           <div className="flex overflow-x-auto border-b border-border/70">

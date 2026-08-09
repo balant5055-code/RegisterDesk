@@ -69,7 +69,7 @@ export function CommunityVenue({
             whileInView={{ opacity: 1, y: 0 }}
             viewport={{ once: true }}
             transition={{ duration: 0.5 }}
-            className="grid gap-4 sm:grid-cols-[1fr_auto]"
+            className="grid gap-4 sm:grid-cols-[minmax(0,1fr)_auto]"
           >
             {/* Info card */}
             <div className="flex gap-4 rounded-2xl bg-gray-50 p-5 ring-1 ring-black/5 sm:p-6">

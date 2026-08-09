@@ -55,6 +55,7 @@ import type { StepViewProps, EventPass, EventPricingDraft, EventPricingType } fr
 import { SUPPORTED_FEE_MODEL, normalizeFeeModel } from '@/lib/events/builder/types'
 import { useFeesConfig } from '@/lib/fees/feesConfigClient'
 import { formatINR } from '@/lib/events/builder/format'
+import { validateStep } from '@/lib/events/builder/stepValidation'
 import { useAutosaveEmit } from '@/lib/events/builder/useAutosaveEmit'
 import { ROUTES } from '@/config/navigation'
 import { cn } from '@/lib/utils/cn'
@@ -909,6 +910,10 @@ export function Step4View({ currentStep, completedValues, onNext, onBack, onSave
 
   useAutosaveEmit(pricing, onAutosave)   // RD-PRODUCT-01B: autosave passes/pricing as edited
 
+  // RD-EVENT-05: this step had no `canProceed` — its rule was written inline at the footer
+  // AND again on the warning below. One source now drives both.
+  const canProceed = validateStep('pricing', { passCount: pricing.passes.length }).valid
+
   return (
     <motion.div
       initial={{ opacity: 0, y: 8 }}
@@ -940,7 +945,7 @@ export function Step4View({ currentStep, completedValues, onNext, onBack, onSave
       </div>
 
       {/* -- Main content -- */}
-      <div className="mt-4 grid flex-1 items-start gap-5 lg:grid-cols-[1fr_280px]">
+      <div className="mt-4 grid flex-1 items-start gap-5 lg:grid-cols-[minmax(0,1fr)_280px]">
 
         {/* Left column — min-w-0 prevents the table from stretching the grid */}
         <div className="flex min-w-0 flex-col gap-5">
@@ -1034,7 +1039,7 @@ export function Step4View({ currentStep, completedValues, onNext, onBack, onSave
 
       </div>
 
-      {pricing.passes.length === 0 && (
+      {!canProceed && (
         <p className="mt-4 text-center text-[13px] font-medium text-amber-600">
           At least one pass is required before continuing.
         </p>
@@ -1044,7 +1049,7 @@ export function Step4View({ currentStep, completedValues, onNext, onBack, onSave
         onBack={onBack}
         onSaveDraft={() => onSaveDraft?.(pricing)}
         onNext={() => onNext('Passes & Pricing', pricing)}
-        isNextDisabled={pricing.passes.length === 0}
+        isNextDisabled={!canProceed}
         stepContext={(() => {
           const steps = wizardSteps ?? WIZARD_STEPS
           return `Step ${currentStep + 1} of ${steps.length} · ${steps[currentStep]?.name ?? ''}`

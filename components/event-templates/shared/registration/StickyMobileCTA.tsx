@@ -71,7 +71,7 @@ export function StickyMobileCTA({ visible, showDesktop = false, title, isFreeEve
             <div className="mx-auto flex max-w-lg items-center justify-between gap-3">
               <div className="min-w-0 flex-1">
                 <p className="truncate text-xs font-bold text-foreground">{title}</p>
-                <p className="text-[10.5px] text-muted-foreground">{priceLine}</p>
+                <p className="text-fs-2xs text-muted-foreground">{priceLine}</p>
               </div>
               <Link
                 href={`#${targetId}`}
@@ -102,8 +102,8 @@ export function StickyMobileCTA({ visible, showDesktop = false, title, isFreeEve
                 className="flex items-center gap-3 rounded-full border border-border bg-card/95 py-2 pl-4 pr-2 shadow-[0_8px_30px_rgb(0_0_0/0.12)] backdrop-blur-md transition-shadow hover:shadow-[0_10px_36px_rgb(0_0_0/0.18)]"
               >
                 <span className="flex min-w-0 flex-col">
-                  <span className="text-[10.5px] font-medium text-muted-foreground">{priceLine}</span>
-                  <span className="max-w-[180px] truncate text-[12.5px] font-bold text-foreground">{title}</span>
+                  <span className="text-fs-2xs font-medium text-muted-foreground">{priceLine}</span>
+                  <span className="max-w-[180px] truncate text-fs-xs font-bold text-foreground">{title}</span>
                 </span>
                 <span className={cn(buttonVariants({ variant: 'primary', size: 'sm' }), 'shrink-0 gap-1.5')}>
                   <Ticket className="size-3.5" aria-hidden />

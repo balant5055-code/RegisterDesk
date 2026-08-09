@@ -1,88 +1,75 @@
 'use client'
 
-// ChallengeSelectionSection — the "Challenge Studio".
+// ChallengeSelectionSection — the tabbed registration experience.
 //
-// A reusable, data-driven selection experience shared by every template: a gallery
-// of premium challenge cards (single-select radiogroup) beside one sticky summary
-// panel that updates instantly. Challenges are normalised from real pass data via
-// `passesToChallenges` — nothing is fabricated; every field self-hides when absent.
+// RD-ST6.0 architecture refactor. The previous layout showed every pass as a card AND
+// repeated the selected pass in a second panel: the same name, price, availability and
+// benefits rendered twice, which is what produced the empty space, the weak focus and
+// the extra scrolling. The selected pass is now the single source of truth.
 //
-// Templates supply `challenges` + labels; the interaction model, a11y and layout
-// are identical across Sports / Conference / Workshop / Entertainment / Exhibition.
+//   TABS      — one pill per pass. Selection only; they carry no duplicated detail.
+//   PANEL     — exactly ONE, describing the selected pass: identity → overview grid →
+//               what's included → notes → primary CTA.
+//   STICKY BAR— a full-width bar that mirrors the same selection and reuses the same
+//               register href. It appears only once the in-panel CTA leaves the
+//               viewport, so the two never compete.
+//
+// Everything derives from `selectedId`. There is no second copy of the selection, the
+// price, the availability or the register action anywhere in this file.
+//
+// Data comes exclusively from `passesToChallenges`; nothing is hardcoded and every
+// field self-hides when the organiser has not set it.
 
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import Link from 'next/link'
 import { buildRegisterHref } from '@/lib/events/registerHref'
-import { motion, useReducedMotion } from 'framer-motion'
+import { AnimatePresence, motion, useReducedMotion } from 'framer-motion'
 import {
-  Users, CalendarClock, ShieldCheck, Zap, RotateCcw, ArrowRight, Check,
+  ShieldCheck, Zap, RotateCcw, ArrowRight, Info,
+  Flag, UserRound, CircleCheck, CalendarClock, Ticket,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { cn } from '@/lib/utils/cn'
-import type { PassPublic } from '@/components/event-templates/types'
-import type { PassAvailability } from '@/lib/registrations/types'
-import { formatINR, formatDateShort, passDisplayPrice } from '@/components/event-templates/shared/utils/format'
-import { SectionShell, SectionHeader } from '@/components/event-templates/shared/ui/framework'
+import { formatINR, formatDateShort } from '@/components/event-templates/shared/utils/format'
+import {
+  SectionShell, EventSectionHeader, TYPE, CARD, EASE, BRAND_GRADIENT,
+  EVENT_CONTAINER, benefitIcon,
+} from '@/components/event-templates/shared/ui/framework'
+// ST41-I01: the data model lives in a directive-free module so Server Components can
+// call passesToChallenges(). The TYPE is re-exported here (types erase — no client
+// reference), but callers must import the FUNCTION from challengeModel directly.
+import type { Challenge } from '@/components/event-templates/shared/registration/challengeModel'
 
-// ─── Data model ─────────────────────────────────────────────────────────────────
+export type { Challenge }
 
-export interface Challenge {
-  id:          string
-  name:        string
-  price:       number
-  isFree:      boolean
-  description?: string           // organiser copy — hidden when empty
-  distance?:   string            // enrichment from a linked category — optional
-  benefits:    string[]          // real, from the pass
-  remaining:   number | null     // null = unlimited/unknown
-  total:       number | null
-  status:      'available' | 'low' | 'sold_out'
-  closesOn?:   string            // sales end date (YYYY-MM-DD)
-  selectable:  boolean
-}
-
-/** Normalise passes (+ optional category enrichment) into challenges. */
-export function passesToChallenges(
-  passes: PassPublic[],
-  availability: Record<string, PassAvailability>,
-  opts?: { categories?: { name: string; distance?: string }[] },
-): Challenge[] {
-  const byName = new Map(
-    (opts?.categories ?? []).map(c => [c.name.trim().toLowerCase(), c] as const),
-  )
-  return passes
-    .filter(p => p.status !== 'inactive' && p.name?.trim())
-    .map(p => {
-      const av        = availability[p.id]
-      const status    = av?.status ?? 'available'
-      const remaining = av?.remaining ?? (p.unlimited ? null : (p.quantity ?? null))
-      const cat       = byName.get(p.name.trim().toLowerCase())
-      return {
-        id:          p.id,
-        name:        p.name.trim(),
-        price:       passDisplayPrice(p),
-        isFree:      p.price === 0,
-        description: p.description?.trim() || undefined,
-        distance:    cat?.distance?.trim() || undefined,
-        benefits:    (p.benefits ?? []).map(b => b.trim()).filter(Boolean),
-        remaining,
-        total:       av?.passCapacity ?? (p.unlimited ? null : (p.quantity ?? null)),
-        status,
-        closesOn:    p.salesEndDate?.trim() || undefined,
-        selectable:  status !== 'sold_out',
-      }
-    })
-}
-
-// ─── Benefit → icon (keyword match; generic fallback) ────────────────────────────
-
-// ─── Availability label ──────────────────────────────────────────────────────────
+// ─── Derived labels ──────────────────────────────────────────────────────────────
 
 function slotsLabel(c: Challenge, unit: string): string | null {
   if (c.status === 'sold_out') return 'Sold out'
   if (c.remaining == null)     return null            // unlimited — no false scarcity
   return `${c.remaining.toLocaleString('en-IN')} ${unit} left`
 }
+
+/** Age eligibility, phrased from whichever bounds the organiser actually set. */
+function ageLabel(c: Challenge): string | null {
+  const min = c.minAge ?? null
+  const max = c.maxAge ?? null
+  if (min == null && max == null) return null
+  if (min != null && max != null) return `${min}–${max} yrs`
+  if (min != null)                return `${min}+ yrs`
+  return `Up to ${max} yrs`
+}
+
+function registrationLabel(c: Challenge, open: boolean): string {
+  if (!open)               return 'Closed'
+  if (!c.selectable)       return 'Sold out'
+  return 'Open'
+}
+
+// ─── Panel rhythm (ST6.1) ────────────────────────────────────────────────────────
+// One padding scale for every band — 16px mobile, 20px tablet, 24px desktop — so the
+// four sections share an identical internal margin and read as one system.
+const SECTION_PAD     = 'p-4 sm:p-5 lg:p-6'
 
 // ─── Props ───────────────────────────────────────────────────────────────────────
 
@@ -106,240 +93,298 @@ export interface ChallengeSelectionSectionProps {
 export function ChallengeSelectionSection({
   slug, challenges, registrationOpen, closedMessage, hasRefundPolicy,
   eyebrow = 'Choose Your Challenge', title, subtitle,
-  panelTitle = 'Your Challenge', ctaLabel = 'Register', unit = 'slots',
+  panelTitle = 'Selected Pass', ctaLabel = 'Register', unit = 'slots',
 }: ChallengeSelectionSectionProps) {
-  const reduce   = useReducedMotion()
-  const cardsRef = useRef<(HTMLButtonElement | null)[]>([])
+  const reduce  = useReducedMotion()
+  const tabsRef = useRef<(HTMLButtonElement | null)[]>([])
+  const ctaRef  = useRef<HTMLDivElement>(null)
 
-  const firstSelectable = challenges.find(c => c.selectable)?.id ?? ''
+  // ── THE single source of truth ──
+  const firstSelectable = challenges.find(c => c.selectable)?.id ?? challenges[0]?.id ?? ''
   const [selectedId, setSelectedId] = useState(firstSelectable)
   const selected = challenges.find(c => c.id === selectedId)
 
-  // roving selection across selectable cards
-  const move = (dir: 1 | -1) => {
-    const order = challenges.map((c, i) => ({ c, i })).filter(x => x.c.selectable)
-    if (!order.length) return
-    const pos  = Math.max(0, order.findIndex(x => x.c.id === selectedId))
-    const next = order[(pos + dir + order.length) % order.length]
-    setSelectedId(next.c.id)
-    cardsRef.current[next.i]?.focus()
+  // The sticky bar shows only once the in-panel CTA has scrolled out of view, so the
+  // page never presents two competing register actions at the same time.
+  const [ctaOffscreen, setCtaOffscreen] = useState(false)
+  useEffect(() => {
+    const el = ctaRef.current
+    if (!el || typeof IntersectionObserver === 'undefined') return
+    const io = new IntersectionObserver(
+      ([entry]) => setCtaOffscreen(!entry.isIntersecting),
+      { rootMargin: '0px 0px -20% 0px' },
+    )
+    io.observe(el)
+    return () => io.disconnect()
+  }, [])
+
+  // Standard tabs keyboard model: arrows move and activate, Home/End jump.
+  const focusTab = (i: number) => {
+    const c = challenges[i]
+    if (!c) return
+    setSelectedId(c.id)
+    tabsRef.current[i]?.focus()
   }
-  const onKey = (e: React.KeyboardEvent, c: Challenge) => {
-    if (['ArrowRight', 'ArrowDown'].includes(e.key)) { e.preventDefault(); move(1) }
-    else if (['ArrowLeft', 'ArrowUp'].includes(e.key)) { e.preventDefault(); move(-1) }
-    else if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); if (c.selectable) setSelectedId(c.id) }
+  const onTabKey = (e: React.KeyboardEvent) => {
+    const i = challenges.findIndex(c => c.id === selectedId)
+    if (['ArrowRight', 'ArrowDown'].includes(e.key)) { e.preventDefault(); focusTab((i + 1) % challenges.length) }
+    else if (['ArrowLeft', 'ArrowUp'].includes(e.key)) { e.preventDefault(); focusTab((i - 1 + challenges.length) % challenges.length) }
+    else if (e.key === 'Home') { e.preventDefault(); focusTab(0) }
+    else if (e.key === 'End')  { e.preventDefault(); focusTab(challenges.length - 1) }
   }
 
-  const canRegister = registrationOpen && !!selected && selected.selectable
+  const canRegister  = registrationOpen && !!selected && selected.selectable
   const registerHref = selected ? buildRegisterHref(slug, selected.id) : '#'
 
   const trust = [
     { icon: ShieldCheck, label: 'Secure Registration' },
     { icon: Zap,         label: 'Instant Confirmation' },
-    hasRefundPolicy && { icon: RotateCcw, label: 'Easy Refunds' },
+    hasRefundPolicy && { icon: RotateCcw, label: 'Easy Refund' },
   ].filter(Boolean) as { icon: LucideIcon; label: string }[]
 
   if (challenges.length === 0) return null
 
-  return (
-    <SectionShell id="register" maxW="6xl" bg="muted" border={false}>
+  // Overview — only fields the organiser actually set. No placeholders.
+  const overview = selected ? ([
+    selected.distance          && { icon: Flag,          label: 'Distance',     value: selected.distance },
+    ageLabel(selected)         && { icon: UserRound,    label: 'Age',          value: ageLabel(selected)! },
+    { icon: CircleCheck, label: 'Registration', value: registrationLabel(selected, registrationOpen) },
+    selected.closesOn          && { icon: CalendarClock, label: 'Closing',      value: formatDateShort(selected.closesOn) },
+    slotsLabel(selected, unit) && { icon: Ticket,        label: 'Availability', value: slotsLabel(selected, unit)! },
+  ].filter(Boolean) as { icon: LucideIcon; label: string; value: string }[]) : []
 
-        {/* header */}
-        <SectionHeader eyebrow={eyebrow} title={title} subtitle={subtitle} />
+  const ctaText = selected?.isFree ? `${ctaLabel} Free` : `${ctaLabel} Now`
+
+  return (
+    <>
+      <SectionShell id="register" maxW="6xl" bg="muted" border={false}>
+
+        <EventSectionHeader eyebrow={eyebrow} title={title} description={subtitle} />
 
         {!registrationOpen && (
-          <div className="mb-6 rounded-2xl border border-amber-200 bg-amber-50 px-5 py-3.5 text-[13.5px] font-medium text-amber-800">
+          <div className="mb-6 rounded-2xl border border-amber-200 bg-amber-50 px-5 py-3.5 text-fs-sm font-medium text-amber-800">
             {closedMessage || 'Registrations are currently closed for this event.'}
           </div>
         )}
 
-        <div className="grid items-start gap-8 lg:grid-cols-[1fr_360px]">
+        {/* ══════════ TABS ══════════
+            Desktop: one row. Tablet: wraps. Mobile: horizontal scroll.
+            Both states carry an equal-width border so selection cannot shift layout. */}
+        <div
+          role="tablist"
+          aria-label={eyebrow}
+          onKeyDown={onTabKey}
+          className={cn(
+            'flex gap-2 overflow-x-auto pb-1 md:flex-wrap md:overflow-visible md:pb-0',
+            '[scrollbar-width:none] [&::-webkit-scrollbar]:hidden',
+          )}
+        >
+          {challenges.map((c, i) => {
+            const isSel = c.id === selectedId
+            return (
+              <button
+                key={c.id}
+                ref={el => { tabsRef.current[i] = el }}
+                type="button"
+                role="tab"
+                id={`challenge-tab-${c.id}`}
+                aria-selected={isSel}
+                aria-controls="challenge-panel"
+                tabIndex={isSel ? 0 : -1}
+                onClick={() => setSelectedId(c.id)}
+                className={cn(
+                  'shrink-0 rounded-full border px-5 py-2.5 text-fs-md font-bold outline-none',
+                  'transition-[background-color,border-color,color,box-shadow] duration-200',
+                  'focus-visible:ring-2 focus-visible:ring-primary/50 focus-visible:ring-offset-2',
+                  isSel
+                    ? cn(BRAND_GRADIENT, 'border-transparent text-white shadow-md')
+                    : 'border-border bg-card text-foreground hover:border-foreground/25 hover:bg-muted/40',
+                  !c.selectable && !isSel && 'opacity-55',
+                )}
+              >
+                {c.distance || c.name}
+              </button>
+            )
+          })}
+        </div>
 
-          {/* ── Challenge selector — race-category cards ── */}
-          <div role="radiogroup" aria-label="Choose your challenge" className="grid gap-4 pb-40 sm:grid-cols-2 lg:pb-0">
-            {challenges.map((c, i) => {
-              const isSel   = c.id === selectedId
-              const slots   = slotsLabel(c, unit)
-              const rewards = c.benefits.slice(0, 3)
-              const extra   = c.benefits.length - rewards.length
-              const selDot  = (
-                <span className={cn(
-                  'mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full transition-colors',
-                  isSel ? 'bg-primary text-white' : 'border border-border/70',
-                )}>
-                  {isSel && <Check className="size-3" aria-hidden />}
-                </span>
-              )
-              return (
-                <motion.button
-                  key={c.id}
-                  ref={el => { cardsRef.current[i] = el }}
-                  type="button"
-                  role="radio"
-                  aria-checked={isSel}
-                  aria-disabled={!c.selectable || undefined}
-                  tabIndex={isSel || (!firstSelectable && i === 0) ? 0 : -1}
-                  disabled={!c.selectable}
-                  onClick={() => c.selectable && setSelectedId(c.id)}
-                  onKeyDown={e => onKey(e, c)}
-                  whileHover={c.selectable && !reduce ? { y: -4, scale: 1.008 } : undefined}
-                  transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
-                  className={cn(
-                    'group relative flex flex-col rounded-2xl p-5 text-left outline-none transition-[box-shadow,background-color] duration-200',
-                    'focus-visible:ring-2 focus-visible:ring-primary/50 focus-visible:ring-offset-2',
-                    c.selectable ? 'cursor-pointer' : 'cursor-not-allowed opacity-60',
-                    isSel
-                      ? 'bg-gradient-to-b from-primary/[0.05] to-card shadow-xl shadow-primary/10 ring-1 ring-primary/30'
-                      : 'bg-card shadow-sm ring-1 ring-border/60 hover:shadow-md hover:ring-border',
-                  )}
-                >
-                  {/* distance hero (or name) + selection dot */}
-                  {c.distance ? (
-                    <div className="flex items-start justify-between gap-2">
-                      <div className="min-w-0">
-                        <span className="block text-[30px] font-black leading-none tracking-tight text-foreground">{c.distance}</span>
-                        <h3 className="mt-1.5 text-[13px] font-bold uppercase tracking-[0.08em] text-muted-foreground">{c.name}</h3>
-                      </div>
-                      {selDot}
-                    </div>
-                  ) : (
-                    <div className="flex items-start justify-between gap-2">
-                      <h3 className="text-[19px] font-bold leading-tight text-foreground">{c.name}</h3>
-                      {selDot}
-                    </div>
-                  )}
+        {/* ══════════ THE ONE PANEL ══════════ */}
+        <div
+          role="tabpanel"
+          id="challenge-panel"
+          aria-labelledby={selected ? `challenge-tab-${selected.id}` : undefined}
+          className={cn(CARD, 'mt-6 overflow-hidden shadow-lg')}
+        >
+          <AnimatePresence mode="wait" initial={false}>
+            {selected && (
+              <motion.div
+                key={selected.id}
+                initial={reduce ? false : { opacity: 0, y: 8 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={reduce ? { opacity: 0 } : { opacity: 0, y: -6 }}
+                transition={{ duration: 0.15, ease: EASE }}
+              >
+                {/* ── 1 · Identity ── */}
+                <div className={SECTION_PAD}>
+                  <span className={cn(
+                    'inline-flex items-center gap-2 rounded-full px-3 py-1 text-fs-2xs font-bold',
+                    canRegister
+                      ? 'bg-primary/10 text-primary ring-1 ring-primary/20'
+                      : 'bg-muted text-muted-foreground ring-1 ring-border',
+                  )}>
+                    <span className={cn('size-1.5 rounded-full', canRegister ? 'bg-primary' : 'bg-muted-foreground/60')} aria-hidden />
+                    Registration {registrationLabel(selected, registrationOpen)}
+                  </span>
 
-                  <p className="mt-3 text-[20px] font-black tracking-tight text-foreground">
-                    {c.isFree ? 'Free' : formatINR(c.price)}
-                  </p>
+                  <div className="mt-4 flex flex-wrap items-end justify-between gap-x-8 gap-y-3">
+                    {/* RD-ST5.2 P1.2 — was an inline clamp(28px→36px), which made this
+                        card title LARGER than the section h2 containing it at every
+                        width. Both now resolve through shared TYPE roles: `panelTitle`
+                        stays strictly under `sectionTitle` at both breakpoints, and the
+                        price uses the same `statValue` role as the organiser stats. */}
+                    <h3 className={TYPE.panelTitle}>
+                      {selected.name}
+                    </h3>
+                    <p className={cn('shrink-0', TYPE.statValue)}>
+                      {selected.isFree ? 'Free' : formatINR(selected.price)}
+                    </p>
+                  </div>
 
-                  {c.description && (
-                    <p className="mt-1.5 line-clamp-2 text-[13px] leading-relaxed text-muted-foreground">{c.description}</p>
-                  )}
-
-                  {rewards.length > 0 && (
-                    <p className="mt-3 line-clamp-1 text-[12.5px] font-medium text-foreground/70">
-                      {rewards.join(' · ')}{extra > 0 ? ` · +${extra}` : ''}
+                  {selected.description && (
+                    <p className="mt-4 max-w-2xl text-fs-base leading-relaxed text-muted-foreground">
+                      {selected.description}
                     </p>
                   )}
+                </div>
 
-                  {/* footer — availability + selection state */}
-                  <div className="mt-4 flex items-center justify-between gap-3 border-t border-border/40 pt-3">
-                    <span className="min-w-0 truncate text-[12px] font-medium text-muted-foreground">
-                      {slots ? (
-                        <span className={cn('inline-flex items-center gap-1.5', c.status === 'low' && 'text-amber-600')}>
-                          <Users className="size-3.5 shrink-0" aria-hidden />{slots}
-                        </span>
-                      ) : c.selectable ? 'Available' : ''}
-                    </span>
-                    <span className={cn('inline-flex shrink-0 items-center gap-1 text-[12.5px] font-bold', isSel ? 'text-primary' : 'text-muted-foreground group-hover:text-foreground')}>
-                      {!c.selectable ? '—' : isSel ? <><Check className="size-3.5" aria-hidden />Selected</> : 'Choose'}
-                    </span>
+                {/* ── 2 · Overview ── */}
+                {overview.length > 0 && (
+                  <div className={cn(SECTION_PAD, 'border-t border-border/40 bg-muted/30')}>
+                    <h4 className={TYPE.cardTitle}>Overview</h4>
+                    <dl className="mt-4 grid grid-cols-2 gap-x-6 gap-y-5 sm:grid-cols-3 lg:grid-cols-5">
+                      {overview.map(o => (
+                        <div key={o.label} className="flex min-w-0 items-start gap-2.5">
+                          <o.icon className="mt-0.5 size-[18px] shrink-0 text-primary" aria-hidden />
+                          <div className="min-w-0">
+                            <dt className={TYPE.label}>{o.label}</dt>
+                            <dd className="mt-1 truncate text-fs-md font-semibold text-foreground">{o.value}</dd>
+                          </div>
+                        </div>
+                      ))}
+                    </dl>
                   </div>
-                </motion.button>
-              )
-            })}
-          </div>
+                )}
 
-          {/* ── Sticky summary panel ── */}
-          <div className="sticky bottom-0 z-30 self-end lg:bottom-auto lg:top-24 lg:self-start">
-            <div
-              aria-live="polite"
-              className={cn(
-                'rounded-t-3xl border-t border-border/70 bg-card p-5 shadow-[0_-8px_30px_-12px_rgba(0,0,0,0.18)]',
-                'lg:rounded-2xl lg:border lg:shadow-sm',
-                'pb-[max(1.25rem,env(safe-area-inset-bottom))] lg:pb-5',
-              )}
-            >
-              <p className="text-[11px] font-bold uppercase tracking-[0.16em] text-muted-foreground/70">{panelTitle}</p>
+                {/* ── 3 · What's Included — labels, never IDs ── */}
+                {selected.benefits.length > 0 && (
+                  <div className={cn(SECTION_PAD, 'border-t border-border/40')}>
+                    <h4 className={TYPE.cardTitle}>What&apos;s Included</h4>
+                    <ul className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+                      {selected.benefits.map(b => {
+                        const Icon = benefitIcon(b)
+                        return (
+                          <li
+                            key={b}
+                            className="flex min-h-14 items-center gap-3 rounded-xl bg-muted/50 px-3.5 py-3"
+                          >
+                            <Icon className="size-[18px] shrink-0 text-primary" aria-hidden />
+                            <span className="min-w-0 text-fs-sm font-semibold leading-snug text-foreground">{b}</span>
+                          </li>
+                        )
+                      })}
+                    </ul>
 
-              {selected ? (
-                <motion.div
-                  key={selected.id}
-                  initial={reduce ? false : { opacity: 0, y: 6 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
-                >
-                  <div className="mt-1.5 flex items-start justify-between gap-3">
-                    <h3 className="text-[20px] font-bold leading-tight text-foreground">{selected.name}</h3>
-                    {selected.distance && (
-                      <span className="shrink-0 rounded-full bg-muted px-2.5 py-1 text-[12px] font-bold text-foreground">{selected.distance}</span>
-                    )}
-                  </div>
-
-                  <p className="mt-2.5 text-[26px] font-black tracking-tight text-foreground">
-                    {selected.isFree ? 'Free' : formatINR(selected.price)}
-                  </p>
-
-                  {/* verbose detail — desktop only (mobile sheet stays compact) */}
-                  {selected.description && (
-                    <p className="mt-2 hidden text-[13px] leading-relaxed text-muted-foreground lg:line-clamp-3 lg:block">{selected.description}</p>
-                  )}
-
-                  {/* What's Included — a clean checklist, not a chip wall */}
-                  {selected.benefits.length > 0 && (
-                    <div className="mt-4 hidden lg:block">
-                      <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-muted-foreground/70">What&apos;s Included</p>
-                      <ul className="mt-2 space-y-1.5">
-                        {selected.benefits.map(b => (
-                          <li key={b} className="flex items-start gap-2 text-[13px] text-foreground/85">
-                            <Check className="mt-0.5 size-3.5 shrink-0 text-primary" aria-hidden />
-                            <span>{b}</span>
+                    {/* Booking / policy notes — derived from real builder flags */}
+                    {selected.notes.length > 0 && (
+                      <ul className="mt-5 flex flex-wrap items-center gap-x-5 gap-y-2">
+                        {selected.notes.map(n => (
+                          <li key={n} className="inline-flex items-center gap-1.5 text-fs-sm text-muted-foreground">
+                            <Info className="size-3.5 shrink-0 text-primary/60" aria-hidden />{n}
                           </li>
                         ))}
                       </ul>
-                    </div>
-                  )}
-
-                  {/* facts — availability · closing date */}
-                  {(slotsLabel(selected, unit) || selected.closesOn) && (
-                    <div className="mt-4 hidden flex-col gap-2 border-t border-border/50 pt-4 lg:flex">
-                      {slotsLabel(selected, unit) && (
-                        <span className="inline-flex items-center gap-2 text-[13px] text-muted-foreground">
-                          <Users className="size-4 text-primary/70" aria-hidden />{slotsLabel(selected, unit)}
-                        </span>
-                      )}
-                      {selected.closesOn && (
-                        <span className="inline-flex items-center gap-2 text-[13px] text-muted-foreground">
-                          <CalendarClock className="size-4 text-primary/70" aria-hidden />Registration closes {formatDateShort(selected.closesOn)}
-                        </span>
-                      )}
-                    </div>
-                  )}
-                </motion.div>
-              ) : (
-                <p className="mt-2 text-[14px] text-muted-foreground">Select a challenge to continue.</p>
-              )}
-
-              {/* CTA */}
-              <div className="mt-5">
-                {canRegister ? (
-                  <Link
-                    href={registerHref}
-                    className="flex items-center justify-center gap-2 rounded-xl py-3.5 text-[15px] font-bold text-white shadow-sm transition-transform duration-200 hover:scale-[1.01] active:scale-[0.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 focus-visible:ring-offset-2"
-                    style={{ backgroundImage: 'var(--primary-gradient)' }}
-                  >
-                    {selected?.isFree ? `${ctaLabel} Free` : ctaLabel} <ArrowRight className="size-4" aria-hidden />
-                  </Link>
-                ) : (
-                  <span className="flex items-center justify-center rounded-xl bg-muted py-3.5 text-[14px] font-semibold text-muted-foreground">
-                    Registrations closed
-                  </span>
+                    )}
+                  </div>
                 )}
-              </div>
 
-              {/* trust */}
-              <div className="mt-3 flex flex-wrap items-center justify-center gap-x-4 gap-y-1.5">
-                {trust.map(({ icon: Icon, label }) => (
-                  <span key={label} className="inline-flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
-                    <Icon className="size-3.5 text-primary/60" aria-hidden />{label}
-                  </span>
-                ))}
-              </div>
-            </div>
-          </div>
+                {/* ── 4 · CTA ── */}
+                <div ref={ctaRef} className={cn(SECTION_PAD, 'border-t border-border/40 bg-muted/30')}>
+                  {canRegister ? (
+                    <Link
+                      href={registerHref}
+                      className={cn(
+                        'group flex h-14 w-full items-center justify-center gap-2 rounded-xl text-fs-lg font-bold text-white shadow-md',
+                        'transition-transform duration-200 hover:-translate-y-0.5 active:translate-y-0 motion-reduce:transform-none',
+                        'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 focus-visible:ring-offset-2',
+                        BRAND_GRADIENT,
+                      )}
+                    >
+                      {ctaText}
+                      <ArrowRight className="size-5 transition-transform group-hover:translate-x-1 motion-reduce:transform-none" aria-hidden />
+                    </Link>
+                  ) : (
+                    <span className="flex h-14 w-full items-center justify-center rounded-xl bg-muted text-fs-md font-semibold text-muted-foreground">
+                      {selected.selectable ? 'Registrations closed' : 'Sold out'}
+                    </span>
+                  )}
 
+                  <ul className="mt-4 flex flex-wrap items-center justify-center gap-x-2 gap-y-1 text-fs-2xs text-muted-foreground">
+                    {trust.map(({ label }, i) => (
+                      <li key={label} className="inline-flex items-center gap-2">
+                        {i > 0 && <span aria-hidden className="text-muted-foreground/40">&bull;</span>}
+                        {label}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
         </div>
-    </SectionShell>
+      </SectionShell>
+
+      {/* ══════════ STICKY BAR ══════════
+          Same `selectedId`, same `registerHref` — no second state, no second action. */}
+      <AnimatePresence>
+        {selected && canRegister && ctaOffscreen && (
+          <motion.div
+            initial={reduce ? false : { y: '100%' }}
+            animate={{ y: 0 }}
+            exit={reduce ? { opacity: 0 } : { y: '100%' }}
+            transition={{ duration: 0.2, ease: EASE }}
+            className="fixed inset-x-0 bottom-0 z-50 border-t border-border bg-card/95 shadow-[0_-6px_24px_rgb(0_0_0/0.08)] backdrop-blur-md"
+          >
+            <div className={cn(EVENT_CONTAINER, 'flex items-center gap-4 py-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]')}>
+              <div className="min-w-0 flex-1">
+                <p className={cn('hidden sm:block', TYPE.label)}>{panelTitle}</p>
+                <div className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5">
+                  <span className="truncate text-fs-md font-bold text-foreground">{selected.name}</span>
+                  <span className="shrink-0 text-fs-lg font-extrabold tracking-tight text-foreground">
+                    {selected.isFree ? 'Free' : formatINR(selected.price)}
+                  </span>
+                  <span className="hidden shrink-0 items-center gap-1.5 text-fs-2xs font-semibold text-primary sm:inline-flex">
+                    <span className="size-1.5 rounded-full bg-primary" aria-hidden />
+                    Registration Open
+                  </span>
+                </div>
+              </div>
+
+              <Link
+                href={registerHref}
+                className={cn(
+                  'group inline-flex h-11 shrink-0 items-center justify-center gap-2 rounded-xl px-5 text-fs-md font-bold text-white shadow-sm sm:px-7',
+                  'transition-transform duration-200 hover:-translate-y-0.5 active:translate-y-0 motion-reduce:transform-none',
+                  'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 focus-visible:ring-offset-2',
+                  BRAND_GRADIENT,
+                )}
+              >
+                {ctaText}
+                <ArrowRight className="size-4 transition-transform group-hover:translate-x-1 motion-reduce:transform-none" aria-hidden />
+              </Link>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </>
   )
 }

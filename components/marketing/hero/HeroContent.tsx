@@ -74,7 +74,7 @@ export function HeroContent({ content }: { content: HeroSectionContent }) {
           href={primary.href}
           className={cn(
             GRADIENT,
-            'inline-flex h-11 items-center justify-center gap-2 rounded-[14px] px-6 text-[var(--fs-md)] font-semibold text-white transition-all duration-200 ease-out hover:-translate-y-px focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 md:h-[46px] lg:h-12',
+            'inline-flex h-11 items-center justify-center gap-2 rounded-[14px] px-6 text-fs-md font-semibold text-white transition-all duration-200 ease-out hover:-translate-y-px focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 md:h-[46px] lg:h-12',
           )}
         >
           {primary.label}
@@ -82,7 +82,7 @@ export function HeroContent({ content }: { content: HeroSectionContent }) {
         </Link>
         <Link
           href={secondary.href}
-          className="inline-flex h-11 items-center justify-center gap-2 rounded-[14px] border border-border/50 bg-white px-6 text-[var(--fs-md)] font-semibold text-[#0F172A] transition-all duration-200 ease-out hover:border-primary/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 md:h-[46px] lg:h-12"
+          className="inline-flex h-11 items-center justify-center gap-2 rounded-[14px] border border-border/50 bg-white px-6 text-fs-md font-semibold text-[#0F172A] transition-all duration-200 ease-out hover:border-primary/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 md:h-[46px] lg:h-12"
         >
           <Play className="size-4" strokeWidth={1.8} aria-hidden />
           {secondary.label}
@@ -92,7 +92,7 @@ export function HeroContent({ content }: { content: HeroSectionContent }) {
       {/* Trust row */}
       <motion.ul {...rise(0.24)} className="mt-6 flex flex-col items-center gap-3 sm:flex-row sm:flex-wrap sm:justify-center sm:gap-x-7">
         {content.trustPoints.map(point => (
-          <li key={point} className="flex items-center gap-2.5 text-[var(--fs-md)] font-medium text-[#0F172A]">
+          <li key={point} className="flex items-center gap-2.5 text-fs-md font-medium text-[#0F172A]">
             <span className={cn('flex size-4 shrink-0 items-center justify-center rounded-full', GRADIENT)}>
               <Check className="size-2.5 text-white" strokeWidth={3} aria-hidden />
             </span>

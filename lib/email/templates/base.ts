@@ -17,6 +17,8 @@ export interface EmailBranding {
   footerText?:               string | null   // free-text line above the copyright
 }
 
+import { OWNERSHIP_SHORT } from '@/lib/marketing/ownership'
+
 const HEX = /^#[0-9a-fA-F]{6}$/
 const isHex = (v?: string | null): v is string => !!v && HEX.test(v)
 const isHttp = (v?: string | null): v is string => !!v && /^https?:\/\//i.test(v)
@@ -56,9 +58,12 @@ export function emailShell(subject: string, bodyHtml: string, unsubscribeUrl?: s
     branding?.copyright ? `<div style="font-size:11px;color:#9ca3af;margin-bottom:4px;">${escHtml(branding.copyright)}</div>` : '',
   ].filter(Boolean).join('')
 
+  // RD-LAUNCH-03: the operating entity rides WITH the RegisterDesk mark — so it appears
+  // wherever our branding appears, and is hidden wherever an organiser has white-labelled.
+  // An organiser presenting their own brand must not carry our legal footer.
   const poweredBy   = branding?.hideRegisterDeskBranding
     ? ''
-    : `\n            <span style="font-size:11.5px;color:#9ca3af;">\n              Powered by <a href="https://registerdesk.in" style="color:#9ca3af;text-decoration:none;">RegisterDesk</a>\n            </span>`
+    : `\n            <span style="font-size:11.5px;color:#9ca3af;">\n              Powered by <a href="https://registerdesk.in" style="color:#9ca3af;text-decoration:none;">RegisterDesk</a>\n            </span>\n            <span style="font-size:10.5px;color:#b0b6c0;display:block;margin-top:3px;">\n              ${OWNERSHIP_SHORT}\n            </span>`
 
   return `<!DOCTYPE html>
 <html lang="en">

@@ -88,6 +88,17 @@ export const AUDIT_ACTIONS = [
   // RD-PRICING-01D — per-event pricing override hierarchy
   'pricing_override.set',
   'pricing_override.cleared',
+  // MC-05 — Media Credits refund decisions. `payout_pending` is its own action rather than
+  // a field on `approved`, because the credits left the wallet but the money has not yet
+  // reached the organizer — a materially different event to audit.
+  'media_credit_refund.approved',
+  'media_credit_refund.rejected',
+  'media_credit_refund.approved_payout_pending',
+  // MC-09 — a manual grant creates credits with no counterparty: no payment, no refund
+  // request, nothing to reconcile against. It is the one Media Credits action whose only
+  // record of WHY it happened is the one an admin typed, which is why it is audited here as
+  // well as in its own collection.
+  'media_credit_grant.created',
 ] as const
 
 export type AdminAuditAction = typeof AUDIT_ACTIONS[number]
@@ -110,6 +121,10 @@ export const AUDIT_ENTITY_TYPES = [
   'registration',
   'certificate',
   'platform_settings',
+  // MC-05
+  'media_credit_refund',
+  // MC-09
+  'media_credit_grant',
 ] as const
 
 export type AdminAuditEntityType = typeof AUDIT_ENTITY_TYPES[number]

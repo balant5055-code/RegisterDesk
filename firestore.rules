@@ -26,6 +26,15 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
+    // RD-FINANCE-CLOSURE-02 — append-only payout-profile change history. Written
+    // ONLY by the payout-profile PUT (in the same batch as the change) and read
+    // ONLY through GET /api/organizer/payout-profile/history, both via the Admin
+    // SDK. Denying writes here also means a compromised client cannot forge or
+    // erase an entry in the trail that exists to detect payout redirection.
+    match /payoutProfileHistory/{docId} {
+      allow read, write: if false;
+    }
+
     // CRM contacts + activity timeline (derived attendee intelligence, contains
     // PII). Written and read exclusively through server-side API routes via the
     // Admin SDK. Explicit deny prevents accidental client access.
@@ -118,8 +127,16 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
-    // RD-PRODUCT-01E organization tax profile (GSTIN/PAN/invoice config) — server-only
-    // (Admin SDK via GET/PATCH /api/organizer/tax-profile). No client SDK access.
+    // RD-PRODUCT-01E organization tax profile (GSTIN/PAN/invoice config).
+    //
+    // RD-FINANCE-TAX-CLEANUP-01 · the GET/PATCH /api/organizer/tax-profile route that used
+    // to write this collection has been REMOVED. Organizer GST is not active: nothing in
+    // the live pricing, payment, receipt, settlement, refund or report path consumes this
+    // profile, and the route accepted configuration that changed nothing. The dormant GST
+    // engine (lib/platform/pricing/tax.ts + taxProfile.ts) is retained and still tested.
+    //
+    // The deny stays: existing documents remain unreadable and unwritable from any client,
+    // and no new writer exists. Delete the rule only when the collection itself goes.
     match /taxProfile/{organizerUid} {
       allow read, write: if false;
     }
@@ -178,6 +195,107 @@ service cloud.firestore {
     // EA-4 S1 — immutable publish-governance baselines (identity snapshot). Written
     // exclusively server-side by the Publish Governance Engine (Admin SDK).
     match /publishBaselines/{docId}   { allow read, write: if false; }
+
+    // ── Race Operations (RD-RACEOPS-01 Sprint 3) ──────────────────────────────
+    // Import sessions and their draft/published race results. Written and read
+    // exclusively through /api/organizer/race-operations/** via the Admin SDK, which
+    // bypasses these rules. Every route authorizes with requireAdmin (workspace owner or
+    // an `admin` team member) and re-checks organizerUid on each session, so tenant
+    // isolation lives in the route layer; these denies are the tripwire that stops a
+    // future client-side query being added without a security review.
+    //
+    // The `results` subcollection needs its OWN deny: Firestore rules do not cascade to
+    // subcollections (same reason registrations/{id}/auditLog has an explicit deny above).
+    match /raceImportSessions/{sessionId} {
+      allow read, write: if false;
+
+      match /results/{rowId} {
+        allow read, write: if false;
+      }
+    }
+
+    // RD-RACEOPS-01 Sprint 4 — the Official Result Snapshot, the ONLY public read model.
+    // Still server-only: the public pages are SERVER components that read via the Admin
+    // SDK, so no browser ever queries these collections directly. Keeping the deny means a
+    // future client-side query cannot be added without a security review — and it is the
+    // reason the snapshot carries no organizerUid/eventId/sessionId in what it returns.
+    // The `entries` subcollection needs its own deny; rules do not cascade.
+    match /raceResultSnapshots/{snapshotId} {
+      allow read, write: if false;
+
+      match /entries/{bibKey} {
+        allow read, write: if false;
+      }
+    }
+
+    // RD-MEDIA-01 — Media Studio. Galleries, albums, photo METADATA and per-workspace
+    // upload settings. Image bytes never live here: they are in object storage, reached
+    // only through features/platform-storage. Written and read exclusively by
+    // /api/organizer/media-studio/** via the Admin SDK, which authorizes every call with
+    // the existing `events` permission and re-checks organizerUid on each document.
+    match /mediaGalleries/{galleryId} { allow read, write: if false; }
+    match /mediaAlbums/{albumId}      { allow read, write: if false; }
+    match /mediaAssets/{assetId}      { allow read, write: if false; }
+    match /mediaSettings/{organizerUid} { allow read, write: if false; }
+    // RD-MEDIA-04 — bulk operation batches (delete / move / publish). Generic lib/jobs
+    // Jobs, driven only by /api/cron/media-jobs via the Admin SDK.
+    match /mediaJobs/{jobId}          { allow read, write: if false; }
+
+    // MC-01 — Media Credits. Wallet balances, an APPEND-ONLY ledger, upload reservations,
+    // purchases and refund requests. Same posture as the Media Studio collections above:
+    // no client path exists at all. Every read and write goes through
+    // /api/organizer/media-credits/** (organizer, existing `events` permission) or the
+    // platform-admin routes, both via the Admin SDK, which re-checks organizerUid.
+    //
+    // Deny-all is what makes the ledger append-only by construction rather than by
+    // convention: there is no client capable of updating an entry.
+    match /mediaCreditWallets/{organizerUid}    { allow read, write: if false; }
+    match /mediaCreditLedger/{entryId}          { allow read, write: if false; }
+    match /mediaCreditReservations/{assetId}    { allow read, write: if false; }
+    match /mediaCreditPurchases/{purchaseId}    { allow read, write: if false; }
+    match /mediaCreditRefunds/{refundId}        { allow read, write: if false; }
+    // MC-04. Captured payments awaiting a grant retry. Server-only like the rest: a client
+    // that could read this would learn which organizers are owed credits.
+    match /mediaCreditReconciliations/{orderId} { allow read, write: if false; }
+    // MC-06A. Upload-session allocations. Server-only like the rest.
+    match /mediaCreditSessions/{sessionId}      { allow read, write: if false; }
+    // MC-09. Manual grant justifications — who issued credits, to whom, and why. Deny-all is
+    // load-bearing twice over: a writable grant record would let a client fabricate the
+    // justification for credits it did not receive, and a readable one would expose internal
+    // support notes about other organizers.
+    match /mediaCreditGrants/{grantId}          { allow read, write: if false; }
+
+    // RD-BADGE-01 — finisher badge METADATA. The PNG bytes live in object storage, reached
+    // only through features/platform-storage. Written server-side by the badge service and
+    // read by /api/public/badges/** (a SERVER route using the Admin SDK), so no browser ever
+    // queries this collection directly. The deny is the tripwire against that changing
+    // without a security review.
+    match /finisherBadges/{badgeId} { allow read, write: if false; }
+
+    // RD-AI-01 — the AI pipeline. `aiJobs` is queue control (status, attempts, provider,
+    // duration); `aiResults` holds normalised model output ABOUT an event's photos; the
+    // batch driver in `aiBatches` is a generic lib/jobs Job. All three are written and read
+    // exclusively server-side, by the dispatcher and by /api/organizer/ai/** via the Admin
+    // SDK, which authorizes every call with the existing `events` permission.
+    //
+    // An AI result is an inference about a participant. It is organizer working data and is
+    // never public — the deny here is the tripwire against a future feature deciding
+    // otherwise without a security review, and it is what keeps `visibility` from being the
+    // only thing standing between a machine guess and a stranger.
+    match /aiJobs/{jobId}       { allow read, write: if false; }
+    match /aiResults/{resultId} { allow read, write: if false; }
+    match /aiBatches/{batchId}  { allow read, write: if false; }
+
+    // RD-BIB-01 — photo ↔ runner links. A link says "this photograph appears to show bib
+    // 137, who ran the 10K": a MACHINE'S UNREVIEWED GUESS about a person, carrying a
+    // confidence and a review status that starts `pending`.
+    //
+    // Denied to every client. The runner gallery that will eventually consume this is a
+    // later sprint and will read through a projection built for the purpose — it will not
+    // open this collection to the browser. Note what a link does NOT store: no name, no
+    // time, no rank. Those stay in the published snapshot and are read from there, so this
+    // collection never becomes a second copy of participant data.
+    match /photoBibLinks/{linkId} { allow read, write: if false; }
 
     // ── Organizer profile ──────────────────────────────────────────────────────
     match /users/{userId} {

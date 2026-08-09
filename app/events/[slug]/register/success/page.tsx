@@ -13,6 +13,17 @@ import { getStoredAttendeeFinancials }   from '@/lib/fees/storedFinancials'
 import { buildAttendeeFeeBreakdown }     from '@/lib/fees/attendeeBreakdown'
 import type { EventDetailsDraft }        from '@/components/wizard/eventDetailsConfig'
 import { SuccessClient, type CalendarData } from './SuccessClient'
+import type { Metadata } from 'next'
+import { buildMetadata } from '@/lib/marketing/seo'
+
+// RD-LAUNCH-07 — noIndex: the URL carries a registration id and the page shows one
+// attendee's ticket code and QR. It must never be indexed.
+export const metadata: Metadata = buildMetadata({
+  title:       'Registration confirmed | RegisterDesk',
+  description: 'Your registration confirmation and ticket.',
+  path:        '/events',
+  noIndex:     true,
+})
 
 // Server-side display formatters (deterministic → passed as strings, no hydration risk).
 function fmtDateLabel(d: string): string {
@@ -22,6 +33,18 @@ function fmtDateLabel(d: string): string {
     weekday: 'short', day: 'numeric', month: 'short', year: 'numeric',
   })
 }
+// Firestore Timestamp | Date | epoch → milliseconds, defensively (the field is typed
+// `unknown` on RegistrationDocument).
+function toMillis(v: unknown): number | null {
+  if (!v) return null
+  if (typeof v === 'number') return v
+  if (v instanceof Date) return v.getTime()
+  const t = v as { toMillis?: () => number; seconds?: number }
+  if (typeof t.toMillis === 'function') return t.toMillis()
+  if (typeof t.seconds === 'number')    return t.seconds * 1000
+  return null
+}
+
 function fmtTimeLabel(t: string): string {
   const [h, m] = t.split(':').map(Number)
   if (Number.isNaN(h)) return t
@@ -45,6 +68,15 @@ export default async function RegistrationSuccessPage({
   if (!registration || registration.eventSlug !== slug) notFound()
 
   const { ticketCode, eventName, passName, attendee, status, amount, paymentStatus } = registration
+
+  // RD-RT3.4: registration date, off the record already loaded. Firestore Timestamp →
+  // label here (deterministic string) rather than shipping a Date to the client.
+  const registeredAtMs = toMillis(registration.registeredAt)
+  const registeredAtLabel = registeredAtMs
+    ? new Date(registeredAtMs).toLocaleDateString('en-IN', {
+        day: 'numeric', month: 'short', year: 'numeric',
+      })
+    : null
 
   const isPending = status === 'pending' || status === 'waitlisted'
 
@@ -88,6 +120,7 @@ export default async function RegistrationSuccessPage({
   let directionsUrl:  string | null = null
   let organizerEmail: string | null = null
   let organizerPhone: string | null = null
+  let faqUrl:         string | null = null
   try {
     const eventSnap = await adminDb.collection('events').doc(slug).get()
     if (eventSnap.exists) {
@@ -133,6 +166,7 @@ export default async function RegistrationSuccessPage({
 
       organizerEmail = support?.supportEmail?.trim() || null
       organizerPhone = support?.supportPhone?.trim() || null
+      faqUrl         = support?.faqUrl?.trim()       || null
     }
   } catch { /* Event summary is non-critical */ }
 
@@ -159,6 +193,9 @@ export default async function RegistrationSuccessPage({
       directionsUrl={directionsUrl}
       organizerEmail={organizerEmail}
       organizerPhone={organizerPhone}
+      faqUrl={faqUrl}
+      paymentStatus={paymentStatus}
+      registeredAtLabel={registeredAtLabel}
       shareUrl={`${baseUrl}/events/${slug}`}
       feeBreakdown={feeBreakdown}
     />

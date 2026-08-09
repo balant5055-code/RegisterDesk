@@ -48,7 +48,7 @@ export function AddToCalendarButton({
   const isDark = variant === 'dark'
 
   const btnCls = cn(
-    'inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-[12px] font-semibold transition-colors select-none',
+    'inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-fs-xs font-semibold transition-colors select-none',
     isDark
       ? 'border-zinc-700 bg-zinc-800 text-zinc-300 hover:border-zinc-600 hover:text-zinc-100'
       : 'border-border bg-background text-muted-foreground hover:border-primary/30 hover:text-foreground',
@@ -63,7 +63,7 @@ export function AddToCalendarButton({
   )
 
   const itemCls = cn(
-    'flex w-full items-center gap-2.5 px-3 py-2.5 text-left text-[13px] font-medium transition-colors',
+    'flex w-full items-center gap-2.5 px-3 py-2.5 text-left text-fs-sm font-medium transition-colors',
     isDark
       ? 'text-zinc-300 hover:bg-zinc-700'
       : 'text-foreground hover:bg-muted/60',

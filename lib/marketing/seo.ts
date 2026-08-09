@@ -56,7 +56,18 @@ export function buildMetadata(input: BuildMetadataInput): Metadata {
 // ─── JSON-LD builders (plain objects; pages embed via a ld+json script) ─────────
 
 export function organizationJsonLd(): Record<string, unknown> {
-  return { '@context': 'https://schema.org', '@type': 'Organization', name: SITE.name, url: SITE.baseUrl, slogan: SITE.tagline }
+  // RD-LAUNCH-03: `name` stays the public brand — titles, previews and search results
+  // must keep saying RegisterDesk. `legalName` is the schema.org field for the
+  // registered entity, so machine consumers (and reviewers) can resolve ownership
+  // without the brand ever being replaced.
+  return {
+    '@context': 'https://schema.org',
+    '@type':    'Organization',
+    name:       SITE.name,
+    legalName:  BRAND.legalName,
+    url:        SITE.baseUrl,
+    slogan:     SITE.tagline,
+  }
 }
 
 export function softwareAppJsonLd(): Record<string, unknown> {

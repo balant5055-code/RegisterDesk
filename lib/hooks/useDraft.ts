@@ -9,6 +9,9 @@ import {
   type EventDraftDocument,
   type DraftPayload,
 } from '@/lib/firebase/firestore/drafts'
+import {
+  createSnapshotScheduler, type SnapshotScheduler, type ScheduleHandle,
+} from './snapshotScheduler'
 
 export type { EventDraftDocument, DraftPayload }
 
@@ -32,6 +35,33 @@ const SNAPSHOT_KEY = 'rd_event_draft_snapshot'    // crash-recovery snapshot
 const DEBOUNCE_MS   = 1000
 const MAX_RETRIES   = 6
 const BACKOFF_BASE  = 800     // ms; capped exponential
+
+// RD-EVENT-09 — how long a coalesced snapshot write may wait for an idle moment.
+// Deliberately well below DEBOUNCE_MS: the snapshot must be on disk before the debounced
+// network write is even attempted, so a crash mid-debounce still recovers every edit.
+const SNAPSHOT_IDLE_TIMEOUT_MS = 400
+
+/**
+ * Schedules `cb` for an idle moment, with a hard `timeout` ceiling.
+ *
+ * `requestIdleCallback` is unavailable in Safari and in SSR, so both fall back to a plain
+ * timer at the same ceiling. The fallback is the WORST case of the idle path, never slower,
+ * which keeps the timing guarantee above true on every browser.
+ */
+function scheduleIdle(cb: () => void, timeout: number): ScheduleHandle {
+  if (typeof window !== 'undefined' && typeof window.requestIdleCallback === 'function') {
+    return window.requestIdleCallback(cb, { timeout }) as unknown as ScheduleHandle
+  }
+  return setTimeout(cb, timeout) as unknown as ScheduleHandle
+}
+
+function cancelIdle(handle: ScheduleHandle): void {
+  if (typeof window !== 'undefined' && typeof window.cancelIdleCallback === 'function') {
+    window.cancelIdleCallback(handle as unknown as number)
+    return
+  }
+  clearTimeout(handle as unknown as ReturnType<typeof setTimeout>)
+}
 
 export type SaveState = 'idle' | 'saving' | 'saved' | 'offline' | 'error' | 'retrying'
 
@@ -135,17 +165,51 @@ export function useDraft() {
     try { localStorage.setItem(SNAPSHOT_KEY, JSON.stringify(snap)) } catch { /* quota — ignore */ }
   }, [])
 
+
+  // ── RD-EVENT-09 · snapshot writes are coalesced off the input path ───────────
+  //
+  // `queue()` used to call `writeSnapshot` synchronously on every autosave emit — one full
+  // `JSON.stringify` of the WHOLE draft plus a synchronous `localStorage.setItem` per
+  // keystroke. The scheduler below coalesces those into one idle write, and every point
+  // where the page may stop running forces it out first (see the lifecycle effect).
+  //
+  // Content is UNCHANGED: the same `writeSnapshot` builds the same `DraftSnapshot` under
+  // the same key. Only the moment of writing moves.
+  // Created exactly once, via a lazy state initializer — the scheduler is an instance, not
+  // a rendered value, and it must not be rebuilt on re-render or its pending write is lost.
+  // The scheduler holds no refs — the writer is handed to `markDirty` at event time, and
+  // reads `pendingRef` when it actually runs, so a coalesced burst always persists the
+  // latest set of unsynced keys rather than the first keystroke's.
+  const [snapshot] = useState<SnapshotScheduler>(() => createSnapshotScheduler({
+    schedule: cb => scheduleIdle(cb, SNAPSHOT_IDLE_TIMEOUT_MS),
+    cancel:   h  => cancelIdle(h),
+  }))
+
   const clearPendingSnapshot = useCallback(() => {
+    // Drop any pending write first: it was computed from state this call is about to
+    // supersede, and letting it land afterwards would re-add pending keys we just cleared.
+    snapshot.cancel()
     try {
       const snap = readSnapshot()
       if (snap && snap.draftId === draftIdRef.current) {
         localStorage.setItem(SNAPSHOT_KEY, JSON.stringify({ ...snap, pendingKeys: [], draft: draftRef.current ?? snap.draft }))
       }
     } catch { /* ignore */ }
-  }, [])
+  }, [snapshot])
 
   const recomputeUnsaved = useCallback(() => {
     setHasUnsavedChanges(Object.keys(pendingRef.current).length > 0 || savingRef.current)
+  }, [])
+
+  /**
+   * RD-EVENT-12 — bring render state up to date with persistence.
+   *
+   * The ONE place `draft` state advances outside load/create/conflict. Passing the ref's
+   * current object means React bails out via `Object.is` when nothing has been edited, so
+   * calling this on every navigation costs a render only when there is something to show.
+   */
+  const syncRenderState = useCallback(() => {
+    setDraft(draftRef.current)
   }, [])
 
   // ── The write path (shared by autosave + immediate saves) ────────────────────
@@ -178,6 +242,10 @@ export function useDraft() {
       // time is never treated as authoritative.
       baseMsRef.current = null
       setLastSavedAt(Date.now())
+      // Audited sync point: saveSuccess. The write landed, so render state should show what
+      // was persisted. Because the debounce timer restarts on every keystroke, this cannot
+      // fire mid-burst — only once typing pauses.
+      syncRenderState()
       clearPendingSnapshot()
       if (Object.keys(pendingRef.current).length > 0) {
         setSaveState('saving'); void flushRef.current?.()   // coalesced edits arrived mid-write
@@ -188,6 +256,13 @@ export function useDraft() {
       // Re-queue the in-flight fields (newer pending edits win on key collision).
       pendingRef.current = { ...inFlight, ...pendingRef.current }
       savingRef.current = false
+      // Audited sync point: saveFailure. Rare, but the error/retry UI must not present
+      // pre-edit data as the thing that failed to save.
+      syncRenderState()
+      // The save FAILED — the snapshot is now the only record of these edits, so it is
+      // written immediately and synchronously, never scheduled. `cancel()` first so a
+      // pending idle write cannot fire again for the same dirty period.
+      snapshot.cancel()
       writeSnapshot(Object.keys(pendingRef.current))
       if (retryRef.current >= MAX_RETRIES) {
         setSaveState('error'); recomputeUnsaved()
@@ -199,7 +274,24 @@ export function useDraft() {
       const delay = Math.min(BACKOFF_BASE * 2 ** (retryRef.current - 1), 15000)
       setTimeout(() => { void flushRef.current?.() }, delay)
     }
-  }, [clearPendingSnapshot, recomputeUnsaved, writeSnapshot])
+  }, [clearPendingSnapshot, recomputeUnsaved, writeSnapshot, snapshot, syncRenderState])
+
+  // ── RD-EVENT-09 · the guarantee that deferral is safe ────────────────────────
+  // A coalesced write is only sound if it cannot be lost when the page stops running.
+  // `pagehide` and `visibilitychange`→hidden are the reliable points for that — mobile
+  // browsers may never fire `beforeunload`. Both are idempotent: `flushNow()` is a no-op
+  // when nothing is dirty, so a hide/show cycle writes at most once.
+  useEffect(() => {
+    const force = () => snapshot.flushNow()
+    const onVisibility = () => { if (document.visibilityState === 'hidden') force() }
+    window.addEventListener('pagehide', force)
+    document.addEventListener('visibilitychange', onVisibility)
+    return () => {
+      window.removeEventListener('pagehide', force)
+      document.removeEventListener('visibilitychange', onVisibility)
+      force()   // unmounting the builder must not strand an unwritten snapshot
+    }
+  }, [snapshot])
 
   // Keep the self-scheduled retry/coalesce path pointed at the latest flush.
   useEffect(() => { flushRef.current = flush }, [flush])
@@ -207,13 +299,24 @@ export function useDraft() {
   const queue = useCallback((payload: DraftPayload, immediate: boolean) => {
     if (!draftIdRef.current) return
     pendingRef.current = { ...pendingRef.current, ...payload }
-    setDraft(prev => (prev ? { ...prev, ...payload } : prev))
-    writeSnapshot(Object.keys(pendingRef.current))
+    // RD-EVENT-12 — PERSISTENCE advances here; RENDER state deliberately does not.
+    //
+    // This line used to be accompanied by `setDraft(prev => ({ ...prev, ...payload }))`,
+    // which allocated a new draft object and therefore re-rendered the 4,000-line wizard on
+    // every keystroke — for data no mounted consumer reads. The active step owns its own
+    // editable state and seeds `initialData` once through a lazy `useState` initializer, so
+    // feeding the draft back mid-edit only produced work.
+    //
+    // `draftRef` is the authority for Firestore and for the crash snapshot, so it must stay
+    // current on every edit. Render state catches up at the audited synchronisation points
+    // — see `syncRenderState` and `lib/hooks/draftRenderSync.ts`.
+    draftRef.current = draftRef.current ? { ...draftRef.current, ...payload } : draftRef.current
+    snapshot.markDirty(() => writeSnapshot(Object.keys(pendingRef.current)))
     setHasUnsavedChanges(true)
     if (timerRef.current) clearTimeout(timerRef.current)
     if (immediate) { void flush() }
     else { setSaveState('saving'); timerRef.current = setTimeout(() => { void flush() }, DEBOUNCE_MS) }
-  }, [flush, writeSnapshot])
+  }, [flush, snapshot, writeSnapshot])
 
   // ── Auth + rehydrate + conflict detection ────────────────────────────────────
   useEffect(() => {
@@ -348,7 +451,7 @@ export function useDraft() {
   }, [conflict, flushNow])
 
   return {
-    draft, isLoading, createDraft, updateDraft, autosaveDraft, flushNow, markPublished,
+    draft, isLoading, createDraft, updateDraft, autosaveDraft, flushNow, markPublished, syncRenderState,
     saveState, lastSavedAt, hasUnsavedChanges, conflict, resolveConflict,
   }
 }

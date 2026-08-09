@@ -16,16 +16,13 @@ import { motion, AnimatePresence, useReducedMotion } from 'framer-motion'
 import { ChevronDown, Search, ArrowRight, Clock, Users, X } from 'lucide-react'
 import { cn } from '@/lib/utils/cn'
 import type { FaqItem } from '@/components/wizard/eventDetailsConfig'
-import { SectionShell, SectionHeader, CARD, EASE, AttachmentChips } from '@/components/event-templates/shared/ui/framework'
+import { SectionShell, EventSectionHeader, CARD, EASE, AttachmentChips, SECTION_SCROLL_MT, TYPE } from '@/components/event-templates/shared/ui/framework'
 
 const slug = (s: string) => s.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
 
-// ── temporary legacy adapter ──
-export function legacyFaqToItems(faqs: { question: string; answer: string }[] | undefined): FaqItem[] {
-  return (faqs ?? [])
-    .filter(f => f?.question?.trim() && f?.answer?.trim())
-    .map((f, i) => ({ id: `faq_${i}`, question: f.question.trim(), answer: f.answer.trim(), enabled: true }))
-}
+// ── legacy adapter ──
+// ST41-I01: moved to shared/faq/faqModel.ts (directive-free) so Server Components can
+// call it. Import legacyFaqToItems from there, not from this module.
 
 // ── one accordion row ──
 function FaqRow({
@@ -37,7 +34,7 @@ function FaqRow({
   const panelId = `faq-panel-${item.id}`
   const btnId   = `faq-btn-${item.id}`
   return (
-    <div id={`faq-item-${item.id}`} className="scroll-mt-28 border-b border-border/50 last:border-0">
+    <div id={`faq-item-${item.id}`} className={cn(SECTION_SCROLL_MT, 'border-b border-border/50 last:border-0')}>
       <h4>
         <button
           id={btnId}
@@ -48,10 +45,10 @@ function FaqRow({
           onClick={onToggle}
           className="flex w-full items-center gap-3 py-4 text-left outline-none focus-visible:ring-2 focus-visible:ring-primary/40 focus-visible:ring-offset-2"
         >
-          <span className="flex-1 text-[15.5px] font-semibold leading-snug text-foreground">
+          <span className="flex-1 text-fs-md font-semibold leading-snug text-foreground">
             {item.question}
             {item.audience?.trim() && (
-              <span className="ml-2 inline-flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 align-middle text-[10.5px] font-medium text-muted-foreground">
+              <span className="ml-2 inline-flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 align-middle text-fs-2xs font-medium text-muted-foreground">
                 <Users className="size-3" aria-hidden />{item.audience}
               </span>
             )}
@@ -73,16 +70,16 @@ function FaqRow({
             className="overflow-hidden"
           >
             <div className="pb-5 pr-8">
-              <p className="whitespace-pre-line text-[14px] leading-relaxed text-muted-foreground">{item.answer}</p>
+              <p className="whitespace-pre-line text-fs-base leading-relaxed text-muted-foreground">{item.answer}</p>
 
               <AttachmentChips attachments={item.attachments} links={item.links} className="mt-3" />
 
               {item.relatedFaqs && item.relatedFaqs.length > 0 && (
                 <div className="mt-3 flex flex-wrap items-center gap-2">
-                  <span className="text-[11.5px] font-semibold uppercase tracking-wide text-muted-foreground/70">Related</span>
+                  <span className="text-fs-2xs font-semibold uppercase tracking-wide text-muted-foreground/70">Related</span>
                   {item.relatedFaqs.filter(Boolean).map(rid => (
                     <button key={rid} type="button" onClick={() => onRelated(rid)}
-                      className="inline-flex items-center gap-1 rounded-full bg-primary/10 px-2.5 py-0.5 text-[12px] font-semibold text-primary hover:bg-primary/15">
+                      className="inline-flex items-center gap-1 rounded-full bg-primary/10 px-2.5 py-0.5 text-fs-xs font-semibold text-primary hover:bg-primary/15">
                       {rid}<ArrowRight className="size-3" aria-hidden />
                     </button>
                   ))}
@@ -90,7 +87,7 @@ function FaqRow({
               )}
 
               {item.updatedAt?.trim() && (
-                <p className="mt-3 inline-flex items-center gap-1.5 text-[11.5px] text-muted-foreground/70">
+                <p className="mt-3 inline-flex items-center gap-1.5 text-fs-2xs text-muted-foreground/70">
                   <Clock className="size-3.5" aria-hidden />Updated {item.updatedAt}
                 </p>
               )}
@@ -210,13 +207,13 @@ export function FAQShowcase({
   )
 
   const body = grouped ? (
-    <div className="grid gap-8 lg:grid-cols-[196px_1fr]">
+    <div className="grid gap-8 lg:grid-cols-[196px_minmax(0,1fr)]">
       {/* sticky category index (desktop) */}
       <nav aria-label="FAQ categories" className="hidden lg:block">
         <div className="sticky top-24 flex flex-col gap-1">
           {groups.map(g => (
             <a key={g.category} href={`#faq-${slug(g.category!)}`}
-              className="rounded-lg px-3 py-2 text-[13px] font-semibold text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground">
+              className="rounded-lg px-3 py-2 text-fs-sm font-semibold text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground">
               {g.category}
             </a>
           ))}
@@ -225,7 +222,7 @@ export function FAQShowcase({
       <div className="flex flex-col gap-8">
         {groups.map(g => (
           <div key={g.category} id={`faq-${slug(g.category!)}`} className="scroll-mt-24">
-            <h3 className="mb-3 text-[14px] font-bold uppercase tracking-[0.12em] text-foreground">{g.category}</h3>
+            <h3 className={cn("mb-3", TYPE.groupLabel)}>{g.category}</h3>
             {accordion(g.items)}
           </div>
         ))}
@@ -234,7 +231,7 @@ export function FAQShowcase({
   ) : (
     <div className="mx-auto max-w-3xl">
       {filtered.length === 0
-        ? <p className="rounded-2xl border border-border/50 bg-card px-6 py-10 text-center text-[14px] text-muted-foreground shadow-sm">No questions match “{query}”.</p>
+        ? <p className="rounded-2xl border border-border/50 bg-card px-6 py-10 text-center text-fs-base text-muted-foreground shadow-sm">No questions match “{query}”.</p>
         : accordion(filtered)}
     </div>
   )
@@ -242,7 +239,7 @@ export function FAQShowcase({
   return (
     <SectionShell id="faq" maxW="5xl" innerRef={rootRef} onKeyDown={onKeyNav}>
 
-        <SectionHeader eyebrow={eyebrow} title={title} subtitle={subtitle} />
+        <EventSectionHeader eyebrow={eyebrow} title={title} description={subtitle} />
 
         {showSearch && (
           <div className="relative mb-6 max-w-md">
@@ -253,7 +250,7 @@ export function FAQShowcase({
               onChange={e => setQuery(e.target.value)}
               placeholder="Search questions…"
               aria-label="Search questions"
-              className="h-11 w-full rounded-xl border border-border/70 bg-muted/15 pl-10 pr-9 text-[14px] text-foreground outline-none transition-all placeholder:text-muted-foreground/50 focus:border-primary/40 focus:bg-white focus:ring-2 focus:ring-primary/10"
+              className="h-11 w-full rounded-xl border border-border/70 bg-muted/15 pl-10 pr-9 text-fs-base text-foreground outline-none transition-all placeholder:text-muted-foreground/50 focus:border-primary/40 focus:bg-white focus:ring-2 focus:ring-primary/10"
             />
             {query && (
               <button type="button" onClick={() => setQuery('')} aria-label="Clear search"
@@ -268,8 +265,8 @@ export function FAQShowcase({
 
         {contactHref?.trim() && (
           <div className="mt-8 flex flex-wrap items-center justify-center gap-3 text-center">
-            <span className="text-[14px] text-muted-foreground">Still have questions?</span>
-            <Link href={contactHref} className="inline-flex items-center gap-1.5 text-[14px] font-semibold text-primary hover:underline">
+            <span className="text-fs-base text-muted-foreground">Still have questions?</span>
+            <Link href={contactHref} className="inline-flex items-center gap-1.5 text-fs-base font-semibold text-primary hover:underline">
               {contactLabel}<ArrowRight className="size-4" aria-hidden />
             </Link>
           </div>

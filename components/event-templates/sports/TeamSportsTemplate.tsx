@@ -6,7 +6,7 @@
 // everything else. (The running SportsTemplate stays as the frozen canonical template.)
 
 import { ExternalLink } from 'lucide-react'
-import type { EventDetailProps } from '@/app/events/[slug]/EventDetailClient'
+import type { EventDetailProps } from '@/components/event-templates/types'
 import { EventDetailsFramework } from '@/components/event-templates/EventDetailsFramework'
 import { SectionShell, SectionHeader } from '@/components/event-templates/shared/ui/framework'
 import type { TeamSportDetails } from '@/components/wizard/eventDetailsConfig'
@@ -34,7 +34,7 @@ function TournamentSection({ td }: { td: Partial<TeamSportDetails> | null }) {
         <div className="mb-5 grid grid-cols-2 gap-3 sm:grid-cols-3">
           {facts.map((f, i) => (
             <div key={i} className="rounded-xl border border-border bg-card p-3.5">
-              <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{f.label}</p>
+              <p className="text-fs-2xs font-semibold uppercase tracking-wide text-muted-foreground">{f.label}</p>
               <p className="mt-1 text-sm font-semibold text-foreground">{f.value}</p>
             </div>
           ))}
@@ -44,7 +44,7 @@ function TournamentSection({ td }: { td: Partial<TeamSportDetails> | null }) {
         <ul className="space-y-3">
           {notes.map((n, i) => (
             <li key={i}>
-              <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{n.label}</p>
+              <p className="text-fs-2xs font-semibold uppercase tracking-wide text-muted-foreground">{n.label}</p>
               <p className="whitespace-pre-line text-sm leading-relaxed text-foreground">{n.value}</p>
             </li>
           ))}

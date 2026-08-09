@@ -1,23 +1,37 @@
 // RD-PRODUCT-01E — Organization Tax Profile + the tax-config resolver. SERVER-ONLY.
 //
-// Stores each organizer's GST/tax identity (legal name, GSTIN, PAN, place of supply,
-// invoice numbering) and resolves the EFFECTIVE ticket-tax settings for a line item
-// through the config hierarchy — Organization → Event → Pass — mirroring the pricing
-// engine's override precedence. The resolved TaxConfig is fed to the Pricing Summary
-// (pricingSummary.ts · opts.taxConfig), which computes the tax ONCE (tax.ts) and carries
-// it immutably into the Order Snapshot. No tax math lives here.
+// ⚠️ DORMANT. Organizer GST is NOT active in this product. Nothing calls `resolveTaxConfig`,
+// and the Pricing Summary it was written to feed (`buildPricingSummary`) has no callers of
+// its own — the live money path is `lib/fees/`, which taxes RegisterDesk's PLATFORM FEE
+// (`FeeConfig.gstRatePercent`) and never the ticket. See RD-FINANCE-TAX-01.
 //
-// Backward compatible: when no profile exists, or tax is disabled, the resolver yields an
-// EXEMPT config → the summary omits its `tax` field → existing behavior is unchanged.
+// This header previously stated that the resolved TaxConfig "is fed to the Pricing Summary".
+// RD-FINANCE-TAX-CLEANUP-01 removed that claim because it was false, and removed the
+// GET/PATCH /api/organizer/tax-profile route that was the only writer of this collection —
+// an endpoint that accepted tax configuration which changed nothing. `load…`/`save…` below
+// therefore have no callers today; they are retained deliberately, with the rest of the
+// engine, for the sprint that activates organizer GST.
+//
+// WHAT IT WOULD DO, once wired: resolve the EFFECTIVE ticket-tax settings for a line item
+// through the hierarchy — Organization → Event → Pass — mirroring the pricing engine's
+// override precedence; the result feeds `pricingSummary.ts · opts.taxConfig`, which computes
+// the tax ONCE (tax.ts) and carries it immutably into the Order Snapshot. No tax math here.
+//
+// Fail-safe by design: with no profile, or tax disabled, the resolver yields an EXEMPT
+// config → the summary omits its `tax` field → behaviour is unchanged. That is also why
+// removing the write route cannot alter any amount.
 
 import { FieldValue } from 'firebase-admin/firestore'
 import { adminDb } from '@/lib/firebase/admin'
 import { EXEMPT_TAX, type TaxConfig, type TaxMode } from './tax'
+import { isValidGstin } from '@/lib/validators/gstin'
 
 const COLLECTION = 'taxProfile'
 
-// GSTIN: 2-digit state + 5 alpha + 4 digit + 1 alpha + 1 alnum + 'Z' + 1 alnum.
-const GSTIN_RE = /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$/
+// RD-FINANCE-TAX-CLEANUP-01 · the GSTIN pattern MOVED to lib/validators/gstin.ts so the
+// LIVE payout profile can validate against the same one. Importing it back is what keeps a
+// single regex in the repository; the behaviour here is unchanged and still pinned by
+// tests/unit/tax.test.ts.
 const PAN_RE   = /^[A-Z]{5}[0-9]{4}[A-Z]$/
 
 const TAX_MODES: readonly TaxMode[] = ['inclusive', 'exclusive', 'exempt']
@@ -87,7 +101,7 @@ export async function saveOrganizationTaxProfile(uid: string, data: Organization
 /** Validate a tax-profile patch. Returns error messages (empty = valid). */
 export function validateOrganizationTaxProfile(p: OrganizationTaxProfile): string[] {
   const errs: string[] = []
-  if (p.gstin && !GSTIN_RE.test(p.gstin)) errs.push('gstin must be a valid 15-character GSTIN')
+  if (p.gstin && !isValidGstin(p.gstin)) errs.push('gstin must be a valid 15-character GSTIN')
   if (p.pan && !PAN_RE.test(p.pan)) errs.push('pan must be a valid 10-character PAN')
   if (p.defaultTaxMode !== undefined && !isTaxMode(p.defaultTaxMode)) errs.push('defaultTaxMode must be inclusive, exclusive or exempt')
   if (p.defaultGstPercent !== undefined) {

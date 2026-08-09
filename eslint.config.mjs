@@ -9,6 +9,10 @@ const eslintConfig = defineConfig([
   globalIgnores([
     // Default ignores of eslint-config-next:
     ".next/**",
+    // RD-EVENT-29 — the emulator profile builds to its own directory (see `distDir` in
+    // next.config.ts). Without this it is linted as source: 57,000+ problems from generated
+    // output, which buries the real 205.
+    ".next-emulator/**",
     "out/**",
     "build/**",
     "next-env.d.ts",

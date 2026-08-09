@@ -23,7 +23,7 @@ export function PricingHighlights({ highlights }: { highlights: string[] }) {
   return (
     <ul className="mt-4 space-y-2">
       {highlights.map((h, i) => (
-        <li key={i} className="flex items-start gap-2 text-[var(--fs-sm)] text-muted-foreground">
+        <li key={i} className="flex items-start gap-2 text-fs-sm text-muted-foreground">
           <Check className="mt-0.5 size-3.5 shrink-0 text-primary" aria-hidden />
           {h}
         </li>
@@ -50,12 +50,12 @@ export function PricingCard({ plan }: { plan: PreviewPlanView }) {
 
       <div className="mt-3 flex items-baseline gap-1.5">
         {plan.regularPriceLabel && (
-          <span className="text-[var(--fs-base)] font-medium text-muted-foreground line-through">{plan.regularPriceLabel}</span>
+          <span className="text-fs-base font-medium text-muted-foreground line-through">{plan.regularPriceLabel}</span>
         )}
-        <span className="text-[var(--fs-3xl)] font-bold text-foreground">{plan.priceLabel}</span>
-        {plan.period && <span className="text-[var(--fs-base)] text-muted-foreground">{plan.period}</span>}
+        <span className="text-fs-3xl font-bold text-foreground">{plan.priceLabel}</span>
+        {plan.period && <span className="text-fs-base text-muted-foreground">{plan.period}</span>}
       </div>
-      <p className="mt-1 text-[var(--fs-sm)] text-muted-foreground">{plan.tagline}</p>
+      <p className="mt-1 text-fs-sm text-muted-foreground">{plan.tagline}</p>
 
       <PricingHighlights highlights={plan.highlights} />
 
@@ -69,7 +69,7 @@ export function PricingCard({ plan }: { plan: PreviewPlanView }) {
         </Link>
         <Link
           href={plan.href}
-          className="block rounded text-center text-[var(--fs-sm)] font-medium text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+          className="block rounded text-center text-fs-sm font-medium text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
         >
           Learn more
         </Link>
@@ -82,10 +82,10 @@ export function PricingFooter() {
   const cta = getCta(PRICING_PREVIEW_FOOTER.ctaKey)
   return (
     <div className="mt-10 flex flex-col items-center justify-center gap-2 text-center sm:flex-row">
-      <span className="text-[var(--fs-base)] text-muted-foreground">{PRICING_PREVIEW_FOOTER.text}</span>
+      <span className="text-fs-base text-muted-foreground">{PRICING_PREVIEW_FOOTER.text}</span>
       <Link
         href={cta.href}
-        className="inline-flex items-center gap-1 rounded text-[var(--fs-base)] font-medium text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+        className="inline-flex items-center gap-1 rounded text-fs-base font-medium text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
       >
         {PRICING_PREVIEW_FOOTER.linkLabel} <ArrowRight className="size-4" aria-hidden />
       </Link>

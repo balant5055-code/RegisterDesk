@@ -108,7 +108,7 @@ export function OrganizerAuthHero({ from = 'lg' }: { from?: 'md' | 'lg' } = {}) 
         </motion.div>
 
         <motion.div variants={fadeUp} className="space-y-3.5">
-          <h1 className="text-[var(--fs-3xl)] font-bold leading-[1.05] tracking-tight text-primary-foreground xl:text-[var(--fs-4xl)]">
+          <h1 className="text-fs-3xl font-bold leading-[1.05] tracking-tight text-primary-foreground xl:text-fs-4xl">
             Your command center
             <br />
             for every event.

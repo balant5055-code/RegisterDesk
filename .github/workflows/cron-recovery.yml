@@ -51,6 +51,26 @@ jobs:
             -H "Authorization: Bearer $CRON_SECRET" \
             --retry 2 --retry-delay 5 --max-time 65 --fail-with-body
 
+      # MC-05 — Media Credits: retries captured-but-ungranted purchases and
+      # approved-but-unpaid refunds. Idempotent; a no-op when credits are disabled.
+      - name: media-credit-reconciliation
+        continue-on-error: true
+        run: |
+          curl -sS -X POST "$CRON_BASE_URL/api/cron/media-credit-reconciliation" \
+            -H "Authorization: Bearer $CRON_SECRET" \
+            --retry 2 --retry-delay 5 --max-time 65 --fail-with-body
+
+      # MC-06D — Media Credits upload sessions: seals expired sessions, settles them,
+      # then reclaims reservations. Idempotent, time-budgeted, and — unlike the
+      # reconciliation cron above — runs even when creditsEnabled is false, so holds
+      # taken while the feature was on can never be stranded.
+      - name: media-credit-sessions
+        continue-on-error: true
+        run: |
+          curl -sS -X POST "$CRON_BASE_URL/api/cron/media-credit-sessions" \
+            -H "Authorization: Bearer $CRON_SECRET" \
+            --retry 2 --retry-delay 5 --max-time 65 --fail-with-body
+
       - name: webhooks
         continue-on-error: true
         run: |

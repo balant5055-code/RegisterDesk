@@ -9,7 +9,19 @@
 // This page is intentionally light: no navbar, no sidebar, no CTA.
 // It serves as a permanent shareable record for the donor.
 
+import type { Metadata }     from 'next'
+import { buildMetadata }     from '@/lib/marketing/seo'
 import { notFound }          from 'next/navigation'
+
+// RD-LAUNCH-07 — noIndex: the URL carries a signed receipt token and the page shows one
+// donor's personal record. A shareable permanent link is intended; a SEARCHABLE one is
+// not.
+export const metadata: Metadata = buildMetadata({
+  title:       'Donation receipt | RegisterDesk',
+  description: 'Your donation receipt.',
+  path:        '/donations',
+  noIndex:     true,
+})
 import { MarketingNavbar }   from '@/components/marketing/navigation/MarketingNavbar'
 import { getDonationReceipt } from '@/lib/firebase/firestore/donations'
 import { getDonation }        from '@/lib/firebase/firestore/donations'

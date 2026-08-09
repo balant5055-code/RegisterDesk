@@ -9,7 +9,7 @@
 
 import type { LucideIcon } from 'lucide-react'
 import type { EventPassFull } from '@/components/wizard/AddPassEditor'
-import type { PublishRequirement } from '@/lib/events/publishRequirements'
+import type { PublishRequirement, PublishSectionHealth, PublishBlocker } from '@/lib/events/publishRequirements'
 import type { FeeModel as EngineFeeModel } from '@/lib/fees/types'
 
 // ─── Wizard + visibility / access-control vocabularies ─────────────────────────
@@ -147,4 +147,17 @@ export interface ReadinessReport {
   blockers:     string[]
   warnings:     string[]
   canPublish:   boolean
+  /** RD-EVENT-21 — per-section rollup from the shared engine. Never recomputed in the UI. */
+  sections:     PublishSectionHealth[]
+  /**
+   * RD-EVENT-21 — findings bucketed by `PublishSeverity`, straight from the engine.
+   *
+   * Distinct from `warnings` above, which is readiness-QUALITY (optional checks that feed
+   * the score). These three are requirement severity, and only `critical` blocks publishing.
+   */
+  findings: {
+    critical:   PublishBlocker[]
+    warning:    PublishBlocker[]
+    suggestion: PublishBlocker[]
+  }
 }

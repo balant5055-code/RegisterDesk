@@ -16,7 +16,7 @@ export default function CampaignPageLoading() {
         {/* Back link */}
         <Skeleton className="mb-6 h-4 w-16 rounded" />
 
-        <div className="lg:grid lg:grid-cols-[1fr_380px] lg:gap-10 xl:gap-14">
+        <div className="lg:grid lg:grid-cols-[minmax(0,1fr)_380px] lg:gap-10 xl:gap-14">
           {/* Left */}
           <div className="flex flex-col gap-8">
             {/* Title block */}

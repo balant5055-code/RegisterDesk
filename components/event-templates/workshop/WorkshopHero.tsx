@@ -88,7 +88,7 @@ export function WorkshopHero({
   return (
     <section className="bg-white">
       <div className="mx-auto max-w-7xl px-4 pb-0 pt-10 sm:px-6 sm:pt-14 lg:px-8">
-        <div className="grid items-start gap-8 lg:grid-cols-[1fr_42%] lg:gap-12">
+        <div className="grid items-start gap-8 lg:grid-cols-[minmax(0,1fr)_42%] lg:gap-12">
 
           {/* ── Left ── */}
           <div className="order-2 lg:order-1">

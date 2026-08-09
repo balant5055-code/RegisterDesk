@@ -2,6 +2,7 @@
 
 import type { Metadata } from 'next'
 import { LegalPage } from '@/components/marketing/legal/LegalPage'
+import { OWNERSHIP_SENTENCE } from '@/lib/marketing/ownership'
 import { buildMetadata, organizationJsonLd, breadcrumbJsonLd } from '@/lib/marketing/seo'
 
 export const metadata: Metadata = buildMetadata({
@@ -19,7 +20,7 @@ export default function RefundPolicyPage() {
     <>
     <LegalPage
       title="Refund Policy"
-      intro="This policy explains how refunds work on RegisterDesk. Refunds for event registrations and donations are set and issued by the organizer of the event; event license fees are handled by RegisterDesk."
+      intro={`${OWNERSHIP_SENTENCE} This policy explains how refunds work on RegisterDesk. Refunds for event registrations and donations are set and issued by the organizer of the event; event license fees are handled by RegisterDesk.`}
       sections={[
         { heading: 'Event registrations and tickets', body: [
           'Each organizer sets their own refund terms for their event. If you registered for an event, please review that event’s terms and contact the organizer for refund requests.',

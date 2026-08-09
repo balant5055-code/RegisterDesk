@@ -51,22 +51,22 @@ export function SectionHeader({
     >
       {overline && (
         <p className={cn(
-          'text-[var(--fs-2xs)] font-semibold uppercase tracking-[0.12em] text-primary',
+          'text-fs-2xs font-semibold uppercase tracking-[0.12em] text-primary',
         )}>
           {overline}
         </p>
       )}
 
       <Tag className={cn(
-        'text-[var(--fs-xl)] font-semibold tracking-tight text-foreground',
-        'sm:text-[var(--fs-2xl)]',
+        'text-fs-xl font-semibold tracking-tight text-foreground',
+        'sm:text-fs-2xl',
       )}>
         {title}
       </Tag>
 
       {description && (
         <p className={cn(
-          'text-[var(--fs-base)] leading-relaxed text-muted-foreground',
+          'text-fs-base leading-relaxed text-muted-foreground',
           isCenter && 'max-w-xl',
         )}>
           {description}

@@ -109,6 +109,9 @@ export interface BreadcrumbItem {
 export interface FooterLink {
   label:       string
   href:        string
+  /** Optional leading icon. Navigation columns carry the SAME key the nav registry
+      already defines for that destination, so the footer never invents an icon. */
+  iconKey?:    MarketingIconKey
   external?:   boolean
   badge?:      string
   comingSoon?: boolean

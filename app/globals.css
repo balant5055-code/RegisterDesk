@@ -72,7 +72,7 @@
   --font-mono: ui-monospace, 'Cascadia Code', 'Source Code Pro', Menlo, Consolas, monospace;
 
   /* Typography — font-size scale (LS2.1A infrastructure fix).
-     Registers the styles/tokens.css --fs-* design tokens under Tailwind's
+     Registers the styles/tokens.css font-size design tokens under Tailwind's
      --text-* theme namespace so they generate real font-size utilities
      (text-fs-2xs … text-fs-5xl / text-fs-display-*) that compile to
      `font-size: var(--fs-2xs)` … `var(--fs-5xl)`. Previously the scale had no named
@@ -93,6 +93,7 @@
   --text-fs-3xl:  var(--fs-3xl);
   --text-fs-4xl:  var(--fs-4xl);
   --text-fs-5xl:  var(--fs-5xl);
+  --text-fs-input: var(--fs-input);
   --text-fs-display-sm: var(--fs-display-sm);
   --text-fs-display-md: var(--fs-display-md);
   --text-fs-display-lg: var(--fs-display-lg);
@@ -175,8 +176,19 @@
 }
 
 /* ─── Base ─────────────────────── */
-html,
-body {
+/* RD-RT3.2.1 — `overflow-x: hidden` is declared on <html> ONLY, deliberately.
+ *
+ * It used to be on `html, body`. On the root element the used overflow value is
+ * propagated to the viewport and <html> itself is treated as `visible`, so horizontal
+ * scroll is still suppressed exactly as before. On <body> there is no such propagation:
+ * a non-visible overflow-x forces overflow-y to compute to `auto`, which turns <body>
+ * into a scroll container. Every `position: sticky` descendant then resolves against
+ * <body> — which never scrolls internally, because its height grows with content — so
+ * sticky elements silently never stick anywhere in the app.
+ *
+ * Keeping the rule on <html> preserves the clipping; removing it from <body> restores
+ * native sticky. Do not re-add `body` here. */
+html {
   overflow-x: hidden;
 }
 
@@ -395,6 +407,29 @@ body {
   to   { opacity: 1; transform: translateY(0); }
 }
 
+/* ─── Marketing: footer ambient backdrop ──────────────────────────────────────
+   Two brand-tinted orbs drifting behind the footer's vector lattice. Composited
+   properties ONLY (transform/opacity), so the animation never triggers layout or
+   paint; durations are long enough to read as ambient rather than motion.
+
+   Static by default and only animated when the user has not asked for reduced
+   motion — the backdrop is decorative, so removing the animation removes nothing
+   but the movement. Note this is a deliberate exception to the "never infinite
+   loops" budget in lib/marketing/motion.ts, taken because the footer's ambient
+   background was explicitly requested. */
+@media (prefers-reduced-motion: no-preference) {
+  .rd-orb-a { animation: rdOrbA 28s ease-in-out infinite alternate; }
+  .rd-orb-b { animation: rdOrbB 36s ease-in-out infinite alternate; }
+}
+@keyframes rdOrbA {
+  from { transform: translate3d(0, 0, 0)      scale(1);    }
+  to   { transform: translate3d(7%, -9%, 0)   scale(1.14); }
+}
+@keyframes rdOrbB {
+  from { transform: translate3d(0, 0, 0)      scale(1.06); }
+  to   { transform: translate3d(-8%, 7%, 0)   scale(0.94); }
+}
+
 .glass-sweep {
   animation: glassSweep 8s linear infinite;
 }
@@ -482,4 +517,93 @@ body {
 @keyframes rdAuroraLogo {
   0%, 100% { transform: translate3d(0, 0, 0); }
   50%      { transform: translate3d(2px, 2px, 0); }
+}
+/* ═══ RD-ST5.6 — Premium animated hero background ══════════════════════════════
+   Replaces the photographic hero backdrop with a calm, enterprise gradient field.
+   Three layers, all pure CSS: brand orbs (radial gradients — no filter:blur, so
+   there is nothing for the compositor to rasterise every frame), a barely-there
+   mesh, and a noise grain. Only transform and opacity animate, so every frame
+   stays on the GPU. Motion is opt-IN via prefers-reduced-motion: no-preference,
+   matching the existing rd-aurora / rd-atmo convention in this file. */
+
+.rd-hero-bg {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  background: var(--background);
+}
+
+/* ── Layer 1 · brand orbs ─────────────────────────────────────────────────── */
+.rd-hero-orb {
+  position: absolute;
+  border-radius: 9999px;
+  opacity: 0.85;
+  transform: translate3d(0, 0, 0);
+  will-change: transform, opacity;
+}
+.rd-hero-orb--a {
+  width: 860px; height: 860px; top: -280px; left: -200px;
+  background: radial-gradient(closest-side, rgb(var(--primary-from-rgb) / 0.08), transparent 100%);
+}
+.rd-hero-orb--b {
+  width: 780px; height: 780px; top: -140px; right: -180px;
+  background: radial-gradient(closest-side, rgb(var(--primary-rgb) / 0.06), transparent 100%);
+}
+.rd-hero-orb--c {
+  width: 720px; height: 720px; bottom: -320px; left: 22%;
+  background: radial-gradient(closest-side, rgb(var(--info-rgb) / 0.05), transparent 100%);
+}
+
+/* ── Layer 2 · mesh (kept under 5%) ───────────────────────────────────────── */
+.rd-hero-mesh {
+  position: absolute;
+  inset: -10%;
+  opacity: 0.04;
+  background:
+    radial-gradient(60% 55% at 18% 12%, rgb(var(--primary-from-rgb) / 1), transparent 70%),
+    radial-gradient(55% 50% at 82% 30%, rgb(var(--primary-rgb) / 1), transparent 72%),
+    radial-gradient(50% 45% at 50% 96%, rgb(var(--info-rgb) / 1), transparent 70%);
+}
+
+/* ── Layer 3 · grain (kept under 2%) ──────────────────────────────────────── */
+.rd-hero-noise {
+  position: absolute;
+  inset: 0;
+  opacity: 0.015;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+/* ── Soft glow behind the registration card ───────────────────────────────── */
+.rd-hero-cardglow {
+  position: absolute;
+  inset: -12%;
+  border-radius: 9999px;
+  opacity: 0.08;
+  background: radial-gradient(closest-side, rgb(var(--primary-rgb) / 1), transparent 100%);
+  transform: translate3d(0, 0, 0);
+  will-change: transform, opacity;
+}
+
+/* ── Motion — opt-in, 10–14s, ease-in-out, infinite ───────────────────────── */
+@media (prefers-reduced-motion: no-preference) {
+  .rd-hero-orb--a     { animation: rdHeroDriftA 13s ease-in-out infinite; }
+  .rd-hero-orb--b     { animation: rdHeroDriftB 11s ease-in-out infinite; }
+  .rd-hero-orb--c     { animation: rdHeroDriftC 14s ease-in-out infinite; }
+  .rd-hero-cardglow   { animation: rdHeroGlow   12s ease-in-out infinite; }
+}
+@keyframes rdHeroDriftA {
+  0%, 100% { transform: translate3d(0, 0, 0) scale(1);    opacity: 0.85; }
+  50%      { transform: translate3d(26px, -20px, 0) scale(1.05); opacity: 1; }
+}
+@keyframes rdHeroDriftB {
+  0%, 100% { transform: translate3d(0, 0, 0) scale(1);    opacity: 0.85; }
+  50%      { transform: translate3d(-24px, 22px, 0) scale(1.05); opacity: 1; }
+}
+@keyframes rdHeroDriftC {
+  0%, 100% { transform: translate3d(0, 0, 0) scale(1);    opacity: 0.85; }
+  50%      { transform: translate3d(20px, -28px, 0) scale(1.04); opacity: 1; }
+}
+@keyframes rdHeroGlow {
+  0%, 100% { transform: translate3d(0, 0, 0) scale(1);    opacity: 0.08; }
+  50%      { transform: translate3d(0, -10px, 0) scale(1.05); opacity: 0.1; }
 }

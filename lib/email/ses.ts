@@ -15,6 +15,7 @@
 import { randomBytes } from 'node:crypto'
 import type { SESv2Client } from '@aws-sdk/client-sesv2'
 import { SendEmailCommand } from '@aws-sdk/client-sesv2'
+import { isSuppressed } from '@/lib/firebase/firestore/emailSuppressionList'
 import type {
   EmailProvider,
   EmailResult,
@@ -241,6 +242,29 @@ export class SESProvider implements EmailProvider {
     html:         string,
     opts?: { attachments?: MimeAttachment[]; headers?: Record<string, string>; fromName?: string },
   ): Promise<EmailResult> {
+    // RD-LAUNCH-05 — THE canonical suppression gate.
+    //
+    // Every typed method on this provider funnels through here, so this single check
+    // covers all transactional mail: registration, ticket, certificate, OTP, welcome,
+    // refund, cancellation, settlement, application and broadcast alike. Before this,
+    // suppression was consulted only by the broadcast path — so an address that had
+    // hard-bounced or filed a spam complaint kept receiving every other kind of email
+    // indefinitely, which is precisely what damages sender reputation.
+    //
+    // Fails OPEN on infrastructure error: if the suppression lookup itself throws, the
+    // message is still sent. Blocking all transactional email (including sign-in OTPs)
+    // during a Firestore blip is a worse outcome than one send to a suppressed address,
+    // and the SES account-level suppression list remains as a second net.
+    try {
+      if (await isSuppressed(to)) {
+        console.warn('[ses] send skipped — recipient suppressed')
+        return { success: false, error: 'Recipient is suppressed', suppressed: true }
+      }
+    } catch (err) {
+      console.error('[ses] suppression check failed; sending anyway:',
+        err instanceof Error ? err.message : err)
+    }
+
     const from = formatFrom(opts?.fromName?.trim() || this.fromName, this.fromEmail)
     const raw  = buildMime({ from, to, subject, html, attachments: opts?.attachments, headers: opts?.headers })
 

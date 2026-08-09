@@ -87,7 +87,7 @@ export function SecuritySection() {
         variants={ITEM}
         className="mx-auto mt-14 max-w-3xl border-t border-border/60 pt-6 text-center"
       >
-        <p className="flex flex-wrap items-center justify-center gap-x-2 gap-y-1 text-[var(--fs-sm)] text-muted-foreground">
+        <p className="flex flex-wrap items-center justify-center gap-x-2 gap-y-1 text-fs-sm text-muted-foreground">
           <span className="font-medium">Trusted for</span>
           {SECURITY_TRUST_STRIP.map(label => (
             <span key={label} className="flex items-center gap-2">

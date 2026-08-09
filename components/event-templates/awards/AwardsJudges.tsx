@@ -132,7 +132,7 @@ export function AwardsJudges({ judges }: AwardsJudgesProps) {
 
         {/* Lead judge */}
         {lead && (
-          <div className={`mb-6 ${hasRest ? 'lg:grid lg:grid-cols-[300px_1fr] lg:gap-6' : 'max-w-xs'}`}>
+          <div className={`mb-6 ${hasRest ? 'lg:grid lg:grid-cols-[300px_minmax(0,1fr)] lg:gap-6' : 'max-w-xs'}`}>
             <JudgeCard judge={lead} isLead delay={0} />
 
             {/* Rest grid alongside lead on large screens */}

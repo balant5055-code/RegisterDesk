@@ -59,6 +59,7 @@ import { buttonVariants } from '@/components/ui'
 import { WizardFooter } from '@/components/wizard/WizardFooter'
 import { Stepper } from '@/components/event-builder/Stepper'
 import { RadioIndicator } from '@/components/event-builder/RadioIndicator'
+import { validateStep } from '@/lib/events/builder/stepValidation'
 import { EASE, WIZARD_STEPS } from '@/lib/events/builder/constants'
 import type { StepViewProps, AccessControlId, ConfirmationMode } from '@/lib/events/builder/types'
 import {
@@ -956,10 +957,12 @@ function Step3ApprovedContactListPanel({
   const handleXlsxChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
     if (!file) return
-    // readSheet returns Row[] (the first worksheet) without requiring a schema.
-    // read-excel-file v9 browser entry; safe to tree-shake server-only code.
-    const { readSheet } = await import('read-excel-file/browser')
-    const rows = await readSheet(file)
+    // Returns Row[] (the first worksheet) without requiring a schema.
+    // RD-RESULTS-XLSX-01 · reads through the app's one workbook reader, which adds the
+    // OOXML inline-string repair; still dynamically imported so it stays out of the
+    // initial bundle.
+    const { readWorkbookFirstSheet } = await import('@/lib/xlsx/readWorkbook')
+    const rows = await readWorkbookFirstSheet(file)
     if (rows.length >= 2) {
       const headers = rows[0].map(cell => String(cell ?? '').toLowerCase().trim())
       const data    = rows.slice(1).map(row =>
@@ -1574,9 +1577,9 @@ export function Step3View({ currentStep, completedValues, onNext, onBack, onSave
     setInviteCodeDraft(prev => ({ ...prev, ...partial }))
 
   const selectedAccess  = step3.accessControl?.type ?? null
-  const canProceed      = selectedAccess !== null && (
-    selectedAccess !== 'approved_contacts' || approvedContacts.length > 0
-  )
+  const canProceed      = validateStep('access', {
+    selectedAccess, approvedContactsCount: approvedContacts.length,
+  }).valid
   const selectedOption  = ACCESS_CONTROL_OPTIONS.find(o => o.id === selectedAccess) ?? null
   const visibilityLabel = completedValues[1] ?? ''
 
@@ -1623,7 +1626,7 @@ export function Step3View({ currentStep, completedValues, onNext, onBack, onSave
       </div>
 
       {/* -- Content: cards + summary panel -- */}
-      <div className="mt-4 grid flex-1 items-start gap-4 lg:grid-cols-[1fr_264px]">
+      <div className="mt-4 grid flex-1 items-start gap-4 lg:grid-cols-[minmax(0,1fr)_264px]">
 
         {/* Left column: card grid + info strip */}
         <div className="flex flex-col gap-3">

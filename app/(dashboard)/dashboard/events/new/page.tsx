@@ -1,6 +1,6 @@
 ﻿'use client'
 
-import { Fragment, useCallback, useEffect, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
 import { useDraft } from '@/lib/hooks/useDraft'
 import { useUnsavedChangesWarning } from '@/lib/hooks/useUnsavedChangesWarning'
@@ -14,6 +14,8 @@ import {
   type FeeModel, normalizeFeeModel,
   type FeeBreakdown, type FeeRates, type StepSummary, type ReadinessReport,
 } from '@/lib/events/builder/types'
+import { draftKeyFor, indexOfStep, type WizardFlow } from '@/lib/events/builder/stepRegistry'
+import { validateStep } from '@/lib/events/builder/stepValidation'
 import { EASE, WIZARD_STEPS } from '@/lib/events/builder/constants'
 import { Stepper } from '@/components/event-builder/Stepper'
 import { Step1View, type Step1State } from '@/components/event-builder/steps/Step1View'
@@ -26,7 +28,6 @@ import { isChannelImplemented } from '@/lib/communications/health/channels'
 import {
   type CampaignType,
   makeBlankCampaignDetailsDraft,
-  isCampaignDetailsValid,
   getCampaignPublishBlockers,
 } from '@/lib/campaigns/campaignDetailsConfig'
 import {
@@ -82,7 +83,11 @@ import { cn } from '@/lib/utils/cn'
 import { auth } from '@/lib/firebase/auth'
 import { calculateCommunicationCost } from '@/lib/events/communicationCost'
 import { estimateCapacity }           from '@/lib/events/estimateCapacity'
-import { evaluatePublishRequirements } from '@/lib/events/publishRequirements'
+import { validatePublish } from '@/lib/events/publishRequirements'
+import { buildEventHref } from '@/lib/events/registerHref'
+import { PublishSectionHealthGrid } from '@/components/wizard/PublishSectionHealth'
+import { PublishFindingsPanel } from '@/components/wizard/PublishFindings'
+import { ReviewSummary } from '@/components/wizard/ReviewSummary'
 import type { CommunicationCostResult, PublishApiResponse, PublishGovernanceInfo, WalletBalanceResponse, WalletTopupOrderResponse, WalletTopupVerifyResponse } from '@/types/events'
 import { CURRENT_LICENSE_VERSION, isValidTierForVersion, defaultLicenseTierForVersion, type AnyEventLicenseTier } from '@/lib/licensing/eventLicense'
 import { useCurrentLicenseCatalogView } from '@/lib/licensing/licenseCatalogClient'
@@ -913,7 +918,7 @@ function EventPagePreviewModal({
           </div>
 
           {/* -- MAIN LAYOUT --------------------------------------------------- */}
-          <div className="grid gap-6 px-5 py-6 lg:grid-cols-[1fr_320px]">
+          <div className="grid gap-6 px-5 py-6 lg:grid-cols-[minmax(0,1fr)_320px]">
 
             {/* -- LEFT COLUMN ------------------------------------------------ */}
             <div className="flex min-w-0 flex-col gap-8">
@@ -1773,6 +1778,11 @@ function PublishConfirmModal({
   isPublishing: boolean
   feeModel:     FeeModel
 }) {
+  // RD-EVENT-33 — declared BEFORE the `!open` early return: a hook after it would be
+  // conditional and violate rules-of-hooks. The modal is conditionally rendered by its
+  // parent, so it unmounts on close and this resets naturally between attempts.
+  const [acknowledged, setAcknowledged] = useState(false)
+
   if (!open) return null
 
   const regStatus = isFreeEvent
@@ -1784,6 +1794,8 @@ function PublishConfirmModal({
       className="fixed inset-0 z-50 flex items-end justify-center p-0 sm:items-center sm:p-4"
       role="dialog"
       aria-modal="true"
+      aria-labelledby="publish-confirm-title"
+      aria-describedby="publish-confirm-desc"
       aria-label="Confirm publish"
     >
       <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={onClose} aria-hidden />
@@ -1801,8 +1813,11 @@ function PublishConfirmModal({
               <Zap className="size-4.5 text-primary" aria-hidden />
             </div>
             <div>
-              <p className="text-[16px] font-bold text-foreground">Ready to Publish?</p>
-              <p className="text-[13px] text-muted-foreground">Your event will go live immediately.</p>
+              {/* RD-EVENT-41 — ids referenced by the dialog's aria-labelledby/-describedby.
+                  Verified missing at runtime: the dialog reported aria-labelledby: null, so a
+                  screen reader announced it with no name. */}
+              <p id="publish-confirm-title" className="text-[16px] font-bold text-foreground">Ready to Publish?</p>
+              <p id="publish-confirm-desc" className="text-[13px] text-muted-foreground">Your event will go live immediately.</p>
             </div>
           </div>
           <button
@@ -1880,6 +1895,30 @@ function PublishConfirmModal({
             </div>
           )}
 
+          {/* RD-EVENT-33 — required acknowledgement, immediately before publishing.
+              This does NOT replace the Terms acceptance on the Review page: that is consent
+              to platform terms, this is confirmation that THIS event's configuration was
+              reviewed. A native <input type="checkbox"> with a <label htmlFor> is used
+              rather than the role="checkbox" button pattern used elsewhere in this file,
+              because that pattern is what produced the unnamed-button defect fixed in
+              RD-EVENT-23. Native semantics are free and correct. */}
+          {report.canPublish && (
+            <div className="flex items-start gap-2.5 rounded-lg border border-border bg-muted/30 p-3">
+              <input
+                id="publish-acknowledge"
+                type="checkbox"
+                checked={acknowledged}
+                onChange={e => setAcknowledged(e.target.checked)}
+                disabled={isPublishing}
+                className="mt-0.5 size-4 shrink-0 accent-[var(--primary)]"
+              />
+              <label htmlFor="publish-acknowledge" className="text-[12.5px] leading-relaxed text-muted-foreground">
+                I have reviewed this event and understand that publishing will make it
+                available according to its visibility settings.
+              </label>
+            </div>
+          )}
+
           {/* Action buttons */}
           <div className="flex gap-3 pb-1 pt-1">
             <button
@@ -1893,11 +1932,11 @@ function PublishConfirmModal({
             <button
               type="button"
               onClick={onConfirm}
-              disabled={!report.canPublish || isPublishing}
+              disabled={!report.canPublish || !acknowledged || isPublishing}
               className={cn(
                 buttonVariants({ variant: 'primary' }),
                 'flex-1 gap-2',
-                (!report.canPublish || isPublishing) && 'cursor-not-allowed opacity-50',
+                (!report.canPublish || !acknowledged || isPublishing) && 'cursor-not-allowed opacity-50',
               )}
             >
               {isPublishing ? (
@@ -2164,22 +2203,42 @@ function buildReadinessReport(
   // these, so the organizer can never reach payment with a required field the
   // server would reject still missing. `steps`/`score` remain the readiness
   // quality display only (optional checks feed the score, not the gate).
-  const requirements = evaluatePublishRequirements({
+  // RD-EVENT-21 — consume the shared summary rather than re-deriving it.
+  //
+  // This previously called `evaluatePublishRequirements` and then hand-rolled `failed`,
+  // `blockers` and `canPublish` — a SECOND implementation of the rollup that
+  // `validatePublish()` already performs, and the one the server publish gate uses. Two
+  // implementations of "can this event publish" is exactly the divergence risk the shared
+  // engine exists to remove.
+  //
+  // `canPublish` is now the engine's, which counts CRITICAL findings only. Every shipped
+  // requirement is critical, so this is identical to the previous `failed.length === 0`.
+  const summary = validatePublish({
     pricing:          pricingData,
     eventDetails:     detailsData as unknown as Record<string, unknown> | null,
     registrationForm: formData,
   })
-  const failed   = requirements.filter(r => !r.passed)
+  const failed   = summary.requirements.filter(r => !r.passed)
   const blockers = failed.map(r => `${r.stepName}: ${r.title}`)
+  // Readiness-quality warnings (optional checks that feed the score) are a DIFFERENT axis
+  // from `summary.warnings` (requirement severity). Kept separate and unchanged — merging
+  // them would put score-quality hints into the publish-gating list.
   const warnings = steps.flatMap(s => s.checks.filter(c => !c.required && !c.passed).map(c => `${s.name}: ${c.label}`))
 
   return {
     score: Math.min(100, Math.round(earned)),
     steps,
-    requirements,
+    requirements: summary.requirements,
     blockers,
     warnings,
-    canPublish: failed.length === 0,
+    canPublish: summary.canPublish,
+    // RD-EVENT-20 taxonomy, surfaced for the Review UI. Never re-categorised here.
+    sections:   summary.sections,
+    findings:   {
+      critical:   summary.blockers,
+      warning:    summary.warnings,
+      suggestion: summary.suggestions,
+    },
   }
 }
 
@@ -2213,6 +2272,12 @@ function FeeCollectionCard({
 }
 
 function Step7View({ currentStep, completedValues, onNext, onBack, onSaveDraft, initialData, onGoToStep, wizardSteps }: StepViewProps) {
+  // RD-EVENT-26 — which wizard this Review belongs to, read off the step list this view was
+  // already given. Derived from the registry's own titles rather than a step count or a new
+  // prop, so inserting a step cannot silently pick the wrong flow.
+  const reviewWizardFlow: WizardFlow =
+    (wizardSteps ?? WIZARD_STEPS).some(s => s.name === 'Fundraising') ? 'fundraising' : 'standard'
+
   const draftId      = (initialData?.draftId          as string | null) ?? null
   const draftStatus  = (initialData?.status           as string | null) ?? null
   const eventTypeId  = (initialData?.eventType        as string | null) ?? null
@@ -2231,9 +2296,19 @@ function Step7View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
 
   // Build shareable event URL once — used by both the publish success screen
   // and the "Changes saved" banner.
+  // RD-EVENT-44 — canonical public slug from the publish response. Null until published.
+  // Declared here because `eventPath` below consumes it.
+  const [publishedSlug, setPublishedSlug] = useState<string | null>(null)
+
   const _slug     = (detailsData ? normalizeEventDetailsDraft(detailsData) : null)?.seo as Record<string, unknown> | null | undefined
   const eventSlug = _slug?.urlSlug as string | undefined
-  const eventPath = eventSlug ? `/e/${eventSlug}` : draftId ? `/e/${draftId}` : null
+  // RD-EVENT-44 — order matters: the published slug wins, then the organizer's SEO slug
+  // (pre-publish preview), and there is deliberately NO draftId fallback. A draft id is not a
+  // public slug; linking to it produced a guaranteed 404 on the success screen.
+  // RD-EVENT-46 — canonical builder; `/e/${slug}` was never a route and always 404'd.
+  const eventPath = publishedSlug
+    ? buildEventHref(publishedSlug)
+    : eventSlug ? buildEventHref(eventSlug) : null
   const eventUrl  = eventPath
     ? `${typeof window !== 'undefined' ? window.location.origin : ''}${eventPath}`
     : null
@@ -2419,6 +2494,11 @@ function Step7View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
         return
       }
 
+      // RD-EVENT-44 — the server's slug is the ONLY authority for the public URL.
+      // `json.slug` was already returned and already typed; the client simply ignored it and
+      // rebuilt the URL from draft data, falling back to draftId — a value that is never a
+      // valid public slug, so Preview/Copy/Share 404'd for every event without a custom SEO slug.
+      if (json.slug) setPublishedSlug(json.slug)
       setSubmittedStatus(json.lifecycleStatus === 'pending_review' ? 'pending_review' : 'published')
       onNext('Published', { publishedAt: json.publishedAt })
       setPublishState('published')
@@ -2858,34 +2938,34 @@ function Step7View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
             </div>
 
             {/* ── Blocker action cards ── */}
-            {blockerItems.length > 0 && (
-              <div className="border-t border-border/40 px-5 pb-5 pt-4 sm:px-6">
-                <p className="mb-3 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground/50">
-                  Action required
-                </p>
-                <div className="flex flex-col gap-2">
-                  {blockerItems.map((req) => (
-                    <button
-                      key={req.id}
-                      type="button"
-                      onClick={() => onGoToStep?.(req.stepIndex, req.fieldHint)}
-                      className="group flex w-full items-center justify-between gap-4 rounded-xl border border-border bg-background px-4 py-3.5 text-left transition-all duration-200 hover:border-primary/25 hover:bg-card hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
-                    >
-                      <div className="flex min-w-0 items-center gap-3">
-                        <div className="flex size-7 shrink-0 items-center justify-center rounded-full bg-amber-100">
-                          <AlertCircle className="size-3.5 text-amber-600" aria-hidden />
-                        </div>
-                        <div className="min-w-0">
-                          <p className="text-[13px] font-semibold text-foreground">{req.title}</p>
-                          <p className="mt-0.5 text-[12px] text-muted-foreground">{req.description}</p>
-                        </div>
-                      </div>
-                      <span className="flex shrink-0 items-center gap-1 text-[12px] font-semibold text-primary opacity-0 transition-opacity duration-150 group-hover:opacity-100">
-                        Fix now <ArrowRight className="size-3" aria-hidden />
-                      </span>
-                    </button>
-                  ))}
-                </div>
+            {/* RD-EVENT-25 — legacy "Action required" list REPLACED.
+                It rendered `report.requirements.filter(r => !r.passed)` — a fourth place that
+                re-derived the failed set, with every issue styled identically regardless of
+                whether it blocked publishing. The panel below consumes `report.findings`,
+                which the engine has already split by severity. */}
+            <div className="border-t border-border/40 px-5 pb-5 pt-4 sm:px-6">
+              <PublishFindingsPanel findings={report.findings} onGoToStep={onGoToStep} />
+            </div>
+
+            {/* RD-EVENT-26 · Review Summary — presentation over the draft Step 7 already
+                receives. The Publish card reads the shared `report`; nothing here
+                recomputes readiness. Edit resolves its step via the registry. */}
+            <div className="border-t border-border/40 px-5 pb-5 pt-4 sm:px-6">
+              <ReviewSummary
+                data={initialData ?? null}
+                report={report}
+                flow={reviewWizardFlow}
+                onGoToStep={onGoToStep}
+              />
+            </div>
+
+            {/* ── RD-EVENT-21 · Section Health ──
+                Rendered straight from `report.sections`, which is the engine's
+                `buildSectionHealth()` output. "Fix now" reuses the wizard's existing
+                `onGoToStep`; no section→step mapping is duplicated here. */}
+            {report.sections.length > 0 && (
+              <div className="border-t border-border px-5 py-5 sm:px-6">
+                <PublishSectionHealthGrid sections={report.sections} onGoToStep={onGoToStep} />
               </div>
             )}
 
@@ -3053,14 +3133,23 @@ function Step7View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
             {/* 2: settlement modal — paid events only */}
             {!isFreeEvent && (
               <div className="flex items-center gap-3 py-3.5">
+                {/* RD-EVENT-23 — this checkbox had NO accessible name: its only content is an
+                    aria-hidden icon, and its label is the sibling <p> below. The usual fixes
+                    don't apply — that paragraph contains its own <button> ("settlement
+                    timelines and fee policy"), so it can be neither a <label> wrapper nor a
+                    child of this button, because nesting interactive elements is invalid.
+                    `aria-labelledby` names it from the existing visible text instead, with no
+                    duplicated string and no DOM restructure. The other two consent checkboxes
+                    (3076, 3109) already get their name from content, so only this one differs. */}
                 <button type="button"
                   onClick={() => termsFees ? setFeesAcceptedAt(null) : setShowCommercialModal(true)}
                   role="checkbox" aria-checked={termsFees}
+                  aria-labelledby="terms-fees-label"
                   className={cn('flex size-[18px] shrink-0 items-center justify-center rounded border-2 transition-all focus-visible:outline-none',
                     termsFees ? 'border-primary bg-primary' : 'border-border bg-background hover:border-primary/50')}>
                   {termsFees && <Check className="size-2.5 text-primary-foreground" aria-hidden />}
                 </button>
-                <p className={cn('text-[13px]', termsFees ? 'font-medium text-foreground' : 'text-muted-foreground')}>
+                <p id="terms-fees-label" className={cn('text-[13px]', termsFees ? 'font-medium text-foreground' : 'text-muted-foreground')}>
                   I understand{' '}
                   <button type="button" onClick={() => setShowCommercialModal(true)}
                     className="text-primary underline underline-offset-2 hover:no-underline">
@@ -3510,7 +3599,7 @@ function DonationCampaignWizard({
 
   // ── Step 1: Campaign Details ──────────────────────────────────────────────
   if (currentStep === 1) {
-    const detailsValid = isCampaignDetailsValid(campaignDetails)
+    const detailsValid = validateStep('details', { draft: campaignDetails }).valid
     return (
       <motion.div
         initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }}
@@ -3769,7 +3858,7 @@ function LicenseStepView({
 
 export default function CreateEventWizard() {
   const {
-    draft, isLoading, createDraft, updateDraft, autosaveDraft, flushNow, markPublished,
+    draft, isLoading, createDraft, updateDraft, autosaveDraft, flushNow, markPublished, syncRenderState,
     saveState, lastSavedAt, hasUnsavedChanges, conflict, resolveConflict,
   } = useDraft()
 
@@ -3801,6 +3890,48 @@ export default function CreateEventWizard() {
   const isEventPlusDonation =
     draft?.eventType === 'fundraising' && draft?.campaignType === 'event_plus_donation'
 
+  // ─── RD-EVENT-03 · step→draft mapping, from the registry ───────────────────
+  //
+  // These three call sites used 29 positional `step === N` comparisons between them, and the
+  // step ORDER is not fixed — 'Fundraising' shifts License and Review by one. Nothing tied
+  // index 3 to `pricing` except a literal repeated in three places.
+  //
+  // The registry answers "which field does this step write, for THIS call site". The three
+  // sites persist different sets of steps — goNext skips License and Review, autosave covers
+  // only three steps — and that asymmetry is existing behaviour, encoded per-site in the
+  // registry rather than smoothed over here.
+  const wizardFlow: WizardFlow = isEventPlusDonation ? 'fundraising' : 'standard'
+  const eventTypeStep  = indexOfStep(wizardFlow, 'eventType')
+  const visibilityStep = indexOfStep(wizardFlow, 'visibility')
+
+  /**
+   * Writes one step's contribution into a draft payload.
+   *
+   * `step0` is the one key that is not a straight assignment: the Category step expands a
+   * single Step1State into four top-level draft fields. That expansion is unchanged.
+   */
+  const applyStepPayload = useCallback(
+    (
+      payload: Record<string, unknown>,
+      step: number,
+      data: unknown,
+      site: 'next' | 'saveDraft' | 'autosave',
+    ) => {
+      const key = draftKeyFor(wizardFlow, step, site)
+      if (!key) return
+      if (key === 'step0') {
+        const d = data as Step1State | null
+        payload.eventType          = d?.eventType     ?? null
+        payload.eventSubtype       = d?.subtype       ?? null
+        payload.customEventSubtype = d?.customSubtype ?? null
+        payload.campaignType       = d?.campaignType  ?? null
+        return
+      }
+      payload[key] = data
+    },
+    [wizardFlow],
+  )
+
   // On first load, seed wizard state from the persisted draft
   useEffect(() => {
     if (isLoading || hydrated) return
@@ -3817,6 +3948,10 @@ export default function CreateEventWizard() {
 
   const goNext = useCallback(
     async (label?: string, data?: unknown) => {
+      // RD-EVENT-12 · audited sync point: navigation. Typing advances persistence only, so
+      // render state must catch up BEFORE the next step mounts and seeds its initialData —
+      // otherwise Form could seed its pass list from a pre-edit pricing.
+      syncRenderState()
       const step       = currentStep
       const totalSteps = isEventPlusDonation ? FUNDRAISING_EVENT_WIZARD_STEPS.length : WIZARD_STEPS.length
       const nextStep   = Math.min(step + 1, totalSteps - 1)
@@ -3831,16 +3966,16 @@ export default function CreateEventWizard() {
 
       // Buffer Step 1/2 selections so they can seed the deferred createDraft
       // (and survive Back navigation) before any Firestore document exists.
-      const step0      = step === 0 ? (data as Step1State)  : pending.step0
-      const visibility = step === 1 ? (data as VisibilityId) : pending.visibility
-      if (step === 0 || step === 1) setPending({ step0, visibility })
+      const step0      = step === eventTypeStep  ? (data as Step1State)  : pending.step0
+      const visibility = step === visibilityStep ? (data as VisibilityId) : pending.visibility
+      if (step === eventTypeStep || step === visibilityStep) setPending({ step0, visibility })
 
       // ── First Firestore write — happens ONLY here, on an explicit Continue ──
       // • donation-only commits at the Category step (it has no Visibility step
       //   and forks to the campaign wizard immediately after).
       // • every other event type commits at the Visibility step.
-      const donationOnlyCommit = step === 0 && step0?.campaignType === 'donation_only'
-      const standardCommit     = step === 1
+      const donationOnlyCommit = step === eventTypeStep && step0?.campaignType === 'donation_only'
+      const standardCommit     = step === visibilityStep
       if (!draft?.id && (donationOnlyCommit || standardCommit)) {
         const created = await createDraft({
           eventType:          step0?.eventType     ?? null,
@@ -3868,20 +4003,9 @@ export default function CreateEventWizard() {
         currentStep:     nextStep,
         completedValues: newValues.map(v => v ?? null),
       }
-      if (step === 0) {
-        const d = data as Step1State | null
-        payload.eventType          = d?.eventType     ?? null
-        payload.eventSubtype       = d?.subtype       ?? null
-        payload.customEventSubtype = d?.customSubtype ?? null
-        payload.campaignType       = d?.campaignType  ?? null
-      }
-      if (step === 1) payload.visibility       = data
-      if (step === 2) payload.accessControl    = data
-      if (step === 3) payload.pricing          = data
-      if (step === 4) payload.registrationForm = data
-      if (step === 5) payload.eventDetails     = data
-      // Step 6: Fundraising (event_plus_donation) saves the linked campaign.
-      if (step === 6 && isEventPlusDonation) payload.linkedCampaign = data
+      // Persists steps 0–5, plus Fundraising in the fundraising flow. License and Review
+      // are deliberately NOT persisted on advance — see the registry.
+      applyStepPayload(payload, step, data, 'next')
       // NOTE (LS2.2): the client must NEVER write `publishedAt` — it is a
       // server-controlled field (set only by the Admin-SDK publish route) and
       // firestore.rules blocks any client draft update whose affectedKeys include
@@ -3890,31 +4014,33 @@ export default function CreateEventWizard() {
 
       void updateDraft(payload)
     },
-    [currentStep, completedValues, createDraft, updateDraft, markPublished, isEventPlusDonation, draft?.id, pending],
+    [currentStep, completedValues, createDraft, updateDraft, markPublished, isEventPlusDonation, draft?.id, pending,
+     applyStepPayload, eventTypeStep, visibilityStep, syncRenderState],
   )
 
   const goBack = useCallback(
-    () => setCurrentStep(s => Math.max(s - 1, 0)),
-    [],
+    () => { syncRenderState(); setCurrentStep(s => Math.max(s - 1, 0)) },
+    [syncRenderState],
   )
 
   const [stepFocusHint, setStepFocusHint] = useState<string | undefined>(undefined)
 
   const goToStep = useCallback(
     (step: number, fieldHint?: string) => {
+      syncRenderState()
       setCurrentStep(step)
       setStepFocusHint(fieldHint)
     },
-    [],
+    [syncRenderState],
   )
 
   // Called by "Save Draft" buttons (no step advance)
   const saveDraft = useCallback(
     async (step: number, data?: unknown) => {
       // Keep the buffer current so a Save Draft on Step 1/2 seeds creation.
-      const step0      = step === 0 ? (data as Step1State)  : pending.step0
-      const visibility = step === 1 ? (data as VisibilityId) : pending.visibility
-      if (step === 0 || step === 1) setPending({ step0, visibility })
+      const step0      = step === eventTypeStep  ? (data as Step1State)  : pending.step0
+      const visibility = step === visibilityStep ? (data as VisibilityId) : pending.visibility
+      if (step === eventTypeStep || step === visibilityStep) setPending({ step0, visibility })
 
       // "Save Draft" is an explicit user action too: if no document exists yet
       // (only possible on Step 1/2), create it once via the same deduped path.
@@ -3930,31 +4056,15 @@ export default function CreateEventWizard() {
       }
 
       const payload: Record<string, unknown> = {}
-      if (step === 0) {
-        const d = data as Step1State | null
-        payload.eventType          = d?.eventType     ?? null
-        payload.eventSubtype       = d?.subtype       ?? null
-        payload.customEventSubtype = d?.customSubtype ?? null
-        payload.campaignType       = d?.campaignType  ?? null
-      }
-      if (step === 1) payload.visibility        = data
-      if (step === 2) payload.accessControl     = data
-      if (step === 3) payload.pricing           = data
-      if (step === 4) payload.registrationForm  = data
-      if (step === 5) payload.eventDetails      = data
-      // Step 6: linkedCampaign draft for event_plus_donation (Fundraising step).
-      if (step === 6 && isEventPlusDonation)  payload.linkedCampaign = data
-      // License step (index 6 standard / 7 event_plus_donation) persists the tier.
-      if (step === 6 && !isEventPlusDonation) payload.licenseTier    = data
-      if (step === 7 && isEventPlusDonation)  payload.licenseTier    = data
-      // Review step (index 7 standard / 8 event_plus_donation): save updated pricing (feeModel).
-      if (step === 7 && !isEventPlusDonation) payload.pricing        = data
-      if (step === 8 && isEventPlusDonation)  payload.pricing        = data
+      // Every keyed step, INCLUDING License and Review — a wider scope than goNext, which
+      // is why the registry carries a flag per call site rather than one shared flag.
+      applyStepPayload(payload, step, data, 'saveDraft')
       if (Object.keys(payload).length) {
         void updateDraft(payload)
       }
     },
-    [createDraft, updateDraft, isEventPlusDonation, draft?.id, pending],
+    [createDraft, updateDraft, draft?.id, pending,
+     applyStepPayload, eventTypeStep, visibilityStep],
   )
 
   // RD-PRODUCT-01B: within-step autosave funnel — same step→payload mapping as
@@ -3964,13 +4074,95 @@ export default function CreateEventWizard() {
     (step: number, data: unknown) => {
       if (!draft?.id) return
       const payload: Record<string, unknown> = {}
-      if (step === 3) payload.pricing          = data
-      if (step === 4) payload.registrationForm = data
-      if (step === 5) payload.eventDetails     = data
+      // Only Passes & Pricing, Form and Details are wired for debounced autosave.
+      applyStepPayload(payload, step, data, 'autosave')
       if (Object.keys(payload).length) autosaveDraft(payload)
     },
-    [autosaveDraft, draft?.id],
+    [autosaveDraft, draft?.id, applyStepPayload],
   )
+
+  // Selected Event License tier (F2.1) — defaults to Starter until the organizer chooses.
+  const selectedLicense: AnyEventLicenseTier = isValidTierForVersion(draft?.licenseTier, CURRENT_LICENSE_VERSION)
+    ? draft.licenseTier
+    : defaultLicenseTierForVersion(CURRENT_LICENSE_VERSION)
+  const onSelectLicense = useCallback(
+    (t: AnyEventLicenseTier) => { void updateDraft({ licenseTier: t }) },
+    [updateDraft],
+  )
+
+  // ─── RD-EVENT-10 · stable step props ────────────────────────────────────────
+  //
+  // Each step block previously wrote `onSaveDraft={data => saveDraft(N, data)}` and an
+  // inline `initialData={{ … }}`, so BOTH allocated a new identity on every render of this
+  // 4,000-line component — including the render caused by the organizer's own keystroke.
+  //
+  // The step index is bound from `currentStep` rather than the literal N. That is exact,
+  // not approximate: every block is guarded by `currentStep === N` and passed the same N,
+  // so inside a mounted block the two are always equal. Binding this way means ONE pair of
+  // callbacks serves every step and their identity changes only on navigation.
+  const handleSaveDraft = useCallback(
+    (data?: unknown) => saveDraft(currentStep, data),
+    [saveDraft, currentStep],
+  )
+  const handleAutosave = useCallback(
+    (data: unknown) => autosave(currentStep, data),
+    [autosave, currentStep],
+  )
+
+  // `draft` is replaced wholesale on every autosave (`{ ...prev, ...payload }`), but the
+  // FIELDS it did not touch keep their identity. Depending on individual fields rather than
+  // on `draft` is therefore what makes these stable while typing in a different step.
+  const eventTypeInitialData = useMemo(() => ({
+    eventType:          draft?.eventType          ?? pending.step0?.eventType     ?? null,
+    eventSubtype:       draft?.eventSubtype        ?? pending.step0?.subtype       ?? null,
+    customEventSubtype: draft?.customEventSubtype  ?? pending.step0?.customSubtype ?? null,
+    campaignType:       (draft?.campaignType as CampaignType | null) ?? pending.step0?.campaignType ?? null,
+  }), [draft?.eventType, draft?.eventSubtype, draft?.customEventSubtype, draft?.campaignType, pending.step0])
+
+  const visibilityInitialData = useMemo(
+    () => ({ visibility: draft?.visibility ?? pending.visibility ?? null }),
+    [draft?.visibility, pending.visibility],
+  )
+
+  const pricingInitialData = useMemo(() => ({
+    pricing: draft?.pricing ?? null, eventTypeId: draft?.eventType ?? null, eventSubtype: draft?.eventSubtype ?? null,
+  }), [draft?.pricing, draft?.eventType, draft?.eventSubtype])
+
+  const formInitialData = useMemo(() => ({
+    registrationForm: draft?.registrationForm ?? null,
+    eventTypeId:      draft?.eventType        ?? null,
+    eventSubtype:     draft?.eventSubtype      ?? null,
+    pricing:          draft?.pricing          ?? null,
+    accessControl:    draft?.accessControl    ?? null,
+  }), [draft?.registrationForm, draft?.eventType, draft?.eventSubtype, draft?.pricing, draft?.accessControl])
+
+  const detailsInitialData = useMemo(() => ({
+    eventDetails: draft?.eventDetails ?? null,
+    eventTypeId:  draft?.eventType    ?? null,
+    eventSubtype: draft?.eventSubtype  ?? null,
+    pricing:      draft?.pricing      ?? null,
+    draftId:      draft?.id           ?? null,
+  }), [draft?.eventDetails, draft?.eventType, draft?.eventSubtype, draft?.pricing, draft?.id])
+
+  const fundraisingInitialData = useMemo(() => ({
+    linkedCampaign: draft?.linkedCampaign ?? null,
+    eventEndDate:   (draft?.eventDetails as Record<string, unknown> | null)?.endDate as string | null ?? null,
+  }), [draft?.linkedCampaign, draft?.eventDetails])
+
+  // Both Review mount points read the identical payload — one memo serves both.
+  const reviewInitialData = useMemo(() => ({
+    draftId:          draft?.id               ?? null,
+    status:           draft?.status           ?? null,
+    eventType:        draft?.eventType        ?? null,
+    eventSubtype:     draft?.eventSubtype      ?? null,
+    visibility:       draft?.visibility        ?? null,
+    accessControl:    draft?.accessControl     ?? null,
+    pricing:          draft?.pricing           ?? null,
+    registrationForm: draft?.registrationForm  ?? null,
+    eventDetails:     draft?.eventDetails      ?? null,
+    licenseTier:      selectedLicense,
+  }), [draft?.id, draft?.status, draft?.eventType, draft?.eventSubtype, draft?.visibility,
+       draft?.accessControl, draft?.pricing, draft?.registrationForm, draft?.eventDetails, selectedLicense])
 
   // Loading skeleton — shown while draft is being fetched from Firestore
   if (!hydrated || isLoading) {
@@ -3992,13 +4184,11 @@ export default function CreateEventWizard() {
   // RD-EVENT-02 S1D (H1): every step view must render the Stepper + footer against the SAME
   // canonical step definition the parent navigates by, so the 9-step event_plus_donation
   // workflow shows 9 steps on every step (not the default 8). One source of truth.
-  const sharedProps = { completedValues, onNext: goNext, onBack: goBack, wizardSteps: isEventPlusDonation ? FUNDRAISING_EVENT_WIZARD_STEPS : WIZARD_STEPS }
+  // Spread at each call site, so this object's own identity never reaches a step — React
+  // compares the individual props. Every one of them is now stable across a re-render.
+  const activeWizardSteps = isEventPlusDonation ? FUNDRAISING_EVENT_WIZARD_STEPS : WIZARD_STEPS
+  const sharedProps = { completedValues, onNext: goNext, onBack: goBack, wizardSteps: activeWizardSteps }
 
-  // Selected Event License tier (F2.1) — defaults to Starter until the organizer chooses.
-  const selectedLicense: AnyEventLicenseTier = isValidTierForVersion(draft?.licenseTier, CURRENT_LICENSE_VERSION)
-    ? draft.licenseTier
-    : defaultLicenseTierForVersion(CURRENT_LICENSE_VERSION)
-  const onSelectLicense = (t: AnyEventLicenseTier) => { void updateDraft({ licenseTier: t }) }
 
   // When donation-only: step 0 shows event type selector; step 1+ hands off to DonationCampaignWizard
   if (isDonationOnly && currentStep >= 1) {
@@ -4025,28 +4215,23 @@ export default function CreateEventWizard() {
         <Step1View
           currentStep={0}
           {...sharedProps}
-          onSaveDraft={data => saveDraft(0, data)}
-          initialData={{
-            eventType:          draft?.eventType          ?? pending.step0?.eventType     ?? null,
-            eventSubtype:       draft?.eventSubtype        ?? pending.step0?.subtype       ?? null,
-            customEventSubtype: draft?.customEventSubtype  ?? pending.step0?.customSubtype ?? null,
-            campaignType:       (draft?.campaignType as CampaignType | null) ?? pending.step0?.campaignType ?? null,
-          }}
+          onSaveDraft={handleSaveDraft}
+          initialData={eventTypeInitialData}
         />
       )}
       {currentStep === 1 && (
         <Step2View
           currentStep={1}
           {...sharedProps}
-          onSaveDraft={data => saveDraft(1, data)}
-          initialData={{ visibility: draft?.visibility ?? pending.visibility ?? null }}
+          onSaveDraft={handleSaveDraft}
+          initialData={visibilityInitialData}
         />
       )}
       {currentStep === 2 && (
         <Step3View
           currentStep={2}
           {...sharedProps}
-          onSaveDraft={data => saveDraft(2, data)}
+          onSaveDraft={handleSaveDraft}
           initialData={(draft?.accessControl as Record<string, unknown> | null) ?? null}
         />
       )}
@@ -4054,24 +4239,18 @@ export default function CreateEventWizard() {
         <Step4View
           currentStep={3}
           {...sharedProps}
-          onSaveDraft={data => saveDraft(3, data)}
-          onAutosave={data => autosave(3, data)}
-          initialData={{ pricing: draft?.pricing ?? null, eventTypeId: draft?.eventType ?? null, eventSubtype: draft?.eventSubtype ?? null }}
+          onSaveDraft={handleSaveDraft}
+          onAutosave={handleAutosave}
+          initialData={pricingInitialData}
         />
       )}
       {currentStep === 4 && (
         <Step5View
           currentStep={4}
           {...sharedProps}
-          onSaveDraft={data => saveDraft(4, data)}
-          onAutosave={data => autosave(4, data)}
-          initialData={{
-            registrationForm: draft?.registrationForm ?? null,
-            eventTypeId:      draft?.eventType        ?? null,
-            eventSubtype:     draft?.eventSubtype      ?? null,
-            pricing:          draft?.pricing          ?? null,
-            accessControl:    draft?.accessControl    ?? null,
-          }}
+          onSaveDraft={handleSaveDraft}
+          onAutosave={handleAutosave}
+          initialData={formInitialData}
         />
       )}
       {currentStep === 5 && (
@@ -4079,15 +4258,9 @@ export default function CreateEventWizard() {
           currentStep={5}
           {...sharedProps}
           focusHint={stepFocusHint}
-          onSaveDraft={data => saveDraft(5, data)}
-          onAutosave={data => autosave(5, data)}
-          initialData={{
-            eventDetails: draft?.eventDetails ?? null,
-            eventTypeId:  draft?.eventType    ?? null,
-            eventSubtype: draft?.eventSubtype  ?? null,
-            pricing:      draft?.pricing      ?? null,
-            draftId:      draft?.id           ?? null,
-          }}
+          onSaveDraft={handleSaveDraft}
+          onAutosave={handleAutosave}
+          initialData={detailsInitialData}
         />
       )}
       {/* Step 6: Fundraising setup for event_plus_donation, or Review for all other types */}
@@ -4097,12 +4270,9 @@ export default function CreateEventWizard() {
           completedValues={completedValues}
           onNext={goNext}
           onBack={goBack}
-          onSaveDraft={data => saveDraft(6, data)}
+          onSaveDraft={handleSaveDraft}
           wizardSteps={FUNDRAISING_EVENT_WIZARD_STEPS}
-          initialData={{
-            linkedCampaign: draft?.linkedCampaign ?? null,
-            eventEndDate:   (draft?.eventDetails as Record<string, unknown> | null)?.endDate as string | null ?? null,
-          }}
+          initialData={fundraisingInitialData}
         />
       )}
       {/* Step 6 (standard) / Step 7 (event_plus_donation): License selection */}
@@ -4134,19 +4304,8 @@ export default function CreateEventWizard() {
           currentStep={7}
           {...sharedProps}
           onGoToStep={goToStep}
-          onSaveDraft={data => saveDraft(7, data)}
-          initialData={{
-            draftId:          draft?.id               ?? null,
-            status:           draft?.status           ?? null,
-            eventType:        draft?.eventType        ?? null,
-            eventSubtype:     draft?.eventSubtype      ?? null,
-            visibility:       draft?.visibility        ?? null,
-            accessControl:    draft?.accessControl     ?? null,
-            pricing:          draft?.pricing           ?? null,
-            registrationForm: draft?.registrationForm  ?? null,
-            eventDetails:     draft?.eventDetails      ?? null,
-            licenseTier:      selectedLicense,
-          }}
+          onSaveDraft={handleSaveDraft}
+          initialData={reviewInitialData}
         />
       )}
       {currentStep === 8 && isEventPlusDonation && (
@@ -4156,20 +4315,9 @@ export default function CreateEventWizard() {
           onNext={goNext}
           onBack={goBack}
           onGoToStep={goToStep}
-          onSaveDraft={data => saveDraft(8, data)}
+          onSaveDraft={handleSaveDraft}
           wizardSteps={FUNDRAISING_EVENT_WIZARD_STEPS}
-          initialData={{
-            draftId:          draft?.id               ?? null,
-            status:           draft?.status           ?? null,
-            eventType:        draft?.eventType        ?? null,
-            eventSubtype:     draft?.eventSubtype      ?? null,
-            visibility:       draft?.visibility        ?? null,
-            accessControl:    draft?.accessControl     ?? null,
-            pricing:          draft?.pricing           ?? null,
-            registrationForm: draft?.registrationForm  ?? null,
-            eventDetails:     draft?.eventDetails      ?? null,
-            licenseTier:      selectedLicense,
-          }}
+          initialData={reviewInitialData}
         />
       )}
     </>

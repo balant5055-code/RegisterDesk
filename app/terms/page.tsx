@@ -2,6 +2,7 @@
 
 import type { Metadata } from 'next'
 import { LegalPage } from '@/components/marketing/legal/LegalPage'
+import { OWNERSHIP_SENTENCE } from '@/lib/marketing/ownership'
 import { buildMetadata, organizationJsonLd, breadcrumbJsonLd } from '@/lib/marketing/seo'
 
 export const metadata: Metadata = buildMetadata({
@@ -19,7 +20,7 @@ export default function TermsPage() {
     <>
     <LegalPage
       title="Terms of Service"
-      intro="These terms govern your access to and use of RegisterDesk. By creating an account or using the platform, you agree to them."
+      intro={`${OWNERSHIP_SENTENCE} These terms govern your access to and use of RegisterDesk. By creating an account or using the platform, you agree to them.`}
       sections={[
         { heading: 'Accounts', body: [
           'You are responsible for keeping your account credentials secure and for activity that happens under your account.',

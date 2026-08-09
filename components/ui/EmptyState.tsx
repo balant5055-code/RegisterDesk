@@ -36,8 +36,8 @@ const sizeConfig = {
     iconBox:   'size-10',
     icon:      'size-4',
     iconBg:    'rounded-xl',
-    titleText: 'text-[var(--fs-base)] font-semibold',
-    descText:  'text-[var(--fs-sm)]',
+    titleText: 'text-fs-base font-semibold',
+    descText:  'text-fs-sm',
     descWidth: 'max-w-[200px]',
   },
   md: {
@@ -45,8 +45,8 @@ const sizeConfig = {
     iconBox:   'size-12',
     icon:      'size-5',
     iconBg:    'rounded-xl',
-    titleText: 'text-[var(--fs-md)] font-semibold',
-    descText:  'text-[var(--fs-base)]',
+    titleText: 'text-fs-md font-semibold',
+    descText:  'text-fs-base',
     descWidth: 'max-w-[260px]',
   },
   lg: {
@@ -54,8 +54,8 @@ const sizeConfig = {
     iconBox:   'size-16',
     icon:      'size-7',
     iconBg:    'rounded-2xl',
-    titleText: 'text-[var(--fs-lg)] font-semibold',
-    descText:  'text-[var(--fs-base)]',
+    titleText: 'text-fs-lg font-semibold',
+    descText:  'text-fs-base',
     descWidth: 'max-w-xs',
   },
 } as const

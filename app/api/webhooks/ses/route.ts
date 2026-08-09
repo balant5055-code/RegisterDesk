@@ -17,7 +17,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import crypto from 'crypto'
 import { adminDb }              from '@/lib/firebase/admin'
 import { updateEmailLog }       from '@/lib/email-logs/write'
-import { addToSuppressionList } from '@/lib/firebase/firestore/emailSuppressionList'
+import { addToSuppressionList, suppressEmailPlatformWide } from '@/lib/firebase/firestore/emailSuppressionList'
 
 export const dynamic     = 'force-dynamic'
 export const maxDuration = 30
@@ -80,9 +80,26 @@ interface SesEvent {
   notificationType?: string   // 'Bounce' | 'Complaint' | 'Delivery'
   eventType?:        string   // some SES configs use eventType instead
   mail?:      { messageId?: string; destination?: string[] }
-  bounce?:    { bounceType?: string; bouncedRecipients?: { emailAddress?: string }[] }
-  complaint?: { complainedRecipients?: { emailAddress?: string }[] }
+  bounce?: {
+    bounceType?:    string    // 'Permanent' | 'Transient' | 'Undetermined'
+    bounceSubType?: string    // 'General' | 'NoEmail' | 'Suppressed' | …
+    timestamp?:     string
+    bouncedRecipients?: { emailAddress?: string; diagnosticCode?: string; status?: string }[]
+  }
+  complaint?: {
+    complaintFeedbackType?: string   // 'abuse' | 'fraud' | 'not-spam' | …
+    feedbackId?:            string
+    timestamp?:             string
+    complainedRecipients?: { emailAddress?: string }[]
+  }
   delivery?:  { recipients?: string[] }
+}
+
+/** SES diagnostic for one recipient, truncated so a provider string cannot bloat the doc. */
+function diagnosticFor(event: SesEvent, address: string): string | undefined {
+  const hit = event.bounce?.bouncedRecipients?.find(r => r.emailAddress === address)
+  const raw = hit?.diagnosticCode ?? hit?.status
+  return raw ? String(raw).slice(0, 300) : undefined
 }
 
 type LogData = { organizerUid?: string; recipientEmail?: string; status?: string }
@@ -135,12 +152,56 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   if (kind === 'Bounce' || kind === 'Complaint') {
     // Only PERMANENT bounces + complaints suppress; transient bounces are not permanent failures.
     const isPermanent = kind === 'Complaint' || event.bounce?.bounceType === 'Permanent'
-    const reason = kind === 'Complaint' ? 'complaint' : 'bounce'
+    const reason: 'bounce' | 'complaint' = kind === 'Complaint' ? 'complaint' : 'bounce'
     const recipients = (kind === 'Complaint'
       ? event.complaint?.complainedRecipients
       : event.bounce?.bouncedRecipients
     )?.map(r => r.emailAddress ?? '').filter(Boolean) as string[] ?? []
 
+    // ── RD-LAUNCH-05 · suppress from the SES RECIPIENT LIST, platform-wide ──
+    //
+    // Two defects are closed here.
+    //
+    // (1) Suppression used to happen only inside the matched-logs loop below, so a
+    //     bounce whose emailLog could not be matched — pruned log, missing
+    //     providerMessageId, or mail sent outside the logging path — was silently
+    //     dropped and the dead address stayed deliverable. SES tells us exactly who
+    //     bounced; that list is now the source of truth, independent of our logs.
+    //
+    // (2) It suppressed only under the sending organizer's uid. A hard bounce is a
+    //     fact about the mailbox: it does not exist for anyone, and platform mail
+    //     (OTP, welcome, settlement) has no organizer to attribute it to at all.
+    //     These records are therefore written platform-wide.
+    let suppressedCount = 0
+    let duplicateCount  = 0
+    if (isPermanent) {
+      for (const address of recipients) {
+        try {
+          const res = await suppressEmailPlatformWide(address, reason, {
+            bounceType:        event.bounce?.bounceType,
+            bounceSubType:     event.bounce?.bounceSubType,
+            complaintType:     event.complaint?.complaintFeedbackType,
+            feedbackId:        event.complaint?.feedbackId,
+            providerMessageId: messageId || undefined,
+            diagnostic:        diagnosticFor(event, address),
+            suppressedAt:      event.bounce?.timestamp ?? event.complaint?.timestamp,
+          })
+          if (res.alreadySuppressed) duplicateCount++
+          else                       suppressedCount++
+        } catch (err) {
+          // Never 500 back to SNS for one address — AWS would retry the whole batch.
+          console.error(`[ses-webhook] suppression write failed (${reason}):`,
+            err instanceof Error ? err.message : err)
+        }
+      }
+      console.warn(`[ses-webhook] ${reason} received — ${recipients.length} recipient(s), `
+        + `${suppressedCount} newly suppressed, ${duplicateCount} already suppressed`)
+    } else {
+      console.warn(`[ses-webhook] transient bounce received (${event.bounce?.bounceType ?? 'unknown'}) — not suppressing`)
+    }
+
+    // Reconcile the Communication Log as before. Organizer-scoped suppression is kept
+    // as well, so an organizer's own broadcast pre-filter stays correct.
     const matched = await matchLogs(messageId, recipients)
     for (const [logId, d] of matched) {
       await updateEmailLog(logId, 'failed', { error: reason })
@@ -148,7 +209,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         await addToSuppressionList(d.recipientEmail, d.organizerUid, reason).catch(() => { /* best-effort */ })
       }
     }
-    return NextResponse.json({ ok: true, kind, matched: matched.size })
+    return NextResponse.json({
+      ok: true, kind, matched: matched.size,
+      suppressed: suppressedCount, duplicates: duplicateCount,
+    })
   }
 
   if (kind === 'Delivery') {
