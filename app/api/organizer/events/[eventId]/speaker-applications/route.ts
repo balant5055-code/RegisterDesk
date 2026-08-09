@@ -6,6 +6,7 @@ import { FieldValue }                  from 'firebase-admin/firestore'
 import { adminDb }                     from '@/lib/firebase/admin'
 import { authorizeWorkspace }          from '@/lib/team/workspace'
 import { notificationEngine, NotificationType, NotificationChannel } from '@/lib/notifications'
+import { resolveEventEmailProvider } from '@/lib/email/resolveEventProvider'
 import type {
   SpeakerApplicationSummary,
   SpeakerApplicationsApiResponse,
@@ -122,7 +123,9 @@ export async function PATCH(req: NextRequest, { params }: Ctx): Promise<NextResp
 
   // Send status email (non-critical)
   try {
-    if (notificationEngine.isAvailable(NotificationChannel.EMAIL) && typeof appData.email === 'string') {
+    // RD-EMAIL-PROVIDER — applicant mail rides the same transport as the event.
+    const emailProviderName = await resolveEventEmailProvider(meta.slug)
+    if (notificationEngine.isAvailable(NotificationChannel.EMAIL, emailProviderName) && typeof appData.email === 'string') {
       await notificationEngine.send(NotificationType.APPLICATION_STATUS, {
         to:              appData.email,
         applicantName:   typeof appData.name === 'string' ? appData.name : '',
@@ -131,7 +134,7 @@ export async function PATCH(req: NextRequest, { params }: Ctx): Promise<NextResp
         status,
         eventUrl:        `${BASE_URL}/events/${meta.slug}`,
         note,
-      })
+      }, emailProviderName)
     }
   } catch { /* email must not break review */ }
 

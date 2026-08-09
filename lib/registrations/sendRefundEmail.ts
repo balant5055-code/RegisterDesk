@@ -15,11 +15,13 @@ import { loadOrganizerEmailBranding, resolveEmailBranding } from '@/lib/email/br
 import type { RegistrationDocument } from './types'
 
 export async function sendRefundEmail(registrationId: string): Promise<void> {
-  if (!notificationEngine.isAvailable(NotificationChannel.EMAIL)) return
-
   const regSnap = await adminDb.collection('registrations').doc(registrationId).get()
   if (!regSnap.exists) return
   const reg = regSnap.data() as RegistrationDocument
+
+  // RD-EMAIL-PROVIDER — resolved once: the transport used AND the transport logged.
+  const emailProviderName = await resolveEventEmailProvider(reg.eventSlug)
+  if (!notificationEngine.isAvailable(NotificationChannel.EMAIL, emailProviderName)) return
 
   if (!reg.refundId || reg.refundAmount == null) {
     console.warn(`[refund-email] Missing refundId or refundAmount for ${registrationId} — skipping`)
@@ -39,7 +41,7 @@ export async function sendRefundEmail(registrationId: string): Promise<void> {
       refundAmount: reg.refundAmount,
       refundId:     reg.refundId,
       branding,
-    }, await resolveEventEmailProvider(reg.eventSlug))
+    }, emailProviderName)
     emailStatus = result.success ? 'sent' : 'failed'
     if (!result.success) {
       console.error(`[refund-email] Failed for ${registrationId}:`, result.error)
@@ -58,7 +60,7 @@ export async function sendRefundEmail(registrationId: string): Promise<void> {
     recipientName:  reg.attendee.name,
     subject:        `Refund confirmed for ${reg.eventName}`,
     status:         emailStatus === 'sent' ? 'sent' : 'failed',
-    provider:       'ses',
+    provider:       emailProviderName,
     registrationId,
   })
 }

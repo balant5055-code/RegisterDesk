@@ -10,6 +10,7 @@
 import { FieldValue }              from 'firebase-admin/firestore'
 import { adminDb }                 from '@/lib/firebase/admin'
 import { notificationEngine, NotificationChannel } from '@/lib/notifications'
+import { resolveEventEmailProvider } from '@/lib/email/resolveEventProvider'
 import { getOrganiserSuppressionSet } from '@/lib/firebase/firestore/emailSuppressionList'
 import { resolveMaxRecipientsPerBroadcast } from '@/lib/broadcasts/limits'
 import { chargeAndStartCampaign, type StartResult } from '@/lib/communications/billing'
@@ -120,7 +121,11 @@ async function deliverEmailCampaign(
     .map(d => ({ id: d.id, data: d.data() as RegistrationDocument }))
     .filter(({ data }) => !suppression.has(data.attendee.email.toLowerCase().trim()))
 
-  const emailAvailable = notificationEngine.isAvailable(NotificationChannel.EMAIL)
+  // RD-EMAIL-PROVIDER — the preflight must ask about the transport the JOB will use,
+  // otherwise a campaign could be marked provider_unavailable while its own provider is fine.
+  const emailAvailable = notificationEngine.isAvailable(
+    NotificationChannel.EMAIL, await resolveEventEmailProvider(c.eventSlug),
+  )
 
   // No provider / no recipients — resolve immediately (no job).
   if (!emailAvailable || recipients.length === 0) {

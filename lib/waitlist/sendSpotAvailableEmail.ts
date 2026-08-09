@@ -9,7 +9,10 @@ export async function sendSpotAvailableEmail(
   entry:       WaitlistDocument,
   registerUrl: string,
 ): Promise<void> {
-  if (!notificationEngine.isAvailable(NotificationChannel.EMAIL)) return
+  // RD-EMAIL-PROVIDER — resolved once: the transport used AND the transport logged.
+  const emailProviderName = await resolveEventEmailProvider(entry.eventSlug)
+
+  if (!notificationEngine.isAvailable(NotificationChannel.EMAIL, emailProviderName)) return
 
   let emailStatus: 'sent' | 'failed' = 'failed'
   let emailFailureReason: string | undefined
@@ -21,7 +24,7 @@ export async function sendSpotAvailableEmail(
       eventName:    entry.eventName,
       passName:     entry.passName,
       registerUrl,
-    }, await resolveEventEmailProvider(entry.eventSlug))
+    }, emailProviderName)
     emailStatus = result.success ? 'sent' : 'failed'
     if (!result.success) emailFailureReason = result.error
   } catch (err) {
@@ -39,7 +42,7 @@ export async function sendSpotAvailableEmail(
     recipientName:  entry.attendee.name,
     subject:        `A spot is available for ${entry.eventName}`,
     status:         emailStatus === 'sent' ? 'sent' : 'failed',
-    provider:       'ses',
+    provider:       emailProviderName,
     error:          emailFailureReason,
   })
 }

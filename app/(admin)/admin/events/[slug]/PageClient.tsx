@@ -601,6 +601,35 @@ function GovernanceWorkspace({ slug, o, onChanged }: {
     } catch (e) { setErr(e instanceof Error ? e.message : 'Moderation failed') } finally { setBusy(null) }
   }
 
+  // ── RD-EMAIL-PROVIDER — ADMIN-ONLY email transport (PATCH …/email-provider) ──
+  // Optimistic UI is deliberately avoided: the displayed value only moves after the
+  // server confirms, so the console can never show a transport that was not persisted.
+  async function changeEmailProvider(next: 'ses' | 'resend') {
+    if (next === o.emailProvider) return
+    const label = next === 'resend' ? 'Resend' : 'Amazon SES'
+    if (!(await confirm({
+      message: `Route this event's attendee email through ${label}? Mail already sent is unaffected.`,
+      tone: next === 'resend' ? 'danger' : undefined,
+    }))) return
+
+    setBusy('emailProvider'); setErr(null)
+    try {
+      const token = await getToken()
+      const res = await fetch(`/api/admin/events/${slug}/email-provider`, {
+        method: 'PATCH',
+        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ emailProvider: next }),
+      })
+      if (!res.ok) {
+        const b = await res.json().catch(() => null) as { error?: string } | null
+        throw new Error(b?.error ?? `Request failed (${res.status})`)
+      }
+      afterMutation()   // re-reads the overview — the shown value comes from the server
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : 'Could not change the email provider')
+    } finally { setBusy(null) }
+  }
+
   const reviewable = o.reviewStatus === 'pending_review'
   const overrides = gov?.baseline?.overrides
 
@@ -635,6 +664,31 @@ function GovernanceWorkspace({ slug, o, onChanged }: {
           </div>
         </Card>
       </div>
+
+      {/* Email delivery provider — ADMIN ONLY. Never rendered on any organizer surface. */}
+      <Card title="Email delivery provider" icon={Mail}>
+        <div className="space-y-3 p-4">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-[12.5px] text-muted-foreground">Current:</span>
+            <StatusPill tone={o.emailProvider === 'resend' ? 'info' : 'neutral'}>
+              {o.emailProvider === 'resend' ? 'Resend' : 'Amazon SES'}
+            </StatusPill>
+          </div>
+          <p className="text-[12.5px] text-muted-foreground">
+            Controls which service carries this event&rsquo;s attendee email. Organizers cannot
+            see or change this. If the selected provider is not configured, sending fails
+            loudly &mdash; it never falls back to the other provider.
+          </p>
+          <div className="flex flex-wrap gap-2">
+            <Act icon={Mail} label="Use Amazon SES" tone="emerald"
+              disabled={o.emailProvider === 'ses'} busy={busy === 'emailProvider'}
+              onClick={() => void changeEmailProvider('ses')} />
+            <Act icon={Send} label="Use Resend"
+              disabled={o.emailProvider === 'resend'} busy={busy === 'emailProvider'}
+              onClick={() => void changeEmailProvider('resend')} />
+          </div>
+        </div>
+      </Card>
 
       {/* Publish governance baseline */}
       <Card title="Publish governance" icon={Fingerprint}>

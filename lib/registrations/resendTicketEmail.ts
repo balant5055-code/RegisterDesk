@@ -30,7 +30,9 @@ export async function resendRegistrationTicketEmail(registrationId: string): Pro
   if (reg.status === 'cancelled')          return { ok: false, error: 'Cannot resend email for a cancelled registration.', status: 422 }
   if (reg.status === 'rejected')           return { ok: false, error: 'Cannot resend email for a rejected registration.', status: 422 }
   if (reg.paymentStatus === 'refunded')    return { ok: false, error: 'Cannot resend email for a refunded registration.', status: 422 }
-  if (!notificationEngine.isAvailable(NotificationChannel.EMAIL)) {
+  // RD-EMAIL-PROVIDER — this ticket belongs to an event; resend uses that event's transport.
+  const emailProviderName = await resolveEventEmailProvider(reg.eventSlug)
+  if (!notificationEngine.isAvailable(NotificationChannel.EMAIL, emailProviderName)) {
     return { ok: false, error: 'Email provider is not configured. Set SES_FROM_EMAIL and AWS credentials.', status: 503 }
   }
 
@@ -72,7 +74,7 @@ export async function resendRegistrationTicketEmail(registrationId: string): Pro
       registrationId,
       ticketPageUrl:  `${baseUrl}/tickets/${registrationId}`,
       pdfDownloadUrl: pdfUrl,
-    }, await resolveEventEmailProvider(reg.eventSlug))
+    }, emailProviderName)
     emailStatus = result.success ? 'sent' : 'failed'
     if (!result.success) emailFailureReason = result.error
   } catch (err) {

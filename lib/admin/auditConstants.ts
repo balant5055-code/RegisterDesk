@@ -99,6 +99,10 @@ export const AUDIT_ACTIONS = [
   // record of WHY it happened is the one an admin typed, which is why it is audited here as
   // well as in its own collection.
   'media_credit_grant.created',
+  // RD-EMAIL-PROVIDER — per-event email transport. Audited because it silently changes
+  // which third party handles attendee mail for a live event, and the only record of WHY
+  // is what the admin recorded here.
+  'event.email_provider_changed',
 ] as const
 
 export type AdminAuditAction = typeof AUDIT_ACTIONS[number]

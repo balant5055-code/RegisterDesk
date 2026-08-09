@@ -19,6 +19,7 @@ import { authorizeWorkspace }             from '@/lib/team/workspace'
 import { signTicketToken }                from '@/lib/tickets/generate'
 import { fmtEmailDate } from '@/lib/email'
 import { notificationEngine, NotificationType, NotificationChannel } from '@/lib/notifications'
+import { resolveEventEmailProvider } from '@/lib/email/resolveEventProvider'
 import { writeEmailLog }                  from '@/lib/email-logs/write'
 import {
   approveRegistration,
@@ -132,6 +133,8 @@ export async function POST(req: NextRequest): Promise<NextResponse<BulkApproveRe
 async function sendBulkApprovalEmails(
   eligible: Array<{ id: string; data: RegistrationDocument }>,
 ): Promise<void> {
+  // RD-EMAIL-PROVIDER — COARSE preflight only. A bulk approve may span events, so the
+  // authoritative gate is per-registration, on that registration's own event transport.
   if (!notificationEngine.isAvailable(NotificationChannel.EMAIL)) return
 
   // Fetch distinct event docs in one round-trip
@@ -169,6 +172,10 @@ async function sendBulkApprovalEmails(
     const pdfToken = signTicketToken(id)
     const pdfUrl   = `${baseUrl}/api/tickets/${id}/pdf${pdfToken ? `?token=${encodeURIComponent(pdfToken)}` : ''}`
 
+    // RD-EMAIL-PROVIDER — same per-event transport the single-registration approval uses.
+    // Cached by slug, so a bulk approve over one event costs one lookup, not one per row.
+    const emailProviderName = await resolveEventEmailProvider(reg.eventSlug)
+
     let emailStatus: 'sent' | 'failed' = 'failed'
     try {
       const result = await notificationEngine.send(NotificationType.REGISTRATION_APPROVED, {
@@ -184,7 +191,7 @@ async function sendBulkApprovalEmails(
         registrationId: id,
         ticketPageUrl:  `${baseUrl}/tickets/${id}`,
         pdfDownloadUrl: pdfUrl,
-      })
+      }, emailProviderName)
       emailStatus = result.success ? 'sent' : 'failed'
       if (!result.success) {
         console.error(`[bulk-approve-email] Failed for ${id}:`, result.error)
@@ -208,7 +215,7 @@ async function sendBulkApprovalEmails(
       recipientName:  reg.attendee.name,
       subject:        `Your registration for ${reg.eventName} has been approved`,
       status:         emailStatus === 'sent' ? 'sent' : 'failed',
-      provider:       'ses',
+      provider:       emailProviderName,
       registrationId: id,
     })
   }))

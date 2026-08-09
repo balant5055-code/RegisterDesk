@@ -10,6 +10,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { adminDb }                   from '@/lib/firebase/admin'
 import { resolveAdminUid }           from '@/lib/admin/auth'
+import { parseEmailProviderName }    from '@/lib/email/providerName'
 import { getLicenseDetail }          from '@/lib/admin/licenseAdminService'
 import { getEventStats }             from '@/lib/firebase/firestore/registrationCounters'
 import type {
@@ -178,6 +179,8 @@ export async function GET(req: NextRequest, ctx: RouteContext): Promise<NextResp
     lifecycleStatus:  str(ev.lifecycleStatus),
     reviewStatus:     str(ev.reviewStatus),
     moderationStatus: str(ev.moderationStatus),
+    // Read from the PERSISTED event doc via the shared parser — never from the client.
+    emailProvider:    parseEmailProviderName(ev.emailProvider),
     organizer: {
       uid,
       name:      str(user?.name) ?? str(organizer.name),

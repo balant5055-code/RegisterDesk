@@ -49,6 +49,9 @@ export interface EventDetailResponse {
   draftId:          string
   status:           'draft' | 'published'
   lifecycleStatus:  EventLifecycleStatus
+  // RD-EMAIL-PROVIDER — the email transport is INTENTIONALLY not exposed here. It is an
+  // admin-only setting; the organizer surface must not see, display or round-trip it.
+  // Admins read it from GET /api/admin/events/[slug]/360.
   // Cancellation metadata — present when lifecycleStatus = 'cancelled'
   cancelReason?:    string
   cancelledAt?:     string | null

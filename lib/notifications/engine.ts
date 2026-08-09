@@ -56,9 +56,17 @@ class NotificationEngine {
   /**
    * Whether the transport for a channel is configured. Callers use this to keep
    * the old `if (!provider) return` short-circuit without touching a provider.
+   *
+   * RD-EMAIL-PROVIDER — pass `providerName` wherever the matching `send()` passes one.
+   * The gate must ask about the SAME transport that will actually carry the message:
+   * asking about SES and then sending through Resend can skip mail that would have
+   * delivered, or admit mail that cannot. Omitted ⇒ the platform default, unchanged.
    */
-  isAvailable(channel: NotificationChannel = NotificationChannel.EMAIL): boolean {
-    return resolveProvider(channel) !== null
+  isAvailable(
+    channel: NotificationChannel = NotificationChannel.EMAIL,
+    providerName?: EmailProviderName,
+  ): boolean {
+    return resolveProvider(channel, providerName) !== null
   }
 
   /** Send a notification. See the behaviour contract at the top of this file. */

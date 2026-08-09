@@ -15,11 +15,13 @@ export async function sendRejectionEmail(
   registrationId: string,
   reason?:        string,
 ): Promise<void> {
-  if (!notificationEngine.isAvailable(NotificationChannel.EMAIL)) return
-
   const regSnap = await adminDb.collection('registrations').doc(registrationId).get()
   if (!regSnap.exists) return
   const reg = regSnap.data() as RegistrationDocument
+
+  // RD-EMAIL-PROVIDER — resolved once: the transport used AND the transport logged.
+  const emailProviderName = await resolveEventEmailProvider(reg.eventSlug)
+  if (!notificationEngine.isAvailable(NotificationChannel.EMAIL, emailProviderName)) return
 
   let emailStatus: 'sent' | 'failed' = 'failed'
   let emailFailureReason: string | undefined
@@ -31,7 +33,7 @@ export async function sendRejectionEmail(
       eventName:    reg.eventName,
       ticketCode:   reg.ticketCode,
       reason,
-    }, await resolveEventEmailProvider(reg.eventSlug))
+    }, emailProviderName)
     emailStatus = result.success ? 'sent' : 'failed'
     if (!result.success) {
       emailFailureReason = result.error
@@ -59,7 +61,7 @@ export async function sendRejectionEmail(
     recipientName:  reg.attendee.name,
     subject:        `Registration update for ${reg.eventName}`,
     status:         emailStatus === 'sent' ? 'sent' : 'failed',
-    provider:       'ses',
+    provider:       emailProviderName,
     error:          emailFailureReason,
     registrationId,
   })

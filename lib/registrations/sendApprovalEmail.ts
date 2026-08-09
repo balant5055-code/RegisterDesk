@@ -16,11 +16,13 @@ import { generateIcs }                    from '@/lib/calendar/ics'
 import type { RegistrationDocument }      from './types'
 
 export async function sendApprovalEmail(registrationId: string): Promise<void> {
-  if (!notificationEngine.isAvailable(NotificationChannel.EMAIL)) return
-
   const regSnap = await adminDb.collection('registrations').doc(registrationId).get()
   if (!regSnap.exists) return
   const reg = regSnap.data() as RegistrationDocument
+
+  // RD-EMAIL-PROVIDER — resolved once: the transport used AND the transport logged.
+  const emailProviderName = await resolveEventEmailProvider(reg.eventSlug)
+  if (!notificationEngine.isAvailable(NotificationChannel.EMAIL, emailProviderName)) return
 
   const eventSnap = await adminDb.collection('events').doc(reg.eventSlug).get()
   const event     = eventSnap.exists ? (eventSnap.data() as Record<string, unknown>) : null
@@ -108,7 +110,7 @@ export async function sendApprovalEmail(registrationId: string): Promise<void> {
       pdfDownloadUrl:     pdfUrl,
       receiptDownloadUrl: receiptUrl,
       icsContent,
-    }, await resolveEventEmailProvider(reg.eventSlug))
+    }, emailProviderName)
     emailStatus = result.success ? 'sent' : 'failed'
     if (!result.success) {
       emailFailureReason = result.error
@@ -136,7 +138,7 @@ export async function sendApprovalEmail(registrationId: string): Promise<void> {
     recipientName:  reg.attendee.name,
     subject:        `Your registration for ${reg.eventName} has been approved`,
     status:         emailStatus === 'sent' ? 'sent' : 'failed',
-    provider:       'ses',
+    provider:       emailProviderName,
     error:          emailFailureReason,
     registrationId,
   })

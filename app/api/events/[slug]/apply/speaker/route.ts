@@ -7,6 +7,7 @@ import { adminDb }                   from '@/lib/firebase/admin'
 import { getEventBySlug }            from '@/lib/firebase/firestore/events'
 import { canExposePublicEvent }      from '@/lib/events/publicVisibility'
 import { notificationEngine, NotificationType, NotificationChannel } from '@/lib/notifications'
+import { resolveEventEmailProvider } from '@/lib/email/resolveEventProvider'
 import { checkPolicy, RATE_POLICY } from '@/lib/rateLimit/policies'
 import { getClientIp } from '@/lib/rateLimit'
 import type { SpeakerApplicationInput } from '@/lib/applications/types'
@@ -100,12 +101,14 @@ export async function POST(req: NextRequest, { params }: Ctx): Promise<NextRespo
     const eventName = typeof (ed?.info as Record<string, unknown> | null)?.name === 'string'
       ? (ed!.info as Record<string, unknown>).name as string
       : slug
-    if (notificationEngine.isAvailable(NotificationChannel.EMAIL)) {
+    // RD-EMAIL-PROVIDER — this event's transport, read from its persisted config.
+    const emailProviderName = await resolveEventEmailProvider(slug)
+    if (notificationEngine.isAvailable(NotificationChannel.EMAIL, emailProviderName)) {
       await notificationEngine.send(NotificationType.APPLICATION_RECEIVED, {
         to: email, applicantName: name,
         eventName, applicationType: 'speaker',
         eventUrl: `${BASE_URL}/events/${slug}`,
-      })
+      }, emailProviderName)
     }
   } catch { /* email must not break submission */ }
 

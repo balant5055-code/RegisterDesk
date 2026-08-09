@@ -76,9 +76,16 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     snap.docs.forEach(d => matched.set(d.id, d.data() as { organizerUid?: string; recipientEmail?: string; status?: string }))
   }
   if (matched.size === 0) {
+    // RD-EMAIL-PROVIDER — the address fallback is inexact, so it MUST be constrained to
+    // logs this provider actually sent. Both providers are live simultaneously and an
+    // address can appear under either; without this filter a Resend bounce would mark an
+    // unrelated SES log failed and suppress the recipient for mail that never bounced.
+    // Filtered after the read (not in the query) so no new composite index is required.
     for (const email of recipients.slice(0, 5)) {
       const snap = await col.where('recipientEmail', '==', email).limit(LOG_QUERY_LIMIT).get()
-      snap.docs.forEach(d => matched.set(d.id, d.data() as { organizerUid?: string; recipientEmail?: string; status?: string }))
+      snap.docs
+        .filter(d => (d.data() as { provider?: unknown }).provider === 'resend')
+        .forEach(d => matched.set(d.id, d.data() as { organizerUid?: string; recipientEmail?: string; status?: string }))
     }
   }
 

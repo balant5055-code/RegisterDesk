@@ -53,6 +53,10 @@ export interface DuplicateEventResponse {
 }
 
 export interface EventEditPayload {
+  // RD-EMAIL-PROVIDER — emailProvider is deliberately ABSENT from this payload. The
+  // transport is an ADMIN-ONLY, per-event setting written solely by
+  // PATCH /api/admin/events/[slug]/email-provider. Adding it back here would re-open an
+  // organizer write path to it; the edit route rejects the key outright.
   // Basic info
   name?:      string
   tagline?:   string

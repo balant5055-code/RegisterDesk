@@ -217,6 +217,7 @@ export default function SettingsTab({ event, eventId, token, onSuccess }: Settin
   const [bannerUrl, setBannerUrl] = useState(event.bannerUrl  ?? '')
   const [logoUrl,   setLogoUrl]   = useState(event.logoUrl    ?? '')
 
+  // ── Email provider (RD-EMAIL-PROVIDER) ──────────────────────────────────────
   // ── Schedule ────────────────────────────────────────────────────────────────
   const [startDate, setStartDate] = useState(event.startDate ?? '')
   const [startTime, setStartTime] = useState(event.startTime ?? '')

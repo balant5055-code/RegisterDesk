@@ -54,7 +54,9 @@ export async function emailCertificate(
   const to = certificate.attendeeEmail
   if (!to) return { success: false, skipped: false, error: 'No recipient email' }
 
-  if (!notificationEngine.isAvailable(NotificationChannel.EMAIL)) return { success: false, skipped: false, error: 'Email is not configured' }
+  // RD-EMAIL-PROVIDER — a certificate belongs to an event; gate and send on ITS transport.
+  const emailProviderName = await resolveEventEmailProvider(certificate.eventId)
+  if (!notificationEngine.isAvailable(NotificationChannel.EMAIL, emailProviderName)) return { success: false, skipped: false, error: 'Email is not configured' }
 
   // Resolve subject + message from settings (placeholder-aware), falling back to
   // sensible defaults. The stored placeholder snapshot IS the resolution context.
@@ -82,7 +84,6 @@ export async function emailCertificate(
 
   // RD-EMAIL-PROVIDER — certificates belong to an event, so they follow its provider.
   // Certificate GENERATION and the PDF attachment are untouched; only the transport moves.
-  const emailProviderName = await resolveEventEmailProvider(certificate.eventId)
   const result = await notificationEngine.send(NotificationType.CERTIFICATE_READY, {
     to,
     attendeeName:  certificate.attendeeName,

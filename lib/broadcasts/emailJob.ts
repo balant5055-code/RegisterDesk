@@ -19,6 +19,8 @@ import { runJobChunk }   from '@/lib/jobs/runner'
 import type { JobStrategy, ProcessResult } from '@/lib/jobs/runner'
 import type { Job }      from '@/lib/jobs/types'
 import { notificationEngine, NotificationType, NotificationChannel } from '@/lib/notifications'
+import { resolveEventEmailProvider } from '@/lib/email/resolveEventProvider'
+import type { EmailProviderName } from '@/lib/email/providerName'
 import { emailShell }              from '@/lib/email/templates/base'
 import { substituteVariables }     from '@/lib/email-templates/types'
 import { writeEmailLog }           from '@/lib/email-logs/write'
@@ -124,15 +126,22 @@ interface EmailJobContext {
   emailBranding?:  { companyName: string | null; primaryColor: string | null; hideRegisterDeskBranding: boolean }
   fromName?:       string
   perMsgCostPaise: number
+  /** RD-EMAIL-PROVIDER — resolved ONCE per job from this broadcast's own event. */
+  emailProviderName: EmailProviderName
 }
 
 type RecipientItem = EmailRecipientRow & { __id: string }
 
 export function emailBroadcastStrategy(): JobStrategy<EmailBroadcastJob, EmailJobContext, RecipientItem> {
   return {
-    // Load once: SES availability + white-label branding + per-msg cost.
+    // Load once: this event's transport + its availability + white-label branding + per-msg cost.
     async loadContext(job) {
-      if (!notificationEngine.isAvailable(NotificationChannel.EMAIL)) {
+      // RD-EMAIL-PROVIDER — a broadcast belongs to ONE event, so its provider is resolved
+      // once per job from that event, never globally. A broadcast for an SES event still
+      // uses SES even while another event is on Resend. Resolved BEFORE the gate so the
+      // gate asks about the transport this job will actually use.
+      const emailProviderName = await resolveEventEmailProvider(job.eventSlug)
+      if (!notificationEngine.isAvailable(NotificationChannel.EMAIL, emailProviderName)) {
         return { ok: false, error: 'Email provider is not configured' }
       }
       const branding = await resolvePublicBranding(job.organizerUid)
@@ -144,6 +153,7 @@ export function emailBroadcastStrategy(): JobStrategy<EmailBroadcastJob, EmailJo
             ? { companyName: branding.companyName, primaryColor: branding.primaryColor, hideRegisterDeskBranding: branding.hideRegisterDeskBranding }
             : undefined,
           fromName:        branding?.emailSenderName ?? undefined,
+          emailProviderName,
           perMsgCostPaise: Math.round((job.actualCostPaise ?? 0) / total),
         },
       }
@@ -183,7 +193,7 @@ export function emailBroadcastStrategy(): JobStrategy<EmailBroadcastJob, EmailJo
       let errorMsg: string | undefined
       let messageId: string | undefined
       try {
-        const r = await notificationEngine.send(NotificationType.BROADCAST, { to: item.email, subject: renderedSubject, html: fullHtml, fromName: ctx.fromName, headers: unsubHeaders })
+        const r = await notificationEngine.send(NotificationType.BROADCAST, { to: item.email, subject: renderedSubject, html: fullHtml, fromName: ctx.fromName, headers: unsubHeaders }, ctx.emailProviderName)
         status    = r.success ? 'sent' : 'failed'
         messageId = r.messageId
         if (!r.success) errorMsg = r.error
@@ -193,7 +203,7 @@ export function emailBroadcastStrategy(): JobStrategy<EmailBroadcastJob, EmailJo
 
       void writeEmailLog({
         organizerUid: job.organizerUid, eventId: job.eventId, eventSlug: job.eventSlug, eventName: job.eventName,
-        templateKey: 'broadcast', provider: 'ses', campaignId: job.campaignId,
+        templateKey: 'broadcast', provider: ctx.emailProviderName, campaignId: job.campaignId,
         recipientEmail: item.email, recipientName: item.name,
         subject: renderedSubject, status, registrationId: item.registrationId,
         error: errorMsg, providerMessageId: messageId,

@@ -18,6 +18,7 @@ import {
   markCertificateEmailed,
 }                                            from '@/lib/certificates/firestore'
 import { notificationEngine, NotificationType, NotificationChannel } from '@/lib/notifications'
+import { resolveEventEmailProvider } from '@/lib/email/resolveEventProvider'
 import type { RegistrationDocument }         from '@/lib/registrations/types'
 
 type Params = { params: Promise<{ eventId: string }> }
@@ -90,7 +91,9 @@ export async function POST(req: NextRequest, { params }: Params): Promise<NextRe
 
   let generated = 0, skipped = 0, ineligible = 0
 
-  const emailAvailable = notificationEngine.isAvailable(NotificationChannel.EMAIL)
+  // RD-EMAIL-PROVIDER — one event per request: resolve once, gate and send on the same transport.
+  const emailProviderName = await resolveEventEmailProvider(slug)
+  const emailAvailable = notificationEngine.isAvailable(NotificationChannel.EMAIL, emailProviderName)
   const issueDate     = new Date().toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' })
   const eventDate     = startDate ? fmtDate(startDate) : ''
 
@@ -142,7 +145,7 @@ export async function POST(req: NextRequest, { params }: Params): Promise<NextRe
             certificateId,
             downloadUrl,
             verifyUrl,
-          })
+          }, emailProviderName)
           await markCertificateEmailed(certificateId, result.success)
         } catch {
           await markCertificateEmailed(certificateId, false).catch(() => {})

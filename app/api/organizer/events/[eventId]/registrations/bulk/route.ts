@@ -100,6 +100,8 @@ export async function POST(
   //      sends via the notification engine and persists emailStatus. The route only resolves
   //      ownership and aggregates results. ──
   if (action === 'resend_email') {
+    // RD-EMAIL-PROVIDER — COARSE preflight. The send itself delegates to the shared resend
+    // service, which resolves and gates on each registration's own event transport.
     if (!notificationEngine.isAvailable(NotificationChannel.EMAIL)) {
       const errResults = registrationIds.map(id => ({ id, success: false, reason: 'Email provider not configured' }))
       return NextResponse.json({ success: false, processed: registrationIds.length, succeeded: 0, failed: registrationIds.length, error: 'Email provider not configured', results: errResults }, { status: 503 })

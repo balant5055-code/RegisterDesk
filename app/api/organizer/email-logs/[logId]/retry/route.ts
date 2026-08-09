@@ -9,6 +9,7 @@ import { FieldValue }                  from 'firebase-admin/firestore'
 import { adminDb }                      from '@/lib/firebase/admin'
 import { fmtEmailDate } from '@/lib/email'
 import { notificationEngine, NotificationType, NotificationChannel } from '@/lib/notifications'
+import { resolveEventEmailProvider } from '@/lib/email/resolveEventProvider'
 import { authorizeWorkspace }            from '@/lib/team/workspace'
 import { signTicketToken }             from '@/lib/tickets/generate'
 import { updateEmailLog }              from '@/lib/email-logs/write'
@@ -34,6 +35,8 @@ export async function POST(
   const logRef = adminDb.collection('emailLogs').doc(logId)
 
   // ── 2. Ensure email provider is configured (before claiming the log) ────────
+  // RD-EMAIL-PROVIDER — COARSE preflight on the platform default. The event slug is not
+  // known yet here; the authoritative per-event gate runs at the send site below.
   if (!notificationEngine.isAvailable(NotificationChannel.EMAIL)) {
     return NextResponse.json(
       { success: false, error: 'Email provider not configured' },
@@ -95,6 +98,9 @@ export async function POST(
   const pdfToken = signTicketToken(log.registrationId)
   const pdfUrl   = `${baseUrl}/api/tickets/${log.registrationId}/pdf${pdfToken ? `?token=${encodeURIComponent(pdfToken)}` : ''}`
 
+  // RD-EMAIL-PROVIDER — retry must leave through the SAME transport a fresh send would.
+  const emailProviderName = await resolveEventEmailProvider(reg.eventSlug)
+
   // ── 7. Re-send (templateKey already validated during the claim) ────────────
   let emailStatus: 'sent' | 'failed' = 'failed'
   let errorMsg: string | undefined
@@ -114,7 +120,7 @@ export async function POST(
       registrationId: log.registrationId,
       ticketPageUrl:  `${baseUrl}/tickets/${log.registrationId}`,
       pdfDownloadUrl: pdfUrl,
-    })
+    }, emailProviderName)
     emailStatus         = result.success ? 'sent' : 'failed'
     providerMessageId   = result.messageId
     if (!result.success) errorMsg = result.error

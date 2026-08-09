@@ -45,6 +45,22 @@ export async function PATCH(
   // Reject any restricted/locked/unknown key outright — an edit may ONLY touch SAFE
   // content fields. Immutable financial/attendee records live in separate collections
   // and are never reachable from here, but this is an explicit contract + audit.
+  // ── RD-EMAIL-PROVIDER — ADMIN-ONLY. Refused explicitly, not merely ignored. ──
+  // The email transport is platform infrastructure: an organizer switching it could move
+  // their attendee mail onto a provider the platform has not verified for them. It is
+  // written ONLY by PATCH /api/admin/events/[slug]/email-provider.
+  //
+  // Removing the key from SAFE_EDIT_KEYS already makes it 'unknown' and therefore
+  // forbidden below. This named check is deliberate belt-and-braces: it survives any
+  // future re-classification, and it returns an honest 403 rather than a generic
+  // 'cannot be edited after publish' 400.
+  if (Object.prototype.hasOwnProperty.call(body, 'emailProvider')) {
+    return NextResponse.json(
+      { success: false, error: 'emailProvider is managed by RegisterDesk administrators and cannot be changed here.' },
+      { status: 403 },
+    )
+  }
+
   const forbidden = findForbiddenEditKeys(Object.keys(body))
   if (forbidden.length > 0) {
     return NextResponse.json(

@@ -8,6 +8,7 @@
 //   GET …/timeline   → merged chronological trail (Governance, lazy)
 // All MUTATIONS reuse existing admin routes — no new mutation logic here.
 
+import type { EmailProviderName } from '@/lib/email/providerName'
 import type { EventAnalytics } from '@/lib/analytics/eventAnalytics'
 import type { LicenseDetail } from '@/lib/admin/licenseAdminTypes'
 
@@ -43,6 +44,9 @@ export interface Event360Overview {
   lifecycleStatus: string | null   // published / pending_review / draft / …
   reviewStatus:    string | null
   moderationStatus: string | null
+  // RD-EMAIL-PROVIDER — ADMIN-ONLY. Always a usable value: absent/legacy/invalid stored
+  // data is normalised to 'ses' by the shared parser, so no event needs migrating.
+  emailProvider:    EmailProviderName
   organizer: {
     uid:       string
     name:      string | null

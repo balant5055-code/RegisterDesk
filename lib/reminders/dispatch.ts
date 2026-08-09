@@ -9,7 +9,8 @@ import { FieldValue, Timestamp, FieldPath } from 'firebase-admin/firestore'
 import { adminDb } from '@/lib/firebase/admin'
 import { notificationEngine, NotificationType, NotificationChannel } from '@/lib/notifications'
 import { writeEmailLog } from '@/lib/email-logs/write'
-import { EMAIL_PROVIDER_NAME, fmtEmailDate } from '@/lib/email'
+import { fmtEmailDate } from '@/lib/email'
+import { resolveEventEmailProvider } from '@/lib/email/resolveEventProvider'
 import { getCommunicationConfig } from '@/lib/communications/resolveCommunicationConfig'
 import { APP_URL } from '@/lib/env'
 import { buildReminderContent } from './templates'
@@ -71,16 +72,19 @@ async function sendReminderWave(
   data:       ReminderDocData,
 ): Promise<{ sent: number; failed: number }> {
   let sent = 0, failed = 0
+  // RD-EMAIL-PROVIDER — a reminder is always about ONE event, so it leaves through that
+  // event's transport. Reminders with no event (if any) resolve to the platform default.
+  const emailProviderName = await resolveEventEmailProvider(data.eventId)
   for (let i = 0; i < recipients.length; i += WAVE) {
     const wave = recipients.slice(i, i + WAVE)
     const results = await Promise.all(wave.map(async r => {
       try {
-        const result = await notificationEngine.send(NotificationType.CUSTOM_EMAIL, { to: r.email, subject, html: html(r) })
+        const result = await notificationEngine.send(NotificationType.CUSTOM_EMAIL, { to: r.email, subject, html: html(r) }, emailProviderName)
         void writeEmailLog({
           organizerUid: data.organizerUid, eventId: data.eventId ?? '', eventSlug: data.eventId ?? '',
           eventName: data.eventName, templateKey: 'event_reminder',
           recipientEmail: r.email, recipientName: r.name, subject,
-          status: result.success ? 'sent' : 'failed', provider: EMAIL_PROVIDER_NAME, channel: 'email',
+          status: result.success ? 'sent' : 'failed', provider: emailProviderName, channel: 'email',
           providerMessageId: result.messageId, error: result.success ? undefined : (result.errorDetail ?? result.error),
         })
         return result.success
@@ -162,6 +166,8 @@ async function reclaimStaleSending(nowMs: number): Promise<number> {
 export async function dispatchDueReminders(limit = 50, budgetMs = DEFAULT_BUDGET_MS): Promise<DispatchOutcome> {
   const startedAt = Date.now()
   const comm = await getCommunicationConfig()
+  // RD-EMAIL-PROVIDER — batch-level health check across MANY events, so it can only ask
+  // about the platform default. Each wave then resolves and sends on its own event transport.
   const emailLive = comm.email.enabled && notificationEngine.isAvailable(NotificationChannel.EMAIL)
 
   // Un-wedge any reminders stuck in 'sending' from a prior crashed run before we

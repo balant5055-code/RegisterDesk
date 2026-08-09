@@ -40,7 +40,10 @@ export interface ConfirmationEmailArgs {
 // ─── Sender ───────────────────────────────────────────────────────────────────
 
 export async function sendConfirmationEmail(args: ConfirmationEmailArgs): Promise<void> {
-  if (!notificationEngine.isAvailable(NotificationChannel.EMAIL)) return  // email not configured — skip silently
+  // RD-EMAIL-PROVIDER — resolved once: the transport used AND the transport logged.
+  const emailProviderName = await resolveEventEmailProvider(args.eventSlug)
+
+  if (!notificationEngine.isAvailable(NotificationChannel.EMAIL, emailProviderName)) return  // email not configured — skip silently
 
   const {
     registrationId, ticketCode, attendeeName, attendeeEmail,
@@ -134,7 +137,7 @@ export async function sendConfirmationEmail(args: ConfirmationEmailArgs): Promis
       pdfDownloadUrl:     pdfUrl,
       receiptDownloadUrl: receiptUrl,
       icsContent,
-    }, await resolveEventEmailProvider(eventSlug))
+    }, emailProviderName)
 
     emailStatus = result.success ? 'sent' : 'failed'
     if (!result.success) {
@@ -167,7 +170,7 @@ export async function sendConfirmationEmail(args: ConfirmationEmailArgs): Promis
     recipientName:  attendeeName,
     subject:        `Registration confirmation for ${eventName}`,
     status:         emailStatus === 'sent' ? 'sent' : 'failed',
-    provider:       'ses',
+    provider:       emailProviderName,
     error:          emailFailureReason,
     registrationId,
   })
