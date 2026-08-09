@@ -19,6 +19,7 @@ import { writeEmailLog }                   from '@/lib/email-logs/write'
 import { generateIcs }                     from '@/lib/calendar/ics'
 import { loadOrganizerEmailBranding, resolveEmailBranding } from '@/lib/email/branding'
 import { sendWhatsAppConfirmation }         from './sendWhatsAppConfirmation'
+import { getEmailAppUrl } from '@/lib/email/appUrl'
 
 // ─── Args ─────────────────────────────────────────────────────────────────────
 
@@ -66,7 +67,7 @@ export async function sendConfirmationEmail(args: ConfirmationEmailArgs): Promis
     ? (typeof physical?.city === 'string' ? physical.city : '')
     : ''
 
-  const baseUrl      = process.env.NEXT_PUBLIC_APP_URL ?? ''
+  const baseUrl = getEmailAppUrl()
   const pdfToken     = signTicketToken(registrationId)
   const pdfUrl       = `${baseUrl}/api/tickets/${registrationId}/pdf?token=${encodeURIComponent(pdfToken)}`
   const receiptToken = amountPaid && amountPaid > 0 ? signReceiptToken(registrationId) : null

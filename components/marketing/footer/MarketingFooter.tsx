@@ -54,7 +54,7 @@ export function MarketingFooter() {
   return (
     <footer
       aria-labelledby="footer-heading"
-      className="relative isolate overflow-hidden border-t border-border/60 bg-white"
+      className="relative isolate overflow-hidden border-t border-border/60 bg-white print:hidden"
     >
       <FooterBackdrop />
       <h2 id="footer-heading" className="sr-only">RegisterDesk footer</h2>

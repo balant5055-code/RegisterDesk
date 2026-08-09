@@ -16,6 +16,7 @@ import { updateEmailLog }              from '@/lib/email-logs/write'
 import { getEventBySlug }              from '@/lib/firebase/firestore/events'
 import type { EmailLog }               from '@/lib/email-logs/types'
 import type { RegistrationDocument }   from '@/lib/registrations/types'
+import { getEmailAppUrl } from '@/lib/email/appUrl'
 
 export interface RetryEmailLogResponse {
   success: boolean
@@ -94,7 +95,7 @@ export async function POST(
     ? (typeof physical?.city   === 'string' ? physical.city   : '')
     : ''
 
-  const baseUrl  = process.env.NEXT_PUBLIC_APP_URL ?? ''
+  const baseUrl = getEmailAppUrl()
   const pdfToken = signTicketToken(log.registrationId)
   const pdfUrl   = `${baseUrl}/api/tickets/${log.registrationId}/pdf${pdfToken ? `?token=${encodeURIComponent(pdfToken)}` : ''}`
 

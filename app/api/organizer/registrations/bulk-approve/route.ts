@@ -27,6 +27,7 @@ import {
   NotPendingError, CapacityBlocksApprovalError,
 } from '@/lib/firebase/firestore/registrations'
 import type { RegistrationDocument, AuditAction } from '@/lib/registrations/types'
+import { getEmailAppUrl } from '@/lib/email/appUrl'
 
 // Sequential per-id approval keeps counter contention off a single event's
 // counter doc; ≤200 admin-triggered approvals fit comfortably in the budget.
@@ -147,7 +148,7 @@ async function sendBulkApprovalEmails(
     if (snap.exists) eventMap.set(snap.id, snap.data() as Record<string, unknown>)
   }
 
-  const baseUrl = process.env.NEXT_PUBLIC_APP_URL ?? ''
+  const baseUrl = getEmailAppUrl()
 
   await Promise.allSettled(eligible.map(async ({ id, data: reg }) => {
     const event = eventMap.get(reg.eventSlug)

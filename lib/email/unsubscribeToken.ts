@@ -11,7 +11,8 @@
 //   {APP_URL}/unsubscribe?email=<encoded>&org=<uid>&token=<hex64>
 
 import crypto from 'crypto'
-import { TICKET_SECRET, APP_URL } from '@/lib/env'
+import { TICKET_SECRET } from '@/lib/env'
+import { getEmailAppUrl } from './appUrl'
 
 const HEX_64 = /^[0-9a-f]{64}$/
 const PREFIX  = 'unsubscribe:'
@@ -53,7 +54,7 @@ export function buildUnsubscribeUrl(
 ): string {
   const token = signUnsubscribeToken(email, organizerUid)
   return (
-    `${APP_URL}/unsubscribe` +
+    `${getEmailAppUrl()}/unsubscribe` +
     `?email=${encodeURIComponent(email)}` +
     `&org=${encodeURIComponent(organizerUid)}` +
     `&token=${token}`
@@ -69,7 +70,7 @@ export function buildUnsubscribeApiUrl(
 ): string {
   const token = signUnsubscribeToken(email, organizerUid)
   return (
-    `${APP_URL}/api/unsubscribe` +
+    `${getEmailAppUrl()}/api/unsubscribe` +
     `?email=${encodeURIComponent(email)}` +
     `&org=${encodeURIComponent(organizerUid)}` +
     `&token=${token}`

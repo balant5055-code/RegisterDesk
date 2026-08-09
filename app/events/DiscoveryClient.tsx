@@ -551,8 +551,14 @@ function HeroSection({
   const searchRef = useRef<HTMLInputElement>(null)
 
   // Decorative floating previews sourced from real upcoming events (fallback: none)
+  // Positions are percentages of the full-bleed hero, matching the layer's `inset-0` box.
+  // The first card sat at 1%, which is 10–13px from the viewport edge — INSIDE the hero
+  // content container's own gutter (`lg:px-8` = 2rem = 32px), so it visually hung off the
+  // left edge of the page. 4% clears that gutter at every width the layer is visible at
+  // (it is `hidden lg:block`, so ≥1024px ⇒ ≥41px), while keeping the same edge-anchored
+  // floating look. The right-hand pair is untouched.
   const FLOATING_POS = [
-    { rotate: -6, x: '1%',  y: '42%' },
+    { rotate: -6, x: '4%',  y: '42%' },
     { rotate:  5, x: '70%', y: '34%' },
     { rotate: -4, x: '73%', y: '66%' },
   ]
@@ -636,7 +642,17 @@ function HeroSection({
             className="mt-3 text-[32px] font-bold leading-[1.1] tracking-tight text-foreground sm:text-[40px] lg:text-[48px] lg:whitespace-nowrap"
           >
             Discover{' '}
-            <span className="bg-gradient-to-r from-[var(--primary-from)] via-[var(--primary)] to-[var(--primary-deep)] bg-clip-text text-transparent">
+            {/* The canonical brand gradient — `--primary-from` → `--primary`, i.e. exactly the
+                `--primary-gradient` token, and the same pair every other gradient headline uses.
+                It previously ended at `--primary-deep`, which is defined NOWHERE in the token
+                system (styles/tokens.css defines --primary, --primary-hover, --primary-from and
+                --primary-to only). Tailwind v4 registers gradient stops with
+                `@property … initial-value: #0000`, so the undefined variable resolved to
+                TRANSPARENT rather than failing loudly: the computed background was
+                `linear-gradient(…, rgb(251,90,106) 0%, rgb(229,39,126) 50%, rgba(0,0,0,0) 100%)`.
+                Under `bg-clip-text` on the white hero that transparent stop is what read as a
+                white halo washing out the end of the word. */}
+            <span className="bg-gradient-to-r from-[var(--primary-from)] to-[var(--primary)] bg-clip-text text-transparent">
               Extraordinary
             </span>
             {' '}Events
@@ -1289,6 +1305,8 @@ function CategoriesSection({
 function EventsGrid({
   events,
   loading,
+  error,
+  onRetry,
   title,
   subtitle,
   onReset,
@@ -1296,11 +1314,47 @@ function EventsGrid({
 }: {
   events:            PublicEventCard[]
   loading:           boolean
+  /** A refetch FAILED. Distinct from "the query succeeded and matched nothing". */
+  error?:            boolean
+  onRetry?:          () => void
   title:             string
   subtitle?:         string
   onReset?:          () => void
   onSuggestCategory?: (cat: string) => void
 }) {
+  // A failed load is NOT an empty result. Reporting "No events match your filters" when the
+  // request never completed tells the visitor the platform has nothing on, and hides a real
+  // outage. Same panel shell/tokens as the empty state — only the message and action differ.
+  if (!loading && error) {
+    return (
+      <section className="pb-12">
+        <div className="mx-auto max-w-xl px-4">
+          <div className="rounded-3xl border border-border/60 bg-card px-6 py-14 text-center shadow-sm">
+            <div className="mx-auto flex size-16 items-center justify-center rounded-2xl bg-muted">
+              <RotateCcw className="size-7 text-muted-foreground/50" aria-hidden />
+            </div>
+            <h3 className="mt-4 text-fs-lg font-semibold text-foreground">
+              We couldn&apos;t load events
+            </h3>
+            <p className="mx-auto mt-1.5 max-w-xs text-fs-base leading-relaxed text-muted-foreground">
+              Something went wrong reaching our servers. Your filters are still applied — try again.
+            </p>
+            {onRetry && (
+              <button
+                type="button"
+                onClick={onRetry}
+                className={cn(buttonVariants({ variant: 'outline', size: 'sm' }), 'mt-5 gap-1.5')}
+              >
+                <RotateCcw className="size-3.5" />
+                Try again
+              </button>
+            )}
+          </div>
+        </div>
+      </section>
+    )
+  }
+
   if (!loading && events.length === 0) {
     return (
       <section className="pb-12">
@@ -1363,10 +1417,22 @@ function EventsGrid({
           className="mb-6"
         />
 
+        {/* Animates on MOUNT, not on scroll-into-view.
+            `whileInView` gates the children's `fadeUp.hidden` (opacity: 0) on an
+            IntersectionObserver firing. This grid is the page's primary content and lands
+            just below the fold at common viewport heights — measured at 1280×720 the first
+            card's top is y≈749 with a 720px viewport, so ZERO pixels of it intersect, the
+            observer never fires, and the cards stay at opacity 0 while the heading directly
+            above them (which does intersect) animates in normally. That is the reported
+            "Upcoming Events with no event card": the card is in the DOM, the data is correct,
+            it is simply never revealed. Only scrolling recovered it.
+            Someone who navigated to /events must not have to scroll to see that events exist,
+            so the primary grid animates on mount. The animation itself — the same staggered
+            fadeUp — is unchanged, and the genuinely secondary sections below still use
+            `whileInView`, which is appropriate for content the visitor scrolls to. */}
         <motion.div
           initial="hidden"
-          whileInView="visible"
-          viewport={{ once: true, amount: 0.05 }}
+          animate="visible"
           variants={staggerChildren}
           className={cn(
             'grid gap-5',
@@ -1497,6 +1563,8 @@ export function DiscoveryClient({
   const [nextCursor, setNextCursor]         = useState<string | null>(initialNextCursor)
   const [loading, setLoading]               = useState(false)   // server refetch on filter change
   const [loadingMore, setLoadingMore]       = useState(false)
+  const [loadError, setLoadError]           = useState(false)   // a refetch FAILED (≠ no matches)
+  const [reloadKey, setReloadKey]           = useState(0)       // manual retry trigger
   const [debouncedQuery, setDebouncedQuery] = useState('')
   const didMount = useRef(false)
 
@@ -1526,6 +1594,8 @@ export function DiscoveryClient({
   // Authoritative refetch whenever a server filter changes — the server filters the WHOLE
   // published set and returns one page, so search/category/filters are complete at any scale
   // (RD-DISCOVERY-01 / D-C1). The initial SSR page is already loaded, so the first run is skipped.
+  // `reloadKey` is only bumped by the retry button; on mount the ref guard still skips the run,
+  // so the SSR page is never refetched and Strict Mode's double-invoke cannot double-query.
   useEffect(() => {
     if (!didMount.current) { didMount.current = true; return }
     let cancelled = false
@@ -1538,15 +1608,20 @@ export function DiscoveryClient({
         if (cancelled) return
         setEvents(json.events)
         setNextCursor(json.nextCursor)
-      } catch {
-        if (!cancelled) { setEvents([]); setNextCursor(null) }
+        setLoadError(false)
+      } catch (err) {
+        // Surface the failure instead of clearing the list. Blanking `events` here rendered the
+        // "No events match your filters" panel, which is indistinguishable from a genuine empty
+        // result and permanently discarded the loaded dataset until another filter change.
+        console.error('[discovery] event refetch failed:', err)
+        if (!cancelled) setLoadError(true)
       } finally {
         if (!cancelled) setLoading(false)
       }
     }
     run()
     return () => { cancelled = true }
-  }, [buildParams])
+  }, [buildParams, reloadKey])
 
   // Append the next cursor page (same filters), gap-free / duplicate-free by slug.
   const loadMore = useCallback(async () => {
@@ -1612,6 +1687,8 @@ export function DiscoveryClient({
             <EventsGrid
               events={sortedEvents}
               loading={loading}
+              error={loadError}
+              onRetry={() => setReloadKey(k => k + 1)}
               title={hasActiveFilter
                 ? `${sortedEvents.length} event${sortedEvents.length !== 1 ? 's' : ''} found`
                 : 'Upcoming Events'}
@@ -1619,7 +1696,7 @@ export function DiscoveryClient({
               onReset={() => updateFilter(FILTER_RESET)}
               onSuggestCategory={cat => updateFilter({ category: cat })}
             />
-            {nextCursor && !loading && (
+            {nextCursor && !loading && !loadError && (
               <div className="flex justify-center pt-8">
                 <button
                   type="button"

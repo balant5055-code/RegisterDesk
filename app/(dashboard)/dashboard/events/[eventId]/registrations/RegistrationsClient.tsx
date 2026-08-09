@@ -7,11 +7,15 @@ import Link                      from 'next/link'
 import { cn }                    from '@/lib/utils/cn'
 import { csvCell as csvEscape }  from '@/lib/utils/csv'
 import {
+  buildRegistrationExportColumns, buildRegistrationExportRow, exportCellValue,
+} from '@/lib/registrations/exportColumns'
+import { hasPaymentRecord, refundLabel } from '@/lib/registrations/paymentDisplay'
+import {
   Search, Filter, Download, Upload, X, ChevronLeft, ChevronRight,
   Users, CheckCircle, Clock, XCircle, RotateCcw,
   Ticket, Mail, Phone, Calendar, Tag, Eye, Send, Loader2,
   FileDown, BanIcon, Undo2, ChevronDown, ChevronUp,
-  AlertTriangle, History, RotateCw, Pencil,
+  AlertTriangle, History, RotateCw, Pencil, CreditCard, Copy, Check,
 } from 'lucide-react'
 import type { SerializedRegistration, RegistrationsApiResponse } from '@/app/api/organizer/events/[eventId]/registrations/route'
 import { registrationStatusCls } from '@/lib/ui/statusColors'
@@ -73,6 +77,48 @@ function statusMeta(status: string): { label: string; cls: string } {
   }
 }
 
+/**
+ * A gateway identifier — long, opaque, and the thing an operator pastes into the Razorpay
+ * dashboard when reconciling. Monospace so character-level differences are visible, and
+ * copyable because retyping "pay_QxKf82hAsdLm01" by hand is how reconciliation goes wrong.
+ */
+function IdRow({ label, value }: { label: string; value: string }) {
+  const [copied, setCopied] = useState(false)
+  return (
+    <div className="flex items-start gap-3 border-b border-border/40 px-4 py-3 last:border-0">
+      <div className="min-w-0 flex-1">
+        <p className="text-[12px] font-semibold uppercase tracking-wider text-muted-foreground">{label}</p>
+        <p className="mt-0.5 break-all font-mono text-[12px] font-medium text-foreground">{value}</p>
+      </div>
+      <button
+        type="button"
+        onClick={() => {
+          void navigator.clipboard?.writeText(value).then(() => {
+            setCopied(true)
+            setTimeout(() => setCopied(false), 1600)
+          }).catch(() => { /* clipboard blocked — the value is still selectable */ })
+        }}
+        aria-label={`Copy ${label}`}
+        className="mt-0.5 shrink-0 rounded-md border border-border p-1.5 text-muted-foreground transition-colors hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      >
+        {copied ? <Check className="size-3.5 text-emerald-600" aria-hidden /> : <Copy className="size-3.5" aria-hidden />}
+      </button>
+    </div>
+  )
+}
+
+/** A plain label/value row inside the payment card. */
+function PayRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex items-start gap-3 border-b border-border/40 px-4 py-3 last:border-0">
+      <div className="min-w-0">
+        <p className="text-[12px] font-semibold uppercase tracking-wider text-muted-foreground">{label}</p>
+        <p className="mt-0.5 text-[13px] font-medium text-foreground">{value}</p>
+      </div>
+    </div>
+  )
+}
+
 function fmtINR(paise: number): string {
   if (paise === 0) return 'Free'
   return new Intl.NumberFormat('en-IN', {
@@ -121,37 +167,28 @@ function isExactSearch(q: string): boolean {
   return s.includes('@') || /^rd[-_ ]?[a-z0-9]{4,}$/i.test(s)
 }
 
-function exportToCsv(rows: SerializedRegistration[], slug: string, fieldLabels: Record<string, string>) {
-  const formFieldIds = Object.keys(fieldLabels)
-  const headers = [
-    'Ticket Code', 'Name', 'Email', 'Phone', 'Pass',
-    'Status', 'Payment Status', 'Check-In', 'Checked-In At',
-    'Refund Status', 'Refund Amount (INR)', 'Registered At',
-    ...formFieldIds.map(id => fieldLabels[id] ?? id),
-  ]
+// Selection export. Uses THE canonical column definition — the same one the server route
+// uses — so the two "Export CSV" buttons no longer produce different data for the same
+// registrations. Only the row SOURCE differs (the selected rows already in memory here,
+// a streamed Firestore query there).
+function exportToCsv(
+  rows:        SerializedRegistration[],
+  slug:        string,
+  fieldLabels: Record<string, string>,
+  eventId:     string,
+) {
+  const columns = buildRegistrationExportColumns(fieldLabels)
+  const ctx     = { eventId, eventSlug: slug, fieldLabels }
+
+  const line = (cells: (string | number)[]) => cells.map(csvEscape).join(',')
   const body = rows.map(r => {
-    const isRefunded = r.paymentStatus === 'refunded'
-    const baseRow = [
-      r.ticketCode,
-      r.attendee.name,
-      r.attendee.email,
-      r.attendee.phone ?? '',
-      r.passName,
-      r.status,
-      r.paymentStatus,
-      r.checkedIn ? 'Yes' : 'No',
-      r.checkedInAt ?? '',
-      isRefunded ? 'Yes' : 'No',
-      isRefunded && r.refundAmount ? String(r.refundAmount / 100) : '',
-      r.registeredAt ?? '',
-    ]
-    const formCols = formFieldIds.map(id => {
-      const responses = r.attendee.formResponses as Record<string, unknown> | undefined
-      return responses?.[id] ?? ''
-    })
-    return [...baseRow, ...formCols].map(csvEscape).join(',')
+    const row = buildRegistrationExportRow(r as unknown as Record<string, unknown>, ctx)
+    return line(columns.map(c => exportCellValue(row[c.key] ?? null, c.type)))
   })
-  const csv  = [headers.join(','), ...body].join('\n')
+
+  // Leading BOM so Excel reads UTF-8: without it Tamil/Hindi names and ₹ arrive mojibake.
+  // The server export always had this; this path did not.
+  const csv  = '﻿' + [line(columns.map(c => c.label)), ...body].join('\r\n') + '\r\n'
   const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
   const url  = URL.createObjectURL(blob)
   const a    = document.createElement('a')
@@ -793,6 +830,54 @@ function RegistrationDrawer({
                   </div>
                 </div>
               ))}
+            </div>
+
+            {/*
+              PAYMENT — this data was ALREADY on the client (the list API spreads the whole
+              document); it was simply never declared on the type and so never rendered.
+              It lives here rather than in the table because reconciliation is a
+              one-registration task and the table is already dense on mobile.
+            */}
+            <div>
+              <p className="mb-2 flex items-center gap-1.5 text-[12px] font-semibold uppercase tracking-wider text-muted-foreground">
+                <CreditCard className="size-3.5" aria-hidden /> Payment
+              </p>
+              <div className="overflow-hidden rounded-xl border border-border bg-card">
+                {hasPaymentRecord(reg) ? (
+                  <>
+                    <PayRow label="Payment Status" value={reg.paymentStatus.replace(/_/g, ' ')} />
+                    <PayRow label="Amount" value={fmtINR(reg.amount)} />
+                    {/* Only shown when a discount actually applied — an "Original" equal to
+                        the amount, or a ₹0 discount, is noise that implies a coupon existed. */}
+                    {typeof reg.originalAmount === 'number' && reg.originalAmount !== reg.amount && (
+                      <PayRow label="Original Amount" value={fmtINR(reg.originalAmount)} />
+                    )}
+                    {typeof reg.discountAmount === 'number' && reg.discountAmount > 0 && (
+                      <PayRow label="Discount" value={`− ${fmtINR(reg.discountAmount)}`} />
+                    )}
+                    {reg.couponCode   && <PayRow label="Coupon Code" value={reg.couponCode} />}
+                    {reg.paymentMethod && <PayRow label="Payment Method" value={reg.paymentMethod} />}
+                    {reg.referenceNumber && <PayRow label="Reference" value={reg.referenceNumber} />}
+                    {reg.paymentId       && <IdRow label="Razorpay Payment ID" value={reg.paymentId} />}
+                    {reg.razorpayOrderId && <IdRow label="Razorpay Order ID"   value={reg.razorpayOrderId} />}
+                    {(reg.paymentStatus === 'refunded' || reg.paymentStatus === 'refund_pending' || reg.refundId) && (
+                      <>
+                        <PayRow
+                          label="Refund Status"
+                          value={refundLabel(reg) ?? 'Refund issued'}
+                        />
+                        {typeof reg.refundAmount === 'number' && <PayRow label="Refund Amount" value={fmtINR(reg.refundAmount)} />}
+                        {reg.refundId   && <IdRow label="Refund ID" value={reg.refundId} />}
+                        {reg.refundedAt && <PayRow label="Refunded At" value={fmtDate(reg.refundedAt as string)} />}
+                      </>
+                    )}
+                  </>
+                ) : (
+                  // A free registration has no payment record at all. Rendering empty
+                  // payment rows would imply a ₹0 transaction that never existed.
+                  <p className="px-4 py-3 text-[13px] text-muted-foreground">No payment required</p>
+                )}
+              </div>
             </div>
 
             {/* Form responses */}
@@ -1480,11 +1565,17 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
           const to = new Date(dateTo + 'T23:59:59')
           if (!r.registeredAt || new Date(r.registeredAt) > to)   return false
         }
+        // Matches the export's registrationMatchesQuery so a search that narrows the
+        // table narrows the download identically — including the identifiers an operator
+        // reconciles with (registration id, Razorpay payment/order id).
         if (q) return (
           r.attendee.name.toLowerCase().includes(q)  ||
           r.attendee.email.toLowerCase().includes(q) ||
           r.ticketCode.toLowerCase().includes(q)     ||
-          (r.attendee.phone ?? '').includes(q)
+          (r.attendee.phone ?? '').includes(q)       ||
+          r.id.toLowerCase().includes(q)             ||
+          (r.paymentId ?? '').toLowerCase().includes(q) ||
+          (r.razorpayOrderId ?? '').toLowerCase().includes(q)
         )
         return true
       })
@@ -1567,9 +1658,19 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
 
   const { eventName, eventSlug, passes, fieldLabels, stats } = data
 
+  // RD-ORGANIZER-01 P0-3: stream the FULL filtered set from the export endpoint (bounded
+  // server memory) rather than a client CSV of the loaded page. Both formats go through
+  // the SAME authorized route and the SAME canonical columns — only the encoding differs.
+  function downloadExport(format: 'csv' | 'xlsx') {
+    const p = serverFilterParams()
+    if (format === 'xlsx') p.set('format', 'xlsx')
+    if (authToken) p.set('token', authToken)
+    window.location.href = `/api/organizer/events/${eventId}/registrations/export?${p.toString()}`
+  }
+
   function handleBulkExport() {
     const rows = filtered.filter(r => selectedIds.has(r.id))
-    if (rows.length > 0) exportToCsv(rows, eventSlug, fieldLabels)
+    if (rows.length > 0) exportToCsv(rows, eventSlug, fieldLabels, eventId)
   }
 
   function refreshList() {
@@ -1774,18 +1875,21 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
           </button>
           <button
             type="button"
-            onClick={() => {
-              // RD-ORGANIZER-01 P0-3: stream the FULL filtered set from the existing export
-              // endpoint (bounded server memory) — no longer a client CSV of the loaded page.
-              const p = serverFilterParams()
-              if (authToken) p.set('token', authToken)
-              window.location.href = `/api/organizer/events/${eventId}/registrations/export?${p.toString()}`
-            }}
+            onClick={() => downloadExport('csv')}
             disabled={totalCount === 0}
             className="flex shrink-0 items-center gap-2 rounded-xl border border-border bg-card px-4 py-2 text-[13px] font-semibold text-foreground shadow-sm hover:bg-muted/50 disabled:opacity-40"
           >
             <Download className="size-4" aria-hidden />
             Export CSV
+          </button>
+          <button
+            type="button"
+            onClick={() => downloadExport('xlsx')}
+            disabled={totalCount === 0}
+            className="flex shrink-0 items-center gap-2 rounded-xl border border-border bg-card px-4 py-2 text-[13px] font-semibold text-foreground shadow-sm hover:bg-muted/50 disabled:opacity-40"
+          >
+            <Download className="size-4" aria-hidden />
+            Export Excel
           </button>
         </div>
       </div>
@@ -1892,6 +1996,7 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
             <option value="not_required">Free</option>
             <option value="paid">Paid</option>
             <option value="pending">Payment Pending</option>
+            <option value="refund_pending">Refund Pending</option>
             <option value="refunded">Refunded</option>
           </select>
         </div>

@@ -5,7 +5,7 @@ import { useRouter }              from 'next/navigation'
 import { useAuth }                from '@/components/auth/AuthProvider'
 // RD-RT1.0: framer-motion, Fragment and the event-meta icons left with the presentation
 // components that moved to ./RegistrationUI — this module no longer renders them.
-import { ShieldCheck, RotateCcw, Check, AlertTriangle } from 'lucide-react'
+import { ShieldCheck, RotateCcw, Check, AlertTriangle, Tag, ChevronUp, Lock, Clock3, KeyRound, UserRound } from 'lucide-react'
 import { cn }                     from '@/lib/utils/cn'
 import { buildRegisterHref }      from '@/lib/events/registerHref'
 import { buttonVariants }         from '@/components/ui/button'
@@ -19,9 +19,12 @@ import type { FeeBreakdownRecord } from '@/lib/fees/types'
 import { buildAttendeeFeeBreakdown, formatPaise, type AttendeeFeeBreakdown } from '@/lib/fees/attendeeBreakdown'
 // RD-RT1.0: the presentation layer now lives in RegistrationUI. Logic stays here.
 import {
-  RegistrationHeader, StepWizard, JourneyStepper, FormSectionCard, SummaryPanel, PassSwitcher,
-  estimateMinutes, type EventIdentity, type SummaryPricing,
+  CheckoutTopBar, RegistrationMasthead, StepWizard, JourneyStepper, FormSectionCard,
+  SummaryPanel, SummaryDigest, PassSwitcher, estimateMinutes,
+  type EventIdentity, type SummaryPricing,
 } from './RegistrationUI'
+// RD-RT4.0: the route's shared surface tokens (server-safe module).
+import { CANVAS_STYLE, CANVAS, PAGE, PANEL, PANEL_BODY } from './registerTheme'
 // RD-RT2.0: one visual system for every control.
 import {
   FieldShell, FieldError, FIELD_HINT, controlCls, textareaCls,
@@ -467,6 +470,7 @@ function SectionBlock({
   section,
   index,
   complete,
+  active,
   fieldStates,
   values,
   errors,
@@ -478,6 +482,8 @@ function SectionBlock({
   index:       number
   /** RD-RT3.3: every required field in this section is filled. */
   complete:    boolean
+  /** RD-RT4.0: the first not-yet-complete section — presentation emphasis only. */
+  active:      boolean
   fieldStates: Map<string, FieldState>
   values:      Record<string, string>
   errors:      Record<string, string>
@@ -493,7 +499,7 @@ function SectionBlock({
   // RD-RT1.0: the card shell moved to FormSectionCard so every logical group shares one
   // rhythm. Field selection, ordering and rendering are untouched.
   return (
-    <FormSectionCard title={section.title} description={section.description} index={index} complete={complete}>
+    <FormSectionCard title={section.title} description={section.description} index={index} complete={complete} active={active}>
       {visibleFields.map(field => (
         <FieldRenderer
           key={field.id}
@@ -590,6 +596,10 @@ export function RegisterClient({
   const [consent, setConsent] = useState<ReviewConsent>({ info: false, terms: false, refund: false })
   // C-2: the mobile checkout bar steps aside while a keyboard field is focused.
   const [fieldFocused, setFieldFocused] = useState(false)
+  // RD-RT4.0: on mobile the desktop summary column is hidden, so the checkout bar can
+  // now unfold the SAME summary facts as a sheet. Presentation state only — it renders
+  // the identical `identity` / `summaryPricing` objects the desktop panel receives.
+  const [mobileSummaryOpen, setMobileSummaryOpen] = useState(false)
   const formRef = useRef<HTMLFormElement>(null)
   // RD-RT3.3: focus target for the grouped error summary.
   const errorSummaryRef = useRef<HTMLDivElement>(null)
@@ -999,7 +1009,7 @@ export function RegisterClient({
     }
     if (verifyJson.success && verifyJson.registrationId) {
       clearSavedForm()
-      router.push(`/events/${eventSlug}/register/success?id=${verifyJson.registrationId}`)
+      router.push(`/events/${eventSlug}/register/success?fresh=1&id=${verifyJson.registrationId}`)
       return
     }
     setSubmitError(verifyJson.error ?? 'Payment verification failed. Please contact support.')
@@ -1156,7 +1166,7 @@ export function RegisterClient({
       }
       if (json.success && json.registrationId) {
         clearSavedForm()
-        router.push(`/events/${eventSlug}/register/success?id=${json.registrationId}`)
+        router.push(`/events/${eventSlug}/register/success?fresh=1&id=${json.registrationId}`)
         return
       }
       setSubmitError(json.error ?? 'Registration failed. Please try again.')
@@ -1168,47 +1178,53 @@ export function RegisterClient({
   }
 
   // ── Invite code gate screen ────────────────────────────────────────────────
+  // RD-RT4.0: the gates now open on the same canvas + checkout bar as the form, so an
+  // invite-only or sign-in-required event does not feel like a different product before
+  // it feels like a registration. Behaviour, handlers and copy are unchanged.
   if (requiresInviteCode && !inviteCodeVerified) {
     return (
-      <div className="mx-auto max-w-md px-4 py-16">
-        <div className="mb-6 text-center">
-          <div className="mx-auto mb-4 flex size-12 items-center justify-center rounded-full bg-primary/10">
-            <svg className="size-6 text-primary" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" />
-            </svg>
-          </div>
-          <h2 className="text-fs-lg font-bold text-foreground">Invite Only</h2>
-          <p className="mt-2 text-fs-base text-muted-foreground">
-            This event requires an invite code to register.
-          </p>
-        </div>
+      <div style={CANVAS_STYLE} className={cn('min-h-screen', CANVAS)}>
+        <CheckoutTopBar eventSlug={eventSlug} secure={false} />
+        <div className={cn(PAGE, 'flex min-h-[calc(100vh-3.5rem)] items-center justify-center py-12')}>
+          <div className="w-full max-w-md">
+            <div className="mb-6 text-center">
+              <div className="mx-auto mb-4 flex size-12 items-center justify-center rounded-2xl bg-primary/10 text-primary">
+                <KeyRound className="size-6" aria-hidden />
+              </div>
+              <h1 className="text-fs-lg font-bold tracking-tight text-foreground">Invite Only</h1>
+              <p className="mt-2 text-fs-base text-muted-foreground">
+                This event requires an invite code to register.
+              </p>
+            </div>
 
-        <div className="rounded-2xl border border-border bg-card p-6 shadow-sm">
-          <label htmlFor="invite-code" className="mb-1.5 block text-fs-sm font-medium text-foreground">
-            Invite Code
-          </label>
-          <input
-            id="invite-code"
-            type="text"
-            autoFocus
-            placeholder="Enter invite code"
-            value={inviteCodeInput}
-            onChange={e => { setInviteCodeInput(e.target.value); setInviteCodeError(null) }}
-            onKeyDown={e => { if (e.key === 'Enter') void handleVerifyInviteCode() }}
-            className="h-10 w-full rounded-xl border border-border bg-background px-3.5 text-fs-sm text-foreground placeholder:text-muted-foreground/50 outline-none transition-colors focus:border-primary/60 focus:ring-2 focus:ring-primary/20"
-            aria-invalid={!!inviteCodeError}
-          />
-          {inviteCodeError && (
-            <p role="alert" className="mt-1.5 text-fs-xs text-destructive">{inviteCodeError}</p>
-          )}
-          <button
-            type="button"
-            onClick={() => void handleVerifyInviteCode()}
-            disabled={inviteCodeChecking}
-            className={cn(buttonVariants({ variant: 'primary', size: 'md' }), 'mt-4 w-full')}
-          >
-            {inviteCodeChecking ? 'Verifying…' : 'Continue'}
-          </button>
+            <div className={cn(PANEL, PANEL_BODY)}>
+              <label htmlFor="invite-code" className="mb-1.5 block text-fs-sm font-semibold text-foreground">
+                Invite Code
+              </label>
+              <input
+                id="invite-code"
+                type="text"
+                autoFocus
+                placeholder="Enter invite code"
+                value={inviteCodeInput}
+                onChange={e => { setInviteCodeInput(e.target.value); setInviteCodeError(null) }}
+                onKeyDown={e => { if (e.key === 'Enter') void handleVerifyInviteCode() }}
+                className={cn(controlCls(!!inviteCodeError), 'font-mono tracking-widest placeholder:font-sans placeholder:tracking-normal')}
+                aria-invalid={!!inviteCodeError}
+              />
+              {inviteCodeError && (
+                <FieldError id="invite-code-error">{inviteCodeError}</FieldError>
+              )}
+              <button
+                type="button"
+                onClick={() => void handleVerifyInviteCode()}
+                disabled={inviteCodeChecking}
+                className={cn(buttonVariants({ variant: 'primary', size: 'lg' }), 'mt-4 w-full')}
+              >
+                {inviteCodeChecking ? 'Verifying…' : 'Continue'}
+              </button>
+            </div>
+          </div>
         </div>
       </div>
     )
@@ -1217,8 +1233,9 @@ export function RegisterClient({
   // ── Auth loading ───────────────────────────────────────────────────────────
   if (!authChecked) {
     return (
-      <div className="flex min-h-[50vh] items-center justify-center">
-        <div className="size-6 animate-spin rounded-full border-2 border-primary border-t-transparent" />
+      <div style={CANVAS_STYLE} className={cn('flex min-h-screen items-center justify-center', CANVAS)}>
+        <div className="size-6 animate-spin rounded-full border-2 border-primary border-t-transparent motion-reduce:animate-none" />
+        <span className="sr-only">Checking your session…</span>
       </div>
     )
   }
@@ -1226,22 +1243,25 @@ export function RegisterClient({
   // ── Auth gate ──────────────────────────────────────────────────────────────
   if (requireLogin && !isLoggedIn) {
     return (
-      <div className="flex min-h-[50vh] flex-col items-center justify-center px-4 py-16 text-center">
-        <div className="mb-4 flex size-12 items-center justify-center rounded-full bg-primary/10">
-          <svg className="size-6 text-primary" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
-          </svg>
+      <div style={CANVAS_STYLE} className={cn('min-h-screen', CANVAS)}>
+        <CheckoutTopBar eventSlug={eventSlug} secure={false} />
+        <div className={cn(PAGE, 'flex min-h-[calc(100vh-3.5rem)] items-center justify-center py-12')}>
+          <div className={cn(PANEL, PANEL_BODY, 'w-full max-w-md text-center')}>
+            <div className="mx-auto mb-4 flex size-12 items-center justify-center rounded-2xl bg-primary/10 text-primary">
+              <UserRound className="size-6" aria-hidden />
+            </div>
+            <h1 className="text-fs-lg font-bold tracking-tight text-foreground">Sign in to Register</h1>
+            <p className="mx-auto mt-2 max-w-sm text-fs-base leading-relaxed text-muted-foreground">
+              The organiser requires you to be signed in before registering for this event.
+            </p>
+            <a
+              href={`/login?redirect=${encodeURIComponent(buildRegisterHref(eventSlug, pass.id))}`}
+              className={cn(buttonVariants({ variant: 'primary', size: 'lg' }), 'mt-6 w-full')}
+            >
+              Sign In to Continue
+            </a>
+          </div>
         </div>
-        <h2 className="text-fs-lg font-bold text-foreground">Sign in to Register</h2>
-        <p className="mt-2 max-w-sm text-fs-base text-muted-foreground">
-          The organiser requires you to be signed in before registering for this event.
-        </p>
-        <a
-          href={`/login?redirect=${encodeURIComponent(buildRegisterHref(eventSlug, pass.id))}`}
-          className={cn(buttonVariants({ variant: 'primary', size: 'sm' }), 'mt-6')}
-        >
-          Sign In to Continue
-        </a>
       </div>
     )
   }
@@ -1371,34 +1391,56 @@ export function RegisterClient({
     groups: reviewGroups,
   }]
 
+  // RD-RT4.0 — the mobile checkout bar's hairline progress meter. Pure formatting over
+  // `completedCount` / `passSections`, both of which already exist for the step wizard.
+  const formProgressPct = passSections.length === 0
+    ? 0
+    : Math.round((completedCount / passSections.length) * 100)
+  const barProgressPct  = step === 'review' ? 100 : formProgressPct
+
   // ── Main layout ────────────────────────────────────────────────────────────
   return (
-    // RD-RT1.0: the page now sits on the Event Details page container (max-w-7xl,
-    // px-4/6/8) instead of max-w-4xl, so registration continues the same measure the
-    // attendee just left. pb-28 (mobile) clears the sticky checkout bar.
-    <div className="mx-auto w-full max-w-7xl px-4 pb-28 pt-6 sm:px-6 lg:px-8 lg:pb-16 lg:pt-8">
+    // RD-RT4.0: THE canvas. Every panel below is white; the page is not. That one
+    // separation is what lets the form sections, the journey and the summary read as
+    // objects sitting on a surface instead of as regions of a single white sheet.
+    <div style={CANVAS_STYLE} className={cn('relative min-h-screen', CANVAS)}>
 
-      {/* RD-RT3.2: compact checkout header (~110px) in place of the 350px poster hero.
-          Poster, pass, date, venue, closing and the trust statements all moved into the
-          sticky summary — relocated, not removed. Owns the page <h1>. */}
-      <RegistrationHeader
-        eventSlug={eventSlug}
-        eventName={eventName}
-        estimate={estimateLabel}
+      {/* A single brand bloom behind the masthead — the only large-area colour on the
+          page, and deliberately at ~0.05 alpha so it registers as warmth, not as pink. */}
+      <div
+        aria-hidden
+        className="pointer-events-none absolute inset-x-0 top-0 h-[420px] bg-[radial-gradient(100%_100%_at_50%_0%,rgb(var(--primary-rgb)_/_0.06)_0%,transparent_70%)]"
       />
 
-      {/* RD-RT3.1: ONE journey, shown for every registration. Payment renders as
-          "not required" rather than vanishing when nothing is due. */}
-      <JourneyStepper current={step} paymentRequired={paymentRequired} />
+      {/* Checkout chrome — pinned for the whole flow, so "where am I / how do I leave"
+          is answerable from any scroll position. */}
+      <CheckoutTopBar eventSlug={eventSlug} secure={isPaid} />
 
-      {/* 65 / 35 — the registration experience beside a sticky summary. */}
+      {/* pb-32 (mobile) clears the sticky checkout bar and its safe-area inset. */}
+      <div className={cn(PAGE, 'relative pb-32 lg:pb-20')}>
+
+        {/* Breadcrumb → eyebrow → title → one sentence → three quiet facts. The poster,
+            pass, price and venue live in the summary, which is on screen the whole
+            way down — relocated, not removed. Owns the page <h1>. */}
+        <RegistrationMasthead
+          eventSlug={eventSlug}
+          eventName={eventName}
+          estimate={estimateLabel}
+          isPaid={isPaid}
+        />
+
+        {/* RD-RT3.1: ONE journey, shown for every registration. Payment renders as
+            "not required" rather than vanishing when nothing is due. */}
+        <JourneyStepper current={step} paymentRequired={paymentRequired} />
+
+      {/* 64 / 36 — the registration experience beside a sticky summary. */}
       {/* RD-RT3.2.1: `lg:items-start` was removed on purpose. It set align-items:start,
           which shrank the right grid item to its content height — so the sticky child
           exactly filled its containing block and had ZERO travel distance, which is why
           it never appeared to stick. With the default `stretch`, the right column spans
           the row height set by the (taller) form column and the sticky child can move
           within it. Native CSS only; no scroll listeners. */}
-      <div className="lg:grid lg:grid-cols-[minmax(0,65fr)_minmax(0,35fr)] lg:gap-8">
+      <div className="lg:grid lg:grid-cols-[minmax(0,64fr)_minmax(0,36fr)] lg:gap-8">
 
         {/* LEFT: review, or progress + form.
             RD-RT3.0: during review the form is replaced rather than appended to, so the
@@ -1443,6 +1485,18 @@ export function RegisterClient({
           />
         ) : (
         <>
+          {/* RD-RT3.5: the draft is OFFERED, never applied behind the attendee's back.
+              RD-RT4.0 moves it ABOVE the pass selector — a pure sibling reorder. "Resume
+              or start over" is the first decision of the visit; asking it after the pass
+              has already been chosen made the answer feel like it might undo that. */}
+          {pendingDraft && (
+            <RecoveryBanner
+              fieldCount={Object.keys(pendingDraft).length}
+              onResume={resumeDraft}
+              onDiscard={discardDraft}
+            />
+          )}
+
           {/* H-7: in-form pass switcher — change pass without losing entered data */}
           {passes.length > 1 && (
             <PassSwitcher
@@ -1461,15 +1515,6 @@ export function RegisterClient({
             activeIdx={activeStepIdx}
             completedCount={completedCount}
           />
-
-          {/* RD-RT3.5: the draft is OFFERED, never applied behind the attendee's back. */}
-          {pendingDraft && (
-            <RecoveryBanner
-              fieldCount={Object.keys(pendingDraft).length}
-              onResume={resumeDraft}
-              onDiscard={discardDraft}
-            />
-          )}
 
           {/* M-4 / RD-RT3.5: autosave + connectivity. Height reserved either way, so the
               text changing never shifts the form. */}
@@ -1491,6 +1536,7 @@ export function RegisterClient({
                   section={section}
                   index={i + 1}
                   complete={sectionCompleteness[i] ?? false}
+                  active={i === activeStepIdx}
                   fieldStates={fieldStates}
                   values={values}
                   errors={errors}
@@ -1500,10 +1546,20 @@ export function RegisterClient({
               ))}
             </div>
 
-            {/* Coupon input — only for paid passes without applied coupon */}
+            {/* Coupon — RD-RT4.0 gives it the same panel language as a form section, so
+                the last thing before the total stops looking like an afterthought bolted
+                to the bottom of the form. Same input, same handlers, same states. */}
             {isPaid && !couponApplied && (
-              <div className="mt-5">
-                <p className="mb-1.5 text-fs-sm font-medium text-foreground">Have a coupon code?</p>
+              <div className={cn(PANEL, 'mt-4 p-4 sm:p-5')}>
+                <div className="mb-2.5 flex items-center gap-2.5">
+                  <span aria-hidden className="flex size-7 shrink-0 items-center justify-center rounded-xl bg-muted text-muted-foreground">
+                    <Tag className="size-3.5" />
+                  </span>
+                  <div className="min-w-0">
+                    <p className="text-fs-sm font-bold text-foreground">Have a coupon code?</p>
+                    <p className="text-fs-2xs text-muted-foreground">Applied to your total before payment.</p>
+                  </div>
+                </div>
                 <div className="flex gap-2">
                   <input
                     type="text"
@@ -1513,14 +1569,14 @@ export function RegisterClient({
                     placeholder="Enter code"
                     aria-invalid={!!couponError}
                     aria-describedby={couponError ? "coupon-error" : undefined}
-                    className={cn(controlCls(!!couponError), "flex-1 font-mono uppercase tracking-widest placeholder:normal-case placeholder:tracking-normal")}
+                    className={cn(controlCls(!!couponError), "flex-1 font-mono uppercase tracking-widest placeholder:font-sans placeholder:normal-case placeholder:tracking-normal")}
                     disabled={couponChecking}
                   />
                   <button
                     type="button"
                     onClick={() => void handleApplyCoupon()}
                     disabled={couponChecking || !couponInput.trim()}
-                    className={buttonVariants({ variant: 'outline', size: 'sm' })}
+                    className={cn(buttonVariants({ variant: 'outline', size: 'md' }), 'shrink-0')}
                   >
                     {couponChecking ? 'Checking…' : 'Apply'}
                   </button>
@@ -1531,23 +1587,27 @@ export function RegisterClient({
 
             {/* Coupon applied badge (with remove) */}
             {isPaid && couponApplied && (
-              <div className="mt-5 flex items-center justify-between rounded-xl border border-emerald-200/70 bg-emerald-50/80 px-4 py-3">
-                <div>
-                  <div className="flex items-center gap-1.5">
-                    <Check className="size-3.5 text-emerald-600" aria-hidden />
-                    <span className="font-mono text-fs-xs font-bold text-emerald-700">{couponApplied.code}</span>
-                    {couponApplied.description && (
-                      <span className="text-fs-xs text-emerald-600">{couponApplied.description}</span>
-                    )}
+              <div className="mt-4 flex items-center justify-between gap-3 rounded-2xl border border-emerald-500/25 bg-emerald-500/[0.06] p-4">
+                <div className="flex min-w-0 items-start gap-3">
+                  <span aria-hidden className="flex size-7 shrink-0 items-center justify-center rounded-xl bg-emerald-500/15 text-emerald-600">
+                    <Check className="size-3.5" strokeWidth={3} />
+                  </span>
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                      <span className="rounded bg-emerald-500/15 px-1.5 py-0.5 font-mono text-fs-2xs font-bold text-emerald-700">{couponApplied.code}</span>
+                      {couponApplied.description && (
+                        <span className="text-fs-xs text-emerald-700/90">{couponApplied.description}</span>
+                      )}
+                    </div>
+                    <p className="mt-1 text-fs-xs font-semibold text-emerald-700">
+                      −₹{(couponApplied.discountPaise / 100).toLocaleString('en-IN')} applied to your total
+                    </p>
                   </div>
-                  <p className="mt-0.5 text-fs-2xs text-emerald-600">
-                    −₹{(couponApplied.discountPaise / 100).toLocaleString('en-IN')} discount applied
-                  </p>
                 </div>
                 <button
                   type="button"
                   onClick={handleRemoveCoupon}
-                  className="ml-3 shrink-0 text-fs-2xs font-medium text-emerald-700 hover:underline"
+                  className="-my-1 inline-flex min-h-9 shrink-0 items-center rounded-md px-2 text-fs-2xs font-semibold text-emerald-700 underline underline-offset-2 outline-none transition-colors hover:bg-emerald-500/10 hover:text-emerald-800 focus-visible:ring-2 focus-visible:ring-emerald-600/40"
                 >
                   Remove
                 </button>
@@ -1556,32 +1616,40 @@ export function RegisterClient({
 
             {/* Approval mode note */}
             {approvalMode === 'manual' && (
-              <div className="mt-5 rounded-xl border border-amber-200/60 bg-amber-50/50 px-4 py-3 text-fs-xs text-amber-700">
-                Your registration will be reviewed before confirmation. You will be notified by email once approved.
+              <div className="mt-4 flex items-start gap-3 rounded-2xl border border-amber-500/25 bg-amber-500/[0.06] p-4">
+                <span aria-hidden className="flex size-7 shrink-0 items-center justify-center rounded-xl bg-amber-500/15 text-amber-600">
+                  <Clock3 className="size-3.5" />
+                </span>
+                <p className="text-fs-xs leading-relaxed text-amber-800">
+                  <span className="font-bold">Reviewed before confirmation.</span>{' '}
+                  Your registration will be reviewed by the organiser. You will be notified by email once approved.
+                </p>
               </div>
             )}
 
             {/* H-4: payment recovery card — shown when a payment was cancelled/failed.
                 Retry reuses the same order (idempotent, no duplicate registration). */}
             {paymentRecovery ? (
-              <div role="alert" className="mt-4 rounded-2xl border border-amber-200/70 bg-amber-50/60 p-4 sm:p-5">
+              <div role="alert" className={cn(PANEL, 'mt-4 border-amber-500/30 p-4 sm:p-5')}>
                 <div className="flex items-start gap-3">
-                  <AlertTriangle className="mt-0.5 size-5 shrink-0 text-amber-600" aria-hidden />
+                  <span aria-hidden className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-amber-500/10 text-amber-600">
+                    <AlertTriangle className="size-4" />
+                  </span>
                   <div className="min-w-0">
                     <p className="text-fs-base font-bold text-foreground">Payment wasn&apos;t completed</p>
-                    <p className="mt-0.5 text-fs-xs leading-relaxed text-muted-foreground">
+                    <p className="mt-1 text-fs-xs leading-relaxed text-muted-foreground">
                       You have <strong className="font-semibold text-foreground">not been charged</strong>, and your
                       registration details are saved. You can safely resume payment — it reuses the same order, so
                       you will never be charged twice.
                     </p>
                   </div>
                 </div>
-                <div className="mt-4 flex flex-col gap-2 sm:flex-row">
+                <div className="mt-4 flex flex-col gap-2 sm:flex-row-reverse">
                   <button
                     type="button"
                     onClick={() => void retryPayment()}
                     disabled={submitting}
-                    className={cn(buttonVariants({ variant: 'primary', size: 'md' }), 'flex-1 gap-1.5')}
+                    className={cn(buttonVariants({ variant: 'primary', size: 'lg' }), 'flex-1 gap-1.5')}
                   >
                     <RotateCcw className="size-4" aria-hidden />
                     {submitting ? 'Processing…' : isPaid ? `Retry Payment · ${priceLabel}` : 'Retry Payment'}
@@ -1590,7 +1658,7 @@ export function RegisterClient({
                     type="button"
                     onClick={() => setPaymentRecovery(null)}
                     disabled={submitting}
-                    className={cn(buttonVariants({ variant: 'outline', size: 'md' }), 'flex-1')}
+                    className={cn(buttonVariants({ variant: 'outline', size: 'lg' }), 'flex-1')}
                   >
                     Return to Registration
                   </button>
@@ -1598,8 +1666,9 @@ export function RegisterClient({
               </div>
             ) : submitError ? (
               /* Submit error — assertive live region so failures are announced */
-              <div role="alert" className="mt-4 rounded-xl border border-destructive/20 bg-destructive/[0.04] px-4 py-3 text-fs-sm text-destructive">
-                {submitError}
+              <div role="alert" className="mt-4 flex items-start gap-3 rounded-2xl border border-destructive/25 bg-destructive/[0.04] p-4 text-fs-sm leading-relaxed text-destructive">
+                <AlertTriangle className="mt-0.5 size-4 shrink-0" aria-hidden />
+                <span className="min-w-0">{submitError}</span>
               </div>
             ) : null}
 
@@ -1623,13 +1692,22 @@ export function RegisterClient({
                   Continue to review
                 </button>
 
-                <p className="mt-5 text-center text-fs-2xs text-muted-foreground">
-                  By registering, you agree to the event organiser&apos;s terms and conditions.
-                </p>
+                {/* RD-RT4.0: one quiet closing block instead of two stacked footnotes —
+                    the legal line, the security line and the draft reassurance are all
+                    the same register of information, so they share one strip. */}
+                <div className="mt-6 rounded-2xl border border-border/60 bg-card/60 px-4 py-3.5">
+                  <p className="flex items-center justify-center gap-1.5 text-fs-2xs font-semibold text-muted-foreground">
+                    <Lock className="size-3 shrink-0 text-emerald-600" aria-hidden />
+                    {isPaid ? 'Encrypted payment via Razorpay' : 'Your details are sent securely'}
+                  </p>
+                  <p className="mt-2 text-center text-fs-2xs leading-relaxed text-muted-foreground">
+                    By registering, you agree to the event organiser&apos;s terms and conditions.
+                  </p>
 
-                {/* RD-RT3.5: quiet reassurance, precise about scope — the draft lives in
-                    this browser, not in an account. */}
-                <RecoveryReassurance />
+                  {/* RD-RT3.5: quiet reassurance, precise about scope — the draft lives
+                      in this browser, not in an account. */}
+                  <RecoveryReassurance />
+                </div>
               </>
             )}
           </form>
@@ -1644,8 +1722,20 @@ export function RegisterClient({
         <div className="hidden lg:block">
           {/* RD-RT3.3: bounded to the viewport and scrollable internally, so a summary
               taller than the screen no longer hides its own CTA. Overflow lives on the
-              STICKY element itself, never an ancestor, so stickiness is unaffected. */}
-          <div className="sticky top-6 max-h-[calc(100vh-3rem)] overflow-y-auto overscroll-contain">
+              STICKY element itself, never an ancestor, so stickiness is unaffected.
+              RD-RT4.0: `top-20` clears the 56px sticky checkout bar with a 24px gutter.
+
+              The horizontal `-mx-3 px-3` that used to be here is GONE: it existed only to
+              stop `overflow-y-auto` (which forces overflow-x to `auto`) from clipping the
+              perforation notches where they overhung the card edge. The notches no longer
+              overhang — they are half-discs inside the border box — so the compensation is
+              dead. Measured after the change: scrollWidth === clientWidth, no overflow.
+
+              `pb-2` stays and IS load-bearing: the panel's ambient shadow extends ~8px
+              below its border box (18px offset + 36px blur / 2 − 28px spread), and
+              box-shadow does not contribute to scrollable overflow, so a smaller pad cuts
+              the bottom of the shadow off at the scroll container's padding edge. */}
+          <div className="sticky top-20 max-h-[calc(100vh-6.5rem)] overflow-y-auto overscroll-contain pb-2">
             <SummaryPanel
               identity={identity}
               passName={pass.name}
@@ -1656,13 +1746,13 @@ export function RegisterClient({
                     type="button"
                     onClick={() => void (feeConfirm ? confirmAndPay() : finaliseRegistration())}
                     disabled={submitting || !reviewReady}
-                    className={cn(buttonVariants({ variant: 'primary', size: 'md' }), 'w-full gap-1.5')}
+                    className={cn(buttonVariants({ variant: 'primary', size: 'lg' }), 'w-full gap-2')}
                   >
                     <ShieldCheck className="size-4" aria-hidden />
                     {submitting ? 'Processing…' : paymentRequired ? 'Proceed to Secure Payment' : 'Complete Registration'}
                   </button>
-                  <p className="mt-2.5 flex items-center justify-center gap-1.5 text-fs-2xs text-muted-foreground">
-                    <ShieldCheck className="size-3 shrink-0 text-emerald-600" aria-hidden />
+                  <p className="mt-2.5 flex items-center justify-center gap-1.5 text-fs-2xs font-medium text-muted-foreground">
+                    <Lock className="size-3 shrink-0 text-emerald-600" aria-hidden />
                     Encrypted payment via Razorpay
                   </p>
                 </>
@@ -1672,12 +1762,12 @@ export function RegisterClient({
                     type="button"
                     onClick={() => formRef.current?.requestSubmit()}
                     disabled={submitting}
-                    className={cn(buttonVariants({ variant: 'primary', size: 'md' }), 'w-full')}
+                    className={cn(buttonVariants({ variant: 'primary', size: 'lg' }), 'w-full')}
                   >
                     {submitting ? processingLabel : ctaLabel}
                   </button>
-                  <p className="mt-2.5 flex items-center justify-center gap-1.5 text-fs-2xs text-muted-foreground">
-                    <ShieldCheck className="size-3 shrink-0 text-emerald-600" aria-hidden />
+                  <p className="mt-2.5 flex items-center justify-center gap-1.5 text-fs-2xs font-medium text-muted-foreground">
+                    <Lock className="size-3 shrink-0 text-emerald-600" aria-hidden />
                     {isPaid ? 'Encrypted payment via Razorpay' : 'Your details are sent securely'}
                   </p>
                 </>
@@ -1687,6 +1777,7 @@ export function RegisterClient({
         </div>
 
       </div>
+      </div>
 
       {/* C-2: mobile-only sticky checkout bar (Total + Pay). Desktop keeps the right-column
           sticky SummaryCard — this is `lg:hidden`, so the desktop summary is never duplicated.
@@ -1695,45 +1786,96 @@ export function RegisterClient({
           and the SAME consent-gated proceed action. It stays hidden during payment
           recovery, where the recovery card owns the action. */}
       {!paymentRecovery && (
-        <div className={cn(
-          'fixed inset-x-0 bottom-0 z-40 border-t border-border bg-card/95 px-4 pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] shadow-[0_-4px_20px_rgb(0_0_0/0.08)] backdrop-blur-md lg:hidden',
-          fieldFocused && 'hidden',
-        )}>
-          <div className="mx-auto flex max-w-lg items-center justify-between gap-4">
-            <div className="min-w-0">
-              <p className="text-fs-2xs font-semibold uppercase tracking-wider text-muted-foreground">Total</p>
-              <p className="text-fs-lg font-bold leading-tight text-foreground">
-                {feeConfirm
-                  ? formatPaise(feeConfirm.breakdown.totalPaise)
-                  : couponApplied
-                    ? priceLabel
-                    : <PassPrice price={pass.price} regularPrice={pass.regularPrice} isFree={pass.isFree} align="left" size="sm" showBadge={false} />}
-              </p>
+        <div className={cn('fixed inset-x-0 bottom-0 z-40 lg:hidden', fieldFocused && 'hidden')}>
+
+          {/* RD-RT4.0: the summary the desktop keeps in view all the way down, folded
+              into a sheet the bar can open. It renders the SAME `identity` and
+              `summaryPricing` objects the desktop panel receives, so the two surfaces
+              can never disagree. Collapsed via grid-rows so the height animates without
+              a measured pixel value; `motion-reduce` snaps it. */}
+          <div
+            id="rd-mobile-summary"
+            className={cn(
+              'grid transition-[grid-template-rows] duration-300 ease-out motion-reduce:transition-none',
+              mobileSummaryOpen ? 'grid-rows-[1fr]' : 'grid-rows-[0fr]',
+            )}
+          >
+            <div className="overflow-hidden">
+              <div className="mx-auto max-w-lg px-3 pb-2">
+                <div className={cn(PANEL, 'max-h-[46vh] overflow-y-auto overscroll-contain p-4')}>
+                  <SummaryDigest identity={identity} passName={pass.name} pricing={summaryPricing} />
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="border-t border-border bg-card/95 shadow-[0_-10px_30px_-12px_rgb(15_23_42_/_0.28)] backdrop-blur-xl">
+            {/* A 2px meter of how much of the form is behind you — the one piece of
+                progress feedback that survives on a 360px screen. */}
+            <div aria-hidden className="h-0.5 w-full bg-border/70">
+              <div
+                className="h-full bg-[image:var(--primary-gradient)] transition-[width] duration-500 ease-out motion-reduce:transition-none"
+                style={{ width: `${barProgressPct}%` }}
+              />
+            </div>
+
+            <div className="mx-auto flex max-w-lg items-center justify-between gap-3 px-4 pt-2.5 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
+              <button
+                type="button"
+                onClick={() => setMobileSummaryOpen(o => !o)}
+                aria-expanded={mobileSummaryOpen}
+                aria-controls="rd-mobile-summary"
+                className="min-w-0 shrink rounded-lg px-1 py-0.5 text-left outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
+              >
+                <span className="flex items-center gap-1 text-fs-2xs font-bold uppercase tracking-wider text-muted-foreground">
+                  Total
+                  <ChevronUp
+                    className={cn(
+                      'size-3 shrink-0 transition-transform duration-200 motion-reduce:transition-none',
+                      mobileSummaryOpen && 'rotate-180',
+                    )}
+                    aria-hidden
+                  />
+                </span>
+                <span className="block text-fs-lg font-extrabold leading-tight tracking-tight text-foreground">
+                  {feeConfirm
+                    ? formatPaise(feeConfirm.breakdown.totalPaise)
+                    : couponApplied
+                      ? priceLabel
+                      : <PassPrice price={pass.price} regularPrice={pass.regularPrice} isFree={pass.isFree} align="left" size="lg" showBadge={false} />}
+                </span>
+                <span className="sr-only">
+                  {mobileSummaryOpen ? 'Hide registration summary' : 'Show registration summary'}
+                </span>
+              </button>
+
               <p className="sr-only">
                 {step === 'review' ? 'Review your registration before confirming' : 'Total for this registration'}
               </p>
+
+              {step === 'review' ? (
+                <button
+                  type="button"
+                  onClick={() => void (feeConfirm ? confirmAndPay() : finaliseRegistration())}
+                  disabled={submitting || !reviewReady}
+                  className={cn(buttonVariants({ variant: 'primary', size: 'lg' }), 'min-w-[52%] gap-1.5')}
+                >
+                  <ShieldCheck className="size-4 shrink-0" aria-hidden />
+                  {submitting ? 'Processing…' : paymentRequired ? 'Proceed to Pay' : 'Complete'}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => formRef.current?.requestSubmit()}
+                  disabled={submitting}
+                  className={cn(buttonVariants({ variant: 'primary', size: 'lg' }), 'min-w-[52%]')}
+                >
+                  {submitting
+                    ? (!isPaid || couponApplied?.finalPaise === 0 ? 'Submitting…' : 'Processing…')
+                    : (!isPaid || couponApplied?.finalPaise === 0 ? 'Complete Registration' : `Pay ${priceLabel}`)}
+                </button>
+              )}
             </div>
-            {step === 'review' ? (
-              <button
-                type="button"
-                onClick={() => void (feeConfirm ? confirmAndPay() : finaliseRegistration())}
-                disabled={submitting || !reviewReady}
-                className={cn(buttonVariants({ variant: 'primary', size: 'lg' }), 'min-w-[52%]')}
-              >
-                {submitting ? 'Processing…' : paymentRequired ? 'Proceed to Pay' : 'Complete'}
-              </button>
-            ) : (
-              <button
-                type="button"
-                onClick={() => formRef.current?.requestSubmit()}
-                disabled={submitting}
-                className={cn(buttonVariants({ variant: 'primary', size: 'lg' }), 'min-w-[52%]')}
-              >
-                {submitting
-                  ? (!isPaid || couponApplied?.finalPaise === 0 ? 'Submitting…' : 'Processing…')
-                  : (!isPaid || couponApplied?.finalPaise === 0 ? 'Complete Registration' : `Pay ${priceLabel}`)}
-              </button>
-            )}
           </div>
         </div>
       )}

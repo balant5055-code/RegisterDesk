@@ -29,7 +29,7 @@ import { SectionLayout } from '@/components/marketing/layout/SectionLayout'
 import { SectionHeader } from '@/components/marketing/layout/SectionHeader'
 import { FAQItem } from '@/components/marketing/sections/FAQSection'
 import { ContactInquiryForm } from '@/components/marketing/contact/ContactInquiryForm'
-import { BUSINESS_IDENTITY, OWNERSHIP_SENTENCE } from '@/lib/marketing/ownership'
+import { BUSINESS_IDENTITY } from '@/lib/marketing/ownership'
 import { buildMetadata, organizationJsonLd, breadcrumbJsonLd, faqJsonLd } from '@/lib/marketing/seo'
 import type { FaqItem } from '@/lib/marketing/types'
 
@@ -138,11 +138,12 @@ function ContactRail({ className }: { className?: string }) {
         ))}
       </ul>
 
-      {/* RD-LAUNCH-03 — business identity. The product brand and the legal entity
-          operating it, stated separately so neither is ambiguous. Only facts that
-          exist in the codebase are listed; registered address and GSTIN are absent
-          because no such values exist to publish. Supporting detail at the foot of
-          the aside column, not a card of its own. */}
+      {/* RD-LAUNCH-03 — business identity. An at-a-glance directory: the product, where
+          to reach it, and where it lives. Only facts that exist in the codebase are
+          listed; registered address and GSTIN are absent because no such values exist
+          to publish. Ownership is disclosed through OWNERSHIP_SENTENCE on the about and
+          legal pages and OWNERSHIP_SHORT in the footer — it is not restated here.
+          Supporting detail at the foot of the aside column, not a card of its own. */}
       <div className="mt-7 border-t border-border/60 pt-6">
         <h2 className={cn(typography.overline, 'text-muted-foreground')}>Business identity</h2>
         <dl className="mt-3 space-y-1.5">
@@ -153,7 +154,6 @@ function ContactRail({ className }: { className?: string }) {
             </div>
           ))}
         </dl>
-        <p className={cn(fs.xs, 'mt-4 leading-relaxed text-muted-foreground')}>{OWNERSHIP_SENTENCE}</p>
       </div>
     </div>
   )

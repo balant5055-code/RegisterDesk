@@ -9,9 +9,10 @@ import { adminDb }         from '@/lib/firebase/admin'
 import { getRegistration } from '@/lib/firebase/firestore/registrations'
 import { buildQrValue, signTicketToken } from '@/lib/tickets/generate'
 import { signReceiptToken }              from '@/lib/receipts/token'
-import { getStoredAttendeeFinancials }   from '@/lib/fees/storedFinancials'
-import { buildAttendeeFeeBreakdown }     from '@/lib/fees/attendeeBreakdown'
 import type { EventDetailsDraft }        from '@/components/wizard/eventDetailsConfig'
+import { MarketingPageLayout } from '@/components/marketing/layout/MarketingPageLayout'
+import { ToastProvider } from '@/components/ui/Toast'
+import { FreshRegistrationToast } from './FreshRegistrationToast'
 import { SuccessClient, type CalendarData } from './SuccessClient'
 import type { Metadata } from 'next'
 import { buildMetadata } from '@/lib/marketing/seo'
@@ -33,18 +34,6 @@ function fmtDateLabel(d: string): string {
     weekday: 'short', day: 'numeric', month: 'short', year: 'numeric',
   })
 }
-// Firestore Timestamp | Date | epoch → milliseconds, defensively (the field is typed
-// `unknown` on RegistrationDocument).
-function toMillis(v: unknown): number | null {
-  if (!v) return null
-  if (typeof v === 'number') return v
-  if (v instanceof Date) return v.getTime()
-  const t = v as { toMillis?: () => number; seconds?: number }
-  if (typeof t.toMillis === 'function') return t.toMillis()
-  if (typeof t.seconds === 'number')    return t.seconds * 1000
-  return null
-}
-
 function fmtTimeLabel(t: string): string {
   const [h, m] = t.split(':').map(Number)
   if (Number.isNaN(h)) return t
@@ -69,15 +58,6 @@ export default async function RegistrationSuccessPage({
 
   const { ticketCode, eventName, passName, attendee, status, amount, paymentStatus } = registration
 
-  // RD-RT3.4: registration date, off the record already loaded. Firestore Timestamp →
-  // label here (deterministic string) rather than shipping a Date to the client.
-  const registeredAtMs = toMillis(registration.registeredAt)
-  const registeredAtLabel = registeredAtMs
-    ? new Date(registeredAtMs).toLocaleDateString('en-IN', {
-        day: 'numeric', month: 'short', year: 'numeric',
-      })
-    : null
-
   const isPending = status === 'pending' || status === 'waitlisted'
 
   // QR — use stored value or derive for legacy registrations
@@ -99,24 +79,16 @@ export default async function RegistrationSuccessPage({
     ? `${baseUrl}/api/receipts/${id}?token=${encodeURIComponent(signReceiptToken(id))}`
     : null
 
-  // RD-PAYMENT-05 B1: itemize the charge from the canonical stored financials (attendee_pays
-  // only; null for organizer_absorbs / free). Never recomputed — read from the ledger entry.
-  const feeBreakdown = isPaidRegistration
-    ? buildAttendeeFeeBreakdown(await getStoredAttendeeFinancials(id))
-    : null
-
-  // H-1: amount actually paid (registration.amount is in paise). Free ⇒ no charge line.
-  const amountLabel = isPaidRegistration
-    ? `₹${Math.round((amount ?? 0) / 100).toLocaleString('en-IN')}`
-    : null
+  // NOTE: the itemized fee breakdown and the "amount paid" label were rendered ONLY by the
+  // Registration summary card. With that card removed nothing consumes them, so both they
+  // and the stored-financials read they required are gone rather than left as dead work.
+  // The receipt download below is untouched and remains the record of what was charged.
 
   // H-1/H-5: load the event once and derive the display summary + action targets.
   // Non-critical — every field falls back to null and the page still renders.
   let calendarData:   CalendarData | undefined = undefined
   let dateLabel:      string | null = null
   let timeLabel:      string | null = null
-  let venueLabel:     string | null = null
-  let eventTypeLabel: string | null = null
   let directionsUrl:  string | null = null
   let organizerEmail: string | null = null
   let organizerPhone: string | null = null
@@ -126,9 +98,6 @@ export default async function RegistrationSuccessPage({
     if (eventSnap.exists) {
       const raw      = eventSnap.data() as Record<string, unknown>
       const ed       = raw.eventDetails as EventDetailsDraft | null
-      const et       = typeof raw.eventType === 'string' ? raw.eventType : null
-      eventTypeLabel = et && et !== 'custom' ? et.charAt(0).toUpperCase() + et.slice(1) : null
-
       const schedule = ed?.schedule
       const venue    = ed?.venue
       const support  = ed?.support
@@ -150,10 +119,9 @@ export default async function RegistrationSuccessPage({
         calendarData = { startDate, endDate, startTime, endTime, location }
       }
 
-      if (venueType === 'online') {
-        venueLabel = online?.platform ? `Online · ${online.platform}` : 'Online event'
-      } else {
-        venueLabel = [physical?.name, physical?.city].filter(Boolean).join(', ') || physical?.addressLine1 || null
+      // Only the physical arm has anything left to do: the venue LABEL is no longer
+      // rendered anywhere on this page, so the online arm's body disappeared entirely.
+      if (venueType !== 'online') {
         const mapsLink = physical?.mapsLink?.trim()
         if (mapsLink) {
           directionsUrl = mapsLink
@@ -170,34 +138,38 @@ export default async function RegistrationSuccessPage({
     }
   } catch { /* Event summary is non-critical */ }
 
+  // CHROME — the registration funnel itself is deliberately chrome-less (a focused
+  // checkout). Success is the END of that funnel: the attendee is done, so they are
+  // handed back to the public product with the same navbar and footer every other
+  // public page uses. Composed here, exactly as the homepage and /causes do it — this
+  // app has no (public) route group, so the shell is opt-in per page.
   return (
-    <SuccessClient
-      registrationId={id}
-      ticketCode={ticketCode}
-      eventName={eventName}
-      passName={passName}
-      attendeeName={attendee.name}
-      attendeeEmail={attendee.email}
-      status={status}
-      isPending={isPending}
-      qrSvg={qrSvg}
-      ticketPdfUrl={ticketPdfUrl}
-      receiptUrl={receiptUrl}
-      eventSlug={slug}
-      calendarData={calendarData}
-      amountLabel={amountLabel}
-      dateLabel={dateLabel}
-      timeLabel={timeLabel}
-      venueLabel={venueLabel}
-      eventTypeLabel={eventTypeLabel}
-      directionsUrl={directionsUrl}
-      organizerEmail={organizerEmail}
-      organizerPhone={organizerPhone}
-      faqUrl={faqUrl}
-      paymentStatus={paymentStatus}
-      registeredAtLabel={registeredAtLabel}
-      shareUrl={`${baseUrl}/events/${slug}`}
-      feeBreakdown={feeBreakdown}
-    />
+    <MarketingPageLayout>
+      <ToastProvider>
+        <FreshRegistrationToast ticketCode={ticketCode} isPending={isPending} />
+        <SuccessClient
+          registrationId={id}
+          ticketCode={ticketCode}
+          eventName={eventName}
+          passName={passName}
+          attendeeName={attendee.name}
+          attendeeEmail={attendee.email}
+          status={status}
+          isPending={isPending}
+          qrSvg={qrSvg}
+          ticketPdfUrl={ticketPdfUrl}
+          receiptUrl={receiptUrl}
+          eventSlug={slug}
+          calendarData={calendarData}
+          dateLabel={dateLabel}
+          timeLabel={timeLabel}
+          directionsUrl={directionsUrl}
+          organizerEmail={organizerEmail}
+          organizerPhone={organizerPhone}
+          faqUrl={faqUrl}
+          shareUrl={`${baseUrl}/events/${slug}`}
+        />
+      </ToastProvider>
+    </MarketingPageLayout>
   )
 }

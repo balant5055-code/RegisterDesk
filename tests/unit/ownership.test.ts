@@ -7,6 +7,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   PLATFORM_BRAND, LEGAL_ENTITY, OWNERSHIP_SENTENCE, OWNERSHIP_SHORT, BUSINESS_IDENTITY,
+  PUBLIC_WEBSITE,
 } from '@/lib/marketing/ownership'
 import { BUSINESS_CONFIG_DEFAULTS } from '@/lib/config/businessConfig'
 
@@ -37,10 +38,24 @@ describe('ownership constants', () => {
 })
 
 describe('business identity — published facts only', () => {
-  it('separates the product brand from the legal entity', () => {
+  it('lists exactly product, support and website, in that order', () => {
+    expect(BUSINESS_IDENTITY.map(i => i.label)).toEqual(['Product', 'Support', 'Website'])
+  })
+
+  it('names the product brand and the support address', () => {
     const byLabel = Object.fromEntries(BUSINESS_IDENTITY.map(i => [i.label, i.value]))
     expect(byLabel['Product']).toBe('RegisterDesk')
-    expect(byLabel['Legal entity']).toBe('VARDHINI PRIME ENTERPRISES')
+    expect(byLabel['Support']).toBe('support@registerdesk.in')
+    expect(byLabel['Website']).toBe('registerdesk.in')
+  })
+
+  // The legal entity is still DISCLOSED (about + legal pages + footer + email shell),
+  // just not restated in this compact directory.
+  it('does not restate the legal entity, which OWNERSHIP_SENTENCE already carries', () => {
+    const labels = BUSINESS_IDENTITY.map(i => i.label.toLowerCase()).join(' ')
+    expect(labels).not.toContain('legal entity')
+    expect(BUSINESS_IDENTITY.some(i => i.value === LEGAL_ENTITY)).toBe(false)
+    expect(OWNERSHIP_SENTENCE).toContain(LEGAL_ENTITY)   // still disclosed elsewhere
   })
 
   it('never publishes a registered address, CIN or GSTIN — none exist to publish', () => {
@@ -52,5 +67,22 @@ describe('business identity — published facts only', () => {
     for (const item of BUSINESS_IDENTITY) {
       expect(item.value.trim().length).toBeGreaterThan(0)
     }
+  })
+})
+
+// The published website is a FACT, not the deployment origin: seo/robots/sitemap need
+// whatever host is serving the request, identity needs one stable answer. These lock
+// the separation so a dev machine can never publish "localhost:3000" as the website.
+describe('published website is environment-independent', () => {
+  it('is the canonical public domain, with no scheme or trailing slash', () => {
+    expect(PUBLIC_WEBSITE).toBe('registerdesk.in')
+    expect(PUBLIC_WEBSITE).not.toMatch(/^https?:\/\//)
+    expect(PUBLIC_WEBSITE).not.toMatch(/\/$/)
+  })
+
+  it('never renders a localhost or preview host', () => {
+    const website = BUSINESS_IDENTITY.find(i => i.label === 'Website')?.value ?? ''
+    expect(website).toBe('registerdesk.in')
+    expect(website).not.toMatch(/localhost|127\.0\.0\.1|vercel\.app|:\d+/)
   })
 })

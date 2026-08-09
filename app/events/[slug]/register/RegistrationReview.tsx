@@ -30,11 +30,14 @@ import {
 } from 'lucide-react'
 import { cn } from '@/lib/utils/cn'
 import {
-  TYPE, CARD, CARD_PAD, BRAND_GRADIENT, reveal,
+  TYPE, BRAND_GRADIENT, reveal,
 } from '@/components/event-templates/shared/ui/framework'
 import { buttonVariants } from '@/components/ui/button'
 import { CheckOption } from './formControls'
 import type { EventIdentity } from './RegistrationUI'
+// RD-RT4.0: the review inherits the route's one panel language, so confirming reads as a
+// continuation of the form rather than as a different screen.
+import { PANEL, PANEL_HEAD, PANEL_BODY } from './registerTheme'
 
 // ─── Shapes ─────────────────────────────────────────────────────────────────────
 
@@ -85,20 +88,33 @@ export interface ReviewPricing {
 // One card, one header treatment, one ordinal chip — the same language RT1.0 gave the
 // form sections, so review reads as a continuation rather than a different screen.
 
-function ReviewSection({ index, title, action, reduce, children }: {
+function ReviewSection({ index, title, action, reduce, emphasis, children }: {
   index:    number
   title:    string
   action?:  React.ReactNode
   reduce:   boolean | null
+  /** RD-RT4.0: the one section that carries the decision gets the brand edge. */
+  emphasis?: boolean
   children: React.ReactNode
 }) {
   return (
-    <motion.section {...reveal(reduce)} className={cn(CARD, 'overflow-hidden')}>
-      <div className="flex items-center justify-between gap-3 border-b border-border/60 bg-muted/[0.03] px-5 py-4">
+    <motion.section
+      {...reveal(reduce)}
+      className={cn(
+        PANEL,
+        emphasis && 'border-primary/35 shadow-[0_1px_2px_rgb(15_23_42_/_0.04),0_20px_44px_-28px_rgb(var(--primary-rgb)_/_0.35)]',
+      )}
+    >
+      <div className={cn(PANEL_HEAD, 'flex items-center justify-between gap-3 rounded-t-2xl')}>
         <div className="flex min-w-0 items-center gap-3">
           <span
             aria-hidden
-            className="flex size-6 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-fs-2xs font-bold text-primary"
+            className={cn(
+              'flex size-7 shrink-0 items-center justify-center rounded-xl text-fs-2xs font-bold',
+              emphasis
+                ? cn(BRAND_GRADIENT, 'text-white shadow-[0_2px_10px_rgb(var(--primary-rgb)_/_0.30)]')
+                : 'bg-muted text-muted-foreground/80',
+            )}
           >
             {index}
           </span>
@@ -106,13 +122,13 @@ function ReviewSection({ index, title, action, reduce, children }: {
         </div>
         {action}
       </div>
-      <div className={CARD_PAD}>{children}</div>
+      <div className={PANEL_BODY}>{children}</div>
     </motion.section>
   )
 }
 
 const EDIT_BTN =
-  'inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-border bg-card px-3 py-1.5 text-fs-xs font-semibold text-foreground outline-none transition-colors hover:border-primary/40 hover:text-primary focus-visible:ring-2 focus-visible:ring-primary/50 focus-visible:ring-offset-2'
+  'inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-border bg-muted/30 px-3 py-1.5 text-fs-xs font-semibold text-foreground outline-none transition-colors hover:border-border-strong hover:bg-muted/60 hover:text-primary focus-visible:ring-2 focus-visible:ring-primary/50 focus-visible:ring-offset-2'
 
 // ─── Review ─────────────────────────────────────────────────────────────────────
 
@@ -242,7 +258,8 @@ export function RegistrationReview({
 
       {/* ══ 3 · Pass Summary ══ */}
       <ReviewSection index={3} title="Your Pass" reduce={reduce}>
-        <div className={cn('flex items-start justify-between gap-4 rounded-xl border border-primary/20 bg-primary/[0.03] p-4')}>
+        <div className="relative flex items-start justify-between gap-4 overflow-hidden rounded-xl border border-primary/40 bg-[rgb(var(--primary-rgb)_/_0.035)] p-4 pl-5 shadow-[0_2px_16px_-8px_rgb(var(--primary-rgb)_/_0.35)]">
+          <span aria-hidden className={cn('absolute inset-y-0 left-0 w-[3px] rounded-r-full', BRAND_GRADIENT)} />
           <div className="min-w-0">
             <p className="text-fs-md font-bold text-foreground">{passName}</p>
             {passAgeLabel && (
@@ -294,11 +311,11 @@ export function RegistrationReview({
           )}
 
           {/* Total — the strongest thing on the screen. */}
-          <div className="mt-2 flex items-baseline justify-between gap-4 border-t border-border pt-3">
+          <div className="mt-2 flex items-baseline justify-between gap-4 border-t border-border pt-3.5">
             <dt className="text-fs-md font-bold text-foreground">
               {paymentRequired ? "Total payable" : "Total"}
             </dt>
-            <dd className="text-fs-xl font-bold tabular-nums tracking-tight text-foreground">
+            <dd className="text-fs-2xl font-extrabold leading-none tabular-nums tracking-tight text-foreground">
               {pricing.totalPaise === 0 ? "Free" : fmtPaise(pricing.totalPaise)}
             </dd>
           </div>
@@ -314,7 +331,7 @@ export function RegistrationReview({
       </ReviewSection>
 
       {/* ══ 5 · Confirmation ══ */}
-      <ReviewSection index={5} title={paymentRequired ? "Confirm & Pay" : "Confirm Registration"} reduce={reduce}>
+      <ReviewSection index={5} title={paymentRequired ? "Confirm & Pay" : "Confirm Registration"} reduce={reduce} emphasis>
         <div className="flex flex-col gap-2">
           <CheckOption checked={consent.info} disabled={submitting} onToggle={v => onConsent('info', v)}>
             I confirm the information above is correct

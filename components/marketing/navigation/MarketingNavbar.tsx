@@ -114,7 +114,7 @@ export function MarketingNavbar() {
         willChange: 'transform',
         transition: 'transform 260ms var(--ease-emphasized)',
       }}
-      className="fixed inset-x-0 top-0 z-[100]"
+      className="fixed inset-x-0 top-0 z-[100] print:hidden"
     >
       <div
         style={{
@@ -221,7 +221,7 @@ export function MarketingNavbar() {
 
     {/* In-flow spacer: preserves the navbar's former height so switching to
         position:fixed causes no layout shift — content underneath never moves. */}
-    <div aria-hidden className="h-[var(--nav-h)]" />
+    <div aria-hidden className="h-[var(--nav-h)] print:hidden" />
 
     {/* Rendered as a sibling (NOT inside the transformed header) so its
         position:fixed resolves against the viewport, not the navbar. */}

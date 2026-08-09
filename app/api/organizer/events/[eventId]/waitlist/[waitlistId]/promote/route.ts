@@ -9,6 +9,7 @@ import { adminDb }                   from '@/lib/firebase/admin'
 import { authorizeWorkspace }        from '@/lib/team/workspace'
 import { sendSpotAvailableEmail }    from '@/lib/waitlist/sendSpotAvailableEmail'
 import type { WaitlistDocument }     from '@/lib/waitlist/types'
+import { getEmailAppUrl } from '@/lib/email/appUrl'
 
 function err(msg: string, status: number) {
   return NextResponse.json({ error: msg }, { status })
@@ -59,7 +60,7 @@ export async function POST(
   }, { merge: true }).catch(e => console.error('[waitlist] promoted counter failed:', e))
 
   // Send "spot available" email (fire-and-forget)
-  const baseUrl     = process.env.NEXT_PUBLIC_APP_URL ?? ''
+  const baseUrl = getEmailAppUrl()
   const registerUrl = `${baseUrl}/events/${slug}/register?passId=${entry.passId}`
   sendSpotAvailableEmail(
     { ...entry, status: 'invited', invitedBy: uid },

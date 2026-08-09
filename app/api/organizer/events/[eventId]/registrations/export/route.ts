@@ -1,46 +1,44 @@
-// GET /api/organizer/events/[eventId]/registrations/export
+// GET /api/organizer/events/[eventId]/registrations/export[?format=csv|xlsx]
 //
-// Returns all confirmed registrations as a CSV file.
-// Columns: ID, Name, Email, Phone, Pass, Status, Registered At,
-//          Bib Number, Bib Category, T-Shirt Size,
-//          Emergency Contact Name, Emergency Contact Phone,
-//          Waiver Accepted (yes/no), Checked In
+// Exports registrations using THE canonical column definition
+// (lib/registrations/exportColumns) — the same one the client bulk export uses, so both
+// buttons produce identical data. Columns, ordering and cell values live there; this
+// route only authorizes, queries, filters and serializes.
+//
+// FORMATS
+//   csv  (default) — streamed page-by-page, UNCAPPED. Memory stays bounded to one batch
+//                    regardless of event size, and CSV is append-only so it can stream.
+//   xlsx           — a real OOXML workbook via the existing dependency-free writer.
+//                    A ZIP central directory can only be written once every entry is
+//                    known, so XLSX cannot stream and is row-CAPPED; the cap is disclosed
+//                    in-file via ReportTable.truncated rather than silently truncating.
+//
+// FILTERS: status / payment / passId / checkin / from / to are pushed into Firestore;
+// `q` is applied in-stream (Firestore has no substring search). Every filter the table
+// offers now narrows the export — previously `q` was ignored entirely, so an operator who
+// searched for one attendee and pressed Export received the whole event.
 
 import { NextRequest, NextResponse } from 'next/server'
 import { Timestamp }                 from 'firebase-admin/firestore'
 import { adminDb }                   from '@/lib/firebase/admin'
 import { authorizeWorkspaceDownload } from '@/lib/team/workspace'
-import { csvCell as csvEscape }        from '@/lib/utils/csv'
+import { csvCell as csvEscape }       from '@/lib/utils/csv'
+import { tablesToXlsx }               from '@/lib/reports/xlsx'
+import type { ReportTable, ReportRow } from '@/lib/reports/types'
+import {
+  buildRegistrationExportColumns,
+  buildRegistrationExportRow,
+  registrationMatchesQuery,
+  exportCellValue,
+} from '@/lib/registrations/exportColumns'
 
-// GA-5 S2: streamed export — CSV rows are generated page-by-page and flushed to the
-// response, so memory stays bounded to one batch regardless of event size (100k+).
 export const dynamic     = 'force-dynamic'
 export const maxDuration = 300
 
-function toISO(ts: unknown): string {
-  if (!ts) return ''
-  if (typeof (ts as { toDate?: () => Date }).toDate === 'function') {
-    return (ts as { toDate: () => Date }).toDate().toISOString()
-  }
-  return ''
-}
-
-// Searches formResponses for a value by matching known label patterns
-function findFormValue(
-  formResponses: Record<string, unknown> | undefined,
-  fieldLabels:   Record<string, string>,
-  labelPattern:  RegExp,
-): string {
-  if (!formResponses) return ''
-  for (const [fieldId, label] of Object.entries(fieldLabels)) {
-    if (labelPattern.test(label)) {
-      const val = formResponses[fieldId]
-      if (Array.isArray(val)) return val.join(', ')
-      return String(val ?? '')
-    }
-  }
-  return ''
-}
+const BATCH_SIZE = 1_000
+/** XLSX must be fully materialised before the ZIP can be written. Beyond this the
+ *  workbook stops being openable on a normal machine — CSV remains the uncapped path. */
+const XLSX_ROW_CAP = 50_000
 
 export async function GET(
   req:     NextRequest,
@@ -54,6 +52,8 @@ export async function GET(
   const { eventId } = await context.params
 
   // ── Resolve event slug ─────────────────────────────────────────────────────
+  // Reading the draft from users/{uid}/... is the ownership check: another organizer's
+  // eventId simply does not exist under this uid, so it 404s before any query runs.
   const draftSnap = await adminDb.doc(`users/${uid}/eventDrafts/${eventId}`).get()
   if (!draftSnap.exists) return NextResponse.json({ error: 'Not found' }, { status: 404 })
 
@@ -63,7 +63,7 @@ export async function GET(
   const slug    = typeof seo.urlSlug === 'string' ? seo.urlSlug : ''
   if (!slug) return NextResponse.json({ error: 'Event not published' }, { status: 400 })
 
-  // ── Build field label map ──────────────────────────────────────────────────
+  // ── Field label map — drives the custom-answer columns ─────────────────────
   const rawForm = d.registrationForm as {
     sections?: Array<{ fields: Array<{ id: string; label: string }> }>
   } | null
@@ -74,90 +74,121 @@ export async function GET(
     }
   }
 
-  // ── Column set (unchanged) ─────────────────────────────────────────────────
-  const COLS = [
-    'Registration ID', 'Full Name', 'Email', 'Phone', 'Pass', 'Status', 'Payment Status',
-    'Registered At', 'Bib Number', 'Bib Category',
-    'T-Shirt Size', 'Emergency Contact Name', 'Emergency Contact Phone',
-    'Waiver Accepted',
-    'Company Name', 'Designation', 'Company Website', 'Industry', 'Pass Type',
-    'Ticket Code', 'Source', 'Payment Method', 'Reference Number', 'Checked In', 'Checked In At',
-  ]
+  const columns = buildRegistrationExportColumns(fieldLabels)
+  const ctx     = { eventId, eventSlug: slug, fieldLabels }
 
-  // Same per-registration row shape as before, extracted so it can be streamed.
-  const buildRow = (doc: FirebaseFirestore.QueryDocumentSnapshot): string => {
-    const r        = doc.data() as Record<string, unknown>
-    const attendee = r.attendee as Record<string, unknown> | undefined
-    const form     = attendee?.formResponses as Record<string, unknown> | undefined
-
-    const tshirt   = findFormValue(form, fieldLabels, /t.?shirt/i)
-    const ecName   = findFormValue(form, fieldLabels, /emergency contact name/i)
-    const ecPhone  = findFormValue(form, fieldLabels, /emergency contact (number|phone)/i)
-    const waiver   = findFormValue(form, fieldLabels, /sports waiver/i)
-    const waiverAt = (r.waiverAcceptedAt as string | null) ?? ''
-
-    const companyName = (r.companyName as string | null) ?? findFormValue(form, fieldLabels, /company name/i)
-    const designation = (r.designation as string | null) ?? findFormValue(form, fieldLabels, /^designation$/i)
-    const website     = (r.website     as string | null) ?? findFormValue(form, fieldLabels, /company website|^website$/i)
-    const industry    = (r.industry    as string | null) ?? findFormValue(form, fieldLabels, /^industry$/i)
-    const passType    = (r.passType    as string | null) ?? String(r.passName ?? '')
-
-    return [
-      doc.id,
-      String(attendee?.name  ?? ''),
-      String(attendee?.email ?? ''),
-      String(attendee?.phone ?? ''),
-      String(r.passName ?? ''),
-      String(r.status   ?? ''),
-      String(r.paymentStatus ?? ''),
-      toISO(r.registeredAt),
-      String((r.bibNumber   as string | null) ?? ''),
-      String((r.bibCategory as string | null) ?? ''),
-      tshirt, ecName, ecPhone,
-      waiver ? 'Yes' : (waiverAt ? 'Yes' : 'No'),
-      companyName, designation, website, industry, passType,
-      String(r.ticketCode ?? ''),
-      String(r.registrationSource ?? 'online'),
-      String(r.paymentMethod ?? ''),
-      String(r.referenceNumber ?? ''),
-      (r.checkedIn as boolean) ? 'Yes' : 'No',
-      toISO(r.checkedInAt),
-    ].map(csvEscape).join(',')
-  }
-
-  // ── Stream the CSV page-by-page (bounded memory; no whole-collection load) ──
-  // RD-ORGANIZER-01 P0-3: apply the SAME server-side filters as the table so the export
-  // covers exactly the filtered set (streamed, uncapped) — not just the loaded rows.
-  // Same composite indexes as the list route; asc order is served from the DESC index.
+  // ── Query: the SAME filters the list route applies ─────────────────────────
   const p = req.nextUrl.searchParams
+  const format = p.get('format') === 'xlsx' ? 'xlsx' : 'csv'
+  const q      = (p.get('q') ?? '').trim()
+
   let baseQuery: FirebaseFirestore.Query = adminDb
     .collection('registrations')
     .where('organizerUid', '==', uid)
     .where('eventSlug',    '==', slug)
-  const exStatus = p.get('status'); if (exStatus) baseQuery = baseQuery.where('status', '==', exStatus)
-  const exPay    = p.get('payment'); if (exPay)   baseQuery = baseQuery.where('paymentStatus', '==', exPay)
-  const exPass   = p.get('passId'); if (exPass)   baseQuery = baseQuery.where('passId', '==', exPass)
-  if (p.get('checkin') === 'yes')   baseQuery = baseQuery.where('checkedIn', '==', true)
-  const exFrom = p.get('from'); if (exFrom) { const dt = new Date(`${exFrom}T00:00:00`);    if (!Number.isNaN(dt.getTime())) baseQuery = baseQuery.where('registeredAt', '>=', Timestamp.fromDate(dt)) }
-  const exTo   = p.get('to');   if (exTo)   { const dt = new Date(`${exTo}T23:59:59.999`);  if (!Number.isNaN(dt.getTime())) baseQuery = baseQuery.where('registeredAt', '<=', Timestamp.fromDate(dt)) }
-  baseQuery = baseQuery.orderBy('registeredAt', 'asc')
-  const BATCH_SIZE = 1_000
 
+  const exStatus = p.get('status');  if (exStatus) baseQuery = baseQuery.where('status', '==', exStatus)
+  const exPay    = p.get('payment'); if (exPay)    baseQuery = baseQuery.where('paymentStatus', '==', exPay)
+  const exPass   = p.get('passId');  if (exPass)   baseQuery = baseQuery.where('passId', '==', exPass)
+
+  // checkin='yes' is a real equality filter. 'no' is deliberately NOT pushed to Firestore:
+  // `checkedIn` is ABSENT on never-checked-in documents (the paid path's regDoc never
+  // writes it), and Firestore excludes docs missing the field from an `== false` query —
+  // so a server-side "not checked in" filter would silently drop exactly the rows the
+  // operator asked for. It is applied in-stream below instead, which is exact.
+  const exCheckin = p.get('checkin')
+  if (exCheckin === 'yes') baseQuery = baseQuery.where('checkedIn', '==', true)
+  const wantNotCheckedIn = exCheckin === 'no'
+
+  const exFrom = p.get('from')
+  if (exFrom) { const dt = new Date(`${exFrom}T00:00:00`);   if (!Number.isNaN(dt.getTime())) baseQuery = baseQuery.where('registeredAt', '>=', Timestamp.fromDate(dt)) }
+  const exTo   = p.get('to')
+  if (exTo)   { const dt = new Date(`${exTo}T23:59:59.999`); if (!Number.isNaN(dt.getTime())) baseQuery = baseQuery.where('registeredAt', '<=', Timestamp.fromDate(dt)) }
+
+  baseQuery = baseQuery.orderBy('registeredAt', 'asc')
+
+  const stamp    = new Date().toISOString().slice(0, 10)
+  const baseName = `${slug}-registrations-${stamp}`
+
+  /** Raw doc → canonical row, or null when an in-stream filter excludes it. */
+  const rowFor = (doc: FirebaseFirestore.QueryDocumentSnapshot): ReportRow | null => {
+    const raw: Record<string, unknown> = { ...(doc.data() as Record<string, unknown>), id: doc.id }
+    // Truthiness, not `=== false`, so a missing field counts as "not checked in".
+    if (wantNotCheckedIn && raw.checkedIn) return null
+    if (q && !registrationMatchesQuery(raw, q)) return null
+    return buildRegistrationExportRow(raw, ctx)
+  }
+
+  // ══ XLSX — materialised (capped), then one workbook ═══════════════════════
+  if (format === 'xlsx') {
+    const rows: ReportRow[] = []
+    let cursor: FirebaseFirestore.QueryDocumentSnapshot | undefined
+    let capped = false
+
+    for (;;) {
+      const snap = await (cursor ? baseQuery.startAfter(cursor).limit(BATCH_SIZE) : baseQuery.limit(BATCH_SIZE)).get()
+      if (snap.empty) break
+      for (const doc of snap.docs) {
+        const row = rowFor(doc)
+        if (row) rows.push(row)
+        if (rows.length >= XLSX_ROW_CAP) { capped = true; break }
+      }
+      if (capped || snap.docs.length < BATCH_SIZE) break
+      cursor = snap.docs[snap.docs.length - 1]
+    }
+
+    const table: ReportTable = {
+      id:      'Registrations',
+      title:   `${slug} registrations`,
+      columns,
+      // Cell values pass through the SAME serializer the CSV uses, so the two formats
+      // can never disagree; 'money' stays a number so Excel can SUM it.
+      rows:    rows.map(r => {
+        const out: ReportRow = {}
+        for (const c of columns) {
+          const v = exportCellValue(r[c.key] ?? null, c.type)
+          out[c.key] = v === '' ? null : v
+        }
+        return out
+      }),
+      truncated: capped,
+    }
+    // Money columns are already rupee NUMBERS here, so re-running the 'money' formatter
+    // in the writer would divide by 100 a second time. Declaring them 'number' keeps the
+    // cell numeric without a second conversion.
+    table.columns = columns.map(c => (c.type === 'money' ? { ...c, type: 'number' as const } : c))
+
+    const body = new Uint8Array(tablesToXlsx([table]))
+    return new Response(body, {
+      status: 200,
+      headers: {
+        'Content-Type':        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        'Content-Disposition': `attachment; filename="${baseName}.xlsx"`,
+        'Cache-Control':       'no-store',
+      },
+    })
+  }
+
+  // ══ CSV — streamed, uncapped ══════════════════════════════════════════════
   const encoder = new TextEncoder()
+  const csvLine = (cells: (string | number)[]) => cells.map(csvEscape).join(',')
+
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
       try {
-        // Lead with a UTF-8 BOM so Excel renders non-ASCII names (Tamil/Hindi/₹)
-        // correctly — parity with tableToCsv (lib/reports/csv.ts).
-        controller.enqueue(encoder.encode('﻿' + COLS.map(csvEscape).join(',')))
+        // UTF-8 BOM so Excel renders Tamil/Hindi/₹ correctly — parity with tableToCsv.
+        controller.enqueue(encoder.encode('﻿' + csvLine(columns.map(c => c.label))))
         let cursor: FirebaseFirestore.QueryDocumentSnapshot | undefined
         for (;;) {
-          const q    = cursor ? baseQuery.startAfter(cursor).limit(BATCH_SIZE) : baseQuery.limit(BATCH_SIZE)
-          const snap = await q.get()
+          const snap = await (cursor ? baseQuery.startAfter(cursor).limit(BATCH_SIZE) : baseQuery.limit(BATCH_SIZE)).get()
           if (snap.empty) break
           let chunk = ''
-          for (const doc of snap.docs) chunk += `\r\n${buildRow(doc)}`
-          controller.enqueue(encoder.encode(chunk))
+          for (const doc of snap.docs) {
+            const row = rowFor(doc)
+            if (!row) continue
+            chunk += `\r\n${csvLine(columns.map(c => exportCellValue(row[c.key] ?? null, c.type)))}`
+          }
+          if (chunk) controller.enqueue(encoder.encode(chunk))
           if (snap.docs.length < BATCH_SIZE) break
           cursor = snap.docs[snap.docs.length - 1]
         }
@@ -168,12 +199,11 @@ export async function GET(
     },
   })
 
-  const filename = `${slug}-registrations-${new Date().toISOString().slice(0, 10)}.csv`
   return new Response(stream, {
     status: 200,
     headers: {
       'Content-Type':        'text/csv; charset=utf-8',
-      'Content-Disposition': `attachment; filename="${filename}"`,
+      'Content-Disposition': `attachment; filename="${baseName}.csv"`,
       'Cache-Control':       'no-store',
     },
   })

@@ -15,7 +15,7 @@ import {
   useRef,
   useState,
 } from 'react'
-import { AnimatePresence, motion } from 'framer-motion'
+import { AnimatePresence, motion, useReducedMotion } from 'framer-motion'
 import { CheckCircle2, AlertCircle, AlertTriangle, Info, X } from 'lucide-react'
 import { cn } from '@/lib/utils/cn'
 
@@ -63,6 +63,10 @@ const STYLES: Record<ToastType, { icon: typeof Info; border: string; bg: string;
 // ─── Single toast item ────────────────────────────────────────────────────────
 
 function ToastChip({ item, onDismiss }: { item: ToastItem; onDismiss: (id: string) => void }) {
+  // A toast that slides and scales is motion the user did not ask for. Under
+  // prefers-reduced-motion it still appears and still auto-dismisses — it just does not
+  // travel. Auto-dismiss timing is unchanged either way.
+  const reduce = useReducedMotion()
   const timerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
 
   useEffect(() => {
@@ -76,10 +80,10 @@ function ToastChip({ item, onDismiss }: { item: ToastItem; onDismiss: (id: strin
   return (
     <motion.div
       layout
-      initial={{ opacity: 0, y: 16, scale: 0.97 }}
-      animate={{ opacity: 1, y: 0,  scale: 1     }}
-      exit={{    opacity: 0, y: 8,  scale: 0.97  }}
-      transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
+      initial={reduce ? { opacity: 0 } : { opacity: 0, y: 16, scale: 0.97 }}
+      animate={reduce ? { opacity: 1 } : { opacity: 1, y: 0,  scale: 1     }}
+      exit={   reduce ? { opacity: 0 } : { opacity: 0, y: 8,  scale: 0.97  }}
+      transition={{ duration: reduce ? 0.12 : 0.22, ease: [0.22, 1, 0.36, 1] }}
       className={cn('flex w-full max-w-sm items-start gap-3 rounded-xl border px-4 py-3 shadow-lg', s.border, s.bg)}
     >
       <Icon className={cn('mt-0.5 size-4 shrink-0', s.text)} aria-hidden />

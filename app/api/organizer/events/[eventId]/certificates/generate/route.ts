@@ -20,6 +20,7 @@ import {
 import { notificationEngine, NotificationType, NotificationChannel } from '@/lib/notifications'
 import { resolveEventEmailProvider } from '@/lib/email/resolveEventProvider'
 import type { RegistrationDocument }         from '@/lib/registrations/types'
+import { getEmailAppUrl } from '@/lib/email/appUrl'
 
 type Params = { params: Promise<{ eventId: string }> }
 
@@ -29,7 +30,9 @@ export interface GenerateCertificatesResponse {
   ineligible:   number   // not yet eligible (e.g. not checked in for completion type)
 }
 
-const APP_URL = (process.env.NEXT_PUBLIC_APP_URL ?? 'https://registerdesk.in').replace(/\/$/, '')
+// RD-EMAIL-PRODUCTION-URL — one guarded resolver; the old local fallback could not
+// tell a localhost origin from a real one before embedding it in mail.
+const APP_URL = () => getEmailAppUrl()
 
 function fmtDate(iso: string | null | undefined): string {
   if (!iso) return ''
@@ -116,8 +119,8 @@ export async function POST(req: NextRequest, { params }: Params): Promise<NextRe
 
     // Generate certificate ID
     const certificateId = generateCertificateId()
-    const verifyUrl     = `${APP_URL}/verify/certificate/${certificateId}`
-    const downloadUrl   = `${APP_URL}/api/certificates/${certificateId}`
+    const verifyUrl     = `${APP_URL()}/verify/certificate/${certificateId}`
+    const downloadUrl   = `${APP_URL()}/api/certificates/${certificateId}`
 
     // Create record
     await createCertificateRecord({

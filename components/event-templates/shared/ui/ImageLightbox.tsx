@@ -9,6 +9,7 @@
 // prefers-reduced-motion. Optional download action in the top bar.
 
 import { useEffect, useRef } from 'react'
+import { createPortal } from 'react-dom'
 import { motion, AnimatePresence, useReducedMotion } from 'framer-motion'
 import { X, Download, ChevronLeft, ChevronRight } from 'lucide-react'
 
@@ -80,7 +81,23 @@ export function ImageLightbox({
     }
   }, [open, onClose, onPrev, onNext])
 
-  return (
+  // PORTALLED TO document.body — the same escape hatch components/ui/Dialog uses.
+  //
+  // `position: fixed` + a high z-index is NOT enough on its own: z-index is only
+  // comparable inside a shared stacking context. Every call site mounts this viewer deep
+  // inside page content, and SportsHero's hero <section> carries `isolate`
+  // (`isolation: isolate`), whose entire purpose is to open a new stacking context. The
+  // z-[120] below was therefore being compared against that section's siblings, not
+  // against the app shell — so the fixed marketing navbar (z-[100] in the ROOT context)
+  // painted over the viewer, including the top bar where the close button lives. That is
+  // why the poster appeared "below another stacking context" and why the X was not
+  // reliably clickable: it was underneath the navbar.
+  //
+  // Portalling to <body> puts the overlay in the root stacking context, where the
+  // EXISTING z-[120] already outranks the navbar's z-[100]. No z-index was raised.
+  if (typeof document === 'undefined') return null
+
+  return createPortal(
     <AnimatePresence>
       {open && (
         <motion.div
@@ -96,10 +113,15 @@ export function ImageLightbox({
             aria-label={alt || 'Image viewer'}
             tabIndex={-1}
             className="relative flex h-full flex-col outline-none"
-            onClick={e => e.stopPropagation()}
           >
             {/* top bar */}
-            <div className="flex items-center justify-between gap-1 px-4 py-3">
+            {/* Click-out close (which this component has always documented) only works if
+                the guard sits on the CONTENT. This wrapper is `h-full`, so carrying
+                stopPropagation here swallowed every click in the viewport and the backdrop
+                could never close — the dark area around the poster IS the backdrop. The
+                guard now lives on the chrome, the arrows and the image instead, so a click
+                on the poster still keeps it open. */}
+            <div className="flex items-center justify-between gap-1 px-4 py-3" onClick={e => e.stopPropagation()}>
               <p className="min-w-0 truncate text-[13px] text-white/70">
                 {typeof index === 'number' && typeof total === 'number'
                   ? `${index} of ${total}`
@@ -141,7 +163,7 @@ export function ImageLightbox({
             <div className="relative flex flex-1 items-center justify-center overflow-hidden px-4 pb-6 sm:px-14">
               {onPrev && (
                 <button
-                  type="button" onClick={onPrev} aria-label="Previous image"
+                  type="button" onClick={e => { e.stopPropagation(); onPrev() }} aria-label="Previous image"
                   className="absolute left-1 z-10 flex size-11 items-center justify-center rounded-full bg-black/40 text-white/90 transition-colors hover:bg-black/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/60 sm:left-3"
                 >
                   <ChevronLeft className="size-6" aria-hidden />
@@ -149,7 +171,7 @@ export function ImageLightbox({
               )}
               {onNext && (
                 <button
-                  type="button" onClick={onNext} aria-label="Next image"
+                  type="button" onClick={e => { e.stopPropagation(); onNext() }} aria-label="Next image"
                   className="absolute right-1 z-10 flex size-11 items-center justify-center rounded-full bg-black/40 text-white/90 transition-colors hover:bg-black/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/60 sm:right-3"
                 >
                   <ChevronRight className="size-6" aria-hidden />
@@ -160,6 +182,8 @@ export function ImageLightbox({
                 initial={reduce ? false : { opacity: 0, scale: 0.96 }} animate={{ opacity: 1, scale: 1 }}
                 transition={{ duration: 0.2 }}
                 className="flex max-h-full max-w-full"
+                // Clicking the image itself must never close the viewer.
+                onClick={e => e.stopPropagation()}
               >
                 {/* eslint-disable-next-line @next/next/no-img-element */}
                 <img src={src} alt={alt} className="max-h-full max-w-full rounded-lg object-contain" />
@@ -168,6 +192,7 @@ export function ImageLightbox({
           </div>
         </motion.div>
       )}
-    </AnimatePresence>
+    </AnimatePresence>,
+    document.body,
   )
 }

@@ -14,8 +14,9 @@
 import { useEffect, useState } from 'react'
 import { RotateCcw, WifiOff, Check, Loader2, ShieldCheck } from 'lucide-react'
 import { cn } from '@/lib/utils/cn'
-import { CARD, TYPE } from '@/components/event-templates/shared/ui/framework'
+import { TYPE } from '@/components/event-templates/shared/ui/framework'
 import { buttonVariants } from '@/components/ui/button'
+import { PANEL } from './registerTheme'
 
 // ─── Recovery banner ────────────────────────────────────────────────────────────
 // Restoring is now a decision, not a surprise. Shown BEFORE any value is applied, so
@@ -31,11 +32,11 @@ export function RecoveryBanner({ fieldCount, onResume, onDiscard }: {
     <div
       role="region"
       aria-labelledby="rd-recovery-h"
-      className={cn(CARD, 'mb-4 border-primary/25 bg-primary/[0.03] p-4 sm:p-5')}
+      className={cn(PANEL, 'mb-4 border-primary/30 p-4 sm:p-5')}
     >
       <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex min-w-0 items-start gap-3">
-          <span className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-xl bg-primary/10" aria-hidden>
+          <span className="mt-0.5 flex size-9 shrink-0 items-center justify-center rounded-xl bg-primary/10" aria-hidden>
             <RotateCcw className="size-4 text-primary" />
           </span>
           <div className="min-w-0">
@@ -134,7 +135,7 @@ export function AutosaveStatus({ savedAt, saving, online }: {
 
 export function RecoveryReassurance() {
   return (
-    <p className="mt-5 flex flex-wrap items-center justify-center gap-x-4 gap-y-1 text-fs-2xs text-muted-foreground">
+    <p className="mt-2 flex flex-wrap items-center justify-center gap-x-4 gap-y-1 text-fs-2xs text-muted-foreground">
       <span className="inline-flex items-center gap-1.5">
         <Check className="size-3 shrink-0 text-emerald-600" aria-hidden />
         Progress saves automatically as you type

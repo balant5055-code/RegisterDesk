@@ -1,17 +1,49 @@
 import type { PassPublic } from '@/components/event-templates/types'
 
+/**
+ * The calendar date inside a stored date string, or null when there isn't one.
+ *
+ * WHY THIS EXISTS. Both formatters below used to do `dateStr.split('-').map(Number)`,
+ * which assumes the value is exactly 'YYYY-MM-DD'. Pass sales windows are not stored that
+ * way: `salesStartDate` / `salesEndDate` come from `<input type="datetime-local">` and are
+ * persisted in its native 'YYYY-MM-DDTHH:mm' form (the live NOYYAL event stores
+ * "2026-08-14T23:00"). Splitting that on '-' yields ['2026','08','14T23:00'], the third
+ * part is NaN, `new Date(2026, 7, NaN)` is an Invalid Date, and toLocaleDateString renders
+ * the literal string "Invalid Date" straight into the page.
+ *
+ * Reading only the leading date portion accepts BOTH shapes, and returning null for
+ * anything unrecognised means no caller can ever print "Invalid Date" again — the
+ * formatters degrade to '' exactly as they already did for an empty input.
+ *
+ * Date-only is deliberate: these are wall-clock calendar values with no timezone, and
+ * `resolvePassSaleState` (lib/registrations/salesWindow.ts) compares them date-first too,
+ * so display and the sales gate stay consistent. No timezone conversion is introduced.
+ */
+function parseCalendarDate(value: string | null | undefined): Date | null {
+  const raw = typeof value === 'string' ? value.trim() : ''
+  if (!raw) return null
+  const m = /^(\d{4})-(\d{2})-(\d{2})(?:[T\s]|$)/.exec(raw)
+  if (!m) return null
+  const [, y, mo, d] = m
+  const date = new Date(Number(y), Number(mo) - 1, Number(d))
+  // Rejects impossible calendar values (e.g. 2026-13-40) rather than letting JS roll them over.
+  if (Number.isNaN(date.getTime())) return null
+  if (date.getMonth() !== Number(mo) - 1 || date.getDate() !== Number(d)) return null
+  return date
+}
+
 export function formatDate(dateStr: string): string {
-  if (!dateStr) return ''
-  const [y, m, d] = dateStr.split('-').map(Number)
-  return new Date(y, m - 1, d).toLocaleDateString('en-IN', {
+  const d = parseCalendarDate(dateStr)
+  if (!d) return ''
+  return d.toLocaleDateString('en-IN', {
     weekday: 'short', day: 'numeric', month: 'long', year: 'numeric',
   })
 }
 
 export function formatDateShort(dateStr: string): string {
-  if (!dateStr) return ''
-  const [y, m, d] = dateStr.split('-').map(Number)
-  return new Date(y, m - 1, d).toLocaleDateString('en-IN', {
+  const d = parseCalendarDate(dateStr)
+  if (!d) return ''
+  return d.toLocaleDateString('en-IN', {
     day: 'numeric', month: 'short', year: 'numeric',
   })
 }

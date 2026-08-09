@@ -22,6 +22,7 @@
 
 import { useState } from 'react'
 import Link from 'next/link'
+import { HashScrollLink } from '@/components/event-templates/shared/ui/HashScrollLink'
 import { motion, useReducedMotion } from 'framer-motion'
 import {
   Calendar, MapPin, Globe, Flag, Users, CalendarClock, ArrowRight, Share2,
@@ -123,6 +124,12 @@ export function SportsHero(props: SportsHeroProps) {
     .map(p => p.salesEndDate?.trim())
     .filter(Boolean)
     .sort()[0] as string | undefined
+
+  // Gate the deadline row on the FORMATTED label, not the raw value: formatDateShort
+  // returns '' for anything it cannot read, so an unparseable stored date omits the whole
+  // row instead of rendering "Registration closes on " with nothing after it. A missing
+  // salesEndDate was already omitted (the field is optional) and still is.
+  const salesCloseLabel = salesCloseDate ? formatDateShort(salesCloseDate) : ''
 
   const clock = useEventClock({
     startDate, startTime, endDate,
@@ -546,11 +553,11 @@ export function SportsHero(props: SportsHeroProps) {
                   )}
 
                   {/* Registration deadline */}
-                  {canRegister && salesCloseDate && (
+                  {canRegister && salesCloseLabel && (
                     <div className="flex items-center justify-between gap-3 border-t border-border/50 pt-4">
                       <span className="inline-flex items-center gap-2 text-fs-sm font-medium text-foreground">
                         <CalendarClock className="size-4 shrink-0 text-primary" aria-hidden />
-                        Registration closes on {formatDateShort(salesCloseDate)}
+                        Registration closes on {salesCloseLabel}
                       </span>
                       {clock.phase === 'closing' && (
                         <span className="shrink-0 rounded-full bg-amber-100 px-2.5 py-1 text-fs-2xs font-bold text-amber-800">
@@ -585,8 +592,8 @@ export function SportsHero(props: SportsHeroProps) {
 
                   {/* Primary CTA */}
                   {canRegister ? (
-                    <Link
-                      href="#register"
+                    <HashScrollLink
+                      targetId="register"
                       className={cn(
                         'group inline-flex h-14 w-full items-center justify-center gap-2 rounded-xl text-fs-lg font-bold text-white shadow-md transition-transform duration-200 hover:-translate-y-0.5 active:translate-y-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 focus-visible:ring-offset-2 motion-reduce:transform-none',
                         BRAND_GRADIENT,
@@ -594,7 +601,7 @@ export function SportsHero(props: SportsHeroProps) {
                     >
                       {ctaLabel ?? (isFreeEvent ? 'Register Free' : 'Register Now')}
                       <ArrowRight className="size-5 transition-transform group-hover:translate-x-1 motion-reduce:transform-none" aria-hidden />
-                    </Link>
+                    </HashScrollLink>
                   ) : (
                     <span className="flex w-full items-center justify-center rounded-xl bg-muted py-3.5 text-fs-md font-semibold text-muted-foreground">
                       {statusWord || 'Registrations closed'}

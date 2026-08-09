@@ -248,9 +248,15 @@ export function ConferenceAgenda({ agenda, speakers, tracks }: ConferenceAgendaP
                       {session.track && (
                         <span
                           className="rounded-full px-2.5 py-0.5 text-[10.5px] font-bold"
+                          // `--color-primary-50` is defined nowhere, so the background fell
+                          // through to its #f0f0ff violet fallback while `--color-primary`
+                          // DID resolve (to the brand magenta #e5277e) — a mismatched pair.
+                          // The brand tint is composed the way styles/tokens.css documents it
+                          // (`rgb(var(--primary-rgb) / <alpha>)`), at the same 0.09 alpha the
+                          // track-colour branch above uses (`18` hex), so both branches match.
                           style={track?.color
                             ? { backgroundColor: `${track.color}18`, color: track.color }
-                            : { backgroundColor: 'var(--color-primary-50, #f0f0ff)', color: 'var(--color-primary, #7c3aed)' }}
+                            : { backgroundColor: 'rgb(var(--primary-rgb) / 0.09)', color: 'var(--color-primary)' }}
                         >
                           {session.track}
                         </span>

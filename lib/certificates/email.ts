@@ -10,7 +10,7 @@ import { safeFetchBytes, validateGeneratedCertificateUrl } from './urlGuard'
 import { getSettings, recordCertificateEmail } from './firestore'
 import { replaceVariables }  from './placeholders'
 import { defaultCertificateSettings } from './types'
-import { APP_URL } from '@/lib/env'
+import { getEmailAppUrl } from '@/lib/email/appUrl'
 import type { Certificate } from './types'
 import type { PlaceholderContext } from './placeholders'
 
@@ -67,12 +67,12 @@ export async function emailCertificate(
   const subject = replaceVariables(auto.subject?.trim() || DEFAULT_SUBJECT, context)
   const message = replaceVariables(auto.message?.trim() || DEFAULT_MESSAGE, context)
 
-  const verifyUrl   = `${APP_URL}/verify/certificate/${certificate.certificateId}`
+  const verifyUrl   = `${getEmailAppUrl()}/verify/certificate/${certificate.certificateId}`
   // Include the verification token so the recipient's download works even when
   // settings.download.requireVerification is enabled.
   const downloadUrl = certificate.verificationToken
-    ? `${APP_URL}/api/certificates/${certificate.certificateId}/file?token=${encodeURIComponent(certificate.verificationToken)}`
-    : `${APP_URL}/api/certificates/${certificate.certificateId}/file`
+    ? `${getEmailAppUrl()}/api/certificates/${certificate.certificateId}/file?token=${encodeURIComponent(certificate.verificationToken)}`
+    : `${getEmailAppUrl()}/api/certificates/${certificate.certificateId}/file`
 
   // Attach the generated PDF — reuse in-memory bytes when available, else fetch.
   let pdfBase64: string | null = null

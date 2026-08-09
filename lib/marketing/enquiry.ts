@@ -36,6 +36,14 @@ export const ENQUIRY_LIMITS = {
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 
+/**
+ * The optional fields, in form order. One list so the validator and the normaliser
+ * can never disagree about which fields are optional.
+ */
+export const OPTIONAL_ENQUIRY_FIELDS = [
+  'organization', 'phone', 'country', 'eventType', 'attendees', 'demoDate', 'subject',
+] as const
+
 const str = (v: unknown): string => (typeof v === 'string' ? v.trim() : '')
 
 /**
@@ -62,7 +70,7 @@ export function validateEnquiry(raw: unknown): EnquiryFieldError[] {
   if (message.length > ENQUIRY_LIMITS.message) {
     errors.push({ field: 'message', message: 'Please keep your message under 5,000 characters.' })
   }
-  for (const k of ['fullName', 'workEmail', 'organization', 'phone', 'country', 'eventType', 'attendees', 'demoDate', 'subject'] as const) {
+  for (const k of ['fullName', 'workEmail', ...OPTIONAL_ENQUIRY_FIELDS] as const) {
     if (str(b[k]).length > ENQUIRY_LIMITS.short) {
       errors.push({ field: k, message: 'This value is too long.' })
     }
@@ -76,22 +84,30 @@ export function validateEnquiry(raw: unknown): EnquiryFieldError[] {
  *
  * Only what the person actually typed. No IP address, no user agent, no referrer, no
  * fingerprinting — an enquiry record needs the enquiry, not the enquirer's device.
+ *
+ * An empty optional is OMITTED, never set to `undefined`. The two are the same when
+ * you read the property back, but they are not the same to Firestore: `add()` rejects
+ * a document carrying an explicit `undefined` value ("Cannot use 'undefined' as a
+ * Firestore value") unless `ignoreUndefinedProperties` is enabled globally — which
+ * would silently drop typos everywhere else in the codebase. Omitting here keeps the
+ * result directly writable and keeps the stored document to what was actually typed.
  */
 export function normaliseEnquiry(raw: unknown): EnquiryInput {
   const b = (raw ?? {}) as Record<string, unknown>
   const cap = (v: unknown, n: number) => str(v).slice(0, n)
-  return {
-    fullName:     cap(b.fullName,  ENQUIRY_LIMITS.short),
-    workEmail:    cap(b.workEmail, ENQUIRY_LIMITS.short).toLowerCase(),
-    message:      cap(b.message,   ENQUIRY_LIMITS.message),
-    organization: cap(b.organization, ENQUIRY_LIMITS.short) || undefined,
-    phone:        cap(b.phone,     ENQUIRY_LIMITS.short) || undefined,
-    country:      cap(b.country,   ENQUIRY_LIMITS.short) || undefined,
-    eventType:    cap(b.eventType, ENQUIRY_LIMITS.short) || undefined,
-    attendees:    cap(b.attendees, ENQUIRY_LIMITS.short) || undefined,
-    demoDate:     cap(b.demoDate,  ENQUIRY_LIMITS.short) || undefined,
-    subject:      cap(b.subject,   ENQUIRY_LIMITS.short) || undefined,
+
+  const enquiry: EnquiryInput = {
+    fullName:  cap(b.fullName,  ENQUIRY_LIMITS.short),
+    workEmail: cap(b.workEmail, ENQUIRY_LIMITS.short).toLowerCase(),
+    message:   cap(b.message,   ENQUIRY_LIMITS.message),
   }
+
+  for (const key of OPTIONAL_ENQUIRY_FIELDS) {
+    const value = cap(b[key], ENQUIRY_LIMITS.short)
+    if (value) enquiry[key] = value
+  }
+
+  return enquiry
 }
 
 /** Escape before interpolating attendee-supplied text into the notification HTML. */

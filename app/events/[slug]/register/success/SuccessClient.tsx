@@ -6,8 +6,6 @@ import { motion, useReducedMotion, type Variants } from 'framer-motion'
 import { Download, ExternalLink, Copy, Check, Mail, Ticket, MapPin, Share2, Phone } from 'lucide-react'
 import { cn }       from '@/lib/utils/cn'
 import { AddToCalendarButton } from '@/components/event-templates/shared/ui/AddToCalendarButton'
-import { formatPaise, type AttendeeFeeBreakdown } from '@/lib/fees/attendeeBreakdown'
-import { statusToneCls } from '@/lib/ui/statusColors'
 
 export interface CalendarData {
   startDate: string   // YYYY-MM-DD
@@ -66,35 +64,20 @@ export interface SuccessClientProps {
   eventSlug:      string
   calendarData?:  CalendarData
   // H-1 summary + H-5 action targets (all optional — hidden when absent)
-  amountLabel?:     string | null
   dateLabel?:       string | null
   timeLabel?:       string | null
-  venueLabel?:      string | null
-  eventTypeLabel?:  string | null
   directionsUrl?:   string | null
   organizerEmail?:  string | null
   organizerPhone?:  string | null
   shareUrl?:        string
   // RD-PAYMENT-05 B1: canonical fee breakdown (attendee_pays only; null otherwise).
-  feeBreakdown?:    AttendeeFeeBreakdown | null
   // RD-RT3.4 — all optional, all hidden when absent.
   faqUrl?:            string | null
   paymentStatus?:     string | null
-  registeredAtLabel?: string | null
 }
 
 // ─── Small building blocks ──────────────────────────────────────────────────────
 
-function SummaryField({ label, value, full, mono }: { label: string; value: string; full?: boolean; mono?: boolean }) {
-  return (
-    <div className={full ? 'col-span-2' : ''}>
-      <dt className="text-fs-2xs font-semibold uppercase tracking-wider text-muted-foreground">{label}</dt>
-      <dd className={cn('mt-0.5 text-fs-sm font-medium text-foreground', mono ? 'break-all font-mono text-fs-2xs' : 'line-clamp-2')}>
-        {value}
-      </dd>
-    </div>
-  )
-}
 
 const primaryAction   = 'flex items-center justify-center gap-2 rounded-xl bg-primary px-4 py-3 text-fs-base font-semibold text-primary-foreground shadow-sm transition-opacity hover:opacity-90'
 const secondaryAction = 'flex items-center justify-center gap-2 rounded-xl border border-border bg-card px-3 py-2.5 text-fs-sm font-semibold text-foreground transition-colors hover:bg-muted/60'
@@ -107,9 +90,8 @@ export function SuccessClient(props: SuccessClientProps) {
   const {
     registrationId, ticketCode, eventName, passName, attendeeName, attendeeEmail,
     status, qrSvg, ticketPdfUrl, receiptUrl, eventSlug, calendarData,
-    amountLabel, dateLabel, timeLabel, venueLabel, eventTypeLabel,
-    directionsUrl, organizerEmail, organizerPhone, shareUrl, feeBreakdown,
-    faqUrl, paymentStatus, registeredAtLabel,
+    dateLabel, timeLabel,
+    directionsUrl, organizerEmail, organizerPhone, shareUrl, faqUrl,
   } = props
 
   const reduce = useReducedMotion() ?? false
@@ -153,28 +135,12 @@ export function SuccessClient(props: SuccessClientProps) {
     ? "Your registration is pending review. We'll email you once it's confirmed."
     : variant === 'problem' ? problem.sub : `Welcome, ${attendeeName}. Your registration is confirmed.`
   const headingColor = variant === 'pending' ? 'text-amber-700' : variant === 'problem' ? 'text-rose-700' : 'text-foreground'
-  const statusLabel  = variant === 'confirmed' ? 'Confirmed'
-    : variant === 'pending' ? (status === 'waitlisted' ? 'Waitlisted' : 'Pending review')
-      : (status === 'rejected' ? 'Not approved' : 'Cancelled')
-  // RD-RT3.4: the text hue now comes from the canonical `statusToneCls` map, so this
-  // page can no longer drift from the attendee dashboard. Only the dot remains local.
-  const statusDot  = variant === 'confirmed' ? 'bg-emerald-500' : variant === 'pending' ? 'bg-amber-500' : 'bg-rose-500'
 
   const item: Variants = {
     hidden:  { opacity: reduce ? 1 : 0, y: reduce ? 0 : 18 },
     visible: { opacity: 1, y: 0, transition: { duration: 0.38, ease: 'easeOut' } },
   }
   const contactHref = organizerEmail ? `mailto:${organizerEmail}` : organizerPhone ? `tel:${organizerPhone}` : null
-
-  // RD-RT3.4 — payment status, shown only when the record actually carries one.
-  const PAYMENT_LABEL: Record<string, string> = {
-    paid:         'Payment complete',
-    pending:      'Payment pending',
-    failed:       'Payment failed',
-    refunded:     'Refunded',
-    not_required: 'No payment required',
-  }
-  const paymentLabel = paymentStatus ? PAYMENT_LABEL[paymentStatus] ?? null : null
 
   // RD-RT3.4 — "what happens next", built ONLY from things that actually happen on this
   // route. Race-kit collection, results and certificates are deliberately absent: no
@@ -193,8 +159,8 @@ export function SuccessClient(props: SuccessClientProps) {
     ]
 
   return (
-    <motion.main
-      className="mx-auto w-full max-w-2xl px-4 py-10 sm:px-6"
+    <motion.div
+      className="mx-auto w-full max-w-5xl px-4 py-10 sm:px-6 lg:px-8 lg:py-14"
       initial={reduce ? 'visible' : 'hidden'}
       animate="visible"
       variants={{ hidden: {}, visible: { transition: { staggerChildren: reduce ? 0 : 0.08 } } }}
@@ -222,55 +188,19 @@ export function SuccessClient(props: SuccessClientProps) {
         </p>
       </motion.div>
 
-      {/* ── Registration summary (above the fold) ───────────────────────────── */}
-      <motion.section variants={item} aria-labelledby="rd-summary-h" className="mb-6">
-        <h2 id="rd-summary-h" className={sectionLabel}>Registration summary</h2>
-        <div className="overflow-hidden rounded-2xl border border-border bg-card shadow-sm">
-          <div className="flex flex-wrap items-center gap-2 border-b border-border px-5 py-3">
-            <span className={cn('inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-fs-2xs font-bold ring-1', statusToneCls[status] ?? statusToneCls.pending)}>
-              <span className={cn('size-1.5 rounded-full', statusDot)} aria-hidden />
-              {statusLabel}
-            </span>
-            {paymentLabel && (
-              <span className={cn('inline-flex items-center rounded-full px-2.5 py-1 text-fs-2xs font-bold ring-1', statusToneCls[paymentStatus ?? ''] ?? statusToneCls.pending)}>
-                {paymentLabel}
-              </span>
-            )}
-          </div>
-          <dl className="grid grid-cols-2 gap-x-4 gap-y-3.5 px-5 py-4">
-            <SummaryField label="Event" value={eventName} full />
-            {dateLabel && <SummaryField label="Date" value={dateLabel} />}
-            {timeLabel && <SummaryField label="Time" value={timeLabel} />}
-            {venueLabel && <SummaryField label="Venue" value={venueLabel} full />}
-            <SummaryField label="Pass" value={passName} />
-            {eventTypeLabel && <SummaryField label="Type" value={eventTypeLabel} />}
-            <SummaryField label="Amount paid" value={amountLabel ?? 'Free'} />
-            {paymentLabel && <SummaryField label="Payment" value={paymentLabel} />}
-            {registeredAtLabel && <SummaryField label="Registered on" value={registeredAtLabel} />}
-            <SummaryField label="Registration ID" value={registrationId} mono full />
-          </dl>
-          {/* RD-PAYMENT-05 B1: itemized fee breakdown (attendee_pays) from canonical stored
-              financials — the same lines shown at checkout. Total === Amount paid above. */}
-          {feeBreakdown && (
-            <dl className="space-y-1.5 border-t border-border bg-muted/20 px-5 py-4">
-              {feeBreakdown.lines.map(l => (
-                <div key={l.label} className="flex items-center justify-between text-fs-xs">
-                  <dt className="text-muted-foreground">{l.label}</dt>
-                  <dd className="tabular-nums text-foreground">{formatPaise(l.paise)}</dd>
-                </div>
-              ))}
-              <div className="flex items-center justify-between border-t border-border pt-2 text-fs-sm font-semibold">
-                <dt className="text-foreground">Total paid</dt>
-                <dd className="tabular-nums text-foreground">{formatPaise(feeBreakdown.totalPaise)}</dd>
-              </div>
-            </dl>
-          )}
-        </div>
-      </motion.section>
+      {/*
+        COMPOSITION — the hero keeps the full measure and stays the focal point. Below it,
+        progress sits in a narrow sticky rail and the ticket (the actionable object) takes
+        the wider column with its actions directly beneath it. Sticky is on the SHORT side
+        deliberately: a sticky column taller than the viewport cannot scroll to its end.
+        One column on mobile, in reading order.
+      */}
+      <div className="grid grid-cols-1 items-start gap-6 lg:grid-cols-12 lg:gap-8">
+        <div className="space-y-6 lg:sticky lg:top-24 lg:col-span-5">
 
       {/* ── What happens next ───────────────────────────────────────────────── */}
       {nextSteps.length > 0 && (
-        <motion.section variants={item} aria-labelledby="rd-next-h" className="mb-6">
+        <motion.section variants={item} aria-labelledby="rd-next-h">
           <h2 id="rd-next-h" className={sectionLabel}>What happens next</h2>
           <ol className="overflow-hidden rounded-2xl border border-border bg-card px-5 py-4 shadow-sm">
             {nextSteps.map((step, i) => (
@@ -301,9 +231,14 @@ export function SuccessClient(props: SuccessClientProps) {
         </motion.section>
       )}
 
+        </div>
+
+        {/* The ticket and everything you do with it. */}
+        <div className="space-y-6 lg:col-span-7">
+
       {/* ── Your ticket (confirmed only) ────────────────────────────────────── */}
       {variant === 'confirmed' && (
-        <motion.section variants={item} aria-labelledby="rd-ticket-h" className="mb-6">
+        <motion.section variants={item} aria-labelledby="rd-ticket-h">
           <h2 id="rd-ticket-h" className={sectionLabel}>Your ticket</h2>
           <div className="overflow-hidden rounded-2xl border border-border bg-card shadow-sm">
             <div className="flex flex-col items-center border-b border-border px-6 py-6">
@@ -330,7 +265,7 @@ export function SuccessClient(props: SuccessClientProps) {
               </button>
             </div>
             <Link
-              href={`/tickets/${registrationId}`}
+              href={`/tickets/${registrationId}?success=1`}
               className="flex items-center justify-center gap-1.5 px-5 py-3 text-fs-xs font-medium text-primary transition-colors hover:bg-muted/50"
             >
               <Ticket className="size-3.5" aria-hidden />
@@ -403,7 +338,7 @@ export function SuccessClient(props: SuccessClientProps) {
 
       {/* ── Need help? — rendered only when the organiser published a channel. ── */}
       {(organizerEmail || organizerPhone || faqUrl) && (
-        <motion.section variants={item} aria-labelledby="rd-help-h" className="mt-6">
+        <motion.section variants={item} aria-labelledby="rd-help-h">
           <h2 id="rd-help-h" className={sectionLabel}>Need help?</h2>
           <div className="rounded-2xl border border-border bg-card px-5 py-4 shadow-sm">
             <p className="text-fs-xs text-muted-foreground">
@@ -432,6 +367,8 @@ export function SuccessClient(props: SuccessClientProps) {
           </div>
         </motion.section>
       )}
-    </motion.main>
+        </div>
+      </div>
+    </motion.div>
   )
 }

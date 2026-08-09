@@ -14,6 +14,7 @@ import { fmtEmailDate } from '@/lib/email'
 import { notificationEngine, NotificationType, NotificationChannel } from '@/lib/notifications'
 import { resolveEventEmailProvider } from '@/lib/email/resolveEventProvider'
 import type { RegistrationDocument } from '@/lib/registrations/types'
+import { getEmailAppUrl } from '@/lib/email/appUrl'
 
 export type ResendResult = { ok: true } | { ok: false; error: string; status: number }
 
@@ -54,7 +55,7 @@ export async function resendRegistrationTicketEmail(registrationId: string): Pro
     ? (typeof physical?.city === 'string' ? physical.city : '')
     : ''
 
-  const baseUrl  = process.env.NEXT_PUBLIC_APP_URL ?? ''
+  const baseUrl = getEmailAppUrl()
   const pdfToken = signTicketToken(registrationId)
   const pdfUrl   = `${baseUrl}/api/tickets/${registrationId}/pdf?token=${encodeURIComponent(pdfToken)}`
 

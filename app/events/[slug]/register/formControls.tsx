@@ -19,7 +19,7 @@
 // reads --select-height: 2.5rem. Option rows are deliberately taller for touch.
 
 import type { ReactNode } from 'react'
-import { AlertCircle, Check } from 'lucide-react'
+import { AlertCircle, Check, ChevronRight } from 'lucide-react'
 import { cn } from '@/lib/utils/cn'
 
 // ─── Type + rhythm tokens ───────────────────────────────────────────────────────
@@ -36,33 +36,45 @@ const MESSAGE_GAP = 'mt-1.5'
 // ─── Control surface ────────────────────────────────────────────────────────────
 // One string for text, textarea, date, time, number, email, tel and url so a date
 // field can never drift from a text field again.
+//
+// RD-RT4.0. The control used to be a white box on a white card — a rectangle you could
+// only find by its 1px border, which is why a long form read as a list of outlines. It
+// is now RECESSED at rest (a faint muted fill plus a 1px inset shadow) and LIFTS to a
+// clean white surface with a soft brand halo on focus. The state you are in is now
+// legible from the fill, not just from the border, and the focused field is the only
+// lit object on the card.
+//
+// Height stays `h-10` (40px) to remain in exact lockstep with CustomSelect, which reads
+// the global `--select-height: 2.5rem`.
 
 const CONTROL_SHARED =
-  'w-full rounded-xl border bg-background text-fs-sm text-foreground placeholder:text-muted-foreground/50 ' +
-  'outline-none transition-colors ' +
-  'disabled:cursor-not-allowed disabled:bg-muted/30 disabled:opacity-60 ' +
-  'read-only:bg-muted/20 read-only:text-muted-foreground'
+  'w-full rounded-xl border text-fs-sm text-foreground placeholder:text-muted-foreground/50 ' +
+  'outline-none transition-[background-color,border-color,box-shadow] duration-150 ' +
+  'disabled:cursor-not-allowed disabled:bg-muted/60 disabled:opacity-60 disabled:shadow-none ' +
+  'read-only:bg-muted/50 read-only:text-muted-foreground read-only:shadow-none'
 
-/** `error` swaps the whole border/ring channel so the control shows its own failure. */
+/** Recessed at rest → lit on focus. Shared by every control branch. */
+const CONTROL_OK =
+  'border-border bg-muted/30 shadow-[inset_0_1px_2px_rgb(15_23_42_/_0.05)] ' +
+  'hover:border-border-strong hover:bg-muted/45 ' +
+  'focus:border-primary/70 focus:bg-background focus:shadow-[0_0_0_4px_rgb(var(--primary-rgb)_/_0.12)]'
+
+const CONTROL_ERR =
+  'border-destructive/60 bg-destructive/[0.035] ' +
+  'hover:border-destructive/80 ' +
+  'focus:border-destructive focus:bg-background focus:shadow-[0_0_0_4px_rgb(220_38_38_/_0.14)]'
+
+/** `error` swaps the whole surface channel so the control shows its own failure. */
 export function controlCls(error?: boolean, extra?: string): string {
-  return cn(
-    CONTROL_SHARED,
-    'h-10 px-3.5',
-    error
-      ? 'border-destructive/70 focus:border-destructive focus:ring-2 focus:ring-destructive/20'
-      : 'border-border hover:border-border/60 focus:border-primary/60 focus:ring-2 focus:ring-primary/20',
-    extra,
-  )
+  return cn(CONTROL_SHARED, 'h-10 px-3.5', error ? CONTROL_ERR : CONTROL_OK, extra)
 }
 
 /** Same channel, but auto-height and vertical-only resize. */
 export function textareaCls(error?: boolean): string {
   return cn(
     CONTROL_SHARED,
-    'min-h-[88px] resize-y px-3.5 py-2.5 leading-relaxed',
-    error
-      ? 'border-destructive/70 focus:border-destructive focus:ring-2 focus:ring-destructive/20'
-      : 'border-border hover:border-border/60 focus:border-primary/60 focus:ring-2 focus:ring-primary/20',
+    'min-h-[92px] resize-y px-3.5 py-2.5 leading-relaxed',
+    error ? CONTROL_ERR : CONTROL_OK,
   )
 }
 
@@ -157,23 +169,29 @@ export function ErrorSummary({ errors, onJump, innerRef }: {
       ref={innerRef}
       role="alert"
       tabIndex={-1}
-      className="mb-4 rounded-2xl border border-destructive/30 bg-destructive/[0.04] p-4 outline-none focus-visible:ring-2 focus-visible:ring-destructive/40"
+      className="mb-4 overflow-hidden rounded-2xl border border-destructive/25 bg-card shadow-[0_1px_2px_rgb(15_23_42_/_0.04),0_18px_36px_-28px_rgb(220_38_38_/_0.45)] outline-none focus-visible:ring-2 focus-visible:ring-destructive/40"
     >
-      <p className="flex items-center gap-2 text-fs-sm font-bold text-destructive">
-        <AlertCircle className="size-4 shrink-0" aria-hidden />
+      <p className="flex items-center gap-2.5 border-b border-destructive/15 bg-destructive/[0.05] px-4 py-3 text-fs-sm font-bold text-destructive">
+        <span aria-hidden className="flex size-6 shrink-0 items-center justify-center rounded-lg bg-destructive/10">
+          <AlertCircle className="size-3.5" />
+        </span>
         {errors.length === 1
           ? 'There is 1 problem to fix before continuing'
           : `There are ${errors.length} problems to fix before continuing`}
       </p>
-      <ul className="mt-2.5 flex flex-col gap-1.5">
+      <ul className="flex flex-col divide-y divide-border/50">
         {errors.map(e => (
           <li key={e.id}>
             <button
               type="button"
               onClick={() => onJump(e.id)}
-              className="rounded text-left text-fs-xs text-destructive underline underline-offset-2 outline-none hover:text-destructive/80 focus-visible:ring-2 focus-visible:ring-destructive/40 focus-visible:ring-offset-2"
+              className="group flex w-full items-start gap-2 px-4 py-2.5 text-left text-fs-xs text-muted-foreground outline-none transition-colors hover:bg-destructive/[0.03] focus-visible:bg-destructive/[0.05] focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-destructive/40"
             >
-              <span className="font-semibold">{e.label}</span> — {e.message}
+              <span className="min-w-0 flex-1">
+                <span className="font-semibold text-destructive underline underline-offset-2 group-hover:text-destructive/80">{e.label}</span>
+                <span className="text-muted-foreground"> — {e.message}</span>
+              </span>
+              <ChevronRight className="mt-0.5 size-3.5 shrink-0 text-destructive/50 transition-transform group-hover:translate-x-0.5 motion-reduce:transition-none" aria-hidden />
             </button>
           </li>
         ))}
@@ -190,23 +208,29 @@ export function ErrorSummary({ errors, onJump, innerRef }: {
 
 const OPTION_ROW =
   'group relative flex min-h-11 cursor-pointer select-none items-center gap-3 rounded-xl border px-3.5 py-2.5 ' +
-  'text-fs-sm text-foreground transition-colors ' +
+  'text-fs-sm text-foreground transition-[background-color,border-color,box-shadow,transform] duration-150 ' +
   'has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-primary/50 has-[:focus-visible]:ring-offset-2 ' +
   'has-[:disabled]:cursor-not-allowed has-[:disabled]:opacity-60'
 
 const OPTION_STATE =
-  'border-border bg-card hover:border-primary/40 hover:bg-muted/20 ' +
-  'has-[:checked]:border-primary has-[:checked]:bg-primary/[0.04] has-[:checked]:ring-1 has-[:checked]:ring-primary/20'
+  'border-border bg-muted/25 hover:border-border-strong hover:bg-muted/45 motion-safe:hover:-translate-y-px ' +
+  'has-[:checked]:border-primary/50 has-[:checked]:bg-[rgb(var(--primary-rgb)_/_0.04)] ' +
+  'has-[:checked]:shadow-[0_2px_14px_-6px_rgb(var(--primary-rgb)_/_0.35)] ' +
+  'has-[:checked]:motion-safe:translate-y-0'
 
-/** Radio dot — a ring that thickens into a filled dot when checked. */
+/** Radio dot — an empty ring that fills with the brand gradient when checked. */
 const RADIO_MARK =
-  'size-[18px] shrink-0 rounded-full border-2 border-border transition-all ' +
-  'peer-checked:border-[5px] peer-checked:border-primary'
+  'flex size-5 shrink-0 items-center justify-center rounded-full border-2 border-border-strong bg-card transition-all duration-150 ' +
+  'peer-checked:border-transparent peer-checked:bg-[image:var(--primary-gradient)] ' +
+  'peer-checked:shadow-[0_2px_8px_rgb(var(--primary-rgb)_/_0.40)] ' +
+  'peer-checked:[&>span]:scale-100'
 
-/** Checkbox mark — box fills, tick fades in. */
+/** Checkbox mark — box fills with the brand gradient, tick fades in. */
 const CHECK_MARK =
-  'flex size-[18px] shrink-0 items-center justify-center rounded-[6px] border-2 border-border transition-colors ' +
-  'peer-checked:border-primary peer-checked:bg-primary peer-checked:[&>svg]:opacity-100'
+  'flex size-5 shrink-0 items-center justify-center rounded-[7px] border-2 border-border-strong bg-card transition-all duration-150 ' +
+  'peer-checked:border-transparent peer-checked:bg-[image:var(--primary-gradient)] ' +
+  'peer-checked:shadow-[0_2px_8px_rgb(var(--primary-rgb)_/_0.40)] ' +
+  'peer-checked:[&>svg]:opacity-100'
 
 export function RadioOption({ name, option, checked, disabled, onSelect }: {
   name:     string
@@ -226,7 +250,9 @@ export function RadioOption({ name, option, checked, disabled, onSelect }: {
         onChange={onSelect}
         className="peer sr-only"
       />
-      <span className={RADIO_MARK} aria-hidden />
+      <span className={RADIO_MARK} aria-hidden>
+        <span className="size-2 scale-0 rounded-full bg-white transition-transform duration-150" />
+      </span>
       <span className="min-w-0 font-medium">{option}</span>
     </label>
   )
@@ -252,7 +278,7 @@ export function CheckOption({ id, option, checked, disabled, onToggle, children 
         className="peer sr-only"
       />
       <span className={cn(CHECK_MARK, 'mt-px')} aria-hidden>
-        <Check className="size-3 text-white opacity-0 transition-opacity" strokeWidth={3} />
+        <Check className="size-3 text-white opacity-0 transition-opacity duration-150" strokeWidth={3} />
       </span>
       <span className="min-w-0 font-medium">{children ?? option}</span>
     </label>
@@ -273,12 +299,13 @@ export function TogglePill({ option, checked, disabled, onToggle }: {
       aria-pressed={checked}
       onClick={onToggle}
       className={cn(
-        'inline-flex min-h-9 items-center rounded-full border px-4 text-fs-sm font-medium outline-none transition-colors',
+        'inline-flex min-h-10 items-center rounded-full border px-4 text-fs-sm font-semibold outline-none',
+        'transition-[background-color,border-color,box-shadow,color] duration-150',
         'focus-visible:ring-2 focus-visible:ring-primary/50 focus-visible:ring-offset-2',
         'disabled:cursor-not-allowed disabled:opacity-60',
         checked
-          ? 'border-primary bg-primary/10 text-primary'
-          : 'border-border bg-card text-foreground hover:border-primary/40 hover:bg-muted/20',
+          ? 'border-transparent bg-[image:var(--primary-gradient)] text-white shadow-[0_2px_12px_-4px_rgb(var(--primary-rgb)_/_0.50)]'
+          : 'border-border bg-muted/25 text-foreground hover:border-border-strong hover:bg-muted/45',
       )}
     >
       {option}

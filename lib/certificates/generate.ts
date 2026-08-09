@@ -24,7 +24,7 @@ import { sendCertificateWhatsApp } from './whatsapp'
 import { uploadServerFile }         from '@/lib/firebase/storage/admin'
 import { generatedCertificatePath } from './constants'
 import { safeFetchBytes, validateEventTemplateUrl, validateGlobalTemplateUrl } from './urlGuard'
-import { APP_URL }                  from '@/lib/env'
+import { getEmailAppUrl } from '@/lib/email/appUrl'
 import { enqueueWebhook }           from '@/lib/integrations/webhooks'
 import { crmRecordCertificate }     from '@/lib/crm/service'
 import { captureError, captureFinancialError } from '@/lib/monitoring/sentry'
@@ -227,7 +227,7 @@ export async function generateCertificate(
   try {
     const verificationToken = generateVerificationToken()
     const issueDate         = formatToday()
-    const verifyUrl         = `${APP_URL}/verify/certificate/${certificateId}`
+    const verifyUrl         = `${getEmailAppUrl()}/verify/certificate/${certificateId}`
 
     // Resolve placeholders.
     const context = buildContext(input, certificateId, issueDate)
@@ -385,7 +385,7 @@ export async function regenerateCertificate(
   const template = opts?.prefetched?.template ?? await getActiveTemplate(existing.eventId, existing.organizerUid)
   if (!template) return { ok: false, error: 'no_active_template' }
 
-  const verifyUrl = `${APP_URL}/verify/certificate/${certificateId}`
+  const verifyUrl = `${getEmailAppUrl()}/verify/certificate/${certificateId}`
   const context   = contextFromSnapshot(existing.data, certificateId)
   const { templateBytes, assets } = opts?.prefetched?.render ?? await loadRenderAssets(template)
   const pdfBytes = await renderCertificatePdf({

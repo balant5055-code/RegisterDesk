@@ -84,6 +84,83 @@ describe('normaliseEnquiry — stores only what was typed', () => {
   })
 })
 
+// The production failure: Firestore's add() rejects a document carrying an explicit
+// `undefined` value ("Cannot use 'undefined' as a Firestore value (found in field
+// 'organization')"). Reading the property back cannot tell an omitted key from one set
+// to undefined, so these assert on the OWN KEYS — the only thing Firestore sees.
+describe('normaliseEnquiry — the result is directly writable to Firestore', () => {
+  const undefinedValued = (o: object) =>
+    Object.entries(o).filter(([, v]) => v === undefined).map(([k]) => k)
+
+  it('omits an empty optional entirely rather than setting it to undefined', () => {
+    const out = normaliseEnquiry({ ...valid, organization: '', phone: '   ' })
+    expect(Object.keys(out)).not.toContain('organization')
+    expect(Object.keys(out)).not.toContain('phone')
+    expect('organization' in out).toBe(false)
+  })
+
+  it('carries no undefined value for the exact production payload', () => {
+    // Name + email + country + message filled; every other optional left blank —
+    // precisely what the browser posts (the form always sends all ten keys).
+    const out = normaliseEnquiry({
+      fullName:  'Asha Rao',
+      workEmail: 'asha@example.com',
+      message:   'We run a 10k road race.',
+      organization: '',
+      phone:        '',
+      country:      'India',
+      eventType:    '',
+      attendees:    '',
+      demoDate:     '',
+      subject:      '',
+      website:      '',   // honeypot — must never be stored
+    })
+
+    expect(undefinedValued(out)).toEqual([])
+    expect(Object.keys(out).sort()).toEqual(
+      ['country', 'fullName', 'message', 'workEmail'],
+    )
+    expect(out.country).toBe('India')
+    expect(out).not.toHaveProperty('website')
+  })
+
+  it('carries no undefined value when only the required fields are supplied', () => {
+    const out = normaliseEnquiry(valid)
+    expect(undefinedValued(out)).toEqual([])
+    expect(Object.keys(out).sort()).toEqual(['fullName', 'message', 'workEmail'])
+  })
+
+  it('stores every optional when all of them are populated', () => {
+    const out = normaliseEnquiry({
+      ...valid,
+      organization: 'Acme Events', phone: '+91 90000 00000', country: 'India',
+      eventType: 'Marathon', attendees: '1000-5000', demoDate: '2026-08-20',
+      subject: 'Book a demo',
+    })
+
+    expect(undefinedValued(out)).toEqual([])
+    expect(out).toEqual({
+      fullName:     'Asha Rao',
+      workEmail:    'asha@example.com',
+      message:      valid.message,
+      organization: 'Acme Events',
+      phone:        '+91 90000 00000',
+      country:      'India',
+      eventType:    'Marathon',
+      attendees:    '1000-5000',
+      demoDate:     '2026-08-20',
+      subject:      'Book a demo',
+    })
+  })
+
+  it('omits an optional whose value is a non-string rather than storing it', () => {
+    const out = normaliseEnquiry({ ...valid, phone: 12345, organization: null })
+    expect(undefinedValued(out)).toEqual([])
+    expect(Object.keys(out)).not.toContain('phone')
+    expect(Object.keys(out)).not.toContain('organization')
+  })
+})
+
 describe('notification HTML is injection-safe', () => {
   it('escapes every HTML metacharacter', () => {
     expect(escapeHtml(`<script>"&'`)).toBe('&lt;script&gt;&quot;&amp;&#39;')

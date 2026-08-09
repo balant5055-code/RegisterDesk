@@ -14,6 +14,7 @@ import { signReceiptToken }               from '@/lib/receipts/token'
 import { writeEmailLog }                  from '@/lib/email-logs/write'
 import { generateIcs }                    from '@/lib/calendar/ics'
 import type { RegistrationDocument }      from './types'
+import { getEmailAppUrl } from '@/lib/email/appUrl'
 
 export async function sendApprovalEmail(registrationId: string): Promise<void> {
   const regSnap = await adminDb.collection('registrations').doc(registrationId).get()
@@ -45,7 +46,7 @@ export async function sendApprovalEmail(registrationId: string): Promise<void> {
     ? (typeof physical?.city   === 'string' ? physical.city   : '')
     : ''
 
-  const baseUrl      = process.env.NEXT_PUBLIC_APP_URL ?? ''
+  const baseUrl = getEmailAppUrl()
   const pdfToken     = signTicketToken(registrationId)
   const pdfUrl       = `${baseUrl}/api/tickets/${registrationId}/pdf?token=${encodeURIComponent(pdfToken)}`
   const receiptToken = reg.amount > 0 && reg.paymentStatus === 'paid'

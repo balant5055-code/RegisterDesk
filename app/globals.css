@@ -363,13 +363,22 @@ body {
   animation: lightSweep 7s linear infinite;
 }
 
+/* The opacity channel below must be Tailwind's own `--tw-*-opacity`, NOT `--primary`.
+   `--primary` is the brand COLOUR token (#e5277e, styles/tokens.css). Assigning it the
+   number 1 here re-declared it in this rule's scope, and custom properties inherit — so
+   every descendant resolving `var(--primary)` as a colour (text-primary, border-primary,
+   --color-primary → var(--primary)) would receive `1`, an invalid colour. Both rules
+   shipped that redeclaration to production CSS (`--primary:1` appeared twice in the built
+   stylesheet). The sibling `.text-muted` below was already written correctly, which is what
+   identifies this as a find-and-replace slip rather than intent. Rendering is unchanged:
+   the channel resolved to 1 before and resolves to 1 now. */
 .bg-brand-50 {
-    --primary: 1;
-    background-color: rgb(253 238 245 / var(--primary, 1));
+    --tw-bg-opacity: 1;
+    background-color: rgb(253 238 245 / var(--tw-bg-opacity, 1));
 }
 .text-brand-600 {
-    --primary: 1;
-    color: rgb(229 39 126 / var(--primary, 1));
+    --tw-text-opacity: 1;
+    color: rgb(229 39 126 / var(--tw-text-opacity, 1));
 }
 .text-muted{
     --tw-text-opacity: 1;

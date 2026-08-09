@@ -25,10 +25,13 @@ import { generateCertificateId }             from '@/lib/certificates/id'
 import { getClientIp }                       from '@/lib/rateLimit'
 import { RATE_POLICY, checkPolicy }          from '@/lib/rateLimit/policies'
 import type { RegistrationDocument }         from '@/lib/registrations/types'
+import { getEmailAppUrl } from '@/lib/email/appUrl'
 
 type Params = { params: Promise<{ registrationId: string }> }
 
-const APP_URL = (process.env.NEXT_PUBLIC_APP_URL ?? 'https://registerdesk.in').replace(/\/$/, '')
+// RD-EMAIL-PRODUCTION-URL — one guarded resolver; the old local fallback could not
+// tell a localhost origin from a real one before embedding it in mail.
+const APP_URL = () => getEmailAppUrl()
 
 export interface CertificateEligibilityResponse {
   eligible: false
@@ -159,7 +162,7 @@ export async function GET(req: NextRequest, { params }: Params): Promise<NextRes
   }
 
   // Generate PDF
-  const verifyUrl = `${APP_URL}/verify/certificate/${record.certificateId}`
+  const verifyUrl = `${APP_URL()}/verify/certificate/${record.certificateId}`
   const issueDate = toISO(record.issuedAt)
     ? fmtDate(toISO(record.issuedAt)!)
     : new Date().toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' })

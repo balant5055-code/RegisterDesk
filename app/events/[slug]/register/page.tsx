@@ -16,6 +16,13 @@ import { RegisterClient }      from './RegisterClient'
 import { PassPrice }          from './PassPrice'
 import { ageRangeLabel }      from '@/lib/registrations/ageEligibility'
 import { WaitlistJoinClient }  from './WaitlistJoinClient'
+// RD-RT4.0 — presentation only. `registerTheme` is intentionally NOT a client module, so
+// these are real strings here rather than client references; CheckoutTopBar is the one
+// client component the server screens render.
+import { CheckoutTopBar }      from './RegistrationUI'
+import { CANVAS_STYLE, CANVAS, PAGE, PANEL, PANEL_HEAD, PANEL_BODY, FOCUS_RING } from './registerTheme'
+import { buttonVariants }      from '@/components/ui/button'
+import { Ticket, ArrowRight, ShieldCheck, CalendarX2 } from 'lucide-react'
 import type {
   FormSection,
   ConditionalRule,
@@ -104,6 +111,9 @@ function extractPasses(pricing: Record<string, unknown> | null): PassPublic[] {
 }
 
 // ─── Blocked state UI ─────────────────────────────────────────────────────────
+// RD-RT4.0: the blocked and picker screens now open on the SAME canvas and checkout bar
+// as the form, so arriving at a closed event does not look like a different product.
+// Presentation only — the gate decision above is untouched.
 
 function BlockedScreen({
   reason,
@@ -117,25 +127,32 @@ function BlockedScreen({
     : 'Registration is not available'
 
   return (
-    <div className="flex min-h-[60vh] flex-col items-center justify-center px-4 py-16 text-center">
-      <div className="mb-4 flex size-14 items-center justify-center rounded-full bg-muted/50">
-        <svg className="size-7 text-muted-foreground" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-          <path strokeLinecap="round" strokeLinejoin="round" d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636" />
-        </svg>
+    <div style={CANVAS_STYLE} className={`min-h-screen ${CANVAS}`}>
+      <CheckoutTopBar eventSlug={eventSlug} secure={false} />
+      <div className={`${PAGE} flex min-h-[calc(100vh-3.5rem)] items-center justify-center py-12`}>
+        <div className={`${PANEL} ${PANEL_BODY} w-full max-w-md text-center`}>
+          <div className="mx-auto mb-4 flex size-12 items-center justify-center rounded-2xl bg-muted text-muted-foreground">
+            <CalendarX2 className="size-6" aria-hidden />
+          </div>
+          <h1 className="text-fs-lg font-bold tracking-tight text-foreground">Registration Unavailable</h1>
+          <p className="mx-auto mt-2 max-w-sm text-fs-base leading-relaxed text-muted-foreground">{label}</p>
+          <Link
+            href={`/events/${eventSlug}`}
+            className={`${buttonVariants({ variant: 'primary', size: 'lg' })} mt-6 w-full`}
+          >
+            Back to Event
+          </Link>
+        </div>
       </div>
-      <h1 className="text-fs-lg font-bold text-foreground">Registration Unavailable</h1>
-      <p className="mt-2 max-w-sm text-fs-base text-muted-foreground">{label}</p>
-      <Link
-        href={`/events/${eventSlug}`}
-        className="mt-6 rounded-xl bg-primary px-6 py-2.5 text-fs-sm font-semibold text-primary-foreground hover:opacity-90"
-      >
-        Back to Event
-      </Link>
     </div>
   )
 }
 
 // ─── Pass selection UI (no passId in query) ───────────────────────────────────
+// The FIRST decision of the flow, and previously a list of four-line rows. It is now the
+// same selectable-card language the in-form pass switcher uses, so choosing a pass looks
+// identical whether you do it here or change your mind two screens later. Same links,
+// same buildRegisterHref destination, same data.
 
 function PassSelectionScreen({
   passes,
@@ -153,46 +170,103 @@ function PassSelectionScreen({
   }
 
   return (
-    <div className="mx-auto max-w-lg px-4 py-12">
-      <div className="mb-8 text-center">
-        <p className="text-fs-xs font-semibold uppercase tracking-wider text-primary">Register for</p>
-        <h1 className="mt-1 text-fs-xl font-bold text-foreground">{eventName}</h1>
-        <p className="mt-1 text-fs-base text-muted-foreground">Select a pass to continue</p>
-      </div>
+    <div style={CANVAS_STYLE} className={`relative min-h-screen ${CANVAS}`}>
+      <div
+        aria-hidden
+        className="pointer-events-none absolute inset-x-0 top-0 h-[420px] bg-[radial-gradient(100%_100%_at_50%_0%,rgb(var(--primary-rgb)_/_0.06)_0%,transparent_70%)]"
+      />
+      <CheckoutTopBar eventSlug={eventSlug} secure={false} />
 
-      <div className="flex flex-col gap-3">
-        {passes.map(pass => (
-          <Link
-            key={pass.id}
-            href={buildRegisterHref(eventSlug, pass.id)}
-            className="group flex items-center justify-between rounded-xl border border-border bg-card p-4 shadow-sm transition-all hover:border-primary/40 hover:shadow-md"
-          >
-            <div className="min-w-0">
-              <p className="text-fs-base font-semibold text-foreground">{pass.name}</p>
-              {pass.description && (
-                <p className="mt-0.5 truncate text-fs-xs text-muted-foreground">{pass.description}</p>
-              )}
-              {!pass.unlimited && pass.quantity !== null && (
-                <p className="mt-1 text-fs-2xs text-muted-foreground">{pass.quantity} seats</p>
-              )}
-              {/* RD-RT3.2.3: eligibility at the FIRST place a pass is chosen, so an
-                  age problem is visible before any form is filled in. */}
-              {ageRangeLabel({ minAge: pass.minAge ?? null, maxAge: pass.maxAge ?? null }) && (
-                <p className="mt-1 text-fs-2xs font-medium text-muted-foreground">
-                  Age {ageRangeLabel({ minAge: pass.minAge ?? null, maxAge: pass.maxAge ?? null })}
-                </p>
-              )}
+      <div className={`${PAGE} relative py-10 sm:py-14`}>
+        <div className="mx-auto max-w-2xl">
+          <div className="mb-7 text-center">
+            <p className="text-fs-xs font-bold uppercase tracking-[0.14em] text-primary">Event Registration</p>
+            <h1 className="mt-2 text-fs-xl font-bold leading-tight tracking-tight text-foreground sm:text-fs-2xl">
+              {eventName}
+            </h1>
+            <p className="mt-2 text-fs-base text-muted-foreground">
+              Choose the pass you want, then fill in your details.
+            </p>
+          </div>
+
+          <div className={PANEL}>
+            <div className={`${PANEL_HEAD} flex items-center justify-between gap-3 rounded-t-2xl`}>
+              <div className="flex min-w-0 items-center gap-3">
+                <span aria-hidden className="flex size-7 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary">
+                  <Ticket className="size-3.5" />
+                </span>
+                <h2 className="text-fs-md font-bold leading-snug text-foreground">Choose your pass</h2>
+              </div>
+              <span className="shrink-0 text-fs-2xs font-semibold text-muted-foreground">
+                {passes.length} {passes.length === 1 ? 'option' : 'options'}
+              </span>
             </div>
-            <div className="ml-4 shrink-0 text-right">
-              {/* RD-RT3.2.2: the picker printed a bare price, hiding an active
-                  early-bird discount at the very first place it is shown. */}
-              <PassPrice price={pass.price} regularPrice={pass.regularPrice} isFree={pass.isFree} />
-              <p className="mt-0.5 text-fs-2xs text-primary opacity-0 transition-opacity group-hover:opacity-100">
-                Select →
-              </p>
+
+            <div className={`${PANEL_BODY} flex flex-col gap-2.5`}>
+              {passes.map(pass => {
+                const ageLabel = ageRangeLabel({ minAge: pass.minAge ?? null, maxAge: pass.maxAge ?? null })
+                return (
+                  <Link
+                    key={pass.id}
+                    href={buildRegisterHref(eventSlug, pass.id)}
+                    className={
+                      'group relative flex items-center gap-3.5 overflow-hidden rounded-xl border border-border bg-card p-4 ' +
+                      'transition-[border-color,background-color,box-shadow,transform] duration-200 ' +
+                      'hover:border-primary/45 hover:bg-[rgb(var(--primary-rgb)_/_0.03)] ' +
+                      'hover:shadow-[0_2px_16px_-6px_rgb(var(--primary-rgb)_/_0.35)] motion-safe:hover:-translate-y-px ' +
+                      FOCUS_RING
+                    }
+                  >
+                    {/* Brand edge — grows in on hover / keyboard focus. */}
+                    <span
+                      aria-hidden
+                      className={
+                        'absolute inset-y-0 left-0 w-[3px] origin-top scale-y-0 rounded-r-full bg-[image:var(--primary-gradient)] ' +
+                        'transition-transform duration-300 group-hover:scale-y-100 group-focus-visible:scale-y-100 motion-reduce:transition-none'
+                      }
+                    />
+
+                    <span className="ml-0.5 min-w-0 flex-1">
+                      <span className="block truncate text-fs-md font-bold leading-snug text-foreground">{pass.name}</span>
+                      {pass.description && (
+                        <span className="mt-0.5 block truncate text-fs-xs text-muted-foreground">{pass.description}</span>
+                      )}
+                      <span className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                        {/* RD-RT3.2.3: eligibility at the FIRST place a pass is chosen, so an
+                            age problem is visible before any form is filled in. */}
+                        {ageLabel && (
+                          <span className="inline-flex items-center rounded-md bg-muted px-1.5 py-0.5 text-fs-2xs font-medium text-muted-foreground">
+                            Age {ageLabel}
+                          </span>
+                        )}
+                        {!pass.unlimited && pass.quantity !== null && (
+                          <span className="inline-flex items-center rounded-md bg-muted px-1.5 py-0.5 text-fs-2xs font-medium text-muted-foreground">
+                            {pass.quantity} seats
+                          </span>
+                        )}
+                      </span>
+                    </span>
+
+                    <span className="flex shrink-0 items-center gap-3">
+                      {/* RD-RT3.2.2: the picker printed a bare price, hiding an active
+                          early-bird discount at the very first place it is shown. */}
+                      <PassPrice price={pass.price} regularPrice={pass.regularPrice} isFree={pass.isFree} />
+                      <ArrowRight
+                        className="size-4 shrink-0 text-muted-foreground/50 transition-all duration-200 group-hover:translate-x-0.5 group-hover:text-primary motion-reduce:transition-none"
+                        aria-hidden
+                      />
+                    </span>
+                  </Link>
+                )
+              })}
             </div>
-          </Link>
-        ))}
+          </div>
+
+          <p className="mt-5 flex items-center justify-center gap-1.5 text-fs-2xs font-medium text-muted-foreground">
+            <ShieldCheck className="size-3 shrink-0 text-emerald-600" aria-hidden />
+            Secure checkout · instant e-ticket
+          </p>
+        </div>
       </div>
     </div>
   )

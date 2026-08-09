@@ -86,7 +86,11 @@ function buildCSP(): string {
     "img-src 'self' data: blob: https:",
     "font-src 'self' data:",
     `connect-src ${connectSrc.join(' ')}`,
-    "frame-src 'self' blob: checkout.razorpay.com api.razorpay.com https://www.youtube.com https://www.youtube-nocookie.com https://player.vimeo.com",
+    // maps.google.com — the venue map iframe on public event pages (VenueShowcase).
+    // www.google.com is required as well: maps.google.com/maps?…&output=embed REDIRECTS
+    // to www.google.com/maps/embed?…, and CSP is re-evaluated on the redirect target, so
+    // allow-listing only the first host still fails on the hop.
+    "frame-src 'self' blob: checkout.razorpay.com api.razorpay.com https://www.youtube.com https://www.youtube-nocookie.com https://player.vimeo.com https://maps.google.com https://www.google.com",
     "frame-ancestors 'none'",
     "object-src 'none'",
     "base-uri 'self'",

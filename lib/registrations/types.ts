@@ -52,6 +52,21 @@ export interface RegistrationDocument {
   status:        RegistrationStatus
   paymentStatus: PaymentStatus
   amount:        number        // paise; 0 for free events
+  // ── Razorpay identifiers ────────────────────────────────────────────────────
+  // TYPE-MODEL CORRECTION (RD-REGISTRATIONS-DATA-AND-EXPORT): both fields have been
+  // written by app/api/registrations/verify-payment since the paid path shipped, but
+  // were never declared here — so they were invisible to every TypeScript consumer and
+  // silently dropped by the API/table/export layers even though the data was present.
+  // Declaring them changes NO runtime behaviour and migrates NOTHING.
+  //
+  // Present ONLY on the Razorpay path. Free, walk-in and imported registrations go
+  // through createRegistration(), which never writes them — hence optional.
+  //
+  // Note the asymmetric names: these are the ACTUAL persisted keys, kept verbatim
+  // rather than normalised, because renaming would orphan existing documents and
+  // break the admin support lookup that queries `paymentId` directly.
+  paymentId?:       string   // Razorpay payment id — "pay_…"
+  razorpayOrderId?: string   // Razorpay order id   — "order_…"
   // Origin of the registration. Absent on pre-Phase-C records ⇒ treat as 'online'.
   registrationSource?: RegistrationSource
   // Walk-in payment mode (gate registration). Absent for online registrations.

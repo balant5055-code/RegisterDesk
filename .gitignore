@@ -56,3 +56,5 @@ e2e/.shots/
 
 # Firebase service account credentials
 registerdesk-c91a3-firebase-adminsdk-fbsvc-7124b9379b.json
+
+.next-verify/

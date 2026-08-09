@@ -12,6 +12,7 @@ import { checkRegistrationGate, WAITLIST_ENABLED } from '@/lib/registrations/gat
 import { checkRateLimit, getClientIp } from '@/lib/rateLimit'
 import { sendWaitlistJoinedEmail }     from '@/lib/waitlist/sendWaitlistJoinedEmail'
 import type { WaitlistDocument }       from '@/lib/waitlist/types'
+import { getEmailAppUrl } from '@/lib/email/appUrl'
 
 interface JoinBody {
   slug:    string
@@ -176,7 +177,7 @@ export async function POST(
   }, { merge: true }).catch(e => console.error('[waitlist] counter increment failed:', e))
 
   // Send confirmation email (fire-and-forget)
-  const baseUrl     = process.env.NEXT_PUBLIC_APP_URL ?? ''
+  const baseUrl = getEmailAppUrl()
   const eventPageUrl = `${baseUrl}/events/${slug}`
   sendWaitlistJoinedEmail(entry as WaitlistDocument, eventPageUrl)
     .catch(e => console.error('[waitlist] joined email failed:', e))
