@@ -13,6 +13,7 @@ import { authorizeWorkspace } from '@/lib/team/workspace'
 import { organizerStatusGuard }  from '@/lib/admin/organizerStatus'
 import { validateEventPublish }  from '@/lib/events/validatePublish'
 import { ensureCounterExists }   from '@/lib/firebase/firestore/registrationCounters'
+import { isEmailProviderName } from '@/lib/email/providerName'
 import { resolveTotalCapacity, capacityPlanForRegistrationLimit } from '@/lib/registrations/capacity'
 import type { PublishApiResponse }    from '@/types/events'
 import type { LinkedCampaignDraft }   from '@/lib/campaigns/linkedCampaignConfig'
@@ -344,6 +345,10 @@ export async function POST(req: NextRequest): Promise<NextResponse<PublishApiRes
       // ── READS (all before any write — Firestore requirement) ────────────────
 
       const existingSnap = await txn.get(slugRef)
+      // Validated through the ONE parser, so a hand-edited or legacy value can never
+      // carry an arbitrary provider string forward into the published document.
+      const existingRaw = (existingSnap.data() as { emailProvider?: unknown } | undefined)?.emailProvider
+      const existingEmailProvider = isEmailProviderName(existingRaw) ? existingRaw : undefined
 
       // Campaign conflict check (event_plus_donation only)
       let existingCampaignSnap: FirebaseFirestore.DocumentSnapshot | null = null
@@ -415,6 +420,14 @@ export async function POST(req: NextRequest): Promise<NextResponse<PublishApiRes
         linkedCampaignSlug: linkedCampaignSlug ?? null,
         linkedCampaignId:   linkedCampaignSlug ?? null,
         lifecycleStatus:    terminalStatus,
+        // RD-EMAIL-PROVIDER — PRESERVED across republish.
+        //
+        // This txn.set() is a FULL overwrite, so any field written directly onto
+        // events/{slug} by an admin action is wiped the next time the organizer
+        // republishes. Carrying the existing value forward is what makes the email
+        // provider survive the lifecycle. Absent stays absent (⇒ SES), so legacy events
+        // are untouched and nothing is backfilled.
+        ...(existingEmailProvider ? { emailProvider: existingEmailProvider } : {}),
         publishedAt:        FieldValue.serverTimestamp(),
         updatedAt:          FieldValue.serverTimestamp(),
       })

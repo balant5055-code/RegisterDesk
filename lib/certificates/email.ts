@@ -5,6 +5,7 @@
 // provider SDK — so swapping Resend ↔ SES requires no change here.
 
 import { notificationEngine, NotificationType, NotificationChannel } from '@/lib/notifications'
+import { resolveEventEmailProvider } from '@/lib/email/resolveEventProvider'
 import { safeFetchBytes, validateGeneratedCertificateUrl } from './urlGuard'
 import { getSettings, recordCertificateEmail } from './firestore'
 import { replaceVariables }  from './placeholders'
@@ -79,6 +80,9 @@ export async function emailCertificate(
     pdfBase64 = await fetchPdfBase64(certificate.fileUrl)
   }
 
+  // RD-EMAIL-PROVIDER — certificates belong to an event, so they follow its provider.
+  // Certificate GENERATION and the PDF attachment are untouched; only the transport moves.
+  const emailProviderName = await resolveEventEmailProvider(certificate.eventId)
   const result = await notificationEngine.send(NotificationType.CERTIFICATE_READY, {
     to,
     attendeeName:  certificate.attendeeName,
@@ -91,14 +95,14 @@ export async function emailCertificate(
     pdf: pdfBase64
       ? { filename: `certificate-${certificate.certificateId}.pdf`, contentBase64: pdfBase64 }
       : undefined,
-  })
+  }, emailProviderName)
 
   const status = result.success ? 'sent' : 'failed'
   await recordCertificateEmail(
     certificate.certificateId,
     {
       recipient: to,
-      provider:  'ses',
+      provider:  emailProviderName,
       status,
       timestamp: new Date().toISOString(),
       ...(result.messageId ? { messageId: result.messageId } : {}),

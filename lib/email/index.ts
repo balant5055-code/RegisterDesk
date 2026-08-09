@@ -17,8 +17,12 @@
 import { SESv2Client } from '@aws-sdk/client-sesv2'
 import type { EmailProvider } from './provider'
 import { SESProvider }        from './ses'
+import { Resend }             from 'resend'
+import { ResendProvider }     from './resend'
+import { DEFAULT_EMAIL_PROVIDER, type EmailProviderName } from './providerName'
 import {
   AWS_REGION, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, SES_FROM_EMAIL, SES_FROM_NAME,
+  RESEND_API_KEY, RESEND_FROM_EMAIL, RESEND_FROM_NAME,
 } from '@/lib/env'
 
 // RD-ENV-ARCH-03 — the SES credential validation lives HERE (the email subsystem
@@ -36,21 +40,21 @@ if (process.env.NEXT_PHASE !== 'phase-production-build' && SES_FROM_EMAIL &&
   )
 }
 
-// The active provider identifier, recorded on email logs.
-export const EMAIL_PROVIDER_NAME = 'ses'
+// The DEFAULT provider identifier. Retained as a constant for the log sites that have no
+// event context (platform-level mail). Event-routed sends must stamp the provider they
+// actually used — see `providerNameFor` below and the callers in lib/notifications.
+export const EMAIL_PROVIDER_NAME: EmailProviderName = DEFAULT_EMAIL_PROVIDER
 
-// Module-level cache — safe in Lambda/Edge since env vars are stable within a
-// cold-start lifecycle.  null means "email disabled", undefined means "not yet resolved".
-let _cache: EmailProvider | null | undefined = undefined
+// PER-PROVIDER cache. A single shared singleton would lock the whole process to whichever
+// provider was resolved first, so SES and Resend must cache independently — both have to
+// coexist in one server process for per-event routing to work at all.
+// undefined = not yet resolved · null = that provider is not configured.
+const _cache = new Map<EmailProviderName, EmailProvider | null>()
 
-export function getEmailProvider(): EmailProvider | null {
-  if (_cache !== undefined) return _cache
-
+/** Builds the SES transport, or null when no verified sender is configured. */
+function buildSesProvider(): EmailProvider | null {
   // No verified sender ⇒ email is disabled (all sends are skipped silently).
-  if (!SES_FROM_EMAIL) {
-    _cache = null
-    return null
-  }
+  if (!SES_FROM_EMAIL) return null
 
   // Explicit static credentials when provided; otherwise fall back to the SDK's
   // default credential chain (IAM role / instance profile). maxAttempts: 1
@@ -63,8 +67,51 @@ export function getEmailProvider(): EmailProvider | null {
       : {}),
   })
 
-  _cache = new SESProvider(client, SES_FROM_EMAIL, SES_FROM_NAME || 'RegisterDesk')
-  return _cache
+  return new SESProvider(client, SES_FROM_EMAIL, SES_FROM_NAME || 'RegisterDesk')
+}
+
+/** Builds the Resend transport, or null when it is not fully configured. */
+function buildResendProvider(): EmailProvider | null {
+  // Same rule SES uses: no API key or no verified sender ⇒ this provider is unavailable.
+  // The CALLER decides what unavailability means — for an event that explicitly chose
+  // Resend it is a hard failure, never a silent downgrade to SES.
+  if (!RESEND_API_KEY || !RESEND_FROM_EMAIL) return null
+  return new ResendProvider(
+    new Resend(RESEND_API_KEY),
+    RESEND_FROM_EMAIL,
+    RESEND_FROM_NAME || 'RegisterDesk',
+  )
+}
+
+/**
+ * The transport for a provider, or null when that provider is not configured.
+ *
+ * ZERO-ARGUMENT BEHAVIOUR IS UNCHANGED: `getEmailProvider()` resolves SES exactly as it did
+ * before this sprint, so every existing call site — including the ~38 that never pass a
+ * provider — keeps behaving identically.
+ *
+ * ═══ NO SILENT CROSS-PROVIDER FALLBACK ══════════════════════════════════════
+ * When `name` is given and that provider is unconfigured this returns NULL. It does not
+ * substitute the other provider. An event that explicitly selected Resend must fail
+ * loudly and visibly rather than quietly routing through SES, which is still in sandbox
+ * and would drop mail to unverified attendees — the precise failure this routing exists
+ * to avoid. (An ABSENT event preference is a different case: it resolves to SES upstream,
+ * in `parseEmailProviderName`, and never reaches here as 'resend'.)
+ */
+export function getEmailProvider(name: EmailProviderName = DEFAULT_EMAIL_PROVIDER): EmailProvider | null {
+  const cached = _cache.get(name)
+  if (cached !== undefined) return cached
+
+  const built = name === 'resend' ? buildResendProvider() : buildSesProvider()
+  if (built === null && name === 'resend') {
+    console.error(
+      '[email] Resend was requested but is not configured — set RESEND_API_KEY and ' +
+      'RESEND_FROM_EMAIL. NOT falling back to SES: an explicit provider choice is never ' +
+      'silently overridden.',
+    )
+  }
+  _cache.set(name, built)
+  return built
 }
 
 /** Format a stored YYYY-MM-DD date string for use in email copy. */

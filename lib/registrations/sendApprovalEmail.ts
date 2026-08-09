@@ -8,6 +8,7 @@ import { FieldValue }                    from 'firebase-admin/firestore'
 import { adminDb }                        from '@/lib/firebase/admin'
 import { fmtEmailDate }                   from '@/lib/email'
 import { notificationEngine, NotificationType, NotificationChannel } from '@/lib/notifications'
+import { resolveEventEmailProvider } from '@/lib/email/resolveEventProvider'
 import { signTicketToken }                from '@/lib/tickets/generate'
 import { signReceiptToken }               from '@/lib/receipts/token'
 import { writeEmailLog }                  from '@/lib/email-logs/write'
@@ -107,7 +108,7 @@ export async function sendApprovalEmail(registrationId: string): Promise<void> {
       pdfDownloadUrl:     pdfUrl,
       receiptDownloadUrl: receiptUrl,
       icsContent,
-    })
+    }, await resolveEventEmailProvider(reg.eventSlug))
     emailStatus = result.success ? 'sent' : 'failed'
     if (!result.success) {
       emailFailureReason = result.error

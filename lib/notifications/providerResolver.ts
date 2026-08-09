@@ -12,15 +12,22 @@ import type { EmailProvider } from '@/lib/email/provider'
 import { getMetaProvider, isMetaConfigured } from '@/lib/whatsapp'
 import type { WhatsAppProvider } from '@/lib/whatsapp'
 import { NotificationChannel } from './channels'
+import type { EmailProviderName } from '@/lib/email/providerName'
 
 // The engine's send path resolves ONLY the email channel through here, so this
 // function's return type stays EmailProvider — dispatch typing is unaffected.
 // WhatsApp/SMS/Push are intentionally NOT routed: they return null so no
 // notification can be dispatched to them yet (Phase G3.1 is foundation-only).
-export function resolveProvider(channel: NotificationChannel): EmailProvider | null {
+// RD-EMAIL-PROVIDER — `providerName` is OPTIONAL and comes only from trusted event
+// configuration (resolveEventEmailProvider). Omitted ⇒ getEmailProvider() resolves the
+// platform default (SES), so every existing caller behaves exactly as before.
+export function resolveProvider(
+  channel: NotificationChannel,
+  providerName?: EmailProviderName,
+): EmailProvider | null {
   switch (channel) {
     case NotificationChannel.EMAIL:
-      return getEmailProvider()
+      return getEmailProvider(providerName)
 
     // WhatsApp (Meta) is DISCOVERABLE via resolveWhatsAppProvider() below, but is
     // deliberately not routed here — no notification type targets it. SMS/Push

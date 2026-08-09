@@ -7,6 +7,7 @@
 import { FieldValue }               from 'firebase-admin/firestore'
 import { adminDb }                   from '@/lib/firebase/admin'
 import { notificationEngine, NotificationType, NotificationChannel } from '@/lib/notifications'
+import { resolveEventEmailProvider } from '@/lib/email/resolveEventProvider'
 import { writeEmailLog }             from '@/lib/email-logs/write'
 import type { RegistrationDocument } from './types'
 
@@ -30,7 +31,7 @@ export async function sendRejectionEmail(
       eventName:    reg.eventName,
       ticketCode:   reg.ticketCode,
       reason,
-    })
+    }, await resolveEventEmailProvider(reg.eventSlug))
     emailStatus = result.success ? 'sent' : 'failed'
     if (!result.success) {
       emailFailureReason = result.error

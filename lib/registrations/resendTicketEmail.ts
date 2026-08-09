@@ -12,6 +12,7 @@ import { getEventBySlug } from '@/lib/firebase/firestore/events'
 import { signTicketToken } from '@/lib/tickets/generate'
 import { fmtEmailDate } from '@/lib/email'
 import { notificationEngine, NotificationType, NotificationChannel } from '@/lib/notifications'
+import { resolveEventEmailProvider } from '@/lib/email/resolveEventProvider'
 import type { RegistrationDocument } from '@/lib/registrations/types'
 
 export type ResendResult = { ok: true } | { ok: false; error: string; status: number }
@@ -71,7 +72,7 @@ export async function resendRegistrationTicketEmail(registrationId: string): Pro
       registrationId,
       ticketPageUrl:  `${baseUrl}/tickets/${registrationId}`,
       pdfDownloadUrl: pdfUrl,
-    })
+    }, await resolveEventEmailProvider(reg.eventSlug))
     emailStatus = result.success ? 'sent' : 'failed'
     if (!result.success) emailFailureReason = result.error
   } catch (err) {

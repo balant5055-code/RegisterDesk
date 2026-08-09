@@ -1,6 +1,7 @@
 // Never throws — email failures are logged but must not block the join flow.
 
 import { notificationEngine, NotificationType, NotificationChannel } from '@/lib/notifications'
+import { resolveEventEmailProvider } from '@/lib/email/resolveEventProvider'
 import { writeEmailLog }    from '@/lib/email-logs/write'
 import type { WaitlistDocument } from './types'
 
@@ -20,7 +21,7 @@ export async function sendWaitlistJoinedEmail(
       eventName:    entry.eventName,
       passName:     entry.passName,
       eventPageUrl,
-    })
+    }, await resolveEventEmailProvider(entry.eventSlug))
     emailStatus = result.success ? 'sent' : 'failed'
     if (!result.success) emailFailureReason = result.error
   } catch (err) {

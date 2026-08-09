@@ -26,6 +26,7 @@ import {
 } from './catalog'
 import { EMAIL_DISPATCHERS, type EmailDispatcher } from './dispatchers'
 import { resolveProvider } from './providerResolver'
+import type { EmailProviderName } from '@/lib/email/providerName'
 import { getNotificationHooks, type NotificationContext, type NotificationHooks } from './hooks'
 import { getCommunicationConfig } from '@/lib/communications/resolveCommunicationConfig'
 
@@ -64,6 +65,11 @@ class NotificationEngine {
   async send<T extends NotificationType>(
     type: T,
     payload: NotificationPayloadMap[T],
+    // RD-EMAIL-PROVIDER — OPTIONAL trusted provider for EVENT-scoped mail. Callers with an
+    // event resolve it via resolveEventEmailProvider(eventSlug) and pass it here. Omitted
+    // (every non-event caller: OTP, settlements, payouts, team, licensing, admin alerts)
+    // ⇒ the platform default, i.e. today's SES behaviour, unchanged.
+    providerName?: EmailProviderName,
   ): Promise<EmailResult> {
     const channel = channelForType(type)
     const ctx: NotificationContext = {
@@ -86,7 +92,7 @@ class NotificationEngine {
       }
     }
 
-    const provider = resolveProvider(channel)
+    const provider = resolveProvider(channel, providerName)
     if (!provider) {
       const result: EmailResult = { success: false, error: 'provider_unavailable' }
       await runHook('afterSend', h => h.afterSend?.(ctx, result))

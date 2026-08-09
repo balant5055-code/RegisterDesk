@@ -143,6 +143,11 @@ export const SES_FROM_NAME         = optional('SES_FROM_NAME', 'RegisterDesk')
 // Svix-style signing secret for the inbound email delivery webhook.
 // Optional: when blank, the webhook route fails closed (rejects all calls).
 export const RESEND_WEBHOOK_SECRET = optional('RESEND_WEBHOOK_SECRET')
+// RD-EMAIL-PROVIDER — Resend send-side configuration. Server-only; Resend is treated as
+// unavailable when either is absent (same rule SES uses for SES_FROM_EMAIL).
+export const RESEND_API_KEY    = optional('RESEND_API_KEY')
+export const RESEND_FROM_EMAIL = optional('RESEND_FROM_EMAIL')
+export const RESEND_FROM_NAME  = optional('RESEND_FROM_NAME')
 
 // ─── Category B (feature) — WhatsApp (Meta Cloud API) ────────────────────────
 // Foundation only (Phase G3.1): the Notification Engine can DISCOVER Meta as a
