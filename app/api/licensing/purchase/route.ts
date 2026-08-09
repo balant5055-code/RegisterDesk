@@ -28,6 +28,7 @@ import {
   getLicenseCoupon, getLicenseCouponsConfig, countOrganizerCouponRedemptions,
   validateLicenseCoupon, normalizeCouponCode, type LicenseCouponSnapshot,
 } from '@/lib/licensing/coupons'
+import { decideCreatedOrderReuse } from '@/lib/licensing/existingOrderDecision'
 import type { PurchaseLicenseRequest, PurchaseLicenseResponse, PurchaseFailureReason } from '@/lib/licensing/purchase'
 import type { LicenseRepositories } from '@/lib/licensing/repository'
 
@@ -187,12 +188,58 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     )
   }
 
+  // ══ EA-4 S2 · LICENSE COUPON — resolved BEFORE the existing-order guard ═══════
+  //
+  // This block used to sit AFTER the retry/reuse guard below. That ordering was the bug:
+  // an organizer who reached checkout once (leaving a `created` order for the full price
+  // with a Razorpay order id) and THEN applied a coupon hit the reuse branch first. The
+  // route returned the persisted full-price remainder and `validateLicenseCoupon` was
+  // never called — so the UI showed ₹0 while Razorpay was asked for the full amount.
+  //
+  // Resolving the coupon first means the CURRENT authoritative price is known before we
+  // decide whether a persisted order may still be reused. Nothing about the coupon engine,
+  // its validation rules, or the discount maths changes — only when it runs.
+  const basePricePaise = prepared.checkout.amountPaise
+  let finalPricePaise  = basePricePaise
+  let couponFields: {
+    couponCode: string; campaign: string; originalPricePaise: number
+    discountPaise: number; finalPricePaise: number; couponSnapshot: LicenseCouponSnapshot
+  } | null = null
+  if (couponCode) {
+    const [coupon, cfg, organizerRedemptions] = await Promise.all([
+      getLicenseCoupon(couponCode),
+      getLicenseCouponsConfig(),
+      countOrganizerCouponRedemptions(couponCode, ctx.workspaceUid),
+    ])
+    const cres = validateLicenseCoupon(coupon, {
+      tier: request.tier, eventType, pricePaise: basePricePaise, organizerRedemptions,
+      couponsEnabled: cfg.enabled, maxPercentageDiscount: cfg.maxPercentageDiscount,
+      maxFixedDiscountPaise: cfg.maxFixedDiscountPaise, allowFreeLicense: cfg.allowFreeLicense,
+    }, Date.now())
+    if (!cres.ok) {
+      return NextResponse.json(
+        { ok: false, status: 'failed', failureReason: 'invalid_coupon', message: cres.message },
+        { status: 422, headers: { 'Cache-Control': 'no-store' } },
+      )
+    }
+    finalPricePaise = cres.finalPricePaise
+    couponFields = {
+      couponCode, campaign: cres.snapshot.campaign, originalPricePaise: basePricePaise,
+      discountPaise: cres.discountPaise, finalPricePaise, couponSnapshot: cres.snapshot,
+    }
+  }
+
   // ── Retry / double-charge guard (Phase 7) ────────────────────────────────────
   // If a PAID license order already exists for this draft (payment succeeded on a
   // previous attempt but the publish step failed), NEVER create a second Razorpay
   // order. Same tier → allow a FREE retry (the client skips checkout and re-runs
   // publish, which reads the paid order). Different tier → refuse rather than
   // silently double-charge.
+  // True once we decide an unpaid persisted order is stale and must be rewritten. It
+  // forces the zero-remainder branch below to persist even with no coupon, so a
+  // superseded order can never keep pointing at its abandoned Razorpay order id.
+  let supersededExisting = false
+
   const existingOrderSnap = await adminDb.collection(LICENSE_ORDERS_COLLECTION).doc(`lic_${eventId}`).withConverter(licenseOrderConverter).get()
   if (existingOrderSnap.exists) {
     const existing = existingOrderSnap.data() as LicenseOrderDoc | undefined
@@ -256,6 +303,56 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     // this same persisted order, so both continue to work unchanged.
     if (existing?.status === 'created' && existing.razorpayOrderId) {
       const remainder = Math.max(0, existing.razorpayAmountPaise ?? 0)
+
+      // ══ PRICING/COUPON DRIFT — reuse only when the persisted order still matches ══
+      //
+      // Reuse is correct ONLY while the persisted order still represents what the
+      // organizer is asking to buy. Applying a coupon after reaching checkout once
+      // changes the authoritative price, and blindly reusing the old order is exactly
+      // the bug this sprint fixes: the UI showed ₹0 while Razorpay was handed the full
+      // amount, because the persisted remainder was returned unchanged.
+      //
+      // `amountPaise` is the FINAL charged amount on the persisted order, so comparing
+      // it against the freshly-computed `finalPricePaise` (plus the coupon identity)
+      // detects both directions of drift: a coupon newly applied, changed, or removed.
+      const requestedCoupon = couponCode || null
+      const decision = decideCreatedOrderReuse({
+        persistedAmountPaise:     existing.amountPaise,
+        persistedCouponCode:      existing.couponCode ?? null,
+        requestedFinalPricePaise: finalPricePaise,
+        requestedCouponCode:      requestedCoupon,
+      })
+
+      if (decision === 'supersede') {
+        // Before superseding, make absolutely sure the old payable order has NOT been
+        // paid. `findCapturedLicensePayment` is the SAME helper the self-heal above
+        // uses. If money was captured against it, superseding would orphan a real
+        // payment — so we refuse and hand back the existing order untouched, leaving
+        // the established self-heal / confirm / webhook paths to finish it.
+        const captured = await findCapturedLicensePayment(existing.razorpayOrderId, remainder)
+        if (captured) {
+          console.warn(`[license] purchase → coupon/price drift but a CAPTURED payment exists; NOT superseding · eventId=${eventId} order=${existing.razorpayOrderId}`)
+          return NextResponse.json({
+            ok: false, status: 'failed', failureReason: 'already_licensed',
+            message: 'A payment for this license is already being processed. Refresh the page — if it is not resolved shortly, contact support.',
+          }, { status: 409, headers: { 'Cache-Control': 'no-store' } })
+        }
+
+        // Genuinely unpaid → the old pending order may be superseded. We fall THROUGH
+        // to the normal pricing path below, which rewrites this same
+        // `licenseOrders/lic_{eventId}` document via `persistCreatedOrder`. That write
+        // sets `razorpayOrderId` to the new value — or to NULL when the coupon brings
+        // the remainder to zero — so the abandoned Razorpay order can never again be
+        // the authoritative one:
+        //   • webhook recovery looks the order up by `.where('razorpayOrderId','==',…)`,
+        //     which no longer matches, so a late payment cannot activate this licence;
+        //   • confirm binds to `persisted.razorpayOrderId` (`deriveLicenseCharge`), which
+        //     is likewise no longer the stale id.
+        // No new status is introduced: the same document remains the single authoritative
+        // order, which is what the existing schema supports.
+        supersededExisting = true
+        console.info(`[license] purchase → superseding unpaid order (pricing/coupon drift) · eventId=${eventId} was=${existing.amountPaise} now=${finalPricePaise} coupon=${requestedCoupon ?? 'none'} staleOrder=${existing.razorpayOrderId}`)
+      } else {
       console.info(`[license] purchase → reuse existing created order, no re-mint · eventId=${eventId} tier=${String(existing.tier)}`)
       return NextResponse.json({
         ok: true, status: 'created',
@@ -272,38 +369,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           couponCode:         existing.couponCode,
         } : {}),
       }, { status: 200, headers: { 'Cache-Control': 'no-store' } })
-    }
-  }
-
-  // ── EA-4 S2: apply a LICENSE coupon BEFORE the wallet split (one payment flow).
-  //    The discount reduces the price; wallet + Razorpay then cover the remainder. ─
-  const basePricePaise = prepared.checkout.amountPaise
-  let finalPricePaise  = basePricePaise
-  let couponFields: {
-    couponCode: string; campaign: string; originalPricePaise: number
-    discountPaise: number; finalPricePaise: number; couponSnapshot: LicenseCouponSnapshot
-  } | null = null
-  if (couponCode) {
-    const [coupon, cfg, organizerRedemptions] = await Promise.all([
-      getLicenseCoupon(couponCode),
-      getLicenseCouponsConfig(),
-      countOrganizerCouponRedemptions(couponCode, ctx.workspaceUid),
-    ])
-    const cres = validateLicenseCoupon(coupon, {
-      tier: request.tier, eventType, pricePaise: basePricePaise, organizerRedemptions,
-      couponsEnabled: cfg.enabled, maxPercentageDiscount: cfg.maxPercentageDiscount,
-      maxFixedDiscountPaise: cfg.maxFixedDiscountPaise, allowFreeLicense: cfg.allowFreeLicense,
-    }, Date.now())
-    if (!cres.ok) {
-      return NextResponse.json(
-        { ok: false, status: 'failed', failureReason: 'invalid_coupon', message: cres.message },
-        { status: 422, headers: { 'Cache-Control': 'no-store' } },
-      )
-    }
-    finalPricePaise = cres.finalPricePaise
-    couponFields = {
-      couponCode, campaign: cres.snapshot.campaign, originalPricePaise: basePricePaise,
-      discountPaise: cres.discountPaise, finalPricePaise, couponSnapshot: cres.snapshot,
+      }
     }
   }
 
@@ -357,7 +423,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   // when a coupon was applied so confirm has the discount; the client then calls
   // /checkout/confirm (remainder = 0) — the SAME confirm flow, no special path.
   if (remainderPaise <= 0) {
-    if (couponFields) await persistCreatedOrder(null)
+    if (couponFields || supersededExisting) await persistCreatedOrder(null)
     return NextResponse.json({
       ok: true, status: 'created', receipt: prepared.receipt,
       pricePaise, walletUsePaise, remainderPaise: 0, checkout: null,
