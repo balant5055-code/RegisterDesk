@@ -15,6 +15,7 @@ import {
   CONFIG_SECTION_REGISTRY,
   BUSINESS_CONFIG_DEFAULTS,
   type LicenseTierOverrideV2,
+  type LicenseCouponsConfig,
 } from '@/lib/config/businessConfig'
 import {
   EVENT_LICENSE_TIERS_V2,
@@ -57,6 +58,29 @@ export function LicensingEditor({
 
   const overrides = (draft.tierOverridesV2 && typeof draft.tierOverridesV2 === 'object' && !Array.isArray(draft.tierOverridesV2) ? draft.tierOverridesV2 : {}) as OverrideMap
   const setTop = (key: 'defaultCurrency' | 'purchasesEnabled', value: unknown) => onDraftChange({ ...draft, [key]: value })
+
+  // ── License coupons (EA-4 S2) ───────────────────────────────────────────────
+  // The five fields below have existed in the schema, the defaults and the licensing
+  // validator since EA-4 S2, and the purchase flow already reads them on every checkout
+  // (validateLicenseCoupon ← getLicenseCouponsConfig). They were simply never rendered, so
+  // `licensing.coupons.enabled` — the master switch for the whole coupon engine — could not
+  // be turned on from the UI. This block only exposes them; nothing about the engine changes.
+  //
+  // READ-ONLY guard, matching `overrides` above: a malformed/absent `coupons` renders as
+  // blank rather than crashing, and NOTHING is written into the draft until the admin edits
+  // a control. That matters — `coupons` is REQUIRED by the validator, so if it were somehow
+  // absent the existing error list already says so and Publish stays disabled. Seeding a
+  // default here would silently repair (and change) stored config on mere page load.
+  const coupons = (draft.coupons && typeof draft.coupons === 'object' && !Array.isArray(draft.coupons)
+    ? draft.coupons
+    : {}) as Partial<LicenseCouponsConfig>
+
+  const setCoupon = (patch: Partial<LicenseCouponsConfig>) =>
+    onDraftChange({ ...draft, coupons: { ...coupons, ...patch } })
+
+  // Empty input → NaN, exactly as the tier price/limit inputs below do. The validator then
+  // reports the field and Publish disables, rather than a blank silently becoming 0.
+  const numOrNaN = (v: string) => (v === '' ? NaN : Number(v))
   const setOverride = (tier: EventLicenseTierV2, patch: Partial<LicenseTierOverrideV2>) => {
     const next: OverrideMap = { ...overrides, [tier]: { ...(overrides[tier] ?? {}), ...patch } }
     onDraftChange({ ...draft, tierOverridesV2: next })
@@ -90,6 +114,73 @@ export function LicensingEditor({
             <span className="text-[12px] font-medium text-foreground">License purchases enabled</span>
             <div className="flex h-8 items-center gap-2"><Toggle checked={draft.purchasesEnabled === true} onChange={v => setTop('purchasesEnabled', v)} /><span className="text-[12px] text-muted-foreground">{draft.purchasesEnabled === true ? 'Enabled' : 'Disabled'}</span></div>
           </label>
+        </div>
+
+        {/* License coupons — the existing licensing.coupons policy, now editable.
+            Same block chrome as a tier card so no new visual language is introduced. */}
+        <div className="rounded-lg border border-border/70 p-3">
+          <p className="mb-2 text-[12px] font-semibold uppercase tracking-wide text-muted-foreground">
+            License Coupons
+          </p>
+
+          <div className="grid grid-cols-1 gap-x-4 gap-y-2.5 sm:grid-cols-2 lg:grid-cols-4">
+            <div className="flex flex-col gap-1">
+              <span className="text-[11.5px] text-muted-foreground">Enable License Coupons</span>
+              <div className="flex h-8 items-center gap-2">
+                <Toggle checked={coupons.enabled === true} onChange={v => setCoupon({ enabled: v })} />
+                <span className="text-[12px] text-muted-foreground">
+                  {coupons.enabled === true ? 'Enabled' : 'Disabled'}
+                </span>
+              </div>
+            </div>
+
+            <label className="flex flex-col gap-1">
+              <span className="text-[11.5px] text-muted-foreground">Max percentage discount (0–100)</span>
+              <input
+                type="number" min={0} max={100}
+                value={typeof coupons.maxPercentageDiscount === 'number' && Number.isFinite(coupons.maxPercentageDiscount) ? String(coupons.maxPercentageDiscount) : ''}
+                onChange={e => setCoupon({ maxPercentageDiscount: numOrNaN(e.target.value) })}
+                className={inputCls}
+              />
+            </label>
+
+            <label className="flex flex-col gap-1">
+              <span className="text-[11.5px] text-muted-foreground">Max fixed discount (paise, 0 = no cap)</span>
+              <input
+                type="number" min={0}
+                value={typeof coupons.maxFixedDiscountPaise === 'number' && Number.isFinite(coupons.maxFixedDiscountPaise) ? String(coupons.maxFixedDiscountPaise) : ''}
+                onChange={e => setCoupon({ maxFixedDiscountPaise: numOrNaN(e.target.value) })}
+                className={inputCls}
+              />
+            </label>
+
+            <div className="flex flex-col gap-1">
+              <span className="text-[11.5px] text-muted-foreground">Allow Free License</span>
+              <div className="flex h-8 items-center gap-2">
+                <Toggle checked={coupons.allowFreeLicense === true} onChange={v => setCoupon({ allowFreeLicense: v })} />
+                <span className="text-[12px] text-muted-foreground">
+                  {coupons.allowFreeLicense === true ? 'Allowed' : 'Not allowed'}
+                </span>
+              </div>
+            </div>
+
+            <div className="flex flex-col gap-1">
+              <span className="text-[11.5px] text-muted-foreground">Allow Coupon Stacking</span>
+              <div className="flex h-8 items-center gap-2">
+                <Toggle checked={coupons.allowStacking === true} onChange={v => setCoupon({ allowStacking: v })} />
+                <span className="text-[12px] text-muted-foreground">
+                  {coupons.allowStacking === true ? 'Allowed' : 'Not allowed'}
+                </span>
+              </div>
+            </div>
+          </div>
+
+          {/* Honest note: the flag is reserved in the schema and the engine does not stack
+              coupons today, so an admin turning it on must not expect stacking to work. */}
+          <p className="mt-2 text-[11px] text-muted-foreground">
+            Coupon stacking is reserved for a future release — the checkout applies one coupon
+            per license purchase regardless of this setting.
+          </p>
         </div>
 
         {/* Per-tier overrides — Licensing V2 (Free / Starter / Professional / Business / Enterprise) */}
