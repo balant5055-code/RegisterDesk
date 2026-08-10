@@ -22,6 +22,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { adminAuth }                 from '@/lib/firebase/admin'
 import { getCertificate, incrementCertificateDownload, getSettings } from '@/lib/certificates/firestore'
 import { defaultCertificateSettings } from '@/lib/certificates/types'
+import { looksLikeDownloadCapability, verifyCertificateDownloadCapability } from '@/lib/certificates/downloadCapability'
 import { isValidCertificateId }      from '@/lib/certificates/id'
 import { safeFetchBytes, validateGeneratedCertificateUrl } from '@/lib/certificates/urlGuard'
 import { timingSafeEqualStr }        from '@/lib/security/timingSafe'
@@ -78,7 +79,22 @@ export async function GET(req: NextRequest, { params }: Params): Promise<NextRes
     }
     if (download.requireVerification) {
       const token = req.nextUrl.searchParams.get('token') ?? ''
-      if (!cert.verificationToken || !timingSafeEqualStr(token, cert.verificationToken)) {
+
+      // TWO accepted credentials, never a bypass:
+      //   • the PERMANENT verificationToken — the emailed link, unchanged below
+      //   • a SHORT-LIVED capability minted by the Event Day Certificate Center, which
+      //     identifies people by guessable email / registration id and therefore must
+      //     never be handed the permanent token
+      //
+      // The shapes are disjoint (capability = "<expiry>.<64 hex>", permanent = bare
+      // 64 hex), so `looksLikeDownloadCapability` routes to exactly one comparison —
+      // a capability can never be tried against, or substituted for, the permanent token.
+      const viaCapability = looksLikeDownloadCapability(token)
+        && verifyCertificateDownloadCapability(cert.certificateId, cert.eventSlug, token)
+
+      const viaPermanent = !!cert.verificationToken && timingSafeEqualStr(token, cert.verificationToken)
+
+      if (!viaCapability && !viaPermanent) {
         return NextResponse.json({ error: 'Verification required to download this certificate.' }, { status: 403 })
       }
     }

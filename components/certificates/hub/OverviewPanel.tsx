@@ -1,11 +1,27 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { Upload, PenSquare, Award } from 'lucide-react'
+import { Upload, PenSquare, Award, QrCode } from 'lucide-react'
 import { Spinner, ErrorBox, StatCard, btnGhost } from './ui'
 import type { CertApi, HubTab } from './api'
+import { CertificateQrDialog } from './CertificateQrDialog'
 
-export default function OverviewPanel({ api, onNav }: { api: CertApi; onNav: (t: HubTab) => void }) {
+/** Public origin for the QR. Literal read so Next inlines it into the client bundle;
+ *  falls back to the current origin in dev if the variable is unset. */
+function appOrigin(): string {
+  const configured = process.env.NEXT_PUBLIC_APP_URL
+  if (configured) return configured.replace(/\/+$/, '')
+  return typeof window !== 'undefined' ? window.location.origin : ''
+}
+
+export default function OverviewPanel({ api, onNav, eventSlug }: {
+  api: CertApi
+  onNav: (t: HubTab) => void
+  /** Public event slug. Absent until the event is published — the QR action is hidden
+   *  then, because an unpublished event has no public Certificate Center to point at. */
+  eventSlug?: string | null
+}) {
+  const [qrOpen, setQrOpen] = useState(false)
   const [loading, setLoading] = useState(true)
   const [err, setErr] = useState<string | null>(null)
   const [stats, setStats] = useState({ total: 0, generated: 0, emailed: 0, revoked: 0, downloads: 0 })
@@ -48,8 +64,19 @@ export default function OverviewPanel({ api, onNav }: { api: CertApi; onNav: (t:
           <button type="button" className={btnGhost} onClick={() => onNav('templates')}><Upload className="size-3.5" /> Upload Template</button>
           <button type="button" className={btnGhost} onClick={() => onNav('templates')}><PenSquare className="size-3.5" /> Open Builder</button>
           <button type="button" className={btnGhost} onClick={() => onNav('issue')}><Award className="size-3.5" /> Generate Certificates</button>
+          {eventSlug && (
+            <button type="button" className={btnGhost} onClick={() => setQrOpen(true)}><QrCode className="size-3.5" /> Certificate Download QR</button>
+          )}
         </div>
       </div>
+
+      {eventSlug && (
+        <CertificateQrDialog
+          open={qrOpen}
+          onClose={() => setQrOpen(false)}
+          url={`${appOrigin()}/events/${eventSlug}/certificates`}
+        />
+      )}
     </div>
   )
 }

@@ -288,7 +288,7 @@ export default function ManageEventClient({ eventId, initialTab }: { eventId: st
               <ReportsTab event={event} registrations={regData?.registrations ?? []} />
             )}
             {activeTab === 'certificates' && (
-              <CertificatesTab eventId={eventId} token={token} />
+              <CertificatesTab eventId={eventId} token={token} eventSlug={event?.slug} />
             )}
             {activeTab === 'settings' && (
               <SettingsTab

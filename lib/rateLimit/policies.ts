@@ -41,6 +41,13 @@ export const RATE_POLICY = {
   // Unauthenticated public application forms (per client IP) — spam / write- and
   // email-amplification guard. Tolerant of shared-NAT applicants (10/hour).
   publicApplication: { route: 'public-application', limit: 10, windowMs: HOUR },
+
+  // Public certificate lookup (per client IP) — ENUMERATION guard. The Event Day
+  // Certificate Center accepts a registration id or an email, both guessable, so the
+  // limit is tight enough to make bulk guessing useless while still covering a family
+  // checking several spellings at a kiosk. Paired with a uniform no-result response:
+  // rate limiting alone cannot stop enumeration if the answers differ.
+  certificateLookup: { route: 'certificate-lookup', limit: 15, windowMs: MIN },
 } as const satisfies Record<string, RatePolicy>
 
 export interface PolicyCheck {

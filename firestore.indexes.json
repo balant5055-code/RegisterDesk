@@ -2113,6 +2113,34 @@
           "order": "ASCENDING"
         }
       ]
+    },
+    {
+      "collectionGroup": "certificates",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "eventSlug",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "attendeeEmail",
+          "order": "ASCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "certificates",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "eventSlug",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "registrationId",
+          "order": "ASCENDING"
+        }
+      ]
     }
   ],
   "fieldOverrides": []

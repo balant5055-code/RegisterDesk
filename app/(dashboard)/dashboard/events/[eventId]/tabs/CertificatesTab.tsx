@@ -18,7 +18,7 @@ import BrandKitPanel   from '@/components/certificates/hub/BrandKitPanel'
 import IssueBulkPanel  from '@/components/certificates/hub/IssueBulkPanel'
 import RecipientsPanel from '@/components/certificates/hub/RecipientsPanel'
 
-interface Props { eventId: string; token: string }
+interface Props { eventId: string; token: string; eventSlug?: string | null }
 
 // GA-8 P1-4: the Brand Kit is persisted but not yet consumed by the certificate
 // renderer, so it is withheld from v1.0 rather than advertised as working. Flip this
@@ -35,7 +35,7 @@ const TABS: { id: HubTab; label: string }[] = [
   { id: 'recipients', label: 'Recipients' },
 ]
 
-export default function CertificatesTab({ eventId, token }: Props) {
+export default function CertificatesTab({ eventId, token, eventSlug }: Props) {
   const [tab, setTab] = useState<HubTab>('overview')
   const api = useMemo(() => makeCertApi(eventId, token), [eventId, token])
 
@@ -71,7 +71,7 @@ export default function CertificatesTab({ eventId, token }: Props) {
 
       {/* Active panel — key forces a fresh mount (reload) on tab switch */}
       <div>
-        {tab === 'overview'   && <OverviewPanel   key="o" api={api} onNav={setTab} />}
+        {tab === 'overview'   && <OverviewPanel   key="o" api={api} onNav={setTab} eventSlug={eventSlug} />}
         {tab === 'settings'   && <SettingsPanel   key="s" api={api} />}
         {tab === 'templates'  && <TemplatesPanel  key="t" api={api} eventId={eventId} />}
         {tab === 'programs'   && <ProgramsPanel   key="p" api={api} />}
