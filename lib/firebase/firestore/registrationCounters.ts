@@ -202,10 +202,21 @@ export function buildCounterIncrement(
   passId:    string,
   opts?:     { amountPaise?: number; checkedIn?: boolean },
 ): Record<string, unknown> {
+  // RD-PAY-P0-3 · DOTTED KEYS ARE NOT FIELD PATHS UNDER set(). Every caller applies this
+  // with `txn.set(ref, …, { merge: true })` (see the usage note above), and `set()` — unlike
+  // `update()` — treats a key containing a dot as a LITERAL field name. `passCounts.p1`
+  // therefore created a top-level field literally called "passCounts.p1" and left
+  // `passCounts` an empty map, so every reader of `passCounts[passId]` — including the
+  // PER-PASS CAPACITY GATE in verify-payment, the webhook and createRegistration — always
+  // read 0 and a sold-out pass could be oversold without limit. Verified against the
+  // emulator: keys were `passCounts | passCounts.p1 | totalCount`, `passCounts` = `{}`.
+  //
+  // The nested-map form is what `set({merge:true})` actually merges: it increments this
+  // pass's key and leaves every sibling pass untouched.
   const update: Record<string, unknown> = {
     eventSlug,
     totalCount:                FieldValue.increment(1),
-    [`passCounts.${passId}`]:  FieldValue.increment(1),
+    passCounts:                { [passId]: FieldValue.increment(1) },
     updatedAt:                 FieldValue.serverTimestamp(),
   }
   // Confirmed revenue — refund-stable (a refund keeps status 'confirmed' and
@@ -217,7 +228,7 @@ export function buildCounterIncrement(
   // in the same atomic write.
   if (opts?.checkedIn) {
     update.checkedInCount = FieldValue.increment(1)
-    update[`passCheckedInCounts.${passId}`] = FieldValue.increment(1)
+    update.passCheckedInCounts = { [passId]: FieldValue.increment(1) }   // nested, not dotted
   }
   return update
 }
@@ -231,10 +242,12 @@ export function buildCounterIncrement(
  * registration's own `checkedIn` flag (idempotent), exactly as before.
  */
 export function buildCheckinDelta(passId: string, dir: 1 | -1): Record<string, unknown> {
+  // Nested, not dotted — writeCheckinDelta applies this with set({merge:true}), where a
+  // dotted key is a literal field name. See buildCounterIncrement for the full note.
   return {
-    checkedInCount:                     FieldValue.increment(dir),
-    [`passCheckedInCounts.${passId}`]:  FieldValue.increment(dir),
-    updatedAt:                          FieldValue.serverTimestamp(),
+    checkedInCount:      FieldValue.increment(dir),
+    passCheckedInCounts: { [passId]: FieldValue.increment(dir) },
+    updatedAt:           FieldValue.serverTimestamp(),
   }
 }
 
@@ -284,9 +297,11 @@ export async function ensureCounterExists(eventSlug: string): Promise<void> {
  * Never decrements below 0 via max(0, current - 1) enforced by the caller.
  */
 export function buildCounterDecrement(passId: string): Record<string, unknown> {
+  // Nested, not dotted — same reason as buildCounterIncrement. (Currently unreferenced;
+  // corrected so it is not a trap for the next caller.)
   return {
     totalCount:                FieldValue.increment(-1),
-    [`passCounts.${passId}`]:  FieldValue.increment(-1),
+    passCounts:                { [passId]: FieldValue.increment(-1) },
     updatedAt:                 FieldValue.serverTimestamp(),
   }
 }

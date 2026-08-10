@@ -56,14 +56,29 @@ async function reconcileOneEvent(slug: string, scope: { events: boolean; passes:
   // the BACKFILL path — stamping statsVersion below flips a legacy event to "trusted".
   const regsCol = adminDb.collection('registrations').where('eventSlug', '==', slug)
 
-  // Candidate pass IDs — the union of every pass already tracked on the counter/shards.
-  // A confirmed/checked-in registration always increments its pass key atomically
-  // (buildCounterIncrement), so any pass with registrations is represented here; no
-  // O(attendees) scan is needed to discover passes.
+  // Candidate pass IDs.
+  //
+  // RD-PAY-P0-4: this used to be ONLY the union of passes already tracked on the
+  // counter/shards, resting on "a confirmed registration always increments its pass key
+  // atomically". That assumption was false while `buildCounterIncrement` emitted a dotted
+  // key under `set({merge:true})` — the dot was taken literally, so `passCounts` stayed
+  // `{}` and the union was EMPTY. The reconciler therefore found no passes to check and
+  // silently repaired nothing, which is exactly the state a rebuild has to fix.
+  //
+  // The event's own configured passes are now included. That set is authoritative, tiny
+  // (a handful per event) and costs ONE extra document read, so a counter whose per-pass
+  // map was lost can be rebuilt from the registrations without an O(attendees) scan.
+  const eventSnap = await adminDb.collection('events').doc(slug).get()
+  const rawPricing = (eventSnap.data()?.pricing ?? null) as Record<string, unknown> | null
+  const configuredPassIds = Array.isArray(rawPricing?.passes)
+    ? (rawPricing.passes as Record<string, unknown>[]).map(p => String(p.id ?? '')).filter(Boolean)
+    : []
+
   const passIds = [...new Set<string>([
     ...Object.keys(c.passCounts ?? {}),
     ...Object.keys(c.passCheckedInCounts ?? {}),
     ...Object.keys(shardSums.passCheckedInCounts),
+    ...configuredPassIds,
   ])]
 
   const [total, pending, cancelled, rejected, checkedIn, revenuePaise, perPass] = await Promise.all([
@@ -102,7 +117,17 @@ async function reconcileOneEvent(slug: string, scope: { events: boolean; passes:
     const storedPassCI = c.passCheckedInCounts ?? {}
     for (const pid of new Set([...Object.keys(storedPassCI), ...Object.keys(shardSums.passCheckedInCounts), ...Object.keys(passCheckedIn)])) {
       const exp = passCheckedIn[pid] ?? 0, act = effPassCI(pid)
-      if (exp !== act) { out.push(mismatch('pass', `${slug}:${pid}`, 'checkedInCount', exp, act, repair)); if (repair) shardRepairs[`passCheckedInCounts.${pid}`] = FieldValue.increment(exp - act) }
+      // RD-PAY-P0-4: nested, not dotted — the repair below is a set({merge:true}), where a
+      // dotted key is a literal field name and would re-create the very corruption being
+      // repaired. Merged per-key, so sibling passes are untouched.
+      if (exp !== act) {
+        out.push(mismatch('pass', `${slug}:${pid}`, 'checkedInCount', exp, act, repair))
+        if (repair) {
+          const m = (shardRepairs.passCheckedInCounts ?? {}) as Record<string, unknown>
+          m[pid] = FieldValue.increment(exp - act)
+          shardRepairs.passCheckedInCounts = m
+        }
+      }
     }
     // Stamp the stats version once the aggregates are known-good — this is what
     // flips a legacy doc to "complete" so readers trust it (forces a write even
@@ -113,7 +138,16 @@ async function reconcileOneEvent(slug: string, scope: { events: boolean; passes:
     const stored = c.passCounts ?? {}
     for (const pid of new Set([...Object.keys(stored), ...Object.keys(passCounts)])) {
       const exp = passCounts[pid] ?? 0, act = stored[pid] ?? 0
-      if (exp !== act) { out.push(mismatch('pass', `${slug}:${pid}`, 'registrationCount', exp, act, repair)); if (repair) repairs[`passCounts.${pid}`] = exp }
+      // RD-PAY-P0-4: nested, not dotted — same reason as passCheckedInCounts above. This
+      // is THE write that rebuilds a per-pass map lost to the dotted-key bug.
+      if (exp !== act) {
+        out.push(mismatch('pass', `${slug}:${pid}`, 'registrationCount', exp, act, repair))
+        if (repair) {
+          const m = (repairs.passCounts ?? {}) as Record<string, unknown>
+          m[pid] = exp
+          repairs.passCounts = m
+        }
+      }
     }
   }
 
