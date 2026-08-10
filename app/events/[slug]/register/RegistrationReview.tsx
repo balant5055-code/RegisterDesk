@@ -132,10 +132,13 @@ const EDIT_BTN =
 
 // ─── Review ─────────────────────────────────────────────────────────────────────
 
+/** The one id both the review section and the payment CTA agree on. */
+export const CONFIRM_SECTION_ID = 'confirm-and-pay'
+
 export function RegistrationReview({
   identity, passName, passPriceLabel, strikeLabel, passAgeLabel, approvalMode,
   participants, paymentRequired, pricing, termsUrl, refundPolicyUrl,
-  submitting, consent, onConsent, ready, onProceed, onEdit,
+  submitting, consent, onConsent, ready, onProceed, onEdit, needsConsent = false,
 }: {
   identity:        EventIdentity
   passName:        string
@@ -152,6 +155,9 @@ export function RegistrationReview({
   termsUrl?:       string
   refundPolicyUrl?: string
   submitting:      boolean
+  /** RD-REGISTRATION-UX — set by the caller when Proceed was pressed with consent
+   *  missing. Drives the temporary attention ring + the inline validation message. */
+  needsConsent?:   boolean
   consent:         ReviewConsent
   onConsent:       (key: keyof ReviewConsent, value: boolean) => void
   /** Computed by the caller so this CTA and the sticky summary CTA share one gate. */
@@ -331,8 +337,24 @@ export function RegistrationReview({
       </ReviewSection>
 
       {/* ══ 5 · Confirmation ══ */}
-      <ReviewSection index={5} title={paymentRequired ? "Confirm & Pay" : "Confirm Registration"} reduce={reduce} emphasis>
-        <div className="flex flex-col gap-2">
+      {/* RD-REGISTRATION-UX — CONFIRM_SECTION_ID is the scroll/focus target the payment
+          CTA sends the attendee to when consent is missing. scroll-mt-24 matches the one
+          fixed-navbar offset used elsewhere, so the heading is not hidden under the bar. */}
+      <div id={CONFIRM_SECTION_ID} tabIndex={-1} className="scroll-mt-24 outline-none">
+      <ReviewSection index={5} title={paymentRequired ? "Confirm & Pay" : "Confirm Registration"} reduce={reduce}>
+        {needsConsent && (
+          // role=alert so the reason is announced the moment it appears — a purely visual
+          // ring would leave a screen-reader user with a button that silently does nothing.
+          <p role="alert" className="mb-3 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-fs-xs font-medium text-amber-800">
+            Please confirm the information above before continuing.
+          </p>
+        )}
+        <div className={cn(
+          'flex flex-col gap-2 rounded-xl transition-shadow duration-300',
+          // Amber, not primary: this is a "you missed something" prompt, and reusing the
+          // brand pink here would recreate the exact ambiguity this sprint removed.
+          needsConsent && 'ring-2 ring-amber-400/70 ring-offset-2',
+        )}>
           <CheckOption checked={consent.info} disabled={submitting} onToggle={v => onConsent('info', v)}>
             I confirm the information above is correct
           </CheckOption>
@@ -360,7 +382,7 @@ export function RegistrationReview({
           <button
             type="button"
             onClick={onProceed}
-            disabled={submitting || !ready}
+            disabled={submitting}
             className={cn(buttonVariants({ variant: 'primary', size: 'lg' }), 'flex-1 gap-2')}
           >
             <ShieldCheck className="size-4" aria-hidden />
@@ -388,6 +410,7 @@ export function RegistrationReview({
           </p>
         )}
       </ReviewSection>
+      </div>
     </div>
   )
 }

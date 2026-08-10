@@ -212,10 +212,14 @@ const OPTION_ROW =
   'has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-primary/50 has-[:focus-visible]:ring-offset-2 ' +
   'has-[:disabled]:cursor-not-allowed has-[:disabled]:opacity-60'
 
+// RD-REGISTRATION-UX — the CHECK MARK is the selected signal (primary gradient fill).
+// The row previously added a second border, a wash AND a coloured drop shadow on top of
+// it; stacked with the section's own primary border that read as an error state rather
+// than a selection. The wash stays (it still distinguishes the row), the border softens,
+// and the redundant coloured shadow goes. The focus ring in OPTION_ROW is untouched.
 const OPTION_STATE =
   'border-border bg-muted/25 hover:border-border-strong hover:bg-muted/45 motion-safe:hover:-translate-y-px ' +
-  'has-[:checked]:border-primary/50 has-[:checked]:bg-[rgb(var(--primary-rgb)_/_0.04)] ' +
-  'has-[:checked]:shadow-[0_2px_14px_-6px_rgb(var(--primary-rgb)_/_0.35)] ' +
+  'has-[:checked]:border-primary/25 has-[:checked]:bg-[rgb(var(--primary-rgb)_/_0.04)] ' +
   'has-[:checked]:motion-safe:translate-y-0'
 
 /** Radio dot — an empty ring that fills with the brand gradient when checked. */

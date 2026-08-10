@@ -35,9 +35,10 @@ import { PassPrice } from './PassPrice'
 import { RecoveryBanner, AutosaveStatus, RecoveryReassurance } from './RecoveryUI'
 // RD-RT3.0: the pre-payment review experience.
 import {
-  RegistrationReview, isReviewReady,
+  RegistrationReview, isReviewReady, CONFIRM_SECTION_ID,
   type ReviewAnswerGroup, type ReviewConsent, type ReviewParticipant,
 } from './RegistrationReview'
+import { useToast } from '@/components/ui/Toast'
 
 // ─── Razorpay checkout (loaded dynamically from checkout.razorpay.com) ─────────
 
@@ -594,6 +595,20 @@ export function RegisterClient({
   // RD-RT3.0: review consent. Lives here — not inside the review — so the review CTA
   // and the sticky-summary CTA are gated by exactly ONE condition. Never persisted.
   const [consent, setConsent] = useState<ReviewConsent>({ info: false, terms: false, refund: false })
+
+  // RD-REGISTRATION-UX — the payment CTA used to be `disabled` while consent was missing,
+  // so clicking it fired NO event at all: no scroll, no message, nothing. That is what
+  // "stuck" was. The button is now always clickable and this flag carries the reason.
+  const [needsConsent, setNeedsConsent] = useState(false)
+  const { showToast } = useToast()
+
+
+  // …and otherwise fades after a short window so it never becomes permanent chrome.
+  useEffect(() => {
+    if (!needsConsent) return
+    const t = setTimeout(() => setNeedsConsent(false), 6000)
+    return () => clearTimeout(t)
+  }, [needsConsent])
   // C-2: the mobile checkout bar steps aside while a keyboard field is focused.
   const [fieldFocused, setFieldFocused] = useState(false)
   // RD-RT4.0: on mobile the desktop summary column is hidden, so the checkout bar can
@@ -1079,8 +1094,27 @@ export function RegisterClient({
   // duplicate precheck, the create-order call, the RD-PAYMENT-05 B1 fee confirmation and
   // the free-registration submit. No request, payload, ordering or branch changed — only
   // the moment it is invoked, which is now the Review step's confirm action.
+  /** Send the attendee to the confirmation control and mark it for attention.
+   *  Same scroll/focus pattern as HashScrollLink: ONE scroll, then focus with
+   *  preventScroll so focusing cannot cause a second competing jump. */
+  function guideToConfirmation(): void {
+    setNeedsConsent(true)   // idempotent — repeated clicks re-arm, never stack
+    const el = document.getElementById(CONFIRM_SECTION_ID)
+    if (!el) return
+    const reduce = typeof window !== 'undefined'
+      && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+    el.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth', block: 'start' })
+    el.focus({ preventScroll: true })
+  }
+
   async function finaliseRegistration(): Promise<void> {
     if (submitting) return
+
+    // GATE — before the duplicate precheck, before create-order, before Razorpay.
+    if (!isReviewReady(consent, termsUrl, refundPolicyUrl)) {
+      guideToConfirmation()
+      return
+    }
     setSubmitError(null)
     setSubmitting(true)
     const headers: Record<string, string> = { 'Content-Type': 'application/json' }
@@ -1097,11 +1131,16 @@ export function RegisterClient({
       })
       const dupJson = await dupRes.json() as { duplicate?: boolean; field?: 'email' | 'mobile' }
       if (dupJson.duplicate) {
-        setSubmitError(
-          dupJson.field === 'mobile'
-            ? 'You already have a registration for this event with this mobile number. Please check your email for your ticket.'
-            : 'You already have a registration for this event with this email address. Please check your inbox for your ticket.',
-        )
+        const dupMessage = dupJson.field === 'mobile'
+          ? 'You already have a registration for this event with this mobile number. Please check your email for your ticket.'
+          : 'You already have a registration for this event with this email address. Please check your inbox for your ticket.'
+        // Inline error stays for persistent context; the toast is the immediate
+        // acknowledgement, because the inline banner sits below the fold on a long review.
+        // Fired here inside the submit handler — an EVENT path, not a render path — so a
+        // re-render can never re-trigger it. Toast.tsx already routes error variants to an
+        // assertive live region.
+        setSubmitError(dupMessage)
+        showToast(dupMessage, 'error', { title: 'Already registered' })
         setSubmitting(false)
         return
       }
@@ -1474,6 +1513,7 @@ export function RegisterClient({
             refundPolicyUrl={refundPolicyUrl}
             submitting={submitting}
             consent={consent}
+            needsConsent={needsConsent && !reviewReady}
             onConsent={(key, value) => setConsent(c => ({ ...c, [key]: value }))}
             ready={reviewReady}
             onProceed={() => void (feeConfirm ? confirmAndPay() : finaliseRegistration())}

@@ -12,6 +12,7 @@ import { checkRegistrationGate, GATE_REASON_LABELS } from '@/lib/registrations/g
 import { buildRegisterHref }   from '@/lib/events/registerHref'
 import type { Metadata }       from 'next'
 import { buildMetadata }       from '@/lib/marketing/seo'
+import { ToastProvider } from '@/components/ui/Toast'
 import { RegisterClient }      from './RegisterClient'
 import { PassPrice }          from './PassPrice'
 import { ageRangeLabel }      from '@/lib/registrations/ageEligibility'
@@ -403,34 +404,38 @@ export default async function RegisterPage({
 
   const requiresInviteCode = ac?.type === 'invite_code'
 
+  // RD-REGISTRATION-UX — public routes have no ToastProvider in any ancestor layout,
+  // so the duplicate-registration toast is mounted here, exactly as the success page does.
   return (
-    <RegisterClient
-      eventSlug={slug}
-      eventName={eventName}
-      startDate={startDate}
-      startTime={startTime}
-      bannerUrl={bannerUrl}
-      venueName={venueName}
-      venueCity={venueCity}
-      venueType={venueType}
-      passes={passes.map(p => ({
-        id:           p.id,
-        name:         p.name,
-        price:        p.price,
-        regularPrice: p.regularPrice,
-        isFree:       p.isFree,
-        salesEndDate: p.salesEndDate,
-        minAge:       p.minAge,
-        maxAge:       p.maxAge,
-      }))}
-      initialPassId={pass.id}
-      sections={sections}
-      conditionalRules={conditionalRules}
-      approvalMode={approvalMode}
-      requireLogin={regRules?.requireLogin ?? false}
-      requiresInviteCode={requiresInviteCode}
-      termsUrl={termsUrl}
-      refundPolicyUrl={refundPolicyUrl}
-    />
+    <ToastProvider>
+      <RegisterClient
+        eventSlug={slug}
+        eventName={eventName}
+        startDate={startDate}
+        startTime={startTime}
+        bannerUrl={bannerUrl}
+        venueName={venueName}
+        venueCity={venueCity}
+        venueType={venueType}
+        passes={passes.map(p => ({
+          id:           p.id,
+          name:         p.name,
+          price:        p.price,
+          regularPrice: p.regularPrice,
+          isFree:       p.isFree,
+          salesEndDate: p.salesEndDate,
+          minAge:       p.minAge,
+          maxAge:       p.maxAge,
+        }))}
+        initialPassId={pass.id}
+        sections={sections}
+        conditionalRules={conditionalRules}
+        approvalMode={approvalMode}
+        requireLogin={regRules?.requireLogin ?? false}
+        requiresInviteCode={requiresInviteCode}
+        termsUrl={termsUrl}
+        refundPolicyUrl={refundPolicyUrl}
+      />
+    </ToastProvider>
   )
 }
