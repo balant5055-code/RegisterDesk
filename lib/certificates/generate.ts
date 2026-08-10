@@ -51,6 +51,8 @@ export interface GenerateContextInput {
   attendeeName:  string
   attendeeEmail: string
   ticketCode:    string
+  /** Pass/ticket the attendee registered for — RegistrationDocument.passName. */
+  passName:      string
   // Sports / timed-event fields (empty when not applicable)
   bibNumber:     string
   distance:      string
@@ -172,6 +174,7 @@ function buildContext(
     eventLocation:   input.eventLocation,
     registrationId:  input.registrationId,
     ticketCode:      input.ticketCode,
+    passName:        input.passName,
     certificateId,
     issueDate,
     organizerName:   input.organizerName,
@@ -348,7 +351,7 @@ function contextFromSnapshot(data: Record<string, string | number> | undefined, 
     eventLocation: g('eventLocation'), registrationId: g('registrationId'), ticketCode: g('ticketCode'),
     certificateId, issueDate: g('issueDate'), organizerName: g('organizerName'),
     bibNumber: g('bibNumber'), distance: g('distance'), finishTime: g('finishTime'),
-    position: g('position'), category: g('category'),
+    position: g('position'), category: g('category'), passName: g('passName'),
   }
 }
 

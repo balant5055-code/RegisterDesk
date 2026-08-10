@@ -184,6 +184,7 @@ async function generateForReg(
         attendeeName:   reg.attendee.name,
         attendeeEmail:  reg.attendee.email,
         ticketCode:     reg.ticketCode ?? '',
+        passName:       reg.passName ?? '',
         bibNumber:      reg.bibNumber ?? '',
         distance:       raceResult.distance,
         finishTime:     raceResult.finishTime,

@@ -14,6 +14,7 @@ export type PlaceholderKey =
   | 'eventLocation'
   | 'registrationId'
   | 'ticketCode'
+  | 'passName'
   | 'certificateId'
   | 'issueDate'
   | 'organizerName'
@@ -65,6 +66,9 @@ export const PLACEHOLDERS: readonly PlaceholderDef[] = [
     example: 'Rotary Club of Chennai' },
 
   // ── Certificate ─────────────────────────────────────────────────────────────
+  { key: 'passName', token: '{{passName}}', label: 'Pass / Ticket Name',
+    description: 'The pass or ticket the attendee registered for.', category: 'identity', sportsOnly: false,
+    example: '3 KM Run' },
   { key: 'certificateId', token: '{{certificateId}}', label: 'Certificate ID',
     description: 'The unique, verifiable certificate identifier.', category: 'certificate', sportsOnly: false,
     example: 'RDC-2026-AB12CD' },
