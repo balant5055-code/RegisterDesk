@@ -67,12 +67,42 @@ export async function emailCertificate(
   const subject = replaceVariables(auto.subject?.trim() || DEFAULT_SUBJECT, context)
   const message = replaceVariables(auto.message?.trim() || DEFAULT_MESSAGE, context)
 
-  const verifyUrl   = `${getEmailAppUrl()}/verify/certificate/${certificate.certificateId}`
-  // Include the verification token so the recipient's download works even when
-  // settings.download.requireVerification is enabled.
-  const downloadUrl = certificate.verificationToken
-    ? `${getEmailAppUrl()}/api/certificates/${certificate.certificateId}/file?token=${encodeURIComponent(certificate.verificationToken)}`
-    : `${getEmailAppUrl()}/api/certificates/${certificate.certificateId}/file`
+  // ── Absolute links ─────────────────────────────────────────────────────────
+  // getEmailAppUrl() THROWS in production when NEXT_PUBLIC_APP_URL is a local origin —
+  // deliberately, so dead links never reach a recipient. But this function is documented
+  // (and relied upon) as best-effort/never-throws, and the calling route has no try/catch
+  // around it: an uncaught throw here surfaced to the operator as a bare "Request failed
+  // (500)" with no history row, because the throw happened BEFORE recordCertificateEmail.
+  //
+  // The refusal is still absolute — the mail is not sent — but it is now a RECORDED,
+  // explained failure instead of a crash.
+  let verifyUrl: string
+  let downloadUrl: string
+  try {
+    const base  = getEmailAppUrl()
+    verifyUrl   = `${base}/verify/certificate/${certificate.certificateId}`
+    // Include the verification token so the recipient's download works even when
+    // settings.download.requireVerification is enabled.
+    downloadUrl = certificate.verificationToken
+      ? `${base}/api/certificates/${certificate.certificateId}/file?token=${encodeURIComponent(certificate.verificationToken)}`
+      : `${base}/api/certificates/${certificate.certificateId}/file`
+  } catch (err) {
+    const reason = err instanceof Error && err.name === 'LocalEmailUrlError'
+      ? 'Email links are misconfigured for this deployment (NEXT_PUBLIC_APP_URL points at a local address). The certificate was not emailed.'
+      : 'Could not build the certificate links. The certificate was not emailed.'
+    console.error('[certificate-email] url_build_failed', {
+      certificateId: certificate.certificateId,
+      eventId:       certificate.eventId,
+      reason:        err instanceof Error ? err.name : 'unknown',
+    })
+    await recordCertificateEmail(
+      certificate.certificateId,
+      { recipient: to, provider: emailProviderName, status: 'failed',
+        timestamp: new Date().toISOString(), error: reason },
+      'failed',
+    ).catch(() => { /* tracking failure is non-fatal */ })
+    return { success: false, skipped: false, error: reason }
+  }
 
   // Attach the generated PDF — reuse in-memory bytes when available, else fetch.
   let pdfBase64: string | null = null

@@ -44,8 +44,24 @@ export async function POST(req: NextRequest, { params }: Params): Promise<NextRe
     return NextResponse.json({ error: 'Certificate not found' }, { status: 404 })
   }
 
-  const result = await emailCertificate(certificate, { force: resend })
+  // emailCertificate is contracted never to throw, but a bare 500 tells the operator
+  // nothing and leaves no history row — so the contract is enforced HERE as well. An
+  // unexpected throw becomes a safe, actionable message rather than 'Request failed (500)'.
+  let result
+  try {
+    result = await emailCertificate(certificate, { force: resend })
+  } catch (err) {
+    console.error('[certificate-email] unexpected_failure', {
+      certificateId, eventId, name: err instanceof Error ? err.name : 'unknown',
+    })
+    return NextResponse.json(
+      { success: false, error: 'The certificate email could not be sent. Please check the email configuration and try again.' },
+      { status: 502 },
+    )
+  }
 
+  // A provider/config failure is an upstream problem, not a server bug — 502, with the
+  // reason the service already produced, so the UI can show something useful.
   if (!result.success && !result.skipped) {
     return NextResponse.json({ success: false, error: result.error ?? 'Email failed' }, { status: 502 })
   }
