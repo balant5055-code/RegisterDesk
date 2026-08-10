@@ -616,3 +616,21 @@ body {
   0%, 100% { transform: translate3d(0, 0, 0) scale(1);    opacity: 0.08; }
   50%      { transform: translate3d(0, -10px, 0) scale(1.05); opacity: 0.1; }
 }
+
+/* ── Sports hero — mobile glow containment (RD-ST5.x) ──────────────────────────
+   The shared hero orbs are sized for a desktop canvas: 860 / 780 / 720px. On a
+   332–412px viewport each one is WIDER THAN THE SCREEN, so the radial never
+   reaches its transparent outer stop — the hero is covered by the dense centre of
+   three stacked brand washes (coral 8% + magenta 6% + rose 5%, each at .85), plus
+   the mesh and the card glow. The result reads as a pink flood rather than a halo.
+
+   Scoped to .sports-hero and to mobile only: the shared .rd-hero-* rules, the
+   global shadow/gradient tokens and every other template are untouched, and the
+   desktop glow is unchanged. Brand presence is reduced, not removed. */
+@media (max-width: 767px) {
+  /* The orbs ANIMATE their own opacity, so a declaration on them loses to the
+     keyframes. Dimming their non-animated parent multiplies through instead. */
+  .sports-hero .rd-hero-bg      { opacity: 0.34; }
+  .sports-hero .rd-hero-mesh    { opacity: 0.02; }
+  .sports-hero .rd-hero-cardglow{ opacity: 0.04 !important; }
+}

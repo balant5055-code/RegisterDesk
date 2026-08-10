@@ -249,7 +249,7 @@ export function SportsHero(props: SportsHeroProps) {
           so navbar → breadcrumb → hero reads as one continuous band with no white seam. */}
       <section
         aria-labelledby={headingId}
-        className="relative isolate flex flex-col overflow-hidden border-b border-border/60 lg:min-h-[var(--hero-h)]"
+        className="sports-hero relative isolate flex flex-col overflow-hidden border-b border-border/60 lg:min-h-[var(--hero-h)]"
       >
 
         {/* ── Backdrop — RD-ST5.6: pure-CSS gradient field, no imagery ── */}

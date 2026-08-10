@@ -184,8 +184,26 @@ function computeFieldStates(
 // C-2: an element whose focus opens the on-screen keyboard (so the mobile checkout bar
 // can step out of the keyboard's way). CustomSelect is a div-combobox, not a native
 // control, and never opens the keyboard — so it's intentionally excluded.
+/**
+ * Does focusing this element raise the on-screen keyboard?
+ *
+ * Only such elements should hide the mobile checkout bar — the bar steps aside so the
+ * keyboard does not cover the field being typed into.
+ *
+ * `tagName === 'INPUT'` was too broad: a checkbox is an <input>, so tapping "Medical
+ * Consent" or "Sports Waiver" hid the payment CTA with no keyboard to justify it, and it
+ * stayed hidden until focus moved elsewhere. Attendees were left unable to pay.
+ *
+ * Checked against the input's TYPE instead, so toggles and buttons never qualify.
+ */
+const NON_KEYBOARD_INPUT_TYPES = new Set([
+  'checkbox', 'radio', 'button', 'submit', 'reset', 'file', 'image', 'range', 'color', 'hidden',
+])
+
 function isKeyboardField(el: EventTarget | null): boolean {
-  return el instanceof HTMLElement && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA')
+  if (el instanceof HTMLTextAreaElement) return true
+  if (el instanceof HTMLInputElement) return !NON_KEYBOARD_INPUT_TYPES.has(el.type.toLowerCase())
+  return false
 }
 
 // H-7: whether a field is shown for a given pass (mirrors the server's passShowsField).

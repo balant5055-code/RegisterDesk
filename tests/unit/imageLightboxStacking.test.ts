@@ -79,7 +79,12 @@ describe('the stacking context that caused this still exists', () => {
     // Documents WHY the portal is required. If `isolate` is ever removed the portal is
     // still correct — but this records the original trap so it is not re-introduced by
     // someone "simplifying" the lightbox back to an in-place render.
-    expect(HERO).toMatch(/className="relative isolate/)
+    // Matches the `isolate` utility wherever it sits in the class list, rather than
+    // requiring it to be the first token. The original regex was anchored to
+    // `className="relative isolate`, so adding any earlier class — e.g. the
+    // `sports-hero` scoping hook — failed the test without the stacking context
+    // having changed at all. What matters is that `isolate` is still applied.
+    expect(HERO).toMatch(/className="[^"]*\bisolate\b/)
   })
 })
 
