@@ -33,7 +33,14 @@ const isHttp = (v?: string | null): v is string => !!v && /^https?:\/\//i.test(v
  *   hide "Powered by"). Omit for default RegisterDesk branding.
  */
 export function emailShell(subject: string, bodyHtml: string, unsubscribeUrl?: string, branding?: EmailBranding): string {
-  const unsubscribeFooter = unsubscribeUrl
+  // Gated on isHttp, not on mere truthiness. The unsubscribe footer is MARKETING-only —
+  // transactional mail (receipts, tickets, certificates) must never carry one — and the
+  // only thing separating the two is which caller passes a 3rd argument. A positional slip
+  // (`emailShell(subject, body, branding)`) would previously have put a footer with a
+  // `[object Object]` href on a receipt. Requiring a real http(s) URL makes the marketing/
+  // transactional split structural: only a genuine unsubscribe link can render one, and a
+  // malformed value degrades to the transactional footer instead of a broken link.
+  const unsubscribeFooter = isHttp(unsubscribeUrl)
     ? `\n            <br>\n            <span style="font-size:11px;color:#9ca3af;display:block;margin-top:6px;">\n              Don&apos;t want these emails?\n              <a href="${escAttr(unsubscribeUrl)}" style="color:#9ca3af;text-decoration:underline;">Unsubscribe</a>\n            </span>`
     : ''
 

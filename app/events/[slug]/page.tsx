@@ -28,6 +28,19 @@ const BASE_URL = process.env.NEXT_PUBLIC_BASE_URL ?? 'https://registerdesk.in'
 
 export const revalidate = 60
 
+// A dynamic segment only enters the Full Route Cache when generateStaticParams exists.
+// Without it this route was rendered on demand with `Cache-Control: no-store` and never
+// appeared in the prerender manifest, so the `revalidate` above was inert and every single
+// view re-rendered and re-read Firestore.
+//
+// Returning [] prerenders NOTHING at build time — correct here, because events are created
+// continuously and the build must not enumerate them. `dynamicParams` keeps its default of
+// true, so any slug (including one published a minute ago) is still generated on first
+// request; it is then cached and revalidated on the 60s window above.
+export async function generateStaticParams(): Promise<{ slug: string }[]> {
+  return []
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function venueLabel(

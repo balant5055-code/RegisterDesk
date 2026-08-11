@@ -20,7 +20,7 @@
 //   Status     → a tracked line, not a filled pill.
 //   Title      → the loudest object on the page; tagline as an editorial subtitle.
 //   Image      → cinematic. Fills the right column's height on lg (flex-1, so it still
-//                cannot drive the hero's height), 16:10 on mobile.
+//                cannot drive the hero's height), 16:10 on tablet, 4:3 on phones.
 //   Rail       → date · venue · distances · closes, as labelled columns split by
 //                hairlines. No tiles, no boxes.
 //   Countdown  → bare digits on the backdrop at ~2× the old size. No glass pill.
@@ -33,6 +33,12 @@
 // mobile reading order (organiser → status → title → image → info → countdown → price
 // → benefits) without duplicating markup. From lg the wrappers become real flex columns
 // and source order takes over.
+//
+// RD-ST6.1 is a MOBILE-ONLY polish on top of ST6.0. Every change below is scoped to
+// base (phone) classes with an `sm:` reset, or to the `max-width: 639.98px` token tier
+// in styles/tokens.css — nothing at 1024 / 1280 / 1440 moves. See the mobile tier there
+// for why the type scale is overridden by media query rather than by raising a clamp
+// floor (1280×800 already resolves --hero-price below any floor worth setting).
 //
 // Unchanged by contract: the props interface, useEventClock, the lead-pass/price
 // derivation, availability + scarcity, salesClose gating, rankPassBenefits, the share
@@ -54,6 +60,8 @@ import {
 import { useEventClock, pad2 } from '@/components/event-templates/shared/hero/useEventClock'
 import { HeroBackground, HeroCardGlow } from '@/components/event-templates/shared/hero/HeroBackground'
 import { AddToCalendarButton } from '@/components/event-templates/shared/ui/AddToCalendarButton'
+import Image from 'next/image'
+import { isValidImageUrl } from '@/lib/utils/imageUrl'
 import { ImageLightbox } from '@/components/event-templates/shared/ui/ImageLightbox'
 import {
   formatDate, formatDateShort, formatTime, formatINR, passDisplayPrice,
@@ -195,23 +203,36 @@ export function SportsHero(props: SportsHeroProps) {
   // at 1440. Six tracks with the two long cells — date and venue — spanning two each
   // gives every value the width it actually needs at every breakpoint, and the values
   // wrap rather than truncate so a date is never cut off.
+  //
+  // RD-ST6.1 — below sm the six tracks collapse to TWO, and the two long cells go full
+  // width with a hairline under each: Date & Time / Venue each own a row, then Distances
+  // and Registration closes share one. A 2×2 grid of ~155px cells was the cramped
+  // desktop-column look the mobile brief calls out; this is the stacked reading order it
+  // asks for. Everything from sm up is untouched.
+  const MOBILE_ROW = 'col-span-2 border-b border-border/50 pb-3.5 last:border-b-0 last:pb-0'
   const rail = [
     dateLines.length > 0 && {
-      key: 'date', icon: Calendar, label: 'Date & Time', lines: dateLines, span: 'sm:col-span-2',
+      key: 'date', icon: Calendar, label: 'Date & Time', lines: dateLines,
+      span: cn(MOBILE_ROW, 'sm:col-span-2 sm:border-b-0 sm:pb-0'),
     },
     venueTitle && {
       key: 'venue', icon: isOnline ? Globe : MapPin, label: 'Venue', lines: [venueTitle],
-      venue: true, span: 'sm:col-span-2',
+      venue: true, span: cn(MOBILE_ROW, 'sm:col-span-2 sm:border-b-0 sm:pb-0'),
     },
     distanceLine && {
       key: 'distances', icon: Flag, label: 'Distances', lines: [distanceLine], span: '',
     },
     canRegister && salesCloseLabel && {
-      key: 'closes', icon: CalendarClock, label: 'Registration closes', lines: [salesCloseLabel],
+      // `shortLabel` is a mobile-only rendering of the SAME label. "Registration closes"
+      // needs ~165px of tracked caps and the half-width mobile cell is ~152px, so it
+      // wrapped to two lines and pushed its date out of line with the Distances value
+      // beside it. Presentational only — the desktop label is unchanged.
+      key: 'closes', icon: CalendarClock, label: 'Registration closes', shortLabel: 'Closes',
+      lines: [salesCloseLabel],
       closing: clock.phase === 'closing', span: '',
     },
   ].filter(Boolean) as {
-    key: string; icon: typeof Calendar; label: string; lines: string[]
+    key: string; icon: typeof Calendar; label: string; shortLabel?: string; lines: string[]
     venue?: boolean; closing?: boolean; span: string
   }[]
 
@@ -293,9 +314,11 @@ export function SportsHero(props: SportsHeroProps) {
             {/* ══════════ LEFT · the story ══════════ */}
             <div className="contents lg:col-span-7 lg:flex lg:flex-col lg:justify-between lg:gap-[var(--hero-gap)]">
 
-              {/* ── 1 · ORGANISER — identity first, at real scale ─────────────── */}
+              {/* ── 1 · ORGANISER — identity first, at real scale ───────────────
+                   `gap-y-2` below sm: the stats wrap onto their own line there, and a
+                   16px gap detached them from the identity they belong to. */}
               {organizer?.name?.trim() && (
-                <motion.div {...rise(0.04)} className="order-1 flex flex-wrap items-center justify-between gap-x-8 gap-y-4 lg:order-none">
+                <motion.div {...rise(0.04)} className="order-1 flex flex-wrap items-center justify-between gap-x-8 gap-y-2 sm:gap-y-4 lg:order-none">
                   <div className="flex min-w-0 items-center gap-3.5">
                     {organizer.logoUrl?.trim() ? (
                       // eslint-disable-next-line @next/next/no-img-element
@@ -379,7 +402,7 @@ export function SportsHero(props: SportsHeroProps) {
               {(registrationOpen || kicker) && (
                 <motion.div {...rise(0.08)} className="order-2 flex flex-wrap items-center gap-x-3 gap-y-1.5 lg:order-none">
                   {registrationOpen && (
-                    <span className="inline-flex items-center gap-2 text-fs-2xs font-bold uppercase tracking-[0.18em] text-primary">
+                    <span className="inline-flex items-center gap-2 text-fs-xs font-bold uppercase tracking-[0.18em] text-primary sm:text-fs-2xs">
                       <span className="relative flex size-2 shrink-0" aria-hidden>
                         <span className="absolute inline-flex size-full rounded-full bg-primary/50 motion-safe:animate-ping" />
                         <span className="relative inline-flex size-2 rounded-full bg-primary" />
@@ -391,7 +414,7 @@ export function SportsHero(props: SportsHeroProps) {
                     <span className="size-1 rounded-full bg-border" aria-hidden />
                   )}
                   {kicker && (
-                    <span className="inline-flex items-center gap-1.5 text-fs-2xs font-bold uppercase tracking-[0.18em] text-muted-foreground">
+                    <span className="inline-flex items-center gap-1.5 text-fs-xs font-bold uppercase tracking-[0.18em] text-muted-foreground sm:text-fs-2xs">
                       {TypeIcon && <TypeIcon className="size-3.5 shrink-0" aria-hidden />}
                       {kicker}
                     </span>
@@ -401,9 +424,13 @@ export function SportsHero(props: SportsHeroProps) {
 
               {/* ── 3 · TITLE — the loudest object in the hero ────────────────── */}
               <motion.div {...rise(0.12)} className="order-3 flex flex-col gap-2 lg:order-none">
+                {/* `break-words` is the mobile overflow guard: an unbroken 20-character
+                    event name at 44px has no wrap opportunity on a 360px screen and
+                    would push the page sideways. It only engages when a single word
+                    cannot fit, so normal titles still wrap on spaces. */}
                 <h1
                   id={headingId}
-                  className="text-balance text-[length:var(--hero-title)] font-extrabold leading-[0.95] tracking-[-0.035em] text-foreground"
+                  className="text-balance break-words text-[length:var(--hero-title)] font-extrabold leading-[0.95] tracking-[-0.035em] text-foreground"
                 >
                   {title}
                 </h1>
@@ -431,12 +458,17 @@ export function SportsHero(props: SportsHeroProps) {
               {/* ── 6 · THE RAIL — labelled columns split by hairlines ────────── */}
               {rail.length > 0 && (
                 <motion.div {...rise(0.24)} className="order-6 lg:order-none">
-                  <dl className="grid grid-cols-2 gap-x-6 gap-y-5 border-y border-border/60 py-5 sm:grid-cols-6 sm:gap-x-0 sm:divide-x sm:divide-border/60">
+                  <dl className="grid grid-cols-2 gap-x-6 gap-y-3.5 border-y border-border/60 py-4 sm:grid-cols-6 sm:gap-x-0 sm:gap-y-5 sm:py-5 sm:divide-x sm:divide-border/60">
                     {rail.map(item => (
                       <div key={item.key} className={cn('min-w-0 sm:px-4 sm:first:pl-0 sm:last:pr-0', item.span)}>
                         <dt className={cn(TYPE.label, 'flex items-center gap-1.5')}>
                           <item.icon className="size-3.5 shrink-0 text-primary" aria-hidden />
-                          {item.label}
+                          {item.shortLabel ? (
+                            <>
+                              <span className="sm:hidden">{item.shortLabel}</span>
+                              <span className="hidden sm:inline">{item.label}</span>
+                            </>
+                          ) : item.label}
                         </dt>
                         {item.venue ? (
                           <dd className="mt-1.5">
@@ -444,7 +476,11 @@ export function SportsHero(props: SportsHeroProps) {
                               {item.lines[0]}
                             </span>
                             {addressLine && (
-                              <span className="mt-0.5 flex min-w-0 flex-wrap items-baseline gap-x-1.5">
+                              // `max-sm:flex-nowrap` — full width below sm, so the address
+                              // truncates on ONE line beside its disclosure link instead of
+                              // pushing the link to a second row. From sm the cell is narrow
+                              // again and the original wrapping behaviour is kept.
+                              <span className="mt-0.5 flex min-w-0 flex-wrap items-baseline gap-x-1.5 max-sm:flex-nowrap">
                                 <span className="min-w-0 truncate text-fs-2xs leading-snug text-muted-foreground">
                                   {addressLine}
                                 </span>
@@ -523,14 +559,21 @@ export function SportsHero(props: SportsHeroProps) {
               {/* ── 4 · CINEMATIC IMAGE ───────────────────────────────────────
                    `lg:flex-1 lg:min-h-0` lets it absorb the column's spare height so
                    both columns finish on one baseline — and, being a flex child of a
-                   height-bounded column, it still cannot drive the hero's height. */}
+                   height-bounded column, it still cannot drive the hero's height.
+
+                   RD-ST6.1 — the frame is 4:3 below sm and 16:10 from sm. Event posters
+                   are usually portrait, so the widest ratio crops them hardest exactly
+                   where the image has the least room to begin with. 4:3 gives the artwork
+                   ~20% more height on a phone while still leaving the countdown and CTA a
+                   short scroll away. `sm:` and `lg:` are untouched, so tablet and desktop
+                   render exactly as approved. */}
               <motion.div {...rise(0.16)} className="order-4 lg:order-none lg:flex lg:min-h-0 lg:flex-1">
                 {bannerUrl?.trim() ? (
                   <button
                     type="button"
                     onClick={() => setPosterOpen(true)}
                     aria-label={`View ${title} poster full screen`}
-                    className="group relative block aspect-[16/10] w-full overflow-hidden rounded-3xl bg-muted/40 shadow-2xl shadow-slate-900/15 ring-1 ring-black/5 outline-none focus-visible:ring-2 focus-visible:ring-primary/60 focus-visible:ring-offset-2 lg:aspect-auto lg:min-h-[16rem] lg:flex-1"
+                    className="group relative block aspect-[4/3] w-full overflow-hidden rounded-3xl bg-muted/40 shadow-2xl shadow-slate-900/15 ring-1 ring-black/5 outline-none focus-visible:ring-2 focus-visible:ring-primary/60 focus-visible:ring-offset-2 sm:aspect-[16/10] lg:aspect-auto lg:min-h-[16rem] lg:flex-1"
                   >
                     {/* ABSOLUTE, not in flow. `h-full` against an auto-height parent
                         resolves to auto, so an in-flow <img> would size the frame to the
@@ -538,14 +581,41 @@ export function SportsHero(props: SportsHeroProps) {
                         tall at 1440 and pushed the whole hero past the viewport contract.
                         Taking it out of flow lets the frame own its height and the image
                         crop into it. */}
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img
-                      src={bannerUrl}
-                      alt={`${title} event poster`}
-                      fetchPriority="high"
-                      decoding="async"
-                      className="absolute inset-0 size-full object-cover transition-transform duration-700 ease-out group-hover:scale-[1.04] motion-reduce:transform-none"
-                    />
+                    {/* The poster is the LCP element. Through next/image it is format-
+                        converted and resized per breakpoint; the raw original is a full-
+                        resolution JPEG that mobile has no use for.
+
+                        `fill` reproduces the previous `absolute inset-0 size-full` exactly
+                        (the parent button is `relative`), so the out-of-flow behaviour the
+                        comment above depends on is unchanged.
+
+                        `preload`, NOT `priority`: Next.js 16 deprecated `priority` in favour
+                        of `preload` (node_modules/next/dist/docs/…/02-components/image.md).
+
+                        GUARD: bannerUrl is organiser-supplied and is NOT validated upstream —
+                        it can be a data: URI or an off-allow-list host, either of which makes
+                        next/image throw and would 500 the entire event page. isValidImageUrl
+                        is this repo's documented predicate for "safe to hand to next/Image",
+                        so anything it rejects keeps the original raw <img> path. */}
+                    {isValidImageUrl(bannerUrl) ? (
+                      <Image
+                        src={bannerUrl}
+                        alt={`${title} event poster`}
+                        fill
+                        preload
+                        sizes="(max-width: 1023px) 100vw, 42vw"
+                        className="object-cover transition-transform duration-700 ease-out group-hover:scale-[1.04] motion-reduce:transform-none"
+                      />
+                    ) : (
+                      /* eslint-disable-next-line @next/next/no-img-element */
+                      <img
+                        src={bannerUrl}
+                        alt={`${title} event poster`}
+                        fetchPriority="high"
+                        decoding="async"
+                        className="absolute inset-0 size-full object-cover transition-transform duration-700 ease-out group-hover:scale-[1.04] motion-reduce:transform-none"
+                      />
+                    )}
                     {/* Scrim — anchors the image and lifts the affordance off it. */}
                     <span
                       aria-hidden
@@ -560,7 +630,7 @@ export function SportsHero(props: SportsHeroProps) {
                   </button>
                 ) : (
                   <div
-                    className={cn('aspect-[16/10] w-full rounded-3xl shadow-2xl shadow-slate-900/15 lg:aspect-auto lg:min-h-[16rem] lg:flex-1', BRAND_GRADIENT)}
+                    className={cn('aspect-[4/3] w-full rounded-3xl shadow-2xl shadow-slate-900/15 sm:aspect-[16/10] lg:aspect-auto lg:min-h-[16rem] lg:flex-1', BRAND_GRADIENT)}
                     aria-hidden
                   />
                 )}
@@ -669,7 +739,10 @@ export function SportsHero(props: SportsHeroProps) {
                so the strip reads as one line without losing information. */}
           {included.length > 0 && (
             <motion.div {...rise(0.38)} className="mt-[var(--hero-gap)] border-t border-border/60 pt-4">
-              <ul className="flex flex-wrap items-center gap-x-7 gap-y-2.5">
+              {/* A 2-column grid below sm, the single wrapping row from sm up. Ragged
+                  `flex-wrap` at 360 produced uneven pairs with no shared left edge;
+                  fixed columns make the strip scannable without adding a card. */}
+              <ul className="grid grid-cols-2 gap-x-4 gap-y-2.5 sm:flex sm:flex-wrap sm:items-center sm:gap-x-7">
                 {included.map(item => (
                   <li
                     key={item.key}

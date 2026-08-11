@@ -353,12 +353,42 @@
 @media (min-width: 768px)  { :root { --nav-h: 68px } }
 @media (min-width: 1024px) { :root { --nav-h: 72px } }
 
+/* RD-ST6.1 · MOBILE TIER — phones only, below Tailwind's `sm` (640px).
+ *
+ * The hero tokens above scale on `min(vw, vh)`, which is the right basis from tablet
+ * up but collapses to the clamp FLOOR on a phone — so every handset from 360 to 414
+ * got byte-identical type, and the floors were tuned for the desktop curve rather than
+ * for a phone. This tier re-tunes the four that matter on mobile and nothing else.
+ *
+ * Scoped by max-width, not by lowering a floor: a floor is global, and 1280×800 already
+ * resolves --hero-price BELOW a raised floor (25.6px), so raising it would have silently
+ * changed the desktop the brief protects. A max-width block cannot reach past 639px.
+ *
+ *   title — 36→44px across 360→414 instead of a flat 32px, so it stays the loudest
+ *           object on the page at the width where it has the least room;
+ *   price — flat 28px: the conversion figure was reading a step under the title;
+ *   gap / py — flat rhythm, dropping the `vh` term. Mobile is not viewport-bounded
+ *           (the --hero-h contract is lg-only), so a short phone was paying a
+ *           compression tax it had no reason to pay.
+ */
+@media (max-width: 639.98px) {
+  :root {
+    --hero-title: clamp(2.25rem, 9.5vw, 2.75rem);
+    --hero-price: 1.75rem;
+    --hero-gap:   1.25rem;
+    --hero-py:    1.25rem;
+  }
+}
+
 /* Short-viewport tier. Below ~800px of viewport height the registration surface's
    non-scaling controls (CTA, secondary buttons) dominate its height, so proportional
    vh scaling alone can no longer recover the difference. This tier compresses the
    parts that CAN give — block rhythm and the description's line budget — without
-   shrinking any touch target or hiding any content. */
-@media (max-height: 800px) {
+   shrinking any touch target or hiding any content.
+   RD-ST6.1: gated to `min-width: 640px` so it stays a laptop tier. Unqualified, it
+   also matched every 360×800 phone and clawed --hero-gap back down to ~11px, undoing
+   the mobile rhythm set above — a phone is not a short window. */
+@media (min-width: 640px) and (max-height: 800px) {
   :root {
     --hero-gap:        clamp(0.4rem, 1.4vh, 1rem);
     --hero-desc-lines: 1;

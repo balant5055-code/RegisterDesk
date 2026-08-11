@@ -23,6 +23,12 @@ export function MarketingLogo({
         alt="RegisterDesk"
         width={658}
         height={127}
+        // The intrinsic 658×127 is the asset's real size, but the wordmark renders at
+        // h-7/h-[30px] with w-auto — about 145–155 CSS px wide. Without `sizes`, next/image
+        // derives the srcset from the `width` prop and requested w=750 (1x) / w=1920 (2x)
+        // for a 28px-tall logo. `sizes` describes the rendered WIDTH, so 160px lets the
+        // optimizer pick a candidate that matches the display size instead.
+        sizes="160px"
         priority={priority}
         className={className}
       />
