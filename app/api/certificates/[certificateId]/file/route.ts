@@ -111,11 +111,26 @@ export async function GET(req: NextRequest, { params }: Params): Promise<NextRes
   // Best-effort tracking — never block the download on a counter write.
   void incrementCertificateDownload(certificateId).catch(() => {})
 
+  // `attachment`, not `inline`. Every consumer of this route is a DOWNLOAD: the public
+  // Certificate Center button, the attendee dashboard button, and the emailed download
+  // link. `inline` made the browser render the PDF in the new tab instead, forcing a second
+  // click on the viewer's own download control. Certificate VIEWING is a different route
+  // (/verify/certificate/[certificateId]), which renders metadata and never embeds this
+  // PDF — so nothing relies on inline rendering. The organizer dashboard reads this route
+  // with fetch()+blob, where Content-Disposition has no effect either way.
+  //
+  // This also brings the route in line with every other file endpoint in the repo,
+  // including its two siblings (certificates/[certificateId] and
+  // certificates/download/[registrationId]) which already send `attachment` with this
+  // exact filename shape.
+  //
+  // The filename is injection-safe by construction: isValidCertificateId() has already
+  // rejected anything but /^RDC-\d{4}-[A-Z0-9]{6}$/, so no quote or CRLF can reach the header.
   return new NextResponse(Buffer.from(bytes), {
     status: 200,
     headers: {
       'Content-Type':        'application/pdf',
-      'Content-Disposition': `inline; filename="certificate-${certificateId}.pdf"`,
+      'Content-Disposition': `attachment; filename="certificate-${certificateId}.pdf"`,
       'Cache-Control':       'no-store',
     },
   })

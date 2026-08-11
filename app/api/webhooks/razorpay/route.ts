@@ -17,7 +17,7 @@
 //     the webhook payload.
 
 import crypto                         from 'crypto'
-import { NextRequest, NextResponse }  from 'next/server'
+import { NextRequest, NextResponse, after }  from 'next/server'
 import { FieldValue }                 from 'firebase-admin/firestore'
 import { adminDb }                    from '@/lib/firebase/admin'
 import {
@@ -432,7 +432,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   // Idempotency is unchanged and still lives where it always did: the payment intent is
   // read INSIDE the transaction, so concurrent settlements serialize on it and every loser
   // observes `paid` and no-ops.
-  const outcome = await settleCapturedRegistration({ orderId, paymentId, intent, source: 'webhook' })
+  // `defer: after` keeps the confirmation email off the webhook ACK path — Razorpay retries
+  // a webhook it considers slow, and settlement is already idempotent, but there is no
+  // reason to spend the ACK budget waiting on an email provider.
+  const outcome = await settleCapturedRegistration({ orderId, paymentId, intent, source: 'webhook', defer: after })
 
   if (outcome.kind === 'settled') {
     console.log('[webhook/razorpay] Registration recovered:', {

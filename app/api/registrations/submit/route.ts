@@ -7,7 +7,7 @@
 //   4. Registration + counter increment happen inside a Firestore transaction.
 //   5. Capacity double-checked inside the transaction (closes TOCTOU race).
 
-import { NextRequest, NextResponse } from 'next/server'
+import { NextRequest, NextResponse, after } from 'next/server'
 import { adminAuth }                from '@/lib/firebase/admin'
 import { checkDuplicateRegistration } from '@/lib/registrations/duplicateCheck'
 import { checkRegistrationGate }    from '@/lib/registrations/gate'
@@ -392,18 +392,34 @@ export async function POST(
     // ── 9. Send confirmation email only for auto-confirmed registrations ──────
     // Manual approval registrations stay pending; email is sent from the
     // approve endpoint once the organizer reviews and approves the registration.
+    //
+    // Deferred with after(): the registration is ALREADY durably committed by
+    // createRegistration() above, so the attendee must never wait on the email provider.
+    // A Resend slowdown costs up to MAX_SEND_ATTEMPTS(3) × RESEND_TIMEOUT_MS(15s) + backoff
+    // ≈ 45s — long enough for the platform to time the function out and show a failure for
+    // a registration that actually succeeded. after() runs the send once, after the response
+    // is flushed, keeping the function alive (same pattern as events/publish and admin
+    // review). Provider routing (eventSlug ⇒ the event's transport), the engine's retry, and
+    // the emailLogs row are all unchanged — only the wait moves off the response path.
+    //
+    // The .catch() is load-bearing: sendConfirmationEmail swallows send failures, but
+    // getEmailAppUrl() throws on a misconfigured deployment BEFORE that try block.
     if (approvalMode !== 'manual') {
-      await sendConfirmationEmail({
-        registrationId: result.registrationId,
-        ticketCode:     result.ticketCode,
-        attendeeName:   attendee.name.trim(),
-        attendeeEmail:  attendee.email.trim().toLowerCase(),
-        eventName,
-        passName,
-        rawDetails:     rawDetails as Record<string, unknown>,
-        organizerUid:   event.uid,
-        eventSlug:      slug,
-      })
+      after(() =>
+        sendConfirmationEmail({
+          registrationId: result.registrationId,
+          ticketCode:     result.ticketCode,
+          attendeeName:   attendee.name.trim(),
+          attendeeEmail:  attendee.email.trim().toLowerCase(),
+          eventName,
+          passName,
+          rawDetails:     rawDetails as Record<string, unknown>,
+          organizerUid:   event.uid,
+          eventSlug:      slug,
+        }).catch(err =>
+          console.error(`[email] Deferred confirmation email failed for ${result.registrationId}:`, err),
+        ),
+      )
     }
 
     return NextResponse.json({

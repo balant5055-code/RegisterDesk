@@ -55,7 +55,11 @@ export async function emailCertificate(
   if (!to) return { success: false, skipped: false, error: 'No recipient email' }
 
   // RD-EMAIL-PROVIDER — a certificate belongs to an event; gate and send on ITS transport.
-  const emailProviderName = await resolveEventEmailProvider(certificate.eventId)
+  // MUST be eventSlug, never eventId: eventId is the draftId, and the resolver reads
+  // events/{slug}. Passing the draftId finds no document and silently falls back to SES,
+  // so every certificate for a Resend event left through the wrong transport.
+  // (`certificate.eventId` remains correct just below for certificateSettings/{eventId}.)
+  const emailProviderName = await resolveEventEmailProvider(certificate.eventSlug)
   if (!notificationEngine.isAvailable(NotificationChannel.EMAIL, emailProviderName)) return { success: false, skipped: false, error: 'Email is not configured' }
 
   // Resolve subject + message from settings (placeholder-aware), falling back to

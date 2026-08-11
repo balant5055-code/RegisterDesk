@@ -130,8 +130,18 @@ export async function settleCapturedRegistration(args: {
    * registration linked to their account. Recovery paths have no session and pass nothing.
    */
   uidOverride?: string
+  /**
+   * Optional scheduler for POST-COMMIT side effects that must not delay the response —
+   * today only the attendee confirmation email. Request-scoped callers pass next/server's
+   * `after`. Omitted ⇒ the side effect runs inline exactly as before, which is required for
+   * the reconciliation sweep and for direct (non-request) callers such as the emulator
+   * tests, where `after()` has no request scope to attach to.
+   *
+   * This never affects settlement: it is read only after the transaction has committed.
+   */
+  defer?: (task: () => void | Promise<void>) => void
 }): Promise<SettlementOutcome> {
-  const { orderId, paymentId, intent, source, uidOverride } = args
+  const { orderId, paymentId, intent, source, uidOverride, defer } = args
 
   // Fast idempotency — avoids a transaction for the overwhelmingly common replay.
   if (intent.status === 'paid' && intent.registrationId) {
@@ -341,8 +351,15 @@ export async function settleCapturedRegistration(args: {
         }
       }
 
-      try {
-        await sendConfirmationEmail({
+      // The financial state is durably committed by this point — the email is a pure
+      // post-commit side effect and already non-fatal. `defer` (supplied only by the
+      // request-scoped callers as next/server's after()) moves the provider wait off the
+      // response path: a Resend slowdown costs up to 3 × 15s + backoff ≈ 45s, which the
+      // attendee would otherwise spend staring at a paid-but-pending checkout. Callers that
+      // pass nothing — the sweep and every emulator test — keep the exact inline behaviour,
+      // and after() would throw for them anyway since they have no request scope.
+      const sendEmail = () =>
+        sendConfirmationEmail({
           registrationId, ticketCode,
           attendeeName:  intent.attendee.name,
           attendeeEmail: intent.attendee.email,
@@ -352,10 +369,12 @@ export async function settleCapturedRegistration(args: {
           organizerUid:  intent.organizerUid,
           eventSlug:     intent.eventSlug,
           amountPaid:    intent.amount,
+        }).catch((emailErr: unknown) => {
+          captureFinancialError(emailErr, { scope: `settleCaptured.${source}.email_failed`, detail: 'non-fatal', registrationId })
         })
-      } catch (emailErr) {
-        captureFinancialError(emailErr, { scope: `settleCaptured.${source}.email_failed`, detail: 'non-fatal', registrationId })
-      }
+
+      if (defer) defer(sendEmail)
+      else await sendEmail()
 
       // Organizer Notification Center (best-effort; deduped per registration).
       void notifyPaymentReceived({

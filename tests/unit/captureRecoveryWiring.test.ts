@@ -55,7 +55,9 @@ describe('6 & 11 · webhook signature verification is mandatory and first', () =
 
 describe('8 · recovery does not introduce a second registration path', () => {
   it('the webhook no longer settles inline — it delegates', () => {
-    expect(webhook).toMatch(/settleCapturedRegistration\(\{ orderId, paymentId, intent, source: 'webhook' \}\)/)
+    // Pinned on the delegation and its identifying arguments, NOT on the exact argument
+    // list — post-commit options (e.g. `defer`) may legitimately be added alongside them.
+    expect(webhook).toMatch(/settleCapturedRegistration\(\{ orderId, paymentId, intent, source: 'webhook'[^}]*\}\)/)
     // No registration-building machinery is left in the route. (adminDb.runTransaction
     // legitimately remains for claimRefundEvent, which dedupes refund.processed and is a
     // different concern entirely.)

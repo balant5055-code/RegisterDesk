@@ -12,7 +12,7 @@
 //      a Razorpay refund is triggered automatically and logged (M2).
 
 import crypto                         from 'crypto'
-import { NextRequest, NextResponse }  from 'next/server'
+import { NextRequest, NextResponse, after }  from 'next/server'
 import { adminAuth }                  from '@/lib/firebase/admin'
 import { captureFinancialError }      from '@/lib/monitoring/sentry'
 import { getPaymentIntent }           from '@/lib/firebase/firestore/paymentIntents'
@@ -180,6 +180,9 @@ export async function POST(
     source:    'verify',
     // An attendee who signed in after creating the order still gets it linked to them.
     ...(uid ? { uidOverride: uid } : {}),
+    // Post-commit only: the confirmation email leaves after this response is flushed, so a
+    // slow email provider can never hold up the attendee's payment confirmation.
+    defer: after,
   })
 
   if (outcome.kind === 'settled' || outcome.kind === 'already_settled') {
