@@ -19,6 +19,7 @@ import { writeEmailLog }                   from '@/lib/email-logs/write'
 import { generateIcs }                     from '@/lib/calendar/ics'
 import { loadOrganizerEmailBranding, resolveEmailBranding } from '@/lib/email/branding'
 import { sendWhatsAppConfirmation }         from './sendWhatsAppConfirmation'
+import { sendRegistrationSms }              from './sendRegistrationSms'
 import { getEmailAppUrl } from '@/lib/email/appUrl'
 
 // ─── Args ─────────────────────────────────────────────────────────────────────
@@ -41,6 +42,31 @@ export interface ConfirmationEmailArgs {
 // ─── Sender ───────────────────────────────────────────────────────────────────
 
 export async function sendConfirmationEmail(args: ConfirmationEmailArgs): Promise<void> {
+  // Attendee SMS confirmation (MSG91) — deliberately ABOVE the email-availability guard
+  // below. SMS is an independent channel: an event whose EMAIL transport is unconfigured
+  // must still get its confirmation SMS, and the early `return` on that guard would
+  // otherwise silently swallow it.
+  //
+  // Still invoked from HERE rather than from the routes, because this function is already
+  // the single convergence of submit, verify-payment, the Razorpay webhook and the
+  // reconciliation sweep — moving the call out would create a second trigger and defeat
+  // the idempotency claim inside sendRegistrationSms. Fire-and-forget, never throws, and a
+  // failure changes nothing about the registration, the payment or the email.
+  //
+  // The ticket URL is resolved defensively: getEmailAppUrl() throws on a deployment whose
+  // base URL is misconfigured, and that must degrade the SMS link, not cancel the SMS.
+  let smsTicketUrl = ''
+  try { smsTicketUrl = `${getEmailAppUrl()}/tickets/${args.registrationId}` } catch { /* link omitted */ }
+  void sendRegistrationSms({
+    registrationId: args.registrationId,
+    organizerUid:   args.organizerUid,
+    eventSlug:      args.eventSlug,
+    eventName:      args.eventName,
+    attendeeName:   args.attendeeName,
+    attendeeEmail:  args.attendeeEmail,
+    ticketUrl:      smsTicketUrl,
+  }).catch(err => console.error(`[sms] confirmation dispatch failed for ${args.registrationId}:`, err))
+
   // RD-EMAIL-PROVIDER — resolved once: the transport used AND the transport logged.
   const emailProviderName = await resolveEventEmailProvider(args.eventSlug)
 
@@ -187,4 +213,5 @@ export async function sendConfirmationEmail(args: ConfirmationEmailArgs): Promis
     eventName,
     ticketCode,
   })
+
 }

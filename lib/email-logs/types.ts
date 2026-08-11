@@ -15,7 +15,7 @@ export const EMAIL_LOG_STATUS_LABELS: Record<EmailLogStatus, string> = {
 
 // Delivery channel for a logged communication. Defaults to 'email' when absent
 // (every pre-existing log row is email), so this is backward-compatible.
-export type CommunicationChannel = 'email' | 'whatsapp'
+export type CommunicationChannel = 'email' | 'whatsapp' | 'sms'
 
 // Fine-grained WhatsApp delivery lifecycle from the Meta status webhook (WA-2).
 // Independent of `status` (EmailLogStatus) which has no 'read' — a read message

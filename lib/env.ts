@@ -64,6 +64,15 @@ export const FIREBASE_STORAGE_BUCKET = optional('NEXT_PUBLIC_FIREBASE_STORAGE_BU
 export const CERT_FONT_REGULAR_URL = optional('CERT_FONT_REGULAR_URL')
 export const CERT_FONT_BOLD_URL    = optional('CERT_FONT_BOLD_URL')
 
+// MSG91 transactional SMS (India DLT). All three are REQUIRED for SMS to be
+// attempted at all — when any is unset the sender skips silently, so an
+// unconfigured deployment behaves exactly as it did before SMS existed.
+// SERVER-ONLY: MSG91_AUTH_KEY must never reach the browser, so it is deliberately
+// not a NEXT_PUBLIC_ variable and is never included in any client bundle.
+export const MSG91_AUTH_KEY   = optional('MSG91_AUTH_KEY')
+export const MSG91_SENDER_ID  = optional('MSG91_SENDER_ID')
+export const MSG91_TEMPLATE_ID = optional('MSG91_TEMPLATE_ID')
+
 // Shared secret for scheduled (cron) endpoints. Vercel Cron sends it as
 // `Authorization: Bearer <CRON_SECRET>`. When unset, cron endpoints reject all
 // requests (fail-closed) so they can never be triggered anonymously.
