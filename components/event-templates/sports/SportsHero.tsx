@@ -20,7 +20,7 @@
 //   Status     → a tracked line, not a filled pill.
 //   Title      → the loudest object on the page; tagline as an editorial subtitle.
 //   Image      → cinematic. Fills the right column's height on lg (flex-1, so it still
-//                cannot drive the hero's height), 16:10 on tablet, 4:3 on phones.
+//                cannot drive the hero's height), 16:10 below it.
 //   Rail       → date · venue · distances · closes, as labelled columns split by
 //                hairlines. No tiles, no boxes.
 //   Countdown  → bare digits on the backdrop at ~2× the old size. No glass pill.
@@ -34,8 +34,16 @@
 // → benefits) without duplicating markup. From lg the wrappers become real flex columns
 // and source order takes over.
 //
-// RD-ST6.1 is a MOBILE-ONLY polish on top of ST6.0. Every change below is scoped to
-// base (phone) classes with an `sm:` reset, or to the `max-width: 639.98px` token tier
+// RD-ST6.1 / 6.2 are MOBILE-ONLY passes on top of ST6.0. ST6.2 rebuilt the phone
+// composition for conversion: the CTA moved from ~1400px down to ~870px by reordering
+// (price + Register Now now follow Date/Venue directly) and by compacting every block
+// above it — one-line breadcrumb, 16:10 image, an inline label+value rail instead of
+// stacked label-over-value cells, and a 16px block rhythm. The organiser left the top
+// of the page and joined the countdown in ONE section below the CTA; see the section
+// itself for why that needed three order tiers.
+//
+// Every change below is scoped to
+// base (phone) classes with an `lg:` reset, or to the `max-width: 639.98px` token tier
 // in styles/tokens.css — nothing at 1024 / 1280 / 1440 moves. See the mobile tier there
 // for why the type scale is overridden by media query rather than by raising a clamp
 // floor (1280×800 already resolves --hero-price below any floor worth setting).
@@ -209,15 +217,14 @@ export function SportsHero(props: SportsHeroProps) {
   // and Registration closes share one. A 2×2 grid of ~155px cells was the cramped
   // desktop-column look the mobile brief calls out; this is the stacked reading order it
   // asks for. Everything from sm up is untouched.
-  const MOBILE_ROW = 'col-span-2 border-b border-border/50 pb-3.5 last:border-b-0 last:pb-0'
   const rail = [
     dateLines.length > 0 && {
       key: 'date', icon: Calendar, label: 'Date & Time', lines: dateLines,
-      span: cn(MOBILE_ROW, 'sm:col-span-2 sm:border-b-0 sm:pb-0'),
+      span: 'lg:col-span-2',
     },
     venueTitle && {
       key: 'venue', icon: isOnline ? Globe : MapPin, label: 'Venue', lines: [venueTitle],
-      venue: true, span: cn(MOBILE_ROW, 'sm:col-span-2 sm:border-b-0 sm:pb-0'),
+      venue: true, span: 'lg:col-span-2',
     },
     distanceLine && {
       key: 'distances', icon: Flag, label: 'Distances', lines: [distanceLine], span: '',
@@ -269,6 +276,12 @@ export function SportsHero(props: SportsHeroProps) {
   const GHOST_BTN =
     'inline-flex h-11 flex-1 items-center justify-center gap-2 rounded-xl border border-border/80 bg-transparent px-3 text-fs-sm font-semibold text-foreground transition-colors hover:border-foreground/30 hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40'
 
+  // Gates for the combined organiser + countdown section. `hasClock` keeps the exact
+  // condition the countdown already used — the terminal word only shows while
+  // registration is open, because the CTA slot states it otherwise.
+  const hasOrganizer = !!organizer?.name?.trim()
+  const hasClock     = showTimer || !!(statusWord && canRegister)
+
   const cdSegments = [
     { v: cd?.d, l: 'Days' }, { v: cd?.h, l: 'Hours' },
     { v: cd?.m, l: 'Min' }, { v: cd?.s, l: 'Sec' },
@@ -300,7 +313,7 @@ export function SportsHero(props: SportsHeroProps) {
         {/* ── Backdrop — pure-CSS gradient field, no imagery ── */}
         <HeroBackground className="-z-10" />
 
-        <div className={cn(EVENT_CONTAINER, 'pt-3')}>
+        <div className={cn(EVENT_CONTAINER, 'pt-3', 'max-lg:[&_ol]:flex-nowrap max-lg:[&_ol]:overflow-hidden max-lg:[&_[aria-current]]:max-w-[8.5rem]')}>
           <Breadcrumbs items={crumbs} />
         </div>
 
@@ -314,11 +327,153 @@ export function SportsHero(props: SportsHeroProps) {
             {/* ══════════ LEFT · the story ══════════ */}
             <div className="contents lg:col-span-7 lg:flex lg:flex-col lg:justify-between lg:gap-[var(--hero-gap)]">
 
-              {/* ── 1 · ORGANISER — identity first, at real scale ───────────────
-                   `gap-y-2` below sm: the stats wrap onto their own line there, and a
-                   16px gap detached them from the identity they belong to. */}
+
+              {/* ── 2 · STATUS — a tracked line, not a filled pill ────────────── */}
+              {(registrationOpen || kicker) && (
+                <motion.div {...rise(0.08)} className="order-1 flex flex-wrap items-center gap-x-3 gap-y-1.5">
+                  {registrationOpen && (
+                    <span className="inline-flex items-center gap-2 text-fs-xs font-bold uppercase tracking-[0.18em] text-primary lg:text-fs-2xs">
+                      <span className="relative flex size-2 shrink-0" aria-hidden>
+                        <span className="absolute inline-flex size-full rounded-full bg-primary/50 motion-safe:animate-ping" />
+                        <span className="relative inline-flex size-2 rounded-full bg-primary" />
+                      </span>
+                      Registration Open
+                    </span>
+                  )}
+                  {registrationOpen && kicker && (
+                    <span className="size-1 rounded-full bg-border" aria-hidden />
+                  )}
+                  {kicker && (
+                    <span className="inline-flex items-center gap-1.5 text-fs-xs font-bold uppercase tracking-[0.18em] text-muted-foreground lg:text-fs-2xs">
+                      {TypeIcon && <TypeIcon className="size-3.5 shrink-0" aria-hidden />}
+                      {kicker}
+                    </span>
+                  )}
+                </motion.div>
+              )}
+
+              {/* ── 3 · TITLE — the loudest object in the hero ────────────────── */}
+              <motion.div {...rise(0.12)} className="order-2 flex flex-col gap-1.5 lg:gap-2">
+                {/* `break-words` is the mobile overflow guard: an unbroken 20-character
+                    event name at 44px has no wrap opportunity on a 360px screen and
+                    would push the page sideways. It only engages when a single word
+                    cannot fit, so normal titles still wrap on spaces. */}
+                <h1
+                  id={headingId}
+                  className="text-balance break-words text-[length:var(--hero-title)] font-extrabold leading-[0.95] tracking-[-0.035em] text-foreground"
+                >
+                  {title}
+                </h1>
+                {tagline && (
+                  <p className="text-[length:var(--hero-tagline)] font-bold uppercase leading-tight tracking-[0.06em] text-primary">
+                    {tagline}
+                  </p>
+                )}
+              </motion.div>
+
+              {/* ── 5 · SHORT DESCRIPTION ─────────────────────────────────────── */}
+              {shortDesc?.trim() && (
+                <motion.div {...rise(0.2)} className="order-7 max-w-xl lg:order-5">
+                  <HeroClampedText
+                    text={shortDesc}
+                    clampClassName="line-clamp-3 lg:[-webkit-line-clamp:var(--hero-desc-lines)]"
+                    className="whitespace-pre-line text-fs-md leading-relaxed text-foreground/75"
+                    reserveClassName="lg:min-h-[var(--hero-desc-h)]"
+                    triggerLabel="Read More"
+                    dialogTitle={title}
+                  />
+                </motion.div>
+              )}
+
+              {/* ── 6 · THE RAIL — labelled columns split by hairlines ────────── */}
+              {rail.length > 0 && (
+                <motion.div {...rise(0.24)} className="order-4">
+                  <dl className="grid grid-cols-1 divide-y divide-border/50 border-y border-border/60 lg:grid-cols-6 lg:gap-x-0 lg:gap-y-5 lg:divide-x lg:divide-y-0 lg:divide-border/60 lg:py-5">
+                    {rail.map(item => (
+                      <div key={item.key} className={cn('flex min-w-0 items-baseline gap-3 py-2 lg:block lg:py-0 lg:px-4 lg:first:pl-0 lg:last:pr-0', item.span)}>
+                        <dt className={cn(TYPE.label, 'flex w-[6.5rem] shrink-0 items-center gap-1.5 lg:w-auto')}>
+                          <item.icon className="size-3.5 shrink-0 text-primary" aria-hidden />
+                          {item.shortLabel ? (
+                            <>
+                              <span className="lg:hidden">{item.shortLabel}</span>
+                              <span className="hidden lg:inline">{item.label}</span>
+                            </>
+                          ) : item.label}
+                        </dt>
+                        {item.venue ? (
+                          <dd className="min-w-0 lg:mt-1.5">
+                            <span className="line-clamp-2 text-pretty text-fs-sm font-bold leading-snug text-foreground">
+                              {item.lines[0]}
+                            </span>
+                            {addressLine && (
+                              // `max-lg:flex-nowrap` — full width below sm, so the address
+                              // truncates on ONE line beside its disclosure link instead of
+                              // pushing the link to a second row. From sm the cell is narrow
+                              // again and the original wrapping behaviour is kept.
+                              <span className="mt-0.5 flex min-w-0 flex-wrap items-baseline gap-x-1.5 max-lg:flex-nowrap">
+                                <span className="min-w-0 truncate text-fs-2xs leading-snug text-muted-foreground">
+                                  {addressLine}
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={() => setAddressOpen(true)}
+                                  className="inline-flex shrink-0 items-center gap-0.5 text-fs-2xs font-semibold text-primary underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+                                >
+                                  Full address
+                                  <ArrowRight className="size-3" aria-hidden />
+                                </button>
+                              </span>
+                            )}
+                          </dd>
+                        ) : (
+                          <dd className="min-w-0 text-fs-sm font-bold leading-snug text-foreground lg:mt-1.5">
+                            {item.lines.map(line => (
+                              <span key={line} className="block text-pretty">{line}</span>
+                            ))}
+                            {item.closing && (
+                              <span className="mt-0.5 block text-fs-2xs font-bold uppercase tracking-[0.14em] text-amber-700">
+                                Closing soon
+                              </span>
+                            )}
+                          </dd>
+                        )}
+                      </div>
+                    ))}
+                  </dl>
+                </motion.div>
+              )}
+
+              {/* ══ RD-ST6.3 · ORGANISER + STARTS IN — ONE section, EVERY viewport ══
+                   The organiser and the countdown share a single surface at every width:
+                   organiser left, countdown right from 375px, stacked at ≤374px where the
+                   organiser column would drop under ~125px and start clipping longer names.
+
+                   RD-ST6.4 — it lives in the LEFT COLUMN and stays a real card at every
+                   width, so its width is always the left column's width and it can never
+                   cross into the poster/registration column.
+
+                   The two orders it needs are not the same, and that is the whole trick:
+
+                     base (≤1023) — one grid column, both wrappers are `contents`, so ALL
+                       blocks are grid items and order sorts across them. `order-6` lands
+                       the card between the registration surface (order-5, right wrapper)
+                       and the description (order-7).
+                     lg (1024+) — the left wrapper is a real flex column. The card keeps
+                       order-6 and the description takes `lg:order-5`, which flips the two
+                       so the column reads status → title → rail → description → card.
+
+                   Two earlier attempts are worth not repeating: ST6.2 dissolved the card
+                   at lg with `lg:contents` (which let an independent `lg:order-1` put the
+                   organiser back at the top), and ST6.3 made it a grid child with
+                   `lg:col-span-12` (which spanned it across BOTH columns). Neither is what
+                   the design calls for. Throughout, there is exactly ONE organiser
+                   rendering — this block has only ever moved, never been duplicated. */}
+              {(hasOrganizer || hasClock) && (
+                <div className="order-6 flex flex-col gap-4 rounded-2xl border border-border/60 bg-muted/25 p-4 min-[375px]:flex-row min-[375px]:items-center min-[375px]:justify-between min-[375px]:gap-5">
+
+              {/* ── ORGANISER ─────────────────────────────────────────────────── */}
               {organizer?.name?.trim() && (
-                <motion.div {...rise(0.04)} className="order-1 flex flex-wrap items-center justify-between gap-x-8 gap-y-2 sm:gap-y-4 lg:order-none">
+                <motion.div {...rise(0.04)} className="flex min-w-0 flex-wrap items-center justify-between gap-x-8 gap-y-2 min-[375px]:flex-1 lg:gap-y-4">
                   <div className="flex min-w-0 items-center gap-3.5">
                     {organizer.logoUrl?.trim() ? (
                       // eslint-disable-next-line @next/next/no-img-element
@@ -336,8 +491,17 @@ export function SportsHero(props: SportsHeroProps) {
                     )}
                     <div className="min-w-0">
                       <p className={TYPE.label}>Organized by</p>
+                      {/* RD-ST6.5 — the organiser name WRAPS, it never ellipsises.
+                          This span used to carry `truncate`, which is white-space:nowrap
+                          plus text-overflow:ellipsis: any name wider than the column was
+                          cut to "UDHAYAM FOUNDATI…" and no amount of vertical room in the
+                          card could rescue it, because nowrap forbade a second line.
+                          `line-clamp-2` wraps instead and caps at two lines, `min-w-0`
+                          lets it shrink inside this flex row, and `break-words` covers a
+                          single unbreakable word. Organiser names are free text, so this
+                          has to hold for any string, not just the ones that fit today. */}
                       <p className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5">
-                        <span className="truncate text-fs-lg font-extrabold leading-tight tracking-[-0.01em] text-foreground">
+                        <span className="line-clamp-2 min-w-0 break-words text-fs-lg font-extrabold leading-tight tracking-[-0.01em] text-foreground">
                           {organizer.name}
                         </span>
                         {organizer.verified && (
@@ -351,7 +515,7 @@ export function SportsHero(props: SportsHeroProps) {
                         Official Organizer
                       </p>
                       {organizer.tagline?.trim() && (
-                        <p className="mt-1 truncate text-fs-2xs leading-snug text-muted-foreground">{organizer.tagline}</p>
+                        <p className="mt-1 truncate text-fs-2xs leading-snug text-muted-foreground max-lg:whitespace-normal max-lg:line-clamp-2">{organizer.tagline}</p>
                       )}
                     </div>
                   </div>
@@ -360,23 +524,23 @@ export function SportsHero(props: SportsHeroProps) {
                       hosted-event count. No field exists for anything else, so nothing
                       else is shown; links stand in when neither figure exists. */}
                   {(registeredCount > 0 || (organizer.eventsHosted ?? 0) > 0) ? (
-                    // `text-left sm:text-right`: below sm this block wraps onto its own
+                    // `text-left lg:text-right`: below sm this block wraps onto its own
                     // line at flex-start, where right-aligned figures read as orphaned.
-                    <div className="flex shrink-0 items-center divide-x divide-border/70 text-left sm:text-right">
+                    <div className="flex shrink-0 items-center divide-x divide-border/70 text-left lg:text-right">
                       {registeredCount > 0 && (
-                        <div className="flex items-baseline gap-1.5 pr-6 last:pr-0 sm:block">
+                        <div className="flex items-baseline gap-1.5 pr-6 last:pr-0 lg:block">
                           <p className="text-fs-lg font-extrabold leading-none text-foreground">
                             {registeredCount.toLocaleString('en-IN')}
                           </p>
-                          <p className={cn('sm:mt-1', TYPE.label)}>Registered</p>
+                          <p className={cn('lg:mt-1', TYPE.label)}>Registered</p>
                         </div>
                       )}
                       {(organizer.eventsHosted ?? 0) > 0 && (
-                        <div className="flex items-baseline gap-1.5 pl-6 first:pl-0 sm:block">
+                        <div className="flex items-baseline gap-1.5 pl-6 first:pl-0 lg:block">
                           <p className="text-fs-lg font-extrabold leading-none text-foreground">
                             {organizer.eventsHosted!.toLocaleString('en-IN')}+
                           </p>
-                          <p className={cn('sm:mt-1', TYPE.label)}>Events hosted</p>
+                          <p className={cn('lg:mt-1', TYPE.label)}>Events hosted</p>
                         </div>
                       )}
                     </div>
@@ -398,146 +562,41 @@ export function SportsHero(props: SportsHeroProps) {
                 </motion.div>
               )}
 
-              {/* ── 2 · STATUS — a tracked line, not a filled pill ────────────── */}
-              {(registrationOpen || kicker) && (
-                <motion.div {...rise(0.08)} className="order-2 flex flex-wrap items-center gap-x-3 gap-y-1.5 lg:order-none">
-                  {registrationOpen && (
-                    <span className="inline-flex items-center gap-2 text-fs-xs font-bold uppercase tracking-[0.18em] text-primary sm:text-fs-2xs">
-                      <span className="relative flex size-2 shrink-0" aria-hidden>
-                        <span className="absolute inline-flex size-full rounded-full bg-primary/50 motion-safe:animate-ping" />
-                        <span className="relative inline-flex size-2 rounded-full bg-primary" />
-                      </span>
-                      Registration Open
-                    </span>
-                  )}
-                  {registrationOpen && kicker && (
-                    <span className="size-1 rounded-full bg-border" aria-hidden />
-                  )}
-                  {kicker && (
-                    <span className="inline-flex items-center gap-1.5 text-fs-xs font-bold uppercase tracking-[0.18em] text-muted-foreground sm:text-fs-2xs">
-                      {TypeIcon && <TypeIcon className="size-3.5 shrink-0" aria-hidden />}
-                      {kicker}
-                    </span>
-                  )}
-                </motion.div>
-              )}
-
-              {/* ── 3 · TITLE — the loudest object in the hero ────────────────── */}
-              <motion.div {...rise(0.12)} className="order-3 flex flex-col gap-2 lg:order-none">
-                {/* `break-words` is the mobile overflow guard: an unbroken 20-character
-                    event name at 44px has no wrap opportunity on a 360px screen and
-                    would push the page sideways. It only engages when a single word
-                    cannot fit, so normal titles still wrap on spaces. */}
-                <h1
-                  id={headingId}
-                  className="text-balance break-words text-[length:var(--hero-title)] font-extrabold leading-[0.95] tracking-[-0.035em] text-foreground"
-                >
-                  {title}
-                </h1>
-                {tagline && (
-                  <p className="text-[length:var(--hero-tagline)] font-bold uppercase leading-tight tracking-[0.06em] text-primary">
-                    {tagline}
-                  </p>
-                )}
-              </motion.div>
-
-              {/* ── 5 · SHORT DESCRIPTION ─────────────────────────────────────── */}
-              {shortDesc?.trim() && (
-                <motion.div {...rise(0.2)} className="order-5 max-w-xl lg:order-none">
-                  <HeroClampedText
-                    text={shortDesc}
-                    clampClassName="line-clamp-4 md:line-clamp-3 lg:[-webkit-line-clamp:var(--hero-desc-lines)]"
-                    className="whitespace-pre-line text-fs-md leading-relaxed text-foreground/75"
-                    reserveClassName="lg:min-h-[var(--hero-desc-h)]"
-                    triggerLabel="Read More"
-                    dialogTitle={title}
-                  />
-                </motion.div>
-              )}
-
-              {/* ── 6 · THE RAIL — labelled columns split by hairlines ────────── */}
-              {rail.length > 0 && (
-                <motion.div {...rise(0.24)} className="order-6 lg:order-none">
-                  <dl className="grid grid-cols-2 gap-x-6 gap-y-3.5 border-y border-border/60 py-4 sm:grid-cols-6 sm:gap-x-0 sm:gap-y-5 sm:py-5 sm:divide-x sm:divide-border/60">
-                    {rail.map(item => (
-                      <div key={item.key} className={cn('min-w-0 sm:px-4 sm:first:pl-0 sm:last:pr-0', item.span)}>
-                        <dt className={cn(TYPE.label, 'flex items-center gap-1.5')}>
-                          <item.icon className="size-3.5 shrink-0 text-primary" aria-hidden />
-                          {item.shortLabel ? (
-                            <>
-                              <span className="sm:hidden">{item.shortLabel}</span>
-                              <span className="hidden sm:inline">{item.label}</span>
-                            </>
-                          ) : item.label}
-                        </dt>
-                        {item.venue ? (
-                          <dd className="mt-1.5">
-                            <span className="line-clamp-2 text-pretty text-fs-sm font-bold leading-snug text-foreground">
-                              {item.lines[0]}
-                            </span>
-                            {addressLine && (
-                              // `max-sm:flex-nowrap` — full width below sm, so the address
-                              // truncates on ONE line beside its disclosure link instead of
-                              // pushing the link to a second row. From sm the cell is narrow
-                              // again and the original wrapping behaviour is kept.
-                              <span className="mt-0.5 flex min-w-0 flex-wrap items-baseline gap-x-1.5 max-sm:flex-nowrap">
-                                <span className="min-w-0 truncate text-fs-2xs leading-snug text-muted-foreground">
-                                  {addressLine}
-                                </span>
-                                <button
-                                  type="button"
-                                  onClick={() => setAddressOpen(true)}
-                                  className="inline-flex shrink-0 items-center gap-0.5 text-fs-2xs font-semibold text-primary underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
-                                >
-                                  Full address
-                                  <ArrowRight className="size-3" aria-hidden />
-                                </button>
-                              </span>
-                            )}
-                          </dd>
-                        ) : (
-                          <dd className="mt-1.5 text-fs-sm font-bold leading-snug text-foreground">
-                            {item.lines.map(line => (
-                              <span key={line} className="block text-pretty">{line}</span>
-                            ))}
-                            {item.closing && (
-                              <span className="mt-0.5 block text-fs-2xs font-bold uppercase tracking-[0.14em] text-amber-700">
-                                Closing soon
-                              </span>
-                            )}
-                          </dd>
-                        )}
-                      </div>
-                    ))}
-                  </dl>
-                </motion.div>
-              )}
-
-              {/* ── 7 · COUNTDOWN — bare digits, no glass pill ──────────────────
+              {/* ── STARTS IN — bare digits, no glass pill ───────────────────────
                    The terminal word is shown here only while registration is still
                    open (e.g. "Happening now" beside a live Register CTA). Once it is
                    closed the CTA slot already states it, and ST5.x printed the same
-                   sentence twice — visible de-duplication, not a content change. */}
-              {(showTimer || (statusWord && canRegister)) && (
+                   sentence twice — visible de-duplication, not a content change.
+
+                   RD-ST6.2 — the segments become a 2×2 grid from 375px. Four across is
+                   ~175px wide, which would leave the organiser ~120px of a 311px row at
+                   375 — not enough for its name once the 56px logo is subtracted. 2×2 is
+                   ~90px, which buys the organiser back ~85px. Below 375 the section is
+                   stacked, so the full-width four-across row is used again, and `lg:flex`
+                   restores the approved tablet/desktop row verbatim. */}
+              {hasClock && (
                 <motion.div
                   {...rise(0.28)}
-                  className="order-7 lg:order-none"
+                  className="shrink-0 min-[375px]:border-l min-[375px]:border-border/60 min-[375px]:pl-5"
                   {...(showTimer ? { role: 'timer', 'aria-label': srLabel } : {})}
                 >
                   {showTimer ? (
                     <div>
                       <p className={TYPE.label}>{heading}</p>
-                      <div aria-hidden className="mt-2 flex items-end gap-4 tabular-nums sm:gap-6">
+                      <div
+                        aria-hidden
+                        className="mt-2 flex items-end gap-4 tabular-nums min-[375px]:grid min-[375px]:grid-cols-2 min-[375px]:gap-x-4 min-[375px]:gap-y-1.5 xl:flex xl:items-end"
+                      >
                         {cdSegments.map(({ v, l }, i) => (
-                          <div key={l} className="flex items-end gap-4 sm:gap-6">
+                          <div key={l} className="flex items-end gap-4">
                             {i > 0 && (
-                              <span className="h-8 w-px shrink-0 self-center bg-border/70" aria-hidden />
+                              <span className="h-8 w-px shrink-0 self-center bg-border/70 min-[375px]:hidden xl:block" aria-hidden />
                             )}
                             <div>
                               <div className="text-[length:var(--hero-digit)] font-extrabold leading-none tracking-[-0.04em] text-foreground">
                                 {v == null ? '––' : pad2(v)}
                               </div>
-                              <div className="mt-1.5 text-[10px] font-bold uppercase tracking-[0.18em] text-muted-foreground">{l}</div>
+                              <div className="mt-1.5 text-[10px] font-bold uppercase tracking-[0.18em] text-muted-foreground max-lg:tracking-[0.08em]">{l}</div>
                             </div>
                           </div>
                         ))}
@@ -551,6 +610,9 @@ export function SportsHero(props: SportsHeroProps) {
                   )}
                 </motion.div>
               )}
+                </div>
+              )}
+
             </div>
 
             {/* ══════════ RIGHT · image + the one registration surface ══════════ */}
@@ -563,17 +625,16 @@ export function SportsHero(props: SportsHeroProps) {
 
                    RD-ST6.1 — the frame is 4:3 below sm and 16:10 from sm. Event posters
                    are usually portrait, so the widest ratio crops them hardest exactly
-                   where the image has the least room to begin with. 4:3 gives the artwork
-                   ~20% more height on a phone while still leaving the countdown and CTA a
-                   short scroll away. `sm:` and `lg:` are untouched, so tablet and desktop
+                   where the image has the least room to begin with. RD-ST6.2 settled on 16:10 for the whole
+                   compact tier: it keeps the CTA a short scroll away. `lg:` and `lg:` are untouched, so tablet and desktop
                    render exactly as approved. */}
-              <motion.div {...rise(0.16)} className="order-4 lg:order-none lg:flex lg:min-h-0 lg:flex-1">
+              <motion.div {...rise(0.16)} className="order-3 lg:order-none lg:flex lg:min-h-0 lg:flex-1">
                 {bannerUrl?.trim() ? (
                   <button
                     type="button"
                     onClick={() => setPosterOpen(true)}
                     aria-label={`View ${title} poster full screen`}
-                    className="group relative block aspect-[4/3] w-full overflow-hidden rounded-3xl bg-muted/40 shadow-2xl shadow-slate-900/15 ring-1 ring-black/5 outline-none focus-visible:ring-2 focus-visible:ring-primary/60 focus-visible:ring-offset-2 sm:aspect-[16/10] lg:aspect-auto lg:min-h-[16rem] lg:flex-1"
+                    className="group relative block aspect-[16/10] w-full overflow-hidden rounded-3xl bg-muted/40 shadow-2xl shadow-slate-900/15 ring-1 ring-black/5 outline-none focus-visible:ring-2 focus-visible:ring-primary/60 focus-visible:ring-offset-2 md:aspect-[2/1] lg:aspect-auto lg:min-h-[16rem] lg:flex-1"
                   >
                     {/* ABSOLUTE, not in flow. `h-full` against an auto-height parent
                         resolves to auto, so an in-flow <img> would size the frame to the
@@ -630,23 +691,23 @@ export function SportsHero(props: SportsHeroProps) {
                   </button>
                 ) : (
                   <div
-                    className={cn('aspect-[4/3] w-full rounded-3xl shadow-2xl shadow-slate-900/15 sm:aspect-[16/10] lg:aspect-auto lg:min-h-[16rem] lg:flex-1', BRAND_GRADIENT)}
+                    className={cn('aspect-[16/10] w-full rounded-3xl shadow-2xl shadow-slate-900/15 md:aspect-[2/1] lg:aspect-auto lg:min-h-[16rem] lg:flex-1', BRAND_GRADIENT)}
                     aria-hidden
                   />
                 )}
               </motion.div>
 
               {/* ── 8 · THE ONE REGISTRATION SURFACE ──────────────────────────── */}
-              <motion.div {...rise(0.32)} className="relative order-8 lg:order-none lg:shrink-0">
+              <motion.div {...rise(0.32)} className="relative order-5 lg:order-none lg:shrink-0">
                 <HeroCardGlow className="-z-10" />
-                <div className="relative rounded-3xl border border-border/60 bg-card/95 p-5 shadow-xl shadow-slate-900/[0.07] backdrop-blur-sm sm:p-6">
+                <div className="relative rounded-3xl border border-border/60 bg-card/95 p-4 shadow-xl shadow-slate-900/[0.07] backdrop-blur-sm lg:p-6">
 
                   {/* Price */}
                   {canRegister && (
                     <div className="flex flex-wrap items-end justify-between gap-x-4 gap-y-2">
-                      <div>
+                      <div className="flex flex-wrap items-baseline gap-x-2 lg:block">
                         <p className={TYPE.label}>{isFree ? 'Entry' : 'From'}</p>
-                        <p className="mt-1 flex items-baseline gap-2">
+                        <p className="flex items-baseline gap-2 lg:mt-1">
                           <span className="text-[length:var(--hero-price)] font-extrabold leading-none tracking-[-0.03em] text-foreground">
                             {isFree ? 'Free' : formatINR(minPrice)}
                           </span>
@@ -665,7 +726,7 @@ export function SportsHero(props: SportsHeroProps) {
 
                   {/* Scarcity for the lead pass — a hairline meter, not a tinted box */}
                   {canRegister && leadRemaining != null && leadCapacity != null && leadCapacity > 0 && (
-                    <div className="mt-4">
+                    <div className="mt-3 lg:mt-4">
                       <p className="inline-flex items-center gap-2 text-fs-sm font-semibold text-foreground">
                         <Users className="size-4 shrink-0 text-primary" aria-hidden />
                         {leadRemaining.toLocaleString('en-IN')} spots left at this price
@@ -687,7 +748,7 @@ export function SportsHero(props: SportsHeroProps) {
                   )}
 
                   {/* Primary CTA */}
-                  <div className={cn(canRegister && 'mt-5')}>
+                  <div className={cn(canRegister && 'mt-4 lg:mt-5')}>
                     {canRegister ? (
                       <HashScrollLink
                         targetId="register"
@@ -707,7 +768,7 @@ export function SportsHero(props: SportsHeroProps) {
                   </div>
 
                   {/* Secondary actions */}
-                  <div className="mt-3 flex items-center gap-3">
+                  <div className="mt-2.5 flex items-center gap-3 lg:mt-3">
                     {startDate && (
                       <AddToCalendarButton
                         title={title}
@@ -730,6 +791,7 @@ export function SportsHero(props: SportsHeroProps) {
                 </div>
               </motion.div>
             </div>
+
           </div>
 
           {/* ══════════ 9 · WHAT'S INCLUDED — one horizontal strip ══════════════
@@ -738,11 +800,11 @@ export function SportsHero(props: SportsHeroProps) {
                carry as a second line is preserved for assistive tech and on hover,
                so the strip reads as one line without losing information. */}
           {included.length > 0 && (
-            <motion.div {...rise(0.38)} className="mt-[var(--hero-gap)] border-t border-border/60 pt-4">
+            <motion.div {...rise(0.38)} className="mt-[var(--hero-gap)] border-t border-border/60 pt-3.5 lg:pt-4">
               {/* A 2-column grid below sm, the single wrapping row from sm up. Ragged
                   `flex-wrap` at 360 produced uneven pairs with no shared left edge;
                   fixed columns make the strip scannable without adding a card. */}
-              <ul className="grid grid-cols-2 gap-x-4 gap-y-2.5 sm:flex sm:flex-wrap sm:items-center sm:gap-x-7">
+              <ul className="grid grid-cols-2 gap-x-4 gap-y-2 lg:flex lg:flex-wrap lg:items-center lg:gap-x-7 lg:gap-y-2.5">
                 {included.map(item => (
                   <li
                     key={item.key}

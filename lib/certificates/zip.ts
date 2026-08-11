@@ -2,12 +2,17 @@
 //
 // REUSES the existing Print Package ZIP engine primitives — buildStoredZip (shared
 // with the print packager + XLSX writer) and the certificate SSRF url-guard — to
-// bundle already-generated certificate PDFs into ONE ZIP. It NEVER re-renders: it
-// reads the stored files back from Storage (owner-scoped) and archives them, exactly
-// like lib/printAssets/packageJob.ts. No second ZIP system is introduced.
+// bundle certificate PDFs into ONE ZIP. No second ZIP system is introduced.
+//
+// Entry sources are MIXED, because generated PDFs are no longer stored:
+//   • legacy certificates (fileUrl set)  → read the stored file back, as before
+//   • current certificates (fileUrl null)→ render on demand via renderCertificateOnDemand
+// Nothing is ever uploaded here. Memory stays bounded by FETCH_CONCURRENCY in the
+// streaming path — at most that many PDFs resident at once, never the whole archive.
 
 import { buildStoredZip, streamStoredZip, type ZipEntry } from '@/lib/zip/store'
 import { safeFetchBytes, validateGeneratedCertificateUrl } from './urlGuard'
+import { renderCertificateOnDemand } from './generate'
 import type { Certificate } from './types'
 
 // Synchronous-ZIP ceiling. The route rejects selections above this with a clear
@@ -21,7 +26,7 @@ export interface CertificateZipResult {
   zip:       Uint8Array
   fileCount: number
   missing:   number         // selected certs whose stored PDF couldn't be read
-  skipped:   number         // selected certs with no stored file (legacy/revoked)
+  skipped:   number         // selected certs beyond the MAX_FILES ceiling
 }
 
 async function mapLimit<T, R>(items: T[], limit: number, fn: (t: T) => Promise<R>): Promise<R[]> {
@@ -37,24 +42,46 @@ function safeName(raw: string): string {
 }
 
 /**
- * Selection = non-revoked certs that actually have a stored file, capped at
- * MAX_FILES. `skipped` = eligible certs with no stored file (legacy on-demand
- * records). Computed WITHOUT fetching, so callers can set response headers upfront.
+ * Selection = non-revoked certs, capped at MAX_FILES. `skipped` = eligible certs beyond
+ * the cap. Computed WITHOUT fetching or rendering, so the route can set response headers
+ * upfront and reject an oversized selection before any work is done.
  */
 export function selectZipCertificates(certs: Certificate[]): { usable: Certificate[]; skipped: number } {
   const eligible = certs.filter(c => c.status !== 'revoked')
-  const usable   = eligible.filter(c => typeof c.fileUrl === 'string' && c.fileUrl).slice(0, MAX_FILES)
+  // A stored file is NO LONGER required. Generated PDFs are not persisted any more, so
+  // every newly issued certificate has fileUrl=null and would previously have been
+  // filtered out here — emptying the archive and 409-ing the route. Eligibility is now
+  // exactly "not revoked", and the only `skipped` are those past the synchronous ceiling.
+  const usable = eligible.slice(0, MAX_FILES)
   return { usable, skipped: eligible.length - usable.length }
 }
 
-// Fetch one certificate's stored PDF (SSRF-guarded). Returns null on a read failure
-// or a URL that fails validation — non-fatal, the entry is simply omitted.
-async function fetchEntry(c: Certificate): Promise<ZipEntry | null> {
-  const check = validateGeneratedCertificateUrl(c.fileUrl as string)
-  if (!check.ok) return null
-  const bytes = await safeFetchBytes(c.fileUrl as string, check, { maxBytes: MAX_FILE_BYTES }).catch(() => null)
-  if (!bytes) return null
-  return { name: `${safeName(c.attendeeName)}-${c.certificateId}.pdf`, data: Buffer.from(bytes) }
+/**
+ * One archive entry. Two sources, one output shape:
+ *   • fileUrl set (legacy)  → read the stored PDF back, SSRF-guarded, exactly as before.
+ *   • fileUrl null (current)→ render on demand from the certificate's `data` snapshot.
+ *
+ * Legacy records deliberately keep the cheap stored read rather than re-rendering: the
+ * bytes already exist, and re-rendering them would cost ~500ms each for no benefit.
+ *
+ * Returns null on any failure — non-fatal by contract, the entry is simply omitted and
+ * counted as `missing`, so one unreadable certificate cannot fail the whole archive.
+ */
+async function buildEntry(c: Certificate): Promise<ZipEntry | null> {
+  const name = `${safeName(c.attendeeName)}-${c.certificateId}.pdf`
+
+  if (typeof c.fileUrl === 'string' && c.fileUrl) {
+    const check = validateGeneratedCertificateUrl(c.fileUrl)
+    if (!check.ok) return null
+    const bytes = await safeFetchBytes(c.fileUrl, check, { maxBytes: MAX_FILE_BYTES }).catch(() => null)
+    return bytes ? { name, data: Buffer.from(bytes) } : null
+  }
+
+  // On-demand: the SAME renderer the individual download uses, so a ZIP entry and a
+  // single download of the same certificate are byte-identical. Nothing is uploaded.
+  const rendered = await renderCertificateOnDemand(c.certificateId).catch(() => null)
+  if (!rendered || !rendered.ok) return null
+  return { name, data: Buffer.from(rendered.bytes) }
 }
 
 // Dedupe a candidate archive name against those already emitted.
@@ -78,7 +105,7 @@ export function streamCertificatesZip(usable: Certificate[]): ReadableStream<Uin
     const seen = new Set<string>()
     let emitted = 0
     for (let i = 0; i < usable.length; i += FETCH_CONCURRENCY) {
-      const fetched = await Promise.all(usable.slice(i, i + FETCH_CONCURRENCY).map(fetchEntry))
+      const fetched = await Promise.all(usable.slice(i, i + FETCH_CONCURRENCY).map(buildEntry))
       for (const r of fetched) {
         if (!r) continue
         yield { name: dedupeName(r.name, seen, emitted++), data: r.data }
@@ -96,7 +123,7 @@ export function streamCertificatesZip(usable: Certificate[]): ReadableStream<Uin
  */
 export async function buildCertificatesZip(certs: Certificate[]): Promise<CertificateZipResult> {
   const { usable, skipped } = selectZipCertificates(certs)
-  const results = await mapLimit(usable, FETCH_CONCURRENCY, fetchEntry)
+  const results = await mapLimit(usable, FETCH_CONCURRENCY, buildEntry)
 
   const seen = new Set<string>()
   const entries: ZipEntry[] = []

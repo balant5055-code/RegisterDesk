@@ -13,7 +13,8 @@
 
 import { useRef, useState } from 'react'
 import { motion, useReducedMotion } from 'framer-motion'
-import { Search, Loader2, Award, Download, ExternalLink } from 'lucide-react'
+import { Search, Loader2, Award, Download, ExternalLink, CheckCircle2, AlertCircle } from 'lucide-react'
+import { Dialog } from '@/components/ui/Dialog'
 import { cn } from '@/lib/utils/cn'
 import { buttonVariants } from '@/components/ui/button'
 
@@ -45,6 +46,62 @@ export function CertificateCenterClient({ slug, eventName }: { slug: string; eve
   // has re-rendered with the new state.
   const inFlight = useRef(false)
   const resultsRef = useRef<HTMLDivElement>(null)
+
+  // ── On-demand certificate download ─────────────────────────────────────────
+  // `downloading` holds the certificateId being prepared: it drives the per-row spinner,
+  // disables EVERY download button (one render at a time), and opens the modal.
+  const [downloading,  setDownloading]  = useState<string | null>(null)
+  const [downloadDone, setDownloadDone] = useState(false)
+  const [downloadErr,  setDownloadErr]  = useState(false)
+  // Same reasoning as `inFlight` above — a double-tap can beat the re-render.
+  const downloadInFlight = useRef(false)
+
+  /** Reads the server's filename so the saved file matches Content-Disposition. */
+  function filenameFrom(header: string | null, fallback: string): string {
+    const m = header && /filename="([^"]+)"/.exec(header)
+    return m ? m[1] : fallback
+  }
+
+  async function downloadCertificate(certificateId: string, capability: string) {
+    if (downloadInFlight.current) return
+    downloadInFlight.current = true
+    setDownloading(certificateId)
+    setDownloadDone(false)
+    setDownloadErr(false)
+
+    let objectUrl: string | null = null
+    try {
+      const res = await fetch(
+        `/api/certificates/${encodeURIComponent(certificateId)}/file?token=${encodeURIComponent(capability)}`,
+      )
+      if (!res.ok) throw new Error(String(res.status))
+
+      const blob = await res.blob()
+      objectUrl = URL.createObjectURL(blob)
+
+      // Anchor + download attribute rather than window.open: it keeps the attendee on the
+      // page and works on Android Chrome, desktop Chrome/Edge and iOS Safari (14.5+),
+      // where a programmatic window.open is frequently blocked after an await.
+      const a = document.createElement('a')
+      a.href = objectUrl
+      a.download = filenameFrom(res.headers.get('content-disposition'), `certificate-${certificateId}.pdf`)
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+
+      setDownloadDone(true)
+      window.setTimeout(() => setDownloadDone(false), 2500)
+    } catch {
+      // Never surface the server's message — it can carry gating detail.
+      setDownloadErr(true)
+    } finally {
+      // Revoked on the next tick: revoking synchronously can cancel the download on Safari.
+      const toRevoke = objectUrl
+      if (toRevoke) window.setTimeout(() => URL.revokeObjectURL(toRevoke), 60_000)
+      setDownloading(null)
+      downloadInFlight.current = false
+    }
+  }
 
   async function lookup(e?: React.FormEvent) {
     e?.preventDefault()
@@ -190,16 +247,25 @@ export function CertificateCenterClient({ slug, eventName }: { slug: string; eve
                     </div>
                     <div className="flex flex-col gap-2 border-t border-border/60 px-5 py-3.5 sm:flex-row-reverse">
                       {/* The capability is short-lived and lives only in this URL — never
-                          persisted, so a refresh cannot resurrect it. */}
-                      <a
-                        href={`/api/certificates/${encodeURIComponent(r.certificateId)}/file?token=${encodeURIComponent(r.downloadCapability)}`}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className={cn(buttonVariants({ variant: 'primary', size: 'lg' }), 'min-h-12 flex-1 gap-2')}
+                          persisted, so a refresh cannot resurrect it.
+
+                          A button, not an anchor: the PDF is now rendered on demand, so
+                          there is a real wait to represent. Fetch + blob also lets us use
+                          the server's Content-Disposition filename and keeps the attendee
+                          on this page — no blank tab, which is what a plain navigation to
+                          a slow endpoint looks like on mobile. */}
+                      <button
+                        type="button"
+                        onClick={() => downloadCertificate(r.certificateId, r.downloadCapability)}
+                        disabled={!!downloading}
+                        aria-busy={downloading === r.certificateId}
+                        className={cn(buttonVariants({ variant: 'primary', size: 'lg' }), 'min-h-12 flex-1 gap-2 disabled:opacity-60')}
                       >
-                        <Download className="size-4" aria-hidden />
-                        Download Certificate
-                      </a>
+                        {downloading === r.certificateId
+                          ? <Loader2 className="size-4 animate-spin" aria-hidden />
+                          : <Download className="size-4" aria-hidden />}
+                        {downloading === r.certificateId ? 'Preparing…' : 'Download Certificate'}
+                      </button>
                       <a
                         href={`/verify/certificate/${encodeURIComponent(r.certificateId)}`}
                         target="_blank"
@@ -217,6 +283,31 @@ export function CertificateCenterClient({ slug, eventName }: { slug: string; eve
           )}
         </motion.div>
       )}
+
+      {/* ── Preparing / done / failed ────────────────────────────────────────
+          Rendering IS the wait, so the modal is honest about it: a spinner and no
+          percentage, because there is no progress to report. Not dismissible while
+          preparing — closing it would leave an in-flight request with nowhere to land. */}
+      <Dialog
+        open={!!downloading || downloadDone || downloadErr}
+        onClose={() => { if (!downloading) { setDownloadDone(false); setDownloadErr(false) } }}
+        closeOnBackdrop={!downloading}
+        size="sm"
+        title={downloadErr ? 'Unable to download certificate' : downloadDone ? 'Certificate downloaded' : 'Preparing your certificate'}
+      >
+        <div className="flex items-start gap-3 py-1">
+          {downloading && <Loader2 className="mt-0.5 size-5 shrink-0 animate-spin text-primary" aria-hidden />}
+          {downloadDone && !downloading && <CheckCircle2 className="mt-0.5 size-5 shrink-0 text-emerald-600" aria-hidden />}
+          {downloadErr && !downloading && <AlertCircle className="mt-0.5 size-5 shrink-0 text-destructive" aria-hidden />}
+          <p className="text-fs-sm text-muted-foreground" role="status" aria-live="polite">
+            {downloadErr
+              ? 'Please try again.'
+              : downloadDone
+                ? 'Check your downloads for the PDF.'
+                : 'Your certificate is being prepared. Please wait a moment…'}
+          </p>
+        </div>
+      </Dialog>
     </div>
   )
 }

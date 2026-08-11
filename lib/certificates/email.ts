@@ -6,7 +6,6 @@
 
 import { notificationEngine, NotificationType, NotificationChannel } from '@/lib/notifications'
 import { resolveEventEmailProvider } from '@/lib/email/resolveEventProvider'
-import { safeFetchBytes, validateGeneratedCertificateUrl } from './urlGuard'
 import { getSettings, recordCertificateEmail } from './firestore'
 import { replaceVariables }  from './placeholders'
 import { defaultCertificateSettings } from './types'
@@ -28,12 +27,6 @@ const DEFAULT_MESSAGE =
   'You can verify its authenticity any time using the link below.\n\n' +
   'Certificate ID: {{certificateId}}'
 
-async function fetchPdfBase64(url: string): Promise<string | null> {
-  // SSRF-guarded: the certificate file must be a generated cert in our Storage.
-  const bytes = await safeFetchBytes(url, validateGeneratedCertificateUrl(url)).catch(() => null)
-  return bytes ? Buffer.from(bytes).toString('base64') : null
-}
-
 /**
  * Sends (or resends) a certificate email and records the result on the
  * certificate. Idempotent by default: if the certificate was already emailed and
@@ -42,9 +35,11 @@ async function fetchPdfBase64(url: string): Promise<string | null> {
  */
 export async function emailCertificate(
   certificate: Certificate,
+  /** `pdfBytes` is still ACCEPTED so the generation path needn't change, but it is no
+   *  longer attached — the mail links to the on-demand download instead. */
   opts: { pdfBytes?: Uint8Array; force?: boolean } = {},
 ): Promise<EmailCertificateResult> {
-  const { pdfBytes, force = false } = opts
+  const { force = false } = opts
 
   // Idempotency — don't re-send an already-delivered certificate unless forced.
   if (!force && (certificate.emailStatus === 'sent' || certificate.emailStatus === 'delivered')) {
@@ -108,13 +103,14 @@ export async function emailCertificate(
     return { success: false, skipped: false, error: reason }
   }
 
-  // Attach the generated PDF — reuse in-memory bytes when available, else fetch.
-  let pdfBase64: string | null = null
-  if (pdfBytes) {
-    pdfBase64 = Buffer.from(pdfBytes).toString('base64')
-  } else if (certificate.fileUrl) {
-    pdfBase64 = await fetchPdfBase64(certificate.fileUrl)
-  }
+  // NO PDF ATTACHMENT. The certificate is now rendered on demand at the download link, so
+  // attaching it here would re-download the artifact per recipient and ship a multi-MB
+  // base64 payload to the provider for every one of them — at event scale that is tens of
+  // GB of egress against a 15s per-attempt send timeout, and the single largest cause of
+  // certificate-email failure. The mail carries `downloadUrl` (token-bearing, honours the
+  // organizer's download settings) and `verifyUrl`, which is strictly more capable than a
+  // static attachment: it always serves the current certificate and can be revoked.
+  const pdfBase64: string | null = null
 
   // RD-EMAIL-PROVIDER — certificates belong to an event, so they follow its provider.
   // Certificate GENERATION and the PDF attachment are untouched; only the transport moves.

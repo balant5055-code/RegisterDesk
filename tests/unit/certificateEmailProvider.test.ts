@@ -143,6 +143,17 @@ describe('certificate email · payload links', () => {
     )
   })
 
+  it('carries NO PDF attachment — the links replace it', async () => {
+    await emailCertificate(certificate())
+    const p = sent[0].payload
+    // RD-CERT-ONDEMAND: attaching a multi-MB PDF per recipient was the largest cause of
+    // certificate-email failure at event scale. The mail links to the on-demand download
+    // instead, which is strictly more capable — always current, and revocable.
+    expect(p.pdf).toBeUndefined()
+    expect(p.downloadUrl).toBeTruthy()
+    expect(p.verifyUrl).toBeTruthy()
+  })
+
   it('addresses the attendee and names the event', async () => {
     await emailCertificate(certificate())
     const p = sent[0].payload

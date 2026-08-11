@@ -40,11 +40,29 @@ vi.mock('@/lib/certificates/firestore', () => ({
   incrementCertificateDownload: async (id: string) => { downloadCounted.push(id) },
 }))
 
-// The stored PDF: a real byte payload so the body assertion is meaningful.
+// The certificate is now RENDERED ON DEMAND rather than fetched from Storage. Mocking at
+// the renderer boundary lets these tests assert the endpoint contract (headers, status
+// codes, gating) without a PDF engine, and — critically — lets us prove that no Storage
+// read happens on the download path.
 const PDF_BYTES = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x37])  // "%PDF-1.7"
+const renderCalls: string[] = []
+let renderOutcome: 'ok' | 'render_failed' = 'ok'
+vi.mock('@/lib/certificates/generate', () => ({
+  renderCertificateOnDemand: async (certificateId: string) => {
+    renderCalls.push(certificateId)
+    return renderOutcome === 'ok'
+      ? { ok: true, bytes: PDF_BYTES, filename: `certificate-${certificateId}.pdf` }
+      : { ok: false, error: 'render_failed' }
+  },
+}))
+
+// Storage must NOT be touched by a download. Any call here fails the test loudly.
+const storageCalls: string[] = []
 vi.mock('@/lib/certificates/urlGuard', () => ({
-  safeFetchBytes: async () => PDF_BYTES,
+  safeFetchBytes: async (url: string) => { storageCalls.push(url); throw new Error('Storage must not be read on the download path') },
   validateGeneratedCertificateUrl: () => true,
+  validateEventTemplateUrl: () => ({ ok: true }),
+  validateGlobalTemplateUrl: () => ({ ok: true }),
 }))
 
 vi.mock('@/lib/rateLimit', () => ({ getClientIp: () => '1.2.3.4' }))
@@ -61,6 +79,9 @@ const get = (query = '', headers: Record<string, string> = {}) =>
 
 beforeEach(() => {
   downloadCounted.length = 0
+  renderCalls.length = 0
+  storageCalls.length = 0
+  renderOutcome = 'ok'
   limited = false
   organizerUid = null
   cert = {
@@ -116,6 +137,81 @@ describe('the certificate downloads instead of opening in a viewer', () => {
   })
 })
 
+// ─── On-demand rendering (RD-CERT-ONDEMAND) ──────────────────────────────────
+
+describe('the PDF is rendered on demand, not read from Storage', () => {
+  it('renders THIS certificate and performs no Storage read', async () => {
+    const res = await GET(get(), ctx())
+    expect(res.status).toBe(200)
+    expect(renderCalls).toEqual([CERT_ID])
+    // The whole point of the change: no stored artifact is fetched.
+    expect(storageCalls).toEqual([])
+  })
+
+  it('repeated downloads produce identical bytes', async () => {
+    const a = Buffer.from(await (await GET(get(), ctx())).arrayBuffer())
+    const b = Buffer.from(await (await GET(get(), ctx())).arrayBuffer())
+    expect(a.equals(b)).toBe(true)
+    expect(renderCalls).toEqual([CERT_ID, CERT_ID])   // rendered each time, not cached to disk
+  })
+
+  it('a render failure is a 502 that leaks nothing', async () => {
+    renderOutcome = 'render_failed'
+    const res = await GET(get(), ctx())
+    expect(res.status).toBe(502)
+    expect(await res.json()).toEqual({ error: 'Could not read the certificate file' })
+    expect(res.headers.get('content-disposition')).toBeNull()
+  })
+
+  it('rendering happens only AFTER authorization — a refused caller renders nothing', async () => {
+    settings = { download: { enabled: true, allowAttendee: true, requireVerification: true } }
+    const res = await GET(get(), ctx())            // no token
+    expect(res.status).toBe(403)
+    expect(renderCalls).toEqual([])                // never spent CPU on an unauthorized request
+  })
+})
+
+// ─── Old vs new certificates (generated-PDF storage removed) ─────────────────
+
+describe('both certificate generations download identically', () => {
+  it('CASE B · a NEW certificate (fileUrl=null) renders on demand', async () => {
+    cert = { ...cert, fileUrl: null, fileSize: null }
+    const res = await GET(get(), ctx())
+    expect(res.status).toBe(200)
+    expect(res.headers.get('content-type')).toBe('application/pdf')
+    expect(res.headers.get('content-disposition')).toMatch(/^attachment;/)
+    expect(renderCalls).toEqual([CERT_ID])
+    expect(storageCalls).toEqual([])
+  })
+
+  it('CASE A · a LEGACY certificate (fileUrl set) still downloads, and still does not read Storage', async () => {
+    // The legacy stored PDF is simply ignored — the render path rebuilds from the `data`
+    // snapshot that old and new records share, so behaviour is uniform.
+    expect(cert?.fileUrl).toBeTruthy()
+    const res = await GET(get(), ctx())
+    expect(res.status).toBe(200)
+    expect(Buffer.from(await res.arrayBuffer()).subarray(0, 5).toString()).toBe('%PDF-')
+    expect(storageCalls).toEqual([])
+  })
+
+  it('a new certificate is refused by the SAME gates as a legacy one', async () => {
+    cert = { ...cert, fileUrl: null, fileSize: null, status: 'revoked' }
+    expect((await GET(get(), ctx())).status).toBe(410)
+    expect(renderCalls).toEqual([])
+
+    cert = { ...cert, status: 'issued' }
+    settings = { download: { enabled: false, allowAttendee: true, requireVerification: false } }
+    expect((await GET(get(), ctx())).status).toBe(403)
+    expect(renderCalls).toEqual([])
+  })
+
+  it('the download counter increments for a fileUrl=null certificate', async () => {
+    cert = { ...cert, fileUrl: null, fileSize: null }
+    await GET(get(), ctx())
+    expect(downloadCounted).toEqual([CERT_ID])
+  })
+})
+
 describe('access control is unchanged by the download fix', () => {
   it('rejects a malformed certificate id before any lookup', async () => {
     const res = await GET(get(), ctx('not-a-certificate-id'))
@@ -127,8 +223,10 @@ describe('access control is unchanged by the download fix', () => {
     expect((await GET(get(), ctx())).status).toBe(410)
   })
 
-  it('404s when the certificate has no stored file', async () => {
-    cert = { ...cert, fileUrl: undefined }
+  it('404s only when the RECORD is missing — not when the stored file is absent', async () => {
+    // Generated PDFs are no longer stored, so fileUrl=null is the NORMAL state for every
+    // newly issued certificate. Requiring it here would 404 all of them.
+    cert = null
     expect((await GET(get(), ctx())).status).toBe(404)
   })
 

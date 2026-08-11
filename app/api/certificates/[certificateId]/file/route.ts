@@ -24,7 +24,7 @@ import { getCertificate, incrementCertificateDownload, getSettings } from '@/lib
 import { defaultCertificateSettings } from '@/lib/certificates/types'
 import { looksLikeDownloadCapability, verifyCertificateDownloadCapability } from '@/lib/certificates/downloadCapability'
 import { isValidCertificateId }      from '@/lib/certificates/id'
-import { safeFetchBytes, validateGeneratedCertificateUrl } from '@/lib/certificates/urlGuard'
+import { renderCertificateOnDemand }  from '@/lib/certificates/generate'
 import { timingSafeEqualStr }        from '@/lib/security/timingSafe'
 import { getClientIp }               from '@/lib/rateLimit'
 import { RATE_POLICY, checkPolicy }  from '@/lib/rateLimit/policies'
@@ -48,7 +48,12 @@ export async function GET(req: NextRequest, { params }: Params): Promise<NextRes
   }
 
   const cert = await getCertificate(certificateId)
-  if (!cert || !cert.fileUrl) {
+  // Only the RECORD must exist. `fileUrl` is no longer required: newly issued certificates
+  // carry fileUrl=null and are rendered on demand below, so requiring it here would 404
+  // every certificate issued after generated-PDF storage was removed. Certificates that
+  // still carry a legacy fileUrl are unaffected — the render path ignores it either way,
+  // rebuilding from the `data` snapshot both old and new records share.
+  if (!cert) {
     return NextResponse.json({ error: 'Not found' }, { status: 404 })
   }
 
@@ -100,13 +105,22 @@ export async function GET(req: NextRequest, { params }: Params): Promise<NextRes
     }
   }
 
-  // Fetch the stored PDF (SSRF-guarded) and stream it same-origin.
-  let bytes: Uint8Array
-  try {
-    bytes = await safeFetchBytes(cert.fileUrl, validateGeneratedCertificateUrl(cert.fileUrl))
-  } catch {
+  // Render on demand instead of streaming a stored artifact. The PDF is rebuilt from the
+  // placeholder snapshot persisted on the certificate record at issuance, through the SAME
+  // renderCertificatePdf used by generation — so the bytes are the certificate that was
+  // issued, not a re-derivation from live registration data. Nothing is uploaded and
+  // nothing is read back from Storage except the (cached) template image.
+  //
+  // Deliberately AFTER every gate above: revocation, download settings, attendee token and
+  // organizer bypass are all unchanged, so this never renders for a caller who would
+  // previously have been refused.
+  const rendered = await renderCertificateOnDemand(certificateId)
+  if (!rendered.ok) {
+    // 'revoked' is already handled above; the remaining outcomes mean we hold a record we
+    // cannot re-render. Same 502 the stored-file fetch returned, with no internal detail.
     return NextResponse.json({ error: 'Could not read the certificate file' }, { status: 502 })
   }
+  const bytes = rendered.bytes
 
   // Best-effort tracking — never block the download on a counter write.
   void incrementCertificateDownload(certificateId).catch(() => {})

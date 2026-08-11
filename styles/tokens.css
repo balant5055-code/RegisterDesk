@@ -338,7 +338,7 @@
      digits on the backdrop, so it now carries the weight the pill used to supply.
      Same viewport basis as every other hero dimension, roughly doubled. Consumed
      only by SportsHero's countdown. */
-  --hero-digit:     clamp(1.75rem, min(3.6vw, 4vh),    3rem);
+  --hero-digit:     clamp(1.5rem,  min(3vw, 3.4vh),    2.5rem);
   --hero-price:     clamp(1.5rem,  min(2.6vw, 3.2vh), 2.25rem);
 
   /* Hero description: a FIXED block, so copy length can never move the hero.
@@ -353,29 +353,38 @@
 @media (min-width: 768px)  { :root { --nav-h: 68px } }
 @media (min-width: 1024px) { :root { --nav-h: 72px } }
 
-/* RD-ST6.1 · MOBILE TIER — phones only, below Tailwind's `sm` (640px).
+/* RD-ST6.1 · COMPACT TIER — everything below Tailwind's `lg` (1024px).
  *
- * The hero tokens above scale on `min(vw, vh)`, which is the right basis from tablet
- * up but collapses to the clamp FLOOR on a phone — so every handset from 360 to 414
- * got byte-identical type, and the floors were tuned for the desktop curve rather than
- * for a phone. This tier re-tunes the four that matter on mobile and nothing else.
+ * The hero tokens above scale on `min(vw, vh)`, which is the right basis for the
+ * two-column desktop hero but collapses to the clamp FLOOR on a phone — so every
+ * handset from 360 to 414 got byte-identical type, tuned for the desktop curve rather
+ * than for a phone. This tier re-tunes the five that matter and nothing else.
  *
  * Scoped by max-width, not by lowering a floor: a floor is global, and 1280×800 already
  * resolves --hero-price BELOW a raised floor (25.6px), so raising it would have silently
- * changed the desktop the brief protects. A max-width block cannot reach past 639px.
+ * changed the desktop the brief protects. A max-width block cannot reach past 1023px.
  *
- *   title — 36→44px across 360→414 instead of a flat 32px, so it stays the loudest
+ * RD-ST6.2 widened this from 639.98 to 1023.98 so the compact composition and its type
+ * scale land together — the layout boundary is lg, and a tier that stopped at sm would
+ * have left 640–1023 with compact LAYOUT but desktop TYPE.
+ *
+ *   title — 36→44px across 360→1023 instead of a flat 32px, so it stays the loudest
  *           object on the page at the width where it has the least room;
  *   price — flat 28px: the conversion figure was reading a step under the title;
- *   gap / py — flat rhythm, dropping the `vh` term. Mobile is not viewport-bounded
- *           (the --hero-h contract is lg-only), so a short phone was paying a
+ *   gap / py — flat rhythm, dropping the `vh` term. Nothing below lg is viewport-bounded
+ *           (the --hero-h contract is lg-only), so a short window was paying a
  *           compression tax it had no reason to pay.
  */
-@media (max-width: 639.98px) {
+@media (max-width: 1023.98px) {
   :root {
     --hero-title: clamp(2.25rem, 9.5vw, 2.75rem);
     --hero-price: 1.75rem;
-    --hero-gap:   1.25rem;
+    /* RD-ST6.2 — the mobile hero was ~1650px with the CTA ~1400px down. The block
+       rhythm tightens from 20px to 16px (×8 gaps) and the countdown digits step down
+       one notch, both as part of the compaction pass. Still well clear of the
+       "cramped 4–8px" floor the brief warns against. */
+    --hero-gap:   1rem;
+    --hero-digit: 1.625rem;
     --hero-py:    1.25rem;
   }
 }
@@ -385,10 +394,10 @@
    vh scaling alone can no longer recover the difference. This tier compresses the
    parts that CAN give — block rhythm and the description's line budget — without
    shrinking any touch target or hiding any content.
-   RD-ST6.1: gated to `min-width: 640px` so it stays a laptop tier. Unqualified, it
-   also matched every 360×800 phone and clawed --hero-gap back down to ~11px, undoing
-   the mobile rhythm set above — a phone is not a short window. */
-@media (min-width: 640px) and (max-height: 800px) {
+   RD-ST6.2: gated to `min-width: 1024px` so it stays a laptop tier — it must not reach
+   into the compact tier above, which now covers everything below lg. Unqualified it also
+   matched every 360×800 phone and clawed --hero-gap back to ~11px. */
+@media (min-width: 1024px) and (max-height: 800px) {
   :root {
     --hero-gap:        clamp(0.4rem, 1.4vh, 1rem);
     --hero-desc-lines: 1;

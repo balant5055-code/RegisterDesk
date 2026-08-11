@@ -92,7 +92,9 @@ export async function POST(req: NextRequest, { params }: Params): Promise<NextRe
   // upfront (no fetches) so the response headers are known before the body streams.
   const { usable, skipped } = selectZipCertificates(selected)
   if (usable.length === 0) {
-    return NextResponse.json({ error: 'No downloadable certificate files (all revoked or legacy).' }, { status: 409 })
+    // Reachable only when every selected certificate is revoked — a certificate without a
+    // stored file is no longer excluded, it is rendered on demand.
+    return NextResponse.json({ error: 'No downloadable certificates in this selection (all revoked).' }, { status: 409 })
   }
 
   const filename = `certificates-${eventId}-${scope}-${usable.length}.zip`
