@@ -27,29 +27,15 @@ import {
 } from '@/lib/firebase/firestore/paymentIntents'
 import { atomicTopupCredit } from '@/lib/firebase/firestore/wallet'
 import { recordWalletTopupReconciliation } from '@/lib/wallet/topupReconciliation'
-import {
-  generateTicketCode,
-  TicketCodeCollisionError,
-}                                     from '@/lib/registrations/ticketCode'
-import { buildCounterIncrement }      from '@/lib/firebase/firestore/registrationCounters'
-import { deriveStoredEventCapacity }  from '@/lib/registrations/capacity'
-import { checkRegistrationGate }      from '@/lib/registrations/gate'
-import {
-  CapacityExceededError,
-  DuplicateRegistrationError,
-  writeAuditEntry,
-}                                     from '@/lib/firebase/firestore/registrations'
-import { razorpay }                   from '@/lib/razorpay/client'
-import { sendConfirmationEmail }      from '@/lib/registrations/sendConfirmationEmail'
+// RD-PAY-P0-3: the registration-settlement imports (ticket code, counters, capacity, gate,
+// duplicate/capacity errors, confirmation email, ledger + wallet credit) left with the
+// inline settlement — they now live in settleCapturedRegistration.
+import { writeAuditEntry }            from '@/lib/firebase/firestore/registrations'
 import { sendRefundEmail }            from '@/lib/registrations/sendRefundEmail'
-import {
-  reversePlatformTransactionAndDebit,
-  recordPlatformTransactionAndCredit,
-}                                     from '@/lib/firebase/firestore/platformTransactions'
-import { recordRegistrationFinancialReconciliation } from '@/lib/payments/registrationReconciliation'
-import { buildRegistrationLedgerAndCredit } from '@/lib/payments/registrationLedger'
-import type { PaymentIntentRecord }   from '@/lib/firebase/firestore/paymentIntents'
+import { reversePlatformTransactionAndDebit } from '@/lib/firebase/firestore/platformTransactions'
 import { flagSuspiciousPayment }      from '@/lib/payments/flagSuspicious'
+// RD-PAY-P0-3 — the ONE settlement path, shared with the reconciliation sweep.
+import { settleCapturedRegistration } from '@/lib/payments/settleCapturedRegistration'
 import { captureFinancialError, captureWebhookError } from '@/lib/monitoring/sentry'
 import { LICENSE_ORDERS_COLLECTION, licenseOrderConverter } from '@/lib/licensing/schema'
 import { getEffectiveDefinitionForVersion } from '@/lib/licensing/resolveCatalog'
@@ -74,51 +60,10 @@ function verifyWebhookSignature(rawBody: string, signature: string): boolean {
   return crypto.timingSafeEqual(expected, actual)
 }
 
-// ─── Refund context ────────────────────────────────────────────────────────────
-
-interface RefundContext {
-  eventSlug:      string
-  attendeeEmail:  string
-  registrationId?: string  // not available in gate-blocked case
-}
-
-// ─── Refund helper ─────────────────────────────────────────────────────────────
-
-async function triggerRefund(
-  orderId:   string,
-  paymentId: string,
-  amount:    number,
-  reason:    string,
-  ctx:       RefundContext,
-): Promise<void> {
-  try {
-    const refund = await razorpay.payments.refund(paymentId, {
-      amount,
-      speed:   'optimum',
-      notes:   { reason, orderId },
-      receipt: `refund_${orderId}`.slice(0, 40),
-    })
-    await updatePaymentIntentRefund(orderId, refund.id, refund.status, amount)
-    console.log('[webhook/razorpay] Refund initiated:', {
-      orderId, paymentId, refundId: refund.id, status: refund.status,
-    })
-  } catch (refundErr) {
-    captureFinancialError(refundErr, { scope: 'razorpay.refund_api_failed', detail: 'writing failedRefunds record', orderId, paymentId, amount, reason })
-    // Write a recovery record so the failure is detectable and actionable (H-2).
-    // Never rely only on logs — this document is the signal for manual intervention.
-    adminDb.collection('failedRefunds').add({
-      orderId,
-      paymentId,
-      amountPaise:    amount,
-      reason,
-      eventSlug:      ctx.eventSlug,
-      attendeeEmail:  ctx.attendeeEmail,
-      registrationId: ctx.registrationId ?? null,
-      status:         'open',
-      createdAt:      FieldValue.serverTimestamp(),
-    }).catch(e => captureFinancialError(e, { scope: 'razorpay.failed_refund_persist_failed', detail: 'CRITICAL: could not write failedRefunds record', orderId, paymentId }))
-  }
-}
+// RD-PAY-P0-3: the local triggerRefund helper moved into settleCapturedRegistration
+// alongside the settlement it served, so the refund-on-refusal policy has exactly one
+// implementation shared by the webhook and the sweep. Refund SYNC (refund.processed,
+// below) is a different concern and stays here.
 
 // ─── Registration refund sync ─────────────────────────────────────────────────
 //
@@ -473,272 +418,33 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ received: true })  // ack to stop retries; do not process
   }
 
-  // ── 6.5. F5: Gate check — cancelled/postponed/full events must not receive ─
-  //         recovered registrations
-  const gate = await checkRegistrationGate(intent.eventSlug, intent.passId)
-  if (!gate.allowed) {
-    captureWebhookError('gate_blocked_refund', { scope: 'razorpay.gate_blocked', orderId, paymentId, reason: gate.reason })
-    await markPaymentIntentFailed(orderId, gate.reason)
-    await triggerRefund(orderId, paymentId, intent.amount, `gate_blocked:${gate.reason}`, {
-      eventSlug:     intent.eventSlug,
-      attendeeEmail: intent.attendee.email,
+  // ── 6.5 – 8. RD-PAY-P0-3: settle through the ONE shared recovery path ──────
+  //
+  // Everything that used to live inline here — the gate check + refund, the ticket-code
+  // retry loop, the atomic transaction (registration · counter · intent · ticket claim ·
+  // email/phone claims), the post-commit email and the ledger/wallet credit, and the
+  // duplicate/capacity refund policy — moved VERBATIM to settleCapturedRegistration().
+  //
+  // It moved because the reconciliation sweep (the other half of P0-3) has to settle
+  // orphaned captures too, and a second hand-written copy of "create a registration" is
+  // exactly how recovery paths drift apart. One function, two callers, identical writes.
+  //
+  // Idempotency is unchanged and still lives where it always did: the payment intent is
+  // read INSIDE the transaction, so concurrent settlements serialize on it and every loser
+  // observes `paid` and no-ops.
+  const outcome = await settleCapturedRegistration({ orderId, paymentId, intent, source: 'webhook' })
+
+  if (outcome.kind === 'settled') {
+    console.log('[webhook/razorpay] Registration recovered:', {
+      orderId, paymentId, registrationId: outcome.registrationId, eventSlug: intent.eventSlug,
     })
-    return NextResponse.json({ received: true })
+  } else if (outcome.kind === 'refunded') {
+    captureWebhookError('settlement_refused_after_capture', {
+      scope: 'razorpay.settlement_refunded', orderId, paymentId, reason: outcome.reason,
+    })
   }
 
-  // ── 7. Compute document refs and claim paths ───────────────────────────────
-  const normEmail = intent.attendee.email
-  const normPhone = intent.attendee.phone
-
-  const intentRef  = adminDb.collection('paymentIntents').doc(orderId)
-  const eventRef   = adminDb.collection('events').doc(intent.eventSlug)
-  const counterRef = adminDb.collection('registrationCounters').doc(intent.eventSlug)
-  const regRef     = adminDb.collection('registrations').doc(crypto.randomUUID())
-
-  const emailClaimRef = adminDb.collection('registrationClaims')
-    .doc(`${intent.eventSlug}_email_${normEmail}`)
-  const phoneClaimRef = normPhone
-    ? adminDb.collection('registrationClaims')
-        .doc(`${intent.eventSlug}_phone_${normPhone}`)
-    : null
-
-  const registrationId = regRef.id
-
-  // Shared refund context — populated once, reused by all triggerRefund calls below.
-  const refundCtx: RefundContext = {
-    eventSlug:      intent.eventSlug,
-    attendeeEmail:  intent.attendee.email,
-    registrationId,
-  }
-
-  // ── 8. F1: retry loop + atomic transaction: idempotency + duplicate + ───────
-  //         capacity + ticket code claim + write
-  for (let attempt = 0; attempt < 5; attempt++) {
-    const ticketCode         = generateTicketCode()
-    const ticketCodeClaimRef = adminDb.collection('ticketCodeClaims').doc(ticketCode)
-
-    // Reset per-iteration: tracks whether the transaction created a new registration
-    // (false on the idempotency no-op path — email was already sent the first time).
-    let txnWasNoOp = false
-    let capturedRawDetails: Record<string, unknown> = {}
-
-    try {
-      await adminDb.runTransaction(async txn => {
-        // Phase 1: read intent for fast idempotency check
-        const intentSnap = await txn.get(intentRef)
-        const intentData = intentSnap.data() as PaymentIntentRecord
-
-        if (intentData.status === 'paid' && intentData.registrationId) {
-          txnWasNoOp = true
-          return  // already processed — no-op
-        }
-
-        // Phase 2: read remaining docs (includes ticket code claim)
-        const [eventSnap, counterSnap, emailClaimSnap, ticketClaimSnap] = await Promise.all([
-          txn.get(eventRef),
-          txn.get(counterRef),
-          txn.get(emailClaimRef),
-          txn.get(ticketCodeClaimRef),  // F1
-        ])
-        const phoneClaimSnap = phoneClaimRef ? await txn.get(phoneClaimRef) : null
-
-        const eventData   = eventSnap.data() as Record<string, unknown> | undefined
-        // Capture event details for the confirmation email sent after the transaction.
-        capturedRawDetails = (eventData?.eventDetails ?? {}) as Record<string, unknown>
-        const counterData = counterSnap.exists
-          ? counterSnap.data() as { totalCount?: number; passCounts?: Record<string, number> }
-          : null
-
-        const regForm  = eventData?.registrationForm as Record<string, unknown> | undefined
-        const regRules = regForm?.registrationRules as
-          { limitPerEmail?: boolean; limitPerMobile?: boolean } | undefined
-
-        // F1: ticket code collision — outer loop retries with a new code
-        if (ticketClaimSnap.exists) throw new TicketCodeCollisionError()
-
-        // Duplicate check
-        if (regRules?.limitPerEmail && emailClaimSnap.exists) {
-          throw new DuplicateRegistrationError('DUPLICATE_EMAIL')
-        }
-        if (regRules?.limitPerMobile && phoneClaimSnap?.exists) {
-          throw new DuplicateRegistrationError('DUPLICATE_MOBILE')
-        }
-
-        // Capacity check
-        const eventCapacity = deriveStoredEventCapacity(eventData)
-        const totalCount    = counterData?.totalCount ?? 0
-        const passCount     = (counterData?.passCounts ?? {})[intent.passId] ?? 0
-
-        // P1-D: Live pass capacity from the transaction-locked event doc.
-        // intent.passCapacity was captured at create-order time and may be stale.
-        const rawPricing      = eventData?.pricing as Record<string, unknown> | null | undefined
-        const livePasses      = Array.isArray(rawPricing?.passes)
-          ? (rawPricing?.passes as Record<string, unknown>[])
-          : []
-        const livePass        = livePasses.find(p => p.id === intent.passId)
-        if (!livePass) throw new CapacityExceededError('PASS_NOT_AVAILABLE')
-        const livePassCapacity = livePass.unlimited === true
-          ? null
-          : typeof livePass.quantity === 'number' ? livePass.quantity : null
-
-        if (eventCapacity !== null && totalCount >= eventCapacity) {
-          throw new CapacityExceededError('EVENT_CAPACITY_FULL')
-        }
-        if (livePassCapacity !== null && passCount >= livePassCapacity) {
-          throw new CapacityExceededError('PASS_CAPACITY_FULL')
-        }
-
-        // Writes
-        txn.set(regRef, {
-          id:              registrationId,
-          eventSlug:       intent.eventSlug,
-          passId:          intent.passId,
-          passName:        intent.passName,
-          eventName:       intent.eventName,
-          organizerUid:    intent.organizerUid,
-          attendee:        intent.attendee,
-          status:          'confirmed',
-          paymentStatus:   'paid',
-          amount:          intent.amount,
-          razorpayOrderId: orderId,
-          paymentId,
-          ticketCode,
-          recoveredByWebhook: true,
-          registeredAt:    FieldValue.serverTimestamp(),
-          updatedAt:       FieldValue.serverTimestamp(),
-          ...(intent.uid ? { uid: intent.uid } : {}),
-        })
-
-        txn.set(counterRef, buildCounterIncrement(intent.eventSlug, intent.passId, { amountPaise: intent.amount }), { merge: true })
-        txn.update(intentRef, {
-          status:         'paid',
-          registrationId,
-          paymentId,
-          updatedAt:      FieldValue.serverTimestamp(),
-        })
-
-        // F1: claim ticket code atomically with the registration
-        txn.set(ticketCodeClaimRef, {
-          registrationId,
-          eventSlug: intent.eventSlug,
-          createdAt: FieldValue.serverTimestamp(),
-        })
-
-        if (regRules?.limitPerEmail) {
-          txn.set(emailClaimRef, {
-            registrationId,
-            eventSlug: intent.eventSlug,
-            email:     normEmail,
-            createdAt: FieldValue.serverTimestamp(),
-          })
-        }
-        if (regRules?.limitPerMobile && phoneClaimRef && normPhone) {
-          txn.set(phoneClaimRef, {
-            registrationId,
-            eventSlug: intent.eventSlug,
-            phone:     normPhone,
-            createdAt: FieldValue.serverTimestamp(),
-          })
-        }
-      })
-
-      // Send confirmation email for recovered registrations only.
-      // txnWasNoOp is true when the idempotency path fired (already processed by
-      // verify-payment or a prior webhook delivery) — do not send a duplicate email.
-      if (!txnWasNoOp) {
-        await sendConfirmationEmail({
-          registrationId,
-          ticketCode,
-          attendeeName:   intent.attendee.name,
-          attendeeEmail:  intent.attendee.email,
-          eventName:      intent.eventName,
-          passName:       intent.passName,
-          rawDetails:     capturedRawDetails,
-          organizerUid:   intent.organizerUid,
-          eventSlug:      intent.eventSlug,
-          amountPaid:     intent.amount,
-        })
-
-        // P0-3: Credit organizer wallet and write the platform ledger entry.
-        // verify-payment handles this on the normal (non-recovery) path. This webhook
-        // recovery path previously skipped it, silently losing organizer revenue for all
-        // webhook-recovered registrations (~2–5% of paid registrations).
-        //
-        // txnWasNoOp guards against double-credit: if verify-payment succeeded first,
-        // the intent is already 'paid' and the inner transaction no-ops (txnWasNoOp = true),
-        // so this block is skipped and verify-payment's ledger entry / wallet credit stand.
-        if (intent.amount > 0) {
-          // RD-PAYMENT-02 Phase 2: build via the ONE canonical registration-ledger builder
-          // (was a verbatim inline duplicate). Identical `{ ledger, credit }` for identical
-          // inputs — the same deterministic `ptx_<registrationId>` key, same fee resolution
-          // (organizer_pays by default), same snapshot/shadow path — so recovery and the
-          // verify-payment happy path can never diverge.
-          const { ledger, credit } = await buildRegistrationLedgerAndCredit({
-            registrationId,
-            organizerUid:     intent.organizerUid,
-            eventSlug:        intent.eventSlug,
-            attendeeName:     intent.attendee.name,
-            attendeeEmail:    intent.attendee.email,
-            grossAmountPaise: intent.amount,
-            paymentId,
-            orderId,
-            // RD-PAYMENT-02 Phase 7: same canonical breakdown the verify path uses.
-            financials:       intent.financials,
-          })
-          // Atomic + idempotent: shares the `ptx_${registrationId}` key with
-          // verify-payment, so whichever path runs first credits exactly once.
-          // Registration is already created — never refund; on failure persist a
-          // reconciliation record for out-of-band retry.
-          try {
-            await recordPlatformTransactionAndCredit(ledger, credit)
-          } catch (walletErr) {
-            await recordRegistrationFinancialReconciliation({
-              registrationId,
-              orderId,
-              paymentId,
-              ledger,
-              credit,
-              error: walletErr instanceof Error ? walletErr.message : 'financial_side_effect_failed',
-            })
-          }
-        }
-      }
-
-      console.log('[webhook/razorpay] Registration recovered:', {
-        orderId, paymentId, registrationId, eventSlug: intent.eventSlug,
-      })
-      return NextResponse.json({ received: true })
-
-    } catch (err) {
-      if (err instanceof TicketCodeCollisionError) {
-        if (attempt < 4) continue  // generate new code, retry
-        captureWebhookError('ticket_code_exhausted', { scope: 'razorpay.ticket_collision', orderId, paymentId })
-        await markPaymentIntentFailed(orderId, 'ticket_code_exhausted')
-        await triggerRefund(orderId, paymentId, intent.amount, 'ticket_code_exhausted', refundCtx)
-        return NextResponse.json({ received: true })
-      }
-
-      if (err instanceof DuplicateRegistrationError) {
-        captureWebhookError('duplicate_after_capture', { scope: 'razorpay.duplicate_refund', orderId, paymentId, reason: err.reason })
-        await markPaymentIntentFailed(orderId, err.reason)
-        await triggerRefund(orderId, paymentId, intent.amount, err.reason, refundCtx)
-        return NextResponse.json({ received: true })
-      }
-
-      if (err instanceof CapacityExceededError) {
-        captureWebhookError('capacity_exceeded_after_capture', { scope: 'razorpay.capacity_refund', orderId, paymentId, reason: err.reason })
-        await markPaymentIntentFailed(orderId, err.reason)
-        await triggerRefund(orderId, paymentId, intent.amount, err.reason, refundCtx)
-        return NextResponse.json({ received: true })
-      }
-
-      captureWebhookError(err, { scope: 'razorpay.unexpected_refund', orderId, paymentId, eventSlug: intent.eventSlug })
-      await markPaymentIntentFailed(orderId, 'webhook_transaction_error')
-      await triggerRefund(orderId, paymentId, intent.amount, 'webhook_transaction_error', refundCtx)
-      return NextResponse.json({ received: true })
-    }
-  }
-
-  // Unreachable: every loop iteration either returns or continues.
+  // Always ack: Razorpay retries a non-2xx, and every outcome above is either final or
+  // deliberately left for the sweep. A retry storm helps nobody.
   return NextResponse.json({ received: true })
 }

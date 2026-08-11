@@ -329,14 +329,17 @@
      min(vw, vh) keeps wide-but-short laptops honest; the clamp floor/ceiling
      keeps phones readable and large monitors from ballooning. */
   --hero-py:        clamp(0.75rem,  2vh,               2.5rem);
-  --hero-gap:       clamp(0.5rem,   1.7vh,             1.5rem);
-  --hero-gap-tight: clamp(0.375rem, 1vh,              0.75rem);
+  /* RD-ST6.0 — the editorial composition leans on whitespace where ST5.x leaned on
+     card borders, so the block rhythm opens up by roughly a third. */
+  --hero-gap:       clamp(0.75rem,  2.2vh,             1.75rem);
   --hero-title:     clamp(2rem,    min(5vw, 5.6vh),   4.25rem);
   --hero-tagline:   clamp(1.05rem, min(2.3vw, 2.7vh), 2rem);
-  --hero-digit:     clamp(1rem,    min(2.1vw, 2.4vh),  1.625rem);
+  /* RD-ST6.0 — the countdown left its dark glass pill and became bare editorial
+     digits on the backdrop, so it now carries the weight the pill used to supply.
+     Same viewport basis as every other hero dimension, roughly doubled. Consumed
+     only by SportsHero's countdown. */
+  --hero-digit:     clamp(1.75rem, min(3.6vw, 4vh),    3rem);
   --hero-price:     clamp(1.5rem,  min(2.6vw, 3.2vh), 2.25rem);
-  --hero-poster-h:  clamp(5rem,     14vh,              12rem);
-  --hero-card-pad:  clamp(0.625rem, 1.6vh,             1.25rem);
 
   /* Hero description: a FIXED block, so copy length can never move the hero.
      The line count is part of the viewport budget — two lines normally, one on
@@ -350,15 +353,13 @@
 @media (min-width: 768px)  { :root { --nav-h: 68px } }
 @media (min-width: 1024px) { :root { --nav-h: 72px } }
 
-/* Short-viewport tier. Below ~800px of viewport height the registration card's
-   non-scaling controls (CTA, trust row, secondary buttons) dominate its height, so
-   proportional vh scaling alone can no longer recover the difference. This tier
-   compresses the parts that CAN give — poster band, card padding, block rhythm —
-   without shrinking any touch target or hiding any content. */
+/* Short-viewport tier. Below ~800px of viewport height the registration surface's
+   non-scaling controls (CTA, secondary buttons) dominate its height, so proportional
+   vh scaling alone can no longer recover the difference. This tier compresses the
+   parts that CAN give — block rhythm and the description's line budget — without
+   shrinking any touch target or hiding any content. */
 @media (max-height: 800px) {
   :root {
-    --hero-poster-h:   clamp(4.5rem, 9.5vh, 8rem);
-    --hero-card-pad:   0.625rem;
     --hero-gap:        clamp(0.4rem, 1.4vh, 1rem);
     --hero-desc-lines: 1;
   }

@@ -93,6 +93,10 @@ export async function generateMetadata({ params }: PageProps): Promise<Metadata>
     keywords:    keywords || undefined,
     metadataBase: new URL(baseUrl),
     alternates:  { canonical: url },
+    // RD-SEO-01 — a PRIVATE event stays reachable by its link (invite-only access is the
+    // product), but it must not be indexed. The sitemap already withholds it; this closes
+    // the other path in, where a crawler follows a link someone shared publicly.
+    robots: event.visibility === 'private' ? { index: false, follow: false } : undefined,
     openGraph: {
       type:        'website',
       url,

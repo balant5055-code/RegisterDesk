@@ -20,6 +20,9 @@ import {
 } from '@/lib/firebase/firestore/platformTransactions'
 import { buildRegistrationLedgerAndCredit } from '@/lib/payments/registrationLedger'
 import type { PaymentIntentRecord } from '@/lib/firebase/firestore/paymentIntents'
+// RD-PAY-P0-3 — orphaned-capture recovery. The SAME settlement the webhook uses.
+import { settleCapturedRegistration } from '@/lib/payments/settleCapturedRegistration'
+import { razorpay } from '@/lib/razorpay/client'
 
 const COLLECTION = 'registrationFinancialReconciliation'
 const REFUND_REVERSAL_COLLECTION = 'refundLedgerReconciliation'
@@ -282,6 +285,122 @@ export async function recoverUncreditedRegistrations(limitN = 500): Promise<Ledg
   }
 
   return { scanned: snap.size, candidates: candidates.length, recovered, enqueued, alreadyOk }
+}
+
+// ─── Orphaned-capture recovery (RD-PAY-P0-3) ───────────────────────────────────
+//
+// THE GAP THIS CLOSES. A payment is captured the moment Razorpay's checkout handler fires.
+// Everything after that — the verify-payment request, its response, the browser staying
+// alive — is best effort. Until now the `payment.captured` webhook was the ONLY thing that
+// could notice an orphaned capture, which made a single point of failure out of a
+// third-party delivery to an endpoint whose dashboard registration nobody can verify from
+// inside the app (LAUNCH_CHECKLIST 2.5/2.6). If that webhook is unregistered, misconfigured,
+// or simply dropped, the attendee's money is taken and no registration ever exists.
+//
+// This sweep is the second, independent observer. It asks Razorpay directly about intents
+// that are still `created`, and settles anything Razorpay says was paid — through the SAME
+// settleCapturedRegistration the webhook uses, so the two can never diverge.
+//
+// WHAT IT WILL NOT DO. It never marks an intent failed and never refunds on its own
+// initiative. An unpaid order is left exactly as it is: `created` is not evidence of
+// failure, only of silence, and a late payment against a still-open order must remain
+// settleable. Razorpay being unreachable is likewise never read as "unpaid" — the intent
+// stays untouched and the next run looks again.
+
+// Recovery window. The GRACE keeps the sweep away from in-flight checkouts: an attendee
+// staring at the Razorpay modal has a `created` intent and no payment yet, and asking about
+// them would be pure noise. The LOOKBACK bounds cost; anything older is a manual/finance
+// concern, not an automated one.
+const CAPTURE_SWEEP_LOOKBACK_MS = 24 * 60 * 60 * 1000
+const CAPTURE_SWEEP_GRACE_MS    = 10 * 60 * 1000
+
+export interface CaptureSweepResult {
+  scanned:    number   // intents read in the window
+  candidates: number   // still `created` with a positive amount
+  recovered:  number   // captured at Razorpay → registration created by this sweep
+  alreadyOk:  number   // raced to settled by the webhook / browser between read and settle
+  refunded:   number   // captured but refused (capacity, duplicate) → refunded by policy
+  unpaid:     number   // Razorpay holds nothing — left untouched, still open
+  uncertain:  number   // Razorpay unreachable or settlement deferred — left recoverable
+}
+
+/**
+ * Finds payment intents stuck in `created`, asks Razorpay whether money was actually taken,
+ * and settles the ones that were.
+ *
+ * Idempotent and safe to run repeatedly and concurrently with the webhook: settlement reads
+ * the intent INSIDE its transaction, so whichever caller commits first wins and every other
+ * observes `paid` and no-ops. No duplicate registration, ticket, email, counter increment or
+ * wallet credit is possible.
+ */
+export async function recoverCapturedPaymentIntents(limitN = 200): Promise<CaptureSweepResult> {
+  const now = Date.now()
+  const out: CaptureSweepResult = {
+    scanned: 0, candidates: 0, recovered: 0, alreadyOk: 0, refunded: 0, unpaid: 0, uncertain: 0,
+  }
+
+  // Same single-field (auto-indexed) createdAt range the ledger sweep uses — no composite
+  // index, no persisted cursor. Re-scanned every run so a late capture is always caught.
+  const snap = await adminDb.collection('paymentIntents')
+    .where('createdAt', '>=', Timestamp.fromMillis(now - CAPTURE_SWEEP_LOOKBACK_MS))
+    .where('createdAt', '<=', Timestamp.fromMillis(now - CAPTURE_SWEEP_GRACE_MS))
+    .orderBy('createdAt', 'desc')
+    .limit(limitN)
+    .get()
+
+  out.scanned = snap.size
+  if (snap.empty) return out
+
+  const candidates = snap.docs
+    .map(d => d.data() as PaymentIntentRecord)
+    .filter(i => i.status === 'created' && (i.amount ?? 0) > 0 && typeof i.orderId === 'string' && !!i.orderId)
+  out.candidates = candidates.length
+
+  for (const intent of candidates) {
+    // Ask the authority. Only a payment matching the intent's OWN amount and currency
+    // counts — the same defence-in-depth check the webhook applies to its payload, so a
+    // mismatched or foreign payment can never settle this registration.
+    let payment: { id?: string; status?: string } | undefined
+    try {
+      const res = await razorpay.orders.fetchPayments(intent.orderId) as {
+        items?: Array<{ id?: string; status?: string; amount?: number; currency?: string }>
+      }
+      payment = (res.items ?? []).find(p =>
+        (p.status === 'captured' || p.status === 'authorized') &&
+        p.currency === 'INR' && p.amount === intent.amount)
+    } catch (err) {
+      // FAIL-CLOSED: unreachable is NOT unpaid. Leave the intent alone and look again.
+      captureFinancialError(err, { scope: 'captureSweep.fetch_payments_failed', detail: 'left recoverable', orderId: intent.orderId })
+      out.uncertain++
+      continue
+    }
+
+    if (!payment?.id) { out.unpaid++; continue }
+
+    const outcome = await settleCapturedRegistration({
+      orderId:   intent.orderId,
+      paymentId: payment.id,
+      intent,
+      source:    'sweep',
+    })
+
+    if (outcome.kind === 'settled') {
+      out.recovered++
+      captureFinancialError('orphaned_capture_recovered', {
+        scope:  'captureSweep.recovered',
+        detail: 'payment was captured at Razorpay but never settled by the browser or webhook',
+        orderId: intent.orderId, paymentId: payment.id, registrationId: outcome.registrationId,
+      })
+    } else if (outcome.kind === 'already_settled') {
+      out.alreadyOk++
+    } else if (outcome.kind === 'refunded') {
+      out.refunded++
+    } else {
+      out.uncertain++
+    }
+  }
+
+  return out
 }
 
 /**

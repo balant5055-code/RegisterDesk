@@ -193,7 +193,8 @@ async function run(scope: { events: boolean; passes: boolean }, opts?: Reconcile
     catch (err) { captureError(err, { scope: 'global_reconciliation', entityType: 'event', eventSlug: doc.id }) }
     lastCompletedId = doc.id
     // Incremental cursor persistence — even an unexpected kill still advances.
-    if (scanned % RECON_CURSOR_FLUSH === 0) await writeCursor(cursorKey, lastCompletedId)
+    // Gated on `repair`: see the cursor note below.
+    if (repair && scanned % RECON_CURSOR_FLUSH === 0) await writeCursor(cursorKey, lastCompletedId)
   }
 
   // Advance the cursor:
@@ -201,11 +202,24 @@ async function run(scope: { events: boolean; passes: boolean }, opts?: Reconcile
   //    (fall back to the existing cursor if nothing completed, never reset to start).
   //  - full page completed  → resume after its last id.
   //  - short page (end)     → clear the cursor to wrap to the start.
-  if (budgetHit) {
-    await writeCursor(cursorKey, lastCompletedId ?? after)
-  } else {
-    const lastId = counters.docs.length ? counters.docs[counters.docs.length - 1].id : null
-    await writeCursor(cursorKey, counters.size === pageSize ? lastId : null)
+  //
+  // ONLY WHEN REPAIRING. `repair: false` is the report-only mode, and it was not actually
+  // read-only: these writes land in `reconciliationCursors` regardless of what
+  // reconcileOneEvent does, so a dry-run mutated the shared paging state of the real
+  // scheduled run — it could skip events past the cursor, or wrap it back to the start.
+  // A report must not be able to change what the next repairing run covers.
+  //
+  // Trade-off, deliberate: a dry-run therefore never advances the cursor, so it always
+  // inspects the page starting at the CURRENT cursor position and cannot page through a
+  // collection larger than `pageSize` across successive calls. That is the correct
+  // behaviour for an inspection — pass `limit` to widen the window instead.
+  if (repair) {
+    if (budgetHit) {
+      await writeCursor(cursorKey, lastCompletedId ?? after)
+    } else {
+      const lastId = counters.docs.length ? counters.docs[counters.docs.length - 1].id : null
+      await writeCursor(cursorKey, counters.size === pageSize ? lastId : null)
+    }
   }
 
   return { entityType, scanned, mismatches: all, repaired: all.filter(m => m.repaired).length }

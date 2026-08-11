@@ -58,3 +58,5 @@ e2e/.shots/
 registerdesk-c91a3-firebase-adminsdk-fbsvc-7124b9379b.json
 
 .next-verify/
+.vercel
+.env*

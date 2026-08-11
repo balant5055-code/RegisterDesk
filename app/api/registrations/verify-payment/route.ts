@@ -13,37 +13,16 @@
 
 import crypto                         from 'crypto'
 import { NextRequest, NextResponse }  from 'next/server'
-import { FieldValue }                 from 'firebase-admin/firestore'
-import { adminAuth, adminDb }         from '@/lib/firebase/admin'
-import { captureError, captureFinancialError } from '@/lib/monitoring/sentry'
-import {
-  getPaymentIntent,
-  markPaymentIntentFailed,
-  updatePaymentIntentRefund,
-} from '@/lib/firebase/firestore/paymentIntents'
-import {
-  generateTicketCode,
-  TicketCodeCollisionError,
-}                                     from '@/lib/registrations/ticketCode'
-import { buildCounterIncrement }      from '@/lib/firebase/firestore/registrationCounters'
-import { deriveStoredEventCapacity }  from '@/lib/registrations/capacity'
-import { checkRegistrationGate }      from '@/lib/registrations/gate'
-import {
-  CapacityExceededError,
-  DuplicateRegistrationError,
-  CouponExhaustedError,
-}                                     from '@/lib/firebase/firestore/registrations'
-import type { CouponDocument }        from '@/lib/coupons/types'
-import { razorpay, RAZORPAY_KEY_SECRET } from '@/lib/razorpay/client'  // C1: throws if absent
+import { adminAuth }                  from '@/lib/firebase/admin'
+import { captureFinancialError }      from '@/lib/monitoring/sentry'
+import { getPaymentIntent }           from '@/lib/firebase/firestore/paymentIntents'
+import { RAZORPAY_KEY_SECRET }        from '@/lib/razorpay/client'  // C1: throws if absent
 import { getClientIp }                   from '@/lib/rateLimit'
 import { checkDistributedRateLimit }     from '@/lib/rateLimit/redis'
-import { sendConfirmationEmail }          from '@/lib/registrations/sendConfirmationEmail'
-import { notifyPaymentReceived }          from '@/lib/notifications/inbox/notify'
-import type { PaymentIntentRecord }   from '@/lib/firebase/firestore/paymentIntents'
-import { recordPlatformTransactionAndCredit } from '@/lib/firebase/firestore/platformTransactions'
-import { recordRegistrationFinancialReconciliation }                         from '@/lib/payments/registrationReconciliation'
-import { buildRegistrationLedgerAndCredit }  from '@/lib/payments/registrationLedger'
-import { validateInviteCode }         from '@/app/api/registrations/validate-invite-code/route'
+// RD-PAY-P0-4 — THE one settlement, shared with the payment.captured webhook and the
+// reconciliation sweep. Everything from the gate check through the post-commit side effects
+// lives there, so all three paths write an identical registration.
+import { settleCapturedRegistration } from '@/lib/payments/settleCapturedRegistration'
 
 // ─── Request / response shapes ────────────────────────────────────────────────
 
@@ -84,65 +63,10 @@ function verifyRazorpaySignature(
   return crypto.timingSafeEqual(expected, actual)
 }
 
-// ─── Refund helpers ────────────────────────────────────────────────────────────
-
-// P0-2: Context passed to triggerRefund so failedRefunds records include event
-// and attendee identifiers for admin triage. Mirrors RefundContext in
-// /api/webhooks/razorpay/route.ts.
-interface FailedRefundContext {
-  eventSlug:       string
-  attendeeEmail:   string
-  registrationId?: string
-}
-
-// P0-1: Thrown inside the Firestore transaction when the invite code stored on the
-// payment intent fails re-validation. Caught by the outer for-loop exactly like
-// DuplicateRegistrationError and CapacityExceededError — triggers a refund.
-class InviteCodeError extends Error {
-  constructor(public readonly reason: string) {
-    super(reason)
-    this.name = 'InviteCodeError'
-  }
-}
-
-// M2: Trigger a full automatic refund and record the outcome.
-// P0-2: ctx is used to write a failedRefunds document when the Razorpay refund API
-// call fails, so admin can trigger manual recovery from the dashboard.
-async function triggerRefund(
-  orderId:   string,
-  paymentId: string,
-  amount:    number,
-  reason:    string,
-  ctx:       FailedRefundContext,
-): Promise<void> {
-  try {
-    const refund = await razorpay.payments.refund(paymentId, {
-      amount,
-      speed:   'optimum',
-      notes:   { reason, orderId },
-      receipt: `refund_${orderId}`.slice(0, 40),
-    })
-    await updatePaymentIntentRefund(orderId, refund.id, refund.status, amount)
-    console.log('[verify-payment] Refund initiated:', {
-      orderId, paymentId, refundId: refund.id, status: refund.status, amount,
-    })
-  } catch (refundErr) {
-    captureFinancialError(refundErr, { scope: 'verify-payment.refund_api_failed', detail: 'writing failedRefunds record', orderId, paymentId, amount, reason })
-    // P0-2: Write recovery record visible in the admin failed-refunds dashboard.
-    // Mirrors the identical pattern in /api/webhooks/razorpay/route.ts:98-111.
-    adminDb.collection('failedRefunds').add({
-      orderId,
-      paymentId,
-      amountPaise:    amount,
-      reason,
-      eventSlug:      ctx.eventSlug,
-      attendeeEmail:  ctx.attendeeEmail,
-      registrationId: ctx.registrationId ?? null,
-      status:         'open',
-      createdAt:      FieldValue.serverTimestamp(),
-    }).catch(e => captureFinancialError(e, { scope: 'verify-payment.failed_refund_persist_failed', detail: 'CRITICAL: could not write failedRefunds record', orderId, paymentId }))
-  }
-}
+// RD-PAY-P0-4: the local FailedRefundContext / InviteCodeError / triggerRefund helpers
+// moved into settleCapturedRegistration alongside the settlement they served, so the
+// refund-on-refusal policy has exactly ONE implementation shared by this route, the
+// payment.captured webhook and the reconciliation sweep.
 
 // ─── Handler ──────────────────────────────────────────────────────────────────
 
@@ -210,13 +134,6 @@ export async function POST(
     )
   }
 
-  // P0-2: Built once after intent is confirmed; reused by every triggerRefund call
-  // so all failedRefunds records include event/attendee context for admin triage.
-  const refundCtx: FailedRefundContext = {
-    eventSlug:    intent.eventSlug,
-    attendeeEmail: intent.attendee.email,
-  }
-
   // ── 4b. Terminal-state guard (mirrors the webhook's registration_failed skip) ─
   // Once an intent has been marked registration_failed OR a refund has been
   // initiated (refundId/refundStatus present), it is TERMINAL: the payment was
@@ -245,426 +162,115 @@ export async function POST(
     )
   }
 
-  // ── 5. Gate check (capacity may have changed since order was created) ───────
-  const gate = await checkRegistrationGate(intent.eventSlug, intent.passId)
-  if (!gate.allowed) {
-    await markPaymentIntentFailed(razorpay_order_id, gate.reason)
-    captureFinancialError('gate_blocked_after_payment', { scope: 'verify-payment.gate_blocked', orderId: razorpay_order_id, paymentId: razorpay_payment_id, reason: gate.reason })
-    await triggerRefund(razorpay_order_id, razorpay_payment_id, intent.amount, `gate_blocked:${gate.reason}`, refundCtx)
+  // ── 5–8. RD-PAY-P0-4: settle through THE ONE shared settlement ─────────────
+  //
+  // Everything from the gate check to the post-commit side effects moved to
+  // settleCapturedRegistration(), which the payment.captured webhook and the reconciliation
+  // sweep also call. Before this, the browser path and the two recovery paths wrote
+  // DIFFERENT registrations for the same paid attendee — recovery dropped the coupon fields,
+  // never consumed the coupon, skipped the coupon cap and the invite re-validation, and
+  // counted gross revenue instead of the ticket base.
+  //
+  // Nothing about THIS route's contract changed: the same reasons, the same messages and the
+  // same status codes are returned below, now mapped from the shared outcome.
+  const outcome = await settleCapturedRegistration({
+    orderId:   razorpay_order_id,
+    paymentId: razorpay_payment_id,
+    intent,
+    source:    'verify',
+    // An attendee who signed in after creating the order still gets it linked to them.
+    ...(uid ? { uidOverride: uid } : {}),
+  })
+
+  if (outcome.kind === 'settled' || outcome.kind === 'already_settled') {
+    return NextResponse.json({ success: true, registrationId: outcome.registrationId })
+  }
+
+  if (outcome.kind === 'deferred') {
+    // The intent went terminal between the guard above and settlement, or the transaction
+    // could not be completed. Nothing was written and nothing was refunded here.
+    return NextResponse.json(
+      { success: false, error: 'Payment could not be verified right now. Please wait a moment — do not pay again.' },
+      { status: 503 },
+    )
+  }
+
+  // Refused, and refunded in full by the shared settlement.
+  const r = outcome.reason
+
+  if (outcome.gateBlocked) {
     return NextResponse.json(
       {
         success: false,
-        reason:  gate.reason,
+        reason:  r,
         error:   'Payment received but registration is no longer available. A full refund has been initiated and will appear within 5–7 business days.',
       },
       { status: 409 },
     )
   }
 
-  // ── 6. H2: Claim doc refs (computed from intent before the transaction) ─────
-  const normEmail = intent.attendee.email  // already normalised in create-order
-  const normPhone = intent.attendee.phone
-
-  const intentRef  = adminDb.collection('paymentIntents').doc(razorpay_order_id)
-  const eventRef   = adminDb.collection('events').doc(intent.eventSlug)
-  const counterRef = adminDb.collection('registrationCounters').doc(intent.eventSlug)
-  const regRef     = adminDb.collection('registrations').doc(crypto.randomUUID())
-
-  const emailClaimRef = adminDb.collection('registrationClaims')
-    .doc(`${intent.eventSlug}_email_${normEmail}`)
-  const phoneClaimRef = normPhone
-    ? adminDb.collection('registrationClaims')
-        .doc(`${intent.eventSlug}_phone_${normPhone}`)
-    : null
-
-  const registrationId = regRef.id
-
-  // ── 7. Atomic transaction: idempotency + capacity + duplicate + write ───────
-  // F1: retry loop — on the extremely rare ticket code collision, generate a new
-  //     code and retry.  All other errors are handled immediately (no retry).
-  let finalRegistrationId!: string
-
-  for (let attempt = 0; attempt < 5; attempt++) {
-    const ticketCode         = generateTicketCode()
-    const ticketCodeClaimRef = adminDb.collection('ticketCodeClaims').doc(ticketCode)
-
-    // Reset per-iteration: tracks whether the transaction created a new registration
-    // (false when the idempotency path fires — email already sent on the first call).
-    let txnWasNoOp = false
-    let capturedRawDetails: Record<string, unknown> = {}
-
-    try {
-      finalRegistrationId = await adminDb.runTransaction(async txn => {
-        // Phase 1: read payment intent — fast idempotency exit before other reads
-        const intentSnap = await txn.get(intentRef)
-        const intentData = intentSnap.data() as PaymentIntentRecord
-
-        if (intentData.status === 'paid' && intentData.registrationId) {
-          txnWasNoOp = true
-          return intentData.registrationId  // already processed — no new code needed
-        }
-
-        // Coupon doc ref — read inside the transaction so the usage cap is
-        // enforced atomically; concurrent paid redemptions serialize on it.
-        const couponRef = (intent.couponDocId && intent.couponCode)
-          ? adminDb.collection('events').doc(intent.eventSlug)
-              .collection('coupons').doc(intent.couponDocId)
-          : null
-
-        // Phase 2: read remaining docs in parallel (includes ticket code claim).
-        // GA-7C P1-4: the base counter is NOT read here — it is read conditionally in
-        // the capacity block below, only when a capacity limit gates this registration,
-        // so uncapped paid settlements don't abort each other on the counter.
-        const [eventSnap, emailClaimSnap, ticketClaimSnap] = await Promise.all([
-          txn.get(eventRef),
-          txn.get(emailClaimRef),
-          txn.get(ticketCodeClaimRef),  // F1
-        ])
-        const phoneClaimSnap = phoneClaimRef ? await txn.get(phoneClaimRef) : null
-        const couponSnap     = couponRef     ? await txn.get(couponRef)     : null
-
-        const eventData   = eventSnap.data() as Record<string, unknown> | undefined
-        // Capture event details for the confirmation email sent after the transaction.
-        capturedRawDetails = (eventData?.eventDetails ?? {}) as Record<string, unknown>
-
-        // P0-1: Re-validate invite code using the live event accessControl.
-        // intentData.inviteCode was stored by create-order after initial validation.
-        // validateInviteCode returns valid:true for events that don't require invite
-        // codes, so this is a no-op for non-invite-only events. For events where
-        // the payment intent pre-dates this fix (inviteCode === undefined), providing
-        // '' will cause rejection when ac.type === 'invite_code' — correct behaviour.
-        const inviteValidation = validateInviteCode(
-          eventData?.accessControl,
-          intentData.inviteCode ?? '',
-        )
-        if (!inviteValidation.valid) throw new InviteCodeError('INVITE_CODE_INVALID')
-
-        // Extract registration rules from the event document
-        const regForm  = eventData?.registrationForm as Record<string, unknown> | undefined
-        const regRules = regForm?.registrationRules as
-          { limitPerEmail?: boolean; limitPerMobile?: boolean } | undefined
-
-        // F1: ticket code collision — outer loop retries with a new code
-        if (ticketClaimSnap.exists) throw new TicketCodeCollisionError()
-
-        // H2: Duplicate check inside transaction — prevents race condition where
-        //     two payments complete simultaneously with the same email/phone.
-        if (regRules?.limitPerEmail && emailClaimSnap.exists) {
-          throw new DuplicateRegistrationError('DUPLICATE_EMAIL')
-        }
-        if (regRules?.limitPerMobile && phoneClaimSnap?.exists) {
-          throw new DuplicateRegistrationError('DUPLICATE_MOBILE')
-        }
-
-        // Capacity double-check inside the transaction (closes TOCTOU race).
-        // P1-4: pass capacity is re-read from the live event document so that any
-        // reduction the organiser made between order creation and payment settlement
-        // is always honoured. intent.passCapacity is intentionally not used here —
-        // it was captured at order creation and may be stale.
-        const rawPricing       = eventData?.pricing as Record<string, unknown> | null | undefined
-        const livePasses       = Array.isArray(rawPricing?.passes)
-          ? (rawPricing!.passes as Record<string, unknown>[])
-          : []
-        const livePass         = livePasses.find(p => p.id === intent.passId)
-
-        // Pass was deleted or deactivated after order creation — attendee cannot register.
-        if (!livePass) throw new CapacityExceededError('PASS_NOT_AVAILABLE')
-
-        const livePassCapacity = livePass.unlimited === true
-          ? null
-          : typeof livePass.quantity === 'number' ? livePass.quantity : null
-
-        const eventCapacity = deriveStoredEventCapacity(eventData)
-
-        // GA-7C P1-4: read the base counter only when a capacity limit actually gates
-        // this paid registration (same rationale as createRegistration). Uncapped paid
-        // settlements skip the read, so concurrent commits don't abort on the counter;
-        // the increment WRITE below stays a blind, commutative FieldValue.increment.
-        // Capped events read + gate here, so overselling remains impossible.
-        let totalCount = 0, passCount = 0
-        if (eventCapacity !== null || livePassCapacity !== null) {
-          const counterSnap = await txn.get(counterRef)
-          const counterData = counterSnap.exists
-            ? counterSnap.data() as { totalCount?: number; passCounts?: Record<string, number> }
-            : null
-          totalCount = counterData?.totalCount ?? 0
-          passCount  = (counterData?.passCounts ?? {})[intent.passId] ?? 0
-        }
-
-        if (eventCapacity !== null && totalCount >= eventCapacity) {
-          throw new CapacityExceededError('EVENT_CAPACITY_FULL')
-        }
-        if (livePassCapacity !== null && passCount >= livePassCapacity) {
-          throw new CapacityExceededError('PASS_CAPACITY_FULL')
-        }
-
-        // Coupon usage cap — re-checked inside the transaction (couponRef is in
-        // the read set). The loser of a concurrent race for the last use is
-        // rejected here and refunded below, so currentUses never exceeds maxUses.
-        if (couponRef && couponSnap?.exists) {
-          const couponData = couponSnap.data() as CouponDocument
-          if (typeof couponData.maxUses === 'number' && couponData.currentUses >= couponData.maxUses) {
-            throw new CouponExhaustedError()
-          }
-        }
-
-        const regDoc = {
-          id:              registrationId,
-          eventSlug:       intent.eventSlug,
-          passId:          intent.passId,
-          passName:        intent.passName,
-          eventName:       intent.eventName,
-          organizerUid:    intent.organizerUid,
-          attendee:        intent.attendee,
-          status:          'confirmed',
-          paymentStatus:   'paid',
-          amount:          intent.amount,           // paise — from payment intent, never from client
-          razorpayOrderId: razorpay_order_id,
-          paymentId:       razorpay_payment_id,
-          ticketCode,
-          registeredAt:    FieldValue.serverTimestamp(),
-          updatedAt:       FieldValue.serverTimestamp(),
-          ...(uid ?? intent.uid ? { uid: uid ?? intent.uid } : {}),
-          // Coupon fields — sourced from the payment intent (set at order creation)
-          ...(intent.couponCode ? {
-            couponCode:     intent.couponCode,
-            discountAmount: intent.discountAmount,
-            originalAmount: intent.originalAmount,
-          } : {}),
-        }
-
-        // Atomically increment coupon currentUses inside the registration
-        // transaction (cap re-checked above; couponRef is in the read set).
-        if (couponRef) {
-          txn.update(couponRef, {
-            currentUses: FieldValue.increment(1),
-            updatedAt:   FieldValue.serverTimestamp(),
-          })
-        }
-
-        txn.set(regRef, regDoc)
-        // RD-PAYMENT-05 B2: the counter tracks ORGANIZER revenue (ticket base), the same
-        // canonical basis the ledger/wallet/finance use — NOT the attendee charge. Under
-        // organizer_pays ticketBasePaise === intent.amount (byte-identical); under
-        // customer_pays (attendee_pays) it strips the attendee-borne fees so the dashboard
-        // revenue matches finance/settlement instead of overstating by the fees.
-        txn.set(counterRef, buildCounterIncrement(intent.eventSlug, intent.passId, { amountPaise: intent.financials?.ticketBasePaise ?? intent.amount }), { merge: true })
-        txn.update(intentRef, {
-          status:         'paid',
-          registrationId,
-          paymentId:      razorpay_payment_id,
-          updatedAt:      FieldValue.serverTimestamp(),
-        })
-
-        // F1: claim ticket code atomically with the registration
-        txn.set(ticketCodeClaimRef, {
-          registrationId,
-          eventSlug: intent.eventSlug,
-          createdAt: FieldValue.serverTimestamp(),
-        })
-
-        // H2: write claim docs atomically — prevents future duplicates
-        if (regRules?.limitPerEmail) {
-          txn.set(emailClaimRef, {
-            registrationId,
-            eventSlug: intent.eventSlug,
-            email:     normEmail,
-            createdAt: FieldValue.serverTimestamp(),
-          })
-        }
-        if (regRules?.limitPerMobile && phoneClaimRef && normPhone) {
-          txn.set(phoneClaimRef, {
-            registrationId,
-            eventSlug: intent.eventSlug,
-            phone:     normPhone,
-            createdAt: FieldValue.serverTimestamp(),
-          })
-        }
-
-        return registrationId
-      })
-
-      // Only run post-transaction work for a new registration.
-      // txnWasNoOp is true when the idempotency path fired (intent already 'paid');
-      // both financial ops and the email were handled on the first call.
-      if (!txnWasNoOp) {
-        // P1-6: Financial operations FIRST — wallet credit and platform ledger must
-        // be committed before email delivery begins. Previously email was awaited
-        // first, so a Lambda timeout or crash during email delivery left the wallet
-        // un-credited with no recovery path. Moving ledger ops here shrinks the
-        // crash window to the Firestore write latency (~ms) rather than the email
-        // provider round-trip (~1-3 s).
-        //
-        // Idempotency is preserved by txnWasNoOp: this block runs exactly once per
-        // new registration. A client retry after the transaction commits finds the
-        // intent already 'paid', sets txnWasNoOp = true, and skips this block.
-        if (intent.amount > 0) {
-          // Build the ledger + credit via the SHARED helper (also used by the recovery
-          // sweep — RD-PAY-GA-01A — so both paths post an identical, deterministic
-          // ptx_<registrationId> entry).
-          const { ledger, credit } = await buildRegistrationLedgerAndCredit({
-            registrationId:   finalRegistrationId,
-            organizerUid:     intent.organizerUid,
-            eventSlug:        intent.eventSlug,
-            attendeeName:     intent.attendee.name,
-            attendeeEmail:    intent.attendee.email,
-            grossAmountPaise: intent.amount,
-            paymentId:        razorpay_payment_id,
-            orderId:          razorpay_order_id,
-            // RD-PAYMENT-02 Phase 7: prefer the canonical breakdown persisted at checkout.
-            // Absent for legacy/organizer_pays intents → the builder uses the legacy path.
-            financials:       intent.financials,
-          })
-          // POST-COMMIT: the registration is already durable. The atomic
-          // ledger+credit is idempotent; if it throws (transient Firestore
-          // error) we MUST NOT refund or fail the intent — instead persist a
-          // reconciliation record for out-of-band retry and continue to success.
-          try {
-            await recordPlatformTransactionAndCredit(ledger, credit)
-          } catch (financialErr) {
-            await recordRegistrationFinancialReconciliation({
-              registrationId: finalRegistrationId,
-              orderId:        razorpay_order_id,
-              paymentId:      razorpay_payment_id,
-              ledger,
-              credit,
-              error:          financialErr instanceof Error ? financialErr.message : 'financial_side_effect_failed',
-            })
-          }
-        }
-
-        // Email AFTER financial ops — wallet and ledger are already committed at
-        // this point. Wrapped in try/catch so a delivery failure cannot propagate
-        // to the outer error handler and trigger an unintended refund.
-        try {
-          await sendConfirmationEmail({
-            registrationId: finalRegistrationId,
-            ticketCode,
-            attendeeName:   intent.attendee.name,
-            attendeeEmail:  intent.attendee.email,
-            eventName:      intent.eventName,
-            passName:       intent.passName,
-            rawDetails:     capturedRawDetails,
-            organizerUid:   intent.organizerUid,
-            eventSlug:      intent.eventSlug,
-            amountPaid:     intent.amount,
-          })
-        } catch (emailErr) {
-          // Registration and financial state are already committed — this is
-          // non-fatal. sendConfirmationEmail has its own internal catch, so this
-          // outer catch handles any unexpected throws from the outer function body.
-          captureError(emailErr, { scope: 'verify-payment.confirmation_email_failed', detail: 'non-fatal', registrationId: finalRegistrationId })
-        }
-
-        // H.4.3: organizer Notification Center inbox (best-effort; deduped per registration).
-        void notifyPaymentReceived({
-          workspaceUid:   intent.organizerUid,
-          registrationId: finalRegistrationId,
-          eventName:      intent.eventName,
-          amountPaise:    intent.amount,
-          attendeeName:   intent.attendee.name,
-        })
-      }
-
-      break  // transaction succeeded — exit retry loop
-
-    } catch (err) {
-      if (err instanceof TicketCodeCollisionError) {
-        if (attempt < 4) continue  // generate new code, retry
-        captureFinancialError('ticket_code_exhausted', { scope: 'verify-payment.ticket_collision', orderId: razorpay_order_id, paymentId: razorpay_payment_id })
-        await markPaymentIntentFailed(razorpay_order_id, 'ticket_code_exhausted')
-        await triggerRefund(razorpay_order_id, razorpay_payment_id, intent.amount, 'ticket_code_exhausted', refundCtx)
-        return NextResponse.json(
-          { success: false, error: 'Registration could not be completed. Please try again or contact support.' },
-          { status: 500 },
-        )
-      }
-
-      if (err instanceof DuplicateRegistrationError) {
-        // A concurrent registration already claimed this email/phone.
-        // Trigger refund — user paid but cannot register due to duplicate constraint.
-        captureFinancialError('duplicate_after_payment', { scope: 'verify-payment.duplicate_refund', orderId: razorpay_order_id, paymentId: razorpay_payment_id, reason: err.reason, amount: intent.amount })
-        await markPaymentIntentFailed(razorpay_order_id, err.reason)
-        await triggerRefund(razorpay_order_id, razorpay_payment_id, intent.amount, err.reason, refundCtx)
-        return NextResponse.json(
-          {
-            success: false,
-            reason:  err.reason,
-            error:   err.reason === 'DUPLICATE_EMAIL'
-              ? 'A registration with this email address already exists. A full refund has been initiated.'
-              : 'A registration with this mobile number already exists. A full refund has been initiated.',
-          },
-          { status: 409 },
-        )
-      }
-
-      if (err instanceof CapacityExceededError) {
-        // M2: Payment captured but event now full — trigger automatic refund.
-        captureFinancialError('capacity_exceeded_after_payment', { scope: 'verify-payment.capacity_refund', orderId: razorpay_order_id, paymentId: razorpay_payment_id, reason: err.reason, amount: intent.amount })
-        await markPaymentIntentFailed(razorpay_order_id, err.reason)
-        await triggerRefund(razorpay_order_id, razorpay_payment_id, intent.amount, err.reason, refundCtx)
-        return NextResponse.json(
-          {
-            success: false,
-            reason:  err.reason,
-            error:   err.reason === 'EVENT_CAPACITY_FULL'
-              ? 'Payment received but this event is now full. A full refund has been initiated and will appear within 5–7 business days.'
-              : err.reason === 'PASS_NOT_AVAILABLE'
-              ? 'Payment received but this pass is no longer available. A full refund has been initiated and will appear within 5–7 business days.'
-              : 'Payment received but this pass is now sold out. A full refund has been initiated and will appear within 5–7 business days.',
-          },
-          { status: 409 },
-        )
-      }
-
-      if (err instanceof CouponExhaustedError) {
-        // Coupon usage limit reached after payment (a concurrent registration
-        // consumed the last use between order creation and settlement).
-        // Refuse + refund — the registration is not created and the coupon is
-        // not incremented (the whole transaction rolled back).
-        captureFinancialError('coupon_exhausted_after_payment', { scope: 'verify-payment.coupon_refund', orderId: razorpay_order_id, paymentId: razorpay_payment_id, amount: intent.amount })
-        await markPaymentIntentFailed(razorpay_order_id, 'coupon_exhausted')
-        await triggerRefund(razorpay_order_id, razorpay_payment_id, intent.amount, 'coupon_exhausted', refundCtx)
-        return NextResponse.json(
-          {
-            success: false,
-            reason:  'COUPON_EXHAUSTED',
-            error:   'Payment received but the coupon reached its usage limit. A full refund has been initiated and will appear within 5–7 business days.',
-          },
-          { status: 409 },
-        )
-      }
-
-      if (err instanceof InviteCodeError) {
-        // P0-1: Invite code re-validation failed inside the transaction. Fires when an
-        // order was created without invite code validation (pre-fix intents or direct
-        // API calls that bypassed create-order). Registration is refused; refund issued.
-        captureFinancialError('invite_invalid_after_payment', { scope: 'verify-payment.invite_refund', orderId: razorpay_order_id, paymentId: razorpay_payment_id, reason: err.reason, amount: intent.amount })
-        await markPaymentIntentFailed(razorpay_order_id, err.reason)
-        await triggerRefund(razorpay_order_id, razorpay_payment_id, intent.amount, err.reason, refundCtx)
-        return NextResponse.json(
-          {
-            success: false,
-            reason:  err.reason,
-            error:   'Payment received but registration is not permitted for this event. A full refund has been initiated and will appear within 5–7 business days.',
-          },
-          { status: 403 },
-        )
-      }
-
-      // M2: Unexpected error — trigger refund and alert for admin recovery.
-      captureFinancialError(err, { scope: 'verify-payment.transaction_failed', orderId: razorpay_order_id, paymentId: razorpay_payment_id, eventSlug: intent.eventSlug, passId: intent.passId, amount: intent.amount })
-      await markPaymentIntentFailed(razorpay_order_id, 'transaction_error')
-      await triggerRefund(razorpay_order_id, razorpay_payment_id, intent.amount, 'transaction_error', refundCtx)
-      return NextResponse.json(
-        {
-          success: false,
-          error:   'Payment received but registration could not be completed. A full refund has been initiated and will appear within 5–7 business days.',
-        },
-        { status: 500 },
-      )
-    }
+  if (r === 'DUPLICATE_EMAIL' || r === 'DUPLICATE_MOBILE') {
+    return NextResponse.json(
+      {
+        success: false,
+        reason:  r,
+        error:   r === 'DUPLICATE_EMAIL'
+          ? 'A registration with this email address already exists. A full refund has been initiated.'
+          : 'A registration with this mobile number already exists. A full refund has been initiated.',
+      },
+      { status: 409 },
+    )
   }
 
-  return NextResponse.json({ success: true, registrationId: finalRegistrationId })
+  if (r === 'EVENT_CAPACITY_FULL' || r === 'PASS_CAPACITY_FULL' || r === 'PASS_NOT_AVAILABLE') {
+    return NextResponse.json(
+      {
+        success: false,
+        reason:  r,
+        error:   r === 'EVENT_CAPACITY_FULL'
+          ? 'Payment received but this event is now full. A full refund has been initiated and will appear within 5–7 business days.'
+          : r === 'PASS_NOT_AVAILABLE'
+          ? 'Payment received but this pass is no longer available. A full refund has been initiated and will appear within 5–7 business days.'
+          : 'Payment received but this pass is now sold out. A full refund has been initiated and will appear within 5–7 business days.',
+      },
+      { status: 409 },
+    )
+  }
+
+  if (r === 'COUPON_EXHAUSTED') {
+    return NextResponse.json(
+      {
+        success: false,
+        reason:  'COUPON_EXHAUSTED',
+        error:   'Payment received but the coupon reached its usage limit. A full refund has been initiated and will appear within 5–7 business days.',
+      },
+      { status: 409 },
+    )
+  }
+
+  if (r === 'INVITE_CODE_INVALID') {
+    return NextResponse.json(
+      {
+        success: false,
+        reason:  r,
+        error:   'Payment received but registration is not permitted for this event. A full refund has been initiated and will appear within 5–7 business days.',
+      },
+      { status: 403 },
+    )
+  }
+
+  if (r === 'ticket_code_exhausted') {
+    return NextResponse.json(
+      { success: false, error: 'Registration could not be completed. Please try again or contact support.' },
+      { status: 500 },
+    )
+  }
+
+  return NextResponse.json(
+    {
+      success: false,
+      error:   'Payment received but registration could not be completed. A full refund has been initiated and will appear within 5–7 business days.',
+    },
+    { status: 500 },
+  )
 }

@@ -45,6 +45,14 @@ export async function generateMetadata(
     title:       `Register — ${name} | RegisterDesk`,
     description: `Complete your registration for ${name}.`,
     path:        `/events/${slug}/register`,
+    // RD-SEO-01 — this is the checkout step: thin, duplicated from the event page it is
+    // reached from, and the wrong result to rank for the event's own name. The event page
+    // is the canonical destination for search.
+    //
+    // noIndex, NOT a robots.txt Disallow: link unfurlers (WhatsApp, Slack) honour
+    // robots.txt but ignore the meta robots tag, so this keeps the share preview above
+    // working while still keeping the URL out of Google's index.
+    noIndex:     true,
   })
 }
 
