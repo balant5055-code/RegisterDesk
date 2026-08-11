@@ -116,15 +116,25 @@ describe('3/5 · email and WhatsApp behaviour are unchanged', () => {
     expect(regUpdates).toHaveLength(0)     // no email status written, exactly as before
   })
 
-  it('WhatsApp still fires only on the email path — unchanged by the SMS move', async () => {
+  it('WhatsApp is ALSO independent of the email channel', async () => {
+    // This assertion is the inverse of what it was: WhatsApp used to sit below the
+    // email-availability guard, so an event whose EMAIL transport was unconfigured
+    // silently lost the WhatsApp confirmation too — a channel the organizer had enabled
+    // and pre-paid for. It now sits above the guard, alongside SMS.
     await sendConfirmationEmail(ARGS)
     expect(waCalls).toHaveLength(1)
 
     waCalls.length = 0
     emailAvailable = false
     await sendConfirmationEmail(ARGS)
-    // WhatsApp sits AFTER the guard by design and was not moved.
-    expect(waCalls).toHaveLength(0)
+    expect(waCalls).toHaveLength(1)
+  })
+
+  it('WhatsApp is still invoked exactly once — no second trigger was introduced', async () => {
+    await sendConfirmationEmail(ARGS)
+    expect(waCalls).toHaveLength(1)
+    expect(waCalls[0].registrationId).toBe('reg-1')
+    expect(waCalls[0].ticketCode).toBe('TKT-1')
   })
 })
 

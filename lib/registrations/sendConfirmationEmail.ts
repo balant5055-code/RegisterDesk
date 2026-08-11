@@ -67,6 +67,29 @@ export async function sendConfirmationEmail(args: ConfirmationEmailArgs): Promis
     ticketUrl:      smsTicketUrl,
   }).catch(err => console.error(`[sms] confirmation dispatch failed for ${args.registrationId}:`, err))
 
+  // Attendee WhatsApp confirmation (Phase G3.4) — paid channel, sent only when the
+  // organizer enabled WhatsApp AND the wallet is funded (both gates live inside the
+  // sender, unchanged).
+  //
+  // Also deliberately ABOVE the email-availability guard below. WhatsApp is an independent
+  // channel with its own provider, its own enablement and its own billing; it was
+  // previously invoked at the END of this function, so an event whose EMAIL transport was
+  // unconfigured silently lost its WhatsApp confirmation too — a channel the organizer had
+  // enabled and pre-paid for.
+  //
+  // Still the SAME single call site, just moved: this function remains the one convergence
+  // of submit, verify-payment, the Razorpay webhook and the reconciliation sweep, so the
+  // `whatsappStatus === 'sent'` duplicate guard inside the sender is unaffected.
+  // Fire-and-forget and never throws, exactly as before.
+  void sendWhatsAppConfirmation({
+    registrationId: args.registrationId,
+    organizerUid:   args.organizerUid,
+    eventSlug:      args.eventSlug,
+    attendeeName:   args.attendeeName,
+    eventName:      args.eventName,
+    ticketCode:     args.ticketCode,
+  })
+
   // RD-EMAIL-PROVIDER — resolved once: the transport used AND the transport logged.
   const emailProviderName = await resolveEventEmailProvider(args.eventSlug)
 
@@ -200,18 +223,6 @@ export async function sendConfirmationEmail(args: ConfirmationEmailArgs): Promis
     provider:       emailProviderName,
     error:          emailFailureReason,
     registrationId,
-  })
-
-  // Attendee WhatsApp confirmation (Phase G3.4) — paid channel, applied AFTER the
-  // free email and only when the organizer enabled WhatsApp + the wallet is funded.
-  // Fire-and-forget: it never throws and never affects the registration or email.
-  void sendWhatsAppConfirmation({
-    registrationId,
-    organizerUid,
-    eventSlug,
-    attendeeName,
-    eventName,
-    ticketCode,
   })
 
 }

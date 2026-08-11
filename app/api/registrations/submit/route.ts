@@ -23,6 +23,7 @@ import { setRegistrationSessions } from '@/lib/sessions/service'
 import { SessionError }            from '@/lib/sessions/types'
 import { checkRateLimit, getClientIp } from '@/lib/rateLimit'
 import { validateInviteCode }       from '@/app/api/registrations/validate-invite-code/route'
+import { validateTermsConsent }     from '@/lib/legal/platformTerms'
 import { sendConfirmationEmail }    from '@/lib/registrations/sendConfirmationEmail'
 import { validateCoupon }           from '@/lib/coupons/validate'
 import { resolveEffectivePassPricePaise } from '@/lib/pricing/earlyBird'
@@ -47,6 +48,9 @@ interface SubmitBody {
   inviteCode?:     string
   couponCode?:     string
   selectedSessions?: string[]   // optional conference session picks (G.3)
+  // Mandatory Terms & Conditions consent — validated server-side below.
+  termsAccepted?: boolean
+  termsVersion?:  string
 }
 
 export interface SubmitResponse {
@@ -124,6 +128,18 @@ export async function POST(
     return NextResponse.json(
       { success: false, error: 'Invalid email address' },
       { status: 400 },
+    )
+  }
+
+  // Mandatory Terms & Conditions consent — enforced HERE, before createRegistration().
+  // Same reasoning as create-order: the checkbox is a UI affordance, this is the control.
+  // A rejected request creates no registration, no ticket, and therefore no confirmation
+  // email, SMS or WhatsApp — all of which hang off a committed registration.
+  const termsCheck = validateTermsConsent(body)
+  if (!termsCheck.ok) {
+    return NextResponse.json(
+      { success: false, error: termsCheck.error, reason: 'TERMS_NOT_ACCEPTED' },
+      { status: 422 },
     )
   }
 
@@ -370,6 +386,9 @@ export async function POST(
       approvalMode,
       couponInfo,
       extraFields,
+      // Server-validated consent — stamped onto the registration for auditability.
+      termsAccepted: true,
+      termsVersion:  termsCheck.version!,
     })
 
     // ── 8b. Optional conference session selection (G.3) ───────────────────────

@@ -26,6 +26,10 @@ export interface PaymentIntentRecord {
     formResponses?: Record<string, unknown>
   }
   uid?:           string         // Firebase Auth uid if signed in
+  // Terms consent captured at create-order, carried to settlement so the paid path can
+  // stamp the registration from the SERVER snapshot rather than trusting a later client.
+  termsAccepted?:  boolean
+  termsVersion?:   string
   status:         PaymentIntentStatus
   registrationId?: string        // set atomically when registration is created
   paymentId?:      string        // Razorpay payment ID, set after verification

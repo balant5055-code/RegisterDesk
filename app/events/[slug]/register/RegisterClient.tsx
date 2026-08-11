@@ -12,6 +12,7 @@ import { buttonVariants }         from '@/components/ui/button'
 import { CustomSelect }           from '@/components/ui/CustomSelect'
 import type { FormSection, FormField, ConditionalRule, FieldType } from '@/components/wizard/registrationFormConfig'
 import { shouldShowSizeChart, type SizeChart } from '@/lib/registrations/sizeChart'
+import { PLATFORM_TERMS_VERSION } from '@/lib/legal/platformTerms'
 import { SizeChartDialog } from '@/components/registration/SizeChartDialog'
 import { resolveAttendeeIdentity } from '@/lib/registrations/attendeeIdentity'
 import { collectFormErrors } from '@/lib/registrations/validateFormResponses'
@@ -1515,6 +1516,10 @@ export function RegisterClient({
       idempotencyKey,
       ...(verifiedCode  ? { inviteCode: verifiedCode         } : {}),
       ...(couponApplied ? { couponCode: couponApplied.code   } : {}),
+      // Mandatory consent. The server re-validates this on BOTH endpoints — the client
+      // gate above is UX, this is the value the server actually checks and stores.
+      termsAccepted: consent.terms,
+      termsVersion:  PLATFORM_TERMS_VERSION,
     }
 
     try {
