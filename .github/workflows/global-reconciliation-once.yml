@@ -1,0 +1,38 @@
+name: One-Time Global Reconciliation
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    env:
+      CRON_BASE_URL: ${{ secrets.CRON_BASE_URL }}
+      CRON_SECRET: ${{ secrets.CRON_SECRET }}
+
+    steps:
+      - name: Preflight
+        run: |
+          test -n "$CRON_BASE_URL" || {
+            echo "::error::CRON_BASE_URL secret is not set"
+            exit 1
+          }
+
+          test -n "$CRON_SECRET" || {
+            echo "::error::CRON_SECRET secret is not set"
+            exit 1
+          }
+
+      - name: Run global reconciliation
+        run: |
+          curl -sS -X POST \
+            "$CRON_BASE_URL/api/cron/global-reconciliation" \
+            -H "Authorization: Bearer $CRON_SECRET" \
+            --retry 2 \
+            --retry-delay 5 \
+            --max-time 120 \
+            --fail-with-body
