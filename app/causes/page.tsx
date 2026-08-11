@@ -21,6 +21,10 @@ const BASE_URL = process.env.NEXT_PUBLIC_BASE_URL ?? 'https://registerdesk.in'
 export const metadata: Metadata = {
   title:       'Discover Causes – RegisterDesk',
   description: 'Support fundraising campaigns, medical emergencies, NGO initiatives, disaster relief, and more. Every donation makes a difference.',
+  // RD-SEO-01 — the only public marketing page that had no canonical, so its filtered
+  // variants had nothing pointing back at the bare URL.
+  metadataBase: new URL(BASE_URL),
+  alternates:  { canonical: `${BASE_URL}/causes` },
   openGraph: {
     title:       'Discover Causes – RegisterDesk',
     description: 'Find and donate to active fundraising campaigns from verified organizers.',

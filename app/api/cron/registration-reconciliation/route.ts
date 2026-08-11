@@ -9,7 +9,7 @@
 // when CRON_SECRET is unset.
 
 import { NextRequest, NextResponse } from 'next/server'
-import { retryPendingRegistrationFinancials, retryPendingRefundLedgerReversals, recoverUncreditedRegistrations } from '@/lib/payments/registrationReconciliation'
+import { retryPendingRegistrationFinancials, retryPendingRefundLedgerReversals, recoverUncreditedRegistrations, recoverCapturedPaymentIntents } from '@/lib/payments/registrationReconciliation'
 import { isAuthorizedCron, cronUnauthorized } from '@/lib/cron/auth'
 import { captureFinancialError, flushMonitoring } from '@/lib/monitoring/sentry'
 import { recordCronExecution } from '@/lib/monitoring/cronMetrics'
@@ -21,12 +21,17 @@ async function handle(req: NextRequest): Promise<NextResponse> {
   if (!isAuthorizedCron(req)) return cronUnauthorized()
   let ok = false, detail = ''
   try {
+    // RD-PAY-P0-3 — FIRST: recover captures the browser never settled and the webhook
+    // never told us about. This runs before the ledger sweep on purpose: it CREATES the
+    // registrations whose ledgers that sweep then verifies, so a capture recovered on this
+    // run is credited on the same run rather than waiting for the next one.
+    const captureSweep = await recoverCapturedPaymentIntents(200)
     const credits   = await retryPendingRegistrationFinancials(100)
     const reversals = await retryPendingRefundLedgerReversals(100)
     // RD-PAY-GA-01A — self-heal paid registrations missing their ptx_ ledger (the residual
     // hard-kill window that leaves no reconciliation record). Idempotent + cursor-bounded.
     const ledgerSweep = await recoverUncreditedRegistrations(500)
-    const result = { credits, reversals, ledgerSweep }
+    const result = { captureSweep, credits, reversals, ledgerSweep }
     ok = true; detail = JSON.stringify(result)
     return NextResponse.json(result)
   } catch (err) {

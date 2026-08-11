@@ -1,17 +1,35 @@
 import type { MetadataRoute } from 'next'
 import { adminDb } from '@/lib/firebase/admin'
 import { getBrandingConfig } from '@/lib/config/resolveBrandingConfig'
+import { isContentTakenDown } from '@/lib/admin/moderation'
+import type { ModerationStatus } from '@/lib/admin/moderation'
 
 // LS1: sitemap.xml (was missing) — static marketing/discovery routes plus every
 // published event and active donation campaign. Regenerated hourly (ISR). If
 // Firestore is unavailable (e.g. build phase), the static entries are still served.
 export const revalidate = 3600
 
-function tsToDate(ts: unknown): Date {
-  if (ts && typeof (ts as { toDate?: () => Date }).toDate === 'function') {
-    return (ts as { toDate: () => Date }).toDate()
+// RD-SEO-01 · <lastmod> is emitted ONLY from a real stored timestamp.
+//
+// The former version fell back to `new Date()`, which meant (a) every static page and
+// (b) any event missing publishedAt/updatedAt advertised "changed just now" on every
+// hourly ISR regeneration. Google explicitly discounts lastmod for the WHOLE site once
+// it catches the value being inaccurate, so a fabricated date is worse than none.
+// Returning undefined omits the element, which the sitemap protocol allows.
+function tsToDate(...candidates: unknown[]): Date | undefined {
+  for (const ts of candidates) {
+    if (ts && typeof (ts as { toDate?: () => Date }).toDate === 'function') {
+      const d = (ts as { toDate: () => Date }).toDate()
+      if (d instanceof Date && !Number.isNaN(d.getTime())) return d
+    }
   }
-  return new Date()
+  return undefined
+}
+
+// `visibility` is 'public' | 'private'; documents published before the field existed
+// store null. Only an EXPLICIT 'private' is withheld, so legacy events keep their entry.
+function isPrivate(visibility: unknown): boolean {
+  return visibility === 'private'
 }
 
 const STATIC_PATHS: Array<[string, number]> = [
@@ -49,13 +67,13 @@ const STATIC_PATHS: Array<[string, number]> = [
 ]
 
 export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
-  const now = new Date()
   // Runtime-editable base URL (this route is already dynamic/ISR).
   const { baseUrl: BASE_URL } = await getBrandingConfig()
 
+  // No lastModified: these pages change on redeploy, and this route regenerates hourly,
+  // so any date emitted here would be invented rather than observed (see tsToDate).
   const staticEntries: MetadataRoute.Sitemap = STATIC_PATHS.map(([path, priority]) => ({
     url: `${BASE_URL}${path}`,
-    lastModified: now,
     changeFrequency: 'weekly',
     priority,
   }))
@@ -63,18 +81,38 @@ export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
   const dynamicEntries: MetadataRoute.Sitemap = []
   try {
     const [events, campaigns] = await Promise.all([
+      // Visibility and moderation are filtered IN MEMORY, exactly as listPublishedEvents
+      // does: 'active' moderation is the ABSENCE of the field so it cannot be queried, and
+      // keeping one equality filter means this needs no composite index.
       adminDb.collection('events')
         .where('lifecycleStatus', '==', 'published')
-        .select('publishedAt', 'updatedAt').limit(5000).get(),
+        .select('publishedAt', 'updatedAt', 'visibility', 'moderationStatus').limit(5000).get(),
+      // Mirrors the canonical /causes gate (listCampaigns): active + publicly visible.
+      // Served by the existing (status, visibility, publishedAt) composite index.
+      //
+      // Isolated with .catch: under Promise.all a campaigns failure (a dropped index, a
+      // permission change) would reject the whole settlement and silently cost us EVERY
+      // event URL — the entries that matter most. Campaigns degrade on their own instead.
       adminDb.collection('donationCampaigns')
         .where('status', '==', 'active')
-        .select('updatedAt').limit(5000).get(),
+        .where('visibility', '==', 'public')
+        .select('updatedAt', 'publishedAt', 'moderationStatus').limit(5000).get()
+        .catch(() => null),
     ])
     for (const d of events.docs) {
-      const data = d.data() as { updatedAt?: unknown; publishedAt?: unknown }
+      const data = d.data() as {
+        updatedAt?: unknown; publishedAt?: unknown
+        visibility?: unknown; moderationStatus?: ModerationStatus
+      }
+      // A PRIVATE event stays reachable by its link (that is the product), but it is an
+      // invite-only page — it must never be advertised to a crawler.
+      if (isPrivate(data.visibility)) continue
+      // An admin-taken-down event 404s on its own page, so listing it would publish a
+      // URL that is guaranteed to be a soft-404 to Google.
+      if (isContentTakenDown(data.moderationStatus)) continue
       dynamicEntries.push({
         url: `${BASE_URL}/events/${d.id}`,
-        lastModified: tsToDate(data.updatedAt ?? data.publishedAt),
+        lastModified: tsToDate(data.updatedAt, data.publishedAt),
         changeFrequency: 'daily',
         priority: 0.8,
       })
@@ -122,11 +160,15 @@ export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
       })
     }
 
-    for (const d of campaigns.docs) {
-      const data = d.data() as { updatedAt?: unknown }
+    for (const d of campaigns?.docs ?? []) {
+      const data = d.data() as {
+        updatedAt?: unknown; publishedAt?: unknown; moderationStatus?: ModerationStatus
+      }
+      // Same moderation axis as the events above — status stays 'active' on takedown.
+      if (isContentTakenDown(data.moderationStatus)) continue
       dynamicEntries.push({
         url: `${BASE_URL}/campaign/${d.id}`,
-        lastModified: tsToDate(data.updatedAt),
+        lastModified: tsToDate(data.updatedAt, data.publishedAt),
         changeFrequency: 'daily',
         priority: 0.6,
       })
@@ -135,5 +177,14 @@ export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
     // Firestore unavailable (e.g. during build) — serve the static sitemap only.
   }
 
-  return [...staticEntries, ...dynamicEntries]
+  // A sitemap must not repeat a <loc>. Every producer above is already unique by
+  // construction (doc ids are unique; event results are de-duplicated by slug), so this
+  // is a guarantee rather than a fix — it keeps that property true if a future producer
+  // is added, and costs one pass over a few thousand strings.
+  const seenUrls = new Set<string>()
+  return [...staticEntries, ...dynamicEntries].filter(entry => {
+    if (seenUrls.has(entry.url)) return false
+    seenUrls.add(entry.url)
+    return true
+  })
 }

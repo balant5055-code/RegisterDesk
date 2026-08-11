@@ -26,7 +26,8 @@
 
 import Link from 'next/link'
 import type { ReactNode } from 'react'
-import { motion, useReducedMotion } from 'framer-motion'
+// RD-RT5.0: framer-motion left with the two progress indicators (see section 3) — the
+// remaining components animate with CSS transitions only.
 import {
   Calendar, MapPin, Globe, ShieldCheck, Zap, Check, CalendarClock, QrCode,
   ArrowLeft, Ticket, Clock3, Lock, RotateCcw, ChevronRight,
@@ -155,180 +156,25 @@ export function RegistrationMasthead({ eventSlug, eventName, estimate, isPaid }:
   )
 }
 
-// ═══ 3 · Journey stepper ════════════════════════════════════════════════════════
-// Progress through the REGISTRATION (as opposed to through the form):
+// ═══ 3 · REMOVED — journey stepper and form-section progress ════════════════════
 //
-//   Registration → Review → Payment → Confirmation
+// RD-RT5.0 "One Page". This module used to export two progress indicators:
 //
-// Nodes on a rail with the label under each node — the composition that lets a stepper
-// carry four words without becoming a row of tabs. Completed rail segments fill with the
-// brand gradient (left-to-right, so the fill reads as travel); the current node is the
-// only element on the page wearing a brand ring; everything ahead is a muted circle.
+//   JourneyStepper — Registration → Review → Payment → Confirmation, with a literal
+//                    "Step 1 of 4" counter.
+//   StepWizard     — a segmented "2 of 4 complete" meter across the organiser's sections.
 //
-// When no payment is due the Payment stage is marked "Not required" rather than removed,
-// so a free registration and a paid one describe the same journey — the shape of the
-// flow never changes underneath the attendee.
-
-export type JourneyStage = 'form' | 'review' | 'payment' | 'success'
-
-const JOURNEY: { id: JourneyStage; label: string; short: string }[] = [
-  { id: 'form',    label: 'Registration', short: 'Details' },
-  { id: 'review',  label: 'Review',       short: 'Review'  },
-  { id: 'payment', label: 'Payment',      short: 'Payment' },
-  { id: 'success', label: 'Confirmation', short: 'Done'    },
-]
-
-export function JourneyStepper({ current, paymentRequired }: {
-  current:         JourneyStage
-  /** False → the Payment stage renders as skipped, never hidden. */
-  paymentRequired: boolean
-}) {
-  const reduce     = useReducedMotion()
-  const currentIdx = JOURNEY.findIndex(s => s.id === current)
-
-  return (
-    <nav aria-label="Registration journey" className={cn(PANEL, 'mb-4 px-4 py-4 sm:px-6 sm:py-5')}>
-      <div className="mb-4 flex items-baseline justify-between gap-4">
-        <p className={TYPE.label}>Your registration</p>
-        <p className="text-fs-2xs font-semibold text-muted-foreground">
-          Step {currentIdx + 1} of {JOURNEY.length}
-        </p>
-      </div>
-
-      <ol className="flex items-start">
-        {JOURNEY.map((stage, i) => {
-          const skipped = stage.id === 'payment' && !paymentRequired
-          const done    = i < currentIdx
-          const active  = i === currentIdx
-          const last    = i === JOURNEY.length - 1
-
-          return (
-            <li key={stage.id} className="relative flex min-w-0 flex-1 flex-col items-center">
-              {/* Rail segment to the NEXT node. Sits behind the node, centred on it. */}
-              {!last && (
-                <span aria-hidden className="absolute left-1/2 top-[13px] h-0.5 w-full overflow-hidden rounded-full bg-border">
-                  <motion.span
-                    className={cn('block size-full origin-left', BRAND_GRADIENT)}
-                    initial={false}
-                    animate={{ scaleX: done ? 1 : 0 }}
-                    transition={reduce ? { duration: 0 } : { duration: 0.45, ease: [0.16, 1, 0.3, 1] }}
-                  />
-                </span>
-              )}
-
-              <span
-                aria-hidden
-                className={cn(
-                  'relative z-10 flex size-7 shrink-0 items-center justify-center rounded-full text-fs-2xs font-bold transition-all duration-200',
-                  done
-                    ? cn(BRAND_GRADIENT, 'text-white shadow-[0_2px_10px_rgb(var(--primary-rgb)_/_0.35)]')
-                    : active
-                      ? 'bg-card text-primary ring-2 ring-primary shadow-[0_0_0_4px_rgb(var(--primary-rgb)_/_0.12)]'
-                      : skipped
-                        ? 'border border-dashed border-border-strong bg-card text-muted-foreground/50'
-                        : 'bg-muted text-muted-foreground/70',
-                )}
-              >
-                {done ? <Check className="size-3.5" strokeWidth={3} /> : skipped ? '–' : i + 1}
-              </span>
-
-              <span
-                className={cn(
-                  'mt-2 w-full truncate px-1 text-center text-fs-2xs transition-colors duration-200',
-                  active
-                    ? 'font-bold text-foreground'
-                    : done
-                      ? 'font-semibold text-muted-foreground'
-                      : 'font-medium text-muted-foreground/60',
-                )}
-              >
-                <span className="sm:hidden">{stage.short}</span>
-                <span className="hidden sm:inline">{stage.label}</span>
-              </span>
-
-              {/* The visible rail is decorative; this is what assistive tech reads. */}
-              <span className="sr-only">
-                {stage.label}
-                {skipped ? ' — not required' : done ? ' — complete' : active ? ' — current step' : ' — not started'}
-              </span>
-            </li>
-          )
-        })}
-      </ol>
-    </nav>
-  )
-}
-
-// ═══ 4 · Form-section progress ══════════════════════════════════════════════════
-// Progress through the FORM, which is a different question from the journey above.
-// A segmented meter — one segment per section, in section order — plus the section
-// names beneath, so "where am I" and "what is still coming" are answered by one object.
+// Both described a multi-step flow that no longer exists. Registration is now ONE page:
+// the fields, the consent gate and the total are on screen together and Pay opens Razorpay
+// directly, so there is no step 2 for a counter to count toward. An indicator that
+// promises stages the product does not have is worse than no indicator — it tells the
+// attendee to expect more work after the button they are looking at.
 //
-// Identical inputs, identical semantics: `activeIdx` (-1 = all complete) and
-// `completedCount` are passed straight through from RegisterClient. No logic moved.
+// What survives is per-section state, which answers "where am I" without implying a
+// wizard: FormSectionCard still takes `complete` and `active`, derived from exactly the
+// same `sectionCompleteness` computation RegisterClient always did.
 
-export function StepWizard({ sections, activeIdx, completedCount }: {
-  sections:       { id: string; title?: string }[]
-  activeIdx:      number
-  completedCount: number
-}) {
-  const reduce = useReducedMotion()
-  if (sections.length <= 1) return null
-
-  const total   = sections.length
-  const allDone = activeIdx === -1
-  const doneN   = allDone ? total : completedCount
-
-  return (
-    <nav aria-label="Registration progress" className="mb-4">
-      <div className="mb-2.5 flex items-baseline justify-between gap-4">
-        <p className={TYPE.label}>Your details</p>
-        <p className="text-fs-2xs font-semibold tabular-nums text-muted-foreground">
-          {doneN} of {total} complete
-        </p>
-      </div>
-
-      <ol className="flex items-stretch gap-2">
-        {sections.map((s, i) => {
-          const done    = allDone || i < activeIdx
-          const current = !allDone && i === activeIdx
-          return (
-            <li key={s.id} className="min-w-0 flex-1">
-              <div className="relative h-1.5 overflow-hidden rounded-full bg-border/80">
-                <motion.span
-                  aria-hidden
-                  className={cn('absolute inset-y-0 left-0 rounded-full', done ? BRAND_GRADIENT : 'bg-primary/60')}
-                  initial={false}
-                  animate={{ width: done ? '100%' : current ? '42%' : '0%' }}
-                  transition={reduce ? { duration: 0 } : { duration: 0.4, ease: [0.16, 1, 0.3, 1] }}
-                />
-              </div>
-              <p
-                className={cn(
-                  'mt-2 truncate text-fs-2xs transition-colors duration-200',
-                  current
-                    ? 'font-bold text-foreground'
-                    : done
-                      ? 'font-semibold text-muted-foreground'
-                      : 'font-medium text-muted-foreground/55',
-                )}
-                title={s.title ?? `Step ${i + 1}`}
-              >
-                {s.title ?? `Step ${i + 1}`}
-              </p>
-              <span className="sr-only">
-                {s.title ?? `Step ${i + 1}`}
-                {done ? ' — complete' : current ? ' — current step' : ' — not started'}
-              </span>
-            </li>
-          )
-        })}
-      </ol>
-    </nav>
-  )
-}
-
-// ═══ 5 · Form section card ══════════════════════════════════════════════════════
+// ═══ 4 · Form section card ══════════════════════════════════════════════════════
 // A pure shell so every logical group gets the SAME rhythm — one card language, one
 // header treatment, one padding. Fields are rendered by RegisterClient and passed as
 // children; this component never knows what a field is.

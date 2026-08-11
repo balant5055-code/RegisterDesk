@@ -14,12 +14,19 @@ import type { FormSection, FormField, ConditionalRule, FieldType } from '@/compo
 import { resolveAttendeeIdentity } from '@/lib/registrations/attendeeIdentity'
 import { collectFormErrors } from '@/lib/registrations/validateFormResponses'
 import { resolveDobField, ageRangeLabel } from '@/lib/registrations/ageEligibility'
+// RD-PAY-P0-2 — the pure rules that decide whether a failed verification means "settled"
+// or "we simply do not know yet". Everything about double-charge safety hangs off this.
+import {
+  classifyVerifyOutcome, VERIFY_RETRY_DELAYS_MS,
+  classifyCreateOrderOutcome, CREATE_ORDER_TIMEOUT_MS,
+  type VerifyOutcome, type VerifyResponseLike,
+} from '@/lib/registrations/paymentVerification'
 import { TAX_INCLUSIVE_NOTE } from '@/lib/pricing/copy'
 import type { FeeBreakdownRecord } from '@/lib/fees/types'
 import { buildAttendeeFeeBreakdown, formatPaise, type AttendeeFeeBreakdown } from '@/lib/fees/attendeeBreakdown'
 // RD-RT1.0: the presentation layer now lives in RegistrationUI. Logic stays here.
 import {
-  CheckoutTopBar, RegistrationMasthead, StepWizard, JourneyStepper, FormSectionCard,
+  CheckoutTopBar, RegistrationMasthead, FormSectionCard,
   SummaryPanel, SummaryDigest, PassSwitcher, estimateMinutes,
   type EventIdentity, type SummaryPricing,
 } from './RegistrationUI'
@@ -33,11 +40,13 @@ import {
 import { PassPrice } from './PassPrice'
 // RD-RT3.5: the recovery surface for the existing draft mechanism.
 import { RecoveryBanner, AutosaveStatus, RecoveryReassurance } from './RecoveryUI'
-// RD-RT3.0: the pre-payment review experience.
+// RD-RT5.0: the checkout blocks that live INSIDE the one form — consent and the itemised
+// total. They replace the separate review screen; the gate helper is unchanged.
 import {
-  RegistrationReview, isReviewReady, CONFIRM_SECTION_ID,
-  type ReviewAnswerGroup, type ReviewConsent, type ReviewParticipant,
-} from './RegistrationReview'
+  ConsentPanel, OrderSummaryPanel, PaymentSummaryDialog, PaymentProcessingLock,
+  isConsentComplete, CONSENT_SECTION_ID,
+  type ConsentState,
+} from './CheckoutPanels'
 import { useToast } from '@/components/ui/Toast'
 
 // ─── Razorpay checkout (loaded dynamically from checkout.razorpay.com) ─────────
@@ -546,6 +555,26 @@ interface CouponState {
   description:   string
 }
 
+/**
+ * A payment attempt whose outcome is not yet known — the ONE shape that is parked in state
+ * and mirrored to sessionStorage. Two things can produce it:
+ *
+ *   · checkout succeeded but verification did not resolve → `payment` is set (P0-2)
+ *   · create-order gave no usable answer                  → `attemptKey` is set (P0-5),
+ *     and `order.orderId` is empty because we never received one.
+ *
+ * While one of these is parked, every Pay affordance is suppressed and create-order is
+ * unreachable, so no second order can originate from either case.
+ */
+interface ParkedPayment {
+  order:    { orderId: string; amount: number; currency: string; keyId: string }
+  attendee: { name: string; email: string; phone?: string }
+  /** Present once Razorpay's handler fired — money has very likely been taken. */
+  payment?: RazorpayPaymentSuccess
+  /** The attempt's idempotency key, when it is the only handle we hold. */
+  attemptKey?: string
+}
+
 // ─── Main Component ───────────────────────────────────────────────────────────
 
 export function RegisterClient({
@@ -599,6 +628,32 @@ export function RegisterClient({
     order:    { orderId: string; amount: number; currency: string; keyId: string }
     attendee: { name: string; email: string; phone?: string }
   } | null>(null)
+  // RD-PAY-P0-2 — THE double-charge guard.
+  //
+  // Razorpay's `handler` fires only AFTER the gateway has taken the money. The moment it
+  // fires we record the order + the signed result here, and from that instant the Pay CTA
+  // is replaced — not merely disabled — until the payment resolves. Previously a failed
+  // verify-payment re-armed Pay, and the next tap minted a SECOND Razorpay order.
+  //
+  // Mirrored into sessionStorage so a refresh, a backgrounded tab or a reopened browser
+  // resumes settlement instead of presenting a fresh, payable form.
+  const [unresolvedPayment, setUnresolvedPayment] = useState<ParkedPayment | null>(null)
+  const [verifying, setVerifying] = useState(false)
+
+  // RD-RT6.0 — the explicit confirmation step.
+  //
+  // `reviewOpen` drives the Payment Summary dialog. Opening it creates NOTHING: no order,
+  // no intent, no Razorpay. `reviewQuote` holds the previewed charge (from the read-only
+  // fee-preview route) so the dialog can name the exact amount before anything exists.
+  const [reviewOpen,  setReviewOpen]  = useState(false)
+  const [reviewQuote, setReviewQuote] = useState<{
+    amountPaise: number
+    discountPaise?: number
+    couponCode?: string
+    financials?: FeeBreakdownRecord
+  } | null>(null)
+  const [quoting, setQuoting] = useState(false)
+
   // RD-PAYMENT-05 B1: when the attendee bears the fees (attendee_pays), the order is parked
   // here with its canonical breakdown so the exact charge is shown and explicitly confirmed
   // BEFORE Razorpay opens. Null for organizer_absorbs / free → checkout is unchanged.
@@ -607,12 +662,11 @@ export function RegisterClient({
     attendee:  { name: string; email: string; phone?: string }
     breakdown: AttendeeFeeBreakdown
   } | null>(null)
-  // RD-RT3.1: which stage of the journey is on screen. 'payment' is Razorpay (a modal)
-  // and 'success' is a route, so only these two are rendered stages.
-  const [step, setStep] = useState<'form' | 'review'>('form')
-  // RD-RT3.0: review consent. Lives here — not inside the review — so the review CTA
-  // and the sticky-summary CTA are gated by exactly ONE condition. Never persisted.
-  const [consent, setConsent] = useState<ReviewConsent>({ info: false, terms: false, refund: false })
+  // RD-RT5.0: there is no `step`. Registration is ONE page — the form, the consent gate
+  // and the total are all on screen at once, and Pay goes straight to Razorpay.
+  // Consent lives here — not inside the panel — so the sticky-summary CTA, the mobile
+  // checkout bar and the submit handler are gated by exactly ONE condition. Never persisted.
+  const [consent, setConsent] = useState<ConsentState>({ info: false, terms: false, refund: false })
 
   // RD-REGISTRATION-UX — the payment CTA used to be `disabled` while consent was missing,
   // so clicking it fired NO event at all: no scroll, no message, nothing. That is what
@@ -903,8 +957,9 @@ export function RegisterClient({
     })
   }, [passSections, fieldStates, values, errors])
 
-  const activeStepIdx    = sectionCompleteness.findIndex(c => !c)  // -1 = all done
-  const completedCount   = sectionCompleteness.filter(Boolean).length
+  // The first not-yet-complete section — presentation emphasis on the one long page.
+  // -1 = every section is complete.
+  const activeStepIdx = sectionCompleteness.findIndex(c => !c)
 
   // RD-RT3.2.2: age limits for the SELECTED pass, measured on the EVENT date. Memoised so
   // it is a stable dependency, and rebuilt when the pass changes — switching pass
@@ -996,6 +1051,186 @@ export function RegisterClient({
     return h
   }
 
+  // ── RD-PAY-P0-2 · unresolved-payment persistence ──────────────────────────
+  // Survives a refresh, a killed tab and a backgrounded browser, so "I paid but the page
+  // reloaded" resumes settlement rather than showing a payable form again.
+
+  const pendingPayKey = `rd:pay:${eventSlug}`
+
+  const rememberPayment = useCallback((p: ParkedPayment | null) => {
+    setUnresolvedPayment(p)
+    try {
+      if (p) sessionStorage.setItem(pendingPayKey, JSON.stringify(p))
+      else   sessionStorage.removeItem(pendingPayKey)
+    } catch { /* private mode / quota — in-memory state still guards this session */ }
+  }, [pendingPayKey])
+
+  /**
+   * ONE verification attempt, reduced to a decision. Never throws: a rejected fetch and an
+   * unparseable body are both "we learned nothing", which is TRANSIENT, not failure.
+   */
+  async function verifyOnce(
+    payment: RazorpayPaymentSuccess,
+    headers: Record<string, string>,
+  ): Promise<VerifyOutcome> {
+    try {
+      const res = await fetch('/api/registrations/verify-payment', {
+        method: 'POST', headers, body: JSON.stringify(payment),
+      })
+      let body: VerifyResponseLike | null = null
+      try { body = await res.json() as VerifyResponseLike } catch { /* HTML 504, empty body … */ }
+      return classifyVerifyOutcome({ status: res.status, body })
+    } catch {
+      return classifyVerifyOutcome({ threw: true })
+    }
+  }
+
+  /**
+   * Verify with a bounded backoff. Retrying is SAFE and is the whole recovery mechanism:
+   * verify-payment is idempotent per intent — its transaction returns the existing
+   * registrationId when the intent is already `paid` — so N attempts settle exactly once.
+   */
+  async function verifyWithRetry(
+    payment: RazorpayPaymentSuccess,
+    headers: Record<string, string>,
+  ): Promise<VerifyOutcome> {
+    let outcome = await verifyOnce(payment, headers)
+    for (let i = 0; outcome.kind === 'transient' && i < VERIFY_RETRY_DELAYS_MS.length; i++) {
+      await new Promise(r => setTimeout(r, VERIFY_RETRY_DELAYS_MS[i]))
+      outcome = await verifyOnce(payment, headers)
+    }
+    return outcome
+  }
+
+  /**
+   * Settle a payment whose money has already been taken.
+   *
+   *   confirmed → ticket.
+   *   final     → the server DECIDED and refused; it has already refunded anything it took,
+   *               so the form is released and a fresh attempt is safe.
+   *   transient → we do not know. Stay parked. Pay is NOT re-armed.
+   */
+  const settlePayment = useCallback(async (p: ParkedPayment, headers: Record<string, string>): Promise<void> => {
+    if (!p.payment) return
+    setVerifying(true)
+    setSubmitError(null)
+    try {
+      const outcome = await verifyWithRetry(p.payment, headers)
+      if (outcome.kind === 'confirmed') {
+        rememberPayment(null)
+        clearSavedForm()
+        router.push(`/events/${eventSlug}/register/success?fresh=1&id=${outcome.registrationId}`)
+        return
+      }
+      if (outcome.kind === 'final') {
+        rememberPayment(null)
+        setSubmitError(outcome.error)
+        return
+      }
+      // Unresolved — keep the parked payment exactly where it is.
+      rememberPayment(p)
+    } finally {
+      setVerifying(false)
+    }
+    // verifyOnce / verifyWithRetry are stable closures over module-level constants only.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rememberPayment, clearSavedForm, router, eventSlug])
+
+  /**
+   * The recovery card's action. Re-runs verification when we hold the signed result (which
+   * both QUERIES and SETTLES, idempotently); otherwise asks the read-only status endpoint,
+   * which reports what Razorpay actually holds without creating anything.
+   */
+  async function checkPaymentStatus(): Promise<void> {
+    const p = unresolvedPayment
+    if (!p || verifying) return
+
+    if (p.payment) { await settlePayment(p, buildHeaders()); return }
+
+    setVerifying(true)
+    try {
+      const res  = await fetch('/api/registrations/payment-status', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        // RD-PAY-P0-5 — by order id when we have one; otherwise by ATTEMPT, for a
+        // create-order whose response never arrived.
+        body: JSON.stringify(p.order.orderId
+          ? { orderId: p.order.orderId }
+          : { idempotencyKey: p.attemptKey, slug: eventSlug }),
+      })
+      const json = await res.json() as {
+        state?: string; registrationId?: string; canRetry?: boolean; reason?: string
+      }
+
+      // RD-PAY-P0-5 — the attempt never claimed an order, so the browser never received one
+      // and no payment can exist against it. Releasing the form here is provably safe, and
+      // the next press reuses the SAME idempotency key, so even a stranded order is reused
+      // rather than duplicated.
+      if (json.state === 'no_order') {
+        rememberPayment(null)
+        setSubmitError('We could not start that payment. Nothing was charged — please try again.')
+        return
+      }
+      if (json.state === 'confirmed' && json.registrationId) {
+        rememberPayment(null)
+        clearSavedForm()
+        router.push(`/events/${eventSlug}/register/success?fresh=1&id=${json.registrationId}`)
+        return
+      }
+      if (json.state === 'failed') {
+        // Terminal server-side: anything captured was refunded before the intent was marked
+        // failed, so releasing the form here cannot double-charge.
+        rememberPayment(null)
+        setSubmitError('That payment could not be used to register. If you were charged, a full refund has been initiated.')
+        return
+      }
+      if (json.state === 'awaiting_payment') {
+        // Razorpay holds nothing for this order, so it is safe to let the attendee proceed.
+        rememberPayment(null)
+        if (p.order.orderId) {
+          // We hold the full order (amount + keyId) — reopen THAT one. No new order.
+          setPaymentRecovery({ order: p.order, attendee: p.attendee })
+        } else {
+          // RD-PAY-P0-5 — resolved by attempt, so we have an order id but not the keyId
+          // needed to open checkout. Release the form instead: the next press runs
+          // create-order with the SAME idempotency key, which the server answers with
+          // `reused: true` and the existing order. Still exactly one Razorpay order.
+          setSubmitError('Your payment was not completed. You can safely continue — you will not be charged twice.')
+        }
+        return
+      }
+      // captured_unsettled | unknown | throttled → stay parked.
+      rememberPayment(p)
+    } catch {
+      rememberPayment(p)
+    } finally {
+      setVerifying(false)
+    }
+  }
+
+  // Resume on mount: a payment recorded before a refresh is settled automatically, so the
+  // attendee lands on "confirming your payment", never on a fresh payable form.
+  const resumedRef = useRef(false)
+  useEffect(() => {
+    if (resumedRef.current || !authChecked) return
+    resumedRef.current = true
+    let parsed: { order?: unknown; attendee?: unknown; payment?: unknown } | null = null
+    try {
+      const raw = sessionStorage.getItem(pendingPayKey)
+      parsed = raw ? JSON.parse(raw) as typeof parsed : null
+    } catch { return }
+    const p = parsed as Parameters<typeof settlePayment>[0] | null
+    if (!p?.order) return
+    // Deferred out of the effect body — this repo forbids synchronous setState there
+    // (react-hooks/set-state-in-effect), the same pattern RecoveryUI/AutosaveStatus use.
+    const raf = requestAnimationFrame(() => {
+      setUnresolvedPayment(p)
+      if (p.payment) void settlePayment(p, buildHeaders())
+    })
+    return () => cancelAnimationFrame(raf)
+    // buildHeaders reads authToken, which `authChecked` already gates.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authChecked, pendingPayKey, settlePayment])
+
   // H-4: open Razorpay for an ALREADY-CREATED order and verify on success. On cancel/
   // failure it parks the order for retry instead of dead-ending on an alert. Shared by
   // the initial submit AND retryPayment, so a retry re-opens the SAME order — no second
@@ -1027,25 +1262,22 @@ export function RegisterClient({
       })
     } catch {
       // Cancelled or failed → recovery card (retry reuses THIS order).
-      // RD-RT3.1: the recovery card renders inside the form, so step back to it —
-      // otherwise a cancelled payment would leave the retry action unreachable.
-      setStep('form')
+      // RD-RT5.0: the recovery card renders inside the one form, which is already on
+      // screen, so there is no step to return to.
       setPaymentRecovery({ order, attendee })
       return
     }
 
-    const verifyRes  = await fetch('/api/registrations/verify-payment', {
-      method: 'POST', headers, body: JSON.stringify(paymentResult),
-    })
-    const verifyJson = await verifyRes.json() as {
-      success?: boolean; registrationId?: string; error?: string; reason?: string
-    }
-    if (verifyJson.success && verifyJson.registrationId) {
-      clearSavedForm()
-      router.push(`/events/${eventSlug}/register/success?fresh=1&id=${verifyJson.registrationId}`)
-      return
-    }
-    setSubmitError(verifyJson.error ?? 'Payment verification failed. Please contact support.')
+    // RD-PAY-P0-2 — THE critical line. Razorpay's handler has fired, which means the money
+    // has been taken. Record that BEFORE any network call, so every subsequent failure mode
+    // — timeout, 429, 500, tab close, crash — lands on the recovery state instead of on a
+    // form whose Pay button would mint a second order.
+    const pending = { order, attendee, payment: paymentResult }
+    rememberPayment(pending)
+
+    // settlePayment owns the outcome: retries transient failures, redirects on success, and
+    // releases the form ONLY when the server has definitively decided (and refunded).
+    await settlePayment(pending, headers)
   }
 
   async function retryPayment(): Promise<void> {
@@ -1078,9 +1310,13 @@ export function RegisterClient({
     }
   }
 
-  // RD-RT3.1: the form no longer submits straight through. It validates — unchanged —
-  // and hands over to the Review step. Every registration now takes the same route,
-  // paid or free, so Review is a stage of the journey rather than a payment panel.
+  // RD-RT5.0: the form submits straight through again. It validates — with the SAME
+  // rules as before — and, when everything passes, goes directly to checkout. There is
+  // no Review step to hand over to: the consent gate and the total are already on this
+  // page, and `finaliseRegistration` still enforces consent before any order is created.
+  //
+  // ORDER MATTERS: fields first, consent second. A form with three empty required fields
+  // AND no consent should name the fields, not send the attendee to a checkbox.
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
     setSubmitError(null)
@@ -1103,21 +1339,82 @@ export function RegisterClient({
       })
       return
     }
-    setConsent({ info: false, terms: false, refund: false })
-    setStep('review')
-    window.scrollTo({ top: 0, behavior: 'smooth' })
+    // RD-RT6.0 — FIRST CLICK ends here. Valid form → open the Payment Summary dialog.
+    // This creates NOTHING: no Razorpay order, no payment intent, no checkout. The only
+    // control that reaches the payment pipeline is "Proceed to Pay" inside the dialog.
+    void openPaymentReview()
   }
 
-  // Everything below this line is the ORIGINAL handleSubmit body, moved verbatim: the
-  // duplicate precheck, the create-order call, the RD-PAYMENT-05 B1 fee confirmation and
-  // the free-registration submit. No request, payload, ordering or branch changed — only
-  // the moment it is invoked, which is now the Review step's confirm action.
+  /**
+   * FIRST CLICK · "Review & Pay".
+   *
+   * Enforces the consent gate (unchanged), fetches a READ-ONLY quote so the dialog can name
+   * the exact amount, and opens it. `fee-preview` runs the same resolution chain
+   * create-order runs and stops before Razorpay — it writes nothing and creates no order.
+   *
+   * A preview failure is NOT fatal: the dialog still opens showing the price the page
+   * already knows, and create-order remains the authority at the moment of charge.
+   */
+  async function openPaymentReview(): Promise<void> {
+    if (submitting || quoting || reviewOpen) return   // triple-tap → exactly one dialog
+
+    if (!isConsentComplete(consent, termsUrl, refundPolicyUrl)) {
+      guideToConfirmation()
+      return
+    }
+    setSubmitError(null)
+
+    const localPaise = couponApplied ? couponApplied.finalPaise : Math.round((pass.price ?? 0) * 100)
+    // Free / fully discounted → no fees to itemise and no quote to fetch.
+    if (pass.isFree || localPaise <= 0) {
+      setReviewQuote({ amountPaise: 0 })
+      setReviewOpen(true)
+      return
+    }
+
+    setQuoting(true)
+    try {
+      const res  = await fetch('/api/registrations/fee-preview', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ slug: eventSlug, passId: pass.id, ...(couponApplied ? { couponCode: couponApplied.code } : {}) }),
+      })
+      const json = await res.json() as {
+        amountPaise?: number; discountPaise?: number; couponCode?: string
+        financials?: FeeBreakdownRecord; error?: string
+      }
+      setReviewQuote(res.ok && typeof json.amountPaise === 'number'
+        ? { amountPaise: json.amountPaise, discountPaise: json.discountPaise, couponCode: json.couponCode, financials: json.financials }
+        : { amountPaise: localPaise })
+    } catch {
+      setReviewQuote({ amountPaise: localPaise })
+    } finally {
+      setQuoting(false)
+      setReviewOpen(true)
+    }
+  }
+
+  /**
+   * SECOND CLICK · "Proceed to Pay ₹X".
+   *
+   * The ONLY control that reaches the payment pipeline. It calls the EXISTING
+   * finaliseRegistration — same duplicate precheck, same create-order (with its P0-2
+   * attempt idempotency and order reuse), same Razorpay initialisation, same verification
+   * and recovery. Nothing is duplicated here.
+   */
+  function proceedToPay(): void {
+    if (submitting) return
+    setReviewOpen(false)
+    void (feeConfirm ? confirmAndPay() : finaliseRegistration())
+  }
+
+  // The duplicate precheck, the create-order call, the RD-PAYMENT-05 B1 fee confirmation
+  // and the free-registration submit. No request, payload, ordering or branch changed.
   /** Send the attendee to the confirmation control and mark it for attention.
    *  Same scroll/focus pattern as HashScrollLink: ONE scroll, then focus with
    *  preventScroll so focusing cannot cause a second competing jump. */
   function guideToConfirmation(): void {
     setNeedsConsent(true)   // idempotent — repeated clicks re-arm, never stack
-    const el = document.getElementById(CONFIRM_SECTION_ID)
+    const el = document.getElementById(CONSENT_SECTION_ID)
     if (!el) return
     const reduce = typeof window !== 'undefined'
       && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
@@ -1128,8 +1425,17 @@ export function RegisterClient({
   async function finaliseRegistration(): Promise<void> {
     if (submitting) return
 
+    // RD-PAY-P0-2 — THE double-charge stop. A payment whose outcome we do not yet know
+    // blocks every path to create-order. This is checked FIRST, before consent, before the
+    // duplicate precheck, before anything: no combination of taps, refreshes or resubmits
+    // can reach order creation while money may already be in flight.
+    if (unresolvedPayment) {
+      void checkPaymentStatus()
+      return
+    }
+
     // GATE — before the duplicate precheck, before create-order, before Razorpay.
-    if (!isReviewReady(consent, termsUrl, refundPolicyUrl)) {
+    if (!isConsentComplete(consent, termsUrl, refundPolicyUrl)) {
       guideToConfirmation()
       return
     }
@@ -1181,30 +1487,100 @@ export function RegisterClient({
     try {
       // ── Paid flow ──────────────────────────────────────────────────────────
       if (!pass.isFree && effectivePricePaise > 0) {
-        const orderRes  = await fetch('/api/registrations/create-order', {
-          method: 'POST', headers, body: JSON.stringify(requestBody),
-        })
-        const orderJson = await orderRes.json() as {
+        // RD-PAY-P0-5 — bounded. Without this the request could hang forever, leaving
+        // `submitting` true and the processing lock on screen with no way out. The abort
+        // stops the WAIT; it says nothing about whether the server created an order, which
+        // is why the outcome below is treated as unknown rather than as a failure.
+        type OrderJson = {
           orderId?: string; amount?: number; currency?: string; keyId?: string; error?: string
+          reason?: string; reused?: boolean
+          alreadyRegistered?: boolean; registrationId?: string
           financials?: FeeBreakdownRecord
         }
-        if (!orderRes.ok || !orderJson.orderId) {
-          setSubmitError(orderJson.error ?? 'Failed to create payment order. Please try again.')
+        let orderRes:  Response | null = null
+        let orderJson: OrderJson | null = null
+        try {
+          orderRes = await fetch('/api/registrations/create-order', {
+            method: 'POST', headers, body: JSON.stringify(requestBody),
+            signal: AbortSignal.timeout(CREATE_ORDER_TIMEOUT_MS),
+          })
+          orderJson = await orderRes.json() as OrderJson
+        } catch {
+          orderRes = null   // abort / offline / connection reset / unparseable body
+        }
+
+        // RD-PAY-P0-2 — the server refused to mint a replacement because Razorpay still
+        // holds a payment against this attempt's previous order. Park it; do not offer Pay.
+        if (orderRes?.status === 409 && orderJson?.reason === 'PAYMENT_IN_PROGRESS' && orderJson.orderId) {
+          rememberPayment({
+            order: { orderId: orderJson.orderId, amount: effectivePricePaise, currency: 'INR', keyId: '' },
+            attendee,
+          })
           return
         }
 
+        if (!orderRes || !orderRes.ok || !orderJson?.orderId) {
+          // RD-PAY-P0-5 — split "the server refused" from "we never found out".
+          const outcome = classifyCreateOrderOutcome(
+            orderRes
+              ? { status: orderRes.status, body: orderJson }
+              : { threw: true },
+          )
+
+          if (outcome.kind === 'definite') {
+            // Every 4xx create-order returns is emitted BEFORE razorpay.orders.create, so
+            // nothing exists to protect and the attendee can safely fix the problem.
+            setSubmitError(outcome.error)
+            return
+          }
+
+          // UNKNOWN. A Razorpay order and a payment intent may both already exist for this
+          // attempt. Park it exactly like a post-capture unknown: the Pay affordance is
+          // suppressed, nothing is auto-retried, and "Check payment status" resolves it
+          // through the attempt claim. `orderId` is empty because we never received one —
+          // `attemptKey` is the handle instead.
+          rememberPayment({
+            order: { orderId: '', amount: effectivePricePaise, currency: 'INR', keyId: '' },
+            attendee,
+            attemptKey: idempotencyKey,
+          })
+          return
+        }
+
+        // RD-PAY-P0-2 — this attempt already settled (a webhook, or an earlier verification
+        // that did land). Send the attendee to their ticket instead of to Razorpay.
+        if (orderJson.alreadyRegistered && orderJson.registrationId) {
+          rememberPayment(null)
+          clearSavedForm()
+          router.push(`/events/${eventSlug}/register/success?fresh=1&id=${orderJson.registrationId}`)
+          return
+        }
+
+        // `reused: true` means this is the SAME order a previous call minted for this
+        // attempt — the server declined to create a second one. Checkout opens on it
+        // exactly as it would on a new order.
         const order = { orderId: orderJson.orderId, amount: orderJson.amount!, currency: orderJson.currency ?? 'INR', keyId: orderJson.keyId! }
 
         // RD-PAYMENT-05 B1: when the attendee bears fees, show the EXACT canonical breakdown
         // (from the server financials — total === order.amount) and require explicit
         // confirmation before opening Razorpay. Absent (organizer_absorbs / free) → the flow
         // is unchanged: open Razorpay directly via runPayment.
+        // RD-PAYMENT-05 B1 — the attendee must have seen and accepted the EXACT amount
+        // before Razorpay opens.
+        //
+        // RD-RT6.0: they normally already have. The Payment Summary dialog showed the
+        // previewed charge and they pressed "Proceed to Pay ₹X", so when the server agrees
+        // with that number the acceptance stands and checkout opens with no further step.
+        //
+        // If the server disagrees (a price or coupon changed between the preview and the
+        // charge), the acceptance no longer covers what is about to be taken — so the
+        // dialog RE-OPENS with the authoritative breakdown and requires an explicit second
+        // confirmation. The guarantee is preserved; only the redundant confirmation is not.
         const breakdown = buildAttendeeFeeBreakdown(orderJson.financials)
-        if (breakdown) {
-          // RD-RT3.0: every review starts unconfirmed. Without this, a cancelled payment
-          // followed by a re-submit would land on the review with the boxes still ticked.
-          setConsent({ info: false, terms: false, refund: false })
+        if (breakdown && breakdown.totalPaise !== reviewQuote?.amountPaise) {
           setFeeConfirm({ order, attendee, breakdown })
+          setReviewQuote({ amountPaise: breakdown.totalPaise, financials: orderJson.financials })
+          setReviewOpen(true)
           return
         }
 
@@ -1335,8 +1711,23 @@ export function RegisterClient({
   // RD-RT1.0 — presentation-only derivations. Every value below is formatting over
   // state that already existed; no new source, no new request, no pricing maths.
   const isFreeCheckout   = !isPaid || couponApplied?.finalPaise === 0
-  const ctaLabel         = isFreeCheckout ? 'Complete Registration' : `Pay ${priceLabel}`
   const processingLabel  = isFreeCheckout ? 'Submitting…' : 'Processing…'
+
+  // RD-RT3.1: mirrors the EXISTING branch in finaliseRegistration verbatim
+  // (`!pass.isFree && effectivePricePaise > 0`). Read only — the decision itself is
+  // still made inside finaliseRegistration and was not touched.
+  const effectivePaiseNow = couponApplied ? couponApplied.finalPaise : Math.round((pass.price ?? 0) * 100)
+  const paymentRequired   = !pass.isFree && effectivePaiseNow > 0
+
+  // RD-RT5.0 — THE amount on the button. Server-canonical once create-order has returned
+  // an itemised attendee charge (feeConfirm); until then the page's own effective price,
+  // which is the same number create-order will charge under organizer_pays. Never a
+  // hardcoded value, and always the same number the Payment Summary above it shows.
+  // RD-RT6.0 — the on-page CTA opens the confirmation dialog, so it must not promise
+  // payment. "Review & Pay" says what the press actually does; the dialog's own CTA names
+  // the amount and says where it goes. A free registration has nothing to review a price
+  // for, so it keeps its direct label.
+  const ctaLabel      = isFreeCheckout ? 'Complete Registration' : 'Review & Pay'
 
   const fmtDay = (d: string | null) => {
     if (!d) return ''
@@ -1417,50 +1808,51 @@ export function RegisterClient({
     if (el instanceof HTMLElement) el.focus({ preventScroll: true })
   }
 
-  // ONE definition of "may proceed", shared by the review CTA and the sticky-summary
-  // CTA so the summary can never become an ungated second path to payment.
-  const reviewReady = isReviewReady(consent, termsUrl, refundPolicyUrl)
+  // ONE definition of "may proceed", shared by the submit handler, the sticky-summary
+  // CTA and the mobile checkout bar, so no surface can become an ungated path to payment.
+  const consentReady = isConsentComplete(consent, termsUrl, refundPolicyUrl)
 
-  // RD-RT3.1: mirrors the EXISTING branch in finaliseRegistration verbatim
-  // (`!pass.isFree && effectivePricePaise > 0`). Read only — the decision itself is
-  // still made inside finaliseRegistration and was not touched.
-  const effectivePaiseNow = couponApplied ? couponApplied.finalPaise : Math.round((pass.price ?? 0) * 100)
-  const paymentRequired   = !pass.isFree && effectivePaiseNow > 0
+  // RD-RT5.0 — the invoice rows shown in the on-page Payment Summary. Server-canonical
+  // once create-order has answered with an itemised attendee charge; until then, the
+  // single "Registration fee" line for the price this page already displays. Formatting
+  // over existing state — no fetch, no pricing maths.
+  // RD-RT6.0 — the inline summary is now STABLE. It used to swap to the server's itemised
+  // breakdown the moment `feeConfirm` arrived, which is precisely the silent mid-flow change
+  // that made attendees think they had already paid. Itemisation belongs to the confirmation
+  // dialog; this panel just states, unchangingly, what the page has always known.
+  const orderLines = paymentRequired ? [{ label: 'Registration fee', paise: effectivePaiseNow }] : []
 
-  const reviewGroups: ReviewAnswerGroup[] = passSections
-    .map(section => ({
-      title: section.title?.trim() || 'Details',
-      items: section.fields
-        .filter(f => fieldStates.get(f.id)?.visible !== false && (values[f.id] ?? '').trim())
-        .map(f => ({ id: f.id, label: f.label, value: values[f.id]! .trim() })),
-    }))
-    .filter(g => g.items.length > 0)
-
-  // ONE participant today. Shaped as a list so group registration is additive — see
-  // ReviewParticipant. Identity comes from the same resolveAttendeeIdentity the
-  // submission uses, so the review can never show a different person than it submits.
-  const reviewIdentity  = resolveAttendeeIdentity(allFields, values)
-  const reviewParticipants: ReviewParticipant[] = [{
-    id:     'primary',
-    name:   reviewIdentity.name,
-    email:  reviewIdentity.email,
-    phone:  reviewIdentity.phone,
-    groups: reviewGroups,
-  }]
-
-  // RD-RT4.0 — the mobile checkout bar's hairline progress meter. Pure formatting over
-  // `completedCount` / `passSections`, both of which already exist for the step wizard.
-  const formProgressPct = passSections.length === 0
-    ? 0
-    : Math.round((completedCount / passSections.length) * 100)
-  const barProgressPct  = step === 'review' ? 100 : formProgressPct
+  // RD-RT6.0 — what the confirmation dialog shows. Server-previewed when available (the
+  // itemised ticket / platform fee / GST / gateway rows), otherwise the single ticket line
+  // the page already knows. Formatting only: every figure is produced by the fee engine,
+  // none is recomputed here.
+  const reviewBreakdown = buildAttendeeFeeBreakdown(reviewQuote?.financials)
+  const reviewTotalPaise = reviewQuote?.amountPaise ?? effectivePaiseNow
+  const reviewLines: { label: string; paise: number }[] = reviewBreakdown
+    ? reviewBreakdown.lines
+    : reviewTotalPaise > 0
+      ? [{ label: 'Ticket price', paise: reviewQuote?.discountPaise !== undefined
+            ? reviewTotalPaise + reviewQuote.discountPaise
+            : reviewTotalPaise }]
+      : []
+  const reviewDiscount = reviewQuote?.discountPaise
+    ? { code: reviewQuote.couponCode ?? couponApplied?.code ?? '', label: `−${formatPaise(reviewQuote.discountPaise)}` }
+    : couponApplied
+      ? { code: couponApplied.code, label: `−${formatPaise(couponApplied.discountPaise)}` }
+      : null
 
   // ── Main layout ────────────────────────────────────────────────────────────
   return (
     // RD-RT4.0: THE canvas. Every panel below is white; the page is not. That one
     // separation is what lets the form sections, the journey and the summary read as
     // objects sitting on a surface instead of as regions of a single white sheet.
-    <div style={CANVAS_STYLE} className={cn('relative min-h-screen', CANVAS)}>
+    // RD-RT7.0: `inert` while a payment attempt is in flight. The overlay already swallows
+    // pointer events and useFocusTrap swallows Tab, but `inert` is the primitive that makes
+    // "background controls are unreachable" true rather than merely hard — it removes every
+    // descendant from the tab order, the a11y tree and hit-testing at once. The lock and the
+    // summary dialog are PORTALLED to document.body, so they sit outside this subtree and
+    // stay fully interactive; Razorpay's own container does too.
+    <div style={CANVAS_STYLE} className={cn('relative min-h-screen', CANVAS)} inert={submitting}>
 
       {/* A single brand bloom behind the masthead — the only large-area colour on the
           page, and deliberately at ~0.05 alpha so it registers as warmth, not as pink. */}
@@ -1486,9 +1878,10 @@ export function RegisterClient({
           isPaid={isPaid}
         />
 
-        {/* RD-RT3.1: ONE journey, shown for every registration. Payment renders as
-            "not required" rather than vanishing when nothing is due. */}
-        <JourneyStepper current={step} paymentRequired={paymentRequired} />
+      {/* RD-RT5.0: the journey stepper is gone. It described a four-stage flow
+          (Registration → Review → Payment → Confirmation) that no longer exists — there is
+          one page, and the only thing after it is Razorpay. A "Step 1 of 4" on a page with
+          no step 2 is worse than no indicator at all. */}
 
       {/* 64 / 36 — the registration experience beside a sticky summary. */}
       {/* RD-RT3.2.1: `lg:items-start` was removed on purpose. It set align-items:start,
@@ -1499,50 +1892,11 @@ export function RegisterClient({
           within it. Native CSS only; no scroll listeners. */}
       <div className="lg:grid lg:grid-cols-[minmax(0,64fr)_minmax(0,36fr)] lg:gap-8">
 
-        {/* LEFT: review, or progress + form.
-            RD-RT3.0: during review the form is replaced rather than appended to, so the
-            attendee confirms one screen instead of scrolling past every field again.
-            `values` lives in component state (and the session draft), so unmounting the
-            form loses nothing and "Edit Registration" restores it exactly. */}
+        {/* LEFT: the one and only registration surface. RD-RT5.0 removed the branch that
+            used to swap this whole column for a review screen — the form is never
+            unmounted, so nothing has to be restored and there is nothing to navigate
+            back from. */}
         <div>
-        {step === 'review' ? (
-          <RegistrationReview
-            identity={identity}
-            passName={pass.name}
-            passPriceLabel={priceLabel}
-            strikeLabel={summaryPricing.strikeLabel}
-            passAgeLabel={passAgeLabel}
-            approvalMode={approvalMode}
-            participants={reviewParticipants}
-            paymentRequired={paymentRequired}
-            pricing={{
-              // Server-canonical once create-order has answered (RD-PAYMENT-05 B1);
-              // until then, the pass price the page already displays.
-              lines: feeConfirm
-                ? feeConfirm.breakdown.lines
-                : paymentRequired ? [{ label: 'Registration fee', paise: effectivePaiseNow }] : [],
-              totalPaise: feeConfirm ? feeConfirm.breakdown.totalPaise : effectivePaiseNow,
-              discount:   couponApplied
-                ? { code: couponApplied.code, label: `−₹${(couponApplied.discountPaise / 100).toLocaleString('en-IN')}` }
-                : null,
-              authoritative: !!feeConfirm,
-            }}
-            termsUrl={termsUrl}
-            refundPolicyUrl={refundPolicyUrl}
-            submitting={submitting}
-            consent={consent}
-            needsConsent={needsConsent && !reviewReady}
-            onConsent={(key, value) => setConsent(c => ({ ...c, [key]: value }))}
-            ready={reviewReady}
-            onProceed={() => void (feeConfirm ? confirmAndPay() : finaliseRegistration())}
-            onEdit={() => {
-              setConsent({ info: false, terms: false, refund: false })
-              setFeeConfirm(null)
-              setStep('form')
-            }}
-          />
-        ) : (
-        <>
           {/* RD-RT3.5: the draft is OFFERED, never applied behind the attendee's back.
               RD-RT4.0 moves it ABOVE the pass selector — a pure sibling reorder. "Resume
               or start over" is the first decision of the visit; asking it after the pass
@@ -1568,11 +1922,9 @@ export function RegisterClient({
             />
           )}
 
-          <StepWizard
-            sections={passSections}
-            activeIdx={activeStepIdx}
-            completedCount={completedCount}
-          />
+          {/* RD-RT5.0: the segmented section meter ("2 of 4 complete") is gone with the
+              stepper. Each section card still carries its own complete/active state, which
+              answers "where am I" without implying the page is a wizard. */}
 
           {/* M-4 / RD-RT3.5: autosave + connectivity. Height reserved either way, so the
               text changing never shifts the form. */}
@@ -1603,6 +1955,22 @@ export function RegisterClient({
                 />
               ))}
             </div>
+
+            {/* RD-RT5.0 · Terms & Consent — ON THIS PAGE, directly after the organiser's
+                own fields. It was the only part of the review screen the attendee had to
+                ACT on, which is exactly why it belongs in the form rather than behind it.
+                Same three checkboxes, same gate, same URL-conditional rules.
+
+                The consent inputs are checkboxes, so `isKeyboardField` returns false for
+                them and ticking one can never hide the mobile checkout bar. */}
+            <ConsentPanel
+              consent={consent}
+              onConsent={(key, value) => setConsent(c => ({ ...c, [key]: value }))}
+              termsUrl={termsUrl}
+              refundPolicyUrl={refundPolicyUrl}
+              submitting={submitting}
+              needsConsent={needsConsent && !consentReady}
+            />
 
             {/* Coupon — RD-RT4.0 gives it the same panel language as a form section, so
                 the last thing before the total stops looking like an afterthought bolted
@@ -1685,9 +2053,91 @@ export function RegisterClient({
               </div>
             )}
 
-            {/* H-4: payment recovery card — shown when a payment was cancelled/failed.
-                Retry reuses the same order (idempotent, no duplicate registration). */}
-            {paymentRecovery ? (
+            {/* RD-RT5.0 · Payment Summary — the itemised total, immediately above the
+                action that authorises it. This is the second half of what the review
+                screen owned. Hidden during payment recovery, where the recovery card is
+                the only thing that should be asking for a decision.
+
+                SCOPED to below `lg`, because at `lg` and up the sticky ticket in the right
+                column already carries the pass, the discount row, the total and the CTA —
+                and both columns are on screen at once, so rendering this too would print
+                "Total payable ₹X" twice within one viewport. Below `lg` that ticket is
+                `hidden` and the checkout bar shows a bare total, so this block is the only
+                place the attendee can see what the number is made of.
+
+                The one exception is `feeConfirm`: when the server has returned an itemised
+                attendee-borne charge, the breakdown is the whole point and must be legible
+                at every width, so it un-hides on desktop too. */}
+            {!paymentRecovery && !unresolvedPayment && (
+              <div className={cn('lg:hidden', feeConfirm && 'lg:block')}>
+              <OrderSummaryPanel
+                passName={pass.name}
+                passPriceLabel={priceLabel}
+                strikeLabel={summaryPricing.strikeLabel}
+                passAgeLabel={passAgeLabel}
+                lines={orderLines}
+                discount={couponApplied
+                  ? { code: couponApplied.code, label: `−₹${(couponApplied.discountPaise / 100).toLocaleString('en-IN')}` }
+                  : null}
+                totalPaise={effectivePaiseNow}
+                paymentRequired={paymentRequired}
+                // Never "authoritative" inline any more — the dialog is where the exact,
+                // server-itemised charge is shown and accepted, so this panel keeps its
+                // honest "fees are itemised before payment opens" note.
+                authoritative={false}
+              />
+              </div>
+            )}
+
+            {/* RD-PAY-P0-2 — UNRESOLVED PAYMENT. Outranks every other state on this page.
+                The attendee's money has (probably) been taken and we cannot yet prove what
+                happened to it, so this card REPLACES the payment affordance rather than
+                sitting beside it: there is deliberately no control here that can create a
+                second order. The only actions are "check again" and "go to my ticket". */}
+            {unresolvedPayment ? (
+              <div role="status" aria-live="polite" className={cn(PANEL, 'mt-4 border-primary/35 p-4 sm:p-5')}>
+                <div className="flex items-start gap-3">
+                  <span aria-hidden className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary">
+                    {verifying
+                      ? <span className="size-4 animate-spin rounded-full border-2 border-primary border-t-transparent motion-reduce:animate-none" />
+                      : <ShieldCheck className="size-4" />}
+                  </span>
+                  <div className="min-w-0">
+                    <p className="text-fs-base font-bold text-foreground">
+                      {verifying ? 'Checking payment status…' : 'Confirming your payment'}
+                    </p>
+                    {/* RD-PAY-P0-5 — the same card serves two unknowns, and they need
+                        different reassurance. A capture-side unknown means money may have
+                        moved; a create-order unknown (no `payment`, resolved by attempt)
+                        means checkout never opened, so promising a ticket would be wrong. */}
+                    <p className="mt-1 text-fs-xs leading-relaxed text-muted-foreground">
+                      <strong className="font-semibold text-foreground">Please do not pay again.</strong>{' '}
+                      {unresolvedPayment.payment || unresolvedPayment.order.orderId
+                        ? <>If you were charged, your registration will be completed automatically and your
+                           ticket emailed to you. You can close this page safely.</>
+                        : <>We are checking whether your payment started. This takes a moment — please do
+                           not refresh or start another payment.</>}
+                    </p>
+                  </div>
+                </div>
+                <div className="mt-4">
+                  <button
+                    type="button"
+                    onClick={() => void checkPaymentStatus()}
+                    disabled={verifying}
+                    className={cn(buttonVariants({ variant: 'primary', size: 'lg' }), 'w-full gap-1.5')}
+                  >
+                    <RotateCcw className="size-4" aria-hidden />
+                    {verifying ? 'Checking…' : 'Check payment status'}
+                  </button>
+                </div>
+                {submitError && (
+                  <p role="alert" className="mt-3 text-fs-xs leading-relaxed text-destructive">{submitError}</p>
+                )}
+              </div>
+            ) : /* H-4: payment recovery card — shown when a payment was cancelled/failed.
+                Retry reuses the same order (idempotent, no duplicate registration). */
+            paymentRecovery ? (
               <div role="alert" className={cn(PANEL, 'mt-4 border-amber-500/30 p-4 sm:p-5')}>
                 <div className="flex items-start gap-3">
                   <span aria-hidden className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-amber-500/10 text-amber-600">
@@ -1744,10 +2194,10 @@ export function RegisterClient({
                 keeps it out of the accessibility tree, so nothing is double-announced.
                 The visible CTAs call formRef.current.requestSubmit(), which never needed
                 a button at all. */}
-            {!paymentRecovery && !feeConfirm && (
+            {!paymentRecovery && !unresolvedPayment && (
               <>
                 <button type="submit" hidden aria-hidden tabIndex={-1} disabled={submitting}>
-                  Continue to review
+                  {ctaLabel}
                 </button>
 
                 {/* RD-RT4.0: one quiet closing block instead of two stacked footnotes —
@@ -1769,8 +2219,6 @@ export function RegisterClient({
               </>
             )}
           </form>
-        </>
-        )}
         </div>
 
         {/* RIGHT: sticky summary — the desktop checkout surface. It carries the pass,
@@ -1794,35 +2242,25 @@ export function RegisterClient({
               box-shadow does not contribute to scrollable overflow, so a smaller pad cuts
               the bottom of the shadow off at the scroll container's padding edge. */}
           <div className="sticky top-20 max-h-[calc(100vh-6.5rem)] overflow-y-auto overscroll-contain pb-2">
+            {/* RD-RT5.0: ONE action, not two. There is no review branch left — this
+                submits the form, which validates and goes straight to Razorpay.
+                Deliberately NOT disabled on missing consent: a disabled button fires no
+                event, so pressing it did nothing and read as broken. It stays live and
+                `finaliseRegistration` brings the attendee to the consent block instead. */}
             <SummaryPanel
               identity={identity}
               passName={pass.name}
               pricing={summaryPricing}
-              action={paymentRecovery ? undefined : step === 'review' ? (
-                <>
-                  <button
-                    type="button"
-                    onClick={() => void (feeConfirm ? confirmAndPay() : finaliseRegistration())}
-                    disabled={submitting || !reviewReady}
-                    className={cn(buttonVariants({ variant: 'primary', size: 'lg' }), 'w-full gap-2')}
-                  >
-                    <ShieldCheck className="size-4" aria-hidden />
-                    {submitting ? 'Processing…' : paymentRequired ? 'Proceed to Secure Payment' : 'Complete Registration'}
-                  </button>
-                  <p className="mt-2.5 flex items-center justify-center gap-1.5 text-fs-2xs font-medium text-muted-foreground">
-                    <Lock className="size-3 shrink-0 text-emerald-600" aria-hidden />
-                    Encrypted payment via Razorpay
-                  </p>
-                </>
-              ) : (
+              action={(paymentRecovery || unresolvedPayment) ? undefined : (
                 <>
                   <button
                     type="button"
                     onClick={() => formRef.current?.requestSubmit()}
-                    disabled={submitting}
-                    className={cn(buttonVariants({ variant: 'primary', size: 'lg' }), 'w-full')}
+                    disabled={submitting || quoting}
+                    className={cn(buttonVariants({ variant: 'primary', size: 'lg' }), 'w-full gap-2')}
                   >
-                    {submitting ? processingLabel : ctaLabel}
+                    {!submitting && !quoting && isPaid && <ShieldCheck className="size-4" aria-hidden />}
+                    {submitting ? processingLabel : quoting ? 'Checking…' : ctaLabel}
                   </button>
                   <p className="mt-2.5 flex items-center justify-center gap-1.5 text-fs-2xs font-medium text-muted-foreground">
                     <Lock className="size-3 shrink-0 text-emerald-600" aria-hidden />
@@ -1840,10 +2278,42 @@ export function RegisterClient({
       {/* C-2: mobile-only sticky checkout bar (Total + Pay). Desktop keeps the right-column
           sticky SummaryCard — this is `lg:hidden`, so the desktop summary is never duplicated.
           Steps aside while a keyboard field is focused; clears the iOS safe-area inset. */}
-      {/* RD-RT3.0: the bar now also serves the review step, showing the confirmed total
-          and the SAME consent-gated proceed action. It stays hidden during payment
-          recovery, where the recovery card owns the action. */}
-      {!paymentRecovery && (
+      {/* RD-RT6.0 · THE explicit confirmation step. Opening it creates nothing — no order,
+          no intent, no Razorpay. Its "Proceed to Pay ₹X" is the ONLY control on this page
+          that reaches the payment pipeline, and it calls the existing finaliseRegistration.
+          Rendered outside the sticky bar so it is never trapped behind it. */}
+      {/* RD-RT7.0 · THE UI LOCK. Rendered from the EXISTING `submitting` flag — the state
+          that already means "an active payment attempt is in flight", spanning create-order
+          → Razorpay → verification → resolution. No new state, no second submission path,
+          and every duplicate-order guard (`if (submitting) return`, the parked
+          unresolvedPayment, the server-side attempt claim) is untouched.
+
+          z-[400] sits above the page and the summary dialog, and far below Razorpay's own
+          container — so checkout stays fully usable while this waits underneath it. */}
+      <PaymentProcessingLock open={submitting} free={!paymentRequired} />
+
+      <PaymentSummaryDialog
+        // …and can never co-exist with the lock.
+        open={reviewOpen && !submitting && !unresolvedPayment && !paymentRecovery}
+        onClose={() => { if (!submitting) setReviewOpen(false) }}
+        onProceed={proceedToPay}
+        submitting={submitting}
+        passName={pass.name}
+        lines={reviewLines}
+        discount={reviewDiscount}
+        totalPaise={reviewTotalPaise}
+        paymentRequired={reviewTotalPaise > 0}
+        error={submitError}
+      />
+
+      {/* RD-RT5.0: ONE bar, ONE action, for the whole registration — there is no review
+          step for it to change shape for. It stays hidden during payment recovery, where
+          the recovery card owns the action.
+
+          `fieldFocused` is driven by isKeyboardField(), which tests the input's TYPE:
+          checkboxes and radios never qualify, so ticking a consent box cannot hide this
+          bar. Only a field that actually raises the on-screen keyboard does. */}
+      {!paymentRecovery && !unresolvedPayment && (
         <div className={cn('fixed inset-x-0 bottom-0 z-40 lg:hidden', fieldFocused && 'hidden')}>
 
           {/* RD-RT4.0: the summary the desktop keeps in view all the way down, folded
@@ -1868,16 +2338,9 @@ export function RegisterClient({
           </div>
 
           <div className="border-t border-border bg-card/95 shadow-[0_-10px_30px_-12px_rgb(15_23_42_/_0.28)] backdrop-blur-xl">
-            {/* A 2px meter of how much of the form is behind you — the one piece of
-                progress feedback that survives on a 360px screen. */}
-            <div aria-hidden className="h-0.5 w-full bg-border/70">
-              <div
-                className="h-full bg-[image:var(--primary-gradient)] transition-[width] duration-500 ease-out motion-reduce:transition-none"
-                style={{ width: `${barProgressPct}%` }}
-              />
-            </div>
-
-            <div className="mx-auto flex max-w-lg items-center justify-between gap-3 px-4 pt-2.5 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
+            {/* RD-RT5.0: the hairline completion meter is gone with the step model it was
+                derived from. `pt-3` replaces the 2px strip so the bar keeps its height. */}
+            <div className="mx-auto flex max-w-lg items-center justify-between gap-3 px-4 pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
               <button
                 type="button"
                 onClick={() => setMobileSummaryOpen(o => !o)}
@@ -1907,32 +2370,20 @@ export function RegisterClient({
                 </span>
               </button>
 
-              <p className="sr-only">
-                {step === 'review' ? 'Review your registration before confirming' : 'Total for this registration'}
-              </p>
+              <p className="sr-only">Total for this registration</p>
 
-              {step === 'review' ? (
-                <button
-                  type="button"
-                  onClick={() => void (feeConfirm ? confirmAndPay() : finaliseRegistration())}
-                  disabled={submitting || !reviewReady}
-                  className={cn(buttonVariants({ variant: 'primary', size: 'lg' }), 'min-w-[52%] gap-1.5')}
-                >
-                  <ShieldCheck className="size-4 shrink-0" aria-hidden />
-                  {submitting ? 'Processing…' : paymentRequired ? 'Proceed to Pay' : 'Complete'}
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  onClick={() => formRef.current?.requestSubmit()}
-                  disabled={submitting}
-                  className={cn(buttonVariants({ variant: 'primary', size: 'lg' }), 'min-w-[52%]')}
-                >
-                  {submitting
-                    ? (!isPaid || couponApplied?.finalPaise === 0 ? 'Submitting…' : 'Processing…')
-                    : (!isPaid || couponApplied?.finalPaise === 0 ? 'Complete Registration' : `Pay ${priceLabel}`)}
-                </button>
-              )}
+              {/* THE one primary action. Submits the form → validates → Razorpay.
+                  Same `disabled={submitting}` double-tap guard as before, and the same
+                  deliberate choice not to disable on missing consent. */}
+              <button
+                type="button"
+                onClick={() => formRef.current?.requestSubmit()}
+                disabled={submitting || quoting}
+                className={cn(buttonVariants({ variant: 'primary', size: 'lg' }), 'min-w-[52%] gap-1.5')}
+              >
+                {!submitting && !quoting && isPaid && <ShieldCheck className="size-4 shrink-0" aria-hidden />}
+                {submitting ? processingLabel : quoting ? 'Checking…' : ctaLabel}
+              </button>
             </div>
           </div>
         </div>
