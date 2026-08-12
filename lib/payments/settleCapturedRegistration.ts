@@ -140,14 +140,44 @@ export async function settleCapturedRegistration(args: {
    * This never affects settlement: it is read only after the transaction has committed.
    */
   defer?: (task: () => void | Promise<void>) => void
+  /**
+   * RD-PAY-P0-6 — set ONLY by the reconciliation sweep, and only after Razorpay itself
+   * confirmed a captured/authorized payment matching this intent's own amount + currency.
+   * It permits recovery of an intent the pre-fix `payment.failed` webhook marked
+   * `registration_failed`. It never bypasses the refund check, the gate, capacity checks,
+   * duplicate claims, amount verification or exactly-once settlement.
+   */
+  capturedByServer?: boolean
 }): Promise<SettlementOutcome> {
   const { orderId, paymentId, intent, source, uidOverride, defer } = args
 
   // Fast idempotency — avoids a transaction for the overwhelmingly common replay.
-  if (intent.status === 'paid' && intent.registrationId) {
+  //
+  // Keyed on `registrationId` ALONE, not on `status === 'paid' && registrationId`. That
+  // field is written in exactly one place — the settlement transaction below, together with
+  // `status: 'paid'` — so its presence always means a registration for this intent already
+  // exists, whatever the status column happens to say. Requiring both let a corrupted
+  // status (see markPaymentIntentAttemptFailed) reopen an already-settled intent and mint a
+  // SECOND registration, ticket and organizer credit. Defence in depth: this holds even if
+  // some future path writes a status over a settled intent.
+  if (intent.registrationId) {
     return { kind: 'already_settled', registrationId: intent.registrationId }
   }
-  if (intent.status === 'registration_failed' || intent.status === 'failed') {
+  // A refund marker is ALWAYS terminal, on every path including the sweep. A refunded
+  // payment must never become a registration — this is the invariant the terminal check
+  // was written to protect, and nothing below relaxes it.
+  if (intent.refundId !== undefined || intent.refundStatus !== undefined) {
+    return { kind: 'deferred', reason: 'intent_refunded' }
+  }
+
+  // RD-PAY-P0-6 — `registration_failed` stays terminal for verify and the webhook, which
+  // hold only a client-supplied signature. The SWEEP is different: it has already asked
+  // Razorpay and found a captured payment matching this intent's own amount and currency,
+  // and the refund check above has passed. That is strictly stronger evidence than the
+  // status flag, and it is the only way to recover intents the pre-fix webhook wrote.
+  // `capturedByServer` is set by the sweep alone (source: 'sweep').
+  const terminalStatus = intent.status === 'registration_failed' || intent.status === 'failed'
+  if (terminalStatus && !(source === 'sweep' && args.capturedByServer === true)) {
     return { kind: 'deferred', reason: 'intent_terminal' }
   }
 
@@ -202,7 +232,10 @@ export async function settleCapturedRegistration(args: {
         const intentData = intentSnap.data() as PaymentIntentRecord | undefined
         if (!intentData) throw new Error('intent_vanished')
 
-        if (intentData.status === 'paid' && intentData.registrationId) {
+        // `registrationId` alone, for the reason given at the fast path above: it is only
+        // ever written by this transaction, so it is the honest record of "a registration
+        // exists", independent of the status column.
+        if (intentData.registrationId) {
           alreadySettled = true
           settledId      = intentData.registrationId
           return

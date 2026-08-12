@@ -6,7 +6,19 @@ import { FieldValue } from 'firebase-admin/firestore'
 import { adminDb }    from '@/lib/firebase/admin'
 import type { FeeBreakdownRecord } from '@/lib/fees/types'
 
-export type PaymentIntentStatus = 'created' | 'paid' | 'failed' | 'registration_failed'
+/**
+ * `attempt_failed` is NOT terminal. One Razorpay ATTEMPT on this order failed (declined
+ * card, 3DS drop-out, insufficient funds) but the ORDER itself is still payable — the
+ * checkout retry reuses the same order, so the intent must stay settleable.
+ *
+ * This exists because `registration_failed` was previously written for that case, and every
+ * guard in the codebase reads `registration_failed` as "already refunded / closed". That
+ * overloading meant a failed-then-retried payment captured money against an intent nothing
+ * would ever settle: verify refused, the webhook skipped, and the capture sweep — which
+ * scans `created` only — never looked at it. Captured, unregistered, unrefunded, forever.
+ */
+export type PaymentIntentStatus =
+  | 'created' | 'paid' | 'failed' | 'registration_failed' | 'attempt_failed'
 export type RefundStatus        = 'pending' | 'processed' | 'failed'
 
 export interface PaymentIntentRecord {
@@ -195,6 +207,44 @@ export async function claimPaymentAttempt(
     const winner = await getAttemptClaim(claimId)
     return winner ?? (body as PaymentAttemptClaim)
   }
+}
+
+/**
+ * Records a FAILED ATTEMPT without closing the intent. Used by the `payment.failed`
+ * webhook: the order can still be paid by a retry, so this must never make the intent
+ * unsettleable.
+ *
+ * ATOMIC BY CONSTRUCTION — and it has to be. The caller reads the intent, sees `created`,
+ * and only then calls this; those are two separate operations, and a settlement can commit
+ * between them. A plain `update()` here would then overwrite `paid` with `attempt_failed`
+ * while leaving `registrationId` in place, and because `attempt_failed` is deliberately
+ * settleable on EVERY path, the next webhook delivery or capture sweep would settle the
+ * same payment a second time: duplicate registration, duplicate ticket, duplicate
+ * notifications, and a second organizer credit (the ledger is keyed `ptx_<registrationId>`,
+ * so a new registration id mints a new ledger doc and the idempotency gate never fires).
+ *
+ * Reading the doc INSIDE the transaction puts it in the read set, so a concurrent
+ * settlement forces a retry; the re-read then observes the new status and no-ops. The only
+ * permitted transition is `created → attempt_failed`. Correctness does not depend on the
+ * caller's earlier check, which remains only as a cheap pre-filter.
+ */
+export async function markPaymentIntentAttemptFailed(
+  orderId:        string,
+  failureReason?: string,
+): Promise<void> {
+  const ref = adminDb.collection('paymentIntents').doc(orderId)
+  await adminDb.runTransaction(async txn => {
+    const snap = await txn.get(ref)
+    if (!snap.exists) return                                            // nothing to mark
+    const current = (snap.data() as PaymentIntentRecord).status
+    // paid · registration_failed · failed · attempt_failed all stay exactly as they are.
+    if (current !== 'created') return
+    txn.update(ref, {
+      status: 'attempt_failed',
+      ...(failureReason ? { failureReason } : {}),
+      updatedAt: FieldValue.serverTimestamp(),
+    })
+  })
 }
 
 export async function markPaymentIntentFailed(

@@ -88,7 +88,13 @@ describe('8 · recovery does not introduce a second registration path', () => {
     const writeReg   = txn.indexOf('txn.set(regRef')
     expect(readIntent).toBeGreaterThan(-1)
     expect(readIntent).toBeLessThan(writeReg)
-    expect(txn).toMatch(/status === 'paid' && intentData\.registrationId[\s\S]{0,120}alreadySettled = true/)
+    // RD-PAY-P0-7 — the short-circuit is keyed on `registrationId` ALONE, not on
+    // `status === 'paid' && registrationId`. That field is written only by this
+    // transaction, so it is the honest record that a registration exists; requiring the
+    // status too let a corrupted status reopen a settled intent and mint a second
+    // registration. Pinning the weaker two-condition form would re-admit that bug.
+    expect(txn).toMatch(/if \(intentData\.registrationId\)[\s\S]{0,120}alreadySettled = true/)
+    expect(txn).not.toMatch(/status === 'paid' && intentData\.registrationId/)
   })
 
   it('post-commit side effects are gated so a replay cannot re-email or re-credit', () => {

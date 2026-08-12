@@ -215,7 +215,10 @@ describe('8–11 · webhook and client callback are idempotent in any order', ()
 
   it('9 · client first, webhook second → the webhook no-ops', () => {
     expect(webhook).toMatch(/if \(intent\.status === 'paid' && intent\.registrationId\)[\s\S]{0,200}received: true/)
-    expect(settle).toMatch(/if \(intentData\.status === 'paid' && intentData\.registrationId\) \{[\s\S]{0,160}alreadySettled = true/)
+    // RD-PAY-P0-7 — keyed on `registrationId` alone; see the note in
+    // captureRecoveryWiring.test.ts. Strictly stronger than the old two-condition form,
+    // which a corrupted status could slip past.
+    expect(settle).toMatch(/if \(intentData\.registrationId\) \{[\s\S]{0,160}alreadySettled = true/)
   })
 
   it('8 · webhook first, client second → verify returns the SAME registrationId', () => {

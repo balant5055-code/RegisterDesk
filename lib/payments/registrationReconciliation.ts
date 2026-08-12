@@ -353,7 +353,21 @@ export async function recoverCapturedPaymentIntents(limitN = 200): Promise<Captu
 
   const candidates = snap.docs
     .map(d => d.data() as PaymentIntentRecord)
-    .filter(i => i.status === 'created' && (i.amount ?? 0) > 0 && typeof i.orderId === 'string' && !!i.orderId)
+    // RD-PAY-P0-6 — `created` is no longer the only settleable state.
+    //
+    // `attempt_failed` means one Razorpay attempt failed while the ORDER stayed payable;
+    // the checkout retry reuses that same order, so a capture can land on it. Scanning only
+    // `created` left those captures invisible to every recovery path.
+    //
+    // `registration_failed` is included as a REPAIR lane for intents already written by the
+    // pre-fix webhook. It is NOT trusted: nothing settles on status alone — each candidate
+    // is checked against Razorpay below for a payment matching this intent's OWN amount and
+    // currency, and any intent carrying a refund marker is excluded outright, because a
+    // refunded payment must never become a registration.
+    .filter(i =>
+      (i.status === 'created' || i.status === 'attempt_failed' || i.status === 'registration_failed') &&
+      i.refundId === undefined && i.refundStatus === undefined &&
+      (i.amount ?? 0) > 0 && typeof i.orderId === 'string' && !!i.orderId)
   out.candidates = candidates.length
 
   for (const intent of candidates) {
@@ -382,6 +396,8 @@ export async function recoverCapturedPaymentIntents(limitN = 200): Promise<Captu
       paymentId: payment.id,
       intent,
       source:    'sweep',
+      // Razorpay confirmed this capture above (amount + currency matched the intent).
+      capturedByServer: true,
     })
 
     if (outcome.kind === 'settled') {

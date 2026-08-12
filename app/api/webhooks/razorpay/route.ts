@@ -23,6 +23,7 @@ import { adminDb }                    from '@/lib/firebase/admin'
 import {
   getPaymentIntent,
   markPaymentIntentFailed,
+  markPaymentIntentAttemptFailed,
   updatePaymentIntentRefund,
 } from '@/lib/firebase/firestore/paymentIntents'
 import { atomicTopupCredit } from '@/lib/firebase/firestore/wallet'
@@ -288,12 +289,28 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
     if (fOrderId) {
       const intent = await getPaymentIntent(fOrderId)
+      // Pre-filter only — it saves a transaction on the common already-settled replay.
+      // The transition itself is enforced atomically inside markPaymentIntentAttemptFailed,
+      // because this read and that write are two operations and a settlement can land
+      // between them.
       if (intent?.status === 'created') {
         const reason = fErrorDesc
           ? `payment_failed:${fErrorCode ?? 'unknown'}:${fErrorDesc}`
           : 'payment_failed'
-        await markPaymentIntentFailed(fOrderId, reason)
-        console.log('[webhook/razorpay] payment.failed — intent marked failed:', {
+        // RD-PAY-P0-6 — `attempt_failed`, NOT `registration_failed`.
+        //
+        // The Razorpay ORDER survives a failed attempt: the checkout retry
+        // (RegisterClient.retryPayment → runPayment(rec.order)) reuses this same order, so
+        // a later attempt can still capture money against this intent. Writing the terminal
+        // status here made that capture unsettleable — verify refused (4b), the webhook
+        // skipped (6.5), and the capture sweep scans `created` only — leaving money taken
+        // with no registration and no refund.
+        //
+        // `attempt_failed` keeps the stale-intent hygiene this block was added for while
+        // leaving the intent settleable. Genuinely terminal states (refund issued, gate
+        // refusal) still use markPaymentIntentFailed and are unchanged.
+        await markPaymentIntentAttemptFailed(fOrderId, reason)
+        console.log('[webhook/razorpay] payment.failed — attempt marked failed:', {
           orderId: fOrderId, fErrorCode, fErrorDesc,
         })
       }
