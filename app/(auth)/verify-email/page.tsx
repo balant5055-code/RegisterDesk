@@ -60,6 +60,22 @@ function errorMessage(err: OtpError): string {
   }
 }
 
+/**
+ * A post-verification return target, or null.
+ *
+ * Same three conditions as the guard in app/(auth)/login/page.tsx, deliberately restated
+ * rather than shared: this is the LAST hop before the user is navigated, and an open
+ * redirect here is exactly as dangerous as one there. Internal absolute paths only —
+ * `https://evil.com` fails `startsWith('/')`, and `//evil.com` (protocol-relative, which
+ * browsers treat as external) is rejected explicitly.
+ *
+ * Deliberately NOT imported from the login page: pages are route entry points, not modules
+ * to depend on, and cross-importing one would couple two routes' bundles.
+ */
+function safeRedirectTarget(raw: string | null): string | null {
+  return raw && raw.startsWith('/') && !raw.startsWith('//') ? raw : null
+}
+
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function VerifyEmailPage() {
@@ -73,6 +89,11 @@ export default function VerifyEmailPage() {
 function VerifyEmailContent() {
   const router      = useRouter()
   const searchParams = useSearchParams()
+
+  // Resolved once, at render, so the submit callback closes over a plain validated string
+  // rather than the searchParams object — a stable dependency, and the validation runs in
+  // exactly one place.
+  const redirectTarget = safeRedirectTarget(searchParams.get('redirect'))
 
   const [currentOtpId, setCurrentOtpId] = useState<string | null>(
     () => searchParams.get('otpId'),
@@ -117,7 +138,10 @@ function VerifyEmailContent() {
       })
       if (res.ok) {
         await auth.currentUser!.reload()
-        router.push(ROUTES.WELCOME)
+        // A team invitee arrives here mid-acceptance: /team/accept → /login → signup →
+        // here. Sending them to /welcome would strand a still-unaccepted invitation. With
+        // no redirect present this is exactly the previous behaviour.
+        router.push(redirectTarget ?? ROUTES.WELCOME)
         return
       }
       const body = await res.json() as { error: string; attemptsLeft?: number }
@@ -129,7 +153,7 @@ function VerifyEmailContent() {
     } finally {
       setVerifying(false)
     }
-  }, [verifying, currentOtpId, router])
+  }, [verifying, currentOtpId, router, redirectTarget])
 
   // Digit change — auto-advance and auto-submit
   const handleChange = (idx: number, raw: string) => {

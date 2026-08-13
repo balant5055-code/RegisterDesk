@@ -113,6 +113,36 @@ function safeRedirectTarget(): string | null {
   return r && r.startsWith('/') && !r.startsWith('//') ? r : null
 }
 
+/**
+ * The verify-email URL, carrying the VALIDATED redirect forward.
+ *
+ * A team invitee creating a brand-new account passes through account creation and email
+ * verification before they can accept. Previously both steps discarded the redirect, so the
+ * invitation was silently abandoned and the user landed on /welcome holding an unaccepted
+ * invite. The value appended here has already passed `safeRedirectTarget()` — an external
+ * or protocol-relative URL is dropped before it is ever written into this link.
+ *
+ * With no redirect present the URL is byte-identical to what these call sites built before,
+ * so ordinary signup is unchanged.
+ */
+function verifyEmailUrl(opts: { otpId?: string; reason?: string }): string {
+  const params = new URLSearchParams()
+  if (opts.otpId)  params.set('otpId', opts.otpId)
+  if (opts.reason) params.set('reason', opts.reason)
+  const redirect = safeRedirectTarget()
+  if (redirect) params.set('redirect', redirect)
+  const qs = params.toString()
+  return qs ? `${ROUTES.VERIFY_EMAIL}?${qs}` : ROUTES.VERIFY_EMAIL
+}
+
+// NOTE: deep-linking straight into signup mode (`?mode=signup`) is deliberately NOT
+// implemented. Deriving the initial mode from `window` mismatches hydration on this
+// prerendered page, and applying it in an effect is refused by the repo's
+// `react-hooks/set-state-in-effect` rule. Doing it correctly means giving this page a
+// Suspense boundary + useSearchParams — a restructure, not a redirect fix. An invitee
+// arriving from "Create an account" therefore lands on the login form and presses
+// "Create account" once; the invitation still completes.
+
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function LoginPage() {
@@ -162,9 +192,9 @@ export default function LoginPage() {
     })
     if (res.ok) {
       const { otpId } = await res.json() as { otpId: string }
-      router.push(`${ROUTES.VERIFY_EMAIL}?otpId=${encodeURIComponent(otpId)}`)
+      router.push(verifyEmailUrl({ otpId }))
     } else {
-      router.push(`${ROUTES.VERIFY_EMAIL}?reason=unverified`)
+      router.push(verifyEmailUrl({ reason: 'unverified' }))
     }
   }
 
@@ -276,9 +306,9 @@ export default function LoginPage() {
       })
       if (res.ok) {
         const { otpId } = await res.json() as { otpId: string }
-        router.push(`${ROUTES.VERIFY_EMAIL}?otpId=${encodeURIComponent(otpId)}`)
+        router.push(verifyEmailUrl({ otpId }))
       } else {
-        router.push(ROUTES.VERIFY_EMAIL)
+        router.push(verifyEmailUrl({}))
       }
     } catch (err) {
       setSignupError(mapAuthError(err))

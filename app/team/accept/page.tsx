@@ -13,7 +13,11 @@ function AcceptInner() {
   const params = useSearchParams()
   const router = useRouter()
   const token  = params.get('token') ?? ''
-  const next   = `/team/accept?token=${encodeURIComponent(token)}`
+  // Where auth must send the invitee back to. The parameter is `redirect`, NOT `next`:
+  // /login already reads `redirect` and validates it through its own same-origin guard, so
+  // reusing that name means this flow inherits the existing protection instead of adding a
+  // second parameter (and a second place to get open-redirect validation wrong).
+  const returnTo = `/team/accept?token=${encodeURIComponent(token)}`
 
   const [phase,   setPhase]   = useState<Phase>(() => (token ? 'loading' : 'error'))
   const [message, setMessage] = useState(() => (token ? '' : 'This invitation link is invalid.'))
@@ -67,10 +71,13 @@ function AcceptInner() {
           <>
             <p className="mt-2 text-[13.5px] text-muted-foreground">Sign in or create an account with the invited email to accept this invitation.</p>
             <div className="mt-5 flex flex-col gap-2">
-              <Link href={`/login?next=${encodeURIComponent(next)}`}
+              <Link href={`/login?redirect=${encodeURIComponent(returnTo)}`}
                 className="inline-flex w-full items-center justify-center rounded-lg px-4 py-2.5 text-[14px] font-semibold text-primary-foreground shadow-sm hover:opacity-90"
                 style={{ backgroundImage: 'var(--primary-gradient)' }}>Sign in</Link>
-              <Link href={`/register?next=${encodeURIComponent(next)}`}
+              {/* /login carries BOTH modes via its own login/signup toggle — there is no
+                  /register page (app/(auth)/register holds only a .gitkeep), which is why
+                  this link used to 404. */}
+              <Link href={`/login?redirect=${encodeURIComponent(returnTo)}`}
                 className="inline-flex w-full items-center justify-center rounded-lg border border-border px-4 py-2.5 text-[14px] font-medium text-foreground hover:bg-muted">Create an account</Link>
             </div>
           </>
