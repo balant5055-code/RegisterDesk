@@ -247,6 +247,85 @@ export async function setMemberStatus(args: {
   return { ok: true, data: toView({ ...m, id: args.memberId, status: args.status }) }
 }
 
+// ─── Resend a pending invitation ──────────────────────────────────────────────
+
+/**
+ * Re-sends the invitation email for an ALREADY PENDING invite.
+ *
+ * ═══ WHY THIS EXISTS ══════════════════════════════════════════════════════════
+ * A pending invite was previously a dead end. `inviteMember` correctly refuses a second
+ * invite for the same email with 409, so an owner whose invitee never received the mail had
+ * only one route back: revoke and re-invite. That destroys the row, mints a new token, and
+ * silently breaks any accept link already sitting in the invitee's inbox.
+ *
+ * ═══ WHAT IT DELIBERATELY DOES NOT DO ═════════════════════════════════════════
+ * · It does NOT create a document — the row must already exist, and only `invitedAt` /
+ *   `updatedAt` are written. The 409 duplicate protection in `inviteMember` is untouched
+ *   and is still the only thing that decides whether a NEW invite may be created.
+ * · It does NOT mint a token. The stored `inviteToken` is reused verbatim, so a link the
+ *   invitee already has keeps working — replacing it would invalidate the very email we
+ *   are trying to deliver.
+ * · It does NOT touch status, role, permissions, memberUid or acceptedAt.
+ *
+ * ═══ WHY `invitedAt` IS REFRESHED ═════════════════════════════════════════════
+ * `invitedAt` is not decorative: `acceptInvitation` derives expiry from it
+ * (`Date.now() - invitedMs > INVITE_TTL_MS`). It IS the TTL clock. Leaving it alone would
+ * mean a resend on day 6 hands the invitee a link that dies tomorrow — the opposite of what
+ * "resend" promises. `createdAt` is never written after creation, so the original invite
+ * date survives in the document; no new field is needed to keep that history.
+ */
+export async function resendInvitation(args: {
+  organizerUid: string; ownerUid: string; ownerEmail: string | null; memberId: string
+}): Promise<ServiceResult<TeamMemberView>> {
+  const ref  = adminDb.collection(TEAM_COLLECTION).doc(args.memberId)
+  const snap = await ref.get()
+  if (!snap.exists) return fail(404, 'Team member not found.')
+  const m = snap.data() as TeamMemberDocument
+  // Same 404 (not 403) the other mutations use for a foreign row: a distinct status here
+  // would turn this endpoint into a probe for other workspaces' member ids.
+  if (m.organizerUid !== args.organizerUid) return fail(404, 'Team member not found.')
+
+  if (m.status !== 'invited') return fail(409, 'Only pending invitations can be resent.')
+  // Accepting an invite consumes the token (`inviteToken: null`). Without one there is no
+  // link to send, and minting a replacement here would be issuing a fresh invitation
+  // through an endpoint that is not allowed to create one.
+  if (!m.inviteToken) return fail(409, 'This invitation can no longer be resent.')
+
+  await ref.update({
+    invitedAt: FieldValue.serverTimestamp(),
+    updatedAt: FieldValue.serverTimestamp(),
+  })
+
+  // Same composition and the same best-effort posture as `inviteMember`: a provider outage
+  // must not fail the request, because the row has already been refreshed and the owner can
+  // simply try again.
+  try {
+    const ownerSnap = await adminDb.doc(`users/${args.ownerUid}`).get()
+    const orgName   = (ownerSnap.data()?.organizationName as string) || 'a RegisterDesk organization'
+    await notificationEngine.send(NotificationType.CUSTOM_EMAIL, {
+      to:      m.email,
+      ...teamInviteTemplate({
+        organizationName: orgName,
+        inviterEmail:     args.ownerEmail ?? 'The organizer',
+        roleLabel:        ROLE_LABELS[m.role],
+        acceptUrl:        `${APP_URL}/team/accept?token=${encodeURIComponent(m.inviteToken)}`,
+      }),
+    })
+  } catch (err) {
+    console.error('[team] invite resend email failed:', err)
+  }
+
+  void logTeamAction({
+    organizerUid: args.organizerUid, actorUid: args.ownerUid,
+    action: 'team.invite_resent', memberId: args.memberId, metadata: { email: m.email, role: m.role },
+  }).catch(() => { /* audit is best-effort */ })
+
+  // Re-read so the returned view carries the resolved server timestamp rather than the
+  // sentinel, matching what the next GET /api/organizer/team will show.
+  const fresh = (await ref.get()).data() as TeamMemberDocument
+  return { ok: true, data: toView({ ...fresh, id: args.memberId }) }
+}
+
 // ─── Remove ─────────────────────────────────────────────────────────────────
 
 export async function removeMember(args: {

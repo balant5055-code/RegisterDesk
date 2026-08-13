@@ -6,7 +6,8 @@
 
 import { NextRequest, NextResponse } from 'next/server'
 import { verifyCaller, requireOwner } from '@/lib/team/access'
-import { changeRole, setMemberStatus, removeMember } from '@/lib/team/service'
+import { changeRole, setMemberStatus, removeMember, resendInvitation } from '@/lib/team/service'
+import { RATE_POLICY, checkPolicy } from '@/lib/rateLimit/policies'
 
 export async function PATCH(
   req: NextRequest,
@@ -31,6 +32,19 @@ export async function PATCH(
   }
   if (body.action === 'suspend' || body.action === 'reactivate') {
     const r = await setMemberStatus({ ...base, status: body.action === 'suspend' ? 'suspended' : 'active' })
+    return r.ok ? NextResponse.json({ member: r.data }) : NextResponse.json({ error: r.error }, { status: r.status })
+  }
+  if (body.action === 'resend') {
+    // Throttled, and ONLY here. The other actions are pure Firestore writes; resend is the
+    // one that sends email, which makes it the one that could be looped to mail-bomb an
+    // address and burn provider quota. It reuses the POST invite policy rather than adding a
+    // second one, so both routes that can send an invitation share a single budget.
+    const rl = checkPolicy(caller.uid, RATE_POLICY.teamInvite)
+    if (rl.limited) return NextResponse.json(
+      { error: 'Too many invitations. Please try again later.' },
+      { status: 429, headers: { 'Retry-After': String(rl.retryAfter) } },
+    )
+    const r = await resendInvitation({ ...base, ownerEmail: caller.email })
     return r.ok ? NextResponse.json({ member: r.data }) : NextResponse.json({ error: r.error }, { status: r.status })
   }
   return NextResponse.json({ error: 'Unknown action.' }, { status: 400 })

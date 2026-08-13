@@ -105,6 +105,9 @@ export default function TeamPage() {
   const reactivate  = (id: string) => act(id, { method: 'PATCH', body: JSON.stringify({ action: 'reactivate' }) }, 'Member reactivated.')
   const remove      = async (id: string) => { if (await confirm({ message: 'Remove this team member? This cannot be undone.', tone: 'danger' })) void act(id, { method: 'DELETE' }, 'Member removed.') }
   const cancelInvite= async (id: string) => { if (await confirm({ message: 'Cancel this invitation?', tone: 'danger' })) void act(id, { method: 'DELETE' }, 'Invitation cancelled.') }
+  // No confirm dialog: resending is non-destructive and reuses the SAME link, so a link the
+  // invitee already has keeps working. It restarts the 7-day expiry.
+  const resendInvite= (id: string) => act(id, { method: 'PATCH', body: JSON.stringify({ action: 'resend' }) }, 'Invitation resent.')
 
   return (
     <div className="space-y-6 p-5 sm:p-6">
@@ -235,10 +238,17 @@ export default function TeamPage() {
                         <td className="px-4 py-3 text-muted-foreground">{ROLE_LABEL[m.role]}</td>
                         <td className="px-4 py-3 text-muted-foreground">{fmtDate(m.invitedAt)}</td>
                         <td className="px-4 py-3 text-right">
-                          <button onClick={() => cancelInvite(m.id)} disabled={busyId === m.id}
-                            className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-[12px] font-medium text-red-600 hover:bg-muted disabled:opacity-50">
-                            <Trash2 className="size-3.5" aria-hidden /> Cancel
-                          </button>
+                          <div className="flex items-center justify-end gap-2">
+                            <button onClick={() => resendInvite(m.id)} disabled={busyId === m.id}
+                              title="Send the invitation email again (same link, 7-day expiry restarts)"
+                              className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-[12px] font-medium text-foreground hover:bg-muted disabled:opacity-50">
+                              <Mail className="size-3.5" aria-hidden /> Resend
+                            </button>
+                            <button onClick={() => cancelInvite(m.id)} disabled={busyId === m.id}
+                              className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-[12px] font-medium text-red-600 hover:bg-muted disabled:opacity-50">
+                              <Trash2 className="size-3.5" aria-hidden /> Cancel
+                            </button>
+                          </div>
                         </td>
                       </tr>
                     ))}

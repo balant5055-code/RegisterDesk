@@ -13,6 +13,11 @@ export const TEAM_AUDIT_ACTIONS = [
   'team.suspended',
   'team.reactivated',
   'team.removed',
+  // A resend is deliberately its OWN action rather than a second 'team.invited'. The two
+  // answer different questions — "when was this person first invited" vs "how many times
+  // have we mailed them" — and collapsing them would hide exactly the history that made a
+  // missing invitation impossible to diagnose.
+  'team.invite_resent',
 ] as const
 
 export type TeamAuditAction = typeof TEAM_AUDIT_ACTIONS[number]
