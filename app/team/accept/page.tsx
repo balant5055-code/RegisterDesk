@@ -27,7 +27,11 @@ function AcceptInner() {
   const accept = useCallback(async (user: User) => {
     setPhase('accepting')
     try {
-      const tok = await user.getIdToken()
+      // force-refresh: `/api/auth/verify-otp` flips emailVerified via adminAuth.updateUser,
+      // and `reload()` updates the local User object — but neither reissues the ID token.
+      // The cached JWT keeps `email_verified: false` for up to an hour, and verifyCaller
+      // rejects exactly that claim, so a just-verified invitee was told to sign in again.
+      const tok = await user.getIdToken(true)
       const res = await fetch('/api/team/accept', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tok}` },
