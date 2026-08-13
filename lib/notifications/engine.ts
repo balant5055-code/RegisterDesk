@@ -29,6 +29,7 @@ import { resolveProvider } from './providerResolver'
 import type { EmailProviderName } from '@/lib/email/providerName'
 import { getNotificationHooks, type NotificationContext, type NotificationHooks } from './hooks'
 import { getCommunicationConfig } from '@/lib/communications/resolveCommunicationConfig'
+import { resolvePlatformEmailProvider } from '@/lib/email/resolvePlatformProvider'
 
 // RD-ORGANIZER-04 P1-3: bulk send types run their own resumable job/wave machinery and are
 // single-attempt by design — only TRANSACTIONAL emails get automatic bounded retry.
@@ -100,7 +101,26 @@ class NotificationEngine {
       }
     }
 
-    const provider = resolveProvider(channel, providerName)
+    // RD-EMAIL-PROVIDER — the provider a caller did NOT specify.
+    //
+    // An explicit `providerName` is honoured EXACTLY and never reconsidered: every
+    // event-scoped caller resolves its transport from `events/{slug}.emailProvider` via
+    // resolveEventEmailProvider() and passes it here, and that decision outranks any
+    // platform setting. Only the ABSENCE of a preference is filled in below.
+    //
+    // Before this, an omitted name went straight to the DEFAULT_EMAIL_PROVIDER code
+    // constant, which is why `communication.email.provider` was editable in Business
+    // Configuration and controlled nothing. It now controls exactly what it claims to:
+    // platform mail. An absent or invalid setting still resolves to DEFAULT_EMAIL_PROVIDER,
+    // so a workspace that never touches the field behaves exactly as it does today.
+    //
+    // Costs no extra I/O: businessConfig caches for 60s and the enabled-check above has
+    // already warmed it.
+    const effectiveProvider = channel === NotificationChannel.EMAIL && providerName === undefined
+      ? await resolvePlatformEmailProvider()
+      : providerName
+
+    const provider = resolveProvider(channel, effectiveProvider)
     if (!provider) {
       const result: EmailResult = { success: false, error: 'provider_unavailable' }
       await runHook('afterSend', h => h.afterSend?.(ctx, result))
