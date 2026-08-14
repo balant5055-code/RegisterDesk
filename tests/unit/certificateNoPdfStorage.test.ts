@@ -1,23 +1,48 @@
-// Issuing a certificate must NOT upload the generated PDF to Storage.
+// Issuing a certificate MUST persist the generated PDF as a durable artifact.
 //
-// WHY. Every generated certificate used to be uploaded and then re-read on every download.
-// At event scale that is ~2.9 MB × 10,000 ≈ 29 GB written once and re-read forever, for an
-// artifact the download endpoint can rebuild deterministically from the `data` snapshot.
-// The snapshot is what makes the stored copy redundant — so this file pins BOTH halves:
-// no upload happens, AND the snapshot that replaces it is still persisted.
+// ═══ THIS FILE'S INTENT WAS DELIBERATELY INVERTED ════════════════════════════
+// It used to assert the opposite — that no upload happened — because generated PDFs were
+// dropped and every download re-rendered them from the `data` snapshot. That traded a
+// one-time write for an unbounded recurring cost: ~155 ms of CPU per download on a path
+// that barely parallelises, so 10,000 attendees downloading became a rendering queue. It
+// also made a certificate reproducible only while its TEMPLATE still existed and still
+// rendered.
 //
-// Template/background assets are a different thing entirely and MUST stay in Storage; the
-// render still fetches them, and that fetch is mocked here rather than asserted against.
+// The snapshot is still persisted and still authoritative — regeneration and legacy
+// records depend on it — so this file pins BOTH halves: the artifact is stored, AND the
+// snapshot that can rebuild it is not lost.
+//
+// The legacy Firebase Storage path (`uploadServerFile` → `fileUrl`) must stay unused: new
+// certificates are addressed by `fileKey` in platform storage, and a record that wrote both
+// would be ambiguous about which artifact is canonical.
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
-const uploads: string[] = []
+const legacyUploads: string[] = []
+const platformUploads: Array<{ id: string; eventSlug: string; mimeType: string; visibility?: string }> = []
 const created: Record<string, unknown>[] = []
 
-// THE assertion surface: any generated-PDF upload lands here.
+// The LEGACY surface — must stay empty.
 vi.mock('@/lib/firebase/storage/admin', () => ({
-  uploadServerFile: async (path: string) => { uploads.push(path); return { url: `https://storage.test/${path}` } },
+  uploadServerFile: async (path: string) => { legacyUploads.push(path); return { url: `https://storage.test/${path}` } },
 }))
+
+// The CURRENT surface — must receive exactly one PDF.
+vi.mock('@/features/platform-storage', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/features/platform-storage')>()
+  return {
+    ...actual,
+    storage: {
+      upload: async (input: { id: string; eventSlug: string; body: Uint8Array; mimeType: string; visibility?: string }) => {
+        platformUploads.push({ id: input.id, eventSlug: input.eventSlug, mimeType: input.mimeType, visibility: input.visibility })
+        return { metadata: { path: `events/${input.eventSlug}/certificates/${input.id}`, size: input.body.byteLength } }
+      },
+      delete: async () => {},
+      download: async () => ({ body: new Uint8Array([1]), mimeType: 'application/pdf', size: 1 }),
+      generateSignedUrl: async () => 'https://r2.test/signed',
+    },
+  }
+})
 
 vi.mock('@/lib/certificates/render', () => ({
   renderCertificatePdf: async () => new Uint8Array([0x25, 0x50, 0x44, 0x46]),   // "%PDF"
@@ -41,6 +66,7 @@ vi.mock('@/lib/certificates/firestore', () => ({
   getTemplateById:      async () => null,
   recordCertificateRegeneration: async () => {},
   releaseCertificateClaim: async () => {},
+  setCertificateArtifact: async () => {},
   getSettings:          async () => null,
   recordTemplateUsage:  async () => {},
 }))
@@ -71,27 +97,46 @@ const INPUT = {
   bibNumber: '1234', distance: '10K', finishTime: '00:52:10', position: '7', category: 'M',
 } as never
 
-beforeEach(() => { uploads.length = 0; created.length = 0 })
+const run = () => generateCertificate({
+  input: INPUT, certificateType: 'participation', source: 'manual', template: TEMPLATE,
+} as never)
 
-describe('certificate issuance no longer stores the generated PDF', () => {
-  it('1 · performs NO Storage upload', async () => {
-    await generateCertificate({ input: INPUT, certificateType: 'participation', source: 'manual', template: TEMPLATE } as never)
-    expect(uploads).toEqual([])
+beforeEach(() => { legacyUploads.length = 0; platformUploads.length = 0; created.length = 0 })
+
+describe('certificate issuance PERSISTS the generated PDF', () => {
+  it('1 · uploads exactly one PDF to platform storage', async () => {
+    await run()
+    expect(platformUploads).toHaveLength(1)
+    expect(platformUploads[0].mimeType).toBe('application/pdf')
+    expect(platformUploads[0].id).toBe('RDC-2026-AB12CD.pdf')
+    expect(platformUploads[0].eventSlug).toBe('noyyal-marathon-2026')
   })
 
-  it('2/3 · persists fileUrl = null and fileSize = null', async () => {
-    await generateCertificate({ input: INPUT, certificateType: 'participation', source: 'manual', template: TEMPLATE } as never)
+  it('2 · requests SIGNED_URL visibility — a certificate is never PUBLIC', async () => {
+    await run()
+    // Names a participant and their result; the storage layer refuses PUBLIC for this
+    // asset type outright, and issuance must not even ask for it.
+    expect(platformUploads[0].visibility).toBe('SIGNED_URL')
+  })
+
+  it('3 · does NOT use the legacy Firebase Storage path', async () => {
+    await run()
+    expect(legacyUploads).toEqual([])
+  })
+
+  it('4 · persists fileKey + fileSize, and leaves the legacy fileUrl null', async () => {
+    await run()
     expect(created).toHaveLength(1)
+    expect(created[0].fileKey).toBe('events/noyyal-marathon-2026/certificates/RDC-2026-AB12CD.pdf')
+    expect(created[0].fileSize).toBe(4)
     expect(created[0].fileUrl).toBeNull()
-    expect(created[0].fileSize).toBeNull()
   })
 
-  it('4 · still persists the placeholder snapshot that on-demand rendering depends on', async () => {
-    await generateCertificate({ input: INPUT, certificateType: 'participation', source: 'manual', template: TEMPLATE } as never)
+  it('5 · STILL persists the placeholder snapshot — regeneration and legacy records need it', async () => {
+    await run()
     const data = created[0].data as Record<string, string>
 
-    // Without these the certificate could never be re-rendered faithfully. issueDate in
-    // particular: if it were not snapshotted, a later download would stamp today's date.
+    // issueDate in particular: without it a later re-render would stamp today's date.
     expect(data.participantName).toBe('Bala Ganapathy')
     expect(data.eventName).toBe('Noyyal Marathon 2026')
     expect(data.eventDate).toBe('15 June 2026')
@@ -101,7 +146,7 @@ describe('certificate issuance no longer stores the generated PDF', () => {
     expect(data.issueDate).toBeTruthy()
   })
 
-  it('still records identity, verification and attribution fields', async () => {
+  it('6 · still records identity, verification and attribution fields', async () => {
     await generateCertificate({ input: INPUT, certificateType: 'participation', source: 'manual', template: TEMPLATE, jobId: 'job-9' } as never)
     const c = created[0]
     for (const k of ['certificateId', 'verificationToken', 'eventId', 'eventSlug', 'organizerUid',
@@ -111,20 +156,5 @@ describe('certificate issuance no longer stores the generated PDF', () => {
     }
     expect(c.jobId).toBe('job-9')
     expect(c.templateId).toBe('TPL-1')
-  })
-
-  it('still RENDERS at issuance — a broken template must fail before the record is written', async () => {
-    // Rendering is retained deliberately: it proves the certificate is producible before a
-    // record exists and the wallet is charged. Only the upload was removed.
-    vi.resetModules()
-    vi.doMock('@/lib/certificates/render', () => ({
-      renderCertificatePdf: async () => { throw new Error('template unreadable') },
-    }))
-    const { generateCertificate: gen } = await import('@/lib/certificates/generate')
-    await expect(
-      gen({ input: INPUT, certificateType: 'participation', source: 'manual', template: TEMPLATE } as never),
-    ).rejects.toThrow()
-    vi.doUnmock('@/lib/certificates/render')
-    vi.resetModules()
   })
 })

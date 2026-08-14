@@ -1,35 +1,43 @@
 // POST /api/organizer/events/[eventId]/certificates/download
 //
-// Bulk certificate ZIP download (GA-4 S2). Reuses the shared ZIP engine
-// (lib/certificates/zip → buildStoredZip) over already-generated certificate PDFs.
-// Never re-renders. Security: auth + event ownership.
+// Bulk certificate ZIP — ENQUEUE ONLY. Returns 202 with a zip-job id; the archive is
+// produced asynchronously in shards by lib/certificates/zipJobs and collected from
+// /api/organizer/events/[eventId]/certificates/zip-jobs/[jobId].
+//
+// ═══ WHY THIS NO LONGER STREAMS ══════════════════════════════════════════════
+// It used to build the whole archive inside this request. Two defects made that
+// unfixable in place:
+//
+//   1. SILENT TRUNCATION. The eligibility guard counted only certificates carrying a
+//      stored `fileUrl`. Once issuance stopped writing that field the count was always
+//      zero, so the "too many certificates" rejection could never fire — and a selection
+//      above the ceiling was quietly sliced to 5,000, with the loss reported only in an
+//      `X-Certificate-Skipped` header no browser download ever surfaces.
+//   2. IT COULD NOT FINISH. Every entry re-rendered its PDF, so the advertised 5,000-file
+//      ceiling needed roughly 10 minutes against a 300 s budget. A timeout mid-stream is
+//      indistinguishable from success, because `200 OK` and the headers are already sent.
+//
+// Both are structural, not tunable. The job path replaces them with shards that are
+// individually atomic and a manifest that states exactly what is and is not included.
 //
 // Body: { scope: 'selected' | 'all' | 'job', certificateIds?: string[], jobId?: string }
-//   • 'selected' → only the given certificateIds
-//   • 'all'      → every generated certificate for the event
-//   • 'job'      → certificates produced by a specific generation job
 
 import { NextRequest, NextResponse } from 'next/server'
 import { adminDb }                   from '@/lib/firebase/admin'
 import { authorizeWorkspace }        from '@/lib/team/workspace'
-import { listEventCertificates, listJobCertificates, getCertificatesByIds, countEventCertificates } from '@/lib/certificates/firestore'
-import { selectZipCertificates, streamCertificatesZip, CERTIFICATE_ZIP_MAX_FILES } from '@/lib/certificates/zip'
+import { countEventCertificates, countJobCertificates } from '@/lib/certificates/firestore'
+import { loadEventContext }          from '@/lib/certificates/jobs'
+import { createZipJob }              from '@/lib/certificates/zipJobsStore'
+import { MAX_EXPLICIT_IDS }          from '@/lib/certificates/validation'
 import { RATE_POLICY, checkPolicy }  from '@/lib/rateLimit/policies'
-import type { Certificate }          from '@/lib/certificates/types'
 
 type Params = { params: Promise<{ eventId: string }> }
-
-// GA-7C S2/P7: the ZIP streams up to CERTIFICATE_ZIP_MAX_FILES PDF fetches — give it
-// the same generous budget as the other bulk certificate paths (streaming keeps
-// memory flat; this bounds wall-clock).
-export const maxDuration = 300
 
 export async function POST(req: NextRequest, { params }: Params): Promise<NextResponse> {
   const authz = await authorizeWorkspace(req, 'certificates')
   if (!authz.ok) return NextResponse.json({ error: authz.error }, { status: authz.status })
   const uid = authz.workspaceUid
 
-  // Bulk ZIP assembly is expensive — throttle per workspace (same PDF policy).
   const rl = checkPolicy(uid, RATE_POLICY.pdfDownload)
   if (rl.limited) {
     return NextResponse.json(
@@ -47,65 +55,63 @@ export async function POST(req: NextRequest, { params }: Params): Promise<NextRe
 
   const scope = body.scope === 'selected' || body.scope === 'job' ? body.scope : 'all'
 
-  // GA-7C P1-3: resolve the selection with a TARGETED query per scope instead of
-  // loading the whole event's certificate collection and filtering in memory. The
-  // 'all' scope is count-gated first so a huge event is rejected without loading it.
-  let selected: Certificate[]
+  // The event slug scopes the shard objects; it is also the ownership check.
+  const ctx = await loadEventContext(uid, eventId)
+  if (!ctx.ok) {
+    return ctx.code === 'not_found'
+      ? NextResponse.json({ error: 'Event not found' }, { status: 404 })
+      : NextResponse.json({ error: 'Event not published' }, { status: 422 })
+  }
+
+  let certificateIds: string[] | null = null
+  let sourceJobId:    string | null   = null
+  let total = 0
+
   if (scope === 'selected') {
-    const idList = Array.isArray(body.certificateIds) ? body.certificateIds.filter((v): v is string => typeof v === 'string') : []
-    if (idList.length === 0) return NextResponse.json({ error: 'certificateIds required for scope "selected"' }, { status: 422 })
-    if (idList.length > CERTIFICATE_ZIP_MAX_FILES) {
-      return NextResponse.json({ error: `Too many certificates for a single ZIP (${idList.length} > ${CERTIFICATE_ZIP_MAX_FILES}). Download in batches.` }, { status: 413 })
+    const ids = Array.isArray(body.certificateIds)
+      ? body.certificateIds.filter((v): v is string => typeof v === 'string')
+      : []
+    if (ids.length === 0) {
+      return NextResponse.json({ error: 'certificateIds required for scope "selected"' }, { status: 422 })
     }
-    selected = await getCertificatesByIds(eventId, uid, idList)
-  } else if (scope === 'job') {
-    const jobId = typeof body.jobId === 'string' ? body.jobId : ''
-    if (!jobId) return NextResponse.json({ error: 'jobId required for scope "job"' }, { status: 422 })
-    selected = await listJobCertificates(eventId, uid, jobId)
-  } else {
-    const total = await countEventCertificates(eventId, uid)
-    if (total > CERTIFICATE_ZIP_MAX_FILES) {
+    // Bounded so the id array stays inside a Firestore document. Unlike the old ceiling
+    // this is a hard REJECTION, never a silent slice.
+    if (ids.length > MAX_EXPLICIT_IDS) {
       return NextResponse.json(
-        { error: `Too many certificates for a single ZIP (${total} > ${CERTIFICATE_ZIP_MAX_FILES}). Narrow the selection (by job or selected certificates) and download in batches.` },
+        { error: `Too many certificates in one request (${ids.length} > ${MAX_EXPLICIT_IDS}). Split the selection.` },
         { status: 413 },
       )
     }
-    selected = await listEventCertificates(eventId, uid)
+    certificateIds = ids
+    total = ids.length
+  } else if (scope === 'job') {
+    if (typeof body.jobId !== 'string' || !body.jobId) {
+      return NextResponse.json({ error: 'jobId required for scope "job"' }, { status: 422 })
+    }
+    sourceJobId = body.jobId
+    // Counted with a Firestore AGGREGATE, not by resolving the selection: `requested` must
+    // be truthful from the first poll, and loading every certificate here would be an
+    // unbounded read on the request path. Leaving it 0 made the poll response report
+    // `requested: 0, included: N`, breaking the completeness contract this API advertises.
+    total = await countJobCertificates(eventId, uid, sourceJobId)
+    if (total === 0) return NextResponse.json({ error: 'No certificates match the selection' }, { status: 404 })
+  } else {
+    total = await countEventCertificates(eventId, uid)
+    if (total === 0) return NextResponse.json({ error: 'No certificates match the selection' }, { status: 404 })
   }
 
-  if (selected.length === 0) return NextResponse.json({ error: 'No certificates match the selection' }, { status: 404 })
+  const job = await createZipJob({
+    organizerUid: uid,
+    createdBy:    authz.callerUid || uid,
+    eventId,
+    eventSlug:    ctx.ctx.eventSlug,
+    scope,
+    sourceJobId,
+    certificateIds,
+  }, total)
 
-  // GA-5 S2: never silently truncate. A selection above the synchronous-ZIP ceiling
-  // is rejected with guidance to narrow the scope (by job / selected IDs).
-  const downloadable = selected.filter(c => c.status !== 'revoked' && typeof c.fileUrl === 'string' && c.fileUrl).length
-  if (downloadable > CERTIFICATE_ZIP_MAX_FILES) {
-    return NextResponse.json(
-      { error: `Too many certificates for a single ZIP (${downloadable} > ${CERTIFICATE_ZIP_MAX_FILES}). Narrow the selection (by job or selected certificates) and download in batches.` },
-      { status: 413 },
-    )
-  }
-
-  // GA-7C P1-2: STREAM the archive instead of buffering every PDF + a full concat
-  // copy in memory (which peaked at multi-GB near the 5000-file cap). PDFs are
-  // fetched in bounded-concurrency batches and piped into the streaming STORED-zip
-  // writer, so only a handful of PDFs are resident at once. Selection is computed
-  // upfront (no fetches) so the response headers are known before the body streams.
-  const { usable, skipped } = selectZipCertificates(selected)
-  if (usable.length === 0) {
-    // Reachable only when every selected certificate is revoked — a certificate without a
-    // stored file is no longer excluded, it is rendered on demand.
-    return NextResponse.json({ error: 'No downloadable certificates in this selection (all revoked).' }, { status: 409 })
-  }
-
-  const filename = `certificates-${eventId}-${scope}-${usable.length}.zip`
-  return new NextResponse(streamCertificatesZip(usable), {
-    status: 200,
-    headers: {
-      'Content-Type':        'application/zip',
-      'Content-Disposition': `attachment; filename="${filename}"`,
-      'Cache-Control':       'no-store',
-      'X-Certificate-Count': String(usable.length),
-      'X-Certificate-Skipped': String(skipped),
-    },
-  })
+  return NextResponse.json(
+    { jobId: job.jobId, status: job.status, scope, total },
+    { status: 202 },
+  )
 }

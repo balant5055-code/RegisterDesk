@@ -45,6 +45,8 @@ const POLICY: Readonly<Record<StorageAssetType, TypePolicy>> = {
       'application/pdf',
       'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
       'application/zip',
+      // RD-CERT-ARTIFACT-01 — machine-readable manifests for a sharded archive.
+      'application/json',
     ],
     maxBytes: 100 * MB,
   },

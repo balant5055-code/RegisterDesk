@@ -22,8 +22,7 @@ import {
 import { emailCertificate } from './email'
 import { chargeCertificate } from './billing'
 import { sendCertificateWhatsApp } from './whatsapp'
-import { uploadServerFile }         from '@/lib/firebase/storage/admin'
-import { generatedCertificatePath } from './constants'
+import { uploadCertificateArtifact, deleteCertificateArtifact } from './artifact'
 import { safeFetchBytes, validateEventTemplateUrl, validateGlobalTemplateUrl } from './urlGuard'
 import { getEmailAppUrl } from '@/lib/email/appUrl'
 import { enqueueWebhook }           from '@/lib/integrations/webhooks'
@@ -248,18 +247,28 @@ export async function generateCertificate(
       assets,
     })
 
-    // NO UPLOAD. The generated PDF is NOT persisted: the download endpoint re-renders it
-    // on demand from the `data` snapshot below, through this same renderCertificatePdf, so
-    // a stored copy is pure cost — at event scale ~2.9 MB × 10,000 ≈ 29 GB written once and
-    // then re-read for every download.
+    // ═══ RD-CERT-ARTIFACT-01 · PERSIST THE PDF *BEFORE* THE RECORD ═══════════
     //
-    // `pdfBytes` is still rendered above, deliberately: rendering here is what proves the
-    // certificate CAN be produced before the record is committed and the wallet charged.
-    // A template that fails to render fails the issuance rather than creating a record
-    // whose download would 502 forever. The bytes are dropped once this scope exits.
+    // THE INVARIANT: a certificate record exists ⟹ its artifact exists. Downloads may then
+    // serve stored bytes by signed URL instead of re-rendering (~155 ms of CPU each, on a
+    // path that barely parallelises), which is what makes 10,000 concurrent downloads a
+    // storage problem rather than a rendering queue.
     //
-    // fileUrl/fileSize = null is an EXISTING supported state (types.ts:358 "null =
-    // generated on demand"), not a new one — the MVP path at types.ts:681 already emits it.
+    // ORDER IS THE WHOLE SAFETY STORY, and it is the same ordering the certificate-photo
+    // route already proves: write the object, THEN commit the reference. The two failure
+    // modes are not symmetric —
+    //   • an orphaned object is bounded, sweepable, and OVERWRITTEN by the next retry,
+    //     because the key is deterministic;
+    //   • a record pointing at bytes that are not there is a permanently broken
+    //     certificate that no retry can repair, since `findCertificate` would return it
+    //     and generation would never run again.
+    //
+    // An upload failure therefore throws to the outer catch, which releases the claim and
+    // lets the item be counted failed and retried — exactly as a render failure already
+    // does. No record is created, nothing is billed, and the tuple stays regenerable.
+    const { fileKey, fileSize } = await uploadCertificateArtifact(
+      input.eventSlug, certificateId, pdfBytes,
+    )
 
     // Persist the certificate record (new `certificates` collection).
     const certInput: CertificateInput = {
@@ -276,13 +285,26 @@ export async function generateCertificate(
       eventDate:      input.eventDate,
       certificateType,
       templateId:     template.templateId,
-      fileUrl:        null,   // generated on demand — see the note above
-      fileSize:       null,
+      fileUrl:        null,      // legacy Firebase Storage field — never written any more
+      fileKey,                   // the canonical artifact, already uploaded above
+      fileSize,
       source,
       data:           snapshotData(context),
       jobId:          params.jobId ?? null,
     }
-    const certificate = await createCertificate(certInput)
+    // If the record cannot be written, the artifact we just uploaded is unreferenced —
+    // remove it rather than leave a paid-for object nothing points at. Best-effort by
+    // design: the deterministic key means a retry overwrites it even if this delete fails,
+    // so a failed cleanup costs storage, never correctness. Rethrown so the outer catch
+    // releases the claim.
+    let certificate: Certificate
+    try {
+      certificate = await createCertificate(certInput)
+    } catch (err) {
+      await deleteCertificateArtifact(fileKey)
+      throw err
+    }
+
 
     // Wallet billing (GA-4 S2). Idempotent + config-driven; runs on the create path
     // only, so a re-issued/duplicate tuple (which returns early above) never charges
@@ -493,11 +515,10 @@ export async function regenerateCertificate(
     assets,
   })
 
-  const path = generatedCertificatePath(existing.eventId, certificateId)
-  const { url } = await uploadServerFile(path, pdfBytes, 'application/pdf')
-  await recordCertificateRegeneration(certificateId, { fileUrl: url, fileSize: pdfBytes.length, templateId: template.templateId }, opts?.actorUid)
+  const { fileKey, fileSize } = await uploadCertificateArtifact(existing.eventSlug, certificateId, pdfBytes)
+  await recordCertificateRegeneration(certificateId, { fileKey, fileSize, templateId: template.templateId }, opts?.actorUid)
 
-  return { ok: true, certificate: { ...existing, fileUrl: url, fileSize: pdfBytes.length, templateId: template.templateId } }
+  return { ok: true, certificate: { ...existing, fileKey, fileSize, templateId: template.templateId } }
 }
 
 // Re-export for callers that want the placeholder key type without a second import.

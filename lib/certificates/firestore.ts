@@ -1,7 +1,7 @@
 // Certificate Firestore operations — server-only.
 // All reads and writes go through adminDb (Firebase Admin SDK).
 
-import { FieldValue }  from 'firebase-admin/firestore'
+import { FieldValue, FieldPath }  from 'firebase-admin/firestore'
 import { adminDb }     from '@/lib/firebase/admin'
 import { deleteServerFile } from '@/lib/firebase/storage/admin'
 import { validateStorageUrl } from './urlGuard'
@@ -669,6 +669,26 @@ export async function countEventCertificates(eventId: string, organizerUid: stri
 }
 
 /** Certificates produced by one bulk job (new collection), event + organizer scoped. */
+/**
+ * RD-CERT-ARTIFACT-01 — how many certificates a source job produced, WITHOUT loading them.
+ *
+ * The bulk-ZIP enqueue path needs the size to seed `counts.total`, and resolving the whole
+ * selection just to call `.length` on it would be an unbounded read on the request path.
+ * Same query shape as `listJobCertificates` below, so it needs no additional index.
+ */
+export async function countJobCertificates(
+  eventId: string,
+  organizerUid: string,
+  jobId: string,
+): Promise<number> {
+  const snap = await certificatesCol()
+    .where('eventId',      '==', eventId)
+    .where('organizerUid', '==', organizerUid)
+    .where('jobId',        '==', jobId)
+    .count().get()
+  return snap.data().count
+}
+
 export async function listJobCertificates(
   eventId: string,
   organizerUid: string,
@@ -865,6 +885,52 @@ export async function createCertificate(input: CertificateInput): Promise<Certif
 }
 
 /**
+ * RD-CERT-ARTIFACT-01 — records the persisted artifact on an EXISTING certificate.
+ *
+ * Used only by the backfill job and the legacy self-heal path. New certificates carry
+ * `fileKey` from `createCertificate`, because the artifact is uploaded BEFORE the record
+ * exists — a record must never be created that points at bytes that are not there.
+ *
+ * `update` (not `set`) so it can never resurrect a deleted certificate.
+ */
+export async function setCertificateArtifact(
+  certificateId: string,
+  artifact: { fileKey: string; fileSize: number },
+): Promise<void> {
+  await certificatesCol().doc(certificateId).update({
+    fileKey:  artifact.fileKey,
+    fileSize: artifact.fileSize,
+  })
+}
+
+/**
+ * One page of certificates that have no persisted artifact yet, for the backfill job.
+ *
+ * Ordered by document id and resumed with `startAfter`, matching every other cursor-paged
+ * reader in the job system, so an interrupted backfill continues instead of restarting.
+ * Always bounded — never an unbounded `.get()`.
+ *
+ * Filters on `fileKey == null` rather than a `!=` / missing-field query because Firestore
+ * cannot index the absence of a field: records written before `fileKey` existed do not have
+ * the property at all. The caller therefore re-checks each record and skips any that
+ * already carries a key (see backfillJob), which also makes re-runs free.
+ */
+export async function listCertificatesMissingArtifact(
+  cursor: string | null,
+  limit:  number,
+): Promise<{ certs: Certificate[]; nextCursor: string | null; hasMore: boolean }> {
+  let q = certificatesCol().orderBy(FieldPath.documentId())
+  if (cursor) q = q.startAfter(cursor)
+  const snap = await q.limit(limit).get()
+  const certs = snap.docs.map(d => d.data() as Certificate)
+  return {
+    certs,
+    nextCursor: snap.docs.length ? snap.docs[snap.docs.length - 1].id : cursor,
+    hasMore:    snap.size === limit,
+  }
+}
+
+/**
  * Revokes a certificate (Phase 9): sets status `revoked`, stamps
  * revokedAt/By/Reason, and appends an append-only revocationHistory entry.
  * Verifies ownership + event inside the transaction. Idempotent — re-revoking an
@@ -976,12 +1042,16 @@ export async function recordCertificateEmail(
  */
 export async function recordCertificateRegeneration(
   certificateId: string,
-  patch: { fileUrl: string; fileSize: number; templateId: string },
+  patch: { fileKey: string; fileSize: number; templateId: string },
   actorUid?: string,
 ): Promise<void> {
   const entry = { at: new Date().toISOString(), templateId: patch.templateId, actorUid: actorUid ?? null }
   await certificatesCol().doc(certificateId).update({
-    fileUrl:             patch.fileUrl,
+    // RD-CERT-ARTIFACT-01 — regeneration overwrites the CANONICAL artifact at the same
+    // deterministic key, so downloads immediately serve the new render. `fileUrl` is left
+    // untouched: it is the legacy pointer, and a regenerated certificate is no longer served
+    // from it. Clearing it would erase provenance for records that still have one.
+    fileKey:             patch.fileKey,
     fileSize:            patch.fileSize,
     templateId:          patch.templateId,
     regeneratedAt:       FieldValue.serverTimestamp(),

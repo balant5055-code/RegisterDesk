@@ -355,7 +355,12 @@ export interface Certificate {
   eventDate:         string               // human-readable, e.g. "15 June 2026"
   certificateType:   CertificateType
   templateId:        string | null        // CertificateTemplateDoc used, if any
-  fileUrl:           string | null        // stored asset; null = generated on demand
+  /** LEGACY stored asset — a Firebase Storage download URL from the pre-R2 pipeline. */
+  fileUrl:           string | null
+  /** RD-CERT-ARTIFACT-01 — the canonical PDF's object KEY in platform storage. A KEY,
+   *  never a URL: signed URLs expire. `null` ⇒ no persisted artifact (legacy/MVP), which
+   *  remains downloadable through the on-demand render fallback. */
+  fileKey:           string | null
   fileSize:          number | null        // bytes, when stored
   status:            CertificateStatus
   source:            CertificateSource
@@ -382,7 +387,7 @@ export type CertificateInput = Pick<Certificate,
   | 'certificateId' | 'verificationToken' | 'eventId' | 'eventSlug'
   | 'organizerUid' | 'issuedBy' | 'registrationId' | 'attendeeName' | 'attendeeEmail'
   | 'eventName' | 'eventDate' | 'certificateType' | 'templateId'
-  | 'fileUrl' | 'fileSize' | 'source' | 'data' | 'jobId'
+  | 'fileUrl' | 'fileKey' | 'fileSize' | 'source' | 'data' | 'jobId'
 >
 
 /** Serialized for API responses (Timestamps → ISO strings). */
@@ -679,6 +684,7 @@ export function legacyRecordToCertificate(r: CertificateRecord): Certificate {
     certificateType:   'participation',   // MVP records carry no per-record type
     templateId:        null,
     fileUrl:           null,              // regenerated on demand by the MVP
+    fileKey:           null,              // MVP records have no persisted artifact
     fileSize:          null,
     status:            r.status,
     source:            'manual',
