@@ -15,11 +15,11 @@ import {
   recordCertificateRegeneration,
   reserveCertificateId,
   releaseCertificateClaim,
-  getSettings,
+
   recordTemplateUsage,
   assertRegistrationEligibleForCertificate,
 } from './firestore'
-import { emailCertificate } from './email'
+
 import { chargeCertificate } from './billing'
 import { sendCertificateWhatsApp } from './whatsapp'
 import { uploadCertificateArtifact, deleteCertificateArtifact } from './artifact'
@@ -320,21 +320,20 @@ export async function generateCertificate(
     })
     const charged = billing?.charged === true
 
-    // Auto-email: explicit override wins; otherwise honor settings.autoEmail.
-    let shouldEmail = params.email
-    if (shouldEmail === undefined) {
-      const settings = await getSettings(eventId)
-      shouldEmail = settings?.autoEmail.enabled ?? false
-    }
-
-    let emailed = false
-    if (shouldEmail) {
-      // Best-effort — a delivery failure must not fail generation. Reuse the
-      // in-memory PDF so we don't re-fetch what we just uploaded.
-      const r = await emailCertificate(certificate, { pdfBytes })
-        .catch(err => { captureError(err, { scope: 'certificate_email', area: 'certificate', certificateId }); return null })
-      emailed = r?.success ?? false
-    }
+    // RD-CERT-EMAIL-BULK — GENERATION NO LONGER SENDS EMAIL.
+    //
+    // Issuing a certificate and delivering it are now separate operations. Sending here
+    // made delivery an invisible side effect of generation: it could not be retried
+    // without regenerating, its failures were not surfaced anywhere an operator looks,
+    // and at bulk scale it charged an unbounded provider wait to the generation budget.
+    //
+    // Delivery is an explicit action from Recipients — single (…/certificates/email) or
+    // bulk (certificateEmailJobs). `settings.autoEmail` is still read there for the
+    // subject and message; only the automatic TRIGGER is gone.
+    //
+    // `emailed` stays in the result shape (always false) so existing callers and the
+    // Overview stat keep compiling and reading.
+    const emailed = false
 
     // WhatsApp delivery (GA-4 S2) — automatically sent after successful generation.
     // Fire-and-forget; reuses the Notification/WhatsApp engine + certificate_ready

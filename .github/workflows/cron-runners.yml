@@ -75,6 +75,17 @@ jobs:
             -H "Authorization: Bearer $CRON_SECRET" \
             --retry 2 --retry-delay 5 --max-time 65 --fail-with-body
 
+      # Delivery is deliberately a SEPARATE invocation from certificate-jobs: that route
+      # already shares one 50s budget between generation and bulk-ZIP, so a delivery loop
+      # added there would be starved by whichever ran first. Its own tick means a long
+      # generation backlog can never stall attendee email.
+      - name: certificate-email-jobs (bulk certificate delivery)
+        continue-on-error: true
+        run: |
+          curl -sS -X POST "$CRON_BASE_URL/api/cron/certificate-email-jobs" \
+            -H "Authorization: Bearer $CRON_SECRET" \
+            --retry 2 --retry-delay 5 --max-time 65 --fail-with-body
+
       - name: registration-import
         continue-on-error: true
         run: |

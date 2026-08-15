@@ -33,6 +33,14 @@ export const COLLECTIONS = {
   ZIP_JOBS: 'certificateZipJobs',
   /** certificateBackfillJobs/{jobId} — artifact backfill for legacy fileKey=null records. */
   BACKFILL_JOBS: 'certificateBackfillJobs',
+  /**
+   * certificateEmailJobs/{jobId} — asynchronous bulk EMAIL DELIVERY (RD-CERT-EMAIL-BULK).
+   *
+   * Deliberately separate from JOBS (generation): the two carry different counts and
+   * different scopes, and generation no longer sends email as a side effect, so a single
+   * collection would make `counts` ambiguous on both surfaces.
+   */
+  EMAIL_JOBS: 'certificateEmailJobs',
 } as const
 
 export type CertificateCollection = (typeof COLLECTIONS)[keyof typeof COLLECTIONS]

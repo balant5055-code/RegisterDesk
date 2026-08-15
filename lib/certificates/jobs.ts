@@ -9,7 +9,6 @@ import { adminDb }   from '@/lib/firebase/admin'
 import { getTemplateById } from './firestore'
 import { generateCertificate, loadRenderAssets, CertificateInProgressError } from './generate'
 import type { RenderAssets } from './generate'
-import { emailCertificate } from './email'
 import { notifyCertificateJobComplete } from '@/lib/notifications/inbox/notify'
 import { runJobChunk } from '@/lib/jobs/runner'
 import { captureError } from '@/lib/monitoring/sentry'
@@ -171,7 +170,7 @@ async function generateForReg(
   })
 
   try {
-    const { certificate } = await generateCertificate({
+    await generateCertificate({
       input: {
         eventId:        job.eventId,
         eventSlug:      ctx.eventSlug,
@@ -200,13 +199,16 @@ async function generateForReg(
       prefetched,               // template + assets fetched once per chunk (R-5)
     })
 
-    // Bulk email: idempotent (skips already-sent) and failure-isolated — a failed
-    // email never fails the certificate. Covers both "generate + send" and
-    // "send existing" bulk jobs.
-    if (job.autoEmail) {
-      await emailCertificate(certificate)
-        .catch(err => captureError(err, { scope: 'certificate_email', area: 'certificate', jobId: job.jobId, registrationId: reg.id }))
-    }
+    // RD-CERT-EMAIL-BULK — GENERATION NO LONGER SENDS EMAIL.
+    //
+    // This used to call emailCertificate here when job.autoEmail was set. Delivery is now
+    // its own job (certificateEmailJobs), for three reasons this loop could not solve:
+    // an unbounded provider wait was charged to the generation budget; a delivery failure
+    // was invisible in a job whose counts describe certificates created; and there was no
+    // way to retry only the sends that failed without regenerating certificates.
+    //
+    // `job.autoEmail` is retained on the document for backward compatibility with jobs
+    // already in flight, and is deliberately no longer read.
 
     return { ok: true }   // created OR already-existed (idempotent) both count as success
   } catch (err) {

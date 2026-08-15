@@ -341,6 +341,63 @@ export interface EmailHistoryEntry {
 /** Schema version stamped on every new-model document, for safe migrations. */
 export const CERTIFICATE_SCHEMA_VERSION = 1
 
+// ─── certificateEmailJobs/{jobId} ─────────────────────────────────────────────
+
+/**
+ * RD-CERT-EMAIL-BULK — an asynchronous bulk EMAIL DELIVERY job.
+ *
+ * Separate from CertificateJob (generation) because generation no longer sends email at
+ * all: the two have different scopes, different outcomes and different counts, and sharing
+ * one document would make `counts` mean two things on two screens.
+ *
+ * Control fields (jobId/organizerUid/createdBy/status/counts/cursor/lockedUntil/timestamps)
+ * are INHERITED from the shared kernel Job — this adds only what delivery needs.
+ */
+export interface CertificateEmailJob extends Job {
+  eventId:   string
+  scopeType: CertificateDeliveryScope
+  /**
+   * Explicit targets for `selected` ONLY; null for `unsent`/`failed`.
+   *
+   * "Select all matching" therefore persists ZERO ids — the scope IS the selection, so a
+   * 10,000-certificate run carries a constant-size payload and is re-resolved server-side
+   * on every chunk.
+   */
+  certificateIds: string[] | null
+  /**
+   * Certificates whose previous delivery outcome is UNKNOWN (claimed, then the worker died
+   * before recording). Counted separately because it is neither a success nor a failure:
+   * it is the one state that needs a human decision, and it must never be auto-retried.
+   * Rare by construction, so incrementing it per occurrence costs nothing at scale.
+   */
+  needsReview:   number
+  schemaVersion: number
+}
+
+/** Shape used to enqueue a delivery job; the server fills id/status/counts/timestamps. */
+export type CertificateEmailJobInput = Pick<CertificateEmailJob,
+  'eventId' | 'organizerUid' | 'createdBy' | 'scopeType' | 'certificateIds'
+>
+
+/** Serialized for API responses (Timestamps → ISO strings). */
+export interface SerializedCertificateEmailJob
+  extends Omit<CertificateEmailJob, 'createdAt' | 'startedAt' | 'updatedAt' | 'completedAt'> {
+  createdAt:   string | null
+  startedAt:   string | null
+  updatedAt:   string | null
+  completedAt: string | null
+}
+
+export function serializeCertificateEmailJob(j: CertificateEmailJob): SerializedCertificateEmailJob {
+  return {
+    ...j,
+    createdAt:   toIsoString(j.createdAt),
+    startedAt:   toIsoString(j.startedAt),
+    updatedAt:   toIsoString(j.updatedAt),
+    completedAt: toIsoString(j.completedAt),
+  }
+}
+
 // ─── certificates/{certificateId} ─────────────────────────────────────────────
 
 /**
