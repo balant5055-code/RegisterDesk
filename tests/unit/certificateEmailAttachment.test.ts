@@ -66,15 +66,35 @@ vi.mock('@/features/platform-storage', () => ({
   },
 }))
 
+// The delivery claim (RD-CERT-EMAIL-IDEMPOTENCY). These tests are about ATTACHMENT
+// resolution, so the claim grants and hands back the certificate under test — its own
+// semantics are pinned in certificateEmailIdempotency.test.ts. It still honours the
+// already-sent rule, so the idempotency cases at the end stay meaningful.
+const claim = vi.hoisted(() => ({ subject: null as unknown }))
+
 vi.mock('@/lib/certificates/firestore', () => ({
   getSettings: async () => null,
+  claimCertificateEmail: async (_id: string, opts: { intent: string }) => {
+    const c = claim.subject as { emailStatus?: string } | null
+    if ((c?.emailStatus === 'sent' || c?.emailStatus === 'delivered') && opts.intent !== 'resend') {
+      return { ok: false, reason: 'already_sent' }
+    }
+    return { ok: true, certificate: claim.subject }
+  },
   recordCertificateEmail: async (_id: string, entry: { status: string; error?: string }) => {
     recorded.push({ status: entry.status, error: entry.error })
   },
 }))
 
-import { emailCertificate } from '@/lib/certificates/email'
+import { emailCertificate as rawEmailCertificate } from '@/lib/certificates/email'
 import type { Certificate } from '@/lib/certificates/types'
+
+// The real code now sends against the CLAIMED document, so the double must hand back the
+// exact certificate under test. Registering it here keeps every call site below unchanged.
+const emailCertificate: typeof rawEmailCertificate = (c, opts) => {
+  claim.subject = c
+  return rawEmailCertificate(c, opts)
+}
 
 const CERT_ID = 'RDC-2026-S368ZI'
 const KEY = 'events/noyyal-marathon-2026/certificates/RDC-2026-S368ZI.pdf'

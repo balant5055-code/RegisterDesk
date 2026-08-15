@@ -290,8 +290,24 @@ export function settingsToInput(settings: CertificateSettings): CertificateSetti
 /** How a certificate came to be generated. */
 export type CertificateSource = CertificateTrigger | 'bulk'
 
-/** Per-send email delivery status for a certificate (Phase 8). */
-export type CertificateEmailStatus = 'pending' | 'sent' | 'delivered' | 'failed'
+/**
+ * Per-send email delivery status for a certificate (Phase 8).
+ *
+ * `processing` (RD-CERT-EMAIL-IDEMPOTENCY) is a CLAIM, not a report: exactly one sender
+ * may hold it, and it is taken inside a transaction BEFORE the provider is called. It ends
+ * when `recordCertificateEmail` writes `sent`/`failed`.
+ *
+ * A `processing` certificate whose lease has expired is the one state the system cannot
+ * resolve on its own — see claimCertificateEmail.
+ */
+export type CertificateEmailStatus = 'pending' | 'processing' | 'sent' | 'delivered' | 'failed'
+
+/**
+ * Which certificates a delivery run targets. Resolved SERVER-SIDE from this scope — the
+ * client never supplies a recipient list, so a 10,000-certificate run is a stored scope
+ * rather than 10,000 ids in a request body.
+ */
+export type CertificateDeliveryScope = 'unsent' | 'failed' | 'selected'
 
 /** Supported revocation reasons (Phase 9). `other` requires a customReason. */
 export type RevocationReason =
@@ -370,6 +386,14 @@ export interface Certificate {
   lastDownloadedAt:  unknown | null       // Firestore Timestamp (Phase 8)
   emailStatus:       CertificateEmailStatus | null
   emailHistory?:     EmailHistoryEntry[]  // append-only delivery log (Phase 8)
+  /**
+   * RD-CERT-EMAIL-IDEMPOTENCY — expiry of the `processing` claim. Present ONLY while a
+   * sender holds the claim; it is what separates "a worker is sending this right now"
+   * from "a worker died mid-send". Absent/null ⇒ no claim is held.
+   */
+  emailLeaseExpiresAt?: unknown | null    // Firestore Timestamp
+  /** Delivery attempts made, including the one in flight. Bounds retry loops. */
+  emailAttempts?:    number
   generatedAt:       unknown              // Firestore Timestamp
   emailedAt:         unknown | null
   revokedAt:         unknown | null       // Phase 9
@@ -392,11 +416,13 @@ export type CertificateInput = Pick<Certificate,
 
 /** Serialized for API responses (Timestamps → ISO strings). */
 export interface SerializedCertificate
-  extends Omit<Certificate, 'generatedAt' | 'emailedAt' | 'revokedAt' | 'lastDownloadedAt'> {
+  extends Omit<Certificate,
+    'generatedAt' | 'emailedAt' | 'revokedAt' | 'lastDownloadedAt' | 'emailLeaseExpiresAt'> {
   generatedAt:      string | null
   emailedAt:        string | null
   revokedAt:        string | null
   lastDownloadedAt: string | null
+  emailLeaseExpiresAt: string | null
 }
 
 // ─── certificateTemplates/{templateId} ────────────────────────────────────────
@@ -633,6 +659,8 @@ export function serializeCertificate(c: Certificate): SerializedCertificate {
     emailedAt:        toIsoString(c.emailedAt),
     revokedAt:        toIsoString(c.revokedAt),
     lastDownloadedAt: toIsoString(c.lastDownloadedAt),
+    // Spread above would otherwise hand the raw Firestore Timestamp to the client.
+    emailLeaseExpiresAt: toIsoString(c.emailLeaseExpiresAt ?? null),
   }
 }
 

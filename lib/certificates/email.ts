@@ -8,7 +8,9 @@ import { notificationEngine, NotificationType, NotificationChannel } from '@/lib
 import { resolveEventEmailProvider } from '@/lib/email/resolveEventProvider'
 import { storage } from '@/features/platform-storage'
 import { safeFetchBytes, validateGeneratedCertificateUrl } from './urlGuard'
-import { getSettings, recordCertificateEmail } from './firestore'
+import { getSettings, recordCertificateEmail, claimCertificateEmail } from './firestore'
+import type { EmailClaimIntent } from './firestore'
+import { BULK_LEASE_MS as EMAIL_LEASE_MS } from './constants'
 import { replaceVariables }  from './placeholders'
 import { defaultCertificateSettings } from './types'
 import { getEmailAppUrl } from '@/lib/email/appUrl'
@@ -43,17 +45,45 @@ async function fetchPdfBase64(url: string): Promise<string | null> {
  */
 export async function emailCertificate(
   certificate: Certificate,
-  opts: { pdfBytes?: Uint8Array; force?: boolean } = {},
+  opts: { pdfBytes?: Uint8Array; force?: boolean; intent?: EmailClaimIntent } = {},
 ): Promise<EmailCertificateResult> {
   const { pdfBytes, force = false } = opts
-
-  // Idempotency — don't re-send an already-delivered certificate unless forced.
-  if (!force && (certificate.emailStatus === 'sent' || certificate.emailStatus === 'delivered')) {
-    return { success: true, skipped: true }
-  }
+  // `force` is the historical spelling of an operator-initiated resend; both map to the
+  // same intent so existing callers keep working unchanged.
+  const intent: EmailClaimIntent = opts.intent ?? (force ? 'resend' : 'send')
 
   const to = certificate.attendeeEmail
   if (!to) return { success: false, skipped: false, error: 'No recipient email' }
+
+  // ── RD-CERT-EMAIL-IDEMPOTENCY · claim BEFORE the provider is called ─────────
+  //
+  // This replaces an in-memory `emailStatus` comparison that could not serialize two
+  // senders and left no trace if the process died after the provider accepted. The claim
+  // re-reads the document inside a transaction, so exactly one of any number of concurrent
+  // senders — bulk worker, manual resend, a second worker after a lease expiry — proceeds.
+  //
+  // `needs_review` is deliberately NOT retried: the certificate was claimed, the lease
+  // expired, and whether the provider accepted is unknowable from here. Re-sending would
+  // risk the duplicate this whole mechanism exists to prevent.
+  const claim = await claimCertificateEmail(certificate.certificateId, {
+    intent, leaseMs: EMAIL_LEASE_MS,
+  })
+  if (!claim.ok) {
+    switch (claim.reason) {
+      case 'already_sent':
+        return { success: true, skipped: true }
+      case 'busy':
+        return { success: true, skipped: true, error: 'Another delivery is in progress' }
+      case 'needs_review':
+        return { success: false, skipped: true, error: 'A previous delivery attempt did not complete. This certificate needs review before it is sent again.' }
+      case 'not_failed':
+        return { success: true, skipped: true }
+      default:
+        return { success: false, skipped: false, error: 'Certificate not found' }
+    }
+  }
+  // Send against the document as it was CLAIMED, not the caller's copy.
+  certificate = claim.certificate
 
   // RD-EMAIL-PROVIDER — a certificate belongs to an event; gate and send on ITS transport.
   const emailProviderName = await resolveEventEmailProvider(certificate.eventId)

@@ -5,7 +5,7 @@ import { FieldValue, FieldPath }  from 'firebase-admin/firestore'
 import { adminDb }     from '@/lib/firebase/admin'
 import { deleteServerFile } from '@/lib/firebase/storage/admin'
 import { validateStorageUrl } from './urlGuard'
-import { COLLECTIONS, REVOCATION_REASON_LABELS } from './constants'
+import { COLLECTIONS, REVOCATION_REASON_LABELS, BULK_PAGE_SIZE } from './constants'
 import { Timestamp } from 'firebase-admin/firestore'
 import { generateTemplateId, generateCertificateId, certificateClaimId, generateJobId } from './id'
 import {
@@ -35,6 +35,7 @@ import type {
   CertificateJobInput,
   EmailHistoryEntry,
   CertificateEmailStatus,
+  CertificateDeliveryScope,
   RevocationReason,
   RevocationHistoryEntry,
   CertificateLayout,
@@ -1031,7 +1032,150 @@ export async function recordCertificateEmail(
     emailHistory: FieldValue.arrayUnion(entry),
     emailStatus:  status,
     emailedAt:    FieldValue.serverTimestamp(),
+    // RD-CERT-EMAIL-IDEMPOTENCY — reaching a terminal status ENDS the claim. Clearing the
+    // lease here is what makes `processing` + a live lease mean "in flight" and nothing
+    // else; a leftover lease would make a finished send look abandoned.
+    emailLeaseExpiresAt: null,
   })
+}
+
+/**
+ * RD-CERT-EMAIL-IDEMPOTENCY — claims a certificate for ONE email send.
+ *
+ * ═══ WHY A CLAIM AND NOT A STATUS CHECK ══════════════════════════════════════
+ * The previous guard compared `certificate.emailStatus` on an object the caller had
+ * already fetched, then sent, then recorded the result. Two senders could both read the
+ * same pre-send value and both deliver; and because the status was written only AFTER the
+ * provider accepted, a crash in between left no trace, so a retry re-sent. The job runner
+ * makes that worse rather than better: it checkpoints per CHUNK, and its own contract
+ * (lib/jobs/kernel.ts) is that re-processing a page is safe *because each item is
+ * idempotent* — which email was not. A crash could therefore re-send a whole page.
+ *
+ * This closes both by re-reading the document INSIDE a transaction and taking the claim
+ * before the provider is ever called. The transaction is the serialization point, so of
+ * two concurrent senders exactly one proceeds.
+ *
+ * ═══ THE ONE CASE THAT CANNOT BE DECIDED IN CODE ═════════════════════════════
+ * `processing` with an EXPIRED lease means one of two things, and the difference is
+ * invisible from here:
+ *   • the sender died before the provider accepted  → a resend is correct
+ *   • the provider accepted and the sender died before recording → a resend DUPLICATES
+ * No two-phase commit exists across an HTTP provider and Firestore, so this window is
+ * unavoidable. It is therefore reported as `needs_review` and NEVER auto-claimed: the
+ * requirement is that an already-delivered certificate is not emailed twice, and only an
+ * operator can resolve the ambiguity (the certificate's emailHistory shows the attempt).
+ */
+/**
+ * `resend_after_review` is the ONLY way out of `needs_review`, and it exists because the
+ * alternative is a certificate that can never be emailed again.
+ *
+ * It is deliberately a SEPARATE intent from `resend`: an operator resending a delivered
+ * certificate is routine, whereas resending one whose delivery is genuinely unknown is a
+ * decision to risk a duplicate. Making them the same value would let a UI "Resend" button
+ * silently take that risk. Automatic senders never use it — `send` and `retry_failed`
+ * still get `needs_review` — so nothing retries an ambiguous certificate on its own.
+ *
+ * It is NOT a bypass: it takes the same transactional claim, so a live lease still blocks
+ * it and two operators cannot both proceed.
+ */
+export type EmailClaimIntent = 'send' | 'retry_failed' | 'resend' | 'resend_after_review'
+
+export type EmailClaimResult =
+  | { ok: true;  certificate: Certificate }
+  | { ok: false; reason: 'not_found' | 'busy' | 'needs_review' | 'already_sent' | 'not_failed' }
+
+export async function claimCertificateEmail(
+  certificateId: string,
+  opts: { intent: EmailClaimIntent; leaseMs: number },
+): Promise<EmailClaimResult> {
+  const ref = certificatesCol().doc(certificateId)
+
+  return adminDb.runTransaction(async tx => {
+    const snap = await tx.get(ref)
+    if (!snap.exists) return { ok: false as const, reason: 'not_found' as const }
+    const cert = snap.data() as Certificate
+
+    const now   = Date.now()
+    const lease = cert.emailLeaseExpiresAt instanceof Timestamp
+      ? cert.emailLeaseExpiresAt.toMillis()
+      : 0
+
+    if (cert.emailStatus === 'processing') {
+      // Someone is sending right now — never two senders on one certificate. This holds
+      // for EVERY intent, including an operator's review decision: it is a claim, not an
+      // override, so two operators can never both proceed.
+      if (lease > now) return { ok: false as const, reason: 'busy' as const }
+      // Lease expired: delivery is genuinely unknown (see the note above). Only an
+      // explicit, reviewed operator decision may take it from here; every automatic
+      // sender is turned away.
+      if (opts.intent !== 'resend_after_review') {
+        return { ok: false as const, reason: 'needs_review' as const }
+      }
+    }
+
+    // A delivered certificate is re-sent ONLY on an explicit operator instruction.
+    if (cert.emailStatus === 'sent' || cert.emailStatus === 'delivered') {
+      if (opts.intent !== 'resend' && opts.intent !== 'resend_after_review') {
+        return { ok: false as const, reason: 'already_sent' as const }
+      }
+    }
+
+    // "Retry failed" means exactly that — it must not sweep up never-attempted ones.
+    if (opts.intent === 'retry_failed' && cert.emailStatus !== 'failed') {
+      return { ok: false as const, reason: 'not_failed' as const }
+    }
+
+    const attempts = typeof cert.emailAttempts === 'number' ? cert.emailAttempts : 0
+    tx.update(ref, {
+      emailStatus:         'processing',
+      emailLeaseExpiresAt: Timestamp.fromMillis(now + opts.leaseMs),
+      emailAttempts:       attempts + 1,
+    })
+
+    // The claimed shape, so the caller sends against what it actually reserved.
+    return {
+      ok: true as const,
+      certificate: {
+        ...cert,
+        emailStatus:         'processing',
+        emailAttempts:       attempts + 1,
+      } as Certificate,
+    }
+  })
+}
+
+/**
+ * Certificates a delivery run should target, resolved SERVER-SIDE from a scope.
+ *
+ * The scope — not a client-supplied id list — is what a 10,000-certificate run carries, so
+ * the request body stays constant-sized. Status is filtered IN MEMORY over the existing
+ * (eventId, organizerUid, generatedAt) index: `emailStatus` is unindexed, and a
+ * `where('emailStatus', ...)` would also miss never-attempted certificates, which store
+ * the field as null or omit it entirely.
+ */
+export async function listCertificatesForDelivery(
+  eventId: string,
+  organizerUid: string,
+  scope: CertificateDeliveryScope,
+  opts: { certificateIds?: string[]; pageSize?: number; cursor?: string | null } = {},
+): Promise<{ certificates: Certificate[]; nextCursor: string | null; hasMore: boolean }> {
+  const page = await listEventCertificatesPage(eventId, organizerUid, {
+    pageSize: opts.pageSize ?? BULK_PAGE_SIZE,
+    cursor:   opts.cursor ?? null,
+  })
+
+  const explicit = opts.certificateIds ? new Set(opts.certificateIds) : null
+  const certificates = page.certificates.filter(c => {
+    // Revoked certificates are never delivered, on any scope.
+    if (c.status === 'revoked') return false
+    if (scope === 'selected') return explicit ? explicit.has(c.certificateId) : false
+    if (scope === 'failed')   return c.emailStatus === 'failed'
+    // 'unsent' — never attempted, or attempted and failed. Deliberately excludes
+    // `processing`: that certificate is either in flight or awaiting review.
+    return c.emailStatus == null || c.emailStatus === 'pending' || c.emailStatus === 'failed'
+  })
+
+  return { certificates, nextCursor: page.nextCursor, hasMore: page.hasMore }
 }
 
 /**
