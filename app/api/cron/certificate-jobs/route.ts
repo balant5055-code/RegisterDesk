@@ -19,6 +19,8 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { listActiveJobs, failJob }   from '@/lib/certificates/firestore'
 import { loadEventContext, processJobChunk } from '@/lib/certificates/jobs'
+import { listActiveZipJobs }         from '@/lib/certificates/zipJobsStore'
+import { processZipJobChunk }        from '@/lib/certificates/zipJobs'
 import { isAuthorizedCron, cronUnauthorized } from '@/lib/cron/auth'
 import { withCronMetrics } from '@/lib/cron/withMetrics'
 import { captureError, flushMonitoring } from '@/lib/monitoring/sentry'
@@ -72,11 +74,31 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     }
   }
 
+  // ── RD-CERT-ARTIFACT-01 · bulk-ZIP jobs ────────────────────────────────────
+  // Same lease/fence/cursor machinery, driven from the same tick so no second scheduler
+  // is introduced (exactly one scheduler per route remains the rule).
+  //
+  // The SAME pre-job budget check as the loop above is used deliberately: this change does
+  // not touch the scheduler's budget arithmetic, which is tracked separately.
+  const zipOutcomes: JobOutcome[] = []
+  for (const zj of await listActiveZipJobs(JOB_BATCH)) {
+    if (Date.now() - start > CRON_BUDGET_MS) break
+    try {
+      const r = await processZipJobChunk(zj.jobId)
+      zipOutcomes.push({ jobId: zj.jobId, status: r.status, processed: r.processed, reason: r.reason })
+    } catch (err) {
+      console.error('[cron/certificate-jobs] zip job error:', { jobId: zj.jobId, err })
+      captureError(err, { scope: 'cron.certificate_zip_jobs', area: 'certificate', jobId: zj.jobId })
+      zipOutcomes.push({ jobId: zj.jobId, status: 'error', processed: 0, reason: err instanceof Error ? err.message : 'error' })
+    }
+  }
+
   await flushMonitoring()   // deliver any events captured during this serverless run
   return NextResponse.json({
     scanned:   jobs.length,
     durationMs: Date.now() - start,
     jobs:      outcomes,
+    zipJobs:   zipOutcomes,
   })
 }
 

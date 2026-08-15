@@ -25,6 +25,8 @@ import { defaultCertificateSettings } from '@/lib/certificates/types'
 import { looksLikeDownloadCapability, verifyCertificateDownloadCapability } from '@/lib/certificates/downloadCapability'
 import { isValidCertificateId }      from '@/lib/certificates/id'
 import { safeFetchBytes, validateGeneratedCertificateUrl } from '@/lib/certificates/urlGuard'
+import { signCertificateArtifact }   from '@/lib/certificates/artifact'
+import { captureError }              from '@/lib/monitoring/sentry'
 import { timingSafeEqualStr }        from '@/lib/security/timingSafe'
 import { getClientIp }               from '@/lib/rateLimit'
 import { RATE_POLICY, checkPolicy }  from '@/lib/rateLimit/policies'
@@ -48,7 +50,12 @@ export async function GET(req: NextRequest, { params }: Params): Promise<NextRes
   }
 
   const cert = await getCertificate(certificateId)
-  if (!cert || !cert.fileUrl) {
+  // RD-CERT-ARTIFACT-01 — a certificate is downloadable if it has EITHER artifact:
+  //   • `fileKey`  — the canonical R2 object written by issuance/regeneration (current)
+  //   • `fileUrl`  — the legacy Firebase Storage pointer (pre-R2 records)
+  // Requiring `fileUrl` alone would 404 every certificate issued after artifact
+  // persistence, because that path deliberately writes `fileUrl: null`.
+  if (!cert || (!cert.fileUrl && !cert.fileKey)) {
     return NextResponse.json({ error: 'Not found' }, { status: 404 })
   }
 
@@ -98,6 +105,49 @@ export async function GET(req: NextRequest, { params }: Params): Promise<NextRes
         return NextResponse.json({ error: 'Verification required to download this certificate.' }, { status: 403 })
       }
     }
+  }
+
+  // ═══ RD-CERT-ARTIFACT-01 · THE CANONICAL ARTIFACT, BY REDIRECT ══════════════
+  //
+  // Placed AFTER every gate above — revocation, organizer ownership, the download
+  // settings and the verification token — because a signed URL is a bearer credential.
+  // It is minted only once the request has already earned the bytes.
+  //
+  // `fileKey` WINS over `fileUrl`, and that precedence is a correctness requirement, not
+  // a preference. Regeneration writes the new artifact to `fileKey` and deliberately
+  // leaves `fileUrl` in place as provenance (see recordCertificateRegeneration), so a
+  // regenerated legacy certificate carries BOTH — a current R2 object and a superseded
+  // Firebase render, potentially from a different template.
+  //
+  // For the same reason a signing failure must NOT fall back to `fileUrl`: serving the
+  // superseded document would be a wrong certificate returned as success, which is worse
+  // than failing. It degrades to the route's existing 502 instead — the same response
+  // this endpoint already returns when the stored file cannot be read.
+  if (cert.fileKey) {
+    try {
+      const url = await signCertificateArtifact(cert.fileKey, cert.certificateId)
+      // Best-effort tracking — never block the download on a counter write.
+      void incrementCertificateDownload(certificateId).catch(() => {})
+      // 302, not 307: a GET with no body to preserve, and the target is a one-shot
+      // credential rather than a permanent location. `Content-Disposition: attachment`
+      // is folded into the signature by signCertificateArtifact, so it cannot be
+      // stripped from the URL.
+      return NextResponse.redirect(new URL(url), {
+        status: 302,
+        headers: { 'Cache-Control': 'no-store' },
+      })
+    } catch (err) {
+      captureError(err, { scope: 'certificate_artifact_sign', area: 'certificate', certificateId })
+      return NextResponse.json({ error: 'Could not read the certificate file' }, { status: 502 })
+    }
+  }
+
+  // Only reachable with NO `fileKey` (that branch always returns), and the guard above
+  // rejected the neither-artifact case — so `fileUrl` is necessarily set here. Re-checked
+  // explicitly rather than asserted with `!`, so that if either branch above is ever
+  // edited, this degrades to the existing 404 instead of fetching `null`.
+  if (!cert.fileUrl) {
+    return NextResponse.json({ error: 'Not found' }, { status: 404 })
   }
 
   // Fetch the stored PDF (SSRF-guarded) and stream it same-origin.
