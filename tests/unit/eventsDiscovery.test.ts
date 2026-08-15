@@ -29,12 +29,19 @@ const h = vi.hoisted(() => {
     registrations: 0,
     organizers:    0,
     throwOnEvents: false,
+    // Every `where(...)` applied to the events query, in order. The stub stays a
+    // passthrough — recording is what lets a test assert the QUERY still gates on
+    // lifecycleStatus, which no in-memory fixture can demonstrate on its own.
+    whereCalls:    [] as Array<[string, string, unknown]>,
   }
 
   const docSnap = (e: RawEvent) => ({ id: e.id, exists: true, data: () => e.data })
 
   const queryStub = (docs: RawEvent[]): Record<string, unknown> => ({
-    where:      () => queryStub(docs),
+    where:      (field: string, op: string, value: unknown) => {
+      store.whereCalls.push([field, op, value])
+      return queryStub(docs)
+    },
     orderBy:    () => queryStub(docs),
     limit:      (n: number) => queryStub(docs.slice(0, n)),
     startAfter: (cur: { id: string }) => {
@@ -92,11 +99,18 @@ const store = h.store
 function publishedEvent(over: {
   slug: string; name?: string; city?: string; eventType?: string
   startDate?: string; free?: boolean; online?: boolean
+  // `visibility` is omitted entirely unless supplied, so the default fixture reproduces a
+  // LEGACY document written before the field existed. Pass null explicitly for the same
+  // shape with the key present.
+  visibility?: string | null
+  moderationStatus?: string
 }) {
   return {
     id: over.slug,
     data: {
       lifecycleStatus: 'published',
+      ...('visibility' in over ? { visibility: over.visibility } : {}),
+      ...(over.moderationStatus ? { moderationStatus: over.moderationStatus } : {}),
       eventType: over.eventType ?? 'sports',
       publishedAt: { toDate: () => new Date('2026-08-09T14:39:39.966Z') },
       totalCapacity: 500,
@@ -121,6 +135,7 @@ beforeEach(() => {
   store.registrations = 0
   store.organizers = 0
   store.throwOnEvents = false
+  store.whereCalls = []
 })
 
 // ── 1. The loaded dataset ─────────────────────────────────────────────────────
@@ -239,5 +254,91 @@ describe('query failure is surfaced, never returned as zero events', () => {
     store.throwOnEvents = false
     const { events } = await listPublishedEvents({ limit: 48 })
     expect(events.map(e => e.slug)).toEqual(['a'])
+  })
+})
+
+// ── 6. Visibility — private events are published but NOT discoverable ──────────
+//
+// THE BUG THIS PINS. A PRIVATE published event appeared on /events. The document was
+// stored correctly (`visibility: 'private'`); the listing simply never looked at the field,
+// filtering only on lifecycle and moderation. The organizer is promised "Invite-only —
+// reachable only by direct link / invite", so this was a disclosure of the event's
+// existence, name, venue and organizer to anyone loading the page.
+//
+// Visibility is a THIRD axis, independent of lifecycle and moderation, and each is asserted
+// separately below so a future change to one cannot quietly satisfy another.
+
+describe('listPublishedEvents — visibility', () => {
+  it('includes a published PUBLIC event', async () => {
+    store.events = [publishedEvent({ slug: 'public-event', visibility: 'public' })]
+
+    const { events } = await listPublishedEvents({ limit: 48 })
+
+    expect(events.map(e => e.slug)).toEqual(['public-event'])
+  })
+
+  it('EXCLUDES a published PRIVATE event', async () => {
+    store.events = [publishedEvent({ slug: 'private-event', visibility: 'private' })]
+
+    const { events } = await listPublishedEvents({ limit: 48 })
+
+    expect(events).toEqual([])
+  })
+
+  it('includes a LEGACY published event whose visibility field is absent', async () => {
+    // Written before the field existed. `where('visibility','==','public')` would hide every
+    // one of these, which is why the exclusion is in memory and matches only an explicit
+    // 'private'.
+    store.events = [publishedEvent({ slug: 'legacy-event' })]
+
+    const { events } = await listPublishedEvents({ limit: 48 })
+
+    expect(events.map(e => e.slug)).toEqual(['legacy-event'])
+  })
+
+  it('includes a published event whose visibility is explicitly null', async () => {
+    store.events = [publishedEvent({ slug: 'null-visibility', visibility: null })]
+
+    const { events } = await listPublishedEvents({ limit: 48 })
+
+    expect(events.map(e => e.slug)).toEqual(['null-visibility'])
+  })
+
+  it('removes ONLY the private events from a mixed page', async () => {
+    store.events = [
+      publishedEvent({ slug: 'pub-1',   visibility: 'public'  }),
+      publishedEvent({ slug: 'priv-1',  visibility: 'private' }),
+      publishedEvent({ slug: 'legacy'                        }),
+      publishedEvent({ slug: 'priv-2',  visibility: 'private' }),
+      publishedEvent({ slug: 'pub-2',   visibility: 'public'  }),
+    ]
+
+    const { events } = await listPublishedEvents({ limit: 48 })
+
+    expect(events.map(e => e.slug)).toEqual(['pub-1', 'legacy', 'pub-2'])
+  })
+
+  it('keeps the moderation exclusion intact and independent of visibility', async () => {
+    store.events = [
+      publishedEvent({ slug: 'taken-down', visibility: 'public', moderationStatus: 'taken_down' }),
+      publishedEvent({ slug: 'visible',    visibility: 'public' }),
+    ]
+
+    const { events } = await listPublishedEvents({ limit: 48 })
+
+    expect(events.map(e => e.slug)).toEqual(['visible'])
+  })
+
+  it('still gates the QUERY on lifecycleStatus, so unpublished events never load', async () => {
+    // The exclusion above is in memory; publication remains a QUERY filter. Asserted on the
+    // recorded query rather than on a fixture, because the stub cannot itself enforce
+    // `where` — without this, a regression that dropped the lifecycle filter would go unseen.
+    store.events = [publishedEvent({ slug: 'a', visibility: 'public' })]
+
+    await listPublishedEvents({ limit: 48 })
+
+    expect(store.whereCalls).toContainEqual(['lifecycleStatus', '==', 'published'])
+    // And the fix did NOT become a query filter, which would hide legacy null events.
+    expect(store.whereCalls.map(c => c[0])).not.toContain('visibility')
   })
 })

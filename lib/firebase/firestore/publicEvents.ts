@@ -255,6 +255,17 @@ export async function listPublishedEvents(opts: DiscoveryQuery | number = {}): P
     // Exclude admin-taken-down events from public discovery (lifecycleStatus
     // stays 'published'; moderation is a separate axis).
     if (isContentTakenDown(raw.moderationStatus as ModerationStatus | undefined)) continue
+    // A PRIVATE event is published but not DISCOVERABLE — the organizer is told it is
+    // "reachable only by direct link / invite", and /events/[slug] deliberately still
+    // serves it (marked noindex). Visibility is therefore a third axis, independent of
+    // lifecycle and moderation, and it was the one this listing never applied.
+    //
+    // Filtered HERE rather than in the query, for the same reason sitemap.ts filters it in
+    // memory: only an EXPLICIT 'private' is withheld. Events published before the field
+    // existed store `null`, and `where('visibility','==','public')` would hide every one of
+    // them — a regression far worse than the leak. Keeping one equality filter also leaves
+    // the (lifecycleStatus, publishedAt) index and the cursor strategy untouched.
+    if (raw.visibility === 'private') continue
     const ed      = rec(raw, 'eventDetails')
     const info    = rec(ed,  'info')
     const sched   = rec(ed,  'schedule')
