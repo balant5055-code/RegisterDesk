@@ -3,8 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import Link from 'next/link'
 import { Upload, Loader2, Pencil, Trash2, CheckCircle2, PenSquare, FileText, Copy, Star, LayoutTemplate } from 'lucide-react'
-import { auth } from '@/lib/firebase/auth'
-import { uploadCertificateTemplate } from '@/lib/firebase/storage'
+import { putToSignedUrl } from '@/features/media-studio/utils/browserImage'
 import { cn } from '@/lib/utils/cn'
 import { useConfirm } from '@/components/ui/ConfirmDialog'
 import { Spinner, ErrorBox, Badge, btnGhost } from './ui'
@@ -51,12 +50,24 @@ export default function TemplatesPanel({ api, eventId }: { api: CertApi; eventId
     if (!file) return
     const templateType = typeFromFile(file)
     if (!templateType) { setErr('Unsupported file. Upload a PDF, PNG, or JPG.'); return }
-    const uid = auth.currentUser?.uid
-    if (!uid) { setErr('Not authenticated.'); return }
     setUploading(true); setErr(null)
     try {
-      const fileUrl = await uploadCertificateTemplate(uid, eventId, file)
-      await api.createTemplate({ name: file.name.replace(/\.[^.]+$/, ''), templateType, fileUrl, fileName: file.name })
+      // RD-CERT-TPL-R2 — direct-to-storage upload, the same shape media uploads use:
+      //   prepare (server mints the key + signs a PUT) → PUT the bytes → register the record.
+      // The bytes never pass through a serverless function, so a 25 MB template is fine.
+      const prep = await api.prepareTemplate({ fileName: file.name, templateType })
+      if (file.size > prep.maxBytes) {
+        throw new Error(`This ${templateType.toUpperCase()} is larger than the ${Math.round(prep.maxBytes / (1024 * 1024))} MB limit.`)
+      }
+      // Reuses the platform's hardened signed-url PUT rather than a bare fetch: it carries
+      // the upload timeout, which matters because a stalled 25 MB PUT would otherwise leave
+      // the organizer on a spinner with no way out.
+      await putToSignedUrl(prep.uploadUrl, file, prep.mimeType)
+
+      await api.createTemplate({
+        name: file.name.replace(/\.[^.]+$/, ''), templateType,
+        fileKey: prep.fileKey, fileName: file.name,
+      })
       await load()
     } catch (e2) {
       setErr(e2 instanceof Error ? e2.message : 'Upload failed')

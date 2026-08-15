@@ -24,6 +24,7 @@ import { chargeCertificate } from './billing'
 import { sendCertificateWhatsApp } from './whatsapp'
 import { uploadCertificateArtifact, deleteCertificateArtifact } from './artifact'
 import { safeFetchBytes, validateEventTemplateUrl, validateGlobalTemplateUrl } from './urlGuard'
+import { loadTemplateBytes, templateSourceIdentity } from './templateAsset'
 import { getEmailAppUrl } from '@/lib/email/appUrl'
 import { enqueueWebhook }           from '@/lib/integrations/webhooks'
 import { crmRecordCertificate }     from '@/lib/crm/service'
@@ -118,8 +119,13 @@ export async function loadRenderAssets(
     return ev.ok ? ev : validateGlobalTemplateUrl(url)
   }
 
-  // Template file — validated (was previously fetched unguarded: SSRF P0).
-  const templateBytes = await safeFetchBytes(template.fileUrl, checkTemplateUrl(template.fileUrl))
+  // RD-CERT-TPL-R2 — the template's bytes come from whichever store owns them:
+  // `fileKey` (R2, canonical) or the legacy `fileUrl` (Firebase, SSRF-guarded exactly as
+  // before). The renderer below is unchanged and storage-agnostic — it receives bytes.
+  //
+  // There is deliberately NO fallback from a present `fileKey` to `fileUrl`: see
+  // templateAsset.ts. Layout image assets are untouched and remain Firebase URLs.
+  const templateBytes = await loadTemplateBytes(template, checkTemplateUrl)
 
   const assets = new Map<string, Uint8Array>()
   const elements = (layoutOverride ?? template.layout)?.elements ?? []
@@ -419,7 +425,10 @@ const TEMPLATE_ASSET_MAX    = 8
 const _assetCache = new Map<string, { at: number; assets: RenderAssets }>()
 
 async function cachedRenderAssets(template: CertificateTemplateDoc): Promise<RenderAssets> {
-  const key = `${template.templateId}:${template.fileUrl}`
+  // RD-CERT-TPL-R2 — keyed on the resolved STORAGE SOURCE, not on fileUrl. A template
+  // re-uploaded to R2 keeps its templateId while its bytes change; keying on the old field
+  // would serve the superseded design from cache until the TTL lapsed.
+  const key = `${template.templateId}:${templateSourceIdentity(template)}`
   const hit = _assetCache.get(key)
   if (hit && Date.now() - hit.at < TEMPLATE_ASSET_TTL_MS) return hit.assets
 

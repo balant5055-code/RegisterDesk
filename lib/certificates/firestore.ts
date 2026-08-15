@@ -5,6 +5,8 @@ import { FieldValue, FieldPath }  from 'firebase-admin/firestore'
 import { adminDb }     from '@/lib/firebase/admin'
 import { deleteServerFile } from '@/lib/firebase/storage/admin'
 import { validateStorageUrl } from './urlGuard'
+import { storage } from '@/features/platform-storage'
+import { captureError } from '@/lib/monitoring/sentry'
 import { COLLECTIONS, REVOCATION_REASON_LABELS, BULK_PAGE_SIZE } from './constants'
 import { Timestamp } from 'firebase-admin/firestore'
 import { generateTemplateId, generateCertificateId, certificateClaimId, generateJobId } from './id'
@@ -195,7 +197,8 @@ export interface CreateTemplateData {
   eventId:      string
   name:         string
   templateType: TemplateType
-  fileUrl:      string
+  fileUrl?:     string | null
+  fileKey?:     string | null
   fileName:     string
   fileSize:     number
   dimensions:   CertificateDimensions | null
@@ -300,7 +303,12 @@ export async function duplicateCertificateTemplate(
     organizerUid: uid,
     name:         `${src.name} (Copy)`,
     templateType: src.templateType,
-    fileUrl:      src.fileUrl,
+    // RD-CERT-TPL-R2 — the copy points at the SAME stored object; it is not a re-upload.
+    // Whichever field the source uses is the one carried over, and only that one: writing
+    // `fileUrl: undefined` for an R2 template would be rejected by Firestore, and writing
+    // both would give the copy a source the original does not have. deleteTemplate knows
+    // about this sharing and will not delete an object another template still references.
+    ...(src.fileKey ? { fileKey: src.fileKey } : { fileUrl: src.fileUrl }),
     fileName:     src.fileName,
     fileSize:     src.fileSize,
     dimensions:   src.dimensions ?? null,
@@ -580,7 +588,7 @@ export async function deleteTemplate(
   eventId: string,
   templateId: string,
   uid: string,
-): Promise<{ fileUrl: string; deletedPaths: string[] }> {
+): Promise<{ fileUrl: string | null; fileKey: string | null; deletedKey: string | null; deletedPaths: string[] }> {
   const tpl = await requireOwnedTemplate(eventId, templateId, uid)
   const tplRef      = templatesCol().doc(templateId)
   const settingsRef = adminDb.collection(COLLECTIONS.SETTINGS).doc(eventId)
@@ -601,7 +609,24 @@ export async function deleteTemplate(
   const remaining    = await listTemplates(eventId, uid)
   const deletedPaths = await deleteUnreferencedPaths(templateStoragePaths(tpl), remaining)
 
-  return { fileUrl: tpl.fileUrl, deletedPaths }
+  // RD-CERT-TPL-R2 — an R2-backed template's object is removed here rather than by the
+  // client, which has no credentials for it. Same reference guard as the Firebase path: a
+  // key another surviving template still points at is left alone (possible after a
+  // duplicate, which copies fileKey). Best-effort, matching deleteServerFile's contract —
+  // a storage hiccup must not strand the Firestore deletion that already committed.
+  let deletedKey: string | null = null
+  if (tpl.fileKey) {
+    const stillReferenced = remaining.some(t => t.fileKey === tpl.fileKey)
+    if (!stillReferenced) {
+      await storage.delete(tpl.fileKey)
+        .then(() => { deletedKey = tpl.fileKey ?? null })
+        .catch(err => captureError(err, {
+          scope: 'certificate_template_delete', area: 'certificate', templateId,
+        }))
+    }
+  }
+
+  return { fileUrl: tpl.fileUrl ?? null, fileKey: tpl.fileKey ?? null, deletedKey, deletedPaths }
 }
 
 // ─── Certificates (Phase 5 — new `certificates` collection) ────────────────────

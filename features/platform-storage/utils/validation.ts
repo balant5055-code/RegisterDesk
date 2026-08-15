@@ -34,6 +34,13 @@ const POLICY: Readonly<Record<StorageAssetType, TypePolicy>> = {
   'event-photo-medium':    { mimeTypes: IMAGE_TYPES, maxBytes: 10 * MB },
   'event-photo-thumbnail': { mimeTypes: IMAGE_TYPES, maxBytes:  2 * MB },
   'event-certificate':     { mimeTypes: ['application/pdf', 'image/png'], maxBytes: 25 * MB },
+  // RD-CERT-TPL-R2 — the organizer's uploaded template. The ceiling matches the largest
+  // TEMPLATE_SIZE_LIMITS entry (pdf 25 MB); the per-type limits (pdf 25 / png,jpg 10) stay
+  // enforced by lib/certificates so the storage layer never becomes a second source of
+  // truth for a product rule.
+  'event-certificate-template': {
+    mimeTypes: ['application/pdf', 'image/png', 'image/jpeg'], maxBytes: 25 * MB,
+  },
   'event-finisher-badge':  { mimeTypes: ['image/png', 'image/jpeg', 'image/webp'], maxBytes: 10 * MB },
   // RD-PHOTO-01 — PNG ONLY, and deliberately so: the overlay must carry an alpha channel,
   // and JPEG cannot. The narrow policy is what makes "transparent PNG" enforceable at the
@@ -155,6 +162,14 @@ export function assertVisibilityAllowed(
     throw new StorageError(
       'FORBIDDEN',
       'Certificates cannot be stored with PUBLIC visibility. Use PRIVATE or SIGNED_URL.',
+    )
+  }
+  // A template is the organizer's design asset — enumerable artwork would leak their work
+  // and, for a PDF template, whatever is embedded in it.
+  if (type === 'event-certificate-template' && visibility === 'PUBLIC') {
+    throw new StorageError(
+      'FORBIDDEN',
+      'Certificate templates cannot be stored with PUBLIC visibility. Use PRIVATE or SIGNED_URL.',
     )
   }
   if (type === 'event-report' && visibility === 'PUBLIC') {

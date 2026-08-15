@@ -7,6 +7,7 @@ import type { EmailJobCreateResponse, EmailJobsListResponse } from '@/app/api/or
 import type { EmailJobResponse } from '@/app/api/organizer/events/[eventId]/certificates/email-jobs/[jobId]/route'
 import type { SettingsResponse }           from '@/app/api/organizer/events/[eventId]/certificates/settings/route'
 import type { TemplatesListResponse }      from '@/app/api/organizer/events/[eventId]/certificates/templates/route'
+import type { TemplatePrepareResponse }    from '@/app/api/organizer/events/[eventId]/certificates/templates/prepare/route'
 import type { JobsListResponse }           from '@/app/api/organizer/events/[eventId]/certificates/jobs/route'
 import type { JobProcessResponse }         from '@/app/api/organizer/events/[eventId]/certificates/jobs/[jobId]/process/route'
 import type { RegistrationsApiResponse }   from '@/app/api/organizer/events/[eventId]/registrations/route'
@@ -111,7 +112,15 @@ export function makeCertApi(eventId: string, token: string) {
 
     // ── Templates ──
     getTemplates: () => fetch(`${B}/templates`, { headers: auth }).then(jsonOrThrow<TemplatesListResponse>),
-    createTemplate: (body: { name: string; templateType: TemplateType; fileUrl: string; fileName: string }) =>
+    // RD-CERT-TPL-R2 — step 1 of the upload: ask the server for a signed PUT url. The key
+    // is decided server-side; the browser never names the object it writes.
+    prepareTemplate: (body: { fileName: string; templateType: TemplateType }) =>
+      fetch(`${B}/templates/prepare`, { method: 'POST', headers: jsonAuth, body: JSON.stringify(body) })
+        .then(jsonOrThrow<TemplatePrepareResponse>),
+    // Step 2: register the uploaded object. `fileKey` is the R2 path; `fileUrl` remains
+    // accepted for the legacy Firebase flow so an older client keeps working.
+    createTemplate: (body: { name: string; templateType: TemplateType; fileName: string }
+                          & ({ fileKey: string } | { fileUrl: string })) =>
       fetch(`${B}/templates`, { method: 'POST', headers: jsonAuth, body: JSON.stringify(body) })
         .then(jsonOrThrow<{ success: boolean; template: SerializedCertificateTemplateDoc }>),
     patchTemplate: (templateId: string, patch: { name?: string; isActive?: boolean }) =>

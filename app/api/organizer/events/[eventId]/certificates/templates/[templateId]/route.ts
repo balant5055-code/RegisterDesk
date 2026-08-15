@@ -20,6 +20,7 @@ import {
   CertificateServiceError,
 } from '@/lib/certificates/firestore'
 import { validateTemplatePatch }     from '@/lib/certificates/validation'
+import { storage }                   from '@/features/platform-storage'
 import { serializeCertificateTemplateDoc } from '@/lib/certificates/types'
 import type { CertificateTemplateDoc, SerializedCertificateTemplateDoc } from '@/lib/certificates/types'
 
@@ -53,7 +54,21 @@ function errorResponse(err: unknown): NextResponse {
 
 // ─── GET ──────────────────────────────────────────────────────────────────────
 
-export interface TemplateResponse { template: SerializedCertificateTemplateDoc }
+export interface TemplateResponse {
+  template: SerializedCertificateTemplateDoc
+  /**
+   * RD-CERT-TPL-R2 — a short-lived signed READ url for an R2-backed template, so the
+   * builder can show the artwork behind the canvas.
+   *
+   * An R2 object has no public url by design; handing the browser a signed one here keeps
+   * the bucket private and is issued only after the same ownership check that guards the
+   * record itself. Null for legacy templates, which already carry a Firebase `fileUrl`.
+   */
+  previewUrl: string | null
+}
+
+/** Signed preview urls are short-lived: the url is a bearer credential for one object. */
+const PREVIEW_URL_TTL_S = 900
 
 export async function GET(req: NextRequest, { params }: Params): Promise<NextResponse> {
   const { eventId, templateId } = await params
@@ -64,7 +79,20 @@ export async function GET(req: NextRequest, { params }: Params): Promise<NextRes
   if (!template || template.eventId !== eventId || template.organizerUid !== auth.uid) {
     return NextResponse.json({ error: 'Template not found' }, { status: 404 })
   }
-  return NextResponse.json({ template: serializeCertificateTemplateDoc(template) } satisfies TemplateResponse)
+
+  // A signing failure must not take the whole template down: the builder can still open,
+  // report a missing background and let the organizer place elements.
+  let previewUrl: string | null = null
+  if (template.fileKey) {
+    previewUrl = await storage
+      .generateSignedUrl({ path: template.fileKey, operation: 'read', expiresIn: PREVIEW_URL_TTL_S })
+      .catch(() => null)
+  }
+
+  return NextResponse.json(
+    { template: serializeCertificateTemplateDoc(template), previewUrl } satisfies TemplateResponse,
+    { headers: { 'Cache-Control': 'no-store' } },
+  )
 }
 
 // ─── PATCH ──────────────────────────────────────────────────────────────────────
@@ -113,9 +141,11 @@ export async function DELETE(req: NextRequest, { params }: Params): Promise<Next
   if (auth.error) return auth.error
 
   try {
-    // fileUrl is returned so the client can delete the Storage object it owns.
-    const { fileUrl } = await deleteTemplate(eventId, templateId, auth.uid)
-    return NextResponse.json({ success: true, fileUrl })
+    // fileUrl is returned so the client can delete the LEGACY Firebase object it owns.
+    // An R2 object is deleted server-side instead — the browser holds no R2 credential —
+    // so `fileUrl` is null there and the client has nothing to clean up.
+    const { fileUrl, deletedKey } = await deleteTemplate(eventId, templateId, auth.uid)
+    return NextResponse.json({ success: true, fileUrl, deletedKey })
   } catch (err) {
     return errorResponse(err)
   }

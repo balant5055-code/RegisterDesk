@@ -41,6 +41,9 @@ export type StorageAssetType =
   /** RD-PHOTO-01 — the organizer's transparent branding overlay for one event. */
   | 'event-branding-overlay'
   | 'event-report'
+  /** RD-CERT-TPL-R2 — an organizer's uploaded certificate TEMPLATE file (pdf/png/jpg).
+   *  Private: it is the organizer's design asset, never public. */
+  | 'event-certificate-template'
   | 'marketing-logo'
   | 'marketing-sponsor'
   | 'system'
