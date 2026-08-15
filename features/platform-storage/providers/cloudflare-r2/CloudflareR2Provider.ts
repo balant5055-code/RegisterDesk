@@ -306,9 +306,18 @@ export class CloudflareR2Provider implements StorageProvider {
       SIGNED_URL_MAX_SECONDS,
     )
 
+    // RD-CERT-ARTIFACT-01 — `ResponseContentDisposition` is folded into the SIGNATURE, so a
+    // recipient cannot strip or rewrite it to turn an attachment into an inline render.
+    // Ignored for `write`, where the header has no meaning.
     const command = options.operation === 'write'
       ? new PutObjectCommand({ Bucket: config.bucket, Key: options.path, ContentType: options.mimeType })
-      : new GetObjectCommand({ Bucket: config.bucket, Key: options.path })
+      : new GetObjectCommand({
+          Bucket: config.bucket,
+          Key:    options.path,
+          ...(options.responseContentDisposition
+            ? { ResponseContentDisposition: options.responseContentDisposition }
+            : {}),
+        })
 
     try {
       return await getSignedUrl(client, command, { expiresIn })

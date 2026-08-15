@@ -29,6 +29,18 @@ export const COLLECTIONS = {
   JOBS: 'certificateJobs',
   /** certificateClaims/{claimId} — deterministic idempotency claims (Phase 5). */
   CLAIMS: 'certificateClaims',
+  /** certificateZipJobs/{jobId} — asynchronous sharded bulk-ZIP jobs (RD-CERT-ARTIFACT-01). */
+  ZIP_JOBS: 'certificateZipJobs',
+  /** certificateBackfillJobs/{jobId} — artifact backfill for legacy fileKey=null records. */
+  BACKFILL_JOBS: 'certificateBackfillJobs',
+  /**
+   * certificateEmailJobs/{jobId} — asynchronous bulk EMAIL DELIVERY (RD-CERT-EMAIL-BULK).
+   *
+   * Deliberately separate from JOBS (generation): the two carry different counts and
+   * different scopes, and generation no longer sends email as a side effect, so a single
+   * collection would make `counts` ambiguous on both surfaces.
+   */
+  EMAIL_JOBS: 'certificateEmailJobs',
 } as const
 
 export type CertificateCollection = (typeof COLLECTIONS)[keyof typeof COLLECTIONS]
@@ -177,3 +189,39 @@ export const BULK_TIME_BUDGET_MS = 45_000
 export const BULK_LEASE_MS = 120_000
 /** Max registrations fetched per `in` query batch (Firestore limit is 30). */
 export const FIRESTORE_IN_LIMIT = 30
+
+// ─── RD-CERT-ARTIFACT-01 · persisted PDF artifacts + async sharded ZIP ────────
+
+/**
+ * TTL for a signed certificate-artifact URL, in seconds.
+ *
+ * Deliberately SHORT. A signed URL is minted only after every authorization gate has
+ * passed, but once minted it is a bearer credential the server can no longer withdraw —
+ * so it necessarily outlives a revocation issued in the same window. 300s bounds that
+ * window to something acceptable for an already-issued certificate; the provider would
+ * allow up to 24h (SIGNED_URL_MAX_SECONDS) and that would not be.
+ */
+export const ARTIFACT_SIGNED_URL_TTL_S = 300
+
+/** Max certificates in ONE zip shard. */
+export const ZIP_SHARD_MAX_FILES = 500
+/**
+ * Max bytes in ONE zip shard, checked ALONGSIDE the file count — whichever trips first.
+ *
+ * Certificate PDFs are NOT a fixed size: `event-certificate` permits up to 25 MB
+ * (features/platform-storage/utils/validation.ts), so 500 files could be anywhere from a
+ * couple of MB to 12.5 GB. A count-only bound would therefore be a memory bug waiting for
+ * a photo-heavy template. 64 MB keeps a shard comfortably inside the 100 MB ceiling that
+ * `event-report` (the shard's own asset type) enforces on upload.
+ */
+export const ZIP_SHARD_MAX_BYTES = 64 * 1024 * 1024
+/**
+ * Max certificate bytes held in memory at once while building a shard.
+ *
+ * The bound is BYTES, not a file count, for the same reason: 16 concurrent 25 MB artifacts
+ * is 400 MB and an OOM, while 16 concurrent 20 KB ones is nothing. Fetches are admitted
+ * until this budget is exhausted, so a single oversized artifact simply runs alone.
+ */
+export const ZIP_INFLIGHT_MAX_BYTES = 32 * 1024 * 1024
+/** Registrations/certificates paged per backfill chunk. */
+export const BACKFILL_PAGE_SIZE = 25

@@ -2,12 +2,20 @@
 //
 // REUSES the existing Print Package ZIP engine primitives — buildStoredZip (shared
 // with the print packager + XLSX writer) and the certificate SSRF url-guard — to
-// bundle already-generated certificate PDFs into ONE ZIP. It NEVER re-renders: it
-// reads the stored files back from Storage (owner-scoped) and archives them, exactly
-// like lib/printAssets/packageJob.ts. No second ZIP system is introduced.
+// bundle certificate PDFs into ONE ZIP. No second ZIP system is introduced.
+//
+// Entry sources are MIXED, in strict preference order:
+//   • fileKey set (current)  → read the CANONICAL persisted artifact from object storage
+//   • fileUrl set (legacy)   → read the stored Firebase file back, SSRF-guarded, as before
+//   • neither (legacy/MVP)   → render on demand via renderCertificateOnDemand
+// Nothing is ever uploaded from buildEntry. Memory stays bounded — by FETCH_CONCURRENCY in
+// the streaming path, and by BYTES in buildZipShard, which is what the async job uses.
 
 import { buildStoredZip, streamStoredZip, type ZipEntry } from '@/lib/zip/store'
 import { safeFetchBytes, validateGeneratedCertificateUrl } from './urlGuard'
+import { renderCertificateOnDemand } from './generate'
+import { storage } from '@/features/platform-storage'
+import { ZIP_INFLIGHT_MAX_BYTES, ZIP_SHARD_MAX_FILES, ZIP_SHARD_MAX_BYTES } from './constants'
 import type { Certificate } from './types'
 
 // Synchronous-ZIP ceiling. The route rejects selections above this with a clear
@@ -21,7 +29,7 @@ export interface CertificateZipResult {
   zip:       Uint8Array
   fileCount: number
   missing:   number         // selected certs whose stored PDF couldn't be read
-  skipped:   number         // selected certs with no stored file (legacy/revoked)
+  skipped:   number         // selected certs beyond the MAX_FILES ceiling
 }
 
 async function mapLimit<T, R>(items: T[], limit: number, fn: (t: T) => Promise<R>): Promise<R[]> {
@@ -37,24 +45,159 @@ function safeName(raw: string): string {
 }
 
 /**
- * Selection = non-revoked certs that actually have a stored file, capped at
- * MAX_FILES. `skipped` = eligible certs with no stored file (legacy on-demand
- * records). Computed WITHOUT fetching, so callers can set response headers upfront.
+ * Selection = non-revoked certs, capped at MAX_FILES. `skipped` = eligible certs beyond
+ * the cap. Computed WITHOUT fetching or rendering, so the route can set response headers
+ * upfront and reject an oversized selection before any work is done.
  */
 export function selectZipCertificates(certs: Certificate[]): { usable: Certificate[]; skipped: number } {
   const eligible = certs.filter(c => c.status !== 'revoked')
-  const usable   = eligible.filter(c => typeof c.fileUrl === 'string' && c.fileUrl).slice(0, MAX_FILES)
+  // A stored file is NO LONGER required. Generated PDFs are not persisted any more, so
+  // every newly issued certificate has fileUrl=null and would previously have been
+  // filtered out here — emptying the archive and 409-ing the route. Eligibility is now
+  // exactly "not revoked", and the only `skipped` are those past the synchronous ceiling.
+  const usable = eligible.slice(0, MAX_FILES)
   return { usable, skipped: eligible.length - usable.length }
 }
 
-// Fetch one certificate's stored PDF (SSRF-guarded). Returns null on a read failure
-// or a URL that fails validation — non-fatal, the entry is simply omitted.
-async function fetchEntry(c: Certificate): Promise<ZipEntry | null> {
-  const check = validateGeneratedCertificateUrl(c.fileUrl as string)
-  if (!check.ok) return null
-  const bytes = await safeFetchBytes(c.fileUrl as string, check, { maxBytes: MAX_FILE_BYTES }).catch(() => null)
-  if (!bytes) return null
-  return { name: `${safeName(c.attendeeName)}-${c.certificateId}.pdf`, data: Buffer.from(bytes) }
+/**
+ * One archive entry. Two sources, one output shape:
+ *   • fileUrl set (legacy)  → read the stored PDF back, SSRF-guarded, exactly as before.
+ *   • fileUrl null (current)→ render on demand from the certificate's `data` snapshot.
+ *
+ * Legacy records deliberately keep the cheap stored read rather than re-rendering: the
+ * bytes already exist, and re-rendering them would cost ~500ms each for no benefit.
+ *
+ * Returns null on any failure — non-fatal by contract, the entry is simply omitted and
+ * counted as `missing`, so one unreadable certificate cannot fail the whole archive.
+ */
+async function buildEntry(c: Certificate): Promise<ZipEntry | null> {
+  const name = `${safeName(c.attendeeName)}-${c.certificateId}.pdf`
+
+  // RD-CERT-ARTIFACT-01 — the canonical persisted artifact, and the reason a bulk archive
+  // is now an I/O problem rather than a rendering one: a stored read is milliseconds where
+  // a re-render is ~155 ms of CPU that does not parallelise.
+  if (typeof c.fileKey === 'string' && c.fileKey) {
+    const got = await storage.download(c.fileKey).catch(() => null)
+    if (got) return { name, data: Buffer.from(got.body) }
+    // Object missing despite a key — fall through and re-render rather than drop a
+    // certificate the caller explicitly asked for.
+  }
+
+  if (typeof c.fileUrl === 'string' && c.fileUrl) {
+    const check = validateGeneratedCertificateUrl(c.fileUrl)
+    if (!check.ok) return null
+    const bytes = await safeFetchBytes(c.fileUrl, check, { maxBytes: MAX_FILE_BYTES }).catch(() => null)
+    return bytes ? { name, data: Buffer.from(bytes) } : null
+  }
+
+  // Last resort — a legacy record with no artifact at all. The SAME renderer the individual
+  // download uses, so a ZIP entry and a single download are byte-identical.
+  const rendered = await renderCertificateOnDemand(c.certificateId).catch(() => null)
+  if (!rendered || !rendered.ok) return null
+  return { name, data: Buffer.from(rendered.bytes) }
+}
+
+// ─── RD-CERT-ARTIFACT-01 · shard building for the ASYNC bulk-ZIP job ──────────
+
+export interface ZipShardResult {
+  /** The finished shard archive. */
+  zip:        Uint8Array
+  /** certificateIds actually inside `zip`, in archive order. */
+  includedIds: string[]
+  /** certificateIds that were requested for this shard but could not be read. */
+  failedIds:   string[]
+  /** Uncompressed payload bytes, for the caller's budget accounting. */
+  bytes:       number
+}
+
+/**
+ * Builds ONE self-contained shard archive from an already-sized slice of certificates.
+ *
+ * ═══ WHY SHARDS, NOT ONE STREAMED ARCHIVE ══════════════════════════════════
+ * A synchronous 10,000-file archive cannot be made reliable: the response commits its
+ * status and headers before the first entry is written, so a timeout mid-stream yields a
+ * TRUNCATED zip that the browser reports as a successful download. A shard is atomic —
+ * it is uploaded whole or not at all — independently retryable, and bounded in memory.
+ *
+ * ═══ MEMORY IS BOUNDED BY BYTES, NOT BY FILE COUNT ═════════════════════════
+ * Certificate PDFs are not a fixed size; this asset type permits up to 25 MB. Admitting a
+ * fixed NUMBER of concurrent fetches would mean anywhere from a few hundred KB to hundreds
+ * of MB in flight. Instead a fetch is admitted only while the in-flight payload is under
+ * ZIP_INFLIGHT_MAX_BYTES, so an oversized artifact simply runs with less company.
+ *
+ * ═══ NOTHING DISAPPEARS ════════════════════════════════════════════════════
+ * Every requested id lands in `includedIds` or `failedIds`. The two together always equal
+ * the input set, which is what lets the job's manifest be honest instead of silently short.
+ */
+/**
+ * How many certificates go in the NEXT shard, bounded by BOTH file count and byte size.
+ *
+ * Pure — no I/O, no Firestore — so the job's cursor arithmetic can be reasoned about (and
+ * tested for gap/duplicate freedom across interruptions) without a database.
+ *
+ * The byte bound is not optional. `event-certificate` permits artifacts up to 25 MB, so a
+ * count-only rule could ask for 500 × 25 MB = 12.5 GB in a single shard. `fileSize` is on
+ * the record for persisted artifacts; legacy records without one are charged a
+ * conservative estimate, so an unknown size can never be treated as free.
+ */
+const UNKNOWN_SIZE_ESTIMATE = 2 * 1024 * 1024
+
+export function planShard(certs: Certificate[], start: number): Certificate[] {
+  const out: Certificate[] = []
+  let bytes = 0
+  for (let i = start; i < certs.length && out.length < ZIP_SHARD_MAX_FILES; i++) {
+    const size = typeof certs[i].fileSize === 'number' && certs[i].fileSize! > 0
+      ? certs[i].fileSize!
+      : UNKNOWN_SIZE_ESTIMATE
+    // Always take at least one: an artifact larger than the whole shard budget must get a
+    // shard to itself, or the job would stall forever planning an empty slice.
+    if (out.length > 0 && bytes + size > ZIP_SHARD_MAX_BYTES) break
+    out.push(certs[i])
+    bytes += size
+  }
+  return out
+}
+
+export async function buildZipShard(certs: Certificate[]): Promise<ZipShardResult> {
+  const seen        = new Set<string>()
+  const entries: ZipEntry[] = []
+  const includedIds: string[] = []
+  const failedIds:   string[] = []
+  let   bytes = 0
+
+  let cursor   = 0
+  let inFlight = 0
+
+  // Bounded-by-bytes worker pool. Each worker claims the next certificate, waits until the
+  // in-flight budget can accommodate a worst-case artifact, then fetches.
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      const idx = cursor++
+      if (idx >= certs.length) return
+      const c = certs[idx]
+
+      // Reserve pessimistically (we cannot know the size before reading); release the
+      // difference once the real size is known.
+      while (inFlight > 0 && inFlight + MAX_FILE_BYTES > ZIP_INFLIGHT_MAX_BYTES) {
+        await new Promise(r => setTimeout(r, 5))
+      }
+      inFlight += MAX_FILE_BYTES
+
+      try {
+        const entry = await buildEntry(c).catch(() => null)
+        if (!entry) { failedIds.push(c.certificateId); continue }
+        entries.push({ name: dedupeName(entry.name, seen, entries.length), data: entry.data })
+        includedIds.push(c.certificateId)
+        bytes += entry.data.byteLength
+      } finally {
+        inFlight -= MAX_FILE_BYTES
+      }
+    }
+  }
+
+  await Promise.all(Array.from({ length: Math.min(FETCH_CONCURRENCY, certs.length) }, worker))
+
+  return { zip: await buildStoredZip(entries), includedIds, failedIds, bytes }
 }
 
 // Dedupe a candidate archive name against those already emitted.
@@ -78,7 +221,7 @@ export function streamCertificatesZip(usable: Certificate[]): ReadableStream<Uin
     const seen = new Set<string>()
     let emitted = 0
     for (let i = 0; i < usable.length; i += FETCH_CONCURRENCY) {
-      const fetched = await Promise.all(usable.slice(i, i + FETCH_CONCURRENCY).map(fetchEntry))
+      const fetched = await Promise.all(usable.slice(i, i + FETCH_CONCURRENCY).map(buildEntry))
       for (const r of fetched) {
         if (!r) continue
         yield { name: dedupeName(r.name, seen, emitted++), data: r.data }
@@ -96,7 +239,7 @@ export function streamCertificatesZip(usable: Certificate[]): ReadableStream<Uin
  */
 export async function buildCertificatesZip(certs: Certificate[]): Promise<CertificateZipResult> {
   const { usable, skipped } = selectZipCertificates(certs)
-  const results = await mapLimit(usable, FETCH_CONCURRENCY, fetchEntry)
+  const results = await mapLimit(usable, FETCH_CONCURRENCY, buildEntry)
 
   const seen = new Set<string>()
   const entries: ZipEntry[] = []

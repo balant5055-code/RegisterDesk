@@ -152,4 +152,18 @@ export interface SignedUrlOptions {
   expiresIn?: number
   /** For `write`, the content type the URL is valid for. */
   mimeType?:  string
+  /**
+   * RD-CERT-ARTIFACT-01 — `read` only. The `Content-Disposition` the STORE should send
+   * back with the object, so a browser following the URL downloads instead of rendering.
+   *
+   * WHY THIS EXISTS. A certificate download used to be streamed by our own route, which
+   * set `Content-Disposition: attachment` itself. Serving the stored artifact by redirect
+   * moves the bytes out of the function, and with them the ability to set that header —
+   * the browser would open the PDF inline and the caller would lose the download semantics
+   * every consumer of that route depends on. S3-compatible stores accept the header as a
+   * SIGNED query parameter, so it cannot be tampered with after the fact.
+   *
+   * Providers with no gateway to honour it (the local development filesystem) ignore it.
+   */
+  responseContentDisposition?: string
 }

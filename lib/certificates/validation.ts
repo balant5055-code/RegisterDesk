@@ -260,7 +260,7 @@ export interface JobCreateInput {
 }
 
 // Cap explicit id lists to a sane size to bound payloads.
-const MAX_EXPLICIT_IDS = 5000
+export const MAX_EXPLICIT_IDS = 5000
 
 export function validateJobCreate(raw: unknown): ValidationResult<JobCreateInput> {
   if (!isObject(raw)) return { ok: false, error: 'Request body must be an object' }

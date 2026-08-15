@@ -1,13 +1,13 @@
 'use client'
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Loader2, Users, UserCheck, ListChecks, User, Play, RefreshCw, Ban, X } from 'lucide-react'
+import { Loader2, Users, UserCheck, ListChecks, User, Play, RefreshCw, Ban, X, Mail } from 'lucide-react'
 import {
   CERTIFICATE_TYPES, CERTIFICATE_TYPE_LABELS, CERTIFICATE_JOB_STATUS_LABELS,
 } from '@/lib/certificates/constants'
 import { cn } from '@/lib/utils/cn'
 import { IconButton } from '@/components/ui'
-import { Toggle, ErrorBox, Badge, FieldLabel, selectCls, btnGhost } from './ui'
+import { ErrorBox, Badge, FieldLabel, selectCls, btnGhost } from './ui'
 import type { CertApi } from './api'
 import type { CertificateType, CertificateJobScope, SerializedCertificateJob } from '@/lib/certificates/types'
 import type { SerializedRegistration } from '@/app/api/organizer/events/[eventId]/registrations/route'
@@ -19,7 +19,6 @@ const jobTone: Record<string, Parameters<typeof Badge>[0]['tone']> = {
 
 export default function IssueBulkPanel({ api }: { api: CertApi }) {
   const [certType, setCertType] = useState<CertificateType>('participation')
-  const [autoEmail, setAutoEmail] = useState(false)
   const [err, setErr] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
@@ -53,7 +52,7 @@ export default function IssueBulkPanel({ api }: { api: CertApi }) {
   async function createJob(scope: CertificateJobScope, registrationIds?: string[]) {
     setBusy(true); setErr(null); setNotice(null)
     try {
-      const { job } = await api.createJob({ scope, certificateType: certType, registrationIds: registrationIds ?? null, autoEmail })
+      const { job } = await api.createJob({ scope, certificateType: certType, registrationIds: registrationIds ?? null })
       setJobs(prev => [job, ...prev])
       setPicker(null); setChosen(new Set())
       void drive(job.jobId)
@@ -101,9 +100,13 @@ export default function IssueBulkPanel({ api }: { api: CertApi }) {
               {CERTIFICATE_TYPES.map(t => <option key={t} value={t}>{CERTIFICATE_TYPE_LABELS[t]}</option>)}
             </select>
           </div>
-          <div className="flex items-end justify-between gap-3 rounded-lg border border-border bg-muted/30 px-4 py-2">
-            <span className="text-[14px] text-foreground">Auto-email after generation</span>
-            <Toggle checked={autoEmail} onChange={setAutoEmail} />
+          {/* Delivery is NOT a generation option. Sending lives in Recipients, where the
+              operator can see what exists, filter it, and retry only what failed. */}
+          <div className="flex items-end gap-2 rounded-lg border border-border bg-muted/30 px-4 py-2">
+            <Mail className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
+            <span className="text-[13px] text-muted-foreground">
+              Not emailed here — send from the <strong className="font-medium text-foreground">Recipients</strong> tab.
+            </span>
           </div>
         </div>
 

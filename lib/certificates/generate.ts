@@ -11,18 +11,18 @@ import {
   createCertificate,
   getCertificate,
   getActiveTemplate,
+  getTemplateById,
   recordCertificateRegeneration,
   reserveCertificateId,
   releaseCertificateClaim,
-  getSettings,
+
   recordTemplateUsage,
   assertRegistrationEligibleForCertificate,
 } from './firestore'
-import { emailCertificate } from './email'
+
 import { chargeCertificate } from './billing'
 import { sendCertificateWhatsApp } from './whatsapp'
-import { uploadServerFile }         from '@/lib/firebase/storage/admin'
-import { generatedCertificatePath } from './constants'
+import { uploadCertificateArtifact, deleteCertificateArtifact } from './artifact'
 import { safeFetchBytes, validateEventTemplateUrl, validateGlobalTemplateUrl } from './urlGuard'
 import { getEmailAppUrl } from '@/lib/email/appUrl'
 import { enqueueWebhook }           from '@/lib/integrations/webhooks'
@@ -247,9 +247,28 @@ export async function generateCertificate(
       assets,
     })
 
-    // Upload the generated file.
-    const path = generatedCertificatePath(eventId, certificateId)
-    const { url } = await uploadServerFile(path, pdfBytes, 'application/pdf')
+    // ═══ RD-CERT-ARTIFACT-01 · PERSIST THE PDF *BEFORE* THE RECORD ═══════════
+    //
+    // THE INVARIANT: a certificate record exists ⟹ its artifact exists. Downloads may then
+    // serve stored bytes by signed URL instead of re-rendering (~155 ms of CPU each, on a
+    // path that barely parallelises), which is what makes 10,000 concurrent downloads a
+    // storage problem rather than a rendering queue.
+    //
+    // ORDER IS THE WHOLE SAFETY STORY, and it is the same ordering the certificate-photo
+    // route already proves: write the object, THEN commit the reference. The two failure
+    // modes are not symmetric —
+    //   • an orphaned object is bounded, sweepable, and OVERWRITTEN by the next retry,
+    //     because the key is deterministic;
+    //   • a record pointing at bytes that are not there is a permanently broken
+    //     certificate that no retry can repair, since `findCertificate` would return it
+    //     and generation would never run again.
+    //
+    // An upload failure therefore throws to the outer catch, which releases the claim and
+    // lets the item be counted failed and retried — exactly as a render failure already
+    // does. No record is created, nothing is billed, and the tuple stays regenerable.
+    const { fileKey, fileSize } = await uploadCertificateArtifact(
+      input.eventSlug, certificateId, pdfBytes,
+    )
 
     // Persist the certificate record (new `certificates` collection).
     const certInput: CertificateInput = {
@@ -266,13 +285,26 @@ export async function generateCertificate(
       eventDate:      input.eventDate,
       certificateType,
       templateId:     template.templateId,
-      fileUrl:        url,
-      fileSize:       pdfBytes.length,
+      fileUrl:        null,      // legacy Firebase Storage field — never written any more
+      fileKey,                   // the canonical artifact, already uploaded above
+      fileSize,
       source,
       data:           snapshotData(context),
       jobId:          params.jobId ?? null,
     }
-    const certificate = await createCertificate(certInput)
+    // If the record cannot be written, the artifact we just uploaded is unreferenced —
+    // remove it rather than leave a paid-for object nothing points at. Best-effort by
+    // design: the deterministic key means a retry overwrites it even if this delete fails,
+    // so a failed cleanup costs storage, never correctness. Rethrown so the outer catch
+    // releases the claim.
+    let certificate: Certificate
+    try {
+      certificate = await createCertificate(certInput)
+    } catch (err) {
+      await deleteCertificateArtifact(fileKey)
+      throw err
+    }
+
 
     // Wallet billing (GA-4 S2). Idempotent + config-driven; runs on the create path
     // only, so a re-issued/duplicate tuple (which returns early above) never charges
@@ -288,21 +320,20 @@ export async function generateCertificate(
     })
     const charged = billing?.charged === true
 
-    // Auto-email: explicit override wins; otherwise honor settings.autoEmail.
-    let shouldEmail = params.email
-    if (shouldEmail === undefined) {
-      const settings = await getSettings(eventId)
-      shouldEmail = settings?.autoEmail.enabled ?? false
-    }
-
-    let emailed = false
-    if (shouldEmail) {
-      // Best-effort — a delivery failure must not fail generation. Reuse the
-      // in-memory PDF so we don't re-fetch what we just uploaded.
-      const r = await emailCertificate(certificate, { pdfBytes })
-        .catch(err => { captureError(err, { scope: 'certificate_email', area: 'certificate', certificateId }); return null })
-      emailed = r?.success ?? false
-    }
+    // RD-CERT-EMAIL-BULK — GENERATION NO LONGER SENDS EMAIL.
+    //
+    // Issuing a certificate and delivering it are now separate operations. Sending here
+    // made delivery an invisible side effect of generation: it could not be retried
+    // without regenerating, its failures were not surfaced anywhere an operator looks,
+    // and at bulk scale it charged an unbounded provider wait to the generation budget.
+    //
+    // Delivery is an explicit action from Recipients — single (…/certificates/email) or
+    // bulk (certificateEmailJobs). `settings.autoEmail` is still read there for the
+    // subject and message; only the automatic TRIGGER is gone.
+    //
+    // `emailed` stays in the result shape (always false) so existing callers and the
+    // Overview stat keep compiling and reading.
+    const emailed = false
 
     // WhatsApp delivery (GA-4 S2) — automatically sent after successful generation.
     // Fire-and-forget; reuses the Notification/WhatsApp engine + certificate_ready
@@ -374,6 +405,88 @@ export async function prefetchRegenAssets(
   return { template, render: await loadRenderAssets(template) }
 }
 
+// ─── On-demand rendering (download path) ─────────────────────────────────────
+
+/**
+ * Template bytes are the expensive part of an on-demand render: the active template is a
+ * multi-MB image fetched from Storage, identical for every attendee of an event. Without a
+ * cache each download would re-fetch it, which would make on-demand rendering SLOWER than
+ * streaming the stored PDF it replaces. Bounded and short-lived: a warm lambda serving a
+ * download burst pays the fetch once, and a template edit is picked up within the TTL.
+ */
+const TEMPLATE_ASSET_TTL_MS = 5 * 60_000
+const TEMPLATE_ASSET_MAX    = 8
+const _assetCache = new Map<string, { at: number; assets: RenderAssets }>()
+
+async function cachedRenderAssets(template: CertificateTemplateDoc): Promise<RenderAssets> {
+  const key = `${template.templateId}:${template.fileUrl}`
+  const hit = _assetCache.get(key)
+  if (hit && Date.now() - hit.at < TEMPLATE_ASSET_TTL_MS) return hit.assets
+
+  const assets = await loadRenderAssets(template)
+  // Oldest-out when full — a plain bound, not a true LRU; the working set is one template
+  // per event being downloaded, so eviction pressure is negligible.
+  if (_assetCache.size >= TEMPLATE_ASSET_MAX) {
+    const oldest = [..._assetCache.entries()].sort((a, b) => a[1].at - b[1].at)[0]
+    if (oldest) _assetCache.delete(oldest[0])
+  }
+  _assetCache.set(key, { at: Date.now(), assets })
+  return assets
+}
+
+/** Test seam — lets a suite assert cold-path behaviour deterministically. */
+export function __clearCertificateAssetCache(): void { _assetCache.clear() }
+
+export type OnDemandRender =
+  | { ok: true;  bytes: Uint8Array; filename: string }
+  | { ok: false; error: 'not_found' | 'revoked' | 'no_template' | 'render_failed' }
+
+/**
+ * Renders an EXISTING certificate to PDF bytes WITHOUT touching Storage — the canonical
+ * renderer for the download endpoint.
+ *
+ * Faithful by construction: it reuses `renderCertificatePdf` (the same function generation
+ * and regeneration use) over `contextFromSnapshot(existing.data)`, the placeholder snapshot
+ * persisted at issuance. Every value on the certificate — participant name, event fields,
+ * bib, finish time, position, and crucially `issueDate` — comes from that snapshot, so a
+ * re-render never drifts to today's date or to changed registration data.
+ *
+ * Template resolution PINS to the certificate's own `templateId` when present, falling back
+ * to the event's active template only for pre-templateId records. That is deliberately
+ * stricter than `regenerateCertificate`, which intentionally re-renders against the CURRENT
+ * active template: a download must reproduce what was issued, not adopt a later redesign.
+ *
+ * Does NOT upload, does NOT write the certificate record, and does NOT base64-encode.
+ * Caller owns the bytes; they are garbage-collected once the response is written.
+ */
+export async function renderCertificateOnDemand(certificateId: string): Promise<OnDemandRender> {
+  const existing = await getCertificate(certificateId)
+  if (!existing) return { ok: false, error: 'not_found' }
+  if (existing.status === 'revoked') return { ok: false, error: 'revoked' }
+
+  const template = existing.templateId
+    ? (await getTemplateById(existing.templateId)) ?? await getActiveTemplate(existing.eventId, existing.organizerUid)
+    : await getActiveTemplate(existing.eventId, existing.organizerUid)
+  if (!template) return { ok: false, error: 'no_template' }
+
+  try {
+    const { templateBytes, assets } = await cachedRenderAssets(template)
+    const bytes = await renderCertificatePdf({
+      templateBytes,
+      templateType: template.templateType,
+      dimensions:   template.dimensions,
+      context:      contextFromSnapshot(existing.data, certificateId),
+      verifyUrl:    `${getEmailAppUrl()}/verify/certificate/${certificateId}`,
+      layout:       template.layout ?? null,
+      assets,
+    })
+    return { ok: true, bytes, filename: `certificate-${certificateId}.pdf` }
+  } catch (err) {
+    captureError(err, { scope: 'certificate_on_demand_render', area: 'certificate', certificateId })
+    return { ok: false, error: 'render_failed' }
+  }
+}
+
 export async function regenerateCertificate(
   certificateId: string,
   opts?: { actorUid?: string; prefetched?: { template: CertificateTemplateDoc; render: RenderAssets } },
@@ -401,11 +514,10 @@ export async function regenerateCertificate(
     assets,
   })
 
-  const path = generatedCertificatePath(existing.eventId, certificateId)
-  const { url } = await uploadServerFile(path, pdfBytes, 'application/pdf')
-  await recordCertificateRegeneration(certificateId, { fileUrl: url, fileSize: pdfBytes.length, templateId: template.templateId }, opts?.actorUid)
+  const { fileKey, fileSize } = await uploadCertificateArtifact(existing.eventSlug, certificateId, pdfBytes)
+  await recordCertificateRegeneration(certificateId, { fileKey, fileSize, templateId: template.templateId }, opts?.actorUid)
 
-  return { ok: true, certificate: { ...existing, fileUrl: url, fileSize: pdfBytes.length, templateId: template.templateId } }
+  return { ok: true, certificate: { ...existing, fileKey, fileSize, templateId: template.templateId } }
 }
 
 // Re-export for callers that want the placeholder key type without a second import.

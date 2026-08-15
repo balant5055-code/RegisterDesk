@@ -11,6 +11,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { authorizeWorkspace }        from '@/lib/team/workspace'
 import { getCertificate }            from '@/lib/certificates/firestore'
+import type { EmailClaimIntent }     from '@/lib/certificates/firestore'
 import { emailCertificate }          from '@/lib/certificates/email'
 
 type Params = { params: Promise<{ eventId: string }> }
@@ -39,6 +40,19 @@ export async function POST(req: NextRequest, { params }: Params): Promise<NextRe
   if (!certificateId) return NextResponse.json({ error: 'certificateId is required' }, { status: 400 })
   const resend = (body as Record<string, unknown>)?.resend === true
 
+  // RD-CERT-EMAIL-BULK — `resend_after_review` is the ONLY way to send a certificate whose
+  // previous delivery outcome is unknown, and it is deliberately a separate value from an
+  // ordinary resend: the operator is accepting a duplicate risk, so the UI must ask for it
+  // explicitly rather than let a generic Resend button take it. It still acquires the same
+  // transactional claim — this is not a bypass.
+  const rawIntent = (body as Record<string, unknown>)?.intent
+  const intent: EmailClaimIntent | undefined =
+    rawIntent === 'resend_after_review' ? 'resend_after_review'
+      : rawIntent === 'resend'       ? 'resend'
+      : rawIntent === 'retry_failed' ? 'retry_failed'
+      : rawIntent === 'send'         ? 'send'
+      : undefined
+
   const certificate = await getCertificate(certificateId)
   if (!certificate || certificate.organizerUid !== auth.uid || certificate.eventId !== eventId) {
     return NextResponse.json({ error: 'Certificate not found' }, { status: 404 })
@@ -49,7 +63,7 @@ export async function POST(req: NextRequest, { params }: Params): Promise<NextRe
   // unexpected throw becomes a safe, actionable message rather than 'Request failed (500)'.
   let result
   try {
-    result = await emailCertificate(certificate, { force: resend })
+    result = await emailCertificate(certificate, { force: resend, ...(intent ? { intent } : {}) })
   } catch (err) {
     console.error('[certificate-email] unexpected_failure', {
       certificateId, eventId, name: err instanceof Error ? err.name : 'unknown',

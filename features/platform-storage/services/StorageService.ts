@@ -189,6 +189,8 @@ export class StorageService {
     operation?: SignedUrlOperation
     expiresIn?: number
     mimeType?:  string
+    /** RD-CERT-ARTIFACT-01 — `read` only; see SignedUrlOptions. */
+    responseContentDisposition?: string
   }): Promise<string> {
     assertSafeKey(params.path)
     return this.provider.generateSignedUrl({
@@ -196,6 +198,7 @@ export class StorageService {
       operation: params.operation ?? 'read',
       expiresIn: params.expiresIn ?? SIGNED_URL_DEFAULT_SECONDS,
       mimeType:  params.mimeType,
+      responseContentDisposition: params.responseContentDisposition,
     })
   }
 

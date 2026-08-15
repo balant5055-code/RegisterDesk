@@ -9,6 +9,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 const recorded: Array<{ status: string; error?: string }> = []
+// Holder so the claim double can echo back the certificate under test (see the mock below).
+const claimed = vi.hoisted(() => ({ subject: null as unknown }))
 const sendMock = vi.fn(async () => ({ success: true, messageId: 'msg_1' }))
 
 vi.mock('@/lib/email/appUrl', () => ({
@@ -31,12 +33,29 @@ vi.mock('@/lib/certificates/urlGuard', () => ({
 }))
 vi.mock('@/lib/certificates/firestore', () => ({
   getSettings: async () => null,
+  // RD-CERT-EMAIL-IDEMPOTENCY — delivery now takes a claim before the provider is called.
+  // These tests are about the URL-build refusal (which happens AFTER the claim), so the
+  // claim grants and echoes the certificate back — except for the already-sent rule, which
+  // the last test in this file asserts is still honoured.
+  claimCertificateEmail: async (_id: string, opts: { intent: string }) => {
+    const c = claimed.subject as { emailStatus?: string } | null
+    if ((c?.emailStatus === 'sent' || c?.emailStatus === 'delivered') && opts.intent !== 'resend') {
+      return { ok: false, reason: 'already_sent' }
+    }
+    return { ok: true, certificate: claimed.subject }
+  },
   recordCertificateEmail: async (_id: string, entry: { status: string; error?: string }) => {
     recorded.push({ status: entry.status, error: entry.error })
   },
 }))
 
-import { emailCertificate } from '@/lib/certificates/email'
+import { emailCertificate as rawEmailCertificate } from '@/lib/certificates/email'
+
+// Delivery sends against the CLAIMED document; register it so the double can return it.
+const emailCertificate: typeof rawEmailCertificate = (c, opts) => {
+  claimed.subject = c
+  return rawEmailCertificate(c, opts)
+}
 
 const CERT = {
   certificateId: 'RDC-2026-5OHOUL',

@@ -290,8 +290,24 @@ export function settingsToInput(settings: CertificateSettings): CertificateSetti
 /** How a certificate came to be generated. */
 export type CertificateSource = CertificateTrigger | 'bulk'
 
-/** Per-send email delivery status for a certificate (Phase 8). */
-export type CertificateEmailStatus = 'pending' | 'sent' | 'delivered' | 'failed'
+/**
+ * Per-send email delivery status for a certificate (Phase 8).
+ *
+ * `processing` (RD-CERT-EMAIL-IDEMPOTENCY) is a CLAIM, not a report: exactly one sender
+ * may hold it, and it is taken inside a transaction BEFORE the provider is called. It ends
+ * when `recordCertificateEmail` writes `sent`/`failed`.
+ *
+ * A `processing` certificate whose lease has expired is the one state the system cannot
+ * resolve on its own — see claimCertificateEmail.
+ */
+export type CertificateEmailStatus = 'pending' | 'processing' | 'sent' | 'delivered' | 'failed'
+
+/**
+ * Which certificates a delivery run targets. Resolved SERVER-SIDE from this scope — the
+ * client never supplies a recipient list, so a 10,000-certificate run is a stored scope
+ * rather than 10,000 ids in a request body.
+ */
+export type CertificateDeliveryScope = 'unsent' | 'failed' | 'selected'
 
 /** Supported revocation reasons (Phase 9). `other` requires a customReason. */
 export type RevocationReason =
@@ -325,6 +341,63 @@ export interface EmailHistoryEntry {
 /** Schema version stamped on every new-model document, for safe migrations. */
 export const CERTIFICATE_SCHEMA_VERSION = 1
 
+// ─── certificateEmailJobs/{jobId} ─────────────────────────────────────────────
+
+/**
+ * RD-CERT-EMAIL-BULK — an asynchronous bulk EMAIL DELIVERY job.
+ *
+ * Separate from CertificateJob (generation) because generation no longer sends email at
+ * all: the two have different scopes, different outcomes and different counts, and sharing
+ * one document would make `counts` mean two things on two screens.
+ *
+ * Control fields (jobId/organizerUid/createdBy/status/counts/cursor/lockedUntil/timestamps)
+ * are INHERITED from the shared kernel Job — this adds only what delivery needs.
+ */
+export interface CertificateEmailJob extends Job {
+  eventId:   string
+  scopeType: CertificateDeliveryScope
+  /**
+   * Explicit targets for `selected` ONLY; null for `unsent`/`failed`.
+   *
+   * "Select all matching" therefore persists ZERO ids — the scope IS the selection, so a
+   * 10,000-certificate run carries a constant-size payload and is re-resolved server-side
+   * on every chunk.
+   */
+  certificateIds: string[] | null
+  /**
+   * Certificates whose previous delivery outcome is UNKNOWN (claimed, then the worker died
+   * before recording). Counted separately because it is neither a success nor a failure:
+   * it is the one state that needs a human decision, and it must never be auto-retried.
+   * Rare by construction, so incrementing it per occurrence costs nothing at scale.
+   */
+  needsReview:   number
+  schemaVersion: number
+}
+
+/** Shape used to enqueue a delivery job; the server fills id/status/counts/timestamps. */
+export type CertificateEmailJobInput = Pick<CertificateEmailJob,
+  'eventId' | 'organizerUid' | 'createdBy' | 'scopeType' | 'certificateIds'
+>
+
+/** Serialized for API responses (Timestamps → ISO strings). */
+export interface SerializedCertificateEmailJob
+  extends Omit<CertificateEmailJob, 'createdAt' | 'startedAt' | 'updatedAt' | 'completedAt'> {
+  createdAt:   string | null
+  startedAt:   string | null
+  updatedAt:   string | null
+  completedAt: string | null
+}
+
+export function serializeCertificateEmailJob(j: CertificateEmailJob): SerializedCertificateEmailJob {
+  return {
+    ...j,
+    createdAt:   toIsoString(j.createdAt),
+    startedAt:   toIsoString(j.startedAt),
+    updatedAt:   toIsoString(j.updatedAt),
+    completedAt: toIsoString(j.completedAt),
+  }
+}
+
 // ─── certificates/{certificateId} ─────────────────────────────────────────────
 
 /**
@@ -355,7 +428,12 @@ export interface Certificate {
   eventDate:         string               // human-readable, e.g. "15 June 2026"
   certificateType:   CertificateType
   templateId:        string | null        // CertificateTemplateDoc used, if any
-  fileUrl:           string | null        // stored asset; null = generated on demand
+  /** LEGACY stored asset — a Firebase Storage download URL from the pre-R2 pipeline. */
+  fileUrl:           string | null
+  /** RD-CERT-ARTIFACT-01 — the canonical PDF's object KEY in platform storage. A KEY,
+   *  never a URL: signed URLs expire. `null` ⇒ no persisted artifact (legacy/MVP), which
+   *  remains downloadable through the on-demand render fallback. */
+  fileKey:           string | null
   fileSize:          number | null        // bytes, when stored
   status:            CertificateStatus
   source:            CertificateSource
@@ -365,6 +443,14 @@ export interface Certificate {
   lastDownloadedAt:  unknown | null       // Firestore Timestamp (Phase 8)
   emailStatus:       CertificateEmailStatus | null
   emailHistory?:     EmailHistoryEntry[]  // append-only delivery log (Phase 8)
+  /**
+   * RD-CERT-EMAIL-IDEMPOTENCY — expiry of the `processing` claim. Present ONLY while a
+   * sender holds the claim; it is what separates "a worker is sending this right now"
+   * from "a worker died mid-send". Absent/null ⇒ no claim is held.
+   */
+  emailLeaseExpiresAt?: unknown | null    // Firestore Timestamp
+  /** Delivery attempts made, including the one in flight. Bounds retry loops. */
+  emailAttempts?:    number
   generatedAt:       unknown              // Firestore Timestamp
   emailedAt:         unknown | null
   revokedAt:         unknown | null       // Phase 9
@@ -382,16 +468,18 @@ export type CertificateInput = Pick<Certificate,
   | 'certificateId' | 'verificationToken' | 'eventId' | 'eventSlug'
   | 'organizerUid' | 'issuedBy' | 'registrationId' | 'attendeeName' | 'attendeeEmail'
   | 'eventName' | 'eventDate' | 'certificateType' | 'templateId'
-  | 'fileUrl' | 'fileSize' | 'source' | 'data' | 'jobId'
+  | 'fileUrl' | 'fileKey' | 'fileSize' | 'source' | 'data' | 'jobId'
 >
 
 /** Serialized for API responses (Timestamps → ISO strings). */
 export interface SerializedCertificate
-  extends Omit<Certificate, 'generatedAt' | 'emailedAt' | 'revokedAt' | 'lastDownloadedAt'> {
+  extends Omit<Certificate,
+    'generatedAt' | 'emailedAt' | 'revokedAt' | 'lastDownloadedAt' | 'emailLeaseExpiresAt'> {
   generatedAt:      string | null
   emailedAt:        string | null
   revokedAt:        string | null
   lastDownloadedAt: string | null
+  emailLeaseExpiresAt: string | null
 }
 
 // ─── certificateTemplates/{templateId} ────────────────────────────────────────
@@ -628,6 +716,8 @@ export function serializeCertificate(c: Certificate): SerializedCertificate {
     emailedAt:        toIsoString(c.emailedAt),
     revokedAt:        toIsoString(c.revokedAt),
     lastDownloadedAt: toIsoString(c.lastDownloadedAt),
+    // Spread above would otherwise hand the raw Firestore Timestamp to the client.
+    emailLeaseExpiresAt: toIsoString(c.emailLeaseExpiresAt ?? null),
   }
 }
 
@@ -679,6 +769,7 @@ export function legacyRecordToCertificate(r: CertificateRecord): Certificate {
     certificateType:   'participation',   // MVP records carry no per-record type
     templateId:        null,
     fileUrl:           null,              // regenerated on demand by the MVP
+    fileKey:           null,              // MVP records have no persisted artifact
     fileSize:          null,
     status:            r.status,
     source:            'manual',

@@ -3,6 +3,8 @@
 // organizer Bearer token.
 
 import type { CertificateRecordsResponse } from '@/app/api/organizer/events/[eventId]/certificates/records/route'
+import type { EmailJobCreateResponse, EmailJobsListResponse } from '@/app/api/organizer/events/[eventId]/certificates/email-jobs/route'
+import type { EmailJobResponse } from '@/app/api/organizer/events/[eventId]/certificates/email-jobs/[jobId]/route'
 import type { SettingsResponse }           from '@/app/api/organizer/events/[eventId]/certificates/settings/route'
 import type { TemplatesListResponse }      from '@/app/api/organizer/events/[eventId]/certificates/templates/route'
 import type { JobsListResponse }           from '@/app/api/organizer/events/[eventId]/certificates/jobs/route'
@@ -11,7 +13,7 @@ import type { RegistrationsApiResponse }   from '@/app/api/organizer/events/[eve
 import type {
   CertificateSettingsInput, CertificateSettingsPatch,
   SerializedCertificateTemplateDoc, SerializedCertificate, SerializedCertificateJob,
-  CertificateType, TemplateType, CertificateJobScope, RevocationReason,
+  CertificateType, TemplateType, CertificateJobScope, RevocationReason, CertificateDeliveryScope,
 } from '@/lib/certificates/types'
 
 export type HubTab = 'overview' | 'settings' | 'templates' | 'programs' | 'brandkit' | 'issue' | 'recipients'
@@ -75,7 +77,28 @@ export function makeCertApi(eventId: string, token: string) {
 
   return {
     // ── Records (Overview + Recipients) ──
-    getRecords: () => fetch(`${B}/records`, { headers: auth }).then(jsonOrThrow<CertificateRecordsResponse>),
+    // Cursor-paginated. The server has always returned hasMore/nextCursor; the client now
+    // uses them, so a 10,000-certificate event is paged instead of silently truncated to
+    // the first response.
+    getRecords: (opts: { limit?: number; cursor?: string | null } = {}) => {
+      const q = new URLSearchParams()
+      if (opts.limit) q.set('limit', String(opts.limit))
+      if (opts.cursor) q.set('cursor', opts.cursor)
+      const suffix = q.toString() ? `?${q}` : ''
+      return fetch(`${B}/records${suffix}`, { headers: auth }).then(jsonOrThrow<CertificateRecordsResponse>)
+    },
+
+    // ── Bulk delivery (RD-CERT-EMAIL-BULK) ──
+    // "Select all matching" sends a SCOPE, never a list of ids, so the payload is the same
+    // size for 10 certificates and for 100,000.
+    createEmailJob: (body: { scopeType: CertificateDeliveryScope; certificateIds?: string[] }) =>
+      fetch(`${B}/email-jobs`, { method: 'POST', headers: jsonAuth, body: JSON.stringify(body) })
+        .then(jsonOrThrow<EmailJobCreateResponse>),
+    listEmailJobs: () => fetch(`${B}/email-jobs`, { headers: auth }).then(jsonOrThrow<EmailJobsListResponse>),
+    // Progress is READ from the job document — the browser polls this and never drives the
+    // job, so progress survives a closed tab, a refresh and a navigation.
+    getEmailJob: (jobId: string) =>
+      fetch(`${B}/email-jobs/${jobId}`, { headers: auth }).then(jsonOrThrow<EmailJobResponse>),
 
     // ── Settings ──
     getSettings: () => fetch(`${B}/settings`, { headers: auth }).then(jsonOrThrow<SettingsResponse>),
@@ -128,7 +151,7 @@ export function makeCertApi(eventId: string, token: string) {
     issue: (registrationId: string, certificateType?: CertificateType) =>
       fetch(`${B}/issue`, { method: 'POST', headers: jsonAuth, body: JSON.stringify({ registrationId, certificateType }) })
         .then(jsonOrThrow<{ success: boolean; created: boolean; certificate: SerializedCertificate }>),
-    createJob: (body: { scope: CertificateJobScope; certificateType?: CertificateType; registrationIds?: string[] | null; autoEmail: boolean }) =>
+    createJob: (body: { scope: CertificateJobScope; certificateType?: CertificateType; registrationIds?: string[] | null }) =>
       fetch(`${B}/jobs`, { method: 'POST', headers: jsonAuth, body: JSON.stringify(body) })
         .then(jsonOrThrow<{ success: boolean; job: SerializedCertificateJob }>),
     listJobs: () => fetch(`${B}/jobs`, { headers: auth }).then(jsonOrThrow<JobsListResponse>),
@@ -138,8 +161,14 @@ export function makeCertApi(eventId: string, token: string) {
       fetch(`${B}/jobs/${jobId}/cancel`, { method: 'POST', headers: auth }).then(jsonOrThrow<{ status: string }>),
 
     // ── Email ──
-    emailCertificate: (certificateId: string, resend: boolean) =>
-      fetch(`${B}/email`, { method: 'POST', headers: jsonAuth, body: JSON.stringify({ certificateId, resend }) })
+    // `intent` is how "Review & Send" is distinguished from an ordinary resend: only
+    // `resend_after_review` can take a certificate whose delivery outcome is unknown.
+    emailCertificate: (
+      certificateId: string,
+      resend: boolean,
+      intent?: 'send' | 'resend' | 'resend_after_review',
+    ) =>
+      fetch(`${B}/email`, { method: 'POST', headers: jsonAuth, body: JSON.stringify({ certificateId, resend, intent }) })
         .then(jsonOrThrow<{ success: boolean; skipped: boolean }>),
 
     // ── Revocation ──
