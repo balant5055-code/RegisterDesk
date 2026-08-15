@@ -205,6 +205,30 @@ export interface CreateTemplateData {
   pageCount:    number | null
 }
 
+/**
+ * The SOURCE field to persist on a template document — exactly one, or none.
+ *
+ * RD-CERT-TPL-R2. A template's bytes live in exactly one store: `fileKey` (R2, canonical) or
+ * the legacy `fileUrl` (Firebase). Callers now pass whichever they have and leave the other
+ * absent, so spelling both out in a document literal writes `undefined` — which Firestore
+ * REJECTS outright ("Cannot use 'undefined' as a Firestore value"), failing the whole write.
+ *
+ * The absent field is OMITTED rather than written as null. `templateSourceIdentity` and
+ * `loadTemplateBytes` both branch on truthiness, so null would read the same — but a stored
+ * `fileUrl: null` next to a real `fileKey` claims the template once had a Firebase render it
+ * never had, and `deleteTemplate` reports `fileUrl` back to the client for cleanup. Absent is
+ * the only shape that is honest about which store owns the file.
+ *
+ * ONE function so a fourth document-construction site cannot reintroduce the same crash.
+ */
+function templateSourceField(
+  src: { fileKey?: string | null; fileUrl?: string | null },
+): { fileKey: string } | { fileUrl: string } | Record<string, never> {
+  if (src.fileKey) return { fileKey: src.fileKey }   // precedence, matching the renderer
+  if (src.fileUrl) return { fileUrl: src.fileUrl }
+  return {}
+}
+
 /** Loads a file-based template by id. Returns null if missing or not a file template. */
 export async function getTemplateById(templateId: string): Promise<CertificateTemplateDoc | null> {
   const snap = await templatesCol().doc(templateId).get()
@@ -268,7 +292,7 @@ export async function createTemplate(
     organizerUid:  uid,
     name:          data.name,
     templateType:  data.templateType,
-    fileUrl:       data.fileUrl,
+    ...templateSourceField(data),
     fileName:      data.fileName,
     fileSize:      data.fileSize,
     dimensions:    data.dimensions,
@@ -304,11 +328,9 @@ export async function duplicateCertificateTemplate(
     name:         `${src.name} (Copy)`,
     templateType: src.templateType,
     // RD-CERT-TPL-R2 — the copy points at the SAME stored object; it is not a re-upload.
-    // Whichever field the source uses is the one carried over, and only that one: writing
-    // `fileUrl: undefined` for an R2 template would be rejected by Firestore, and writing
-    // both would give the copy a source the original does not have. deleteTemplate knows
-    // about this sharing and will not delete an object another template still references.
-    ...(src.fileKey ? { fileKey: src.fileKey } : { fileUrl: src.fileUrl }),
+    // Same one-source rule as createTemplate. deleteTemplate knows about this sharing and
+    // will not delete an object another template still references.
+    ...templateSourceField(src),
     fileName:     src.fileName,
     fileSize:     src.fileSize,
     dimensions:   src.dimensions ?? null,
