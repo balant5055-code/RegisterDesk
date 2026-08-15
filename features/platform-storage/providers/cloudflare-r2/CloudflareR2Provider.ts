@@ -109,6 +109,7 @@ export class CloudflareR2Provider implements StorageProvider {
   readonly name = 'Cloudflare R2'
 
   private client: S3Client | null = null
+  private presigner: S3Client | null = null
   private config: R2Config | null = null
 
   /** Never throws — lets a caller degrade instead of failing a cold path. */
@@ -118,20 +119,39 @@ export class CloudflareR2Provider implements StorageProvider {
 
   /** Lazy: the client is built on first use, so importing this file costs nothing and an
    *  unconfigured deployment fails only when storage is actually used. */
-  private conn(): { client: S3Client; config: R2Config } {
-    if (!this.client || !this.config) {
+  private conn(): { client: S3Client; presigner: S3Client; config: R2Config } {
+    if (!this.client || !this.presigner || !this.config) {
       const config = requireR2Config()
+      const credentials = {
+        accessKeyId:     config.accessKeyId,
+        secretAccessKey: config.secretAccessKey,
+      }
       this.config = config
-      this.client = new S3Client({
+      this.client = new S3Client({ region: R2_REGION, endpoint: config.endpoint, credentials })
+
+      // ─── Why a SECOND client exists, used only for presigning ──────────────────
+      // AWS SDK v3 defaults `requestChecksumCalculation` to WHEN_SUPPORTED, so it computes
+      // a CRC32 over the request body and sends it with every PutObject. When the SDK owns
+      // the upload (see `upload` below) that is a genuine integrity check and is kept.
+      //
+      // PRESIGNING is the case where it is not merely useless but actively wrong. A presign
+      // request carries NO body, so the SDK checksums the empty payload — producing the
+      // constant `x-amz-checksum-crc32=AAAAAA==` — and bakes that value into the signed
+      // query string. The browser then PUTs real bytes, R2 compares them against a checksum
+      // for zero bytes, and rejects the upload. Every direct-to-storage upload fails, and
+      // the browser only ever sees an opaque CORS/400.
+      //
+      // WHEN_REQUIRED keeps the checksum for operations that genuinely mandate one and drops
+      // it here. Scoped to its own client so the server-side upload path above is completely
+      // untouched — its requests remain byte-identical.
+      this.presigner = new S3Client({
         region:   R2_REGION,
         endpoint: config.endpoint,
-        credentials: {
-          accessKeyId:     config.accessKeyId,
-          secretAccessKey: config.secretAccessKey,
-        },
+        credentials,
+        requestChecksumCalculation: 'WHEN_REQUIRED',
       })
     }
-    return { client: this.client, config: this.config }
+    return { client: this.client, presigner: this.presigner, config: this.config }
   }
 
   // ── Write ───────────────────────────────────────────────────────────────────
@@ -299,17 +319,19 @@ export class CloudflareR2Provider implements StorageProvider {
    */
   async generateSignedUrl(options: SignedUrlOptions): Promise<string> {
     assertSafeKey(options.path)
-    const { client, config } = this.conn()
+    const { client, presigner, config } = this.conn()
 
     const expiresIn = Math.min(
       Math.max(1, options.expiresIn ?? SIGNED_URL_DEFAULT_SECONDS),
       SIGNED_URL_MAX_SECONDS,
     )
 
+    const isWrite = options.operation === 'write'
+
     // RD-CERT-ARTIFACT-01 — `ResponseContentDisposition` is folded into the SIGNATURE, so a
     // recipient cannot strip or rewrite it to turn an attachment into an inline render.
     // Ignored for `write`, where the header has no meaning.
-    const command = options.operation === 'write'
+    const command = isWrite
       ? new PutObjectCommand({ Bucket: config.bucket, Key: options.path, ContentType: options.mimeType })
       : new GetObjectCommand({
           Bucket: config.bucket,
@@ -320,7 +342,17 @@ export class CloudflareR2Provider implements StorageProvider {
         })
 
     try {
-      return await getSignedUrl(client, command, { expiresIn })
+      // A write is signed by the checksum-free client (see `conn`) and binds `content-type`
+      // into the signature: without listing it as signable, SigV4 signs only `host`, and the
+      // ContentType passed above would be a suggestion the uploader could simply ignore —
+      // letting anyone holding the URL store, say, HTML at an image key. Every caller PUTs
+      // through `putToSignedUrl`, which sends exactly the mimeType it was handed here.
+      //
+      // Reads keep the original client and the original options: that path is in production
+      // today and is deliberately left byte-identical.
+      return isWrite
+        ? await getSignedUrl(presigner, command, { expiresIn, signableHeaders: new Set(['content-type']) })
+        : await getSignedUrl(client, command, { expiresIn })
     } catch (err) {
       throw translate(err, `sign ${options.path}`)
     }
