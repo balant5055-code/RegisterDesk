@@ -186,6 +186,22 @@ export async function POST(
     return NextResponse.json({ success: true, registrationId: outcome.registrationId })
   }
 
+  // RD-PAY-DUP-HOLD — a duplicate is refused WITHOUT an automatic refund, so this must not
+  // promise one. The payment is held for manual review; saying "a refund has been initiated"
+  // here would be a false statement to someone who has actually been charged.
+  if (outcome.kind === 'held') {
+    return NextResponse.json(
+      {
+        success: false,
+        reason:  outcome.reason,
+        error:   outcome.reason === 'DUPLICATE_EMAIL'
+          ? 'A registration with this email address already exists for this event, so this registration could not be completed. Your payment has been received and is under review — our team will contact you shortly.'
+          : 'A registration with this mobile number already exists for this event, so this registration could not be completed. Your payment has been received and is under review — our team will contact you shortly.',
+      },
+      { status: 409 },
+    )
+  }
+
   if (outcome.kind === 'deferred') {
     // The intent went terminal between the guard above and settlement, or the transaction
     // could not be completed. Nothing was written and nothing was refunded here.
@@ -209,18 +225,10 @@ export async function POST(
     )
   }
 
-  if (r === 'DUPLICATE_EMAIL' || r === 'DUPLICATE_MOBILE') {
-    return NextResponse.json(
-      {
-        success: false,
-        reason:  r,
-        error:   r === 'DUPLICATE_EMAIL'
-          ? 'A registration with this email address already exists. A full refund has been initiated.'
-          : 'A registration with this mobile number already exists. A full refund has been initiated.',
-      },
-      { status: 409 },
-    )
-  }
+  // NOTE: DUPLICATE_EMAIL / DUPLICATE_MOBILE no longer reach here. Settlement returns
+  // `kind: 'held'` for them (handled above) because a duplicate is refused WITHOUT an
+  // automatic refund. The old branch that promised "a full refund has been initiated" was
+  // removed rather than left unreachable — it would be a false promise if it ever ran again.
 
   if (r === 'EVENT_CAPACITY_FULL' || r === 'PASS_CAPACITY_FULL' || r === 'PASS_NOT_AVAILABLE') {
     return NextResponse.json(

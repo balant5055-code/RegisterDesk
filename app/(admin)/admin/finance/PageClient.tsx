@@ -76,6 +76,9 @@ function StatusBadge({ status }: { status: string }) {
     retried:  'bg-blue-100   text-blue-800   dark:bg-blue-900/30   dark:text-blue-300',
     resolved: 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-300',
     ignored:  'bg-muted      text-muted-foreground',
+    // RD-PAY-DUP-HOLD — a captured payment held for a human decision, NOT a failed refund.
+    // Amber rather than red: nothing failed here, something is waiting to be decided.
+    review:   'bg-amber-100  text-amber-800  dark:bg-amber-900/30  dark:text-amber-300',
   }
   return (
     <span className={cn('inline-block rounded-full px-2 py-0.5 text-[11px] font-semibold capitalize', map[status] ?? 'bg-muted text-muted-foreground')}>
@@ -735,7 +738,7 @@ export default function AdminFinancePage() {
   const [failedRefundsLoading, setFailedRefundsLoading] = useState(false)
   const [failedRefundsTotal,   setFailedRefundsTotal]   = useState(0)
   const [failedRefundsPage,    setFailedRefundsPage]    = useState(1)
-  const [failedRefundsFilter,  setFailedRefundsFilter]  = useState<'open' | 'retried' | 'resolved' | 'ignored' | 'all'>('open')
+  const [failedRefundsFilter,  setFailedRefundsFilter]  = useState<'open' | 'review' | 'retried' | 'resolved' | 'ignored' | 'all'>('open')
   const [failedRefundsStats,   setFailedRefundsStats]   = useState<FailedRefundsStats | null>(null)
   const [retryModal,           setRetryModal]           = useState<FailedRefundSummary | null>(null)
   const [frProcessing,         setFrProcessing]         = useState<string | null>(null)
@@ -1816,7 +1819,7 @@ export default function AdminFinancePage() {
           {/* Filter pills + refresh */}
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="flex flex-wrap gap-2">
-              {(['open', 'retried', 'resolved', 'ignored', 'all'] as const).map(f => (
+              {(['open', 'review', 'retried', 'resolved', 'ignored', 'all'] as const).map(f => (
                 <button
                   key={f}
                   onClick={() => {
@@ -1898,6 +1901,13 @@ export default function AdminFinancePage() {
                           </td>
                           <td className="px-4 py-3.5">
                             <StatusBadge status={fr.status} />
+                            {/* RD-PAY-DUP-HOLD — say plainly that this money was NOT refunded,
+                                so a hold is never mistaken for a refund that merely failed. */}
+                            {fr.kind === 'duplicate_hold' && (
+                              <p className="mt-1 text-[11px] font-medium text-amber-700 dark:text-amber-400">
+                                Duplicate hold · not refunded
+                              </p>
+                            )}
                           </td>
                           <td className="px-4 py-3.5">
                             {fr.status === 'open' && (

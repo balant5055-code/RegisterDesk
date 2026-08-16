@@ -5,7 +5,10 @@
 // composite index requirements and serve stats independently of the status filter.
 //
 // Query params:
-//   status   — open | retried | resolved | ignored | all  (default: open)
+//   status   — open | retried | resolved | ignored | review | all  (default: open)
+//              'review' = RD-PAY-DUP-HOLD duplicate holds: captured payments deliberately
+//              NOT auto-refunded. They are excluded from the open stats on purpose — they
+//              are not refunds awaiting retry, they are decisions awaiting a human.
 //   page     — 1-based page number  (default: 1)
 //   pageSize — records per page     (default: 20, max: 50)
 
@@ -24,7 +27,13 @@ export interface FailedRefundSummary {
   eventSlug:      string
   attendeeEmail:  string
   registrationId: string | null
-  status:         'open' | 'retried' | 'resolved' | 'ignored'
+  status:         'open' | 'retried' | 'resolved' | 'ignored' | 'review'
+  /**
+   * RD-PAY-DUP-HOLD — 'duplicate_hold' is a captured payment deliberately NOT refunded,
+   * parked for manual settlement. Records written before this field existed carry no `kind`
+   * and are reported as 'failed_refund', so nothing had to be migrated.
+   */
+  kind:           'failed_refund' | 'duplicate_hold'
   createdAt:      string | null
   updatedAt:      string | null
 }
@@ -54,6 +63,7 @@ interface FailedRefundDoc {
   attendeeEmail:  string
   registrationId: string | null
   status:         string
+  kind?:          string   // absent on every pre-RD-PAY-DUP-HOLD record ⇒ 'failed_refund'
   createdAt:      unknown
   updatedAt?:     unknown
 }
@@ -115,6 +125,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     attendeeEmail:  d.attendeeEmail  ?? '',
     registrationId: d.registrationId ?? null,
     status:         (d.status as FailedRefundSummary['status']) ?? 'open',
+    kind:           d.kind === 'duplicate_hold' ? 'duplicate_hold' : 'failed_refund',
     createdAt:      tsToISO(d.createdAt),
     updatedAt:      tsToISO(d.updatedAt),
   }))
