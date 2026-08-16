@@ -1,3 +1,5 @@
+import type { SizeChart } from '@/lib/registrations/sizeChart'
+
 // Config-driven registration form templates + default fields per eventType × eventSubtype.
 // Add a new template by appending one entry to TEMPLATES — no component changes needed.
 
@@ -43,6 +45,12 @@ export interface FormField {
   section:          string
   conditionalLogic: ConditionalRule | null
   passVisibility:   'all' | string[]
+  /**
+   * Optional apparel size chart for a dropdown field (e.g. "T-Shirt Size"). Absent on
+   * every existing event and on every field created today, so the attendee form is
+   * unchanged unless an event opts in. See lib/registrations/sizeChart.ts.
+   */
+  sizeChart?:       SizeChart
 }
 
 /** A named group of fields displayed as a collapsible section on the form. */
