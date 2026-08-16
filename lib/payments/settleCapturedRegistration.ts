@@ -271,6 +271,12 @@ export async function settleCapturedRegistration(args: {
           razorpayOrderId: orderId,
           paymentId,
           ticketCode,
+          // Consent audit trail — from the intent snapshot, never a client on this path.
+          ...(intent.termsAccepted === true ? {
+            termsAccepted:   true,
+            termsAcceptedAt: FieldValue.serverTimestamp(),
+            ...(intent.termsVersion ? { termsVersion: intent.termsVersion } : {}),
+          } : {}),
           registeredAt:    FieldValue.serverTimestamp(),
           updatedAt:       FieldValue.serverTimestamp(),
           ...(uidOverride ?? intent.uid ? { uid: uidOverride ?? intent.uid } : {}),

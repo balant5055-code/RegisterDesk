@@ -48,8 +48,13 @@ export const WHATSAPP_TEMPLATE_REGISTRY_VERSION = 1
 export const WHATSAPP_TEMPLATE_REGISTRY = {
   REGISTRATION_CONFIRMATION: {
     templateName:      'registration_confirmation',
-    language:          'en_US',
-    languages:         ['en_US'],
+    // 'en', NOT 'en_US'. WhatsApp resolves a template by the (name, language) PAIR and does
+    // not fall back between locales, so requesting a locale the template was not approved in
+    // fails at Meta with 132001 "Template name does not exist in the translation". This
+    // template is approved on the WABA in `en`; the registry must state the locale Meta
+    // actually holds. Other entries keep en_US — only this one was verified against Meta.
+    language:          'en',
+    languages:         ['en'],
     channels:          ['whatsapp'],
     requiredVariables: ['attendeeName', 'eventName', 'ticketCode'],
     category:          'utility',

@@ -22,13 +22,14 @@
 // value arrives already computed by RegisterClient, exactly as it did before.
 
 import Link from 'next/link'
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { ShieldCheck, Receipt, ArrowRight, Lock } from 'lucide-react'
 import { cn } from '@/lib/utils/cn'
 import { TYPE } from '@/components/event-templates/shared/ui/framework'
 import { Dialog } from '@/components/ui/Dialog'
+import { TermsDialog } from '@/components/legal/TermsDialog'
 import { buttonVariants } from '@/components/ui/button'
 import { useFocusTrap } from '@/lib/hooks/useFocusTrap'
 import { CheckOption } from './formControls'
@@ -54,7 +55,10 @@ export function isConsentComplete(
   termsUrl?: string,
   refundPolicyUrl?: string,
 ): boolean {
-  return c.info && (!termsUrl?.trim() || c.terms) && (!refundPolicyUrl?.trim() || c.refund)
+  // `c.terms` is now unconditional: the PLATFORM Terms & Conditions are mandatory for every
+  // event, shown in a modal rather than depending on an organiser-published URL. The refund
+  // row keeps its URL-conditional behaviour, which is unchanged.
+  return c.info && c.terms && (!refundPolicyUrl?.trim() || c.refund)
 }
 
 /**
@@ -118,6 +122,7 @@ export function ConsentPanel({
   /** Set by the caller when Pay was pressed with consent missing. */
   needsConsent?:    boolean
 }) {
+  const [termsOpen, setTermsOpen] = useState(false)
   const terms  = termsUrl?.trim()
   const refund = refundPolicyUrl?.trim()
 
@@ -147,14 +152,21 @@ export function ConsentPanel({
           I confirm the information above is correct
         </CheckOption>
 
-        {terms && (
-          <CheckOption checked={consent.terms} disabled={submitting} onToggle={v => onConsent('terms', v)}>
-            I agree to the{' '}
-            <Link href={terms} target="_blank" rel="noopener noreferrer" className="font-semibold text-primary underline underline-offset-2">
-              Terms &amp; Conditions
-            </Link>
-          </CheckOption>
-        )}
+        <CheckOption checked={consent.terms} disabled={submitting} onToggle={v => onConsent('terms', v)}>
+          I agree to the{' '}
+          {/* Opens the terms modal. type=button: inside the form a bare button submits. */}
+          <button type="button" onClick={() => setTermsOpen(true)} className="font-semibold text-primary underline underline-offset-2">
+            Terms &amp; Conditions
+          </button>
+          {terms && (
+            <>
+              {' · '}
+              <Link href={terms} target="_blank" rel="noopener noreferrer" className="font-semibold text-primary underline underline-offset-2">
+                Organiser terms
+              </Link>
+            </>
+          )}
+        </CheckOption>
 
         {refund && (
           <CheckOption checked={consent.refund} disabled={submitting} onToggle={v => onConsent('refund', v)}>
@@ -165,6 +177,13 @@ export function ConsentPanel({
           </CheckOption>
         )}
       </div>
+
+      <TermsDialog
+        open={termsOpen}
+        onClose={() => setTermsOpen(false)}
+        onAgree={() => onConsent('terms', true)}
+        alreadyAgreed={consent.terms}
+      />
     </CheckoutSection>
   )
 }
