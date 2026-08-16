@@ -1315,16 +1315,31 @@ export function RegisterClient({
   }
 
   async function retryPayment(): Promise<void> {
-    const rec = paymentRecovery
-    if (!rec || submitting) return
+    if (!paymentRecovery || submitting) return
+
+    // RD-PAY-RETRY-01 — retry re-enters the FULL submission path instead of reopening the
+    // cached order.
+    //
+    // It used to call `runPayment(rec.order, rec.attendee, …)` with the attendee snapshot
+    // taken when the order was created. That snapshot goes stale the moment the attendee
+    // edits the form after cancelling checkout, and reopening the gateway from it skipped
+    // every gate the real submission runs: current-form identity resolution, the duplicate
+    // precheck, and create-order — which is the AUTHORITATIVE duplicate gate. So a retry
+    // could open Razorpay for an email the server would refuse, and (worse, because it
+    // succeeds silently) a retry after an identity edit would charge the card and register
+    // the ORIGINAL attendee, since settlement reads `intent.attendee`, never the client.
+    //
+    // Re-entering finaliseRegistration fixes both from one place, with no second copy of the
+    // validation. Double-charge protection is preserved by the SERVER, not by reusing the
+    // cached order: create-order's paymentAttempt decision returns `reuse_order` for an
+    // unchanged attempt (same orderId, no new order), `supersede` only after asking Razorpay
+    // whether the old order was captured, and `already_registered` when it was settled.
+    //
+    // `submitting` is deliberately NOT set here: finaliseRegistration owns that lifecycle and
+    // returns immediately if it is already true, so setting it would make this a no-op.
     setSubmitError(null)
     setPaymentRecovery(null)
-    setSubmitting(true)
-    try {
-      await runPayment(rec.order, rec.attendee, buildHeaders())
-    } finally {
-      setSubmitting(false)
-    }
+    await finaliseRegistration()
   }
 
   // RD-PAYMENT-05 B1: attendee confirmed the itemized charge → open Razorpay for the SAME
