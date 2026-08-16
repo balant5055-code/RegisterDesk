@@ -134,6 +134,7 @@ export const WORKSPACE_NAV: WorkspaceNavSection[] = [
           { label: 'Broadcasts', href: '/dashboard/communications/broadcasts' },
           { label: 'Templates',  href: '/dashboard/communications/email-templates' },
           { label: 'Email Logs', href: '/dashboard/communications/email-logs' },
+          { label: 'WhatsApp Logs', href: '/dashboard/communications/whatsapp-logs' },
         ],
       },
       {

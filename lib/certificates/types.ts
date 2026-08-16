@@ -583,7 +583,18 @@ export interface CertificateTemplateDoc {
   organizerUid:  string
   name:          string                   // organizer-facing label
   templateType:  TemplateType             // pdf | png | jpg
-  fileUrl:       string                    // stored template asset
+  /**
+   * RD-CERT-TPL-R2 — the CANONICAL template object key in platform storage (R2).
+   * A KEY, never a URL: signed URLs expire. Present on every template uploaded after the
+   * migration; absent on legacy records.
+   */
+  fileKey?:      string | null
+  /**
+   * LEGACY Firebase Storage download URL. Required on pre-migration records and still the
+   * only source for them; `null`/absent on new R2 templates. When BOTH are present,
+   * `fileKey` wins — see loadTemplateBytes.
+   */
+  fileUrl?:      string | null
   fileName:      string
   fileSize:      number                    // bytes
   dimensions:    CertificateDimensions | null

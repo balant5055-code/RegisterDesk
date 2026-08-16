@@ -55,6 +55,11 @@ export interface CreateRegistrationInput {
   // ── Walk-in / on-site staff registration (Phase C) ──────────────────────────
   // Source of the registration. Defaults to 'online'. Reuses the same capacity,
   // duplicate, ticket-code and counter logic — no separate collection.
+  // Terms & Conditions consent, validated server-side by the calling route. Optional on
+  // the type so walk-in/import/bulk callers are unaffected; when present it is stamped
+  // onto the registration for auditability.
+  termsAccepted?: boolean
+  termsVersion?:  string
   registrationSource?:   'online' | 'walkin'
   paymentMethod?:        'cash' | 'upi' | 'complimentary'
   referenceNumber?:      string
@@ -288,6 +293,13 @@ export async function createRegistration(
           paymentStatus: input.paymentStatusOverride ?? 'not_required',
           amount:        input.amountPaise ?? 0,
           registrationSource: input.registrationSource ?? 'online',
+          // Consent audit trail. Written only when the caller supplied it, so historical
+          // registrations and non-attendee paths (walk-in, import, bulk) are unchanged.
+          ...(input.termsAccepted === true ? {
+            termsAccepted:   true,
+            termsAcceptedAt: FieldValue.serverTimestamp(),
+            ...(input.termsVersion ? { termsVersion: input.termsVersion } : {}),
+          } : {}),
           ticketCode,
           ticket: {
             ticketId:      registrationId,

@@ -1,6 +1,7 @@
 // Certificate overlay renderer — server-only.
-// Renders a PDF certificate by drawing a layout (Phase 10 builder design) or a
-// sensible default onto the organizer's active template (PDF / PNG / JPG).
+// Renders a PDF certificate by drawing the layout (Phase 10 builder design) onto the
+// organizer's active template (PDF / PNG / JPG). ONLY the elements in that layout are
+// drawn — see the note in renderCertificatePdf on why there is no default design.
 //
 // Layouts are resolution-independent: element positions/sizes are FRACTIONS
 // [0,1] of the reference canvas with a TOP-LEFT origin; this renderer maps them
@@ -41,10 +42,6 @@ function hexToRgb(hex: string) {
 
 function isJpeg(b: Uint8Array): boolean {
   return b.length > 2 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff
-}
-
-function clamp(v: number, min: number, max: number): number {
-  return Math.max(min, Math.min(max, v))
 }
 
 // Rotation transform (GA-4 S2) — mirrors the print engine's rotate-about-center
@@ -196,46 +193,6 @@ function drawLineEl(page: AnyPage, el: LineLayoutElement, W: number, H: number):
   })
 }
 
-// ─── Default layout (no builder design) ───────────────────────────────────────
-
-async function drawDefault(
-  page: AnyPage, fonts: FontSet, W: number, H: number,
-  context: PlaceholderContext, verifyUrl: string,
-): Promise<void> {
-  const name = String(context.participantName ?? '')
-  if (name) {
-    const size = clamp(Math.round(H * 0.05), 18, 44)
-    const { font, isUnicode } = await fonts.pick('helvetica', { bold: true }, name)
-    const text = isUnicode ? name : sanitizeWinAnsi(name)
-    const tw = font.widthOfTextAtSize(text, size)
-    page.drawText(text, {
-      x: (W - Math.min(tw, W * 0.9)) / 2, y: H - H * 0.54,
-      size, font, color: rgb(0.1, 0.1, 0.1), maxWidth: W * 0.9,
-    })
-  }
-
-  const { font: meta } = await fonts.pick('helvetica', {}, 'meta')
-  const metaSize = clamp(Math.round(H * 0.016), 7, 11)
-  const lines = [
-    `Certificate ID: ${context.certificateId ?? ''}`,
-    `Issued: ${context.issueDate ?? ''}`,
-  ]
-  let my = H * 0.11
-  for (const line of lines) {
-    page.drawText(sanitizeWinAnsi(line), { x: W * 0.04, y: my, size: metaSize, font: meta, color: rgb(0.4, 0.4, 0.4) })
-    my -= metaSize + 4
-  }
-
-  const qrSize = clamp(Math.round(H * 0.14), 56, 120)
-  const margin = W * 0.04
-  const qrX    = W - margin - qrSize
-  const qrY    = H * 0.06
-  drawQr(page, verifyUrl, qrX, qrY, qrSize)
-  const label = 'Scan to verify'
-  const lw    = meta.widthOfTextAtSize(label, metaSize)
-  page.drawText(label, { x: qrX + (qrSize - lw) / 2, y: qrY + qrSize + 4, size: metaSize, font: meta, color: rgb(0.45, 0.45, 0.45) })
-}
-
 // ─── Public entry point ─────────────────────────────────────────────────────
 
 export interface RenderCertificateInput {
@@ -280,19 +237,24 @@ export async function renderCertificatePdf(input: RenderCertificateInput): Promi
 
   const fonts = await buildFontSet(doc)
 
-  if (layout && layout.elements.length > 0) {
-    const ordered = [...layout.elements].sort((a, b) => a.zIndex - b.zIndex)
-    for (const el of ordered) {
-      switch (el.type) {
-        case 'text':  await drawTextEl(page, fonts, el, W, H, context); break
-        case 'image': await drawImageEl(page, doc, el, W, H, assets);   break
-        case 'qr':    drawQrEl(page, el, W, H, verifyUrl);              break
-        case 'line':  drawLineEl(page, el, W, H);                       break
-        // Unknown types are skipped (forward-compatible).
-      }
+  // RD-CERT-2E — THE LAYOUT IS THE WHOLE CONTRACT. Only elements the organizer placed are
+  // drawn. There is deliberately no `else`: this used to fall back to a built-in design that
+  // stamped the participant's name, the certificate id and a QR onto the artwork, so a
+  // template with zero elements silently produced a certificate carrying attendee data the
+  // organizer never asked for — landing at fixed coordinates over their background.
+  //
+  // A template with no design can no longer reach this function at all: `assertTemplateIsDesigned`
+  // in generate.ts refuses issuance, preview and re-render first. Rendering nothing here would
+  // be a blank certificate, which is why the guard lives upstream rather than as a fallback.
+  const ordered = [...(layout?.elements ?? [])].sort((a, b) => a.zIndex - b.zIndex)
+  for (const el of ordered) {
+    switch (el.type) {
+      case 'text':  await drawTextEl(page, fonts, el, W, H, context); break
+      case 'image': await drawImageEl(page, doc, el, W, H, assets);   break
+      case 'qr':    drawQrEl(page, el, W, H, verifyUrl);              break
+      case 'line':  drawLineEl(page, el, W, H);                       break
+      // Unknown types are skipped (forward-compatible).
     }
-  } else {
-    await drawDefault(page, fonts, W, H, context, verifyUrl)
   }
 
   return doc.save()

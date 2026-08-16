@@ -1,8 +1,1 @@
-{
-  "crons": [
-    {
-      "path": "/api/cron/certificate-email-jobs",
-      "schedule": "*/5 * * * *"
-    }
-  ]
-}
+{}

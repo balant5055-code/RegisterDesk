@@ -34,6 +34,7 @@ const TYPE_SEGMENT: Readonly<Record<StorageAssetType, string>> = {
   'event-photo-medium':    'photos/medium',
   'event-photo-thumbnail': 'photos/thumbnail',
   'event-certificate':     'certificates',
+  'event-certificate-template': 'certificates/templates',
   'event-finisher-badge':  'finisher-badges',
   'event-branding-overlay': 'branding',
   'event-report':          'reports',
@@ -46,6 +47,7 @@ const TYPE_SEGMENT: Readonly<Record<StorageAssetType, string>> = {
 const EVENT_SCOPED: ReadonlySet<StorageAssetType> = new Set<StorageAssetType>([
   'event-banner', 'event-photo-original', 'event-photo-medium', 'event-photo-thumbnail',
   'event-certificate', 'event-finisher-badge', 'event-report', 'event-branding-overlay',
+  'event-certificate-template',
 ])
 
 export function isEventScoped(type: StorageAssetType): boolean {
@@ -64,6 +66,8 @@ const DEFAULT_VISIBILITY: Readonly<Record<StorageAssetType, StorageVisibility>> 
   'event-photo-medium':    'PUBLIC',
   'event-photo-thumbnail': 'PUBLIC',
   'event-certificate':     'SIGNED_URL',   // never PUBLIC — see validation.ts
+  // The organizer's own design asset — private, exactly like the certificates it renders.
+  'event-certificate-template': 'SIGNED_URL',
   'event-finisher-badge':  'PUBLIC',
   // The overlay is composited into a download by the BROWSER, so it must be fetchable by
   // anyone who may download a branded photo. It contains only artwork the organizer chose

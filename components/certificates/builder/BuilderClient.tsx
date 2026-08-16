@@ -95,12 +95,14 @@ export default function BuilderClient({ eventId, templateId }: { eventId: string
           headers: { Authorization: `Bearer ${token}` },
         })
         if (!res.ok) throw new Error((await res.json().catch(() => null) as { error?: string })?.error ?? 'Failed to load template')
-        const { template } = await res.json() as TemplateResponse
+        const { template, previewUrl } = await res.json() as TemplateResponse
         if (cancelled) return
         setTemplateName(template.name)
         setCanvas(template.dimensions ?? FALLBACK_CANVAS)
         setIsPdf(template.templateType === 'pdf')
-        setBgUrl(template.templateType === 'pdf' ? null : template.fileUrl)
+        // R2 templates have no public url; the API signs a short-lived read url instead.
+        // Legacy templates keep their Firebase `fileUrl`, so both render identically here.
+        setBgUrl(template.templateType === 'pdf' ? null : (previewUrl ?? template.fileUrl ?? null))
         resetEls(template.layout?.elements ?? [])
         setLoading(false)
       } catch (e) {

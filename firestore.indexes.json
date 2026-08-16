@@ -389,6 +389,24 @@
           "order": "ASCENDING"
         },
         {
+          "fieldPath": "channel",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "createdAt",
+          "order": "DESCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "emailLogs",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "organizerUid",
+          "order": "ASCENDING"
+        },
+        {
           "fieldPath": "createdAt",
           "order": "ASCENDING"
         }

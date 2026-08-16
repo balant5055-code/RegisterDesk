@@ -5,12 +5,15 @@ import { useRouter }              from 'next/navigation'
 import { useAuth }                from '@/components/auth/AuthProvider'
 // RD-RT1.0: framer-motion, Fragment and the event-meta icons left with the presentation
 // components that moved to ./RegistrationUI — this module no longer renders them.
-import { ShieldCheck, RotateCcw, Check, AlertTriangle, Tag, ChevronUp, Lock, Clock3, KeyRound, UserRound } from 'lucide-react'
+import { ShieldCheck, RotateCcw, Check, AlertTriangle, Tag, ChevronUp, Lock, Clock3, KeyRound, UserRound, Ruler } from 'lucide-react'
 import { cn }                     from '@/lib/utils/cn'
 import { buildRegisterHref }      from '@/lib/events/registerHref'
 import { buttonVariants }         from '@/components/ui/button'
 import { CustomSelect }           from '@/components/ui/CustomSelect'
 import type { FormSection, FormField, ConditionalRule, FieldType } from '@/components/wizard/registrationFormConfig'
+import { shouldShowSizeChart, type SizeChart } from '@/lib/registrations/sizeChart'
+import { SizeChartDialog } from '@/components/registration/SizeChartDialog'
+import { PLATFORM_TERMS_VERSION } from '@/lib/legal/platformTerms'
 import { resolveAttendeeIdentity } from '@/lib/registrations/attendeeIdentity'
 import { collectFormErrors } from '@/lib/registrations/validateFormResponses'
 import { resolveDobField, ageRangeLabel } from '@/lib/registrations/ageEligibility'
@@ -276,6 +279,30 @@ function describedBy(id: string, helperText: string, error: string | undefined):
   return ids.length ? ids.join(' ') : undefined
 }
 
+/** "Size Chart" action + its modal. Owns ONLY its own open/closed boolean — it never
+ *  reads or writes the field's value, so opening and closing it cannot disturb the form. */
+function SizeChartTrigger({ chart, label }: { chart: SizeChart; label: string }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        className="mt-1.5 inline-flex items-center gap-1 text-fs-2xs font-semibold text-primary underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 rounded"
+      >
+        <Ruler className="size-3.5" aria-hidden />
+        Size Chart
+      </button>
+      <SizeChartDialog
+        open={open}
+        onClose={() => setOpen(false)}
+        chart={chart}
+        title={`${label} — Size Chart`}
+      />
+    </>
+  )
+}
+
 function FieldRenderer({
   field,
   state,
@@ -342,6 +369,13 @@ function FieldRenderer({
           aria-invalid={!!error}
           aria-describedby={describedBy(id, helperText, error)}
         />
+        {/* Optional size chart. Rendered ONLY when the field opts in, so every existing
+            event — none of which carry `sizeChart` — is byte-identical to before.
+            type="button" is load-bearing: inside a <form>, a bare <button> defaults to
+            submit, which would post the registration on click. */}
+        {shouldShowSizeChart(field.sizeChart) && (
+          <SizeChartTrigger chart={field.sizeChart!} label={label} />
+        )}
       </FieldShell>
     )
   }
@@ -1482,6 +1516,10 @@ export function RegisterClient({
       idempotencyKey,
       ...(verifiedCode  ? { inviteCode: verifiedCode         } : {}),
       ...(couponApplied ? { couponCode: couponApplied.code   } : {}),
+      // Mandatory consent. The server re-validates this on BOTH endpoints — the client
+      // gate above is UX, this is the value the server actually checks and stores.
+      termsAccepted: consent.terms,
+      termsVersion:  PLATFORM_TERMS_VERSION,
     }
 
     try {

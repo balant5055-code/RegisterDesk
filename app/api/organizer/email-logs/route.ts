@@ -59,7 +59,14 @@ export async function GET(req: NextRequest): Promise<NextResponse<GetResponse>> 
 
   const snap = await query.limit(limit).get()
 
-  const logs: EmailLog[] = snap.docs.map(doc => {
+  // RD-WA-LOGS-01 — WhatsApp rows live in this same collection and now have their own page.
+  // Filtered IN MEMORY, deliberately: a Firestore `channel != 'whatsapp'` would exclude every
+  // document MISSING the field, and most legacy email rows have no `channel` at all — the
+  // query would silently hide the entire email history. The trade is that a page may render
+  // slightly fewer than `limit` rows, which is cosmetic.
+  const emailDocs = snap.docs.filter(doc => doc.data().channel !== 'whatsapp')
+
+  const logs: EmailLog[] = emailDocs.map(doc => {
     const d = doc.data()
     return {
       id:                doc.id,
