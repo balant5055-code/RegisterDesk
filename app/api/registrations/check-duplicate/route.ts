@@ -10,7 +10,7 @@
 
 import { NextRequest, NextResponse } from 'next/server'
 import { getEventBySlug }              from '@/lib/firebase/firestore/events'
-import { checkDuplicateRegistration }  from '@/lib/registrations/duplicateCheck'
+import { checkDuplicateRegistration, resolveDuplicateEnforcement } from '@/lib/registrations/duplicateCheck'
 import { checkRateLimit, getClientIp } from '@/lib/rateLimit'
 import type { RegistrationRules }      from '@/components/wizard/registrationFormConfig'
 
@@ -23,6 +23,10 @@ interface CheckDuplicateBody {
 export interface CheckDuplicateResponse {
   duplicate: boolean
   field?:    'email' | 'mobile'
+  /** The organizer's duplicate policy. Absent on the early/error returns. */
+  policy?:   'block' | 'warn' | 'allow'
+  /** True only when this duplicate must STOP the registration (policy === 'block'). */
+  blocking?: boolean
   error?:    string
 }
 
@@ -56,13 +60,24 @@ export async function POST(req: NextRequest): Promise<NextResponse<CheckDuplicat
   if (!event) return NextResponse.json({ duplicate: false })
 
   const regRules = (event.registrationForm?.registrationRules as RegistrationRules | undefined)
+
+  // RD-REG-DUP-01 — ONE resolver decides whether duplicates matter here at all. Under
+  // "Allow All" it reports both limits as false, so no query is even issued.
+  const enforcement = resolveDuplicateEnforcement(regRules)
   const result = await checkDuplicateRegistration({
     slug,
     email,
     phone,
-    limitPerEmail:  regRules?.limitPerEmail  ?? false,
-    limitPerMobile: regRules?.limitPerMobile ?? false,
+    limitPerEmail:  enforcement.limitPerEmail,
+    limitPerMobile: enforcement.limitPerMobile,
   })
 
-  return NextResponse.json({ duplicate: result.duplicate, ...(result.field ? { field: result.field } : {}) })
+  // `blocking` is the single value the form should branch on, so the block-vs-warn rule is
+  // never re-derived client-side and can never drift from the server's decision.
+  return NextResponse.json({
+    duplicate: result.duplicate,
+    policy:    enforcement.policy,
+    blocking:  result.duplicate && enforcement.enforce,
+    ...(result.field ? { field: result.field } : {}),
+  })
 }

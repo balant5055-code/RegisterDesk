@@ -16,6 +16,7 @@ import { authorizeWorkspace }        from '@/lib/team/workspace'
 import { getEventBySlug }            from '@/lib/firebase/firestore/events'
 import { getEventCheckInStatus }     from '@/lib/checkin/eventStatus'
 import { adminDb }                   from '@/lib/firebase/admin'
+import { resolveDuplicateEnforcement } from '@/lib/registrations/duplicateCheck'
 import {
   createRegistration, writeAuditEntry,
   CapacityExceededError, DuplicateRegistrationError,
@@ -139,6 +140,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const paymentStatusOverride = collected ? 'paid' as const : 'not_required' as const
   const paymentMethod = paymentMode === 'free' ? undefined : paymentMode
 
+  // RD-REG-DUP-01 — same resolved policy as the attendee paths, so a walk-in cannot enforce
+  // a limit the organizer switched off (or write a claim that blocks one).
+  const dupEnforcement = resolveDuplicateEnforcement(loaded.rules)
+
   // ── Create (atomic: capacity + duplicate + ticket + check-in counter) ──────
   try {
     const result = await createRegistration({
@@ -149,8 +154,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       eventName:    loaded.eventName,
       organizerUid: uid,
       attendee: { name, email, phone: phone || undefined },
-      limitPerEmail:  loaded.rules?.limitPerEmail  ?? false,
-      limitPerMobile: loaded.rules?.limitPerMobile ?? false,
+      limitPerEmail:  dupEnforcement.limitPerEmail,
+      limitPerMobile: dupEnforcement.limitPerMobile,
       approvalMode:   'auto',                       // walk-in is staff-confirmed immediately
       registrationSource:    'walkin',
       paymentMethod,

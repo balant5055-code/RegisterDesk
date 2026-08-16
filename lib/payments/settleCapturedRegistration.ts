@@ -36,6 +36,8 @@
 import crypto           from 'crypto'
 import { FieldValue }   from 'firebase-admin/firestore'
 import { adminDb }      from '@/lib/firebase/admin'
+import { resolveDuplicateEnforcement } from '@/lib/registrations/duplicateCheck'
+import type { DuplicateRuleSource }    from '@/lib/registrations/duplicateCheck'
 import { generateTicketCode, TicketCodeCollisionError } from '@/lib/registrations/ticketCode'
 import { buildCounterIncrement }     from '@/lib/firebase/firestore/registrationCounters'
 import { deriveStoredEventCapacity } from '@/lib/registrations/capacity'
@@ -217,12 +219,23 @@ export async function settleCapturedRegistration(args: {
         if (!inviteValidation.valid) throw new InviteCodeError('INVITE_CODE_INVALID')
 
         const regForm  = eventData?.registrationForm as Record<string, unknown> | undefined
-        const regRules = regForm?.registrationRules as { limitPerEmail?: boolean; limitPerMobile?: boolean } | undefined
+        const regRules = regForm?.registrationRules as DuplicateRuleSource | undefined
 
         if (ticketClaimSnap.exists) throw new TicketCodeCollisionError()
 
-        if (regRules?.limitPerEmail && emailClaimSnap.exists) throw new DuplicateRegistrationError('DUPLICATE_EMAIL')
-        if (regRules?.limitPerMobile && phoneClaimSnap?.exists) throw new DuplicateRegistrationError('DUPLICATE_MOBILE')
+        // RD-REG-DUP-01 — the duplicate gate is the ONLY refusal reason an organizer can
+        // switch off, and switching it off has to stop the throw HERE rather than downstream:
+        // DuplicateRegistrationError is caught below and routed to refuse(), which refunds
+        // the captured payment in full. An organizer who chose "Allow All" or "Warn Only"
+        // must never have a legitimate payment reversed for matching an earlier attendee.
+        //
+        // Only this condition changes. refuse() and refundInFull() are untouched, so every
+        // other refusal — capacity, pass unavailable, coupon exhausted, invite invalid,
+        // ticket-code exhaustion, gate blocked, transaction error — still refunds exactly
+        // as before.
+        const dupEnforcement = resolveDuplicateEnforcement(regRules)
+        if (dupEnforcement.limitPerEmail && emailClaimSnap.exists) throw new DuplicateRegistrationError('DUPLICATE_EMAIL')
+        if (dupEnforcement.limitPerMobile && phoneClaimSnap?.exists) throw new DuplicateRegistrationError('DUPLICATE_MOBILE')
 
         // Capacity — live from the transaction-locked event doc, never intent.passCapacity
         // (captured at order creation and possibly stale).
@@ -310,10 +323,12 @@ export async function settleCapturedRegistration(args: {
         })
         txn.set(ticketCodeClaimRef, { registrationId, eventSlug: intent.eventSlug, createdAt: FieldValue.serverTimestamp() })
 
-        if (regRules?.limitPerEmail) {
+        // Claim docs follow the same resolved policy: writing one under allow/warn would
+        // block the NEXT registration, which is the behaviour the organizer opted out of.
+        if (dupEnforcement.limitPerEmail) {
           txn.set(emailClaimRef, { registrationId, eventSlug: intent.eventSlug, email: normEmail, createdAt: FieldValue.serverTimestamp() })
         }
-        if (regRules?.limitPerMobile && phoneClaimRef && normPhone) {
+        if (dupEnforcement.limitPerMobile && phoneClaimRef && normPhone) {
           txn.set(phoneClaimRef, { registrationId, eventSlug: intent.eventSlug, phone: normPhone, createdAt: FieldValue.serverTimestamp() })
         }
       })

@@ -10,7 +10,7 @@
 
 import { NextRequest, NextResponse } from 'next/server'
 import { adminAuth }                 from '@/lib/firebase/admin'
-import { checkDuplicateRegistration } from '@/lib/registrations/duplicateCheck'
+import { checkDuplicateRegistration, resolveDuplicateEnforcement } from '@/lib/registrations/duplicateCheck'
 import { captureFinancialError }     from '@/lib/monitoring/sentry'
 import { checkRegistrationGate }     from '@/lib/registrations/gate'
 import { getEventBySlug }            from '@/lib/firebase/firestore/events'
@@ -272,14 +272,23 @@ export async function POST(
 
   // H2: authoritative duplicate check via the ONE shared helper (also used by the
   // pre-payment pre-check and submit) — never charge a user for a duplicate.
+  //
+  // RD-REG-DUP-01 — gated by the organizer's policy. Under "Allow All" the resolver zeroes
+  // both limits so no query runs; under "Warn Only" the duplicate is detected (the form
+  // already warned) but must NOT 409 here, because blocking is exactly what that organizer
+  // opted out of. Only "Block" refuses, and it refuses well before the gateway order is
+  // created below — so an allowed duplicate reaches checkout and a blocked one is never
+  // charged. (The literal call name is deliberately not written here: an invariant test
+  // locates that call by string, and a mention in a comment would shadow it.)
+  const dupEnforcement = resolveDuplicateEnforcement(regRules)
   const dup = await checkDuplicateRegistration({
     slug,
     email:          attendee.email,
     phone:          attendee.phone,
-    limitPerEmail:  regRules?.limitPerEmail  ?? false,
-    limitPerMobile: regRules?.limitPerMobile ?? false,
+    limitPerEmail:  dupEnforcement.limitPerEmail,
+    limitPerMobile: dupEnforcement.limitPerMobile,
   })
-  if (dup.duplicate) {
+  if (dup.duplicate && dupEnforcement.enforce) {
     return dup.field === 'mobile'
       ? NextResponse.json({ error: 'A registration with this mobile number already exists.', reason: 'DUPLICATE_MOBILE' }, { status: 409 })
       : NextResponse.json({ error: 'A registration with this email address already exists.', reason: 'DUPLICATE_EMAIL' }, { status: 409 })
