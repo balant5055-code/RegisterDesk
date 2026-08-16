@@ -9,7 +9,7 @@
 
 import { NextRequest, NextResponse } from 'next/server'
 import { adminAuth }                from '@/lib/firebase/admin'
-import { checkDuplicateRegistration, resolveDuplicateEnforcement } from '@/lib/registrations/duplicateCheck'
+import { checkDuplicateRegistration } from '@/lib/registrations/duplicateCheck'
 import { checkRegistrationGate }    from '@/lib/registrations/gate'
 import { getEventBySlug }           from '@/lib/firebase/firestore/events'
 import {
@@ -289,16 +289,14 @@ export async function POST(
   }
 
   // ── 7c. Duplicate check via the ONE shared helper (H2) ─────────────────────
-  // RD-REG-DUP-01 — gated by the organizer's policy, identical to create-order.
-  const dupEnforcement = resolveDuplicateEnforcement(regRules)
   const dup = await checkDuplicateRegistration({
     slug,
     email:          attendee.email,
     phone:          attendee.phone,
-    limitPerEmail:  dupEnforcement.limitPerEmail,
-    limitPerMobile: dupEnforcement.limitPerMobile,
+    limitPerEmail:  regRules?.limitPerEmail  ?? false,
+    limitPerMobile: regRules?.limitPerMobile ?? false,
   })
-  if (dup.duplicate && dupEnforcement.enforce) {
+  if (dup.duplicate) {
     return dup.field === 'mobile'
       ? NextResponse.json({ success: false, reason: 'DUPLICATE_MOBILE', error: 'A registration with this mobile number already exists.' }, { status: 409 })
       : NextResponse.json({ success: false, reason: 'DUPLICATE_EMAIL', error: 'A registration with this email address already exists.' }, { status: 409 })
@@ -379,11 +377,8 @@ export async function POST(
       uid,
       // H2: pass rule flags so claim docs are written inside the transaction,
       //     closing the race condition between concurrent free-registration submits.
-      // RD-REG-DUP-01: the POLICY-RESOLVED flags. Under allow/warn both are false, so no
-      // claim doc is written — a claim would block the NEXT registration, reintroducing
-      // exactly the block the organizer turned off.
-      limitPerEmail:  dupEnforcement.limitPerEmail,
-      limitPerMobile: dupEnforcement.limitPerMobile,
+      limitPerEmail:  regRules?.limitPerEmail  ?? false,
+      limitPerMobile: regRules?.limitPerMobile ?? false,
       // Idempotency: client UUID so same-key retries return the existing registration
       idempotencyKey: typeof idempotencyKey === 'string' && idempotencyKey.trim()
         ? idempotencyKey.trim()

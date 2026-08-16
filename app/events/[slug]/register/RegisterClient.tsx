@@ -1487,23 +1487,8 @@ export function RegisterClient({
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ slug: eventSlug, email: attendee.email, phone: attendee.phone }),
       })
-      const dupJson = await dupRes.json() as {
-        duplicate?: boolean; field?: 'email' | 'mobile'
-        policy?: 'block' | 'warn' | 'allow'; blocking?: boolean
-      }
-      // RD-REG-DUP-01 — only a BLOCKING duplicate stops the flow. Under "Warn Only" the
-      // attendee is told and continues; under "Allow All" the server reports no duplicate
-      // at all. `blocking` is decided server-side so this never re-derives the rule.
-      if (dupJson.duplicate && dupJson.blocking === false) {
-        showToast(
-          dupJson.field === 'mobile'
-            ? 'You already have a registration for this event with this mobile number.'
-            : 'You already have a registration for this event with this email address.',
-          'info',
-          { title: 'Already registered' },
-        )
-      }
-      if (dupJson.duplicate && dupJson.blocking !== false) {
+      const dupJson = await dupRes.json() as { duplicate?: boolean; field?: 'email' | 'mobile' }
+      if (dupJson.duplicate) {
         const dupMessage = dupJson.field === 'mobile'
           ? 'You already have a registration for this event with this mobile number. Please check your email for your ticket.'
           : 'You already have a registration for this event with this email address. Please check your inbox for your ticket.'
