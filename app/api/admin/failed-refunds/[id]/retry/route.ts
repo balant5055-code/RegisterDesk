@@ -43,6 +43,7 @@ interface FailedRefundDoc {
   reason:         string
   registrationId: string | null
   status:         string
+  kind?:          string   // 'duplicate_hold' must never be refunded here
 }
 
 // ─── POST ─────────────────────────────────────────────────────────────────────
@@ -65,6 +66,13 @@ export async function POST(req: NextRequest, ctx: RouteContext): Promise<NextRes
     const fresh = await txn.get(docRef)
     if (!fresh.exists) return { ok: false, status: 404, error: 'Failed refund not found' }
     const d = fresh.data() as FailedRefundDoc
+    // RD-PAY-DUP-HOLD — a duplicate hold is a captured payment we deliberately did NOT
+    // refund. `status: 'review'` already fails the check below, so this is defence in depth:
+    // it states the rule explicitly so a future change to the status vocabulary cannot turn
+    // this endpoint into the automatic refund the hold exists to avoid.
+    if (d.kind === 'duplicate_hold') {
+      return { ok: false as const, status: 409, error: 'This is a duplicate hold, not a failed refund. Resolve it from the Review queue — it must not be auto-refunded.' }
+    }
     if (d.status !== 'open') return { ok: false, status: 409, error: `Cannot retry a refund in status '${d.status}'` }
     txn.update(docRef, { status: 'retrying', updatedAt: FieldValue.serverTimestamp() })
     return { ok: true, data: d }

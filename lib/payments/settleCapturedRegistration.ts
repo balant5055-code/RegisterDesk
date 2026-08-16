@@ -78,6 +78,12 @@ export type SettlementOutcome =
   | { kind: 'already_settled'; registrationId: string }
   /** Refused on an existing business rule; the payment has been refunded in full. */
   | { kind: 'refunded';        reason: SettlementRefusal; gateBlocked?: boolean }
+  /**
+   * RD-PAY-DUP-HOLD — refused as a DUPLICATE. The registration is blocked exactly as before,
+   * the intent is terminal, but the captured payment is deliberately NOT auto-refunded: it is
+   * parked as a `duplicate_hold` review record for an admin to settle by hand.
+   */
+  | { kind: 'held';            reason: 'DUPLICATE_EMAIL' | 'DUPLICATE_MOBILE' }
   /** Nothing written, nothing refunded — safe to retry later. */
   | { kind: 'deferred';        reason: string }
 
@@ -106,6 +112,50 @@ async function refundInFull(
       registrationId: ctx.registrationId ?? null,
       status: 'open', createdAt: FieldValue.serverTimestamp(),
     }).catch(e => captureFinancialError(e, { scope: 'settleCaptured.failed_refund_persist_failed', detail: 'CRITICAL: could not write failedRefunds record', orderId, paymentId }))
+  }
+}
+
+// ─── Duplicate hold (RD-PAY-DUP-HOLD) ─────────────────────────────────────────
+//
+// A duplicate refusal is the ONE refusal that must not auto-refund. Every other reason —
+// capacity, pass unavailable, coupon exhausted, invite invalid, ticket-code exhaustion,
+// gate blocked, transaction error — keeps refunding through refuse()/refundInFull(),
+// which are deliberately left untouched.
+//
+// The captured payment is therefore parked, never silently orphaned:
+//   • `status: 'review'`  — the admin retry endpoint refuses anything that is not 'open',
+//                           so a hold can NEVER enter the refund path even by mistake.
+//   • `kind: 'duplicate_hold'` — distinguishes it from a genuine failed refund. Records
+//                           written before this field existed have no `kind` and are read
+//                           as 'failed_refund', so nothing is migrated.
+//
+// IDEMPOTENT by deterministic id: one hold per ORDER, so a webhook replay or a sweep
+// re-run can never open a second review record for the same payment.
+async function recordDuplicateHold(
+  orderId: string, paymentId: string, amount: number, reason: string,
+  ctx: { eventSlug: string; attendeeEmail: string },
+): Promise<void> {
+  const ref = adminDb.collection('failedRefunds').doc(`duplicate_hold_${orderId}`)
+  try {
+    // `create` throws ALREADY_EXISTS rather than overwriting — that IS the idempotency,
+    // and it also preserves the original createdAt on a replay.
+    await ref.create({
+      orderId, paymentId, amountPaise: amount, reason,
+      eventSlug: ctx.eventSlug, attendeeEmail: ctx.attendeeEmail,
+      registrationId: null,
+      kind:      'duplicate_hold',
+      status:    'review',
+      createdAt: FieldValue.serverTimestamp(),
+    })
+  } catch (err) {
+    // ALREADY_EXISTS is the expected replay path and is not an error worth reporting.
+    const code = (err as { code?: number | string })?.code
+    if (code === 6 || code === 'already-exists') return
+    captureFinancialError(err, {
+      scope: 'settleCaptured.duplicate_hold_persist_failed',
+      detail: 'CRITICAL: captured payment was not refunded and the review record could not be written',
+      orderId, paymentId, amount, reason,
+    })
   }
 }
 
@@ -379,7 +429,10 @@ export async function settleCapturedRegistration(args: {
         if (attempt < 4) continue
         return refuse('ticket_code_exhausted')
       }
-      if (err instanceof DuplicateRegistrationError)  return refuse(err.reason)
+      // RD-PAY-DUP-HOLD — the ONLY reason that bypasses refundInFull(). The registration is
+      // still refused; only the automatic refund is withheld, and the payment is parked for
+      // review instead. Every other branch below is unchanged.
+      if (err instanceof DuplicateRegistrationError)  return holdForReview(err.reason)
       if (err instanceof CapacityExceededError)       return refuse(err.reason)
       if (err instanceof CouponExhaustedError)        return refuse('COUPON_EXHAUSTED')
       if (err instanceof InviteCodeError)             return refuse(err.reason)
@@ -394,6 +447,29 @@ export async function settleCapturedRegistration(args: {
       }
       captureFinancialError(err, { scope: `settleCaptured.${source}.transaction_failed`, orderId, paymentId, eventSlug: intent.eventSlug })
       return refuse('transaction_error')
+    }
+
+    /**
+     * RD-PAY-DUP-HOLD — a duplicate refusal: terminal intent, NO automatic refund.
+     *
+     * Deliberately a sibling of refuse() rather than a flag inside it: refuse() is shared by
+     * seven other refusal reasons whose refunds must keep working exactly as they do today,
+     * and a conditional inside it would put every one of those refunds one edit away from
+     * being switched off.
+     */
+    async function holdForReview(reason: 'DUPLICATE_EMAIL' | 'DUPLICATE_MOBILE'): Promise<SettlementOutcome> {
+      captureFinancialError(`settlement_duplicate_hold:${reason}`, {
+        scope: `settleCaptured.${source}.duplicate_hold`,
+        detail: 'registration refused as a duplicate; payment captured and held for manual review (NOT refunded)',
+        orderId, paymentId, reason, amount: intent.amount,
+      })
+      // Terminal FIRST, so the entry guard short-circuits any replay before it can reach
+      // this branch again — the same ordering refuse() uses.
+      await markPaymentIntentFailed(orderId, reason)
+      await recordDuplicateHold(orderId, paymentId, intent.amount, reason, {
+        eventSlug: intent.eventSlug, attendeeEmail: intent.attendee.email,
+      })
+      return { kind: 'held', reason }
     }
 
     // Mark failed + refund in full, then report the canonical reason.
