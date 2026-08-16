@@ -15,7 +15,9 @@ import { authorizeWorkspace }        from '@/lib/team/workspace'
 import { getFeatureFlags }           from '@/lib/config/resolveFeatureFlags'
 import { checkRateLimit }            from '@/lib/rateLimit'
 import { getActiveTemplate, getTemplateById, getSettings, CertificateIneligibleError } from '@/lib/certificates/firestore'
-import { generateCertificate, CertificateInProgressError } from '@/lib/certificates/generate'
+import {
+  generateCertificate, CertificateInProgressError, CertificateTemplateNotDesignedError,
+} from '@/lib/certificates/generate'
 import { buildAssignmentContext, resolveAssignment } from '@/lib/certificates/assignment'
 import { isCertificateType }         from '@/lib/certificates/validation'
 import { serializeCertificate }      from '@/lib/certificates/types'
@@ -175,6 +177,11 @@ export async function POST(req: NextRequest, { params }: Params): Promise<NextRe
   } catch (err) {
     if (err instanceof CertificateInProgressError) {
       return NextResponse.json({ error: err.message }, { status: 409 })
+    }
+    // RD-CERT-2E — an undesigned template is an organizer action, not a server fault: it must
+    // arrive as a message they can act on rather than an opaque 500.
+    if (err instanceof CertificateTemplateNotDesignedError) {
+      return NextResponse.json({ error: err.message }, { status: 422 })
     }
     if (err instanceof CertificateIneligibleError) {
       return NextResponse.json({ error: `Registration is not eligible for a certificate (${err.reason}).` }, { status: 422 })

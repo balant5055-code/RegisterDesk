@@ -85,7 +85,14 @@ import { generateCertificate } from '@/lib/certificates/generate'
 const TEMPLATE = {
   templateId: 'TPL-1', organizerUid: 'org-1', eventId: 'draft-1',
   templateType: 'png', dimensions: { width: 1492, height: 1054, unit: 'px' },
-  fileUrl: 'https://storage.test/templates/TPL-1.png', layout: { elements: [] }, isActive: true,
+  fileUrl: 'https://storage.test/templates/TPL-1.png', isActive: true,
+  // RD-CERT-2E: issuance now requires a designed template, so this fixture carries one
+  // element. Nothing in this suite asserts on the layout — it is about artifact persistence.
+  layout: {
+    version: 1, canvas: { width: 1492, height: 1054, unit: 'px' },
+    elements: [{ id: 'e1', type: 'text', content: '{{participantName}}', zIndex: 1, x: 0.1, y: 0.4,
+      width: 0.8, fontFamily: 'helvetica', fontSizeFrac: 0.05, weight: 'normal', color: '#111111', align: 'center' }],
+  },
 } as never
 
 const INPUT = {

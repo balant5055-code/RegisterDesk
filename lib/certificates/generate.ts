@@ -167,6 +167,40 @@ export class CertificateInProgressError extends Error {
   }
 }
 
+/** Raised when a template carries no builder design and therefore cannot produce a certificate. */
+export class CertificateTemplateNotDesignedError extends Error {
+  constructor() {
+    super('Certificate template must be designed before certificates can be issued.')
+    this.name = 'CertificateTemplateNotDesignedError'
+  }
+}
+
+/**
+ * RD-CERT-2E — a template may only produce a certificate once it has a design.
+ *
+ * The renderer draws the layout and nothing else. Before this guard existed it fell back to a
+ * built-in design that stamped the participant's name, certificate id and a QR onto the
+ * artwork, so an undesigned template quietly issued certificates carrying attendee data the
+ * organizer never placed. Removing that fallback fixes the wrong certificate but would turn it
+ * into a BLANK one — a background with no name, no id, no verification route — which is just as
+ * unusable and harder to notice.
+ *
+ * So issuance stops here instead, with a message that names the actual next step. Refusing to
+ * issue is recoverable in one click; a blank certificate in an attendee's inbox is not.
+ */
+export function templateHasDesign(
+  template: Pick<CertificateTemplateDoc, 'layout'>,
+): boolean {
+  return (template.layout?.elements?.length ?? 0) > 0
+}
+
+/** Throwing form of `templateHasDesign`, for the issuance paths. */
+export function assertTemplateIsDesigned(
+  template: Pick<CertificateTemplateDoc, 'layout'>,
+): void {
+  if (!templateHasDesign(template)) throw new CertificateTemplateNotDesignedError()
+}
+
 /** Resolves the full placeholder context for a certificate. */
 function buildContext(
   input: GenerateContextInput,
@@ -220,6 +254,12 @@ export async function generateCertificate(
   //    pre-claim records). Strongly consistent Firestore query.
   const existing = await findCertificate(eventId, registrationId, certificateType)
   if (existing) return { certificate: existing, created: false }
+
+  // 1b. RD-CERT-2E — the template must actually carry a design. Placed AFTER the fast path
+  //     on purpose: an already-issued certificate stays retrievable even if its template was
+  //     later stripped, so a retry or a re-download never starts failing retroactively. Placed
+  //     BEFORE the claim so a refusal does not burn a certificateId that then needs releasing.
+  assertTemplateIsDesigned(template)
 
   // 2. Deterministic claim — atomically reserve the certificateId for this tuple.
   //    Only the caller that creates the claim (`owned`) proceeds to generate.
@@ -476,7 +516,10 @@ export async function renderCertificateOnDemand(certificateId: string): Promise<
   const template = existing.templateId
     ? (await getTemplateById(existing.templateId)) ?? await getActiveTemplate(existing.eventId, existing.organizerUid)
     : await getActiveTemplate(existing.eventId, existing.organizerUid)
-  if (!template) return { ok: false, error: 'no_template' }
+  // A template stripped of its design after issuance would re-render as a bare background —
+  // the same silent-blank outcome the issuance guard exists to prevent. Reported through the
+  // existing `no_template` code, which every caller already handles, rather than a new one.
+  if (!template || !templateHasDesign(template)) return { ok: false, error: 'no_template' }
 
   try {
     const { templateBytes, assets } = await cachedRenderAssets(template)
@@ -508,7 +551,9 @@ export async function regenerateCertificate(
   // (batch regenerate), falling back to a per-cert fetch for the single-cert path —
   // identical rendering either way.
   const template = opts?.prefetched?.template ?? await getActiveTemplate(existing.eventId, existing.organizerUid)
-  if (!template) return { ok: false, error: 'no_active_template' }
+  // Same rule as the on-demand path: a regeneration must not quietly replace a good artifact
+  // with a bare background.
+  if (!template || !templateHasDesign(template)) return { ok: false, error: 'no_active_template' }
 
   const verifyUrl = `${getEmailAppUrl()}/verify/certificate/${certificateId}`
   const context   = contextFromSnapshot(existing.data, certificateId)

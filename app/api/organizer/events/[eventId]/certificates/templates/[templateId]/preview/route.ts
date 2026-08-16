@@ -10,7 +10,9 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { authorizeWorkspace }        from '@/lib/team/workspace'
 import { getTemplateById }           from '@/lib/certificates/firestore'
-import { loadRenderAssets }          from '@/lib/certificates/generate'
+import {
+  loadRenderAssets, templateHasDesign, CertificateTemplateNotDesignedError,
+} from '@/lib/certificates/generate'
 import { renderCertificatePdf }      from '@/lib/certificates/render'
 import { validateLayout }            from '@/lib/certificates/validation'
 import { PLACEHOLDERS }              from '@/lib/certificates/placeholders'
@@ -49,6 +51,17 @@ export async function POST(req: NextRequest, { params }: Params): Promise<NextRe
     const parsed = validateLayout((raw as { layout: unknown }).layout)
     if (!parsed.ok) return NextResponse.json({ error: parsed.error }, { status: 400 })
     layout = parsed.value
+  }
+
+  // RD-CERT-2E — the same rule issuance enforces. A preview of an undesigned template used to
+  // render the built-in default design, which is precisely how the phantom participant name
+  // looked legitimate: the organizer saw it in preview and assumed the template produced it.
+  // Refusing here keeps preview an honest picture of what would actually be issued.
+  if (!templateHasDesign({ layout: layout ?? undefined })) {
+    return NextResponse.json(
+      { error: new CertificateTemplateNotDesignedError().message },
+      { status: 422 },
+    )
   }
 
   try {
