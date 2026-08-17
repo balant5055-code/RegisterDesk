@@ -36,10 +36,18 @@ export async function PUT(req: NextRequest, { params }: Params): Promise<NextRes
   const parsed = validateLayout(body)
   if (!parsed.ok) return NextResponse.json({ error: parsed.error }, { status: 400 })
 
-  // SSRF (save-time): every image asset must be a Storage object in this event's
+  // SSRF (save-time): every STATIC image asset must be a Storage object in this event's
   // own folder — reject foreign / non-Storage URLs before they're ever fetched.
+  //
+  // RD-CERT-PHOTO-01: an `attendeePhoto` element carries no URL by construction (validation
+  // has already forced assetUrl to ''), so there is nothing to guard here. Its bytes are
+  // never fetched by URL at all — the renderer reads them from object storage by key, so
+  // this SSRF gate stays exactly as strict as it was for everything it still governs.
   for (const el of parsed.value.elements) {
-    if (el.type === 'image' && !validateEventTemplateUrl(el.assetUrl, auth.uid, eventId).ok) {
+    if (el.type !== 'image') continue
+    if (el.source === 'attendeePhoto') continue
+
+    if (!validateEventTemplateUrl(el.assetUrl, auth.uid, eventId).ok) {
       return NextResponse.json(
         { error: 'Image assets must be uploaded to this event' },
         { status: 400 },
