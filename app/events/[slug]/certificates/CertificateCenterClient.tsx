@@ -17,7 +17,29 @@ import { Search, Loader2, Award, Download, ExternalLink } from 'lucide-react'
 import { cn } from '@/lib/utils/cn'
 import { buttonVariants } from '@/components/ui/button'
 
-type Mode = 'email' | 'registrationId'
+type Mode = 'email' | 'mobile' | 'registrationId' | 'bibNumber'
+
+/**
+ * The lookup modes, in display order. ONE table drives the selector, the field label, the
+ * input's type/inputMode/autoComplete and its placeholder — so adding a mode is a single
+ * row here rather than five parallel ternaries that can drift out of step.
+ *
+ * The key doubles as the request-body field name, which is what lets the request be built
+ * as `{ [mode]: value }` and keeps the client from re-encoding the API's contract.
+ */
+const MODES: ReadonlyArray<{
+  id:           Mode
+  label:        string
+  placeholder:  string
+  type:         'email' | 'text' | 'tel'
+  inputMode:    'email' | 'text' | 'tel' | 'numeric'
+  autoComplete: string
+}> = [
+  { id: 'email',          label: 'Email Address',   placeholder: 'you@example.com', type: 'email', inputMode: 'email',   autoComplete: 'email' },
+  { id: 'mobile',         label: 'Mobile Number',   placeholder: '98765 43210',     type: 'tel',   inputMode: 'tel',     autoComplete: 'tel'   },
+  { id: 'registrationId', label: 'Registration ID', placeholder: 'e.g. 3f2c…',      type: 'text',  inputMode: 'text',    autoComplete: 'off'   },
+  { id: 'bibNumber',      label: 'Bib Number',      placeholder: 'e.g. 1042',       type: 'text',  inputMode: 'numeric', autoComplete: 'off'   },
+]
 
 interface Result {
   participantName:    string
@@ -36,6 +58,8 @@ const inputCls =
 export function CertificateCenterClient({ slug, eventName }: { slug: string; eventName: string }) {
   const reduce = useReducedMotion()
   const [mode,    setMode]    = useState<Mode>('email')
+  // Non-null by construction: `mode` is only ever set from MODES.
+  const active = MODES.find(m => m.id === mode) ?? MODES[0]
   const [value,   setValue]   = useState('')
   const [busy,    setBusy]    = useState(false)
   const [error,   setError]   = useState<string | null>(null)
@@ -59,7 +83,9 @@ export function CertificateCenterClient({ slug, eventName }: { slug: string; eve
       const res  = await fetch(`/api/events/${encodeURIComponent(slug)}/certificates/lookup`, {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify(mode === 'email' ? { email: q } : { registrationId: q }),
+        // The mode key IS the API's field name, so exactly one field is ever sent — which
+        // is what the server's "exactly one mode" guard expects.
+        body:    JSON.stringify({ [mode]: q }),
       })
       const body = await res.json().catch(() => null) as { results?: Result[]; error?: string } | null
 
@@ -94,18 +120,20 @@ export function CertificateCenterClient({ slug, eventName }: { slug: string; eve
 
       {/* ── Lookup ─────────────────────────────────────────────────────────── */}
       <form onSubmit={lookup} autoComplete="off" className="mt-8 rounded-2xl border border-border bg-card p-5 shadow-sm sm:p-6">
+        {/* Two columns still, so four options stack 2×2 rather than squeezing onto one row
+            on a phone — the same control height and touch target as before. */}
         <div role="radiogroup" aria-label="Look up by" className="mb-4 grid grid-cols-2 gap-2">
-          {([['email', 'Email Address'], ['registrationId', 'Registration ID']] as const).map(([m, label]) => (
+          {MODES.map(({ id, label }) => (
             <button
-              key={m}
+              key={id}
               type="button"
               role="radio"
-              aria-checked={mode === m}
-              onClick={() => { setMode(m); setValue(''); setResults(null); setError(null) }}
+              aria-checked={mode === id}
+              onClick={() => { setMode(id); setValue(''); setResults(null); setError(null) }}
               className={cn(
                 'h-11 rounded-xl border text-fs-sm font-semibold transition-colors',
                 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 focus-visible:ring-offset-2',
-                mode === m
+                mode === id
                   ? 'border-primary/30 bg-[rgb(var(--primary-rgb)_/_0.06)] text-foreground'
                   : 'border-border bg-muted/25 text-muted-foreground hover:bg-muted/45',
               )}
@@ -116,15 +144,15 @@ export function CertificateCenterClient({ slug, eventName }: { slug: string; eve
         </div>
 
         <label htmlFor="cc-input" className="mb-1.5 block text-fs-2xs font-semibold uppercase tracking-wider text-muted-foreground">
-          {mode === 'email' ? 'Email Address' : 'Registration ID'}
+          {active.label}
         </label>
         <input
           id="cc-input"
           className={inputCls}
-          type={mode === 'email' ? 'email' : 'text'}
-          inputMode={mode === 'email' ? 'email' : 'text'}
-          autoComplete={mode === 'email' ? 'email' : 'off'}
-          placeholder={mode === 'email' ? 'you@example.com' : 'e.g. 3f2c…'}
+          type={active.type}
+          inputMode={active.inputMode}
+          autoComplete={active.autoComplete}
+          placeholder={active.placeholder}
           value={value}
           disabled={busy}
           onChange={e => setValue(e.target.value)}

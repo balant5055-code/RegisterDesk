@@ -163,10 +163,34 @@ describe('input validation', () => {
     expect((await POST(bad, ctx())).status).toBe(400)
   })
 
-  it('mobile lookup is NOT supported in V1', async () => {
-    // attendee.phone is stored un-normalised, so a phone query would silently miss.
+  // RD-CERT-SEARCH-4 — mobile and bib are now supported. The V1 limitation was that
+  // `attendee.phone` is stored un-normalised so a single-value query would silently miss;
+  // that is solved by querying the plausible spellings in one indexed `in` filter rather
+  // than by migrating live data.
+  it('mobile lookup is accepted', async () => {
     const res = await POST(post({ mobile: '9876543210' }), ctx())
-    expect(res.status).toBe(400)
+    expect(res.status).not.toBe(400)
+  })
+
+  it('bib lookup is accepted', async () => {
+    const res = await POST(post({ bibNumber: '1042' }), ctx())
+    expect(res.status).not.toBe(400)
+  })
+
+  it('still rejects more than one mode at a time', async () => {
+    expect((await POST(post({ email: 'a@b.c', mobile: '9876543210' }), ctx())).status).toBe(400)
+    expect((await POST(post({ mobile: '9876543210', bibNumber: '1042' }), ctx())).status).toBe(400)
+  })
+
+  it('an over-long mobile or bib falls through to the uniform empty response, not an error', async () => {
+    // Same anti-oracle rule the email/registrationId shape checks already follow.
+    const long = await POST(post({ mobile: '9'.repeat(40) }), ctx())
+    expect(long.status).toBe(200)
+    expect(await long.json()).toEqual({ results: [] })
+
+    const bib = await POST(post({ bibNumber: 'x'.repeat(80) }), ctx())
+    expect(bib.status).toBe(200)
+    expect(await bib.json()).toEqual({ results: [] })
   })
 })
 
