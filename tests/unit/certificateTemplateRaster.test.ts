@@ -137,8 +137,9 @@ describe('the Certificate Center action row cannot be displaced by the photo car
 describe('View and Download are independent', () => {
   const src = code(read('app/events/[slug]/certificates/CertificateCenterClient.tsx'))
 
-  it('View points at the verification route only', () => {
-    expect(src).toMatch(/href=\{`\/verify\/certificate\/\$\{encodeURIComponent\(r\.certificateId\)\}`\}/)
+  it('View opens the in-page modal, backed by the public verification API', () => {
+    expect(src).toMatch(/onClick=\{\(\) => setViewing\(\{ certificateId: r\.certificateId/)
+    expect(src).toMatch(/\/api\/verify\/certificate\/\$\{encodeURIComponent\(certificateId\)\}/)
   })
 
   it('Download points at the download route', () => {
@@ -192,5 +193,62 @@ describe('the photo workflow is untouched', () => {
     const buttons = card.match(/<button[\s\S]*?>/g) ?? []
     expect(buttons.length).toBeGreaterThan(0)
     for (const b of buttons) expect(b).toMatch(/type="button"/)
+  })
+})
+
+// ─── RD-CERT-UX · download readiness ──────────────────────────────────────────
+//
+// THE RACE THIS PINS. `photoSupported` and `hasPhoto` both arrive asynchronously and the
+// download URL depends on `hasPhoto`. While a photo was uploading the button still pointed at
+// the ORIGINAL artifact, so a click mid-upload returned a certificate WITHOUT the photo the
+// attendee had just added — indistinguishable from a failed upload.
+
+describe('Download is gated on resolved photo state', () => {
+  const src = code(read('app/events/[slug]/certificates/CertificateCenterClient.tsx'))
+
+  it('models readiness explicitly', () => {
+    expect(src).toMatch(/type Readiness = 'resolving' \| 'ready' \| 'unavailable'/)
+  })
+
+  it('disables Download while unresolved, and when no session has answered yet', () => {
+    expect(src).toMatch(/disabled=\{!!action\[r\.certificateId\] \|\| !p \|\| p\.readiness === 'resolving'\}/)
+  })
+
+  it('shows a distinct waiting state rather than a dead button', () => {
+    expect(src).toMatch(/Getting ready…/)
+  })
+
+  it('settles hasPhoto and readiness in ONE update — never observable apart', () => {
+    expect(src).toMatch(/hasPhoto: has, readiness: 'ready'/)
+  })
+
+  it('a template with no photo area is ready immediately — no needless wait', () => {
+    expect(src).toMatch(/readiness:\s+body\.photoSupported \? 'resolving' : 'ready'/)
+  })
+
+  it('re-resolves while the attendee finishes with the card', () => {
+    const fn = src.slice(src.indexOf('async function refreshHasPhoto'), src.indexOf('function setPhotoBusy'))
+    expect(fn).toMatch(/readiness: 'resolving'/)
+    expect(fn).toMatch(/readiness: 'ready'/)
+  })
+
+  it('the photo card reports write activity upward', () => {
+    expect(src).toMatch(/onBusyChange=\{busyNow => setPhotoBusy\(r\.certificateId, busyNow\)\}/)
+    const card = code(read('components/certificates/AttendeePhotoCard.tsx'))
+    expect(card).toMatch(/onBusyChange\?\.\(busy\)/)
+  })
+})
+
+describe('ticket code is offered as its own mode in the UI', () => {
+  const src = code(read('app/events/[slug]/certificates/CertificateCenterClient.tsx'))
+
+  it('is a distinct mode, not folded into registrationId', () => {
+    expect(src).toMatch(/type Mode = 'email' \| 'mobile' \| 'ticketCode' \| 'registrationId' \| 'bibNumber'/)
+    expect(src).toMatch(/id: 'ticketCode',\s+label: 'Ticket Code'/)
+    expect(src).toMatch(/id: 'registrationId', label: 'Registration ID'/)
+  })
+
+  it('sends the mode key as the body field, so ticketCode never arrives as registrationId', () => {
+    expect(src).toMatch(/JSON\.stringify\(\{ \[mode\]: q \}\)/)
   })
 })

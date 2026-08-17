@@ -157,8 +157,10 @@ describe('the download button switches only when a photo exists', () => {
     expect(src).toMatch(/\/api\/certificates\/\$\{encodeURIComponent\(r\.certificateId\)\}\/file\?token=\$\{encodeURIComponent\(r\.downloadCapability\)\}/)
   })
 
-  it('leaves the verify link untouched', () => {
-    expect(src).toMatch(/\/verify\/certificate\/\$\{encodeURIComponent\(r\.certificateId\)\}/)
+  it('leaves the verification route as the View target', () => {
+    // Now consumed through the public verification API inside the modal rather than by
+    // navigating; either way the certificate id is what identifies it.
+    expect(src).toMatch(/\/api\/verify\/certificate\/\$\{encodeURIComponent\(certificateId\)\}/)
   })
 
   it('re-reads the stored photo when the attendee finishes with the card', () => {
@@ -324,8 +326,23 @@ describe('View and Download are independent actions', () => {
     expect(li.length).toBeGreaterThan(500)          // non-vacuity for the slices below
   })
 
-  it('View points at the verification page and nothing else', () => {
-    expect(li).toMatch(/href=\{`\/verify\/certificate\/\$\{encodeURIComponent\(r\.certificateId\)\}`\}/)
+  it('View opens the in-page modal and does NOT navigate', () => {
+    // RD-CERT-UX: View is a button that stages `viewing`. It must not be a link — navigating
+    // away discarded the attendee's results, photo section and other certificates.
+    expect(li).toMatch(/onClick=\{\(\) => setViewing\(\{ certificateId: r\.certificateId/)
+    expect(li).not.toMatch(/href=\{`\/verify\/certificate/)
+  })
+
+  it('the modal reuses the PUBLIC verification API — no second renderer', () => {
+    expect(src).toMatch(/fetch\(`\/api\/verify\/certificate\/\$\{encodeURIComponent\(certificateId\)\}`\)/)
+    // It renders the verification RESULT, never the PDF or a storage URL.
+    const dlg = src.slice(src.indexOf('function VerifyDialog'))
+    expect(dlg).not.toMatch(/downloadHref|signCertificateArtifact|fileKey|token/)
+  })
+
+  it('View triggers no download', () => {
+    const view = li.slice(li.indexOf('setViewing('), li.indexOf('setViewing(') + 400)
+    expect(view).not.toMatch(/downloadPdf|\.download|createObjectURL/)
   })
 
   it('Download fetches the download flow instead of navigating to it', () => {
@@ -343,12 +360,14 @@ describe('View and Download are independent actions', () => {
     expect(src).not.toMatch(/window\.open\(/)
   })
 
-  it('View stays a plain anchor — only Download and Share are scripted', () => {
-    // The independence guarantee: View has NO onClick at all, so nothing it does can reach
-    // the download or share handlers.
-    const view = li.slice(li.indexOf('View Certificate') - 600, li.indexOf('View Certificate'))
-    expect(view).toMatch(/<a\s/)
-    expect(view).not.toMatch(/onClick=/)
+  it('the three actions have three distinct handlers — none shared', () => {
+    // The independence guarantee, restated for the modal era: each action names its own
+    // function, so no click path can reach another action's effect.
+    expect(li).toMatch(/setViewing\(/)          // View
+    expect(li).toMatch(/void downloadPdf\(/)    // Download
+    expect(li).toMatch(/void shareCertificate\(/) // Share
+    // The card carries no anchors at all now, so anchor/button nesting is impossible.
+    expect(li).not.toMatch(/<a\s/)
   })
 
   it('no shared handler, no nesting, no parent click target', () => {

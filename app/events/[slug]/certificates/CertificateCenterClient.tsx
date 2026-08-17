@@ -15,10 +15,12 @@ import { useEffect, useRef, useState } from 'react'
 import { motion, useReducedMotion } from 'framer-motion'
 import { Search, Loader2, Award, Download, ExternalLink, Share2 } from 'lucide-react'
 import { cn } from '@/lib/utils/cn'
+import { Dialog } from '@/components/ui/Dialog'
+import type { CertificateVerifyResponse } from '@/app/api/verify/certificate/[certificateId]/route'
 import { buttonVariants } from '@/components/ui/button'
 import { AttendeePhotoCard } from '@/components/certificates/AttendeePhotoCard'
 
-type Mode = 'email' | 'mobile' | 'registrationId' | 'bibNumber'
+type Mode = 'email' | 'mobile' | 'ticketCode' | 'registrationId' | 'bibNumber'
 
 /**
  * The lookup modes, in display order. ONE table drives the selector, the field label, the
@@ -38,6 +40,9 @@ const MODES: ReadonlyArray<{
 }> = [
   { id: 'email',          label: 'Email Address',   placeholder: 'you@example.com', type: 'email', inputMode: 'email',   autoComplete: 'email' },
   { id: 'mobile',         label: 'Mobile Number',   placeholder: '98765 43210',     type: 'tel',   inputMode: 'tel',     autoComplete: 'tel'   },
+  // The code printed on the ticket / encoded in the check-in QR. A DIFFERENT identifier from
+  // the registration id below — attendees have the ticket code to hand, almost never the uuid.
+  { id: 'ticketCode',     label: 'Ticket Code',     placeholder: 'RD-XXXXXXXX',     type: 'text',  inputMode: 'text',    autoComplete: 'off'   },
   { id: 'registrationId', label: 'Registration ID', placeholder: 'e.g. 3f2c…',      type: 'text',  inputMode: 'text',    autoComplete: 'off'   },
   { id: 'bibNumber',      label: 'Bib Number',      placeholder: 'e.g. 1042',       type: 'text',  inputMode: 'numeric', autoComplete: 'off'   },
 ]
@@ -57,6 +62,22 @@ interface Result {
  * several certificates (a parent who registered three children), and an index would hand a
  * sibling's grant to the wrong card the moment the list re-sorts or a search is repeated.
  */
+/**
+ * Whether THIS certificate can be downloaded yet.
+ *
+ * THE RACE THIS CLOSES. `photoSupported` and `hasPhoto` both arrive asynchronously, and the
+ * download URL depends on `hasPhoto`. While a photo was uploading, the button still pointed at
+ * the ORIGINAL artifact — so a click mid-upload handed the attendee a certificate without the
+ * photo they had just added, and it looked like the upload had failed. Download is therefore
+ * gated on the photo state being RESOLVED, not merely on nothing being clicked.
+ *
+ *   'resolving'  — session in flight, or a photo write is in progress: the correct download
+ *                  target is not yet known
+ *   'ready'      — the target is known and correct (with or without a photo)
+ *   'unavailable'— the session failed; the ordinary artifact is still offered
+ */
+type Readiness = 'resolving' | 'ready' | 'unavailable'
+
 interface PhotoState {
   /** Write credential for THIS certificate's photo. Scoped to one certificateId + event. */
   grant:          string
@@ -64,6 +85,8 @@ interface PhotoState {
   photoSupported: boolean
   /** Is a photo currently stored on this certificate? Decides which download URL is used. */
   hasPhoto:       boolean
+  /** Whether `hasPhoto` — and therefore the download target — can be trusted right now. */
+  readiness:      Readiness
 }
 
 /** The photo endpoint for one certificate. The card never builds this itself, so it can
@@ -111,6 +134,8 @@ export function CertificateCenterClient({ slug, eventName }: { slug: string; eve
   /** Inline per-card feedback. The public Center is outside the dashboard's ToastProvider,
    *  so results are shown in the card itself rather than through a toast that cannot mount. */
   const [actionMsg, setActionMsg] = useState<Record<string, { ok: boolean; text: string } | null>>({})
+  /** The certificate whose verification details are open in the modal, or null. */
+  const [viewing, setViewing] = useState<{ certificateId: string; participantName: string } | null>(null)
   const [error,   setError]   = useState<string | null>(null)
   const [results, setResults] = useState<Result[] | null>(null)
   // Guards against a second in-flight request when the CTA is double-tapped. The disabled
@@ -196,14 +221,21 @@ export function CertificateCenterClient({ slug, eventName }: { slug: string; eve
           grant:          body.grant,
           photoSupported: !!body.photoSupported,
           hasPhoto:       false,
+          // A template with no photo area is immediately settled: `hasPhoto` can never
+          // become true, so the ordinary artifact is already the right target.
+          readiness:      body.photoSupported ? 'resolving' : 'ready',
         }
         setPhoto(prev => ({ ...prev, [certificateId]: entry }))
 
         // Only worth asking when the template could print it.
         if (!entry.photoSupported) return
         const has = await readHasPhoto(slug, certificateId, entry.grant)
-        if (cancelled || !has) return
-        setPhoto(prev => (prev[certificateId] ? { ...prev, [certificateId]: { ...prev[certificateId], hasPhoto: true } } : prev))
+        if (cancelled) return
+        // Settle in ONE update: `hasPhoto` and `readiness` must never be observed apart, or
+        // the button would briefly be enabled while still pointing at the wrong URL.
+        setPhoto(prev => (prev[certificateId]
+          ? { ...prev, [certificateId]: { ...prev[certificateId], hasPhoto: has, readiness: 'ready' } }
+          : prev))
       } catch {
         // Deliberately swallowed: the certificate list must survive a photo-service outage.
       }
@@ -290,10 +322,26 @@ export function CertificateCenterClient({ slug, eventName }: { slug: string; eve
 
   /** Re-reads the stored photo after the attendee says they are done with the card. This is
    *  what moves the download button onto the personalized URL (and back off it after a
-   *  removal) without AttendeePhotoCard needing to report anything upward. */
+   *  removal). Download stays disabled for the whole round trip. */
   async function refreshHasPhoto(certificateId: string, grant: string) {
+    setPhoto(prev => (prev[certificateId]
+      ? { ...prev, [certificateId]: { ...prev[certificateId], readiness: 'resolving' } }
+      : prev))
     const has = await readHasPhoto(slug, certificateId, grant)
-    setPhoto(prev => (prev[certificateId] ? { ...prev, [certificateId]: { ...prev[certificateId], hasPhoto: has } } : prev))
+    setPhoto(prev => (prev[certificateId]
+      ? { ...prev, [certificateId]: { ...prev[certificateId], hasPhoto: has, readiness: 'ready' } }
+      : prev))
+  }
+
+  /**
+   * The card reports upload/remove activity so the download target cannot be used while the
+   * stored photo is changing underneath it — the exact race where a click mid-upload returned
+   * the certificate WITHOUT the photo the attendee had just added.
+   */
+  function setPhotoBusy(certificateId: string, busy: boolean) {
+    setPhoto(prev => (prev[certificateId]
+      ? { ...prev, [certificateId]: { ...prev[certificateId], readiness: busy ? 'resolving' : prev[certificateId].readiness } }
+      : prev))
   }
 
   const count = results?.length ?? 0
@@ -441,28 +489,36 @@ export function CertificateCenterClient({ slug, eventName }: { slug: string; eve
                       {/* View first in the DOM AND first visually, at every breakpoint — the
                           row used to be `sm:flex-row-reverse`, which made reading order and
                           tab order disagree with the rendered order on desktop. */}
-                      <a
-                        href={`/verify/certificate/${encodeURIComponent(r.certificateId)}`}
-                        target="_blank"
-                        rel="noopener noreferrer"
+                      {/* Opens the verification details IN PLACE. A button, not a link: the
+                          Center must stay mounted so the attendee keeps their results, their
+                          photo section and their other certificates. It triggers no download
+                          and never touches the capability token. */}
+                      <button
+                        type="button"
+                        onClick={() => setViewing({ certificateId: r.certificateId, participantName: r.participantName })}
                         className={cn(buttonVariants({ variant: 'outline', size: 'lg' }), 'min-h-12 flex-1 gap-2')}
                       >
                         <ExternalLink className="size-4" aria-hidden />
                         View Certificate
-                      </a>
+                      </button>
                       {/* DOWNLOAD IS A BUTTON, NOT A LINK. The capability is short-lived and
                           lives only in the fetched URL — never in the address bar, and never
                           persisted, so a refresh cannot resurrect it. Fetching keeps the
                           attendee on this page with their other certificates intact. */}
+                      {/* Disabled until the photo state is RESOLVED — see Readiness. An
+                          undefined entry means the session has not answered yet, which is
+                          also "not ready". */}
                       <button
                         type="button"
-                        disabled={!!action[r.certificateId]}
+                        disabled={!!action[r.certificateId] || !p || p.readiness === 'resolving'}
                         onClick={() => { void downloadPdf(r.certificateId, downloadHref) }}
                         className={cn(buttonVariants({ variant: 'primary', size: 'lg' }), 'min-h-12 flex-1 gap-2')}
                       >
                         {action[r.certificateId] === 'pdf'
                           ? <><Loader2 className="size-4 animate-spin" aria-hidden /> Preparing…</>
-                          : <><Download className="size-4" aria-hidden /> Download PDF</>}
+                          : (!p || p.readiness === 'resolving')
+                            ? <><Loader2 className="size-4 animate-spin" aria-hidden /> Getting ready…</>
+                            : <><Download className="size-4" aria-hidden /> Download PDF</>}
                       </button>
                       <button
                         type="button"
@@ -501,6 +557,7 @@ export function CertificateCenterClient({ slug, eventName }: { slug: string; eve
                           grant={p.grant}
                           description="This event’s certificate has a photo area. Add your picture and it appears on the certificate you download."
                           onContinue={() => { void refreshHasPhoto(r.certificateId, p.grant) }}
+                          onBusyChange={busyNow => setPhotoBusy(r.certificateId, busyNow)}
                           className="rounded-none border-0 bg-transparent p-0 sm:p-0"
                         />
                       </div>
@@ -513,6 +570,106 @@ export function CertificateCenterClient({ slug, eventName }: { slug: string; eve
           )}
         </motion.div>
       )}
+
+      {viewing && (
+        <VerifyDialog
+          certificateId={viewing.certificateId}
+          participantName={viewing.participantName}
+          onClose={() => setViewing(null)}
+        />
+      )}
     </div>
+  )
+}
+
+/**
+ * Certificate verification, shown IN PLACE.
+ *
+ * Reuses the existing public endpoint `/api/verify/certificate/{id}` — the same read-only,
+ * rate-limited, privacy-filtered source the standalone verification page consumes. Nothing
+ * about certificate rendering is duplicated here: this shows the verification RESULT, exactly
+ * the fields that endpoint already chooses to expose, and never the PDF, a storage URL or the
+ * download capability.
+ *
+ * Escape-to-close and the focus trap come from the shared Dialog.
+ */
+function VerifyDialog({
+  certificateId, participantName, onClose,
+}: {
+  certificateId:   string
+  participantName: string
+  onClose:         () => void
+}) {
+  const [state, setState] = useState<'loading' | 'ok' | 'error'>('loading')
+  const [data,  setData]  = useState<CertificateVerifyResponse | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    const run = async () => {
+      try {
+        const res = await fetch(`/api/verify/certificate/${encodeURIComponent(certificateId)}`)
+        if (!res.ok) throw new Error('unavailable')
+        const body = await res.json() as CertificateVerifyResponse
+        if (cancelled) return
+        setData(body); setState('ok')
+      } catch {
+        if (!cancelled) setState('error')
+      }
+    }
+    void run()
+    return () => { cancelled = true }
+  }, [certificateId])
+
+  const rows: Array<[string, string | undefined]> = data ? [
+    ['Certificate ID', data.certificateId],
+    ['Participant',    data.participantName],
+    ['Event',          data.eventName],
+    ['Type',           data.certificateType],   // already a human label, e.g. "Participation"
+    ['Issued',         data.issueDate ? new Date(data.issueDate).toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' }) : undefined],
+    ['Issued by',      data.issuer],
+  ] : []
+
+  return (
+    <Dialog open onClose={onClose} title={`Certificate — ${participantName}`}>
+      {state === 'loading' && (
+        <p className="flex items-center gap-2 py-6 text-fs-sm text-muted-foreground">
+          <Loader2 className="size-4 animate-spin" aria-hidden /> Checking this certificate…
+        </p>
+      )}
+
+      {state === 'error' && (
+        <p role="alert" className="py-6 text-fs-sm text-destructive">
+          We could not verify this certificate right now. Please try again in a moment.
+        </p>
+      )}
+
+      {state === 'ok' && data && (
+        <div className="space-y-4">
+          <p
+            className={cn(
+              'inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-fs-2xs font-bold uppercase tracking-wider',
+              data.valid
+                ? 'bg-emerald-50 text-emerald-700'
+                : 'bg-red-50 text-red-700',
+            )}
+          >
+            {data.valid ? 'Verified' : data.state === 'revoked' ? 'Revoked' : 'Not verified'}
+          </p>
+
+          <dl className="grid grid-cols-3 gap-x-4 gap-y-2 text-fs-sm">
+            {rows.filter(([, v]) => !!v).map(([k, v]) => (
+              <div key={k} className="col-span-3 grid grid-cols-3 gap-4">
+                <dt className="text-muted-foreground">{k}</dt>
+                <dd className="col-span-2 break-words font-medium text-foreground">{v}</dd>
+              </div>
+            ))}
+          </dl>
+
+          {data.state === 'revoked' && data.revokeReason && (
+            <p className="rounded-lg bg-red-50 px-3 py-2 text-fs-2xs text-red-700">{data.revokeReason}</p>
+          )}
+        </div>
+      )}
+    </Dialog>
   )
 }

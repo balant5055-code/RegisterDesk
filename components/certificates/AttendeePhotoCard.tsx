@@ -45,6 +45,7 @@ export function AttendeePhotoCard({
   grant,
   description,
   onContinue,
+  onBusyChange,
   className,
 }: {
   /**
@@ -63,6 +64,12 @@ export function AttendeePhotoCard({
   description?: string
   /** Optional "I'm done here" affordance — the card works standalone without it. */
   onContinue?: () => void
+  /**
+   * Reports whether a write (upload or removal) is in flight, so a parent can hold back
+   * anything that depends on the STORED photo. The Certificate Center uses it to keep the
+   * download disabled while the photo it would embed is still changing.
+   */
+  onBusyChange?: (busy: boolean) => void
   className?: string
 }) {
   const [status,   setStatus]   = useState<Status>('loading')
@@ -72,6 +79,10 @@ export function AttendeePhotoCard({
   const fileRef = useRef<HTMLInputElement>(null)
 
   const busy = status === 'saving' || status === 'removing'
+
+  // Reported from an effect, not from the handlers: `busy` is derived state, and mirroring it
+  // here means every path that changes `status` — including the error paths — is covered.
+  useEffect(() => { onBusyChange?.(busy) }, [busy, onBusyChange])
 
   /** The grant travels in a header, never in the URL — a query string ends up in history,
    *  in referrers and in server logs, and this one is a write credential. */
