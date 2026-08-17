@@ -11,11 +11,12 @@
 // Everything shown here comes from the lookup API's five-field projection. No private
 // field is available to this component even if it wanted one.
 
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { motion, useReducedMotion } from 'framer-motion'
 import { Search, Loader2, Award, Download, ExternalLink } from 'lucide-react'
 import { cn } from '@/lib/utils/cn'
 import { buttonVariants } from '@/components/ui/button'
+import { AttendeePhotoCard } from '@/components/certificates/AttendeePhotoCard'
 
 type Mode = 'email' | 'mobile' | 'registrationId' | 'bibNumber'
 
@@ -49,6 +50,48 @@ interface Result {
   downloadCapability: string
 }
 
+/**
+ * RD-CERT-PHOTO-02 — the photo flow for ONE certificate.
+ *
+ * Keyed by `certificateId` and never by list position: one email legitimately returns
+ * several certificates (a parent who registered three children), and an index would hand a
+ * sibling's grant to the wrong card the moment the list re-sorts or a search is repeated.
+ */
+interface PhotoState {
+  /** Write credential for THIS certificate's photo. Scoped to one certificateId + event. */
+  grant:          string
+  /** Does the template actually have somewhere to put a photo? Server-resolved. */
+  photoSupported: boolean
+  /** Is a photo currently stored on this certificate? Decides which download URL is used. */
+  hasPhoto:       boolean
+}
+
+/** The photo endpoint for one certificate. The card never builds this itself, so it can
+ *  only ever address the certificate this page selected. */
+function photoEndpoint(slug: string, certificateId: string): string {
+  return `/api/events/${encodeURIComponent(slug)}/certificates/photo?certificateId=${encodeURIComponent(certificateId)}`
+}
+
+/**
+ * Asks the server whether this certificate has a photo. Deliberately a server read rather
+ * than something inferred from the card: the photo is persisted on the certificate, so a
+ * returning attendee already has one before any upload happens in this session.
+ *
+ * Never throws — a failed probe reads as "no photo", which selects the ordinary download.
+ */
+async function readHasPhoto(slug: string, certificateId: string, grant: string): Promise<boolean> {
+  try {
+    const res = await fetch(photoEndpoint(slug, certificateId), {
+      headers: { 'X-Certificate-Grant': grant },
+    })
+    if (!res.ok) return false
+    const body = await res.json() as { hasPhoto?: boolean }
+    return !!body.hasPhoto
+  } catch {
+    return false
+  }
+}
+
 const inputCls =
   'h-12 w-full rounded-xl border border-border bg-card px-4 text-fs-sm text-foreground ' +
   'placeholder:text-muted-foreground/70 transition-colors ' +
@@ -69,6 +112,14 @@ export function CertificateCenterClient({ slug, eventName }: { slug: string; eve
   // has re-rendered with the new state.
   const inFlight = useRef(false)
   const resultsRef = useRef<HTMLDivElement>(null)
+  // Photo flow state, one entry per certificateId. Absent ⇒ no session yet (or it failed),
+  // in which case the card is simply not offered and the ordinary download is used.
+  const [photo, setPhoto] = useState<Record<string, PhotoState>>({})
+  // Certificates whose session has already been requested. A Set rather than a flag because
+  // several certificates are minted concurrently, and `photo` alone cannot express
+  // "requested but not yet answered" — which is exactly when a re-render would fire a
+  // duplicate POST.
+  const sessions = useRef<Set<string>>(new Set())
 
   async function lookup(e?: React.FormEvent) {
     e?.preventDefault()
@@ -77,6 +128,10 @@ export function CertificateCenterClient({ slug, eventName }: { slug: string; eve
 
     inFlight.current = true
     setBusy(true); setError(null); setResults(null)
+    // A new search returns a different set of certificates, so the previous grants and
+    // photo answers no longer describe anything on screen. Cleared together with the
+    // results they belonged to.
+    setPhoto({}); sessions.current.clear()
     try {
       // Exactly one mode, and never the slug — the API derives the event from the URL,
       // which is what makes cross-event lookup impossible from the client.
@@ -99,6 +154,65 @@ export function CertificateCenterClient({ slug, eventName }: { slug: string; eve
       inFlight.current = false
       setBusy(false)
     }
+  }
+
+  // ── Photo sessions, one per certificate in the current results ──────────────
+  //
+  // A grant is minted per certificate because `photoSupported` and the write credential BOTH
+  // come from that mint — the client cannot know whether to offer an upload until the server
+  // has resolved this certificate's template. The registrationId the grant is bound to is
+  // resolved server-side from the certificate record and never sent here.
+  //
+  // Everything is per-certificate and failure-isolated: a rejected mint leaves that one card
+  // without a photo section and changes nothing else on the page. The lookup results, the
+  // download links and the verify links do not depend on any of this.
+  //
+  // The async work lives INSIDE the effect, matching AttendeePhotoCard and the rest of the
+  // repo: every setState lands after an await, on a later tick.
+  useEffect(() => {
+    if (!results || results.length === 0) return
+    let cancelled = false
+
+    const open = async (certificateId: string) => {
+      if (sessions.current.has(certificateId)) return
+      sessions.current.add(certificateId)
+      try {
+        const res = await fetch(`/api/events/${encodeURIComponent(slug)}/certificates/photo/session`, {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ certificateId }),
+        })
+        if (!res.ok) return
+        const body = await res.json() as { grant?: string; photoSupported?: boolean }
+        if (cancelled || !body.grant) return
+
+        const entry: PhotoState = {
+          grant:          body.grant,
+          photoSupported: !!body.photoSupported,
+          hasPhoto:       false,
+        }
+        setPhoto(prev => ({ ...prev, [certificateId]: entry }))
+
+        // Only worth asking when the template could print it.
+        if (!entry.photoSupported) return
+        const has = await readHasPhoto(slug, certificateId, entry.grant)
+        if (cancelled || !has) return
+        setPhoto(prev => (prev[certificateId] ? { ...prev, [certificateId]: { ...prev[certificateId], hasPhoto: true } } : prev))
+      } catch {
+        // Deliberately swallowed: the certificate list must survive a photo-service outage.
+      }
+    }
+
+    void Promise.all(results.map(r => open(r.certificateId)))
+    return () => { cancelled = true }
+  }, [results, slug])
+
+  /** Re-reads the stored photo after the attendee says they are done with the card. This is
+   *  what moves the download button onto the personalized URL (and back off it after a
+   *  removal) without AttendeePhotoCard needing to report anything upward. */
+  async function refreshHasPhoto(certificateId: string, grant: string) {
+    const has = await readHasPhoto(slug, certificateId, grant)
+    setPhoto(prev => (prev[certificateId] ? { ...prev, [certificateId]: { ...prev[certificateId], hasPhoto: has } } : prev))
   }
 
   const count = results?.length ?? 0
@@ -205,7 +319,19 @@ export function CertificateCenterClient({ slug, eventName }: { slug: string; eve
                 {count === 1 ? '1 certificate found' : `${count} certificates found`}
               </h2>
               <ul className="space-y-3">
-                {results.map(r => (
+                {results.map(r => {
+                  const p = photo[r.certificateId]
+                  // The personalized endpoint applies EVERY gate the artifact endpoint does
+                  // and carries the SAME short-lived capability — it is a second door to the
+                  // same room, not a wider one. It is chosen only when a photo actually
+                  // exists; without one the original URL is used, untouched. Should this
+                  // state ever be stale, the personalized route falls back to the stored
+                  // artifact, so the attendee always gets their certificate.
+                  const downloadHref = p?.hasPhoto
+                    ? `/api/certificates/${encodeURIComponent(r.certificateId)}/file/personalized?token=${encodeURIComponent(r.downloadCapability)}`
+                    : `/api/certificates/${encodeURIComponent(r.certificateId)}/file?token=${encodeURIComponent(r.downloadCapability)}`
+
+                  return (
                   <li key={r.certificateId} className="overflow-hidden rounded-2xl border border-border bg-card shadow-sm">
                     <div className="px-5 py-4">
                       {/* Participant name is the dominant identity — with three siblings
@@ -216,11 +342,28 @@ export function CertificateCenterClient({ slug, eventName }: { slug: string; eve
                         {r.certificateId}
                       </p>
                     </div>
+
+                    {/* Photo, per certificate — never page-level. The section appears only
+                        when the server confirmed this certificate's template has a photo
+                        area, so an attendee is never offered an upload that could not
+                        appear on their PDF. */}
+                    {p?.photoSupported && (
+                      <div className="border-t border-border/60 px-5 py-4">
+                        <AttendeePhotoCard
+                          endpoint={photoEndpoint(slug, r.certificateId)}
+                          grant={p.grant}
+                          description="This event’s certificate has a photo area. Add your picture and it appears on the certificate you download."
+                          onContinue={() => { void refreshHasPhoto(r.certificateId, p.grant) }}
+                          className="rounded-none border-0 bg-transparent p-0 sm:p-0"
+                        />
+                      </div>
+                    )}
+
                     <div className="flex flex-col gap-2 border-t border-border/60 px-5 py-3.5 sm:flex-row-reverse">
                       {/* The capability is short-lived and lives only in this URL — never
                           persisted, so a refresh cannot resurrect it. */}
                       <a
-                        href={`/api/certificates/${encodeURIComponent(r.certificateId)}/file?token=${encodeURIComponent(r.downloadCapability)}`}
+                        href={downloadHref}
                         target="_blank"
                         rel="noopener noreferrer"
                         className={cn(buttonVariants({ variant: 'primary', size: 'lg' }), 'min-h-12 flex-1 gap-2')}
@@ -239,7 +382,8 @@ export function CertificateCenterClient({ slug, eventName }: { slug: string; eve
                       </a>
                     </div>
                   </li>
-                ))}
+                  )
+                })}
               </ul>
             </>
           )}

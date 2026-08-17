@@ -21,8 +21,9 @@
 // certificate downloads.
 
 import { NextRequest, NextResponse } from 'next/server'
-import { getCertificate }            from '@/lib/certificates/firestore'
+import { getCertificate, getTemplateById, getActiveTemplate } from '@/lib/certificates/firestore'
 import { isValidCertificateId }      from '@/lib/certificates/id'
+import { layoutHasAttendeePhoto }    from '@/lib/certificates/attendeePhotoLayout'
 import { createCertificatePhotoGrant, GRANT_TTL_MS } from '@/lib/certificates/photoGrant'
 import { getClientIp }               from '@/lib/rateLimit'
 import { RATE_POLICY, checkPolicy }  from '@/lib/rateLimit/policies'
@@ -63,10 +64,32 @@ export async function POST(req: NextRequest, { params }: Params): Promise<NextRe
   const registrationId = typeof cert.registrationId === 'string' ? cert.registrationId.trim() : ''
   if (!registrationId) return INVALID()
 
+  // ═══ CAN THIS CERTIFICATE ACTUALLY PRINT A PHOTO? ═══════════════════════════
+  //
+  // Resolved BEFORE the grant is minted, and read-only: nothing about the grant's security
+  // model depends on it, and no grant is written for a request that fails here.
+  //
+  // Template precedence is deliberately the SAME as renderCertificateOnDemand's — pin to the
+  // certificate's own templateId, fall back to the event's active template — so the answer
+  // the Center is given describes the template the download will actually render against.
+  // The detection itself is the ONE shared predicate; this route does not restate it.
+  //
+  // A failure reports `false` rather than throwing: hiding the upload is recoverable, while
+  // offering one whose bytes could never appear on the PDF is the exact silent no-op this
+  // field exists to prevent. The grant is still minted either way, so a transient template
+  // read can never break the photo flow for an attendee who reloads.
+  let photoSupported = false
+  try {
+    const template = cert.templateId
+      ? (await getTemplateById(cert.templateId)) ?? await getActiveTemplate(cert.eventId, cert.organizerUid)
+      : await getActiveTemplate(cert.eventId, cert.organizerUid)
+    photoSupported = layoutHasAttendeePhoto(template?.layout)
+  } catch { /* stays false — see above */ }
+
   const grant = await createCertificatePhotoGrant({ certificateId, registrationId, eventSlug: slug })
 
   return NextResponse.json(
-    { grant, expiresInMs: GRANT_TTL_MS, participantName: cert.attendeeName ?? '' },
+    { grant, expiresInMs: GRANT_TTL_MS, participantName: cert.attendeeName ?? '', photoSupported },
     { headers: { 'Cache-Control': 'no-store' } },
   )
 }
