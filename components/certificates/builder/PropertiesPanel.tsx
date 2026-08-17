@@ -113,20 +113,62 @@ export default function PropertiesPanel({ element, multiCount, canvas, eventId, 
 
       {el.type === 'image' && (
         <Section title="Image">
-          <label className={cn('flex cursor-pointer items-center justify-center gap-2 rounded-md border border-border bg-card py-2 text-[13px] font-medium text-foreground hover:bg-muted/40', uploading && 'opacity-60')}>
-            {uploading ? <Loader2 className="size-3.5 animate-spin" /> : <Upload className="size-3.5" />}
-            {el.assetUrl ? 'Replace image' : 'Upload image'}
-            <input type="file" accept="image/png,image/jpeg" className="hidden" disabled={uploading} onChange={onFile} />
-          </label>
-          <button type="button" onClick={() => setPickerOpen(true)} className="mt-1.5 flex w-full items-center justify-center gap-2 rounded-md border border-border bg-card py-2 text-[13px] font-medium text-foreground hover:bg-muted/40">
-            <Images className="size-3.5" /> Choose from Library
-          </button>
-          <AssetPickerModal open={pickerOpen} onClose={() => setPickerOpen(false)} onPick={url => onChange({ assetUrl: url } as Partial<LayoutElement>)} />
-          <Row label="Fit">
-            {(['contain', 'cover'] as const).map(f => (
-              <ToggleBtn key={f} active={el.fit === f} onClick={() => onChange({ fit: f })}>{f}</ToggleBtn>
-            ))}
+          {/* RD-CERT-PHOTO-01 — SOURCE decides where the bytes come from. Absent ⇒ static,
+              so an element saved before this control existed lands on "Static Image".
+              Switching to Attendee Photo clears assetUrl: keeping a stale URL on an
+              element that ignores it would resurface if the organizer switched back. */}
+          <Row label="Source">
+            <ToggleBtn
+              active={(el.source ?? 'static') === 'static'}
+              onClick={() => onChange({ source: 'static' } as Partial<LayoutElement>)}
+            >Static</ToggleBtn>
+            <ToggleBtn
+              active={el.source === 'attendeePhoto'}
+              // `fit: 'contain'` is set in the SAME patch as the switch. An element that
+              // was a static 'cover' image would otherwise carry cover into a source the
+              // server rejects, and the very next autosave would fail with a 400.
+              onClick={() => onChange({ source: 'attendeePhoto', assetUrl: '', fit: 'contain' } as Partial<LayoutElement>)}
+            >Attendee Photo</ToggleBtn>
           </Row>
+
+          {el.source === 'attendeePhoto' ? (
+            <p className="mt-1 rounded-md bg-muted/40 p-2 text-[11px] leading-relaxed text-muted-foreground">
+              Uses the attendee&apos;s uploaded photo when available. Attendees who have not
+              uploaded one still receive their certificate — this box is simply left empty.
+            </p>
+          ) : (
+            <>
+              <label className={cn('flex cursor-pointer items-center justify-center gap-2 rounded-md border border-border bg-card py-2 text-[13px] font-medium text-foreground hover:bg-muted/40', uploading && 'opacity-60')}>
+                {uploading ? <Loader2 className="size-3.5 animate-spin" /> : <Upload className="size-3.5" />}
+                {el.assetUrl ? 'Replace image' : 'Upload image'}
+                <input type="file" accept="image/png,image/jpeg" className="hidden" disabled={uploading} onChange={onFile} />
+              </label>
+              <button type="button" onClick={() => setPickerOpen(true)} className="mt-1.5 flex w-full items-center justify-center gap-2 rounded-md border border-border bg-card py-2 text-[13px] font-medium text-foreground hover:bg-muted/40">
+                <Images className="size-3.5" /> Choose from Library
+              </button>
+              <AssetPickerModal open={pickerOpen} onClose={() => setPickerOpen(false)} onPick={url => onChange({ assetUrl: url } as Partial<LayoutElement>)} />
+            </>
+          )}
+
+          {/* FIT. Static images keep both options, exactly as before.
+              An attendee photo is CONTAIN-only: pdf-lib cannot clip, so `cover` scales the
+              image past its box and paints over whatever the organizer placed around it.
+              A static asset is chosen by the organizer at a known aspect, so they can judge
+              that; an attendee photo is an unknown crop of a stranger's camera roll, so the
+              overflow is unpredictable. `contain` also costs nothing here — the attendee's
+              crop is already baked into the stored image. */}
+          {el.source === 'attendeePhoto' ? (
+            <Row label="Fit">
+              <ToggleBtn active onClick={() => onChange({ fit: 'contain' })}>contain</ToggleBtn>
+              <span className="text-[11px] text-muted-foreground">fits inside the box</span>
+            </Row>
+          ) : (
+            <Row label="Fit">
+              {(['contain', 'cover'] as const).map(f => (
+                <ToggleBtn key={f} active={el.fit === f} onClick={() => onChange({ fit: f })}>{f}</ToggleBtn>
+              ))}
+            </Row>
+          )}
         </Section>
       )}
 

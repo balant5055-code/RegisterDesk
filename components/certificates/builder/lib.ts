@@ -13,7 +13,7 @@ import type {
 // preset placeholder content; image entries carry a semantic role.
 export type PaletteKind =
   | 'text' | 'participantName' | 'eventName' | 'eventDate' | 'certificateId' | 'issueDate'
-  | 'qr' | 'logo' | 'signature' | 'seal' | 'image' | 'line'
+  | 'qr' | 'logo' | 'signature' | 'seal' | 'image' | 'attendeePhoto' | 'line'
 
 /** Editor-only state, NOT persisted (the layout schema has no lock/hide). */
 export interface EditorMeta { locked: boolean; hidden: boolean }
@@ -57,7 +57,8 @@ const IMAGE_ROLE: Partial<Record<PaletteKind, 'logo' | 'signature' | 'seal' | 'i
 export const PALETTE_LABELS: Record<PaletteKind, string> = {
   text: 'Text', participantName: 'Participant Name', eventName: 'Event Name',
   eventDate: 'Event Date', certificateId: 'Certificate ID', issueDate: 'Issue Date',
-  qr: 'QR Code', logo: 'Logo', signature: 'Signature', seal: 'Seal', image: 'Image', line: 'Line',
+  qr: 'QR Code', logo: 'Logo', signature: 'Signature', seal: 'Seal', image: 'Image',
+  attendeePhoto: 'Attendee Photo', line: 'Line',
 }
 
 /** Creates a new element with sensible defaults, centered-ish on the canvas. */
@@ -76,6 +77,23 @@ export function createElement(kind: PaletteKind, zIndex: number): LayoutElement 
       color: '#1a1a1a',
       align: 'center',
       width: 0.4,
+    } satisfies LayoutElement
+  }
+
+  // RD-CERT-PHOTO-01 — the attendee photo is an ordinary image element with a different
+  // SOURCE, not a new element type. It carries no assetUrl: the bytes are resolved per
+  // certificate at render time. 'contain' because the attendee's crop is already baked
+  // into the stored image, so the box never needs to clip.
+  if (kind === 'attendeePhoto') {
+    return {
+      ...base,
+      type: 'image',
+      assetUrl: '',
+      source: 'attendeePhoto',
+      fit: 'contain',
+      role: 'image',
+      width: 0.18,
+      height: 0.24,
     } satisfies LayoutElement
   }
 
@@ -101,10 +119,17 @@ export function createElement(kind: PaletteKind, zIndex: number): LayoutElement 
 
 /** Builds the persisted layout, dropping incomplete image elements (no asset). */
 export function toSavedLayout(canvas: CertificateDimensions, elements: LayoutElement[]): CertificateLayout {
-  const usable = elements.filter(el => !(el.type === 'image' && !el.assetUrl))
+  const usable = elements.filter(el => !isIncompleteImage(el))
   return { version: CURRENT_LAYOUT_VERSION, canvas, elements: usable }
 }
 
+/**
+ * An image element that cannot render and must not be persisted.
+ *
+ * RD-CERT-PHOTO-01: this is scoped to STATIC images. An `attendeePhoto` element is complete
+ * with an empty assetUrl — that is its normal, finished state — and dropping it here would
+ * have deleted the organizer's element on the next autosave.
+ */
 export function isIncompleteImage(el: LayoutElement): boolean {
-  return el.type === 'image' && !el.assetUrl
+  return el.type === 'image' && el.source !== 'attendeePhoto' && !el.assetUrl
 }

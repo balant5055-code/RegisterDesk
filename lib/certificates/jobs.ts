@@ -189,6 +189,11 @@ async function generateForReg(
         finishTime:     raceResult.finishTime,
         position:       raceResult.position,
         category:       reg.bibCategory ?? '',
+        // RD-CERT-PHOTO-01 — the registration is ALREADY loaded here, so passing the key
+        // costs no extra read. Undefined for attendees without a photo, which renders
+        // exactly as before. No N+1: the photo BYTES are fetched inside generateCertificate,
+        // and only when the template actually places an attendeePhoto element.
+        attendeePhotoKey: reg.attendeePhotoKey,
       },
       certificateType: job.certificateType,
       source:          'bulk',

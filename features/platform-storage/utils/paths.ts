@@ -35,6 +35,9 @@ const TYPE_SEGMENT: Readonly<Record<StorageAssetType, string>> = {
   'event-photo-thumbnail': 'photos/thumbnail',
   'event-certificate':     'certificates',
   'event-certificate-template': 'certificates/templates',
+  'event-attendee-photo':  'attendee-photos',
+  'event-certificate-photo-tmp': 'certificate-photos-tmp',
+  'event-certificate-photo':     'certificate-photos',
   'event-finisher-badge':  'finisher-badges',
   'event-branding-overlay': 'branding',
   'event-report':          'reports',
@@ -48,6 +51,7 @@ const EVENT_SCOPED: ReadonlySet<StorageAssetType> = new Set<StorageAssetType>([
   'event-banner', 'event-photo-original', 'event-photo-medium', 'event-photo-thumbnail',
   'event-certificate', 'event-finisher-badge', 'event-report', 'event-branding-overlay',
   'event-certificate-template',
+  'event-attendee-photo', 'event-certificate-photo-tmp', 'event-certificate-photo',
 ])
 
 export function isEventScoped(type: StorageAssetType): boolean {
@@ -68,6 +72,15 @@ const DEFAULT_VISIBILITY: Readonly<Record<StorageAssetType, StorageVisibility>> 
   'event-certificate':     'SIGNED_URL',   // never PUBLIC — see validation.ts
   // The organizer's own design asset — private, exactly like the certificates it renders.
   'event-certificate-template': 'SIGNED_URL',
+  // A photograph of an identifiable person on a named registration. SIGNED_URL, never
+  // PUBLIC: the only readers are the owning attendee (short-lived signed URL, issued after
+  // an ownership check) and the certificate renderer (server-side, by key).
+  'event-attendee-photo':  'SIGNED_URL',
+  // Temporary per-certificate photo. SIGNED_URL for the same reason as the permanent one.
+  'event-certificate-photo-tmp': 'SIGNED_URL',
+  // Persisted certificate photo — private for the same reason as every other photo of a
+  // named person; reachable only through the authorized photo endpoint.
+  'event-certificate-photo':     'SIGNED_URL',
   'event-finisher-badge':  'PUBLIC',
   // The overlay is composited into a download by the BROWSER, so it must be fetchable by
   // anyone who may download a branded photo. It contains only artwork the organizer chose
@@ -130,23 +143,42 @@ export function buildObjectKey(params: {
   type:      StorageAssetType
   eventSlug: string | null
   objectId:  string
+  /**
+   * RD-CERT-PHOTO-03 — an OPTIONAL extra segment between the type folder and the object id,
+   * so an asset can be scoped to something narrower than the event. Used by the certificate
+   * photo types to key a photo under its certificate, which is what makes "one certificate's
+   * photo can never be another's" true at the PATH level and gives cleanup a per-certificate
+   * prefix to sweep.
+   *
+   * Validated with the same `assertSafeSlug` as the event slug, so it can no more escape its
+   * prefix than a slug can. Callers pass a server-derived id; the browser never supplies it.
+   */
+  scopeId?:  string
 }): string {
-  const { type, eventSlug, objectId } = params
+  const { type, eventSlug, objectId, scopeId } = params
   const segment = TYPE_SEGMENT[type]
   if (!segment) throw new StorageError('INVALID_INPUT', `Unknown asset type: ${type}`)
+
+  // Absent scopeId reproduces the previous key exactly, so every existing asset type is
+  // byte-for-byte unaffected by this parameter.
+  let scoped = ''
+  if (scopeId) {
+    assertSafeSlug(scopeId)
+    scoped = `${scopeId}/`
+  }
 
   if (EVENT_SCOPED.has(type)) {
     if (!eventSlug) {
       throw new StorageError('INVALID_INPUT', `Asset type "${type}" requires an eventSlug.`)
     }
     assertSafeSlug(eventSlug)
-    return `events/${eventSlug}/${segment}/${objectId}`
+    return `events/${eventSlug}/${segment}/${scoped}${objectId}`
   }
 
   if (eventSlug) {
     throw new StorageError('INVALID_INPUT', `Asset type "${type}" must not carry an eventSlug.`)
   }
-  return `${segment}/${objectId}`
+  return `${segment}/${scoped}${objectId}`
 }
 
 /** Prefix for listing — e.g. every photo thumbnail for one event. */

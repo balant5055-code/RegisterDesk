@@ -142,9 +142,20 @@ async function drawTextEl(
 async function drawImageEl(
   page: AnyPage, doc: PDFDocument, el: ImageLayoutElement,
   W: number, H: number, assets: Map<string, Uint8Array> | undefined,
+  attendeePhoto: Uint8Array | undefined,
 ): Promise<void> {
-  const bytes = assets?.get(el.assetUrl)
-  if (!bytes) return   // asset not pre-fetched (or blocked) — skip rather than fail
+  // RD-CERT-PHOTO-01 — the attendee photo is passed in SEPARATELY, never through the
+  // `assets` map. That map is the template-level, cross-certificate cache; putting a
+  // per-registration photo into it is exactly how one attendee's face would end up on
+  // another attendee's certificate.
+  //
+  // An attendeePhoto element NEVER falls back to `assetUrl`: its assetUrl is empty by
+  // construction, and reading the map here would let a stale URL paint someone else's
+  // asset into the photo box.
+  const bytes = el.source === 'attendeePhoto' ? attendeePhoto : assets?.get(el.assetUrl)
+  // No photo (or asset not pre-fetched / blocked) — skip the element rather than fail.
+  // This is the whole no-photo story: the box simply does not draw.
+  if (!bytes) return
   let img
   try {
     img = isJpeg(bytes) ? await doc.embedJpg(bytes) : await doc.embedPng(bytes)
@@ -202,8 +213,19 @@ export interface RenderCertificateInput {
   context:       PlaceholderContext      // full resolved placeholders
   verifyUrl:     string
   layout?:       CertificateLayout | null
-  /** Pre-fetched image asset bytes by URL (R-5). */
+  /** Pre-fetched image asset bytes by URL (R-5). TEMPLATE-level, shared across a batch. */
   assets?:       Map<string, Uint8Array>
+  /**
+   * RD-CERT-PHOTO-01 — THIS certificate's attendee photo, already cropped and resized by
+   * the attendee's browser and resolved to BYTES by the generation layer. Deliberately a
+   * separate parameter rather than an entry in `assets`: it is per-registration and must
+   * never be cached across certificates.
+   *
+   * Bytes only — the renderer never fetches a URL, never builds one, and never accepts a
+   * key or URL from a client. Undefined ⇒ the attendee has no photo and any attendeePhoto
+   * element is skipped.
+   */
+  attendeePhoto?: Uint8Array
 }
 
 function imageOutputSize(dim: CertificateDimensions | null): { W: number; H: number } {
@@ -214,7 +236,7 @@ function imageOutputSize(dim: CertificateDimensions | null): { W: number; H: num
 }
 
 export async function renderCertificatePdf(input: RenderCertificateInput): Promise<Uint8Array> {
-  const { templateBytes, templateType, dimensions, context, verifyUrl, layout, assets } = input
+  const { templateBytes, templateType, dimensions, context, verifyUrl, layout, assets, attendeePhoto } = input
 
   let doc:  PDFDocument
   let page: AnyPage
@@ -250,7 +272,7 @@ export async function renderCertificatePdf(input: RenderCertificateInput): Promi
   for (const el of ordered) {
     switch (el.type) {
       case 'text':  await drawTextEl(page, fonts, el, W, H, context); break
-      case 'image': await drawImageEl(page, doc, el, W, H, assets);   break
+      case 'image': await drawImageEl(page, doc, el, W, H, assets, attendeePhoto); break
       case 'qr':    drawQrEl(page, el, W, H, verifyUrl);              break
       case 'line':  drawLineEl(page, el, W, H);                       break
       // Unknown types are skipped (forward-compatible).

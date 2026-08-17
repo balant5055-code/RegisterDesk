@@ -37,6 +37,29 @@ export type StorageAssetType =
   | 'event-photo-medium'
   | 'event-photo-thumbnail'
   | 'event-certificate'
+  /**
+   * RD-CERT-PHOTO-01 — the attendee's own photo, printed on their certificate.
+   * ONE object per attendee: the browser produces the final crop, so no original, medium or
+   * thumbnail rendition is ever stored. Never PUBLIC — it is a photograph of an identifiable
+   * person attached to a named registration.
+   */
+  | 'event-attendee-photo'
+  /**
+   * RD-CERT-PHOTO-03 — a TEMPORARY attendee photo used to personalise ONE certificate
+   * download from the public Certificate Center.
+   *
+   * Distinct from `event-attendee-photo`, which is the attendee portal's PERMANENT photo on
+   * `registration.attendeePhotoKey`. The public flow is not OTP-gated, so it must never write
+   * that field; it writes here instead, under a per-certificate prefix, and the object dies
+   * with the photo grant that owns it.
+   */
+  | 'event-certificate-photo-tmp'
+  /**
+   * RD-CERT-PHOTO-04 — the PERSISTED attendee photo for one certificate, referenced by
+   * `certificates/{id}.attendeePhotoKey`. Same bytes policy as the temporary form; it differs
+   * only in lifetime, so it survives a refresh instead of dying with the grant.
+   */
+  | 'event-certificate-photo'
   | 'event-finisher-badge'
   /** RD-PHOTO-01 — the organizer's transparent branding overlay for one event. */
   | 'event-branding-overlay'
@@ -109,6 +132,11 @@ export interface UploadInput {
   tags?:       Record<string, string>
   /** Supply to make an upload idempotent — the same id overwrites the same key. */
   id?:         string
+  /**
+   * RD-CERT-PHOTO-03 — narrows the key below the event folder, e.g. a certificateId for a
+   * certificate photo. SERVER-DERIVED ONLY; validated like a slug in paths.ts.
+   */
+  scopeId?:    string
 }
 
 export interface UploadResult {

@@ -392,11 +392,45 @@ function validateElement(raw: unknown): ValidationResult<LayoutElement> {
       return { ok: true, value: out as unknown as LayoutElement }
     }
     case 'image': {
+      // RD-CERT-PHOTO-01 — WHERE the bytes come from. Absent ⇒ 'static', so every template
+      // saved before this field existed takes exactly the branch it always took.
+      if (raw.source !== undefined && raw.source !== 'static' && raw.source !== 'attendeePhoto') {
+        // Rejected rather than downgraded to static: silently reinterpreting an unknown
+        // source would paint the organizer's logo where a participant photo was intended.
+        return { ok: false, error: 'image.source must be static or attendeePhoto' }
+      }
+
+      if (raw.source === 'attendeePhoto') {
+        // No design-time asset exists for an attendee photo. A URL riding along is either a
+        // stale field or a crafted request; both are refused rather than ignored, so the
+        // stored element can never carry a second, contradictory source of bytes.
+        if (raw.assetUrl !== undefined && raw.assetUrl !== '') {
+          return { ok: false, error: 'image.assetUrl must be empty when source is attendeePhoto' }
+        }
+        // pdf-lib cannot clip, so `cover` would paint the photo outside its box and over the
+        // rest of the certificate. The builder hides the control; this holds the rule against
+        // a hand-rolled request too.
+        if (raw.fit !== 'contain') {
+          return { ok: false, error: 'image.fit must be contain when source is attendeePhoto' }
+        }
+        out.assetUrl = ''; out.fit = 'contain'; out.source = 'attendeePhoto'
+        if (raw.role !== undefined) {
+          if (raw.role !== 'image' && raw.role !== 'logo' && raw.role !== 'signature' && raw.role !== 'seal') {
+            return { ok: false, error: 'image.role must be image, logo, signature, or seal' }
+          }
+          out.role = raw.role
+        }
+        return { ok: true, value: out as unknown as LayoutElement }
+      }
+
+      // ── static (explicit or absent) — unchanged from before the feature ──────────
       if (typeof raw.assetUrl !== 'string' || !/^https:\/\//.test(raw.assetUrl)) {
         return { ok: false, error: 'image.assetUrl must be an https URL' }
       }
       if (raw.assetUrl.length > LIMITS.fileUrlMax) return { ok: false, error: 'image.assetUrl is too long' }
       if (raw.fit !== 'contain' && raw.fit !== 'cover') return { ok: false, error: 'image.fit must be contain or cover' }
+      // `source: 'static'` is deliberately NOT persisted: absent already means static, and
+      // writing the redundant field would churn every existing template on its next save.
       out.assetUrl = raw.assetUrl; out.fit = raw.fit
       if (raw.role !== undefined) {
         if (raw.role !== 'image' && raw.role !== 'logo' && raw.role !== 'signature' && raw.role !== 'seal') {

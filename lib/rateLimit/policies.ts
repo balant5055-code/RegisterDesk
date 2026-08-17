@@ -48,6 +48,14 @@ export const RATE_POLICY = {
   // checking several spellings at a kiosk. Paired with a uniform no-result response:
   // rate limiting alone cannot stop enumeration if the answers differ.
   certificateLookup: { route: 'certificate-lookup', limit: 15, windowMs: MIN },
+
+  // ─── Certificate photo (RD-CERT-PHOTO-03) ──────────────────────────────────
+  // Minting a photo grant, per client IP. The grant is what turns a guessable public
+  // identifier into a short-lived WRITE credential, so it is the tighter of the two.
+  certificatePhotoVerify: { route: 'certificate-photo-verify', limit: 20, windowMs: HOUR },
+  // Grant-authorized photo write, per client IP. The grant already bounds a client to ONE
+  // certificate for its lifetime; this only stops a granted client from hammering storage.
+  certificatePhotoWrite:  { route: 'certificate-photo-write',  limit: 30, windowMs: HOUR },
 } as const satisfies Record<string, RatePolicy>
 
 export interface PolicyCheck {

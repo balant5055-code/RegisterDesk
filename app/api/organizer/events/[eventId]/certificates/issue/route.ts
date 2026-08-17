@@ -163,6 +163,12 @@ export async function POST(req: NextRequest, { params }: Params): Promise<NextRe
         finishTime:     raceResult.finishTime,
         position:       raceResult.position,
         category:       reg.bibCategory ?? '',
+        // RD-CERT-PHOTO-01 — the registration is ALREADY loaded above, so passing the key
+        // costs no extra read. This keeps MANUAL issuance identical to bulk: without it, a
+        // bulk-issued certificate would carry the attendee's photo and a manually-issued one
+        // silently would not. The bytes are fetched inside generateCertificate, and only when
+        // the template actually places an attendeePhoto element.
+        attendeePhotoKey: reg.attendeePhotoKey,
       },
       certificateType: assignedType,
       source:   'manual',

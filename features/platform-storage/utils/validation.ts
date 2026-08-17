@@ -41,6 +41,16 @@ const POLICY: Readonly<Record<StorageAssetType, TypePolicy>> = {
   'event-certificate-template': {
     mimeTypes: ['application/pdf', 'image/png', 'image/jpeg'], maxBytes: 25 * MB,
   },
+  // RD-CERT-PHOTO-01 — the BROWSER already resized and re-encoded, so a legitimate upload
+  // lands at ~150-400 KB. 4 MB is a generous ceiling that still refuses an unprocessed phone
+  // original outright. JPEG/WebP/PNG only; no SVG anywhere.
+  'event-attendee-photo':  { mimeTypes: ['image/jpeg', 'image/webp', 'image/png'], maxBytes: 4 * MB },
+  // RD-CERT-PHOTO-03 — identical policy to the permanent photo above. The temporary public
+  // photo differs in LIFETIME and OWNERSHIP, not in what bytes are acceptable, so relaxing
+  // anything here would let the public path accept what the authenticated one refuses.
+  'event-certificate-photo-tmp': { mimeTypes: ['image/jpeg', 'image/webp', 'image/png'], maxBytes: 4 * MB },
+  // Identical to the temporary form: the finalized object is the SAME bytes, copied.
+  'event-certificate-photo':     { mimeTypes: ['image/jpeg', 'image/webp', 'image/png'], maxBytes: 4 * MB },
   'event-finisher-badge':  { mimeTypes: ['image/png', 'image/jpeg', 'image/webp'], maxBytes: 10 * MB },
   // RD-PHOTO-01 — PNG ONLY, and deliberately so: the overlay must carry an alpha channel,
   // and JPEG cannot. The narrow policy is what makes "transparent PNG" enforceable at the

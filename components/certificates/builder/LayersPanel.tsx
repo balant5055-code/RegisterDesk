@@ -30,7 +30,10 @@ function iconFor(el: LayoutElement) {
 
 function labelFor(el: LayoutElement): string {
   if (el.type === 'text') return el.content.slice(0, 28) || 'Text'
-  if (el.type === 'image') return (el.role ?? 'image').replace(/^\w/, c => c.toUpperCase())
+  if (el.type === 'image') {
+    if (el.source === 'attendeePhoto') return 'Attendee Photo'
+    return (el.role ?? 'image').replace(/^\w/, c => c.toUpperCase())
+  }
   if (el.type === 'qr') return 'QR Code'
   return 'Line'
 }

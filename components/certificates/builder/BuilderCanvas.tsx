@@ -324,6 +324,18 @@ function ElementBody({ el, displayH }: { el: LayoutElement; displayH: number }) 
     )
   }
   if (el.type === 'image') {
+    // RD-CERT-PHOTO-01 — an attendee-photo box has no design-time image and never will:
+    // the builder must NOT fetch a real attendee's photo, and inventing a sample attendee
+    // would be fake data. It renders as a labelled box so the organizer can still judge
+    // position, size, boundary and fit. Same dashed placeholder styling as an un-uploaded
+    // static image, so nothing new is introduced.
+    if (el.source === 'attendeePhoto') {
+      return (
+        <div className="flex h-full w-full items-center justify-center rounded border border-dashed border-primary/50 bg-primary/5 px-1 text-center text-[11px] font-semibold uppercase tracking-wide text-primary">
+          Attendee Photo
+        </div>
+      )
+    }
     return el.assetUrl
       ? <img src={el.assetUrl} alt="" className="h-full w-full" style={{ objectFit: el.fit }} draggable={false} />
       : (
