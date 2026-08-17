@@ -17,10 +17,21 @@ import { resolve } from 'node:path'
 
 const read = (p: string) => readFileSync(resolve(process.cwd(), p), 'utf8')
 
-/** Strips comments so the explanatory notes in these files are not false positives. */
+/**
+ * Strips comments so the explanatory notes in these files are not false positives.
+ *
+ * A block comment is only recognised at a line start or after whitespace / an opening
+ * delimiter. The earlier form matched a bare `/*` anywhere, which meant a JSX attribute like
+ * `accept="image/*"` opened a phantom comment and everything up to the next real `*​/` was
+ * deleted — in AttendeePhotoCard that silently removed ~7 KB including every <button> tag, so
+ * assertions about those buttons passed against nothing at all.
+ *
+ * Verified: this produces byte-identical output to the previous version for every other file
+ * these suites read, so it changes nothing except the case it fixes.
+ */
 function code(src: string): string {
   return src
-    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/(^|[\s{(,;=])\/\*[\s\S]*?\*\//gm, '$1')
     .replace(/^\s*\/\/.*$/gm, '')
 }
 
@@ -28,6 +39,7 @@ const CENTER      = 'app/events/[slug]/certificates/CertificateCenterClient.tsx'
 const SESSION     = 'app/api/events/[slug]/certificates/photo/session/route.ts'
 const FILE_ROUTE  = 'app/api/certificates/[certificateId]/file/route.ts'
 const PERSONALIZED = 'app/api/certificates/[certificateId]/file/personalized/route.ts'
+const CARD         = 'components/certificates/AttendeePhotoCard.tsx'
 const LOOKUP      = 'app/api/events/[slug]/certificates/lookup/route.ts'
 
 describe('the Certificate Center mounts AttendeePhotoCard', () => {
@@ -42,11 +54,53 @@ describe('the Certificate Center mounts AttendeePhotoCard', () => {
   })
 
   it('mounts it INSIDE the per-certificate card, not once for the page', () => {
-    // The element must appear within the results map, after the identity block. A
-    // page-level card could not know which of a family's certificates it belonged to.
-    const map = src.slice(src.indexOf('results.map('))
-    expect(map).toMatch(/<AttendeePhotoCard/)
-    expect(map.indexOf('<AttendeePhotoCard')).toBeLessThan(map.indexOf('Download Certificate'))
+    // The requirement is CONTAINMENT, not source order: a page-level card could not know
+    // which of a family's certificates it belonged to.
+    //
+    // This deliberately no longer asserts that the card precedes the Download button. That
+    // ordering was inverted on purpose (RD-CERT-TPL-SIZE): `photoSupported` resolves
+    // asynchronously, and while the card rendered ABOVE the actions its arrival pushed both
+    // buttons downward, so a tap already in flight landed on the newly-inserted photo area.
+    // The actions are now pinned above it. Order is presentation; containment is the invariant.
+    const liStart = src.indexOf('<li key={r.certificateId}')
+    const liEnd   = src.indexOf('</ul>')
+    const card    = src.indexOf('<AttendeePhotoCard')
+
+    expect(liStart).toBeGreaterThan(-1)
+    expect(card).toBeGreaterThan(-1)
+    // Inside the per-certificate <li>, which only exists within results.map.
+    expect(card).toBeGreaterThan(liStart)
+    expect(card).toBeLessThan(liEnd)
+  })
+
+  it('is bound to THAT row’s certificate, not a page-level value', () => {
+    // The props must come from the mapped row (`r`) and its own photo state (`p`). A card
+    // reading page-level state would hand one family member another's grant.
+    //
+    // `p` is derived in the map callback, ABOVE the <li> it is used in, so the lookup is
+    // asserted against the whole map block and the props against the row itself.
+    const mapStart = src.indexOf('results.map(r => {')
+    const mapBlock = src.slice(mapStart, src.indexOf('</ul>'))
+    const li       = src.slice(src.indexOf('<li key={r.certificateId}'), src.indexOf('</ul>'))
+
+    expect(mapStart).toBeGreaterThan(-1)
+    expect(mapBlock).toMatch(/const p = photo\[r\.certificateId\]/)
+    expect(li).toMatch(/endpoint=\{photoEndpoint\(slug, r\.certificateId\)\}/)
+    expect(li).toMatch(/grant=\{p\.grant\}/)
+  })
+
+  it('is gated on photoSupported, so no upload is offered a template cannot print', () => {
+    const li = src.slice(src.indexOf('<li key={r.certificateId}'), src.indexOf('</ul>'))
+    expect(li).toMatch(/\{p\?\.photoSupported && \(/)
+  })
+
+  it('FAILS if the card is hoisted out of the results map', () => {
+    // Guards the replacement above: prove the assertion is sensitive to the thing it claims
+    // to check, rather than passing because both indexes happen to be -1.
+    const hoisted = src.replace(/<AttendeePhotoCard/, '<Placeholder')
+    const liStart = hoisted.indexOf('<li key={r.certificateId}')
+    expect(hoisted.indexOf('<AttendeePhotoCard')).toBe(-1)
+    expect(liStart).toBeGreaterThan(-1)
   })
 
   it('passes the certificate-scoped endpoint and that certificate’s grant', () => {
@@ -225,5 +279,112 @@ describe('the lookup projection is unchanged', () => {
   it('still does not expose registrationId to the browser', () => {
     const push = src.slice(src.indexOf('results.push('), src.indexOf('results.sort('))
     expect(push).not.toMatch(/registrationId/)
+  })
+})
+
+// ─── The photo controls themselves ────────────────────────────────────────────
+
+describe('AttendeePhotoCard offers the documented controls', () => {
+  const src = code(read(CARD))
+
+  it('THE PARSER DID NOT EAT THE JSX — every assertion below is non-vacuous', () => {
+    // This file contains `accept="image/*"`. Under the previous comment stripper that `/*`
+    // opened a phantom comment and ~7 KB vanished, taking all three <button> tags with it —
+    // so the button assertions passed against an empty string. This guard fails loudly if
+    // that regression ever returns, instead of letting the suite go quietly green.
+    expect(src).toContain('accept="image/*"')
+    expect(src).toContain('<button')
+    expect(src.length).toBeGreaterThan(9_000)
+  })
+
+  it('offers an upload control', () => {
+    expect(src).toMatch(/'Replace photo' : 'Upload photo'/)
+  })
+
+  it('offers Continue, worded for both states', () => {
+    expect(src).toMatch(/photoUrl \? 'Continue' : 'Continue without photo'/)
+  })
+
+  it('every control is type="button" — none can submit or navigate a parent', () => {
+    const buttons = src.match(/<button[\s\S]*?>/g) ?? []
+    expect(buttons.length).toBeGreaterThanOrEqual(3)
+    for (const b of buttons) expect(b).toMatch(/type="button"/)
+  })
+
+  it('contains no anchor, so no control can navigate away mid-upload', () => {
+    expect(src).not.toMatch(/<a\s/)
+  })
+})
+
+describe('View and Download are independent actions', () => {
+  const src = code(read(CENTER))
+  const li  = src.slice(src.indexOf('<li key={r.certificateId}'), src.indexOf('</ul>'))
+
+  it('the result card was actually located', () => {
+    expect(li.length).toBeGreaterThan(500)          // non-vacuity for the slices below
+  })
+
+  it('View points at the verification page and nothing else', () => {
+    expect(li).toMatch(/href=\{`\/verify\/certificate\/\$\{encodeURIComponent\(r\.certificateId\)\}`\}/)
+  })
+
+  it('Download fetches the download flow instead of navigating to it', () => {
+    // RD-CERT-UX: Download is deliberately a BUTTON now. A navigating anchor took the tab to
+    // /file and, on a 302-to-R2, stranded the attendee in a PDF viewer away from their other
+    // certificates. The capability URL is still the same one the route enforces.
+    expect(li).toMatch(/onClick=\{\(\) => \{ void downloadPdf\(r\.certificateId, downloadHref\) \}\}/)
+    expect(li).not.toMatch(/href=\{downloadHref\}/)   // must not be a link any more
+    expect(src).toMatch(/\/api\/certificates\/\$\{encodeURIComponent\(r\.certificateId\)\}\/file/)
+  })
+
+  it('the download never puts the capability in the address bar', () => {
+    expect(src).toMatch(/const res = await fetch\(href\)/)
+    expect(src).not.toMatch(/window\.location\s*=/)
+    expect(src).not.toMatch(/window\.open\(/)
+  })
+
+  it('View stays a plain anchor — only Download and Share are scripted', () => {
+    // The independence guarantee: View has NO onClick at all, so nothing it does can reach
+    // the download or share handlers.
+    const view = li.slice(li.indexOf('View Certificate') - 600, li.indexOf('View Certificate'))
+    expect(view).toMatch(/<a\s/)
+    expect(view).not.toMatch(/onClick=/)
+  })
+
+  it('no shared handler, no nesting, no parent click target', () => {
+    expect(li).not.toMatch(/<li[^>]*onClick/)
+    expect(li).not.toMatch(/router\.(push|replace)/)
+    expect(li).not.toMatch(/\bdownload=\{/)                   // no forced-download attr on View
+
+    // NESTING, not adjacency. A proximity regex cannot tell `<a/><button/>` (correct, they are
+    // siblings) from `<a><button/></a>` (the bug), so each element's OWN body is inspected.
+    for (const anchor of li.match(/<a\s[\s\S]*?<\/a>/g) ?? []) {
+      expect(anchor, 'button nested inside an anchor').not.toMatch(/<button/)
+    }
+    for (const button of li.match(/<button[\s\S]*?<\/button>/g) ?? []) {
+      expect(button, 'anchor nested inside a button').not.toMatch(/<a\s/)
+    }
+  })
+
+  it('every scripted action guards against duplicate clicks', () => {
+    expect(src).toMatch(/if \(action\[certificateId\]\) return/)
+    expect(li).toMatch(/disabled=\{!!action\[r\.certificateId\]\}/)
+  })
+
+  it('Share exposes the PUBLIC verification link, never storage or the capability', () => {
+    expect(src).toMatch(/\/verify\/certificate\/\$\{encodeURIComponent\(certificateId\)\}/)
+    // Bounded by the NEXT function, not by a comment — `code()` strips comments, so a
+    // comment marker would slice to -1 and silently test the wrong region.
+    const from = src.indexOf('async function shareCertificate')
+    const to   = src.indexOf('async function refreshHasPhoto')
+    expect(from).toBeGreaterThan(-1)
+    expect(to).toBeGreaterThan(from)
+    const share = src.slice(from, to)
+    expect(share).not.toMatch(/downloadHref|downloadCapability|fileKey|signed/)
+  })
+
+  it('the result list is outside the lookup <form>, so no control can submit it', () => {
+    // A result-card button inside the search form would re-run the lookup on click.
+    expect(src.indexOf('</form>')).toBeLessThan(src.indexOf('<li key={r.certificateId}'))
   })
 })

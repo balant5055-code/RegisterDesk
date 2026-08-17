@@ -19,6 +19,20 @@ import type {
 
 export type HubTab = 'overview' | 'settings' | 'templates' | 'programs' | 'brandkit' | 'issue' | 'recipients'
 
+/**
+ * The regenerate route's wire format. Typed here rather than imported because that route
+ * returns its JSON inline and exports no named type; `CertResolveResponse` below is declared
+ * the same way for the same reason.
+ *
+ * PARTIAL FAILURE IS THE NORMAL CASE: the route answers 200 with per-item outcomes, so
+ * `failed` and `results[].ok` — not the HTTP status — are what say whether anything worked.
+ */
+export interface CertificateRegenerateResponse {
+  succeeded: number
+  failed:    number
+  results:   Array<{ certificateId: string; ok: boolean; error?: string }>
+}
+
 // ── Extra response/patch shapes for the newly-surfaced endpoints (GA-7D S3) ──
 // The engines already exist server-side; these only type the wire format.
 export interface CertResolveResponse {
@@ -187,6 +201,19 @@ export function makeCertApi(eventId: string, token: string) {
     restore: (certificateId: string) =>
       fetch(`${B}/restore`, { method: 'POST', headers: jsonAuth, body: JSON.stringify({ certificateId }) })
         .then(jsonOrThrow<{ success: boolean; certificate: SerializedCertificate }>),
+
+    // ── In-place regeneration (GA-4 S2) ──
+    // Re-renders EXISTING certificates against the event's current active template. The
+    // certificateId and verificationToken are preserved and no new record is created — this
+    // is deliberately NOT the issue/generate endpoint, which is idempotent per
+    // (eventId, registrationId, certificateType) and would silently return the old record.
+    //
+    // The route answers 200 even when every item failed, so the caller MUST read
+    // `results[].ok` rather than trusting the HTTP status. The shape below is the route's
+    // own, unchanged.
+    regenerate: (certificateIds: string[]) =>
+      fetch(`${B}/regenerate`, { method: 'POST', headers: jsonAuth, body: JSON.stringify({ certificateIds }) })
+        .then(jsonOrThrow<CertificateRegenerateResponse>),
 
     // ── Authenticated certificate file download (organizer bypass) ──
     // Fetches with the organizer's Bearer token so the /file route's organizer

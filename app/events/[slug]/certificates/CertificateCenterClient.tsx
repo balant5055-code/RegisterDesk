@@ -13,7 +13,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { motion, useReducedMotion } from 'framer-motion'
-import { Search, Loader2, Award, Download, ExternalLink } from 'lucide-react'
+import { Search, Loader2, Award, Download, ExternalLink, Share2 } from 'lucide-react'
 import { cn } from '@/lib/utils/cn'
 import { buttonVariants } from '@/components/ui/button'
 import { AttendeePhotoCard } from '@/components/certificates/AttendeePhotoCard'
@@ -105,6 +105,12 @@ export function CertificateCenterClient({ slug, eventName }: { slug: string; eve
   const active = MODES.find(m => m.id === mode) ?? MODES[0]
   const [value,   setValue]   = useState('')
   const [busy,    setBusy]    = useState(false)
+  /** Which action is in flight for a given certificate — also the duplicate-click guard.
+   *  Per certificate, because a family sees several cards and one must not freeze the rest. */
+  const [action,  setAction]  = useState<Record<string, 'pdf' | 'share' | null>>({})
+  /** Inline per-card feedback. The public Center is outside the dashboard's ToastProvider,
+   *  so results are shown in the card itself rather than through a toast that cannot mount. */
+  const [actionMsg, setActionMsg] = useState<Record<string, { ok: boolean; text: string } | null>>({})
   const [error,   setError]   = useState<string | null>(null)
   const [results, setResults] = useState<Result[] | null>(null)
   // Guards against a second in-flight request when the CTA is double-tapped. The disabled
@@ -206,6 +212,81 @@ export function CertificateCenterClient({ slug, eventName }: { slug: string; eve
     void Promise.all(results.map(r => open(r.certificateId)))
     return () => { cancelled = true }
   }, [results, slug])
+
+  /**
+   * Downloads the certificate WITHOUT leaving the page.
+   *
+   * A plain `<a href>` navigated the tab to `/file`, which on a 302-to-R2 left the attendee
+   * staring at a PDF viewer with no way back to their other certificates — and on mobile
+   * looked like the photo section had "opened" something. Fetching the bytes and handing the
+   * browser a blob keeps the Center mounted, so the photo card, the other certificates and
+   * the lookup results all survive the download.
+   *
+   * Every server-side gate is unchanged: the same capability-bearing URL is requested, the
+   * same route enforces revocation, download settings and the token. Nothing is exposed that
+   * the anchor did not already expose — the signed storage URL stays inside `fetch`, and is
+   * never put in the address bar.
+   */
+  async function downloadPdf(certificateId: string, href: string) {
+    if (action[certificateId]) return                     // duplicate-click guard
+    setAction(a => ({ ...a, [certificateId]: 'pdf' }))
+    setActionMsg(m => ({ ...m, [certificateId]: null }))
+
+    let objectUrl: string | null = null
+    try {
+      const res = await fetch(href)
+      if (!res.ok) {
+        const body = await res.json().catch(() => null) as { error?: string } | null
+        throw new Error(body?.error ?? 'We could not prepare your certificate. Please try again.')
+      }
+      const blob = await res.blob()
+      objectUrl = URL.createObjectURL(blob)
+
+      const a = document.createElement('a')
+      a.href = objectUrl
+      a.download = `certificate-${certificateId}.pdf`
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+
+      setActionMsg(m => ({ ...m, [certificateId]: { ok: true, text: 'Certificate downloaded.' } }))
+    } catch (e) {
+      setActionMsg(m => ({
+        ...m,
+        [certificateId]: { ok: false, text: e instanceof Error ? e.message : 'Download failed. Please try again.' },
+      }))
+    } finally {
+      // Revoked on a later tick: Safari cancels an in-flight download if the blob URL is
+      // released in the same task as the click.
+      if (objectUrl) setTimeout(() => URL.revokeObjectURL(objectUrl!), 60_000)
+      setAction(a => ({ ...a, [certificateId]: null }))
+    }
+  }
+
+  /**
+   * Shares the PUBLIC verification link — never a storage URL and never the download
+   * capability, which is short-lived and would hand whoever received it the PDF itself.
+   */
+  async function shareCertificate(certificateId: string, participantName: string, eventTitle: string) {
+    if (action[certificateId]) return
+    const url = `${window.location.origin}/verify/certificate/${encodeURIComponent(certificateId)}`
+    setAction(a => ({ ...a, [certificateId]: 'share' }))
+    setActionMsg(m => ({ ...m, [certificateId]: null }))
+    try {
+      if (typeof navigator !== 'undefined' && navigator.share) {
+        await navigator.share({ title: `${participantName} — ${eventTitle}`, text: `${participantName}'s certificate`, url })
+        return                                            // the sheet is its own confirmation
+      }
+      await navigator.clipboard.writeText(url)
+      setActionMsg(m => ({ ...m, [certificateId]: { ok: true, text: 'Certificate link copied.' } }))
+    } catch (e) {
+      // A dismissed share sheet rejects with AbortError — that is a choice, not a failure.
+      if (e instanceof DOMException && e.name === 'AbortError') return
+      setActionMsg(m => ({ ...m, [certificateId]: { ok: false, text: 'Could not share. Copy the link from the verification page instead.' } }))
+    } finally {
+      setAction(a => ({ ...a, [certificateId]: null }))
+    }
+  }
 
   /** Re-reads the stored photo after the attendee says they are done with the card. This is
    *  what moves the download button onto the personalized URL (and back off it after a
@@ -343,10 +424,76 @@ export function CertificateCenterClient({ slug, eventName }: { slug: string; eve
                       </p>
                     </div>
 
+                    {/* ── ACTIONS ─────────────────────────────────────────────────────
+                        Pinned DIRECTLY under the certificate's identity and rendered BEFORE
+                        the photo section, so they occupy a fixed position from first paint.
+                        `photoSupported` resolves asynchronously; when the photo card used to
+                        render ABOVE this row, its arrival pushed both buttons downward and a
+                        tap already in flight landed on the newly-inserted photo area instead.
+                        Nothing below can move them now, and no space has to be reserved — so
+                        a certificate without a photo area shows no empty gap.
+
+                        The two actions are independent anchors and must stay that way: no
+                        shared handler, no parent onClick, no button/anchor nesting. View
+                        navigates to verification and nothing else; it never downloads, never
+                        mints a grant and never touches the download counter. */}
+                    <div className="flex flex-col gap-2 border-t border-border/60 px-5 py-3.5 sm:flex-row">
+                      {/* View first in the DOM AND first visually, at every breakpoint — the
+                          row used to be `sm:flex-row-reverse`, which made reading order and
+                          tab order disagree with the rendered order on desktop. */}
+                      <a
+                        href={`/verify/certificate/${encodeURIComponent(r.certificateId)}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className={cn(buttonVariants({ variant: 'outline', size: 'lg' }), 'min-h-12 flex-1 gap-2')}
+                      >
+                        <ExternalLink className="size-4" aria-hidden />
+                        View Certificate
+                      </a>
+                      {/* DOWNLOAD IS A BUTTON, NOT A LINK. The capability is short-lived and
+                          lives only in the fetched URL — never in the address bar, and never
+                          persisted, so a refresh cannot resurrect it. Fetching keeps the
+                          attendee on this page with their other certificates intact. */}
+                      <button
+                        type="button"
+                        disabled={!!action[r.certificateId]}
+                        onClick={() => { void downloadPdf(r.certificateId, downloadHref) }}
+                        className={cn(buttonVariants({ variant: 'primary', size: 'lg' }), 'min-h-12 flex-1 gap-2')}
+                      >
+                        {action[r.certificateId] === 'pdf'
+                          ? <><Loader2 className="size-4 animate-spin" aria-hidden /> Preparing…</>
+                          : <><Download className="size-4" aria-hidden /> Download PDF</>}
+                      </button>
+                      <button
+                        type="button"
+                        disabled={!!action[r.certificateId]}
+                        onClick={() => { void shareCertificate(r.certificateId, r.participantName, r.eventName) }}
+                        className={cn(buttonVariants({ variant: 'outline', size: 'lg' }), 'min-h-12 flex-1 gap-2')}
+                      >
+                        <Share2 className="size-4" aria-hidden />
+                        Share
+                      </button>
+                    </div>
+
+                    {/* Per-card result. Inline rather than a toast: this public page is not
+                        inside the dashboard's ToastProvider. */}
+                    {actionMsg[r.certificateId] && (
+                      <p
+                        role={actionMsg[r.certificateId]!.ok ? 'status' : 'alert'}
+                        className={cn(
+                          'px-5 pb-3 text-fs-2xs font-medium',
+                          actionMsg[r.certificateId]!.ok ? 'text-emerald-600' : 'text-destructive',
+                        )}
+                      >
+                        {actionMsg[r.certificateId]!.text}
+                      </p>
+                    )}
+
                     {/* Photo, per certificate — never page-level. The section appears only
                         when the server confirmed this certificate's template has a photo
                         area, so an attendee is never offered an upload that could not
-                        appear on their PDF. */}
+                        appear on their PDF. Rendered AFTER the actions: its late arrival
+                        extends the card downward instead of displacing the buttons. */}
                     {p?.photoSupported && (
                       <div className="border-t border-border/60 px-5 py-4">
                         <AttendeePhotoCard
@@ -358,29 +505,6 @@ export function CertificateCenterClient({ slug, eventName }: { slug: string; eve
                         />
                       </div>
                     )}
-
-                    <div className="flex flex-col gap-2 border-t border-border/60 px-5 py-3.5 sm:flex-row-reverse">
-                      {/* The capability is short-lived and lives only in this URL — never
-                          persisted, so a refresh cannot resurrect it. */}
-                      <a
-                        href={downloadHref}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className={cn(buttonVariants({ variant: 'primary', size: 'lg' }), 'min-h-12 flex-1 gap-2')}
-                      >
-                        <Download className="size-4" aria-hidden />
-                        Download Certificate
-                      </a>
-                      <a
-                        href={`/verify/certificate/${encodeURIComponent(r.certificateId)}`}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className={cn(buttonVariants({ variant: 'outline', size: 'lg' }), 'min-h-12 flex-1 gap-2')}
-                      >
-                        <ExternalLink className="size-4" aria-hidden />
-                        View Certificate
-                      </a>
-                    </div>
                   </li>
                   )
                 })}

@@ -17,7 +17,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
-  Download, ShieldCheck, Mail, Ban, RotateCcw, Search, Loader2, AlertTriangle, Send,
+  Download, ShieldCheck, Mail, Ban, RotateCcw, RefreshCw, Search, Loader2, AlertTriangle, Send,
 } from 'lucide-react'
 import { REVOCATION_REASONS, REVOCATION_REASON_LABELS, CERTIFICATE_TYPE_LABELS } from '@/lib/certificates/constants'
 import { cn } from '@/lib/utils/cn'
@@ -77,6 +77,10 @@ export default function RecipientsPanel({ api }: { api: CertApi }) {
   const [allMatching, setAllMatching] = useState(false)
 
   const [busyId, setBusyId]   = useState<string | null>(null)
+  /** Certificates awaiting a regeneration confirmation. One entry = a row action, many = bulk.
+   *  Null while no dialog is open — the same shape `revoking` uses, so there is one pattern. */
+  const [regenerating, setRegenerating] = useState<string[] | null>(null)
+  const [regenBusy, setRegenBusy] = useState(false)
   const [revoking, setRevoking] = useState<SerializedCertificate | null>(null)
   const [reviewing, setReviewing] = useState<SerializedCertificate | null>(null)
   const [notice, setNotice]   = useState<string | null>(null)
@@ -138,6 +142,44 @@ export default function RecipientsPanel({ api }: { api: CertApi }) {
     try { await fn(); await loadFirst() }
     catch (e) { setErr(e instanceof Error ? e.message : 'Action failed') }
     finally { setBusyId(null) }
+  }
+
+  /**
+   * Regenerates the given certificates in place.
+   *
+   * THE ROUTE ANSWERS 200 EVEN WHEN EVERY ITEM FAILED — it reports per-item outcomes in
+   * `results`. Treating `res.ok` as success is precisely how a fully-failed batch reads as
+   * "done" and a stale certificate looks regenerated. So the outcome here is derived from
+   * `results[].ok`, and any `error` the server returned is surfaced verbatim.
+   */
+  async function runRegenerate(ids: string[]) {
+    setRegenBusy(true); setErr(null); setNotice(null)
+    try {
+      const r = await api.regenerate(ids)
+      const failures = r.results.filter(x => !x.ok)
+
+      if (failures.length === 0) {
+        setNotice(ids.length === 1
+          ? 'Certificate regenerated successfully.'
+          : `${r.succeeded} certificates regenerated.`)
+      } else {
+        // Name the certificate and quote the server's reason — "no_active_template" is the
+        // one an organizer can actually act on, and hiding it is what makes this silent.
+        const detail = failures.map(f => `${f.certificateId}: ${f.error ?? 'failed'}`).join('; ')
+        setErr(ids.length === 1
+          ? `Certificate regeneration failed: ${failures[0].error ?? 'unknown error'}`
+          : `${r.succeeded} regenerated. ${failures.length} failed — ${detail}`)
+        if (r.succeeded > 0) setNotice(`${r.succeeded} certificates regenerated.`)
+      }
+
+      setRegenerating(null)
+      await loadFirst()
+    } catch (e) {
+      // Transport / auth failure — the request never produced per-item results.
+      setErr(e instanceof Error ? e.message : 'Regeneration failed')
+    } finally {
+      setRegenBusy(false)
+    }
   }
 
   async function startJob(scopeType: 'unsent' | 'failed' | 'selected') {
@@ -216,6 +258,12 @@ export default function RecipientsPanel({ api }: { api: CertApi }) {
           {selected.size > 0 && (
             <button type="button" className={btnGhost} disabled={!!active} onClick={() => startJob('selected')}>
               <Mail className="size-3.5" /> Send {selected.size} selected
+            </button>
+          )}
+          {selected.size > 0 && (
+            <button type="button" className={btnGhost} disabled={!!active || regenBusy}
+              onClick={() => setRegenerating([...selected])}>
+              <RefreshCw className="size-3.5" /> Regenerate {selected.size} selected
             </button>
           )}
         </div>
@@ -314,6 +362,18 @@ export default function RecipientsPanel({ api }: { api: CertApi }) {
                           </button>
                         )}
 
+                        {/* Regeneration re-renders against the CURRENT active template. Hidden
+                            for revoked certificates — the engine refuses them anyway, and the
+                            server stays the authority; this only avoids offering a dead action. */}
+                        {!revoked && (
+                          <button type="button" className={btnGhost} title="Regenerate"
+                            aria-label="Regenerate"
+                            disabled={busyId === c.certificateId || regenBusy}
+                            onClick={() => setRegenerating([c.certificateId])}>
+                            <RefreshCw className="size-3.5" />
+                          </button>
+                        )}
+
                         {revoked
                           ? <button type="button" className={btnGhost} title="Restore" disabled={busyId === c.certificateId}
                               onClick={() => act(c.certificateId, () => api.restore(c.certificateId))}><RotateCcw className="size-3.5" /></button>
@@ -336,6 +396,15 @@ export default function RecipientsPanel({ api }: { api: CertApi }) {
             Load more
           </button>
         </div>
+      )}
+
+      {regenerating && (
+        <RegenerateDialog
+          certificateIds={regenerating}
+          busy={regenBusy}
+          onClose={() => setRegenerating(null)}
+          onConfirm={() => void runRegenerate(regenerating)}
+        />
       )}
 
       {revoking && (
@@ -409,6 +478,50 @@ function ReviewSendDialog({
         <div className="flex justify-end gap-2 pt-1">
           <button type="button" className={btnGhost} onClick={onClose}>Cancel</button>
           <button type="button" className={btnPrimary} onClick={onConfirm}>Send anyway</button>
+        </div>
+      </div>
+    </Dialog>
+  )
+}
+
+/**
+ * Confirms an in-place regeneration. Destructive in one specific way — it REPLACES the stored
+ * PDF — while leaving identity untouched, so the copy states both halves rather than a generic
+ * "are you sure".
+ */
+function RegenerateDialog({
+  certificateIds, busy, onClose, onConfirm,
+}: {
+  certificateIds: string[]
+  busy:      boolean
+  onClose:   () => void
+  onConfirm: () => void
+}) {
+  const many = certificateIds.length > 1
+  return (
+    <Dialog
+      open
+      onClose={onClose}
+      title={many ? `Regenerate ${certificateIds.length} certificates?` : `Regenerate ${certificateIds[0]}`}
+    >
+      <div className="space-y-3">
+        <p className="text-[13px] text-muted-foreground">
+          {many
+            ? 'These certificates will be re-rendered using the event’s current active template.'
+            : 'Regenerate this certificate using the event’s current active template?'}
+        </p>
+        <ul className="list-disc space-y-1 pl-5 text-[13px] text-muted-foreground">
+          <li>The stored PDF is replaced.</li>
+          <li>The certificate ID stays the same.</li>
+          <li>The verification link stays the same.</li>
+          <li>No additional certificate is created.</li>
+        </ul>
+        <div className="flex justify-end gap-2 pt-1">
+          <button type="button" className={btnGhost} disabled={busy} onClick={onClose}>Cancel</button>
+          <button type="button" className={btnPrimary} disabled={busy} onClick={onConfirm}>
+            {busy ? <Loader2 className="size-3.5 animate-spin" /> : <RefreshCw className="size-3.5" />}
+            Regenerate
+          </button>
         </div>
       </div>
     </Dialog>
