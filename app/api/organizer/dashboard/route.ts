@@ -17,6 +17,19 @@ import { EVENT_STATS_VERSION }       from '@/lib/registrations/types'
 import type { RegistrationDocument, RegistrationCounter } from '@/lib/registrations/types'
 import { aggregateRegistrationStatusCounts } from '@/lib/firebase/firestore/registrationCounters'
 import type { RegistrationStatusCounts }     from '@/lib/firebase/firestore/registrationCounters'
+import { aggregateCancelledByPass, aggregateWaitlistedCount } from '@/lib/analytics/registrationPassAggregates'
+import { buildDashboardAnalytics } from '@/lib/analytics/dashboardAnalytics'
+import type { PassRow, RegistrationTotals } from '@/lib/analytics/dashboardAnalytics'
+
+/**
+ * Ceiling on per-pass cancelled aggregates for ONE dashboard load (events × passes).
+ *
+ * Cancelled-by-pass costs one count() per (event, pass), so an organizer with many events
+ * each carrying many passes could otherwise fire hundreds of queries per render. Events with
+ * zero cancellations are skipped entirely, so in practice this is rarely approached — and
+ * when it is, the affected events report "unavailable" rather than a fabricated zero.
+ */
+const PASS_AGGREGATE_BUDGET = 120
 
 // ─── Utilities ────────────────────────────────────────────────────────────────
 
@@ -122,11 +135,21 @@ export interface DashboardData {
   // Organizer-wide, ALL-TIME breakdowns — derived from the registrationCounters documents
   // this route already fetches, NOT from the 90-day recent window. No extra Firestore reads
   // in the healthy case. Empty ⇒ charts degrade.
-  passDistribution:   { label: string; count: number }[]   // confirmed by pass, + Other / Unassigned / Unattributed
+  /** Confirmed + cancelled per pass, + Other / Unassigned / Unattributed. `count` is the
+   *  CONFIRMED figure, kept under that name so the bar chart and insights are unchanged. */
+  passDistribution:   PassRow[]
   registrationStatus: { label: string; count: number }[]   // organizer-wide, all-time, by status
+  /** Every status total, so the card can show counts AND percentages from one source. */
+  registrationTotals: RegistrationTotals
   /** True when at least one event's counts could not be read. The client must NOT render
    *  these two charts as authoritative zeros when this is set. */
   analyticsUnavailable?: boolean
+  /** True when a per-pass cancelled split could not be completed for some event with
+   *  cancellations. The client must hide the cancelled column rather than show zeros. */
+  passCancelledUnavailable?: boolean
+  /** Registered per event, SAME event scope and SAME confirmed figure as the two breakdowns
+   *  above, Top-N with a real "Other" remainder. */
+  eventPerformance:   { label: string; count: number }[]
   communications: {
     emailsSent:        number
     emailsSentToday:   number
@@ -604,17 +627,28 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   // ── passId → pass name, from the drafts ALREADY loaded above (no extra reads) ──
   // `passCounts` is keyed by passId; the chart shows names. Passes live at
   // `draft.pricing.passes`, the same shape the attendance and event routes read.
-  const passNameById = new Map<string, string>()
+  //
+  // A pass whose configured name is genuinely "free" therefore DISPLAYS as "free" — that is
+  // real configured data, not a fallback. An unresolvable passId becomes "Unassigned"
+  // downstream; the two are never confused.
+  const passNamesBySlug = new Map<string, Record<string, string>>()
+  const eventNameBySlug = new Map<string, string>()
   drafts.forEach(d => {
     const slug = slugOfDraft(d)
     if (!slug) return
+    const details = (d.eventDetails as Record<string, unknown>) ?? {}
+    const info    = (details.info as Record<string, unknown>) ?? {}
+    eventNameBySlug.set(slug, typeof info.name === 'string' && info.name ? info.name : 'Untitled Event')
+
     const raw = (d.pricing as Record<string, unknown> | undefined)?.passes
     if (!Array.isArray(raw)) return
+    const names: Record<string, string> = {}
     for (const p of raw as Array<Record<string, unknown>>) {
       const id   = typeof p.id === 'string' ? p.id : ''
       const name = typeof p.name === 'string' ? p.name.trim() : ''
-      if (id) passNameById.set(`${slug}::${id}`, name)
+      if (id) names[id] = name
     }
+    passNamesBySlug.set(slug, names)
   })
 
   // ── Organizer-wide, ALL-TIME status + pass distribution ───────────────────────
@@ -627,98 +661,84 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   //
   // The recent scan REMAINS — trendDays, today's figures and the activity feed genuinely need
   // recent per-registration rows.
-  const statusTotals = { confirmed: 0, pending: 0, cancelled: 0, rejected: 0, waitlisted: 0 }
-  const passCount = new Map<string, number>()
-  let unattributedConfirmed = 0
-  let statusUnavailable     = false
+  // ── ONE authoritative status source per event ─────────────────────────────────
+  // C: every event resolves its status breakdown the same way, so Waitlisted stops being a
+  // confident zero. `registrationCounters` carries pending/cancelled/rejected but has NO
+  // waitlistedCount field — the counter path could therefore never report a waitlist. Events
+  // with current stats reuse the counter (free, already fetched) plus ONE extra aggregate for
+  // waitlisted; events with stale stats fall back to the full shared aggregate as before.
+  // Every query is a count(): zero documents transferred, existing indexes.
+  const eventStatus = new Map<string, RegistrationStatusCounts | null>()
 
-  // Events whose counter predates the stats backfill: the status fields cannot be trusted, so
-  // each falls back to the SHARED count() aggregate — zero documents transferred, existing
-  // indexes. Empty in steady state, once reconciliation has stamped statsVersion.
-  const statusFallbackSlugs = slugList.filter(slug => {
+  const staleSet    = new Set(slugList.filter(slug => {
     const c = counterBySlug.get(slug)
     return !c || (c.statsVersion ?? 0) < EVENT_STATS_VERSION
-  })
-  const fallbackCounts = new Map<string, RegistrationStatusCounts>()
-  if (statusFallbackSlugs.length) {
-    const rows = await Promise.all(statusFallbackSlugs.map(slug =>
-      aggregateRegistrationStatusCounts(uid, slug).catch(() => null)))
-    statusFallbackSlugs.forEach((slug, i) => {
-      const r = rows[i]
-      if (r) fallbackCounts.set(slug, r)
-      else   statusUnavailable = true      // never silently report 0 for a failed read
+  }))
+  const staleSlugs  = slugList.filter(s => staleSet.has(s))
+  const freshSlugs  = slugList.filter(s => !staleSet.has(s))
+
+  const [staleRows, waitRows] = await Promise.all([
+    Promise.all(staleSlugs.map(slug => aggregateRegistrationStatusCounts(uid, slug).catch(() => null))),
+    Promise.all(freshSlugs.map(slug => aggregateWaitlistedCount(uid, slug))),
+  ])
+
+  staleSlugs.forEach((slug, i) => eventStatus.set(slug, staleRows[i]))
+  freshSlugs.forEach((slug, i) => {
+    const c = counterBySlug.get(slug)!
+    const waitlisted = waitRows[i]
+    // A failed waitlist read makes the whole event's breakdown unavailable rather than
+    // contributing a zero that cannot be distinguished from a genuinely empty waitlist.
+    if (waitlisted === null) { eventStatus.set(slug, null); return }
+    const confirmed = c.totalCount     ?? 0
+    const pending   = c.pendingCount   ?? 0
+    const cancelled = c.cancelledCount ?? 0
+    const rejected  = c.rejectedCount  ?? 0
+    eventStatus.set(slug, {
+      // `total` is SUMMED from the parts, never read as an independent figure — the counter
+      // has no all-status total, and inventing one by another route could disagree with them.
+      total: confirmed + pending + cancelled + rejected + waitlisted,
+      confirmed, pending, cancelled, rejected, waitlisted,
+      checkedIn: c.checkedInCount ?? 0,
     })
-  }
+  })
 
+  // ── A: cancelled split by pass, count()-only and budgeted ─────────────────────
+  // Runs ONLY for events that actually have cancellations, so a clean event costs nothing.
+  // The budget caps events × passes; once spent, the remaining events report `null` (→
+  // "unavailable"), never zeros.
+  const passIdsBySlug = new Map<string, string[]>()
+  drafts.forEach(d => {
+    const slug = slugOfDraft(d)
+    if (!slug) return
+    const raw = (d.pricing as Record<string, unknown> | undefined)?.passes
+    if (!Array.isArray(raw)) return
+    passIdsBySlug.set(slug, (raw as Array<Record<string, unknown>>)
+      .map(p => (typeof p.id === 'string' ? p.id : ''))
+      .filter(Boolean))
+  })
+
+  const passBudget = { remaining: PASS_AGGREGATE_BUDGET }
+  const cancelledByPass = new Map<string, Record<string, number> | null>()
   for (const slug of slugList) {
-    const c  = counterBySlug.get(slug)
-    const fb = fallbackCounts.get(slug)
-
-    if (fb) {
-      statusTotals.confirmed  += fb.confirmed
-      statusTotals.pending    += fb.pending
-      statusTotals.cancelled  += fb.cancelled
-      statusTotals.rejected   += fb.rejected
-      statusTotals.waitlisted += fb.waitlisted
-    } else if (c) {
-      // `totalCount` is the CONFIRMED count (see RegistrationCounter); the other statuses are
-      // their own fields. Confirmed is never derived by subtraction.
-      statusTotals.confirmed += c.totalCount ?? 0
-      statusTotals.pending   += c.pendingCount ?? 0
-      statusTotals.cancelled += c.cancelledCount ?? 0
-      statusTotals.rejected  += c.rejectedCount ?? 0
-    }
-
-    // ── Pass distribution: confirmed registrations by pass ──────────────────────
-    const confirmedHere = fb ? fb.confirmed : (c?.totalCount ?? 0)
-    const counts = c?.passCounts ?? {}
-    const attributed = Object.values(counts).reduce((s, n) => s + (typeof n === 'number' ? n : 0), 0)
-
-    if (attributed === 0 && confirmedHere > 0) {
-      // UNATTRIBUTED — a historical dotted-key defect left `passCounts` empty on some older
-      // events, so their per-pass split is permanently lost. Reporting it honestly keeps the
-      // chart reconciled with the confirmed total; inventing a split, or showing zero, would
-      // both be worse than saying the attribution is missing.
-      unattributedConfirmed += confirmedHere
-      continue
-    }
-
-    for (const [passId, n] of Object.entries(counts)) {
-      const count = typeof n === 'number' ? n : 0
-      if (count <= 0) continue
-      // UNASSIGNED — a live confirmed registration carrying no pass name.
-      const label = passNameById.get(`${slug}::${passId}`) || 'Unassigned'
-      passCount.set(label, (passCount.get(label) ?? 0) + count)
-    }
+    const st = eventStatus.get(slug)
+    if (!st || st.cancelled === 0) continue
+    const r = await aggregateCancelledByPass(uid, slug, passIdsBySlug.get(slug) ?? [], passBudget)
+    cancelledByPass.set(slug, r.complete ? r.counts : null)
   }
 
-  // Existing status categories and order preserved; `rejected` stays its own category and is
-  // never folded into cancelled.
-  const REG_STATUS_ORDER: Array<[string, number]> = [
-    ['Confirmed',  statusTotals.confirmed],
-    ['Pending',    statusTotals.pending],
-    ['Waitlisted', statusTotals.waitlisted],
-    ['Cancelled',  statusTotals.cancelled],
-    ['Rejected',   statusTotals.rejected],
-  ]
-  const registrationStatus = REG_STATUS_ORDER
-    .filter(([, count]) => count > 0)
-    .map(([label, count]) => ({ label, count }))
+  const analytics = buildDashboardAnalytics(slugList.map(slug => ({
+    slug,
+    eventName:     eventNameBySlug.get(slug) ?? 'Untitled Event',
+    status:        eventStatus.get(slug) ?? null,
+    passConfirmed: (counterBySlug.get(slug)?.passCounts ?? {}) as Record<string, number>,
+    // Absent from the map ⇒ nothing to attribute (no cancellations); present ⇒ the computed
+    // split, or null when it could not be completed.
+    passCancelled: cancelledByPass.has(slug) ? cancelledByPass.get(slug)! : {},
+    passNames:     passNamesBySlug.get(slug) ?? {},
+  })))
 
-  // Display limit preserved, but the remainder is SUMMED into "Other" rather than discarded —
-  // the old `.slice(0, 6)` silently dropped the 7th+ pass, so the chart could never reconcile.
-  const PASS_DISPLAY_LIMIT = 6
-  const ranked = Array.from(passCount.entries())
-    .map(([label, count]) => ({ label, count }))
-    .sort((a, b) => b.count - a.count)
-
-  const head = ranked.slice(0, PASS_DISPLAY_LIMIT)
-  const rest = ranked.slice(PASS_DISPLAY_LIMIT).reduce((s, p) => s + p.count, 0)
-  const passDistribution = [
-    ...head,
-    ...(rest > 0 ? [{ label: 'Other', count: rest }] : []),
-    ...(unattributedConfirmed > 0 ? [{ label: 'Unattributed', count: unattributedConfirmed }] : []),
-  ]
+  const registrationStatus = analytics.registrationStatus
+  const passDistribution   = analytics.passDistribution
 
   // ── Communications ─────────────────────────────────────────────────────────
 
@@ -859,7 +879,10 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     trendDays,
     passDistribution,
     registrationStatus,
-    analyticsUnavailable: statusUnavailable,
+    registrationTotals:       analytics.totals,
+    eventPerformance:         analytics.eventPerformance,
+    analyticsUnavailable:     analytics.statusUnavailable,
+    passCancelledUnavailable: analytics.passCancelledUnavailable,
     communications,
     healthScore,
     walletBalancePaise,

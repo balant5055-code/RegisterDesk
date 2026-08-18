@@ -246,9 +246,14 @@ export default function DashboardPage() {
       revenueTrend:   last30.map(d => ({ label: shortDate(d.date), value: Math.round(d.revenuePaise / 100) } as ChartPoint)),
       regTrend:       last30.map(d => ({ label: shortDate(d.date), value: d.count } as ChartPoint)),
       passDist:       data.passDistribution.map(p => ({ label: p.label, value: p.count } as ChartPoint)),
+      passRows:       data.passDistribution,
       regStatus:      data.registrationStatus.map(s => ({ label: s.label, value: s.count } as ChartPoint)),
-      eventPerf:      [...data.events].sort((a, b) => b.registered - a.registered).slice(0, 6)
-                        .map(e => ({ label: e.name, value: e.registered } as ChartPoint)),
+      // Server-computed: the SAME organizer-wide event scope and the SAME confirmed figures
+      // the two breakdowns use, already Top-N with a real "Other". The old client-side
+      // `.slice(0, 6)` over `data.events` did neither — it ranked a DIFFERENT event set
+      // (current lifecycle status only, so an unpublished event's registrations counted in
+      // the totals while its row was invisible) and silently discarded the 7th onward.
+      eventPerf:      data.eventPerformance.map(e => ({ label: e.label, value: e.count } as ChartPoint)),
       revenue30Paise: last30.reduce((s, d) => s + d.revenuePaise, 0),
       regs30:         last30.reduce((s, d) => s + d.count, 0),
     }
@@ -276,7 +281,8 @@ export default function DashboardPage() {
     }
     const topPass = data.passDistribution[0]
     if (topPass && topPass.count > 0 && data.passDistribution.length > 1) {
-      out.push({ tone: 'info', icon: Sparkles, text: `“${topPass.label}” is your fastest-selling pass — ${topPass.count} recent registrations.` })
+      // "recent" was wrong: this figure is organizer-wide and all-time, from the counters.
+      out.push({ tone: 'info', icon: Sparkles, text: `“${topPass.label}” is your most-registered pass — ${topPass.count} confirmed across all events.` })
     }
     const hot = [...data.events].filter(e => e.capacity && e.fillPct >= 90).sort((a, b) => b.fillPct - a.fillPct)[0]
     if (hot) {
@@ -434,7 +440,10 @@ export default function DashboardPage() {
             revenueTrend={charts.revenueTrend}
             regTrend={charts.regTrend}
             passDist={charts.passDist}
+            passRows={charts.passRows}
             regStatus={charts.regStatus}
+            regTotals={data.registrationTotals}
+            passCancelledUnavailable={data.passCancelledUnavailable}
             eventPerf={charts.eventPerf}
             revenue30Paise={charts.revenue30Paise}
             regs30={charts.regs30}

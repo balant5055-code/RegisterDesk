@@ -8,7 +8,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
-const recorded: Array<{ status: string; error?: string }> = []
+const recorded: Array<{ status: string; error?: string; provider?: string }> = []
 // Holder so the claim double can echo back the certificate under test (see the mock below).
 const claimed = vi.hoisted(() => ({ subject: null as unknown }))
 const sendMock = vi.fn(async () => ({ success: true, messageId: 'msg_1' }))
@@ -50,8 +50,8 @@ vi.mock('@/lib/certificates/firestore', () => ({
     }
     return { ok: true, certificate: claimed.subject }
   },
-  recordCertificateEmail: async (_id: string, entry: { status: string; error?: string }) => {
-    recorded.push({ status: entry.status, error: entry.error })
+  recordCertificateEmail: async (_id: string, entry: { status: string; error?: string; provider?: string }) => {
+    recorded.push({ status: entry.status, error: entry.error, provider: entry.provider })
   },
 }))
 
@@ -97,9 +97,14 @@ describe('the certificate transport is resolved by event SLUG', () => {
     expect(providerArgs[0]).not.toBe('evt-1')
   })
 
-  it('records the resolved provider on the attempt, so history is provider-accurate', async () => {
+  it('records the ACTUALLY RESOLVED provider on the attempt', async () => {
+    // emailHistory.provider is what the organizer's delivery history reports. Recording a
+    // constant, or the requested provider rather than the resolved one, is how history
+    // starts disagreeing with the transport that really ran.
     await emailCertificate(CERT, { force: true })
     expect(recorded.length).toBeGreaterThan(0)
+    expect(recorded[0].provider).toBe('resend')     // the resolver's answer, not a default
+    expect(recorded[0].provider).not.toBe('ses')
   })
 })
 
