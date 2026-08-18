@@ -179,3 +179,77 @@ describe('the Recipients panel surfaces regeneration', () => {
     expect(src).toMatch(/await loadFirst\(\)/)
   })
 })
+
+// ─── RD-CERT-UX · per-row action loading states ───────────────────────────────
+//
+// WHAT WAS WRONG. Three overlapping flags described "something is happening": `busyId` held a
+// single certificate id with no action identity, so a spinner could not say whether the row
+// was sending or regenerating; `regenBusy` and `deleteBusy` were module-wide booleans, so
+// starting either one greyed that action out on EVERY row. Download had no guard at all, so a
+// double-click issued two signed-URL requests and opened two tabs.
+
+describe('every recipient action reports its own progress', () => {
+  const src = code(read(PANEL))
+
+  it('models the running action per row, not as a global flag', () => {
+    expect(src).toMatch(/rowBusy, setRowBusy\] = useState<Record<string, RowAction>>/)
+    // The flags that could not distinguish rows or actions are gone.
+    expect(src).not.toMatch(/const \[busyId/)
+  })
+
+  it('names a distinct label for each action', () => {
+    for (const [action, label] of [
+      ['download', 'Preparing…'], ['send', 'Sending…'], ['retry', 'Retrying…'],
+      ['regenerate', 'Generating…'], ['revoke', 'Revoking…'], ['delete', 'Deleting…'],
+    ]) {
+      expect(src, action).toContain(label)
+    }
+  })
+
+  it('scopes disabling to the row that is working', () => {
+    // `busy` is derived per row inside the map; a global would disable unrelated rows.
+    expect(src).toMatch(/const busy\s+= rowBusy\[c\.certificateId\]/)
+    expect(src).toMatch(/disabled=\{!!busy\}/)
+
+    // Scoped to the ROW cluster. The toolbar's bulk buttons legitimately still gate on
+    // regenBusy/deleteBusy — those describe the batch operation, not one row — so asserting
+    // over the whole file would fail against correct code.
+    const rows = src.slice(src.indexOf('{rows.map(c => {'), src.indexOf('</tbody>'))
+    expect(rows.length).toBeGreaterThan(0)
+    expect(rows).not.toMatch(/regenBusy|deleteBusy|busyId/)
+  })
+
+  it('guards against a duplicate submission before the disabled state paints', () => {
+    // React state is asynchronous, so a fast second click can dispatch before `disabled`
+    // renders. The handler itself has to refuse the second run.
+    const fn = src.slice(src.indexOf('async function act('), src.indexOf('function markRows'))
+    expect(fn).toMatch(/if \(already\) return/)
+  })
+
+  it('restores the action on failure instead of stranding a spinner', () => {
+    const fn = src.slice(src.indexOf('async function act('), src.indexOf('function markRows'))
+    expect(fn).toMatch(/finally\s*\{/)
+    expect(fn).toMatch(/delete next\[id\]/)
+  })
+
+  it('gives Download a guard it previously lacked', () => {
+    const btn = src.slice(src.indexOf('title="Download"'), src.indexOf('title="Download"') + 400)
+    expect(btn).toMatch(/disabled=\{!!busy\}/)
+    expect(btn).toMatch(/busy === 'download'/)
+  })
+
+  it('marks every affected row during a BULK regenerate or delete', () => {
+    expect(src).toMatch(/markRows\(ids, 'regenerate'\)/)
+    expect(src).toMatch(/markRows\(ids, 'delete'\)/)
+    expect(src).toMatch(/markRows\(ids, null\)/)
+  })
+
+  it('uses no artificial delay and no fabricated progress', () => {
+    expect(src).not.toMatch(/setTimeout|setInterval\(\s*\(\)\s*=>\s*setProgress/)
+    expect(src).not.toMatch(/fakeProgress|simulateProgress/)
+  })
+
+  it('never navigates or reloads to reflect an action', () => {
+    expect(src).not.toMatch(/window\.location\.reload|router\.refresh\(\)/)
+  })
+})

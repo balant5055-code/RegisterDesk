@@ -33,6 +33,26 @@ export interface CertificateRegenerateResponse {
   results:   Array<{ certificateId: string; ok: boolean; error?: string }>
 }
 
+/**
+ * RD-CERT-DELETE — permanent deletion. Same partial-failure contract as regenerate.
+ *
+ * `orphanedKeys` counts R2 objects that survived the deletion. Those certificates ARE deleted
+ * (their `ok` is true); the number exists so unreferenced bytes are reported rather than
+ * swallowed, and it must never be presented as a failed deletion.
+ */
+export interface CertificateDeleteResponse {
+  succeeded:    number
+  failed:       number
+  orphanedKeys: number
+  results:      Array<{
+    certificateId:   string
+    ok:              boolean
+    error?:          string
+    alreadyDeleted?: boolean
+    orphanedKeys?:   string[]
+  }>
+}
+
 // ── Extra response/patch shapes for the newly-surfaced endpoints (GA-7D S3) ──
 // The engines already exist server-side; these only type the wire format.
 export interface CertResolveResponse {
@@ -214,6 +234,13 @@ export function makeCertApi(eventId: string, token: string) {
     regenerate: (certificateIds: string[]) =>
       fetch(`${B}/regenerate`, { method: 'POST', headers: jsonAuth, body: JSON.stringify({ certificateIds }) })
         .then(jsonOrThrow<CertificateRegenerateResponse>),
+
+    // ── Permanent deletion (one endpoint for one certificate or many) ──
+    // Individual delete is a batch of one, so the browser never fires N independent deletion
+    // requests. Same 200-with-per-item-outcomes contract as regenerate above.
+    remove: (certificateIds: string[]) =>
+      fetch(`${B}/delete`, { method: 'POST', headers: jsonAuth, body: JSON.stringify({ certificateIds }) })
+        .then(jsonOrThrow<CertificateDeleteResponse>),
 
     // ── Authenticated certificate file download (organizer bypass) ──
     // Fetches with the organizer's Bearer token so the /file route's organizer

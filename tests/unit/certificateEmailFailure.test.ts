@@ -27,7 +27,13 @@ vi.mock('@/lib/notifications', () => ({
   NotificationType:    { CERTIFICATE_READY: 'CERTIFICATE_READY' },
   NotificationChannel: { EMAIL: 'EMAIL' },
 }))
-vi.mock('@/lib/email/resolveEventProvider', () => ({ resolveEventEmailProvider: async () => 'resend' }))
+// RD-EMAIL-PROVIDER — the ARGUMENT is recorded, not just the return value. A mock that
+// answers a constant is exactly what let a wrong identifier reach this resolver unnoticed:
+// every provider assertion passed while the real lookup was missing its document.
+const providerArgs = vi.hoisted(() => [] as unknown[])
+vi.mock('@/lib/email/resolveEventProvider', () => ({
+  resolveEventEmailProvider: async (arg: unknown) => { providerArgs.push(arg); return 'resend' },
+}))
 vi.mock('@/lib/certificates/urlGuard', () => ({
   safeFetchBytes: async () => null, validateGeneratedCertificateUrl: () => true,
 }))
@@ -59,7 +65,10 @@ const emailCertificate: typeof rawEmailCertificate = (c, opts) => {
 
 const CERT = {
   certificateId: 'RDC-2026-5OHOUL',
+  // Deliberately DIFFERENT values: the resolver reads `events/{slug}`, so a test where the
+  // draft id and the slug are the same string cannot tell a correct call from a wrong one.
   eventId:       'evt-1',
+  eventSlug:     'noyyal-awareness-marathon-2026',
   attendeeEmail: 'arun@example.test',
   attendeeName:  'Arun Prakash',
   eventName:     'Noyyal Awareness Marathon 2026',
@@ -67,7 +76,45 @@ const CERT = {
   data:          {},
 } as unknown as Parameters<typeof emailCertificate>[0]
 
-beforeEach(() => { recorded.length = 0; sendMock.mockClear() })
+beforeEach(() => { recorded.length = 0; sendMock.mockClear(); providerArgs.length = 0 })
+
+// ─── RD-EMAIL-PROVIDER · certificate mail follows the EVENT's transport ───────
+//
+// THE BUG THIS PINS. `resolveEventEmailProvider` reads `events/{slug}`; the certificate path
+// handed it `certificate.eventId`, which is the DRAFT id. The document could never exist, the
+// resolver's absent-value path returned the SES default, and every certificate email went out
+// through SES regardless of the provider an admin had selected. The organizer saw a truthful
+// "Email rejected by SES" on an event configured for Resend — the message was correct, the
+// routing was not. Nothing in the UI ever hardcoded a provider name.
+
+describe('the certificate transport is resolved by event SLUG', () => {
+  it('passes the slug, never the draft id', async () => {
+    await emailCertificate(CERT, { force: true })
+
+    expect(providerArgs).toHaveLength(1)
+    expect(providerArgs[0]).toBe('noyyal-awareness-marathon-2026')
+    // The precise regression: a draft id here silently means "use the default provider".
+    expect(providerArgs[0]).not.toBe('evt-1')
+  })
+
+  it('records the resolved provider on the attempt, so history is provider-accurate', async () => {
+    await emailCertificate(CERT, { force: true })
+    expect(recorded.length).toBeGreaterThan(0)
+  })
+})
+
+// Every certificate email action — Send, Resend, Retry failed, Send all not sent, and the
+// admin resend route — funnels through emailCertificate(), so the routing above is the only
+// one that exists. This guards that no future caller reintroduces the draft id.
+describe('no certificate module resolves a provider from an id that is not a slug', () => {
+  it('the sender passes eventSlug', async () => {
+    const { readFileSync } = await import('node:fs')
+    const { resolve } = await import('node:path')
+    const src = readFileSync(resolve(process.cwd(), 'lib/certificates/email.ts'), 'utf8')
+    expect(src).toMatch(/resolveEventEmailProvider\(certificate\.eventSlug\)/)
+    expect(src).not.toMatch(/resolveEventEmailProvider\(certificate\.eventId\)/)
+  })
+})
 
 describe('a misconfigured email URL fails cleanly instead of throwing', () => {
   it('does NOT throw — the route can no longer emit a bare 500', async () => {

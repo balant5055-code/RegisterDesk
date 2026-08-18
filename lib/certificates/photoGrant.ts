@@ -189,3 +189,39 @@ export async function revokeCertificatePhotoGrant(token: string): Promise<void> 
   if (!grantId) return
   await grantsCol().doc(grantId).delete().catch(() => { /* expiry still bounds it */ })
 }
+
+/**
+ * RD-CERT-DELETE — removes EVERY grant minted for one certificate and reports the temporary
+ * photo keys those grants owned.
+ *
+ * WHY IT LIVES HERE. Grant ids are random 32-byte hex, so a grant can only be found by
+ * querying `certificateId`. This module owns the collection and the document shape; a caller
+ * that re-derived either would fork the schema away from its owner the first time a field
+ * moved. So deletion asks for grants by certificate and gets back keys — never a query.
+ *
+ * THE KEYS ARE RETURNED, NOT DELETED. This module knows Firestore, not object storage. The
+ * caller owns R2 cleanup because it is the one that must report a failed key rather than
+ * swallow it — `revokeCertificatePhotoGrant` above can be best-effort precisely because
+ * expiry still bounds it, and a deletion has no such backstop.
+ *
+ * Grants carry a TTL, so a grant missed here expires on its own; the value of deleting them
+ * is that the temporary photo bytes go with the certificate instead of lingering until the
+ * sweep. Unbounded by design: grants per certificate are naturally a handful.
+ */
+export async function deleteGrantsForCertificate(
+  certificateId: string,
+): Promise<{ tempPhotoKeys: string[] }> {
+  const snap = await grantsCol().where('certificateId', '==', certificateId).get()
+  if (snap.empty) return { tempPhotoKeys: [] }
+
+  const tempPhotoKeys: string[] = []
+  const batch = adminDb.batch()
+  for (const doc of snap.docs) {
+    const key = (doc.data() as Record<string, unknown>).photoKey
+    if (typeof key === 'string' && key) tempPhotoKeys.push(key)
+    batch.delete(doc.ref)
+  }
+  await batch.commit()
+
+  return { tempPhotoKeys }
+}
