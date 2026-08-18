@@ -285,11 +285,11 @@ describe('the dashboard route uses ONE canonical, archive-free event set', () =>
     .replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
 
   it('defines the canonical set with the archived exclusion', () => {
-    // Now via the shared `isArchivedEvent` predicate. The previous form —
-    // `deriveLifecycleStatus(d) !== 'archived'` — could not see an event archived before
-    // `lifecycleStatus` existed, because archiving also writes the legacy `status: 'draft'`
-    // and the derivation reports that instead. That was the Preview leak.
-    expect(src).toMatch(/const dashboardDrafts = drafts\.filter\(d => d\.publishedAt && !isArchivedEvent\(d\)\)/)
+    // Scope is now Archived-TAB membership, derived from `listingTabsForEvent` so the tab
+    // and the dashboard cannot drift. It covers archived | completed | cancelled |
+    // unpublished — the last of which was the Preview leak: those events sat under the
+    // Archived tab while every archived-ONLY rule correctly ignored them.
+    expect(src).toMatch(/const dashboardDrafts = drafts\.filter\(d => d\.publishedAt && !isArchivedTabEvent\(d\)\)/)
     expect(src).not.toMatch(/deriveLifecycleStatus\(d\) !== 'archived'/)
   })
 

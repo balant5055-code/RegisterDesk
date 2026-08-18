@@ -12,7 +12,7 @@ import { deriveLifecycleStatus, isArchivedEvent } from '@/lib/events/lifecycleSt
 
 /** The route's canonical predicate, applied to one draft document. */
 const inDashboardScope = (d: Record<string, unknown>) =>
-  !!d.publishedAt && !isArchivedEvent(d)
+  !!d.publishedAt && !isArchivedTabEvent(d)
 
 describe('the canonical predicate over real archived-draft shapes', () => {
   it('excludes an event archived by the current lifecycle writer', () => {
@@ -35,12 +35,14 @@ describe('the canonical predicate over real archived-draft shapes', () => {
     expect(inDashboardScope(legacyArchived)).toBe(false)
   })
 
-  it('keeps active, completed and cancelled events in scope', () => {
-    for (const ls of ['published', 'registration_closed', 'completed', 'cancelled', 'unpublished']) {
+  it('keeps only NON-Archived-tab states in scope', () => {
+    // Superseded by RD-DASHBOARD-05: completed / cancelled / unpublished all sit under
+    // the Archived tab, so they no longer contribute. Only genuinely active states remain.
+    for (const ls of ['published', 'registration_closed', 'pending_review']) {
       expect(inDashboardScope({ publishedAt: 1, lifecycleStatus: ls }), ls).toBe(true)
+
     }
   })
-
   it('excludes an event that was never published', () => {
     expect(inDashboardScope({ lifecycleStatus: 'published' })).toBe(false)
   })
@@ -104,10 +106,11 @@ describe('THE OBSERVED PREVIEW CASE', () => {
     expect(perfRows).toEqual(['VANATHUKKUL NOYYAL MARATHON'])
   })
 
-  it('a RESTORED event returns to scope — archivedAt is cleared, not left behind', () => {
-    // lib/events/lifecycle.ts restore sets archivedAt: null. The guard must not be one-way.
+  it('a RESTORED event stays OUT of scope — restore lands on unpublished', () => {
+    // restore sets archivedAt:null AND lifecycleStatus:'unpublished'. It is no longer
+    // archived, but unpublished is still an Archived-tab state, so it stays excluded.
     const restored = { publishedAt: 1, lifecycleStatus: 'unpublished', status: 'draft', archivedAt: null }
-    expect(inDashboardScope(restored)).toBe(true)
+    expect(inDashboardScope(restored)).toBe(false)
   })
 })
 
@@ -116,15 +119,15 @@ describe('every event list in the route is archive-guarded', () => {
     .replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
 
   it('uses the shared predicate, not a bare lifecycle comparison', () => {
-    expect(src).toMatch(/isArchivedEvent/)
+    expect(src).toMatch(/isArchivedTabEvent/)
     // The comparison that could not see a legacy archived event.
     expect(src).not.toMatch(/deriveLifecycleStatus\(d\) !== 'archived'/)
   })
 
   it('guards ALL THREE event lists — canonical scope, publishedDrafts, and the event cards', () => {
-    expect(src).toMatch(/const dashboardDrafts = drafts\.filter\(d => d\.publishedAt && !isArchivedEvent\(d\)\)/)
-    expect(src).toMatch(/const publishedDrafts = drafts\.filter\(d => d\.status === 'published' && !isArchivedEvent\(d\)\)/)
-    expect(src).toMatch(/visibleStatuses\.has\(deriveLifecycleStatus\(d\)\) && !isArchivedEvent\(d\)/)
+    expect(src).toMatch(/const dashboardDrafts = drafts\.filter\(d => d\.publishedAt && !isArchivedTabEvent\(d\)\)/)
+    expect(src).toMatch(/const publishedDrafts = drafts\.filter\(d => d\.status === 'published' && !isArchivedTabEvent\(d\)\)/)
+    expect(src).toMatch(/visibleStatuses\.has\(deriveLifecycleStatus\(d\)\) && !isArchivedTabEvent\(d\)/)
   })
 
   it('no aggregation reads the raw draft list', () => {
@@ -213,7 +216,7 @@ describe('the three surfaces use the shared predicate, not their own', () => {
 
   it('the events LIST api emits an archive-accurate lifecycleStatus', () => {
     const src = read('app/api/organizer/events/route.ts')
-    expect(src).toMatch(/lifecycleStatus:\s+isArchivedEvent\(d\) \? 'archived' : deriveLifecycleStatus\(d\)/)
+    expect(src).toMatch(/lifecycleStatus:\s+effectiveLifecycleStatus\(d\)/)
   })
 
   it('the event DETAIL api does the same, so the actions panel agrees', () => {
@@ -243,5 +246,159 @@ describe('the three surfaces use the shared predicate, not their own', () => {
       const code = read(p).replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
       expect(code, p).not.toMatch(/archivedAt\s*!=\s*null|archivedAt\s*!==\s*null/)
     }
+  })
+})
+
+// ─── RD-DASHBOARD-05 · the Archived TAB is the dashboard boundary ─────────────
+//
+// THE PREVIEW DEFECT THIS PINS. Two events sat under the Events "Archived" tab yet still fed
+// Pass Distribution ("free = 2") and Event Performance. Neither was `archived`: the Archived
+// tab groups FOUR terminal states, and both events were `unpublished`. Every archived-only
+// rule therefore correctly evaluated false for them.
+//
+// The invariant is now: eventInListingTab(e,'archived') ⇒ contributes nothing to the
+// dashboard. It is derived from `listingTabsForEvent`, so the tab and the dashboard cannot
+// drift apart again.
+
+import {
+  listingTabsForEvent, eventInListingTab, isArchivedTabEvent, effectiveLifecycleStatus,
+} from '@/lib/events/listingTabs'
+import type { EventLifecycleStatus } from '@/types/events'
+
+const draft = (ls: EventLifecycleStatus, extra: Record<string, unknown> = {}) =>
+  ({ publishedAt: 1, lifecycleStatus: ls, ...extra })
+
+/** The route's canonical scope predicate. */
+const inDashboard = (d: Record<string, unknown>) => !!d.publishedAt && !isArchivedTabEvent(d)
+
+describe('the state matrix — tab membership drives dashboard scope', () => {
+  const EXCLUDED: EventLifecycleStatus[] = ['archived', 'unpublished', 'completed', 'cancelled']
+  const INCLUDED: EventLifecycleStatus[] = ['published', 'registration_closed', 'pending_review']
+
+  it.each(EXCLUDED)('%s is in the Archived tab and is EXCLUDED', (ls) => {
+    expect(eventInListingTab(ls, 'archived')).toBe(true)
+    expect(inDashboard(draft(ls))).toBe(false)
+  })
+
+  it.each(INCLUDED)('%s is NOT in the Archived tab and stays INCLUDED', (ls) => {
+    expect(eventInListingTab(ls, 'archived')).toBe(false)
+    expect(inDashboard(draft(ls))).toBe(true)
+  })
+
+  it('the invariant holds for EVERY lifecycle state, not only the listed ones', () => {
+    const all: EventLifecycleStatus[] = [
+      'draft', 'pending_review', 'changes_requested', 'published',
+      'registration_closed', 'completed', 'cancelled', 'archived', 'unpublished',
+    ]
+    for (const ls of all) {
+      const inArchivedTab = listingTabsForEvent(ls).includes('archived')
+      expect(inDashboard(draft(ls)), ls).toBe(!inArchivedTab)
+    }
+  })
+
+  it('a legacy archived doc with no lifecycleStatus is still excluded', () => {
+    const legacy = { publishedAt: 1, status: 'draft', archivedAt: 1 }
+    expect(effectiveLifecycleStatus(legacy)).toBe('archived')
+    expect(inDashboard(legacy)).toBe(false)
+  })
+})
+
+describe('THE OBSERVED PREVIEW CASE — two unpublished events', () => {
+  const live   = draft('published')
+  const unpub2 = draft('unpublished')   // carried 2 confirmed, pass "free"
+  const unpub0 = draft('unpublished')   // carried 0
+
+  it('the Archived-tab events contribute nothing; the live event does', () => {
+    expect(inDashboard(live)).toBe(true)
+    expect(inDashboard(unpub2)).toBe(false)
+    expect(inDashboard(unpub0)).toBe(false)
+  })
+
+  it('registrations, revenue, pass distribution and event performance all exclude them', () => {
+    const events = [
+      { d: live,   name: 'VANATHUKKUL NOYYAL MARATHON', confirmed: 94, revenue: 470000, passes: ['5 KM Marathon'] },
+      { d: unpub2, name: 'REGISTERDESK CERTIFICATE TEST', confirmed: 2, revenue: 0, passes: ['free'] },
+      { d: unpub0, name: 'REGISTERDESK CERTIFICATE TEST', confirmed: 0, revenue: 0, passes: [] },
+    ]
+    const scoped = events.filter(e => inDashboard(e.d))
+
+    expect(scoped.reduce((s, e) => s + e.confirmed, 0)).toBe(94)
+    expect(scoped.reduce((s, e) => s + e.revenue, 0)).toBe(470000)
+    expect(scoped.flatMap(e => e.passes)).toEqual(['5 KM Marathon'])
+    expect(scoped.map(e => e.name)).toEqual(['VANATHUKKUL NOYYAL MARATHON'])
+  })
+
+  it('their registrations cannot enter trends or the activity feed', () => {
+    // Both derive from recentRegs, filtered by dashboardSlugs — built from the same scope.
+    const slugs = new Set(['live-slug'])
+    const rows  = [{ eventSlug: 'live-slug' }, { eventSlug: 'unpub-a' }, { eventSlug: 'unpub-b' }]
+    expect(rows.filter(r => slugs.has(r.eventSlug))).toHaveLength(1)
+  })
+})
+
+describe('Events UI semantics are unchanged by the dashboard fix', () => {
+  const src = readFileSync(resolve(process.cwd(), 'app/(dashboard)/dashboard/events/EventsClient.tsx'), 'utf8')
+
+  it('unpublished stays EDITABLE — isReadOnly does not include it', () => {
+    expect(src).toMatch(/const isReadOnly\s+= ls === 'archived' \|\| ls === 'completed' \|\| ls === 'cancelled'/)
+  })
+
+  it('unpublished does NOT show Delete Permanently', () => {
+    // Still gated on the GENUINE archived state, never on tab membership.
+    expect(src).toMatch(/const canDeleteForever = ls === 'archived'/)
+    expect(src).not.toMatch(/canDeleteForever = isArchivedTabEvent/)
+  })
+
+  it('genuine archived events still show it', () => {
+    expect(src).toMatch(/\{canDeleteForever && \(/)
+    expect(src).toMatch(/Delete Permanently/)
+  })
+})
+
+describe('deletion and restore still key on the GENUINE archived state', () => {
+  const read2 = (p: string) => readFileSync(resolve(process.cwd(), p), 'utf8')
+
+  it('permanent delete gates on isArchivedEvent, not tab membership', () => {
+    const src = read2('app/api/organizer/events/[eventId]/route.ts')
+    expect(src).toMatch(/if \(!isArchivedEvent\(draft\)\)/)
+    expect(src).not.toMatch(/isArchivedTabEvent/)
+  })
+
+  it('restore gates on isArchivedEvent', () => {
+    const src = read2('app/api/organizer/events/[eventId]/restore/route.ts')
+    expect(src).toMatch(/if \(!isArchivedEvent\(/)
+    expect(src).not.toMatch(/isArchivedTabEvent/)
+  })
+
+  it('the two predicates remain distinct concepts in distinct modules', () => {
+    expect(read2('lib/events/listingTabs.ts')).toMatch(/export function isArchivedTabEvent/)
+    expect(read2('lib/events/lifecycleStateMachine.ts')).toMatch(/export function isArchivedEvent/)
+  })
+})
+
+describe('the dashboard applies the scope once, at the data boundary', () => {
+  const src = readFileSync(resolve(process.cwd(), 'app/api/organizer/dashboard/route.ts'), 'utf8')
+    .replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+
+  it('all three event lists use the canonical predicate', () => {
+    expect(src).toMatch(/const dashboardDrafts = drafts\.filter\(d => d\.publishedAt && !isArchivedTabEvent\(d\)\)/)
+    expect(src).toMatch(/const publishedDrafts = drafts\.filter\(d => d\.status === 'published' && !isArchivedTabEvent\(d\)\)/)
+    expect(src).toMatch(/visibleStatuses\.has\(deriveLifecycleStatus\(d\)\) && !isArchivedTabEvent\(d\)/)
+  })
+
+  it('the dashboard no longer uses the DELETION predicate for scope', () => {
+    expect(src).not.toMatch(/isArchivedEvent\(d\)/)
+  })
+
+  it('no aggregation reads the unscoped draft list', () => {
+    const offenders = [...src.matchAll(/drafts\.(filter|reduce|forEach)\(/g)]
+      .map(m => src.slice(Math.max(0, m.index - 90), m.index + 40))
+      .filter(s => !/dashboardDrafts|publishedDrafts|pendingApproval|changesRequested|published:|rejected:/.test(s))
+    expect(offenders, offenders.join('\n---\n')).toHaveLength(0)
+  })
+
+  it('alerts and communication cost derive from the scoped list', () => {
+    expect(src).toMatch(/const communicationCostPaise = dashboardDrafts\.reduce\(/)
+    expect(src).toMatch(/dashboardDrafts\.forEach\(/)
   })
 })

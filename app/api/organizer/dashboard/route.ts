@@ -9,7 +9,8 @@ import { AggregateField }            from 'firebase-admin/firestore'
 import { adminDb }                   from '@/lib/firebase/admin'
 import { authorizeAnyWorkspace }     from '@/lib/team/workspace'
 import { ensureOrganizerProfile }    from '@/lib/organizer/ensureProfile'
-import { deriveLifecycleStatus, isArchivedEvent } from '@/lib/events/lifecycle'
+import { deriveLifecycleStatus } from '@/lib/events/lifecycle'
+import { isArchivedTabEvent } from '@/lib/events/listingTabs'
 import { getWalletBalance }          from '@/lib/firebase/firestore/wallet'
 import { getFreeEventCapacity }      from '@/lib/licensing/resolveCatalog'
 import type { OrganizerRevenueWallet } from '@/lib/fees/types'
@@ -322,7 +323,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   // Also archive-guarded: an event archived before the current writer existed can still
   // carry the legacy status 'published', which would put it back into the alerts, the
   // Active-events KPI and the event-health list.
-  const publishedDrafts = drafts.filter(d => d.status === 'published' && !isArchivedEvent(d))
+  const publishedDrafts = drafts.filter(d => d.status === 'published' && !isArchivedTabEvent(d))
   // Certificate-template alerts are scoped to currently-published events.
   const draftIdList: string[] = publishedDrafts.map(d => d.id as string)
 
@@ -339,20 +340,21 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   // the activity feed. No card may filter events for itself — that is exactly how they
   // drifted apart before.
   //
-  //   ever published (has publishedAt)  AND  NOT archived (isArchivedEvent)
+  //   ever published (has publishedAt)  AND  NOT shown under the Archived tab
   //
-  // Statistics still span every event that was ever published — including ones since
-  // cancelled or completed — so the totals describe the organizer's whole history rather
-  // than only what is live today. ARCHIVED is the deliberate exception: archiving is the
-  // organizer saying "this is finished, take it off my books", so a retired test event must
-  // not keep inflating registrations, revenue, or any breakdown. Excluded HERE, before any
-  // aggregation runs — never hidden afterwards.
-  // `isArchivedEvent`, NOT `deriveLifecycleStatus(d) !== 'archived'`. Archiving also stamps
-  // the legacy `status: 'draft'`, so a document written before `lifecycleStatus` existed
-  // derives as 'draft' and can never derive as 'archived' — it passed the old check while
-  // keeping its publishedAt, which is exactly how an archived event kept contributing
-  // registrations here. The shared predicate honours `archivedAt` as well.
-  const dashboardDrafts = drafts.filter(d => d.publishedAt && !isArchivedEvent(d))
+  // THE INVARIANT: if the Events page files an event under "Archived", it contributes
+  // nothing here. That tab is a bucket for FOUR terminal states — completed, cancelled,
+  // archived and unpublished — and `isArchivedTabEvent` derives its answer from the very
+  // same `listingTabsForEvent` mapping the tab uses, so the two can never disagree.
+  //
+  // Re-listing those states here instead would be a second copy destined to drift: that is
+  // precisely how an UNPUBLISHED event kept feeding Pass Distribution and Event Performance
+  // while the operator was looking at it under the Archived tab.
+  //
+  // NOT the same question as `isArchivedEvent`, which means the genuine permanent archived
+  // state and gates permanent DELETION. An unpublished event is excluded from the dashboard
+  // yet stays editable, restorable, and NOT permanently deletable.
+  const dashboardDrafts = drafts.filter(d => d.publishedAt && !isArchivedTabEvent(d))
   const slugList = Array.from(new Set(
     dashboardDrafts.map(slugOfDraft).filter((s): s is string => !!s),
   ))
@@ -604,7 +606,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
 
   const visibleStatuses = new Set(['published', 'registration_closed', 'completed'])
   const events: DashboardEvent[] = drafts
-    .filter(d => visibleStatuses.has(deriveLifecycleStatus(d)) && !isArchivedEvent(d))
+    .filter(d => visibleStatuses.has(deriveLifecycleStatus(d)) && !isArchivedTabEvent(d))
     .map(d => {
       const details  = (d.eventDetails as Record<string, unknown>) ?? {}
       const info     = (details.info    as Record<string, unknown>) ?? {}
