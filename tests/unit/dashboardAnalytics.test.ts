@@ -13,6 +13,8 @@
 //     unresolvable passId becomes "Unassigned".
 
 import { describe, it, expect } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import {
   buildDashboardAnalytics, DISPLAY_LIMIT,
   type EventAnalyticsInput,
@@ -263,5 +265,52 @@ describe('the same pass name across events merges, because the card is organizer
     ])
     expect(row(a, '5 KM')?.count).toBe(8)
     expect(a.passDistribution.reduce((s, p) => s + p.count, 0)).toBe(8)
+  })
+})
+
+// ─── RD-DASHBOARD-04 · archived events never reach the dashboard ──────────────
+//
+// THE DEFECT. The dashboard's event set was `drafts.filter(d => d.publishedAt)` — every
+// event ever published, archived ones included, and the comment above it said so
+// deliberately. Archiving is the organizer saying "this is finished, take it off my books",
+// so a retired test event kept inflating registrations, revenue, both trends, pass
+// distribution, registration status and event performance.
+//
+// The fix is ONE canonical set — `dashboardDrafts` — filtered BEFORE any aggregation, and a
+// `dashboardSlugs` lookup that scopes the organizer-wide recent-registration scan (which
+// carries no event filter of its own). These assert that no card re-filters for itself.
+
+describe('the dashboard route uses ONE canonical, archive-free event set', () => {
+  const src = readFileSync(resolve(process.cwd(), 'app/api/organizer/dashboard/route.ts'), 'utf8')
+    .replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+
+  it('defines the canonical set with the archived exclusion', () => {
+    expect(src).toMatch(/const dashboardDrafts = drafts\.filter\(d =>\s*d\.publishedAt && deriveLifecycleStatus\(d\) !== 'archived'\)/)
+  })
+
+  it('derives slugList from that set, not from raw drafts', () => {
+    expect(src).toMatch(/dashboardDrafts\.map\(slugOfDraft\)/)
+    // The exact expression that used to include archived events.
+    expect(src).not.toMatch(/drafts\.filter\(d => d\.publishedAt\)\.map\(slugOfDraft\)/)
+  })
+
+  it('scopes the recent-registration scan — trends and activity feed', () => {
+    // organizerUid + registeredAt only: without this filter an archived event's rows flow
+    // straight into both trend charts, today's figures and the activity feed.
+    expect(src).toMatch(/const recentRegs = recentRegsRaw\.filter\(/)
+    expect(src).toMatch(/dashboardSlugs\.has\(r\.eventSlug\)/)
+  })
+
+  it('scopes the settlement communication-cost figure', () => {
+    expect(src).toMatch(/const communicationCostPaise = dashboardDrafts\.reduce\(/)
+  })
+
+  it('leaves NO aggregation reading the unscoped draft list', () => {
+    // The review-pipeline counters legitimately count every event (that is their subject),
+    // so they are excluded from this check by name; nothing else may use `drafts.` directly.
+    const offenders = [...src.matchAll(/drafts\.(filter|reduce|forEach)\(/g)]
+      .map(m => src.slice(Math.max(0, m.index - 90), m.index + 40))
+      .filter(s => !/dashboardDrafts|publishedDrafts|pendingApproval|changesRequested|published:|rejected:/.test(s))
+    expect(offenders, offenders.join('\n---\n')).toHaveLength(0)
   })
 })

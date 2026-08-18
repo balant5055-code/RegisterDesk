@@ -113,3 +113,123 @@ describe('close affordances are present', () => {
     expect(LIGHTBOX).toMatch(/document\.removeEventListener\('keydown', onKey\)/)
   })
 })
+
+// ─── The SAME defect in the attendee photo editor ─────────────────────────────
+//
+// ImageCropperModal is the full-screen crop/zoom/rotate editor opened from the public
+// Certificate Center (/events/[slug]/certificates) and from organizer settings. It had the
+// identical shape as the lightbox bug above: `fixed inset-0` with a z-index, rendered IN
+// PLACE deep inside page content. Its `z-50` was ranked inside the Certificate Center's
+// subtree, while MarketingNavbar's `z-[100]` sits in the ROOT stacking context — so the
+// navbar painted across the top of the editor, over the Cancel control, and consumed
+// viewport the editor was supposed to own.
+//
+// Same fix, same precedent: portal to document.body and adopt the z-[120] overlay tier the
+// lightbox already established. The navbar itself is untouched.
+
+const CROPPER = read('components/ui/ImageCropperModal.tsx')
+
+/**
+ * Comment-stripped source.
+ *
+ * `zIndexOf` returns the FIRST `z-[N]` in a file, and the cropper's comment explains the bug
+ * by NAMING the navbar's z-[100] — so scanning raw source reads the prose, not the class.
+ * The same applies to the "does not touch the navbar" check: the comment mentions
+ * MarketingNavbar precisely because the fix deliberately leaves it alone.
+ */
+const code = (src: string) =>
+  src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+
+const CROPPER_CODE = code(CROPPER)
+
+describe('ImageCropperModal escapes page stacking contexts', () => {
+  it('imports createPortal', () => {
+    expect(CROPPER).toMatch(/import\s*\{\s*createPortal\s*\}\s*from\s*'react-dom'/)
+  })
+
+  it('portals the overlay to document.body — this is the regression', () => {
+    expect(CROPPER).toMatch(/return createPortal\(/)
+    expect(CROPPER).toMatch(/document\.body,\s*\)/)
+  })
+
+  it('is SSR-safe, the same way Dialog and the lightbox are', () => {
+    expect(CROPPER).toContain("typeof document === 'undefined'")
+  })
+
+  it('outranks the marketing navbar', () => {
+    const cropper = zIndexOf(CROPPER_CODE)
+    const navbar  = zIndexOf(NAVBAR)
+    expect(cropper, 'cropper z-index').not.toBeNull()
+    expect(cropper!).toBeGreaterThan(navbar!)
+  })
+
+  it('uses the EXISTING overlay tier rather than an arbitrary huge number', () => {
+    // z-[120] is the tier ImageLightbox already established for full-viewport overlays.
+    // A z-[9999] here would paper over the real problem and start a second convention.
+    expect(zIndexOf(CROPPER_CODE)).toBe(120)
+    expect(zIndexOf(CROPPER_CODE)).toBe(zIndexOf(code(LIGHTBOX)))
+  })
+
+  it('no longer relies on the trapped z-50', () => {
+    expect(CROPPER).not.toMatch(/className="fixed inset-0 z-50/)
+  })
+
+  it('covers the whole viewport rather than offsetting around the navbar', () => {
+    // The forbidden alternative: a hardcoded navbar height, a top offset, or a margin hack.
+    expect(CROPPER).toMatch(/fixed inset-0/)
+    expect(CROPPER).not.toMatch(/top-\[\d+px\]|mt-\[\d+px\]|pt-\[\d+px\]/)
+  })
+})
+
+describe('the photo editor behaves as a modal', () => {
+  it('locks body scroll while open and restores the PREVIOUS value on close', () => {
+    // Restoring the previous value (not '') matters: the editor can be opened from inside
+    // another overlay that already locked the page.
+    expect(CROPPER).toMatch(/document\.body\.style\.overflow = 'hidden'/)
+    expect(CROPPER).toMatch(/document\.body\.style\.overflow = prevOverflow/)
+  })
+
+  it('traps focus and marks itself as a modal', () => {
+    expect(CROPPER).toMatch(/useFocusTrap/)
+    expect(CROPPER).toMatch(/role="dialog"/)
+    expect(CROPPER).toMatch(/aria-modal="true"/)
+  })
+
+  it('closes on Escape and removes its listener on cleanup', () => {
+    expect(CROPPER).toMatch(/e\.key === 'Escape'/)
+    expect(CROPPER).toMatch(/document\.removeEventListener\('keydown', onKey\)/)
+  })
+
+  it('does not hide or alter the navbar to get out of its way', () => {
+    // The navbar must be restored untouched when the editor closes, so the editor may not
+    // reach outside itself to suppress it.
+    // Comment-stripped: the explanatory comment above the portal NAMES MarketingNavbar,
+    // precisely to record that the fix leaves it alone. Scanning raw source would fail on
+    // its own documentation.
+    expect(CROPPER_CODE).not.toMatch(/MarketingNavbar|display:\s*'none'/)
+  })
+})
+
+describe('the editor keeps every existing capability', () => {
+  it('still exposes crop, zoom, rotation, reset, apply and cancel', () => {
+    for (const token of ['setCrop', 'setZoom', 'setRotation', 'handleReset', 'handleApply', 'onCancel']) {
+      expect(CROPPER, token).toContain(token)
+    }
+  })
+
+  it('still renders at the configured output size — no quality change', () => {
+    expect(CROPPER).toMatch(/getCroppedBlob\(imageSrc, croppedAreaPixels, rotation, config\.outputWidth, config\.outputHeight\)/)
+  })
+
+  it('still hands back a File plus an object URL, unchanged', () => {
+    expect(CROPPER).toMatch(/new File\(\[blob\]/)
+    expect(CROPPER).toMatch(/URL\.createObjectURL\(blob\)/)
+    expect(CROPPER).toMatch(/onApply\(file, previewUrl\)/)
+  })
+
+  it('performs no upload or storage work itself — that stays with the caller', () => {
+    for (const forbidden of ['fetch(', 'firebase', 'uploadBytes', 'generateSignedUrl', 'buildObjectKey', '/api/']) {
+      expect(CROPPER_CODE, forbidden).not.toContain(forbidden)
+    }
+  })
+})

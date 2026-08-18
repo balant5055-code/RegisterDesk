@@ -314,25 +314,52 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   }
   const drafts     = draftDocs.map(d => ({ id: d.id, ...d.data() }) as Record<string, unknown>)
   // Bounded, projected recent registrations (NOT the full history).
-  const recentRegs = recentRegsSnap.docs.map(d => d.data() as RegistrationDocument)
+  // Raw window: organizerUid + registeredAt ≥ 90d, with NO event filter. Scoped to the
+  // canonical dashboard event set below, once that set exists.
+  const recentRegsRaw = recentRegsSnap.docs.map(d => d.data() as RegistrationDocument)
 
   // ── Collect slugs + draft IDs for batch 2 ─────────────────────────────────
   const publishedDrafts = drafts.filter(d => d.status === 'published')
   // Certificate-template alerts are scoped to currently-published events.
   const draftIdList: string[] = publishedDrafts.map(d => d.id as string)
 
-  // Per-event statistics (counts + revenue) are summed over EVERY event that was
-  // ever published — including ones since archived/cancelled/completed — so the
-  // overview totals match the previous all-events scan rather than only the
-  // currently-published set. Resolved by slug from publishedAt-stamped drafts.
   const slugOfDraft = (d: Record<string, unknown>): string | null => {
     const details = (d.eventDetails as Record<string, unknown>) ?? {}
     const seo     = (details.seo    as Record<string, unknown>) ?? {}
     return typeof seo.urlSlug === 'string' && seo.urlSlug ? seo.urlSlug : null
   }
+
+  // ══ THE CANONICAL DASHBOARD EVENT SET ════════════════════════════════════════
+  //
+  // ONE definition, used by EVERY figure on this dashboard: the KPI cards, revenue, both
+  // trend charts, pass distribution, registration status, event performance, insights and
+  // the activity feed. No card may filter events for itself — that is exactly how they
+  // drifted apart before.
+  //
+  //   ever published (has publishedAt)  AND  lifecycleStatus !== 'archived'
+  //
+  // Statistics still span every event that was ever published — including ones since
+  // cancelled or completed — so the totals describe the organizer's whole history rather
+  // than only what is live today. ARCHIVED is the deliberate exception: archiving is the
+  // organizer saying "this is finished, take it off my books", so a retired test event must
+  // not keep inflating registrations, revenue, or any breakdown. Excluded HERE, before any
+  // aggregation runs — never hidden afterwards.
+  const dashboardDrafts = drafts.filter(d =>
+    d.publishedAt && deriveLifecycleStatus(d) !== 'archived')
   const slugList = Array.from(new Set(
-    drafts.filter(d => d.publishedAt).map(slugOfDraft).filter((s): s is string => !!s),
+    dashboardDrafts.map(slugOfDraft).filter((s): s is string => !!s),
   ))
+  // The same set as a lookup. The recent-registration scan below is organizerUid-scoped with
+  // NO event filter, so without this an archived event's registrations would flow straight
+  // into both trend charts, today's figures and the activity feed.
+  const dashboardSlugs = new Set(slugList)
+
+  // Every per-registration figure on this screen — both trends, today's count and revenue,
+  // this month's, and the activity feed — is derived from THIS array, so the archived
+  // exclusion applies to all of them from one place. A registration whose event was never
+  // published (no slug in the set) is excluded for the same reason it has no counter.
+  const recentRegs = recentRegsRaw.filter(r =>
+    typeof r.eventSlug === 'string' && dashboardSlugs.has(r.eventSlug))
 
   // ── Batch 2: counters + cert templates ────────────────────────────────────
   // D.1: read each set with a single getAll() multi-get instead of N individual
@@ -486,7 +513,8 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   })
 
   // Communication payment pending
-  drafts.forEach(d => {
+  // Canonical set: an archived event needs no action, so it must not raise an alert.
+  dashboardDrafts.forEach(d => {
     const billing = d.communicationBilling as Record<string, unknown> | null | undefined
     if (billing?.status !== 'pending') return
     const details = (d.eventDetails as Record<string, unknown>) ?? {}
@@ -515,7 +543,9 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
 
   // Communication billing is a SEPARATE concern (comms wallet), surfaced on the
   // Communication usage card — never mixed into the revenue settlement figures above.
-  const communicationCostPaise = drafts.reduce((s, d) => {
+  // Canonical set: this is a dashboard money figure, so an archived event's communication
+  // spend must not keep appearing in the settlement card after the event is off the books.
+  const communicationCostPaise = dashboardDrafts.reduce((s, d) => {
     const b = d.communicationBilling as Record<string, unknown> | null | undefined
     return (b?.status === 'paid' && typeof b.amount === 'number') ? s + b.amount : s
   }, 0)
@@ -633,7 +663,10 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   // downstream; the two are never confused.
   const passNamesBySlug = new Map<string, Record<string, string>>()
   const eventNameBySlug = new Map<string, string>()
-  drafts.forEach(d => {
+  // Canonical set. These are only ever read for a slug already in `slugList`, so an archived
+  // entry could not leak — but building them from the same source keeps the invariant true
+  // by construction rather than by luck, and lets a test assert it.
+  dashboardDrafts.forEach(d => {
     const slug = slugOfDraft(d)
     if (!slug) return
     const details = (d.eventDetails as Record<string, unknown>) ?? {}
@@ -707,7 +740,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   // The budget caps events × passes; once spent, the remaining events report `null` (→
   // "unavailable"), never zeros.
   const passIdsBySlug = new Map<string, string[]>()
-  drafts.forEach(d => {
+  dashboardDrafts.forEach(d => {   // canonical set — see eventNameBySlug above
     const slug = slugOfDraft(d)
     if (!slug) return
     const raw = (d.pricing as Record<string, unknown> | undefined)?.passes

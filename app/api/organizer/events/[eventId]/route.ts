@@ -8,6 +8,7 @@ import { adminDb }                   from '@/lib/firebase/admin'
 import { getEventStats, sumConfirmedRevenueFromLedger } from '@/lib/firebase/firestore/registrationCounters'
 import { authorizeWorkspace }        from '@/lib/team/workspace'
 import { deriveLifecycleStatus }     from '@/lib/events/lifecycle'
+import { runEventDeletion }          from '@/lib/events/eventDeletion'
 import { getFreeEventCapacity }      from '@/lib/licensing/resolveCatalog'
 import type { EventLifecycleStatus } from '@/types/events'
 
@@ -317,4 +318,77 @@ export async function GET(
   }
 
   return NextResponse.json(result)
+}
+
+// ─── DELETE /api/organizer/events/[eventId] ───────────────────────────────────
+//
+// RD-EVENT-DELETE — permanently deletes an ARCHIVED event and its event-specific
+// OPERATIONAL data. Financial and audit records are retained by design; see
+// lib/events/eventDeletion.ts for the manifest and the reasoning.
+//
+// EVERY gate is server-side. The client sends only an eventId, which is a lookup key and
+// never authority:
+//   • authorizeWorkspace  — authenticated, and scoped to the 'events' capability
+//   • the draft is read from users/{workspaceUid}/eventDrafts/{eventId}, so another
+//     organizer's event is simply not found — cross-organizer deletion is impossible by
+//     construction rather than by a check that could be forgotten
+//   • lifecycleStatus MUST be 'archived' — an active, published, draft or pending event is
+//     refused with 409 no matter what the UI offered
+//
+// Idempotent: a second call finds no draft and reports success with `alreadyDeleted`, so a
+// retried request or a double-click cannot produce an error the operator has to interpret.
+
+export async function DELETE(
+  req: NextRequest,
+  { params }: { params: Promise<{ eventId: string }> },
+): Promise<NextResponse> {
+  const authz = await authorizeWorkspace(req, 'events')
+  if (!authz.ok) return NextResponse.json({ error: authz.error }, { status: authz.status })
+  const uid = authz.workspaceUid
+
+  const { eventId } = await params
+
+  const draftSnap = await adminDb.doc(`users/${uid}/eventDrafts/${eventId}`).get()
+  if (!draftSnap.exists) {
+    // Already gone (or never this organizer's). Idempotent success — never a 404 the UI has
+    // to explain after a retry.
+    return NextResponse.json({ success: true, alreadyDeleted: true, deleted: 0, failures: [] })
+  }
+
+  const draft = draftSnap.data() as Record<string, unknown>
+  const lifecycle = deriveLifecycleStatus(draft)
+  if (lifecycle !== 'archived') {
+    return NextResponse.json(
+      { error: 'Only archived events can be permanently deleted. Archive this event first.' },
+      { status: 409 },
+    )
+  }
+
+  const details = (draft.eventDetails as Record<string, unknown>) ?? {}
+  const seo     = (details.seo as Record<string, unknown>) ?? {}
+  const slug    = typeof seo.urlSlug === 'string' ? seo.urlSlug : ''
+  if (!slug) {
+    return NextResponse.json(
+      { error: 'This event has no resolvable slug, so its data cannot be located safely.' },
+      { status: 409 },
+    )
+  }
+
+  const { summary, finished } = await runEventDeletion({ eventSlug: slug, eventId, organizerUid: uid })
+
+  // Partial work is NEVER reported as success: the operator must be able to trust that a
+  // green result means the event is gone.
+  if (!summary.ok || !finished) {
+    return NextResponse.json({
+      success: false,
+      finished,
+      deleted:  summary.deleted,
+      failures: summary.failures.slice(0, 20),
+      error:    finished
+        ? 'Some data could not be deleted. The event was partially removed — retry to continue.'
+        : 'Deletion is taking longer than one request allows. Retry to continue where it stopped.',
+    }, { status: 500 })
+  }
+
+  return NextResponse.json({ success: true, deleted: summary.deleted, failures: [] })
 }

@@ -227,13 +227,21 @@ describe('Download is gated on resolved photo state', () => {
   })
 
   it('re-resolves while the attendee finishes with the card', () => {
-    const fn = src.slice(src.indexOf('async function refreshHasPhoto'), src.indexOf('function setPhotoBusy'))
+    // Boundary is the const declaration: `setPhotoBusy` is a useCallback now, so the old
+    // `function setPhotoBusy` marker no longer exists and indexOf would return -1, silently
+    // slicing to the end of the file.
+    const fn = src.slice(src.indexOf('async function refreshHasPhoto'), src.indexOf('const setPhotoBusy'))
+    expect(fn.length).toBeGreaterThan(0)
     expect(fn).toMatch(/readiness: 'resolving'/)
     expect(fn).toMatch(/readiness: 'ready'/)
   })
 
-  it('the photo card reports write activity upward', () => {
-    expect(src).toMatch(/onBusyChange=\{busyNow => setPhotoBusy\(r\.certificateId, busyNow\)\}/)
+  it('the photo card reports write activity upward, through a STABLE callback', () => {
+    // The inline `busyNow => setPhotoBusy(...)` this used to assert was the render-loop
+    // defect: a fresh function every render re-fired the card's effect. The contract is now
+    // a per-certificate handler resolved from a memoised map.
+    expect(src).toMatch(/onBusyChange=\{busyHandlers\.get\(r\.certificateId\)\}/)
+    expect(src).not.toMatch(/onBusyChange=\{busyNow =>/)
     const card = code(read('components/certificates/AttendeePhotoCard.tsx'))
     expect(card).toMatch(/onBusyChange\?\.\(busy\)/)
   })

@@ -11,7 +11,7 @@
 // Everything shown here comes from the lookup API's five-field projection. No private
 // field is available to this component even if it wanted one.
 
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { motion, useReducedMotion } from 'framer-motion'
 import { Search, Loader2, Award, Download, ExternalLink, Share2 } from 'lucide-react'
 import { cn } from '@/lib/utils/cn'
@@ -19,6 +19,7 @@ import { Dialog } from '@/components/ui/Dialog'
 import type { CertificateVerifyResponse } from '@/app/api/verify/certificate/[certificateId]/route'
 import { buttonVariants } from '@/components/ui/button'
 import { AttendeePhotoCard } from '@/components/certificates/AttendeePhotoCard'
+import { applyPhotoBusy } from '@/lib/certificates/photoBusyState'
 
 type Mode = 'email' | 'mobile' | 'ticketCode' | 'registrationId' | 'bibNumber'
 
@@ -338,11 +339,33 @@ export function CertificateCenterClient({ slug, eventName }: { slug: string; eve
    * stored photo is changing underneath it — the exact race where a click mid-upload returned
    * the certificate WITHOUT the photo the attendee had just added.
    */
-  function setPhotoBusy(certificateId: string, busy: boolean) {
-    setPhoto(prev => (prev[certificateId]
-      ? { ...prev, [certificateId]: { ...prev[certificateId], readiness: busy ? 'resolving' : prev[certificateId].readiness } }
-      : prev))
-  }
+  // Stable for the component's lifetime: it closes over nothing but the `setPhoto` setter,
+  // which React guarantees is stable. The transition itself lives in `applyPhotoBusy`, which
+  // returns `prev` by reference when nothing actually changes — so a repeated report costs
+  // no render. Both halves matter; see photoBusyState.ts for the loop they prevent.
+  const setPhotoBusy = useCallback((certificateId: string, busy: boolean) => {
+    setPhoto(prev => applyPhotoBusy(prev, certificateId, busy))
+  }, [])
+
+  /**
+   * ONE stable `onBusyChange` per certificate.
+   *
+   * The previous call site built `busyNow => setPhotoBusy(r.certificateId, busyNow)` inline
+   * inside the results map, so every render handed each card a brand-new function. The card
+   * reports its busy state from an effect keyed on that callback, so a new identity re-fired
+   * the effect on every render — the other half of the loop.
+   *
+   * Keyed by certificateId and rebuilt only when the RESULT SET changes (a new lookup), which
+   * is exactly when a card can appear or disappear. Per-certificate keys are what keep the
+   * cards independent: participant A's handler only ever names A's id.
+   */
+  const busyHandlers = useMemo(() => {
+    const m = new Map<string, (busy: boolean) => void>()
+    for (const r of results ?? []) {
+      m.set(r.certificateId, (busy: boolean) => setPhotoBusy(r.certificateId, busy))
+    }
+    return m
+  }, [results, setPhotoBusy])
 
   const count = results?.length ?? 0
 
@@ -557,7 +580,7 @@ export function CertificateCenterClient({ slug, eventName }: { slug: string; eve
                           grant={p.grant}
                           description="This event’s certificate has a photo area. Add your picture and it appears on the certificate you download."
                           onContinue={() => { void refreshHasPhoto(r.certificateId, p.grant) }}
-                          onBusyChange={busyNow => setPhotoBusy(r.certificateId, busyNow)}
+                          onBusyChange={busyHandlers.get(r.certificateId)}
                           className="rounded-none border-0 bg-transparent p-0 sm:p-0"
                         />
                       </div>
