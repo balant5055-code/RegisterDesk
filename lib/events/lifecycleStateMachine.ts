@@ -66,3 +66,26 @@ export function deriveLifecycleStatus(d: Record<string, unknown>): EventLifecycl
   }
   return 'published'   // very old docs with no recognizable status → assume live
 }
+
+/**
+ * Is this event archived? The ONE predicate every archive-aware reader should use.
+ *
+ * ═══ WHY deriveLifecycleStatus IS NOT ENOUGH ═════════════════════════════════
+ * Archiving writes TWO fields: `lifecycleStatus: 'archived'` and, for backward
+ * compatibility with every legacy `status === 'published'` reader, `status: 'draft'`.
+ *
+ * On a document written before `lifecycleStatus` existed, only the legacy field is present —
+ * so `deriveLifecycleStatus` falls through to `status` and reports 'draft'. It can never
+ * return 'archived' for such a document. A caller testing `!== 'archived'` therefore treats a
+ * legacy archived event as live, and because archiving KEEPS `publishedAt`, the event sails
+ * through any "ever published and not archived" filter. That is exactly how an archived test
+ * event kept contributing registrations to the organizer dashboard.
+ *
+ * `archivedAt` closes it: archiving stamps it, and restore explicitly sets it back to null
+ * (see lib/events/lifecycle.ts), so it is a reliable marker in both directions and on
+ * documents of any vintage. Either signal alone is sufficient; requiring both would
+ * reintroduce the gap.
+ */
+export function isArchivedEvent(d: Record<string, unknown>): boolean {
+  return deriveLifecycleStatus(d) === 'archived' || d.archivedAt != null
+}

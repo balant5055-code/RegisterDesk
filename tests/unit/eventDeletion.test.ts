@@ -340,7 +340,11 @@ describe('the DELETE endpoint enforces every rule server-side', () => {
   })
 
   it('refuses anything that is not archived', () => {
-    expect(src).toMatch(/lifecycle !== 'archived'/)
+    // Gate is unchanged in strength, but now uses the shared `isArchivedEvent` predicate:
+    // the bare `deriveLifecycleStatus(...) !== 'archived'` could not see an event archived
+    // before `lifecycleStatus` existed, so it would have refused a legacy archived event
+    // that the UI correctly offers for deletion.
+    expect(src).toMatch(/if \(!isArchivedEvent\(draft\)\)/)
     expect(src).toMatch(/Only archived events can be permanently deleted/)
   })
 
@@ -361,12 +365,15 @@ describe('the UI offers permanent deletion only for archived events', () => {
     expect(src).toMatch(/canDeleteForever && <ActionBtn/)
   })
 
-  it('uses the exact required confirmation copy', () => {
-    expect(src).toContain('This permanently deletes the archived event and its event-specific operational data. This cannot be undone. Financial and audit records are retained.')
+  it('uses the shared confirmation copy rather than its own string', () => {
+    // The wording now lives in one module so the detail page and the Archived card menu
+    // cannot drift — an inline literal here would be the drift.
+    expect(src).toMatch(/description=\{PERMANENT_DELETE_DESCRIPTION\}/)
+    expect(src).not.toContain('This permanently deletes the archived event and its')
   })
 
   it('offers Cancel and Delete Permanently', () => {
-    expect(src).toMatch(/confirmLabel="Delete Permanently"/)
+    expect(src).toMatch(/confirmLabel=\{PERMANENT_DELETE_TITLE\}/)
     // ConfirmModal's dismiss control is the shared Cancel affordance.
     expect(src).toMatch(/onClose=\{\(\) => setModal\('none'\)\}/)
   })
@@ -541,5 +548,98 @@ describe('speaker photos are not deleted by key', () => {
     await runEventDeletion(TARGET)
     expect(deletedKeys).toEqual([`events/${TARGET.eventSlug}/media/inside.jpg`])
     expect(deletedKeys.some(k => k.includes('cdn.example.com'))).toBe(false)
+  })
+})
+
+// ─── 8 · The Archived TAB's card menu ─────────────────────────────────────────
+//
+// THE DEFECT THIS PINS. Permanent deletion was wired into the event DETAIL page
+// (EventActionsPanel) only. The Archived tab's card renders a completely separate "…" menu
+// in EventsClient, which never offered the action — so on the surface where an operator
+// actually manages archived events, the feature was invisible. Backend and endpoint were
+// fine; the integration was missing.
+
+describe('the Archived tab card menu offers permanent deletion', () => {
+  const src = readFileSync(resolve(process.cwd(), 'app/(dashboard)/dashboard/events/EventsClient.tsx'), 'utf8')
+
+  it('gates the action on ARCHIVED specifically', () => {
+    expect(src).toMatch(/const canDeleteForever = ls === 'archived'/)
+    expect(src).toMatch(/\{canDeleteForever && \(/)
+  })
+
+  it('does NOT reuse isReadOnly — completed and cancelled are read-only but not deletable', () => {
+    // isReadOnly covers archived|completed|cancelled. Gating on it would offer permanent
+    // deletion for two states the server refuses with 409.
+    expect(src).toMatch(/const isReadOnly\s+= ls === 'archived' \|\| ls === 'completed' \|\| ls === 'cancelled'/)
+    expect(src).not.toMatch(/isReadOnly && \([\s\S]{0,200}Delete Permanently/)
+  })
+
+  it('renders the label and a deleting state', () => {
+    expect(src).toMatch(/Delete Permanently/)
+    expect(src).toMatch(/deleting \? 'Deleting…' : 'Delete Permanently'/)
+  })
+
+  it('calls the EXISTING endpoint — no second deletion route', () => {
+    expect(src).toMatch(/fetch\(`\/api\/organizer\/events\/\$\{event\.draftId\}`, \{\s*method:\s*'DELETE'/)
+    // The draft-delete path is a different, pre-existing flow and must stay separate.
+    expect(src).not.toMatch(/eventDeletion|buildDeletionManifest/)
+  })
+
+  it('confirms through the SHARED dialog with the SHARED copy', () => {
+    expect(src).toMatch(/PERMANENT_DELETE_TITLE/)
+    expect(src).toMatch(/message:\s+PERMANENT_DELETE_DESCRIPTION/)
+    expect(src).toMatch(/tone:\s+'danger'/)
+  })
+
+  it('cancelling the confirmation deletes nothing', () => {
+    // `confirm()` resolves false on Cancel; the handler must return before any fetch.
+    const fn = src.slice(src.indexOf('async function handlePermanentDelete'), src.indexOf('// Event was returned by an admin'))
+    expect(fn).toMatch(/if \(!ok\) return/)
+    expect(fn.indexOf('if (!ok) return')).toBeLessThan(fn.indexOf('fetch('))
+  })
+
+  it('derives success from the payload, not the HTTP status alone', () => {
+    expect(src).toMatch(/if \(!res\.ok \|\| !json\.success\)/)
+  })
+
+  it('prevents duplicate submission', () => {
+    const fn = src.slice(src.indexOf('async function handlePermanentDelete'), src.indexOf('// Event was returned by an admin'))
+    expect(fn).toMatch(/if \(deleting\) return/)
+  })
+
+  it('uses the existing destructive token, not an arbitrary colour', () => {
+    expect(src).toMatch(/text-red-600 hover:bg-red-50/)
+  })
+
+  it('leaves Archive unavailable for an already-archived event', () => {
+    // Archive is rendered under !isReadOnly, and archived IS read-only — so it cannot show.
+    const menu = src.slice(src.indexOf('{menuOpen && ('), src.indexOf('{isDraft && onDelete && ('))
+    expect(menu).toMatch(/\{!isReadOnly && \([\s\S]*?Archive/)
+  })
+
+  it('keeps Edit / Duplicate / Manage behaviour unchanged', () => {
+    expect(src).toMatch(/isDraft \? 'Continue Setup' : 'Edit'/)
+    expect(src).toMatch(/<Copy className="size-3\.5" \/> Duplicate/)
+    expect(src).toMatch(/isReadOnly \? 'View' : isDraft \? 'Continue Setup' : 'Manage'/)
+  })
+})
+
+describe('both delete surfaces share one contract', () => {
+  const list   = readFileSync(resolve(process.cwd(), 'app/(dashboard)/dashboard/events/EventsClient.tsx'), 'utf8')
+  const detail = readFileSync(resolve(process.cwd(), 'app/(dashboard)/dashboard/events/[eventId]/EventActionsPanel.tsx'), 'utf8')
+
+  it('neither hard-codes the confirmation sentence', () => {
+    for (const [name, src] of [['list', list], ['detail', detail]] as const) {
+      expect(src, name).not.toContain('This permanently deletes the archived event and its')
+      expect(src, name).toMatch(/PERMANENT_DELETE_DESCRIPTION/)
+    }
+  })
+
+  it('both gate on archived only', () => {
+    for (const src of [list, detail]) expect(src).toMatch(/canDeleteForever = ls === 'archived'/)
+  })
+
+  it('both target the same endpoint', () => {
+    for (const src of [list, detail]) expect(src).toMatch(/\/api\/organizer\/events\/\$\{event\.draftId\}`, \{\s*method:\s*'DELETE'/)
   })
 })

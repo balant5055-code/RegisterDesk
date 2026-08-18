@@ -11,6 +11,7 @@ import type { EventDetailResponse } from '@/app/api/organizer/events/[eventId]/r
 import type { EventLifecycleStatus } from '@/types/events'
 import { useToast } from '@/components/ui/Toast'
 import { Dialog } from '@/components/ui/Dialog'
+import { PERMANENT_DELETE_TITLE, PERMANENT_DELETE_DESCRIPTION } from '@/lib/events/permanentDeleteCopy'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -693,9 +694,9 @@ export default function EventActionsPanel({ event, token, onSuccess, mode = 'fla
 
       {modal === 'delete_permanent' && (
         <ConfirmModal
-          title="Delete Permanently"
-          description="This permanently deletes the archived event and its event-specific operational data. This cannot be undone. Financial and audit records are retained."
-          confirmLabel="Delete Permanently"
+          title={PERMANENT_DELETE_TITLE}
+          description={PERMANENT_DELETE_DESCRIPTION}
+          confirmLabel={PERMANENT_DELETE_TITLE}
           confirmCls="bg-red-600 hover:bg-red-700"
           icon={Trash2}
           loading={loading}

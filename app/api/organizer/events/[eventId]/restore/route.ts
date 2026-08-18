@@ -9,7 +9,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { adminDb }                   from '@/lib/firebase/admin'
 import { authorizeWorkspace }        from '@/lib/team/workspace'
-import { applyLifecycleTransition, deriveLifecycleStatus } from '@/lib/events/lifecycle'
+import { applyLifecycleTransition, isArchivedEvent } from '@/lib/events/lifecycle'
 import type { StatusChangeResponse } from '@/types/events'
 
 export async function POST(
@@ -27,7 +27,7 @@ export async function POST(
   // would let a non-archived event through and mislabel the audit as a restore.)
   const draftSnap = await adminDb.doc(`users/${uid}/eventDrafts/${eventId}`).get()
   if (!draftSnap.exists) return NextResponse.json({ success: false, error: 'Event not found' }, { status: 404 })
-  if (deriveLifecycleStatus(draftSnap.data() as Record<string, unknown>) !== 'archived') {
+  if (!isArchivedEvent(draftSnap.data() as Record<string, unknown>)) {
     return NextResponse.json({ success: false, error: 'Only an archived event can be restored.' }, { status: 409 })
   }
 

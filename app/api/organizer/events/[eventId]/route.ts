@@ -7,7 +7,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { adminDb }                   from '@/lib/firebase/admin'
 import { getEventStats, sumConfirmedRevenueFromLedger } from '@/lib/firebase/firestore/registrationCounters'
 import { authorizeWorkspace }        from '@/lib/team/workspace'
-import { deriveLifecycleStatus }     from '@/lib/events/lifecycle'
+import { deriveLifecycleStatus, isArchivedEvent } from '@/lib/events/lifecycle'
 import { runEventDeletion }          from '@/lib/events/eventDeletion'
 import { getFreeEventCapacity }      from '@/lib/licensing/resolveCatalog'
 import type { EventLifecycleStatus } from '@/types/events'
@@ -264,7 +264,7 @@ export async function GET(
   const result: EventDetailResponse = {
     draftId:          draftSnap.id,
     status:           (d.status as 'draft' | 'published') ?? 'draft',
-    lifecycleStatus:  deriveLifecycleStatus(d),
+    lifecycleStatus:  isArchivedEvent(d) ? 'archived' : deriveLifecycleStatus(d),
     cancelReason:     str(d.cancelReason) ?? undefined,
     cancelledAt:      toIso(d.cancelledAt),
     name:             str(info.name)     ?? 'Untitled Event',
@@ -356,8 +356,11 @@ export async function DELETE(
   }
 
   const draft = draftSnap.data() as Record<string, unknown>
-  const lifecycle = deriveLifecycleStatus(draft)
-  if (lifecycle !== 'archived') {
+  // Same predicate as the restore guard and the list payload above. Using the bare
+  // derivation here would refuse a LEGACY archived event that the UI now correctly shows as
+  // archived — offering an action the server rejects. The rule is unchanged and no weaker:
+  // still archived-only, still server-side, still 409 for anything else.
+  if (!isArchivedEvent(draft)) {
     return NextResponse.json(
       { error: 'Only archived events can be permanently deleted. Archive this event first.' },
       { status: 409 },

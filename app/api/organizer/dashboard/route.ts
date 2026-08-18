@@ -9,7 +9,7 @@ import { AggregateField }            from 'firebase-admin/firestore'
 import { adminDb }                   from '@/lib/firebase/admin'
 import { authorizeAnyWorkspace }     from '@/lib/team/workspace'
 import { ensureOrganizerProfile }    from '@/lib/organizer/ensureProfile'
-import { deriveLifecycleStatus }     from '@/lib/events/lifecycle'
+import { deriveLifecycleStatus, isArchivedEvent } from '@/lib/events/lifecycle'
 import { getWalletBalance }          from '@/lib/firebase/firestore/wallet'
 import { getFreeEventCapacity }      from '@/lib/licensing/resolveCatalog'
 import type { OrganizerRevenueWallet } from '@/lib/fees/types'
@@ -319,7 +319,10 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   const recentRegsRaw = recentRegsSnap.docs.map(d => d.data() as RegistrationDocument)
 
   // ── Collect slugs + draft IDs for batch 2 ─────────────────────────────────
-  const publishedDrafts = drafts.filter(d => d.status === 'published')
+  // Also archive-guarded: an event archived before the current writer existed can still
+  // carry the legacy status 'published', which would put it back into the alerts, the
+  // Active-events KPI and the event-health list.
+  const publishedDrafts = drafts.filter(d => d.status === 'published' && !isArchivedEvent(d))
   // Certificate-template alerts are scoped to currently-published events.
   const draftIdList: string[] = publishedDrafts.map(d => d.id as string)
 
@@ -336,7 +339,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   // the activity feed. No card may filter events for itself — that is exactly how they
   // drifted apart before.
   //
-  //   ever published (has publishedAt)  AND  lifecycleStatus !== 'archived'
+  //   ever published (has publishedAt)  AND  NOT archived (isArchivedEvent)
   //
   // Statistics still span every event that was ever published — including ones since
   // cancelled or completed — so the totals describe the organizer's whole history rather
@@ -344,8 +347,12 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   // organizer saying "this is finished, take it off my books", so a retired test event must
   // not keep inflating registrations, revenue, or any breakdown. Excluded HERE, before any
   // aggregation runs — never hidden afterwards.
-  const dashboardDrafts = drafts.filter(d =>
-    d.publishedAt && deriveLifecycleStatus(d) !== 'archived')
+  // `isArchivedEvent`, NOT `deriveLifecycleStatus(d) !== 'archived'`. Archiving also stamps
+  // the legacy `status: 'draft'`, so a document written before `lifecycleStatus` existed
+  // derives as 'draft' and can never derive as 'archived' — it passed the old check while
+  // keeping its publishedAt, which is exactly how an archived event kept contributing
+  // registrations here. The shared predicate honours `archivedAt` as well.
+  const dashboardDrafts = drafts.filter(d => d.publishedAt && !isArchivedEvent(d))
   const slugList = Array.from(new Set(
     dashboardDrafts.map(slugOfDraft).filter((s): s is string => !!s),
   ))
@@ -597,7 +604,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
 
   const visibleStatuses = new Set(['published', 'registration_closed', 'completed'])
   const events: DashboardEvent[] = drafts
-    .filter(d => visibleStatuses.has(deriveLifecycleStatus(d)))
+    .filter(d => visibleStatuses.has(deriveLifecycleStatus(d)) && !isArchivedEvent(d))
     .map(d => {
       const details  = (d.eventDetails as Record<string, unknown>) ?? {}
       const info     = (details.info    as Record<string, unknown>) ?? {}

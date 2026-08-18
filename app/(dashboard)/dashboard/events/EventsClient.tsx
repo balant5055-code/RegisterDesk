@@ -14,6 +14,7 @@ import type { LucideIcon } from 'lucide-react'
 import { EmptyState, PageHeader, buttonVariants } from '@/components/ui'
 import { ErrorState } from '@/components/dashboard/EmptyState'
 import { useConfirm } from '@/components/ui/ConfirmDialog'
+import { PERMANENT_DELETE_TITLE, PERMANENT_DELETE_DESCRIPTION } from '@/lib/events/permanentDeleteCopy'
 import type { EventListItem, EventsListResponse } from '@/app/api/organizer/events/route'
 import type { EventLifecycleStatus } from '@/types/events'
 import type { EventListingTabKey } from '@/lib/events/listingTabs'
@@ -130,6 +131,11 @@ function EventCard({
   const GRADIENT       = 'bg-gradient-to-br from-[var(--primary-from)]/25 via-[var(--primary)]/15 to-transparent'
   const isReadOnly     = ls === 'archived' || ls === 'completed' || ls === 'cancelled'
   const isDraft        = ls === 'draft'
+  // ARCHIVED ONLY. `isReadOnly` is deliberately not reused here — it also covers `completed`
+  // and `cancelled`, which are read-only but NOT deletable. The server enforces the same
+  // archived-only rule independently and answers 409 otherwise, so this only avoids showing
+  // an action that would be refused.
+  const canDeleteForever = ls === 'archived'
 
   async function handleDelete() {
     if (!onDelete || deleting) return
@@ -141,6 +147,53 @@ function EventCard({
       await onDelete(event.draftId)
     } catch (e) {
       setDeleteErr(e instanceof Error ? e.message : 'Delete failed')
+      setDeleting(false)
+    }
+  }
+
+  /**
+   * Permanently deletes an ARCHIVED event, from the Archived tab's card menu.
+   *
+   * Calls the SAME endpoint the event detail page uses — there is one deletion route and one
+   * deletion service. Confirmation goes through the shared `useConfirm()` this card already
+   * uses for the draft delete, carrying the shared copy so the promise about retained
+   * financial records is identical on both surfaces.
+   *
+   * Success is read from `json.success`, never from `res.ok`: a partial deletion returns an
+   * explicit failure list, and trusting the status code is how a half-deleted event would
+   * look clean.
+   */
+  async function handlePermanentDelete() {
+    if (deleting) return
+    setMenuOpen(false)
+    const ok = await confirm({
+      title:        PERMANENT_DELETE_TITLE,
+      message:      PERMANENT_DELETE_DESCRIPTION,
+      confirmLabel: PERMANENT_DELETE_TITLE,
+      tone:         'danger',
+    })
+    if (!ok) return
+
+    setDeleteErr(null)
+    setDeleting(true)
+    try {
+      const u = auth.currentUser
+      if (!u) throw new Error('Not authenticated')
+      const token = await u.getIdToken()
+      const res  = await fetch(`/api/organizer/events/${event.draftId}`, {
+        method:  'DELETE',
+        headers: { authorization: `Bearer ${token}` },
+      })
+      const json = await res.json().catch(() => ({})) as {
+        success?: boolean; error?: string; failures?: string[]
+      }
+      if (!res.ok || !json.success) {
+        const extra = json.failures?.length ? ` (${json.failures.length} item(s) could not be removed)` : ''
+        throw new Error((json.error ?? 'Permanent deletion failed') + extra)
+      }
+      window.location.reload()   // the card is gone; re-read the list from the server
+    } catch (e) {
+      setDeleteErr(e instanceof Error ? e.message : 'Permanent deletion failed')
       setDeleting(false)
     }
   }
@@ -341,6 +394,22 @@ function EventCard({
                     {isDraft && event.hasPaidLicense ? 'Available Soon' : 'Go to Manage'}
                   </span>
                 </button>
+              )}
+              {/* Archived only. Separated by a rule and using the existing destructive
+                  token, so the one irreversible action never sits flush against Edit. */}
+              {canDeleteForever && (
+                <>
+                  <div className="my-1 border-t border-border/40" />
+                  <button
+                    type="button"
+                    onClick={handlePermanentDelete}
+                    disabled={deleting}
+                    className="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-left text-[14px] text-red-600 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    <Trash2 className="size-3.5" />
+                    {deleting ? 'Deleting…' : 'Delete Permanently'}
+                  </button>
+                </>
               )}
               {isDraft && onDelete && (
                 <>
