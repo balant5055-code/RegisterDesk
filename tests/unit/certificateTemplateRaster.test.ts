@@ -230,7 +230,7 @@ describe('Download is gated on resolved photo state', () => {
     // Boundary is the const declaration: `setPhotoBusy` is a useCallback now, so the old
     // `function setPhotoBusy` marker no longer exists and indexOf would return -1, silently
     // slicing to the end of the file.
-    const fn = src.slice(src.indexOf('async function refreshHasPhoto'), src.indexOf('const setPhotoBusy'))
+    const fn = src.slice(src.indexOf('const refreshHasPhoto'), src.indexOf('const setPhotoBusy'))
     expect(fn.length).toBeGreaterThan(0)
     expect(fn).toMatch(/readiness: 'resolving'/)
     expect(fn).toMatch(/readiness: 'ready'/)

@@ -32,6 +32,7 @@ interface JobDoc {
 }
 let job: JobDoc
 let failedIdsWriteShouldFail = false
+const absentKeys = new Set<string>()
 const uploads: Array<{ key: string; bytes: number; sha: string }> = []
 /** Shard uploads only — onComplete also uploads a manifest.json to the same bucket. */
 const shardUploads = () => uploads.filter(u => u.key.includes(`-part-`))
@@ -39,7 +40,14 @@ const shardUploads = () => uploads.filter(u => u.key.includes(`-part-`))
 const applyUpdate = (patch: Record<string, unknown>) => {
   for (const [k, v] of Object.entries(patch)) {
     if (k === 'counts.total') { job.counts.total = v as number; continue }
-    const val = v as { __arrayUnion?: unknown[] }
+    const val = v as { __arrayUnion?: unknown[]; __arrayRemove?: unknown[] }
+    if (val && typeof val === 'object' && '__arrayRemove' in val) {
+      const cur = (job as unknown as Record<string, unknown[]>)[k] ?? []
+      const drop = (val as { __arrayRemove: unknown[] }).__arrayRemove
+      ;(job as unknown as Record<string, unknown>)[k] =
+        cur.filter(e => !drop.some(d => JSON.stringify(d) === JSON.stringify(e)))
+      continue
+    }
     if (val && typeof val === 'object' && '__arrayUnion' in val) {
       const cur = (job as unknown as Record<string, unknown[]>)[k] ?? []
       const next = [...cur]
@@ -56,6 +64,7 @@ const applyUpdate = (patch: Record<string, unknown>) => {
 vi.mock('firebase-admin/firestore', () => ({
   FieldValue: {
     arrayUnion: (...els: unknown[]) => ({ __arrayUnion: els }),
+    arrayRemove: (...els: unknown[]) => ({ __arrayRemove: els }),
     serverTimestamp: () => 'TS',
     increment: (n: number) => ({ __inc: n }),
     delete: () => 'DEL',
@@ -118,6 +127,9 @@ vi.mock('@/features/platform-storage', async (importOriginal) => {
         const id = /(RDLT-[0-9A-Z]+)\.pdf$/.exec(key)?.[1] ?? ''
         return { body: new TextEncoder().encode(`%PDF-1.4 ${id}`), mimeType: 'application/pdf', size: 20 }
       },
+      // Models R2 honestly: an object exists only if it was actually uploaded. `absentKeys`
+      // lets a test delete one, which is how shard repair is exercised.
+      exists: async (key: string) => uploads.some(u => u.key === key) && !absentKeys.has(key),
       generateSignedUrl: async () => 'https://r2.test/signed',
       delete: async () => {},
     },
@@ -143,9 +155,25 @@ const CERTS = Array.from({ length: TOTAL }, (_, i) => {
     fileKey: `events/rd-loadtest-2026/certificates/${id}.pdf`, fileUrl: null, fileSize: 20,
   }
 })
+// RD-CERT-SCALE P2-1: `all`/`job` no longer read the collection — they page by document id.
+// This fake reproduces Firestore's contract exactly: order by __name__, startAfter(cursor),
+// limit(pageSize), and a nextCursor only when the page came back FULL.
+const reads = { pages: 0, docs: 0 }
+const idPage = (rows: typeof CERTS, cursor: string | null | undefined, pageSize: number) => {
+  const ordered = [...rows].sort((a, b) => a.certificateId.localeCompare(b.certificateId))
+  const from = cursor ? ordered.findIndex(c => c.certificateId === cursor) + 1 : 0
+  const slice = ordered.slice(from, from + pageSize)
+  reads.pages += 1; reads.docs += slice.length
+  return {
+    certificates: slice,
+    nextCursor: slice.length === pageSize ? slice[slice.length - 1].certificateId : null,
+  }
+}
 vi.mock('@/lib/certificates/firestore', () => ({
-  listJobCertificates:  async () => CERTS,
-  listEventCertificates: async () => CERTS,
+  listEventCertificatesByIdPage: async (_e: string, _o: string, opts: { pageSize: number; cursor?: string | null }) =>
+    idPage(CERTS, opts.cursor, opts.pageSize),
+  listJobCertificatesByIdPage: async (_e: string, _o: string, _j: string, opts: { pageSize: number; cursor?: string | null }) =>
+    idPage(CERTS, opts.cursor, opts.pageSize),
   getCertificatesByIds: async () => CERTS,
 }))
 
@@ -167,7 +195,7 @@ const idsInShard = (start: number) => {
   return CERTS.slice(from, to).map(c => c.certificateId)
 }
 
-beforeEach(() => { job = freshJob(); uploads.length = 0; failedIdsWriteShouldFail = false })
+beforeEach(() => { job = freshJob(); uploads.length = 0; absentKeys.clear(); failedIdsWriteShouldFail = false; reads.pages = 0; reads.docs = 0 })
 
 // Restore spies unconditionally. The suite's `clearMocks: true` clears CALLS between tests
 // but does not undo `vi.spyOn`, and a spy restored inside a test body is skipped when an
@@ -252,11 +280,17 @@ describe('B · completeness — nothing lost, nothing double-counted', () => {
 })
 
 describe('C · requested / progress reporting', () => {
-  it("scope:'job' reports the true requested count", async () => {
-    job = freshJob({ scope: 'job', counts: { total: 0, processed: 0, succeeded: 0, failed: 0 } })
+  // P2-1 changed WHERE the denominator comes from. It used to be re-derived here from a
+  // full read of the selection; that read is exactly what P2-1 removed. It is now the
+  // count() aggregate the enqueue route already computes (countJobCertificates /
+  // countEventCertificates), which also 404s a job whose total would be 0 — so a
+  // `total: 0` job cannot reach the runner at all.
+  it("scope:'job' trusts the enqueue-time aggregate and never re-derives it", async () => {
+    job = freshJob({ scope: 'job' })
     await processZipJobChunk(job.jobId)
-    expect(job.counts.total).toBe(TOTAL)            // reconciled, not left at 0
-    expect(job.selectionSize).toBe(TOTAL)
+    expect(job.counts.total).toBe(TOTAL)
+    // The proof it was not recomputed: reconciling would have cost a full-collection read.
+    expect(reads.docs).toBeLessThanOrEqual(TOTAL)
   })
 
   it('included equals the sum of successful shard counts', async () => {
@@ -279,15 +313,30 @@ describe('D · resume across a second /process call', () => {
   })
 
   it('a job resumed from a mid-selection cursor continues, never restarts', async () => {
-    job = freshJob({ cursor: String(ZIP_SHARD_MAX_FILES), selectionSize: TOTAL, status: 'processing', lockedUntil: null })
+    // The cursor is now `<lastDocId>|<offset>`: the id is the Firestore resume point, the
+    // offset remains the shard identity/storage key.
+    const resume = `${CERTS[ZIP_SHARD_MAX_FILES - 1].certificateId}|${ZIP_SHARD_MAX_FILES}`
+    // A resumed job carries the record of the part it already wrote, and that object really
+    // exists — otherwise the finalize seal would correctly refuse to complete a short export.
+    const priorKey = 'events/rd-loadtest-2026/reports/JOB-ZIP-1-part-000000.zip'
+    job = freshJob({
+      cursor: resume, selectionSize: TOTAL, status: 'processing', lockedUntil: null,
+      shards: [{ start: 0, key: priorKey, count: ZIP_SHARD_MAX_FILES, bytes: 1, fromId: null }],
+    })
+    uploads.push({ key: priorKey, bytes: 1, sha: 'prior' })
     await processZipJobChunk(job.jobId)
-    expect(job.shards.map(s => s.start)).toEqual([ZIP_SHARD_MAX_FILES])   // did not re-emit offset 0
+    expect(job.shards.map(s => s.start)).toEqual([0, ZIP_SHARD_MAX_FILES])  // did not re-emit offset 0
+    // ...and it covered the TAIL only: 600 - 500 = 100 remaining, not a fresh 500.
+    expect(job.shards.map(s => s.count)).toEqual([ZIP_SHARD_MAX_FILES, TOTAL - ZIP_SHARD_MAX_FILES])
   })
 })
 
 describe('E · selection stability (I6)', () => {
+  // I6 protects an OFFSET cursor, which after P2-1 only `selected` still uses. all/job
+  // resume on a document id, which does not shift when rows are added or removed near it —
+  // so the guard is deliberately not applied to them (see the E-scoped test below).
   it('fails loudly when the selection size changes under a resumed cursor', async () => {
-    job = freshJob({ cursor: '500', selectionSize: 999, status: 'processing' })
+    job = freshJob({ scope: 'selected', certificateIds: ['x'], cursor: '|500', selectionSize: 999, status: 'processing' })
     const r = await processZipJobChunk(job.jobId)
     expect(r.status).toBe('failed')
     expect(job.error).toMatch(/Selection changed during processing/)

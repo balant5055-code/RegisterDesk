@@ -176,3 +176,94 @@ describe('the card keeps correct effect dependencies', () => {
     expect(fn).not.toMatch(/setTimeout|requestAnimationFrame|useRef\(/)
   })
 })
+
+// ─── RD-CERT-PHOTO-STUCK · "Getting ready…" must always terminate ─────────────
+//
+// THE PRODUCTION DEFECT. A participant uploaded a photo, the API returned HTTP 200, and the
+// certificate action stayed on "Getting ready…" permanently.
+//
+// The upload sets the card busy → the parent marks readiness 'resolving'. When the upload
+// FINISHES the card reports busy=false — and `applyPhotoBusy(…, false)` computes
+// `next = entry.readiness`, which is always equal, so it returns `prev` UNCHANGED. Nothing in
+// the false branch could ever move readiness off 'resolving'. The only escape was the
+// attendee pressing "Continue", which is optional. A 200 therefore left the button dead.
+//
+// The reducer's no-op is correct and stays (it is what prevents the render loop). What was
+// missing is that a busy FALSE EDGE means "a write finished" and must re-resolve.
+
+describe('applyPhotoBusy still refuses to clear readiness — by design', () => {
+  const state = { A: { readiness: 'resolving' as const, grant: 'g' } }
+
+  it('busy=false is a no-op, which is exactly why the UI got stuck', () => {
+    // Documents the mechanism. The recovery belongs to the caller, not the reducer:
+    // clearing here would announce 'ready' before hasPhoto was re-read.
+    expect(applyPhotoBusy(state, 'A', false)).toBe(state)
+  })
+
+  it('busy=true still marks resolving exactly once', () => {
+    const idle = { A: { readiness: 'ready' as const, grant: 'g' } }
+    const next = applyPhotoBusy(idle, 'A', true)
+    expect(next.A.readiness).toBe('resolving')
+    expect(applyPhotoBusy(next, 'A', true)).toBe(next)   // no render storm
+  })
+})
+
+describe('the busy FALSE EDGE re-resolves, so the button always recovers', () => {
+  const src = readFileSync(resolve(process.cwd(), 'app/events/[slug]/certificates/CertificateCenterClient.tsx'), 'utf8')
+
+  it('a finished write triggers exactly one re-resolve', () => {
+    expect(src).toMatch(/if \(!writing\.current\.delete\(r\.certificateId\)\) return/)
+    expect(src).toMatch(/void refreshHasPhoto\(r\.certificateId\)/)
+  })
+
+  it('a card merely MOUNTING does not fire a request', () => {
+    // Mount reports busy=false too. Without the `writing` guard that would be one extra
+    // photo GET per card on every page load — the request multiplication in the report.
+    expect(src).toMatch(/writing\.current\.add\(r\.certificateId\)/)
+  })
+
+  it('readiness settles even when the read throws — no path leaves it resolving', () => {
+    const fn = src.slice(src.indexOf('const refreshHasPhoto'), src.indexOf('const setPhotoBusy'))
+    expect(fn).toMatch(/finally \{/)
+    expect(fn).toMatch(/readiness: 'ready'/)
+  })
+
+  it('a missing grant settles instead of hanging', () => {
+    const fn = src.slice(src.indexOf('const refreshHasPhoto'), src.indexOf('const setPhotoBusy'))
+    expect(fn).toMatch(/if \(!grant\)/)
+    expect(fn).toMatch(/readiness: 'ready'/)
+  })
+
+  it('the handler map stays identity-stable — the render loop does not return', () => {
+    expect(src).toMatch(/\}, \[results, setPhotoBusy, refreshHasPhoto\]\)/)
+    expect(src).toMatch(/const setPhotoBusy = useCallback\(/)
+    // Reading the live grant through a ref is what keeps `photo` out of the dep array.
+    expect(src).toMatch(/photoRef\.current\[certificateId\]\?\.grant/)
+  })
+
+  it('Continue still works and still passes its grant explicitly', () => {
+    expect(src).toMatch(/onContinue=\{\(\) => \{ void refreshHasPhoto\(r\.certificateId, p\.grant\) \}\}/)
+  })
+
+  it('no polling or retry loop was introduced', () => {
+    // NOT "no timers": a pre-existing setTimeout revokes a download object URL after 60s,
+    // which is cleanup, not polling. What must be absent is anything that repeats.
+    expect(src.includes(String.fromCharCode(115,101,116,73,110,116,101,114,118,97,108))).toBe(false)
+    expect(src.indexOf("refreshHasPhoto") > -1).toBe(true)
+  })
+
+  it('the fix adds no synchronous generation on the public path', () => {
+    const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+    expect(code).not.toMatch(/generateCertificate|renderCertificateOnDemand|regenerate/)
+  })
+})
+
+describe('the existing certificate is never silently rewritten', () => {
+  it('the client only READS photo state; it never asks for a new artifact', () => {
+    const src = readFileSync(resolve(process.cwd(), 'app/events/[slug]/certificates/CertificateCenterClient.tsx'), 'utf8')
+      .replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+    // Download simply switches WHICH url is used; it does not mutate the stored artifact.
+    expect(src).toMatch(/p\?\.hasPhoto/)
+    expect(src).not.toMatch(/method:\s*'PUT'|regenerate\(/)
+  })
+})

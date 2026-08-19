@@ -5,6 +5,7 @@ import { Upload, PenSquare, Award, QrCode } from 'lucide-react'
 import { Spinner, ErrorBox, StatCard, btnGhost } from './ui'
 import type { CertApi, HubTab } from './api'
 import { CertificateQrDialog } from './CertificateQrDialog'
+import ExportZipPanel from './ExportZipPanel'
 
 /** Public origin for the QR. Literal read so Next inlines it into the client bundle;
  *  falls back to the current origin in dev if the variable is unset. */
@@ -69,6 +70,10 @@ export default function OverviewPanel({ api, onNav, eventSlug }: {
           )}
         </div>
       </div>
+
+      {/* Bulk export lives beside the quick actions because it IS one — it just has a
+          result worth showing (several parts) rather than a single file to hand back. */}
+      <ExportZipPanel api={api} />
 
       {eventSlug && (
         <CertificateQrDialog

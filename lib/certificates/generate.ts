@@ -447,7 +447,13 @@ export async function generateCertificate(
     }).catch(() => {})
 
     // Template usage analytics (GA-6 S5) — fire-and-forget, counts one generation.
-    void recordTemplateUsage(template.templateId)
+    //
+    // RD-CERT-SCALE P2-4: the BULK path is excluded here and records once per completed job
+    // instead (lib/certificates/jobs.ts onComplete). `usageCount` is ONE Firestore document
+    // per template, and Firestore sustains ~1 write/s to a single doc — at concurrency 6 a
+    // 10k run turned this fire-and-forget line into 10,000 contended writes on one hot
+    // document. Manual/single issuance is unchanged: one certificate, one write.
+    if (source !== 'bulk') void recordTemplateUsage(template.templateId)
 
     // CRM certificate activity (fire-and-forget, idempotent).
     crmRecordCertificate({

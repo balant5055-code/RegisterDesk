@@ -14,6 +14,8 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { NextRequest } from 'next/server'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 
 const CERT_ID = 'RDC-2026-Z6HQC9'
 const SLUG    = 'noyyal-marathon-2026'
@@ -198,5 +200,139 @@ describe('every gate the artifact endpoint applies is applied here', () => {
     )
     expect(res.status).toBe(403)
     expect(renderCalls).toHaveLength(0)
+  })
+})
+
+// ─── RD-CERT-PERSONALIZED-CACHE (P1) ─────────────────────────────────────────
+//
+// THE DEFECT. `/file/personalized` called `renderCertificateOnDemand` on EVERY request, with
+// `Cache-Control: no-store`. Cost scaled with DOWNLOADS, not with certificates: one attendee
+// refreshing ten times cost ten pdf-lib renders (~155 ms CPU each). On a public endpoint at
+// 10k attendees that is live-event CPU contention.
+//
+// The personalised PDF is now persisted under a key derived from the certificate AND the
+// photo it embeds, and served through the ordinary signed-URL mechanism. The photo key is the
+// version token, which makes invalidation and concurrency fall out of the key itself.
+
+const PERSONALIZED = 'app/api/certificates/[certificateId]/file/personalized/route.ts'
+const psrc = readFileSync(resolve(process.cwd(), PERSONALIZED), 'utf8')
+const pcode = psrc.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+
+describe('the personalized artifact is rendered at most once per photo version', () => {
+  it('probes for an existing artifact BEFORE rendering', () => {
+    const probe  = pcode.indexOf('storage.exists(artifactKey)')
+    const render = pcode.indexOf('renderCertificateOnDemand(')
+    expect(probe).toBeGreaterThan(-1)
+    expect(render).toBeGreaterThan(-1)
+    expect(probe).toBeLessThan(render)
+  })
+
+  it('renders ONLY when the artifact is absent', () => {
+    // The whole fix: the render is inside `if (!cached)`. Without that guard every request
+    // renders again, which is the defect.
+    const guard = pcode.indexOf('if (!cached) {')
+    expect(guard).toBeGreaterThan(-1)
+    expect(guard).toBeLessThan(pcode.indexOf('renderCertificateOnDemand('))
+  })
+
+  it('persists the rendered bytes so the next request can reuse them', () => {
+    expect(pcode).toMatch(/await storage\.upload\(\{/)
+    expect(pcode).toMatch(/body:\s+rendered\.bytes/)
+  })
+
+  it('serves through the signed-URL mechanism, not by streaming bytes on the happy path', () => {
+    expect(pcode).toMatch(/storage\.generateSignedUrl\(\{/)
+    expect(pcode).toMatch(/path:\s+artifactKey/)
+    expect(pcode).toMatch(/NextResponse\.redirect\(url/)
+  })
+
+  it('a storage probe fault falls through to rendering, never to a wrong answer', () => {
+    // `exists` throws on a credential/bucket problem. Treating that as "absent" is correct
+    // (render once more); treating it as "present" would serve a 404 signed URL.
+    const fn = pcode.slice(pcode.indexOf('let cached = false'), pcode.indexOf('if (!cached) {'))
+    expect(fn).toMatch(/catch/)
+    expect(fn).not.toMatch(/cached = true/)
+  })
+
+  it('a persist failure still delivers the certificate', () => {
+    expect(pcode).toMatch(/certificate_personalized_persist/)
+  })
+})
+
+describe('the cache key is derived from the certificate AND the photo', () => {
+  it('includes attendeePhotoKey — this is the invalidation strategy', () => {
+    expect(pcode).toMatch(/function personalizedArtifactKey\(eventSlug: string, certificateId: string, attendeePhotoKey: string\)/)
+    expect(pcode).toMatch(/createHash\('sha256'\)\.update\(attendeePhotoKey\)/)
+  })
+
+  it('is built with the shared key builder under the event prefix', () => {
+    // So permanent event deletion's existing prefix sweep reclaims these objects too.
+    expect(pcode).toMatch(/buildObjectKey\(\{/)
+    expect(pcode).toMatch(/type:\s+'event-certificate'/)
+    expect(pcode).toMatch(/scopeId:\s+'personalized'/)
+  })
+
+  it('does not leak the raw photo object path into the key', () => {
+    expect(pcode).toMatch(/digest\('hex'\)\.slice\(0, 16\)/)
+  })
+
+  it('is called with the photo key from the RECORD, never from the request', () => {
+    expect(pcode).toMatch(/personalizedArtifactKey\(cert\.eventSlug, certificateId, cert\.attendeePhotoKey\)/)
+  })
+})
+
+describe('the canonical artifact is untouched', () => {
+  it('the personalized path never writes fileKey', () => {
+    expect(pcode).not.toMatch(/fileKey\s*[:=]/)
+    expect(pcode).not.toMatch(/setCertificateArtifact/)
+  })
+
+  it('artifact.ts still refuses to store a personalised render as the canonical one', () => {
+    const a = readFileSync(resolve(process.cwd(), 'lib/certificates/artifact.ts'), 'utf8')
+    expect(a).toMatch(/WHAT IS \*NOT\* PERSISTED/)
+    expect(a).toMatch(/certificateObjectKey/)
+    // The canonical builder must not have grown a personalized branch.
+    expect(a).not.toMatch(/personalized/i)
+  })
+
+  it('the base /file route still signs the canonical artifact with no render', () => {
+    const f = readFileSync(resolve(process.cwd(), 'app/api/certificates/[certificateId]/file/route.ts'), 'utf8')
+    expect(f).toMatch(/signCertificateArtifact\(cert\.fileKey/)
+    expect(f).not.toMatch(/renderCertificateOnDemand/)
+  })
+})
+
+describe('gates and fast paths are unchanged', () => {
+  it('rate limit, auth, and download settings all run BEFORE any artifact access', () => {
+    const rl    = pcode.indexOf('checkPolicy(getClientIp(req)')
+    const auth  = pcode.indexOf('verifyIdToken')
+    const gates = pcode.indexOf('download.enabled')
+    const key   = pcode.indexOf('personalizedArtifactKey(cert.eventSlug')
+    for (const [name, i] of [['rateLimit', rl], ['auth', auth], ['gates', gates]] as const) {
+      expect(i, name).toBeGreaterThan(-1)
+      expect(i, name).toBeLessThan(key)
+    }
+  })
+
+  it('verification still accepts capability OR permanent token, timing-safe', () => {
+    expect(pcode).toMatch(/looksLikeDownloadCapability/)
+    expect(pcode).toMatch(/timingSafeEqualStr\(token, cert\.verificationToken\)/)
+  })
+
+  it('a certificate with NO photo still takes the plain /file redirect', () => {
+    expect(pcode).toMatch(/if \(!cert\.attendeePhotoKey\) return toStoredArtifact\(req, certificateId\)/)
+  })
+
+  it('no bulk or synchronous mass generation was introduced', () => {
+    expect(pcode).not.toMatch(/generateCertificate\(|createJob|listEventCertificates|Promise\.all/)
+  })
+
+  it('lookup remains read-only — no generation on search', () => {
+    const lookup = readFileSync(resolve(process.cwd(), 'app/api/events/[slug]/certificates/lookup/route.ts'), 'utf8')
+    expect(lookup).not.toMatch(/renderCertificateOnDemand|generateCertificate\(/)
+  })
+
+  it('the job/claim kernel was not touched by this change', () => {
+    expect(pcode).not.toMatch(/reserveCertificateId|leaseJob|commitChunk|processJobChunk/)
   })
 })

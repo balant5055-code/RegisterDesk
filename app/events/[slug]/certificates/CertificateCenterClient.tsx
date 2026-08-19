@@ -324,15 +324,45 @@ export function CertificateCenterClient({ slug, eventName }: { slug: string; eve
   /** Re-reads the stored photo after the attendee says they are done with the card. This is
    *  what moves the download button onto the personalized URL (and back off it after a
    *  removal). Download stays disabled for the whole round trip. */
-  async function refreshHasPhoto(certificateId: string, grant: string) {
+  /** Mirrors `photo` so the stable callbacks below can read the CURRENT grant without
+   *  taking `photo` as a dependency — which would churn their identity on every render and
+   *  re-fire the card's effect (the render loop fixed in RD-CERT-PHOTO-BUSY). */
+  const photoRef = useRef<Record<string, PhotoState>>({})
+  useEffect(() => { photoRef.current = photo }, [photo])
+
+  /** Certificates whose card has reported an IN-FLIGHT write. A busy=false report only means
+   *  "finished" if we saw the matching busy=true — otherwise it is just the card mounting,
+   *  and re-resolving there would fire a duplicate request per card at page load. */
+  const writing = useRef<Set<string>>(new Set())
+
+  // useCallback so the memoised busy handlers can DECLARE it as a dependency without their
+  // identity churning every render — declaring a dep that is rebuilt each render would
+  // re-fire the card's effect and resurrect the render loop. It closes over `slug` plus two
+  // stable references (the ref and the setter), so [slug] is genuinely exhaustive.
+  const refreshHasPhoto = useCallback(async (certificateId: string, grantArg?: string) => {
+    const grant = grantArg ?? photoRef.current[certificateId]?.grant
+    if (!grant) {
+      // No credential ⇒ we can never resolve. Settle rather than leave the button stuck.
+      setPhoto(prev => (prev[certificateId]
+        ? { ...prev, [certificateId]: { ...prev[certificateId], readiness: 'ready' } }
+        : prev))
+      return
+    }
     setPhoto(prev => (prev[certificateId]
       ? { ...prev, [certificateId]: { ...prev[certificateId], readiness: 'resolving' } }
       : prev))
-    const has = await readHasPhoto(slug, certificateId, grant)
-    setPhoto(prev => (prev[certificateId]
-      ? { ...prev, [certificateId]: { ...prev[certificateId], hasPhoto: has, readiness: 'ready' } }
-      : prev))
-  }
+    // Settled in `finally` so the guarantee is STRUCTURAL: there is no path out of this
+    // function that leaves the button on "Getting ready…". readHasPhoto already swallows its
+    // own errors, but relying on that would make the guarantee accidental rather than certain.
+    let has = false
+    try {
+      has = await readHasPhoto(slug, certificateId, grant)
+    } finally {
+      setPhoto(prev => (prev[certificateId]
+        ? { ...prev, [certificateId]: { ...prev[certificateId], hasPhoto: has, readiness: 'ready' } }
+        : prev))
+    }
+  }, [slug])
 
   /**
    * The card reports upload/remove activity so the download target cannot be used while the
@@ -362,10 +392,26 @@ export function CertificateCenterClient({ slug, eventName }: { slug: string; eve
   const busyHandlers = useMemo(() => {
     const m = new Map<string, (busy: boolean) => void>()
     for (const r of results ?? []) {
-      m.set(r.certificateId, (busy: boolean) => setPhotoBusy(r.certificateId, busy))
+      m.set(r.certificateId, (busy: boolean) => {
+        if (busy) {
+          writing.current.add(r.certificateId)
+          setPhotoBusy(r.certificateId, true)
+          return
+        }
+        // THE STUCK STATE. `applyPhotoBusy(…, false)` deliberately leaves `readiness`
+        // untouched, so nothing here could ever move it off 'resolving' — the button read
+        // "Getting ready…" forever once an upload finished, even on HTTP 200. Recovery used
+        // to depend entirely on the attendee pressing "Continue".
+        //
+        // A write has finished, and the stored photo may have changed, so the download target
+        // has to be re-read exactly once. Guarded by `writing` so a card merely mounting
+        // (which also reports busy=false) does not fire a duplicate request.
+        if (!writing.current.delete(r.certificateId)) return
+        void refreshHasPhoto(r.certificateId)
+      })
     }
     return m
-  }, [results, setPhotoBusy])
+  }, [results, setPhotoBusy, refreshHasPhoto])
 
   const count = results?.length ?? 0
 

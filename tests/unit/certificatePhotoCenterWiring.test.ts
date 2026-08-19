@@ -255,9 +255,21 @@ describe('the personalized endpoint is a second door to the same room', () => {
     expect(src).not.toMatch(/verifyCertificatePhotoGrant/)
   })
 
-  it('persists nothing — no upload, no certificate write', () => {
+  it('writes NO certificate field — the canonical artifact is untouched', () => {
+    // Superseded by RD-CERT-PERSONALIZED-CACHE: the route now persists a SEPARATE
+    // personalised artifact under its own key, so "no upload" is no longer the contract.
+    // What must still hold — and is the reason artifact.ts refuses to store a personalised
+    // render as the canonical one — is that no certificate DOCUMENT field changes here.
     expect(src).not.toMatch(/uploadCertificateArtifact|regenerateCertificate|recordCertificateRegeneration/)
-    expect(src).not.toMatch(/storage\.upload|\.set\(|\.update\(/)
+    expect(src).not.toMatch(/setCertificateArtifact|fileKey\s*[:=]/)
+    // Precise: the route touches no Firestore handle at all. (A naive /.update(/ here
+    // matched createHash().update() — a crypto call, not a document write.)
+    expect(src).not.toMatch(/adminDb/)
+  })
+
+  it('persists ONLY to the personalized key, never the canonical one', () => {
+    expect(src).toMatch(/scopeId:\s+'personalized'/)
+    expect(src).not.toMatch(/certificateObjectKey/)
   })
 
   it('falls back to the ONE existing artifact implementation instead of restating it', () => {
@@ -395,7 +407,7 @@ describe('View and Download are independent actions', () => {
     // Bounded by the NEXT function, not by a comment — `code()` strips comments, so a
     // comment marker would slice to -1 and silently test the wrong region.
     const from = src.indexOf('async function shareCertificate')
-    const to   = src.indexOf('async function refreshHasPhoto')
+    const to   = src.indexOf('const refreshHasPhoto')
     expect(from).toBeGreaterThan(-1)
     expect(to).toBeGreaterThan(from)
     const share = src.slice(from, to)

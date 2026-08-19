@@ -17,6 +17,45 @@ import type {
   CertificateType, TemplateType, CertificateJobScope, RevocationReason, CertificateDeliveryScope,
 } from '@/lib/certificates/types'
 
+export type ZipScope = 'all' | 'job' | 'selected'
+
+export interface ZipJobCreateResponse {
+  jobId: string; status: string; scope: ZipScope; total: number
+}
+
+/**
+ * One part of a multipart export. `part` is a presentation ordinal derived from shard order;
+ * `url` is a short-lived signed URL minted per poll, never stored.
+ */
+export interface ZipPart {
+  part: number; count: number; bytes: number; url: string
+}
+
+/**
+ * READ `outcome`, NOT `status`, to decide whether an export is whole.
+ *
+ * `status: 'completed'` only means the job stopped running. `outcome` is written by the
+ * finalize seal, which refuses to pass a short or duplicated archive:
+ *   complete   — every requested certificate is inside a verified part
+ *   partial    — the archive is short by exactly `failedCount` certificates
+ *   unverified — a job from before multipart verification existed
+ */
+export interface ZipJobResponse {
+  jobId: string
+  status: 'pending' | 'processing' | 'completed' | 'failed' | 'cancelled'
+  scope: ZipScope
+  counts: { total: number; processed: number; succeeded: number; failed: number }
+  requested: number
+  included: number
+  outcome: 'complete' | 'partial' | 'unverified' | null
+  failedCount: number
+  failedIds: string[]
+  partCount: number
+  parts: ZipPart[]
+  manifestUrl: string | null
+  error: string | null
+}
+
 export type HubTab = 'overview' | 'settings' | 'templates' | 'programs' | 'brandkit' | 'issue' | 'recipients'
 
 /**
@@ -200,6 +239,21 @@ export function makeCertApi(eventId: string, token: string) {
     listJobs: () => fetch(`${B}/jobs`, { headers: auth }).then(jsonOrThrow<JobsListResponse>),
     processJob: (jobId: string) =>
       fetch(`${B}/jobs/${jobId}/process`, { method: 'POST', headers: auth }).then(jsonOrThrow<JobProcessResponse>),
+    // ── Bulk ZIP export (RD-CERT-ARTIFACT-01 enqueue + poll, RD-CERT-SCALE P2-2 multipart) ──
+    // These wrap the EXISTING endpoints; the export mechanism is the sharded job, not a
+    // second download path. `processZipJob` exists so the organizer's open tab drives the
+    // job immediately instead of waiting for the cron that would otherwise pick it up.
+    createZipJob: (scope: ZipScope, body?: { certificateIds?: string[]; jobId?: string }) =>
+      fetch(`${B}/download`, {
+        method: 'POST', headers: { ...auth, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ scope, ...body }),
+      }).then(jsonOrThrow<ZipJobCreateResponse>),
+    getZipJob: (jobId: string) =>
+      fetch(`${B}/zip-jobs/${jobId}`, { headers: auth }).then(jsonOrThrow<ZipJobResponse>),
+    processZipJob: (jobId: string) =>
+      fetch(`${B}/zip-jobs/${jobId}/process`, { method: 'POST', headers: auth })
+        .then(jsonOrThrow<{ status: string }>),
+
     cancelJob: (jobId: string) =>
       fetch(`${B}/jobs/${jobId}/cancel`, { method: 'POST', headers: auth }).then(jsonOrThrow<{ status: string }>),
 

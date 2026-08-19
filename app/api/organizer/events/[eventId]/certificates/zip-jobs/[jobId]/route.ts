@@ -30,6 +30,12 @@ export async function GET(req: NextRequest, { params }: Params): Promise<NextRes
   }
 
   const included = (job.shards ?? []).reduce((n, s) => n + s.count, 0)
+  // Exact, and never the truncated sample: `failedIds` on the document stops growing at
+  // ZIP_FAILED_SAMPLE_MAX so it stays writable at 50k, while `failedCount` keeps counting.
+  const failedCount = job.failedCount ?? (job.failedIds ?? []).length
+  // Set by the finalize seal, which is the only path to status 'completed'. A completed job
+  // without it predates multipart verification and is reported as such rather than as whole.
+  const outcome = job.outcome ?? (job.status === 'completed' ? 'unverified' : null)
 
   // Signed URLs are minted ONLY here, after the ownership check above, and only for a
   // finished job — never stored on the document, because they expire.
@@ -58,7 +64,14 @@ export async function GET(req: NextRequest, { params }: Params): Promise<NextRes
     counts:    job.counts,
     requested: job.counts?.total ?? 0,
     included,
-    failedIds: job.failedIds ?? [],
+      // 'complete' | 'partial' | 'unverified' | null. A caller must read THIS, not `status`,
+      // to decide whether the export is whole: 'completed' only means the job stopped running.
+      outcome,
+      // Exact, unlike `failedIds`, which is a bounded display sample so the document stays
+      // writable at 50k. The complete per-part lists are in the manifest.
+      failedCount,
+      failedIds: job.failedIds ?? [],
+      partCount: (job.shards ?? []).length,
     parts,
     manifestUrl: job.manifestKey
       ? await storage.generateSignedUrl({ path: job.manifestKey, operation: 'read', expiresIn: ARTIFACT_SIGNED_URL_TTL_S })
