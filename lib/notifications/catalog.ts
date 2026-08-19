@@ -89,6 +89,18 @@ export const NotificationType = {
   WAITLIST_SPOT_AVAILABLE:  'WAITLIST_SPOT_AVAILABLE',
   CERTIFICATE_READY:        'CERTIFICATE_READY',
 
+  // RD-WA-BROADCAST-02 — the SUCCESSOR registration-confirmation template, held
+  // deliberately DORMANT while Meta reviews it. It exists so the future migration is a
+  // one-line switch rather than a fresh catalog addition; nothing dispatches it today,
+  // and REGISTRATION_CONFIRMATION above remains the live path.
+  REGISTRATION_CONFIRMATION_V2: 'REGISTRATION_CONFIRMATION_V2',
+
+  // Organizer → attendee OPERATIONAL broadcasts (RD-WA-BROADCAST-02). WhatsApp-only:
+  // they exist to give the broadcast composer an approved-template contract, and have
+  // no email counterpart — see the payload note below.
+  KIT_COLLECTION:           'KIT_COLLECTION',
+  EVENT_LOCATION:           'EVENT_LOCATION',
+
   // Donations (organizer → donor)
   DONATION_RECEIPT:         'DONATION_RECEIPT',
   DONATION_80G_RECEIPT:     'DONATION_80G_RECEIPT',
@@ -116,6 +128,35 @@ export const NotificationType = {
 export type NotificationType =
   typeof NotificationType[keyof typeof NotificationType]
 
+// ─── WhatsApp-only broadcast payloads (RD-WA-BROADCAST-02) ───────────────────
+//
+// Declared locally rather than in lib/email/provider: every params interface in that
+// module is paired with a `sendXEmail()` method on the provider contract, so adding
+// these there would assert an email transport that does not exist. They are reached
+// only through the WhatsApp template registry, which maps them to positional Meta
+// template variables — the field NAMES below must match that registry's
+// `requiredVariables`, which is what the broadcast composer renders inputs from.
+
+/** Where and when an attendee collects their kit / race t-shirt. */
+export interface KitCollectionParams {
+  attendeeName:       string
+  eventName:          string
+  collectionDate:     string
+  collectionTime:     string
+  collectionLocation: string
+  mapsUrl:            string
+}
+
+/** Venue and timing for the event itself. */
+export interface EventLocationParams {
+  attendeeName: string
+  eventName:    string
+  eventDate:    string
+  eventTime:    string
+  venue:        string
+  mapsUrl:      string
+}
+
 // Binds each notification type to its payload shape. Keys MUST equal the
 // NotificationType values (asserted at the bottom of this file).
 export type NotificationPayloadMap = {
@@ -139,6 +180,9 @@ export type NotificationPayloadMap = {
   WAITLIST_JOINED:           WaitlistJoinedEmailParams
   WAITLIST_SPOT_AVAILABLE:   SpotAvailableEmailParams
   CERTIFICATE_READY:         CertificateEmailParams
+  REGISTRATION_CONFIRMATION_V2: RegistrationEmailParams
+  KIT_COLLECTION:            KitCollectionParams
+  EVENT_LOCATION:            EventLocationParams
 
   DONATION_RECEIPT:          DonationReceiptEmailParams
   DONATION_80G_RECEIPT:      Donation80GEmailParams
@@ -192,6 +236,9 @@ export const NOTIFICATION_META: Record<NotificationType, NotificationMeta> = {
   WAITLIST_JOINED:           ATTENDEE(),
   WAITLIST_SPOT_AVAILABLE:   ATTENDEE(),
   CERTIFICATE_READY:         ATTENDEE(),
+  REGISTRATION_CONFIRMATION_V2: ATTENDEE(),
+  KIT_COLLECTION:            ATTENDEE(),
+  EVENT_LOCATION:            ATTENDEE(),
   DONATION_RECEIPT:          ATTENDEE(),
   DONATION_80G_RECEIPT:      ATTENDEE(),
   APPLICATION_RECEIVED:      PLATFORM(),

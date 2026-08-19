@@ -20,6 +20,7 @@ import { getMetaProvider, resolveWhatsAppTemplate } from '@/lib/whatsapp'
 import { NotificationType } from '@/lib/notifications'
 import { writeEmailLog } from '@/lib/email-logs/write'
 import { validatePhoneNumber } from '@/lib/communication/phone'
+import { getEmailAppUrl } from '@/lib/email/appUrl'
 import { captureError } from '@/lib/monitoring/sentry'
 import type { OrganizerWallet } from '@/types/events'
 import type { RegistrationDocument } from '@/lib/registrations/types'
@@ -102,10 +103,15 @@ export async function sendCertificateWhatsApp(args: CertificateWhatsAppArgs): Pr
       if (balance < costPaise) return   // insufficient — skip silently (cert already issued)
     }
 
+    // RD-WA-BROADCAST-02 — the template now carries the attendee's route to their
+    // certificate. Built from the SAME helper and shape the broadcast job uses, so a
+    // transactional 'certificate ready' and a bulk one link to the identical place.
+    const certificateUrl = `${getEmailAppUrl()}/events/${args.eventSlug}/certificates`
+
     const resolved = resolveWhatsAppTemplate(
       NotificationType.CERTIFICATE_READY,
       normalizedPhone,
-      { attendeeName: args.attendeeName, eventName: args.eventName },
+      { attendeeName: args.attendeeName, eventName: args.eventName, certificateUrl },
     )
     if (!resolved.ok) return
 

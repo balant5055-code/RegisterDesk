@@ -16,6 +16,7 @@ import { logBroadcastAction }          from '@/lib/broadcasts/audit'
 import { requireLimit }                from '@/lib/licensing/workspaceEntitlements'
 import { getFeatureFlags }             from '@/lib/config/resolveFeatureFlags'
 import { hasWhatsAppTemplate, getWhatsAppTemplate } from '@/lib/whatsapp'
+import { isSendableMetaStatus } from '@/lib/whatsapp/registry'
 import { getCommunicationConfig }      from '@/lib/communications/resolveCommunicationConfig'
 
 const AUDIENCES: BroadcastAudience[] = ['all', 'confirmed', 'pending', 'rejected', 'cancelled']
@@ -153,6 +154,18 @@ export async function POST(req: NextRequest): Promise<NextResponse<PostBroadcast
       return NextResponse.json({ success: false, error: 'Select an approved WhatsApp template.' }, { status: 400 })
     }
     const def = getWhatsAppTemplate(templateType)
+    // Refuse a template Meta cannot deliver HERE, before chargeAndStartCampaign runs.
+    // The resolver would refuse it later anyway, but by then the campaign is created and
+    // billed upfront for the whole audience — the organizer would pay for a send that
+    // fails on every recipient. The UI hides these too; this is the boundary that counts.
+    if (!isSendableMetaStatus(def.metaStatus)) {
+      return NextResponse.json(
+        { success: false, error: def.metaStatus === 'rejected'
+          ? 'This WhatsApp template was rejected by Meta and cannot be used.'
+          : 'This WhatsApp template is still awaiting Meta approval.' },
+        { status: 422 },
+      )
+    }
     if (typeof languageCode === 'string' && languageCode) {
       if (!def.languages.includes(languageCode)) {
         return NextResponse.json({ success: false, error: `Language "${languageCode}" is not available for this template.` }, { status: 400 })
@@ -168,7 +181,11 @@ export async function POST(req: NextRequest): Promise<NextResponse<PostBroadcast
     // per recipient (attendeeName/eventName/ticketCode) or provided as a non-blank
     // static variable. Otherwise the resolver fails EVERY recipient at send time while
     // the campaign is still charged upfront (M4). Reject at create instead.
-    const PER_RECIPIENT_VARS = new Set(['attendeeName', 'eventName', 'ticketCode'])
+    // Variables the SERVER fills at send time, so the organizer is never asked for them.
+    // `certificateUrl` is derived per campaign from the event slug (see whatsappJob.ts);
+    // listing it here is what stops this gate demanding a static value for a variable the
+    // composer deliberately does not offer an input for.
+    const PER_RECIPIENT_VARS = new Set(['attendeeName', 'eventName', 'ticketCode', 'certificateUrl'])
     const unsatisfiable = def.requiredVariables.filter(k =>
       !PER_RECIPIENT_VARS.has(k) && !(typeof waVariables[k] === 'string' && waVariables[k].trim() !== ''))
     if (unsatisfiable.length) {

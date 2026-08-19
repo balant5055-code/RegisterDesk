@@ -10,7 +10,7 @@ import {
 } from '@/lib/broadcasts/types'
 import type { BroadcastAudience, BroadcastCampaign, BroadcastStatus } from '@/lib/broadcasts/types'
 import { TEMPLATE_VARIABLES, SAMPLE_VARS, substituteVariables } from '@/lib/email-templates/types'
-import { WHATSAPP_TEMPLATE_REGISTRY } from '@/lib/whatsapp/registry'
+import { WHATSAPP_TEMPLATE_REGISTRY, isSendableMetaStatus } from '@/lib/whatsapp/registry'
 import type { WhatsAppTemplateType } from '@/lib/whatsapp/registry'
 import { isOrganizerNotification } from '@/lib/notifications/catalog'
 import type { EventListItem } from '@/app/api/organizer/events/route'
@@ -43,15 +43,26 @@ const AUDIENCE_OPTIONS: { value: BroadcastAudience; label: string }[] = [
 
 type BroadcastChannelUI = 'email' | 'whatsapp'
 // Variables resolved per-recipient at send time (never entered by the organizer).
-const WA_AUTO_VARS = new Set(['attendeeName', 'eventName', 'ticketCode'])
+// `certificateUrl` is derived SERVER-side from the event slug at send time. It is listed
+// here so the composer renders no input for it — an organizer-typed link could point at a
+// preview deployment or another event, and this screen is the only place that could happen.
+const WA_AUTO_VARS = new Set(['attendeeName', 'eventName', 'ticketCode', 'certificateUrl'])
 const WA_SAMPLE: Record<string, string> = {
   attendeeName: 'Asha Rao', eventName: 'Sample Event', ticketCode: 'TCK-1234',
   organizerName: 'Your Organisation', amount: '₹500', refundAmount: '₹500', tierName: 'Pro',
+  certificateUrl: 'https://registerdesk.in/events/your-event/certificates',
+  collectionDate: '18 Aug 2026', collectionTime: '10:00 AM – 6:00 PM',
+  collectionLocation: 'Race Expo, Gate 3', venue: 'City Stadium, Coimbatore',
+  eventDate: '20 Aug 2026', eventTime: '5:30 AM', mapsUrl: 'https://maps.app.goo.gl/…',
 }
 // Organizer broadcast composer offers ONLY organizer-scoped templates; platform
 // lifecycle templates (wallet/licensing/settlement/event-review) stay hidden.
+// A template Meta has rejected or is still reviewing cannot deliver, so it is not offered.
+// This is presentation only — the server refuses it too (broadcasts/route.ts), and the
+// resolver refuses it a third time. The picker just avoids showing a dead end.
 const WA_TEMPLATE_TYPES = (Object.keys(WHATSAPP_TEMPLATE_REGISTRY) as WhatsAppTemplateType[])
   .filter(t => isOrganizerNotification(t))
+  .filter(t => isSendableMetaStatus(WHATSAPP_TEMPLATE_REGISTRY[t].metaStatus))
 const humanizeTemplateType = (t: string) =>
   t.toLowerCase().split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')
 

@@ -22,6 +22,10 @@ import { cn } from '@/lib/utils/cn'
 import { emailLogStatusCls } from '@/lib/ui/statusColors'
 import { EmptyState, PageHeader } from '@/components/ui'
 import type { WhatsAppLog } from '@/app/api/organizer/whatsapp-logs/route'
+// TYPE-ONLY from the route (erased at build). The runtime constant comes from the
+// client-safe types module — importing a value from the route would bundle the Admin SDK.
+import type { WhatsAppLogType } from '@/lib/email-logs/types'
+import { BROADCAST_TEMPLATE_KEY } from '@/lib/email-logs/types'
 
 const TEMPLATE_KEY_LABELS: Record<string, string> = {
   registration_confirmation: 'Registration Confirmation',
@@ -36,6 +40,14 @@ const STATUS_OPTIONS: { value: string; label: string }[] = [
   { value: 'failed',    label: 'Failed' },
   { value: 'skipped',   label: 'Skipped' },
   { value: 'queued',    label: 'Queued' },
+]
+
+// Broadcast vs transactional. Only the broadcast half is an indexed equality server-side;
+// the transactional half is refined on the server within a bounded scan (see the route).
+const TYPE_OPTIONS: { value: string; label: string }[] = [
+  { value: '',              label: 'All messages' },
+  { value: 'broadcast',     label: 'Broadcast' },
+  { value: 'transactional', label: 'Transactional' },
 ]
 
 /** The Meta lifecycle is finer than the log status — prefer it when the webhook has run. */
@@ -59,6 +71,31 @@ function fmtTime(iso: string): string {
 const fmtRupees = (paise: number): string => `₹${(paise / 100).toFixed(2)}`
 
 /**
+ * Broadcast or transactional? DERIVED from the row, exactly as the API derives it — the
+ * broadcast job is the only writer that uses templateKey 'broadcast', and it is also the
+ * only one that carries a campaignId. Nothing was added to the log documents for this.
+ */
+function logType(log: WhatsAppLog): WhatsAppLogType {
+  return log.templateKey === BROADCAST_TEMPLATE_KEY ? 'broadcast' : 'transactional'
+}
+
+/**
+ * What to show in the Template column.
+ *
+ * A TRANSACTIONAL row names its own template, and the list route resolves the approved
+ * Meta name from the registry. A BROADCAST row cannot: the job writes
+ * templateKey 'broadcast' for every recipient, and which Meta template the campaign used
+ * lives on the campaign document. Resolving that per row would be an N+1 read across the
+ * page, so the column reads "Broadcast" and the drawer carries the campaign id instead.
+ */
+function templateLabel(log: WhatsAppLog): string {
+  return TEMPLATE_KEY_LABELS[log.templateKey]
+    ?? log.templateName
+    ?? log.templateKey
+    ?? String.fromCharCode(8212)
+}
+
+/**
  * One line the organizer can act on: the reason, then the code that identifies it.
  *
  * This used to return '—' for every status except `failed`, which hid the reason on SKIPPED
@@ -78,6 +115,10 @@ function DetailsDrawer({ log, onClose }: { log: WhatsAppLog; onClose: () => void
   const status = effectiveStatus(log)
   const rows: Array<[string, string]> = [
     ['Status',              STATUS_LABELS[status] ?? status],
+    ['Message type',        logType(log) === 'broadcast' ? 'Broadcast' : 'Transactional'],
+    // Broadcast Campaign → this message → recipient → provider response. The campaign id is
+    // written by the broadcast job onto every row it logs, so the trace needs no extra read.
+    ['Campaign',            log.campaignId ?? '—'],
     ['Reason',              log.error ?? '—'],
     ['Provider error code', log.errorCode !== null ? String(log.errorCode) : '—'],
     ['HTTP status',         log.httpStatus !== null ? String(log.httpStatus) : '—'],
@@ -139,31 +180,40 @@ function LogRow({ log, onRetry, retrying, onOpen }: {
   onOpen:   (log: WhatsAppLog) => void
 }) {
   const status = effectiveStatus(log)
+  const kind   = logType(log)
+  const reason = failureSummary(log)
   const Icon = status === 'failed' ? XCircle
     : status === 'queued' ? Clock
     : CheckCircle2
 
   return (
     <tr className="border-b border-border last:border-0 hover:bg-muted/30">
-      <td className="px-4 py-3">
-        <button type="button" onClick={() => onOpen(log)} className="text-left text-[13px] font-semibold text-primary hover:underline">
-          {TEMPLATE_KEY_LABELS[log.templateKey] ?? log.templateKey}
-        </button>
-      </td>
-      <td className="px-4 py-3 text-[13px] text-foreground">{log.eventName || log.eventSlug || '—'}</td>
-      <td className="px-4 py-3">
-        <div className="text-[13px] text-foreground">{log.recipientPhone || '—'}</div>
-        {log.recipientName && <div className="text-[11px] text-muted-foreground">{log.recipientName}</div>}
-      </td>
-      <td className="px-4 py-3">
+      <td className="max-w-[240px] px-4 py-3">
         <span className={cn('inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[11px] font-semibold',
           emailLogStatusCls[status] ?? 'bg-muted text-muted-foreground')}>
           <Icon className="size-3" />
           {STATUS_LABELS[status] ?? status}
         </span>
+        {reason !== String.fromCharCode(8212) && (
+          <div className="mt-1 text-[11px] leading-snug text-muted-foreground line-clamp-2">{reason}</div>
+        )}
       </td>
-      <td className="max-w-[280px] px-4 py-3 text-[12px] text-muted-foreground">
-        <span className="line-clamp-2">{failureSummary(log)}</span>
+      <td className="px-4 py-3">
+        <div className="text-[13px] text-foreground">{log.recipientName || '—'}</div>
+        {log.recipientPhone && <div className="text-[11px] text-muted-foreground">{log.recipientPhone}</div>}
+      </td>
+      <td className="px-4 py-3 text-[13px] text-foreground">{log.eventName || log.eventSlug || '—'}</td>
+      <td className="px-4 py-3">
+        <span className={cn('inline-flex rounded-full px-2 py-0.5 text-[11px] font-semibold',
+          kind === 'broadcast' ? 'bg-primary/10 text-primary' : 'bg-muted text-muted-foreground')}>
+          {kind === 'broadcast' ? 'Broadcast' : 'Transactional'}
+        </span>
+      </td>
+      <td className="max-w-[200px] px-4 py-3">
+        <button type="button" onClick={() => onOpen(log)} className="text-left font-mono text-[12px] text-primary hover:underline">
+          {templateLabel(log)}
+        </button>
+        {log.templateLanguage && <div className="text-[11px] text-muted-foreground">{log.templateLanguage}</div>}
       </td>
       <td className="whitespace-nowrap px-4 py-3 text-[12px] text-muted-foreground">{fmtTime(log.createdAt)}</td>
       <td className="px-4 py-3 text-right">
@@ -182,7 +232,13 @@ function LogRow({ log, onRetry, retrying, onOpen }: {
             {retrying ? 'Sending…' : 'Resend'}
           </button>
         ) : (
-          <span className="text-[12px] text-muted-foreground">—</span>
+          <button
+            type="button"
+            onClick={() => onOpen(log)}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-border px-2.5 py-1.5 text-[12px] font-semibold hover:bg-muted"
+          >
+            Details
+          </button>
         )}
       </td>
     </tr>
@@ -197,11 +253,20 @@ export function WhatsAppLogsClient() {
   const [error,      setError]      = useState<string | null>(null)
   const [status,     setStatus]     = useState('')
   const [search,     setSearch]     = useState('')
+  const [type,       setType]       = useState('')
+  const [eventSlug,  setEventSlug]  = useState('')
+  const [dateFrom,   setDateFrom]   = useState('')
+  const [dateTo,     setDateTo]     = useState('')
+  // Cursor paging. `nextCursor` is opaque to this component — it is whatever the server
+  // handed back, and it is the ONLY way to ask for more. No offsets, no total count.
+  const [nextCursor, setNextCursor] = useState<string | null>(null)
+  const [loadingMore, setLoadingMore] = useState(false)
+  const [events,     setEvents]     = useState<{ slug: string; name: string }[]>([])
   const [retryingId, setRetryingId] = useState<string | null>(null)
   const [retryMsg,   setRetryMsg]   = useState<{ id: string; ok: boolean; msg: string } | null>(null)
   const [detail,     setDetail]     = useState<WhatsAppLog | null>(null)
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (cursor?: string) => {
     try {
       // The token fetch is awaited BEFORE any setState so this is never a synchronous
       // state update inside the effect body below (react-hooks/set-state-in-effect).
@@ -209,20 +274,33 @@ export function WhatsAppLogsClient() {
       setError(null)
       if (!token) { setError('Not authenticated'); setLoading(false); return }
 
+      // EVERY filter is sent to the server. Nothing here narrows a full collection in the
+      // browser — the client never receives rows it is not going to show.
       const params = new URLSearchParams()
-      if (status) params.set('status', status)
+      if (status)    params.set('status',    status)
+      if (type)      params.set('type',      type)
+      if (eventSlug) params.set('eventSlug', eventSlug)
+      if (dateFrom)  params.set('dateFrom',  dateFrom)
+      if (dateTo)    params.set('dateTo',    dateTo)
+      if (cursor)    params.set('cursor',    cursor)
 
       const res  = await fetch(`/api/organizer/whatsapp-logs?${params}`, {
         headers: { Authorization: `Bearer ${token}` },
       })
-      const data = await res.json() as { success: boolean; logs?: WhatsAppLog[]; error?: string }
-      if (!data.success) { setError(data.error ?? 'Failed to load'); setLoading(false); return }
-      setLogs(data.logs ?? [])
+      const data = await res.json() as {
+        success: boolean; items?: WhatsAppLog[]; nextCursor?: string | null; hasMore?: boolean; error?: string
+      }
+      if (!data.success) { setError(data.error ?? 'Failed to load'); setLoading(false); setLoadingMore(false); return }
+      const page = data.items ?? []
+      // Appending on a cursor load is what makes this incremental rather than a re-fetch.
+      setLogs(prev => (cursor ? [...prev, ...page] : page))
+      setNextCursor(data.hasMore ? (data.nextCursor ?? null) : null)
     } catch {
       setError('Network error')
     }
     setLoading(false)
-  }, [status])
+    setLoadingMore(false)
+  }, [status, type, eventSlug, dateFrom, dateTo])
 
   // The fetch runs inside an async IIFE so no state update happens synchronously during the
   // effect — the same shape the certificate builder uses, and what keeps this off the
@@ -232,6 +310,25 @@ export function WhatsAppLogsClient() {
     ;(async () => { if (!cancelled) await load() })()
     return () => { cancelled = true }
   }, [load])
+
+  // The event dropdown reuses the existing organizer events endpoint. One request, on
+  // mount only — it is a label source for the filter, not part of the log query.
+  useEffect(() => {
+    let cancelled = false
+    const run = async () => {
+      try {
+        const token = await auth.currentUser?.getIdToken()
+        if (!token) return
+        const res = await fetch('/api/organizer/events', { headers: { Authorization: `Bearer ${token}` } })
+        const data = await res.json() as { events?: { slug: string | null; name: string }[] }
+        if (cancelled) return
+        setEvents((data.events ?? [])
+          .filter((e): e is { slug: string; name: string } => typeof e.slug === 'string' && !!e.slug))
+      } catch { /* the filter simply stays empty — the log table is unaffected */ }
+    }
+    void run()
+    return () => { cancelled = true }
+  }, [])
 
   async function handleRetry(logId: string) {
     setRetryingId(logId)
@@ -290,10 +387,42 @@ export function WhatsAppLogsClient() {
         <select
           value={status}
           onChange={e => setStatus(e.target.value)}
+          aria-label="Filter by delivery status"
           className="h-10 rounded-xl border border-border bg-card px-3 text-[13px] outline-none focus:ring-2 focus:ring-ring"
         >
           {STATUS_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
         </select>
+        <select
+          value={type}
+          onChange={e => setType(e.target.value)}
+          aria-label="Filter by message type"
+          className="h-10 rounded-xl border border-border bg-card px-3 text-[13px] outline-none focus:ring-2 focus:ring-ring"
+        >
+          {TYPE_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+        </select>
+        <select
+          value={eventSlug}
+          onChange={e => setEventSlug(e.target.value)}
+          aria-label="Filter by event"
+          className="h-10 max-w-[220px] rounded-xl border border-border bg-card px-3 text-[13px] outline-none focus:ring-2 focus:ring-ring"
+        >
+          <option value="">All events</option>
+          {events.map(e => <option key={e.slug} value={e.slug}>{e.name}</option>)}
+        </select>
+        <input
+          type="date"
+          value={dateFrom}
+          onChange={e => setDateFrom(e.target.value)}
+          aria-label="From date"
+          className="h-10 rounded-xl border border-border bg-card px-3 text-[13px] outline-none focus:ring-2 focus:ring-ring"
+        />
+        <input
+          type="date"
+          value={dateTo}
+          onChange={e => setDateTo(e.target.value)}
+          aria-label="To date"
+          className="h-10 rounded-xl border border-border bg-card px-3 text-[13px] outline-none focus:ring-2 focus:ring-ring"
+        />
         <button
           type="button"
           onClick={() => { setLoading(true); void load() }}
@@ -333,13 +462,13 @@ export function WhatsAppLogsClient() {
           <table className="w-full min-w-[880px] text-left">
             <thead className="border-b border-border bg-muted/40">
               <tr className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-                <th className="px-4 py-2.5">Message</th>
-                <th className="px-4 py-2.5">Event</th>
-                <th className="px-4 py-2.5">Recipient</th>
                 <th className="px-4 py-2.5">Status</th>
-                <th className="px-4 py-2.5">Failure Reason</th>
+                <th className="px-4 py-2.5">Recipient</th>
+                <th className="px-4 py-2.5">Event</th>
+                <th className="px-4 py-2.5">Type</th>
+                <th className="px-4 py-2.5">Template</th>
                 <th className="px-4 py-2.5">Sent At</th>
-                <th className="px-4 py-2.5 text-right">Action</th>
+                <th className="px-4 py-2.5 text-right">Details</th>
               </tr>
             </thead>
             <tbody>
@@ -354,6 +483,24 @@ export function WhatsAppLogsClient() {
               ))}
             </tbody>
           </table>
+        </div>
+      )}
+
+      {/* Cursor paging. The server decides the page size and hands back the next cursor;
+          this button is the only way more rows are ever requested. */}
+      {!loading && nextCursor && (
+        <div className="flex justify-center">
+          <button
+            type="button"
+            disabled={loadingMore}
+            onClick={() => { setLoadingMore(true); void load(nextCursor) }}
+            className={cn(
+              'inline-flex h-10 items-center gap-2 rounded-xl border border-border px-4 text-[13px] font-semibold',
+              loadingMore ? 'cursor-not-allowed opacity-60' : 'hover:bg-muted',
+            )}
+          >
+            {loadingMore ? <><Loader2 className="size-4 animate-spin" /> Loading…</> : 'Load more'}
+          </button>
         </div>
       )}
 

@@ -107,3 +107,20 @@ export function isWalletSkippedWhatsAppLog(
   return log.status === 'skipped'
     && (log.error ?? '').trim().toLowerCase() === WHATSAPP_WALLET_SKIP_REASON.toLowerCase()
 }
+
+// ─── WhatsApp message type (RD-WA-LOGS-03) ───────────────────────────────────
+
+/**
+ * The templateKey the broadcast job writes on every row it logs. It is the ONLY
+ * discriminator between a broadcast message and a transactional one — broadcast rows also
+ * carry a campaignId, transactional rows carry neither.
+ *
+ * Declared HERE, in the client-safe types module, and not in the logs route: the route
+ * imports the Admin SDK, so importing a VALUE from it inside a client component pulls
+ * firebase-admin into the browser bundle. A type-only import is erased; a value import is
+ * not — which is a build failure, not a type error.
+ */
+export const BROADCAST_TEMPLATE_KEY = 'broadcast'
+
+/** Broadcast or transactional — derived from templateKey, never stored. */
+export type WhatsAppLogType = 'broadcast' | 'transactional'
