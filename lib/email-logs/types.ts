@@ -43,6 +43,15 @@ export interface EmailLog {
   registrationId:    string
   campaignId?:       string                 // broadcast campaign this log belongs to (WA-2 reporting)
   // WhatsApp delivery tracking (WA-2) — set by the Meta status webhook.
+  /**
+   * True when the send ended in a TRANSPORT failure (timeout / network) rather than a
+   * decision by Meta — i.e. RegisterDesk aborted before Meta answered, so delivery is
+   * UNKNOWN, not failed. `status` deliberately stays 'failed' so every existing consumer
+   * (email logs, broadcast stats, communications timeline) behaves exactly as before;
+   * this flag is purely additive and is what lets the WhatsApp surface say 'unknown'
+   * instead of asserting non-delivery. Absent on every existing row.
+   */
+  deliveryUnknown?:  boolean
   waStatus?:         WhatsAppDeliveryStatus
   deliveredAt?:      string   // ISO 8601
   readAt?:           string   // ISO 8601
@@ -73,6 +82,8 @@ export interface WriteEmailLogInput {
   error?:             string
   registrationId?:    string
   campaignId?:        string                 // broadcast campaign this log belongs to (WA-2 reporting)
+  /** Transport failure (timeout/network) ⇒ delivery UNKNOWN, not failed. See EmailLogDoc. */
+  deliveryUnknown?:   boolean
 }
 
 // ─── WhatsApp wallet-skip eligibility (RD-WA-LOGS-02) ─────────────────────────

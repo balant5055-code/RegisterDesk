@@ -18,6 +18,7 @@ import { logBroadcastAction }      from '@/lib/broadcasts/audit'
 import { getMetaProvider, hasWhatsAppTemplate } from '@/lib/whatsapp'
 import { createWhatsAppBroadcastJob, processWhatsAppBroadcastChunk } from './whatsappJob'
 import { createEmailBroadcastJob, processEmailBroadcastChunk } from './emailJob'
+import { dedupeRecipientsByEmail } from './dedupeRecipients'
 import type { BroadcastChannel }   from '@/lib/broadcasts/types'
 import type { RegistrationDocument } from '@/lib/registrations/types'
 
@@ -43,6 +44,13 @@ interface CampaignData {
   // WA-3 / OE-2: the generic-runner job that executes this campaign (once created).
   whatsappJobId?: string
   emailJobId?:    string
+  /**
+   * EMAIL ONLY — "Ignore duplicate email IDs" (see BroadcastCampaign.dedupeEmails).
+   * Read off the stored campaign so a SCHEDULED send, which the cron resolves later with
+   * nothing but this document, behaves identically to an immediate one.
+   * Absent/false ⇒ original behaviour. `deliverWhatsAppCampaign` never reads it.
+   */
+  dedupeEmails?:  boolean
 }
 
 // ─── Bill + start (the only entry point for kicking off a campaign) ───────────
@@ -117,9 +125,21 @@ async function deliverEmailCampaign(
   const maxRecipients = await resolveMaxRecipientsPerBroadcast(uid)
   const regsSnap    = await regsQuery.limit(maxRecipients + 1).get()
   const suppression = await getOrganiserSuppressionSet(uid)
-  const recipients: Recipient[] = regsSnap.docs
+  const suppressed: Recipient[] = regsSnap.docs
     .map(d => ({ id: d.id, data: d.data() as RegistrationDocument }))
     .filter(({ data }) => !suppression.has(data.attendee.email.toLowerCase().trim()))
+
+  // "Ignore duplicate email IDs" — applied HERE, before createEmailBroadcastJob, so the
+  // snapshot itself holds one row per address. That placement is what makes the guarantee
+  // hold for free: the job is created once (emailJobId above short-circuits every resume),
+  // and each snapshot row carries its own `sent` flag, so a retry can neither re-resolve the
+  // audience nor mail a collapsed duplicate a second time.
+  //
+  // Read from the CAMPAIGN document, not from a parameter: a scheduled campaign reaches this
+  // function from the cron with nothing but the stored campaign, so the flag has to live there.
+  const recipients: Recipient[] = c.dedupeEmails
+    ? dedupeRecipientsByEmail(suppressed)
+    : suppressed
 
   // RD-EMAIL-PROVIDER — the preflight must ask about the transport the JOB will use,
   // otherwise a campaign could be marked provider_unavailable while its own provider is fine.

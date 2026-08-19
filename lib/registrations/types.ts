@@ -105,7 +105,15 @@ export interface RegistrationDocument {
   emailSentAt?:        unknown  // Firestore Timestamp — set when successfully sent
   emailFailureReason?: string   // last failure message if emailStatus === 'failed'
   // WhatsApp confirmation fields (Phase G3.4) — attendee WhatsApp is wallet-charged.
-  whatsappStatus?:        'sent' | 'failed' | 'skipped_no_phone' | 'skipped_insufficient_balance'
+  /**
+   * `unknown` = the Meta request TIMED OUT or the network failed, so RegisterDesk aborted
+   * before Meta answered. It is NOT a delivery failure: the abort happens client-side and
+   * cannot cancel a request Meta may already have accepted, and the wamid — which only
+   * arrives in the response we never got — is absent, so no webhook can reconcile the row.
+   * Treating that as `failed` is what allowed a retry to send the attendee a second
+   * WhatsApp. Additive value only: no existing document carries it and nothing is migrated.
+   */
+  whatsappStatus?:        'sent' | 'failed' | 'unknown' | 'skipped_no_phone' | 'skipped_insufficient_balance'
   whatsappSentAt?:        unknown  // Firestore Timestamp — set when successfully sent
   whatsappMessageId?:     string   // Meta wamid when sent
   whatsappFailureReason?: string   // normalized reason when failed / skipped

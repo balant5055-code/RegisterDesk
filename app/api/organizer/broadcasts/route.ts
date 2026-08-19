@@ -8,6 +8,7 @@ import type { BroadcastAudience, BroadcastChannel, BroadcastCampaign } from '@/l
 import type { RegistrationDocument }   from '@/lib/registrations/types'
 import { sanitizeBroadcastHtml }              from '@/lib/broadcasts/sanitize'
 import { getOrganiserSuppressionSet }  from '@/lib/firebase/firestore/emailSuppressionList'
+import { dedupeRecipientsByEmail } from '@/lib/broadcasts/dedupeRecipients'
 import { checkBroadcastLimits, resolveMaxRecipientsPerBroadcast } from '@/lib/broadcasts/limits'
 import { organizerStatusGuard }        from '@/lib/admin/organizerStatus'
 import { authorizeWorkspace }          from '@/lib/team/workspace'
@@ -104,6 +105,11 @@ export async function POST(req: NextRequest): Promise<NextResponse<PostBroadcast
 
   const { eventId, eventSlug, eventName, audience, subject, html, channel, templateType, languageCode, variables, scheduledFor } =
     body as Record<string, unknown>
+
+  // "Ignore duplicate email IDs". Strict `=== true` so any other value — absent, null, a
+  // string, a stray truthy — means the original behaviour. Applied to EMAIL only; the
+  // WhatsApp branch below never consults it, so WhatsApp is byte-for-byte unchanged.
+  const dedupeEmails = (body as Record<string, unknown>).dedupeEmails === true
 
   if (typeof eventSlug !== 'string' || !eventSlug) {
     return NextResponse.json({ success: false, error: 'eventSlug is required' }, { status: 400 })
@@ -229,7 +235,17 @@ export async function POST(req: NextRequest): Promise<NextResponse<PostBroadcast
     recipients = allRecipients.filter(({ data: reg }) => typeof reg.attendee.phone === 'string' && reg.attendee.phone.trim().length > 0)
   } else {
     const suppressionSet = await getOrganiserSuppressionSet(uid)
-    recipients = allRecipients.filter(({ data: reg }) => !suppressionSet.has(reg.attendee.email.toLowerCase().trim()))
+    const suppressed = allRecipients.filter(({ data: reg }) => !suppressionSet.has(reg.attendee.email.toLowerCase().trim()))
+    // "Ignore duplicate email IDs" — EMAIL ONLY, applied after suppression so both filters
+    // compose in the same order the send path uses. `recipientCount` then reflects the
+    // addresses that will actually be mailed, which is what the plan/limit gates below and
+    // the campaign history should record.
+    //
+    // Deliberately AFTER the cap gate above: the cap bounds how much this route READS
+    // (count() + limit(cap+1)) and already ignores suppression filtering today. Evaluating it
+    // after dedupe would admit a 1,200-registration audience on the promise of 900 unique,
+    // changing what the cap protects. Existing cap semantics are unchanged.
+    recipients = dedupeEmails ? dedupeRecipientsByEmail(suppressed) : suppressed
   }
 
   const recipientCount = recipients.length
@@ -279,6 +295,10 @@ export async function POST(req: NextRequest): Promise<NextResponse<PostBroadcast
       variables:    waVariables,
     } : {}),
     recipientCount,
+    // EMAIL ONLY. Persisted so a SCHEDULED campaign, resolved later by the cron from this
+    // document alone, dedupes exactly like an immediate one. Written only when true, so
+    // existing campaigns and every WhatsApp campaign keep an absent field.
+    ...(dedupeEmails && chosenChannel !== 'whatsapp' ? { dedupeEmails: true } : {}),
     successCount:   0,
     failCount:      0,
     status:         isScheduled ? 'scheduled' : 'draft',

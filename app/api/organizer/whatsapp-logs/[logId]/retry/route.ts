@@ -44,6 +44,8 @@ const REASON_STATUS: Record<string, number> = {
   event_disabled:       422,
   registration_missing: 404,
   already_sent:         409,
+  // Same 409: the state conflicts with resending, we just cannot prove which way.
+  delivery_unknown:     409,
   no_phone:             422,
   insufficient_balance: 402,
   template_unresolved:  422,

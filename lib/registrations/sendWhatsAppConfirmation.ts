@@ -62,7 +62,7 @@ function logComm(
   email:  string,
   phone:  string,
   status: 'sent' | 'failed' | 'skipped',
-  extra?: { costPaise?: number; messageId?: string; error?: string; providerResponse?: string },
+  extra?: { costPaise?: number; messageId?: string; error?: string; providerResponse?: string; deliveryUnknown?: boolean },
 ): void {
   // writeEmailLog (LS2.1) strips undefined keys — safe to pass optional diagnostics.
   void writeEmailLog({
@@ -80,6 +80,7 @@ function logComm(
     recipientPhone: phone,
     costPaise:      extra?.costPaise ?? 0,
     providerMessageId: extra?.messageId,
+    deliveryUnknown:   extra?.deliveryUnknown,
     providerResponse:  extra?.providerResponse,
     error:             extra?.error,
     registrationId: args.registrationId,
@@ -213,7 +214,21 @@ export async function sendWhatsAppConfirmation(args: WhatsAppConfirmationArgs): 
       `[wa-trace][REGISTRATION_CONFIRMATION] STEP 6 POST /messages → Meta` +
       ` · Template=${resolved.message.templateName} · Original=${phone} · Normalized=${normalizedPhone}`,
     )
-    const result = await provider.sendTemplate(resolved.message)
+    const startedAt = Date.now()
+    const result    = await provider.sendTemplate(resolved.message)
+    const durationMs = Date.now() - startedAt
+    // ═══ OBSERVABILITY ═════════════════════════════════════════════════════════
+    // One structured line per attempt so a timeout is diagnosable after the fact: how long we
+    // waited before aborting, and whether Meta answered at all. Deliberately carries NO
+    // Authorization header, access token, phone number or template body — only the
+    // registration id (already the correlation key everywhere else), the outcome, and the
+    // wamid when Meta returned one.
+    console.info(
+      `[wa-obs][REGISTRATION_CONFIRMATION] registrationId=${args.registrationId}` +
+      ` · result=${result.success ? 'sent' : (result.httpStatus === undefined ? 'unknown' : 'failed')}` +
+      ` · durationMs=${durationMs} · httpStatus=${result.httpStatus ?? 'none'}` +
+      ` · wamid=${result.success ? (result.messageId ?? '-') : '-'}`,
+    )
     if (!result.success) {
       // WhatsApp failed → wallet NOT deducted, log failure with FULL Meta diagnostics.
       console.warn(
@@ -223,8 +238,25 @@ export async function sendWhatsAppConfirmation(args: WhatsAppConfirmationArgs): 
         ` · template=${resolved.message.templateName} · registrationId=${args.registrationId}`,
       )
       const providerResponse = `HTTP ${result.httpStatus ?? '-'} · code ${result.code ?? '-'} · ${result.providerMessage ?? result.error ?? 'unknown'}`
-      recordStatus(args.registrationId, 'failed', { reason: result.error ?? 'WhatsApp send failed' })
-      logComm(args, email, phone, 'failed', { error: result.error ?? 'WhatsApp send failed', providerResponse })
+
+      // ═══ TRANSPORT FAILURE ⇒ UNKNOWN, NOT FAILED ═══════════════════════════════
+      // A response Meta actually produced always carries an httpStatus (normalizeMetaError
+      // sets it). Its ABSENCE means the request never completed — AbortSignal.timeout fired,
+      // or the socket broke — and that abort is purely client-side: it cannot cancel a
+      // message Meta may already have accepted and queued, and the wamid we would need to
+      // reconcile it only ever arrives in the response we did not get. Delivery is therefore
+      // genuinely indeterminate. Recording it as 'failed' is what let the retry path resend and
+      // double-message the attendee. Structural test, not string matching, so it cannot drift
+      // with Meta error copy.
+      const deliveryUnknown = result.httpStatus === undefined
+      const reason = deliveryUnknown
+        ? `Delivery status unknown — no response from Meta (${result.error ?? 'transport failure'})`
+        : (result.error ?? 'WhatsApp send failed')
+
+      recordStatus(args.registrationId, deliveryUnknown ? 'unknown' : 'failed', { reason })
+      // The log row keeps status 'failed' so every existing consumer stays byte-identical;
+      // deliveryUnknown is the additive flag the WhatsApp surfaces read.
+      logComm(args, email, phone, 'failed', { error: reason, providerResponse, deliveryUnknown })
       return
     }
 

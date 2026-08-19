@@ -52,13 +52,16 @@ const TYPE_OPTIONS: { value: string; label: string }[] = [
 
 /** The Meta lifecycle is finer than the log status — prefer it when the webhook has run. */
 function effectiveStatus(log: WhatsAppLog): string {
+  // A timed-out send is NOT a failure: Meta may have delivered it. Say so rather than
+  // asserting non-delivery, which is what sends organizers chasing a phantom problem.
+  if (log.deliveryUnknown) return 'unknown'
   if (log.status === 'failed') return 'failed'
   return log.waStatus ?? log.status
 }
 
 const STATUS_LABELS: Record<string, string> = {
   queued: 'Queued', sent: 'Sent', delivered: 'Delivered',
-  read: 'Read', failed: 'Failed', skipped: 'Skipped',
+  read: 'Read', failed: 'Failed', skipped: 'Skipped', unknown: 'Unknown',
 }
 
 function fmtTime(iso: string): string {

@@ -44,6 +44,12 @@ export interface WhatsAppLog {
   status:            EmailLogStatus
   /** Finer Meta lifecycle from the status webhook: sent | delivered | read | failed. */
   waStatus:          WhatsAppDeliveryStatus | null
+  /**
+   * True when the send ended in a TIMEOUT / network abort, so RegisterDesk never learned
+   * whether Meta accepted the message. `status` is still 'failed' for compatibility, but the
+   * UI must NOT claim non-delivery, and retry is withheld — see retryAvailable.
+   */
+  deliveryUnknown:   boolean
   provider:          string
   providerMessageId: string | null
   /** Normalized, organizer-facing reason. */
@@ -252,6 +258,7 @@ export async function GET(req: NextRequest): Promise<NextResponse<GetResponse>> 
     const providerResponse = sanitizeProviderResponse(strOrNull(d.providerResponse) ?? undefined) ?? null
     const { code, httpStatus } = parseProviderDiagnostics(providerResponse ?? undefined)
     const logStatus = (str(d.status) || 'queued') as EmailLogStatus
+    const deliveryUnknown = d.deliveryUnknown === true
     const waStatus  = (strOrNull(d.waStatus) as WhatsAppDeliveryStatus | null)
 
     return {
@@ -267,6 +274,7 @@ export async function GET(req: NextRequest): Promise<NextResponse<GetResponse>> 
       recipientName:     str(d.recipientName),
       status:            logStatus,
       waStatus,
+      deliveryUnknown,
       provider:          str(d.provider) || 'meta',
       providerMessageId: strOrNull(d.providerMessageId),
       error:             strOrNull(d.error),
@@ -287,7 +295,10 @@ export async function GET(req: NextRequest): Promise<NextResponse<GetResponse>> 
       retryAvailable:    (logStatus === 'failed'
                           || isWalletSkippedWhatsAppLog({ status: logStatus, error: strOrNull(d.error) }))
                          && key === RETRYABLE_TEMPLATE_KEY
-                         && !!str(d.registrationId),
+                         && !!str(d.registrationId)
+                         // An indeterminate send is never offered a retry: resending could
+                         // double-message an attendee Meta may already have reached.
+                         && !deliveryUnknown,
       createdAt:         tsToIso(d.createdAt),
       updatedAt:         tsToIso(d.updatedAt),
       deliveredAt:       tsToIsoOrNull(d.deliveredAt),

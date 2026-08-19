@@ -278,6 +278,7 @@ function ComposeTab({
   const [eventSlug,       setEventSlug]       = useState('')
   const [audience,        setAudience]        = useState<BroadcastAudience>('confirmed')
   const [channel,         setChannel]         = useState<BroadcastChannelUI>('email')
+  const [dedupeEmails,    setDedupeEmails]    = useState(false)
   const [subject,         setSubject]         = useState('')
   const [body,            setBody]            = useState('')
   const [waTemplate,      setWaTemplate]      = useState<WhatsAppTemplateType | ''>('')
@@ -310,7 +311,7 @@ function ComposeTab({
   }
 
   // ── Fetch recipient count (channel-aware — WhatsApp counts phone recipients) ─
-  const fetchCount = useCallback(async (slug: string, aud: BroadcastAudience, ch: BroadcastChannelUI) => {
+  const fetchCount = useCallback(async (slug: string, aud: BroadcastAudience, ch: BroadcastChannelUI, dedupe: boolean) => {
     if (!slug) { setRecipientCount(null); return }
     setCountLoading(true)
     try {
@@ -319,7 +320,7 @@ function ComposeTab({
       const res  = await fetch('/api/organizer/broadcasts/count', {
         method:  'POST',
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-        body:    JSON.stringify({ eventSlug: slug, audience: aud, channel: ch }),
+        body:    JSON.stringify({ eventSlug: slug, audience: aud, channel: ch, dedupeEmails: dedupe }),
       })
       const data = await res.json() as { success: boolean; count?: number }
       if (data.success) setRecipientCount(data.count ?? 0)
@@ -329,10 +330,10 @@ function ComposeTab({
 
   useEffect(() => {
     /* eslint-disable react-hooks/set-state-in-effect -- server-sync fetch when event/audience/channel changes */
-    if (eventSlug) void fetchCount(eventSlug, audience, channel)
+    if (eventSlug) void fetchCount(eventSlug, audience, channel, dedupeEmails)
     else setRecipientCount(null)
     /* eslint-enable react-hooks/set-state-in-effect */
-  }, [eventSlug, audience, channel, fetchCount])
+    }, [eventSlug, audience, channel, dedupeEmails, fetchCount])
 
   // ── Send test email ──────────────────────────────────────────────────────
   async function handleTest() {
@@ -378,7 +379,7 @@ function ComposeTab({
       }
       const payload = channel === 'whatsapp'
         ? { ...common, channel: 'whatsapp', templateType: waTemplate, languageCode: waLanguage || undefined, variables: waVars }
-        : { ...common, channel: 'email', subject: subject.trim(), html: body.trim() }
+        : { ...common, channel: 'email', subject: subject.trim(), html: body.trim(), dedupeEmails }
       const res  = await fetch('/api/organizer/broadcasts', {
         method:  'POST',
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
@@ -395,6 +396,7 @@ function ComposeTab({
       // Reset form
       setEventSlug('')
       setAudience('confirmed')
+        setDedupeEmails(false)
       setSubject('')
       setBody('')
       selectWaTemplate('')
@@ -517,6 +519,33 @@ function ComposeTab({
                   }
                 </div>
               </div>
+
+              {/*
+                EMAIL ONLY. One address can hold several registrations — family or team
+                sign-ups, multiple passes — and the audience is one row per REGISTRATION, so
+                by default such a person is mailed once per registration. This collapses them
+                to one. Rendered only for email: WhatsApp targets phone numbers and is
+                deliberately untouched by this option. Toggling it re-runs the recipient count
+                so the number shown is the number that will actually be sent.
+              */}
+              {channel === 'email' && (
+                <label className="mt-3 flex cursor-pointer items-start gap-2.5">
+                  <input
+                    type="checkbox"
+                    checked={dedupeEmails}
+                    onChange={e => setDedupeEmails(e.target.checked)}
+                    className="mt-0.5 size-4 shrink-0 rounded border-border text-primary focus:ring-2 focus:ring-primary/20"
+                  />
+                  <span className="min-w-0">
+                    <span className="block text-[13.5px] font-medium text-foreground">
+                      Ignore duplicate email IDs
+                    </span>
+                    <span className="block text-[12.5px] text-muted-foreground">
+                      Send at most one email per address, even if it appears on several registrations.
+                    </span>
+                  </span>
+                </label>
+              )}
             </div>
 
             {/* Email content (subject + HTML body) */}

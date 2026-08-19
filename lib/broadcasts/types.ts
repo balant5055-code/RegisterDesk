@@ -54,6 +54,18 @@ export interface BroadcastCampaign {
   subject:        string
   html:           string       // HTML body fragment stored, NOT the full shell
   recipientCount: number
+  /**
+   * EMAIL ONLY — "Ignore duplicate email IDs". When true, an address that appears on several
+   * registrations receives ONE email.
+   *
+   * Optional on purpose: absent (every existing campaign) and false both mean the original
+   * behaviour, so no migration and no backfill. Persisted on the campaign document rather
+   * than passed around, because a SCHEDULED campaign has its recipients resolved later by the
+   * cron — the document is the only state that survives from create to send.
+   *
+   * Has no effect on WhatsApp: `deliverWhatsAppCampaign` never reads it.
+   */
+  dedupeEmails?:  boolean
   successCount:   number
   failCount:      number
   status:         BroadcastStatus
