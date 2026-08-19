@@ -208,7 +208,7 @@ export const WHATSAPP_TEMPLATE_REGISTRY = {
     // `certificateUrl` is SERVER-DERIVED per campaign (see whatsappJob.ts) — the
     // organizer never types it, so a preview/deployment host can never reach an attendee.
     requiredVariables: ['attendeeName', 'eventName', 'certificateUrl'],
-    metaStatus:        'in_review',
+    metaStatus:        'active',
     category:          'utility',
     version:           2,
   },
@@ -256,7 +256,7 @@ export const WHATSAPP_TEMPLATE_REGISTRY = {
     languages:         ['en'],
     channels:          ['whatsapp'],
     requiredVariables: ['attendeeName', 'eventName', 'eventDate', 'eventTime', 'venue', 'mapsUrl'],
-    metaStatus:        'in_review',
+    metaStatus:        'active',
     category:          'utility',
     version:           1,
   },

@@ -110,18 +110,45 @@ describe('Meta approval state gates what can be sent', () => {
   it('records the state verified in WhatsApp Manager', () => {
     expect(R.REGISTRATION_CONFIRMATION.metaStatus).toBe('active')     // Active – High quality
     expect(R.KIT_COLLECTION.metaStatus).toBe('active')                // Active – Quality pending
-    expect(R.EVENT_LOCATION.metaStatus).toBe('in_review')
-    expect(R.CERTIFICATE_READY.metaStatus).toBe('in_review')
+    expect(R.EVENT_LOCATION.metaStatus).toBe('active')                // Active – Quality pending
+    expect(R.CERTIFICATE_READY.metaStatus).toBe('active')             // Active – Quality pending
+    // v2 stays DORMANT even though Meta approved it: activating it would put a second
+    // registration template in play beside the live one, which is a migration decision,
+    // not a status sync. Meta approval is necessary for that switch, never sufficient.
     expect(R.REGISTRATION_CONFIRMATION_V2.metaStatus).toBe('in_review')
   })
 
   it('an in-review template is REFUSED before Meta is called', () => {
-    const r = resolveWhatsAppTemplateByType('EVENT_LOCATION', '919000000000', {
-      attendeeName: 'A', eventName: 'E', eventDate: 'd', eventTime: 't', venue: 'v', mapsUrl: 'u',
+    // registration_confirmation_v2 is the template still held in review, and it is the one
+    // that matters most: it must not be reachable while the live v1 is the registration path.
+    const r = resolveWhatsAppTemplateByType('REGISTRATION_CONFIRMATION_V2', '919000000000', {
+      attendeeName: 'A', eventName: 'E', ticketCode: 'T',
     })
     expect(r.ok).toBe(false)
     if (r.ok) return
     expect(r.error).toMatch(/awaiting Meta approval/i)
+  })
+
+  it('the two newly-approved broadcast templates now RESOLVE', () => {
+    // Meta moved them to Active, so the gate must let them through — otherwise the feature
+    // stays inert and the organizer sees an empty picker with no explanation.
+    const evt = resolveWhatsAppTemplateByType('EVENT_LOCATION', '919000000000', {
+      attendeeName: 'A', eventName: 'E', eventDate: 'd', eventTime: 't', venue: 'v', mapsUrl: 'u',
+    })
+    expect(evt.ok).toBe(true)
+    if (!evt.ok) return
+    expect(evt.message.templateName).toBe('event_location_v2')
+    expect(evt.message.languageCode).toBe('en')
+
+    const cert = resolveWhatsAppTemplateByType('CERTIFICATE_READY', '919000000000', {
+      attendeeName: 'A', eventName: 'E', certificateUrl: 'https://registerdesk.in/events/x/certificates',
+    })
+    expect(cert.ok).toBe(true)
+    if (!cert.ok) return
+    expect(cert.message.templateName).toBe('certificate_ready_v2')
+    expect(cert.message.languageCode).toBe('en')
+    // The URL still travels as the third positional body parameter.
+    expect((cert.message.bodyParameters?.[2] as { text: string }).text).toContain('/certificates')
   })
 
   it('the ACTIVE kit template resolves normally', () => {
