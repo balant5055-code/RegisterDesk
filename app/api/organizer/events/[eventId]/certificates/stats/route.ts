@@ -6,8 +6,8 @@
 import { NextRequest, NextResponse }       from 'next/server'
 import { adminDb }                         from '@/lib/firebase/admin'
 import { authorizeWorkspace }              from '@/lib/team/workspace'
-import { getCertificatesByEventId }        from '@/lib/certificates/firestore'
-import type { SerializedCertificateRecord } from '@/lib/certificates/types'
+import type { SerializedCertificateRecord, CertificateRecord } from '@/lib/certificates/types'
+import { LEGACY_CERTIFICATE_RECORDS } from '@/lib/certificates/constants'
 
 type Params = { params: Promise<{ eventId: string }> }
 
@@ -45,13 +45,30 @@ export async function GET(req: NextRequest, { params }: Params): Promise<NextRes
   const seo      = (details.seo         as Record<string, unknown>) ?? {}
   const slug     = typeof seo.urlSlug === 'string' ? seo.urlSlug : null
 
-  // Load all cert records for this event
-  const records = await getCertificatesByEventId(eventId, uid)
+  // RD-CERT-SCALE P2-3 — BOUNDED.
+  //
+  // This used to load EVERY certificateRecord for the event with an unbounded .get(), then
+  // compute three numbers with .filter().length and discard the rest. At 10k that is 10,000
+  // document reads to render four counters and twenty rows.
+  //
+  // Now: three count() aggregates (which transfer ZERO documents) plus one limit(20) query.
+  // Cost is flat in the number of certificates. Same numbers, same rows, same order.
+  const base = adminDb.collection(LEGACY_CERTIFICATE_RECORDS)
+    .where('organizerUid', '==', uid)
+    .where('eventId',      '==', eventId)
 
-  // Compute stats
-  const generated  = records.length
-  const downloaded = records.filter(r => r.downloadCount > 0).length
-  const emailed    = records.filter(r => r.emailStatus === 'sent').length
+  const [generatedAgg, downloadedAgg, emailedAgg, recentSnap] = await Promise.all([
+    base.count().get(),
+    // `> 0` is a RANGE filter, so downloadCount must be the last field in its index.
+    base.where('downloadCount', '>', 0).count().get(),
+    base.where('emailStatus', '==', 'sent').count().get(),
+    // Newest first — the sort key is issuedAt (CertificateRecord has no createdAt).
+    base.orderBy('issuedAt', 'desc').limit(20).get(),
+  ])
+
+  const generated  = generatedAgg.data().count
+  const downloaded = downloadedAgg.data().count
+  const emailed    = emailedAgg.data().count
 
   // Compute pending: eligible registrations without certificates.
   // GA-7C P1-3: derive from a COUNT aggregation (no document reads) instead of the
@@ -68,19 +85,15 @@ export async function GET(req: NextRequest, { params }: Params): Promise<NextRes
     pending = Math.max(0, confirmedSnap.data().count - generated)
   }
 
-  // Serialize recent 20 records, newest first
-  const recent: SerializedCertificateRecord[] = records
-    .sort((a, b) => {
-      const at = toISO(a.issuedAt) ?? ''
-      const bt = toISO(b.issuedAt) ?? ''
-      return bt.localeCompare(at)
-    })
-    .slice(0, 20)
-    .map(r => ({
+  // Ordered by Firestore, not in memory — these 20 are the only documents read.
+  const recent: SerializedCertificateRecord[] = recentSnap.docs.map(d => {
+    const r = d.data() as CertificateRecord
+    return {
       ...r,
       issuedAt:  toISO(r.issuedAt)  ?? new Date().toISOString(),
       emailedAt: toISO(r.emailedAt) ?? null,
-    }))
+    }
+  })
 
   return NextResponse.json({
     generated, downloaded, emailed, pending, recent,

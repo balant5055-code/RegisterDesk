@@ -163,10 +163,34 @@ describe('input validation', () => {
     expect((await POST(bad, ctx())).status).toBe(400)
   })
 
-  it('mobile lookup is NOT supported in V1', async () => {
-    // attendee.phone is stored un-normalised, so a phone query would silently miss.
+  // RD-CERT-SEARCH-4 — mobile and bib are now supported. The V1 limitation was that
+  // `attendee.phone` is stored un-normalised so a single-value query would silently miss;
+  // that is solved by querying the plausible spellings in one indexed `in` filter rather
+  // than by migrating live data.
+  it('mobile lookup is accepted', async () => {
     const res = await POST(post({ mobile: '9876543210' }), ctx())
-    expect(res.status).toBe(400)
+    expect(res.status).not.toBe(400)
+  })
+
+  it('bib lookup is accepted', async () => {
+    const res = await POST(post({ bibNumber: '1042' }), ctx())
+    expect(res.status).not.toBe(400)
+  })
+
+  it('still rejects more than one mode at a time', async () => {
+    expect((await POST(post({ email: 'a@b.c', mobile: '9876543210' }), ctx())).status).toBe(400)
+    expect((await POST(post({ mobile: '9876543210', bibNumber: '1042' }), ctx())).status).toBe(400)
+  })
+
+  it('an over-long mobile or bib falls through to the uniform empty response, not an error', async () => {
+    // Same anti-oracle rule the email/registrationId shape checks already follow.
+    const long = await POST(post({ mobile: '9'.repeat(40) }), ctx())
+    expect(long.status).toBe(200)
+    expect(await long.json()).toEqual({ results: [] })
+
+    const bib = await POST(post({ bibNumber: 'x'.repeat(80) }), ctx())
+    expect(bib.status).toBe(200)
+    expect(await bib.json()).toEqual({ results: [] })
   })
 })
 
@@ -177,5 +201,60 @@ describe('rate limiting', () => {
     expect(res.status).toBe(429)
     expect(res.headers.get('Retry-After')).toBe('30')
     expect(wheres).toHaveLength(0)
+  })
+})
+
+// ─── RD-CERT-LOOKUP-TICKET — the fifth mode ───────────────────────────────────
+//
+// THE DEFECT THIS PINS. `ticketCode` ("RD-XXXXXXXX") is the code on the ticket and in the
+// check-in QR; `registrationId` is the Firestore document id, a uuid. They are different
+// fields, and the Center previously offered only the latter — so an attendee typing the code
+// they actually possess got a silent empty result that looked like "no certificate".
+
+describe('ticket code is its own lookup mode', () => {
+  it('accepts a ticket code', async () => {
+    const res = await POST(post({ ticketCode: 'RD-VNT8T3UW' }), ctx())
+    expect(res.status).not.toBe(400)
+  })
+
+  it('resolves it through registrations.ticketCode, event-scoped', async () => {
+    await POST(post({ ticketCode: 'RD-VNT8T3UW' }), ctx())
+    expect(wheres).toContainEqual(['eventSlug', '==', SLUG])
+    expect(wheres).toContainEqual(['ticketCode', '==', 'RD-VNT8T3UW'])
+  })
+
+  it('upper-cases the code — tickets are minted upper-case', async () => {
+    await POST(post({ ticketCode: 'rd-vnt8t3uw' }), ctx())
+    expect(wheres).toContainEqual(['ticketCode', '==', 'RD-VNT8T3UW'])
+  })
+
+  it('is NOT queried as a registrationId', async () => {
+    await POST(post({ ticketCode: 'RD-VNT8T3UW' }), ctx())
+    expect(wheres.find(w => w[0] === 'registrationId' && w[2] === 'RD-VNT8T3UW')).toBeUndefined()
+  })
+
+  it('a registration id is still queried as a registration id', async () => {
+    await POST(post({ registrationId: '6d54808e-8c45-4c9f-bd48-eb91c0f9345b' }), ctx())
+    expect(wheres).toContainEqual(['registrationId', '==', '6d54808e-8c45-4c9f-bd48-eb91c0f9345b'])
+    expect(wheres.find(w => w[0] === 'ticketCode')).toBeUndefined()
+  })
+
+  it('still rejects more than one mode at a time', async () => {
+    expect((await POST(post({ ticketCode: 'RD-X', email: 'a@b.c' }), ctx())).status).toBe(400)
+    expect((await POST(post({ ticketCode: 'RD-X', bibNumber: '12' }), ctx())).status).toBe(400)
+  })
+
+  it('an over-long code falls through to the uniform empty response', async () => {
+    const res = await POST(post({ ticketCode: 'R'.repeat(80) }), ctx())
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({ results: [] })
+  })
+})
+
+describe('bib lookup remains a two-hop registrations query', () => {
+  it('queries registrations.bibNumber, event-scoped', async () => {
+    await POST(post({ bibNumber: '1042' }), ctx())
+    expect(wheres).toContainEqual(['eventSlug', '==', SLUG])
+    expect(wheres).toContainEqual(['bibNumber', '==', '1042'])
   })
 })

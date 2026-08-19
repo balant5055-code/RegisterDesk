@@ -72,11 +72,18 @@ export default async function RegistrationSuccessPage({
   // Signed PDF download URLs (server-side only)
   const baseUrl      = process.env.NEXT_PUBLIC_APP_URL ?? ''
   const ticketToken  = signTicketToken(id)
-  const ticketPdfUrl = `${baseUrl}/api/tickets/${id}/pdf?token=${encodeURIComponent(ticketToken)}`
+  // RELATIVE, deliberately. These two are browser <a href> downloads on THIS page, so they
+  // must resolve against the deployment the attendee is actually on. Built from
+  // NEXT_PUBLIC_APP_URL they resolved to the production host instead, which meant a Vercel
+  // Preview's "Download PDF"/"Download Receipt" left the preview and was served by
+  // production — returning production's older ticket generator, and a 500 for the receipt
+  // whose crash fix had not shipped there yet. `shareUrl` below stays absolute: it is shared
+  // outside the browser and genuinely needs the canonical host.
+  const ticketPdfUrl = `/api/tickets/${id}/pdf?token=${encodeURIComponent(ticketToken)}`
 
   const isPaidRegistration = paymentStatus === 'paid' && (amount ?? 0) > 0
   const receiptUrl = isPaidRegistration
-    ? `${baseUrl}/api/receipts/${id}?token=${encodeURIComponent(signReceiptToken(id))}`
+    ? `/api/receipts/${id}?token=${encodeURIComponent(signReceiptToken(id))}`
     : null
 
   // NOTE: the itemized fee breakdown and the "amount paid" label were rendered ONLY by the

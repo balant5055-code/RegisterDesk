@@ -6,7 +6,7 @@
 
 import { FieldPath } from 'firebase-admin/firestore'
 import { adminDb }   from '@/lib/firebase/admin'
-import { getTemplateById } from './firestore'
+import { getTemplateById, recordTemplateUsage } from './firestore'
 import { generateCertificate, loadRenderAssets, CertificateInProgressError } from './generate'
 import type { RenderAssets } from './generate'
 import { notifyCertificateJobComplete } from '@/lib/notifications/inbox/notify'
@@ -189,6 +189,11 @@ async function generateForReg(
         finishTime:     raceResult.finishTime,
         position:       raceResult.position,
         category:       reg.bibCategory ?? '',
+        // RD-CERT-PHOTO-01 — the registration is ALREADY loaded here, so passing the key
+        // costs no extra read. Undefined for attendees without a photo, which renders
+        // exactly as before. No N+1: the photo BYTES are fetched inside generateCertificate,
+        // and only when the template actually places an attendeePhoto element.
+        attendeePhotoKey: reg.attendeePhotoKey,
       },
       certificateType: job.certificateType,
       source:          'bulk',
@@ -266,6 +271,12 @@ function certificateJobStrategy(eventCtx: JobEventContext): JobStrategy<Certific
       return generateForReg(reg, job, ctx.event, ctx.template, ctx.prefetched)
     },
     onComplete(job, ctx) {
+      // RD-CERT-SCALE P2-4 — ONE usage write for the whole job, replacing one per
+      // certificate. Same meaning (`usageCount` = certificates generated from this
+      // template), ~10,000× fewer writes to a single hot document at 10k scale.
+      // Fire-and-forget: generation must never depend on an analytics update.
+      void recordTemplateUsage(ctx.template.templateId, job.counts.succeeded)
+
       // H.4.3: record the terminal job once in the organizer inbox (final counts).
       // Best-effort — never affects job processing.
       void notifyCertificateJobComplete({

@@ -9,7 +9,7 @@ import { targetStatus, isValidTransition, deriveLifecycleStatus } from './lifecy
 
 // Re-export the pure state machine so existing importers of this module are
 // unaffected (the machine now lives in ./lifecycleStateMachine for testability).
-export { targetStatus, isValidTransition, deriveLifecycleStatus } from './lifecycleStateMachine'
+export { targetStatus, isValidTransition, deriveLifecycleStatus, isArchivedEvent } from './lifecycleStateMachine'
 export { VALID_TRANSITIONS } from './lifecycleStateMachine'
 
 // ─── Core transition function ─────────────────────────────────────────────────

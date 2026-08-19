@@ -17,7 +17,80 @@ import type {
   CertificateType, TemplateType, CertificateJobScope, RevocationReason, CertificateDeliveryScope,
 } from '@/lib/certificates/types'
 
+export type ZipScope = 'all' | 'job' | 'selected'
+
+export interface ZipJobCreateResponse {
+  jobId: string; status: string; scope: ZipScope; total: number
+}
+
+/**
+ * One part of a multipart export. `part` is a presentation ordinal derived from shard order;
+ * `url` is a short-lived signed URL minted per poll, never stored.
+ */
+export interface ZipPart {
+  part: number; count: number; bytes: number; url: string
+}
+
+/**
+ * READ `outcome`, NOT `status`, to decide whether an export is whole.
+ *
+ * `status: 'completed'` only means the job stopped running. `outcome` is written by the
+ * finalize seal, which refuses to pass a short or duplicated archive:
+ *   complete   — every requested certificate is inside a verified part
+ *   partial    — the archive is short by exactly `failedCount` certificates
+ *   unverified — a job from before multipart verification existed
+ */
+export interface ZipJobResponse {
+  jobId: string
+  status: 'pending' | 'processing' | 'completed' | 'failed' | 'cancelled'
+  scope: ZipScope
+  counts: { total: number; processed: number; succeeded: number; failed: number }
+  requested: number
+  included: number
+  outcome: 'complete' | 'partial' | 'unverified' | null
+  failedCount: number
+  failedIds: string[]
+  partCount: number
+  parts: ZipPart[]
+  manifestUrl: string | null
+  error: string | null
+}
+
 export type HubTab = 'overview' | 'settings' | 'templates' | 'programs' | 'brandkit' | 'issue' | 'recipients'
+
+/**
+ * The regenerate route's wire format. Typed here rather than imported because that route
+ * returns its JSON inline and exports no named type; `CertResolveResponse` below is declared
+ * the same way for the same reason.
+ *
+ * PARTIAL FAILURE IS THE NORMAL CASE: the route answers 200 with per-item outcomes, so
+ * `failed` and `results[].ok` — not the HTTP status — are what say whether anything worked.
+ */
+export interface CertificateRegenerateResponse {
+  succeeded: number
+  failed:    number
+  results:   Array<{ certificateId: string; ok: boolean; error?: string }>
+}
+
+/**
+ * RD-CERT-DELETE — permanent deletion. Same partial-failure contract as regenerate.
+ *
+ * `orphanedKeys` counts R2 objects that survived the deletion. Those certificates ARE deleted
+ * (their `ok` is true); the number exists so unreferenced bytes are reported rather than
+ * swallowed, and it must never be presented as a failed deletion.
+ */
+export interface CertificateDeleteResponse {
+  succeeded:    number
+  failed:       number
+  orphanedKeys: number
+  results:      Array<{
+    certificateId:   string
+    ok:              boolean
+    error?:          string
+    alreadyDeleted?: boolean
+    orphanedKeys?:   string[]
+  }>
+}
 
 // ── Extra response/patch shapes for the newly-surfaced endpoints (GA-7D S3) ──
 // The engines already exist server-side; these only type the wire format.
@@ -166,6 +239,21 @@ export function makeCertApi(eventId: string, token: string) {
     listJobs: () => fetch(`${B}/jobs`, { headers: auth }).then(jsonOrThrow<JobsListResponse>),
     processJob: (jobId: string) =>
       fetch(`${B}/jobs/${jobId}/process`, { method: 'POST', headers: auth }).then(jsonOrThrow<JobProcessResponse>),
+    // ── Bulk ZIP export (RD-CERT-ARTIFACT-01 enqueue + poll, RD-CERT-SCALE P2-2 multipart) ──
+    // These wrap the EXISTING endpoints; the export mechanism is the sharded job, not a
+    // second download path. `processZipJob` exists so the organizer's open tab drives the
+    // job immediately instead of waiting for the cron that would otherwise pick it up.
+    createZipJob: (scope: ZipScope, body?: { certificateIds?: string[]; jobId?: string }) =>
+      fetch(`${B}/download`, {
+        method: 'POST', headers: { ...auth, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ scope, ...body }),
+      }).then(jsonOrThrow<ZipJobCreateResponse>),
+    getZipJob: (jobId: string) =>
+      fetch(`${B}/zip-jobs/${jobId}`, { headers: auth }).then(jsonOrThrow<ZipJobResponse>),
+    processZipJob: (jobId: string) =>
+      fetch(`${B}/zip-jobs/${jobId}/process`, { method: 'POST', headers: auth })
+        .then(jsonOrThrow<{ status: string }>),
+
     cancelJob: (jobId: string) =>
       fetch(`${B}/jobs/${jobId}/cancel`, { method: 'POST', headers: auth }).then(jsonOrThrow<{ status: string }>),
 
@@ -187,6 +275,26 @@ export function makeCertApi(eventId: string, token: string) {
     restore: (certificateId: string) =>
       fetch(`${B}/restore`, { method: 'POST', headers: jsonAuth, body: JSON.stringify({ certificateId }) })
         .then(jsonOrThrow<{ success: boolean; certificate: SerializedCertificate }>),
+
+    // ── In-place regeneration (GA-4 S2) ──
+    // Re-renders EXISTING certificates against the event's current active template. The
+    // certificateId and verificationToken are preserved and no new record is created — this
+    // is deliberately NOT the issue/generate endpoint, which is idempotent per
+    // (eventId, registrationId, certificateType) and would silently return the old record.
+    //
+    // The route answers 200 even when every item failed, so the caller MUST read
+    // `results[].ok` rather than trusting the HTTP status. The shape below is the route's
+    // own, unchanged.
+    regenerate: (certificateIds: string[]) =>
+      fetch(`${B}/regenerate`, { method: 'POST', headers: jsonAuth, body: JSON.stringify({ certificateIds }) })
+        .then(jsonOrThrow<CertificateRegenerateResponse>),
+
+    // ── Permanent deletion (one endpoint for one certificate or many) ──
+    // Individual delete is a batch of one, so the browser never fires N independent deletion
+    // requests. Same 200-with-per-item-outcomes contract as regenerate above.
+    remove: (certificateIds: string[]) =>
+      fetch(`${B}/delete`, { method: 'POST', headers: jsonAuth, body: JSON.stringify({ certificateIds }) })
+        .then(jsonOrThrow<CertificateDeleteResponse>),
 
     // ── Authenticated certificate file download (organizer bypass) ──
     // Fetches with the organizer's Bearer token so the /file route's organizer

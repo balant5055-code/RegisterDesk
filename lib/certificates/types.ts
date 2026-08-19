@@ -458,6 +458,15 @@ export interface Certificate {
   revokeReason:      string | null        // resolved human-readable reason text
   revocationHistory?: RevocationHistoryEntry[]   // append-only revoke/restore log
   jobId:             string | null        // owning bulk job (Phase 7), if any
+  /**
+   * RD-CERT-PHOTO-04 — the attendee photo PERSISTED against this certificate.
+   *
+   * Server-written only, derived from the certificate record; never a browser-supplied key.
+   * Distinct from `registration.attendeePhotoKey`, which remains the attendee portal's
+   * permanent photo and is untouched by the public Certificate Center. Absent ⇒ no photo,
+   * and the certificate renders exactly as it always did.
+   */
+  attendeePhotoKey?: string
   schemaVersion:     number
   /** True only when this object was adapted from a legacy certificateRecord. */
   legacy?:           boolean
@@ -530,11 +539,29 @@ export interface TextLayoutElement extends BaseLayoutElement {
 /** Semantic role of an image element — drives the builder's upload slots / labels. */
 export type ImageRole = 'image' | 'logo' | 'signature' | 'seal'
 
+/**
+ * WHERE an image element's bytes come from. Deliberately separate from `role`, which is
+ * semantic (logo / signature / seal) and drives labels only.
+ *
+ *   'static'        — the organizer's uploaded asset at `assetUrl` (the only behaviour that
+ *                     existed before RD-CERT-PHOTO-01).
+ *   'attendeePhoto' — the attendee's own uploaded photo, resolved PER CERTIFICATE at render
+ *                     time from the registration's `attendeePhotoKey`. `assetUrl` is the
+ *                     empty string for these: there is no design-time URL to store.
+ *
+ * ABSENT ⇒ 'static'. Every template saved before this field existed therefore behaves
+ * exactly as it always did, with no migration and no layout-version bump.
+ */
+export type ImageSource = 'static' | 'attendeePhoto'
+
 export interface ImageLayoutElement extends BaseLayoutElement {
   type:     'image'
-  assetUrl: string                          // must live in the project's Storage bucket
+  /** Must live in the project's Storage bucket. EMPTY for `source: 'attendeePhoto'`, which
+   *  has no design-time asset — see ImageSource. */
+  assetUrl: string
   fit:      'contain' | 'cover'
   role?:    ImageRole                       // logo / signature / seal / generic image
+  source?:  ImageSource                     // absent ⇒ 'static'
 }
 
 export interface QrLayoutElement extends BaseLayoutElement {

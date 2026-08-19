@@ -5,12 +5,13 @@ import { useRouter }  from 'next/navigation'
 import { cn }         from '@/lib/utils/cn'
 import {
   LockOpen, Lock, CheckCircle, XCircle, Archive,
-  Copy, AlertTriangle, X, Loader2, Link2, EyeOff, ChevronDown, Send, RotateCcw,
+  Copy, AlertTriangle, X, Loader2, Link2, EyeOff, ChevronDown, Send, RotateCcw, Trash2,
 } from 'lucide-react'
 import type { EventDetailResponse } from '@/app/api/organizer/events/[eventId]/route'
 import type { EventLifecycleStatus } from '@/types/events'
 import { useToast } from '@/components/ui/Toast'
 import { Dialog } from '@/components/ui/Dialog'
+import { PERMANENT_DELETE_TITLE, PERMANENT_DELETE_DESCRIPTION } from '@/lib/events/permanentDeleteCopy'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -235,7 +236,7 @@ function CopyLinkButton({ slug }: { slug: string }) {
 
 // ─── Main Component ───────────────────────────────────────────────────────────
 
-type ModalState = 'none' | 'cancel' | 'close_reg' | 'reopen_reg' | 'complete' | 'archive' | 'duplicate' | 'unpublish' | 'republish' | 'restore'
+type ModalState = 'none' | 'cancel' | 'close_reg' | 'reopen_reg' | 'complete' | 'archive' | 'duplicate' | 'unpublish' | 'republish' | 'restore' | 'delete_permanent'
 
 export default function EventActionsPanel({ event, token, onSuccess, mode = 'flat' }: Props) {
   const router                          = useRouter()
@@ -319,6 +320,48 @@ export default function EventActionsPanel({ event, token, onSuccess, mode = 'fla
     }
   }
 
+  /**
+   * Permanently deletes an ARCHIVED event.
+   *
+   * `loading` gates the confirm button so a double-click cannot issue a second DELETE — and
+   * the endpoint is idempotent regardless, so even one that slipped through reports success
+   * rather than an error.
+   *
+   * Success is read from `json.success`, NEVER from `res.ok`: a partial deletion returns an
+   * explicit failure list, and trusting the HTTP status is exactly how a half-deleted event
+   * would look clean. On success the event no longer exists, so there is nothing to refresh
+   * into — navigate back to the events list.
+   */
+  async function callPermanentDelete() {
+    setLoading(true)
+    setActionError(null)
+    try {
+      const res  = await fetch(`/api/organizer/events/${event.draftId}`, {
+        method:  'DELETE',
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      const json = await res.json().catch(() => ({})) as {
+        success?: boolean; error?: string; deleted?: number; failures?: string[]
+      }
+      if (res.ok && json.success) {
+        showToast('Event permanently deleted.', 'success')
+        setModal('none')
+        router.push('/dashboard/events')
+      } else {
+        const detail = json.failures?.length ? ` (${json.failures.length} item(s) could not be removed)` : ''
+        const msg = (json.error ?? 'Permanent deletion failed') + detail
+        setActionError(msg)
+        showToast(msg, 'error')
+      }
+    } catch {
+      const msg = 'Could not reach the server. The event was not deleted.'
+      setActionError(msg)
+      showToast(msg, 'error')
+    } finally {
+      setLoading(false)
+    }
+  }
+
   // Restore an archived event: returns it to the private 'unpublished' state via
   // the dedicated route (reuses the paid license — never a payment).
   async function callRestore() {
@@ -385,6 +428,9 @@ export default function EventActionsPanel({ event, token, onSuccess, mode = 'fla
   const canUnpublish = ls === 'published'
   const canRepublish = ls === 'unpublished'
   const canRestore   = ls === 'archived'
+  // Permanent deletion is offered ONLY for an archived event. The server enforces the same
+  // rule independently (409 otherwise), so this merely avoids presenting a refused action.
+  const canDeleteForever = ls === 'archived'
   const canDuplicate = true
   const showRegLink  = (ls === 'published' || ls === 'registration_closed') && !!event.slug
   const isReadOnly   = false
@@ -462,6 +508,9 @@ export default function EventActionsPanel({ event, token, onSuccess, mode = 'fla
               {canUnpublish && <ActionBtn icon={EyeOff}      label="Unpublish Event"       onClick={() => setModal('unpublish')}  />}
               {canRepublish && <ActionBtn icon={Send}        label="Republish Event"       onClick={() => setModal('republish')} variant="primary" />}
               {canRestore   && <ActionBtn icon={RotateCcw}   label="Restore Event"         onClick={() => setModal('restore')}   variant="primary" />}
+              {/* Irreversible, so it is never the primary action and never sits where
+                  Restore was a moment ago in the operator's muscle memory. */}
+              {canDeleteForever && <ActionBtn icon={Trash2}  label="Delete Permanently"    onClick={() => setModal('delete_permanent')} variant="danger" />}
               {canReopenReg && <ActionBtn icon={LockOpen}    label="Reopen Registrations" onClick={() => setModal('reopen_reg')} variant="primary" />}
               {canComplete  && <ActionBtn icon={CheckCircle} label="Mark Complete"         onClick={() => setModal('complete')}   />}
               {canArchive   && <ActionBtn icon={Archive}     label="Archive"               onClick={() => setModal('archive')}    />}
@@ -639,6 +688,19 @@ export default function EventActionsPanel({ event, token, onSuccess, mode = 'fla
           icon={RotateCcw}
           loading={loading}
           onConfirm={() => callRestore()}
+          onClose={() => setModal('none')}
+        />
+      )}
+
+      {modal === 'delete_permanent' && (
+        <ConfirmModal
+          title={PERMANENT_DELETE_TITLE}
+          description={PERMANENT_DELETE_DESCRIPTION}
+          confirmLabel={PERMANENT_DELETE_TITLE}
+          confirmCls="bg-red-600 hover:bg-red-700"
+          icon={Trash2}
+          loading={loading}
+          onConfirm={() => callPermanentDelete()}
           onClose={() => setModal('none')}
         />
       )}

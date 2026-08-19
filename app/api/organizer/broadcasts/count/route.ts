@@ -10,6 +10,7 @@ import { adminDb }                   from '@/lib/firebase/admin'
 import type { BroadcastAudience }    from '@/lib/broadcasts/types'
 import { authorizeWorkspace }        from '@/lib/team/workspace'
 import { resolveMaxRecipientsPerBroadcast } from '@/lib/broadcasts/limits'
+import { countUniqueRecipients } from '@/lib/broadcasts/dedupeRecipients'
 
 interface CountResponse {
   success: boolean
@@ -26,7 +27,9 @@ export async function POST(req: NextRequest): Promise<NextResponse<CountResponse
   try { body = await req.json() }
   catch { return NextResponse.json({ success: false, error: 'Invalid JSON' }, { status: 400 }) }
 
-  const { eventSlug, audience, channel } = body as Record<string, unknown>
+  const { eventSlug, audience, channel, dedupeEmails: dedupeRaw } = body as Record<string, unknown>
+  // Strict === true so anything else preserves the existing count behaviour exactly.
+  const dedupeEmails = dedupeRaw === true
   if (typeof eventSlug !== 'string' || !eventSlug) {
     return NextResponse.json({ success: false, error: 'eventSlug is required' }, { status: 400 })
   }
@@ -60,6 +63,17 @@ export async function POST(req: NextRequest): Promise<NextResponse<CountResponse
       if (typeof phone === 'string' && phone.trim().length > 0) count++
     }
     return NextResponse.json({ success: true, count })
+  }
+
+  // Email + "Ignore duplicate email IDs": the count must be UNIQUE ADDRESSES, and Firestore
+  // has no DISTINCT — count() would report registrations and over-state what gets sent.
+  // Reuses the WhatsApp branch's bounded shape above (projected read, capped at cap+1), so
+  // the read cost is one already-established pattern rather than a new one, and the whole
+  // collection is never loaded — here or in the browser.
+  if (dedupeEmails) {
+    const snap = await query.select('attendee').limit(maxRecipients + 1).get()
+    const emails = snap.docs.map(d => (d.data() as { attendee?: { email?: string } }).attendee?.email)
+    return NextResponse.json({ success: true, count: countUniqueRecipients(emails) })
   }
 
   // Email: exact count via an indexed aggregate — no documents transferred.

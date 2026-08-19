@@ -9,12 +9,30 @@ import { AggregateField }            from 'firebase-admin/firestore'
 import { adminDb }                   from '@/lib/firebase/admin'
 import { authorizeAnyWorkspace }     from '@/lib/team/workspace'
 import { ensureOrganizerProfile }    from '@/lib/organizer/ensureProfile'
-import { deriveLifecycleStatus }     from '@/lib/events/lifecycle'
+import { deriveLifecycleStatus } from '@/lib/events/lifecycle'
+import { isArchivedTabEvent } from '@/lib/events/listingTabs'
 import { getWalletBalance }          from '@/lib/firebase/firestore/wallet'
 import { getFreeEventCapacity }      from '@/lib/licensing/resolveCatalog'
 import type { OrganizerRevenueWallet } from '@/lib/fees/types'
 import { EVENT_STATS_VERSION }       from '@/lib/registrations/types'
 import type { RegistrationDocument, RegistrationCounter } from '@/lib/registrations/types'
+import { aggregateRegistrationStatusCounts } from '@/lib/firebase/firestore/registrationCounters'
+import type { RegistrationStatusCounts }     from '@/lib/firebase/firestore/registrationCounters'
+import { aggregateCancelledByPass, aggregateWaitlistedCount } from '@/lib/analytics/registrationPassAggregates'
+import { getOrganizerCouponPerformance, EMPTY_ORGANIZER_COUPON_PERFORMANCE } from '@/lib/analytics/couponPerformance'
+import type { OrganizerCouponPerformance } from '@/lib/analytics/couponPerformance'
+import { buildDashboardAnalytics } from '@/lib/analytics/dashboardAnalytics'
+import type { PassRow, RegistrationTotals } from '@/lib/analytics/dashboardAnalytics'
+
+/**
+ * Ceiling on per-pass cancelled aggregates for ONE dashboard load (events × passes).
+ *
+ * Cancelled-by-pass costs one count() per (event, pass), so an organizer with many events
+ * each carrying many passes could otherwise fire hundreds of queries per render. Events with
+ * zero cancellations are skipped entirely, so in practice this is rarely approached — and
+ * when it is, the affected events report "unavailable" rather than a fabricated zero.
+ */
+const PASS_AGGREGATE_BUDGET = 120
 
 // ─── Utilities ────────────────────────────────────────────────────────────────
 
@@ -117,10 +135,24 @@ export interface DashboardData {
   activity:   DashboardActivity[]
   events:     DashboardEvent[]
   trendDays:  { date: string; count: number; revenuePaise: number }[]   // 90 entries, oldest → newest
-  // Recent-window (≤90d) breakdowns — derived from the SAME bounded registration
-  // read that powers trendDays/today; no extra Firestore reads. Empty ⇒ charts degrade.
-  passDistribution:   { label: string; count: number }[]   // top passes by confirmed registrations
-  registrationStatus: { label: string; count: number }[]   // recent registrations by status
+  // Organizer-wide, ALL-TIME breakdowns — derived from the registrationCounters documents
+  // this route already fetches, NOT from the 90-day recent window. No extra Firestore reads
+  // in the healthy case. Empty ⇒ charts degrade.
+  /** Confirmed + cancelled per pass, + Other / Unassigned / Unattributed. `count` is the
+   *  CONFIRMED figure, kept under that name so the bar chart and insights are unchanged. */
+  passDistribution:   PassRow[]
+  registrationStatus: { label: string; count: number }[]   // organizer-wide, all-time, by status
+  /** Every status total, so the card can show counts AND percentages from one source. */
+  registrationTotals: RegistrationTotals
+  /** True when at least one event's counts could not be read. The client must NOT render
+   *  these two charts as authoritative zeros when this is set. */
+  analyticsUnavailable?: boolean
+  /** True when a per-pass cancelled split could not be completed for some event with
+   *  cancellations. The client must hide the cancelled column rather than show zeros. */
+  passCancelledUnavailable?: boolean
+  /** Registered per event, SAME event scope and SAME confirmed figure as the two breakdowns
+   *  above, Top-N with a real "Other" remainder. */
+  eventPerformance:   { label: string; count: number }[]
   communications: {
     emailsSent:        number
     emailsSentToday:   number
@@ -144,6 +176,12 @@ export interface DashboardData {
     rejected:         number
   }
   actionEvents:        DashboardActionEvent[]
+  /**
+   * Coupon performance across the organizer's events. Derived from the coupon documents
+   * plus ONE sum() aggregate — never a registration scan — so it is exact regardless of how
+   * many registrations exist. `partial` is true when the event budget was reached.
+   */
+  couponPerformance:   OrganizerCouponPerformance
 }
 
 // ─── Organizer event enumeration ──────────────────────────────────────────────
@@ -285,25 +323,60 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   }
   const drafts     = draftDocs.map(d => ({ id: d.id, ...d.data() }) as Record<string, unknown>)
   // Bounded, projected recent registrations (NOT the full history).
-  const recentRegs = recentRegsSnap.docs.map(d => d.data() as RegistrationDocument)
+  // Raw window: organizerUid + registeredAt ≥ 90d, with NO event filter. Scoped to the
+  // canonical dashboard event set below, once that set exists.
+  const recentRegsRaw = recentRegsSnap.docs.map(d => d.data() as RegistrationDocument)
 
   // ── Collect slugs + draft IDs for batch 2 ─────────────────────────────────
-  const publishedDrafts = drafts.filter(d => d.status === 'published')
+  // Also archive-guarded: an event archived before the current writer existed can still
+  // carry the legacy status 'published', which would put it back into the alerts, the
+  // Active-events KPI and the event-health list.
+  const publishedDrafts = drafts.filter(d => d.status === 'published' && !isArchivedTabEvent(d))
   // Certificate-template alerts are scoped to currently-published events.
   const draftIdList: string[] = publishedDrafts.map(d => d.id as string)
 
-  // Per-event statistics (counts + revenue) are summed over EVERY event that was
-  // ever published — including ones since archived/cancelled/completed — so the
-  // overview totals match the previous all-events scan rather than only the
-  // currently-published set. Resolved by slug from publishedAt-stamped drafts.
   const slugOfDraft = (d: Record<string, unknown>): string | null => {
     const details = (d.eventDetails as Record<string, unknown>) ?? {}
     const seo     = (details.seo    as Record<string, unknown>) ?? {}
     return typeof seo.urlSlug === 'string' && seo.urlSlug ? seo.urlSlug : null
   }
+
+  // ══ THE CANONICAL DASHBOARD EVENT SET ════════════════════════════════════════
+  //
+  // ONE definition, used by EVERY figure on this dashboard: the KPI cards, revenue, both
+  // trend charts, pass distribution, registration status, event performance, insights and
+  // the activity feed. No card may filter events for itself — that is exactly how they
+  // drifted apart before.
+  //
+  //   ever published (has publishedAt)  AND  NOT shown under the Archived tab
+  //
+  // THE INVARIANT: if the Events page files an event under "Archived", it contributes
+  // nothing here. That tab is a bucket for FOUR terminal states — completed, cancelled,
+  // archived and unpublished — and `isArchivedTabEvent` derives its answer from the very
+  // same `listingTabsForEvent` mapping the tab uses, so the two can never disagree.
+  //
+  // Re-listing those states here instead would be a second copy destined to drift: that is
+  // precisely how an UNPUBLISHED event kept feeding Pass Distribution and Event Performance
+  // while the operator was looking at it under the Archived tab.
+  //
+  // NOT the same question as `isArchivedEvent`, which means the genuine permanent archived
+  // state and gates permanent DELETION. An unpublished event is excluded from the dashboard
+  // yet stays editable, restorable, and NOT permanently deletable.
+  const dashboardDrafts = drafts.filter(d => d.publishedAt && !isArchivedTabEvent(d))
   const slugList = Array.from(new Set(
-    drafts.filter(d => d.publishedAt).map(slugOfDraft).filter((s): s is string => !!s),
+    dashboardDrafts.map(slugOfDraft).filter((s): s is string => !!s),
   ))
+  // The same set as a lookup. The recent-registration scan below is organizerUid-scoped with
+  // NO event filter, so without this an archived event's registrations would flow straight
+  // into both trend charts, today's figures and the activity feed.
+  const dashboardSlugs = new Set(slugList)
+
+  // Every per-registration figure on this screen — both trends, today's count and revenue,
+  // this month's, and the activity feed — is derived from THIS array, so the archived
+  // exclusion applies to all of them from one place. A registration whose event was never
+  // published (no slug in the set) is excluded for the same reason it has no counter.
+  const recentRegs = recentRegsRaw.filter(r =>
+    typeof r.eventSlug === 'string' && dashboardSlugs.has(r.eventSlug))
 
   // ── Batch 2: counters + cert templates ────────────────────────────────────
   // D.1: read each set with a single getAll() multi-get instead of N individual
@@ -325,10 +398,15 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   const counterMap = new Map<string, number>()
   const revBySlug  = new Map<string, number>()
   const revenueFallbackSlugs: string[] = []
+  // RD-DASHBOARD-ANALYTICS — the raw counter per slug, kept so the organizer-wide
+  // Registration Status and Pass Distribution can be derived from these ALREADY-LOADED
+  // documents instead of the 90-day/5000-capped registration scan. Absent ⇒ no counter doc.
+  const counterBySlug = new Map<string, RegistrationCounter | null>()
   counterSnaps.forEach((snap, i) => {
     const slug = slugList[i]
-    if (!snap.exists) { counterMap.set(slug, 0); revBySlug.set(slug, 0); return }
+    if (!snap.exists) { counterMap.set(slug, 0); revBySlug.set(slug, 0); counterBySlug.set(slug, null); return }
     const d = snap.data() as RegistrationCounter
+    counterBySlug.set(slug, d)
     counterMap.set(slug, d.totalCount ?? 0)
     if ((d.statsVersion ?? 0) >= EVENT_STATS_VERSION) revBySlug.set(slug, d.revenuePaise ?? 0)
     else revenueFallbackSlugs.push(slug)
@@ -452,7 +530,8 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   })
 
   // Communication payment pending
-  drafts.forEach(d => {
+  // Canonical set: an archived event needs no action, so it must not raise an alert.
+  dashboardDrafts.forEach(d => {
     const billing = d.communicationBilling as Record<string, unknown> | null | undefined
     if (billing?.status !== 'pending') return
     const details = (d.eventDetails as Record<string, unknown>) ?? {}
@@ -481,7 +560,9 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
 
   // Communication billing is a SEPARATE concern (comms wallet), surfaced on the
   // Communication usage card — never mixed into the revenue settlement figures above.
-  const communicationCostPaise = drafts.reduce((s, d) => {
+  // Canonical set: this is a dashboard money figure, so an archived event's communication
+  // spend must not keep appearing in the settlement card after the event is off the books.
+  const communicationCostPaise = dashboardDrafts.reduce((s, d) => {
     const b = d.communicationBilling as Record<string, unknown> | null | undefined
     return (b?.status === 'paid' && typeof b.amount === 'number') ? s + b.amount : s
   }, 0)
@@ -533,7 +614,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
 
   const visibleStatuses = new Set(['published', 'registration_closed', 'completed'])
   const events: DashboardEvent[] = drafts
-    .filter(d => visibleStatuses.has(deriveLifecycleStatus(d)))
+    .filter(d => visibleStatuses.has(deriveLifecycleStatus(d)) && !isArchivedTabEvent(d))
     .map(d => {
       const details  = (d.eventDetails as Record<string, unknown>) ?? {}
       const info     = (details.info    as Record<string, unknown>) ?? {}
@@ -590,29 +671,135 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   const trendDays = Array.from(trendCount.entries())
     .map(([date, count]) => ({ date, count, revenuePaise: trendRev.get(date) ?? 0 }))
 
-  // ── Recent-window breakdowns (pass distribution + registration status) ─────────
-  // Both derived from the already-loaded recent window — no extra reads. Pass
-  // distribution counts confirmed registrations by pass; status counts every recent
-  // registration by lifecycle status. Empty arrays ⇒ the client charts degrade.
-  const passCount = new Map<string, number>()
-  confirmedRecent.forEach(r => {
-    const label = (r.passName ?? '').trim() || 'General'
-    passCount.set(label, (passCount.get(label) ?? 0) + 1)
-  })
-  const passDistribution = Array.from(passCount.entries())
-    .map(([label, count]) => ({ label, count }))
-    .sort((a, b) => b.count - a.count)
-    .slice(0, 6)
+  // ── passId → pass name, from the drafts ALREADY loaded above (no extra reads) ──
+  // `passCounts` is keyed by passId; the chart shows names. Passes live at
+  // `draft.pricing.passes`, the same shape the attendance and event routes read.
+  //
+  // A pass whose configured name is genuinely "free" therefore DISPLAYS as "free" — that is
+  // real configured data, not a fallback. An unresolvable passId becomes "Unassigned"
+  // downstream; the two are never confused.
+  const passNamesBySlug = new Map<string, Record<string, string>>()
+  const eventNameBySlug = new Map<string, string>()
+  // Canonical set. These are only ever read for a slug already in `slugList`, so an archived
+  // entry could not leak — but building them from the same source keeps the invariant true
+  // by construction rather than by luck, and lets a test assert it.
+  dashboardDrafts.forEach(d => {
+    const slug = slugOfDraft(d)
+    if (!slug) return
+    const details = (d.eventDetails as Record<string, unknown>) ?? {}
+    const info    = (details.info as Record<string, unknown>) ?? {}
+    eventNameBySlug.set(slug, typeof info.name === 'string' && info.name ? info.name : 'Untitled Event')
 
-  const REG_STATUS_ORDER = ['confirmed', 'pending', 'waitlisted', 'cancelled', 'rejected']
-  const statusCount = new Map<string, number>()
-  recentRegs.forEach(r => {
-    const s = typeof r.status === 'string' && r.status ? r.status : 'unknown'
-    statusCount.set(s, (statusCount.get(s) ?? 0) + 1)
+    const raw = (d.pricing as Record<string, unknown> | undefined)?.passes
+    if (!Array.isArray(raw)) return
+    const names: Record<string, string> = {}
+    for (const p of raw as Array<Record<string, unknown>>) {
+      const id   = typeof p.id === 'string' ? p.id : ''
+      const name = typeof p.name === 'string' ? p.name.trim() : ''
+      if (id) names[id] = name
+    }
+    passNamesBySlug.set(slug, names)
   })
-  const registrationStatus = REG_STATUS_ORDER
-    .filter(s => statusCount.has(s))
-    .map(s => ({ label: s.charAt(0).toUpperCase() + s.slice(1), count: statusCount.get(s) ?? 0 }))
+
+  // ── Organizer-wide, ALL-TIME status + pass distribution ───────────────────────
+  //
+  // WHY NOT THE RECENT SCAN. These two charts used to be derived from `recentRegs`, which is
+  // organizerUid + registeredAt ≥ 90d + limit(5000) and carries NO event filter. That made
+  // them silently window-limited and cap-limited, and inconsistent with Event Performance on
+  // the same screen (which is all-time, from the counters). They now come from the counter
+  // documents that this route already fetches, so they are all-time, uncapped, and cheaper.
+  //
+  // The recent scan REMAINS — trendDays, today's figures and the activity feed genuinely need
+  // recent per-registration rows.
+  // ── ONE authoritative status source per event ─────────────────────────────────
+  // C: every event resolves its status breakdown the same way, so Waitlisted stops being a
+  // confident zero. `registrationCounters` carries pending/cancelled/rejected but has NO
+  // waitlistedCount field — the counter path could therefore never report a waitlist. Events
+  // with current stats reuse the counter (free, already fetched) plus ONE extra aggregate for
+  // waitlisted; events with stale stats fall back to the full shared aggregate as before.
+  // Every query is a count(): zero documents transferred, existing indexes.
+  const eventStatus = new Map<string, RegistrationStatusCounts | null>()
+
+  const staleSet    = new Set(slugList.filter(slug => {
+    const c = counterBySlug.get(slug)
+    return !c || (c.statsVersion ?? 0) < EVENT_STATS_VERSION
+  }))
+  const staleSlugs  = slugList.filter(s => staleSet.has(s))
+  const freshSlugs  = slugList.filter(s => !staleSet.has(s))
+
+  const [staleRows, waitRows] = await Promise.all([
+    Promise.all(staleSlugs.map(slug => aggregateRegistrationStatusCounts(uid, slug).catch(() => null))),
+    Promise.all(freshSlugs.map(slug => aggregateWaitlistedCount(uid, slug))),
+  ])
+
+  staleSlugs.forEach((slug, i) => eventStatus.set(slug, staleRows[i]))
+  freshSlugs.forEach((slug, i) => {
+    const c = counterBySlug.get(slug)!
+    const waitlisted = waitRows[i]
+    // A failed waitlist read makes the whole event's breakdown unavailable rather than
+    // contributing a zero that cannot be distinguished from a genuinely empty waitlist.
+    if (waitlisted === null) { eventStatus.set(slug, null); return }
+    const confirmed = c.totalCount     ?? 0
+    const pending   = c.pendingCount   ?? 0
+    const cancelled = c.cancelledCount ?? 0
+    const rejected  = c.rejectedCount  ?? 0
+    eventStatus.set(slug, {
+      // `total` is SUMMED from the parts, never read as an independent figure — the counter
+      // has no all-status total, and inventing one by another route could disagree with them.
+      total: confirmed + pending + cancelled + rejected + waitlisted,
+      confirmed, pending, cancelled, rejected, waitlisted,
+      checkedIn: c.checkedInCount ?? 0,
+    })
+  })
+
+  // ── A: cancelled split by pass, count()-only and budgeted ─────────────────────
+  // Runs ONLY for events that actually have cancellations, so a clean event costs nothing.
+  // The budget caps events × passes; once spent, the remaining events report `null` (→
+  // "unavailable"), never zeros.
+  const passIdsBySlug = new Map<string, string[]>()
+  dashboardDrafts.forEach(d => {   // canonical set — see eventNameBySlug above
+    const slug = slugOfDraft(d)
+    if (!slug) return
+    const raw = (d.pricing as Record<string, unknown> | undefined)?.passes
+    if (!Array.isArray(raw)) return
+    passIdsBySlug.set(slug, (raw as Array<Record<string, unknown>>)
+      .map(p => (typeof p.id === 'string' ? p.id : ''))
+      .filter(Boolean))
+  })
+
+  const passBudget = { remaining: PASS_AGGREGATE_BUDGET }
+  const cancelledByPass = new Map<string, Record<string, number> | null>()
+  for (const slug of slugList) {
+    const st = eventStatus.get(slug)
+    if (!st || st.cancelled === 0) continue
+    const r = await aggregateCancelledByPass(uid, slug, passIdsBySlug.get(slug) ?? [], passBudget)
+    cancelledByPass.set(slug, r.complete ? r.counts : null)
+  }
+
+  // ── Coupon performance (organizer-wide) ──────────────────────────────────
+  // Reuses the SAME bounded event set the rest of this route already established, so it
+  // cannot widen the dashboard's scope. Cost is one coupons-subcollection read per event
+  // (capped inside the helper) plus ONE sum() aggregate for the whole organizer — never a
+  // registration scan, never a query per coupon. A failure degrades to an empty card rather
+  // than taking the dashboard down.
+  const couponPerformance = await getOrganizerCouponPerformance(
+    uid,
+    slugList.map(slug => ({ slug, name: eventNameBySlug.get(slug) ?? 'Untitled Event' })),
+  ).catch(() => EMPTY_ORGANIZER_COUPON_PERFORMANCE)
+
+  const analytics = buildDashboardAnalytics(slugList.map(slug => ({
+    slug,
+    eventName:     eventNameBySlug.get(slug) ?? 'Untitled Event',
+    status:        eventStatus.get(slug) ?? null,
+    passConfirmed: (counterBySlug.get(slug)?.passCounts ?? {}) as Record<string, number>,
+    // Absent from the map ⇒ nothing to attribute (no cancellations); present ⇒ the computed
+    // split, or null when it could not be completed.
+    passCancelled: cancelledByPass.has(slug) ? cancelledByPass.get(slug)! : {},
+    passNames:     passNamesBySlug.get(slug) ?? {},
+  })))
+
+  const registrationStatus = analytics.registrationStatus
+  const passDistribution   = analytics.passDistribution
 
   // ── Communications ─────────────────────────────────────────────────────────
 
@@ -753,12 +940,17 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     trendDays,
     passDistribution,
     registrationStatus,
+    registrationTotals:       analytics.totals,
+    eventPerformance:         analytics.eventPerformance,
+    analyticsUnavailable:     analytics.statusUnavailable,
+    passCancelledUnavailable: analytics.passCancelledUnavailable,
     communications,
     healthScore,
     walletBalancePaise,
     recentTransactions,
     licenseSummary,
     actionEvents,
+    couponPerformance,
   }
 
   return NextResponse.json(data)

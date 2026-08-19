@@ -17,7 +17,8 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
-  Download, ShieldCheck, Mail, Ban, RotateCcw, Search, Loader2, AlertTriangle, Send,
+  Download, ShieldCheck, Mail, Ban, RotateCcw, RefreshCw, Search, Loader2, AlertTriangle, Send,
+  Trash2,
 } from 'lucide-react'
 import { REVOCATION_REASONS, REVOCATION_REASON_LABELS, CERTIFICATE_TYPE_LABELS } from '@/lib/certificates/constants'
 import { cn } from '@/lib/utils/cn'
@@ -30,6 +31,27 @@ import type {
 
 const PAGE_SIZE = 50
 const POLL_MS   = 4_000
+
+/**
+ * RD-CERT-UX · what a row is currently doing.
+ *
+ * ONE map replaces three overlapping flags. `busyId` was a single id with no action identity,
+ * so a spinner could not say WHICH operation was running; `regenBusy` and `deleteBusy` were
+ * globals, so regenerating one certificate greyed out that action on every other row. Keying
+ * the action by certificateId scopes the feedback to the row that earned it and leaves every
+ * other row fully interactive.
+ */
+type RowAction = 'download' | 'send' | 'retry' | 'regenerate' | 'revoke' | 'restore' | 'delete'
+
+const ACTION_LABELS: Record<RowAction, string> = {
+  download:   'Preparing…',
+  send:       'Sending…',
+  retry:      'Retrying…',
+  regenerate: 'Generating…',
+  revoke:     'Revoking…',
+  restore:    'Restoring…',
+  delete:     'Deleting…',
+}
 
 type StatusFilter = 'all' | 'unsent' | 'sent' | 'failed' | 'processing' | 'needs_review'
 
@@ -76,7 +98,13 @@ export default function RecipientsPanel({ api }: { api: CertApi }) {
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [allMatching, setAllMatching] = useState(false)
 
-  const [busyId, setBusyId]   = useState<string | null>(null)
+  const [rowBusy, setRowBusy] = useState<Record<string, RowAction>>({})
+  /** Certificates awaiting a regeneration confirmation. One entry = a row action, many = bulk.
+   *  Null while no dialog is open — the same shape `revoking` uses, so there is one pattern. */
+  const [regenerating, setRegenerating] = useState<string[] | null>(null)
+  const [regenBusy, setRegenBusy] = useState(false)
+  const [deleting, setDeleting]   = useState<SerializedCertificate[] | null>(null)
+  const [deleteBusy, setDeleteBusy] = useState(false)
   const [revoking, setRevoking] = useState<SerializedCertificate | null>(null)
   const [reviewing, setReviewing] = useState<SerializedCertificate | null>(null)
   const [notice, setNotice]   = useState<string | null>(null)
@@ -133,11 +161,145 @@ export default function RecipientsPanel({ api }: { api: CertApi }) {
     finally { setLoadingMore(false) }
   }
 
-  async function act(id: string, fn: () => Promise<unknown>) {
-    setBusyId(id); setErr(null); setNotice(null)
+  /**
+   * Runs one action against one row, marking that row busy for its duration.
+   *
+   * The `if (busy) return` guard is the duplicate-submit protection: React sets state
+   * asynchronously, so a fast double-click can dispatch the second handler before the
+   * disabled attribute has painted. Checking the ref-like current value first makes the
+   * second click a no-op rather than a second request.
+   *
+   * `finally` clears the row unconditionally, so a failure restores the action instead of
+   * stranding it in a permanent spinner.
+   */
+  async function act(id: string, kind: RowAction, fn: () => Promise<unknown>) {
+    let already = false
+    setRowBusy(prev => {
+      if (prev[id]) { already = true; return prev }
+      return { ...prev, [id]: kind }
+    })
+    if (already) return
+
+    setErr(null); setNotice(null)
     try { await fn(); await loadFirst() }
     catch (e) { setErr(e instanceof Error ? e.message : 'Action failed') }
-    finally { setBusyId(null) }
+    finally {
+      setRowBusy(prev => {
+        const next = { ...prev }
+        delete next[id]
+        return next
+      })
+    }
+  }
+
+  /** Marks rows busy for a bulk operation, so each affected row shows its own state. */
+  function markRows(ids: string[], kind: RowAction | null) {
+    setRowBusy(prev => {
+      const next = { ...prev }
+      for (const id of ids) { if (kind) next[id] = kind; else delete next[id] }
+      return next
+    })
+  }
+
+  /**
+   * Regenerates the given certificates in place.
+   *
+   * THE ROUTE ANSWERS 200 EVEN WHEN EVERY ITEM FAILED — it reports per-item outcomes in
+   * `results`. Treating `res.ok` as success is precisely how a fully-failed batch reads as
+   * "done" and a stale certificate looks regenerated. So the outcome here is derived from
+   * `results[].ok`, and any `error` the server returned is surfaced verbatim.
+   */
+  async function runRegenerate(ids: string[]) {
+    setRegenBusy(true); setErr(null); setNotice(null)
+    markRows(ids, 'regenerate')
+    try {
+      const r = await api.regenerate(ids)
+      const failures = r.results.filter(x => !x.ok)
+
+      if (failures.length === 0) {
+        setNotice(ids.length === 1
+          ? 'Certificate regenerated successfully.'
+          : `${r.succeeded} certificates regenerated.`)
+      } else {
+        // Name the certificate and quote the server's reason — "no_active_template" is the
+        // one an organizer can actually act on, and hiding it is what makes this silent.
+        const detail = failures.map(f => `${f.certificateId}: ${f.error ?? 'failed'}`).join('; ')
+        setErr(ids.length === 1
+          ? `Certificate regeneration failed: ${failures[0].error ?? 'unknown error'}`
+          : `${r.succeeded} regenerated. ${failures.length} failed — ${detail}`)
+        if (r.succeeded > 0) setNotice(`${r.succeeded} certificates regenerated.`)
+      }
+
+      setRegenerating(null)
+      await loadFirst()
+    } catch (e) {
+      // Transport / auth failure — the request never produced per-item results.
+      setErr(e instanceof Error ? e.message : 'Regeneration failed')
+    } finally {
+      setRegenBusy(false)
+      markRows(ids, null)
+    }
+  }
+
+  /**
+   * Permanently deletes the given certificates.
+   *
+   * THE DELETED ROWS ARE DROPPED LOCALLY RATHER THAN REFETCHED. `loadFirst()` would collapse
+   * the list back to page one, so an operator who had paged through three pages to find a
+   * certificate would lose all of it the moment they deleted one row. Removing the succeeded
+   * ids from the loaded set instead keeps pagination, the active filter, the search term and
+   * the remaining selection exactly as they were — and the panel's counts derive from that
+   * same list, so they fall immediately with no counter to update.
+   *
+   * Only the ids the SERVER confirmed are dropped. A failed row stays on screen with its
+   * reason, which is the whole point of reading `results[].ok` rather than the HTTP status.
+   */
+  async function runDelete(certificates: SerializedCertificate[]) {
+    const ids = certificates.map(c => c.certificateId)
+    setDeleteBusy(true); setErr(null); setNotice(null)
+    markRows(ids, 'delete')
+    try {
+      const r = await api.remove(ids)
+      const deletedIds = new Set(r.results.filter(x => x.ok).map(x => x.certificateId))
+      const failures   = r.results.filter(x => !x.ok)
+
+      if (deletedIds.size > 0) {
+        setCerts(prev => prev.filter(c => !deletedIds.has(c.certificateId)))
+        setSelected(prev => {
+          const n = new Set(prev)
+          deletedIds.forEach(id => n.delete(id))
+          return n
+        })
+        setAllMatching(false)
+      }
+
+      if (failures.length === 0) {
+        // Storage residue is NOT a failed deletion — the certificates are gone. It is
+        // surfaced anyway so unreferenced objects are never silently accepted.
+        const orphanNote = r.orphanedKeys > 0
+          ? ` ${r.orphanedKeys} storage object(s) could not be removed and were reported.`
+          : ''
+        setNotice((ids.length === 1
+          ? 'Certificate deleted.'
+          : `${r.succeeded} certificates deleted.`) + orphanNote)
+      } else {
+        const detail = failures.map(f => `${f.certificateId}: ${f.error ?? 'failed'}`).join('; ')
+        setErr(ids.length === 1
+          ? `Deletion failed: ${failures[0].error ?? 'unknown error'}`
+          : `${r.succeeded} deleted. ${failures.length} failed — ${detail}`)
+        if (r.succeeded > 0) setNotice(`${r.succeeded} certificates deleted.`)
+      }
+
+      setDeleting(null)
+    } catch (e) {
+      // Transport / auth failure — nothing was reported per item, so nothing is removed.
+      setErr(e instanceof Error ? e.message : 'Deletion failed')
+    } finally {
+      setDeleteBusy(false)
+      // Rows that were deleted are already gone from `certs`; clearing by id is harmless
+      // for those and restores the action on any row whose deletion failed.
+      markRows(ids, null)
+    }
   }
 
   async function startJob(scopeType: 'unsent' | 'failed' | 'selected') {
@@ -218,6 +380,22 @@ export default function RecipientsPanel({ api }: { api: CertApi }) {
               <Mail className="size-3.5" /> Send {selected.size} selected
             </button>
           )}
+          {selected.size > 0 && (
+            <button type="button" className={btnGhost} disabled={!!active || regenBusy}
+              onClick={() => setRegenerating([...selected])}>
+              <RefreshCw className="size-3.5" /> Regenerate {selected.size} selected
+            </button>
+          )}
+          {/* Destructive, so it is styled apart from the send/regenerate cluster and never
+              adopts the primary treatment. Resolved from the LOADED set, not the visible
+              rows — a selection made before a filter changed is still a real selection. */}
+          {selected.size > 0 && (
+            <button type="button" className={cn(btnGhost, 'text-red-600 hover:bg-red-50')}
+              disabled={!!active || deleteBusy}
+              onClick={() => setDeleting(certs.filter(c => selected.has(c.certificateId)))}>
+              <Trash2 className="size-3.5" /> Delete {selected.size} selected
+            </button>
+          )}
         </div>
       </div>
 
@@ -266,6 +444,8 @@ export default function RecipientsPanel({ api }: { api: CertApi }) {
                 const revoked = c.status === 'revoked'
                 const review  = isNeedsReview(c)
                 const badge   = deliveryLabel(c)
+                // Scoped to THIS row: another row's action never disables this one.
+                const busy    = rowBusy[c.certificateId]
                 return (
                   <tr key={c.certificateId} className="hover:bg-muted/20">
                     <td className="px-3 py-2">
@@ -290,11 +470,14 @@ export default function RecipientsPanel({ api }: { api: CertApi }) {
                     <td className="px-3 py-2">
                       <div className="flex items-center justify-end gap-1">
                         <button type="button" className={btnGhost} title="Download"
-                          onClick={() => act(c.certificateId, async () => {
+                          disabled={!!busy}
+                          onClick={() => act(c.certificateId, 'download', async () => {
                             const url = await api.downloadCertificateObjectUrl(c.certificateId)
                             window.open(url, '_blank', 'noopener')
                           })}>
-                          <Download className="size-3.5" />
+                          {busy === 'download'
+                            ? <><Loader2 className="size-3.5 animate-spin" /> {ACTION_LABELS.download}</>
+                            : <Download className="size-3.5" />}
                         </button>
 
                         {/* An unknown delivery is NEVER handled by the ordinary resend —
@@ -302,23 +485,64 @@ export default function RecipientsPanel({ api }: { api: CertApi }) {
                         {!revoked && review && (
                           <button type="button" className={cn(btnGhost, 'text-amber-700')}
                             title="Delivery unknown — review & send"
+                            disabled={!!busy}
                             onClick={() => setReviewing(c)}>
-                            <AlertTriangle className="size-3.5" /> Review
+                            {busy === 'retry'
+                              ? <><Loader2 className="size-3.5 animate-spin" /> {ACTION_LABELS.retry}</>
+                              : <><AlertTriangle className="size-3.5" /> Review</>}
                           </button>
                         )}
                         {!revoked && !review && (
                           <button type="button" className={btnGhost} title="Resend email"
-                            disabled={busyId === c.certificateId}
-                            onClick={() => act(c.certificateId, () => api.emailCertificate(c.certificateId, true, 'resend'))}>
-                            <Mail className="size-3.5" />
+                            disabled={!!busy}
+                            onClick={() => act(c.certificateId, 'send',
+                              () => api.emailCertificate(c.certificateId, true, 'resend'))}>
+                            {busy === 'send'
+                              ? <><Loader2 className="size-3.5 animate-spin" /> {ACTION_LABELS.send}</>
+                              : <Mail className="size-3.5" />}
+                          </button>
+                        )}
+
+                        {/* Regeneration re-renders against the CURRENT active template. Hidden
+                            for revoked certificates — the engine refuses them anyway, and the
+                            server stays the authority; this only avoids offering a dead action. */}
+                        {!revoked && (
+                          <button type="button" className={btnGhost} title="Regenerate"
+                            aria-label="Regenerate"
+                            disabled={!!busy}
+                            onClick={() => setRegenerating([c.certificateId])}>
+                            {busy === 'regenerate'
+                              ? <><Loader2 className="size-3.5 animate-spin" /> {ACTION_LABELS.regenerate}</>
+                              : <RefreshCw className="size-3.5" />}
                           </button>
                         )}
 
                         {revoked
-                          ? <button type="button" className={btnGhost} title="Restore" disabled={busyId === c.certificateId}
-                              onClick={() => act(c.certificateId, () => api.restore(c.certificateId))}><RotateCcw className="size-3.5" /></button>
-                          : <button type="button" className={btnGhost} title="Revoke" disabled={busyId === c.certificateId}
-                              onClick={() => setRevoking(c)}><Ban className="size-3.5" /></button>}
+                          ? <button type="button" className={btnGhost} title="Restore" disabled={!!busy}
+                              onClick={() => act(c.certificateId, 'restore', () => api.restore(c.certificateId))}>
+                              {busy === 'restore'
+                                ? <><Loader2 className="size-3.5 animate-spin" /> {ACTION_LABELS.restore}</>
+                                : <RotateCcw className="size-3.5" />}
+                            </button>
+                          : <button type="button" className={btnGhost} title="Revoke" disabled={!!busy}
+                              onClick={() => setRevoking(c)}>
+                              {busy === 'revoke'
+                                ? <><Loader2 className="size-3.5 animate-spin" /> {ACTION_LABELS.revoke}</>
+                                : <Ban className="size-3.5" />}
+                            </button>}
+
+                        {/* Deliberately set apart by a rule: this is the one irreversible
+                            action in the row, and it must not sit flush against Resend or
+                            Regenerate where a mis-tap lands on it. */}
+                        <button type="button"
+                          className={cn(btnGhost, 'ml-1 border-l border-border pl-2 text-red-600 hover:bg-red-50')}
+                          title="Delete permanently" aria-label="Delete permanently"
+                          disabled={!!busy}
+                          onClick={() => setDeleting([c])}>
+                          {busy === 'delete'
+                            ? <><Loader2 className="size-3.5 animate-spin" /> {ACTION_LABELS.delete}</>
+                            : <Trash2 className="size-3.5" />}
+                        </button>
                       </div>
                     </td>
                   </tr>
@@ -338,11 +562,29 @@ export default function RecipientsPanel({ api }: { api: CertApi }) {
         </div>
       )}
 
+      {regenerating && (
+        <RegenerateDialog
+          certificateIds={regenerating}
+          busy={regenBusy}
+          onClose={() => setRegenerating(null)}
+          onConfirm={() => void runRegenerate(regenerating)}
+        />
+      )}
+
+      {deleting && (
+        <DeleteDialog
+          certificates={deleting}
+          busy={deleteBusy}
+          onClose={() => setDeleting(null)}
+          onConfirm={() => void runDelete(deleting)}
+        />
+      )}
+
       {revoking && (
         <RevokeDialog
           certificate={revoking}
           onClose={() => setRevoking(null)}
-          onConfirm={(reason, custom) => act(revoking.certificateId, async () => {
+          onConfirm={(reason, custom) => act(revoking.certificateId, 'revoke', async () => {
             await api.revoke(revoking.certificateId, reason, custom); setRevoking(null)
           })}
         />
@@ -352,7 +594,7 @@ export default function RecipientsPanel({ api }: { api: CertApi }) {
         <ReviewSendDialog
           certificate={reviewing}
           onClose={() => setReviewing(null)}
-          onConfirm={() => act(reviewing.certificateId, async () => {
+          onConfirm={() => act(reviewing.certificateId, 'retry', async () => {
             await api.emailCertificate(reviewing.certificateId, true, 'resend_after_review')
             setReviewing(null)
           })}
@@ -409,6 +651,132 @@ function ReviewSendDialog({
         <div className="flex justify-end gap-2 pt-1">
           <button type="button" className={btnGhost} onClick={onClose}>Cancel</button>
           <button type="button" className={btnPrimary} onClick={onConfirm}>Send anyway</button>
+        </div>
+      </div>
+    </Dialog>
+  )
+}
+
+/**
+ * Confirms an in-place regeneration. Destructive in one specific way — it REPLACES the stored
+ * PDF — while leaving identity untouched, so the copy states both halves rather than a generic
+ * "are you sure".
+ */
+function RegenerateDialog({
+  certificateIds, busy, onClose, onConfirm,
+}: {
+  certificateIds: string[]
+  busy:      boolean
+  onClose:   () => void
+  onConfirm: () => void
+}) {
+  const many = certificateIds.length > 1
+  return (
+    <Dialog
+      open
+      onClose={onClose}
+      title={many ? `Regenerate ${certificateIds.length} certificates?` : `Regenerate ${certificateIds[0]}`}
+    >
+      <div className="space-y-3">
+        <p className="text-[13px] text-muted-foreground">
+          {many
+            ? 'These certificates will be re-rendered using the event’s current active template.'
+            : 'Regenerate this certificate using the event’s current active template?'}
+        </p>
+        <ul className="list-disc space-y-1 pl-5 text-[13px] text-muted-foreground">
+          <li>The stored PDF is replaced.</li>
+          <li>The certificate ID stays the same.</li>
+          <li>The verification link stays the same.</li>
+          <li>No additional certificate is created.</li>
+        </ul>
+        <div className="flex justify-end gap-2 pt-1">
+          <button type="button" className={btnGhost} disabled={busy} onClick={onClose}>Cancel</button>
+          <button type="button" className={btnPrimary} disabled={busy} onClick={onConfirm}>
+            {busy ? <Loader2 className="size-3.5 animate-spin" /> : <RefreshCw className="size-3.5" />}
+            Regenerate
+          </button>
+        </div>
+      </div>
+    </Dialog>
+  )
+}
+
+/**
+ * Confirms PERMANENT deletion.
+ *
+ * The copy names the irreversible parts rather than asking "are you sure". Revoke already
+ * exists one button away and is the reversible option, so the difference between the two has
+ * to be legible here or the operator will pick the wrong one — the verification link dying is
+ * what separates them, and an attendee may already be holding that link.
+ *
+ * The confirm button is disabled while the request is in flight, which is also what prevents a
+ * double submission from issuing a second batch.
+ */
+function DeleteDialog({
+  certificates, busy, onClose, onConfirm,
+}: {
+  certificates: SerializedCertificate[]
+  busy:         boolean
+  onClose:      () => void
+  onConfirm:    () => void
+}) {
+  const many  = certificates.length > 1
+  const first = certificates[0]
+  // A long selection is summarised rather than rendered in full — a 200-row dialog scrolls
+  // the buttons off screen, and the exact count is the number that matters.
+  const shown = certificates.slice(0, 8)
+
+  return (
+    <Dialog
+      open
+      onClose={onClose}
+      title={many ? `Delete ${certificates.length} certificates?` : `Delete ${first.certificateId}?`}
+    >
+      <div className="space-y-3">
+        {!many && (
+          <p className="text-[13px] text-foreground">
+            {first.attendeeName}
+            <span className="text-muted-foreground"> · {first.attendeeEmail}</span>
+          </p>
+        )}
+        {many && (
+          <div className="max-h-40 overflow-y-auto rounded-lg border border-border bg-muted/20 px-3 py-2 text-[12px]">
+            {shown.map(c => (
+              <div key={c.certificateId} className="truncate text-muted-foreground">
+                <span className="text-foreground">{c.attendeeName}</span> · {c.certificateId}
+              </div>
+            ))}
+            {certificates.length > shown.length && (
+              <div className="pt-1 text-muted-foreground">
+                …and {certificates.length - shown.length} more
+              </div>
+            )}
+          </div>
+        )}
+        <p className="text-[13px] text-muted-foreground">
+          This permanently removes the certificate record and every asset it owns — the
+          generated PDF and any uploaded participant photo.
+        </p>
+        <ul className="list-disc space-y-1 pl-5 text-[13px] text-muted-foreground">
+          <li><strong className="text-foreground">This cannot be undone.</strong></li>
+          <li>The verification link stops working, including copies already emailed.</li>
+          <li>The attendee&rsquo;s registration and their portal photo are not affected.</li>
+          <li>The event&rsquo;s certificate template is not affected.</li>
+          <li>To keep the record and only invalidate it, use Revoke instead.</li>
+        </ul>
+        <div className="flex justify-end gap-2 pt-1">
+          <button type="button" className={btnGhost} disabled={busy} onClick={onClose}>Cancel</button>
+          <button
+            type="button"
+            className={cn(btnPrimary, 'bg-red-600 hover:bg-red-700')}
+            disabled={busy}
+            onClick={onConfirm}
+          >
+            {busy ? <Loader2 className="size-3.5 animate-spin" /> : <Trash2 className="size-3.5" />}
+            {busy
+              ? 'Deleting…'
+              : many ? `Delete ${certificates.length} certificates` : 'Delete certificate'}
+          </button>
         </div>
       </div>
     </Dialog>

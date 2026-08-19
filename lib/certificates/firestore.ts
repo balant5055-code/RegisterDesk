@@ -388,10 +388,20 @@ export async function importGlobalTemplateIntoEvent(
  * Increments usageCount + stamps lastUsedAt. Best-effort, never throws — a metrics
  * write must never fail generation. No new analytics engine: it's one field bump.
  */
-export async function recordTemplateUsage(templateId: string): Promise<void> {
+/**
+ * Records template usage. `count` lets a caller fold a whole batch into ONE write.
+ *
+ * RD-CERT-SCALE P2-4 — `usageCount` lives on a SINGLE document per template, and Firestore
+ * sustains only about one write per second to one document. Bulk generation used to call
+ * this once per certificate at concurrency 6, so a 10k run meant 10,000 contended writes on
+ * one hot doc. The bulk path now records once per completed job; the meaning of `usageCount`
+ * is unchanged — total certificates generated from this template.
+ */
+export async function recordTemplateUsage(templateId: string, count = 1): Promise<void> {
+  if (count <= 0) return
   try {
     await templatesCol().doc(templateId).update({
-      usageCount: FieldValue.increment(1),
+      usageCount: FieldValue.increment(count),
       lastUsedAt: FieldValue.serverTimestamp(),
     })
   } catch { /* template may be legacy/missing — usage tracking is best-effort */ }
@@ -1406,4 +1416,57 @@ export async function getCertificatesByOrganizerUid(
     .limit(limitN)
     .get()
   return snap.docs.map(d => d.data() as CertificateRecord)
+}
+
+// ─── RD-CERT-SCALE P2-1 · document-id paging for the ZIP worker ───────────────
+//
+// The ZIP worker used to read EVERY certificate for the event on EVERY chunk and slice the
+// array by a numeric offset. At 10k that is 10,000 document reads per shard, and the offset
+// cursor silently shifts if the selection changes size between chunks.
+//
+// These read ONE page, ordered by document id. Document id is chosen deliberately over
+// `generatedAt`: Firestore EXCLUDES documents that lack the orderBy field, so ordering a ZIP
+// by a timestamp would silently drop any legacy certificate missing it — certificates would
+// vanish from the archive with no error. Every document has a name, so id ordering cannot
+// skip one. It is also totally ordered, which is what makes shard boundaries exact.
+//
+// The cursor is the last document id of the previous page: minimal state, and resumable
+// after a crash or a deployment without persisting any id array.
+
+/** One page of an event's certificates, ordered by document id. */
+export async function listEventCertificatesByIdPage(
+  eventId: string,
+  organizerUid: string,
+  opts: { pageSize: number; cursor?: string | null },
+): Promise<{ certificates: Certificate[]; nextCursor: string | null }> {
+  let q = certificatesCol()
+    .where('eventId',      '==', eventId)
+    .where('organizerUid', '==', organizerUid)
+    .orderBy(FieldPath.documentId())
+  if (opts.cursor) q = q.startAfter(opts.cursor)
+  const snap = await q.limit(opts.pageSize).get()
+  return {
+    certificates: snap.docs.map(d => d.data() as Certificate),
+    nextCursor:   snap.size === opts.pageSize ? snap.docs[snap.docs.length - 1].id : null,
+  }
+}
+
+/** One page of the certificates produced by ONE generation job, ordered by document id. */
+export async function listJobCertificatesByIdPage(
+  eventId: string,
+  organizerUid: string,
+  jobId: string,
+  opts: { pageSize: number; cursor?: string | null },
+): Promise<{ certificates: Certificate[]; nextCursor: string | null }> {
+  let q = certificatesCol()
+    .where('eventId',      '==', eventId)
+    .where('organizerUid', '==', organizerUid)
+    .where('jobId',        '==', jobId)
+    .orderBy(FieldPath.documentId())
+  if (opts.cursor) q = q.startAfter(opts.cursor)
+  const snap = await q.limit(opts.pageSize).get()
+  return {
+    certificates: snap.docs.map(d => d.data() as Certificate),
+    nextCursor:   snap.size === opts.pageSize ? snap.docs[snap.docs.length - 1].id : null,
+  }
 }

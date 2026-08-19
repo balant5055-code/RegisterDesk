@@ -2,7 +2,7 @@
 
 import {
   Type, User, CalendarDays, Hash, CalendarClock,
-  QrCode, ImageIcon, PenTool, Stamp, Image as ImgIcon, Minus,
+  QrCode, ImageIcon, PenTool, Stamp, Image as ImgIcon, Minus, UserSquare,
 } from 'lucide-react'
 import { PALETTE_LABELS } from './lib'
 import type { PaletteKind } from './lib'
@@ -27,6 +27,7 @@ const GROUPS: { title: string; items: { kind: PaletteKind; icon: React.ElementTy
       { kind: 'signature', icon: PenTool },
       { kind: 'seal',      icon: Stamp },
       { kind: 'image',     icon: ImgIcon },
+      { kind: 'attendeePhoto', icon: UserSquare },
     ],
   },
   {

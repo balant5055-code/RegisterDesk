@@ -17,6 +17,22 @@ import type { WhatsAppTemplateMessage, WhatsAppParameter } from './types'
 // Meta template categories (WhatsApp Manager taxonomy).
 export type WhatsAppTemplateCategory = 'utility' | 'marketing' | 'authentication'
 
+/** Verified Meta WhatsApp Manager state — see WhatsAppTemplateDefinition.metaStatus. */
+export type MetaTemplateStatus = 'active' | 'in_review' | 'rejected' | 'unverified'
+
+/**
+ * Statuses we have POSITIVE evidence cannot deliver, so a send is refused before Meta is
+ * called. Deliberately a blocklist, not an allowlist: 'unverified' entries keep their
+ * existing behaviour exactly, so introducing this field changes nothing for any template
+ * whose Meta state nobody has confirmed.
+ */
+const NON_SENDABLE: ReadonlySet<MetaTemplateStatus> = new Set(['in_review', 'rejected'])
+
+/** True when this template may be sent — i.e. not known-unsendable. */
+export function isSendableMetaStatus(status: MetaTemplateStatus): boolean {
+  return !NON_SENDABLE.has(status)
+}
+
 export interface WhatsAppTemplateDefinition {
   /** The approved template name in Meta WhatsApp Manager. */
   templateName:       string
@@ -29,6 +45,19 @@ export interface WhatsAppTemplateDefinition {
   /** Ordered body variables — position maps to the template's {{1}}, {{2}}, … */
   requiredVariables:  readonly string[]
   category:           WhatsAppTemplateCategory
+  /**
+   * The template's state in Meta WhatsApp Manager, as VERIFIED BY A HUMAN and recorded
+   * here by hand. Nothing synchronises this — there is no Meta template API in this
+   * codebase — so it is a manual fact, not a live value, and it is only ever as fresh as
+   * the last person who checked the console.
+   *
+   *   'active'     — approved and sendable.
+   *   'in_review'  — submitted, NOT yet approved. Sending fails at Meta with 132001.
+   *   'rejected'   — refused by Meta. Must never be sent.
+   *   'unverified' — nobody has checked. Behaves exactly as before this field existed:
+   *                  the send is attempted and Meta decides.
+   */
+  metaStatus:         MetaTemplateStatus
   /** Template contract version. Bump alongside templateName for a v2. */
   version:            number
 }
@@ -45,6 +74,22 @@ export const WHATSAPP_TEMPLATE_REGISTRY_VERSION = 1
 // compiler can enforce the variable contract; `satisfies` proves every key is a
 // real NotificationType and every entry matches the definition shape.
 
+// ─── LOCALE IS PER TEMPLATE ──────────────────────────────────────────────────
+//
+// THE RULE: a template's locale MUST match the locale actually configured for it in
+// WhatsApp Manager. It is a property of that one template, never a house style — some
+// templates on this WABA are legitimately `en` and others `en_US`, and both are correct.
+//
+// WHY IT MATTERS: WhatsApp resolves a template by the (name, language) PAIR and does NOT
+// fall back between locales, so `en` and `en_US` are two different templates as far as
+// Meta is concerned. Declaring a locale the WABA does not hold fails at send with 132001
+// "Template name does not exist in the translation" — once per recipient, and for a
+// broadcast that happens after the campaign has already been billed upfront.
+//
+// So: never normalise these values in either direction, and never copy a locale from a
+// neighbouring entry. Read each one off WhatsApp Manager and record what is actually
+// there. Entries still marked `metaStatus: 'unverified'` have not been checked against
+// Meta at all; their locale is a guess until someone confirms it in the console.
 export const WHATSAPP_TEMPLATE_REGISTRY = {
   REGISTRATION_CONFIRMATION: {
     templateName:      'registration_confirmation',
@@ -57,6 +102,7 @@ export const WHATSAPP_TEMPLATE_REGISTRY = {
     languages:         ['en'],
     channels:          ['whatsapp'],
     requiredVariables: ['attendeeName', 'eventName', 'ticketCode'],
+    metaStatus:        'active',
     category:          'utility',
     version:           1,
   },
@@ -66,6 +112,7 @@ export const WHATSAPP_TEMPLATE_REGISTRY = {
     languages:         ['en_US'],
     channels:          ['whatsapp'],
     requiredVariables: ['attendeeName', 'eventName', 'ticketCode'],
+    metaStatus:        'unverified',
     category:          'utility',
     version:           1,
   },
@@ -75,6 +122,7 @@ export const WHATSAPP_TEMPLATE_REGISTRY = {
     languages:         ['en_US'],
     channels:          ['whatsapp'],
     requiredVariables: ['attendeeName', 'eventName'],
+    metaStatus:        'unverified',
     category:          'utility',
     version:           1,
   },
@@ -84,6 +132,7 @@ export const WHATSAPP_TEMPLATE_REGISTRY = {
     languages:         ['en_US'],
     channels:          ['whatsapp'],
     requiredVariables: ['attendeeName', 'eventName'],
+    metaStatus:        'unverified',
     category:          'utility',
     version:           1,
   },
@@ -93,6 +142,7 @@ export const WHATSAPP_TEMPLATE_REGISTRY = {
     languages:         ['en_US'],
     channels:          ['whatsapp'],
     requiredVariables: ['attendeeName', 'eventName', 'ticketCode'],
+    metaStatus:        'unverified',
     category:          'utility',
     version:           1,
   },
@@ -102,6 +152,7 @@ export const WHATSAPP_TEMPLATE_REGISTRY = {
     languages:         ['en_US'],
     channels:          ['whatsapp'],
     requiredVariables: ['attendeeName', 'eventName'],
+    metaStatus:        'unverified',
     category:          'utility',
     version:           1,
   },
@@ -111,6 +162,7 @@ export const WHATSAPP_TEMPLATE_REGISTRY = {
     languages:         ['en_US'],
     channels:          ['whatsapp'],
     requiredVariables: ['attendeeName', 'eventName'],
+    metaStatus:        'unverified',
     category:          'utility',
     version:           1,
   },
@@ -120,6 +172,7 @@ export const WHATSAPP_TEMPLATE_REGISTRY = {
     languages:         ['en_US'],
     channels:          ['whatsapp'],
     requiredVariables: ['attendeeName', 'eventName', 'refundAmount'],
+    metaStatus:        'unverified',
     category:          'utility',
     version:           1,
   },
@@ -129,6 +182,7 @@ export const WHATSAPP_TEMPLATE_REGISTRY = {
     languages:         ['en_US'],
     channels:          ['whatsapp'],
     requiredVariables: ['attendeeName', 'eventName'],
+    metaStatus:        'unverified',
     category:          'utility',
     version:           1,
   },
@@ -138,15 +192,71 @@ export const WHATSAPP_TEMPLATE_REGISTRY = {
     languages:         ['en_US'],
     channels:          ['whatsapp'],
     requiredVariables: ['attendeeName', 'eventName'],
+    metaStatus:        'unverified',
     category:          'utility',
     version:           1,
   },
   CERTIFICATE_READY: {
-    templateName:      'certificate_ready',
+    // v2 — a NEW Meta template, not a re-approval of `certificate_ready`. The parameter
+    // count changed from 2 to 3, and Meta matches a template by (name, language) with a
+    // fixed variable count: sending 3 parameters to the 2-variable `certificate_ready`
+    // fails at the Graph API, so the name must change alongside the contract.
+    templateName:      'certificate_ready_v2',
+    language:          'en',
+    languages:         ['en'],
+    channels:          ['whatsapp'],
+    // `certificateUrl` is SERVER-DERIVED per campaign (see whatsappJob.ts) — the
+    // organizer never types it, so a preview/deployment host can never reach an attendee.
+    requiredVariables: ['attendeeName', 'eventName', 'certificateUrl'],
+    metaStatus:        'active',
+    category:          'utility',
+    version:           2,
+  },
+
+  // ── Dormant successor to the live registration confirmation ────────────────
+  //
+  // Registered so the registry describes Meta's ACTUAL template set, and so the eventual
+  // migration is a one-line change. It is `in_review`, so the resolver refuses it and it
+  // never appears in the broadcast composer. REGISTRATION_CONFIRMATION is unaffected and
+  // remains the only template the live registration path resolves.
+  REGISTRATION_CONFIRMATION_V2: {
+    templateName:      'registration_confirmation_v2',
+    language:          'en',
+    languages:         ['en'],
+    channels:          ['whatsapp'],
+    requiredVariables: ['attendeeName', 'eventName', 'ticketCode'],
+    metaStatus:        'in_review',
+    category:          'utility',
+    version:           2,
+  },
+  // ── Operational broadcasts (RD-WA-BROADCAST-02) ────────────────────────────
+  //
+  // Both are organizer-composed broadcasts: `attendeeName` and `eventName` are filled
+  // per recipient by the broadcast job, and every remaining variable is typed by the
+  // organizer in the composer, which renders one input per non-auto variable straight
+  // from the tuple below. Ordering IS the contract — position maps to {{1}}, {{2}}, …
+  // in the approved Meta template, so reordering these silently reshuffles a live message.
+  KIT_COLLECTION: {
+    // `kit_collection` (no suffix) was REJECTED by Meta and is deliberately NOT registered
+    // anywhere — a rejected name must never become a selectable broadcast option.
+    templateName:      'kit_collection_v2',
+    // English (US) — this template ALONE. Meta resolves by the (name, language) PAIR and
+    // never falls back, so this locale is not interchangeable with its `en` siblings.
     language:          'en_US',
     languages:         ['en_US'],
     channels:          ['whatsapp'],
-    requiredVariables: ['attendeeName', 'eventName'],
+    requiredVariables: ['attendeeName', 'eventName', 'collectionDate', 'collectionTime', 'collectionLocation', 'mapsUrl'],
+    metaStatus:        'active',
+    category:          'utility',
+    version:           1,
+  },
+  EVENT_LOCATION: {
+    templateName:      'event_location_v2',
+    language:          'en',
+    languages:         ['en'],
+    channels:          ['whatsapp'],
+    requiredVariables: ['attendeeName', 'eventName', 'eventDate', 'eventTime', 'venue', 'mapsUrl'],
+    metaStatus:        'active',
     category:          'utility',
     version:           1,
   },
@@ -158,6 +268,7 @@ export const WHATSAPP_TEMPLATE_REGISTRY = {
     languages:         ['en_US'],
     channels:          ['whatsapp'],
     requiredVariables: ['eventName'],
+    metaStatus:        'unverified',
     category:          'utility',
     version:           1,
   },
@@ -167,6 +278,7 @@ export const WHATSAPP_TEMPLATE_REGISTRY = {
     languages:         ['en_US'],
     channels:          ['whatsapp'],
     requiredVariables: ['eventName'],
+    metaStatus:        'unverified',
     category:          'utility',
     version:           1,
   },
@@ -176,6 +288,7 @@ export const WHATSAPP_TEMPLATE_REGISTRY = {
     languages:         ['en_US'],
     channels:          ['whatsapp'],
     requiredVariables: ['eventName'],
+    metaStatus:        'unverified',
     category:          'utility',
     version:           1,
   },
@@ -185,6 +298,7 @@ export const WHATSAPP_TEMPLATE_REGISTRY = {
     languages:         ['en_US'],
     channels:          ['whatsapp'],
     requiredVariables: ['eventName'],
+    metaStatus:        'unverified',
     category:          'utility',
     version:           1,
   },
@@ -194,6 +308,7 @@ export const WHATSAPP_TEMPLATE_REGISTRY = {
     languages:         ['en_US'],
     channels:          ['whatsapp'],
     requiredVariables: ['eventName'],
+    metaStatus:        'unverified',
     category:          'utility',
     version:           1,
   },
@@ -203,6 +318,7 @@ export const WHATSAPP_TEMPLATE_REGISTRY = {
     languages:         ['en_US'],
     channels:          ['whatsapp'],
     requiredVariables: ['organizerName', 'amount'],
+    metaStatus:        'unverified',
     category:          'utility',
     version:           1,
   },
@@ -212,6 +328,7 @@ export const WHATSAPP_TEMPLATE_REGISTRY = {
     languages:         ['en_US'],
     channels:          ['whatsapp'],
     requiredVariables: ['organizerName', 'eventName', 'tierName'],
+    metaStatus:        'unverified',
     category:          'utility',
     version:           1,
   },
@@ -221,6 +338,7 @@ export const WHATSAPP_TEMPLATE_REGISTRY = {
     languages:         ['en_US'],
     channels:          ['whatsapp'],
     requiredVariables: ['organizerName', 'amount'],
+    metaStatus:        'unverified',
     category:          'utility',
     version:           1,
   },
@@ -292,6 +410,24 @@ export function resolveWhatsAppTemplateByType(
 
   if (!entry.channels.includes('whatsapp')) {
     return { ok: false, error: `Notification "${type}" does not support WhatsApp` }
+  }
+
+  // THE ONE PLACE AN UNAPPROVED TEMPLATE IS STOPPED.
+  //
+  // Every sender — transactional, broadcast and retry — passes through this resolver, so
+  // gating here covers all of them at once rather than trusting each caller to check.
+  // Refusing BEFORE the provider is called also means Meta is never asked, no wallet is
+  // debited, and a broadcast fails at creation instead of per-recipient after billing.
+  //
+  // Only states we have POSITIVE evidence about are blocked ('in_review', 'rejected').
+  // An 'unverified' template behaves exactly as it did before this gate existed.
+  if (!isSendableMetaStatus(entry.metaStatus)) {
+    return {
+      ok: false,
+      error: entry.metaStatus === 'rejected'
+        ? `The WhatsApp template for "${type}" was rejected by Meta and cannot be sent.`
+        : `The WhatsApp template for "${type}" is still awaiting Meta approval.`,
+    }
   }
   if (!to || !to.trim()) {
     return { ok: false, error: 'Missing recipient phone number' }

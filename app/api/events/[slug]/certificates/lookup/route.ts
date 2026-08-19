@@ -1,7 +1,11 @@
 // POST /api/events/[slug]/certificates/lookup
 //
 // PUBLIC endpoint behind the event-day QR poster. An attendee identifies themselves with
-// a registration id OR an email and receives the certificates for THAT EVENT only.
+// EXACTLY ONE of an email, a mobile number, a registration id or a bib number, and receives
+// the certificates for THAT EVENT only.
+//
+// Mobile and bib are TWO-HOP: neither is stored on the certificate record, so the
+// registration is resolved first and the certificates are then fetched by id.
 //
 // ═══ EVENT SCOPING ═══════════════════════════════════════════════════════════
 // The slug comes from the URL and is applied to every query as an equality filter. A
@@ -28,6 +32,7 @@ import { COLLECTIONS }               from '@/lib/certificates/constants'
 import { signCertificateDownloadCapability } from '@/lib/certificates/downloadCapability'
 import { getClientIp }               from '@/lib/rateLimit'
 import { RATE_POLICY, checkPolicy }  from '@/lib/rateLimit/policies'
+import { normalizePhoneNumber }     from '@/lib/communication/phone'
 import type { Certificate }          from '@/lib/certificates/types'
 
 export const dynamic = 'force-dynamic'
@@ -35,7 +40,72 @@ export const dynamic = 'force-dynamic'
 /** Cap on returned rows. A family is a handful; anything larger is not a real lookup. */
 const MAX_RESULTS = 25
 
+/** Firestore caps an `in` filter at 10 values, which also bounds the first hop of the
+ *  two-hop modes. A family is a handful; anything larger is not a real lookup. */
+const IN_CHUNK = 10
+
 type Params = { params: Promise<{ slug: string }> }
+
+/**
+ * Registration ids for a mobile number, within this event.
+ *
+ * `attendee.phone` is stored AS TYPED (trimmed), not in a canonical form — the same person
+ * may be "+91 99168 03664", "9916803664" or "919916803664" depending on the form they
+ * filled. Rather than migrate live data, the small set of plausible spellings is queried in
+ * ONE indexed `in` filter, so this stays a single read regardless of how many variants exist.
+ */
+async function registrationIdsByPhone(slug: string, raw: string): Promise<string[]> {
+  const e164 = normalizePhoneNumber(raw)          // digits only, with country code
+  if (!e164) return []
+  const national = e164.length > 10 ? e164.slice(-10) : e164
+
+  const variants = [...new Set([raw.trim(), e164, `+${e164}`, national, `+91${national}`, `91${national}`])]
+    .filter(v => v.length > 0)
+    .slice(0, IN_CHUNK)
+
+  const snap = await adminDb.collection('registrations')
+    .where('eventSlug', '==', slug)
+    .where('attendee.phone', 'in', variants)
+    .limit(IN_CHUNK)
+    .get()
+  return snap.docs.map(d => d.id)
+}
+
+/**
+ * Registration ids for a TICKET CODE, within this event.
+ *
+ * `ticketCode` ("RD-XXXXXXXX") is the code printed on the ticket and encoded in the check-in
+ * QR. It is a DIFFERENT identifier from the registration id — the registration id is the
+ * Firestore document id, a uuid — so it gets its own mode rather than being accepted by the
+ * registration-id field, which would silently return nothing.
+ *
+ * Resolved through `registrations` rather than the certificate's `data` snapshot: the
+ * registration is the authoritative record and always carries the code, while the snapshot
+ * only carries whatever placeholders existed when that certificate was issued.
+ *
+ * Upper-cased because the codes are minted upper-case and an attendee reading one off a
+ * ticket will often type it in lower case.
+ */
+async function registrationIdsByTicketCode(slug: string, raw: string): Promise<string[]> {
+  const code = raw.toUpperCase()
+  const snap = await adminDb.collection('registrations')
+    .where('eventSlug', '==', slug)
+    .where('ticketCode', '==', code)
+    .limit(IN_CHUNK)
+    .get()
+  return snap.docs.map(d => d.id)
+}
+
+/** Registration ids for a bib number, within this event. Exact match — bibs are stored as
+ *  assigned (e.g. "0042"), and normalising here would guess at the organizer's scheme. */
+async function registrationIdsByBib(slug: string, bib: string): Promise<string[]> {
+  const snap = await adminDb.collection('registrations')
+    .where('eventSlug', '==', slug)
+    .where('bibNumber', '==', bib)
+    .limit(IN_CHUNK)
+    .get()
+  return snap.docs.map(d => d.id)
+}
 
 export interface CertificateLookupResult {
   participantName:    string
@@ -65,18 +135,22 @@ export async function POST(req: NextRequest, { params }: Params): Promise<NextRe
   const { slug } = await params
   if (!slug) return NextResponse.json(EMPTY)
 
-  let body: { email?: unknown; registrationId?: unknown }
+  let body: { email?: unknown; registrationId?: unknown; mobile?: unknown; bibNumber?: unknown; ticketCode?: unknown }
   try { body = await req.json() as typeof body }
   catch { return NextResponse.json({ error: 'Invalid request.' }, { status: 400 }) }
 
   const email          = typeof body.email === 'string' ? body.email.trim().toLowerCase() : ''
   const registrationId = typeof body.registrationId === 'string' ? body.registrationId.trim() : ''
+  const mobile         = typeof body.mobile === 'string' ? body.mobile.trim() : ''
+  const bibNumber      = typeof body.bibNumber === 'string' ? body.bibNumber.trim() : ''
+  const ticketCode     = typeof body.ticketCode === 'string' ? body.ticketCode.trim() : ''
 
-  // Exactly one mode. Accepting both would mean an implicit OR whose result set is harder
+  // Exactly one mode. Accepting several would mean an implicit OR whose result set is harder
   // to reason about than the sum of its parts — and easy to get subtly wrong.
-  if ((!email && !registrationId) || (email && registrationId)) {
+  const supplied = [email, registrationId, mobile, bibNumber, ticketCode].filter(Boolean)
+  if (supplied.length !== 1) {
     return NextResponse.json(
-      { error: 'Enter either a registration ID or an email address.' },
+      { error: 'Enter exactly one of: email, mobile number, ticket code, registration ID or bib number.' },
       { status: 400 },
     )
   }
@@ -84,21 +158,45 @@ export async function POST(req: NextRequest, { params }: Params): Promise<NextRe
   // response rather than a distinct error, so probing cannot use validation as an oracle.
   if (email && (!email.includes('@') || email.length > 254)) return NextResponse.json(EMPTY)
   if (registrationId && registrationId.length > 128)         return NextResponse.json(EMPTY)
+  if (mobile && mobile.length > 32)                          return NextResponse.json(EMPTY)
+  if (bibNumber && bibNumber.length > 64)                    return NextResponse.json(EMPTY)
+  if (ticketCode && ticketCode.length > 64)                  return NextResponse.json(EMPTY)
 
   // Indexed, event-scoped equality queries — never a scan.
-  //   certificates: eventSlug + attendeeEmail
-  //   certificates: eventSlug + registrationId
+  //   certificates:  eventSlug + attendeeEmail
+  //   certificates:  eventSlug + registrationId
+  //   registrations: eventSlug + attendee.phone      (mobile — two hops, see below)
+  //   registrations: eventSlug + bibNumber           (bib    — two hops, see below)
   let snap: FirebaseFirestore.QuerySnapshot
   try {
     const base = adminDb.collection(COLLECTIONS.CERTIFICATES).where('eventSlug', '==', slug)
-    snap = await (email
-      ? base.where('attendeeEmail', '==', email)
-      : base.where('registrationId', '==', registrationId)
-    ).limit(MAX_RESULTS).get()
+
+    if (mobile || bibNumber || ticketCode) {
+      // ── TWO-HOP MODES ──────────────────────────────────────────────────────
+      // Neither a phone number nor a bib is stored on the certificate record, so the
+      // registration is resolved first and the certificates are fetched by id.
+      //
+      // BOUNDED BY CONSTRUCTION: the first hop is capped at IN_CHUNK and the second is a
+      // single `in` query over those ids — never one query per registration, so a family of
+      // three costs exactly two reads, the same as a family of ten.
+      const regIds = mobile
+        ? await registrationIdsByPhone(slug, mobile)
+        : ticketCode
+          ? await registrationIdsByTicketCode(slug, ticketCode)
+          : await registrationIdsByBib(slug, bibNumber)
+
+      if (regIds.length === 0) return NextResponse.json(EMPTY)
+      snap = await base.where('registrationId', 'in', regIds).limit(MAX_RESULTS).get()
+    } else {
+      snap = await (email
+        ? base.where('attendeeEmail', '==', email)
+        : base.where('registrationId', '==', registrationId)
+      ).limit(MAX_RESULTS).get()
+    }
   } catch (err) {
     // Never surface a Firestore error; a missing index must not become an oracle either.
     console.error('[certificate-lookup] query_failed', {
-      slug, mode: email ? 'email' : 'registrationId',
+      slug, mode: email ? 'email' : registrationId ? 'registrationId' : mobile ? 'mobile' : ticketCode ? 'ticketCode' : 'bib',
       name: err instanceof Error ? err.name : 'unknown',
     })
     return NextResponse.json({ error: 'Lookup is temporarily unavailable.' }, { status: 503 })

@@ -86,7 +86,17 @@ export async function emailCertificate(
   certificate = claim.certificate
 
   // RD-EMAIL-PROVIDER — a certificate belongs to an event; gate and send on ITS transport.
-  const emailProviderName = await resolveEventEmailProvider(certificate.eventId)
+  //
+  // eventSLUG, not eventId. `resolveEventEmailProvider` reads `events/{slug}`, and a
+  // certificate's `eventId` is the DRAFT id — so this looked up a document that cannot
+  // exist, the resolver's "absent value" path returned the SES default, and EVERY
+  // certificate email left through SES no matter which provider an admin had selected for
+  // the event. The organizer then saw a truthful "Email rejected by SES" on an event
+  // configured for Resend: the message was never hardcoded, the routing was wrong.
+  //
+  // Note the deliberate trap two lines below: `getSettings` IS keyed by the draft id. The
+  // two identifiers are not interchangeable, and only this call wants the slug.
+  const emailProviderName = await resolveEventEmailProvider(certificate.eventSlug)
   if (!notificationEngine.isAvailable(NotificationChannel.EMAIL, emailProviderName)) return { success: false, skipped: false, error: 'Email is not configured' }
 
   // Resolve subject + message from settings (placeholder-aware), falling back to

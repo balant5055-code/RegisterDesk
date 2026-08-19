@@ -33,6 +33,50 @@ export interface CertificateChargeArgs {
 }
 
 /**
+ * RD-CERT-DELETE · the free-allowance usage ledger. MONOTONIC — never deleted, never
+ * decremented, not even when the certificate it records is deleted.
+ *
+ * ═══ THE LOOPHOLE THIS CLOSES ═══════════════════════════════════════════════
+ * Free allowance used to be measured by counting the LIVE `certificates` collection. That
+ * count is a measure of what currently exists, not of what has been consumed — so deleting a
+ * certificate handed the allowance back. Issue → delete → issue would mint unlimited free
+ * certificates for as long as `freeAllowance > 0`.
+ *
+ * One doc per certificate ever issued, keyed BY certificateId, so a replay (bulk re-run,
+ * retry, regeneration) writes the same document instead of consuming a second unit — the same
+ * deterministic-id idempotency the wallet ledger below already relies on.
+ */
+export const CERTIFICATE_ISSUANCE_LEDGER = 'certificateIssuanceLedger'
+
+/**
+ * Records this certificate's issuance and returns allowance consumed for the event.
+ *
+ * WHY THE MAX. The ledger only accumulates while `freeAllowance > 0`, so an event that
+ * issued certificates under a zero allowance has live certificates the ledger never saw. If
+ * an organizer then raised the allowance, a ledger-only reading would restart the count and
+ * grant free units for certificates already issued — trading one loophole for another. Taking
+ * the greater of the two means the ledger can only ever RAISE the usage figure: deletion
+ * cannot lower it, and pre-ledger history still counts.
+ *
+ * Both reads are `.count()` aggregates (no document reads) and run only inside the caller's
+ * existing `freeAllowance > 0` guard, so the default configuration pays nothing.
+ */
+async function recordAndCountIssuance(
+  eventId: string, certificateId: string, organizerUid: string,
+): Promise<number> {
+  const ledgerRef = adminDb.collection(CERTIFICATE_ISSUANCE_LEDGER).doc(certificateId)
+  // Written BEFORE the count so this certificate is included, matching the `<=` semantics
+  // the live-count version had. An overwrite is a no-op, which is what makes it idempotent.
+  await ledgerRef.set({ eventId, organizerUid, certificateId, createdAt: FieldValue.serverTimestamp() })
+
+  const [ledgerSnap, liveSnap] = await Promise.all([
+    adminDb.collection(CERTIFICATE_ISSUANCE_LEDGER).where('eventId', '==', eventId).count().get(),
+    adminDb.collection(COLLECTIONS.CERTIFICATES).where('eventId', '==', eventId).count().get(),
+  ])
+  return Math.max(ledgerSnap.data().count, liveSnap.data().count)
+}
+
+/**
  * Idempotently charges the wallet for ONE certificate. Never throws for a business
  * outcome (insufficient balance / not billable) — those are returned. Safe to call
  * once per newly-created certificate on the single, bulk, and job paths.
@@ -47,12 +91,10 @@ export async function chargeCertificate(args: CertificateChargeArgs): Promise<Ce
   // Free allowance (soft): the first N certificates per event are not charged.
   // Guarded so the default (0) adds no extra read on the hot path.
   if (cert.freeAllowance > 0) {
-    const countSnap = await adminDb.collection(COLLECTIONS.CERTIFICATES)
-      .where('eventId', '==', args.eventId)
-      .count().get()
+    const used = await recordAndCountIssuance(args.eventId, args.certificateId, args.organizerUid)
     // The just-written certificate is included in the count, so `<=` keeps exactly
     // `freeAllowance` certificates free.
-    if (countSnap.data().count <= cert.freeAllowance) return { charged: false, reason: 'free_allowance' }
+    if (used <= cert.freeAllowance) return { charged: false, reason: 'free_allowance' }
   }
 
   const walletRef = adminDb.doc(`organizerWallets/${args.organizerUid}`)

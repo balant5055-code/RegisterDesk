@@ -12,9 +12,9 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { adminDb }                   from '@/lib/firebase/admin'
 import { authorizeWorkspace }        from '@/lib/team/workspace'
-import { deriveLifecycleStatus }     from '@/lib/events/lifecycle'
+
 import { getEventStats, sumConfirmedRevenueFromLedger } from '@/lib/firebase/firestore/registrationCounters'
-import { parseListingTab, eventInListingTab } from '@/lib/events/listingTabs'
+import { parseListingTab, eventInListingTab, effectiveLifecycleStatus } from '@/lib/events/listingTabs'
 import { LICENSE_ORDERS_COLLECTION } from '@/lib/licensing/schema'
 import type { EventLifecycleStatus } from '@/types/events'
 
@@ -159,7 +159,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       let filled = false
       for (const doc of batch.docs) {
         const d = doc.data() as Record<string, unknown>
-        if (eventInListingTab(deriveLifecycleStatus(d), tab) && draftMatchesSearch(d, searchTerm)) {
+        if (eventInListingTab(effectiveLifecycleStatus(d), tab) && draftMatchesSearch(d, searchTerm)) {
           matched.push(doc)
           if (matched.length >= wanted) { filled = true; break }
         }
@@ -258,7 +258,14 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     return {
       draftId:            doc.id,
       status:             (d.status as 'draft' | 'published') ?? 'draft',
-      lifecycleStatus:    deriveLifecycleStatus(d),
+      // ARCHIVE-ACCURATE. `deriveLifecycleStatus` alone cannot report 'archived' for an event
+      // archived before `lifecycleStatus` existed: archiving also writes the legacy
+      // `status: 'draft'`, so the derivation returns THAT and the event reads as a draft
+      // forever. Every consumer of this payload — the Registrations picker, the Reports
+      // picker, the events tabs — then treats a legacy archived event as live. Correcting it
+      // HERE fixes all of them at the data boundary rather than repeating the predicate in
+      // each client, which could not run it anyway: `archivedAt` is not part of this payload.
+      lifecycleStatus:    effectiveLifecycleStatus(d),
       name:               typeof info.name     === 'string' ? info.name    : 'Untitled Event',
       slug,
       tagline:            typeof info.tagline  === 'string' ? info.tagline : null,

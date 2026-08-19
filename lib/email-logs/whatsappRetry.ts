@@ -49,7 +49,7 @@ export type WhatsAppRetryResult =
       /** Machine-readable outcome, mapped to an HTTP status by the route. */
       reason:
         | 'not_configured' | 'channel_disabled' | 'event_disabled'
-        | 'registration_missing' | 'already_sent' | 'no_phone'
+        | 'registration_missing' | 'already_sent' | 'delivery_unknown' | 'no_phone'
         | 'insufficient_balance' | 'template_unresolved' | 'send_failed'
       /** Normalized, organizer-safe message. Never contains credentials. */
       error: string
@@ -180,6 +180,21 @@ export async function retryWhatsAppConfirmation(args: WhatsAppRetryArgs): Promis
   // called, so an already-delivered confirmation can never be sent twice.
   if (reg.whatsappStatus === 'sent') {
     return { ok: false, reason: 'already_sent', error: 'This WhatsApp confirmation was already delivered.' }
+  }
+
+  // ═══ UNKNOWN IS NOT A LICENCE TO RESEND ════════════════════════════════════
+  // 'unknown' means the Meta request timed out, so RegisterDesk never learned whether the
+  // message was accepted. A blind retry here is exactly the double-message risk: if Meta did
+  // queue the original, the attendee gets the confirmation twice. There is also no wamid to
+  // reconcile against, so no webhook can ever resolve it for us. Refuse, and tell the
+  // organizer plainly — a human who has confirmed with the attendee can still act, but nothing
+  // automatic will resend on their behalf.
+  if (reg.whatsappStatus === 'unknown') {
+    return {
+      ok: false,
+      reason: 'delivery_unknown',
+      error:  'Delivery status unknown — do not resend automatically. The message may already have reached the attendee.',
+    }
   }
 
   const phone = reg.attendee.phone?.trim()

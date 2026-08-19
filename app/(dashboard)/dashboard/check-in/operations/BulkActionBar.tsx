@@ -4,7 +4,7 @@
 // EXISTING endpoint; nothing new is built:
 //   check-in    → POST /events/[id]/registrations/bulk-jobs {kind:'check_in'}   (job runner, ≤20k)
 //   badges      → POST /api/organizer/print-jobs {templateId, filters:{registrationIds}}  (job)
-//   certificates→ POST /events/[id]/certificates/generate   (event-wide, existing)
+//   certificates→ POST /events/[id]/certificates/jobs       (event-wide background job)
 //   ticket email→ POST /events/[id]/registrations/bulk {action:'resend_email'}   (≤200 sync)
 //   undo        → POST /organizer/registrations/[id]/undo-checkin   (no bulk engine exists →
 //                 sequential over the single audited endpoint, with progress)
@@ -117,15 +117,34 @@ export function BulkActionBar({ eventId, selectedIds, regs, onClear, onRefresh }
     })
   })
 
-  // ── Generate Certificates (existing event-wide endpoint) ─────────────────────
+  // ── Generate Certificates — BACKGROUND JOB (RD-CERT-SCALE P1-1) ──────────────
   const certificates = () => setConfirm({
     title: 'Generate certificates', confirmLabel: 'Generate',
     body: <>Generate certificates for <b>all eligible</b> registrations in this event that don’t have one yet? (The certificate engine is event-wide; the current selection is not used.)</>,
     onConfirm: () => { setConfirm(null); void run('certs', async () => {
-      const res = await fetch(`/api/organizer/events/${eventId}/certificates/generate`, { method: 'POST', headers: await headers() })
-      const data = await res.json().catch(() => ({})) as { generated?: number; skipped?: number; ineligible?: number; error?: string }
-      if (!res.ok) { showToast(data.error ?? 'Certificate generation failed', 'error'); return }
-      showToast(`Certificates: ${data.generated ?? 0} generated · ${data.skipped ?? 0} existing · ${data.ineligible ?? 0} ineligible`, 'success'); onRefresh()
+      // This used to POST /certificates/generate, which loads EVERY confirmed registration
+      // with an unbounded .get() and then generates synchronously inside the request. At 10k
+      // that is 10,000 documents in one function and a loop that cannot finish within the
+      // function budget — it times out mid-way, leaving partial writes in the legacy
+      // certificateRecords collection. This button lives on the CHECK-IN screen, so it was
+      // reachable while the event is live and held a function slot for its whole lifetime.
+      //
+      // It now creates a job on the SAME engine the Certificate Hub uses: 25/page, leased,
+      // cursor-resumable, per-item failure isolation, driven by cron/certificate-jobs.
+      // `scope: 'all'` is the exact equivalent of the old event-wide behaviour, so the
+      // confirmation copy above still describes what happens — only the execution changes.
+      const res = await fetch(`/api/organizer/events/${eventId}/certificates/jobs`, {
+        method:  'POST',
+        headers: { ...(await headers()), 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ scope: 'all' }),
+      })
+      const data = await res.json().catch(() => ({})) as
+        { success?: boolean; job?: { counts?: { total?: number } }; error?: string }
+      if (!res.ok || !data.success) { showToast(data.error ?? 'Certificate generation failed', 'error'); return }
+      const total = data.job?.counts?.total ?? 0
+      showToast(`Generating ${total} certificate${total === 1 ? '' : 's'} in the background`, 'success')
+      setJobLink({ href: `/dashboard/events/${eventId}?tab=certificates`, label: 'Track in Certificate Center' })
+      onRefresh()
     }) },
   })
 

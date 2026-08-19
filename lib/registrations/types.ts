@@ -79,6 +79,18 @@ export interface RegistrationDocument {
     qrValue:       string    // "RD:{slug}:{registrationId}:{ticketCode}"
     qrGeneratedAt: unknown   // Firestore Timestamp
   }
+  /**
+   * RD-CERT-PHOTO-01 — object-storage KEY of the attendee's certificate photo.
+   *
+   * OPTIONAL and absent on every existing registration; absent ⇒ the attendee simply has no
+   * photo and their certificate renders exactly as it always did. A key, never a URL: storing
+   * a URL would either be permanent-public (unacceptable for a photograph of a named person)
+   * or an expiring string that rots in the database. The renderer reads the bytes server-side
+   * via `storage.download(key)`; the attendee's own UI gets a short-lived signed URL issued
+   * only after an ownership check.
+   */
+  attendeePhotoKey?: string
+
   // Check-in fields
   checkedIn:        boolean   // false at creation; true once scanned at gate
   checkedInAt?:     unknown   // Firestore Timestamp — set when checked in
@@ -93,7 +105,15 @@ export interface RegistrationDocument {
   emailSentAt?:        unknown  // Firestore Timestamp — set when successfully sent
   emailFailureReason?: string   // last failure message if emailStatus === 'failed'
   // WhatsApp confirmation fields (Phase G3.4) — attendee WhatsApp is wallet-charged.
-  whatsappStatus?:        'sent' | 'failed' | 'skipped_no_phone' | 'skipped_insufficient_balance'
+  /**
+   * `unknown` = the Meta request TIMED OUT or the network failed, so RegisterDesk aborted
+   * before Meta answered. It is NOT a delivery failure: the abort happens client-side and
+   * cannot cancel a request Meta may already have accepted, and the wamid — which only
+   * arrives in the response we never got — is absent, so no webhook can reconcile the row.
+   * Treating that as `failed` is what allowed a retry to send the attendee a second
+   * WhatsApp. Additive value only: no existing document carries it and nothing is migrated.
+   */
+  whatsappStatus?:        'sent' | 'failed' | 'unknown' | 'skipped_no_phone' | 'skipped_insufficient_balance'
   whatsappSentAt?:        unknown  // Firestore Timestamp — set when successfully sent
   whatsappMessageId?:     string   // Meta wamid when sent
   whatsappFailureReason?: string   // normalized reason when failed / skipped

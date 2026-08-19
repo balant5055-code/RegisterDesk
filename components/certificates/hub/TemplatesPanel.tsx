@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import Link from 'next/link'
 import { Upload, Loader2, Pencil, Trash2, CheckCircle2, PenSquare, FileText, Copy, Star, LayoutTemplate } from 'lucide-react'
 import { putToSignedUrl } from '@/features/media-studio/utils/browserImage'
+import { optimizeTemplateUpload } from '@/lib/certificates/templateRaster'
 import { cn } from '@/lib/utils/cn'
 import { useConfirm } from '@/components/ui/ConfirmDialog'
 import { Spinner, ErrorBox, Badge, btnGhost } from './ui'
@@ -48,25 +49,33 @@ export default function TemplatesPanel({ api, eventId }: { api: CertApi; eventId
     const file = e.target.files?.[0]
     e.target.value = ''
     if (!file) return
-    const templateType = typeFromFile(file)
-    if (!templateType) { setErr('Unsupported file. Upload a PDF, PNG, or JPG.'); return }
+    const picked = typeFromFile(file)
+    if (!picked) { setErr('Unsupported file. Upload a PDF, PNG, or JPG.'); return }
     setUploading(true); setErr(null)
     try {
-      // RD-CERT-TPL-R2 — direct-to-storage upload, the same shape media uploads use:
-      //   prepare (server mints the key + signs a PUT) → PUT the bytes → register the record.
-      // The bytes never pass through a serverless function, so a 25 MB template is fine.
-      const prep = await api.prepareTemplate({ fileName: file.name, templateType })
-      if (file.size > prep.maxBytes) {
+      // RD-CERT-TPL-SIZE — flatten an OPAQUE PNG to JPEG once, here, before it is stored.
+      // pdf-lib re-encodes PNG as a raw Flate bitmap but passes JPEG through untouched, so
+      // this is the difference between an 8 MB certificate and a few hundred KB — at the same
+      // 3508×2480 resolution. A transparent PNG is returned untouched; so is a PDF or JPEG.
+      const optimized = await optimizeTemplateUpload(file, picked)
+      const upload       = optimized.file
+      const templateType = optimized.templateType
+
+      // The prepare call is made with the FINAL name and type, so the signed PUT's content
+      // type, the object key's extension and the stored templateType all describe the same
+      // bytes. Preparing before converting would sign a PUT for the wrong content type.
+      const prep = await api.prepareTemplate({ fileName: upload.name, templateType })
+      if (upload.size > prep.maxBytes) {
         throw new Error(`This ${templateType.toUpperCase()} is larger than the ${Math.round(prep.maxBytes / (1024 * 1024))} MB limit.`)
       }
       // Reuses the platform's hardened signed-url PUT rather than a bare fetch: it carries
       // the upload timeout, which matters because a stalled 25 MB PUT would otherwise leave
       // the organizer on a spinner with no way out.
-      await putToSignedUrl(prep.uploadUrl, file, prep.mimeType)
+      await putToSignedUrl(prep.uploadUrl, upload, prep.mimeType)
 
       await api.createTemplate({
         name: file.name.replace(/\.[^.]+$/, ''), templateType,
-        fileKey: prep.fileKey, fileName: file.name,
+        fileKey: prep.fileKey, fileName: upload.name,
       })
       await load()
     } catch (e2) {

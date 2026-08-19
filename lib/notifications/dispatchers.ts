@@ -16,6 +16,16 @@ export type EmailDispatcher<T extends NotificationType> = (
   payload:  NotificationPayloadMap[T],
 ) => Promise<EmailResult>
 
+/**
+ * A notification type that is deliberately WhatsApp-only. Returns the ordinary failure
+ * shape rather than throwing, so an accidental email dispatch degrades exactly like any
+ * other provider refusal instead of taking a request down.
+ */
+const NO_EMAIL_TRANSPORT = async (): Promise<EmailResult> => ({
+  success: false,
+  error:   'This notification is delivered on WhatsApp only.',
+})
+
 export const EMAIL_DISPATCHERS: { [T in NotificationType]: EmailDispatcher<T> } = {
   // Auth & onboarding
   EMAIL_VERIFICATION:        (p, x) => p.sendOtpEmail(x),
@@ -63,4 +73,19 @@ export const EMAIL_DISPATCHERS: { [T in NotificationType]: EmailDispatcher<T> } 
   // Marketing / free-form
   CUSTOM_EMAIL:              (p, x) => p.sendCustomEmail(x),
   BROADCAST:                 (p, x) => p.sendCustomEmail(x),
+
+  // ── WhatsApp-only notification types (RD-WA-BROADCAST-02) ──────────────────
+  //
+  // All THREE below are delivered on WhatsApp and have no email counterpart. The two
+  // broadcast types give the composer an approved-template contract; the v2 registration
+  // template is a dormant successor awaiting Meta approval and is not dispatched at all.
+  //
+  // This table is exhaustive by design, so they must appear here — and what they must NOT
+  // do is silently fall back to a generic email, which would send an unstyled message
+  // nobody wrote. They refuse instead, in the shape every caller already handles.
+  //
+  // The LIVE REGISTRATION_CONFIRMATION dispatcher above is untouched.
+  REGISTRATION_CONFIRMATION_V2: NO_EMAIL_TRANSPORT,
+  KIT_COLLECTION:            NO_EMAIL_TRANSPORT,
+  EVENT_LOCATION:            NO_EMAIL_TRANSPORT,
 }

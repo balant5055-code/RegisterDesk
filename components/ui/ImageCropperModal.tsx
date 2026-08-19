@@ -1,6 +1,7 @@
 'use client'
 
 import { useState, useCallback, useEffect } from 'react'
+import { createPortal }                   from 'react-dom'
 import Cropper                           from 'react-easy-crop'
 import type { Area, Point }              from 'react-easy-crop'
 import {
@@ -165,7 +166,19 @@ export function ImageCropperModal({ imageSrc, config, onApply, onCancel }: Props
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onCancel() }
     document.addEventListener('keydown', onKey)
-    return () => document.removeEventListener('keydown', onKey)
+
+    // The page behind must not scroll while the editor owns the viewport — a drag that
+    // starts on the crop surface and leaves it would otherwise scroll the document under
+    // the overlay. Same save-and-restore as ImageLightbox and MobileDrawer: the PREVIOUS
+    // value is restored rather than cleared, so an editor opened from inside another
+    // already-locked overlay does not unlock the page when it closes.
+    const prevOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+
+    return () => {
+      document.removeEventListener('keydown', onKey)
+      document.body.style.overflow = prevOverflow
+    }
   }, [onCancel])
 
   const onCropComplete = useCallback((_croppedArea: Area, pixels: Area) => {
@@ -193,13 +206,29 @@ export function ImageCropperModal({ imageSrc, config, onApply, onCancel }: Props
     }
   }
 
-  return (
+  // PORTALLED TO document.body — the same escape hatch components/ui/Dialog and
+  // ImageLightbox use, and for the identical reason.
+  //
+  // `position: fixed` + a z-index is NOT enough on its own: z-index only compares inside a
+  // SHARED stacking context. This editor mounts deep inside page content (the public
+  // Certificate Center card), so its `z-50` was ranked among that subtree's siblings — not
+  // against the app shell. MarketingNavbar is `fixed inset-x-0 top-0 z-[100]` in the ROOT
+  // stacking context, so it painted straight over the editor's top bar, taking the Cancel
+  // control with it. Adding offsets or a bigger number inside the trapped subtree could
+  // never fix that; only leaving the subtree can.
+  //
+  // Portalling to <body> puts the overlay in the root context, where z-[120] — the tier
+  // ImageLightbox already established for full-viewport overlays — outranks the navbar's
+  // z-[100]. No new layer was invented and the navbar is untouched.
+  if (typeof document === 'undefined') return null
+
+  return createPortal(
     <div
       ref={trapRef}
       role="dialog"
       aria-modal="true"
       aria-label={config.label}
-      className="fixed inset-0 z-50 flex flex-col bg-[#111]"
+      className="fixed inset-0 z-[120] flex flex-col bg-[#111]"
       style={{ touchAction: 'none' }}
     >
 
@@ -335,6 +364,7 @@ export function ImageCropperModal({ imageSrc, config, onApply, onCancel }: Props
         </div>
       </div>
 
-    </div>
+    </div>,
+    document.body,
   )
 }

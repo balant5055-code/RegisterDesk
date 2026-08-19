@@ -69,7 +69,7 @@ export class StorageService {
 
     // 5. Key. Always a generated id — never the uploader's filename.
     const objectId = input.id ?? generateObjectId(mimeType)
-    const key = buildObjectKey({ type: input.type, eventSlug: input.eventSlug, objectId })
+    const key = buildObjectKey({ type: input.type, eventSlug: input.eventSlug, objectId, scopeId: input.scopeId })
 
     // 6. Checksum, computed on OUR side so it attests to what we sent.
     const checksum = sha256Hex(input.body)

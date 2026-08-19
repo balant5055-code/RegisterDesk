@@ -223,5 +223,38 @@ export const ZIP_SHARD_MAX_BYTES = 64 * 1024 * 1024
  * until this budget is exhausted, so a single oversized artifact simply runs alone.
  */
 export const ZIP_INFLIGHT_MAX_BYTES = 32 * 1024 * 1024
+// ─── RD-CERT-SCALE P2-2 · multipart export beyond one shard ───────────────────
+
+/**
+ * Shards whose stored object is confirmed per finalize page.
+ *
+ * The finalize phase HEAD-checks every shard before the job may complete. Those checks are
+ * metadata-only, but they are still network calls inside the chunk's 45s budget, and one of
+ * them may escalate into a full shard rebuild. Batching keeps a page's worst case to a
+ * handful of rebuilds rather than all 100 of a 50k job's shards at once.
+ */
+export const ZIP_VERIFY_BATCH = 8
+
+/**
+ * Failed certificate ids retained ON the job document.
+ *
+ * Firestore indexes EVERY array element, and caps a document at 40,000 index entries — two
+ * per string element, so an unbounded `failedIds` stops being writable at ~20,000 failures.
+ * A 25k or 50k export whose storage is unavailable would therefore fail to record that it
+ * failed, which is the one outcome the completeness contract cannot tolerate.
+ *
+ * So the document keeps a bounded SAMPLE for display, `failedCount` keeps the exact number,
+ * and the complete enumeration lives in a per-shard sidecar object in R2 (see failureParts).
+ * Nothing is lost; only the copy that has to fit in a document is truncated.
+ */
+export const ZIP_FAILED_SAMPLE_MAX = 200
+
+/**
+ * Runaway backstop on shard count. 50,000 certificates is 100 shards at the file cap; a
+ * byte-capped photo-heavy export might reach a few hundred. Four figures means the planner
+ * is not advancing and the job should stop rather than grow its document forever.
+ */
+export const ZIP_MAX_SHARDS = 2000
+
 /** Registrations/certificates paged per backfill chunk. */
 export const BACKFILL_PAGE_SIZE = 25

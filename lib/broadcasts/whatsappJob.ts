@@ -22,6 +22,7 @@ import { getMetaProvider, resolveWhatsAppTemplateByType, hasWhatsAppTemplate } f
 import type { WhatsAppProvider, WhatsAppTemplateType } from '@/lib/whatsapp'
 import { writeEmailLog }     from '@/lib/email-logs/write'
 import { validatePhoneNumber } from '@/lib/communication/phone'
+import { getEmailAppUrl }   from '@/lib/email/appUrl'
 import { logBroadcastAction } from '@/lib/broadcasts/audit'
 import { finalizeBroadcast } from './finalize'
 import type { FinalizeCampaign, FinalizeRecipient } from './finalize'
@@ -135,6 +136,8 @@ interface WhatsAppJobContext {
   languageCode?:   string
   staticVars:      Record<string, string>
   eventName:       string
+  /** RD-WA-BROADCAST-02 — this event's public Certificate Center, derived server-side. */
+  certificateUrl:  string
   perMsgCostPaise: number
 }
 
@@ -156,6 +159,7 @@ export function whatsAppBroadcastStrategy(): JobStrategy<WhatsAppBroadcastJob, W
           languageCode:    job.languageCode,
           staticVars:      job.variables ?? {},
           eventName:       job.eventName,
+          certificateUrl:  `${getEmailAppUrl()}/events/${job.eventSlug}/certificates`,
           perMsgCostPaise: Math.round((job.actualCostPaise ?? 0) / total),
         },
       }
@@ -203,6 +207,11 @@ export function whatsAppBroadcastStrategy(): JobStrategy<WhatsAppBroadcastJob, W
         attendeeName: item.name,
         eventName:    ctx.eventName,
         ticketCode:   item.ticketCode ?? '',
+        // RD-WA-BROADCAST-02 — SERVER-DERIVED, and deliberately last so it overrides any
+        // same-named value that reached `staticVars`. The Certificate Center link must
+        // always be this deployment's canonical origin for THIS event; an organizer-typed
+        // URL could be a preview host, a stale slug, or another event entirely.
+        certificateUrl: ctx.certificateUrl,
       }
       const resolved = resolveWhatsAppTemplateByType(ctx.templateType, normalizedPhone, vars, { languageCode: ctx.languageCode })
 

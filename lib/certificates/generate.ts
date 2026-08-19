@@ -25,6 +25,7 @@ import { sendCertificateWhatsApp } from './whatsapp'
 import { uploadCertificateArtifact, deleteCertificateArtifact } from './artifact'
 import { safeFetchBytes, validateEventTemplateUrl, validateGlobalTemplateUrl } from './urlGuard'
 import { loadTemplateBytes, templateSourceIdentity } from './templateAsset'
+import { layoutHasAttendeePhoto }   from './attendeePhotoLayout'
 import { getEmailAppUrl } from '@/lib/email/appUrl'
 import { enqueueWebhook }           from '@/lib/integrations/webhooks'
 import { crmRecordCertificate }     from '@/lib/crm/service'
@@ -60,6 +61,45 @@ export interface GenerateContextInput {
   finishTime:    string
   position:      string
   category:      string
+  /**
+   * RD-CERT-PHOTO-01 — object-storage key of the attendee photo, or undefined.
+   *
+   * A KEY, not bytes: every caller already has the registration in hand, so passing the key
+   * costs no extra read (no N+1 in bulk), and the bytes are fetched once, here, only when
+   * the template actually uses them.
+   */
+  attendeePhotoKey?: string
+}
+
+/**
+ * RD-CERT-PHOTO-01 — fetches THIS certificate's attendee photo.
+ *
+ * Read straight from object storage BY KEY. Never through `loadRenderAssets`, which is keyed
+ * by TEMPLATE and shared across every certificate in a batch — a per-registration photo in
+ * there would print one attendee's face on another's certificate.
+ *
+ * No URL is ever constructed and no client-supplied URL is ever accepted; the key goes
+ * through the platform-storage abstraction, which applies its own safe-key guard.
+ *
+ * Never throws. A missing, deleted or unreadable object degrades to "no photo", which is a
+ * fully valid certificate; failing issuance over a decorative image would be worse than
+ * omitting it. Returns undefined when the layout has no attendeePhoto element, so an event
+ * that does not use the feature performs no storage read at all.
+ */
+async function loadAttendeePhotoBytes(
+  layout: CertificateLayout | null | undefined,
+  photoKey: string | undefined,
+): Promise<Uint8Array | undefined> {
+  if (!photoKey) return undefined
+  if (!layoutHasAttendeePhoto(layout)) return undefined
+  try {
+    const { storage } = await import('@/features/platform-storage')
+    const res = await storage.download(photoKey)
+    return new Uint8Array(res.body)
+  } catch (err) {
+    captureError(err, { scope: 'certificate_attendee_photo', area: 'certificate' })
+    return undefined
+  }
 }
 
 export interface GenerateCertificateParams {
@@ -283,6 +323,9 @@ export async function generateCertificate(
 
     // Render the certificate file from the active template + its layout.
     const { templateBytes, assets } = params.prefetched ?? await loadRenderAssets(template)
+    // Fetched OUTSIDE the (template-keyed, batch-shared) render assets — see
+    // loadAttendeePhotoBytes. Costs nothing when the layout has no photo element.
+    const attendeePhoto = await loadAttendeePhotoBytes(template.layout, input.attendeePhotoKey)
     const pdfBytes = await renderCertificatePdf({
       templateBytes,
       templateType: template.templateType,
@@ -291,6 +334,7 @@ export async function generateCertificate(
       verifyUrl,
       layout:       template.layout ?? null,
       assets,
+      attendeePhoto,
     })
 
     // ═══ RD-CERT-ARTIFACT-01 · PERSIST THE PDF *BEFORE* THE RECORD ═══════════
@@ -335,7 +379,11 @@ export async function generateCertificate(
       fileKey,                   // the canonical artifact, already uploaded above
       fileSize,
       source,
-      data:           snapshotData(context),
+      // RD-CERT-PHOTO-01 — the photo KEY is snapshotted with the placeholder values so a
+      // later re-render reproduces the certificate AS ISSUED, exactly as every other value
+      // here does. contextFromSnapshot reads only its known placeholder keys, so this extra
+      // entry is inert for text rendering.
+      data:           { ...snapshotData(context), ...(input.attendeePhotoKey ? { attendeePhotoKey: input.attendeePhotoKey } : {}) },
       jobId:          params.jobId ?? null,
     }
     // If the record cannot be written, the artifact we just uploaded is unreferenced —
@@ -399,7 +447,13 @@ export async function generateCertificate(
     }).catch(() => {})
 
     // Template usage analytics (GA-6 S5) — fire-and-forget, counts one generation.
-    void recordTemplateUsage(template.templateId)
+    //
+    // RD-CERT-SCALE P2-4: the BULK path is excluded here and records once per completed job
+    // instead (lib/certificates/jobs.ts onComplete). `usageCount` is ONE Firestore document
+    // per template, and Firestore sustains ~1 write/s to a single doc — at concurrency 6 a
+    // 10k run turned this fire-and-forget line into 10,000 contended writes on one hot
+    // document. Manual/single issuance is unchanged: one certificate, one write.
+    if (source !== 'bulk') void recordTemplateUsage(template.templateId)
 
     // CRM certificate activity (fire-and-forget, idempotent).
     crmRecordCertificate({
@@ -507,8 +561,22 @@ export type OnDemandRender =
  *
  * Does NOT upload, does NOT write the certificate record, and does NOT base64-encode.
  * Caller owns the bytes; they are garbage-collected once the response is written.
+ *
+ * ═══ PERSONALIZED RENDER (RD-CERT-PHOTO-02) ══════════════════════════════════
+ * `attendeePhotoKeyOverride` swaps ONE input — the photo bytes — for this render only. It is
+ * a RENDER-TIME override and nothing else: the certificate record, its id, status, claim,
+ * verification token, issuance timestamp and `data` snapshot are all untouched, and no PDF
+ * is stored. Two people downloading the same certificate id, one with a photo and one
+ * without, get two different files and the SAME issued certificate.
+ *
+ * It is an object KEY, never a URL. The CALLER is responsible for having proved that the
+ * override belongs to this certificate; this function does not authorize, it only renders —
+ * the download endpoint's own authorization is unchanged and unweakened by this parameter.
  */
-export async function renderCertificateOnDemand(certificateId: string): Promise<OnDemandRender> {
+export async function renderCertificateOnDemand(
+  certificateId: string,
+  opts?: { attendeePhotoKeyOverride?: string },
+): Promise<OnDemandRender> {
   const existing = await getCertificate(certificateId)
   if (!existing) return { ok: false, error: 'not_found' }
   if (existing.status === 'revoked') return { ok: false, error: 'revoked' }
@@ -523,6 +591,16 @@ export async function renderCertificateOnDemand(certificateId: string): Promise<
 
   try {
     const { templateBytes, assets } = await cachedRenderAssets(template)
+    // The photo comes from the SNAPSHOT — a download must reproduce what was issued —
+    // unless the caller supplied a verified override for this one render. Either way it is
+    // fetched OUTSIDE cachedRenderAssets, which is keyed by template and SHARED across
+    // certificates: putting attendee bytes in there would leak one person's photo onto the
+    // next person's certificate.
+    const snapshotKey = typeof existing.data?.attendeePhotoKey === 'string' ? existing.data.attendeePhotoKey : undefined
+    const attendeePhoto = await loadAttendeePhotoBytes(
+      template.layout,
+      opts?.attendeePhotoKeyOverride || snapshotKey,
+    )
     const bytes = await renderCertificatePdf({
       templateBytes,
       templateType: template.templateType,
@@ -531,6 +609,7 @@ export async function renderCertificateOnDemand(certificateId: string): Promise<
       verifyUrl:    `${getEmailAppUrl()}/verify/certificate/${certificateId}`,
       layout:       template.layout ?? null,
       assets,
+      attendeePhoto,
     })
     return { ok: true, bytes, filename: `certificate-${certificateId}.pdf` }
   } catch (err) {
@@ -558,6 +637,14 @@ export async function regenerateCertificate(
   const verifyUrl = `${getEmailAppUrl()}/verify/certificate/${certificateId}`
   const context   = contextFromSnapshot(existing.data, certificateId)
   const { templateBytes, assets } = opts?.prefetched?.render ?? await loadRenderAssets(template)
+  // Regeneration re-renders against the CURRENT template but the SAME data — that is its
+  // documented contract — so it uses the SNAPSHOTTED photo, not the live registration.
+  // Without this, regenerating would silently strip the photo off a certificate that was
+  // issued with one, and overwrite the stored artifact with the photo-less version.
+  const attendeePhoto = await loadAttendeePhotoBytes(
+    template.layout,
+    typeof existing.data?.attendeePhotoKey === 'string' ? existing.data.attendeePhotoKey : undefined,
+  )
   const pdfBytes = await renderCertificatePdf({
     templateBytes,
     templateType: template.templateType,
@@ -566,6 +653,7 @@ export async function regenerateCertificate(
     verifyUrl,
     layout:       template.layout ?? null,
     assets,
+    attendeePhoto,
   })
 
   const { fileKey, fileSize } = await uploadCertificateArtifact(existing.eventSlug, certificateId, pdfBytes)

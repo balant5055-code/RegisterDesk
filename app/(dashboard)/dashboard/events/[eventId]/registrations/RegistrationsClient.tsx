@@ -10,6 +10,7 @@ import {
   buildRegistrationExportColumns, buildRegistrationExportRow, exportCellValue,
 } from '@/lib/registrations/exportColumns'
 import { hasPaymentRecord, refundLabel } from '@/lib/registrations/paymentDisplay'
+import { summarizePricing, couponCellText, formatPaise } from '@/lib/registrations/couponDisplay'
 import {
   Search, Filter, Download, Upload, X, ChevronLeft, ChevronRight,
   Users, CheckCircle, Clock, XCircle, RotateCcw,
@@ -461,6 +462,34 @@ function RegistrationDrawer({
     }
   }
 
+  // ── Download helpers ────────────────────────────────────────────────────────
+  //
+  // FILENAMES CARRY THE EDIT VERSION. Both PDFs are generated on demand from the current
+  // registration, so the bytes are always current — but the filename used to be derived only
+  // from the ticket code, which does NOT change when an organizer corrects an attendee's
+  // name. Every download therefore landed on an identical filename, so the browser saved
+  // `ticket-RD-X (1).pdf` beside the original and opening `ticket-RD-X.pdf` showed the OLD
+  // name. Stamping the version makes each correction a distinct file.
+  const docVersion = (reg.updatedAt ?? '').replace(/[^0-9]/g, '').slice(0, 14) || 'v1'
+
+  /** Read the server's actual error instead of replacing it with a fixed string. */
+  async function describeFailure(res: Response, fallback: string): Promise<string> {
+    try {
+      const body = await res.json() as { error?: string }
+      if (typeof body.error === 'string' && body.error.trim()) return body.error
+    } catch { /* not JSON — fall through */ }
+    return `${fallback} (${res.status})`
+  }
+
+  function saveBlob(blob: Blob, filename: string): void {
+    const url = URL.createObjectURL(blob)
+    const a   = document.createElement('a')
+    a.href     = url
+    a.download = filename
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
   // ── PDF download ────────────────────────────────────────────────────────────
   const [pdfLoading, setPdfLoading] = useState(false)
   const [pdfError,   setPdfError]   = useState<string | null>(null)
@@ -470,20 +499,16 @@ function RegistrationDrawer({
     setPdfLoading(true)
     setPdfError(null)
     try {
-      const res = await fetch(`/api/tickets/${reg.id}/pdf`, {
+      // `v` defeats any intermediary that ignores `no-store`; the server ignores the param.
+      const res = await fetch(`/api/tickets/${reg.id}/pdf?v=${encodeURIComponent(docVersion)}`, {
         headers: { Authorization: `Bearer ${token}` },
+        cache:   'no-store',
       })
       if (!res.ok) {
-        setPdfError('Could not generate ticket PDF.')
+        setPdfError(await describeFailure(res, 'Could not generate ticket PDF.'))
         return
       }
-      const blob = await res.blob()
-      const url  = URL.createObjectURL(blob)
-      const a    = document.createElement('a')
-      a.href     = url
-      a.download = `ticket-${reg.ticketCode}.pdf`
-      a.click()
-      URL.revokeObjectURL(url)
+      saveBlob(await res.blob(), `ticket-${reg.ticketCode}-${docVersion}.pdf`)
     } catch {
       setPdfError('Network error. Please try again.')
     } finally {
@@ -500,20 +525,15 @@ function RegistrationDrawer({
     setReceiptLoading(true)
     setReceiptError(null)
     try {
-      const res = await fetch(`/api/receipts/${reg.id}`, {
+      const res = await fetch(`/api/receipts/${reg.id}?v=${encodeURIComponent(docVersion)}`, {
         headers: { Authorization: `Bearer ${token}` },
+        cache:   'no-store',
       })
       if (!res.ok) {
-        setReceiptError('Could not generate receipt.')
+        setReceiptError(await describeFailure(res, 'Could not generate receipt.'))
         return
       }
-      const blob = await res.blob()
-      const url  = URL.createObjectURL(blob)
-      const a    = document.createElement('a')
-      a.href     = url
-      a.download = `receipt-${reg.ticketCode}.pdf`
-      a.click()
-      URL.revokeObjectURL(url)
+      saveBlob(await res.blob(), `receipt-${reg.ticketCode}-${docVersion}.pdf`)
     } catch {
       setReceiptError('Network error. Please try again.')
     } finally {
@@ -521,6 +541,8 @@ function RegistrationDrawer({
     }
   }
 
+  // One derivation per open drawer — pure, no query, no read.
+  const pricing = summarizePricing(reg)
   const showReceipt = reg.amount > 0 && (reg.paymentStatus === 'paid' || reg.paymentStatus === 'refunded')
 
   // ── Cancel ──────────────────────────────────────────────────────────────────
@@ -833,6 +855,37 @@ function RegistrationDrawer({
             </div>
 
             {/*
+              COUPON — its own section, ABOVE payment, and deliberately outside the
+              `hasPaymentRecord` gate below.
+              THE BUG THIS FIXES: a coupon that takes a registration to ₹0 leaves amount=0 and
+              no paymentId, so `hasPaymentRecord` was false and the entire block — code,
+              original amount, discount — collapsed into "No payment required", in exactly the
+              case the organizer most needs to see it. Coupon facts are not payment facts.
+              Every value is the one STORED at registration time; the coupon document is never
+              read, so a coupon edited later cannot rewrite an old registration's history.
+            */}
+            {pricing.hasCoupon && (
+              <div>
+                <p className="mb-2 flex items-center gap-1.5 text-[12px] font-semibold uppercase tracking-wider text-muted-foreground">
+                  <Tag className="size-3.5" aria-hidden /> Coupon Applied
+                </p>
+                <div className="overflow-hidden rounded-xl border border-primary/30 bg-primary/[0.04]">
+                  {pricing.couponCode && (
+                    <div className="flex items-start gap-3 border-b border-border/40 px-4 py-3">
+                      <div className="min-w-0">
+                        <p className="text-[12px] font-semibold uppercase tracking-wider text-muted-foreground">Code</p>
+                        <p className="mt-0.5 font-mono text-[15px] font-bold text-primary">{pricing.couponCode}</p>
+                      </div>
+                    </div>
+                  )}
+                  <PayRow label="Discount" value={`− ${formatPaise(pricing.discountPaise)}`} />
+                  <PayRow label="Original" value={formatPaise(pricing.originalPaise)} />
+                  <PayRow label="Final"    value={formatPaise(pricing.finalPaise)} />
+                </div>
+              </div>
+            )}
+
+            {/*
               PAYMENT — this data was ALREADY on the client (the list API spreads the whole
               document); it was simply never declared on the type and so never rendered.
               It lives here rather than in the table because reconciliation is a
@@ -873,9 +926,21 @@ function RegistrationDrawer({
                     )}
                   </>
                 ) : (
-                  // A free registration has no payment record at all. Rendering empty
-                  // payment rows would imply a ₹0 transaction that never existed.
-                  <p className="px-4 py-3 text-[13px] text-muted-foreground">No payment required</p>
+                  // A free registration has no gateway record, so payment rows would imply a
+                  // ₹0 transaction that never happened. But "No payment required" alone hid
+                  // WHY it was free — the organizer could not tell a coupon-funded ₹0 from a
+                  // genuinely free event. The reason is now stated explicitly, and the coupon
+                  // section above carries the numbers.
+                  <div className="px-4 py-3">
+                    <p className="text-[13px] font-medium text-foreground">
+                      {pricing.kind === 'free_by_coupon' ? 'Free after coupon' : 'Free registration'}
+                    </p>
+                    <p className="mt-0.5 text-[12px] text-muted-foreground">
+                      {pricing.kind === 'free_by_coupon'
+                        ? `${formatPaise(pricing.originalPaise)} covered by ${pricing.couponCode ?? 'a coupon'} — no payment was required.`
+                        : 'This registration was free; no payment was required.'}
+                    </p>
+                  </div>
                 )}
               </div>
             </div>
@@ -1371,6 +1436,10 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
   const [statusFilter,    setStatusFilter]    = useState(() => searchParams.get('status') ?? '')
   const [checkinFilter,   setCheckinFilter]   = useState('')
   const [paymentFilter,   setPaymentFilter]   = useState('')
+  const [couponFilter,    setCouponFilter]    = useState('')
+  // The event's REAL configured coupon codes. Fetched ONCE on mount from the existing
+  // authorized coupons endpoint — one bounded read, never per row and never per page.
+  const [couponCodes,     setCouponCodes]     = useState<string[]>([])
   const [dateFrom,        setDateFrom]        = useState('')
   const [dateTo,          setDateTo]          = useState('')
   const [debouncedSearch, setDebouncedSearch] = useState('')
@@ -1419,6 +1488,7 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
     if (paymentFilter) p.set('payment', paymentFilter)
     if (passFilter)    p.set('passId',  passFilter)
     if (checkinFilter === 'checked_in') p.set('checkin', 'yes')
+    if (couponFilter)  p.set('coupon',  couponFilter)
     if (dateFrom) p.set('from', dateFrom)
     if (dateTo)   p.set('to',   dateTo)
     return p
@@ -1511,7 +1581,29 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
     if (clientOnly) doFetch({ allMode: true })
     else            doFetch({ allMode: false, limit: pageSize })
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [debouncedSearch, passFilter, statusFilter, checkinFilter, paymentFilter, dateFrom, dateTo, sortKey, sortDir])
+  }, [debouncedSearch, passFilter, statusFilter, checkinFilter, paymentFilter, couponFilter, dateFrom, dateTo, sortKey, sortDir])
+
+  // ── Coupon codes for the filter ───────────────────────────────────────────
+  // ONE bounded read of the event's own coupons, on mount. Deliberately not per page and
+  // never per row: the dropdown must show the organizer's REAL configured coupons, and
+  // deriving them from the loaded registrations would only ever show the codes on the
+  // current page. A failure leaves the list empty, which hides the filter rather than
+  // showing a broken one.
+  useEffect(() => {
+    if (!authToken) return
+    let live = true
+    fetch(`/api/organizer/events/${eventId}/coupons`, { headers: { Authorization: `Bearer ${authToken}` } })
+      .then(r => (r.ok ? r.json() as Promise<{ coupons?: { code?: string }[] }> : { coupons: [] }))
+      .then(body => {
+        if (!live) return
+        const codes = (body.coupons ?? [])
+          .map(c => (typeof c.code === 'string' ? c.code.trim() : ''))
+          .filter(Boolean)
+        setCouponCodes([...new Set(codes)].sort())
+      })
+      .catch(() => { /* filter simply stays hidden */ })
+    return () => { live = false }
+  }, [authToken, eventId])
 
   // ── Handle drawer updates ──────────────────────────────────────────────────
 
@@ -1613,7 +1705,7 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
   function selectPage()     { setSelectedIds(new Set(filtered.map(r => r.id))) }
   function clearSelection() { setSelectedIds(new Set()) }
 
-  const hasActiveFilters = !!(search || passFilter || statusFilter || checkinFilter || paymentFilter || dateFrom || dateTo)
+  const hasActiveFilters = !!(search || passFilter || statusFilter || checkinFilter || paymentFilter || couponFilter || dateFrom || dateTo)
   const currentPage      = cursorStack.length + 1
   // Pending registrations among the current selection — drives Approve/Reject visibility
   const pendingSelected  = filtered.filter(r => selectedIds.has(r.id) && r.status === 'pending').length
@@ -1984,6 +2076,32 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
           </select>
         </div>
 
+        {/*
+          COUPON — server-side filtered, so it paginates over the whole matching set exactly
+          like status/pass/payment do. The code list is the event's REAL configured coupons,
+          fetched once on mount; nothing is hardcoded.
+
+          There is deliberately no "Without coupon" option. `couponCode` is not written at all
+          when no coupon is used, and Firestore cannot query for an absent field — the same
+          reason "Not Checked In" above is a client refinement rather than a server filter.
+          A "Without coupon" that silently returned everything would be worse than its absence.
+        */}
+        {couponCodes.length > 0 && (
+          <div className="relative">
+            <Tag className="absolute left-3 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground/50" aria-hidden />
+            <select
+              value={couponFilter}
+              onChange={e => setCouponFilter(e.target.value)}
+              className="h-10 rounded-xl border border-border bg-background pl-8 pr-3 text-[13px] text-foreground outline-none focus:border-primary/60 focus:ring-2 focus:ring-primary/20"
+              aria-label="Filter by coupon"
+            >
+              <option value="">All Coupons</option>
+              <option value="with">With Coupon</option>
+              {couponCodes.map(code => <option key={code} value={code}>{code}</option>)}
+            </select>
+          </div>
+        )}
+
         <div className="relative">
           <Filter className="absolute left-3 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground/50" aria-hidden />
           <select
@@ -2006,7 +2124,7 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
             type="button"
             onClick={() => {
               setSearch(''); setPassFilter(''); setStatusFilter('')
-              setCheckinFilter(''); setPaymentFilter(''); setDateFrom(''); setDateTo('')
+              setCheckinFilter(''); setPaymentFilter(''); setCouponFilter(''); setDateFrom(''); setDateTo('')
               searchRef.current?.focus()
             }}
             className="flex items-center gap-1.5 rounded-xl border border-border bg-card px-3 py-2 text-[13px] font-medium text-muted-foreground hover:bg-muted/50"
@@ -2262,6 +2380,7 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
                       { key: null,                      label: 'Email'     },
                       { key: null,                      label: 'Phone'     },
                       { key: null,                      label: 'Pass'      },
+                      { key: null,                      label: 'Discount'  },
                       { key: 'registeredAt' as SortKey, label: 'Date'      },
                       { key: 'status'      as SortKey,  label: 'Status'    },
                       { key: null,                      label: 'Check-In'  },
@@ -2304,6 +2423,23 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
                         <td className="px-4 py-3 text-muted-foreground">{reg.attendee.email}</td>
                         <td className="px-4 py-3 text-muted-foreground">{reg.attendee.phone || '—'}</td>
                         <td className="px-4 py-3 text-muted-foreground">{reg.passName}</td>
+                        {/* DISCOUNT — derived from values already on the row, so this column
+                            costs no query and no extra read. Silent for an ordinary paid
+                            registration: repeating "No discount" down the page is noise. */}
+                        <td className="whitespace-nowrap px-4 py-3">
+                          {(() => {
+                            const cell = couponCellText(reg)
+                            if (!cell) return <span className="text-[13px] text-muted-foreground/40">—</span>
+                            return (
+                              <span className="inline-flex flex-col leading-tight">
+                                {cell.code && (
+                                  <span className="font-mono text-[12px] font-semibold text-primary">{cell.code}</span>
+                                )}
+                                <span className="text-[12px] text-muted-foreground">{cell.note}</span>
+                              </span>
+                            )
+                          })()}
+                        </td>
                         <td className="whitespace-nowrap px-4 py-3 text-muted-foreground">{fmtDateShort(reg.registeredAt)}</td>
                         <td className="px-4 py-3">
                           <span className={`inline-flex rounded-full px-2.5 py-0.5 text-[13px] font-semibold ${sm.cls}`}>

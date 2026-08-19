@@ -62,6 +62,14 @@ export const COMMUNICATION_REGISTRY: CommRegistryEntry[] = [
   { id: T.WAITLIST_SPOT_AVAILABLE, category: 'communication', displayName: 'Spot Available', description: 'Notifies a waitlisted attendee a spot opened.', trigger: 'Waitlist spot frees up', audience: 'attendee', priority: 'high', mandatory: false, supportsInApp: false, templateKey: 'spot-available', futureRuleKey: 'waitlist.spot_available' },
   { id: T.CERTIFICATE_READY, category: 'communication', displayName: 'Certificate Ready', description: 'Delivers a participation certificate.', trigger: 'Certificate generated', audience: 'attendee', priority: 'medium', mandatory: false, supportsInApp: false, templateKey: 'certificate', futureRuleKey: 'certificate.ready' },
 
+  // ── Operational broadcasts (RD-WA-BROADCAST-02) — WhatsApp only ──────────────
+  // Organizer-composed and sent from the Broadcasts screen rather than fired by a
+  // system event, so `trigger` names the human action. No email template exists for
+  // either (see EMAIL_DISPATCHERS), hence templateKey 'broadcast'.
+  { id: T.REGISTRATION_CONFIRMATION_V2, category: 'communication', displayName: 'Registration Confirmation (v2, dormant)', description: 'Successor registration template held dormant pending Meta approval. Not dispatched.', trigger: 'Not dispatched — awaiting Meta approval and a deliberate migration', audience: 'attendee', priority: 'high', mandatory: false, supportsInApp: false, templateKey: 'registration', futureRuleKey: 'registration.confirmation_v2' },
+  { id: T.KIT_COLLECTION, category: 'communication', displayName: 'Kit Collection', description: 'Tells attendees where and when to collect their event kit.', trigger: 'Organizer sends a kit-collection broadcast', audience: 'attendee', priority: 'medium', mandatory: false, supportsInApp: false, templateKey: 'broadcast', futureRuleKey: 'event.kit_collection' },
+  { id: T.EVENT_LOCATION, category: 'communication', displayName: 'Event Location', description: 'Sends attendees the venue, date and time of the event.', trigger: 'Organizer sends an event-location broadcast', audience: 'attendee', priority: 'medium', mandatory: false, supportsInApp: false, templateKey: 'broadcast', futureRuleKey: 'event.location' },
+
   // ── Compliance / Billing (donations) ─────────────────────────────────────────
   { id: T.DONATION_RECEIPT, category: 'billing', displayName: 'Donation Receipt', description: 'Payment receipt for a donation.', trigger: 'Donation succeeds', audience: 'donor', priority: 'high', mandatory: true, supportsInApp: false, templateKey: 'donation-receipt', futureRuleKey: 'donation.receipt' },
   { id: T.DONATION_80G_RECEIPT, category: 'compliance', displayName: '80G Tax Receipt', description: 'Tax-exemption (80G) receipt for a donation.', trigger: 'Donation succeeds (80G-eligible)', audience: 'donor', priority: 'high', mandatory: true, supportsInApp: false, templateKey: 'donation-80g', futureRuleKey: 'compliance.donation_80g' },
