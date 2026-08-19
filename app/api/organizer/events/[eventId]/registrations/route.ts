@@ -10,6 +10,12 @@
 //   passId   — passId equality filter
 //   checkin  — 'yes' → checkedIn==true (see note: 'no' is NOT server-filtered because the
 //              field is absent on never-checked-in docs — the client refines that case)
+//   coupon   — 'with' → any coupon; or an exact coupon CODE. There is deliberately no
+//              'without': `couponCode` is not written at all when no coupon is used
+//              (see createRegistration), and Firestore cannot query for an absent field —
+//              exactly the same limitation as checkin='no' above. Offering a broken
+//              "Without coupon" that silently returned everything would be worse than
+//              omitting it, so the option is not shown.
 //   from,to  — registeredAt date range (YYYY-MM-DD, inclusive)
 //   dir      — 'asc' | 'desc' sort on registeredAt (default 'desc')
 //   q        — EXACT lookup: ticket code (RD-…) or email. Firestore has no substring
@@ -135,6 +141,8 @@ export async function GET(
   const paymentF = params.get('payment') ?? ''
   const passF    = params.get('passId')  ?? ''
   const checkinF = params.get('checkin') ?? ''       // 'yes' → checkedIn==true (see header note)
+  // Uppercased to match the normalized `couponCode` the registration stores.
+  const couponF  = (params.get('coupon') ?? '').trim().toUpperCase()
   const fromF    = params.get('from')    ?? ''
   const toF      = params.get('to')      ?? ''
   const dir: 'asc' | 'desc' = params.get('dir') === 'asc' ? 'asc' : 'desc'
@@ -209,6 +217,11 @@ export async function GET(
       if (paymentF)           query = query.where('paymentStatus', '==', paymentF)
       if (passF)              query = query.where('passId', '==', passF)
       if (checkinF === 'yes') query = query.where('checkedIn', '==', true)
+      // 'WITH' uses a range predicate because every stored code is a non-empty string, so
+      // >= '' matches exactly the documents that HAVE the field. Documents without a coupon
+      // are absent from this index entirely, which is precisely why the inverse is impossible.
+      if (couponF === 'WITH')  query = query.where('couponCode', '>=', '')
+      else if (couponF)        query = query.where('couponCode', '==', couponF)
       if (fromF) { const d = new Date(`${fromF}T00:00:00`);     if (!Number.isNaN(d.getTime())) query = query.where('registeredAt', '>=', Timestamp.fromDate(d)) }
       if (toF)   { const d = new Date(`${toF}T23:59:59.999`);   if (!Number.isNaN(d.getTime())) query = query.where('registeredAt', '<=', Timestamp.fromDate(d)) }
     }

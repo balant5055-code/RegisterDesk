@@ -19,6 +19,8 @@ import type { RegistrationDocument, RegistrationCounter } from '@/lib/registrati
 import { aggregateRegistrationStatusCounts } from '@/lib/firebase/firestore/registrationCounters'
 import type { RegistrationStatusCounts }     from '@/lib/firebase/firestore/registrationCounters'
 import { aggregateCancelledByPass, aggregateWaitlistedCount } from '@/lib/analytics/registrationPassAggregates'
+import { getOrganizerCouponPerformance, EMPTY_ORGANIZER_COUPON_PERFORMANCE } from '@/lib/analytics/couponPerformance'
+import type { OrganizerCouponPerformance } from '@/lib/analytics/couponPerformance'
 import { buildDashboardAnalytics } from '@/lib/analytics/dashboardAnalytics'
 import type { PassRow, RegistrationTotals } from '@/lib/analytics/dashboardAnalytics'
 
@@ -174,6 +176,12 @@ export interface DashboardData {
     rejected:         number
   }
   actionEvents:        DashboardActionEvent[]
+  /**
+   * Coupon performance across the organizer's events. Derived from the coupon documents
+   * plus ONE sum() aggregate — never a registration scan — so it is exact regardless of how
+   * many registrations exist. `partial` is true when the event budget was reached.
+   */
+  couponPerformance:   OrganizerCouponPerformance
 }
 
 // ─── Organizer event enumeration ──────────────────────────────────────────────
@@ -768,6 +776,17 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     cancelledByPass.set(slug, r.complete ? r.counts : null)
   }
 
+  // ── Coupon performance (organizer-wide) ──────────────────────────────────
+  // Reuses the SAME bounded event set the rest of this route already established, so it
+  // cannot widen the dashboard's scope. Cost is one coupons-subcollection read per event
+  // (capped inside the helper) plus ONE sum() aggregate for the whole organizer — never a
+  // registration scan, never a query per coupon. A failure degrades to an empty card rather
+  // than taking the dashboard down.
+  const couponPerformance = await getOrganizerCouponPerformance(
+    uid,
+    slugList.map(slug => ({ slug, name: eventNameBySlug.get(slug) ?? 'Untitled Event' })),
+  ).catch(() => EMPTY_ORGANIZER_COUPON_PERFORMANCE)
+
   const analytics = buildDashboardAnalytics(slugList.map(slug => ({
     slug,
     eventName:     eventNameBySlug.get(slug) ?? 'Untitled Event',
@@ -931,6 +950,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     recentTransactions,
     licenseSummary,
     actionEvents,
+    couponPerformance,
   }
 
   return NextResponse.json(data)

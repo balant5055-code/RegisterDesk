@@ -8,6 +8,7 @@
 import { adminDb } from '@/lib/firebase/admin'
 import { readReportFromLedgerData } from '@/lib/platform/pricing'
 import { COLLECTIONS as CERT_COLLECTIONS } from '@/lib/certificates/constants'
+import { getCouponPerformance, EMPTY_COUPON_PERFORMANCE, type CouponPerformance } from './couponPerformance'
 
 const CAP = 5000
 
@@ -34,8 +35,15 @@ export interface EventAnalytics {
   paymentStatus:      Point[]
   passSales:          Point[]
   passRevenue:        Point[]
+  /**
+   * Coupon figures are the ONE part of this payload that `truncated` does not apply to.
+   * They used to come from the capped registration scan below, which silently under-reported
+   * every coupon number above CAP. They now come from the coupon documents plus a single
+   * sum() aggregate, so they are exact at any event size — see lib/analytics/couponPerformance.
+   */
   couponUsage:        Point[]
   couponDiscountPaise: number
+  couponPerformance:  CouponPerformance
   checkInsByDay:      Point[]
   funnel:             Point[]
   financial: {
@@ -87,11 +95,10 @@ export async function getEventAnalytics(eventId: string): Promise<{ analytics: E
   const checkByDay = new Map<string, number>(days.map(d => [d.key, 0]))
   const passCount = new Map<string, number>()
   const passRev   = new Map<string, number>()
-  const couponCount = new Map<string, number>()
   const payStatus = new Map<string, number>()
 
   let revenuePaise = 0, paid = 0, free = 0, pending = 0, cancelled = 0, refunded = 0, confirmed = 0, checkedIn = 0
-  let refundsPaise = 0, couponDiscountPaise = 0
+  let refundsPaise = 0
 
   for (const d of regDocs) {
     const r = d.data() as Record<string, unknown>
@@ -110,10 +117,9 @@ export async function getEventAnalytics(eventId: string): Promise<{ analytics: E
     if (pay === 'refunded' || pay === 'refund_pending') { refunded++; refundsPaise += (typeof r.refundAmount === 'number' ? r.refundAmount : amount) }
 
     passCount.set(passName, (passCount.get(passName) ?? 0) + 1)
-    if (typeof r.couponCode === 'string' && r.couponCode) {
-      couponCount.set(r.couponCode, (couponCount.get(r.couponCode) ?? 0) + 1)
-      couponDiscountPaise += typeof r.discountAmount === 'number' ? r.discountAmount : 0
-    }
+      // Coupon totals are deliberately NOT accumulated here any more: this loop runs over at
+      // most CAP documents, so above CAP it under-counted every coupon silently. They come
+      // from getCouponPerformance() instead — exact, and independent of event size.
 
     const regMs = tsMs(r.registeredAt) ?? tsMs(r.createdAt)
     if (regMs != null) {
@@ -127,6 +133,12 @@ export async function getEventAnalytics(eventId: string): Promise<{ analytics: E
       if (ci != null) { const k = new Date(ci).toISOString().slice(0, 10); if (checkByDay.has(k)) checkByDay.set(k, (checkByDay.get(k) ?? 0) + 1) }
     }
   }
+
+  // Coupon performance: two bounded round trips (the coupons subcollection + one sum()
+  // aggregate), independent of registration count. Failure degrades to an empty block rather
+  // than taking the whole analytics payload down for a secondary widget.
+  const couponPerformance = await getCouponPerformance(eventId, organizerUid)
+    .catch(() => EMPTY_COUPON_PERFORMANCE)
 
   const registrations = regDocs.length
   const conversionPct = registrations > 0 ? Math.round((paid / registrations) * 100) : 0
@@ -237,8 +249,11 @@ export async function getEventAnalytics(eventId: string): Promise<{ analytics: E
     paymentStatus:      toPoints(payStatus),
     passSales:          toPoints(passCount).slice(0, 8),
     passRevenue:        toPoints(passRev).slice(0, 8),
-    couponUsage:        toPoints(couponCount).slice(0, 8),
-    couponDiscountPaise,
+    // Sourced from the coupon documents + one sum() aggregate, NOT from the capped scan
+    // above — so these three stay exact no matter how large the event grows.
+    couponUsage:        couponPerformance.rows.slice(0, 8).map(r => ({ label: r.code, value: r.uses })),
+    couponDiscountPaise: couponPerformance.totalDiscountPaise,
+    couponPerformance,
     checkInsByDay:      days.map(d => ({ label: d.label, value: checkByDay.get(d.key) ?? 0 })),
     funnel: [
       { label: 'Registered', value: registrations },

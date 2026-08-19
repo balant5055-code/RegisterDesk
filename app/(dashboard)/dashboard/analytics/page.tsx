@@ -142,9 +142,53 @@ export default function AnalyticsPage() {
             <DashboardCard title="Payment status"><div className="px-5 pb-4 pt-3"><Donut segments={data.paymentStatus} /></div></DashboardCard>
             <DashboardCard title="Check-ins by day"><div className="px-5 pb-4 pt-3"><Bars data={data.checkInsByDay} /></div></DashboardCard>
             <DashboardCard title="Pass sales"><div className="px-5 pb-4 pt-3">{data.passSales.length ? <HBars data={data.passSales} /> : <p className="text-[13px] text-muted-foreground">No passes sold yet.</p>}</div></DashboardCard>
-            <Widget title="Coupon usage" state={data.couponUsage.length ? 'ready' : 'empty'} emptyText="No coupons redeemed."
-              action={data.couponDiscountPaise > 0 ? <span className="text-[12px] font-semibold text-primary">{rupees(data.couponDiscountPaise)} off</span> : undefined}>
-              <div className="px-5 pb-4 pt-3"><HBars data={data.couponUsage} /></div>
+            {/*
+              COUPON PERFORMANCE — the figures here are the one part of this page that the
+              `truncated` cap does NOT apply to. They used to be derived from the capped
+              registration scan (first 5,000 docs), which silently under-reported every coupon
+              on a large event; they now come from the coupon documents plus a single sum()
+              aggregate, so they are exact at any size and cost O(#coupons) to produce.
+
+              Usage counts are the coupon's own `currentUses` — the same counter the validator
+              enforces `maxUses` against — so "84 / 100" here agrees with what the 101st
+              attempt will be told.
+            */}
+            <Widget title="Coupon performance" state={data.couponPerformance.rows.length ? 'ready' : 'empty'}
+              emptyText="No coupons configured for this event."
+              action={data.couponPerformance.discountUnavailable
+                ? <span className="text-[12px] text-muted-foreground">Discount total unavailable</span>
+                : data.couponPerformance.totalDiscountPaise > 0
+                  ? <span className="text-[12px] font-semibold text-primary">{rupees(data.couponPerformance.totalDiscountPaise)} off</span>
+                  : undefined}>
+              <div className="space-y-3 px-5 pb-4 pt-3">
+                <div className="flex flex-wrap gap-x-6 gap-y-1 text-[12px] text-muted-foreground">
+                  <span><strong className="text-foreground">{data.couponPerformance.totalRedemptions}</strong> redemptions</span>
+                  <span><strong className="text-foreground">{data.couponPerformance.activeCoupons}</strong> active</span>
+                  <span><strong className="text-foreground">{data.couponPerformance.totalCoupons}</strong> configured</span>
+                </div>
+                <ul className="space-y-2.5">
+                  {data.couponPerformance.rows.slice(0, 8).map(c => (
+                    <li key={c.code}>
+                      <div className="flex items-baseline justify-between gap-3">
+                        <span className="truncate font-mono text-[12px] font-semibold text-foreground">{c.code}</span>
+                        <span className="shrink-0 text-[12px] text-muted-foreground">
+                          {c.maxUses === null ? `${c.uses} used` : `${c.uses} / ${c.maxUses} used`}
+                                        </span>
+                      </div>
+                      {/* Only a capped coupon gets a progress bar — a share of unlimited is
+                          meaningless, so it is left out rather than drawn as 0%. */}
+                      {c.percentUsed !== null && (
+                        <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-muted">
+                          <div className="h-full rounded-full bg-primary" style={{ width: `${c.percentUsed}%` }} />
+                        </div>
+                      )}
+                      {c.remaining !== null && (
+                        <p className="mt-0.5 text-[11px] text-muted-foreground">{c.remaining} remaining</p>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              </div>
             </Widget>
           </div>
 

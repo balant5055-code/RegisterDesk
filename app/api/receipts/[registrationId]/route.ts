@@ -36,6 +36,15 @@ function fmtTransactionDate(iso: string | null): string {
   })
 }
 
+/** Event start date — a plain `YYYY-MM-DD`, so it is parsed as local, never as UTC. */
+function fmtEventDate(dateStr: string): string {
+  const [y, m, d] = dateStr.split('-').map(Number)
+  if (!y || !m || !d) return ''
+  return new Date(y, m - 1, d).toLocaleDateString('en-IN', {
+    day: 'numeric', month: 'long', year: 'numeric',
+  })
+}
+
 export async function GET(
   req:     NextRequest,
   context: { params: Promise<{ registrationId: string }> },
@@ -107,8 +116,11 @@ export async function GET(
     if (bd) feeLines = bd.lines
   }
 
-  // ── Load event for organizer name ──────────────────────────────────────────
+  // ── Load event for organizer name, date and venue ──────────────────────────
+  // Same single document read as before — it just yields three fields now instead of one.
   let organizerName = 'Event Organiser'
+  let eventDate: string | undefined
+  let venue:     string | undefined
   const eventSnap   = await adminDb.collection('events').doc(reg.eventSlug).get()
   if (eventSnap.exists) {
     const event = eventSnap.data() as Record<string, unknown>
@@ -117,22 +129,56 @@ export async function GET(
     if (typeof org?.name === 'string' && org.name.trim()) {
       organizerName = org.name.trim()
     }
+    const sched = ed?.schedule as Record<string, unknown> | null
+    if (typeof sched?.startDate === 'string' && sched.startDate) {
+      eventDate = fmtEventDate(sched.startDate)
+    }
+    const ven = ed?.venue as Record<string, unknown> | null
+    if (ven?.type === 'online') {
+      const online = ven.online as Record<string, unknown> | null
+      venue = typeof online?.platform === 'string' ? online.platform : 'Online'
+    } else {
+      const phys = ven?.physical as Record<string, unknown> | null
+      const name = typeof phys?.name === 'string' ? phys.name : ''
+      const city = typeof phys?.city === 'string' ? phys.city : ''
+      venue = [name, city].filter(Boolean).join(', ') || undefined
+    }
   }
 
   // ── Generate PDF ───────────────────────────────────────────────────────────
-  const pdfBytes = await generateReceiptPdf({
-    registrationId:  registrationId,
-    ticketCode:      reg.ticketCode,
-    attendeeName:    reg.attendee.name,
-    attendeeEmail:   reg.attendee.email,
-    passName:        reg.passName,
-    eventName:       reg.eventName,
-    organizerName,
-    amountPaid:      reg.amount,
-    paymentId,
-    transactionDate,
-    ...(feeLines ? { feeLines } : {}),
-  })
+  // Every value below is read from the CURRENT registration document on this request, so an
+  // organizer's edit is reflected by the next download. Nothing is persisted or cached.
+  //
+  // Wrapped because pdf-lib throws on unrenderable input: without this, a generator fault
+  // became a bare 500 with the reason visible only in the platform log. The client shows a
+  // fixed string, so an unlogged throw here is effectively undiagnosable.
+  let pdfBytes: Uint8Array
+  try {
+    pdfBytes = await generateReceiptPdf({
+      registrationId:  registrationId,
+      ticketCode:      reg.ticketCode,
+      attendeeName:    reg.attendee.name,
+      attendeeEmail:   reg.attendee.email,
+      attendeePhone:   reg.attendee.phone,
+      passName:        reg.passName,
+      eventName:       reg.eventName,
+      organizerName,
+      eventDate,
+      venue,
+      registrationDate: fmtTransactionDate(toIso(reg.registeredAt)),
+      paymentStatus:   reg.paymentStatus,
+      amountPaid:      reg.amount,
+      ...(reg.originalAmount  != null ? { subtotalPaise: reg.originalAmount } : {}),
+      ...(reg.discountAmount  != null ? { discountPaise: reg.discountAmount } : {}),
+      ...(reg.couponCode      ? { couponCode: reg.couponCode } : {}),
+      paymentId,
+      transactionDate,
+      ...(feeLines ? { feeLines } : {}),
+    })
+  } catch (err) {
+    console.error('[receipts] generation failed:', { registrationId, err })
+    return NextResponse.json({ error: 'Could not generate receipt' }, { status: 500 })
+  }
 
   return new NextResponse(Buffer.from(pdfBytes), {
     status:  200,
