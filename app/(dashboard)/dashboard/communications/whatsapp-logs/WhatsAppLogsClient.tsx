@@ -58,10 +58,17 @@ function fmtTime(iso: string): string {
 
 const fmtRupees = (paise: number): string => `₹${(paise / 100).toFixed(2)}`
 
-/** One line the organizer can act on: the reason, then the code that identifies it. */
+/**
+ * One line the organizer can act on: the reason, then the code that identifies it.
+ *
+ * This used to return '—' for every status except `failed`, which hid the reason on SKIPPED
+ * rows even though `error` was populated on them — the wallet-skip reason was stored, and
+ * shown in the details drawer, but never in the table. A row is now silent only when there
+ * is genuinely nothing to say (a successful send clears `error`).
+ */
 function failureSummary(log: WhatsAppLog): string {
-  if (log.status !== 'failed') return '—'
-  const reason = log.error ?? 'WhatsApp send failed'
+  const reason = log.error ?? (log.status === 'failed' ? 'WhatsApp send failed' : null)
+  if (!reason) return '—'
   return log.errorCode ? `${reason} (${log.errorCode})` : reason
 }
 
@@ -172,7 +179,7 @@ function LogRow({ log, onRetry, retrying, onOpen }: {
             )}
           >
             {retrying ? <Loader2 className="size-3.5 animate-spin" /> : <RotateCcw className="size-3.5" />}
-            Retry
+            {retrying ? 'Sending…' : 'Resend'}
           </button>
         ) : (
           <span className="text-[12px] text-muted-foreground">—</span>

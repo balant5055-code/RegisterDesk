@@ -74,3 +74,36 @@ export interface WriteEmailLogInput {
   registrationId?:    string
   campaignId?:        string                 // broadcast campaign this log belongs to (WA-2 reporting)
 }
+
+// ─── WhatsApp wallet-skip eligibility (RD-WA-LOGS-02) ─────────────────────────
+
+/**
+ * The exact `error` string the live confirmation path stores when the organizer's wallet
+ * cannot cover a message — see `sendWhatsAppConfirmation()` in
+ * lib/registrations/sendWhatsAppConfirmation.ts, which is its ONLY writer.
+ *
+ * `emailLogs` carries no separate reason CODE for skips, so this string is the canonical
+ * stored value. It is declared here, once, rather than re-typed at each read site: a
+ * duplicated literal is exactly how a matcher silently stops matching. A source-level test
+ * asserts the writer still emits this value.
+ */
+export const WHATSAPP_WALLET_SKIP_REASON = 'Insufficient wallet balance'
+
+/**
+ * Was this row skipped because the wallet could not pay for it?
+ *
+ * HISTORICAL STATE ONLY, and that separation is the whole point. Why a row was skipped is a
+ * fact about the past and never changes. Whether a NEW attempt may proceed is decided later,
+ * at send time, from the CURRENT fee and balance. Lowering the fee to ₹0 therefore does not
+ * erase the reason an old row was skipped, and it does not need to: the two questions are
+ * answered by different code at different times.
+ *
+ * Case- and whitespace-tolerant so a row written by an older build still matches; the value
+ * itself is never rewritten, so no stored document is migrated to gain eligibility.
+ */
+export function isWalletSkippedWhatsAppLog(
+  log: { status?: string | null; error?: string | null },
+): boolean {
+  return log.status === 'skipped'
+    && (log.error ?? '').trim().toLowerCase() === WHATSAPP_WALLET_SKIP_REASON.toLowerCase()
+}

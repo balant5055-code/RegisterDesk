@@ -22,6 +22,7 @@ import { FieldValue }                from 'firebase-admin/firestore'
 import { adminDb }                   from '@/lib/firebase/admin'
 import { authorizeWorkspace }        from '@/lib/team/workspace'
 import { retryWhatsAppConfirmation, RETRYABLE_WHATSAPP_TEMPLATE_KEY } from '@/lib/email-logs/whatsappRetry'
+import { isWalletSkippedWhatsAppLog } from '@/lib/email-logs/types'
 import { sanitizeProviderResponse }  from '@/lib/email-logs/whatsappDiagnostics'
 import type { EmailLog }             from '@/lib/email-logs/types'
 
@@ -73,7 +74,12 @@ export async function POST(
     if (l.templateKey !== RETRYABLE_WHATSAPP_TEMPLATE_KEY) {
       return { ok: false as const, status: 422, error: `Retry not supported for template "${l.templateKey}"` }
     }
-    if (l.status !== 'failed') {
+    // The claim accepts exactly the two histories the logs route offers a button for:
+    // a `failed` attempt, or a `skipped` one whose stored reason was the wallet. Anything
+    // else — sent, delivered, queued (a claim already held), or a skip for a DIFFERENT
+    // reason such as a missing phone — is refused here regardless of what the UI showed.
+    // The UI is not the security boundary; this transaction is.
+    if (l.status !== 'failed' && !isWalletSkippedWhatsAppLog(l)) {
       return { ok: false as const, status: 409, error: 'This message is not in a retryable state (already retried or in progress).' }
     }
     if (!l.registrationId) {

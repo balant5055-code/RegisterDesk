@@ -21,6 +21,7 @@ import { adminDb }                   from '@/lib/firebase/admin'
 import { authorizeWorkspace }        from '@/lib/team/workspace'
 import { sanitizeProviderResponse, parseProviderDiagnostics } from '@/lib/email-logs/whatsappDiagnostics'
 import { getWhatsAppTemplate, hasWhatsAppTemplate } from '@/lib/whatsapp/registry'
+import { isWalletSkippedWhatsAppLog }  from '@/lib/email-logs/types'
 import type { EmailLogStatus, WhatsAppDeliveryStatus } from '@/lib/email-logs/types'
 
 /** The one template a failed row can be retried for. Kept in sync with the retry route. */
@@ -157,7 +158,15 @@ export async function GET(req: NextRequest): Promise<NextResponse<GetResponse>> 
       campaignId:        strOrNull(d.campaignId),
       // Retry is manual, one template, failed-only. `waStatus === 'sent'` means Meta
       // accepted it, so a row that merely lacks a delivery receipt is NOT retryable.
-      retryAvailable:    logStatus === 'failed'
+      // Two histories qualify. `failed` means Meta was asked and refused. `skipped`
+      // because the WALLET could not pay means the message never reached Meta at all, so
+      // re-sending is the only way the attendee ever receives it.
+      //
+      // Eligibility reads the row's OWN historical reason and deliberately does NOT consult
+      // the current fee or balance — those are re-checked by the SEND path at attempt time.
+      // Lowering the fee to zero must not erase why an old row was skipped.
+      retryAvailable:    (logStatus === 'failed'
+                          || isWalletSkippedWhatsAppLog({ status: logStatus, error: strOrNull(d.error) }))
                          && key === RETRYABLE_TEMPLATE_KEY
                          && !!str(d.registrationId),
       createdAt:         tsToIso(d.createdAt),
