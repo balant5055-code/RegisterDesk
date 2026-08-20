@@ -237,17 +237,42 @@ describe('H+I · WhatsApp and registration confirmations are untouched', () => {
     expect(wa).not.toMatch(/dedupeEmails|dedupeRecipientsByEmail/)
   })
 
-  it('the WhatsApp recipient filter is unchanged — phone only, no dedupe', () => {
-    expect(route).toMatch(/recipients = allRecipients\.filter\(\(\{ data: reg \}\) => typeof reg\.attendee\.phone === 'string' && reg\.attendee\.phone\.trim\(\)\.length > 0\)/)
+  it('the WhatsApp branch still filters on phone PRESENCE, and never on email', () => {
+    // The presence rule is unchanged; only the local it binds to was renamed when the
+    // WhatsApp-number dedupe was added on top of it (RD-WA-DEDUPE).
+    expect(route).toContain("allRecipients.filter(({ data: reg }) => typeof reg.attendee.phone === 'string' && reg.attendee.phone.trim().length > 0)")
+    // What must never happen: email dedupe leaking into the WhatsApp branch. Sliced to the
+    // branch itself — a character-window regex would run past `} else {` and match the email
+    // branch's own legitimate call.
+    const waStart = route.indexOf("if (chosenChannel === 'whatsapp') {")
+    const waEnd   = route.indexOf('} else {', waStart)
+    expect(waStart).toBeGreaterThan(-1)
+    expect(waEnd).toBeGreaterThan(waStart)
+    expect(route.slice(waStart, waEnd)).not.toContain('dedupeRecipientsByEmail')
   })
 
   it('the flag is never persisted on a WhatsApp campaign', () => {
     expect(route).toMatch(/chosenChannel !== 'whatsapp'/)
   })
 
-  it('no phone deduplication was introduced anywhere', () => {
-    expect(strip(read('lib/broadcasts/dedupeRecipients.ts'))).not.toMatch(/phone/i)
-    expect(send).not.toMatch(/dedupe.*phone|phone.*dedupe/i)
+  // WHY THIS ASSERTION CHANGED. It used to read "no phone deduplication was introduced
+  // anywhere" — correct while WhatsApp dedupe did not exist, and the honest way to state
+  // "the email feature must not touch WhatsApp" at that time. Phone dedupe has since been
+  // commissioned deliberately (RD-WA-DEDUPE), so the old wording now forbids a shipped
+  // requirement rather than protecting one. What it was really guarding — that the two
+  // channels cannot reach into each other — is what is asserted here instead, and that
+  // guarantee is unchanged.
+  it('the EMAIL dedupe never applies to WhatsApp, and vice versa', () => {
+    const helper = strip(read('lib/broadcasts/dedupeRecipients.ts'))
+    // Two separate functions, each keyed on its own identity — never one generic switch.
+    expect(helper).toContain('export function dedupeRecipientsByEmail')
+    expect(helper).toContain('export function dedupeRecipientsByPhone')
+    // The email collapser keys on the address; the phone collapser on the number.
+    expect(helper).toMatch(/const key = normalizeEmail\(r\.data\?\.attendee\?\.email\)/)
+    expect(helper).toMatch(/const key = phoneKey\(r\.data\?\.attendee\?\.phone\)/)
+    // And the campaign flags stay distinct, so one channel's option cannot drive the other.
+    expect(send).toContain('c.dedupeEmails')
+    expect(send).toContain('c.dedupePhones')
   })
 
   it('the helper is pure — no Firebase, no I/O', () => {

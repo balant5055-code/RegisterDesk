@@ -45,6 +45,7 @@ function fmtINR(n: number) {
 
 export function ConferenceTemplate(props: EventDetailProps) {
   const {
+    eventMilestoneAlert,
     slug,
     registrationOpen, regClosedMessage,
     title, tagline, description,
@@ -214,6 +215,7 @@ export function ConferenceTemplate(props: EventDetailProps) {
         isFreeEvent={isFreeEvent}
         slug={slug}
         availability={availability}
+        eventMilestoneAlert={eventMilestoneAlert}
         registrationOpen={registrationOpen}
         closedMessage={regClosedMessage}
       />

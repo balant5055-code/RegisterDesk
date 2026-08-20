@@ -8,6 +8,8 @@ import type { PassPublic } from '@/components/event-templates/types'
 import type { PassAvailability } from '@/lib/registrations/types'
 import { AvailabilityBadge } from '@/components/event-templates/shared/registration/AvailabilityBadge'
 import { passDisplayPrice } from '@/components/event-templates/shared/utils/format'
+import { MilestoneNotice } from '@/components/event-templates/shared/registration/MilestoneNotice'
+import type { ResolvedMilestoneAlert } from '@/lib/events/milestoneAlerts'
 
 // ─── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -28,6 +30,8 @@ interface WorkshopEnrollmentProps {
   isFreeEvent:      boolean
   slug:             string
   availability:     Record<string, PassAvailability>
+  /** EVENT-TOTAL milestone, resolved server-side. Absent ⇒ nothing renders. */
+  eventMilestoneAlert?: ResolvedMilestoneAlert | null
   registrationOpen: boolean
   closedMessage?:   string
 }
@@ -35,7 +39,7 @@ interface WorkshopEnrollmentProps {
 // ─── Component ─────────────────────────────────────────────────────────────────
 
 export function WorkshopEnrollment({
-  passes, isFreeEvent, slug, availability, registrationOpen, closedMessage,
+  passes, isFreeEvent, slug, availability, eventMilestoneAlert, registrationOpen, closedMessage,
 }: WorkshopEnrollmentProps) {
   const visible = passes.filter(p => {
     if (p.status === 'inactive') return false
@@ -91,6 +95,8 @@ export function WorkshopEnrollment({
         )}
 
         {/* Pass cards */}
+        {/* EVENT-TOTAL milestone — one notice for the whole event, above the pass list. */}
+        <MilestoneNotice alert={eventMilestoneAlert} className="mb-4 mt-0" />
         <div className={`grid grid-cols-1 gap-4 ${
           visible.length === 2 ? 'sm:grid-cols-2'
           : visible.length >= 3 ? 'sm:grid-cols-2 lg:grid-cols-3'
@@ -166,6 +172,9 @@ export function WorkshopEnrollment({
 
                   {/* Dashed separator */}
                   <div className="mb-4 border-t border-dashed border-gray-200" />
+
+                  {/* Booking Milestone Alert — informational only; resolved server-side. */}
+                  <MilestoneNotice alert={pass.milestoneAlert} />
 
                   {benefits.length > 0 && (
                     <ul className="mb-4 flex flex-col gap-2">

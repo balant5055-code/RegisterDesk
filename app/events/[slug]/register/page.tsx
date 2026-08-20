@@ -9,6 +9,8 @@ import Link                    from 'next/link'
 import { getEventBySlug }      from '@/lib/firebase/firestore/events'
 import { resolveEffectivePriceRupees } from '@/lib/pricing/earlyBird'
 import { checkRegistrationGate, GATE_REASON_LABELS } from '@/lib/registrations/gate'
+import { resolveMilestoneAlert } from '@/lib/events/milestoneAlerts'
+import type { MilestoneAlert } from '@/lib/events/milestoneAlerts'
 import { buildRegisterHref }   from '@/lib/events/registerHref'
 import type { Metadata }       from 'next'
 import { buildMetadata }       from '@/lib/marketing/seo'
@@ -74,6 +76,11 @@ interface PassPublic {
   // RD-RT3.2.2: per-pass age limits set in the pass editor (raceDetails).
   minAge?:       number | null
   maxAge?:       number | null
+  // Organizer-configured milestone notices, carried through extractPasses. Declared on the
+  // type — not read via a cast — so that dropping it from the projection is a COMPILE error
+  // rather than a feature that silently never fires. Reuses the canonical MilestoneAlert
+  // shape instead of restating it, so the two can never drift.
+  milestoneAlerts?: MilestoneAlert[]
 }
 
 // ─── Pass extraction ──────────────────────────────────────────────────────────
@@ -108,6 +115,14 @@ function extractPasses(pricing: Record<string, unknown> | null): PassPublic[] {
         status:      String(p.status ?? 'active'),
         description: typeof p.description === 'string' ? p.description : undefined,
         salesEndDate: typeof p.salesEndDate === 'string' ? p.salesEndDate : undefined,
+        // Milestone configuration is CARRIED THROUGH, not spread. This projection deliberately
+        // narrows the stored pass — dropping internals the checkout screen has no business
+        // seeing — so `...p` would be a regression, not a fix. Copied only when it is genuinely
+        // an array: a malformed value stays absent and the resolver treats the pass as
+        // unconfigured, which is the same thing it does for every pass today.
+        ...(Array.isArray(p.milestoneAlerts)
+          ? { milestoneAlerts: p.milestoneAlerts as PassPublic['milestoneAlerts'] }
+          : {}),
         ...(() => {
           const rd = p.raceDetails as Record<string, unknown> | null | undefined
           return {
@@ -339,6 +354,32 @@ export default async function RegisterPage({
     return <BlockedScreen reason="PASS_NOT_FOUND" eventSlug={slug} />
   }
 
+  // ── Booking Milestone Alert (informational) ─────────────────────────────────
+  // Uses the count the GATE already loaded — `checkRegistrationGate` reads the registration
+  // counter to enforce capacity, so `availability.passCount` is the same number, free of any
+  // additional Firestore read. Resolved AFTER the gate decision so it can never influence it.
+  //
+  // Anything unexpected resolves to null inside the resolver, so a milestone can never block
+  // this page: the attendee still selects, fills, pays and submits exactly as before.
+  const milestoneAlert = resolveMilestoneAlert(
+    pass.milestoneAlerts,
+    gate.availability?.passCount,
+  )
+
+  // ── Event-TOTAL milestone (informational) ───────────────────────────────────
+  // `checkRegistrationGate` already read the registration counter to enforce capacity, and
+  // `availability.eventTotalCount` is the event-wide confirmed total it derived — so this
+  // costs no additional Firestore read. Never a sum of per-pass counts.
+  //
+  // Resolved AFTER the gate allowed the attendee, exactly like the per-pass alert, and it
+  // gates nothing itself. Unlike the per-pass notice this one is INDEPENDENT of the selected
+  // pass: the event total does not change when the attendee switches pass in-form, so it
+  // stays correct across a switch and needs no re-resolution.
+  const eventMilestoneAlert = resolveMilestoneAlert(
+    rawPricing?.eventMilestoneAlerts as MilestoneAlert[] | undefined,
+    gate.availability?.eventTotalCount,
+  )
+
   // Build form config from the denormalized registrationForm
   const form = event.registrationForm
   let sections: FormSection[] = []
@@ -436,6 +477,8 @@ export default async function RegisterPage({
           maxAge:       p.maxAge,
         }))}
         initialPassId={pass.id}
+        milestoneAlert={milestoneAlert}
+        eventMilestoneAlert={eventMilestoneAlert}
         sections={sections}
         conditionalRules={conditionalRules}
         approvalMode={approvalMode}

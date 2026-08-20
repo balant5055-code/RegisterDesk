@@ -9,7 +9,13 @@ import {
   BROADCAST_STATUS_LABELS,
 } from '@/lib/broadcasts/types'
 import type { BroadcastAudience, BroadcastCampaign, BroadcastStatus } from '@/lib/broadcasts/types'
+import type { RegistrationDateFilterInput, RegistrationDateFilterType } from '@/lib/broadcasts/registrationDateFilter'
+import { createRecipientCountController, type RecipientCountState, type RecipientCountMeta } from '@/lib/broadcasts/recipientCount'
 import { TEMPLATE_VARIABLES, SAMPLE_VARS, substituteVariables } from '@/lib/email-templates/types'
+// Both are pure and client-safe. emailShell is already used this way by the email-branding
+// settings preview, so this reuses a proven boundary rather than opening a new one.
+import { renderBroadcastBody } from '@/lib/broadcasts/renderBody'
+import { emailShell } from '@/lib/email/templates/base'
 import { WHATSAPP_TEMPLATE_REGISTRY, isSendableMetaStatus } from '@/lib/whatsapp/registry'
 import type { WhatsAppTemplateType } from '@/lib/whatsapp/registry'
 import { isOrganizerNotification } from '@/lib/notifications/catalog'
@@ -63,30 +69,33 @@ const WA_SAMPLE: Record<string, string> = {
 const WA_TEMPLATE_TYPES = (Object.keys(WHATSAPP_TEMPLATE_REGISTRY) as WhatsAppTemplateType[])
   .filter(t => isOrganizerNotification(t))
   .filter(t => isSendableMetaStatus(WHATSAPP_TEMPLATE_REGISTRY[t].metaStatus))
+// One sentence, correct for 1 and for many. Kept out of the JSX so the warning reads as
+// prose in the source too — this is the line that stops a date filter from lying by omission.
+function undatedNotice(n: number): string {
+  return n === 1
+    ? '1 registration has no registration date and is not included.'
+    : `${n} registrations have no registration date and are not included.`
+}
+
+// The THIRD state. Not "0 are missing" — that would be a claim the server explicitly
+// declined to make when its diagnostic failed. Silence here would read as reassurance.
+const UNDATED_UNKNOWN_NOTICE =
+  'Unable to determine whether any registrations have no registration date. The recipient count may not cover everyone who registered.'
+
 const humanizeTemplateType = (t: string) =>
   t.toLowerCase().split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')
 
-function buildPreviewHtml(subject: string, body: string): string {
-  return `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>${subject.replace(/</g, '&lt;')}</title>
-<style>
-  *{box-sizing:border-box;margin:0;padding:0}
-  body{background:#f4f4f5;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;padding:20px 8px}
-  .shell{max-width:560px;margin:0 auto;background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.1)}
-  .hdr{background:#e5277e;padding:18px 28px}
-  .hdr span{font-size:11px;font-weight:700;color:#fff;letter-spacing:.14em;text-transform:uppercase;opacity:.9}
-  .body{padding:28px 28px 24px;border:1px solid #e5e7eb;border-top:none}
-  .ftr{background:#f9fafb;border:1px solid #e5e7eb;border-top:none;border-radius:0 0 12px 12px;padding:12px 28px;text-align:center}
-  .ftr span{font-size:11.5px;color:#9ca3af}
-</style>
-</head><body>
-<div class="shell">
-  <div class="hdr"><span>RegisterDesk</span></div>
-  <div class="body">${body}</div>
-  <div class="ftr"><span>Powered by RegisterDesk</span></div>
-</div></body></html>`
-}
+// RD-BCAST-FMT-01 — the hand-rolled preview shell that used to live here is gone.
+//
+// It was a second email design: a <style> block (which real clients strip), div layout
+// instead of the table layout that actually survives Outlook, and a footer showing only
+// "Powered by RegisterDesk". So the preview flattered the result and hid the real footer.
+// The preview now renders through the same emailShell every send uses — see previewHtml.
+//
+// A stand-in href for the preview only. The real send builds a signed per-recipient URL
+// server-side (buildUnsubscribeUrl); that is HMAC + env work which cannot and must not
+// run in the browser. The line is shown because recipients genuinely receive it.
+const PREVIEW_UNSUBSCRIBE_HREF = '#'
 
 function wrapSelection(
   ta: HTMLTextAreaElement,
@@ -279,6 +288,7 @@ function ComposeTab({
   const [audience,        setAudience]        = useState<BroadcastAudience>('confirmed')
   const [channel,         setChannel]         = useState<BroadcastChannelUI>('email')
   const [dedupeEmails,    setDedupeEmails]    = useState(false)
+  const [dedupePhones,    setDedupePhones]    = useState(false)
   const [subject,         setSubject]         = useState('')
   const [body,            setBody]            = useState('')
   const [waTemplate,      setWaTemplate]      = useState<WhatsAppTemplateType | ''>('')
@@ -288,6 +298,18 @@ function ComposeTab({
 
   const [countLoading,    setCountLoading]    = useState(false)
   const [recipientCount,  setRecipientCount]  = useState<number | null>(null)
+  // RD-BCAST-COUNT-01 — a count we could NOT calculate is its own state. Previously a
+  // failed request just left the last good number on screen, which is the one outcome an
+  // organizer must never be shown before deciding to send.
+  const [countError,      setCountError]      = useState<string | null>(null)
+  // RD-BCAST-DATE-01 — registration-date audience. 'all' is the default, so a composer
+  // that is never touched sends exactly the audience it sent before this feature existed.
+  const [dateType,        setDateType]        = useState<RegistrationDateFilterType>('all')
+  const [dateSingle,      setDateSingle]      = useState('')
+  const [dateFrom,        setDateFrom]        = useState('')
+  const [dateTo,          setDateTo]          = useState('')
+  // Echoed back by the server: the window it actually counted, and what it could not see.
+  const [dateMeta,        setDateMeta]        = useState<RecipientCountMeta | null>(null)
 
   const [testLoading,     setTestLoading]     = useState(false)
   const [testMsg,         setTestMsg]         = useState<{ ok: boolean; msg: string } | null>(null)
@@ -310,30 +332,77 @@ function ComposeTab({
     setWaLanguage(t ? WHATSAPP_TEMPLATE_REGISTRY[t].language : '')
   }
 
+  // The date filter as the API expects it. ONE builder feeds both the count preview and
+  // the create call, so the audience previewed is the audience billed — the two cannot
+  // drift apart by construction.
+  const registrationDate: RegistrationDateFilterInput =
+    dateType === 'date'  ? { type: 'date',  date: dateSingle }
+    : dateType === 'range' ? { type: 'range', from: dateFrom, to: dateTo }
+    : { type: dateType }
+
+  const dateRangeInverted = dateType === 'range' && !!dateFrom && !!dateTo && dateFrom > dateTo
+
+  // An incomplete custom selection is not a filter yet — don't ask the server to count it.
+  const dateReady =
+    dateType === 'all' || dateType === 'today' || dateType === 'yesterday' ? true
+    : dateType === 'date' ? !!dateSingle
+    : !!dateFrom && !!dateTo && dateFrom <= dateTo
+
+  // Applies whatever the controller decides. Split out so the controller stays
+  // framework-free and testable; this function is the only place count state is written.
+  const applyCountState = useCallback((next: RecipientCountState) => {
+    setCountLoading(next.status === 'loading')
+    if (next.status === 'ready') {
+      setRecipientCount(next.count)
+      setDateMeta(next.meta)
+      setCountError(null)
+    } else if (next.status === 'error') {
+      // Cleared, not retained. `recipientCount === null` also disables Send, so an
+      // unknown audience cannot be broadcast to by accident.
+      setRecipientCount(null)
+      setDateMeta(null)
+      setCountError(next.message)
+    } else if (next.status === 'idle') {
+      setRecipientCount(null)
+      setDateMeta(null)
+      setCountError(null)
+    }
+  }, [])
+
+  // One controller per composer instance — the sequencing counter lives inside it, so
+  // nothing is shared globally and remounting starts clean.
+  const countCtl = useRef<ReturnType<typeof createRecipientCountController> | null>(null)
+  if (countCtl.current == null) { countCtl.current = createRecipientCountController(applyCountState) }
+
   // ── Fetch recipient count (channel-aware — WhatsApp counts phone recipients) ─
-  const fetchCount = useCallback(async (slug: string, aud: BroadcastAudience, ch: BroadcastChannelUI, dedupe: boolean) => {
-    if (!slug) { setRecipientCount(null); return }
-    setCountLoading(true)
-    try {
+  // Transport ONLY. Sequencing, mapping and failure handling belong to the controller —
+  // see lib/broadcasts/recipientCount.ts, where they are covered by tests this environment
+  // (node, no DOM) could never run against the component itself.
+  const fetchCount = useCallback(async (slug: string, aud: BroadcastAudience, ch: BroadcastChannelUI, dedupe: boolean, dedupePhone: boolean, regDate: RegistrationDateFilterInput) => {
+    if (!slug) { applyCountState({ status: 'idle' }); return }
+    await countCtl.current!.run(async () => {
       const token = await auth.currentUser?.getIdToken()
-      if (!token) return
-      const res  = await fetch('/api/organizer/broadcasts/count', {
+      // No token is not a zero-recipient audience; it is an unknown one.
+      if (!token) return { ok: false, body: null }
+      const res = await fetch('/api/organizer/broadcasts/count', {
         method:  'POST',
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-        body:    JSON.stringify({ eventSlug: slug, audience: aud, channel: ch, dedupeEmails: dedupe }),
+        body:    JSON.stringify({ eventSlug: slug, audience: aud, channel: ch, dedupeEmails: dedupe, dedupePhones: dedupePhone, registrationDate: regDate }),
       })
-      const data = await res.json() as { success: boolean; count?: number }
-      if (data.success) setRecipientCount(data.count ?? 0)
-    } catch { /* silent */ }
-    finally { setCountLoading(false) }
-  }, [])
+      return { ok: res.ok, body: await res.json() }
+    })
+  }, [applyCountState])
 
   useEffect(() => {
     /* eslint-disable react-hooks/set-state-in-effect -- server-sync fetch when event/audience/channel changes */
-    if (eventSlug) void fetchCount(eventSlug, audience, channel, dedupeEmails)
-    else setRecipientCount(null)
+    if (eventSlug && dateReady) void fetchCount(eventSlug, audience, channel, dedupeEmails, dedupePhones, registrationDate)
+    else if (!eventSlug) applyCountState({ status: 'idle' })
     /* eslint-enable react-hooks/set-state-in-effect */
-    }, [eventSlug, audience, channel, dedupeEmails, fetchCount])
+    // `registrationDate` is rebuilt on every render, so listing it here would re-fetch in a
+    // loop. Its PRIMITIVE inputs are listed instead — dateType, the single date and both
+    // range endpoints — which is the same information without the identity churn.
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- see above
+    }, [eventSlug, audience, channel, dedupeEmails, dedupePhones, fetchCount, applyCountState, dateReady, dateType, dateSingle, dateFrom, dateTo])
 
   // ── Send test email ──────────────────────────────────────────────────────
   async function handleTest() {
@@ -376,9 +445,12 @@ function ComposeTab({
         audience,
         // Future datetime ⇒ schedule; empty ⇒ send now.
         scheduledFor: scheduleFor ? new Date(scheduleFor).toISOString() : undefined,
+        // The SAME object the preview counted with. The server re-resolves it into absolute
+        // instants and persists those, so a scheduled send cannot re-interpret 'Today'.
+        registrationDate,
       }
       const payload = channel === 'whatsapp'
-        ? { ...common, channel: 'whatsapp', templateType: waTemplate, languageCode: waLanguage || undefined, variables: waVars }
+        ? { ...common, channel: 'whatsapp', templateType: waTemplate, languageCode: waLanguage || undefined, variables: waVars, dedupePhones }
         : { ...common, channel: 'email', subject: subject.trim(), html: body.trim(), dedupeEmails }
       const res  = await fetch('/api/organizer/broadcasts', {
         method:  'POST',
@@ -397,6 +469,7 @@ function ComposeTab({
       setEventSlug('')
       setAudience('confirmed')
         setDedupeEmails(false)
+        setDedupePhones(false)
       setSubject('')
       setBody('')
       selectWaTemplate('')
@@ -417,8 +490,11 @@ function ComposeTab({
 
   // ── Preview ─────────────────────────────────────────────────────────────
   const previewSubject = substituteVariables(subject, SAMPLE_VARS)
-  const previewBody    = substituteVariables(body,    SAMPLE_VARS, { escapeValues: true })
-  const previewHtml    = buildPreviewHtml(previewSubject, previewBody)
+  // Same body renderer and same shell as delivery — the only differences left are the ones
+  // that cannot exist in a browser: a signed unsubscribe URL, and the organizer's saved
+  // white-label branding, which is resolved server-side per send.
+  const previewBody    = renderBroadcastBody(body, SAMPLE_VARS)
+  const previewHtml    = emailShell(previewSubject, previewBody, PREVIEW_UNSUBSCRIBE_HREF, undefined, { hideOwnershipLine: true })
 
   return (
     <>
@@ -498,26 +574,142 @@ function ComposeTab({
                   ))}
                 </select>
 
-                {/* Recipient count chip */}
+                {/* Recipient count chip — RD-BCAST-COUNT-01
+                    Four states, deliberately distinguishable: loading, a CONFIRMED number
+                    (including a confirmed 0), no event chosen yet, and could-not-calculate.
+                    The last one used to be invisible — it rendered the previous number. */}
                 <div className={cn(
                   'shrink-0 flex items-center gap-1.5 rounded-xl px-3 py-2 text-[13px] font-semibold tabular-nums min-w-[90px]',
-                  recipientCount === null
-                    ? 'bg-muted text-muted-foreground'
-                    : recipientCount === 0
-                      ? 'bg-rose-100 text-rose-700'
-                      : 'bg-emerald-100 text-emerald-700',
+                  countError
+                    ? 'bg-amber-100 text-amber-800'
+                    : recipientCount === null
+                      ? 'bg-muted text-muted-foreground'
+                      : recipientCount === 0
+                        ? 'bg-rose-100 text-rose-700'
+                        : 'bg-emerald-100 text-emerald-700',
                 )}>
                   {countLoading
                     ? <Loader2 className="size-3.5 animate-spin" />
-                    : <Users className="size-3.5" />
+                    : countError
+                      ? <AlertCircle className="size-3.5" />
+                      : <Users className="size-3.5" />
                   }
                   {countLoading
                     ? 'Loading…'
-                    : recipientCount === null
-                      ? 'Pick event'
-                      : `${recipientCount.toLocaleString()} recipient${recipientCount !== 1 ? 's' : ''}`
+                    : countError
+                      ? 'Count failed'
+                      : recipientCount === null
+                        ? 'Pick event'
+                        : `${recipientCount.toLocaleString()} recipient${recipientCount !== 1 ? 's' : ''}`
                   }
                 </div>
+              </div>
+
+              {/* Says WHY, not just that something is wrong. Shown whenever the count could
+                  not be established, so the organizer never reads a stale number as current. */}
+              {countError && !countLoading && (
+                <p className="flex items-start gap-1.5 rounded-lg bg-amber-500/10 px-2.5 py-2 text-[12px] leading-snug text-amber-700 dark:text-amber-400">
+                  <AlertCircle className="mt-px size-3.5 shrink-0" />
+                  <span>{countError}</span>
+                </p>
+              )}
+              {/* ── Registration date (RD-BCAST-DATE-01) ──────────────────────
+                  An additional restriction on the SAME audience, never a replacement for
+                  it: status eligibility above still decides who is reachable. The default,
+                  "All registrations", adds no constraint at all, so a composer nobody
+                  touches sends exactly what it sent before this existed. */}
+              <div className="mt-3 space-y-2">
+                <label htmlFor="bc-regdate" className="block text-[13px] font-semibold text-foreground">
+                  Registration date
+                </label>
+                <select
+                  id="bc-regdate"
+                  value={dateType}
+                  onChange={e => setDateType(e.target.value as RegistrationDateFilterType)}
+                  className="w-full rounded-xl border border-border bg-background px-3 py-2.5 text-[14px] text-foreground focus:border-primary/50 focus:outline-none focus:ring-2 focus:ring-primary/20"
+                >
+                  <option value="all">All registrations</option>
+                  <option value="today">Today</option>
+                  <option value="yesterday">Yesterday</option>
+                  <option value="date">Custom date</option>
+                  <option value="range">Custom date range</option>
+                </select>
+
+                {dateType === 'date' && (
+                  <input
+                    type="date"
+                    aria-label="Registration date"
+                    value={dateSingle}
+                    onChange={e => setDateSingle(e.target.value)}
+                    className="w-full rounded-lg border border-border bg-background px-2.5 py-1.5 text-[13px] text-foreground focus:border-primary/50 focus:outline-none focus:ring-2 focus:ring-primary/20"
+                  />
+                )}
+
+                {dateType === 'range' && (
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="date"
+                      aria-label="From date"
+                      value={dateFrom}
+                      onChange={e => setDateFrom(e.target.value)}
+                      className="flex-1 rounded-lg border border-border bg-background px-2.5 py-1.5 text-[13px] text-foreground focus:border-primary/50 focus:outline-none focus:ring-2 focus:ring-primary/20"
+                    />
+                    <span className="text-[12px] text-muted-foreground">to</span>
+                    <input
+                      type="date"
+                      aria-label="To date"
+                      value={dateTo}
+                      onChange={e => setDateTo(e.target.value)}
+                      className="flex-1 rounded-lg border border-border bg-background px-2.5 py-1.5 text-[13px] text-foreground focus:border-primary/50 focus:outline-none focus:ring-2 focus:ring-primary/20"
+                    />
+                  </div>
+                )}
+
+                {/* Stated in the timezone the SERVER resolved, never the browser’s — two
+                    operators in different places must read the same window. */}
+                {dateMeta && (
+                  <p className="text-[12px] text-muted-foreground">
+                    Registered on <span className="font-medium text-foreground">{dateMeta.dateLabel}</span>{' '}
+                    ({dateMeta.timezone})
+                  </p>
+                )}
+
+                {/* Firestore cannot return a document that has no registeredAt, so these
+                    would leave the audience with nothing on screen to say so.
+
+                    THREE states, deliberately distinct — a number, a confirmed zero, and
+                    "we could not find out". The third used to be indistinguishable from
+                    the second, which turned a failed diagnostic into false reassurance. */}
+                {dateMeta && dateMeta.undatedCount !== null && dateMeta.undatedCount > 0 && (
+                  <p className="flex items-start gap-1.5 rounded-lg bg-amber-500/10 px-2.5 py-2 text-[12px] leading-snug text-amber-700 dark:text-amber-400">
+                    <AlertCircle className="mt-px size-3.5 shrink-0" />
+                    <span>{undatedNotice(dateMeta.undatedCount)}</span>
+                  </p>
+                )}
+
+                {/* Confirmed zero — stated, not merely implied by the absence of a warning. */}
+                {dateMeta && dateMeta.undatedCount === 0 && (
+                  <p className="text-[12px] text-muted-foreground">
+                    Every registration in this audience has a registration date.
+                  </p>
+                )}
+
+                {/* Unknown — visually a warning, because an unverified audience deserves
+                    the same attention as a known-incomplete one. */}
+                {dateMeta && dateMeta.undatedCount === null && (
+                  <p className="flex items-start gap-1.5 rounded-lg bg-amber-500/10 px-2.5 py-2 text-[12px] leading-snug text-amber-700 dark:text-amber-400">
+                    <AlertCircle className="mt-px size-3.5 shrink-0" />
+                    <span>{UNDATED_UNKNOWN_NOTICE}</span>
+                  </p>
+                )}
+
+                {!dateReady && (
+                  <p className="text-[12px] text-muted-foreground">
+                    {dateRangeInverted
+                      ? 'The start date must not be after the end date.'
+                      : 'Pick a date to see the recipient count.'}
+                  </p>
+                )}
               </div>
 
               {/*
@@ -542,6 +734,37 @@ function ComposeTab({
                     </span>
                     <span className="block text-[12.5px] text-muted-foreground">
                       Send at most one email per address, even if it appears on several registrations.
+                    </span>
+                  </span>
+                </label>
+              )}
+
+              {/*
+                WHATSAPP ONLY. One person can hold several registrations — family or team sign-ups,
+                multiple passes — and the audience is one row per REGISTRATION, so by default that
+                person is messaged once per registration. This collapses them to one.
+
+                Numbers are matched by their CANONICAL form, the same normalisation applied just
+                before the message is handed to Meta, so '+91 98765 43210', '09876543210' and
+                '9876543210' count as one recipient. Rendered only for WhatsApp: email targets
+                addresses and is deliberately untouched by this option. Toggling it re-runs the
+                recipient count so the number shown is the number that will actually be sent — and,
+                because WhatsApp is billed per recipient, the number that will be charged.
+              */}
+              {channel === 'whatsapp' && (
+                <label className="mt-3 flex cursor-pointer items-start gap-2.5">
+                  <input
+                    type="checkbox"
+                    checked={dedupePhones}
+                    onChange={e => setDedupePhones(e.target.checked)}
+                    className="mt-0.5 size-4 shrink-0 rounded border-border text-primary focus:ring-2 focus:ring-primary/20"
+                  />
+                  <span className="min-w-0">
+                    <span className="block text-[13.5px] font-medium text-foreground">
+                      Ignore duplicate WhatsApp numbers
+                    </span>
+                    <span className="block text-[12.5px] text-muted-foreground">
+                      Send at most one message per number, even if it appears on several registrations.
                     </span>
                   </span>
                 </label>

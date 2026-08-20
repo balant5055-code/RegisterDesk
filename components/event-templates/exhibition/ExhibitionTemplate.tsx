@@ -27,6 +27,7 @@ import { SharedGallery }             from '@/components/event-templates/shared/m
 
 export function ExhibitionTemplate(props: EventDetailProps) {
   const {
+    eventMilestoneAlert,
     slug,
     registrationOpen, regClosedMessage,
     title, tagline, description,
@@ -232,6 +233,7 @@ export function ExhibitionTemplate(props: EventDetailProps) {
           isFreeEvent={isFreeEvent}
           slug={slug}
           availability={availability}
+          eventMilestoneAlert={eventMilestoneAlert}
           registrationOpen={registrationOpen}
           closedMessage={regClosedMessage}
         />

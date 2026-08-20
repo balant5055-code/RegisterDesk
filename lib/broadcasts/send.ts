@@ -18,7 +18,8 @@ import { logBroadcastAction }      from '@/lib/broadcasts/audit'
 import { getMetaProvider, hasWhatsAppTemplate } from '@/lib/whatsapp'
 import { createWhatsAppBroadcastJob, processWhatsAppBroadcastChunk } from './whatsappJob'
 import { createEmailBroadcastJob, processEmailBroadcastChunk } from './emailJob'
-import { dedupeRecipientsByEmail } from './dedupeRecipients'
+import { dedupeRecipientsByEmail, dedupeRecipientsByPhone } from './dedupeRecipients'
+import { applyRegistrationDateRange, persistedDateBounds } from '@/lib/broadcasts/registrationDateFilter'
 import type { BroadcastChannel }   from '@/lib/broadcasts/types'
 import type { RegistrationDocument } from '@/lib/registrations/types'
 
@@ -51,6 +52,20 @@ interface CampaignData {
    * Absent/false ⇒ original behaviour. `deliverWhatsAppCampaign` never reads it.
    */
   dedupeEmails?:  boolean
+  /**
+   * RD-BCAST-DATE-01 — the registration-date window, as ABSOLUTE Firestore Timestamps
+   * resolved when the campaign was CREATED. Absent ⇒ no date constraint, which is every
+   * campaign that predates the feature and every 'All registrations' campaign.
+   *
+   * Read here and nowhere else in the send path. Nothing in this file may consult a clock
+   * or a timezone: 'today' was decided at creation, and re-deciding it now would mail a
+   * different audience than the one previewed and billed.
+   */
+  registeredFrom?: unknown
+  /** EXCLUSIVE upper bound. See registeredFrom. */
+  registeredTo?:   unknown
+  /** WHATSAPP ONLY — 'Ignore duplicate WhatsApp numbers'. See BroadcastCampaign.dedupePhones. */
+  dedupePhones?:  boolean
 }
 
 // ─── Bill + start (the only entry point for kicking off a campaign) ───────────
@@ -122,6 +137,11 @@ async function deliverEmailCampaign(
     .where('organizerUid', '==', uid)
     .where('eventSlug',    '==', c.eventSlug) as FirebaseFirestore.Query
   if (c.audience !== 'all') regsQuery = regsQuery.where('status', '==', c.audience)
+  // RD-BCAST-DATE-01 — the persisted window, applied as a Firestore `where` BEFORE the
+  // limit below. After the limit it would be a silent-miss bug: this query has no
+  // orderBy, so limit() truncates in document-ID order and an in-memory date filter
+  // would then see an arbitrary slice of a large event.
+  regsQuery = applyRegistrationDateRange(regsQuery, persistedDateBounds(c.registeredFrom, c.registeredTo))
   const maxRecipients = await resolveMaxRecipientsPerBroadcast(uid)
   const regsSnap    = await regsQuery.limit(maxRecipients + 1).get()
   const suppression = await getOrganiserSuppressionSet(uid)
@@ -189,12 +209,28 @@ async function deliverWhatsAppCampaign(
       .where('organizerUid', '==', uid)
       .where('eventSlug',    '==', c.eventSlug) as FirebaseFirestore.Query
     if (c.audience !== 'all') regsQuery = regsQuery.where('status', '==', c.audience)
+    // RD-BCAST-DATE-01 — same persisted window, same placement: in the query, before the
+    // limit. Shared with email because it filters REGISTRATIONS; the channel-specific
+    // parts (phone presence, dedupePhones) stay below and stay WhatsApp-only.
+    regsQuery = applyRegistrationDateRange(regsQuery, persistedDateBounds(c.registeredFrom, c.registeredTo))
     // RD-ORGANIZER-04 P1-1: bound the snapshot load to cap+1 (never the whole collection).
     const maxRecipients = await resolveMaxRecipientsPerBroadcast(uid)
     const regsSnap = await regsQuery.limit(maxRecipients + 1).get()
-    const recipients: Recipient[] = regsSnap.docs
+    const withPhone: Recipient[] = regsSnap.docs
       .map(d => ({ id: d.id, data: d.data() as RegistrationDocument }))
       .filter(({ data }) => typeof data.attendee.phone === 'string' && data.attendee.phone.trim().length > 0)
+
+    // 'Ignore duplicate WhatsApp numbers' — applied HERE, before the job snapshot, because
+    // the snapshot IS the idempotency boundary: `createWhatsAppBroadcastJob` writes one row
+    // per recipient and every resume pages that subcollection. Deduping later would either
+    // desynchronise the cursor or re-resolve on resume and undo itself. Deduping earlier —
+    // at creation — is also done, so the billed count and this snapshot agree.
+    //
+    // Reads the flag off the persisted campaign, so an immediate send and a scheduled one
+    // resolved by the cron behave identically.
+    const recipients: Recipient[] = c.dedupePhones
+      ? dedupeRecipientsByPhone(withPhone)
+      : withPhone
 
     const provider      = await getMetaProvider()
     const validTemplate = typeof c.templateType === 'string' && hasWhatsAppTemplate(c.templateType)

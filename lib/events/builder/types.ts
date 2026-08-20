@@ -9,6 +9,7 @@
 
 import type { LucideIcon } from 'lucide-react'
 import type { EventPassFull } from '@/components/wizard/AddPassEditor'
+import type { MilestoneAlert } from '@/lib/events/milestoneAlerts'
 import type { PublishRequirement, PublishSectionHealth, PublishBlocker } from '@/lib/events/publishRequirements'
 import type { FeeModel as EngineFeeModel } from '@/lib/fees/types'
 
@@ -92,6 +93,21 @@ export interface EventPricingDraft {
   // Early bird is entirely pass-specific: pricing.passes[].earlyBirdEndDate.
   registrationEndDate:     string
   showRemainingSeats:      boolean
+  /**
+   * EVENT-TOTAL Booking Milestone Alerts — notices keyed to the WHOLE event's confirmed
+   * booking count, not one pass's. A 5 KM pass at 1,500 and a 10 KM at 700 total 2,200, so a
+   * 2,000 event milestone fires even though neither pass reached it on its own.
+   *
+   * Separate from, and independent of, the per-pass `milestoneAlerts` on each pass: both may
+   * be configured and neither suppresses the other. Reuses the canonical MilestoneAlert shape
+   * rather than a parallel one, so the two scopes can never drift apart.
+   *
+   * `showOnSelection` is IGNORED here. It means 'show when this pass is chosen', and an
+   * event-total milestone belongs to no pass — it stays true whichever pass the attendee
+   * picks. Housed beside showRemainingSeats because both are event-level, count-driven
+   * public-display settings. Absent on every existing event ⇒ no behaviour change.
+   */
+  eventMilestoneAlerts?:   MilestoneAlert[]
   whatsappEnabled:         boolean
   smsEnabled:              boolean
   certEnabled:             boolean

@@ -8,6 +8,8 @@ import ReportButton                  from '@/components/report/ReportButton'
 import { getRegistrationCounter }   from '@/lib/firebase/firestore/registrationCounters'
 import { getCampaignBySlug, getCampaignCounter } from '@/lib/firebase/firestore/campaigns'
 import { computeEventAvailability } from '@/lib/registrations/availability'
+import { resolveMilestoneAlertsByPass, resolveMilestoneAlert } from '@/lib/events/milestoneAlerts'
+import type { MilestoneAlert } from '@/lib/events/milestoneAlerts'
 import { resolveEffectivePriceRupees } from '@/lib/pricing/earlyBird'
 import { todayISOInTz, resolvePassSaleState } from '@/lib/registrations/salesWindow'
 import type { PassAvailability, CapacityPlan } from '@/lib/registrations/types'
@@ -390,6 +392,34 @@ export default async function EventPage({ params }: PageProps) {
   )
   const availabilityRecord: Record<string, PassAvailability> = Object.fromEntries(availability)
 
+  // ── Booking Milestone Alerts ───────────────────────────────────────────────
+  // Resolved ONCE here, server-side, from the counter this page already loaded — so the
+  // feature costs ZERO additional Firestore reads and every template renders the same
+  // answer. Only the resolved message crosses to the client: the raw booking count and the
+  // organizer's threshold configuration stay on the server.
+  //
+  // PRESENTATION ONLY. This runs AFTER availability is computed and feeds nothing back into
+  // it, so a milestone can never influence capacity, price or whether a pass is sellable.
+  const milestoneAlerts = resolveMilestoneAlertsByPass(passes, counter?.passCounts)
+  const passesWithAlerts: PassPublic[] = passes.map(p =>
+    milestoneAlerts[p.id] ? { ...p, milestoneAlert: milestoneAlerts[p.id] } : p,
+  )
+
+  // ── Event-TOTAL milestone ──────────────────────────────────────────────────
+  // Keyed to the WHOLE event's confirmed bookings, so 1,500 + 700 across two passes fires a
+  // 2,000 event milestone that neither pass reaches alone. Uses `counter.totalCount` — the
+  // authoritative event-level count this page ALREADY loaded and the same number capacity
+  // enforces — never a re-sum of passCounts, which would be both redundant and, on events
+  // predating the historical per-pass counter defect, wrong.
+  //
+  // Resolved AFTER availability above and feeding nothing back into it: like the per-pass
+  // notice this is presentation only and can never influence capacity, price or sellability.
+  // Independent of the per-pass alerts — both may resolve, neither suppresses the other.
+  const eventMilestoneAlert = resolveMilestoneAlert(
+    pricing?.eventMilestoneAlerts as MilestoneAlert[] | undefined,
+    counter?.totalCount,
+  )
+
   // ── Event info ─────────────────────────────────────────────────────────────
   const language  = ed.info?.language?.trim()  || ''
   const dressCode = ed.info?.dressCode?.trim() || ''
@@ -451,8 +481,9 @@ export default async function EventPage({ params }: PageProps) {
         showSocial={showSocial}
         showVenueMap={showVenueMap}
         isFreeEvent={isFreeEvent}
-        passes={passes}
+        passes={passesWithAlerts}
         availability={availabilityRecord}
+        eventMilestoneAlert={eventMilestoneAlert}
         speakers={speakers}
         sponsors={sponsors}
         showSpeakers={showSpeakers}

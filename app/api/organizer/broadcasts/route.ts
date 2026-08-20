@@ -8,7 +8,7 @@ import type { BroadcastAudience, BroadcastChannel, BroadcastCampaign } from '@/l
 import type { RegistrationDocument }   from '@/lib/registrations/types'
 import { sanitizeBroadcastHtml }              from '@/lib/broadcasts/sanitize'
 import { getOrganiserSuppressionSet }  from '@/lib/firebase/firestore/emailSuppressionList'
-import { dedupeRecipientsByEmail } from '@/lib/broadcasts/dedupeRecipients'
+import { dedupeRecipientsByEmail, dedupeRecipientsByPhone } from '@/lib/broadcasts/dedupeRecipients'
 import { checkBroadcastLimits, resolveMaxRecipientsPerBroadcast } from '@/lib/broadcasts/limits'
 import { organizerStatusGuard }        from '@/lib/admin/organizerStatus'
 import { authorizeWorkspace }          from '@/lib/team/workspace'
@@ -19,6 +19,13 @@ import { getFeatureFlags }             from '@/lib/config/resolveFeatureFlags'
 import { hasWhatsAppTemplate, getWhatsAppTemplate } from '@/lib/whatsapp'
 import { isSendableMetaStatus } from '@/lib/whatsapp/registry'
 import { getCommunicationConfig }      from '@/lib/communications/resolveCommunicationConfig'
+import {
+  parseRegistrationDateFilter, resolveRegistrationDateWindow, applyRegistrationDateRange, toFilterRecord,
+  type RegistrationDateWindow, type RegistrationDateFilterRecord,
+} from '@/lib/broadcasts/registrationDateFilter'
+import { resolveBroadcastTimezone }    from '@/lib/broadcasts/resolveBroadcastTimezone'
+import { countUndatedRegistrations }   from '@/lib/broadcasts/undatedRegistrations'
+import { todayISOInTz }                from '@/lib/registrations/salesWindow'
 
 const AUDIENCES: BroadcastAudience[] = ['all', 'confirmed', 'pending', 'rejected', 'cancelled']
 
@@ -48,6 +55,11 @@ function docToCampaign(id: string, d: Record<string, unknown>): BroadcastCampaig
     successCount:   typeof d.successCount    === 'number' ? d.successCount    : 0,
     failCount:      typeof d.failCount       === 'number' ? d.failCount       : 0,
     status:         (d.status as BroadcastCampaign['status']) ?? 'sending',
+    // RD-BCAST-DATE-01 — absent on every campaign created before this feature, which is
+    // exactly how they keep behaving as before.
+    registeredFrom:         tsToIso(d.registeredFrom),
+    registeredTo:           tsToIso(d.registeredTo),
+    registrationDateFilter: (d.registrationDateFilter as RegistrationDateFilterRecord | undefined) ?? null,
     scheduledFor:       tsToIso(d.scheduledFor),
     estimatedCostPaise: typeof d.estimatedCostPaise === 'number' ? d.estimatedCostPaise : 0,
     actualCostPaise:    typeof d.actualCostPaise    === 'number' ? d.actualCostPaise    : 0,
@@ -110,6 +122,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<PostBroadcast
   // string, a stray truthy — means the original behaviour. Applied to EMAIL only; the
   // WhatsApp branch below never consults it, so WhatsApp is byte-for-byte unchanged.
   const dedupeEmails = (body as Record<string, unknown>).dedupeEmails === true
+  const dedupePhones = (body as Record<string, unknown>).dedupePhones === true
 
   if (typeof eventSlug !== 'string' || !eventSlug) {
     return NextResponse.json({ success: false, error: 'eventSlug is required' }, { status: 400 })
@@ -213,12 +226,47 @@ export async function POST(req: NextRequest): Promise<NextResponse<PostBroadcast
     regsQuery = regsQuery.where('status', '==', audience)
   }
 
+  // ═══ RD-BCAST-DATE-01 — resolve the registration-date window, ONCE, HERE ══════
+  // "Today" becomes two absolute instants at THIS moment and is persisted below. It is
+  // never stored as a word and never re-read from the clock at delivery: a campaign
+  // created on 20 Aug and sent by the cron on 21 Aug must reach 20 Aug's registrants —
+  // the audience that was previewed, and the audience that is billed three lines down.
+  const parsedDate = parseRegistrationDateFilter((body as Record<string, unknown>).registrationDate)
+  if (!parsedDate.ok) {
+    return NextResponse.json({ success: false, error: `Invalid registration date filter (${parsedDate.error})` }, { status: 400 })
+  }
+
+  let dateWindow: RegistrationDateWindow | null = null
+  if (parsedDate.value.type !== 'all') {
+    const timezone = await resolveBroadcastTimezone(eventSlug, uid)
+    const resolved = resolveRegistrationDateWindow(parsedDate.value, timezone, todayISOInTz(timezone))
+    if (!resolved.ok) {
+      return NextResponse.json({ success: false, error: `Invalid registration date filter (${resolved.error})` }, { status: 400 })
+    }
+    dateWindow = resolved.window
+  }
+
+  // Counted BEFORE the range is applied — once it is on, undated registrations are
+  // invisible to the query and could not be counted at all.
+  // number | null — see countUndatedRegistrations. A failure here no longer aborts the
+  // campaign: the PRIMARY filtered recipient count below is the authoritative audience,
+  // and it is computed by its own query that must succeed on its own merits.
+  const undatedCount = dateWindow ? await countUndatedRegistrations(regsQuery) : 0
+
+  // The range enters the QUERY, so the cap gate and the cap-bounded load below both see
+  // the filtered audience. Reversing these two lines is the silent-miss bug: on an event
+  // larger than the cap, limit() would truncate in document-ID order first and the date
+  // filter would then see an arbitrary slice.
+  regsQuery = applyRegistrationDateRange(regsQuery, dateWindow)
+
   // RD-ORGANIZER-04 P1-1: gate audience size with an indexed count() aggregate (zero
   // document reads) so an oversized audience is rejected WITHOUT loading the whole
   // collection into memory; then load at most cap+1 docs for suppression + billing.
   const maxRecipients = await resolveMaxRecipientsPerBroadcast(uid)
   const audienceSize  = (await regsQuery.count().get()).data().count
   if (audienceSize > maxRecipients) {
+    // Explicit refusal, never a truncated send. With a date filter active this now gates
+    // the FILTERED audience, which is the audience that would actually be mailed.
     return NextResponse.json({ success: false, error: 'BROADCAST_TOO_LARGE' }, { status: 422 })
   }
 
@@ -232,7 +280,17 @@ export async function POST(req: NextRequest): Promise<NextResponse<PostBroadcast
   // requires a phone number (email suppression is an email-channel concept).
   let recipients: typeof allRecipients
   if (chosenChannel === 'whatsapp') {
-    recipients = allRecipients.filter(({ data: reg }) => typeof reg.attendee.phone === 'string' && reg.attendee.phone.trim().length > 0)
+    const withPhone = allRecipients.filter(({ data: reg }) => typeof reg.attendee.phone === 'string' && reg.attendee.phone.trim().length > 0)
+    // 'Ignore duplicate WhatsApp numbers' — WHATSAPP ONLY, applied after the presence filter
+    // so both compose in the same order the send path uses. `recipientCount` below then
+    // reflects the CANONICAL numbers that will actually be messaged, which is what the plan
+    // gate, WhatsApp billing and the campaign history should all record.
+    //
+    // Deliberately AFTER the cap gate above: the cap bounds how much this route READS
+    // (limit(cap+1)), exactly as it does for email. Evaluating it after dedupe would admit a
+    // larger audience on the promise of fewer uniques, changing what the cap protects.
+    // Existing cap semantics are unchanged.
+    recipients = dedupePhones ? dedupeRecipientsByPhone(withPhone) : withPhone
   } else {
     const suppressionSet = await getOrganiserSuppressionSet(uid)
     const suppressed = allRecipients.filter(({ data: reg }) => !suppressionSet.has(reg.attendee.email.toLowerCase().trim()))
@@ -299,6 +357,23 @@ export async function POST(req: NextRequest): Promise<NextResponse<PostBroadcast
     // document alone, dedupes exactly like an immediate one. Written only when true, so
     // existing campaigns and every WhatsApp campaign keep an absent field.
     ...(dedupeEmails && chosenChannel !== 'whatsapp' ? { dedupeEmails: true } : {}),
+    // The WhatsApp counterpart, mirrored exactly: written ONLY for a WhatsApp campaign and
+    // ONLY when true, so an email campaign can never carry it and every existing campaign
+    // keeps an absent field. This is what lets a SCHEDULED broadcast dedupe identically —
+    // the cron resolves recipients hours later from this document alone.
+    ...(dedupePhones && chosenChannel === 'whatsapp' ? { dedupePhones: true } : {}),
+    // RD-BCAST-DATE-01 — the resolved window, as ABSOLUTE Timestamps. Written ONLY when a
+    // filter was chosen, so "All registrations" and every pre-existing campaign keep the
+    // fields absent, and send.ts adds no constraint at all for them. No migration.
+    //
+    // `registeredTo` is EXCLUSIVE. Persisting instants rather than the token 'today' is
+    // what makes a scheduled campaign target the day it was created for, not the day it
+    // happens to run.
+    ...(dateWindow ? {
+      registeredFrom:         Timestamp.fromDate(dateWindow.startUtc),
+      registeredTo:           Timestamp.fromDate(dateWindow.endUtcExclusive),
+      registrationDateFilter: toFilterRecord(parsedDate.value, dateWindow, undatedCount),
+    } : {}),
     successCount:   0,
     failCount:      0,
     status:         isScheduled ? 'scheduled' : 'draft',
@@ -314,7 +389,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<PostBroadcast
   if (isScheduled) {
     void logBroadcastAction({
       organizerUid: uid, actorUid: callerUid, action: 'broadcast.scheduled',
-      campaignId: campaignRef.id, metadata: { scheduledFor: new Date(scheduledMs).toISOString(), recipientCount, channel: chosenChannel },
+      campaignId: campaignRef.id, metadata: { scheduledFor: new Date(scheduledMs).toISOString(), recipientCount, channel: chosenChannel, ...(undatedCount ? { undatedExcluded: undatedCount } : {}) },
     }).catch(() => {})
   } else {
     // Single shared path — atomic bill + transition to 'sending', then deliver.

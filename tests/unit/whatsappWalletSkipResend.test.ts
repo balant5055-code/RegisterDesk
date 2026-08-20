@@ -209,8 +209,13 @@ describe('the Failure Reason column no longer hides a skip reason', () => {
   })
 
   it('renders the stored reason whenever one exists', () => {
+    // RD-WA-RETRY-01 moved the HEADLINE to the classified sentence, so the assertion follows
+    // the same intent one layer up: the row still never swallows a reason it holds. The raw
+    // stored text remains the fallback when no classification exists (skips are not Meta
+    // failures, so they have no category — their  is the reason).
+    expect(src).toContain("if (log.failureMessage) return log.failureMessage")
     expect(src).toContain("const reason = log.error ?? (log.status === 'failed' ? 'WhatsApp send failed' : null)")
-    expect(src).toContain("if (!reason) return '—'")
+    expect(src).toContain("return reason ?? '—'")
   })
 
   it('the action reads Resend, and Sending while in flight', () => {

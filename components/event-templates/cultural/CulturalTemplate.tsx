@@ -26,6 +26,7 @@ import { PromoVideoSection }        from '@/components/event-templates/shared/me
 
 export function CulturalTemplate(props: EventDetailProps) {
   const {
+    eventMilestoneAlert,
     slug, lifecycleStatus: ls, cancelReason,
     registrationOpen, regClosedMessage,
     title, tagline, description,
@@ -230,6 +231,7 @@ export function CulturalTemplate(props: EventDetailProps) {
           isFreeEvent={isFreeEvent}
           slug={slug}
           availability={availability}
+          eventMilestoneAlert={eventMilestoneAlert}
           registrationOpen={registrationOpen}
           closedMessage={regClosedMessage}
         />

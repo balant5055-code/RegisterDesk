@@ -21,6 +21,8 @@ import { adminDb }                   from '@/lib/firebase/admin'
 import { authorizeWorkspace }        from '@/lib/team/workspace'
 import { sanitizeProviderResponse, parseProviderDiagnostics } from '@/lib/email-logs/whatsappDiagnostics'
 import { getWhatsAppTemplate, hasWhatsAppTemplate } from '@/lib/whatsapp/registry'
+import { describeWhatsAppFailure } from '@/lib/whatsapp/failureReason'
+import type { WhatsAppFailureReason } from '@/lib/whatsapp/failureReason'
 import { isWalletSkippedWhatsAppLog }  from '@/lib/email-logs/types'
 import { BROADCAST_TEMPLATE_KEY as BROADCAST_KEY } from '@/lib/email-logs/types'
 import type { EmailLogStatus, WhatsAppDeliveryStatus } from '@/lib/email-logs/types'
@@ -62,7 +64,22 @@ export interface WhatsAppLog {
   costPaise:         number
   campaignId:        string | null
   /** True when this row is eligible for the manual retry action. */
+  /**
+   * RD-WA-RETRY-01 — the stable category behind this failure, and the one sentence the
+   * organizer reads. Classified SERVER-side so the dashboard never re-derives meaning from
+   * prose, and so the raw Meta text stays a diagnostic rather than the headline.
+   * Null on a row that did not fail.
+   */
+  failureReason:     WhatsAppFailureReason | null
+  failureMessage:    string | null
+  /** The failure is the recipient number, so resending it unchanged will fail the same way. */
+  recipientFault:    boolean
   retryAvailable:    boolean
+  /**
+   * Retry is offered, but Meta never confirmed the original attempt — so the client must
+   * take an explicit confirmation before sending it, and the endpoint refuses without one.
+   */
+  requiresUnknownConfirmation: boolean
   createdAt:         string
   updatedAt:         string
   deliveredAt:       string | null
@@ -259,6 +276,14 @@ export async function GET(req: NextRequest): Promise<NextResponse<GetResponse>> 
     const { code, httpStatus } = parseProviderDiagnostics(providerResponse ?? undefined)
     const logStatus = (str(d.status) || 'queued') as EmailLogStatus
     const deliveryUnknown = d.deliveryUnknown === true
+
+    // Classify once, here. `code`/`httpStatus` come from the stored providerResponse via
+    // parseProviderDiagnostics, so the same structural rule the sender used is applied to
+    // the row: no httpStatus means Meta never returned a verdict.
+    const failed = logStatus === 'failed'
+    const described = failed
+      ? describeWhatsAppFailure({ code, httpStatus, error: strOrNull(d.error) })
+      : null
     const waStatus  = (strOrNull(d.waStatus) as WhatsAppDeliveryStatus | null)
 
     return {
@@ -292,13 +317,22 @@ export async function GET(req: NextRequest): Promise<NextResponse<GetResponse>> 
       // Eligibility reads the row's OWN historical reason and deliberately does NOT consult
       // the current fee or balance — those are re-checked by the SEND path at attempt time.
       // Lowering the fee to zero must not erase why an old row was skipped.
+      failureReason:     described?.reason  ?? null,
+      failureMessage:    described?.message ?? null,
+      recipientFault:    described?.recipientFault ?? false,
+      // An indeterminate delivery is now RECOVERABLE, not frozen: the organizer gets an
+      // action, and the duplicate risk is carried by an explicit confirmation instead of by
+      // hiding the button. `requiresUnknownConfirmation` is what tells the client which is
+      // which — the endpoint enforces it again regardless of what the client does.
+      requiresUnknownConfirmation: deliveryUnknown,
       retryAvailable:    (logStatus === 'failed'
                           || isWalletSkippedWhatsAppLog({ status: logStatus, error: strOrNull(d.error) }))
                          && key === RETRYABLE_TEMPLATE_KEY
-                         && !!str(d.registrationId)
-                         // An indeterminate send is never offered a retry: resending could
-                         // double-message an attendee Meta may already have reached.
-                         && !deliveryUnknown,
+                         // deliveryUnknown is deliberately NOT excluded here. Withholding the
+                         // button left the organizer with no recovery at all; the duplicate
+                         // risk is carried by requiresUnknownConfirmation above and enforced
+                         // again by the endpoint, which refuses an unconfirmed unknown retry.
+                         && !!str(d.registrationId),
       createdAt:         tsToIso(d.createdAt),
       updatedAt:         tsToIso(d.updatedAt),
       deliveredAt:       tsToIsoOrNull(d.deliveredAt),

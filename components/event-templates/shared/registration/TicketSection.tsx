@@ -10,12 +10,16 @@ import { AvailabilityBadge } from '@/components/event-templates/shared/registrat
 import { formatINR, formatDateShort, passDisplayPrice } from '@/components/event-templates/shared/utils/format'
 import { organizerFeaturedPassId } from '@/components/event-templates/shared/utils/featuredPass'
 import { TAX_INCLUSIVE_NOTE } from '@/lib/pricing/copy'
+import { MilestoneNotice } from './MilestoneNotice'
+import type { ResolvedMilestoneAlert } from '@/lib/events/milestoneAlerts'
 
-export function TicketSection({ passes, isFreeEvent, slug, availability, registrationOpen, closedMessage }: {
+export function TicketSection({ passes, isFreeEvent, slug, availability, eventMilestoneAlert, registrationOpen, closedMessage }: {
   passes:           PassPublic[]
   isFreeEvent:      boolean
   slug:             string
   availability:     Record<string, PassAvailability>
+  /** EVENT-TOTAL milestone, resolved server-side. Absent ⇒ nothing renders. */
+  eventMilestoneAlert?: ResolvedMilestoneAlert | null
   registrationOpen: boolean
   closedMessage:    string
 }) {
@@ -55,6 +59,8 @@ export function TicketSection({ passes, isFreeEvent, slug, availability, registr
         </div>
       ) : (
         <>
+          {/* EVENT-TOTAL milestone — one notice for the whole event, above the pass list. */}
+          <MilestoneNotice alert={eventMilestoneAlert} className="mb-4 mt-0" />
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
             {visiblePasses.map((pass, idx) => {
               const avail     = availability[pass.id]
@@ -126,6 +132,9 @@ export function TicketSection({ passes, isFreeEvent, slug, availability, registr
                         </span>
                       )}
                     </div>
+
+                    {/* Booking Milestone Alert — informational only; resolved server-side. */}
+                    <MilestoneNotice alert={pass.milestoneAlert} />
 
                     {pass.benefits && pass.benefits.length > 0 && (
                       <ul className="mt-2.5 flex flex-col gap-1 border-t border-border/40 pt-2.5">

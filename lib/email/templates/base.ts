@@ -24,6 +24,28 @@ const isHex = (v?: string | null): v is string => !!v && HEX.test(v)
 const isHttp = (v?: string | null): v is string => !!v && /^https?:\/\//i.test(v)
 
 /**
+ * Per-send shell options that are a PLATFORM decision about the class of email,
+ * not an organizer white-label preference — which is why they live here and not
+ * on EmailBranding.
+ */
+export interface EmailShellOptions {
+  /**
+   * RD-BCAST-FMT-01 — drops the legal-entity line while KEEPING "Powered by
+   * RegisterDesk". Set only by broadcast sends.
+   *
+   * Broadcasts are organizer-voiced mail to the organizer's own audience; the
+   * operating-entity line reads as a third party interrupting that. It stays on
+   * every transactional email, where RegisterDesk is genuinely the sender.
+   *
+   * Deliberately NOT `hideRegisterDeskBranding`: that flag removes the platform
+   * mark too, and the mark is meant to remain.
+   *
+   * Default (omitted) reproduces the previous output byte for byte.
+   */
+  hideOwnershipLine?: boolean
+}
+
+/**
  * Wraps `bodyHtml` in the standard RegisterDesk email shell.
  *
  * @param unsubscribeUrl — when provided (broadcast emails only), an
@@ -31,8 +53,10 @@ const isHttp = (v?: string | null): v is string => !!v && /^https?:\/\//i.test(v
  *   emails which must always reach the recipient.
  * @param branding — optional white-label overrides (header color, header label,
  *   hide "Powered by"). Omit for default RegisterDesk branding.
+ * @param opts — platform-level shell options; see EmailShellOptions. Omitting it
+ *   leaves output identical to before this parameter existed.
  */
-export function emailShell(subject: string, bodyHtml: string, unsubscribeUrl?: string, branding?: EmailBranding): string {
+export function emailShell(subject: string, bodyHtml: string, unsubscribeUrl?: string, branding?: EmailBranding, opts?: EmailShellOptions): string {
   const unsubscribeFooter = unsubscribeUrl
     ? `\n            <br>\n            <span style="font-size:11px;color:#9ca3af;display:block;margin-top:6px;">\n              Don&apos;t want these emails?\n              <a href="${escAttr(unsubscribeUrl)}" style="color:#9ca3af;text-decoration:underline;">Unsubscribe</a>\n            </span>`
     : ''
@@ -61,9 +85,16 @@ export function emailShell(subject: string, bodyHtml: string, unsubscribeUrl?: s
   // RD-LAUNCH-03: the operating entity rides WITH the RegisterDesk mark — so it appears
   // wherever our branding appears, and is hidden wherever an organiser has white-labelled.
   // An organiser presenting their own brand must not carry our legal footer.
+  //
+  // RD-BCAST-FMT-01 split the two into separately-gated spans so a broadcast can drop the
+  // entity line and keep the mark. The concatenation below is unchanged when
+  // hideOwnershipLine is absent, which is what keeps ~35 transactional senders byte-identical.
+  const ownershipLine = opts?.hideOwnershipLine
+    ? ''
+    : `\n            <span style="font-size:10.5px;color:#b0b6c0;display:block;margin-top:3px;">\n              ${OWNERSHIP_SHORT}\n            </span>`
   const poweredBy   = branding?.hideRegisterDeskBranding
     ? ''
-    : `\n            <span style="font-size:11.5px;color:#9ca3af;">\n              Powered by <a href="https://registerdesk.in" style="color:#9ca3af;text-decoration:none;">RegisterDesk</a>\n            </span>\n            <span style="font-size:10.5px;color:#b0b6c0;display:block;margin-top:3px;">\n              ${OWNERSHIP_SHORT}\n            </span>`
+    : `\n            <span style="font-size:11.5px;color:#9ca3af;">\n              Powered by <a href="https://registerdesk.in" style="color:#9ca3af;text-decoration:none;">RegisterDesk</a>\n            </span>${ownershipLine}`
 
   return `<!DOCTYPE html>
 <html lang="en">

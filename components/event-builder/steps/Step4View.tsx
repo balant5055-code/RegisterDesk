@@ -59,6 +59,8 @@ import { validateStep } from '@/lib/events/builder/stepValidation'
 import { useAutosaveEmit } from '@/lib/events/builder/useAutosaveEmit'
 import { ROUTES } from '@/config/navigation'
 import { cn } from '@/lib/utils/cn'
+import { MILESTONE_THRESHOLD_MAX, MILESTONE_MESSAGE_MAX } from '@/lib/events/milestoneAlerts'
+import type { MilestoneAlert } from '@/lib/events/milestoneAlerts'
 
 function generatePassId(): string {
   return 'pass_' + Math.random().toString(36).slice(2, 10)
@@ -618,6 +620,120 @@ function RegistrationPeriodSection({
             )} />
           </button>
         </div>
+
+        {/* ── Event Total Milestones ──────────────────────────────────────────
+            EVENT-WIDE notices, keyed to the total confirmed bookings across every pass —
+            5 KM at 1,500 plus 10 KM at 700 reaches 2,000 even though neither pass did.
+            Distinct from the per-pass milestones inside each pass editor: both may be set
+            and neither suppresses the other. Housed beside "Show remaining seats" because
+            both are event-level, count-driven public-display settings. Informational only —
+            nothing here affects capacity, price, checkout or eligibility. */}
+        <div className="mt-5 rounded-xl border border-border/60 bg-muted/[0.04] px-4 py-3.5">
+          <div className="flex items-start justify-between gap-4">
+            <div className="flex min-w-0 items-start gap-3">
+              <div className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-muted/50">
+                <Users className="size-4 text-muted-foreground" aria-hidden />
+              </div>
+              <div className="min-w-0">
+                <p className="text-[14px] font-semibold text-foreground">Event Total Milestones</p>
+                <p className="text-[13px] text-muted-foreground">
+                  Notices shown once TOTAL bookings across all passes reach a number
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => onUpdate({
+                eventMilestoneAlerts: [
+                  ...(draft.eventMilestoneAlerts ?? []),
+                  { threshold: 1000, message: '', tone: 'info' },
+                ],
+              })}
+              className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-lg border border-border bg-background px-3 text-[13px] font-medium text-foreground transition-colors hover:border-primary/45 hover:text-primary"
+            >
+              <Plus className="size-3.5" aria-hidden />
+              Add Milestone
+            </button>
+          </div>
+
+          {(draft.eventMilestoneAlerts?.length ?? 0) > 0 && (
+            <div className="mt-3 flex flex-col gap-3">
+              {(draft.eventMilestoneAlerts ?? []).map((a, i) => (
+                <div key={i} className="rounded-lg border border-border/60 bg-background p-3">
+                  <div className="grid gap-3 sm:grid-cols-[140px_1fr]">
+                    <div>
+                      <label className="mb-1 block text-[13px] font-medium text-foreground">Total bookings</label>
+                      <input
+                        type="number"
+                        min={1}
+                        max={MILESTONE_THRESHOLD_MAX}
+                        step={1}
+                        className="h-9 w-full rounded-lg border border-border bg-background px-3 text-[14px] text-foreground outline-none transition-colors focus:border-primary/50 focus:ring-2 focus:ring-primary/20"
+                        value={a.threshold}
+                        // Clamped to a whole number in range: an out-of-range value would be
+                        // ignored at render anyway, so correcting it here shows the organizer
+                        // what will actually happen.
+                        onChange={e => onUpdate({
+                          eventMilestoneAlerts: (draft.eventMilestoneAlerts ?? []).map((x, k) => k === i
+                            ? { ...x, threshold: Math.min(MILESTONE_THRESHOLD_MAX, Math.max(1, Math.floor(Number(e.target.value) || 1))) }
+                            : x),
+                        })}
+                      />
+                    </div>
+                    <div>
+                      <label className="mb-1 block text-[13px] font-medium text-foreground">Message</label>
+                      <input
+                        type="text"
+                        maxLength={MILESTONE_MESSAGE_MAX}
+                        className="h-9 w-full rounded-lg border border-border bg-background px-3 text-[14px] text-foreground placeholder:text-muted-foreground/60 outline-none transition-colors focus:border-primary/50 focus:ring-2 focus:ring-primary/20"
+                        placeholder="Thank you — we have crossed 2,000 registrations!"
+                        value={a.message}
+                        onChange={e => onUpdate({
+                          eventMilestoneAlerts: (draft.eventMilestoneAlerts ?? []).map((x, k) => k === i ? { ...x, message: e.target.value } : x),
+                        })}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="mt-3 flex items-end justify-between gap-3">
+                    <div className="w-[140px]">
+                      <label className="mb-1 block text-[13px] font-medium text-foreground">Tone</label>
+                      <select
+                        className="h-9 w-full rounded-lg border border-border bg-background px-3 text-[14px] text-foreground outline-none transition-colors focus:border-primary/50 focus:ring-2 focus:ring-primary/20"
+                        value={a.tone ?? 'info'}
+                        onChange={e => onUpdate({
+                          eventMilestoneAlerts: (draft.eventMilestoneAlerts ?? []).map((x, k) => k === i
+                            ? { ...x, tone: e.target.value as MilestoneAlert['tone'] } : x),
+                        })}
+                      >
+                        <option value="info">Info</option>
+                        <option value="success">Success</option>
+                        <option value="warning">Warning</option>
+                      </select>
+                    </div>
+                    <button
+                      type="button"
+                      aria-label={`Remove event milestone at ${a.threshold} bookings`}
+                      onClick={() => onUpdate({
+                        eventMilestoneAlerts: (draft.eventMilestoneAlerts ?? []).filter((_, k) => k !== i),
+                      })}
+                      className="inline-flex size-8 shrink-0 items-center justify-center rounded-lg border border-border text-muted-foreground transition-colors hover:border-destructive/50 hover:text-destructive"
+                    >
+                      <Trash2 className="size-3.5" aria-hidden />
+                    </button>
+                  </div>
+
+                  {a.message.trim().length === 0 && (
+                    <p className="mt-2 text-[12.5px] text-muted-foreground">
+                      Add a message — a milestone with no text is never shown.
+                    </p>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
       </div>
     </div>
   )

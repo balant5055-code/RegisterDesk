@@ -1,6 +1,8 @@
 'use client'
 
 import { useEffect, useRef, useState } from 'react'
+import type { MilestoneAlert } from '@/lib/events/milestoneAlerts'
+import { MILESTONE_THRESHOLD_MAX, MILESTONE_MESSAGE_MAX } from '@/lib/events/milestoneAlerts'
 import { useFeatureFlags } from '@/lib/config/featureFlagsClient'
 import { AnimatePresence, motion } from 'framer-motion'
 import {
@@ -104,6 +106,14 @@ export interface EventPassFull {
   eventSubtype:       string
   advancedSettings:   AdvancedSettings
   status:             'active' | 'inactive'
+  /**
+   * Booking Milestone Alerts — optional informational notices keyed to this pass's
+   * confirmed booking count. PRESENTATION ONLY: resolving one never affects price,
+   * availability, capacity, selection or checkout. Absent on every existing pass, which
+   * is why adding it changes nothing for events that do not use it. Resolution lives in
+   * lib/events/milestoneAlerts.ts — the one place a milestone is decided.
+   */
+  milestoneAlerts?:   MilestoneAlert[]
 }
 
 export function makeBlankPass(eventTypeId?: string | null, eventSubtypeId?: string | null): EventPassFull {
@@ -606,11 +616,150 @@ function TabPricing({
               desc="Remove this pass from the event page once all seats are taken"
             />
           </div>
+
+          {/* Booking Milestone Alerts — per-pass, informational only. */}
+          <MilestoneAlertsEditor
+            alerts={pass.milestoneAlerts ?? []}
+            onChange={next => onChange({ milestoneAlerts: next })}
+          />
         </div>
       </SectionCard>
     </div>
   )
 }
+
+// ─── Booking Milestone Alerts (per-pass, informational) ─────────────────────────
+//
+// Optional participant notices keyed to this pass's confirmed booking count. The count comes
+// from the platform's existing registration counter — this editor only decides WHAT to say and
+// AT WHICH number, never how bookings are counted.
+//
+// PRESENTATION ONLY. Nothing configured here can gate registration, change a price, or alter
+// capacity. It is deliberately housed next to "Hide when sold out" because both are per-pass
+// public-display settings, and unlike capacity neither affects whether a seat can be sold.
+//
+// An alert exists iff its array entry exists — there is no `enabled` flag and no id, so there
+// is no way to leave a half-configured alert silently switched off. Removing it is the off
+// switch. Entries that are incomplete (blank message, non-positive threshold) simply never
+// resolve at render time, so a partially typed draft can never break a live event page.
+
+function MilestoneAlertsEditor({
+  alerts,
+  onChange,
+}: {
+  alerts:   MilestoneAlert[]
+  onChange: (next: MilestoneAlert[]) => void
+}) {
+  function update(i: number, patch: Partial<MilestoneAlert>) {
+    onChange(alerts.map((a, k) => (k === i ? { ...a, ...patch } : a)))
+  }
+  function remove(i: number) {
+    onChange(alerts.filter((_, k) => k !== i))
+  }
+  function add() {
+    onChange([...alerts, { threshold: 1000, message: '', tone: 'info', showOnSelection: false }])
+  }
+
+  return (
+    <div className="rounded-lg border border-border/60 bg-muted/[0.03] px-4 py-3">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="text-[14px] font-semibold text-foreground">Booking Milestone Alerts</p>
+          <p className="text-[13px] text-muted-foreground">
+            Optional participant notices shown once this pass reaches a booking count
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={add}
+          className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-lg border border-border bg-background px-3 text-[13px] font-medium text-foreground transition-colors hover:border-primary/45 hover:text-primary"
+        >
+          <Plus className="size-3.5" aria-hidden />
+          Add Alert
+        </button>
+      </div>
+
+      {alerts.length > 0 && (
+        <div className="mt-3 flex flex-col gap-3">
+          {alerts.map((a, i) => (
+            <div key={i} className="rounded-lg border border-border/60 bg-background p-3">
+              <div className="grid gap-3 sm:grid-cols-[140px_1fr]">
+                <FieldGroup label="Bookings" hint="Whole number, 1 or more">
+                  <input
+                    type="number"
+                    min={1}
+                    max={MILESTONE_THRESHOLD_MAX}
+                    step={1}
+                    className={inputCls}
+                    value={a.threshold}
+                    // Clamped to a whole number in range so a decimal or negative can never be
+                    // stored. An out-of-range entry would be ignored at render anyway; correcting
+                    // it here means the organizer sees what will actually happen.
+                    onChange={e => update(i, {
+                      threshold: Math.min(
+                        MILESTONE_THRESHOLD_MAX,
+                        Math.max(1, Math.floor(Number(e.target.value) || 1)),
+                      ),
+                    })}
+                  />
+                </FieldGroup>
+
+                <FieldGroup label="Message" hint={`Plain text, up to ${MILESTONE_MESSAGE_MAX} characters`}>
+                  <input
+                    type="text"
+                    maxLength={MILESTONE_MESSAGE_MAX}
+                    className={inputCls}
+                    placeholder="T-shirt benefit is available for this pass."
+                    value={a.message}
+                    onChange={e => update(i, { message: e.target.value })}
+                  />
+                </FieldGroup>
+              </div>
+
+              <div className="mt-3 grid gap-3 sm:grid-cols-[140px_1fr]">
+                <FieldGroup label="Tone" hint="Visual emphasis">
+                  <select
+                    className={inputCls}
+                    value={a.tone ?? 'info'}
+                    onChange={e => update(i, { tone: e.target.value as MilestoneAlert['tone'] })}
+                  >
+                    <option value="info">Info</option>
+                    <option value="success">Success</option>
+                    <option value="warning">Warning</option>
+                  </select>
+                </FieldGroup>
+
+                <div className="flex items-end justify-between gap-3 pb-1">
+                  <Toggle
+                    checked={a.showOnSelection === true}
+                    onChange={v => update(i, { showOnSelection: v })}
+                    label="Show when selected"
+                    desc="Also show a dismissible notice when this pass is chosen"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => remove(i)}
+                    aria-label={`Remove milestone alert at ${a.threshold} bookings`}
+                    className="inline-flex size-8 shrink-0 items-center justify-center rounded-lg border border-border text-muted-foreground transition-colors hover:border-destructive/50 hover:text-destructive"
+                  >
+                    <Trash2 className="size-3.5" aria-hidden />
+                  </button>
+                </div>
+              </div>
+
+              {a.message.trim().length === 0 && (
+                <p className="mt-2 text-[12.5px] text-muted-foreground">
+                  Add a message — an alert with no text is never shown.
+                </p>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 
 // ─── TAB 3: Registration Period ─────────────────────────────────────────────────
 

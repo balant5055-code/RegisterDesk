@@ -1,6 +1,10 @@
 // Shared types for the broadcastCampaigns Firestore collection.
 // Safe to import from client and server.
 
+import type { RegistrationDateFilterRecord } from '@/lib/broadcasts/registrationDateFilter'
+
+export type { RegistrationDateFilterRecord }
+
 export type BroadcastAudience =
   | 'all'
   | 'confirmed'
@@ -66,6 +70,34 @@ export interface BroadcastCampaign {
    * Has no effect on WhatsApp: `deliverWhatsAppCampaign` never reads it.
    */
   dedupeEmails?:  boolean
+  /**
+   * 'Ignore duplicate WhatsApp numbers' — WHATSAPP ONLY, and deliberately a SEPARATE field
+   * from `dedupeEmails`. One flag for both channels would mean a campaign created on one
+   * channel could silently alter the other's recipient resolution; two fields make the
+   * channels unable to interfere with each other at all.
+   *
+   * Persisted on the campaign so a SCHEDULED broadcast — which the cron resolves hours later
+   * from this document alone — dedupes exactly like an immediate one. Absent on every
+   * existing campaign, which is why adding it changes nothing for them.
+   */
+  dedupePhones?:  boolean
+  /**
+   * RD-BCAST-DATE-01 — the registration-date audience restriction, as it was RESOLVED at
+   * creation. Absent on every existing campaign, and absent whenever the organizer chose
+   * "All registrations", which is what makes this additive with no migration.
+   *
+   * Stored as ABSOLUTE boundaries, never as the word "today". A campaign created on 20 Aug
+   * selecting Today and delivered by the cron on 21 Aug must still mail 20 Aug's
+   * registrants — the audience the organizer previewed and was billed for. Persisting the
+   * token instead of the instants is precisely how that guarantee would be lost.
+   *
+   * `registeredTo` is EXCLUSIVE: the first instant of the day after the last selected day.
+   * Both are serialized to ISO for the client; the Firestore document holds Timestamps.
+   */
+  registeredFrom?: string | null
+  registeredTo?:   string | null
+  /** Human-readable provenance for the same window: what was picked, and in which zone. */
+  registrationDateFilter?: RegistrationDateFilterRecord | null
   successCount:   number
   failCount:      number
   status:         BroadcastStatus
