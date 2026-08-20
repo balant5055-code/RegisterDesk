@@ -35,8 +35,30 @@ export const WHATSAPP_BROADCAST_JOBS = 'whatsappBroadcastJobs'
 // concurrent cron re-leases at the un-advanced cursor, and both drivers re-send the
 // same recipients (duplicate WhatsApp messages, H1). Sends run sequentially and each
 // is bounded by metaApiTimeoutMs (default 10s), so worst-case page time is
-// WAB_PAGE_SIZE × 10s; 5 × 10s = 50s stays safely under the 60s lease.
+// WAB_PAGE_SIZE × 10s; 5 × 10s = 50s stays safely under the 60s lease. With
+// WAB_CONCURRENCY the worst case only improves — ceil(5/3) × 10s = 20s.
 const WAB_PAGE_SIZE = 5
+/**
+ * RD-WA-THRU-01 — messages sent in parallel WITHIN a page.
+ *
+ * Measured, not guessed. A production campaign (job wab_c929d80e, 385/1472) showed a
+ * median inter-message cost of 392 ms and ~77 messages per invocation; a scaled
+ * reproduction of that latency gives 75/chunk at 1 and 180/chunk at 3.
+ *
+ * WHY 3 AND NOT 4. The pool runs inside a page, and pages are WAB_PAGE_SIZE = 5.
+ * ceil(5/3) and ceil(5/4) are both two rounds, so 4 opens an extra simultaneous
+ * connection to Meta and delivers nothing for it. 5 would be one round and roughly
+ * twice as fast again — deliberately not taken, because it triples the instantaneous
+ * send rate and NO Meta throughput limit is recorded anywhere in this codebase or its
+ * configuration (integrations policy carries only metaApiVersion and metaApiTimeoutMs).
+ * Raising it further is a decision to make against a documented account limit, not
+ * against an assumption.
+ *
+ * Safe to raise at all only because processItem is independent and idempotent per
+ * recipient: its own row, its own `sent` marker, no wallet debit (the campaign is
+ * charged once, upfront, under a deterministic ledger id).
+ */
+const WAB_CONCURRENCY = 3
 const WAB_BUDGET_MS = 45_000
 const WAB_LEASE_MS  = 60_000
 
@@ -299,9 +321,10 @@ export function whatsAppBroadcastStrategy(): JobStrategy<WhatsAppBroadcastJob, W
 export async function processWhatsAppBroadcastChunk(jobId: string): Promise<ProcessResult> {
   const result = await runJobChunk(jobId, whatsAppBroadcastStrategy(), {
     collection: WHATSAPP_BROADCAST_JOBS,
-    pageSize:   WAB_PAGE_SIZE,
-    budgetMs:   WAB_BUDGET_MS,
-    leaseMs:    WAB_LEASE_MS,
+    pageSize:    WAB_PAGE_SIZE,
+    budgetMs:    WAB_BUDGET_MS,
+    leaseMs:     WAB_LEASE_MS,
+    concurrency: WAB_CONCURRENCY,
   })
   if (result.status === 'cancelled' || result.status === 'failed') {
     await syncCampaignTerminal(jobId, result.status).catch(() => { /* best-effort */ })
