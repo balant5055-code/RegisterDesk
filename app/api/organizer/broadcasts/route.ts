@@ -94,7 +94,20 @@ export async function GET(req: NextRequest): Promise<NextResponse<GetBroadcastsR
 
 export type PostBroadcastResponse =
   | { success: true;  campaign: BroadcastCampaign }
-  | { success: false; error: string }
+  | {
+      success: false
+      /** Stable machine code (e.g. DAILY_LIMIT_REACHED). Kept for existing consumers. */
+      error: string
+      /**
+       * RD-BCAST-LIMIT-01 — human-readable reason, safe to display verbatim. The UI shows
+       * this in preference to `error`, so an organizer stops being handed a raw token.
+       */
+      message?: string
+      used?:    number
+      limit?:   number | string
+      /** ISO instant at which a daily quota rolls over. */
+      resetAt?: string
+    }
 
 export async function POST(req: NextRequest): Promise<NextResponse<PostBroadcastResponse>> {
   const authz = await authorizeWorkspace(req, 'broadcasts')
@@ -317,8 +330,17 @@ export async function POST(req: NextRequest): Promise<NextResponse<PostBroadcast
   // ── Broadcast rate limit check (free email quota) ─────────────────────────
   const limitCheck = await checkBroadcastLimits(uid, recipientCount)
   if (!limitCheck.ok) {
+    // The code stays the contract; the message, counts and reset time are what make the
+    // refusal actionable instead of cryptic.
     return NextResponse.json(
-      { success: false, error: limitCheck.code },
+      {
+        success: false,
+        error:   limitCheck.code,
+        message: limitCheck.message,
+        ...(limitCheck.used    !== undefined ? { used:    limitCheck.used }    : {}),
+        ...(limitCheck.limit   !== undefined ? { limit:   limitCheck.limit }   : {}),
+        ...(limitCheck.resetAt !== undefined ? { resetAt: limitCheck.resetAt } : {}),
+      },
       { status: limitCheck.status },
     )
   }

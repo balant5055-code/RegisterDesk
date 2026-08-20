@@ -459,7 +459,13 @@ function ComposeTab({
       })
       const data = await res.json() as PostBroadcastResponse
       if (!data.success) {
-        setSendError(data.error ?? 'Send failed.')
+        // Prefer the server’s sentence over its machine code. `DAILY_LIMIT_REACHED` is a
+        // contract for callers, not a message for a person about to send an email; when a
+        // reset time is supplied it is rendered in the reader’s own locale.
+        const resetNote = data.resetAt
+          ? ` Resets ${new Date(data.resetAt).toLocaleString()}.`
+          : ''
+        setSendError((data.message ?? data.error ?? 'Send failed.') + resetNote)
         setSendLoading(false)
         setShowConfirm(false)
         return
