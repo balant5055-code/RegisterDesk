@@ -16,6 +16,7 @@ import type {
   RefundWindow,
 } from '@/components/wizard/eventDetailsConfig'
 import type { PassAvailability } from '@/lib/registrations/types'
+import type { MilestoneAlert, ResolvedMilestoneAlert } from '@/lib/events/milestoneAlerts'
 
 export interface PassPublic {
   id:                  string
@@ -28,6 +29,25 @@ export interface PassPublic {
   salesEndDate?:       string
   hideWhenSoldOut?:    boolean
   showRemainingSeats?: boolean
+  /**
+   * The milestone notice CURRENTLY showing for this pass, already resolved on the server
+   * from the existing registration counter. Templates render it and nothing else — the raw
+   * booking count and the organizer's full threshold configuration never cross to the client.
+   * Absent ⇒ no notice, which is every pass today.
+   */
+  milestoneAlert?:     ResolvedMilestoneAlert | null
+  /**
+   * The organizer's CONFIGURED milestone notices for this pass, as stored on the event.
+   * Declared here — rather than left to an inline cast at the call site — because a pass
+   * projection that silently drops it produces a feature that is quietly dead while every
+   * gate stays green. That already happened once: the registration page rebuilt passes as a
+   * field-by-field literal, `milestoneAlerts` was not in the list, and nothing could detect
+   * it because no type ever claimed the field existed.
+   *
+   * This is CONFIGURATION, not display data. Surfaces render `milestoneAlert` (resolved,
+   * singular) — the server reads this array, decides, and hands down only the outcome.
+   */
+  milestoneAlerts?:    MilestoneAlert[]
   status?:             'active' | 'inactive'
   visibility?:         string
   benefits?:           string[]

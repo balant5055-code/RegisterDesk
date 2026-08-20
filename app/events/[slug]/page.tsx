@@ -8,6 +8,7 @@ import ReportButton                  from '@/components/report/ReportButton'
 import { getRegistrationCounter }   from '@/lib/firebase/firestore/registrationCounters'
 import { getCampaignBySlug, getCampaignCounter } from '@/lib/firebase/firestore/campaigns'
 import { computeEventAvailability } from '@/lib/registrations/availability'
+import { resolveMilestoneAlertsByPass } from '@/lib/events/milestoneAlerts'
 import { resolveEffectivePriceRupees } from '@/lib/pricing/earlyBird'
 import { todayISOInTz, resolvePassSaleState } from '@/lib/registrations/salesWindow'
 import type { PassAvailability, CapacityPlan } from '@/lib/registrations/types'
@@ -390,6 +391,19 @@ export default async function EventPage({ params }: PageProps) {
   )
   const availabilityRecord: Record<string, PassAvailability> = Object.fromEntries(availability)
 
+  // ── Booking Milestone Alerts ───────────────────────────────────────────────
+  // Resolved ONCE here, server-side, from the counter this page already loaded — so the
+  // feature costs ZERO additional Firestore reads and every template renders the same
+  // answer. Only the resolved message crosses to the client: the raw booking count and the
+  // organizer's threshold configuration stay on the server.
+  //
+  // PRESENTATION ONLY. This runs AFTER availability is computed and feeds nothing back into
+  // it, so a milestone can never influence capacity, price or whether a pass is sellable.
+  const milestoneAlerts = resolveMilestoneAlertsByPass(passes, counter?.passCounts)
+  const passesWithAlerts: PassPublic[] = passes.map(p =>
+    milestoneAlerts[p.id] ? { ...p, milestoneAlert: milestoneAlerts[p.id] } : p,
+  )
+
   // ── Event info ─────────────────────────────────────────────────────────────
   const language  = ed.info?.language?.trim()  || ''
   const dressCode = ed.info?.dressCode?.trim() || ''
@@ -451,7 +465,7 @@ export default async function EventPage({ params }: PageProps) {
         showSocial={showSocial}
         showVenueMap={showVenueMap}
         isFreeEvent={isFreeEvent}
-        passes={passes}
+        passes={passesWithAlerts}
         availability={availabilityRecord}
         speakers={speakers}
         sponsors={sponsors}

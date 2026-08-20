@@ -22,6 +22,7 @@
 // untouched.
 
 import { normalizeEmail } from '@/lib/crm/identity'
+import { normalizePhoneNumber } from '@/lib/communication/phone'
 
 /** The audience row shape both resolvers already use. Structural, so neither caller casts. */
 export interface DedupableRecipient {
@@ -80,4 +81,100 @@ export function countUniqueRecipients(
     seen.add(key)
   }
   return seen.size + blanks
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// "Ignore duplicate WhatsApp numbers" — the phone-channel counterpart.
+//
+// SEPARATE FROM THE EMAIL PATH ON PURPOSE. Same shape, different identity: an address is a
+// string the platform lower-cases, a phone number is a value five different spellings can
+// express. Sharing one generic function would mean one call site deciding which identity rule
+// applies, and that is exactly the kind of switch that eventually gets the wrong argument.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/** The audience row shape the WhatsApp resolvers already use. Structural, so no caller casts. */
+export interface PhoneDedupableRecipient {
+  id: string
+  data: { attendee: { phone?: string | null } }
+}
+
+/**
+ * The canonical identity of a WhatsApp recipient.
+ *
+ * ═══ WHY normalizePhoneNumber AND NOTHING ELSE ═══════════════════════════════
+ * `whatsappJob.ts` calls `validatePhoneNumber` — and therefore this same
+ * `normalizePhoneNumber` — on every recipient immediately before handing it to Meta. Keying
+ * on it means the dedupe key IS the address Meta is dialled with:
+ *
+ *   • two rows that collapse here would provably have produced the SAME Meta recipient;
+ *   • two rows that do not collapse would provably have produced DIFFERENT ones.
+ *
+ * So this can never merge two people who would otherwise have received separate messages, and
+ * never splits one person into two. Any other rule — raw string, last-10-digits, a regex —
+ * would be a second definition of "who this is" that could disagree with the send path.
+ * The helper is idempotent, so a stored value that is already canonical keys to itself.
+ */
+function phoneKey(raw: string | null | undefined): string {
+  return typeof raw === 'string' ? normalizePhoneNumber(raw) : ''
+}
+
+/**
+ * One recipient per canonical WhatsApp number; FIRST occurrence wins.
+ *
+ * ═══ BLANK AND MALFORMED NUMBERS ARE NEVER COLLAPSED ═════════════════════════
+ * `normalizePhoneNumber` returns '' for anything with no digits at all — '', '   ', 'abc',
+ * '---'. Those are NOT one recipient who appears four times; they are four different rows
+ * that happen to be equally unusable. Keying on '' would silently drop three real attendees
+ * and the organizer would never see it happen. So an empty key is not an identity: the row
+ * passes through UNCHANGED, exactly as it does today, and the send path decides its fate —
+ * `whatsappJob` already logs an invalid number as failed, charges 0, and never sends it.
+ *
+ * This function decides duplicates. It does not decide eligibility, and it introduces no
+ * validation that could change who is eligible to receive.
+ *
+ * ═══ FIRST WINS, IN THE CALLER'S ORDER ═══════════════════════════════════════
+ * The audience query carries no `orderBy`, so Firestore returns document-id order — already
+ * deterministic and identical between the create-time and send-time resolutions. Keeping the
+ * first occurrence preserves that order rather than imposing a new one, and it fixes WHICH
+ * registration represents the number: the whole row survives, so the snapshot's
+ * registrationId, name, ticketCode and every template variable come from that one
+ * registration. (Two people sharing a phone means one of them is not the one named —
+ * unavoidable when only one message may be sent.)
+ *
+ * Nothing is mutated: no sort in place, no stored value rewritten.
+ */
+export function dedupeRecipientsByPhone<T extends PhoneDedupableRecipient>(recipients: T[]): T[] {
+  const seen = new Set<string>()
+  const out: T[] = []
+
+  for (const r of recipients) {
+    const key = phoneKey(r.data?.attendee?.phone)
+    if (!key) { out.push(r); continue }   // blank/malformed ⇒ never a dedupe key; pass through
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(r)
+  }
+  return out
+}
+
+/**
+ * How many DISTINCT WhatsApp recipients an audience would reach, for the composer's preview.
+ *
+ * Counted the same way `dedupeRecipientsByPhone` collapses — including counting each
+ * blank/malformed row as its own recipient — so the number the organizer is shown, the
+ * number WhatsApp billing charges for, and the number of rows written into the send snapshot
+ * cannot disagree.
+ */
+export function countUniquePhones(
+  phones: (string | null | undefined)[],
+): number {
+  const seen = new Set<string>()
+  let unkeyed = 0
+
+  for (const p of phones) {
+    const key = phoneKey(p)
+    if (!key) { unkeyed++; continue }
+    seen.add(key)
+  }
+  return seen.size + unkeyed
 }

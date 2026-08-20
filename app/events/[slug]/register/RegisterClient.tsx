@@ -51,6 +51,9 @@ import {
   type ConsentState,
 } from './CheckoutPanels'
 import { useToast } from '@/components/ui/Toast'
+import { MilestoneNotice } from '@/components/event-templates/shared/registration/MilestoneNotice'
+import { Dialog } from '@/components/ui/Dialog'
+import type { ResolvedMilestoneAlert } from '@/lib/events/milestoneAlerts'
 
 // ─── Razorpay checkout (loaded dynamically from checkout.razorpay.com) ─────────
 
@@ -132,6 +135,12 @@ export interface RegisterClientProps {
   // in-form. `sections` is the FULL set (all passes) — filtered per selected pass client-side.
   passes:             PassInfo[]
   initialPassId:      string
+  /**
+   * Booking Milestone Alert for `initialPassId`, already resolved on the server from the
+   * count the registration gate loaded. Informational only — it never gates the form,
+   * the pass, the price or the submit button. Absent/null ⇒ nothing renders.
+   */
+  milestoneAlert?:    ResolvedMilestoneAlert | null
   sections:           FormSection[]
   conditionalRules:   ConditionalRule[]
   approvalMode:       'auto' | 'manual'
@@ -622,6 +631,7 @@ export function RegisterClient({
   venueType    = 'physical',
   passes,
   initialPassId,
+  milestoneAlert = null,
   sections,
   conditionalRules,
   approvalMode,
@@ -634,6 +644,20 @@ export function RegisterClient({
 
   // H-7: the selected pass is client state → switchable in-form without navigation.
   const [selectedPassId, setSelectedPassId] = useState(initialPassId)
+
+  // ── Booking Milestone Alert (informational) ────────────────────────────────
+  // The alert was resolved server-side for `initialPassId` only, because the gate supplies a
+  // count for exactly the pass it was asked about. Switching pass in-form does NOT navigate,
+  // so no fresh count arrives — rather than show a figure that belongs to a different pass,
+  // the notice hides until the original pass is selected again. Showing nothing is correct;
+  // showing another pass's milestone would not be.
+  const milestoneVisible = milestoneAlert != null && selectedPassId === initialPassId
+
+  // Opens once on arrival when the organizer asked for it. Purely a notice: dismissing is the
+  // only action, nothing is submitted, and the form underneath is fully usable regardless.
+  const [milestoneDialogOpen, setMilestoneDialogOpen] = useState(
+    () => milestoneAlert?.showOnSelection === true,
+  )
   const pass = (passes.find(p => p.id === selectedPassId) ?? passes[0])!
 
   // Full field set (all passes) drives conditional state exactly like the server validator.
@@ -853,6 +877,9 @@ export function RegisterClient({
   async function switchPass(newId: string) {
     if (newId === selectedPassId) return
     setSelectedPassId(newId)
+    // Selecting the alerted pass again re-shows its notice — same informational dialog,
+    // still dismissible, still nothing to do with the registration itself.
+    if (newId === initialPassId && milestoneAlert?.showOnSelection === true) setMilestoneDialogOpen(true)
     setSubmitError(null)
     setPaymentRecovery(null)
     setIdempotencyKey(crypto.randomUUID())   // a switched pass is a distinct registration attempt
@@ -1962,6 +1989,9 @@ export function RegisterClient({
             />
           )}
 
+          {/* Booking Milestone Alert — presentation only; never gates the form. */}
+          {milestoneVisible && <MilestoneNotice alert={milestoneAlert} className="mb-3 mt-0" />}
+
           {/* H-7: in-form pass switcher — change pass without losing entered data */}
           {passes.length > 1 && (
             <PassSwitcher
@@ -2344,6 +2374,32 @@ export function RegisterClient({
           z-[400] sits above the page and the summary dialog, and far below Razorpay's own
           container — so checkout stays fully usable while this waits underneath it. */}
       <PaymentProcessingLock open={submitting} free={!paymentRequired} />
+
+      {/* Booking Milestone Alert — optional 'show when selected' notice.
+          Reuses the platform Dialog rather than adding a second modal implementation. It is
+          purely informational: the only action is dismissal, it submits nothing, changes no
+          selected pass, price or registration state, and the form behind it stays fully usable.
+          Rendered only when the organizer opted in AND the milestone is currently crossed. */}
+      {milestoneVisible && milestoneAlert?.showOnSelection === true && (
+        <Dialog
+          open={milestoneDialogOpen}
+          onClose={() => setMilestoneDialogOpen(false)}
+          title="Important information"
+          size="sm"
+          footer={(
+            <button
+              type="button"
+              onClick={() => setMilestoneDialogOpen(false)}
+              className="inline-flex h-9 items-center justify-center rounded-lg bg-primary px-4 text-[13.5px] font-semibold text-primary-foreground transition-colors hover:bg-primary/90"
+            >
+              Got it
+            </button>
+          )}
+        >
+          {/* Organizer copy rendered as a TEXT CHILD — React escapes it; never innerHTML. */}
+          <p className="text-[13.5px] leading-relaxed text-foreground">{milestoneAlert.message}</p>
+        </Dialog>
+      )}
 
       <PaymentSummaryDialog
         // …and can never co-exist with the lock.

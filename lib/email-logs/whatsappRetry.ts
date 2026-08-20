@@ -60,6 +60,19 @@ export type WhatsAppRetryResult =
       providerResponse?: string
     }
 
+/**
+ * RD-WA-RETRY-01 — the caller EXPLICITLY authorises resending a delivery whose outcome
+ * Meta never confirmed.
+ *
+ * This is the only way past the unknown guard, and it exists because the old behaviour —
+ * refuse forever — left the organizer with no recovery action at all. It is a strict
+ * boolean and it is never inferred: the risk being accepted (the attendee may receive the
+ * message twice) is a human judgement, so a human has to make it.
+ */
+export interface WhatsAppRetryOptions {
+  confirmUnknownDelivery?: boolean
+}
+
 export interface WhatsAppRetryArgs {
   registrationId: string
   organizerUid:   string
@@ -148,7 +161,10 @@ function recordStatus(
  * Reads an existing registration; writes no registration and no payment. Unlike the live
  * path this RETURNS the outcome so the API can surface the exact Meta reason.
  */
-export async function retryWhatsAppConfirmation(args: WhatsAppRetryArgs): Promise<WhatsAppRetryResult> {
+export async function retryWhatsAppConfirmation(
+  args: WhatsAppRetryArgs,
+  opts?: WhatsAppRetryOptions,
+): Promise<WhatsAppRetryResult> {
   const provider = await getMetaProvider()
   if (!provider) {
     return { ok: false, reason: 'not_configured', error: 'WhatsApp is not configured on this deployment.' }
@@ -189,7 +205,16 @@ export async function retryWhatsAppConfirmation(args: WhatsAppRetryArgs): Promis
   // reconcile against, so no webhook can ever resolve it for us. Refuse, and tell the
   // organizer plainly — a human who has confirmed with the attendee can still act, but nothing
   // automatic will resend on their behalf.
-  if (reg.whatsappStatus === 'unknown') {
+  // ═══ INDETERMINATE DELIVERY ════════════════════════════════════════════════
+  // Meta never confirmed the original attempt, so it may already have been accepted and
+  // queued. Resending is therefore a real duplicate risk — but refusing forever left the
+  // organizer stuck with a message they could neither confirm nor recover.
+  //
+  // So the block stands by DEFAULT and is lifted only by an explicit confirmation from the
+  // caller. `=== true` is deliberate: a truthy string, 1, or an accidental object must not
+  // open this path. Automatic and background callers pass nothing and stay blocked, which
+  // is what keeps "unknown is never silently retried" true no matter who calls.
+  if (reg.whatsappStatus === 'unknown' && opts?.confirmUnknownDelivery !== true) {
     return {
       ok: false,
       reason: 'delivery_unknown',

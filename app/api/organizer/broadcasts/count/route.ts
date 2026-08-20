@@ -10,7 +10,7 @@ import { adminDb }                   from '@/lib/firebase/admin'
 import type { BroadcastAudience }    from '@/lib/broadcasts/types'
 import { authorizeWorkspace }        from '@/lib/team/workspace'
 import { resolveMaxRecipientsPerBroadcast } from '@/lib/broadcasts/limits'
-import { countUniqueRecipients } from '@/lib/broadcasts/dedupeRecipients'
+import { countUniqueRecipients, countUniquePhones } from '@/lib/broadcasts/dedupeRecipients'
 
 interface CountResponse {
   success: boolean
@@ -27,9 +27,10 @@ export async function POST(req: NextRequest): Promise<NextResponse<CountResponse
   try { body = await req.json() }
   catch { return NextResponse.json({ success: false, error: 'Invalid JSON' }, { status: 400 }) }
 
-  const { eventSlug, audience, channel, dedupeEmails: dedupeRaw } = body as Record<string, unknown>
+  const { eventSlug, audience, channel, dedupeEmails: dedupeRaw, dedupePhones: dedupePhonesRaw } = body as Record<string, unknown>
   // Strict === true so anything else preserves the existing count behaviour exactly.
   const dedupeEmails = dedupeRaw === true
+  const dedupePhones = dedupePhonesRaw === true
   if (typeof eventSlug !== 'string' || !eventSlug) {
     return NextResponse.json({ success: false, error: 'eventSlug is required' }, { status: 400 })
   }
@@ -57,12 +58,21 @@ export async function POST(req: NextRequest): Promise<NextResponse<CountResponse
 
   if (channel === 'whatsapp') {
     const snap = await query.select('attendee').limit(maxRecipients + 1).get()
-    let count = 0
+    const phones: (string | undefined)[] = []
     for (const d of snap.docs) {
       const phone = (d.data() as { attendee?: { phone?: string } }).attendee?.phone
-      if (typeof phone === 'string' && phone.trim().length > 0) count++
+      // Presence filter FIRST, exactly as before: a registration with no number is not a
+      // WhatsApp recipient at all, whether or not dedupe is on.
+      if (typeof phone === 'string' && phone.trim().length > 0) phones.push(phone)
     }
-    return NextResponse.json({ success: true, count })
+    // 'Ignore duplicate WhatsApp numbers': count CANONICAL numbers, not registrations.
+    // Counted by the same helper the send path collapses with, so the number previewed, the
+    // number billed and the number of rows snapshotted cannot disagree. Off ⇒ the previous
+    // count, unchanged.
+    return NextResponse.json({
+      success: true,
+      count: dedupePhones ? countUniquePhones(phones) : phones.length,
+    })
   }
 
   // Email + "Ignore duplicate email IDs": the count must be UNIQUE ADDRESSES, and Firestore

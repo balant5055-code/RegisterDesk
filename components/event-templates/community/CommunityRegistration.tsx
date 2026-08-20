@@ -10,6 +10,7 @@ import type { PassPublic } from '@/components/event-templates/types'
 import type { PassAvailability } from '@/lib/registrations/types'
 import { formatINR, formatDateShort, passDisplayPrice } from '@/components/event-templates/shared/utils/format'
 import { organizerFeaturedPassId } from '@/components/event-templates/shared/utils/featuredPass'
+import { MilestoneNotice } from '@/components/event-templates/shared/registration/MilestoneNotice'
 
 const PASS_ACCENTS = [
   'from-rose-400 to-pink-500',
@@ -244,6 +245,9 @@ export function CommunityRegistration({
                           {pass.description}
                         </p>
                       )}
+
+                      {/* Booking Milestone Alert — informational only; resolved server-side. */}
+                      <MilestoneNotice alert={pass.milestoneAlert} />
 
                       {(pass.benefits?.length ?? 0) > 0 && (
                         <ul className="mb-4 flex-1 space-y-1.5">

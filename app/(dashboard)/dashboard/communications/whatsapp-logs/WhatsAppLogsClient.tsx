@@ -21,6 +21,7 @@ import {
 import { cn } from '@/lib/utils/cn'
 import { emailLogStatusCls } from '@/lib/ui/statusColors'
 import { EmptyState, PageHeader } from '@/components/ui'
+import { useConfirm } from '@/components/ui/ConfirmDialog'
 import type { WhatsAppLog } from '@/app/api/organizer/whatsapp-logs/route'
 // TYPE-ONLY from the route (erased at build). The runtime constant comes from the
 // client-safe types module — importing a value from the route would bundle the Admin SDK.
@@ -107,9 +108,11 @@ function templateLabel(log: WhatsAppLog): string {
  * is genuinely nothing to say (a successful send clears `error`).
  */
 function failureSummary(log: WhatsAppLog): string {
+  // The classified sentence LEADS. Meta codes and raw provider text are diagnostics, not
+  // the headline — they stay in Details, where someone debugging will look for them.
+  if (log.failureMessage) return log.failureMessage
   const reason = log.error ?? (log.status === 'failed' ? 'WhatsApp send failed' : null)
-  if (!reason) return '—'
-  return log.errorCode ? `${reason} (${log.errorCode})` : reason
+  return reason ?? '—'
 }
 
 // ─── Details drawer ───────────────────────────────────────────────────────────
@@ -122,7 +125,12 @@ function DetailsDrawer({ log, onClose }: { log: WhatsAppLog; onClose: () => void
     // Broadcast Campaign → this message → recipient → provider response. The campaign id is
     // written by the broadcast job onto every row it logs, so the trace needs no extra read.
     ['Campaign',            log.campaignId ?? '—'],
-    ['Reason',              log.error ?? '—'],
+    ['Reason',              log.failureMessage ?? log.error ?? '—'],
+    // The raw Meta text stays available for debugging — below the human sentence, never
+    // instead of it. Credentials never reach here: providerResponse is sanitised at the
+    // API boundary before it is ever returned.
+    ['Category',            log.failureReason ?? '—'],
+    ['Provider detail',     log.error ?? '—'],
     ['Provider error code', log.errorCode !== null ? String(log.errorCode) : '—'],
     ['HTTP status',         log.httpStatus !== null ? String(log.httpStatus) : '—'],
     ['Recipient',           [log.recipientPhone, log.recipientName].filter(Boolean).join(' · ') || '—'],
@@ -178,7 +186,7 @@ function DetailsDrawer({ log, onClose }: { log: WhatsAppLog; onClose: () => void
 
 function LogRow({ log, onRetry, retrying, onOpen }: {
   log:      WhatsAppLog
-  onRetry:  (id: string) => void
+  onRetry:  (log: WhatsAppLog) => void
   retrying: boolean
   onOpen:   (log: WhatsAppLog) => void
 }) {
@@ -197,6 +205,11 @@ function LogRow({ log, onRetry, retrying, onOpen }: {
           <Icon className="size-3" />
           {STATUS_LABELS[status] ?? status}
         </span>
+        {log.recipientFault && (
+          <div className="mt-1 text-[11px] leading-snug text-muted-foreground">
+            Retrying without correcting the number will fail the same way.
+          </div>
+        )}
         {reason !== String.fromCharCode(8212) && (
           <div className="mt-1 text-[11px] leading-snug text-muted-foreground line-clamp-2">{reason}</div>
         )}
@@ -223,7 +236,7 @@ function LogRow({ log, onRetry, retrying, onOpen }: {
         {log.retryAvailable ? (
           <button
             type="button"
-            onClick={() => onRetry(log.id)}
+            onClick={() => onRetry(log)}
             disabled={retrying}
             title="Re-send this WhatsApp message"
             className={cn(
@@ -268,6 +281,7 @@ export function WhatsAppLogsClient() {
   const [retryingId, setRetryingId] = useState<string | null>(null)
   const [retryMsg,   setRetryMsg]   = useState<{ id: string; ok: boolean; msg: string } | null>(null)
   const [detail,     setDetail]     = useState<WhatsAppLog | null>(null)
+  const { confirm } = useConfirm()
 
   const load = useCallback(async (cursor?: string) => {
     try {
@@ -333,7 +347,25 @@ export function WhatsAppLogsClient() {
     return () => { cancelled = true }
   }, [])
 
-  async function handleRetry(logId: string) {
+  async function handleRetry(log: WhatsAppLog) {
+    const logId = log.id
+
+    // ═══ INDETERMINATE DELIVERY NEEDS A HUMAN ════════════════════════════════
+    // Meta never confirmed the original attempt, so it may already have been delivered.
+    // The organizer is told exactly that, in those terms, and nothing is sent unless they
+    // accept it. The confirmation runs BEFORE the request, and the endpoint refuses an
+    // unconfirmed unknown retry anyway — this dialog is the explanation, not the control.
+    if (log.requiresUnknownConfirmation) {
+      const ok = await confirm({
+        title:        'Delivery status is unknown',
+        message:      'Meta did not confirm whether the previous request was accepted. Retrying may cause the attendee to receive this message more than once.',
+        confirmLabel: 'Retry anyway',
+        cancelLabel:  'Cancel',
+        tone:         'danger',
+      })
+      if (!ok) return
+    }
+
     setRetryingId(logId)
     setRetryMsg(null)
     try {
@@ -341,7 +373,11 @@ export function WhatsAppLogsClient() {
       if (!token) { setRetryingId(null); return }
 
       const res  = await fetch(`/api/organizer/whatsapp-logs/${logId}/retry`, {
-        method: 'POST', headers: { Authorization: `Bearer ${token}` },
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        // Sent ONLY for a row the server itself flagged indeterminate, and only after the
+        // organizer confirmed. Never a default, never inferred.
+        body: JSON.stringify({ confirmUnknownDelivery: log.requiresUnknownConfirmation === true }),
       })
       const data = await res.json() as { success: boolean; error?: string; code?: number }
       if (data.success) {

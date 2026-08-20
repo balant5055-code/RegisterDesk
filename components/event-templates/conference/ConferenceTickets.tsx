@@ -10,6 +10,7 @@ import type { PassPublic } from '@/components/event-templates/types'
 import { AvailabilityBadge } from '@/components/event-templates/shared/registration/AvailabilityBadge'
 import { passDisplayPrice } from '@/components/event-templates/shared/utils/format'
 import { organizerFeaturedPassId } from '@/components/event-templates/shared/utils/featuredPass'
+import { MilestoneNotice } from '@/components/event-templates/shared/registration/MilestoneNotice'
 
 // ─── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -199,6 +200,9 @@ export function ConferenceTickets({
 
                     {/* ── Lower: benefits + CTA ── */}
                     <div className="flex flex-1 flex-col px-5 pb-5 pt-5 sm:px-6 sm:pb-6">
+
+                      {/* Booking Milestone Alert — informational only; resolved server-side. */}
+                      <MilestoneNotice alert={pass.milestoneAlert} />
 
                       {pass.benefits && pass.benefits.length > 0 && (
                         <ul className="mb-6 flex flex-col gap-2.5">

@@ -279,6 +279,7 @@ function ComposeTab({
   const [audience,        setAudience]        = useState<BroadcastAudience>('confirmed')
   const [channel,         setChannel]         = useState<BroadcastChannelUI>('email')
   const [dedupeEmails,    setDedupeEmails]    = useState(false)
+  const [dedupePhones,    setDedupePhones]    = useState(false)
   const [subject,         setSubject]         = useState('')
   const [body,            setBody]            = useState('')
   const [waTemplate,      setWaTemplate]      = useState<WhatsAppTemplateType | ''>('')
@@ -311,7 +312,7 @@ function ComposeTab({
   }
 
   // ── Fetch recipient count (channel-aware — WhatsApp counts phone recipients) ─
-  const fetchCount = useCallback(async (slug: string, aud: BroadcastAudience, ch: BroadcastChannelUI, dedupe: boolean) => {
+  const fetchCount = useCallback(async (slug: string, aud: BroadcastAudience, ch: BroadcastChannelUI, dedupe: boolean, dedupePhone: boolean) => {
     if (!slug) { setRecipientCount(null); return }
     setCountLoading(true)
     try {
@@ -320,7 +321,7 @@ function ComposeTab({
       const res  = await fetch('/api/organizer/broadcasts/count', {
         method:  'POST',
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-        body:    JSON.stringify({ eventSlug: slug, audience: aud, channel: ch, dedupeEmails: dedupe }),
+        body:    JSON.stringify({ eventSlug: slug, audience: aud, channel: ch, dedupeEmails: dedupe, dedupePhones: dedupePhone }),
       })
       const data = await res.json() as { success: boolean; count?: number }
       if (data.success) setRecipientCount(data.count ?? 0)
@@ -330,10 +331,10 @@ function ComposeTab({
 
   useEffect(() => {
     /* eslint-disable react-hooks/set-state-in-effect -- server-sync fetch when event/audience/channel changes */
-    if (eventSlug) void fetchCount(eventSlug, audience, channel, dedupeEmails)
+    if (eventSlug) void fetchCount(eventSlug, audience, channel, dedupeEmails, dedupePhones)
     else setRecipientCount(null)
     /* eslint-enable react-hooks/set-state-in-effect */
-    }, [eventSlug, audience, channel, dedupeEmails, fetchCount])
+    }, [eventSlug, audience, channel, dedupeEmails, dedupePhones, fetchCount])
 
   // ── Send test email ──────────────────────────────────────────────────────
   async function handleTest() {
@@ -378,7 +379,7 @@ function ComposeTab({
         scheduledFor: scheduleFor ? new Date(scheduleFor).toISOString() : undefined,
       }
       const payload = channel === 'whatsapp'
-        ? { ...common, channel: 'whatsapp', templateType: waTemplate, languageCode: waLanguage || undefined, variables: waVars }
+        ? { ...common, channel: 'whatsapp', templateType: waTemplate, languageCode: waLanguage || undefined, variables: waVars, dedupePhones }
         : { ...common, channel: 'email', subject: subject.trim(), html: body.trim(), dedupeEmails }
       const res  = await fetch('/api/organizer/broadcasts', {
         method:  'POST',
@@ -397,6 +398,7 @@ function ComposeTab({
       setEventSlug('')
       setAudience('confirmed')
         setDedupeEmails(false)
+        setDedupePhones(false)
       setSubject('')
       setBody('')
       selectWaTemplate('')
@@ -542,6 +544,37 @@ function ComposeTab({
                     </span>
                     <span className="block text-[12.5px] text-muted-foreground">
                       Send at most one email per address, even if it appears on several registrations.
+                    </span>
+                  </span>
+                </label>
+              )}
+
+              {/*
+                WHATSAPP ONLY. One person can hold several registrations — family or team sign-ups,
+                multiple passes — and the audience is one row per REGISTRATION, so by default that
+                person is messaged once per registration. This collapses them to one.
+
+                Numbers are matched by their CANONICAL form, the same normalisation applied just
+                before the message is handed to Meta, so '+91 98765 43210', '09876543210' and
+                '9876543210' count as one recipient. Rendered only for WhatsApp: email targets
+                addresses and is deliberately untouched by this option. Toggling it re-runs the
+                recipient count so the number shown is the number that will actually be sent — and,
+                because WhatsApp is billed per recipient, the number that will be charged.
+              */}
+              {channel === 'whatsapp' && (
+                <label className="mt-3 flex cursor-pointer items-start gap-2.5">
+                  <input
+                    type="checkbox"
+                    checked={dedupePhones}
+                    onChange={e => setDedupePhones(e.target.checked)}
+                    className="mt-0.5 size-4 shrink-0 rounded border-border text-primary focus:ring-2 focus:ring-primary/20"
+                  />
+                  <span className="min-w-0">
+                    <span className="block text-[13.5px] font-medium text-foreground">
+                      Ignore duplicate WhatsApp numbers
+                    </span>
+                    <span className="block text-[12.5px] text-muted-foreground">
+                      Send at most one message per number, even if it appears on several registrations.
                     </span>
                   </span>
                 </label>

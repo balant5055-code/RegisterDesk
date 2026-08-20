@@ -66,6 +66,17 @@ export interface BroadcastCampaign {
    * Has no effect on WhatsApp: `deliverWhatsAppCampaign` never reads it.
    */
   dedupeEmails?:  boolean
+  /**
+   * 'Ignore duplicate WhatsApp numbers' — WHATSAPP ONLY, and deliberately a SEPARATE field
+   * from `dedupeEmails`. One flag for both channels would mean a campaign created on one
+   * channel could silently alter the other's recipient resolution; two fields make the
+   * channels unable to interfere with each other at all.
+   *
+   * Persisted on the campaign so a SCHEDULED broadcast — which the cron resolves hours later
+   * from this document alone — dedupes exactly like an immediate one. Absent on every
+   * existing campaign, which is why adding it changes nothing for them.
+   */
+  dedupePhones?:  boolean
   successCount:   number
   failCount:      number
   status:         BroadcastStatus

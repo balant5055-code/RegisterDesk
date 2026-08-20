@@ -38,6 +38,12 @@ export interface RetryWhatsAppLogResponse {
 }
 
 /** Maps a retry outcome to the HTTP status that describes it honestly. */
+/**
+ * RD-WA-RETRY-01 — the machine-readable code the client branches on to open the duplicate
+ * -risk confirmation. A prose message would work until someone improved the wording.
+ */
+export const DELIVERY_UNKNOWN_CONFIRMATION_REQUIRED = 'delivery_unknown_confirmation_required'
+
 const REASON_STATUS: Record<string, number> = {
   not_configured:       503,
   channel_disabled:     503,
@@ -97,12 +103,19 @@ export async function POST(
   }
   const log = claim.log
 
+  // The confirmation is read as a STRICT boolean from a JSON body. Anything else — a
+  // truthy string, 1, a query parameter — is not a confirmation, because the risk being
+  // accepted here (a duplicate WhatsApp to a real attendee) must be a deliberate act and
+  // not something a stray value can perform. A malformed or absent body simply means "no".
+  const body = await req.json().catch(() => null) as { confirmUnknownDelivery?: unknown } | null
+  const confirmUnknownDelivery = body?.confirmUnknownDelivery === true
+
   const result = await retryWhatsAppConfirmation({
     registrationId: log.registrationId,
     organizerUid:   uid,
     eventSlug:      log.eventSlug,
     eventName:      log.eventName,
-  })
+  }, { confirmUnknownDelivery })
 
   if (!result.ok) {
     // Release the claim so the row stays retryable, and persist the fresh diagnostics so
@@ -116,7 +129,14 @@ export async function POST(
     }).catch(err => console.error('[whatsapp-retry] claim release failed:', err))
 
     return NextResponse.json(
-      { success: false, error: result.error, code: result.code, httpStatus: result.httpStatus },
+      {
+        success: false, error: result.error, code: result.code, httpStatus: result.httpStatus,
+        // Only the indeterminate case is actionable by the client — it is the one the
+        // organizer can resolve, by accepting the duplicate risk.
+        ...(result.reason === 'delivery_unknown'
+          ? { reason: DELIVERY_UNKNOWN_CONFIRMATION_REQUIRED, confirmationRequired: true }
+          : {}),
+      },
       { status: REASON_STATUS[result.reason] ?? 500 },
     )
   }

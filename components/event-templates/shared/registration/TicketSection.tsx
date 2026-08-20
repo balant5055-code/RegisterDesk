@@ -10,6 +10,7 @@ import { AvailabilityBadge } from '@/components/event-templates/shared/registrat
 import { formatINR, formatDateShort, passDisplayPrice } from '@/components/event-templates/shared/utils/format'
 import { organizerFeaturedPassId } from '@/components/event-templates/shared/utils/featuredPass'
 import { TAX_INCLUSIVE_NOTE } from '@/lib/pricing/copy'
+import { MilestoneNotice } from './MilestoneNotice'
 
 export function TicketSection({ passes, isFreeEvent, slug, availability, registrationOpen, closedMessage }: {
   passes:           PassPublic[]
@@ -126,6 +127,9 @@ export function TicketSection({ passes, isFreeEvent, slug, availability, registr
                         </span>
                       )}
                     </div>
+
+                    {/* Booking Milestone Alert — informational only; resolved server-side. */}
+                    <MilestoneNotice alert={pass.milestoneAlert} />
 
                     {pass.benefits && pass.benefits.length > 0 && (
                       <ul className="mt-2.5 flex flex-col gap-1 border-t border-border/40 pt-2.5">

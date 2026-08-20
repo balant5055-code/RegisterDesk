@@ -8,6 +8,7 @@ import type { PassPublic } from '@/components/event-templates/types'
 import type { PassAvailability } from '@/lib/registrations/types'
 import { AvailabilityBadge } from '@/components/event-templates/shared/registration/AvailabilityBadge'
 import { passDisplayPrice } from '@/components/event-templates/shared/utils/format'
+import { MilestoneNotice } from '@/components/event-templates/shared/registration/MilestoneNotice'
 
 // ─── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -166,6 +167,9 @@ export function WorkshopEnrollment({
 
                   {/* Dashed separator */}
                   <div className="mb-4 border-t border-dashed border-gray-200" />
+
+                  {/* Booking Milestone Alert — informational only; resolved server-side. */}
+                  <MilestoneNotice alert={pass.milestoneAlert} />
 
                   {benefits.length > 0 && (
                     <ul className="mb-4 flex flex-col gap-2">
