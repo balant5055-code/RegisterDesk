@@ -180,6 +180,21 @@ export async function settleCapturedRegistration(args: {
    * registration linked to their account. Recovery paths have no session and pass nothing.
    */
   uidOverride?: string
+  /**
+   * EXPLICIT ORPHANED-CAPTURE RECOVERY (RD-RECOVER-01). Present ONLY when the caller has
+   * already proven at Razorpay that `paymentId` is a captured payment on `orderId`.
+   *
+   * It lifts exactly two things, and nothing else:
+   *   1. the terminal-state guard — the whole point, since the intent was wrongly marked
+   *      `registration_failed` by a payment.failed that a later capture superseded;
+   *   2. the REFUND-on-gate-block, but only for timing reasons (sales window / registration
+   *      window). This is not a new purchase: refunding a legitimate captured payment
+   *      because the sales date has since elapsed would be the wrong outcome.
+   *
+   * Every other eligibility rule still applies and still stops the settlement — see the
+   * `blocked` outcome. Absent ⇒ behaviour is byte-identical to before this existed.
+   */
+  recovery?: { verifiedCapturedPaymentId: string }
 }): Promise<SettlementOutcome> {
   const { orderId, paymentId, intent, source, uidOverride } = args
 
@@ -187,19 +202,41 @@ export async function settleCapturedRegistration(args: {
   if (intent.status === 'paid' && intent.registrationId) {
     return { kind: 'already_settled', registrationId: intent.registrationId }
   }
-  if (intent.status === 'registration_failed' || intent.status === 'failed') {
+  // RECOVERY BYPASS #1 — the terminal-state guard. `registration_failed` is exactly the state
+  // an orphaned capture is stuck in (a payment.failed marked it terminal, a later capture on
+  // the same order was then skipped), so a recovery that has PROVEN the capture at Razorpay
+  // must be allowed past. Every non-recovery caller still stops here, unchanged.
+  const isRecovery = args.recovery?.verifiedCapturedPaymentId === paymentId
+  if (!isRecovery && (intent.status === 'registration_failed' || intent.status === 'failed')) {
     return { kind: 'deferred', reason: 'intent_terminal' }
   }
 
   // F5: a cancelled / closed / full event must not receive this registration.
   const gate = await checkRegistrationGate(intent.eventSlug, intent.passId)
   if (!gate.allowed) {
-    captureFinancialError('gate_blocked_after_capture', { scope: `settleCaptured.${source}.gate_blocked`, orderId, paymentId, reason: gate.reason })
-    await markPaymentIntentFailed(orderId, gate.reason)
-    await refundInFull(orderId, paymentId, intent.amount, `gate_blocked:${gate.reason}`, {
-      eventSlug: intent.eventSlug, attendeeEmail: intent.attendee.email,
-    })
-    return { kind: 'refunded', reason: gate.reason ?? 'gate_blocked', gateBlocked: true }
+    // RECOVERY BYPASS #2 — and ONLY for timing. A recovery is not a new purchase: the money
+    // was taken while the window was open, so refunding it now because the sales/registration
+    // date has since elapsed would punish the attendee for our own missed settlement.
+    //
+    // Deliberately narrow. Any OTHER refusal — cancelled, postponed, taken down, capacity or
+    // pass full, invite-code — still stops the settlement. It is reported rather than
+    // refunded, because auto-refunding an already-captured legitimate payment for a
+    // substantive reason is an operator decision, not this function's to make.
+    const TIMING_ONLY = new Set([
+      'REGISTRATION_NOT_OPEN', 'REGISTRATION_CLOSED', 'PASS_SALES_NOT_OPEN', 'PASS_SALES_ENDED',
+    ])
+    if (!(isRecovery && gate.reason && TIMING_ONLY.has(gate.reason))) {
+      if (isRecovery) {
+        captureFinancialError('recovery_gate_blocked', { scope: `settleCaptured.${source}.recovery_blocked`, orderId, paymentId, reason: gate.reason })
+        return { kind: 'deferred', reason: `recovery_blocked:${gate.reason ?? 'gate_blocked'}` }
+      }
+      captureFinancialError('gate_blocked_after_capture', { scope: `settleCaptured.${source}.gate_blocked`, orderId, paymentId, reason: gate.reason })
+      await markPaymentIntentFailed(orderId, gate.reason)
+      await refundInFull(orderId, paymentId, intent.amount, `gate_blocked:${gate.reason}`, {
+        eventSlug: intent.eventSlug, attendeeEmail: intent.attendee.email,
+      })
+      return { kind: 'refunded', reason: gate.reason ?? 'gate_blocked', gateBlocked: true }
+    }
   }
 
   const normEmail = intent.attendee.email
