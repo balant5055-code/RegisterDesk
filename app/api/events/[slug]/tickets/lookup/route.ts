@@ -27,10 +27,16 @@
 // path that reads a registration without the eventSlug filter.
 //
 // ═══ WHAT IS RETURNED ════════════════════════════════════════════════════════
-// A deliberately tiny projection: attendee name, ticket code, pass name, event name, and a
-// freshly minted download capability. Email, phone, uid, organizerUid, amount, payment
-// status, coupon and the raw document never leave the server — a correct guess must not
-// become a way to read somebody's contact details.
+// ALWAYS a LIST of tickets, even when there is one. A shared family number legitimately
+// maps to several registrations, and a single-ticket response shape would force this
+// route to pick one of them — so the shape itself removes the possibility. Each entry
+// carries its own capability, so a family downloads three tickets rather than three
+// copies of whichever happened to sort first.
+//
+// Each entry is a deliberately tiny projection: attendee name, ticket code, pass name,
+// event name, and a freshly minted download capability. Email, phone, uid, organizerUid,
+// amount, payment status, coupon and the raw document never leave the server — a correct
+// guess must not become a way to read somebody's contact details.
 //
 // ═══ ENUMERATION ═════════════════════════════════════════════════════════════
 // Every miss returns the SAME payload. "No such ticket code", "that code belongs to another
@@ -64,16 +70,10 @@ export interface TicketLookupResult {
 }
 
 export type TicketLookupResponse =
-  | { success: true;  ticket: TicketLookupResult }
-  /** Identity proved, but this registration has no ticket to hand out. */
+  /** One entry per CONFIRMED registration matched. Never empty on success. */
+  | { success: true;  tickets: TicketLookupResult[] }
+  /** Identity proved, but nothing matched is confirmed, so there is no ticket. */
   | { success: false; found: true;  reason: string }
-  /**
-   * The mobile number matches SEVERAL registrations at this event — a family or a team
-   * that shared one number. Picking one would be a coin toss that hands somebody the wrong
-   * person's ticket, so the caller is asked to disambiguate with the Ticket ID instead.
-   * Deliberately carries NO names or codes: the caller has proved nothing yet.
-   */
-  | { success: false; ambiguous: true; matches: number; reason: string }
   /** Uniform miss — deliberately says nothing about which identifier was wrong. */
   | { success: false; found: false; reason: string }
 
@@ -167,6 +167,26 @@ async function findByPhone(
   return snap.docs.map(d => ({ id: d.id, data: d.data() as RegistrationDocument }))
 }
 
+/**
+ * The ONLY shape that leaves this route.
+ *
+ * Extracted so a multi-result response cannot accidentally acquire a wider projection
+ * than a single one — every ticket returned, however many, is built here.
+ */
+function toResult(id: string, d: RegistrationDocument, slug: string): TicketLookupResult {
+  return {
+    attendeeName: d.attendee?.name ?? '',
+    ticketCode:   d.ticketCode ?? '',
+    passName:     d.passName ?? '',
+    eventName:    d.eventName ?? '',
+    eventSlug:    slug,
+    // Reuses the EXISTING ticket PDF route and its HMAC capability — no second ticket
+    // renderer, and no new authorization path to get wrong. Each ticket gets its OWN
+    // capability, scoped to its own registration id.
+    downloadUrl:  `/api/tickets/${encodeURIComponent(id)}/pdf?token=${signTicketToken(id)}`,
+  }
+}
+
 /** Statuses that legitimately hold an admission ticket. */
 const TICKETED_STATUSES = new Set(['confirmed'])
 
@@ -202,58 +222,44 @@ export async function POST(req: NextRequest, { params }: Params): Promise<NextRe
     return NextResponse.json({ success: false, found: false, reason: NO_MATCH }, { status: 400 })
   }
 
-  let match: { id: string; data: RegistrationDocument } | null = null
+  let candidates: Array<{ id: string; data: RegistrationDocument }> = []
 
   if (idRaw) {
-    // The identifier is the strong factor, so it decides WHICH registration. A mobile
-    // supplied alongside it must agree — it can only narrow, never redirect.
-    match = await findRegistration(slug, idRaw)
-    if (match && mobileRaw && !phoneMatches(match.data.attendee?.phone, mobileRaw)) match = null
+    // The identifier is the strong factor, so it decides WHICH registration — at most one.
+    // A mobile supplied alongside it must agree: it can narrow, never redirect.
+    const match = await findRegistration(slug, idRaw)
+    const agrees = !!match && (!mobileRaw || phoneMatches(match.data.attendee?.phone, mobileRaw))
+    if (match && agrees) candidates = [match]
   } else {
-    const byPhone = await findByPhone(slug, mobileRaw)
-    if (byPhone.length > 1) {
-      // Do NOT choose. One number, several people — the Ticket ID is the only thing that
-      // says which of them is asking.
-      return NextResponse.json(
-        {
-          success: false, ambiguous: true, matches: byPhone.length,
-          reason: 'Several registrations use this mobile number for this event. Enter your Ticket ID to download the right ticket.',
-        },
-        { status: 409 },
-      )
-    }
-    match = byPhone[0] ?? null
+    // One number may legitimately cover a family or a team. ALL of them are returned
+    // below; nothing here picks a winner.
+    candidates = await findByPhone(slug, mobileRaw)
   }
 
   // ONE response for every failure mode below this line.
-  if (!match) {
+  if (!candidates.length) {
     return NextResponse.json({ success: false, found: false, reason: NO_MATCH }, { status: 404 })
   }
 
+  // Only a confirmed registration holds an admission ticket. Filtering here rather than
+  // at the query keeps the status message available for the case below.
+  const ticketed = candidates.filter(c => TICKETED_STATUSES.has(c.data.status))
+
   // Identity is proved from here on, so a specific answer is help rather than a leak.
-  if (!TICKETED_STATUSES.has(match.data.status)) {
+  if (!ticketed.length) {
     return NextResponse.json(
       {
         success: false, found: true,
-        reason: `This registration is ${match.data.status}, so there is no ticket to download. Please contact the organizer.`,
+        reason: candidates.length === 1
+          ? `This registration is ${candidates[0].data.status}, so there is no ticket to download. Please contact the organizer.`
+          : 'None of the registrations for this mobile number are confirmed, so there is no ticket to download. Please contact the organizer.',
       },
       { status: 409 },
     )
   }
 
-  // Reuses the EXISTING ticket PDF route and its HMAC capability — no second ticket
-  // renderer, and no new authorization path to get wrong.
-  const token = signTicketToken(match.id)
-
   return NextResponse.json({
     success: true,
-    ticket: {
-      attendeeName: match.data.attendee?.name ?? '',
-      ticketCode:   match.data.ticketCode ?? '',
-      passName:     match.data.passName ?? '',
-      eventName:    match.data.eventName ?? '',
-      eventSlug:    slug,
-      downloadUrl:  `/api/tickets/${encodeURIComponent(match.id)}/pdf?token=${token}`,
-    },
+    tickets: ticketed.map(c => toResult(c.id, c.data, slug)),
   })
 }

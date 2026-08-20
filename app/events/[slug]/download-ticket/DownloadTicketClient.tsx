@@ -4,9 +4,11 @@
 //
 // EITHER identifier is enough. They are not equally strong and the copy does not pretend
 // otherwise: a ticket code is crypto-random and unguessable, so possession is proof; a
-// mobile number is merely something the attendee knows. When one number covers several
-// registrations the server refuses to guess and asks for the Ticket ID — handled below as
-// a first-class state rather than an error, because it is the common family case.
+// mobile number is merely something the attendee knows.
+//
+// Results are ALWAYS a list. One number legitimately covers a family or a team, and every
+// matching confirmed ticket is shown with its own download button — the attendee chooses,
+// nothing is picked for them, and nothing downloads automatically.
 //
 // Everything rendered here comes from the lookup API's six-field projection. No email,
 // phone, payment or organizer field is available to this component even if it wanted one.
@@ -29,9 +31,7 @@ export function DownloadTicketClient({ slug, eventName }: { slug: string; eventN
   const [mobile,   setMobile]   = useState('')
   const [loading,  setLoading]  = useState(false)
   const [error,    setError]    = useState<string | null>(null)
-  const [ticket,   setTicket]   = useState<TicketLookupResult | null>(null)
-  /** Set when one mobile number covers several registrations — ask for the Ticket ID. */
-  const [needsId,  setNeedsId]  = useState(false)
+  const [tickets,  setTickets]  = useState<TicketLookupResult[]>([])
 
   // EITHER field enables the button. Requiring both would block the attendee who has only
   // their ticket code — the exact person this page exists for.
@@ -42,8 +42,7 @@ export function DownloadTicketClient({ slug, eventName }: { slug: string; eventN
     if (!ready || loading) return
     setLoading(true)
     setError(null)
-    setTicket(null)
-    setNeedsId(false)
+    setTickets([])
     try {
       const res  = await fetch(`/api/events/${encodeURIComponent(slug)}/tickets/lookup`, {
         method:  'POST',
@@ -51,13 +50,10 @@ export function DownloadTicketClient({ slug, eventName }: { slug: string; eventN
         body:    JSON.stringify({ ticketId: ticketId.trim(), mobile: mobile.trim() }),
       })
       const data = await res.json() as TicketLookupResponse
-      if (data.success) setTicket(data.ticket)
+      if (data.success) setTickets(data.tickets)
       // The server decides the wording. The client never invents a reason, so it cannot
       // accidentally distinguish "no such ticket" from "wrong mobile".
-      else {
-        setError(data.reason)
-        if ('ambiguous' in data && data.ambiguous) setNeedsId(true)
-      }
+      else setError(data.reason)
     } catch {
       setError('Something went wrong. Please check your connection and try again.')
     } finally {
@@ -137,12 +133,6 @@ export function DownloadTicketClient({ slug, eventName }: { slug: string; eventN
           </p>
         )}
 
-        {needsId && (
-          <p className="mt-3 rounded-lg bg-[rgb(var(--primary-rgb)_/_0.06)] px-3 py-2 text-center text-fs-2xs leading-relaxed text-foreground">
-            That number is used by more than one registration. Add your Ticket ID above and
-            search again.
-          </p>
-        )}
       </form>
 
       {error && (
@@ -155,41 +145,56 @@ export function DownloadTicketClient({ slug, eventName }: { slug: string; eventN
         </div>
       )}
 
-      {ticket && (
-        <div className="mt-6 overflow-hidden rounded-2xl border border-border bg-card shadow-sm">
-          <div className="flex items-center gap-2 border-b border-border bg-emerald-500/10 px-5 py-3 text-fs-sm font-semibold text-emerald-700 dark:text-emerald-400">
-            <CheckCircle2 className="size-4" aria-hidden /> Ticket found
-          </div>
+      {tickets.length > 0 && (
+        <section className="mt-6" aria-live="polite">
+          <h2 className="mb-3 text-fs-md font-semibold text-foreground">
+            {tickets.length === 1 ? 'Ticket found' : `Tickets found (${tickets.length})`}
+          </h2>
 
-          <dl className="divide-y divide-border">
-            {([
-              ['Name',   ticket.attendeeName],
-              ['Ticket', ticket.ticketCode],
-              ['Pass',   ticket.passName],
-              ['Event',  ticket.eventName],
-            ] as const).filter(([, v]) => !!v).map(([label, value]) => (
-              <div key={label} className="flex items-baseline justify-between gap-4 px-5 py-3">
-                <dt className="text-fs-2xs font-semibold uppercase tracking-wider text-muted-foreground">{label}</dt>
-                <dd className="text-right text-fs-sm font-medium text-foreground">{value}</dd>
-              </div>
-            ))}
-          </dl>
-
-          <div className="px-5 pb-5 pt-4">
-            {/* Points at the EXISTING ticket PDF route, carrying the capability the server
-                minted. No second ticket renderer, and no download path that skips the
-                identity check that produced this token. */}
-            <a
-              href={ticket.downloadUrl}
-              className={cn(buttonVariants({ size: 'lg' }), 'w-full gap-2')}
-            >
-              <Download className="size-4" aria-hidden /> Download Ticket (PDF)
-            </a>
-            <p className="mt-2.5 text-center text-fs-2xs text-muted-foreground">
-              Having trouble? Contact the event organizer.
+          {tickets.length > 1 && (
+            <p className="mb-3 text-fs-2xs leading-relaxed text-muted-foreground">
+              This mobile number is registered for more than one person. Download each
+              ticket separately.
             </p>
-          </div>
-        </div>
+          )}
+
+          <ul className="space-y-3">
+            {tickets.map(t => (
+              <li key={t.ticketCode || t.downloadUrl} className="overflow-hidden rounded-2xl border border-border bg-card shadow-sm">
+                <div className="flex items-center gap-2 border-b border-border bg-emerald-500/10 px-5 py-2.5 text-fs-2xs font-semibold uppercase tracking-wider text-emerald-700 dark:text-emerald-400">
+                  <CheckCircle2 className="size-3.5" aria-hidden /> Confirmed
+                </div>
+
+                <div className="px-5 pt-4">
+                  {/* The NAME leads: with several tickets on screen it is the only thing
+                      that tells a parent which child they are downloading for. */}
+                  <p className="text-fs-md font-semibold text-foreground">{t.attendeeName}</p>
+                  <dl className="mt-2 space-y-1">
+                    {([['Ticket ID', t.ticketCode], ['Pass', t.passName], ['Event', t.eventName]] as const)
+                      .filter(([, v]) => !!v)
+                      .map(([label, value]) => (
+                        <div key={label} className="flex items-baseline gap-2 text-fs-sm">
+                          <dt className="text-muted-foreground">{label}:</dt>
+                          <dd className="font-medium text-foreground">{value}</dd>
+                        </div>
+                      ))}
+                  </dl>
+                </div>
+
+                <div className="px-5 pb-5 pt-4">
+                  {/* Its OWN capability, scoped to its own registration — see toResult. */}
+                  <a href={t.downloadUrl} className={cn(buttonVariants({ size: 'lg' }), 'w-full gap-2')}>
+                    <Download className="size-4" aria-hidden /> Download Ticket
+                  </a>
+                </div>
+              </li>
+            ))}
+          </ul>
+
+          <p className="mt-3 text-center text-fs-2xs text-muted-foreground">
+            Having trouble? Contact the event organizer.
+          </p>
+        </section>
       )}
     </div>
   )

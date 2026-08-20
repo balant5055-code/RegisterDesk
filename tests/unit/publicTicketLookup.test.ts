@@ -4,9 +4,10 @@
 // that matter most are the ones that try to get somebody else's.
 //
 // EITHER identifier is accepted. The ticket code carries the security (crypto-random,
-// 29^8 combinations) while the mobile number carries the convenience, and when a number
-// covers several people the server refuses to choose. Cross-event access, the six-field
-// projection and the uniform miss are unchanged and still the load-bearing guarantees.
+// 29^8 combinations) while the mobile number carries the convenience. A shared number
+// returns EVERY matching confirmed ticket rather than one of them — the response shape is
+// a list precisely so that no code path can pick a winner. Cross-event access, the
+// six-field projection and the uniform miss remain the load-bearing guarantees.
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { NextRequest } from 'next/server'
@@ -94,6 +95,13 @@ const call = async (slug: string, body: unknown) => {
 
 const SLUG = 'noyyal-marathon-2026'
 
+/** Every success is a list now; this reads the one entry a single-match lookup returns. */
+const only = (body: Record<string, unknown>) => {
+  const list = body.tickets as Array<Record<string, string>> | undefined
+  if (!list || list.length !== 1) throw new Error(`expected exactly 1 ticket, got ${list?.length ?? 'none'}`)
+  return list[0]
+}
+
 beforeEach(() => { REGS = [reg()]; limited = false })
 
 // ─── The happy path ───────────────────────────────────────────────────────────
@@ -103,7 +111,7 @@ describe('a valid lookup returns that attendee\'s ticket', () => {
     const r = await call(SLUG, { ticketId: 'RD-AAAA1111', mobile: '+91 99168 03664' })
     expect(r.status).toBe(200)
     expect(r.body.success).toBe(true)
-    const t = r.body.ticket as Record<string, string>
+    const t = only(r.body)
     expect(t.attendeeName).toBe('Alice R')
     expect(t.ticketCode).toBe('RD-AAAA1111')
   })
@@ -126,7 +134,7 @@ describe('a valid lookup returns that attendee\'s ticket', () => {
 
   it('hands back the EXISTING ticket PDF route with a signed capability', async () => {
     // No second ticket renderer, and no download path that skips the identity check.
-    const t = (await call(SLUG, { ticketId: 'RD-AAAA1111', mobile: '9916803664' })).body.ticket as Record<string, string>
+    const t = only((await call(SLUG, { ticketId: 'RD-AAAA1111', mobile: '9916803664' })).body)
     expect(t.downloadUrl).toBe('/api/tickets/reg-alice/pdf?token=signed-reg-alice')
   })
 })
@@ -204,7 +212,7 @@ describe('misses are indistinguishable from each other', () => {
 describe('the response exposes nothing beyond the ticket', () => {
   it('a successful lookup returns SIX fields and no contact or payment data', async () => {
     const r = await call(SLUG, { ticketId: 'RD-AAAA1111', mobile: '9916803664' })
-    const t = r.body.ticket as Record<string, unknown>
+    const t = only(r.body)
     expect(Object.keys(t).sort()).toEqual(
       ['attendeeName', 'downloadUrl', 'eventName', 'eventSlug', 'passName', 'ticketCode'].sort(),
     )
@@ -217,7 +225,7 @@ describe('the response exposes nothing beyond the ticket', () => {
   it('a miss returns no registration data at all', async () => {
     const r = await call(SLUG, { ticketId: 'RD-AAAA1111', mobile: '9000000000' })
     expect(JSON.stringify(r.body)).not.toContain('Alice')
-    expect(r.body.ticket).toBeUndefined()
+    expect(r.body.tickets).toBeUndefined()
   })
 })
 
@@ -255,7 +263,7 @@ describe('only a ticketed registration yields a ticket', () => {
       // Identity was proved first, so naming the status here is help, not a leak.
       expect(r.body.found).toBe(true)
       expect(String(r.body.reason)).toContain(status)
-      expect(r.body.ticket).toBeUndefined()
+      expect(r.body.tickets).toBeUndefined()
     })
   }
 
@@ -308,7 +316,8 @@ describe('the existing ticket infrastructure is reused', () => {
 
   it('the capability comes from the existing signer', () => {
     expect(route).toContain("from '@/lib/tickets/generate'")
-    expect(route).toContain('signTicketToken(match.id)')
+    // Now inside toResult(), the single place every returned ticket is built.
+    expect(route).toContain('signTicketToken(id)')
   })
 
   it('every registration query is scoped by the URL slug', () => {
@@ -332,7 +341,7 @@ describe('a single identifier is sufficient', () => {
     const r = await call(SLUG, { ticketId: 'RD-AAAA1111' })
     expect(r.status).toBe(200)
     expect(r.body.success).toBe(true)
-    expect((r.body.ticket as Record<string, string>).attendeeName).toBe('Alice R')
+    expect(only(r.body).attendeeName).toBe('Alice R')
   })
 
   it('REGISTRATION ID alone downloads the ticket', async () => {
@@ -367,41 +376,96 @@ describe('a single identifier is sufficient', () => {
   })
 })
 
-// ─── A shared number must never be guessed at ────────────────────────────────
+// ─── A shared number returns EVERY ticket, never a chosen one ────────────────
 
-describe('one mobile, several registrations', () => {
+describe('one mobile, several confirmed registrations', () => {
   const family = () => [
-    reg({ id: 'reg-a', ticketCode: 'RD-AAAA1111', attendee: { name: 'Alice R', phone: '9916803664',    email: 'a@x.com' } }),
-    reg({ id: 'reg-b', ticketCode: 'RD-BBBB2222', attendee: { name: 'Bala R',  phone: '+919916803664', email: 'b@x.com' } }),
+    reg({ id: 'reg-a', ticketCode: 'RD-AAAA1111', passName: '10K', attendee: { name: 'Bala N',  phone: '9916803664',    email: 'a@x.com' } }),
+    reg({ id: 'reg-b', ticketCode: 'RD-BBBB2222', passName: '5K',  attendee: { name: 'Kumar S', phone: '+919916803664', email: 'b@x.com' } }),
   ]
 
-  it('refuses to pick one and asks for the Ticket ID', async () => {
+  it('returns ALL matching confirmed tickets', async () => {
     REGS = family()
+    const r = await call(SLUG, { mobile: '9916803664' })
+    expect(r.status).toBe(200)
+    expect(r.body.success).toBe(true)
+    const list = r.body.tickets as Array<Record<string, string>>
+    expect(list).toHaveLength(2)
+    expect(list.map(t => t.attendeeName).sort()).toEqual(['Bala N', 'Kumar S'])
+    expect(list.map(t => t.ticketCode).sort()).toEqual(['RD-AAAA1111', 'RD-BBBB2222'])
+  })
+
+  it('each ticket carries its OWN download capability', async () => {
+    // A shared capability would let one family member download another's ticket by
+    // swapping the id — the token is bound to the registration it belongs to.
+    REGS = family()
+    const list = (await call(SLUG, { mobile: '9916803664' })).body.tickets as Array<Record<string, string>>
+    const byName = Object.fromEntries(list.map(t => [t.attendeeName, t.downloadUrl]))
+    expect(byName['Bala N']).toBe('/api/tickets/reg-a/pdf?token=signed-reg-a')
+    expect(byName['Kumar S']).toBe('/api/tickets/reg-b/pdf?token=signed-reg-b')
+    expect(new Set(list.map(t => t.downloadUrl)).size).toBe(2)
+  })
+
+  it('NO arbitrary selection — the response shape cannot express one', async () => {
+    REGS = family()
+    const r = await call(SLUG, { mobile: '9916803664' })
+    expect(r.body.ticket).toBeUndefined()          // no single-ticket field exists
+    expect(Array.isArray(r.body.tickets)).toBe(true)
+  })
+
+  it('a single match still returns a ONE-entry list, same shape', async () => {
+    const r = await call(SLUG, { mobile: '9916803664' })
+    expect(Array.isArray(r.body.tickets)).toBe(true)
+    expect((r.body.tickets as unknown[])).toHaveLength(1)
+  })
+
+  it('excludes cancelled and pending members of the same family', async () => {
+    REGS = [
+      ...family(),
+      reg({ id: 'reg-c', ticketCode: 'RD-CCCC3333', status: 'cancelled', attendee: { name: 'Gone',    phone: '9916803664', email: 'c@x.com' } }),
+      reg({ id: 'reg-d', ticketCode: 'RD-DDDD4444', status: 'pending',   attendee: { name: 'Waiting', phone: '9916803664', email: 'd@x.com' } }),
+    ]
+    const list = (await call(SLUG, { mobile: '9916803664' })).body.tickets as Array<Record<string, string>>
+    expect(list).toHaveLength(2)
+    expect(list.map(t => t.attendeeName).sort()).toEqual(['Bala N', 'Kumar S'])
+  })
+
+  it('excludes registrations from ANOTHER EVENT sharing the number', async () => {
+    REGS = [
+      ...family(),
+      reg({ id: 'reg-x', eventSlug: 'elsewhere', ticketCode: 'RD-XXXX9999', attendee: { name: 'Other Event', phone: '9916803664', email: 'x@x.com' } }),
+    ]
+    const list = (await call(SLUG, { mobile: '9916803664' })).body.tickets as Array<Record<string, string>>
+    expect(list).toHaveLength(2)
+    expect(list.map(t => t.attendeeName)).not.toContain('Other Event')
+  })
+
+  it('when NONE of the family is confirmed, no ticket and no names', async () => {
+    REGS = [
+      reg({ id: 'reg-a', status: 'cancelled', attendee: { name: 'Bala N',  phone: '9916803664',    email: 'a@x.com' } }),
+      reg({ id: 'reg-b', status: 'pending',   attendee: { name: 'Kumar S', phone: '+919916803664', email: 'b@x.com' } }),
+    ]
     const r = await call(SLUG, { mobile: '9916803664' })
     expect(r.status).toBe(409)
     expect(r.body.success).toBe(false)
-    expect(r.body.ambiguous).toBe(true)
-    expect(String(r.body.reason)).toMatch(/enter your ticket id/i)
+    expect(r.body.tickets).toBeUndefined()
+    expect(JSON.stringify(r.body)).not.toContain('Bala N')
   })
 
-  it('hands over NO ticket and NO identifying detail while ambiguous', async () => {
+  it('leaks no contact data across a multi-result response', async () => {
     REGS = family()
-    const r = await call(SLUG, { mobile: '9916803664' })
-    expect(r.body.ticket).toBeUndefined()
-    const body = JSON.stringify(r.body)
-    for (const leak of ['Alice', 'Bala', 'RD-AAAA1111', 'RD-BBBB2222', 'a@x.com']) {
-      expect(body, leak).not.toContain(leak)
+    const body = JSON.stringify((await call(SLUG, { mobile: '9916803664' })).body)
+    for (const secret of ['a@x.com', 'b@x.com', '9916803664', 'org-1', 'user-1', '150000']) {
+      expect(body, secret).not.toContain(secret)
     }
   })
 
-  it('the Ticket ID then resolves it unambiguously', async () => {
+  it('the Ticket ID still narrows to exactly one of them', async () => {
     REGS = family()
     const r = await call(SLUG, { ticketId: 'RD-BBBB2222', mobile: '9916803664' })
-    expect(r.body.success).toBe(true)
-    expect((r.body.ticket as Record<string, string>).attendeeName).toBe('Bala R')
+    expect(only(r.body).attendeeName).toBe('Kumar S')
   })
 })
-
 // ─── The button contract the UI implements ───────────────────────────────────
 
 describe('the form enables Find My Ticket on EITHER field', () => {
@@ -420,9 +484,19 @@ describe('the form enables Find My Ticket on EITHER field', () => {
     expect(client).toContain('Enter either field to continue.')
   })
 
-  it('the ambiguous answer is surfaced as its own state, not a dead end', () => {
-    expect(client).toContain("if ('ambiguous' in data && data.ambiguous) setNeedsId(true)")
-    expect(client).toContain('Add your Ticket ID above and')
+  it('renders EVERY returned ticket, each with its own download button', () => {
+    expect(client).toContain('setTickets(data.tickets)')
+    expect(client).toContain('tickets.map(t => (')
+    expect(client).toContain('href={t.downloadUrl}')
+  })
+
+  it('heads the list honestly for one versus many', () => {
+    expect(client).toContain("tickets.length === 1 ? 'Ticket found' : `Tickets found (${tickets.length})`")
+  })
+
+  it('no longer asks for a Ticket ID when a number is shared', () => {
+    expect(client).not.toContain('needsId')
+    expect(client).not.toContain('ambiguous')
   })
 })
 
