@@ -141,6 +141,13 @@ export interface RegisterClientProps {
    * the pass, the price or the submit button. Absent/null ⇒ nothing renders.
    */
   milestoneAlert?:    ResolvedMilestoneAlert | null
+  /**
+   * The EVENT-TOTAL milestone. Independent of the selected pass — the event-wide count does
+   * not change when the attendee switches pass, so unlike `milestoneAlert` this one stays
+   * valid across a switch and is rendered unconditionally when present. Informational only:
+   * it has no `showOnSelection`, opens no dialog, and gates nothing.
+   */
+  eventMilestoneAlert?: ResolvedMilestoneAlert | null
   sections:           FormSection[]
   conditionalRules:   ConditionalRule[]
   approvalMode:       'auto' | 'manual'
@@ -632,6 +639,7 @@ export function RegisterClient({
   passes,
   initialPassId,
   milestoneAlert = null,
+  eventMilestoneAlert = null,
   sections,
   conditionalRules,
   approvalMode,
@@ -1990,6 +1998,9 @@ export function RegisterClient({
           )}
 
           {/* Booking Milestone Alert — presentation only; never gates the form. */}
+          {/* EVENT-TOTAL milestone — pass-independent, so no `milestoneVisible` guard: it stays
+              correct whichever pass is selected. Presentation only. */}
+          <MilestoneNotice alert={eventMilestoneAlert} className="mb-3 mt-0" />
           {milestoneVisible && <MilestoneNotice alert={milestoneAlert} className="mb-3 mt-0" />}
 
           {/* H-7: in-form pass switcher — change pass without losing entered data */}

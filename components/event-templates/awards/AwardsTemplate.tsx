@@ -28,6 +28,7 @@ import { SharedGallery }       from '@/components/event-templates/shared/media/S
 
 export function AwardsTemplate(props: EventDetailProps) {
   const {
+    eventMilestoneAlert,
     slug, lifecycleStatus: ls, cancelReason,
     registrationOpen, regClosedMessage,
     title, tagline, description,
@@ -231,6 +232,7 @@ export function AwardsTemplate(props: EventDetailProps) {
           isFreeEvent={isFreeEvent}
           slug={slug}
           availability={availability}
+          eventMilestoneAlert={eventMilestoneAlert}
           registrationOpen={registrationOpen}
           closedMessage={regClosedMessage}
         />

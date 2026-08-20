@@ -361,6 +361,7 @@ function CulturalSection({ td }: { td: CulturalDetails }) {
 
 export function EventDetailClient(props: EventDetailProps) {
   const {
+    eventMilestoneAlert,
     slug, lifecycleStatus: ls, cancelReason,
     eventType, eventSubtype,
     registrationOpen, regClosedMessage,
@@ -694,6 +695,7 @@ export function EventDetailClient(props: EventDetailProps) {
                   isFreeEvent={isFreeEvent}
                   slug={slug}
                   availability={availability}
+                  eventMilestoneAlert={eventMilestoneAlert}
                   registrationOpen={registrationOpen}
                   closedMessage={regClosedMessage}
                 />

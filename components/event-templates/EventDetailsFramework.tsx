@@ -151,7 +151,7 @@ function ComposedBody({
     title, tagline, description, bannerUrl, gallery, promoVideoUrl,
     startDate, startTime, endDate, endTime,
     venueType, physical, online, venueName, mapsLink, venueMaps, showVenueMap,
-    isFreeEvent, passes, availability,
+    isFreeEvent, passes, availability, eventMilestoneAlert,
     sponsors, organizer, showOrg, showSocial, speakers,
     showSponsors, showAgenda, showGallery, showSpeakers,
     agenda, supportEmail, lifecycleStatus: ls,
@@ -192,6 +192,7 @@ function ComposedBody({
         isFreeEvent={isFreeEvent}
         slug={slug}
         availability={availability}
+        eventMilestoneAlert={eventMilestoneAlert}
         registrationOpen={registrationOpen}
         closedMessage={regClosedMessage}
       />

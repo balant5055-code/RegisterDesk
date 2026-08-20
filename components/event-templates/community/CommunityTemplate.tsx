@@ -43,6 +43,7 @@ function fmtTime(t: string) {
 
 export function CommunityTemplate(props: EventDetailProps) {
   const {
+    eventMilestoneAlert,
     slug, lifecycleStatus: ls, cancelReason,
     registrationOpen, regClosedMessage,
     description,
@@ -293,6 +294,7 @@ export function CommunityTemplate(props: EventDetailProps) {
         isFreeEvent={isFreeEvent}
         slug={slug}
         availability={availability}
+        eventMilestoneAlert={eventMilestoneAlert}
         registrationOpen={registrationOpen}
         closedMessage={regClosedMessage}
       />

@@ -366,6 +366,20 @@ export default async function RegisterPage({
     gate.availability?.passCount,
   )
 
+  // ── Event-TOTAL milestone (informational) ───────────────────────────────────
+  // `checkRegistrationGate` already read the registration counter to enforce capacity, and
+  // `availability.eventTotalCount` is the event-wide confirmed total it derived — so this
+  // costs no additional Firestore read. Never a sum of per-pass counts.
+  //
+  // Resolved AFTER the gate allowed the attendee, exactly like the per-pass alert, and it
+  // gates nothing itself. Unlike the per-pass notice this one is INDEPENDENT of the selected
+  // pass: the event total does not change when the attendee switches pass in-form, so it
+  // stays correct across a switch and needs no re-resolution.
+  const eventMilestoneAlert = resolveMilestoneAlert(
+    rawPricing?.eventMilestoneAlerts as MilestoneAlert[] | undefined,
+    gate.availability?.eventTotalCount,
+  )
+
   // Build form config from the denormalized registrationForm
   const form = event.registrationForm
   let sections: FormSection[] = []
@@ -464,6 +478,7 @@ export default async function RegisterPage({
         }))}
         initialPassId={pass.id}
         milestoneAlert={milestoneAlert}
+        eventMilestoneAlert={eventMilestoneAlert}
         sections={sections}
         conditionalRules={conditionalRules}
         approvalMode={approvalMode}

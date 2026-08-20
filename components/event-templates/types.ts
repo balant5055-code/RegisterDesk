@@ -151,6 +151,14 @@ export interface EventDetailProps {
   isFreeEvent:      boolean
   passes:           PassPublic[]
   availability:     Record<string, PassAvailability>
+  /**
+   * The EVENT-TOTAL milestone notice currently showing, already resolved on the server from
+   * `registrationCounters.totalCount`. Rendered once, above the pass list — it belongs to the
+   * event, not to any pass, so it stays valid whichever pass the attendee is looking at.
+   * Only the resolved message crosses to the client; the raw count and the organizer's
+   * threshold configuration never leave the server. Absent ⇒ no notice.
+   */
+  eventMilestoneAlert?: ResolvedMilestoneAlert | null
   speakers:         Speaker[]
   sponsors:         Sponsor[]
   showSpeakers:      boolean

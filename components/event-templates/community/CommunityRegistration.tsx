@@ -11,6 +11,7 @@ import type { PassAvailability } from '@/lib/registrations/types'
 import { formatINR, formatDateShort, passDisplayPrice } from '@/components/event-templates/shared/utils/format'
 import { organizerFeaturedPassId } from '@/components/event-templates/shared/utils/featuredPass'
 import { MilestoneNotice } from '@/components/event-templates/shared/registration/MilestoneNotice'
+import type { ResolvedMilestoneAlert } from '@/lib/events/milestoneAlerts'
 
 const PASS_ACCENTS = [
   'from-rose-400 to-pink-500',
@@ -20,12 +21,14 @@ const PASS_ACCENTS = [
 ]
 
 export function CommunityRegistration({
-  passes, isFreeEvent, slug, availability, registrationOpen, closedMessage,
+  passes, isFreeEvent, slug, availability, eventMilestoneAlert, registrationOpen, closedMessage,
 }: {
   passes:           PassPublic[]
   isFreeEvent:      boolean
   slug:             string
   availability:     Record<string, PassAvailability>
+  /** EVENT-TOTAL milestone, resolved server-side. Absent ⇒ nothing renders. */
+  eventMilestoneAlert?: ResolvedMilestoneAlert | null
   registrationOpen: boolean
   closedMessage:    string
 }) {
@@ -168,6 +171,8 @@ export function CommunityRegistration({
         {/* Multiple passes */}
         {registrationOpen && visiblePasses.length > 0 && !singleFreePass && (
           <>
+            {/* EVENT-TOTAL milestone — one notice for the whole event, above the pass list. */}
+            <MilestoneNotice alert={eventMilestoneAlert} className="mb-4 mt-0" />
             <div className={`grid gap-4 ${
               visiblePasses.length <= 2
                 ? 'sm:grid-cols-2'

@@ -27,6 +27,7 @@ import { SharedGallery }        from '@/components/event-templates/shared/media/
 
 export function WorkshopTemplate(props: EventDetailProps) {
   const {
+    eventMilestoneAlert,
     slug,
     registrationOpen, regClosedMessage,
     title, tagline, description,
@@ -200,6 +201,7 @@ export function WorkshopTemplate(props: EventDetailProps) {
         isFreeEvent={isFreeEvent}
         slug={slug}
         availability={availability}
+        eventMilestoneAlert={eventMilestoneAlert}
         registrationOpen={registrationOpen}
         closedMessage={regClosedMessage}
       />

@@ -10,6 +10,7 @@ import { AvailabilityBadge } from '@/components/event-templates/shared/registrat
 import { passDisplayPrice } from '@/components/event-templates/shared/utils/format'
 import { resolveFeaturedPassId } from '@/components/event-templates/shared/utils/featuredPass'
 import { MilestoneNotice } from '@/components/event-templates/shared/registration/MilestoneNotice'
+import type { ResolvedMilestoneAlert } from '@/lib/events/milestoneAlerts'
 
 // ─── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -30,6 +31,8 @@ interface ExhibitionPassesProps {
   isFreeEvent:      boolean
   slug:             string
   availability:     Record<string, PassAvailability>
+  /** EVENT-TOTAL milestone, resolved server-side. Absent ⇒ nothing renders. */
+  eventMilestoneAlert?: ResolvedMilestoneAlert | null
   registrationOpen: boolean
   closedMessage?:   string
 }
@@ -37,7 +40,7 @@ interface ExhibitionPassesProps {
 // ─── Component ─────────────────────────────────────────────────────────────────
 
 export function ExhibitionPasses({
-  passes, isFreeEvent, slug, availability, registrationOpen, closedMessage,
+  passes, isFreeEvent, slug, availability, eventMilestoneAlert, registrationOpen, closedMessage,
 }: ExhibitionPassesProps) {
   const visible = passes.filter(p => {
     if (p.status === 'inactive') return false
@@ -92,6 +95,8 @@ export function ExhibitionPasses({
         )}
 
         {/* Pass cards */}
+        {/* EVENT-TOTAL milestone — one notice for the whole event, above the pass list. */}
+        <MilestoneNotice alert={eventMilestoneAlert} className="mb-4 mt-0" />
         <div className={`grid grid-cols-1 gap-4 ${gridClass}`}>
           {visible.map((pass, i) => {
             const isFree      = isFreeEvent || pass.price === 0

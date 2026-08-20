@@ -11,6 +11,7 @@ import { AvailabilityBadge } from '@/components/event-templates/shared/registrat
 import { passDisplayPrice } from '@/components/event-templates/shared/utils/format'
 import { organizerFeaturedPassId } from '@/components/event-templates/shared/utils/featuredPass'
 import { MilestoneNotice } from '@/components/event-templates/shared/registration/MilestoneNotice'
+import type { ResolvedMilestoneAlert } from '@/lib/events/milestoneAlerts'
 
 // ─── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -33,6 +34,8 @@ interface ConferenceTicketsProps {
   isFreeEvent:      boolean
   slug:             string
   availability:     Record<string, PassAvailability>
+  /** EVENT-TOTAL milestone, resolved server-side. Absent ⇒ nothing renders. */
+  eventMilestoneAlert?: ResolvedMilestoneAlert | null
   registrationOpen: boolean
   closedMessage:    string
 }
@@ -40,7 +43,7 @@ interface ConferenceTicketsProps {
 // ─── Component ─────────────────────────────────────────────────────────────────
 
 export function ConferenceTickets({
-  passes, isFreeEvent, slug, availability, registrationOpen, closedMessage,
+  passes, isFreeEvent, slug, availability, eventMilestoneAlert, registrationOpen, closedMessage,
 }: ConferenceTicketsProps) {
   const visible = passes.filter(p => {
     if (p.status === 'inactive') return false
@@ -95,6 +98,8 @@ export function ConferenceTickets({
           </div>
         ) : (
           <>
+            {/* EVENT-TOTAL milestone — one notice for the whole event, above the pass list. */}
+            <MilestoneNotice alert={eventMilestoneAlert} className="mb-4 mt-0" />
             <div className={cn(
               'grid items-stretch gap-5',
               visible.length === 1 ? 'mx-auto max-w-sm'
