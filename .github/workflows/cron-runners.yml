@@ -138,3 +138,18 @@ jobs:
           curl -sS -X POST "$CRON_BASE_URL/api/cron/ai-jobs" \
             -H "Authorization: Bearer $CRON_SECRET" \
             --retry 2 --retry-delay 5 --max-time 65 --fail-with-body
+
+      # RD-JOB-CONT-01 — last-resort net for the lease+cursor broadcast runners. A job left
+      # `processing` by a driver that died leaves no trace: `error` stays null and the counts
+      # simply stop, so a 218-recipient campaign sat at 54/218 behind a healthy-looking
+      # progress bar until someone cancelled it by hand. This revives such a job, or after 30
+      # idle minutes fails it with a reason an organizer can act on.
+      #
+      # Runs LAST in the group, after the drivers have had their turn — anything still
+      # stalled by this point has genuinely been missed by both of them.
+      - name: job-reaper (revive or fail stalled broadcast jobs)
+        continue-on-error: true
+        run: |
+          curl -sS -X POST "$CRON_BASE_URL/api/cron/job-reaper" \
+            -H "Authorization: Bearer $CRON_SECRET" \
+            --retry 2 --retry-delay 5 --max-time 65 --fail-with-body

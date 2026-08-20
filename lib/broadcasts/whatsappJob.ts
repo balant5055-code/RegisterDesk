@@ -248,9 +248,27 @@ export function whatsAppBroadcastStrategy(): JobStrategy<WhatsAppBroadcastJob, W
       })
 
       if (status === 'sent') {
-        // Mark sent BEFORE counting — a resumed chunk skips it (no duplicate send).
-        void adminDb.collection(WHATSAPP_BROADCAST_JOBS).doc(job.jobId).collection('recipients').doc(item.__id)
-          .update({ sent: true, ...(messageId ? { wamid: messageId } : {}) }).catch(() => {})
+        // RD-JOB-CONT-01 — mark sent BEFORE counting, and AWAIT it.
+        //
+        // The comment above this line used to claim "before counting" while the write was
+        // `void … .catch(() => {})` — not awaited, failures swallowed. That had to become
+        // true before automatic continuation made resumes routine.
+        //
+        // What a duplicate here actually costs: a second Meta message (a real external
+        // charge) and a second notification to the attendee. It does NOT double-debit the
+        // wallet — the campaign is charged once, upfront, by chargeAndStartCampaign under a
+        // deterministic ledger id, and `perMsgCostPaise` below is a LOG field, not a debit.
+        //
+        // A write failure is reported but the item still counts as SENT: Meta accepted it.
+        // Re-queuing it would guarantee the duplicate this guard exists to avoid.
+        try {
+          await adminDb.collection(WHATSAPP_BROADCAST_JOBS).doc(job.jobId).collection('recipients').doc(item.__id)
+            .update({ sent: true, ...(messageId ? { wamid: messageId } : {}) })
+        } catch (err) {
+          console.error('[whatsapp-broadcast] sent-flag write failed — resume may re-send:', {
+            jobId: job.jobId, recipient: item.__id, err: err instanceof Error ? err.message : err,
+          })
+        }
         return { ok: true }
       }
       return { ok: false, error: errorMsg }

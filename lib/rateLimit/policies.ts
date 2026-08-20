@@ -56,6 +56,14 @@ export const RATE_POLICY = {
   // Grant-authorized photo write, per client IP. The grant already bounds a client to ONE
   // certificate for its lifetime; this only stops a granted client from hammering storage.
   certificatePhotoWrite:  { route: 'certificate-photo-write',  limit: 30, windowMs: HOUR },
+
+  // ─── Public ticket lookup (RD-TICKET-PUB-01) ───────────────────────────────
+  // "Download your ticket", per client IP. Tighter than certificateLookup because a hit
+  // mints a ticket DOWNLOAD capability, and because this endpoint requires TWO matching
+  // identifiers rather than one — a legitimate attendee needs a couple of attempts, never
+  // a dozen. Paired with a uniform no-result response; rate limiting alone cannot stop
+  // enumeration if the answers differ.
+  ticketLookup:    { route: 'ticket-lookup',    limit: 10, windowMs: MIN },
 } as const satisfies Record<string, RatePolicy>
 
 export interface PolicyCheck {
