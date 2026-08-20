@@ -143,6 +143,19 @@ export async function POST(
 
   await logRef.update({
     status:    'sent',
+    // RD-WA-RETRY-02 · CLEAR THE INDETERMINACY FLAG.
+    //
+    // deliveryUnknown records that a PREVIOUS attempt got no verdict from Meta. This attempt
+    // did: the provider returned a wamid. Leaving the flag behind made the row contradict
+    // itself — status 'sent' with an orphaned flag — and effectiveStatus reads the flag
+    // FIRST, so the dashboard kept showing "Unknown" after a retry the organizer had just
+    // been told succeeded. Deleted rather than set false so a row that was never
+    // indeterminate keeps no field at all, exactly as before.
+    //
+    // This says a confirmed message reached the attendee. It does NOT claim the ORIGINAL
+    // attempt was delivered, and it must not: that is still unknowable, which is precisely
+    // why resending it required an explicit confirmation.
+    deliveryUnknown: FieldValue.delete(),
     costPaise: result.costPaise,
     ...(result.messageId ? { providerMessageId: result.messageId } : {}),
     error:     FieldValue.delete(),
