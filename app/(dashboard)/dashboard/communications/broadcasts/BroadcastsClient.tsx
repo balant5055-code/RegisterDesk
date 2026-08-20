@@ -9,6 +9,7 @@ import {
   BROADCAST_STATUS_LABELS,
 } from '@/lib/broadcasts/types'
 import type { BroadcastAudience, BroadcastCampaign, BroadcastStatus } from '@/lib/broadcasts/types'
+import type { RegistrationDateFilterInput, RegistrationDateFilterType } from '@/lib/broadcasts/registrationDateFilter'
 import { TEMPLATE_VARIABLES, SAMPLE_VARS, substituteVariables } from '@/lib/email-templates/types'
 import { WHATSAPP_TEMPLATE_REGISTRY, isSendableMetaStatus } from '@/lib/whatsapp/registry'
 import type { WhatsAppTemplateType } from '@/lib/whatsapp/registry'
@@ -63,6 +64,14 @@ const WA_SAMPLE: Record<string, string> = {
 const WA_TEMPLATE_TYPES = (Object.keys(WHATSAPP_TEMPLATE_REGISTRY) as WhatsAppTemplateType[])
   .filter(t => isOrganizerNotification(t))
   .filter(t => isSendableMetaStatus(WHATSAPP_TEMPLATE_REGISTRY[t].metaStatus))
+// One sentence, correct for 1 and for many. Kept out of the JSX so the warning reads as
+// prose in the source too — this is the line that stops a date filter from lying by omission.
+function undatedNotice(n: number): string {
+  return n === 1
+    ? '1 registration has no registration date and is not included.'
+    : `${n} registrations have no registration date and are not included.`
+}
+
 const humanizeTemplateType = (t: string) =>
   t.toLowerCase().split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')
 
@@ -289,6 +298,14 @@ function ComposeTab({
 
   const [countLoading,    setCountLoading]    = useState(false)
   const [recipientCount,  setRecipientCount]  = useState<number | null>(null)
+  // RD-BCAST-DATE-01 — registration-date audience. 'all' is the default, so a composer
+  // that is never touched sends exactly the audience it sent before this feature existed.
+  const [dateType,        setDateType]        = useState<RegistrationDateFilterType>('all')
+  const [dateSingle,      setDateSingle]      = useState('')
+  const [dateFrom,        setDateFrom]        = useState('')
+  const [dateTo,          setDateTo]          = useState('')
+  // Echoed back by the server: the window it actually counted, and what it could not see.
+  const [dateMeta,        setDateMeta]        = useState<{ timezone: string; dateLabel: string; undatedCount: number } | null>(null)
 
   const [testLoading,     setTestLoading]     = useState(false)
   const [testMsg,         setTestMsg]         = useState<{ ok: boolean; msg: string } | null>(null)
@@ -311,8 +328,24 @@ function ComposeTab({
     setWaLanguage(t ? WHATSAPP_TEMPLATE_REGISTRY[t].language : '')
   }
 
+  // The date filter as the API expects it. ONE builder feeds both the count preview and
+  // the create call, so the audience previewed is the audience billed — the two cannot
+  // drift apart by construction.
+  const registrationDate: RegistrationDateFilterInput =
+    dateType === 'date'  ? { type: 'date',  date: dateSingle }
+    : dateType === 'range' ? { type: 'range', from: dateFrom, to: dateTo }
+    : { type: dateType }
+
+  const dateRangeInverted = dateType === 'range' && !!dateFrom && !!dateTo && dateFrom > dateTo
+
+  // An incomplete custom selection is not a filter yet — don't ask the server to count it.
+  const dateReady =
+    dateType === 'all' || dateType === 'today' || dateType === 'yesterday' ? true
+    : dateType === 'date' ? !!dateSingle
+    : !!dateFrom && !!dateTo && dateFrom <= dateTo
+
   // ── Fetch recipient count (channel-aware — WhatsApp counts phone recipients) ─
-  const fetchCount = useCallback(async (slug: string, aud: BroadcastAudience, ch: BroadcastChannelUI, dedupe: boolean, dedupePhone: boolean) => {
+  const fetchCount = useCallback(async (slug: string, aud: BroadcastAudience, ch: BroadcastChannelUI, dedupe: boolean, dedupePhone: boolean, regDate: RegistrationDateFilterInput) => {
     if (!slug) { setRecipientCount(null); return }
     setCountLoading(true)
     try {
@@ -321,20 +354,29 @@ function ComposeTab({
       const res  = await fetch('/api/organizer/broadcasts/count', {
         method:  'POST',
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-        body:    JSON.stringify({ eventSlug: slug, audience: aud, channel: ch, dedupeEmails: dedupe, dedupePhones: dedupePhone }),
+        body:    JSON.stringify({ eventSlug: slug, audience: aud, channel: ch, dedupeEmails: dedupe, dedupePhones: dedupePhone, registrationDate: regDate }),
       })
-      const data = await res.json() as { success: boolean; count?: number }
-      if (data.success) setRecipientCount(data.count ?? 0)
+      const data = await res.json() as { success: boolean; count?: number; timezone?: string; dateLabel?: string; undatedCount?: number }
+      if (data.success) {
+        setRecipientCount(data.count ?? 0)
+        setDateMeta(data.timezone && data.dateLabel
+          ? { timezone: data.timezone, dateLabel: data.dateLabel, undatedCount: data.undatedCount ?? 0 }
+          : null)
+      }
     } catch { /* silent */ }
     finally { setCountLoading(false) }
   }, [])
 
   useEffect(() => {
     /* eslint-disable react-hooks/set-state-in-effect -- server-sync fetch when event/audience/channel changes */
-    if (eventSlug) void fetchCount(eventSlug, audience, channel, dedupeEmails, dedupePhones)
-    else setRecipientCount(null)
+    if (eventSlug && dateReady) void fetchCount(eventSlug, audience, channel, dedupeEmails, dedupePhones, registrationDate)
+    else if (!eventSlug) { setRecipientCount(null); setDateMeta(null) }
     /* eslint-enable react-hooks/set-state-in-effect */
-    }, [eventSlug, audience, channel, dedupeEmails, dedupePhones, fetchCount])
+    // `registrationDate` is rebuilt on every render, so listing it here would re-fetch in a
+    // loop. Its PRIMITIVE inputs are listed instead — dateType, the single date and both
+    // range endpoints — which is the same information without the identity churn.
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- see above
+    }, [eventSlug, audience, channel, dedupeEmails, dedupePhones, fetchCount, dateReady, dateType, dateSingle, dateFrom, dateTo])
 
   // ── Send test email ──────────────────────────────────────────────────────
   async function handleTest() {
@@ -377,6 +419,9 @@ function ComposeTab({
         audience,
         // Future datetime ⇒ schedule; empty ⇒ send now.
         scheduledFor: scheduleFor ? new Date(scheduleFor).toISOString() : undefined,
+        // The SAME object the preview counted with. The server re-resolves it into absolute
+        // instants and persists those, so a scheduled send cannot re-interpret 'Today'.
+        registrationDate,
       }
       const payload = channel === 'whatsapp'
         ? { ...common, channel: 'whatsapp', templateType: waTemplate, languageCode: waLanguage || undefined, variables: waVars, dedupePhones }
@@ -520,6 +565,84 @@ function ComposeTab({
                       : `${recipientCount.toLocaleString()} recipient${recipientCount !== 1 ? 's' : ''}`
                   }
                 </div>
+              </div>
+              {/* ── Registration date (RD-BCAST-DATE-01) ──────────────────────
+                  An additional restriction on the SAME audience, never a replacement for
+                  it: status eligibility above still decides who is reachable. The default,
+                  "All registrations", adds no constraint at all, so a composer nobody
+                  touches sends exactly what it sent before this existed. */}
+              <div className="mt-3 space-y-2">
+                <label htmlFor="bc-regdate" className="block text-[13px] font-semibold text-foreground">
+                  Registration date
+                </label>
+                <select
+                  id="bc-regdate"
+                  value={dateType}
+                  onChange={e => setDateType(e.target.value as RegistrationDateFilterType)}
+                  className="w-full rounded-xl border border-border bg-background px-3 py-2.5 text-[14px] text-foreground focus:border-primary/50 focus:outline-none focus:ring-2 focus:ring-primary/20"
+                >
+                  <option value="all">All registrations</option>
+                  <option value="today">Today</option>
+                  <option value="yesterday">Yesterday</option>
+                  <option value="date">Custom date</option>
+                  <option value="range">Custom date range</option>
+                </select>
+
+                {dateType === 'date' && (
+                  <input
+                    type="date"
+                    aria-label="Registration date"
+                    value={dateSingle}
+                    onChange={e => setDateSingle(e.target.value)}
+                    className="w-full rounded-lg border border-border bg-background px-2.5 py-1.5 text-[13px] text-foreground focus:border-primary/50 focus:outline-none focus:ring-2 focus:ring-primary/20"
+                  />
+                )}
+
+                {dateType === 'range' && (
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="date"
+                      aria-label="From date"
+                      value={dateFrom}
+                      onChange={e => setDateFrom(e.target.value)}
+                      className="flex-1 rounded-lg border border-border bg-background px-2.5 py-1.5 text-[13px] text-foreground focus:border-primary/50 focus:outline-none focus:ring-2 focus:ring-primary/20"
+                    />
+                    <span className="text-[12px] text-muted-foreground">to</span>
+                    <input
+                      type="date"
+                      aria-label="To date"
+                      value={dateTo}
+                      onChange={e => setDateTo(e.target.value)}
+                      className="flex-1 rounded-lg border border-border bg-background px-2.5 py-1.5 text-[13px] text-foreground focus:border-primary/50 focus:outline-none focus:ring-2 focus:ring-primary/20"
+                    />
+                  </div>
+                )}
+
+                {/* Stated in the timezone the SERVER resolved, never the browser’s — two
+                    operators in different places must read the same window. */}
+                {dateMeta && (
+                  <p className="text-[12px] text-muted-foreground">
+                    Registered on <span className="font-medium text-foreground">{dateMeta.dateLabel}</span>{' '}
+                    ({dateMeta.timezone})
+                  </p>
+                )}
+
+                {/* Firestore cannot return a document that has no registeredAt, so these
+                    would leave the audience with nothing on screen to say so. */}
+                {dateMeta && dateMeta.undatedCount > 0 && (
+                  <p className="flex items-start gap-1.5 rounded-lg bg-amber-500/10 px-2.5 py-2 text-[12px] leading-snug text-amber-700 dark:text-amber-400">
+                    <AlertCircle className="mt-px size-3.5 shrink-0" />
+                    <span>{undatedNotice(dateMeta.undatedCount)}</span>
+                  </p>
+                )}
+
+                {!dateReady && (
+                  <p className="text-[12px] text-muted-foreground">
+                    {dateRangeInverted
+                      ? 'The start date must not be after the end date.'
+                      : 'Pick a date to see the recipient count.'}
+                  </p>
+                )}
               </div>
 
               {/*
