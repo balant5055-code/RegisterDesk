@@ -218,8 +218,26 @@ export function emailBroadcastStrategy(): JobStrategy<EmailBroadcastJob, EmailJo
       })
 
       if (status === 'sent') {
-        void adminDb.collection(EMAIL_BROADCAST_JOBS).doc(job.jobId).collection('recipients').doc(item.__id)
-          .update({ sent: true }).catch(() => {})
+        // RD-JOB-CONT-01 — AWAITED, not fire-and-forget.
+        //
+        // This flag is the ONLY thing standing between a resumed chunk and a second copy
+        // of the same email. It used to be `void … .catch(() => {})`: the write was not
+        // waited for and its failure was swallowed, so an invocation that died between
+        // the send and the write left the recipient unmarked and they were mailed again
+        // on resume. Automatic continuation makes resumes routine rather than rare, so
+        // that window had to close before the chain was switched on.
+        //
+        // A write failure is reported but the item still counts as SENT, because it was:
+        // the attendee has the email. Counting it failed would be a lie and would queue
+        // a retry — the exact duplicate this guards against.
+        try {
+          await adminDb.collection(EMAIL_BROADCAST_JOBS).doc(job.jobId).collection('recipients').doc(item.__id)
+            .update({ sent: true })
+        } catch (err) {
+          console.error('[email-broadcast] sent-flag write failed — resume may re-send:', {
+            jobId: job.jobId, recipient: item.__id, err: err instanceof Error ? err.message : err,
+          })
+        }
         return { ok: true }
       }
       return { ok: false, error: errorMsg }
