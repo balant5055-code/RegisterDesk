@@ -13,6 +13,7 @@ import { authorizeWorkspace }        from '@/lib/team/workspace'
 import { checkDistributedRateLimit } from '@/lib/rateLimit/redis'
 import { emailShell }                from '@/lib/email/templates/base'
 import { substituteVariables, SAMPLE_VARS } from '@/lib/email-templates/types'
+import { renderBroadcastBody }      from '@/lib/broadcasts/renderBody'
 
 interface TestResponse {
   success: boolean
@@ -64,8 +65,16 @@ export async function POST(req: NextRequest): Promise<NextResponse<TestResponse>
   }
 
   const renderedSubject = substituteVariables(subject, SAMPLE_VARS)
-  const renderedBody    = substituteVariables(html,    SAMPLE_VARS, { escapeValues: true })
-  const fullHtml        = emailShell(renderedSubject, renderedBody)
+  // RD-BCAST-FMT-01 — the SAME body renderer the real send uses, so a test email is a
+  // faithful rehearsal rather than a third variant.
+  const renderedBody    = renderBroadcastBody(html, SAMPLE_VARS)
+  // Footer matches a real broadcast: entity line off, platform mark on.
+  //
+  // The unsubscribe link is deliberately NOT passed here. This message goes to the
+  // organizer's own address, and a live link would let them suppress themselves from
+  // their own campaigns with one curious click — a real, hard-to-diagnose outcome from a
+  // button labelled "Send Test". Recipients still get the link; see emailJob.
+  const fullHtml        = emailShell(renderedSubject, renderedBody, undefined, undefined, { hideOwnershipLine: true })
 
   try {
     const result = await notificationEngine.send(NotificationType.CUSTOM_EMAIL, {

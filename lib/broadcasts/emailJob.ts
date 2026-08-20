@@ -23,6 +23,7 @@ import { resolveEventEmailProvider } from '@/lib/email/resolveEventProvider'
 import type { EmailProviderName } from '@/lib/email/providerName'
 import { emailShell }              from '@/lib/email/templates/base'
 import { substituteVariables }     from '@/lib/email-templates/types'
+import { renderBroadcastBody }     from '@/lib/broadcasts/renderBody'
 import { writeEmailLog }           from '@/lib/email-logs/write'
 import { buildUnsubscribeUrl, buildUnsubscribeApiUrl } from '@/lib/email/unsubscribeToken'
 import { resolvePublicBranding }   from '@/lib/branding/service'
@@ -182,8 +183,14 @@ export function emailBroadcastStrategy(): JobStrategy<EmailBroadcastJob, EmailJo
         registrationId: item.registrationId, organizerName: '', eventDate: '', eventLocation: '',
       }
       const renderedSubject = substituteVariables(job.subject, vars)
-      const renderedBody    = substituteVariables(job.html, vars, { escapeValues: true })
-      const fullHtml        = emailShell(renderedSubject, renderedBody, buildUnsubscribeUrl(item.email, job.organizerUid), ctx.emailBranding)
+      // RD-BCAST-FMT-01 — the shared body renderer (line breaks + escaped substitution).
+      // The composer preview and Send Test call this same function, so what the organizer
+      // approved is what the attendee receives.
+      const renderedBody    = renderBroadcastBody(job.html, vars)
+      // hideOwnershipLine: a broadcast is the organizer's voice to their own audience, so
+      // the operating-entity line comes off. "Powered by RegisterDesk" and the visible
+      // unsubscribe link both stay — the latter is what makes this mail honest.
+      const fullHtml        = emailShell(renderedSubject, renderedBody, buildUnsubscribeUrl(item.email, job.organizerUid), ctx.emailBranding, { hideOwnershipLine: true })
       const unsubHeaders: Record<string, string> = {
         'List-Unsubscribe':      `<${buildUnsubscribeApiUrl(item.email, job.organizerUid)}>`,
         'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',

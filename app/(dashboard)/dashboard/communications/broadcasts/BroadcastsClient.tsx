@@ -11,6 +11,10 @@ import {
 import type { BroadcastAudience, BroadcastCampaign, BroadcastStatus } from '@/lib/broadcasts/types'
 import type { RegistrationDateFilterInput, RegistrationDateFilterType } from '@/lib/broadcasts/registrationDateFilter'
 import { TEMPLATE_VARIABLES, SAMPLE_VARS, substituteVariables } from '@/lib/email-templates/types'
+// Both are pure and client-safe. emailShell is already used this way by the email-branding
+// settings preview, so this reuses a proven boundary rather than opening a new one.
+import { renderBroadcastBody } from '@/lib/broadcasts/renderBody'
+import { emailShell } from '@/lib/email/templates/base'
 import { WHATSAPP_TEMPLATE_REGISTRY, isSendableMetaStatus } from '@/lib/whatsapp/registry'
 import type { WhatsAppTemplateType } from '@/lib/whatsapp/registry'
 import { isOrganizerNotification } from '@/lib/notifications/catalog'
@@ -75,27 +79,17 @@ function undatedNotice(n: number): string {
 const humanizeTemplateType = (t: string) =>
   t.toLowerCase().split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')
 
-function buildPreviewHtml(subject: string, body: string): string {
-  return `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>${subject.replace(/</g, '&lt;')}</title>
-<style>
-  *{box-sizing:border-box;margin:0;padding:0}
-  body{background:#f4f4f5;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;padding:20px 8px}
-  .shell{max-width:560px;margin:0 auto;background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.1)}
-  .hdr{background:#e5277e;padding:18px 28px}
-  .hdr span{font-size:11px;font-weight:700;color:#fff;letter-spacing:.14em;text-transform:uppercase;opacity:.9}
-  .body{padding:28px 28px 24px;border:1px solid #e5e7eb;border-top:none}
-  .ftr{background:#f9fafb;border:1px solid #e5e7eb;border-top:none;border-radius:0 0 12px 12px;padding:12px 28px;text-align:center}
-  .ftr span{font-size:11.5px;color:#9ca3af}
-</style>
-</head><body>
-<div class="shell">
-  <div class="hdr"><span>RegisterDesk</span></div>
-  <div class="body">${body}</div>
-  <div class="ftr"><span>Powered by RegisterDesk</span></div>
-</div></body></html>`
-}
+// RD-BCAST-FMT-01 — the hand-rolled preview shell that used to live here is gone.
+//
+// It was a second email design: a <style> block (which real clients strip), div layout
+// instead of the table layout that actually survives Outlook, and a footer showing only
+// "Powered by RegisterDesk". So the preview flattered the result and hid the real footer.
+// The preview now renders through the same emailShell every send uses — see previewHtml.
+//
+// A stand-in href for the preview only. The real send builds a signed per-recipient URL
+// server-side (buildUnsubscribeUrl); that is HMAC + env work which cannot and must not
+// run in the browser. The line is shown because recipients genuinely receive it.
+const PREVIEW_UNSUBSCRIBE_HREF = '#'
 
 function wrapSelection(
   ta: HTMLTextAreaElement,
@@ -464,8 +458,11 @@ function ComposeTab({
 
   // ── Preview ─────────────────────────────────────────────────────────────
   const previewSubject = substituteVariables(subject, SAMPLE_VARS)
-  const previewBody    = substituteVariables(body,    SAMPLE_VARS, { escapeValues: true })
-  const previewHtml    = buildPreviewHtml(previewSubject, previewBody)
+  // Same body renderer and same shell as delivery — the only differences left are the ones
+  // that cannot exist in a browser: a signed unsubscribe URL, and the organizer's saved
+  // white-label branding, which is resolved server-side per send.
+  const previewBody    = renderBroadcastBody(body, SAMPLE_VARS)
+  const previewHtml    = emailShell(previewSubject, previewBody, PREVIEW_UNSUBSCRIBE_HREF, undefined, { hideOwnershipLine: true })
 
   return (
     <>
