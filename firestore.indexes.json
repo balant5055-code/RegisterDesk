@@ -1361,6 +1361,28 @@
       "queryScope": "COLLECTION",
       "fields": [
         {
+          "fieldPath": "eventSlug",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "organizerUid",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "status",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "registeredAt",
+          "order": "ASCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "registrations",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
           "fieldPath": "organizerUid",
           "order": "ASCENDING"
         },

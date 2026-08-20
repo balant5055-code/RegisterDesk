@@ -60,8 +60,11 @@ export interface RegistrationDateFilterRecord {
    * moment the campaign is sent. Afterwards this is the only record that the campaign's
    * audience was smaller than "everyone who registered that day" — without it, the history
    * row would quietly imply complete coverage.
+   *
+   * `null` means the diagnostic could not run — NOT zero. Zero asserts that every
+   * registration in the audience was date-filterable; null admits we never found out.
    */
-  undatedExcluded: number
+  undatedExcluded: number | null
 }
 
 export type RegistrationDateFilterError =
@@ -174,7 +177,7 @@ export function resolveRegistrationDateWindow(
 export function toFilterRecord(
   input:  RegistrationDateFilterInput,
   window: RegistrationDateWindow,
-  undatedExcluded = 0,
+  undatedExcluded: number | null = 0,
 ): RegistrationDateFilterRecord {
   return {
     type:     input.type === 'all' ? 'date' : input.type,

@@ -248,6 +248,9 @@ export async function POST(req: NextRequest): Promise<NextResponse<PostBroadcast
 
   // Counted BEFORE the range is applied — once it is on, undated registrations are
   // invisible to the query and could not be counted at all.
+  // number | null — see countUndatedRegistrations. A failure here no longer aborts the
+  // campaign: the PRIMARY filtered recipient count below is the authoritative audience,
+  // and it is computed by its own query that must succeed on its own merits.
   const undatedCount = dateWindow ? await countUndatedRegistrations(regsQuery) : 0
 
   // The range enters the QUERY, so the cap gate and the cap-bounded load below both see

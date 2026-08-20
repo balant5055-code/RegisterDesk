@@ -30,7 +30,8 @@ interface CountResponse {
    */
   timezone?:     string
   dateLabel?:    string
-  undatedCount?: number
+  /** `null` ⇒ the diagnostic failed; the count is UNKNOWN, not zero. */
+  undatedCount?: number | null
 }
 
 export async function POST(req: NextRequest): Promise<NextResponse<CountResponse>> {
@@ -91,6 +92,8 @@ export async function POST(req: NextRequest): Promise<NextResponse<CountResponse
   // (zero document reads) and is the difference between "not included" and "silently
   // missing". Measured against the audience BEFORE the date range, which is the only
   // query that can still see them.
+  // number | null. A null NEVER becomes 0: the warning would then read "0 registrations
+  // have no registration date", which is a claim we could not make.
   const undatedCount = dateWindow ? await countUndatedRegistrations(query) : 0
 
   // A Firestore `where`, never an in-memory filter — see applyRegistrationDateRange.
