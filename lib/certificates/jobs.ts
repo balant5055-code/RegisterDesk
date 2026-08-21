@@ -301,6 +301,19 @@ export async function processJobChunk(
     budgetMs:    BULK_TIME_BUDGET_MS,
     leaseMs:     BULK_LEASE_MS,
     concurrency: BULK_CONCURRENCY,   // GA-7C S2: bounded intra-page parallelism
+    // RD-CERT-SCALE-01 — the certificate cron now chains itself the moment a chunk yields,
+    // so the yielding worker hands the lease over instead of holding it for another full
+    // BULK_LEASE_MS (120s). Without this the successor always loses the race and issuance
+    // runs at one 45s chunk per 5-minute tick — a 15% duty cycle that cannot finish 10,000
+    // certificates unattended, and that silently depends on an organizer keeping the
+    // dashboard open to go faster.
+    //
+    // Identical opt-in to the broadcast runners, on the same hardened kernel: `yieldingNow`
+    // is the single decision controlling both release and loop exit (D1), and a commit with
+    // `expectedLeaseTag === 0` is fenced before any mutation (D2). Nothing else about the
+    // chunk changes — page size, concurrency, budget, lease, cursor semantics and fencing
+    // are untouched.
+    releaseLeaseOnHandoff: true,
   })
 }
 

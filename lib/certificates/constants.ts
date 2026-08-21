@@ -214,6 +214,23 @@ export const ZIP_SHARD_MAX_FILES = 500
  * a photo-heavy template. 64 MB keeps a shard comfortably inside the 100 MB ceiling that
  * `event-report` (the shard's own asset type) enforces on upload.
  */
+/**
+ * RD-CERT-SCALE-01 · the size a generated certificate PDF is expected to stay within.
+ *
+ * A TARGET, not a limit. Nothing rejects, truncates or re-renders a certificate for exceeding
+ * it — an attendee being denied their certificate because it is 2.1 MB would be a far worse
+ * outcome than a large file. Crossing it emits a structured warning so the cause is visible
+ * while it is still cheap to fix.
+ *
+ * WHY IT MATTERS AT SCALE. Production certificates measured ~5.7 MB average, 8.2 MB peak,
+ * because a raster template is embedded at its native resolution (`drawImage` scales the
+ * DISPLAY, not the stored bytes). At 10,000 attendees that is ~57 GB of downloads instead of
+ * ~15 GB, and roughly six times the wait on congested venue Wi-Fi. The fix is upstream — a
+ * JPEG template instead of a full-resolution PNG — which is exactly what this warning points
+ * an organizer at. `optimizeTemplateUpload` already does that conversion in the browser.
+ */
+export const CERTIFICATE_TARGET_MAX_BYTES = 2 * 1024 * 1024
+
 export const ZIP_SHARD_MAX_BYTES = 64 * 1024 * 1024
 /**
  * Max certificate bytes held in memory at once while building a shard.

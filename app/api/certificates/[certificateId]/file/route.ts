@@ -34,16 +34,25 @@ import { RATE_POLICY, checkPolicy }  from '@/lib/rateLimit/policies'
 type Params = { params: Promise<{ certificateId: string }> }
 
 export async function GET(req: NextRequest, { params }: Params): Promise<NextResponse> {
-  // Per-IP throttle on the stored-PDF fetch/stream (same policy as ticket PDFs).
-  const rl = checkPolicy(getClientIp(req), RATE_POLICY.pdfDownload)
+  const { certificateId } = await params
+
+  // Throttle on the stored-PDF fetch/stream (same policy as ticket PDFs).
+  //
+  // RD-CERT-SCALE-01 — keyed on IP **and** the certificate, not IP alone. A whole venue
+  // shares one NAT address at a live event, so an IP-only bucket refused legitimate attendees
+  // downloading their own certificates. Limit and window are UNCHANGED (60/min): repeatedly
+  // pulling the SAME certificate from one address is still throttled exactly as before, while
+  // a thousand attendees fetching a thousand different certificates no longer collide.
+  //
+  // Moved below the params read because the key needs the id. Nothing above it touches
+  // Firestore or storage — the throttle still precedes every read and every gate.
+  const rl = checkPolicy(`${getClientIp(req)}|${certificateId}`, RATE_POLICY.pdfDownload)
   if (rl.limited) {
     return NextResponse.json(
       { error: 'Too many requests. Please try again shortly.' },
       { status: 429, headers: { 'Retry-After': String(rl.retryAfter) } },
     )
   }
-
-  const { certificateId } = await params
 
   if (!isValidCertificateId(certificateId)) {
     return NextResponse.json({ error: 'Not found' }, { status: 404 })

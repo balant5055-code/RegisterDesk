@@ -304,7 +304,11 @@ describe('the canonical artifact is untouched', () => {
 
 describe('gates and fast paths are unchanged', () => {
   it('rate limit, auth, and download settings all run BEFORE any artifact access', () => {
-    const rl    = pcode.indexOf('checkPolicy(getClientIp(req)')
+    // RD-CERT-SCALE-01 — matched on the CALL, not on the key shape. The throttle is now keyed
+    // on IP + certificateId (a venue behind one NAT was being throttled as one attendee), so
+    // pinning the old IP-only literal would assert the bug rather than the property. The
+    // property — the throttle runs before any artifact access — is unchanged and still checked.
+    const rl    = pcode.indexOf('checkPolicy(')
     const auth  = pcode.indexOf('verifyIdToken')
     const gates = pcode.indexOf('download.enabled')
     const key   = pcode.indexOf('personalizedArtifactKey(cert.eventSlug')

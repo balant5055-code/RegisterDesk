@@ -152,6 +152,8 @@ export function CertificateCenterClient({ slug, eventName }: { slug: string; eve
   // "requested but not yet answered" — which is exactly when a re-render would fire a
   // duplicate POST.
   const sessions = useRef<Set<string>>(new Set())
+  /** Certificate ids with a download in flight. Synchronous twin of `action` — see downloadPdf. */
+  const downloading = useRef<Set<string>>(new Set())
 
   async function lookup(e?: React.FormEvent) {
     e?.preventDefault()
@@ -261,7 +263,21 @@ export function CertificateCenterClient({ slug, eventName }: { slug: string; eve
    * never put in the address bar.
    */
   async function downloadPdf(certificateId: string, href: string) {
-    if (action[certificateId]) return                     // duplicate-click guard
+    // DUPLICATE-CLICK GUARD — synchronous, because `action` is React state.
+    //
+    // `if (action[certificateId]) return` reads a value that only becomes true after a
+    // re-render. Two taps in the same tick — which is what an impatient thumb on a slow venue
+    // connection actually produces — both observe the stale falsy value, both pass, and the
+    // attendee gets two fetches and two saved copies of the same PDF. The `disabled` prop has
+    // the same lag for the same reason.
+    //
+    // This Set is written before the first `await`, so the second call returns immediately.
+    // It is CLEARED in `finally` rather than held forever: the button must come back so a
+    // failed or repeated download is still possible (that is the point of the restore below).
+    // It guards concurrency, not repetition.
+    if (downloading.current.has(certificateId)) return
+    downloading.current.add(certificateId)
+
     setAction(a => ({ ...a, [certificateId]: 'pdf' }))
     setActionMsg(m => ({ ...m, [certificateId]: null }))
 
@@ -292,6 +308,7 @@ export function CertificateCenterClient({ slug, eventName }: { slug: string; eve
       // Revoked on a later tick: Safari cancels an in-flight download if the blob URL is
       // released in the same task as the click.
       if (objectUrl) setTimeout(() => URL.revokeObjectURL(objectUrl!), 60_000)
+      downloading.current.delete(certificateId)
       setAction(a => ({ ...a, [certificateId]: null }))
     }
   }

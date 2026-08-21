@@ -51,16 +51,20 @@ function toISO(val: unknown): string | null {
 }
 
 export async function GET(req: NextRequest, { params }: Params): Promise<NextResponse> {
-  // Per-IP throttle: this route renders a PDF (and may scan drafts) on every hit.
-  const rl = checkPolicy(getClientIp(req), RATE_POLICY.pdfDownload)
+  const { registrationId } = await params
+
+  // RD-CERT-SCALE-01 — keyed on IP **and** the certificate, not IP alone. A whole venue
+  // shares one NAT address at a live event, so an IP-only bucket refused legitimate attendees
+  // downloading their own certificates. Limit and window are UNCHANGED (60/min): repeatedly
+  // pulling the SAME certificate from one address is still throttled exactly as before, while
+  // a thousand attendees fetching a thousand different certificates no longer collide.
+  const rl = checkPolicy(`${getClientIp(req)}|${registrationId}`, RATE_POLICY.pdfDownload)
   if (rl.limited) {
     return NextResponse.json(
       { error: 'Too many requests. Please try again shortly.' },
       { status: 429, headers: { 'Retry-After': String(rl.retryAfter) } },
     )
   }
-
-  const { registrationId } = await params
 
   // Load registration
   const regSnap = await adminDb.collection('registrations').doc(registrationId).get()

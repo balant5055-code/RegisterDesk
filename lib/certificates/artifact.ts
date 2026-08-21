@@ -32,7 +32,7 @@
 // artifact another download serves.
 
 import { storage, buildObjectKey } from '@/features/platform-storage'
-import { ARTIFACT_SIGNED_URL_TTL_S } from './constants'
+import { ARTIFACT_SIGNED_URL_TTL_S, CERTIFICATE_TARGET_MAX_BYTES } from './constants'
 
 /** The canonical object key for a certificate's PDF. Pure; no I/O. */
 export function certificateObjectKey(eventSlug: string, certificateId: string): string {
@@ -70,6 +70,26 @@ export async function uploadCertificateArtifact(
     visibility: 'SIGNED_URL',
     uploadedBy: `certificate:${certificateId}`,
   })
+
+  // RD-CERT-SCALE-01 · size observability. OBSERVE ONLY — the upload has already succeeded
+  // and the certificate is returned unchanged. Issuance must never fail over a size budget:
+  // an attendee denied their certificate because it is 2.1 MB is a worse outcome than a large
+  // file, and the remedy (a JPEG template rather than a full-resolution PNG) belongs upstream
+  // with the organizer, not in the middle of a 10,000-certificate run.
+  //
+  // Logged fields are the object key, the byte size and the target. NOT the attendee name,
+  // email, registration id, event name or any certificate content — this line can appear
+  // thousands of times in one run, and a log that repeats PII at that volume is its own
+  // incident. `certificateId` is already in the key, so nothing extra is disclosed.
+  if (result.metadata.size > CERTIFICATE_TARGET_MAX_BYTES) {
+    console.warn('[certificate-artifact] oversized certificate', {
+      fileKey:    result.metadata.path,
+      bytes:      result.metadata.size,
+      targetBytes: CERTIFICATE_TARGET_MAX_BYTES,
+      overBy:     result.metadata.size - CERTIFICATE_TARGET_MAX_BYTES,
+    })
+  }
+
   return { fileKey: result.metadata.path, fileSize: result.metadata.size }
 }
 

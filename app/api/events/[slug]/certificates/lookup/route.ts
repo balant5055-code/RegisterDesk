@@ -124,14 +124,6 @@ export interface CertificateLookupResponse {
 const EMPTY: CertificateLookupResponse = { results: [] }
 
 export async function POST(req: NextRequest, { params }: Params): Promise<NextResponse> {
-  const rl = checkPolicy(getClientIp(req), RATE_POLICY.certificateLookup)
-  if (rl.limited) {
-    return NextResponse.json(
-      { error: 'Too many lookups. Please wait a moment and try again.' },
-      { status: 429, headers: { 'Retry-After': String(rl.retryAfter) } },
-    )
-  }
-
   const { slug } = await params
   if (!slug) return NextResponse.json(EMPTY)
 
@@ -154,6 +146,44 @@ export async function POST(req: NextRequest, { params }: Params): Promise<NextRe
       { status: 400 },
     )
   }
+  // ═══ RD-CERT-SCALE-01 · THROTTLE PER IP **AND** IDENTIFIER ══════════════════
+  //
+  // WHY THE KEY CHANGED. This limiter is process-local and was keyed on client IP alone. At a
+  // live event a whole venue shares one NAT address, so ~the 16th attendee to look up their
+  // own certificate in a minute was refused — a legitimate attendee denied their certificate
+  // by a control aimed at someone else. Per-instance fanout made it sporadic rather than
+  // absent, which is worse: it reads as flakiness, not as a limit.
+  //
+  // WHY IT IS STILL AN ENUMERATION GUARD. The limit and window are UNCHANGED (15/min). What
+  // changed is the bucket: guessing requires many DIFFERENT identifiers, and each distinct
+  // identifier from one IP still gets only 15 attempts per minute. A thousand attendees each
+  // asking about themselves are a thousand independent buckets; one attacker walking a
+  // thousand guesses is throttled on every one of them. Removing or widening the limit would
+  // have traded the guard away — re-keying does not.
+  //
+  // WHY IT MOVED BELOW THE PARSE. The key needs the identifier, so the body must be read
+  // first. Everything before this point is bounded and side-effect free — a JSON parse, a
+  // type check and a length check — and NO Firestore read happens above it. The throttle
+  // still precedes every query, which is what it exists to protect.
+  //
+  // The value is normalized exactly as the query below normalizes it, so "A@B.com" and
+  // "a@b.com" share a bucket and cannot be used to double the allowance. The mode prefix
+  // keeps a bib and a ticket code that happen to read alike in separate buckets.
+  const lookupKey =
+      email          ? `e:${email}`
+    : registrationId ? `r:${registrationId}`
+    : mobile         ? `m:${normalizePhoneNumber(mobile) || mobile}`
+    : bibNumber      ? `b:${bibNumber}`
+    :                  `t:${ticketCode}`
+
+  const rl = checkPolicy(`${getClientIp(req)}|${lookupKey}`, RATE_POLICY.certificateLookup)
+  if (rl.limited) {
+    return NextResponse.json(
+      { error: 'Too many lookups. Please wait a moment and try again.' },
+      { status: 429, headers: { 'Retry-After': String(rl.retryAfter) } },
+    )
+  }
+
   // Cheap shape check only. An invalid-looking value falls through to the uniform empty
   // response rather than a distinct error, so probing cannot use validation as an oracle.
   if (email && (!email.includes('@') || email.length > 254)) return NextResponse.json(EMPTY)

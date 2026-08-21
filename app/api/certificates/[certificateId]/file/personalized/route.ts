@@ -106,17 +106,20 @@ function toStoredArtifact(req: NextRequest, certificateId: string): NextResponse
 }
 
 export async function GET(req: NextRequest, { params }: Params): Promise<NextResponse> {
-  // Same per-IP throttle as the stored-PDF endpoint. Rendering costs more than streaming, so
-  // this route must never be the cheaper way to ask for the same bytes.
-  const rl = checkPolicy(getClientIp(req), RATE_POLICY.pdfDownload)
+  const { certificateId } = await params
+
+  // RD-CERT-SCALE-01 — keyed on IP **and** the certificate, not IP alone. A whole venue
+  // shares one NAT address at a live event, so an IP-only bucket refused legitimate attendees
+  // downloading their own certificates. Limit and window are UNCHANGED (60/min): repeatedly
+  // pulling the SAME certificate from one address is still throttled exactly as before, while
+  // a thousand attendees fetching a thousand different certificates no longer collide.
+  const rl = checkPolicy(`${getClientIp(req)}|${certificateId}`, RATE_POLICY.pdfDownload)
   if (rl.limited) {
     return NextResponse.json(
       { error: 'Too many requests. Please try again shortly.' },
       { status: 429, headers: { 'Retry-After': String(rl.retryAfter) } },
     )
   }
-
-  const { certificateId } = await params
 
   if (!isValidCertificateId(certificateId)) {
     return NextResponse.json({ error: 'Not found' }, { status: 404 })
