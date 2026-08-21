@@ -13,6 +13,7 @@ import { Button } from '@/components/ui'
 import { cn } from '@/lib/utils/cn'
 import { AuthScreen } from '@/components/auth'
 import { ROUTES } from '@/config/navigation'
+import { redirectFromSearch } from '@/lib/auth/redirectTarget'
 import { auth } from '@/lib/firebase/auth'
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -117,7 +118,11 @@ function VerifyEmailContent() {
       })
       if (res.ok) {
         await auth.currentUser!.reload()
-        router.push(ROUTES.WELCOME)
+        // RD-TEAM-INVITE-01 — return the user to where authentication interrupted
+        // them (a team invitation), instead of always the onboarding page. Absent
+        // or unsafe destinations fall through to WELCOME, so the ordinary
+        // new-organizer journey is unchanged. Same guard as the login page.
+        router.push(redirectFromSearch(searchParams) ?? ROUTES.WELCOME)
         return
       }
       const body = await res.json() as { error: string; attemptsLeft?: number }
@@ -129,7 +134,7 @@ function VerifyEmailContent() {
     } finally {
       setVerifying(false)
     }
-  }, [verifying, currentOtpId, router])
+  }, [verifying, currentOtpId, router, searchParams])
 
   // Digit change — auto-advance and auto-submit
   const handleChange = (idx: number, raw: string) => {

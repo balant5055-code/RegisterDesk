@@ -22,6 +22,7 @@ import {
 import { LinkAccountDialog } from '@/components/auth/LinkAccountDialog'
 import { EASE } from '@/components/auth/authMotion'
 import { ROUTES } from '@/config/navigation'
+import { redirectFromSearch, withRedirect } from '@/lib/auth/redirectTarget'
 import { formatPhoneNumber, validatePhoneNumber } from '@/lib/communication/phone'
 import { DEFAULT_DIAL_CODE, callingDigitsForDialCode } from '@/lib/communication/countryCodes'
 import {
@@ -107,10 +108,20 @@ function validateSignup(fields: {
 // registration form) instead of always the dashboard — so attendees are never dead-ended
 // on the organizer dashboard. Read from window (no useSearchParams → no Suspense boundary
 // needed) and guarded to internal paths only (never protocol-relative // or absolute URLs).
+// RD-TEAM-INVITE-01: the guard itself now lives in lib/auth/redirectTarget so the
+// verify-email hop applies the IDENTICAL rule instead of a second copy. Behaviour
+// is unchanged for existing callers; the shared version additionally rejects a
+// `/\` backslash form and control characters.
 function safeRedirectTarget(): string | null {
   if (typeof window === 'undefined') return null
-  const r = new URLSearchParams(window.location.search).get('redirect')
-  return r && r.startsWith('/') && !r.startsWith('//') ? r : null
+  return redirectFromSearch(window.location.search)
+}
+
+/** Signup preselected via `?mode=signup` — used by the team-invitation page, whose
+ *  "Create an account" action previously pointed at a non-existent /register. */
+function initialMode(): 'login' | 'signup' {
+  if (typeof window === 'undefined') return 'login'
+  return new URLSearchParams(window.location.search).get('mode') === 'signup' ? 'signup' : 'login'
 }
 
 // ─── Page ─────────────────────────────────────────────────────────────────────
@@ -119,7 +130,9 @@ export default function LoginPage() {
   const router = useRouter()
 
   // ── mode ───────────────────────────────────────────────────────────────────
-  const [mode, setMode] = useState<'login' | 'signup'>('login')
+  // Lazy initialiser (not an effect) so the correct tab is on the FIRST paint —
+  // an invitee who asked to create an account never sees the login form flash.
+  const [mode, setMode] = useState<'login' | 'signup'>(initialMode)
 
   // ── login state ────────────────────────────────────────────────────────────
   const [email, setEmail]         = useState('')
@@ -155,6 +168,15 @@ export default function LoginPage() {
       router.push(safeRedirectTarget() ?? ROUTES.DASHBOARD)
       return
     }
+    // RD-TEAM-INVITE-01 — carry the destination THROUGH verification.
+    //
+    // Previously these two pushes dropped it, so an invitee who had to verify their
+    // email (every newly created account) lost the invitation even though the
+    // redirect had survived login. Both invitees in the reported incident took
+    // exactly this branch. `withRedirect` is a no-op when there is no destination,
+    // so the ordinary sign-in journey is byte-identical.
+    const destination = safeRedirectTarget()
+
     const token = await auth.currentUser!.getIdToken()
     const res   = await fetch('/api/auth/send-otp', {
       method:  'POST',
@@ -162,9 +184,9 @@ export default function LoginPage() {
     })
     if (res.ok) {
       const { otpId } = await res.json() as { otpId: string }
-      router.push(`${ROUTES.VERIFY_EMAIL}?otpId=${encodeURIComponent(otpId)}`)
+      router.push(withRedirect(`${ROUTES.VERIFY_EMAIL}?otpId=${encodeURIComponent(otpId)}`, destination))
     } else {
-      router.push(`${ROUTES.VERIFY_EMAIL}?reason=unverified`)
+      router.push(withRedirect(`${ROUTES.VERIFY_EMAIL}?reason=unverified`, destination))
     }
   }
 
@@ -274,11 +296,14 @@ export default function LoginPage() {
         method:  'POST',
         headers: { Authorization: `Bearer ${token}` },
       })
+      // RD-TEAM-INVITE-01 — a NEW account is exactly the invitee case, so the
+      // destination has to survive here as well as on the sign-in path above.
+      const destination = safeRedirectTarget()
       if (res.ok) {
         const { otpId } = await res.json() as { otpId: string }
-        router.push(`${ROUTES.VERIFY_EMAIL}?otpId=${encodeURIComponent(otpId)}`)
+        router.push(withRedirect(`${ROUTES.VERIFY_EMAIL}?otpId=${encodeURIComponent(otpId)}`, destination))
       } else {
-        router.push(ROUTES.VERIFY_EMAIL)
+        router.push(withRedirect(ROUTES.VERIFY_EMAIL, destination))
       }
     } catch (err) {
       setSignupError(mapAuthError(err))

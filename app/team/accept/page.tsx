@@ -6,6 +6,8 @@ import { useSearchParams, useRouter } from 'next/navigation'
 import { type User } from 'firebase/auth'
 import { useAuth } from '@/components/auth/AuthProvider'
 import { Loader2, ShieldCheck, CheckCircle2, XCircle } from 'lucide-react'
+import { withRedirect } from '@/lib/auth/redirectTarget'
+import { ROUTES } from '@/config/navigation'
 
 type Phase = 'loading' | 'need-auth' | 'accepting' | 'done' | 'error'
 
@@ -13,7 +15,16 @@ function AcceptInner() {
   const params = useSearchParams()
   const router = useRouter()
   const token  = params.get('token') ?? ''
-  const next   = `/team/accept?token=${encodeURIComponent(token)}`
+
+  // RD-TEAM-INVITE-01 — where authentication must return the invitee.
+  //
+  // This used to be handed to /login as `?next=`, but the login page reads
+  // `?redirect=` (safeRedirectTarget, C-1). The names never matched, so the guard
+  // returned null and the invitee was routed to the dashboard instead of back
+  // here — the invitation was silently abandoned and its token never consumed.
+  // `withRedirect` speaks the canonical parameter and encodes the whole
+  // destination, so THIS page's own `?token=` survives the nesting intact.
+  const returnHere = `/team/accept?token=${encodeURIComponent(token)}`
 
   const [phase,   setPhase]   = useState<Phase>(() => (token ? 'loading' : 'error'))
   const [message, setMessage] = useState(() => (token ? '' : 'This invitation link is invalid.'))
@@ -67,10 +78,15 @@ function AcceptInner() {
           <>
             <p className="mt-2 text-[13.5px] text-muted-foreground">Sign in or create an account with the invited email to accept this invitation.</p>
             <div className="mt-5 flex flex-col gap-2">
-              <Link href={`/login?next=${encodeURIComponent(next)}`}
+              <Link href={withRedirect(ROUTES.LOGIN, returnHere)}
                 className="inline-flex w-full items-center justify-center rounded-lg px-4 py-2.5 text-[14px] font-semibold text-primary-foreground shadow-sm hover:opacity-90"
                 style={{ backgroundImage: 'var(--primary-gradient)' }}>Sign in</Link>
-              <Link href={`/register?next=${encodeURIComponent(next)}`}
+              {/* RD-TEAM-INVITE-01 — this pointed at `/register`, which does not
+                  exist (app/(auth)/register holds only a .gitkeep) and returned a
+                  404 in production. The login page already carries a signup mode,
+                  so the invitee is sent there with it preselected — reusing the
+                  existing auth surface rather than adding a registration system. */}
+              <Link href={withRedirect(`${ROUTES.LOGIN}?mode=signup`, returnHere)}
                 className="inline-flex w-full items-center justify-center rounded-lg border border-border px-4 py-2.5 text-[14px] font-medium text-foreground hover:bg-muted">Create an account</Link>
             </div>
           </>
