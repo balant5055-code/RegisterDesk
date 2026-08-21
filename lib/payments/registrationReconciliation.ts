@@ -22,6 +22,7 @@ import { buildRegistrationLedgerAndCredit } from '@/lib/payments/registrationLed
 import type { PaymentIntentRecord } from '@/lib/firebase/firestore/paymentIntents'
 // RD-PAY-P0-3 — orphaned-capture recovery. The SAME settlement the webhook uses.
 import { settleCapturedRegistration } from '@/lib/payments/settleCapturedRegistration'
+import { upsertReconciliationCase, type CasePaymentState, type CaseStatus } from '@/lib/payments/reconciliationCases'
 import { razorpay } from '@/lib/razorpay/client'
 
 const COLLECTION = 'registrationFinancialReconciliation'
@@ -333,6 +334,30 @@ export interface CaptureSweepResult {
  * observes `paid` and no-ops. No duplicate registration, ticket, email, counter increment or
  * wallet credit is possible.
  */
+/**
+ * Adapts one swept intent + its verdict into a durable case row.
+ *
+ * Every organizer-visible field comes from the INTENT — server data written at order
+ * creation — never from Razorpay's payload and never from a request. The paymentId is the
+ * only Razorpay-derived value, and it is stored for the recovery path, not for display.
+ */
+async function recordCase(
+  intent: PaymentIntentRecord,
+  v: { paymentState: CasePaymentState; paymentId: string | null; status: CaseStatus; reason: string; registrationId?: string | null },
+): Promise<void> {
+  await upsertReconciliationCase({
+    orderId:       intent.orderId,
+    organizerUid:  intent.organizerUid ?? '',
+    eventSlug:     intent.eventSlug ?? '',
+    eventName:     intent.eventName ?? '',
+    attendeeName:  intent.attendee?.name ?? '',
+    attendeePhone: intent.attendee?.phone ?? '',
+    amountPaise:   intent.amount ?? 0,
+    currency:      intent.currency ?? 'INR',
+    ...v,
+  })
+}
+
 export async function recoverCapturedPaymentIntents(limitN = 200): Promise<CaptureSweepResult> {
   const now = Date.now()
   const out: CaptureSweepResult = {
@@ -351,9 +376,30 @@ export async function recoverCapturedPaymentIntents(limitN = 200): Promise<Captu
   out.scanned = snap.size
   if (snap.empty) return out
 
+  // ═══ RD-PAY-RECON-01 · WHY `registration_failed` IS NOW A CANDIDATE ══════════
+  //
+  // A Razorpay ORDER accepts multiple payment ATTEMPTS. The trap that produced silent
+  // orphans is four steps long, and every step is individually correct:
+  //
+  //   1. Attempt 1 fails → `payment.failed` → the webhook's failure handler writes
+  //      `registration_failed` (a misnomer: registration was never attempted — the PAYMENT
+  //      attempt failed).
+  //   2. The attendee retries THE SAME ORDER and succeeds → `payment.captured`.
+  //   3. The webhook sees a terminal intent and skips, returning 200 — so Razorpay treats
+  //      delivery as successful and never retries it.
+  //   4. This sweep only looked at `created`, so it could not see the case either.
+  //
+  // Money captured, no registration, no refund, no alert. Nothing in the system was left
+  // watching, which is why the first one was found by hand.
+  //
+  // A terminal intent is included ONLY when it has no registrationId. One that already
+  // carries one is settled by definition, and re-examining it would just spend a Razorpay
+  // call to reach `already_settled`.
   const candidates = snap.docs
     .map(d => d.data() as PaymentIntentRecord)
-    .filter(i => i.status === 'created' && (i.amount ?? 0) > 0 && typeof i.orderId === 'string' && !!i.orderId)
+    .filter(i =>
+      (i.status === 'created' || (i.status === 'registration_failed' && !i.registrationId))
+      && (i.amount ?? 0) > 0 && typeof i.orderId === 'string' && !!i.orderId)
   out.candidates = candidates.length
 
   for (const intent of candidates) {
@@ -372,16 +418,49 @@ export async function recoverCapturedPaymentIntents(limitN = 200): Promise<Captu
       // FAIL-CLOSED: unreachable is NOT unpaid. Leave the intent alone and look again.
       captureFinancialError(err, { scope: 'captureSweep.fetch_payments_failed', detail: 'left recoverable', orderId: intent.orderId })
       out.uncertain++
+      // RD-PAY-RECON-02 — indeterminate, and it must READ as indeterminate. Recording this
+      // as `not_captured` would be the same mistake as treating an unreachable gateway as
+      // "unpaid": it hides a possible orphan behind a network blip.
+      await recordCase(intent, { paymentState: 'unverified', paymentId: null, status: 'requires_review', reason: 'razorpay_unreachable' })
       continue
     }
 
-    if (!payment?.id) { out.unpaid++; continue }
+    if (!payment?.id) {
+      out.unpaid++
+      // RD-PAY-RECON-02 — Razorpay holds nothing matching this order. Recorded so a later
+      // run can see it was checked, but `not_captured` is never surfaced to an organizer:
+      // a declined card is not a payment issue, and listing it would bury the real ones.
+      await recordCase(intent, { paymentState: 'not_captured', paymentId: null, status: 'requires_review', reason: 'no_matching_payment' })
+      continue
+    }
+
+    // ═══ RECOVERY AUTHORIZATION — TERMINAL INTENTS ONLY ════════════════════════
+    //
+    // `settleCapturedRegistration` refuses a terminal intent outright (`intent_terminal`).
+    // That guard is correct and stays: it is what stops every skipped capture settling
+    // itself unverified. The recovery option lifts it for exactly one caller — one that has
+    // just proved, against Razorpay, that THIS payment on THIS order was accepted for THIS
+    // amount and currency.
+    //
+    // The token is the paymentId itself, and the settlement re-checks
+    // `recovery.verifiedCapturedPaymentId === paymentId`, so it cannot authorise a different
+    // payment than the one verified here. It is attached ONLY for a terminal intent: a
+    // `created` intent takes the byte-identical path it took before this change, refund
+    // policy and all.
+    //
+    // What the recovery flag does NOT do is widen the gates. Timing-only refusals
+    // (registration/pass window closed) proceed — the money was taken while the window was
+    // open. Every SUBSTANTIVE refusal — capacity, cancelled event, inactive pass, duplicate —
+    // still stops, and stops WITHOUT refunding: handing back a legitimate capture is an
+    // operator decision, and Phase 2's reconciliation queue is where it belongs.
+    const isTerminalRecovery = intent.status === 'registration_failed'
 
     const outcome = await settleCapturedRegistration({
       orderId:   intent.orderId,
       paymentId: payment.id,
       intent,
       source:    'sweep',
+      ...(isTerminalRecovery ? { recovery: { verifiedCapturedPaymentId: payment.id } } : {}),
     })
 
     if (outcome.kind === 'settled') {
@@ -398,6 +477,27 @@ export async function recoverCapturedPaymentIntents(limitN = 200): Promise<Captu
     } else {
       out.uncertain++
     }
+
+    // ═══ RD-PAY-RECON-02 · PERSIST THE VERDICT ═════════════════════════════════
+    //
+    // Written HERE because this is the only place that holds all three facts at once: the
+    // intent, what Razorpay said, and what the settlement decided. Deriving any of them
+    // again later would mean a second Razorpay call per row on page load.
+    //
+    // `settled`/`already_settled` ⇒ resolved: a registration exists, so there is nothing for
+    // an organizer to do. Everything else keeps `captured` — money is real — and lands in
+    // `requires_review` UNLESS the settlement said `deferred`, which is the one outcome that
+    // means "nothing was written and it is safe to try again".
+    const settledId =
+      outcome.kind === 'settled' || outcome.kind === 'already_settled' ? outcome.registrationId : null
+
+    await recordCase(intent, {
+      paymentState:   'captured',
+      paymentId:      payment.id,
+      status:         settledId ? 'resolved' : (outcome.kind === 'deferred' ? 'actionable' : 'requires_review'),
+      reason:         settledId ? 'recovered' : `${outcome.kind}:${'reason' in outcome ? outcome.reason : 'unknown'}`,
+      registrationId: settledId,
+    })
   }
 
   return out

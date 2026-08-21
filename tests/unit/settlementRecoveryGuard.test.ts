@@ -100,11 +100,24 @@ describe('the untouched systems stay untouched', () => {
     expect(wh).not.toContain('verifiedCapturedPaymentId')
   })
 
-  it('the reconciliation sweep still scans only `created` intents', () => {
+  it('the sweep scans `created` AND orphaned `registration_failed` intents', () => {
+    // RD-PAY-RECON-01 — this used to assert `created` ONLY, and that restriction was the
+    // hole: a retry on the same order captured money against an intent the failure handler
+    // had already marked terminal, and neither the webhook nor this sweep looked at it again.
+    // The terminal arm is deliberately narrower than the `created` arm — it requires the
+    // intent to carry no registrationId, and it is the only arm that sends a recovery
+    // authorization.
     const rec = strip(read('lib/payments/registrationReconciliation.ts'))
     expect(rec).toContain("i.status === 'created'")
+    expect(rec).toContain("i.status === 'registration_failed' && !i.registrationId")
+    // The recovery authorization is bound to the payment this sweep just verified…
+    expect(rec).toContain('recovery: { verifiedCapturedPaymentId: payment.id }')
+    // …and is attached ONLY when the intent is terminal, so a `created` intent keeps its
+    // previous behaviour byte for byte.
+    expect(rec).toContain("const isTerminalRecovery = intent.status === 'registration_failed'")
+    expect(rec).toContain('...(isTerminalRecovery ? { recovery:')
+    // The strict operator-only service is still NOT wired into the sweep.
     expect(rec).not.toContain('recoverOrphanedCapture')
-    expect(rec).not.toContain('verifiedCapturedPaymentId')
   })
 
   it('no route or cron wires the recovery path — it is operator-invoked only', () => {

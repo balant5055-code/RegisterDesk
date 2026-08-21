@@ -103,6 +103,10 @@ export const WORKSPACE_NAV: WorkspaceNavSection[] = [
           { label: 'Transactions',   href: '/dashboard/finance?filter=all', matchParams: { filter: 'all' } },
           { label: 'Wallet Ledger',  href: '/dashboard/finance/ledger' },
           { label: 'Settlements',    href: '/dashboard/finance/settlements' },
+          // RD-PAY-RECON-02 — captured payments whose registration is missing. Sits under
+          // Finance rather than Participants because the question it answers is a money
+          // question: "did someone pay us and get nothing?"
+          { label: 'Payment Issues', href: '/dashboard/finance/payment-issues' },
           { label: 'Payout Profile', href: '/dashboard/finance/payout-profile' },
         ],
       },

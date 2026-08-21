@@ -11,6 +11,8 @@
 // transparently scopes to the owner's data — gated by the permission check.
 
 import { verifyCaller, requirePermission, activeMemberships, type AccessResult } from '@/lib/team/access'
+import { adminDb } from '@/lib/firebase/admin'
+import { isOrganizer } from '@/lib/organizer/identity'
 import { permissionsForRole, isCheckinOnlyRole, isEventInScope, type TeamRole, type TeamPermission } from '@/lib/team/types'
 
 export interface WorkspaceContext {
@@ -24,12 +26,56 @@ export interface WorkspaceContext {
 }
 
 /**
+ * Does this caller own a workspace of their own?
+ *
+ * `users/{uid}.role === 'organizer'` is the ONE canonical definition of an organizer
+ * account (lib/organizer/identity.ts) — written by createOrganizerProfile, self-healed by
+ * verify-otp, and pinned by firestore.rules. Reused here rather than re-derived, so this
+ * cannot drift from the admin counts and listings that already depend on it.
+ *
+ * Read ONLY in the ambiguous case below, so the common paths pay nothing for it.
+ */
+async function ownsWorkspace(callerUid: string): Promise<boolean> {
+  try {
+    const snap = await adminDb.collection('users').doc(callerUid).get()
+    return snap.exists && isOrganizer(snap.data())
+  } catch {
+    // FAIL CLOSED TOWARDS SELF. An unreadable profile must not be read as "not an owner",
+    // because that is precisely the branch that would hand this caller someone else's
+    // workspace. Treating it as ownership resolves them to their own data — which is, at
+    // worst, empty.
+    return true
+  }
+}
+
+/**
  * Resolves which workspace the caller is acting in.
  *
- * Phase B.1 assumes a single active workspace per caller. If a caller both owns
- * a workspace AND is a member elsewhere, the membership wins (documented
- * limitation — a workspace switcher is the follow-up). Owners have no member
- * row, so they always resolve to their own workspace.
+ *   • Owner (no memberships)            → their own workspace
+ *   • Team member                       → the owner's workspace
+ *   • Owner who ALSO holds a membership → their OWN workspace
+ *
+ * ═══ THE DEFECT THIS FIXES ═══════════════════════════════════════════════════
+ * This used to take `memberships[0]` whenever any membership existed, on the stated
+ * assumption that "owners have no member row". That was an assumption, not an enforced
+ * invariant: nothing stops an organizer being invited into someone else's team. When it
+ * happened, an owner's every request silently resolved to the OTHER organizer's workspace —
+ * and because `workspaceUid` is what routes feed into `where('organizerUid','==',…)`, they
+ * read that organizer's data under their own login.
+ *
+ * Harmless-looking on a settings page. Not harmless on a surface that reconciles captured
+ * payments, which is why it is fixed before that surface exists rather than after.
+ *
+ * ═══ WHY OWNERSHIP WINS, AND WHY THAT DIRECTION IS THE SAFE ONE ══════════════
+ * Resolving to SELF can only ever show a caller their own data. Resolving to a membership
+ * can show them someone else's. When the two are ambiguous the tie must break towards self,
+ * because the failure modes are not symmetric: the cost of being wrong here is an owner
+ * seeing their own (possibly empty) workspace instead of one they were invited to — a
+ * functionality gap a workspace switcher closes later — versus cross-organizer exposure,
+ * which no later feature can undo.
+ *
+ * The single-active-workspace model is otherwise unchanged; no permission, role or matrix
+ * behaviour is touched.
  */
 export async function resolveWorkspaceUid(callerUid: string): Promise<WorkspaceContext> {
   const memberships = await activeMemberships(callerUid)
@@ -39,6 +85,16 @@ export async function resolveWorkspaceUid(callerUid: string): Promise<WorkspaceC
       permissions: permissionsForRole('owner'), isOwner: true, eventIds: [],
     }
   }
+
+  // Ambiguous: the caller holds at least one membership. Ownership still wins. The profile
+  // read happens ONLY here — a caller with no memberships never pays for it.
+  if (await ownsWorkspace(callerUid)) {
+    return {
+      callerUid, workspaceUid: callerUid, role: 'owner',
+      permissions: permissionsForRole('owner'), isOwner: true, eventIds: [],
+    }
+  }
+
   const m = memberships[0]
   return {
     callerUid, workspaceUid: m.organizerUid, role: m.role,
