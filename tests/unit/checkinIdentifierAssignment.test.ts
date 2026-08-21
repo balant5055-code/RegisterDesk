@@ -158,11 +158,17 @@ describe('4 — the label always comes from config', () => {
 // ─── 5. One flow for QR, manual and lookup ──────────────────────────────────
 
 describe('5 — QR, manual and lookup share one implementation', () => {
-  it('the ops console routes all three through a single submitCode', () => {
+  it('the ops console routes all three through one resolver and one performer', () => {
+    // RD-CHECKIN-CONFIRM-01 moved the ENTRY points to `resolveAttendee` (which shows
+    // ATTENDEE INFORMATION and writes nothing); confirming still funnels into the
+    // one unchanged `submitCode`. The property under test — a single shared
+    // implementation for QR, manual and lookup — is unchanged.
     expect(OPS).toContain('const submitCode = useCallback(async (rawCode: string, identifierValue?: string)')
-    // QR and lookup both call it; manual submits the same function.
-    expect(OPS).toContain('onCode={submitCode}')
-    expect(OPS).toContain('submitCode(r.ticketCode)')
+    expect(OPS).toContain('onCode={resolveAttendee}')            // QR
+    expect(OPS).toContain('void resolveAttendee(manualCode)')     // manual
+    expect(OPS).toContain('void resolveAttendee(r.ticketCode)')   // lookup
+    // …and exactly one place performs the check-in.
+    expect(OPS.match(/fetch\('\/api\/checkin\/scan'/g)).toHaveLength(1)
   })
 
   it('every check-in surface posts to the ONE canonical endpoint', () => {
@@ -189,10 +195,21 @@ describe('5 — QR, manual and lookup share one implementation', () => {
 // ─── 6. Cancelling leaves the attendee OUT ──────────────────────────────────
 
 describe('6 — cancelling the prompt does not admit anyone', () => {
-  it('each surface reports a failure on cancel', () => {
+  it('each surface reports a failure when the IDENTIFIER prompt is cancelled', () => {
+    // Anchored to the IdentifierPrompt block specifically. Both surfaces now also
+    // render an AttendeeConfirmation with its own onCancel (which simply dismisses,
+    // having written nothing), so slicing from the first `onCancel=` would test the
+    // wrong control.
     for (const [name, src] of [['ops', OPS], ['dashboard', DASH], ['lookup', SEARCH]] as const) {
-      const seg = src.slice(src.indexOf('onCancel={'))
-      expect(seg.slice(0, 400), name).toMatch(/IDENTIFIER_REQUIRED|required/)
+      const promptAt = src.indexOf('<IdentifierPrompt')
+      expect(promptAt, name).toBeGreaterThan(-1)
+      // Sliced to the END OF THE ELEMENT rather than a fixed character count — the
+      // ops handler grew when identifier CORRECTION was added, and a magic length
+      // silently stopped covering onCancel.
+      const closeAt = src.indexOf('/>', promptAt)
+      expect(closeAt, name).toBeGreaterThan(promptAt)
+      const seg = src.slice(promptAt, closeAt)
+      expect(seg, name).toMatch(/IDENTIFIER_REQUIRED|required/)
     }
   })
 

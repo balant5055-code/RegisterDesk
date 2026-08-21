@@ -3,28 +3,37 @@
 // RD-CHECKIN-STAFF-01 — the event-day gate console.
 //
 // ═══ WHAT THIS SURFACE DELIBERATELY DOES NOT HAVE ════════════════════════════
-// No sidebar, no breadcrumbs, no command palette, no organizer links, no undo, no
-// walk-in, no export, no attendee record beyond the name and pass needed to admit
-// someone at a gate. A gate operator is handed one job and the controls for it.
+// No sidebar, no breadcrumbs, no command palette, no organizer links, no walk-in,
+// no export, no attendee record beyond what is needed to admit someone at a gate.
+// A gate operator is handed one job and the controls for it.
 //
 // ═══ THE UI IS NOT THE CONTROL ═══════════════════════════════════════════════
 // `canUndo` / `canWalkIn` arrive from the server and decide only what is DRAWN.
-// The undo and walk-in routes independently require the `registrations`
-// permission, which a gate-only role does not hold, so editing this state in a
-// browser changes the pixels and nothing else.
+// The BROAD undo (/api/checkin/undo) and walk-in routes independently require the
+// `registrations` permission, which a gate-only role does not hold, so editing
+// this state in a browser changes the pixels and nothing else.
+//
+// ═══ THE TWO CORRECTIONS (RD-CHECKIN-FIX-01) ═════════════════════════════════
+// An operator can fix their own two mistakes without gaining that permission:
+// re-typing an identifier they mistyped, and reversing a check-in they just made.
+// Both go to /api/checkin/correct, which is gated on `checkin` + event assignment
+// and — for the undo — on it being THEIR check-in, inside a short window. That is
+// strictly narrower than the `registrations` route, which is untouched.
 //
 // Everything here goes through the SAME endpoints the dashboard check-in uses —
 // this is a different door onto one implementation, not a second implementation.
 
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
-import { CheckCircle2, XCircle, AlertCircle, Loader2, ScanLine, Keyboard, Search } from 'lucide-react'
+import { CheckCircle2, XCircle, AlertCircle, Loader2, ScanLine, Keyboard, Search, RotateCcw } from 'lucide-react'
 import { useAuth } from '@/components/auth/AuthProvider'
 import { ticketCodeFromQr } from '@/lib/checkin/qr'
 import { cn } from '@/lib/utils/cn'
 import QrScanner from '@/app/(dashboard)/dashboard/events/[eventId]/checkin/QrScanner'
 import IdentifierPrompt from '@/components/checkin/IdentifierPrompt'
+import AttendeeConfirmation from '@/components/checkin/AttendeeConfirmation'
 import type { OpsCheckinContext } from '@/app/api/checkin/ops/[eventId]/route'
 import type { CheckInResult } from '@/app/api/checkin/scan/route'
+import type { CheckInCorrectResult } from '@/app/api/checkin/correct/route'
 import type { AttendeeSearchResult } from '@/app/api/organizer/events/[eventId]/checkin/search/route'
 
 type Mode = 'scan' | 'manual' | 'lookup'
@@ -96,6 +105,21 @@ interface Prompt {
   label:         string
   attendeeName?: string
   error:         string
+  /** RD-CHECKIN-FIX-01 — true when this is correcting an existing value rather
+   *  than assigning a first one. Decides which endpoint Confirm submits to. */
+  correcting?:   boolean
+}
+
+/** Correction-endpoint codes in gate language. */
+const CORRECT_ERROR_COPY: Record<string, string> = {
+  NOT_YOUR_CHECKIN:        'You can only undo a check-in you performed.',
+  UNDO_WINDOW_EXPIRED:     'Too long ago to undo here — ask an organizer.',
+  NOT_CHECKED_IN:          'This attendee is not checked in.',
+  EVENT_NOT_ASSIGNED:      'You are not assigned to this event.',
+  NO_IDENTIFIER_TO_CORRECT:'Nothing to correct yet.',
+  VALUE_CONFLICT:          'Already assigned to another participant.',
+  UNAUTHORIZED:            'You cannot correct this ticket.',
+  TICKET_NOT_FOUND:        'Ticket not found.',
 }
 
 export default function OpsCheckinClient({ eventId }: { eventId: string }) {
@@ -107,6 +131,12 @@ export default function OpsCheckinClient({ eventId }: { eventId: string }) {
   const [busy,     setBusy]     = useState(false)
   const [outcome,  setOutcome]  = useState<Outcome | null>(null)
   const [prompt,   setPrompt]   = useState<Prompt | null>(null)
+  // RD-CHECKIN-CONFIRM-01 — the attendee awaiting the operator's confirmation.
+  // QR, Manual and Lookup all land here first; nothing is checked in until Confirm.
+  const [confirm,  setConfirm]  = useState<AttendeeSearchResult | null>(null)
+  // RD-CHECKIN-FIX-01 — the ticket this operator most recently admitted, so the
+  // success card can offer a same-session undo. Cleared once undone or superseded.
+  const [lastCheckIn, setLastCheckIn] = useState<string | null>(null)
 
   // Signed-out is DERIVED, not stored. Mirroring auth into state would mean writing
   // it from an effect, which cascades a second render on every auth transition —
@@ -162,10 +192,93 @@ export default function OpsCheckinClient({ eventId }: { eventId: string }) {
     return () => { active = false }
   }, [user, eventId, getToken])
 
-  // ── Check in one ticket code ──────────────────────────────────────────────
+  // ── Step 1: resolve the attendee, WITHOUT checking anyone in ──────────────
   //
-  // ONE function for QR, Manual and Lookup — they differ only in where the ticket
-  // code came from. The identifier round-trip is part of this function rather than
+  // ONE resolver for QR, Manual and Lookup — they differ only in where the ticket
+  // code came from. It reuses the event-scoped search endpoint's exact ticket-code
+  // path, which the server already authorizes with the same `checkin` permission
+  // and the same event assignment. No check-in happens here, so an operator who
+  // scanned the wrong person can simply cancel.
+  const resolveAttendee = useCallback(async (rawCode: string) => {
+    const ticketCode = ticketCodeFromQr(rawCode)
+    if (!ticketCode || !ctx) return
+
+    setBusy(true)
+    setOutcome(null)
+    try {
+      const token = await getToken()
+      const res = await fetch(
+        `/api/organizer/events/${encodeURIComponent(eventId)}/checkin/search?q=${encodeURIComponent(ticketCode)}`,
+        { headers: { Authorization: `Bearer ${token}` } },
+      )
+      if (!res.ok) {
+        const body = await res.json().catch(() => null) as { error?: string } | null
+        setOutcome({ kind: 'error', title: body?.error ?? 'Could not look up this ticket.' })
+        return
+      }
+      const data = await res.json() as { results?: AttendeeSearchResult[] }
+      const found = data.results?.[0]
+      // An empty result is the server's uniform answer for "not this event's ticket"
+      // as well as "no such ticket" — it deliberately does not distinguish them.
+      if (!found) {
+        setOutcome({ kind: 'error', title: ERROR_COPY.TICKET_NOT_FOUND })
+        return
+      }
+      setConfirm(found)
+    } catch {
+      setOutcome({ kind: 'error', title: 'Network error. Check your connection and retry.' })
+    } finally {
+      setBusy(false)
+      setManualCode('')
+    }
+  }, [ctx, eventId, getToken])
+
+  // ── Corrections (RD-CHECKIN-FIX-01) ───────────────────────────────────────
+  //
+  // One narrow endpoint for both. It re-authorizes independently — `checkin`,
+  // event assignment, own-check-in and the undo window are all decided server-side
+  // — so these handlers only carry the operator's intent.
+  const correct = useCallback(async (
+    ticketCode: string,
+    action: 'identifier' | 'undo',
+    identifierValue?: string,
+  ): Promise<CheckInCorrectResult | null> => {
+    setBusy(true)
+    try {
+      const token = await getToken()
+      const res = await fetch('/api/checkin/correct', {
+        method:  'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ ticketCode, action, ...(identifierValue ? { identifierValue } : {}) }),
+      })
+      return await res.json() as CheckInCorrectResult
+    } catch {
+      return null
+    } finally {
+      setBusy(false)
+    }
+  }, [getToken])
+
+  /** Undo a check-in this operator just performed. */
+  const undoLast = useCallback(async (ticketCode: string) => {
+    const data = await correct(ticketCode, 'undo')
+    if (!data) { setOutcome({ kind: 'error', title: 'Network error. Check your connection and retry.' }); return }
+    if (!data.success) {
+      setOutcome({ kind: 'error', title: CORRECT_ERROR_COPY[data.error ?? ''] ?? data.error ?? 'Could not undo.' })
+      return
+    }
+    setLastCheckIn(null)
+    setOutcome({ kind: 'already', title: data.attendee?.name ?? 'Attendee', detail: 'Check-in undone' })
+    // The header count is optimistic in both directions; the next bootstrap
+    // refresh reconciles it against the canonical counters.
+    setCtx(c => (c ? { ...c, checkedIn: Math.max(0, c.checkedIn - 1) } : c))
+  }, [correct])
+
+  // ── Step 2: the existing check-in, unchanged ──────────────────────────────
+  //
+  // Reached only after the operator confirms. Still the same single call to
+  // POST /api/checkin/scan — same transaction, same identifier engine, same
+  // event-scope authorization. The identifier round-trip lives here rather than in
   // each caller, which is what keeps the three flows identical.
   const submitCode = useCallback(async (rawCode: string, identifierValue?: string) => {
     const ticketCode = ticketCodeFromQr(rawCode)
@@ -203,7 +316,9 @@ export default function OpsCheckinClient({ eventId }: { eventId: string }) {
         return
       }
 
+      // Past the identifier gate — the confirmation and prompt are both done with.
       setPrompt(null)
+      setConfirm(null)
 
       if (!res.ok || !data.success) {
         const code = data.error ?? ''
@@ -231,6 +346,8 @@ export default function OpsCheckinClient({ eventId }: { eventId: string }) {
       })
       // Optimistic header bump; the next bootstrap refresh reconciles with counters.
       setCtx(c => (c ? { ...c, checkedIn: c.checkedIn + 1 } : c))
+      // Remember it so this operator can reverse their own mistake immediately.
+      setLastCheckIn(ticketCode)
     } catch {
       setOutcome({ kind: 'error', title: 'Network error. Check your connection and retry.' })
     } finally {
@@ -335,12 +452,12 @@ export default function OpsCheckinClient({ eventId }: { eventId: string }) {
 
       {/* ── Active mode ──────────────────────────────────────────────────── */}
       {mode === 'scan' && (
-        <QrScanner active={!busy} onCode={submitCode} />
+        <QrScanner active={!busy && !confirm && !prompt} onCode={resolveAttendee} />
       )}
 
       {mode === 'manual' && (
         <form
-          onSubmit={e => { e.preventDefault(); void submitCode(manualCode) }}
+          onSubmit={e => { e.preventDefault(); void resolveAttendee(manualCode) }}
           className="flex flex-col gap-3"
         >
           <label htmlFor="ops-ticket" className="text-fs-sm font-medium">Ticket code</label>
@@ -401,7 +518,7 @@ export default function OpsCheckinClient({ eventId }: { eventId: string }) {
                   <span className="shrink-0 text-fs-2xs font-semibold text-success">Checked in</span>
                 ) : (
                   <button
-                    onClick={() => void submitCode(r.ticketCode)}
+                    onClick={() => void resolveAttendee(r.ticketCode)}
                     disabled={busy}
                     className="shrink-0 rounded-lg bg-primary px-3 py-2 text-fs-2xs font-semibold text-primary-foreground disabled:opacity-50"
                   >
@@ -414,6 +531,28 @@ export default function OpsCheckinClient({ eventId }: { eventId: string }) {
         </div>
       )}
 
+      {/* ── Attendee confirmation ────────────────────────────────────────────
+          Step 2 of the flow: the operator sees WHO they resolved before anything
+          is written. Confirm hands the same ticket code to the unchanged check-in
+          call; the identifier prompt (below) only appears afterwards, and only if
+          the server says one is needed. */}
+      {confirm && !prompt && (
+        <AttendeeConfirmation
+          attendee={confirm}
+          identifierLabel={confirm.detail?.identifierLabel ?? 'Identifier'}
+          busy={busy}
+          onConfirm={() => void submitCode(confirm.ticketCode)}
+          onCancel={() => setConfirm(null)}
+          onEditIdentifier={() => setPrompt({
+            ticketCode:   confirm.ticketCode,
+            label:        confirm.detail?.identifierLabel ?? 'Identifier',
+            attendeeName: confirm.attendeeName,
+            error:        '',
+            correcting:   true,
+          })}
+        />
+      )}
+
       {/* ── Identifier prompt ────────────────────────────────────────────────
           Blocking: until it is satisfied or cancelled, the attendee is not
           checked in. Confirm retries the SAME ticket code with the value. */}
@@ -423,10 +562,34 @@ export default function OpsCheckinClient({ eventId }: { eventId: string }) {
           attendeeName={prompt.attendeeName}
           error={prompt.error}
           busy={busy}
-          onSubmit={value => void submitCode(prompt.ticketCode, value)}
+          onSubmit={value => {
+            // Correcting an EXISTING value goes to the narrow correction endpoint
+            // (engine swap); assigning a FIRST one stays part of the check-in.
+            if (prompt.correcting) {
+              void (async () => {
+                const data = await correct(prompt.ticketCode, 'identifier', value)
+                if (!data?.success) {
+                  setPrompt(p => p && ({
+                    ...p,
+                    error: CORRECT_ERROR_COPY[data?.error ?? ''] ?? data?.error ?? 'Not accepted.',
+                  }))
+                  return
+                }
+                setPrompt(null)
+                // Reflect the corrected value on the card the operator came from.
+                setConfirm(c => (c && c.detail
+                  ? { ...c, detail: { ...c.detail, identifierValue: data.identifierValue ?? null } }
+                  : c))
+              })()
+              return
+            }
+            void submitCode(prompt.ticketCode, value)
+          }}
           onCancel={() => {
             setPrompt(null)
-            setOutcome({ kind: 'error', title: `${prompt.label} required — not checked in.` })
+            if (!prompt.correcting) {
+              setOutcome({ kind: 'error', title: `${prompt.label} required — not checked in.` })
+            }
           }}
         />
       )}
@@ -446,9 +609,24 @@ export default function OpsCheckinClient({ eventId }: { eventId: string }) {
           {outcome.kind === 'success' && <CheckCircle2 className="h-6 w-6 shrink-0 text-success" aria-hidden />}
           {outcome.kind === 'already' && <AlertCircle  className="h-6 w-6 shrink-0 text-warning" aria-hidden />}
           {outcome.kind === 'error'   && <XCircle      className="h-6 w-6 shrink-0 text-destructive" aria-hidden />}
-          <div className="min-w-0">
+          <div className="min-w-0 flex-1">
             <p className="text-fs-md font-semibold leading-snug">{outcome.title}</p>
             {outcome.detail && <p className="text-fs-sm text-muted-foreground">{outcome.detail}</p>}
+
+            {/* RD-CHECKIN-FIX-01 — reverse a check-in this operator just made.
+                Shown only after a successful admit, and the server independently
+                re-checks that it was theirs and is still inside the window. */}
+            {outcome.kind === 'success' && lastCheckIn && (
+              <button
+                type="button"
+                onClick={() => void undoLast(lastCheckIn)}
+                disabled={busy}
+                className="mt-2 inline-flex items-center gap-1.5 rounded-lg border border-border bg-card px-3 py-1.5 text-fs-2xs font-semibold text-foreground disabled:opacity-50"
+              >
+                <RotateCcw className="size-3" aria-hidden />
+                Undo check-in
+              </button>
+            )}
           </div>
         </div>
       )}

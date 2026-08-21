@@ -24,6 +24,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { adminDb }        from '@/lib/firebase/admin'
 import { authorizeEvent } from '@/lib/team/workspace'
 import { getEventCheckInStatus }     from '@/lib/checkin/eventStatus'
+import { resolveIdentifierConfig }   from '@/lib/identifiers/config'
 import type { RegistrationDocument } from '@/lib/registrations/types'
 
 // ─── Response types ───────────────────────────────────────────────────────────
@@ -38,6 +39,37 @@ export interface AttendeeSearchResult {
   status:        string
   checkedIn:     boolean
   checkedInAt:   string | null
+  /**
+   * RD-CHECKIN-CONFIRM-01 — the attendee's own registration answers, LABELLED.
+   *
+   * Present ONLY on the exact ticket-code lookup — i.e. when the operator has
+   * resolved exactly ONE person by scanning or typing their code. A name search
+   * returns a list, and attaching form answers there would hand a gate operator
+   * the gender, date of birth and blood group of everyone matching "s" — bulk
+   * participant data, which is precisely what this role must not receive.
+   *
+   * Answers are resolved against the event's registration form SERVER-SIDE, so the
+   * client never sees the opaque field ids (`f_hvcpas0a`) and no form definition
+   * has to be shipped to the gate. Ordered as the organizer built the form.
+   */
+  detail?: AttendeeDetail
+}
+
+/** One labelled answer from the attendee's registration form. */
+export interface AttendeeFormAnswer {
+  fieldId: string
+  label:   string
+  value:   string
+}
+
+/** Everything the confirmation view shows beyond the row fields above. */
+export interface AttendeeDetail {
+  eventName: string
+  /** The event's configured identifier label + the attendee's value, when assigned. */
+  identifierLabel: string | null
+  identifierValue: string | null
+  /** Registration-form answers, labelled and ordered. Empty when the form had none. */
+  answers: AttendeeFormAnswer[]
 }
 
 export interface AttendeeSearchResponse {
@@ -59,6 +91,69 @@ function toISO(ts: unknown): string | null {
     return (ts as { toDate: () => Date }).toDate().toISOString()
   }
   return null
+}
+
+/**
+ * RD-CHECKIN-CONFIRM-01 — renders the attendee's form answers with their real labels.
+ *
+ * The registration form stores answers keyed by opaque field id
+ * (`f_hvcpas0a: "Male"`), so the labels have to come from the event's own form
+ * definition — which the caller already holds, because ownership was proved by
+ * reading that same draft document. No extra read, and no field name is invented:
+ * an id with no matching definition is DROPPED rather than shown raw, so a removed
+ * question cannot surface as `f_hvcpas0a` on a gate screen.
+ *
+ * Iterating the FORM (not the answers) is what makes the order the organizer's.
+ */
+function labelledAnswers(draft: Record<string, unknown>, reg: RegistrationDocument): AttendeeFormAnswer[] {
+  const form   = draft.registrationForm as Record<string, unknown> | undefined
+  const fields = Array.isArray(form?.fields) ? form.fields as Array<Record<string, unknown>> : []
+  const responses = reg.attendee?.formResponses ?? {}
+
+  const out: AttendeeFormAnswer[] = []
+  for (const f of fields) {
+    const fieldId = typeof f.id === 'string' ? f.id : ''
+    const label   = typeof f.label === 'string' ? f.label : ''
+    if (!fieldId || !label) continue
+
+    const raw = (responses as Record<string, unknown>)[fieldId]
+    if (raw === undefined || raw === null || raw === '') continue
+
+    // Multi-select answers arrive as arrays; everything else stringifies plainly.
+    // Objects are skipped rather than rendered as "[object Object]".
+    let value: string
+    if (Array.isArray(raw))            value = raw.filter(v => v !== null && v !== undefined).join(', ')
+    else if (typeof raw === 'object')  continue
+    else                               value = String(raw)
+
+    if (value) out.push({ fieldId, label, value })
+  }
+  return out
+}
+
+/**
+ * The confirmation payload for ONE resolved attendee.
+ *
+ * `identifierLabel` is the EVENT'S CONFIGURED label and is always present, so the
+ * confirmation view can name the field even when the attendee has no value yet
+ * ("Bib Number — not assigned"). Taking it from the attendee's own record instead
+ * would leave the un-assigned case with nothing to display, which is exactly the
+ * case that needs naming. Never hardcoded on either side.
+ */
+function toDetail(
+  draft: Record<string, unknown>,
+  reg: RegistrationDocument,
+  configuredLabel: string,
+): AttendeeDetail {
+  const identifier = (reg as { identifier?: { value?: unknown; label?: unknown } }).identifier
+  return {
+    eventName:       reg.eventName ?? '',
+    identifierLabel: typeof identifier?.label === 'string' && identifier.label
+      ? identifier.label            // what this attendee's identifier actually calls itself
+      : configuredLabel,            // else the event's current configuration
+    identifierValue: typeof identifier?.value === 'string' && identifier.value ? identifier.value : null,
+    answers:         labelledAnswers(draft, reg),
+  }
 }
 
 function toResult(id: string, reg: RegistrationDocument): AttendeeSearchResult {
@@ -167,8 +262,25 @@ export async function GET(
       return NextResponse.json({ results: [], truncated: false, searchMode: 'exact' })
     }
 
+    // RD-CHECKIN-CONFIRM-01 — the ticket must belong to THIS event.
+    //
+    // `ticketCode` is globally unique, so this branch queried it without any event
+    // filter — meaning a code from another of the same organizer's events resolved
+    // here, while the name-search branch below has always been event-scoped. That
+    // asymmetry mattered little when the response was four fields; it matters now
+    // that this path returns the attendee's full registration answers. Same empty
+    // shape as "not found", so a code cannot be probed for existence elsewhere.
+    if (reg.eventSlug !== slug) {
+      return NextResponse.json({ results: [], truncated: false, searchMode: 'exact' })
+    }
+
+    // Full detail is attached ONLY here — one attendee the operator has explicitly
+    // resolved, never a list. See the note on AttendeeSearchResult.detail.
+    // One config read, on this branch only, so the list path is unchanged.
+    const { config: idConfig } = await resolveIdentifierConfig(slug)
+
     return NextResponse.json({
-      results:    [toResult(doc.id, reg)],
+      results:    [{ ...toResult(doc.id, reg), detail: toDetail(draft, reg, idConfig.label) }],
       truncated:  false,
       searchMode: 'exact',
     })

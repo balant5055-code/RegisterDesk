@@ -11,6 +11,7 @@ import type { AttendeeSearchResult, AttendeeSearchResponse } from '@/app/api/org
 import type { CheckInResult }                                from '@/app/api/checkin/scan/route'
 import type { CheckInUndoResult }                            from '@/app/api/checkin/undo/route'
 import IdentifierPrompt                                     from '@/components/checkin/IdentifierPrompt'
+import AttendeeConfirmation                                 from '@/components/checkin/AttendeeConfirmation'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -241,6 +242,8 @@ export default function AttendeeSearch({ eventId, token, onCheckedIn, onUndid }:
   const [idPrompt,       setIdPrompt]       = useState<{
     reg: AttendeeSearchResult; label: string; error: string
   } | null>(null)
+  // RD-CHECKIN-CONFIRM-01 — attendee awaiting the operator's confirmation.
+  const [confirm,        setConfirm]        = useState<AttendeeSearchResult | null>(null)
 
   const inputRef = useRef<HTMLInputElement>(null)
   const abortRef = useRef<AbortController | null>(null)
@@ -298,6 +301,30 @@ export default function AttendeeSearch({ eventId, token, onCheckedIn, onUndid }:
 
   // ── Check-in ──────────────────────────────────────────────────────────────
 
+  // RD-CHECKIN-CONFIRM-01 — step 1 for lookup: re-resolve the selected attendee by
+  // TICKET CODE so the confirmation view gets their labelled registration answers.
+  //
+  // The list rows deliberately do not carry those answers (a name search would then
+  // return everyone's gender and date of birth), so the detail is fetched only for
+  // the one person the operator actually chose. Same endpoint, same authorization.
+  async function requestCheckIn(reg: AttendeeSearchResult) {
+    setCheckInActions(prev => ({ ...prev, [reg.id]: { loading: true, result: null } }))
+    try {
+      const res = await fetch(
+        `/api/organizer/events/${encodeURIComponent(eventId)}/checkin/search?q=${encodeURIComponent(reg.ticketCode)}`,
+        { headers: { Authorization: `Bearer ${token}` } },
+      )
+      const data  = res.ok ? await res.json() as { results?: AttendeeSearchResult[] } : null
+      // Fall back to the row we already have if the detail lookup fails — the
+      // operator still gets a confirmation step, just without the form answers.
+      setConfirm(data?.results?.[0] ?? reg)
+    } catch {
+      setConfirm(reg)
+    } finally {
+      setCheckInActions(prev => ({ ...prev, [reg.id]: { loading: false, result: null } }))
+    }
+  }
+
   async function handleCheckIn(reg: AttendeeSearchResult, identifierValue?: string) {
     setCheckInActions(prev => ({ ...prev, [reg.id]: { loading: true, result: null } }))
     try {
@@ -324,6 +351,7 @@ export default function AttendeeSearch({ eventId, token, onCheckedIn, onUndid }:
         return
       }
       setIdPrompt(null)
+      setConfirm(null)
 
       setCheckInActions(prev => ({ ...prev, [reg.id]: { loading: false, result: data } }))
       if (data.success && !data.alreadyCheckedIn) onCheckedIn()
@@ -459,11 +487,23 @@ export default function AttendeeSearch({ eventId, token, onCheckedIn, onUndid }:
               reg={reg}
               checkInAction={checkInActions[reg.id]}
               undoAction={undoActions[reg.id]}
-              onCheckIn={handleCheckIn}
+              onCheckIn={requestCheckIn}
               onUndoCheckIn={handleUndoCheckIn}
             />
           ))}
         </div>
+      )}
+
+      {/* RD-CHECKIN-CONFIRM-01 — lookup takes the SAME confirmation step as QR and
+          manual. Confirm routes into the unchanged check-in call below. */}
+      {confirm && !idPrompt && (
+        <AttendeeConfirmation
+          attendee={confirm}
+          identifierLabel={confirm.detail?.identifierLabel ?? 'Identifier'}
+          busy={!!checkInActions[confirm.id]?.loading}
+          onConfirm={() => void handleCheckIn(confirm)}
+          onCancel={() => setConfirm(null)}
+        />
       )}
 
       {/* RD-CHECKIN-BIB-01 — same prompt, same server rule, as QR and manual. */}

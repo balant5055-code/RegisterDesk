@@ -10,9 +10,11 @@ import {
 } from 'lucide-react'
 import type { CheckInResult } from '@/app/api/checkin/scan/route'
 import type { AttendanceDashboardResponse } from '@/app/api/organizer/events/[eventId]/attendance/route'
+import type { AttendeeSearchResult } from '@/app/api/organizer/events/[eventId]/checkin/search/route'
 import { useOfflineCheckin }    from '@/lib/checkin/useOfflineCheckin'
 import { ticketCodeFromQr }     from '@/lib/checkin/qr'
 import IdentifierPrompt        from '@/components/checkin/IdentifierPrompt'
+import AttendeeConfirmation    from '@/components/checkin/AttendeeConfirmation'
 import AttendeeSearch           from './AttendeeSearch'
 import WalkInForm               from './WalkInForm'
 
@@ -129,6 +131,8 @@ export default function CheckInClient({
   const [idPrompt,      setIdPrompt]      = useState<{
     ticketCode: string; label: string; attendeeName?: string; error: string
   } | null>(null)
+  // RD-CHECKIN-CONFIRM-01 — attendee awaiting confirmation (online only).
+  const [confirm,       setConfirm]       = useState<AttendeeSearchResult | null>(null)
   const [liveCheckedIn, setLiveCheckedIn] = useState(initialCheckedIn)
   const [liveTotal,     setLiveTotal]     = useState(totalRegistrations)
   const [mode,          setMode]          = useState<Mode>('qr')
@@ -261,6 +265,7 @@ export default function CheckInClient({
         return
       }
       setIdPrompt(null)
+      setConfirm(null)
 
       setResult(data)
       if (data.success && !data.alreadyCheckedIn) {
@@ -280,11 +285,42 @@ export default function CheckInClient({
 
   // ── Manual form submit ────────────────────────────────────────────────────
 
+  // RD-CHECKIN-CONFIRM-01 — resolve the attendee and show ATTENDEE INFORMATION
+  // before anything is written.
+  //
+  // OFFLINE IS DELIBERATELY UNCHANGED. The confirmation needs the server's labelled
+  // registration answers, which a cached device does not have; rather than invent a
+  // thinner offline variant, the offline path keeps its existing behaviour exactly.
+  async function resolveAttendee(rawCode: string) {
+    const ticketCode = ticketCodeFromQr(rawCode)
+    if (!ticketCode) return
+
+    if (!offline.online) { void submitCode(ticketCode); return }
+
+    setLoading(true)
+    setResult(null)
+    try {
+      const res = await fetch(
+        `/api/organizer/events/${encodeURIComponent(eventId)}/checkin/search?q=${encodeURIComponent(ticketCode)}`,
+        { headers: { Authorization: `Bearer ${token}` } },
+      )
+      if (!res.ok) { setResult({ success: false, error: 'TICKET_NOT_FOUND' }); return }
+      const data  = await res.json() as { results?: AttendeeSearchResult[] }
+      const found = data.results?.[0]
+      if (!found) { setResult({ success: false, error: 'TICKET_NOT_FOUND' }); return }
+      setConfirm(found)
+    } catch {
+      setResult({ success: false, error: 'NETWORK_ERROR' })
+    } finally {
+      setLoading(false)
+    }
+  }
+
   function handleManualSubmit(e?: React.FormEvent) {
     e?.preventDefault()
     const trimmed = code.trim().toUpperCase()
     if (!trimmed) return
-    submitCode(trimmed)
+    void resolveAttendee(trimmed)
   }
 
   // ── QR code received from scanner ─────────────────────────────────────────
@@ -295,7 +331,7 @@ export default function CheckInClient({
     // Ticket QR format: RD:{eventSlug}:{registrationId}:{ticketCode}
     // Extract just the ticketCode; bare manual codes (RD-XXXXXXXX) pass through
     // unchanged. Shared with the /ops gate surface — see lib/checkin/qr.ts.
-    submitCode(ticketCodeFromQr(raw))
+    void resolveAttendee(raw)
   }
 
   // ── Reset for next attendee ────────────────────────────────────────────────
@@ -463,6 +499,19 @@ export default function CheckInClient({
             <QrScanner active={scannerActive} onCode={handleQrCode} />
           )}
         </div>
+      )}
+
+      {/* RD-CHECKIN-CONFIRM-01 — ATTENDEE INFORMATION before any write. Same
+          component the /ops gate uses; Confirm hands the ticket to the unchanged
+          check-in call, and the identifier prompt (below) follows only if needed. */}
+      {confirm && !idPrompt && (
+        <AttendeeConfirmation
+          attendee={confirm}
+          identifierLabel={confirm.detail?.identifierLabel ?? 'Identifier'}
+          busy={loading}
+          onConfirm={() => void submitCode(confirm.ticketCode)}
+          onCancel={() => setConfirm(null)}
+        />
       )}
 
       {/* RD-CHECKIN-BIB-01 — blocking identifier prompt. Same component and same
