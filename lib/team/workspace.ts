@@ -12,7 +12,6 @@
 
 import { verifyCaller, requirePermission, activeMemberships, type AccessResult } from '@/lib/team/access'
 import { adminDb } from '@/lib/firebase/admin'
-import { isOrganizer } from '@/lib/organizer/identity'
 import { permissionsForRole, isCheckinOnlyRole, isEventInScope, type TeamRole, type TeamPermission } from '@/lib/team/types'
 
 export interface WorkspaceContext {
@@ -26,25 +25,39 @@ export interface WorkspaceContext {
 }
 
 /**
- * Does this caller own a workspace of their own?
+ * Does this caller own a workspace with something IN it?
  *
- * `users/{uid}.role === 'organizer'` is the ONE canonical definition of an organizer
- * account (lib/organizer/identity.ts) — written by createOrganizerProfile, self-healed by
- * verify-otp, and pinned by firestore.rules. Reused here rather than re-derived, so this
- * cannot drift from the admin counts and listings that already depend on it.
+ * ═══ WHY NOT `users/{uid}.role === 'organizer'` ══════════════════════════════
+ * That was the first attempt and it was wrong, in a way only live data showed. Every
+ * account created through the ordinary sign-in paths gets a users doc with
+ * `role: 'organizer'` — createOrganizerProfile writes it, the verify-otp self-heal writes
+ * it, and firestore.rules pins it. A gate operator who was invited to a team and then
+ * signed in once has that row too.
  *
- * Read ONLY in the ambiguous case below, so the common paths pay nothing for it.
+ * Measured on the two live check-in staff accounts: both carry
+ * `users.role === 'organizer'` and own ZERO events. Keying ownership on the profile row
+ * would have resolved both of them to their own empty workspace, silently cutting them off
+ * from the event they are assigned to — trading a rare exposure bug for a certain outage.
+ *
+ * ═══ WHAT COUNTS AS EVIDENCE ═════════════════════════════════════════════════
+ * An owned workspace is one that CONTAINS something. `users/{uid}/eventDrafts` is that
+ * evidence and is the superset: publishing derives `events/{slug}` from a draft, so an
+ * organizer with any event — published or not — has a draft. A single `limit(1)` read, and
+ * only in the ambiguous branch below.
+ *
+ * ═══ FAIL CLOSED ═════════════════════════════════════════════════════════════
+ * An unreadable subcollection resolves the caller to THEMSELVES, never to a membership.
+ * The two outcomes are not symmetric: resolving to self can only ever show a caller their
+ * own data, while resolving to a membership on bad information can show them someone
+ * else's. A transient read failure must not be able to open another organizer's workspace.
  */
 async function ownsWorkspace(callerUid: string): Promise<boolean> {
   try {
-    const snap = await adminDb.collection('users').doc(callerUid).get()
-    return snap.exists && isOrganizer(snap.data())
+    const drafts = await adminDb.collection('users').doc(callerUid)
+      .collection('eventDrafts').limit(1).get()
+    return !drafts.empty
   } catch {
-    // FAIL CLOSED TOWARDS SELF. An unreadable profile must not be read as "not an owner",
-    // because that is precisely the branch that would hand this caller someone else's
-    // workspace. Treating it as ownership resolves them to their own data — which is, at
-    // worst, empty.
-    return true
+    return true   // fail closed — towards self
   }
 }
 

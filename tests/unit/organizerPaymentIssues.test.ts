@@ -49,9 +49,22 @@ describe('workspace resolution: ownership always wins', () => {
     expect(idx).toBeLessThan(memb)          // ownership is decided BEFORE the membership
   })
 
-  it('ownership uses the canonical organizer predicate, not a new one', () => {
-    expect(WORKSPACE).toContain("import { isOrganizer } from '@/lib/organizer/identity'")
-    expect(WORKSPACE).toContain('isOrganizer(snap.data())')
+  // UPDATED by RD-CHECKIN-STAFF-02. This used to assert the opposite — that ownership was
+  // decided by the canonical `isOrganizer(users/{uid})` predicate. Live data disproved it:
+  // every account that has ever signed in carries `role: 'organizer'`, including both gate
+  // operators, who own zero events. The requirement changed, so the assertion changed with
+  // it, and it is now the stronger one: the profile row must NOT be the evidence.
+  it('ownership needs evidence of an owned workspace, not merely an organizer profile row', () => {
+    const fn = WORKSPACE.slice(
+      WORKSPACE.indexOf('async function ownsWorkspace'),
+      WORKSPACE.indexOf('export async function resolveWorkspaceUid'),
+    )
+    expect(fn).toContain('eventDrafts')
+    expect(fn).toContain('.limit(1)')
+    // The profile row decides nothing.
+    expect(fn).not.toContain('isOrganizer')
+    expect(fn).not.toMatch(/collection\('users'\)\.doc\(callerUid\)\.get\(\)/)
+    expect(WORKSPACE).not.toContain("from '@/lib/organizer/identity'")
   })
 
   it('an unreadable profile fails CLOSED — towards self, never towards a membership', () => {
