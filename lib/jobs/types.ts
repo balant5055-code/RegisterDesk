@@ -9,6 +9,19 @@ export interface JobCounts {
   processed: number
   succeeded: number
   failed:    number
+  /**
+   * Items the strategy declined to act on — neither done nor broken.
+   *
+   * OPTIONAL AND OPT-IN. A strategy that never reports a skip never causes this field to be
+   * written, so existing job documents and every job type other than certificate delivery
+   * are byte-identical to before. Read it as `?? 0`.
+   *
+   * WHY IT EXISTS. `succeeded` is surfaced to operators as "Sent". Folding "nothing was
+   * done" into it produced a delivery run that reported 1 sent while the provider was never
+   * called — the counter agreed with the job and both disagreed with reality. A third
+   * bucket is the only way for `succeeded` to keep meaning what its label claims.
+   */
+  skipped?:  number
 }
 
 /** Generic job fields. Feature job types extend this with their own payload. */
@@ -33,6 +46,11 @@ export interface ChunkCommit {
   deltaProcessed: number
   deltaSucceeded: number
   deltaFailed:    number
+  /**
+   * Items skipped in this chunk. Optional: omitted or 0 means the kernel writes NOTHING for
+   * `counts.skipped`, so a job type that does not report skips never gains the field.
+   */
+  deltaSkipped?:  number
   cursor:         string | null
   lastError:      string | null
   finished:       boolean          // no more items remain

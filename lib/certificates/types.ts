@@ -209,10 +209,18 @@ export function defaultCertificateSettings(): CertificateSettingsInput {
     autoEmail: {
       enabled: false,
       subject: 'Your certificate for {{eventName}}',
+      // RD-CERT-EMAIL-02 — THIS is the copy recipients actually get. `emailCertificate`
+      // resolves `auto.message` first and only falls back to its own constant when an
+      // organizer has blanked this, so wording fixed only there would never be seen.
+      //
+      // The previous text ("verify it any time using the QR code or the link on the
+      // certificate") described the old flow, where the certificate arrived as an
+      // attachment. It arrives as a link to the Certificate Center now, so the copy names
+      // the steps that are actually waiting there.
       message:
         'Hi {{participantName}},\n\n' +
-        'Your certificate for {{eventName}} is ready. You can verify it any ' +
-        'time using the QR code or the link on the certificate.\n\n' +
+        'Your certificate for {{eventName}} is ready. Click below to verify your ' +
+        'details, upload your photo, and download your certificate.\n\n' +
         'Certificate ID: {{certificateId}}',
     },
     download: {

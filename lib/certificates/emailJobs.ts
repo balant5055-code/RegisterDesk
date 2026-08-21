@@ -25,11 +25,14 @@ import { adminDb } from '@/lib/firebase/admin'
 import { FieldValue } from 'firebase-admin/firestore'
 import { captureError } from '@/lib/monitoring/sentry'
 import {
-  claimCertificateEmail,
   listCertificatesForDelivery,
   getCertificatesByIds,
 } from './firestore'
+// NOTE: `claimCertificateEmail` is deliberately NOT imported here. The claim belongs to
+// emailCertificate alone — see processItem below for what happened when this module held
+// one too.
 import { emailCertificate } from './email'
+import type { EmailCertificateResult } from './email'
 import {
   COLLECTIONS, BULK_PAGE_SIZE, BULK_TIME_BUDGET_MS, BULK_LEASE_MS,
 } from './constants'
@@ -94,41 +97,59 @@ function emailJobStrategy(): JobStrategy<CertificateEmailJob, EmailJobContext, C
     },
 
     /**
-     * One certificate. The claim decides whether anything is sent at all.
+     * One certificate.
      *
-     * `ok: true` means "this certificate needs no further action from this job" — it was
-     * delivered, or another sender owns it, or it is already sent. Only a real delivery
-     * failure is counted as failed, so `counts.failed` stays actionable and Retry Failed
-     * targets exactly what went wrong.
+     * ═══ THIS MUST NOT CLAIM ══════════════════════════════════════════════════
+     * It used to call `claimCertificateEmail` here and then hand the claimed document to
+     * `emailCertificate` — which claims again, because it is the single owner of the claim
+     * for all three of its callers. `claimCertificateEmail` has no re-entrancy (deliberately:
+     * a holder token would be a second way for two senders to both proceed), so the inner
+     * claim saw the outer one's own `processing` + live lease and returned `busy`.
+     *
+     * `busy` reads as "someone else is sending", so the send was skipped — and the skip was
+     * counted as a success. Every bulk delivery therefore completed with `succeeded: N`, zero
+     * provider calls, and N certificates left in `processing` until their lease lapsed into
+     * `needs_review`, which no automatic intent may take. Bulk delivery never sent a single
+     * email from the day it shipped, and reported success every time.
+     *
+     * The fix is the absence below: ONE claim, owned by `emailCertificate`. Idempotency and
+     * retry semantics are unchanged — they were always enforced by that claim, never by this
+     * one. Replay safety still holds: a replayed page re-enters the same transactional claim,
+     * so an already-sent certificate is refused exactly as before.
+     *
+     * ═══ WHAT EACH OUTCOME MEANS ══════════════════════════════════════════════
+     *   succeeded — the provider was called and accepted. Nothing else.
+     *   skipped   — nothing to do (already sent, not failed, genuinely busy) or withheld for
+     *               review. Not work done, so it must never inflate "Sent".
+     *   failed    — a real delivery failure, and therefore actionable by Retry Failed.
      */
     async processItem(certificate, job) {
-      const claim = await claimCertificateEmail(certificate.certificateId, {
-        intent:  intentFor(job),
-        leaseMs: BULK_LEASE_MS,
-      })
-
-      if (!claim.ok) {
-        if (claim.reason === 'needs_review') {
-          await countNeedsReview(job.jobId)
-          return { ok: true }        // withheld deliberately — not a failure to retry
-        }
-        // busy / already_sent / not_failed / not_found: nothing to do, nothing wrong.
-        return { ok: true }
-      }
-
-      // Phase 2A resolves the attachment (pdfBytes → fileKey → fileUrl) and refuses to
-      // send a certificate whose artifact cannot be retrieved. Phase 2B records the
-      // outcome, which releases the claim either way.
-      const result = await emailCertificate(claim.certificate, { intent: intentFor(job) })
+      const result = await emailCertificate(certificate, { intent: intentFor(job) })
         .catch(err => {
           captureError(err, {
             scope: 'certificate_email_job', area: 'certificate',
             jobId: job.jobId, certificateId: certificate.certificateId,
           })
-          return { success: false, skipped: false, error: 'Unexpected delivery failure' }
+          // emailCertificate is contracted never to throw and now guards its own body, so
+          // this is a belt-and-braces path. A throw means the outcome is unknown, so it is
+          // reported as a failure rather than quietly passed over.
+          const failure: EmailCertificateResult = {
+            success: false, skipped: false, error: 'Unexpected delivery failure',
+          }
+          return failure
         })
 
-      if (result.success || result.skipped) return { ok: true }
+      // Withheld pending a human decision. Counted on the job document because it is neither
+      // a success nor a retryable failure — and never re-sent.
+      if (result.reason === 'needs_review') {
+        await countNeedsReview(job.jobId)
+        return { ok: true, skipped: true }
+      }
+
+      // already_sent / not_failed / busy: correct to pass over, wrong to call "Sent".
+      if (result.skipped) return { ok: true, skipped: true }
+
+      if (result.success) return { ok: true }
       return { ok: false, error: result.error ?? 'Delivery failed' }
     },
   }

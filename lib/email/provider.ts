@@ -70,17 +70,44 @@ export interface CertificateEmailParams {
   attendeeName:  string
   eventName:     string
   certificateId: string
-  downloadUrl:   string   // absolute URL to download the certificate PDF
+  /**
+   * The event this certificate belongs to. Carried explicitly because it — and NOT the
+   * certificateId — is what identifies the Certificate Center below; the two are easy to
+   * transpose and a transposed URL 404s for every recipient of a run.
+   */
+  eventSlug:     string
+  /**
+   * Absolute URL of the EVENT CERTIFICATE CENTER — `/events/{eventSlug}/certificates`.
+   *
+   * Deliberately not a direct download. It replaced `downloadUrl`, which pointed at
+   * `/api/certificates/{id}/file?token=<verificationToken>` — a link that skipped the Center
+   * entirely, so an attendee whose certificate needs a photo could never supply one, and that
+   * put the PERMANENT verification token in an email. That token is a 192-bit bearer
+   * credential with no expiry: once forwarded, whoever holds the mail can download the
+   * certificate forever, and it cannot be revoked without reissuing.
+   *
+   * The Center asks the attendee to identify themselves and then mints a SHORT-LIVED
+   * capability, so a forwarded link grants nothing. The PDF is still attached to the mail, so
+   * the common case needs no link at all.
+   */
+  certificateCenterUrl: string
   verifyUrl:     string   // absolute URL to verify on public page
   /** Overrides the default subject (already placeholder-resolved). */
   subject?:      string
   /** Organizer custom body text (already placeholder-resolved, plain text). */
   message?:      string
-  /** Generated certificate PDF to attach. */
-  pdf?: {
-    filename:      string
-    contentBase64: string
-  }
+  // RD-CERT-EMAIL-02 — there is deliberately NO `pdf` field any more.
+  //
+  // The certificate mail is CTA-only. What used to be attached was the STORED artifact,
+  // which is the non-personalised render: an attendee photo is applied at request time and
+  // never written back to storage, so the attachment was a certificate missing the photo the
+  // recipient was being asked to upload — and having it in hand removed any reason to open
+  // the Center at all.
+  //
+  // Removing the field rather than leaving it optional is the point: an optional `pdf` is an
+  // open invitation to reattach it later and quietly reintroduce both problems. Generic
+  // attachment support is untouched — `sendCustomEmail` and every other template that needs
+  // an attachment still has one; this single template stopped using it.
   branding?:       EmailBranding   // RD-PRODUCT-01C white-label
 }
 

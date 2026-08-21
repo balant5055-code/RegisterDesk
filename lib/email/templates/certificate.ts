@@ -15,6 +15,12 @@ export function certificateTemplate(p: CertificateEmailParams): { subject: strin
 
   // Organizer custom message (placeholder-resolved upstream) takes precedence;
   // otherwise fall back to the default copy. Newlines become paragraph breaks.
+  //
+  // RD-CERT-EMAIL-02 — the fallback copy no longer says the certificate is "attached",
+  // because it is not: the mail is CTA-only and the download happens in the Certificate
+  // Center, after the attendee identifies themselves and adds a photo if the template needs
+  // one. The organizer-custom branch is unchanged — their message still wins outright, and
+  // the CTA below is a sibling of this block, so no custom text can replace or hide it.
   const intro = p.message?.trim()
     ? `<p style="font-size:14px;color:#333;margin:0 0 4px 0;white-space:pre-line;">${esc(p.message.trim())}</p>`
     : `
@@ -22,7 +28,7 @@ export function certificateTemplate(p: CertificateEmailParams): { subject: strin
         Your certificate is ready, ${esc(p.attendeeName)}!
       </p>
       <p style="font-size:14px;color:#555;margin:0;">
-        Your certificate for <strong>${esc(p.eventName)}</strong> has been generated and is available to download.
+        Your certificate for <strong>${esc(p.eventName)}</strong> is ready. Click below to verify your details, upload your photo, and download your certificate.
       </p>`
 
   const body = `
@@ -36,7 +42,7 @@ export function certificateTemplate(p: CertificateEmailParams): { subject: strin
     </div>
 
     <div style="text-align:center;margin-bottom:24px;">
-      <a href="${p.downloadUrl}"
+      <a href="${p.certificateCenterUrl}"
          style="display:inline-block;background:linear-gradient(135deg,#fb5a6a,#e5277e);color:#fff;font-size:14px;font-weight:700;padding:14px 32px;border-radius:12px;text-decoration:none;">
         Download Certificate
       </a>

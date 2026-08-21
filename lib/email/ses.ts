@@ -330,12 +330,11 @@ export class SESProvider implements EmailProvider {
     return this.send(p.to, subject, html)
   }
 
+  // RD-CERT-EMAIL-02 — CTA-only: no attachment. `this.send`'s `attachments` option is
+  // untouched and still used by the templates that genuinely need it (raw-MIME path).
   async sendCertificateEmail(p: CertificateEmailParams): Promise<EmailResult> {
     const { subject, html } = certificateTemplate(p)
-    const attachments = p.pdf
-      ? [{ filename: p.pdf.filename, contentType: 'application/pdf', base64: p.pdf.contentBase64 }]
-      : undefined
-    return this.send(p.to, subject, html, { attachments })
+    return this.send(p.to, subject, html)
   }
 
   async sendCustomEmail(p: CustomEmailParams): Promise<EmailResult> {

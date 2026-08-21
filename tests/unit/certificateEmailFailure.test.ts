@@ -68,10 +68,10 @@ const CERT = {
   // Deliberately DIFFERENT values: the resolver reads `events/{slug}`, so a test where the
   // draft id and the slug are the same string cannot tell a correct call from a wrong one.
   eventId:       'evt-1',
-  eventSlug:     'noyyal-awareness-marathon-2026',
+  eventSlug:     'lakeside-awareness-run-2026',
   attendeeEmail: 'arun@example.test',
   attendeeName:  'Arun Prakash',
-  eventName:     'Noyyal Awareness Marathon 2026',
+  eventName:     'Lakeside Awareness Run 2026',
   emailStatus:   'failed',
   data:          {},
 } as unknown as Parameters<typeof emailCertificate>[0]
@@ -92,7 +92,7 @@ describe('the certificate transport is resolved by event SLUG', () => {
     await emailCertificate(CERT, { force: true })
 
     expect(providerArgs).toHaveLength(1)
-    expect(providerArgs[0]).toBe('noyyal-awareness-marathon-2026')
+    expect(providerArgs[0]).toBe('lakeside-awareness-run-2026')
     // The precise regression: a draft id here silently means "use the default provider".
     expect(providerArgs[0]).not.toBe('evt-1')
   })
@@ -157,7 +157,10 @@ describe('idempotency is unchanged', () => {
   it('an already-sent certificate is skipped without forcing', async () => {
     const sent = { ...CERT, emailStatus: 'sent' } as typeof CERT
     const r = await emailCertificate(sent)
-    expect(r).toEqual({ success: true, skipped: true })
+    // RD-CERT-EMAIL-02 added a `reason` discriminant so the bulk worker can tell a skip from
+    // a send without matching on prose. Asserting it explicitly rather than loosening the
+    // shape: the skip must still be a skip, AND it must now say why.
+    expect(r).toEqual({ success: true, skipped: true, reason: 'already_sent' })
     expect(recorded).toHaveLength(0)
   })
 })

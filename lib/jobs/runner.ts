@@ -34,7 +34,15 @@ export interface JobStrategy<J extends Job, Ctx, Item> {
   /** Fetch the next page of items after `cursor`. */
   fetchPage(job: J, ctx: Ctx, cursor: string | null, limit: number): Promise<JobPage<Item>>
   /** Process one item. A per-item failure is counted, never fails the whole job. */
-  processItem(item: Item, job: J, ctx: Ctx): Promise<{ ok: boolean; error?: string }>
+  /**
+   * One item.
+   *
+   * `skipped: true` means "there was nothing to do here" — not done, not broken. It is
+   * OPT-IN: a strategy that never sets it behaves exactly as before, and the field cannot be
+   * reached accidentally because `ok` alone still selects succeeded/failed. Use it when
+   * counting the item as a success would misreport work that never happened.
+   */
+  processItem(item: Item, job: J, ctx: Ctx): Promise<{ ok: boolean; error?: string; skipped?: boolean }>
   /** Terminal hook, invoked once when the job reaches `completed`. Best-effort. */
   onComplete?(job: J, ctx: Ctx): Promise<void> | void
 }
@@ -110,6 +118,7 @@ export async function runJobChunk<J extends Job, Ctx, Item>(
 
     let succeeded = 0
     let failed    = 0
+    let skipped   = 0
     let lastError: string | null = null
     // Bounded worker pool over the page's items. concurrency=1 → identical to the
     // original sequential loop. JS is single-threaded, so the shared counters are
@@ -118,7 +127,11 @@ export async function runJobChunk<J extends Job, Ctx, Item>(
     const worker = async () => {
       while (next < items.length) {
         const r = await strategy.processItem(items[next++], job, ctx)
-        if (r.ok) succeeded++
+        // Skip is checked FIRST and is independent of `ok`: an item can be legitimately
+        // skipped (nothing to do) or withheld (needs a human), and neither is work done.
+        // Only a strategy that opts in can reach this branch.
+        if (r.skipped) skipped++
+        else if (r.ok) succeeded++
         else { failed++; lastError = r.error ?? lastError }
       }
     }
@@ -154,6 +167,7 @@ export async function runJobChunk<J extends Job, Ctx, Item>(
       deltaProcessed: items.length,
       deltaSucceeded: succeeded,
       deltaFailed:    failed,
+      deltaSkipped:   skipped,
       cursor:         nextCursor,
       lastError,
       finished,

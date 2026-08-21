@@ -45,21 +45,30 @@ describe('certificate email — the one that shipped a localhost link', () => {
     const certificateId = 'RDC-2026-5OHOUL'
 
     // Exactly the expressions lib/certificates/email.ts builds.
+    //
+    // RD-CERT-EMAIL-01 — the primary CTA is now the EVENT CERTIFICATE CENTER, not
+    // `/api/certificates/{id}/file?token=…`. That older link skipped the Center (so a
+    // certificate needing a photo could never get one) and carried the PERMANENT
+    // verification token in an email. Pinning it here would assert the defect.
+    const eventSlug   = 'harbour-half-marathon-2026'
     const verifyUrl   = `${appUrl.getEmailAppUrl()}/verify/certificate/${certificateId}`
-    const downloadUrl = `${appUrl.getEmailAppUrl()}/api/certificates/${certificateId}/file?token=${encodeURIComponent('tok123')}`
+    const certificateCenterUrl = `${appUrl.getEmailAppUrl()}/events/${eventSlug}/certificates`
 
     const { subject, html } = certificate({
       to: 'arun@example.test',
       attendeeName: 'அருண் Prakash',
-      eventName: 'Noyyal Marathon 2026',
+      eventName: 'Harbour Half Marathon 2026',
       certificateId,
-      downloadUrl,
+      eventSlug,
+      certificateCenterUrl,
       verifyUrl,
     })
 
     expect(verifyUrl).toBe('https://registerdesk.in/verify/certificate/RDC-2026-5OHOUL')
     expect(html).toContain('https://registerdesk.in/verify/certificate/RDC-2026-5OHOUL')
-    expect(html).toContain('https://registerdesk.in/api/certificates/RDC-2026-5OHOUL/file')
+    expect(html).toContain('https://registerdesk.in/events/harbour-half-marathon-2026/certificates')
+    // The token-bearing file link must not reappear.
+    expect(html).not.toContain('/api/certificates/')
     assertNoLocalOrigin(html, 'certificate email')
     expect(subject).toBeTruthy()
   })
@@ -67,7 +76,7 @@ describe('certificate email — the one that shipped a localhost link', () => {
   it('preserves Unicode recipient data while fixing the URLs', async () => {
     const { appUrl, certificate } = await loadProd()
     const { html } = certificate({
-      to: 'a@b.test', attendeeName: 'அருண் Prakash', eventName: 'Noyyal ₹ Marathon',
+      to: 'a@b.test', attendeeName: 'அருண் Prakash', eventName: 'Harbour ₹ Marathon',
       certificateId: 'RDC-1',
       downloadUrl: `${appUrl.getEmailAppUrl()}/api/certificates/RDC-1/file`,
       verifyUrl:   `${appUrl.getEmailAppUrl()}/verify/certificate/RDC-1`,
@@ -83,7 +92,7 @@ describe('other transactional emails render production URLs', () => {
     const fn = Object.values(ticket).find(v => typeof v === 'function') as
       ((p: Record<string, unknown>) => { html: string })
     const { html } = fn({
-      to: 'a@b.test', attendeeName: 'Arun', eventName: 'Noyyal Marathon 2026',
+      to: 'a@b.test', attendeeName: 'Arun', eventName: 'Harbour Half Marathon 2026',
       ticketCode: 'NYM-1', registrationId: 'reg-1', passName: '42K Full Marathon',
       ticketPageUrl:  `${base}/tickets/reg-1`,
       pdfDownloadUrl: `${base}/api/tickets/reg-1/pdf`,
@@ -99,7 +108,7 @@ describe('other transactional emails render production URLs', () => {
     const fn = Object.values(registration).find(v => typeof v === 'function') as
       ((p: Record<string, unknown>) => { html: string })
     const { html } = fn({
-      to: 'a@b.test', attendeeName: 'Arun', eventName: 'Noyyal Marathon 2026',
+      to: 'a@b.test', attendeeName: 'Arun', eventName: 'Harbour Half Marathon 2026',
       ticketCode: 'NYM-1', registrationId: 'reg-1', passName: '42K',
       ticketPageUrl:  `${base}/tickets/reg-1`,
       pdfDownloadUrl: `${base}/api/tickets/reg-1/pdf`,
@@ -112,16 +121,16 @@ describe('other transactional emails render production URLs', () => {
     const { appUrl, waitlist, spot } = await loadProd()
     const base = appUrl.getEmailAppUrl()
     for (const [label, mod, extra] of [
-      ['waitlist-joined', waitlist, { eventPageUrl: `${base}/events/noyyal-marathon-2026` }],
-      ['spot-available',  spot,     { registerUrl:  `${base}/events/noyyal-marathon-2026/register` }],
+      ['waitlist-joined', waitlist, { eventPageUrl: `${base}/events/harbour-half-marathon-2026` }],
+      ['spot-available',  spot,     { registerUrl:  `${base}/events/harbour-half-marathon-2026/register` }],
     ] as const) {
       const fn = Object.values(mod).find(v => typeof v === 'function') as
         ((p: Record<string, unknown>) => { html: string })
       const { html } = fn({
-        to: 'a@b.test', attendeeName: 'Arun', eventName: 'Noyyal Marathon 2026',
+        to: 'a@b.test', attendeeName: 'Arun', eventName: 'Harbour Half Marathon 2026',
         passName: '42K', ...extra,
       })
-      expect(html).toContain('https://registerdesk.in/events/noyyal-marathon-2026')
+      expect(html).toContain('https://registerdesk.in/events/harbour-half-marathon-2026')
       assertNoLocalOrigin(html, `${label} email`)
     }
   })

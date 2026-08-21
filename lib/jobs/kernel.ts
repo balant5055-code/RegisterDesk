@@ -163,6 +163,11 @@ export async function commitChunk(collection: string, jobId: string, c: ChunkCom
       'counts.processed': FieldValue.increment(c.deltaProcessed),
       'counts.succeeded': FieldValue.increment(c.deltaSucceeded),
       'counts.failed':    FieldValue.increment(c.deltaFailed),
+      // Written ONLY when a strategy actually reported a skip. Spread-in rather than a
+      // plain increment-by-zero so that job types which do not use the third bucket
+      // (broadcasts, generation, ZIP, imports, prints) never gain the field at all and
+      // their documents stay exactly as they are today.
+      ...(c.deltaSkipped ? { 'counts.skipped': FieldValue.increment(c.deltaSkipped) } : {}),
       cursor:      c.cursor,
       error:       c.lastError ?? job.error ?? null,
       status,
