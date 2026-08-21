@@ -112,6 +112,8 @@ export default function RecipientsPanel({ api }: { api: CertApi }) {
   const [job, setJob]         = useState<SerializedCertificateEmailJob | null>(null)
   const [pending, setPending] = useState(0)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  // Guards the drive loop: exactly one chunk request in flight for this panel at a time.
+  const drivingRef = useRef(false)
 
   // No synchronous setState here: `loading` already starts true, and the effect below
   // must not trigger a cascading render (react-hooks/set-state-in-effect).
@@ -135,18 +137,46 @@ export default function RecipientsPanel({ api }: { api: CertApi }) {
       .catch(() => {})
   }, [api])
 
-  // Poll the job document. This is a READ — the browser never advances the job.
+  // DRIVE, then read. The chunk call advances the job; the GET is what the UI trusts.
+  //
+  // The cron driver would finish the job on its own — driving it here just means the organizer
+  // does not wait out a scheduled tick to see anything happen. Same shape ExportZipPanel uses,
+  // for the same reason. The process call is deliberately best-effort: if it fails the job is
+  // untouched (the lease is transactional), the next tick retries, and cron remains the
+  // guarantee for a tab that has been closed.
+  //
+  // Stops on its own at a terminal status, because the effect's own guard below drops out as
+  // soon as the polled status is no longer pending/processing.
   useEffect(() => {
     if (!job || (job.status !== 'pending' && job.status !== 'processing')) {
       if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null }
       return
     }
-    pollRef.current = setInterval(() => {
-      api.getEmailJob(job.jobId)
-        .then(r => { setJob(r.job); setPending(r.pending) })
-        .catch(() => {})
-    }, POLL_MS)
-    return () => { if (pollRef.current) clearInterval(pollRef.current) }
+    const jobId = job.jobId
+    let live = true
+
+    const tick = async () => {
+      // ONE chunk in flight at a time. A chunk can outlast POLL_MS on a slow provider, and
+      // overlapping calls would just queue up behind the lease — wasted requests, and a
+      // backlog that keeps firing after the job is done.
+      if (!live || drivingRef.current) return
+      drivingRef.current = true
+      try {
+        await api.processEmailJob(jobId).catch(() => {})   // best-effort; cron is the guarantee
+        const r = await api.getEmailJob(jobId)
+        if (live) { setJob(r.job); setPending(r.pending) }
+      } catch {
+        // Keep polling: a transient read failure must not stop the loop.
+      } finally {
+        drivingRef.current = false
+      }
+    }
+
+    pollRef.current = setInterval(() => { void tick() }, POLL_MS)
+    return () => {
+      live = false
+      if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null }
+    }
   }, [api, job])
 
   async function loadMore() {
@@ -302,17 +332,59 @@ export default function RecipientsPanel({ api }: { api: CertApi }) {
     }
   }
 
+  /**
+   * Enqueue a delivery job and then actually START it.
+   *
+   * ═══ WHY THE SECOND STEP EXISTS ═══════════════════════════════════════════
+   * Creating the job only writes a `pending` document; something has to run it. This used to
+   * stop after the POST and announce "Delivery started", which was not true: the only thing
+   * that could advance the job was the scheduled cron, observed in production at 20–56 minute
+   * gaps despite declaring a five-minute cron. The organizer pressed the button, saw a success message,
+   * and nothing was sent for half an hour.
+   *
+   * Generation (IssueBulkPanel) and ZIP export (ExportZipPanel) have always driven their own
+   * jobs from the open tab. Delivery now does the same, through the SAME existing route the
+   * cron uses. Nothing is bypassed: the route takes the job lease, and each certificate is
+   * still guarded by its own transactional claim, so a tab-driven chunk and a cron chunk can
+   * never send the same certificate twice.
+   *
+   * The two steps are reported separately on purpose. The job is durable the moment the POST
+   * succeeds — cron will finish it even if this tab dies — but only the second step justifies
+   * telling the operator that delivery has begun.
+   */
   async function startJob(scopeType: 'unsent' | 'failed' | 'selected') {
     setErr(null); setNotice(null)
+
+    let created: SerializedCertificateEmailJob
     try {
       const body = scopeType === 'selected'
         ? { scopeType, certificateIds: [...selected] }
         : { scopeType }
-      const { job: created } = await api.createEmailJob(body)
+      const r = await api.createEmailJob(body)
+      created = r.job
       setJob(created)
       setSelected(new Set()); setAllMatching(false)
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : 'Failed to start delivery')
+      return                                   // nothing was enqueued; nothing to drive
+    }
+
+    // The job now EXISTS. Whatever happens next, it is safe: it is visible to the cron
+    // driver and will be completed there if this tab cannot do it.
+    try {
+      const { job: after } = await api.processEmailJob(created.jobId)
+      if (after) {
+        setJob(prev => prev && prev.jobId === after.jobId
+          ? { ...prev, status: after.status, counts: after.counts, needsReview: after.needsReview, error: after.error }
+          : prev)
+      }
       setNotice('Delivery started. It continues on the server — you can close this tab.')
-    } catch (e) { setErr(e instanceof Error ? e.message : 'Failed to start delivery') }
+    } catch {
+      // Deliberately NOT the success message. The work is queued and recoverable, but it has
+      // not begun, and saying otherwise is what made the original bug invisible. The poll loop
+      // below keeps trying while the tab is open; cron is the guarantee if it is not.
+      setErr('Delivery is queued but has not started yet. This tab will keep trying, and the server will pick it up automatically.')
+    }
   }
 
   if (loading) return <Spinner />

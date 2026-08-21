@@ -16,6 +16,29 @@ import type {
   SerializedCertificateTemplateDoc, SerializedCertificate, SerializedCertificateJob,
   CertificateType, TemplateType, CertificateJobScope, RevocationReason, CertificateDeliveryScope,
 } from '@/lib/certificates/types'
+// Type-only, so both are erased at build — no server module is pulled into the bundle. Same
+// idiom the route-type imports above already rely on.
+import type { ProcessResult } from '@/lib/jobs/runner'
+import type { JobCounts, JobStatus } from '@/lib/jobs/types'
+
+/**
+ * Response of the EXISTING email-job process route.
+ *
+ * Declared here rather than imported because that route exports no type of its own, and this
+ * change is not permitted to modify it. Kept structurally identical to what the route returns
+ * — `result` from the shared job runner, plus the job's post-chunk summary (null if the job
+ * vanished between the chunk and the read-back).
+ */
+export interface EmailJobProcessResponse {
+  result: ProcessResult
+  job: {
+    jobId:       string
+    status:      JobStatus
+    counts:      JobCounts
+    needsReview: number
+    error:       string | null
+  } | null
+}
 
 export type ZipScope = 'all' | 'job' | 'selected'
 
@@ -169,10 +192,29 @@ export function makeCertApi(eventId: string, token: string) {
       fetch(`${B}/email-jobs`, { method: 'POST', headers: jsonAuth, body: JSON.stringify(body) })
         .then(jsonOrThrow<EmailJobCreateResponse>),
     listEmailJobs: () => fetch(`${B}/email-jobs`, { headers: auth }).then(jsonOrThrow<EmailJobsListResponse>),
-    // Progress is READ from the job document — the browser polls this and never drives the
-    // job, so progress survives a closed tab, a refresh and a navigation.
+    // Progress is READ from the job document, so it survives a closed tab, a refresh and a
+    // navigation. This is the authoritative state — `processEmailJob` advances the work, but
+    // what the UI shows always comes from here.
     getEmailJob: (jobId: string) =>
       fetch(`${B}/email-jobs/${jobId}`, { headers: auth }).then(jsonOrThrow<EmailJobResponse>),
+    /**
+     * Advances ONE chunk of a delivery job, exactly as the cron driver does.
+     *
+     * WHY THIS EXISTS. Creating the job only enqueues it; something has to run it. Generation
+     * (`processJob`) and ZIP export (`processZipJob`) have always been driven by the open tab,
+     * with cron as the safety net. Delivery had no such method, so "Send all not sent" left the
+     * job `pending` until the next scheduled tick — observed in production at 20–56 minute
+     * intervals, because GitHub throttles scheduled workflows regardless of the five-minute cron expression they declare.
+     * The organizer saw a button that appeared to do nothing.
+     *
+     * This wraps the EXISTING route; no endpoint, permission or server behaviour is added. The
+     * job lease arbitrates a tab-driven chunk against a cron chunk, and the per-certificate
+     * claim makes a double send impossible, so calling this is safe at any time — and safe to
+     * fail, since cron still finishes the job.
+     */
+    processEmailJob: (jobId: string) =>
+      fetch(`${B}/email-jobs/${jobId}/process`, { method: 'POST', headers: auth })
+        .then(jsonOrThrow<EmailJobProcessResponse>),
 
     // ── Settings ──
     getSettings: () => fetch(`${B}/settings`, { headers: auth }).then(jsonOrThrow<SettingsResponse>),
