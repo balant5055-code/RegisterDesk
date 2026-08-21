@@ -45,6 +45,24 @@ const EB_PAGE_SIZE = 2
 const EB_BUDGET_MS = 45_000
 const EB_LEASE_MS  = 60_000
 
+// RD-BROADCAST-RETRY-01 — total send attempts per recipient, counted ACROSS invocations.
+//
+// WHY EMAIL RETRIES ON A DIFFERENT SIGNAL FROM WHATSAPP. WhatsApp has a structured taxonomy
+// (httpStatus + Graph code) so it can tell a definite refusal from an indeterminate timeout.
+// SES surfaces only prose here — `normalizeSesError` returns an English sentence, and this
+// codebase deliberately refuses to branch on that (see lib/whatsapp/failureReason.ts). So the
+// email rule uses the ONE structural signal that is available and unambiguous:
+//
+//   success:false  → the provider ANSWERED and rejected the message. Nothing was queued.
+//   a THROW        → no answer arrived. SES may already have accepted it. Indeterminate.
+//
+// Only the first is retried. That is strictly narrower than the shared notificationEngine
+// retry (which also retries throws) and is why BROADCAST is left in its NON_RETRY_TYPES
+// rather than being switched on there — a duplicate bulk email is not worth the convenience.
+const EB_MAX_ATTEMPTS = 3
+const EB_RETRY_BACKOFF_MS = [200, 400] as const
+const ebSleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms))
+
 export interface EmailBroadcastJob extends Job {
   campaignId:      string
   eventId:         string
@@ -61,6 +79,10 @@ interface EmailRecipientRow {
   name:           string
   ticketCode:     string
   sent?:          boolean
+  /** Running total of send attempts. Bounds retry ACROSS invocations. */
+  attempts?:      number
+  /** Normalized message of the last failure. Observable final state. */
+  lastError?:     string
 }
 
 // send.ts CampaignData is a superset; typed locally to avoid a circular import.
@@ -199,13 +221,39 @@ export function emailBroadcastStrategy(): JobStrategy<EmailBroadcastJob, EmailJo
       let status: 'sent' | 'failed' = 'failed'
       let errorMsg: string | undefined
       let messageId: string | undefined
-      try {
-        const r = await notificationEngine.send(NotificationType.BROADCAST, { to: item.email, subject: renderedSubject, html: fullHtml, fromName: ctx.fromName, headers: unsubHeaders }, ctx.emailProviderName)
-        status    = r.success ? 'sent' : 'failed'
-        messageId = r.messageId
-        if (!r.success) errorMsg = r.error
-      } catch (err) {
-        errorMsg = err instanceof Error ? err.message : 'Unknown error'
+
+      // RD-BROADCAST-RETRY-01 — bounded retry of DEFINITELY-REJECTED sends only.
+      //
+      // In-page, before the cursor advances past this recipient, so no rewind is ever needed
+      // and cursor mechanics cannot produce a duplicate. Bounded across invocations by the
+      // stored `attempts` total, so an interrupted page cannot hand a failing recipient a
+      // fresh allowance on every resume.
+      const priorAttempts = typeof item.attempts === 'number' ? item.attempts : 0
+      let   attemptsUsed  = 0
+
+      if (priorAttempts >= EB_MAX_ATTEMPTS) {
+        errorMsg = `Send abandoned after ${priorAttempts} attempts`
+      } else {
+        const remaining = EB_MAX_ATTEMPTS - priorAttempts
+        for (let attempt = 1; attempt <= remaining; attempt++) {
+          attemptsUsed = attempt
+          let indeterminate = false
+          try {
+            const r = await notificationEngine.send(NotificationType.BROADCAST, { to: item.email, subject: renderedSubject, html: fullHtml, fromName: ctx.fromName, headers: unsubHeaders }, ctx.emailProviderName)
+            status    = r.success ? 'sent' : 'failed'
+            messageId = r.messageId
+            if (r.success) { errorMsg = undefined; break }
+            errorMsg = r.error          // provider ANSWERED and rejected — nothing was queued
+          } catch (err) {
+            errorMsg = err instanceof Error ? err.message : 'Unknown error'
+            indeterminate = true        // no answer — SES may already hold it
+          }
+
+          // A throw is never retried: resending it is how one attendee gets the same broadcast
+          // twice. Only an explicit rejection earns another attempt.
+          if (indeterminate) break
+          if (attempt < remaining) await ebSleep(EB_RETRY_BACKOFF_MS[attempt - 1] ?? 400)
+        }
       }
 
       void writeEmailLog({
@@ -240,6 +288,24 @@ export function emailBroadcastStrategy(): JobStrategy<EmailBroadcastJob, EmailJo
         }
         return { ok: true }
       }
+
+      // RD-BROADCAST-RETRY-01 — persist the running attempt total. This is what bounds retry
+      // across invocations and makes the final failure state observable. Best-effort: the
+      // emailLog already carries the reason, and the only cost of a lost write is one more
+      // bounded attempt on a later resume.
+      if (attemptsUsed > 0) {
+        try {
+          await adminDb.collection(EMAIL_BROADCAST_JOBS).doc(job.jobId).collection('recipients').doc(item.__id)
+            .update({
+              attempts: priorAttempts + attemptsUsed,
+              ...(errorMsg ? { lastError: errorMsg.slice(0, 300) } : {}),
+            })
+        } catch (err) {
+          console.error('[email-broadcast] retry-state write failed:', {
+            jobId: job.jobId, recipient: item.__id, err: err instanceof Error ? err.message : err,
+          })
+        }
+      }
       return { ok: false, error: errorMsg }
     },
 
@@ -271,6 +337,10 @@ export async function processEmailBroadcastChunk(jobId: string): Promise<Process
     pageSize:   EB_PAGE_SIZE,
     budgetMs:   EB_BUDGET_MS,
     leaseMs:    EB_LEASE_MS,
+    // The broadcast crons chain themselves the moment a chunk yields, so the yielding
+    // worker hands the lease over instead of holding it for another full leaseMs. Without
+    // this the successor always lost the race and the chain died at depth 1.
+    releaseLeaseOnHandoff: true,
   })
   if (result.status === 'cancelled' || result.status === 'failed') {
     await syncCampaignTerminal(jobId, result.status).catch(() => { /* best-effort */ })

@@ -125,6 +125,22 @@ export async function commitChunk(collection: string, jobId: string, c: ChunkCom
     // continues from the last committed cursor (re-processing the page is safe: the
     // same idempotent-per-item contract that already covers crash recovery).
     const currentTag = job.lockedUntil instanceof Timestamp ? job.lockedUntil.toMillis() : 0
+
+    // NO LEASE, NO COMMIT. `lockedUntil: null` yields currentTag 0, so a worker holding tag 0
+    // — one whose lease was released or cleared — would otherwise satisfy `0 === 0` below and
+    // commit while owning nothing. The runner never does this today (a released lease always
+    // ends its loop), but that is a timing argument, and a timing argument is the wrong thing
+    // to rest duplicate paid WhatsApp messages on: an unleased worker committing alongside the
+    // successor that legitimately re-leased the job means both drive the same cursor.
+    //
+    // Rejected here, BEFORE any mutation, and as `fenced` — the caller already treats fenced
+    // as "stop, someone else owns this", which is exactly right. No legitimate caller passes
+    // 0: leaseJob always returns `now + leaseMs`, and the only commits that produce tag 0 are
+    // terminal or hand-off commits, after which the loop has already exited.
+    if (c.expectedLeaseTag === 0) {
+      return { status: job.status, leaseTag: currentTag, fenced: true }
+    }
+
     if (currentTag !== c.expectedLeaseTag) {
       return { status: job.status, leaseTag: currentTag, fenced: true }
     }
@@ -132,7 +148,16 @@ export async function commitChunk(collection: string, jobId: string, c: ChunkCom
     const cancelled = job.status === 'cancelled'
     const status: JobStatus = cancelled ? 'cancelled' : c.finished ? 'completed' : 'processing'
     const terminal = cancelled || c.finished
-    const newTag   = terminal ? 0 : Date.now() + c.leaseMs
+    // OPT-IN HAND-OFF. `releaseLease` clears this worker's lease instead of renewing it, so a
+    // continuation invoked moments from now can acquire the job immediately rather than waiting
+    // out a lease the yielding worker no longer needs. Reached ONLY after the fencing check
+    // above, so a stale worker can never clear the live owner's lease; and applied in THIS
+    // transaction, so the cursor a successor resumes from is the one committed here.
+    //
+    // Terminal commits already clear the lease, so the flag is a no-op there. Absent/false is
+    // the untouched default every other job type keeps.
+    const handOff = !terminal && c.releaseLease === true
+    const newTag  = terminal || handOff ? 0 : Date.now() + c.leaseMs
 
     tx.update(ref, {
       'counts.processed': FieldValue.increment(c.deltaProcessed),
@@ -141,7 +166,10 @@ export async function commitChunk(collection: string, jobId: string, c: ChunkCom
       cursor:      c.cursor,
       error:       c.lastError ?? job.error ?? null,
       status,
-      lockedUntil: terminal ? null : Timestamp.fromMillis(newTag),
+      // null — not Timestamp(0) — so a released lease reads as genuinely unheld to the
+      // reaper, to listActiveJobs and to anyone inspecting the doc, exactly like a
+      // terminal job. leaseTag 0 mirrors it for the fencing token.
+      lockedUntil: terminal || handOff ? null : Timestamp.fromMillis(newTag),
       updatedAt:   FieldValue.serverTimestamp(),
       completedAt: c.finished && !cancelled ? FieldValue.serverTimestamp() : (job.completedAt ?? null),
     })

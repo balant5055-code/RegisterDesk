@@ -52,6 +52,16 @@ export interface RunnerConfig {
    *  per-page, and per-item failures are still counted — so ordering, idempotency, and
    *  retry semantics are unchanged; only in-flight item count (and thus memory) rises. */
   concurrency?: number
+  /**
+   * OPT-IN CONTINUATION HAND-OFF. When true, the commit that ENDS this invocation because
+   * the budget ran out (job not finished, not cancelled) clears the lease instead of
+   * renewing it — so the continuation this caller is about to dispatch can acquire the job
+   * at once rather than waiting out a lease the yielding worker no longer needs.
+   *
+   * Only the broadcast runners set it. Everything else keeps the renew-on-commit behaviour
+   * unchanged, because their work is driven by the scheduled tick, not by a chained call.
+   */
+  releaseLeaseOnHandoff?: boolean
 }
 
 export interface ProcessResult {
@@ -115,6 +125,31 @@ export async function runJobChunk<J extends Job, Ctx, Item>(
     await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, worker))
 
     const finished = !hasMore
+
+    // Whether THIS commit ends the invocation. It MUST be decided once, here, because the
+    // same value both (a) tells the kernel whether to release the lease and (b) decides
+    // whether the loop below exits. The loop must not re-read the clock.
+    //
+    // WHY RE-READING WOULD BE WRONG, IN BOTH DIRECTIONS.
+    //   · Re-reading AFTER the commit can observe the budget crossing DURING commitChunk
+    //     (a Firestore transaction, 150-500ms). That renews a full lease and then breaks —
+    //     the yielding worker holds the job for another leaseMs, the continuation gets
+    //     `busy`, and the chain dies. That is precisely the deadlock this option exists to
+    //     remove, so a late re-read silently reintroduces it for any page whose budget
+    //     boundary lands inside the commit.
+    //   · Releasing EARLY (a safety margin) is worse: the lease would be cleared while this
+    //     loop keeps going, and because a released lease writes `lockedUntil: null` whose
+    //     fencing tag is 0, an unleased worker's next commit would still pass fencing. Two
+    //     workers would then drive the same job and send the same messages twice.
+    //
+    // One variable, used for both, makes `releaseLease === true ⇒ the loop exits` true by
+    // construction rather than by a timing argument. The cost is bounded and acceptable: if
+    // the budget is crossed during the commit, exactly one more page runs, under a lease
+    // this worker legitimately renewed.
+    const yieldingNow = !finished && Date.now() - startedAt >= config.budgetMs
+    // Released ONLY when this caller opted in AND the invocation is genuinely handing off.
+    // A terminal commit already clears the lease; a mid-budget commit still renews it.
+    const releaseLease = config.releaseLeaseOnHandoff === true && yieldingNow
     const commit = await commitChunk(config.collection, jobId, {
       deltaProcessed: items.length,
       deltaSucceeded: succeeded,
@@ -124,6 +159,7 @@ export async function runJobChunk<J extends Job, Ctx, Item>(
       finished,
       leaseMs:        config.leaseMs,
       expectedLeaseTag: leaseTag,
+      releaseLease,
     })
 
     // Lost the lease (a co-driver re-leased after ours expired): the commit was
@@ -137,7 +173,9 @@ export async function runJobChunk<J extends Job, Ctx, Item>(
     processed += items.length
 
     if (finished || status === 'cancelled') break
-    if (Date.now() - startedAt >= config.budgetMs) break   // yield; caller resumes
+    // The SAME decision that drove `releaseLease` above — deliberately not a second clock
+    // read. See the comment there: re-reading here is what allowed renew-then-break.
+    if (yieldingNow) break                                 // yield; caller resumes
   }
 
   // Terminal hook — read the just-committed job so the strategy sees final counts.

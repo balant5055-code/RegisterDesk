@@ -51,12 +51,44 @@ describe('a yielded chunk summons the next invocation', () => {
     })
   }
 
-  it('the lease/fencing kernel was NOT modified to make this work', () => {
-    // The chain deliberately tolerates the busy window instead of releasing leases early;
-    // kernel.ts is shared with certificates, prints, imports, media and reports.
-    expect(KERNEL).toContain('lockedUntil: terminal ? null : Timestamp.fromMillis(newTag)')
+  // WHY THIS ASSERTION CHANGED. It used to read "the lease/fencing kernel was NOT modified",
+  // pinning `lockedUntil: terminal ? null : …`. That was right while the chain tolerated the
+  // busy window instead of releasing leases — but production proved that approach cannot
+  // work: commitChunk RENEWS the lease to now+60s at the END of a 45s chunk, so the successor
+  // faced a 60s lease with an 18s retry budget and the chain died at depth 1 every time
+  // (7 invocations, zero sub-minute gaps, 2.79 msg/min end-to-end).
+  //
+  // The kernel now carries an OPT-IN hand-off. What the original assertion actually protected
+  // — that certificates, prints, imports, media and reports are unaffected — is what is
+  // asserted here instead, and that protection is unchanged.
+  it('the kernel default is untouched; only an explicit opt-in releases a lease', () => {
+    // Default path: still renews, exactly as every non-broadcast job relies on.
+    expect(KERNEL).toContain('const newTag  = terminal || handOff ? 0 : Date.now() + c.leaseMs')
+    // The release is gated on a STRICT boolean, and never on a terminal commit.
+    expect(KERNEL).toContain('const handOff = !terminal && c.releaseLease === true')
+    // Fencing and the busy check are untouched.
     expect(KERNEL).toContain("if (job.status === 'processing' && locked > now)")
-    expect(RUNNER).toContain('if (Date.now() - startedAt >= config.budgetMs) break')
+    expect(KERNEL).toContain('if (currentTag !== c.expectedLeaseTag)')
+    // D1 — the loop exit is now the SAME decision that drove the release, not a second clock
+    // read. The old assertion pinned `if (Date.now() - startedAt >= config.budgetMs) break`,
+    // which is exactly what allowed the budget to cross DURING commitChunk: the lease was
+    // renewed and the loop broke anyway, so the yielding worker held the job for another full
+    // leaseMs and the continuation it had just dispatched got `busy`. One variable, used for
+    // both, makes `releaseLease === true ⇒ the loop exits` true by construction.
+    expect(RUNNER).toContain('if (yieldingNow) break')
+    expect(RUNNER).not.toContain('if (Date.now() - startedAt >= config.budgetMs) break')
+    // Exactly ONE clock read decides the yield.
+    expect(RUNNER.match(/Date\.now\(\) - startedAt >= config\.budgetMs/g) ?? []).toHaveLength(1)
+    // And the runner only asks for it when genuinely handing off.
+    expect(RUNNER).toContain('config.releaseLeaseOnHandoff === true && yieldingNow')
+  })
+
+  it('only the broadcast runners opt in — no other job type does', () => {
+    const optedIn = ['lib/broadcasts/emailJob.ts', 'lib/broadcasts/whatsappJob.ts']
+    for (const f of optedIn) expect(read(f), f).toContain('releaseLeaseOnHandoff: true')
+    for (const f of ['lib/certificates/jobs.ts', 'lib/printAssets/generationJob.ts']) {
+      try { expect(read(f), f).not.toContain('releaseLeaseOnHandoff') } catch { /* file may not exist */ }
+    }
   })
 
   it('the execution budget was NOT raised to paper over the problem', () => {

@@ -22,6 +22,10 @@ import { getMetaProvider, resolveWhatsAppTemplateByType, hasWhatsAppTemplate } f
 import type { WhatsAppProvider, WhatsAppTemplateType } from '@/lib/whatsapp'
 import { writeEmailLog }     from '@/lib/email-logs/write'
 import { validatePhoneNumber } from '@/lib/communication/phone'
+// RD-BROADCAST-RETRY-01 — the EXISTING failure taxonomy. No new classifier was created; the
+// narrow auto-resend predicate lives beside it because retry safety is a property of the
+// taxonomy, not of this job.
+import { classifyWhatsAppFailure, isRetryableWhatsAppFailure } from '@/lib/whatsapp/failureReason'
 import { getEmailAppUrl }   from '@/lib/email/appUrl'
 import { logBroadcastAction } from '@/lib/broadcasts/audit'
 import { finalizeBroadcast } from './finalize'
@@ -62,6 +66,15 @@ const WAB_CONCURRENCY = 3
 const WAB_BUDGET_MS = 45_000
 const WAB_LEASE_MS  = 60_000
 
+// RD-BROADCAST-RETRY-01 — total send attempts per recipient, counted ACROSS invocations (the
+// row carries the running total), so a recipient that fails on every resume cannot be retried
+// forever. Backoff is deliberately small: at most 250+750ms per failing recipient, which keeps
+// a full page of failures inside the 15s of headroom between WAB_BUDGET_MS and WAB_LEASE_MS.
+// Neither WAB_BUDGET_MS, WAB_LEASE_MS, WAB_PAGE_SIZE nor WAB_CONCURRENCY is changed for this.
+const WAB_MAX_ATTEMPTS = 3
+const WAB_RETRY_BACKOFF_MS = [250, 750] as const
+const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms))
+
 // whatsappBroadcastJobs/{jobId} — generic control fields (Job) + campaign payload.
 export interface WhatsAppBroadcastJob extends Job {
   campaignId:      string
@@ -84,6 +97,12 @@ interface WhatsAppRecipientRow {
   ticketCode:     string
   sent?:          boolean
   wamid?:         string
+  /** Running total of send attempts. Bounds retry ACROSS invocations. */
+  attempts?:      number
+  /** Stable failure category of the LAST attempt — observable final state. */
+  failureReason?: string
+  /** Normalized message of the last failure. Never a raw Meta payload. */
+  lastError?:     string
 }
 
 // Only the campaign fields job-creation needs (send.ts CampaignData is a superset;
@@ -242,19 +261,55 @@ export function whatsAppBroadcastStrategy(): JobStrategy<WhatsAppBroadcastJob, W
       let messageId: string | undefined
       let providerResponse: string | undefined
 
+      // RD-BROADCAST-RETRY-01 — bounded retry of DEFINITELY-REFUSED sends only.
+      //
+      // WHY IN-PAGE, AND NOT BY REWINDING THE CURSOR. The cursor is a document-id watermark
+      // that only moves forward; a past recipient is revisited only if the whole page re-runs.
+      // Rewinding it to sweep failures would drag every already-sent recipient on that page
+      // back through processItem AND re-attempt the indeterminate ones — the precise case that
+      // must never be resent. Retrying here, before the cursor advances past this recipient,
+      // needs no rewind at all, so cursor mechanics can never cause a duplicate.
+      const priorAttempts = typeof item.attempts === 'number' ? item.attempts : 0
+      let   attemptsUsed  = 0
+      let   failureReason: string | undefined
+
       if (!resolved.ok) {
         errorMsg = resolved.error
+      } else if (priorAttempts >= WAB_MAX_ATTEMPTS) {
+        // Already spent its budget on earlier invocations. Not sent, not retried, and — the
+        // point of the bound — not allowed to keep consuming the budget of the recipients
+        // queued behind it.
+        errorMsg      = `Send abandoned after ${priorAttempts} attempts`
+        failureReason = 'ATTEMPTS_EXHAUSTED'
       } else {
-        try {
-          const r = await ctx.provider.sendTemplate(resolved.message)
-          status    = r.success ? 'sent' : 'failed'
-          messageId = r.messageId
-          if (!r.success) {
-            errorMsg = r.error
+        const remaining = WAB_MAX_ATTEMPTS - priorAttempts
+        for (let attempt = 1; attempt <= remaining; attempt++) {
+          attemptsUsed = attempt
+          let code:       number | undefined
+          let httpStatus: number | undefined
+
+          try {
+            const r = await ctx.provider.sendTemplate(resolved.message)
+            status    = r.success ? 'sent' : 'failed'
+            messageId = r.messageId
+            if (r.success) { errorMsg = undefined; failureReason = undefined; break }
+            errorMsg         = r.error
             providerResponse = r.providerMessage ? `code ${r.code ?? '?'} · ${r.providerMessage}` : undefined
+            code             = r.code
+            httpStatus       = r.httpStatus
+          } catch (err) {
+            errorMsg = err instanceof Error ? err.message : 'Unknown error'
+            // A throw means no response arrived, so httpStatus stays undefined and the
+            // classifier below reads it as transport — indeterminate, never auto-resent.
           }
-        } catch (err) {
-          errorMsg = err instanceof Error ? err.message : 'Unknown error'
+
+          const reason = classifyWhatsAppFailure({ code, httpStatus, error: errorMsg })
+          failureReason = reason
+
+          // Only a verdict Meta actually returned, and only one that says "not accepted",
+          // earns another attempt. Timeouts and permanent refusals stop here.
+          if (!isRetryableWhatsAppFailure(reason)) break
+          if (attempt < remaining) await sleep(WAB_RETRY_BACKOFF_MS[attempt - 1] ?? 750)
         }
       }
 
@@ -293,6 +348,32 @@ export function whatsAppBroadcastStrategy(): JobStrategy<WhatsAppBroadcastJob, W
         }
         return { ok: true }
       }
+
+      // RD-BROADCAST-RETRY-01 — persist the running attempt total and the classification.
+      //
+      // This write is what makes the bound hold ACROSS invocations. An interrupted page
+      // re-runs from the same cursor, so without a stored total a recipient that fails every
+      // time would get a fresh full allowance on every resume — an unbounded loop wearing the
+      // costume of progress. It is also the observable final state: `failureReason` says why
+      // in a symbol the dashboard can branch on, not in prose.
+      //
+      // Best-effort by design. If it fails the recipient is still counted failed and the
+      // emailLog already carries the reason; the only cost is that a later resume may grant
+      // this one recipient another attempt, which is bounded anyway.
+      if (attemptsUsed > 0 || failureReason) {
+        try {
+          await adminDb.collection(WHATSAPP_BROADCAST_JOBS).doc(job.jobId).collection('recipients').doc(item.__id)
+            .update({
+              attempts: priorAttempts + attemptsUsed,
+              ...(failureReason ? { failureReason } : {}),
+              ...(errorMsg ? { lastError: errorMsg.slice(0, 300) } : {}),
+            })
+        } catch (err) {
+          console.error('[whatsapp-broadcast] retry-state write failed:', {
+            jobId: job.jobId, recipient: item.__id, err: err instanceof Error ? err.message : err,
+          })
+        }
+      }
       return { ok: false, error: errorMsg }
     },
 
@@ -324,6 +405,10 @@ export async function processWhatsAppBroadcastChunk(jobId: string): Promise<Proc
     pageSize:    WAB_PAGE_SIZE,
     budgetMs:    WAB_BUDGET_MS,
     leaseMs:     WAB_LEASE_MS,
+    // The broadcast crons chain themselves the moment a chunk yields, so the yielding
+    // worker hands the lease over instead of holding it for another full leaseMs. Without
+    // this the successor always lost the race and the chain died at depth 1.
+    releaseLeaseOnHandoff: true,
     concurrency: WAB_CONCURRENCY,
   })
   if (result.status === 'cancelled' || result.status === 'failed') {

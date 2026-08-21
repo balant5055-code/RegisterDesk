@@ -42,6 +42,27 @@ export interface ChunkCommit {
   // after this worker's lease expired — so a stale worker can never double-apply
   // counts/cursor/onComplete.
   expectedLeaseTag: number
+  /**
+   * OPT-IN HAND-OFF (RD-BROADCAST-CONTINUATION). When true AND the commit is non-terminal,
+   * this worker CLEARS its own lease instead of renewing it, in the same transaction that
+   * advances the cursor.
+   *
+   * WHY IT EXISTS. `commitChunk` renews the lease to `now + leaseMs` at the END of a page.
+   * A worker that yields at a 45s budget therefore keeps a 60s lease for another full
+   * minute after it has stopped working. A continuation invoked immediately after that
+   * response sees a live lease, cannot acquire it, and gives up — so the chain died at
+   * depth 1 and the job fell back to the scheduled tick 20-40 minutes later.
+   *
+   * SAFETY. This is not 'release the lease early': the page is already committed when the
+   * clear happens, atomically with it, so no work is in flight and the cursor a successor
+   * resumes from is the one this transaction just wrote. Fencing is unchanged and is
+   * checked BEFORE this is honoured — a stale worker whose lease was stolen is rejected
+   * with no mutation, so it can never clear the current owner's lease.
+   *
+   * Absent/false ⇒ byte-identical behaviour to before this option existed, which is what
+   * every certificate, print, import and report job continues to get.
+   */
+  releaseLease?:    boolean
 }
 
 /** Result of committing one page. `fenced` = the worker lost the lease (no mutation

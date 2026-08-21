@@ -140,6 +140,50 @@ export function classifyWhatsAppFailure(input: ClassifyInput): WhatsAppFailureRe
   return 'UNKNOWN_ERROR'
 }
 
+/**
+ * Reasons an automatic resend may be attempted for, WITHOUT risking a duplicate message.
+ *
+ * ═══ THE RULE: RETRY ONLY WHAT META DEFINITIVELY REFUSED ═════════════════════
+ * A retry is safe only when we know no message exists. That is true for exactly one class of
+ * failure: Meta ANSWERED, and its answer was "not accepted, try later". Everything else is
+ * excluded, for two different reasons:
+ *
+ *   · INDETERMINATE — `NETWORK_TIMEOUT`, `NETWORK_ERROR`, `UNKNOWN_ERROR`. These are the
+ *     httpStatus-absent cases: the request never completed, so Meta may already have accepted
+ *     and queued the message while the wamid that would prove it was lost with the response.
+ *     Resending is how one attendee gets the same paid template twice. The whole point of the
+ *     httpStatus distinction at the top of this file is that this case is NOT a failure, and
+ *     it must not be treated as one here either.
+ *
+ *   · PERMANENT — `INVALID_RECIPIENT`, `INVALID_WHATSAPP_NUMBER`, `TEMPLATE_ERROR`,
+ *     `AUTHENTICATION_ERROR`. Meta answered with a verdict that an identical resend cannot
+ *     change. Retrying burns budget on a guaranteed second refusal and delays every recipient
+ *     queued behind it.
+ *
+ * This is deliberately NOT the same question as `isRecipientFault`. That one asks "whose fault
+ * is it" for the organizer's benefit and keeps MANUAL resend available for everything. This
+ * one asks "may the machine resend this unattended", and is far narrower.
+ *
+ * ═══ WHY NOT `NormalizedMetaError.retriable` ═════════════════════════════════
+ * errors.ts already carries a `retriable` hint, and reusing it would look like the obvious
+ * economy. It is the wrong question. `normalizeMetaNetworkError` sets `retriable: true` for a
+ * TIMEOUT and for a dead socket — correct for its purpose, which is "is it worth attempting
+ * the HTTP call again", but catastrophic as a resend rule: those are exactly the cases where
+ * Meta may already hold the message. Driving automatic resends off that flag would send a
+ * second paid template to every attendee whose first send timed out.
+ *
+ * Transport-retry safety and delivery-duplicate safety are different questions that agree
+ * everywhere except the one case that costs money. Hence a separate, narrower predicate.
+ */
+const AUTO_RETRYABLE: ReadonlySet<WhatsAppFailureReason> = new Set([
+  'RATE_LIMITED',       // Meta answered 429 / a rate-limit code — nothing was queued.
+  'META_SERVER_ERROR',  // Meta answered 5xx — it did not accept the message.
+])
+
+export function isRetryableWhatsAppFailure(reason: WhatsAppFailureReason): boolean {
+  return AUTO_RETRYABLE.has(reason)
+}
+
 /** Convenience: classification plus the sentence the organizer reads. */
 export function describeWhatsAppFailure(
   input: ClassifyInput,
