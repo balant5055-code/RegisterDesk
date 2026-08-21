@@ -50,6 +50,9 @@ export function useOfflineCheckin({ eventSlug, token, onSynced }: Params): Offli
   const [syncing,       setSyncing]       = useState(false)
   const [cacheError,    setCacheError]    = useState<string | null>(null)
   const syncingRef = useRef(false)
+  // Whether THIS event issues identifiers, learned from the last cache build.
+  // Defaults to false so an event that never fetched a cache behaves as before.
+  const identifierRequiredRef = useRef(false)
 
   const refreshCounts = useCallback(() => {
     Promise.all([countAttendees(), countByStatus('pending'), countByStatus('conflict')])
@@ -69,7 +72,13 @@ export function useOfflineCheckin({ eventSlug, token, onSynced }: Params): Offli
         headers: { authorization: `Bearer ${token}` }, cache: 'no-store',
       }))
       .then(res => { if (!res.ok) throw new Error('CACHE_FETCH_FAILED'); return res.json() as Promise<CacheResponse> })
-      .then(data => { setTruncated(data.truncated); return replaceAttendees(eventSlug, data.attendees) })
+      .then(data => {
+        setTruncated(data.truncated)
+        // RD-CHECKIN-BIB-01 — remembered per cache build so the offline path knows
+        // whether an attendee without an identifier may be admitted.
+        identifierRequiredRef.current = data.identifierRequired
+        return replaceAttendees(eventSlug, data.attendees)
+      })
       .then(() => refreshCounts())
       .catch(() => setCacheError('Could not refresh the offline attendee list.'))
   }, [eventSlug, token, refreshCounts])
@@ -86,6 +95,21 @@ export function useOfflineCheckin({ eventSlug, token, onSynced }: Params): Offli
     const attendee = { name: att.attendeeName, passName: att.passName }
     if (att.checkedIn || await isQueued(code)) {
       return { success: true, alreadyCheckedIn: true, attendee, checkedInAt: att.checkedInAt ?? undefined }
+    }
+
+    // ── Identifier safety offline (RD-CHECKIN-BIB-01) ───────────────────────
+    //
+    // An attendee who ALREADY holds an identifier checks in offline exactly as
+    // before — nothing about that path changes.
+    //
+    // An attendee who does NOT is refused until the device is online. Assigning a
+    // value requires the engine's uniqueness transaction against `identifierLocks`,
+    // which cannot run on a device. Any offline alternative would either admit
+    // someone with no identifier at all, or let two gates hand out the same number
+    // and discover the collision at sync — after both attendees have gone through.
+    // Refusing is the only answer that cannot produce a duplicate.
+    if (identifierRequiredRef.current && !att.hasIdentifier) {
+      return { success: false, error: 'IDENTIFIER_REQUIRES_ONLINE' }
     }
 
     const at = new Date().toISOString()

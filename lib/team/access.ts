@@ -23,6 +23,14 @@ export interface CallerAccess {
   role:        TeamRole
   permissions: TeamPermission[]
   isOwner:     boolean
+  /**
+   * Events this member may act on. EMPTY = unrestricted (every event in the
+   * workspace) — the implicit behaviour of every member row created before event
+   * assignment existed, and always the case for owners.
+   *
+   * Enforced by requireEventScope() for gate-only roles; see lib/team/types.ts.
+   */
+  eventIds:    string[]
 }
 
 export interface AccessResult {
@@ -69,7 +77,7 @@ export async function verifyCaller(req: Request): Promise<{ uid: string; email: 
  */
 export async function resolveTeamAccess(callerUid: string, organizerUid: string): Promise<CallerAccess | null> {
   if (callerUid === organizerUid) {
-    return { role: 'owner', permissions: permissionsForRole('owner'), isOwner: true }
+    return { role: 'owner', permissions: permissionsForRole('owner'), isOwner: true, eventIds: [] }
   }
   const snap = await adminDb.collection(TEAM_COLLECTION)
     .where('organizerUid', '==', organizerUid)
@@ -80,12 +88,20 @@ export async function resolveTeamAccess(callerUid: string, organizerUid: string)
   if (snap.empty) return null
   const m = snap.docs[0].data() as TeamMemberDocument
   // Re-derive from role — never trust a stored permissions array to widen scope.
-  return { role: m.role, permissions: permissionsForRole(m.role), isOwner: false }
+  // `eventIds` is the mirror image: it can only NARROW access, so the stored value
+  // is honoured as written, and a missing / malformed field degrades to [] —
+  // exactly the unrestricted behaviour every row had before this field existed.
+  return {
+    role:        m.role,
+    permissions: permissionsForRole(m.role),
+    isOwner:     false,
+    eventIds:    Array.isArray(m.eventIds) ? m.eventIds.filter(e => typeof e === 'string') : [],
+  }
 }
 
 export function requireOwner(callerUid: string, organizerUid: string): AccessResult {
   if (callerUid !== organizerUid) return FORBIDDEN('Only the account owner can perform this action.')
-  return { ok: true, status: 200, reason: 'owner', access: { role: 'owner', permissions: permissionsForRole('owner'), isOwner: true } }
+  return { ok: true, status: 200, reason: 'owner', access: { role: 'owner', permissions: permissionsForRole('owner'), isOwner: true, eventIds: [] } }
 }
 
 export async function requireAdmin(callerUid: string, organizerUid: string): Promise<AccessResult> {
@@ -108,13 +124,19 @@ export async function requirePermission(
  * All workspaces the caller actively belongs to (excludes their own). Lets
  * resource routes discover which owner's data a team member may act upon.
  */
-export async function activeMemberships(callerUid: string): Promise<Array<{ organizerUid: string; role: TeamRole }>> {
+export async function activeMemberships(
+  callerUid: string,
+): Promise<Array<{ organizerUid: string; role: TeamRole; eventIds: string[] }>> {
   const snap = await adminDb.collection(TEAM_COLLECTION)
     .where('memberUid', '==', callerUid)
     .where('status', '==', 'active')
     .get()
   return snap.docs.map(d => {
     const m = d.data() as TeamMemberDocument
-    return { organizerUid: m.organizerUid, role: m.role }
+    return {
+      organizerUid: m.organizerUid,
+      role:         m.role,
+      eventIds:     Array.isArray(m.eventIds) ? m.eventIds.filter(e => typeof e === 'string') : [],
+    }
   })
 }

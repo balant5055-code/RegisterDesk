@@ -11,6 +11,8 @@ import {
 import type { CheckInResult } from '@/app/api/checkin/scan/route'
 import type { AttendanceDashboardResponse } from '@/app/api/organizer/events/[eventId]/attendance/route'
 import { useOfflineCheckin }    from '@/lib/checkin/useOfflineCheckin'
+import { ticketCodeFromQr }     from '@/lib/checkin/qr'
+import IdentifierPrompt        from '@/components/checkin/IdentifierPrompt'
 import AttendeeSearch           from './AttendeeSearch'
 import WalkInForm               from './WalkInForm'
 
@@ -56,6 +58,9 @@ function ResultCard({ result }: { result: CheckInResult }) {
       INVALID_BODY:                  'Invalid request.',
       INVALID_TOKEN:                 'Session expired. Please refresh and try again.',
       NETWORK_ERROR:                 'Network error. Check your connection and try again.',
+      // RD-CHECKIN-BIB-01
+      IDENTIFIER_REQUIRED:           'Not checked in — the required identifier was not entered.',
+      IDENTIFIER_REQUIRES_ONLINE:    'This attendee has no identifier yet. Go online to assign one before checking them in.',
     }
     return (
       // RD-ORGANIZER-02 P1: announce the outcome to screen-reader operators (assertive for
@@ -119,6 +124,11 @@ export default function CheckInClient({
   const [code,          setCode]          = useState('')
   const [loading,       setLoading]       = useState(false)
   const [result,        setResult]        = useState<CheckInResult | null>(null)
+  // RD-CHECKIN-BIB-01 — the pending identifier request, when the server reported
+  // this attendee has none. Holds the ticket code so Confirm retries the SAME one.
+  const [idPrompt,      setIdPrompt]      = useState<{
+    ticketCode: string; label: string; attendeeName?: string; error: string
+  } | null>(null)
   const [liveCheckedIn, setLiveCheckedIn] = useState(initialCheckedIn)
   const [liveTotal,     setLiveTotal]     = useState(totalRegistrations)
   const [mode,          setMode]          = useState<Mode>('qr')
@@ -210,9 +220,11 @@ export default function CheckInClient({
     if (data.success && !data.alreadyCheckedIn) setLiveCheckedIn(n => n + 1)
   }
 
-  async function submitCode(ticketCode: string) {
+  async function submitCode(ticketCode: string, identifierValue?: string) {
     setLoading(true)
-    setResult(null)
+    // A retry carrying an identifier keeps the prompt on screen, so the previous
+    // result must not be cleared out from under it.
+    if (!identifierValue) setResult(null)
     setOfflineQueued(false)
 
     // Offline: validate against the IndexedDB cache and queue for later sync.
@@ -228,9 +240,28 @@ export default function CheckInClient({
       const res  = await fetch('/api/checkin/scan', {
         method:  'POST',
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-        body:    JSON.stringify({ ticketCode, source: mode, eventSlug: slug }),
+        body:    JSON.stringify({
+          ticketCode, source: mode, eventSlug: slug,
+          ...(identifierValue ? { identifierValue } : {}),
+        }),
       })
       const data = await res.json() as CheckInResult
+
+      // RD-CHECKIN-BIB-01 — this attendee has no identifier yet. Nothing was
+      // written; collect one and retry the same ticket. Same server rule and same
+      // prompt component the /ops gate uses.
+      if (data.requiresIdentifier) {
+        setIdPrompt({
+          ticketCode,
+          label:        data.identifierLabel ?? 'Identifier',
+          attendeeName: data.attendee?.name,
+          error:        identifierValue ? (data.error ?? 'Not accepted.') : '',
+        })
+        setLoading(false)
+        return
+      }
+      setIdPrompt(null)
+
       setResult(data)
       if (data.success && !data.alreadyCheckedIn) {
         // Existing optimistic bump kept — it makes the gate feel instant. The refresh
@@ -262,10 +293,9 @@ export default function CheckInClient({
   function handleQrCode(raw: string) {
     setScannerActive(false)
     // Ticket QR format: RD:{eventSlug}:{registrationId}:{ticketCode}
-    // Extract just the ticketCode; bare manual codes (RD-XXXXXXXX) pass through unchanged.
-    const parts = raw.split(':')
-    const ticketCode = parts.length === 4 && parts[0] === 'RD' ? parts[3] : raw
-    submitCode(ticketCode.trim().toUpperCase())
+    // Extract just the ticketCode; bare manual codes (RD-XXXXXXXX) pass through
+    // unchanged. Shared with the /ops gate surface — see lib/checkin/qr.ts.
+    submitCode(ticketCodeFromQr(raw))
   }
 
   // ── Reset for next attendee ────────────────────────────────────────────────
@@ -433,6 +463,23 @@ export default function CheckInClient({
             <QrScanner active={scannerActive} onCode={handleQrCode} />
           )}
         </div>
+      )}
+
+      {/* RD-CHECKIN-BIB-01 — blocking identifier prompt. Same component and same
+          server rule as the /ops gate; the attendee is not checked in until it is
+          satisfied. Cancelling leaves them un-checked-in, deliberately. */}
+      {idPrompt && (
+        <IdentifierPrompt
+          label={idPrompt.label}
+          attendeeName={idPrompt.attendeeName}
+          error={idPrompt.error}
+          busy={loading}
+          onSubmit={value => void submitCode(idPrompt.ticketCode, value)}
+          onCancel={() => {
+            setIdPrompt(null)
+            setResult({ success: false, error: 'IDENTIFIER_REQUIRED' })
+          }}
+        />
       )}
 
       {/* ── Manual entry panel ── */}

@@ -44,7 +44,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const lim = await requireLimit(caller.uid, 'maxTeamMembers', members.length + invites.length + 1)
   if (!lim.ok) return NextResponse.json({ error: lim.error }, { status: lim.status })
 
-  let body: { email?: unknown; role?: unknown }
+  let body: { email?: unknown; role?: unknown; eventIds?: unknown }
   try { body = await req.json() } catch { return NextResponse.json({ error: 'Invalid request body.' }, { status: 400 }) }
   if (typeof body.email !== 'string' || typeof body.role !== 'string') {
     return NextResponse.json({ error: 'Email and role are required.' }, { status: 400 })
@@ -52,7 +52,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
   const result = await inviteMember({
     organizerUid: caller.uid, ownerUid: caller.uid, ownerEmail: caller.email,
-    email: body.email, role: body.role,
+    email: body.email, role: body.role, eventIds: body.eventIds,
   })
   if (!result.ok) return NextResponse.json({ error: result.error }, { status: result.status })
   return NextResponse.json({ member: result.data }, { status: 201 })

@@ -19,14 +19,14 @@ export async function PATCH(
   if (!access.ok) return NextResponse.json({ error: access.reason }, { status: access.status })
 
   const { memberId } = await params
-  let body: { action?: unknown; role?: unknown }
+  let body: { action?: unknown; role?: unknown; eventIds?: unknown }
   try { body = await req.json() } catch { return NextResponse.json({ error: 'Invalid request body.' }, { status: 400 }) }
 
   const base = { organizerUid: caller.uid, ownerUid: caller.uid, memberId }
 
   if (body.action === 'change_role') {
     if (typeof body.role !== 'string') return NextResponse.json({ error: 'Role is required.' }, { status: 400 })
-    const r = await changeRole({ ...base, role: body.role })
+    const r = await changeRole({ ...base, role: body.role, eventIds: body.eventIds })
     return r.ok ? NextResponse.json({ member: r.data }) : NextResponse.json({ error: r.error }, { status: r.status })
   }
   if (body.action === 'suspend' || body.action === 'reactivate') {

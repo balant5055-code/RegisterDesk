@@ -8,12 +8,24 @@ import { NextRequest, NextResponse } from 'next/server'
 import { adminDb }                   from '@/lib/firebase/admin'
 import { verifyCaller }              from '@/lib/team/access'
 import { resolveWorkspaceUid }       from '@/lib/team/workspace'
+import { isCheckinOnlyRole }         from '@/lib/team/types'
 
 export interface WorkspaceInfoResponse {
   isOwner:          boolean
   role:             string
   organizationName: string
   workspaceUid:     string
+  /**
+   * RD-CHECKIN-STAFF-01 — the events this caller is assigned to ([] = all).
+   *
+   * Exposed so the dashboard shell can send a gate-only operator to their own
+   * console instead of an organizer page that would only refuse them. This is a
+   * ROUTING hint, never a permission: every organizer route re-authorizes server
+   * side, so a client that ignores it gains nothing.
+   */
+  eventIds:         string[]
+  /** True when the caller's whole grant is gate check-in. */
+  checkinOnly:      boolean
 }
 
 export async function GET(req: NextRequest): Promise<NextResponse> {
@@ -33,6 +45,8 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     role:             ctx.role,
     organizationName,
     workspaceUid:     ctx.workspaceUid,
+    eventIds:         ctx.eventIds,
+    checkinOnly:      !ctx.isOwner && isCheckinOnlyRole(ctx.role),
   }
   return NextResponse.json(body, { headers: { 'Cache-Control': 'no-store' } })
 }

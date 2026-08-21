@@ -10,6 +10,7 @@ import {
 import type { AttendeeSearchResult, AttendeeSearchResponse } from '@/app/api/organizer/events/[eventId]/checkin/search/route'
 import type { CheckInResult }                                from '@/app/api/checkin/scan/route'
 import type { CheckInUndoResult }                            from '@/app/api/checkin/undo/route'
+import IdentifierPrompt                                     from '@/components/checkin/IdentifierPrompt'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -56,6 +57,7 @@ const CHECKIN_ERROR: Record<string, string> = {
   UNAUTHORIZED:                 'Permission denied.',
   INVALID_TOKEN:                'Session expired. Refresh the page.',
   NETWORK_ERROR:                'Network error.',
+  IDENTIFIER_REQUIRED:          'Not checked in — identifier not entered.',
 }
 
 const UNDO_ERROR: Record<string, string> = {
@@ -235,6 +237,10 @@ export default function AttendeeSearch({ eventId, token, onCheckedIn, onUndid }:
 
   const [checkInActions, setCheckInActions] = useState<Record<string, CheckInAction>>({})
   const [undoActions,    setUndoActions]    = useState<Record<string, UndoAction>>({})
+  // RD-CHECKIN-BIB-01 — pending identifier request for ONE looked-up attendee.
+  const [idPrompt,       setIdPrompt]       = useState<{
+    reg: AttendeeSearchResult; label: string; error: string
+  } | null>(null)
 
   const inputRef = useRef<HTMLInputElement>(null)
   const abortRef = useRef<AbortController | null>(null)
@@ -292,15 +298,33 @@ export default function AttendeeSearch({ eventId, token, onCheckedIn, onUndid }:
 
   // ── Check-in ──────────────────────────────────────────────────────────────
 
-  async function handleCheckIn(reg: AttendeeSearchResult) {
+  async function handleCheckIn(reg: AttendeeSearchResult, identifierValue?: string) {
     setCheckInActions(prev => ({ ...prev, [reg.id]: { loading: true, result: null } }))
     try {
       const res  = await fetch('/api/checkin/scan', {
         method:  'POST',
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-        body:    JSON.stringify({ ticketCode: reg.ticketCode }),
+        body:    JSON.stringify({
+          ticketCode: reg.ticketCode,
+          ...(identifierValue ? { identifierValue } : {}),
+        }),
       })
       const data = await res.json() as CheckInResult
+
+      // RD-CHECKIN-BIB-01 — lookup takes the SAME identifier path as QR and manual:
+      // one server rule, one prompt component. Nothing was written, so the row goes
+      // back to idle while the modal collects a value and retries this same reg.
+      if (data.requiresIdentifier) {
+        setCheckInActions(prev => ({ ...prev, [reg.id]: { loading: false, result: null } }))
+        setIdPrompt({
+          reg,
+          label:  data.identifierLabel ?? 'Identifier',
+          error:  identifierValue ? (data.error ?? 'Not accepted.') : '',
+        })
+        return
+      }
+      setIdPrompt(null)
+
       setCheckInActions(prev => ({ ...prev, [reg.id]: { loading: false, result: data } }))
       if (data.success && !data.alreadyCheckedIn) onCheckedIn()
     } catch {
@@ -440,6 +464,24 @@ export default function AttendeeSearch({ eventId, token, onCheckedIn, onUndid }:
             />
           ))}
         </div>
+      )}
+
+      {/* RD-CHECKIN-BIB-01 — same prompt, same server rule, as QR and manual. */}
+      {idPrompt && (
+        <IdentifierPrompt
+          label={idPrompt.label}
+          attendeeName={idPrompt.reg.attendeeName}
+          error={idPrompt.error}
+          busy={!!checkInActions[idPrompt.reg.id]?.loading}
+          onSubmit={value => void handleCheckIn(idPrompt.reg, value)}
+          onCancel={() => {
+            setIdPrompt(null)
+            setCheckInActions(prev => ({
+              ...prev,
+              [idPrompt.reg.id]: { loading: false, result: { success: false, error: 'IDENTIFIER_REQUIRED' } },
+            }))
+          }}
+        />
       )}
     </div>
   )

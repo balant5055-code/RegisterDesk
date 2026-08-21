@@ -59,7 +59,12 @@ async function loadOwnedEvent(slug: string, workspaceUid: string): Promise<LoadR
 // ─── GET — passes + remaining capacity for the walk-in form ───────────────────
 
 export async function GET(req: NextRequest): Promise<NextResponse> {
-  const authz = await authorizeWorkspace(req, 'checkin')
+  // RD-CHECKIN-STAFF-01 — walk-in CREATES a registration, so it is gated on
+  // `registrations`, not `checkin`. Owner/admin/manager keep it unchanged; the
+  // gate-only `checkin_staff` loses it, which is the intent. Gated on the GET too:
+  // the form's pass list and remaining-capacity numbers are exactly the data a
+  // gate-only operator should not be reading.
+  const authz = await authorizeWorkspace(req, 'registrations')
   if (!authz.ok) return NextResponse.json({ error: authz.error }, { status: authz.status })
   const uid = authz.workspaceUid
 
@@ -93,7 +98,8 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
 // ─── POST — register + check in at the gate ───────────────────────────────────
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
-  const authz = await authorizeWorkspace(req, 'checkin')
+  // See the GET above — walk-in is registration creation and requires `registrations`.
+  const authz = await authorizeWorkspace(req, 'registrations')
   if (!authz.ok) return NextResponse.json({ error: authz.error }, { status: authz.status })
   const uid       = authz.workspaceUid    // authorization / ownership scope
   const callerUid = authz.callerUid       // attribution: the registering operator

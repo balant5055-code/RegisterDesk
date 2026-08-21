@@ -22,7 +22,7 @@
 
 import { NextRequest, NextResponse } from 'next/server'
 import { adminDb }        from '@/lib/firebase/admin'
-import { authorizeWorkspace } from '@/lib/team/workspace'
+import { authorizeEvent } from '@/lib/team/workspace'
 import { getEventCheckInStatus }     from '@/lib/checkin/eventStatus'
 import type { RegistrationDocument } from '@/lib/registrations/types'
 
@@ -100,11 +100,15 @@ export async function GET(
 ): Promise<NextResponse<AttendeeSearchResponse | { error: string }>> {
 
   // ── 1. Auth ────────────────────────────────────────────────────────────────
-  const authz = await authorizeWorkspace(req, 'checkin')
+  // RD-CHECKIN-STAFF-01: eventId is read from the ROUTE PATH first so authorizeEvent
+  // can confirm a gate-only operator is assigned to THIS event before any attendee
+  // data is queried — lookup for an unassigned event returns 403, not results.
+  const { eventId } = await context.params
+
+  const authz = await authorizeEvent(req, 'checkin', eventId)
   if (!authz.ok) return NextResponse.json({ error: authz.error }, { status: authz.status })
   const uid = authz.workspaceUid
 
-  const { eventId } = await context.params
 
   // ── 2. Verify organizer owns this event ────────────────────────────────────
   const draftSnap = await adminDb.doc(`users/${uid}/eventDrafts/${eventId}`).get()

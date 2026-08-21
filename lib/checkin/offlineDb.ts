@@ -19,6 +19,16 @@ export interface CachedAttendee {
   paymentStatus:  string
   checkedIn:      boolean
   checkedInAt:    string | null
+  /**
+   * RD-CHECKIN-BIB-01 — mirrors the field of the same name on the cache payload.
+   *
+   * OPTIONAL on purpose. A device holding a cache built before this field existed
+   * has records without it, which read as `undefined` — and the offline gate treats
+   * that as "no identifier" and refuses. Failing closed is correct here: the worst
+   * outcome is an operator being told to go online, versus admitting someone with
+   * no identifier or minting a duplicate that only surfaces at sync.
+   */
+  hasIdentifier?: boolean
 }
 
 export type QueueStatus = 'pending' | 'synced' | 'conflict' | 'failed'

@@ -9,7 +9,13 @@ import { cn } from '@/lib/utils/cn'
 import {
   Users, UserPlus, Loader2, Trash2, ShieldCheck, PauseCircle, PlayCircle, Mail, AlertCircle,
 } from 'lucide-react'
-import { ASSIGNABLE_ROLES, ROLE_PERMISSIONS, permissionsForRole, type TeamRole, type TeamMemberView } from '@/lib/team/types'
+import {
+  ASSIGNABLE_ROLES, ROLE_PERMISSIONS, permissionsForRole, isCheckinOnlyRole,
+  type TeamRole, type TeamMemberView,
+} from '@/lib/team/types'
+
+/** The two fields the assignment picker needs from an event. */
+interface EventOption { id: string; name: string }
 
 const ROLE_LABEL: Record<string, string> = {
   owner: 'Owner', admin: 'Admin', manager: 'Manager', checkin_staff: 'Check-in Staff', finance: 'Finance',
@@ -33,6 +39,13 @@ export default function TeamPage() {
   const [inviteEmail, setInviteEmail] = useState('')
   const [inviteRole,  setInviteRole]  = useState<TeamRole>('manager')
   const [inviting,    setInviting]    = useState(false)
+
+  // RD-CHECKIN-STAFF-01 — event assignment, offered only for gate-only roles.
+  // Broader roles hold workspace-wide permissions and can reach any event through
+  // the organizer surfaces, so an "assignment" for them would be decorative.
+  const [events,        setEvents]        = useState<EventOption[]>([])
+  const [inviteEventIds, setInviteEventIds] = useState<string[]>([])
+  const assignsEvents = isCheckinOnlyRole(inviteRole)
 
   const { user } = useAuth()
 
@@ -69,18 +82,51 @@ export default function TeamPage() {
     return () => { cancelled = true }
   }, [user, reload])
 
+  // Loaded lazily — only a gate-only role needs the picker, so the ordinary
+  // invite flow costs no extra request.
+  const loadEvents = useCallback(async () => {
+    try {
+      const res = await authedFetch('/api/organizer/events?limit=100&tab=published')
+      if (!res.ok) return
+      // `draftId` is the id every event route and /ops/checkin/[eventId] address an
+      // event by, and it is what teamMembers.eventIds stores — so the picker must
+      // send exactly this, not the slug.
+      const data = await res.json() as { events?: Array<{ draftId?: string; name?: string }> }
+      setEvents((data.events ?? [])
+        .map(e => ({ id: e.draftId ?? '', name: e.name ?? 'Untitled event' }))
+        .filter(e => e.id))
+    } catch { /* the picker simply stays empty; assignment is optional */ }
+  }, [authedFetch])
+
+  // Choosing the role is what makes the picker relevant, so the fetch hangs off
+  // that event rather than an effect — no cascading render, and no request at all
+  // for the ordinary invite flow.
+  function selectInviteRole(role: TeamRole) {
+    setInviteRole(role)
+    setInviteEventIds([])
+    if (isCheckinOnlyRole(role) && events.length === 0) void loadEvents()
+  }
+
   async function handleInvite(e: React.FormEvent) {
     e.preventDefault()
     if (!inviteEmail.trim()) return
     setInviting(true)
     try {
       const res = await authedFetch('/api/organizer/team', {
-        method: 'POST', body: JSON.stringify({ email: inviteEmail.trim(), role: inviteRole }),
+        method: 'POST',
+        body: JSON.stringify({
+          email: inviteEmail.trim(),
+          role:  inviteRole,
+          // [] means "every event", which is the correct default and the behaviour
+          // every member had before assignment existed. Only sent for gate roles.
+          eventIds: assignsEvents ? inviteEventIds : [],
+        }),
       })
       const data = await res.json().catch(() => null) as { error?: string } | null
       if (!res.ok) throw new Error(data?.error ?? 'Could not send the invitation.')
       showToast('Invitation sent.', 'success')
       setInviteEmail('')
+      setInviteEventIds([])
       await reload()
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Invite failed', 'error')
@@ -127,7 +173,9 @@ export default function TeamPage() {
           </label>
           <label className="sm:w-48">
             <span className="mb-1 block text-[12.5px] font-medium text-muted-foreground">Role</span>
-            <select value={inviteRole} onChange={e => setInviteRole(e.target.value as TeamRole)}
+            <select
+              value={inviteRole}
+              onChange={e => selectInviteRole(e.target.value as TeamRole)}
               className="w-full rounded-lg border border-border bg-background px-3 py-2.5 text-[14px] text-foreground outline-none focus:ring-2 focus:ring-primary/30">
               {ASSIGNABLE_ROLES.map(r => <option key={r} value={r}>{ROLE_LABEL[r]}</option>)}
             </select>
@@ -141,6 +189,46 @@ export default function TeamPage() {
         <p className="mt-2 text-[12px] text-muted-foreground">
           {ROLE_LABEL[inviteRole]} can access: {permissionsForRole(inviteRole).join(', ')}.
         </p>
+
+        {/* ── Event assignment (gate-only roles) ─────────────────────────────
+            Confines this member to the events they actually work. Enforced
+            server-side on every check-in route, not just hidden here. */}
+        {assignsEvents && (
+          <fieldset className="mt-4 rounded-xl border border-border p-4">
+            <legend className="px-1 text-[12.5px] font-medium text-muted-foreground">
+              Assign events
+            </legend>
+
+            {events.length === 0 ? (
+              <p className="text-[12px] text-muted-foreground">
+                No published events yet — this member will be able to check in at any event.
+              </p>
+            ) : (
+              <>
+                <div className="flex max-h-44 flex-col gap-1.5 overflow-y-auto">
+                  {events.map(ev => (
+                    <label key={ev.id} className="flex items-center gap-2 text-[13.5px] text-foreground">
+                      <input
+                        type="checkbox"
+                        checked={inviteEventIds.includes(ev.id)}
+                        onChange={e => setInviteEventIds(prev =>
+                          e.target.checked ? [...prev, ev.id] : prev.filter(id => id !== ev.id),
+                        )}
+                        className="size-4 rounded border-border accent-[var(--primary)]"
+                      />
+                      <span className="truncate">{ev.name}</span>
+                    </label>
+                  ))}
+                </div>
+                <p className="mt-2 text-[12px] text-muted-foreground">
+                  {inviteEventIds.length === 0
+                    ? 'Nothing selected — this member can check in at every event.'
+                    : `Limited to ${inviteEventIds.length} event${inviteEventIds.length === 1 ? '' : 's'}. Every other event is refused.`}
+                </p>
+              </>
+            )}
+          </fieldset>
+        )}
       </section>
 
       {error && (

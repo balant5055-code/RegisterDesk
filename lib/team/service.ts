@@ -9,7 +9,7 @@ import { notificationEngine, NotificationType } from '@/lib/notifications'
 import { teamInviteTemplate }      from '@/lib/email/templates/team-invite'
 import { logTeamAction }           from '@/lib/team/audit'
 import {
-  TEAM_COLLECTION, INVITE_TTL_MS, permissionsForRole, isAssignableRole,
+  TEAM_COLLECTION, INVITE_TTL_MS, permissionsForRole, isAssignableRole, sanitizeEventIds,
   type TeamRole, type TeamMemberDocument, type TeamMemberView, type TeamStatus,
 } from '@/lib/team/types'
 
@@ -47,6 +47,9 @@ function toView(doc: TeamMemberDocument): TeamMemberView {
     email:       doc.email,
     role:        doc.role,
     permissions: permissionsForRole(doc.role),
+    // [] = every event in the workspace. Normalised here rather than at every call
+    // site so a row written before event assignment existed reads as unrestricted.
+    eventIds:    Array.isArray(doc.eventIds) ? doc.eventIds.filter(e => typeof e === 'string') : [],
     status:      doc.status,
     invitedAt:   tsToISO(doc.invitedAt),
     acceptedAt:  tsToISO(doc.acceptedAt),
@@ -78,10 +81,14 @@ export async function listTeam(organizerUid: string): Promise<{ members: TeamMem
 
 export async function inviteMember(args: {
   organizerUid: string; ownerUid: string; ownerEmail: string | null; email: string; role: string
+  /** RD-CHECKIN-STAFF-01 — events this member may work. Omitted/[] = all events. */
+  eventIds?: unknown
 }): Promise<ServiceResult<TeamMemberView>> {
   const email = normalizeEmail(args.email)
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return fail(400, 'Enter a valid email address.')
   if (!isAssignableRole(args.role))              return fail(400, 'Invalid role.')
+  const eventIds = sanitizeEventIds(args.eventIds)
+  if (eventIds === null) return fail(400, 'Invalid event assignment.')
   if (args.ownerEmail && normalizeEmail(args.ownerEmail) === email) {
     return fail(400, 'You cannot invite yourself — you already own this workspace.')
   }
@@ -105,6 +112,7 @@ export async function inviteMember(args: {
       email,
       role,
       permissions:  permissionsForRole(role),
+      eventIds,
       status:       'invited',
       invitedBy:    args.ownerUid,
       invitedAt:    now,
@@ -205,6 +213,8 @@ export async function acceptInvite(args: {
 
 export async function changeRole(args: {
   organizerUid: string; ownerUid: string; memberId: string; role: string
+  /** RD-CHECKIN-STAFF-01 — when provided, replaces the event assignment. Omit to leave it as-is. */
+  eventIds?: unknown
 }): Promise<ServiceResult<TeamMemberView>> {
   if (!isAssignableRole(args.role)) return fail(400, 'Invalid role.')
   const ref  = adminDb.collection(TEAM_COLLECTION).doc(args.memberId)
@@ -213,15 +223,32 @@ export async function changeRole(args: {
   const m = snap.data() as TeamMemberDocument
   if (m.organizerUid !== args.organizerUid) return fail(404, 'Team member not found.')
 
+  // Absent means "don't touch the assignment"; [] means "all events". These are
+  // deliberately different, so an unrelated role change cannot silently widen a
+  // gate operator's scope from one event to the whole workspace.
+  const nextEventIds = args.eventIds === undefined ? undefined : sanitizeEventIds(args.eventIds)
+  if (nextEventIds === null) return fail(400, 'Invalid event assignment.')
+
   const role = args.role as TeamRole
-  await ref.update({ role, permissions: permissionsForRole(role), updatedAt: FieldValue.serverTimestamp() })
+  await ref.update({
+    role,
+    permissions: permissionsForRole(role),
+    ...(nextEventIds !== undefined ? { eventIds: nextEventIds } : {}),
+    updatedAt: FieldValue.serverTimestamp(),
+  })
 
   void logTeamAction({
     organizerUid: args.organizerUid, actorUid: args.ownerUid,
     action: 'team.role_changed', memberId: args.memberId, metadata: { from: m.role, to: role },
   }).catch(() => { /* best-effort */ })
 
-  return { ok: true, data: toView({ ...m, id: args.memberId, role, permissions: permissionsForRole(role) }) }
+  return {
+    ok: true,
+    data: toView({
+      ...m, id: args.memberId, role, permissions: permissionsForRole(role),
+      eventIds: nextEventIds ?? m.eventIds,
+    }),
+  }
 }
 
 // ─── Suspend / reactivate ──────────────────────────────────────────────────────

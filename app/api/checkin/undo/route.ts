@@ -29,7 +29,14 @@ export interface CheckInUndoResult {
 
 export async function POST(req: NextRequest): Promise<NextResponse<CheckInUndoResult>> {
   // ── Auth ──────────────────────────────────────────────────────────────────
-  const authz = await authorizeWorkspace(req, 'checkin')
+  // RD-CHECKIN-STAFF-01 — undo is gated on `registrations`, NOT `checkin`.
+  //
+  // Undo mutates a registration's attendance record and rolls back the attendance
+  // counter; it is a correction, not a gate action. Owner/admin/manager all hold
+  // `registrations` so their behaviour is unchanged — the only role this removes is
+  // the gate-only `checkin_staff`, which is the intent. No role check is hard-coded:
+  // the matrix in lib/team/types.ts remains the single source of truth.
+  const authz = await authorizeWorkspace(req, 'registrations')
   if (!authz.ok) return NextResponse.json({ success: false, error: authz.error }, { status: authz.status })
   const uid       = authz.workspaceUid
   const callerUid = authz.callerUid

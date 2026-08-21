@@ -9,7 +9,7 @@
 
 import { NextRequest, NextResponse } from 'next/server'
 import { adminDb }                   from '@/lib/firebase/admin'
-import { authorizeWorkspace }        from '@/lib/team/workspace'
+import { authorizeEvent }           from '@/lib/team/workspace'
 import { getEventStats, aggregateRegistrationStatusCounts } from '@/lib/firebase/firestore/registrationCounters'
 import type { RegistrationDocument } from '@/lib/registrations/types'
 
@@ -160,11 +160,14 @@ export async function GET(
   // operators, so it is gated by 'checkin' (held by checkin_staff/manager/admin/owner) —
   // not 'events' (which locked the very role built for the gate out of this view). Tenant
   // isolation is unchanged: the event is still resolved under the caller's own uid namespace.
-  const authz = await authorizeWorkspace(req, 'checkin')
+  // RD-CHECKIN-STAFF-01: eventId comes from the ROUTE PATH, and authorizeEvent
+  // additionally confirms a gate-only operator is assigned to this event — so
+  // attendance for an unassigned event is refused, not merely un-navigable.
+  const { eventId } = await context.params
+
+  const authz = await authorizeEvent(req, 'checkin', eventId)
   if (!authz.ok) return NextResponse.json({ error: authz.error }, { status: authz.status })
   const uid = authz.workspaceUid
-
-  const { eventId } = await context.params
 
   // ── 2. Ownership — load draft ──────────────────────────────────────────────
   const draftRef  = adminDb.doc(`users/${uid}/eventDrafts/${eventId}`)

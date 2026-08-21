@@ -16,11 +16,14 @@ import { FieldValue }                   from 'firebase-admin/firestore'
 import { adminDb }                      from '@/lib/firebase/admin'
 import { writeCheckinDelta }            from '@/lib/firebase/firestore/registrationCounters'
 import { authorizeWorkspace }           from '@/lib/team/workspace'
+import { isEventSlugInScope }           from '@/lib/team/eventScope'
 import { getEventCheckInStatus }        from '@/lib/checkin/eventStatus'
 import { checkRateLimit }               from '@/lib/rateLimit'
 import { enqueueWebhook }                from '@/lib/integrations/webhooks'
 import { crmRecordCheckIn }              from '@/lib/crm/service'
-import { consumeIdentifier }             from '@/lib/identifiers/engine'
+import { consumeIdentifier, allocateIdentifier } from '@/lib/identifiers/engine'
+import { resolveIdentifierConfig }      from '@/lib/identifiers/config'
+import { IdentifierError }              from '@/lib/identifiers/types'
 import { checkInBlockReason, type CheckInBlockReason } from '@/lib/registrations/checkinEligibility'
 import type { RegistrationDocument }    from '@/lib/registrations/types'
 
@@ -36,6 +39,16 @@ export interface CheckInResult {
   eventName?:   string
   checkedInAt?: string          // ISO string
   error?:       string
+  /**
+   * RD-CHECKIN-BIB-01 — set when this event issues identifiers and THIS attendee
+   * has none. The caller must collect one and retry with `identifierValue`; the
+   * attendee is NOT checked in until it is supplied and accepted.
+   */
+  requiresIdentifier?: boolean
+  /** The organizer's configured label ("Bib Number", "Member ID", …). Never hardcoded. */
+  identifierLabel?:    string
+  /** The value that was assigned as part of this check-in, when one was. */
+  identifierValue?:    string
 }
 
 // ─── Handler ──────────────────────────────────────────────────────────────────
@@ -69,13 +82,22 @@ export async function POST(req: NextRequest): Promise<NextResponse<CheckInResult
   let ticketCode: string
   let source: string | undefined
   let expectedEventSlug: string | undefined
+  let identifierValue: string | undefined
   try {
-    const body = await req.json() as { ticketCode?: unknown; source?: unknown; eventSlug?: unknown }
+    const body = await req.json() as {
+      ticketCode?: unknown; source?: unknown; eventSlug?: unknown; identifierValue?: unknown
+    }
     if (typeof body.ticketCode !== 'string' || !body.ticketCode.trim()) {
       return NextResponse.json({ success: false, error: 'MISSING_TICKET_CODE' }, { status: 400 })
     }
     ticketCode = body.ticketCode.trim().toUpperCase()
     source     = typeof body.source === 'string' ? body.source.trim() : undefined
+    // RD-CHECKIN-BIB-01 — the identifier the operator typed, when the previous
+    // attempt reported one was required. Length-capped here only to keep an absurd
+    // payload out of the engine; the ENGINE owns format, range and uniqueness.
+    identifierValue = typeof body.identifierValue === 'string' && body.identifierValue.trim()
+      ? body.identifierValue.trim().slice(0, 64)
+      : undefined
     // Optional (backward-compatible): the gate the operator is running. When
     // present, the scanned ticket must belong to THIS event — otherwise a ticket
     // for another of the same organizer's events would open this gate.
@@ -114,6 +136,16 @@ export async function POST(req: NextRequest): Promise<NextResponse<CheckInResult
   // cache and the session check-in EVENT_MISMATCH guard.
   if (expectedEventSlug && reg.eventSlug !== expectedEventSlug) {
     return NextResponse.json({ success: false, error: 'WRONG_EVENT' }, { status: 422 })
+  }
+
+  // ── Staff event assignment (RD-CHECKIN-STAFF-01) ──────────────────────────
+  // The check above is a CLIENT-DECLARED gate and is optional, so on its own it
+  // cannot contain an operator: omitting `eventSlug` skips it entirely. This one
+  // is derived from the caller's own team record and the registration's real
+  // event, so it cannot be sidestepped from the request. A gate operator assigned
+  // to Event A is refused an Event B ticket even if the client sends nothing.
+  if (!await isEventSlugInScope(authz, reg.eventSlug)) {
+    return NextResponse.json({ success: false, error: 'EVENT_NOT_ASSIGNED' }, { status: 403 })
   }
 
   // ── Registration status and payment eligibility ──────────────────────────
@@ -157,6 +189,73 @@ export async function POST(req: NextRequest): Promise<NextResponse<CheckInResult
   const eventStatus = await getEventCheckInStatus(reg.eventSlug)
   if (eventStatus !== 'ok') {
     return NextResponse.json({ success: false, error: 'EVENT_NOT_ACCEPTING_CHECKINS' }, { status: 422 })
+  }
+
+  // ── Identifier gate (RD-CHECKIN-BIB-01) ───────────────────────────────────
+  //
+  // Runs AFTER every eligibility check and BEFORE the check-in transaction, which
+  // is what makes the ordering requirement true: an attendee who cannot be
+  // identified is never marked present, and an ineligible attendee is rejected
+  // before we would have asked for an identifier at all.
+  //
+  // ORDER IS THE ATOMICITY STORY. `allocateIdentifier` runs its own Firestore
+  // transaction (lock read + write + registration mirror). Assigning FIRST means:
+  //   • assignment fails  → we return here; the attendee is NOT checked in.
+  //   • check-in fails    → the identifier stays assigned. That is deliberate and
+  //     safe: it belongs to this attendee, a retry finds it present, skips the
+  //     prompt, and completes. The alternative — folding both into one
+  //     transaction — would mean reimplementing the identifier engine, which owns
+  //     locks, pools, reuse policy and history.
+  //
+  // The identifier value is the ONLY thing taken from the request here. The
+  // registration was resolved from the ticket code and the event from the stored
+  // document, so an operator can name a value, never a victim.
+  let assignedIdentifier: string | undefined
+
+  const { config: idConfig } = await resolveIdentifierConfig(reg.eventSlug)
+  if (idConfig.enabled) {
+    const existing = (reg as { identifier?: { value?: string } }).identifier
+    const hasIdentifier = typeof existing?.value === 'string' && existing.value.length > 0
+
+    if (!hasIdentifier) {
+      // Nothing typed yet → tell the caller what to ask for, and stop. This is the
+      // "show the popup" signal; no write of any kind has happened.
+      if (!identifierValue) {
+        return NextResponse.json({
+          success: false,
+          error:   'IDENTIFIER_REQUIRED',
+          requiresIdentifier: true,
+          identifierLabel:    idConfig.label,
+          attendee:  { name: reg.attendee.name, passName: reg.passName },
+          eventName: reg.eventName,
+        }, { status: 422 })
+      }
+
+      try {
+        const allocated = await allocateIdentifier({
+          eventSlug:      reg.eventSlug,
+          registrationId: regDoc.id,
+          actor:          callerUid,      // attribution: the operator at the gate
+          source:         'manual',       // an operator typed it
+          explicitValue:  identifierValue,
+        })
+        assignedIdentifier = allocated.value
+      } catch (err) {
+        // The engine is the authority on duplicate / blocked / retired / range /
+        // manual-override-disabled. Its codes are surfaced verbatim so the operator
+        // is told which one it was, and the attendee stays NOT checked in.
+        const code = err instanceof IdentifierError ? err.code : 'IDENTIFIER_ASSIGN_FAILED'
+        if (!(err instanceof IdentifierError)) {
+          console.error('[scan] identifier allocation failed:', err)
+        }
+        return NextResponse.json({
+          success: false,
+          error:   code,
+          requiresIdentifier: true,
+          identifierLabel:    idConfig.label,
+        }, { status: 422 })
+      }
+    }
   }
 
   // ── Perform check-in atomically ───────────────────────────────────────────
@@ -208,5 +307,8 @@ export async function POST(req: NextRequest): Promise<NextResponse<CheckInResult
     attendee:        { name: reg.attendee.name, passName: reg.passName },
     eventName:       reg.eventName,
     checkedInAt,
+    // Echoed so the gate can confirm on screen what was written — an operator who
+    // just typed a bib needs to see the one that actually stuck.
+    ...(assignedIdentifier ? { identifierValue: assignedIdentifier } : {}),
   })
 }

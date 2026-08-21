@@ -21,6 +21,7 @@ import { resolveAuthGuard } from '@/lib/auth/authGuard'
 import { Sidebar } from '@/components/dashboard/Sidebar'
 import { WorkspaceBanner } from '@/components/dashboard/WorkspaceBanner'
 import { SessionGuard } from '@/components/auth/SessionGuard'
+import { CheckinStaffGuard } from '@/components/dashboard/CheckinStaffGuard'
 import { useTheme } from '@/lib/hooks/useTheme'
 import { VerifiedBadge } from '@/components/auth/VerifiedBadge'
 import { ROUTES } from '@/config/navigation'
@@ -472,6 +473,10 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       {/* Session expiry warning — inside the provider so the idle/warn timeouts
           come from the live security config. Overlays everything at layout level. */}
       <SessionGuard enabled={user != null} />
+
+      {/* RD-CHECKIN-STAFF-01 — routes a gate-only operator to their own console.
+          A routing hint, not a control: the organizer APIs already refuse them. */}
+      <CheckinStaffGuard />
 
       {/* Global Command Palette (Ctrl/⌘+K) — pure orchestration over existing routes/actions */}
       <CommandPalette />

@@ -11,7 +11,7 @@
 // transparently scopes to the owner's data — gated by the permission check.
 
 import { verifyCaller, requirePermission, activeMemberships, type AccessResult } from '@/lib/team/access'
-import { permissionsForRole, type TeamRole, type TeamPermission } from '@/lib/team/types'
+import { permissionsForRole, isCheckinOnlyRole, isEventInScope, type TeamRole, type TeamPermission } from '@/lib/team/types'
 
 export interface WorkspaceContext {
   callerUid:    string
@@ -19,6 +19,8 @@ export interface WorkspaceContext {
   role:         TeamRole
   permissions:  TeamPermission[]
   isOwner:      boolean
+  /** Events this caller may act on. [] = unrestricted. See requireEventScope. */
+  eventIds:     string[]
 }
 
 /**
@@ -32,10 +34,16 @@ export interface WorkspaceContext {
 export async function resolveWorkspaceUid(callerUid: string): Promise<WorkspaceContext> {
   const memberships = await activeMemberships(callerUid)
   if (memberships.length === 0) {
-    return { callerUid, workspaceUid: callerUid, role: 'owner', permissions: permissionsForRole('owner'), isOwner: true }
+    return {
+      callerUid, workspaceUid: callerUid, role: 'owner',
+      permissions: permissionsForRole('owner'), isOwner: true, eventIds: [],
+    }
   }
   const m = memberships[0]
-  return { callerUid, workspaceUid: m.organizerUid, role: m.role, permissions: permissionsForRole(m.role), isOwner: false }
+  return {
+    callerUid, workspaceUid: m.organizerUid, role: m.role,
+    permissions: permissionsForRole(m.role), isOwner: false, eventIds: m.eventIds,
+  }
 }
 
 /**
@@ -59,7 +67,7 @@ export interface WorkspaceAuthz extends WorkspaceContext {
 }
 
 const denied = (status: number, error: string): WorkspaceAuthz => ({
-  ok: false, status, error, callerUid: '', workspaceUid: '', role: 'owner', permissions: [], isOwner: false,
+  ok: false, status, error, callerUid: '', workspaceUid: '', role: 'owner', permissions: [], isOwner: false, eventIds: [],
 })
 
 /**
@@ -81,12 +89,58 @@ export async function authorizeWorkspace(req: Request, permission: TeamPermissio
  * Like authorizeWorkspace but for routes that need workspace context WITHOUT a
  * specific permission (e.g. the dashboard aggregate). Any active member of the
  * workspace — or the owner — passes.
+ *
+ * RD-CHECKIN-STAFF-01: "any member" deliberately EXCLUDES gate-only roles. A
+ * permissionless surface is still an organizer surface, and a role whose entire
+ * grant is `checkin` has no business reading workspace aggregates. Roles that hold
+ * any other permission are unaffected.
  */
 export async function authorizeAnyWorkspace(req: Request): Promise<WorkspaceAuthz> {
   const caller = await verifyCaller(req)
   if (!caller) return denied(401, 'Unauthorized')
   const ctx = await resolveWorkspaceUid(caller.uid)
+  if (!ctx.isOwner && isCheckinOnlyRole(ctx.role)) {
+    return { ...ctx, ok: false, status: 403, error: 'This account is limited to event check-in.' }
+  }
   return { ...ctx, ok: true, status: 200, error: '' }
+}
+
+/**
+ * Event-scoped authorization for gate operations.
+ *
+ * Runs the ordinary workspace + permission check, then confirms the caller may act
+ * on THIS event. `eventId` must come from the route path (a server-controlled
+ * value), never from a request body the operator can edit.
+ *
+ * Scope is enforced only for gate-only roles: broader roles already hold
+ * workspace-wide permissions and can reach the same event through the organizer
+ * surfaces, so narrowing them here would be a false promise rather than a control.
+ *
+ * An empty `eventIds` means unrestricted — the implicit state of every member row
+ * written before event assignment existed, so this is backward-compatible.
+ */
+export async function authorizeEvent(
+  req: Request, permission: TeamPermission, eventId: string,
+): Promise<WorkspaceAuthz> {
+  const authz = await authorizeWorkspace(req, permission)
+  if (!authz.ok) return authz
+  if (!requireEventScope(authz, eventId)) {
+    // Deliberately the same message and status as an unassigned event would give,
+    // so a probing operator cannot use the response to enumerate which events exist.
+    return { ...authz, ok: false, status: 403, error: 'You are not assigned to this event.' }
+  }
+  return authz
+}
+
+/**
+ * Scope predicate for a resolved workspace context.
+ *
+ * A thin adapter over the pure rule in lib/team/types.ts — the rule itself lives
+ * there because this module imports the Admin SDK transitively, which would make
+ * the rule untestable in the repo's node-environment vitest run.
+ */
+export function requireEventScope(ctx: WorkspaceContext, eventId: string): boolean {
+  return isEventInScope(ctx, eventId)
 }
 
 /**
