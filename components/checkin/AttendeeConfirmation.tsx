@@ -22,7 +22,7 @@
 // an opaque field id. The identifier label is likewise the configured one.
 
 import { useEffect, useRef } from 'react'
-import { Loader2, Pencil, UserCheck, X } from 'lucide-react'
+import { Loader2, Pencil, RotateCcw, UserCheck, X } from 'lucide-react'
 import { cn } from '@/lib/utils/cn'
 import type { AttendeeSearchResult } from '@/app/api/organizer/events/[eventId]/checkin/search/route'
 
@@ -43,6 +43,16 @@ interface Props {
    * and that the attendee already holds a value.
    */
   onEditIdentifier?: () => void
+  /**
+   * RD-CHECKIN-LOOKUP-01 — optional restricted undo, offered only when the
+   * attendee is ALREADY checked in.
+   *
+   * Like the edit action this is an affordance, not an authorization: the
+   * correction endpoint independently requires `checkin`, event assignment, that
+   * the check-in was THIS operator's, and that it is inside the 15-minute window.
+   * Omitting it renders the card as a pure read-only record.
+   */
+  onUndo?: () => void
 }
 
 /** One label/value row. Values are plain text — never HTML. */
@@ -56,7 +66,7 @@ function Row({ label, value }: { label: string; value: string }) {
 }
 
 export default function AttendeeConfirmation({
-  attendee, identifierLabel, busy, onConfirm, onCancel, onEditIdentifier,
+  attendee, identifierLabel, busy, onConfirm, onCancel, onEditIdentifier, onUndo,
 }: Props) {
   const confirmRef = useRef<HTMLButtonElement>(null)
 
@@ -151,25 +161,44 @@ export default function AttendeeConfirmation({
           )}
         </div>
 
-        {/* ── Actions ──────────────────────────────────────────────────── */}
+        {/* ── Actions ──────────────────────────────────────────────────────
+            An attendee who is ALREADY checked in is never offered check-in
+            again — the card becomes a read-only record with, at most, the
+            restricted undo. Whether that undo is actually permitted (their own
+            check-in, inside the window) is decided by the server; offering the
+            button is not a claim that it will succeed. */}
         <div className="flex gap-2 border-t border-border px-5 py-4">
           <button
             type="button" onClick={onCancel} disabled={busy}
             className="flex-1 rounded-xl border border-border px-4 py-2.5 text-fs-sm font-semibold text-foreground disabled:opacity-50"
           >
-            Cancel
+            {attendee.checkedIn ? 'Close' : 'Cancel'}
           </button>
-          <button
-            ref={confirmRef}
-            type="button" onClick={onConfirm} disabled={busy}
-            className={cn(
-              'flex-1 inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2.5',
-              'text-fs-sm font-semibold text-primary-foreground bg-primary disabled:opacity-50',
-            )}
-          >
-            {busy ? <Loader2 className="size-4 animate-spin" aria-hidden /> : <UserCheck className="size-4" aria-hidden />}
-            {assigned ? 'Check In' : 'Continue'}
-          </button>
+
+          {attendee.checkedIn ? (
+            onUndo && (
+              <button
+                ref={confirmRef}
+                type="button" onClick={onUndo} disabled={busy}
+                className="flex-1 inline-flex items-center justify-center gap-2 rounded-xl border border-border px-4 py-2.5 text-fs-sm font-semibold text-foreground disabled:opacity-50"
+              >
+                {busy ? <Loader2 className="size-4 animate-spin" aria-hidden /> : <RotateCcw className="size-4" aria-hidden />}
+                Undo check-in
+              </button>
+            )
+          ) : (
+            <button
+              ref={confirmRef}
+              type="button" onClick={onConfirm} disabled={busy}
+              className={cn(
+                'flex-1 inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2.5',
+                'text-fs-sm font-semibold text-primary-foreground bg-primary disabled:opacity-50',
+              )}
+            >
+              {busy ? <Loader2 className="size-4 animate-spin" aria-hidden /> : <UserCheck className="size-4" aria-hidden />}
+              {assigned ? 'Check In' : 'Continue'}
+            </button>
+          )}
         </div>
       </div>
     </div>

@@ -259,6 +259,30 @@ export default function OpsCheckinClient({ eventId }: { eventId: string }) {
     }
   }, [getToken])
 
+  /**
+   * Undo from the ATTENDEE INFORMATION card (lookup path).
+   *
+   * Same endpoint and same server-side limits as the success-card undo; it only
+   * differs in closing the card and clearing the stale search row afterwards, so
+   * the operator is not left looking at a record that no longer reflects reality.
+   */
+  const undoFrom = useCallback(async (ticketCode: string) => {
+    const data = await correct(ticketCode, 'undo')
+    if (!data) { setOutcome({ kind: 'error', title: 'Network error. Check your connection and retry.' }); return }
+    if (!data.success) {
+      // The refusal stays ON the card — the operator needs to see which rule they
+      // hit (not theirs / too long ago) next to the person it applies to.
+      setOutcome({ kind: 'error', title: CORRECT_ERROR_COPY[data.error ?? ''] ?? data.error ?? 'Could not undo.' })
+      return
+    }
+    setConfirm(null)
+    setLastCheckIn(null)
+    // Reflect it in the open result list rather than leaving a stale "Checked in".
+    setResults(rows => rows.map(r => (r.ticketCode === ticketCode ? { ...r, checkedIn: false } : r)))
+    setOutcome({ kind: 'already', title: data.attendee?.name ?? 'Attendee', detail: 'Check-in undone' })
+    setCtx(c => (c ? { ...c, checkedIn: Math.max(0, c.checkedIn - 1) } : c))
+  }, [correct])
+
   /** Undo a check-in this operator just performed. */
   const undoLast = useCallback(async (ticketCode: string) => {
     const data = await correct(ticketCode, 'undo')
@@ -503,28 +527,35 @@ export default function OpsCheckinClient({ eventId }: { eventId: string }) {
           </form>
 
           <ul className="flex flex-col gap-2">
+            {/* RD-CHECKIN-LOOKUP-01 — the WHOLE ROW opens ATTENDEE INFORMATION.
+                It previously rendered a "Check In" button for un-checked-in people
+                and inert "Checked in" text for everyone else, which meant an
+                already-admitted attendee could not be inspected at all — their
+                registration answers, bib and category were unreachable from lookup.
+                Selecting a row is now a READ, identical for both states; what the
+                detail view then offers depends on the attendee, not on the row. */}
             {results.map(r => (
-              <li
-                key={r.id}
-                className="flex items-center justify-between gap-3 rounded-xl border border-border bg-card px-4 py-3"
-              >
-                <div className="min-w-0">
-                  <p className="truncate text-fs-sm font-semibold">{r.attendeeName}</p>
-                  <p className="truncate text-fs-2xs text-muted-foreground">{r.passName}</p>
-                </div>
-                {/* Check In only. Undo is intentionally absent for gate-only roles —
-                    and the undo route requires `registrations` regardless. */}
-                {r.checkedIn ? (
-                  <span className="shrink-0 text-fs-2xs font-semibold text-success">Checked in</span>
-                ) : (
-                  <button
-                    onClick={() => void resolveAttendee(r.ticketCode)}
-                    disabled={busy}
-                    className="shrink-0 rounded-lg bg-primary px-3 py-2 text-fs-2xs font-semibold text-primary-foreground disabled:opacity-50"
+              <li key={r.id}>
+                <button
+                  type="button"
+                  onClick={() => void resolveAttendee(r.ticketCode)}
+                  disabled={busy}
+                  aria-label={`View ${r.attendeeName}`}
+                  className="flex w-full items-center justify-between gap-3 rounded-xl border border-border bg-card px-4 py-3 text-left transition-colors hover:border-primary/40 disabled:opacity-50"
+                >
+                  <div className="min-w-0">
+                    <p className="truncate text-fs-sm font-semibold text-foreground">{r.attendeeName}</p>
+                    <p className="truncate text-fs-2xs text-muted-foreground">{r.passName}</p>
+                  </div>
+                  <span
+                    className={cn(
+                      'shrink-0 rounded-full px-2.5 py-1 text-fs-2xs font-semibold',
+                      r.checkedIn ? 'bg-success/10 text-success' : 'bg-primary/10 text-primary',
+                    )}
                   >
-                    Check In
-                  </button>
-                )}
+                    {r.checkedIn ? 'Checked in' : 'View'}
+                  </span>
+                </button>
               </li>
             ))}
           </ul>
@@ -550,6 +581,10 @@ export default function OpsCheckinClient({ eventId }: { eventId: string }) {
             error:        '',
             correcting:   true,
           })}
+          // Offered only when the card shows an already-checked-in attendee. The
+          // server decides whether THIS operator may actually reverse it (own
+          // check-in, inside the window) and says so plainly if not.
+          onUndo={confirm.checkedIn ? () => void undoFrom(confirm.ticketCode) : undefined}
         />
       )}
 

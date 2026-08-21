@@ -243,6 +243,71 @@ describe('10 — the privacy boundary and the registration record', () => {
   })
 })
 
+// ─── 12. Lookup opens the detail view for EVERY result ─────────────────────
+//
+// THE REGRESSION. Lookup rendered a "Check In" button for un-checked-in people and
+// inert "Checked in" TEXT for everyone else. An already-admitted attendee could
+// therefore not be inspected at all — their registration answers, bib and category
+// were unreachable from search. Selecting a row must be a READ, identical for both
+// states, and search must never itself check anyone in.
+
+describe('12 — every lookup row opens ATTENDEE INFORMATION', () => {
+  it('the row itself is the control — no state-dependent button', () => {
+    const list = OPS.slice(OPS.indexOf('results.map'), OPS.indexOf('results.map') + 1400)
+    expect(list).toContain('onClick={() => void resolveAttendee(r.ticketCode)}')
+    // The old shape: a check-in button rendered only for un-checked-in rows.
+    expect(list).not.toMatch(/r\.checkedIn \?[\s\S]{0,200}<button/)
+  })
+
+  it('a checked-in row is no longer inert text', () => {
+    const list = OPS.slice(OPS.indexOf('results.map'), OPS.indexOf('results.map') + 1400)
+    // It may still SAY "Checked in" — as a badge inside the button, not instead of it.
+    expect(list).not.toMatch(/<span[^>]*>\s*Checked in\s*<\/span>\s*\)\s*:/)
+    expect(list).toContain('aria-label={`View ${r.attendeeName}`}')
+  })
+
+  it('selecting a row RESOLVES — it never checks anyone in', () => {
+    const list = OPS.slice(OPS.indexOf('results.map'), OPS.indexOf('results.map') + 1400)
+    expect(list).not.toContain('submitCode')
+    expect(list).not.toContain('/api/checkin/scan')
+  })
+})
+
+describe('13 — an already-checked-in attendee is never re-admitted', () => {
+  it('the card offers Close/Undo instead of Check In', () => {
+    expect(CONFIRM).toContain('attendee.checkedIn ?')
+    expect(CONFIRM).toContain("'Close' : 'Cancel'")
+    expect(CONFIRM).toContain('Undo check-in')
+  })
+
+  it('the check-in action is rendered only in the NOT-checked-in branch', () => {
+    // Guards against the confirm button leaking back into the checked-in branch.
+    const actions = CONFIRM.slice(CONFIRM.indexOf('── Actions'))
+    const checkedInBranch = actions.slice(actions.indexOf('attendee.checkedIn ?'), actions.indexOf(') : ('))
+    expect(checkedInBranch).not.toContain('onConfirm')
+  })
+
+  it('undo is offered only when the attendee is checked in', () => {
+    expect(OPS).toContain('onUndo={confirm.checkedIn ?')
+  })
+
+  it('undo goes to the restricted correction endpoint, not the broad route', () => {
+    expect(OPS).toContain("correct(ticketCode, 'undo')")
+    expect(OPS).not.toContain('/api/checkin/undo')
+  })
+
+  it('a refusal keeps the operator informed rather than failing silently', () => {
+    expect(OPS).toContain('CORRECT_ERROR_COPY')
+    expect(OPS).toContain('NOT_YOUR_CHECKIN')
+    expect(OPS).toContain('UNDO_WINDOW_EXPIRED')
+  })
+
+  it('the client re-decides nothing — the window and ownership stay server-side', () => {
+    expect(OPS).not.toContain('UNDO_WINDOW_MS')
+    expect(OPS).not.toContain('checkedInBy')
+  })
+})
+
 // ─── 11. Offline behaviour is explicitly unchanged ─────────────────────────
 
 describe('11 — offline is untouched', () => {
