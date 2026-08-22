@@ -16,6 +16,7 @@ import { ErrorState } from '@/components/ui'
 import { RevenueWalletSummary } from '@/components/dashboard/finance/RevenueWalletSummary'
 import { CommunicationWalletPanel } from '@/components/dashboard/finance/CommunicationWalletPanel'
 import { TransactionExplorer } from '@/components/dashboard/finance/TransactionExplorer'
+import { FinanceControlCenter } from '@/components/dashboard/finance/FinanceControlCenter'
 import type { FinanceOverview } from '@/app/api/organizer/finance/route'
 import type { GetWalletOverviewResponse } from '@/app/api/organizer/wallet/overview/route'
 import type { GetWalletTransactionsResponse } from '@/app/api/organizer/wallet/transactions/route'
@@ -138,6 +139,15 @@ export default function WalletLedgerPage() {
                 onExport={() => void handleExportComms()}
                 exporting={exportingComms}
               />
+            </section>
+          )}
+
+          {/* RD-FINANCE-P3 — the Finance Control Center. Every figure is aggregated
+              server-side from verified index shapes; this page renders, it never computes.
+              Gated on the same revenue permission as the explorer below it. */}
+          {revenueOk !== false && token && (
+            <section aria-label="Finance control center">
+              <FinanceControlCenter token={token} />
             </section>
           )}
 

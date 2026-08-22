@@ -711,6 +711,130 @@
       ]
     },
     {
+      "collectionGroup": "platformTransactions",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "organizerUid",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "gatewayFeeEstimatePaise",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "grossAmountPaise",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "netSettlementPaise",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "platformFeeBasePaise",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "platformFeeGstPaise",
+          "order": "ASCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "platformTransactions",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "organizerUid",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "entityId",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "gatewayFeeEstimatePaise",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "grossAmountPaise",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "netSettlementPaise",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "platformFeeBasePaise",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "platformFeeGstPaise",
+          "order": "ASCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "platformTransactions",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "organizerUid",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "entityId",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "status",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "grossAmountPaise",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "netSettlementPaise",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "platformFeeBasePaise",
+          "order": "ASCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "platformTransactions",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "organizerUid",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "entityId",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "paidAt",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "grossAmountPaise",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "netSettlementPaise",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "platformFeeBasePaise",
+          "order": "ASCENDING"
+        }
+      ]
+    },
+    {
       "collectionGroup": "settlementRequests",
       "queryScope": "COLLECTION",
       "fields": [
@@ -2363,6 +2487,32 @@
         {
           "fieldPath": "registeredAt",
           "order": "DESCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "registrations",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "eventSlug",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "organizerUid",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "amount",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "discountAmount",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "originalAmount",
+          "order": "ASCENDING"
         }
       ]
     },

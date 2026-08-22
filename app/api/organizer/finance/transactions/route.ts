@@ -13,9 +13,22 @@ import { NextRequest, NextResponse }        from 'next/server'
 import { authorizeWorkspace }               from '@/lib/team/workspace'
 import { adminDb }                          from '@/lib/firebase/admin'
 import { readFinanceFromLedger }            from '@/lib/platform/pricing'
+import {
+  buildFinanceTransactionView, loadRegistrationJoins, loadFinanceCoverage,
+  type FinanceCoverage,
+} from '@/lib/finance/financeService'
 import type { PlatformTransactionDocument } from '@/lib/fees/types'
 
+/**
+ * RD-FINANCE-P1 — the wire shape.
+ *
+ * Every original field is retained with its original name and meaning, so existing readers
+ * keep working; the new fields are purely additive. They are all assembled by
+ * lib/finance/financeService.ts — this route performs no arithmetic of its own, and neither
+ * does the client.
+ */
 export interface FinanceTransaction {
+  // ── Original contract, unchanged ──────────────────────────────────────────
   id:                      string
   type:                    string
   category:                string
@@ -30,12 +43,45 @@ export interface FinanceTransaction {
   feeModel:                string
   status:                  string
   paidAt:                  string | null
+
+  // ── Added: what the ledger alone cannot express ───────────────────────────
+  sourceId:                string
+  passId:                  string | null
+  passName:                string | null
+  originalAmountPaise:     number | null
+  discountAmountPaise:     number
+  /** What the attendee was actually charged. Null when it cannot be sourced. */
+  chargeAmountPaise:       number | null
+  platformFeeBasePaise:    number
+  platformFeeGstPaise:     number
+  /** Null until Razorpay settlement reconciliation exists — never inferred. */
+  gatewayFeeActualPaise:   number | null
+  gatewayFeeBasis:         'estimated' | 'actual'
+  /** Alias of netSettlementPaise under an unambiguous name. */
+  organizerNetPaise:       number
+  refundAmountPaise:       number
+  /** Fees the ATTENDEE paid on top — NOT a deduction from the organizer. */
+  attendeeBorneFeePaise:   number
+  /** Fees genuinely deducted from the organizer's proceeds. */
+  organizerBorneFeePaise:  number
+  feeBearer:               'attendee' | 'organizer' | 'split' | 'none' | 'unknown'
+  couponCode:              string | null
+  refundStatus:            string | null
+  paymentId:               string | null
+  orderId:                 string | null
+  figuresSource:           string
 }
 
 export interface FinanceTransactionsResponse {
   transactions: FinanceTransaction[]
   hasMore:      boolean
   nextCursor:   string | null
+  /**
+   * How much of the organizer's registration reality this ledger-backed list represents.
+   * `platformTransactions` holds PAID transactions only, so a free registration has no row
+   * here. Surfaced rather than hidden; free rows are never fabricated.
+   */
+  coverage:     FinanceCoverage
 }
 
 function tsToISO(ts: unknown): string | null {
@@ -77,29 +123,65 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   const pageDocs  = hasMore ? snap.docs.slice(0, limit) : snap.docs
   const nextCursor = hasMore ? (pageDocs[pageDocs.length - 1]?.id ?? null) : null
 
-  const transactions: FinanceTransaction[] = pageDocs.map(doc => {
-    const d = doc.data() as PlatformTransactionDocument
+  const docs = pageDocs.map(doc => ({ id: doc.id, d: doc.data() as PlatformTransactionDocument }))
+
+  // ONE batched read for the whole page. The join supplies what the ledger never stored —
+  // the attendee's actual charge, the coupon and the pass — and is best-effort: if it fails
+  // the ledger figures are still complete, so the page degrades rather than breaking.
+  const regs = await loadRegistrationJoins(docs.map(x => x.d.sourceId))
+
+  const transactions: FinanceTransaction[] = docs.map(({ id, d }) => {
     // RD-PRICING-02E: source finance figures from the immutable snapshot (ledger
     // fallback). Read-only; values are guaranteed byte-identical to the stored ledger.
-    const fig = readFinanceFromLedger(d)
+    const fig  = readFinanceFromLedger(d)
+    const view = buildFinanceTransactionView(
+      { ...d, id } as PlatformTransactionDocument & Record<string, unknown>,
+      fig,
+      regs.get(d.sourceId) ?? null,
+    )
     return {
-      id:                      doc.id,
-      type:                    d.type,
-      category:                d.category,
-      entityId:                d.entityId,
-      entityType:              d.entityType,
-      payerName:               d.payerName,
-      payerEmail:              d.payerEmail,
-      grossAmountPaise:        fig.grossAmountPaise,
-      platformFeeTotalPaise:   fig.platformFeeTotalPaise,
-      gatewayFeeEstimatePaise: fig.gatewayFeeEstimatePaise,
-      netSettlementPaise:      fig.netSettlementPaise,
-      feeModel:                d.feeModel,
-      status:                  d.status,
-      paidAt:                  tsToISO(d.paidAt),
+      // Original contract — same names, same values, same source as before.
+      id,
+      type:                    view.type,
+      category:                view.category,
+      entityId:                view.entityId,
+      entityType:              view.entityType,
+      payerName:               view.payerName,
+      payerEmail:              view.payerEmail,
+      grossAmountPaise:        view.grossAmountPaise,
+      platformFeeTotalPaise:   view.platformFeeTotalPaise,
+      gatewayFeeEstimatePaise: view.gatewayFeeEstimatePaise,
+      netSettlementPaise:      view.organizerNetPaise,
+      feeModel:                view.feeModel,
+      status:                  view.status,
+      paidAt:                  view.paidAt ?? tsToISO(d.paidAt),
+
+      // Additive.
+      sourceId:                view.sourceId,
+      passId:                  view.passId,
+      passName:                view.passName,
+      originalAmountPaise:     view.originalAmountPaise,
+      discountAmountPaise:     view.discountAmountPaise,
+      chargeAmountPaise:       view.chargeAmountPaise,
+      platformFeeBasePaise:    view.platformFeeBasePaise,
+      platformFeeGstPaise:     view.platformFeeGstPaise,
+      gatewayFeeActualPaise:   view.gatewayFeeActualPaise,
+      gatewayFeeBasis:         view.gatewayFeeBasis,
+      organizerNetPaise:       view.organizerNetPaise,
+      refundAmountPaise:       view.refundAmountPaise,
+      attendeeBorneFeePaise:   view.attendeeBorneFeePaise,
+      organizerBorneFeePaise:  view.organizerBorneFeePaise,
+      feeBearer:               view.feeBearer,
+      couponCode:              view.couponCode,
+      refundStatus:            view.refundStatus,
+      paymentId:               view.paymentId,
+      orderId:                 view.orderId,
+      figuresSource:           view.figuresSource,
     }
   })
 
-  const response: FinanceTransactionsResponse = { transactions, hasMore, nextCursor }
+  const coverage = await loadFinanceCoverage(uid, transactions.length)
+
+  const response: FinanceTransactionsResponse = { transactions, hasMore, nextCursor, coverage }
   return NextResponse.json(response)
 }
