@@ -18,7 +18,7 @@ import {
 import type { EventLicenseTierV2 } from '@/lib/licensing/eventLicense'
 
 export interface MediaLimitsResponse {
-  /** The licence tier the plan layer was read from; null ⇒ the global layer applied. */
+  /** Always null since RD-LEGACY-01 (no licence-tier layer); kept in the response for old clients. */
   tier: EventLicenseTierV2 | null
 
   limits: {

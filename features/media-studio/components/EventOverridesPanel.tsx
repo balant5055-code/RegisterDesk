@@ -4,7 +4,7 @@
 //
 // Per-event PREFERENCES, made editable. Every field is a two-state control:
 //
-//     ○ Use inherited value      — no override; the licence tier or the platform decides
+//     ○ Use inherited value      — no override; the platform default decides
 //     ● Override value           — this event's own number
 //
 // ═══ NOT A SECOND CONFIGURATION SYSTEM ════════════════════════════════════════
@@ -17,7 +17,7 @@
 // The six PLATFORM LIMITS — maxPhotosPerEvent, maxUploadBatchSize, maxUploadFileSizeBytes,
 // maxGalleriesPerEvent, maxAlbumsPerGallery, signedUrlExpirySeconds — used to be editable
 // here, with `maxPhotosPerEvent` blankable to mean UNLIMITED. Since the resolver ranks the
-// event layer above plan and global, an organizer could hand themselves a limit the
+// event layer above the global default, an organizer could hand themselves a limit the
 // business never sold them.
 //
 // They are now admin-only and `PATCH /overrides` REFUSES them with 403. Removing the
@@ -146,7 +146,7 @@ export function EventOverridesPanel() {
 
   if (!event) return null
 
-  /** What this field would be WITHOUT this event's override — the plan or the platform. */
+  /** What this field would be WITHOUT this event's override — the platform default. */
   const inheritedOf = (key: keyof MediaOverridableConfig): string => {
     if (!effective) return '—'
     const fromLimits = (effective.limits as Record<string, unknown>)[key]
@@ -171,8 +171,8 @@ export function EventOverridesPanel() {
             </h2>
           </div>
           <p className="text-fs-sm leading-relaxed text-muted-foreground">
-            Each setting either inherits from your licence plan or is overridden for this
-            event. An override always wins; everything else keeps following the plan.
+            Each setting either follows the platform default or is overridden for this
+            event. An override always wins; everything else keeps following the default.
           </p>
 
           {error && <Banner tone="error" title="Something went wrong">{error}</Banner>}

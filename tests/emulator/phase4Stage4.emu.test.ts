@@ -358,21 +358,18 @@ describeEmu('RD-PHASE4-S4 · financial controls & audit logging on real Firestor
     expect(rows[0]).toMatchObject({ reason: 'write it off', actorRole: 'super_admin', before: { status: 'open' }, after: { status: 'waived' } })
   }, T)
 
-  it('PLAN · the comp tier: Super Admin + reason; change and audit (before/after) in one transaction', async () => {
+  // RD-LEGACY-01 — the comp-tier lever is RETIRED: Super Admin still gated, then 410, nothing written.
+  it('PLAN · the comp tier is retired: non-admin 403, Super Admin 410 PLAN_RETIRED; no write, no audit row', async () => {
     const org = `p4s4-plan-${P}`
     await put(`users/${org}`, { uid: org, role: 'organizer' })
     const { PATCH } = await import('@/app/api/admin/organizers/[uid]/plan/route')
     h.admin = PLAIN
     expect((await json(await PATCH(req({ overrideTier: 'growth', reason: 'support comp' }, 'PATCH'), ctx('uid', org)))).body.code).toBe('SUPER_ADMIN_REQUIRED')
     h.admin = SUPER
-    expect((await json(await PATCH(req({ overrideTier: 'growth' }, 'PATCH'), ctx('uid', org)))).body.code).toBe('REASON_REQUIRED')
-    failAuditCreate()
-    await expect(PATCH(req({ overrideTier: 'growth', reason: 'support comp' }, 'PATCH'), ctx('uid', org))).rejects.toThrow(/injected audit failure/)
-    vi.restoreAllMocks()
+    const r = await json(await PATCH(req({ overrideTier: 'growth', reason: 'support comp' }, 'PATCH'), ctx('uid', org)))
+    expect([r.status, r.body.code]).toEqual([410, 'PLAN_RETIRED'])
     expect((await adminDb.doc(`users/${org}`).get()).data()!.entitlementOverrideTier).toBeUndefined()
-    expect((await json(await PATCH(req({ overrideTier: 'growth', reason: 'support comp' }, 'PATCH'), ctx('uid', org)))).status).toBe(200)
-    const [row] = await auditRows(org, 'plan.changed')
-    expect(row).toMatchObject({ reason: 'support comp', before: { entitlementOverrideTier: null }, after: { entitlementOverrideTier: 'growth' } })
+    expect(await auditRows(org, 'plan.changed')).toHaveLength(0)
   }, T)
 
   // ═══ Licences — D1 / F8 / F3 ═════════════════════════════════════════════════════════════
@@ -391,12 +388,13 @@ describeEmu('RD-PHASE4-S4 · financial controls & audit logging on real Firestor
     h.admin = SUPER
     for (let i = 0; i < 3; i++) {
       const [a, b] = await Promise.all([
-        licAct(slug, { action: 'overrideFeatures', features: { apiAccess: i % 2 === 0 }, reason: 'feature change' }),
+        // RD-LEGACY-01 — overrideFeatures is retired (410); the race is exercised with overridePrice.
+        licAct(slug, { action: 'overridePrice', pricePaise: 1_000 + i, reason: 'price change' }),
         licAct(slug, { action: 'overrideLimit', limitKey: 'maxTeamMembers', limitValue: 10 + i, reason: 'limit change' }),
       ])
       expect([a.status, b.status]).toEqual([200, 200])
       const admin = (await adminDb.doc(`eventLicenses/${slug}`).get()).data()!.admin as Record<string, Record<string, unknown>>
-      expect(admin.featureOverrides.apiAccess).toBe(i % 2 === 0)
+      expect(admin.pricePaiseOverride).toBe(1_000 + i)
       expect(admin.limitOverrides.maxTeamMembers).toBe(10 + i)
     }
     const hist = (await adminDb.collection('licenseHistory').where('eventId', '==', slug).get()).docs

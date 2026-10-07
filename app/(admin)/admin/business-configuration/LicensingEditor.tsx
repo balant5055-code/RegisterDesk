@@ -1,10 +1,14 @@
 'use client'
 
-// Specialized editor for the Licensing section — the flat SectionEditor can't edit
-// the per-tier `tierOverrides` map. Each field is pre-filled with the EFFECTIVE
-// value (eventLicense.ts default ⊕ current override); editing a field writes only
-// that delta into the override, so untouched tiers keep inheriting the code default.
-// Validation reuses the engine's own licensing validator.
+// Specialized editor for the Licensing section: the capacity commercial model, license coupons and
+// the prepaid service allowances (WhatsApp, certificates, photos). Validation reuses the engine's
+// own licensing validator.
+//
+// RD-LEGACY-01 — the retired licence-tier model (Free / Starter / Professional / Business /
+// Enterprise prices, limits and feature switches) is NOT editable here any more. Stored
+// `tierOverrides` / `tierOverridesV2` values are left exactly as they are (the draft is a copy of
+// the published section, so a publish passes them through unchanged); they are read only to
+// interpret historical tier licences and orders.
 
 import { useMemo, useState } from 'react'
 import { parseRupeesToPaise, paiseToRupeesInput } from '@/lib/licensing/moneyInput'
@@ -15,7 +19,6 @@ import { Undo2, RotateCcw } from 'lucide-react'
 import {
   CONFIG_SECTION_REGISTRY,
   BUSINESS_CONFIG_DEFAULTS,
-  type LicenseTierOverrideV2,
   type LicenseCouponsConfig,
 } from '@/lib/config/businessConfig'
 import {
@@ -28,20 +31,8 @@ import {
   validateServiceAllowances, priceServiceItem, serviceSaleReadinessErrors,
   type ServiceKind, type PrepaidServiceConfig,
 } from '@/lib/licensing/serviceAllowances'
-import {
-  EVENT_LICENSE_TIERS_V2,
-  getEventLicenseDefinitionV2,
-  isUnlimited,
-  type EventLicenseTierV2,
-  type EventLicenseFeature,
-} from '@/lib/licensing/eventLicense'
 
-// RD-LICENSE-GA-03: edits the approved Licensing V2 catalog (5 tiers, regular + offer
-// prices) via `tierOverridesV2`. The legacy V1 `tierOverrides` (Growth) editor is removed;
-// V1 overrides remain in the config for historical resolution but are no longer UI-editable.
 type SectionDraft   = Record<string, unknown>
-type OverrideMap    = Partial<Record<EventLicenseTierV2, LicenseTierOverrideV2>>
-const FEATURE_KEYS  = Object.keys(getEventLicenseDefinitionV2('free').features) as EventLicenseFeature[]
 const toDraft = (v: unknown): SectionDraft => JSON.parse(JSON.stringify(v ?? {})) as SectionDraft
 
 function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
@@ -113,8 +104,7 @@ export function LicensingEditor({
   }, [draft])
   const dirty      = useMemo(() => JSON.stringify(draft) !== JSON.stringify(published), [draft, published])
 
-  const overrides = (draft.tierOverridesV2 && typeof draft.tierOverridesV2 === 'object' && !Array.isArray(draft.tierOverridesV2) ? draft.tierOverridesV2 : {}) as OverrideMap
-  const setTop = (key: 'defaultCurrency' | 'purchasesEnabled', value: unknown) => onDraftChange({ ...draft, [key]: value })
+  const setTop = (key: 'defaultCurrency', value: unknown) => onDraftChange({ ...draft, [key]: value })
 
   // ── License coupons (EA-4 S2) ───────────────────────────────────────────────
   // The five fields below have existed in the schema, the defaults and the licensing
@@ -187,17 +177,9 @@ export function LicensingEditor({
   const exampleBase = exampleChargeable * eff('activationRatePaise')
   const exampleGst  = Math.round(exampleBase * eff('gstRatePercent') / 100)
 
-  // Empty input → NaN, exactly as the tier price/limit inputs below do. The validator then
+  // Empty input → NaN. The validator then
   // reports the field and Publish disables, rather than a blank silently becoming 0.
   const numOrNaN = (v: string) => (v === '' ? NaN : Number(v))
-  const setOverride = (tier: EventLicenseTierV2, patch: Partial<LicenseTierOverrideV2>) => {
-    const next: OverrideMap = { ...overrides, [tier]: { ...(overrides[tier] ?? {}), ...patch } }
-    onDraftChange({ ...draft, tierOverridesV2: next })
-  }
-  const setFeature = (tier: EventLicenseTierV2, f: EventLicenseFeature, on: boolean) => {
-    const cur = overrides[tier] ?? {}
-    setOverride(tier, { features: { ...(cur.features ?? {}), [f]: on } })
-  }
 
   return (
     <div className="rounded-xl border border-border bg-card">
@@ -227,8 +209,7 @@ export function LicensingEditor({
 
       <div className="space-y-4 p-4">
         {/* ── RD-CAPACITY-01 · Commercial model (GLOBAL DEFAULTS) ───────────────
-            Rendered first because it is now the primary commercial configuration: the
-            tier cards below are retained only for historical resolution. */}
+            Rendered first: it is the commercial configuration every new event is priced by. */}
         <div className="rounded-lg border border-primary/30 bg-primary/[0.03] p-3">
           <div className="mb-1 flex flex-wrap items-center gap-2">
             <p className="text-[12px] font-semibold uppercase tracking-wide text-muted-foreground">
@@ -317,14 +298,10 @@ export function LicensingEditor({
             <span className="text-[12px] font-medium text-foreground">Default currency</span>
             <input value={typeof draft.defaultCurrency === 'string' ? draft.defaultCurrency : ''} onChange={e => setTop('defaultCurrency', e.target.value)} className={inputCls} />
           </label>
-          <label className="flex flex-col gap-1">
-            <span className="text-[12px] font-medium text-foreground">License purchases enabled</span>
-            <div className="flex h-8 items-center gap-2"><Toggle checked={draft.purchasesEnabled === true} onChange={v => setTop('purchasesEnabled', v)} /><span className="text-[12px] text-muted-foreground">{draft.purchasesEnabled === true ? 'Enabled' : 'Disabled'}</span></div>
-          </label>
         </div>
 
         {/* License coupons — the existing licensing.coupons policy, now editable.
-            Same block chrome as a tier card so no new visual language is introduced. */}
+            Same block chrome as the commercial model so no new visual language is introduced. */}
         <div className="rounded-lg border border-border/70 p-3">
           <p className="mb-2 text-[12px] font-semibold uppercase tracking-wide text-muted-foreground">
             License Coupons
@@ -389,72 +366,6 @@ export function LicensingEditor({
             per license purchase regardless of this setting.
           </p>
         </div>
-
-        {/* Per-tier overrides — Licensing V2 (Free / Starter / Professional / Business / Enterprise).
-            RD-EVENT-COMMERCE-04 — RETAINED for historical licences only; labelled so a price
-            here is never mistaken for an active one. */}
-        <div className="rounded-lg border border-dashed border-border/70 px-3 py-2 text-[11px] text-muted-foreground">
-          <span className="font-semibold text-foreground">Legacy tiers — not sold.</span>{' '}
-          New events are priced ONLY by the Commercial Model above. The tier values below are kept to
-          read historical tier licences and orders, and to size an admin Grant/Comp for an event with
-          no capacity licence. Tier prices here do not price any new purchase.
-        </div>
-        {EVENT_LICENSE_TIERS_V2.map(tier => {
-          const base = getEventLicenseDefinitionV2(tier)
-          const ov   = overrides[tier] ?? {}
-          const effName    = ov.name ?? base.name
-          const effRegular = ov.regularPricePaise ?? base.regularPricePaise
-          const effOffer   = ov.offerPricePaise ?? base.offerPricePaise
-          const effReg   = ov.maxRegistrations === undefined ? base.limits.maxRegistrations : (ov.maxRegistrations === null ? Infinity : ov.maxRegistrations)
-          const unlimited = isUnlimited(effReg)
-          const effFeatures = { ...base.features, ...(ov.features ?? {}) }
-          const effFeatureList = ov.featureList ?? base.featureList
-          return (
-            <div key={tier} className="rounded-lg border border-border/70 p-3">
-              <p className="mb-2 text-[12px] font-semibold uppercase tracking-wide text-muted-foreground">{base.name}</p>
-              <div className="grid grid-cols-1 gap-x-4 gap-y-2.5 sm:grid-cols-2 lg:grid-cols-4">
-                <label className="flex flex-col gap-1">
-                  <span className="text-[11.5px] text-muted-foreground">Name</span>
-                  <input value={effName} onChange={e => setOverride(tier, { name: e.target.value })} className={inputCls} />
-                </label>
-                <label className="flex flex-col gap-1">
-                  <span className="text-[11.5px] text-muted-foreground">Regular price (paise)</span>
-                  <input type="number" value={Number.isFinite(effRegular) ? String(effRegular) : ''} onChange={e => setOverride(tier, { regularPricePaise: e.target.value === '' ? NaN : Number(e.target.value) })} className={inputCls} />
-                </label>
-                <label className="flex flex-col gap-1">
-                  <span className="text-[11.5px] text-muted-foreground">Offer price (paise, charged)</span>
-                  <input type="number" value={Number.isFinite(effOffer) ? String(effOffer) : ''} onChange={e => { const v = e.target.value === '' ? NaN : Number(e.target.value); setOverride(tier, { offerPricePaise: v, licensePricePaise: v }) }} className={inputCls} />
-                </label>
-                <div className="flex flex-col gap-1">
-                  <span className="text-[11.5px] text-muted-foreground">Max registrations</span>
-                  <div className="flex items-center gap-2">
-                    <input type="number" disabled={unlimited} value={unlimited ? '' : String(effReg)} onChange={e => setOverride(tier, { maxRegistrations: e.target.value === '' ? NaN : Number(e.target.value) })} className={cn(inputCls, unlimited && 'opacity-50')} />
-                    <label className="flex shrink-0 items-center gap-1 text-[11px] text-muted-foreground">
-                      <input type="checkbox" checked={unlimited} onChange={e => setOverride(tier, { maxRegistrations: e.target.checked ? null : base.limits.maxRegistrations })} />∞
-                    </label>
-                  </div>
-                </div>
-              </div>
-
-              <div className="mt-2.5">
-                <span className="text-[11.5px] text-muted-foreground">Features</span>
-                <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1.5">
-                  {FEATURE_KEYS.map(f => (
-                    <label key={f} className="flex items-center gap-1.5 text-[11.5px] text-foreground">
-                      <Toggle checked={effFeatures[f] === true} onChange={v => setFeature(tier, f, v)} />{f}
-                    </label>
-                  ))}
-                </div>
-              </div>
-
-              <label className="mt-2.5 flex flex-col gap-1">
-                <span className="text-[11.5px] text-muted-foreground">Feature list (one per line)</span>
-                <textarea rows={3} value={effFeatureList.join('\n')} onChange={e => setOverride(tier, { featureList: e.target.value.split('\n').map(s => s.trim()).filter(Boolean) })}
-                  className="w-full rounded-lg border border-border bg-background px-2.5 py-1.5 text-[12.5px] text-foreground focus:border-border-strong focus:outline-none focus:ring-2 focus:ring-primary/15" />
-              </label>
-            </div>
-          )
-        })}
 
         {!validation.valid && (
           <ul className="space-y-1 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-[12px] text-destructive">

@@ -2,9 +2,10 @@
 // RD-CONF-08. Resolves the effective feature flags via the Business Configuration
 // Engine (runtime override → Firestore config → code default).
 //
-// Feature flags are GLOBAL master switches layered ABOVE any per-license / per-
-// channel gate — they never replace them (e.g. whatsapp/sms stay governed by
-// communication config; customDomains/whiteLabel/publicApi by license entitlements).
+// Feature flags are GLOBAL master switches layered ABOVE any per-channel gate — they
+// never replace them (e.g. whatsapp/sms stay governed by communication config).
+// RD-LEGACY-01 — there are no licence entitlements any more: customDomains / whiteLabel /
+// publicApi are governed by these flags and the workspace permission system only.
 //
 // EXTENSIBLE (Step 8): an optional resolution context (organizerUid / eventId) is
 // accepted now but NOT yet applied — future organizer/event override layers slot in

@@ -62,7 +62,7 @@ const FAQ: FaqItem[] = [
   { question: 'Can I schedule a demo?',               answer: 'Yes — use Book a Demo in the inquiry form, tell us when suits you in your message, and our team will take it from there.', category: 'contact', order: 1 },
   { question: 'How long does onboarding take?',       answer: 'RegisterDesk is self-serve: create a free account and publish an event right away. For larger events, our team can help you get set up.', category: 'contact', order: 2 },
   { question: 'Do you support large events?',         answer: 'Yes. The platform runs everything from small workshops to multi-thousand-attendee marathons, with QR check-in, wallets and settlements.', category: 'contact', order: 3 },
-  { question: 'Can RegisterDesk be white-labelled?',  answer: 'Yes. White-labelling puts your own brand on public event pages and emails on eligible plans.', category: 'contact', order: 4 },
+  { question: 'Can RegisterDesk be white-labelled?',  answer: 'Yes. White-labelling puts your own brand on public event pages and emails, for every organizer.', category: 'contact', order: 4 },
   { question: 'Can I migrate from another platform?', answer: 'Reach out through the form and we will help you plan a migration that fits your data and timeline.', category: 'contact', order: 5 },
 ]
 

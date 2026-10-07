@@ -186,7 +186,8 @@ describeEmu('RD-EVENT-COMMERCE-04A · config reliability, audit atomicity, Super
     const ctx = () => ({ params: Promise.resolve({ eventId: SLUG }) })
     const plain = await json(await POST(req('POST', 'admin', { action: 'overrideFeatures', features: {}, reason: 'access check' }), ctx()))
     expect(plain.status).toBe(403); expect(PLAIN_REFUSED).toContain(plain.body.code)
-    expect((await POST(req('POST', 'superAdmin', { action: 'overrideFeatures', features: {}, reason: 'access check' }), ctx())).status).toBe(200)
+    // RD-LEGACY-01 — feature switches are retired: even a Super Admin gets 410 (nothing written).
+    expect((await POST(req('POST', 'superAdmin', { action: 'overrideFeatures', features: {}, reason: 'access check' }), ctx())).status).toBe(410)
     expect((await POST(req('POST', 'admin', { action: 'addNote', note: 'a plain note' }), ctx())).status).toBe(403)
     expect((await POST(req('POST', 'superAdmin', { action: 'addNote', note: 'a super note' }), ctx())).status).toBe(200)
     expect((await POST(req('POST', 'organizer', { action: 'addNote', note: 'x' }), ctx())).status).toBe(403)

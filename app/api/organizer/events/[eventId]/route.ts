@@ -383,7 +383,6 @@ export async function GET(
     return { totalRaisedPaise: dc.totalRaisedPaise ?? 0, donorCount: dc.donorCount ?? 0 }
   }
 
-  // Free-event capacity = the effective Starter registration limit (SSOT), not a literal.
   // RD-BIB-UX-04 · the event's configured identifier name, so the workspace tab can
   // read "BIB Numbers" / "Delegate Numbers" instead of the generic "Identifiers".
   //

@@ -143,8 +143,6 @@ export default function Organizer360Page() {
           <div className="mt-1 flex flex-wrap items-center gap-2 text-[12.5px] text-muted-foreground">
             <span className="font-mono">{organizerUid}</span>
             {overview && <StatusPill tone={overview.account.status === 'active' ? 'success' : overview.account.status === 'suspended' ? 'warning' : 'danger'}>{overview.account.status}</StatusPill>}
-            {overview && <StatusPill tone="neutral">{overview.entitlements.effectiveTier}</StatusPill>}
-            {overview?.entitlements.source === 'admin_override' && <StatusPill tone="info">override</StatusPill>}
           </div>
         </div>
         <button onClick={refreshOverview} className={btnOutline}><RefreshCw className="size-3.5" /> Refresh</button>
@@ -173,7 +171,7 @@ export default function Organizer360Page() {
           : operationsLoading ? <CenterSpin /> : operations && <OperationsWorkspace d={operations} />
       )}
       {tab === 'business' && <BusinessWorkspace uid={organizerUid} />}
-      {tab === 'governance' && overview && <GovernanceWorkspace uid={organizerUid} o={overview} onChanged={refreshOverview} />}
+      {tab === 'governance' && overview && <GovernanceWorkspace uid={organizerUid} onChanged={refreshOverview} />}
     </div>
   )
 }
@@ -289,7 +287,6 @@ function OverviewWorkspace({ o, uid, onGoto, onChanged }: {
               <Row label="Account status" value={o.account.status} />
               {o.account.statusReason && <Row label="Reason" value={o.account.statusReason} />}
               <Row label="Team" value={`${o.team.memberCount} members · ${o.team.inviteCount} invites`} icon={Users} />
-              <Row label="Entitlement tier" value={`${o.entitlements.effectiveTier} (${o.entitlements.source})`} />
             </dl>
           </div>
         </Card>
@@ -452,7 +449,7 @@ function BusinessWorkspace({ uid }: { uid: string }) {
           <div className="overflow-x-auto">
             <table className="w-full min-w-[520px] text-[13px]">
               <thead className="border-b border-border text-left text-[11px] uppercase tracking-wide text-muted-foreground">
-                <tr><th className="px-4 py-2 font-semibold">Event</th><th className="px-4 py-2 font-semibold">Tier</th><th className="px-4 py-2 font-semibold">Status</th><th className="px-4 py-2 text-right font-semibold">Paid</th></tr>
+                <tr><th className="px-4 py-2 font-semibold">Event</th><th className="px-4 py-2 font-semibold">Legacy tier</th><th className="px-4 py-2 font-semibold">Status</th><th className="px-4 py-2 text-right font-semibold">Paid</th></tr>
               </thead>
               <tbody>
                 {data.licenses.length === 0 ? <tr><td colSpan={4} className="px-4 py-8 text-center text-muted-foreground">No licenses.</td></tr>
@@ -498,19 +495,8 @@ function BusinessWorkspace({ uid }: { uid: string }) {
           </div>
         </Card>
 
-        <Card title="Entitlements" icon={SlidersHorizontal}>
-          <div className="space-y-3 p-4">
-            <div className="flex flex-wrap items-center gap-2">
-              <StatusPill tone="neutral">{data.entitlements.effectiveTier}</StatusPill>
-              <StatusPill tone="info">{data.entitlements.source}</StatusPill>
-              <span className="text-[12.5px] text-muted-foreground">{data.entitlements.activeLicensedEvents} active licensed events</span>
-            </div>
-            <div className="flex flex-wrap gap-1.5">
-              {data.entitlements.features.filter(f => f.enabled).map(f => <StatusPill key={f.key} tone="success">{f.key}</StatusPill>)}
-              {data.entitlements.features.filter(f => f.enabled).length === 0 && <Empty>No premium features enabled.</Empty>}
-            </div>
-          </div>
-        </Card>
+        {/* RD-LEGACY-01 — the "Entitlements" card (licence tier + premium feature pills) is gone:
+            RegisterDesk has no feature tiers, and every feature is available to every organizer. */}
       </div>
     </div>
   )
@@ -518,8 +504,8 @@ function BusinessWorkspace({ uid }: { uid: string }) {
 
 // ─── Governance workspace ──────────────────────────────────────────────────────
 
-function GovernanceWorkspace({ uid, o }: {
-  uid: string; o: Organizer360Overview; onChanged: () => void
+function GovernanceWorkspace({ uid }: {
+  uid: string; onChanged: () => void
 }) {
   const [gov, setGov] = useState<Organizer360Governance | null>(null)
   const [timeline, setTimeline] = useState<Organizer360TimelineEntry[] | null>(null)
@@ -548,20 +534,19 @@ function GovernanceWorkspace({ uid, o }: {
       {err && <ErrorBanner>{err}</ErrorBanner>}
 
       <div className="grid gap-4 lg:grid-cols-2">
-        <Card title="Overrides & feature flags" icon={SlidersHorizontal}>
+        <Card title="Overrides" icon={SlidersHorizontal}>
           <div className="space-y-3 p-4">
-            <div className="flex flex-wrap items-center gap-2 text-[13.5px]">
-              {/* RD-EVENT-COMMERCE-05 — tiers are retired: shown for history only, never set here. */}
-              <span className="text-muted-foreground">Legacy tier (historical)</span>
-              <StatusPill tone="neutral">{gov?.overrides.effectiveTier ?? o.entitlements.effectiveTier}</StatusPill>
-              <StatusPill tone="info">{gov?.overrides.source ?? o.entitlements.source}</StatusPill>
-              {gov?.overrides.entitlementOverrideTier && <StatusPill tone="accent">override: {gov.overrides.entitlementOverrideTier}</StatusPill>}
-            </div>
-            <p className="text-[12px] text-muted-foreground">Tier entitlements are retired — registration capacity and prepaid services are bought per event.</p>
-            <div className="flex flex-wrap gap-1.5 pt-1">
-              {(gov?.features ?? []).filter(f => f.enabled).map(f => <StatusPill key={f.key} tone="success">{f.key}</StatusPill>)}
-              {gov && gov.features.filter(f => f.enabled).length === 0 && <Empty>No premium features enabled.</Empty>}
-            </div>
+            {/* RD-LEGACY-01 — RegisterDesk has no feature tiers: every feature is available to every
+                organizer, and registration capacity and prepaid services are bought per event. The
+                old tier / premium-feature pills are gone; a comp tier stored on the account before
+                retirement is still shown, as history only (it grants nothing and cannot be set). */}
+            <p className="text-[12.5px] text-muted-foreground">No plan or tier applies — capacity and services are bought per event.</p>
+            {gov?.overrides.entitlementOverrideTier && (
+              <div className="flex flex-wrap items-center gap-2 text-[12.5px]">
+                <span className="text-muted-foreground">Historical comp tier (inactive)</span>
+                <StatusPill tone="neutral">{gov.overrides.entitlementOverrideTier}</StatusPill>
+              </div>
+            )}
           </div>
         </Card>
 

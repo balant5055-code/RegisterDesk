@@ -1,7 +1,7 @@
 // RD-PRICING-01D — Organizer per-event pricing override.
 //
 //   PATCH → set/merge the organizer override. Organizers may override ONLY the
-//           allow-list: registrationLimit (DOWNWARD only — never above the licensed maximum).
+//           allow-list: registrationLimit (DOWNWARD only — never above the event's paid capacity).
 //           RD-PHASE4-S3 · Q4 — `convenienceFee` (and every other pricing field) is refused with
 //           403 PRICING_NOT_ORGANIZER_EDITABLE: organizers do not configure pricing, and
 //           `organizerOverride` is retired as a pricing layer (events/{slug}.commercial is the one
@@ -16,18 +16,19 @@
 //   • the live event is resolved through the reverse-pointer-checked resolveLiveEventRef AND must
 //     belong to this workspace — a draft whose (client-writable) seo.urlSlug names another
 //     organizer's event is refused before ANY write;
-//   • the licensed ceiling comes from server-only licence data (the live event's licence, else the
-//     draft's PAID activation order), never from the client-writable draft.licenseTier.
+//   • the ceiling comes from server-only data — RD-LEGACY-01: the event's PAID REGISTRATION CAPACITY
+//     (events/{slug}.totalCapacity when published, else the draft's PAID activation order), else the
+//     free allowance. Never from the client-writable draft, and never from a licence tier: the old
+//     tier lookup capped every capacity event at the V1 Starter limit (100), whatever it had paid for.
 
 import { NextRequest, NextResponse } from 'next/server'
 import { adminDb } from '@/lib/firebase/admin'
 import { authorizeEvent } from '@/lib/team/workspace'
-import { isEventLicenseTier, type EventLicenseTier } from '@/lib/licensing/eventLicense'
-import { EVENT_LICENSES_COLLECTION, LICENSE_ORDERS_COLLECTION } from '@/lib/licensing/schema'
+import { LICENSE_ORDERS_COLLECTION } from '@/lib/licensing/schema'
+import { getGlobalCommercialTerms } from '@/lib/licensing/resolveCommercialTerms'
 import { resolveLiveEventRef, liveEventLookupMessage, liveEventLookupStatus } from '@/lib/events/liveEventRef'
 import {
   resolveEffectivePlatformConfiguration,
-  resolveEffectiveLicense,
   validateOrganizerEventOverride,
   type AdminEventOverride,
   type OrganizerEventOverride,
@@ -39,21 +40,23 @@ const ALLOWED_FIELDS = new Set(['registrationLimit'])
 /** RD-PHASE4-S3 — pricing fields an organizer might send here; each is an explicit 403 with a code. */
 const PRICING_FIELDS = ['convenienceFee', 'platformFeeAmount', 'platformGstPercent', 'gatewayPercent', 'gatewayGstPercent', 'attendeeTransactionFeePercent', 'feeModel']
 
+const isPositiveInt = (v: unknown): v is number => typeof v === 'number' && Number.isInteger(v) && v > 0
+
 /**
- * RD-PHASE4-S1 · C1 — the licence tier from SERVER-ONLY data (both collections are Admin-SDK-only
- * under firestore.rules): the live event's licence when published, else the draft's PAID activation
- * order, else the lowest tier (the route's previous fallback). Never the client-writable draft field.
+ * RD-LEGACY-01 — the registration ceiling from SERVER-ONLY data (events/* and licenseOrders/* are
+ * Admin-SDK-only under firestore.rules): the live event's ENFORCED capacity when published, else
+ * the capacity the draft's PAID activation order bought, else the free allowance. Never the
+ * client-writable draft, and no licence tier.
  */
-async function trustedLicenseTier(draftId: string, liveSlug: string | null, workspaceUid: string): Promise<EventLicenseTier> {
-  if (liveSlug) {
-    const lic = await adminDb.collection(EVENT_LICENSES_COLLECTION).doc(liveSlug).get()
-    const l = lic.exists ? lic.data() as { tier?: unknown; organizerUid?: unknown } : null
-    if (l && l.organizerUid === workspaceUid && isEventLicenseTier(l.tier)) return l.tier
-  }
+async function trustedRegistrationCeiling(
+  draftId: string, liveData: Record<string, unknown> | null, workspaceUid: string,
+): Promise<number> {
+  if (liveData && isPositiveInt(liveData.totalCapacity)) return liveData.totalCapacity
   const ord = await adminDb.collection(LICENSE_ORDERS_COLLECTION).doc(`lic_${draftId}`).get()
-  const o = ord.exists ? ord.data() as { tier?: unknown; status?: unknown; organizerUid?: unknown } : null
-  if (o && o.status === 'paid' && o.organizerUid === workspaceUid && isEventLicenseTier(o.tier)) return o.tier
-  return 'starter'
+  const o = ord.exists ? ord.data() as { status?: unknown; organizerUid?: unknown; capacityChange?: { capacity?: unknown } } : null
+  if (o && o.status === 'paid' && o.organizerUid === workspaceUid && isPositiveInt(o.capacityChange?.capacity)) return o.capacityChange.capacity
+  const terms = await getGlobalCommercialTerms()
+  return isPositiveInt(terms.freeRegistrationCapacity) ? terms.freeRegistrationCapacity : 1
 }
 
 export async function PATCH(req: NextRequest, { params }: Ctx): Promise<NextResponse> {
@@ -91,7 +94,7 @@ export async function PATCH(req: NextRequest, { params }: Ctx): Promise<NextResp
     return NextResponse.json({ error: 'No overridable fields supplied' }, { status: 400 })
   }
 
-  // 3. Load draft → resolve the LIVE event (trusted) + the licence tier (trusted). Every refusal
+  // 3. Load draft → resolve the LIVE event (trusted) + the paid-capacity ceiling (trusted). Every refusal
   //    below happens BEFORE any write — to the draft or to any event.
   const draftRef  = adminDb.doc(`users/${uid}/eventDrafts/${eventId}`)
   const draftSnap = await draftRef.get()
@@ -117,11 +120,10 @@ export async function PATCH(req: NextRequest, { params }: Ctx): Promise<NextResp
     return NextResponse.json({ error: liveEventLookupMessage(live), code: live.reason }, { status: liveEventLookupStatus(live) })
   }
   // NO_SLUG / MISSING ⇒ not published: the override is stored on the draft only (as before).
-  const tier = await trustedLicenseTier(eventId, live.ok ? live.slug : null, uid)
+  const ceiling = await trustedRegistrationCeiling(eventId, liveData, uid)
 
-  // 4. Validate against the LICENSED ceiling (downward-only rule).
-  const licensedMax = (await resolveEffectiveLicense({ license: { tier } })).maxRegistrations.value
-  const check = validateOrganizerEventOverride(override, licensedMax)
+  // 4. Validate against the paid-capacity ceiling (downward-only rule).
+  const check = validateOrganizerEventOverride(override, ceiling)
   if (!check.ok) return NextResponse.json({ error: 'Invalid override', details: check.errors }, { status: 400 })
 
   // 5. Merge onto any existing override + stamp; write to draft and, if published, the event.
@@ -139,7 +141,7 @@ export async function PATCH(req: NextRequest, { params }: Ctx): Promise<NextResp
   }
 
   const configuration = await resolveEffectivePlatformConfiguration({
-    license: { tier }, adminOverride, organizerOverride: next,
+    adminOverride, organizerOverride: next,
   })
   return NextResponse.json({ eventId, configuration })
 }

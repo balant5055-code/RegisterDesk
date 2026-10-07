@@ -3,7 +3,7 @@
 // Admin License Management Console (RD-LIC-ADMIN-01).
 // Every event's license — searchable/filterable/sortable table, CSV export, a
 // detail drawer with the immutable timeline + internal notes, and the full set of
-// admin actions (grant / lifecycle / overrides / upgrade-downgrade / mark-paid /
+// admin actions (lifecycle / overrides / mark-paid /
 // refund / reissue). Reuses the shared admin primitives; all mutations go through
 // the server (no client trust) and require a reason.
 
@@ -14,7 +14,7 @@ import { cn } from '@/lib/utils/cn'
 import { IconButton } from '@/components/ui'
 import {
   Loader2, X, Eye, Download, KeyRound, PauseCircle, PlayCircle, XCircle,
-  IndianRupee, Users, ToggleRight, BadgeCheck,
+  IndianRupee, Users, BadgeCheck,
   Undo2, RefreshCw, StickyNote, ExternalLink,
 } from 'lucide-react'
 import {
@@ -133,7 +133,7 @@ export default function AdminLicensesPage() {
     <div className="space-y-5">
       <AdminToolbar
         title="Event Licenses"
-        description="Manage every organizer's event license — grants, overrides, lifecycle, refunds."
+        description="Manage every organizer's event license — overrides, lifecycle, refunds."
         icon={KeyRound}
         actions={
           <div className="flex items-center gap-2">
@@ -149,8 +149,8 @@ export default function AdminLicensesPage() {
       />
 
       <div className="flex flex-wrap items-center gap-3">
-        <SearchInput value={search} onChange={setSearch} placeholder="Search event, organizer, email, tier…" className="max-w-xs flex-1" />
-        <FilterTabs options={STATUS_FILTERS} value={status} onChange={setStatus} aria-label="Filter by license status" />
+        <SearchInput value={search} onChange={setSearch} placeholder="Search event, organizer, email…" className="max-w-xs flex-1" />
+        <FilterTabs scrollable options={STATUS_FILTERS} value={status} onChange={setStatus} aria-label="Filter by license status" />
       </div>
 
       {error && <ErrorBanner>{error}</ErrorBanner>}
@@ -159,7 +159,7 @@ export default function AdminLicensesPage() {
         <THead>
           <Th>Event</Th>
           <Th>Organizer</Th>
-          <Th>Tier</Th>
+          <Th>License</Th>
           <Th align="right">Reg. Limit</Th>
           <Th align="right">Price Paid</Th>
           <Th>Status</Th>
@@ -318,14 +318,6 @@ function LicenseDetailModal({ eventId, onClose, onChanged }: {
     await withReason('overrideLimit', { limitKey: 'maxRegistrations', limitValue: n })
   }
 
-  async function promptFeature() {
-    const spec = (await prompt({ title: 'Feature override', message: 'Feature override, e.g. "apiAccess=true" or "whiteLabel=false":', placeholder: 'apiAccess=true' }))?.trim()
-    const m = /^(\w+)\s*=\s*(true|false)$/i.exec(spec ?? '')
-    if (!m) { if (spec) setError('Format must be feature=true|false'); return }
-    const features = { [m[1]]: m[2].toLowerCase() === 'true' } as unknown as LicenseAdminActionRequest['features']
-    await withReason('overrideFeatures', { features })
-  }
-
   async function addNote() {
     const note = (await prompt({ title: 'Internal note', message: 'Add an internal note:', required: true, multiline: true }))?.trim()
     if (!note) return
@@ -389,7 +381,6 @@ function LicenseDetailModal({ eventId, onClose, onChanged }: {
                 {/* RD-EVENT-COMMERCE-04B — licence pricing is Super Admin only (server-enforced). */}
                 {detail?.canEditPricing === true && <ActBtn icon={IndianRupee} label="Override price" busy={busy === 'overridePrice'} onClick={promptPrice} />}
                 <ActBtn icon={Users} label="Override limit" busy={busy === 'overrideLimit'} onClick={promptLimit} />
-                <ActBtn icon={ToggleRight} label="Override feature" busy={busy === 'overrideFeatures'} onClick={promptFeature} />
                 {!detail?.capacityModel && <ActBtn icon={BadgeCheck} label="Mark paid" tone="emerald" busy={busy === 'markPaymentReceived'} onClick={() => withReason('markPaymentReceived', {}, 'Mark payment as received?')} />}
                 {/* RD-EVENT-COMMERCE-05 — no tier Upgrade / Downgrade / Grant: retired (410). "Mark paid"
                     stays hidden for capacity licences (04A). */}

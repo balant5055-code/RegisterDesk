@@ -193,7 +193,7 @@ function OverviewWorkspace({ o, onGoto }: { o: LicenseCenterOverview; onGoto: (t
           </dl>
         </Card>
 
-        <Card title="License sales by tier" icon={TrendingUp}>
+        <Card title="License sales by type" icon={TrendingUp}>
           <div className="p-4">{o.byTier.length ? <HBars data={o.byTier} /> : <Empty>No sales yet.</Empty>}</div>
         </Card>
         <Card title="Top coupons" icon={Gift}>
@@ -252,7 +252,7 @@ function LicensesWorkspace() {
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center gap-3">
-        <SearchInput value={search} onChange={setSearch} placeholder="Search event, organizer, email, tier…" className="max-w-xs flex-1" />
+        <SearchInput value={search} onChange={setSearch} placeholder="Search event, organizer, email…" className="max-w-xs flex-1" />
         <FilterTabs options={LICENSE_STATUS_FILTERS} value={status} onChange={setStatus} aria-label="Filter by status" />
       </div>
       {err && <ErrorBanner>{err}</ErrorBanner>}
@@ -263,7 +263,7 @@ function LicensesWorkspace() {
             <thead className="border-b border-border text-left text-[11px] uppercase tracking-wide text-muted-foreground">
               <tr>
                 <th className="px-4 py-2 font-semibold">Event</th><th className="px-4 py-2 font-semibold">Organizer</th>
-                <th className="px-4 py-2 font-semibold">Tier</th><th className="px-4 py-2 font-semibold">Status</th>
+                <th className="px-4 py-2 font-semibold">License</th><th className="px-4 py-2 font-semibold">Status</th>
                 <th className="px-4 py-2 text-right font-semibold">Used</th><th className="px-4 py-2 text-right font-semibold">Paid</th>
                 <th className="px-4 py-2 text-right font-semibold">Manage</th>
               </tr>
@@ -368,8 +368,8 @@ function LicenseDrawer({ eventId, onClose, onChanged }: { eventId: string; onClo
               {ov?.paymentReceived !== undefined && <Stat label="Payment received" value={ov.paymentReceived ? 'Yes' : 'No'} />}
             </div>
 
-            {/* Lifecycle + tier + payment */}
-            <ActionGroup title="Lifecycle & tier">
+            {/* Lifecycle + payment (RD-LEGACY-01 — tier actions are retired; nothing here sets a tier) */}
+            <ActionGroup title="Lifecycle & payment">
               {lifecycle !== 'active'
                 ? <Act icon={PlayCircle} label="Reactivate" tone="emerald" busy={busy === 'reactivate'} onClick={() => void withReason('reactivate', {}, 'Reactivate this license?')} />
                 : <Act icon={PauseCircle} label="Suspend" tone="amber" busy={busy === 'suspend'} onClick={() => void withReason('suspend')} />}
@@ -648,7 +648,7 @@ function CouponDrawer({ code, onClose, onChanged }: { code: string; onClose: () 
             {(c.restrictions.tiers.length > 0 || c.restrictions.eventTypes.length > 0) && (
               <div className="rounded-lg border border-border bg-muted/30 px-3 py-2 text-[12.5px]">
                 <p className="font-semibold text-foreground">Restrictions</p>
-                {c.restrictions.tiers.length > 0 && <p className="text-muted-foreground">Tiers: {c.restrictions.tiers.join(', ')}</p>}
+                {c.restrictions.tiers.length > 0 && <p className="text-muted-foreground">Legacy tier restriction (inactive — tiers are retired): {c.restrictions.tiers.join(', ')}</p>}
                 {c.restrictions.eventTypes.length > 0 && <p className="text-muted-foreground">Event types: {c.restrictions.eventTypes.join(', ')}</p>}
               </div>
             )}
@@ -696,7 +696,7 @@ function BusinessWorkspace() {
 
       <div className="grid gap-4 lg:grid-cols-2">
         <Card title="Platform growth — events / day" icon={TrendingUp}><div className="p-4"><Bars data={data.growth.eventsByDay} /></div></Card>
-        <Card title="License sales by tier" icon={KeyRound}><div className="p-4">{ls.byTier.length ? <HBars data={ls.byTier} /> : <Empty>No sales.</Empty>}</div></Card>
+        <Card title="License sales by type" icon={KeyRound}><div className="p-4">{ls.byTier.length ? <HBars data={ls.byTier} /> : <Empty>No sales.</Empty>}</div></Card>
         <Card title="Top coupons" icon={Gift}><div className="p-4">{ls.topCoupons.length ? <HBars data={ls.topCoupons} /> : <Empty>No redemptions.</Empty>}</div></Card>
         <Card title="Campaign performance" icon={TrendingUp}><div className="p-4">{ls.byCampaign.length ? <HBars data={ls.byCampaign} /> : <Empty>No campaigns.</Empty>}</div></Card>
         <Card title="Top organizers (gross)" icon={Building2}>

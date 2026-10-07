@@ -243,11 +243,13 @@ describeEmu('RD-LICENSE-E2E-03 · publish capacity hardening on real Firestore',
     expect((await adminDb.doc(`eventLicenses/${r.body.slug}`).get()).data()!.tier).toBe('professional')
   }, T)
 
-  it('C · a paid legacy tier WITHOUT a paid order is still refused (402), not given a capacity', async () => {
+  // RD-LEGACY-01 — the draft's (client-writable) tier is no longer read at all: without a paid
+  // historical tier order the draft is a plain capacity draft, refused for having no capacity.
+  it('C · a paid legacy tier WITHOUT a paid order is still refused, not given a capacity', async () => {
     const id = `pubcap-legacy-unpaid-${process.pid}`
     await seedDraft(id, { licenseTier: 'professional' })
     const r = await doPublish(id)
-    expect(r.status).toBe(402)
+    expect([r.status, r.body.reason]).toEqual([422, 'CAPACITY_NOT_CONFIGURED'])
     expect((await adminDb.collection('events').where('draftId', '==', id).get()).empty).toBe(true)
   }, T)
 
@@ -330,4 +332,110 @@ describeEmu('RD-LICENSE-E2E-03 · publish capacity hardening on real Firestore',
       expect(full.reason).toBe('EVENT_CAPACITY_FULL')          // at cap — not at the plan's limit
     }, T)
   }
+
+  // ═══ RD-LEGACY-01 · decision 4 — no obsolete tier price or forged tier decides a publish ═══
+  const CFG = 'system/businessConfiguration'
+  async function withConfigPatch(patch: Record<string, unknown>, run: () => Promise<void>) {
+    const { businessConfig } = await import('@/lib/config/businessConfigService')
+    const backup = (await adminDb.doc(CFG).get()).data()
+    await adminDb.doc(CFG).set(patch, { merge: true }); businessConfig.invalidateCache()
+    try { await run() } finally {
+      if (backup) await adminDb.doc(CFG).set(backup); else await adminDb.doc(CFG).delete().catch(() => null)
+      businessConfig.invalidateCache()
+    }
+  }
+  const HAZARD = { licensing: { tierOverridesV2: {
+    free:         { offerPricePaise: 99_900, regularPricePaise: 99_900, licensePricePaise: 99_900 },
+    professional: { offerPricePaise: 1_23_400, regularPricePaise: 1_23_400, licensePricePaise: 1_23_400 },
+  } } }
+
+  it('L1 · a NEW free event (capacity 100, no order) publishes — no tier, no payment', async () => {
+    const id = `pubcap-free-${process.pid}`
+    await seedDraft(id, { registrationCapacity: 100 })
+    const r = await doPublish(id)
+    expect(r.status).toBe(200)
+    expect((await eventOf(r.body.slug!)).totalCapacity).toBe(100)
+    expect((await adminDb.doc(`eventLicenses/${r.body.slug}`).get()).data()!.tier).toBe('free')   // compatibility stamp only
+  }, T)
+
+  it('L2 · a FORGED stored free-tier price (raw config) cannot block a free publish or create a tier charge', async () => {
+    await withConfigPatch(HAZARD, async () => {
+      const id = `pubcap-freeprice-${process.pid}`
+      await seedDraft(id, { registrationCapacity: 100 })
+      const r = await doPublish(id)
+      expect(r.status).toBe(200)                                // was 402 "Payment is required before publishing a Free event"
+      expect((await eventOf(r.body.slug!)).totalCapacity).toBe(100)
+      expect(rzp.orders).toHaveLength(0)                        // nothing was charged
+    })
+  }, T)
+
+  it('L3 · a NEW paid-capacity event uses the commercial capacity price: unpaid → 402 CAPACITY_PAYMENT_REQUIRED; paid → publishes', async () => {
+    const id = `pubcap-paidcap-${process.pid}`
+    await seedDraft(id, { registrationCapacity: 500 })
+    const unpaid = await doPublish(id)
+    expect([unpaid.status, unpaid.body.reason]).toEqual([402, 'CAPACITY_PAYMENT_REQUIRED'])
+    const order = await activate(id, 500)
+    expect(order.amount).toBe(70_800)                          // 400 × ₹1.50 + 18% GST — not a tier price
+    const r = await doPublish(id)
+    expect(r.status).toBe(200)
+    expect((await eventOf(r.body.slug!)).totalCapacity).toBe(500)
+  }, T)
+
+  it('L4 · a FORGED old tier on the draft is ignored: no capacity → 422; a capacity still has to be paid', async () => {
+    for (const tier of ['starter', 'professional', 'business', 'enterprise']) {
+      const id = `pubcap-forged-${tier}-${process.pid}`
+      await seedDraft(id, { licenseTier: tier })
+      const none = await doPublish(id)
+      expect([none.status, none.body.reason], tier).toEqual([422, 'CAPACITY_NOT_CONFIGURED'])
+      await adminDb.doc(`users/${UID}/eventDrafts/${id}`).update({ registrationCapacity: 5_000 })
+      const big = await doPublish(id)
+      expect([big.status, big.body.reason], tier).toEqual([402, 'CAPACITY_PAYMENT_REQUIRED'])
+    }
+  }, T)
+
+  it('L5 · a paid CAPACITY order carrying a forged tier field grants no tier path', async () => {
+    const id = `pubcap-capforge-${process.pid}`
+    await seedDraft(id, { licenseTier: 'enterprise' })
+    await adminDb.doc(`licenseOrders/lic_${id}`).set({ orderId: `lic_${id}`, eventId: id, organizerUid: UID, tier: 'enterprise', fromTier: null,
+      purpose: 'purchase', amountPaise: 0, currency: 'INR', status: 'paid', commercialModel: 'capacity', razorpayOrderId: null, razorpayPaymentId: null })
+    const r = await doPublish(id)
+    expect([r.status, r.body.reason]).toEqual([422, 'CAPACITY_NOT_CONFIGURED'])
+  }, T)
+
+  it('L6 · NEW Starter / Professional / Business / Enterprise orders are rejected (purchase + confirm), nothing written', async () => {
+    for (const tier of ['starter', 'professional', 'business', 'enterprise']) {
+      const id = `pubcap-newtier-${tier}-${process.pid}`
+      await seedDraft(id, { licenseTier: tier })
+      const p = await purchase(req({ eventId: id, tier }))
+      expect(p.status, tier).toBe(400)
+      expect(((await p.json()) as { failureReason?: string }).failureReason, tier).toBe('capacity_required')
+      const c = await confirm(req({ eventId: id, tier, razorpay_order_id: 'order_x', razorpay_payment_id: 'pay_x', razorpay_signature: 'sig' }))
+      expect(c.status, tier).toBe(410)
+      expect(((await c.json()) as { code?: string }).code, tier).toBe('TIER_RETIRED')
+      expect((await adminDb.doc(`licenseOrders/lic_${id}`).get()).exists, tier).toBe(false)
+    }
+    expect(rzp.orders).toHaveLength(0)
+  }, T)
+
+  it('L7 · a HISTORICAL tier order created before retirement still settles — at its OWN stored price, not today’s catalog', async () => {
+    await withConfigPatch(HAZARD, async () => {                // the catalog now says ₹1,234 for Professional
+      const id = `pubcap-hist-${process.pid}`
+      await seedDraft(id, { licenseTier: 'professional' })
+      const STORED = 4_99_900
+      const rzpOrder = `order_pubcap_hist_${process.pid}`
+      await adminDb.doc(`licenseOrders/lic_${id}`).set({ orderId: `lic_${id}`, eventId: id, organizerUid: UID, tier: 'professional', fromTier: null,
+        purpose: 'purchase', amountPaise: STORED, currency: 'INR', status: 'created', razorpayOrderId: rzpOrder, razorpayPaymentId: null,
+        razorpayAmountPaise: STORED, createdAt: new Date('2026-06-01T00:00:00Z'), updatedAt: new Date('2026-06-01T00:00:00Z') })
+      const paymentId = `pay_pubcap_hist_${process.pid}`
+      rzp.payments.set(paymentId, { id: paymentId, order_id: rzpOrder, amount: STORED, currency: 'INR', status: 'captured' })
+      const c = await confirm(req({ eventId: id, tier: 'professional', razorpay_order_id: rzpOrder, razorpay_payment_id: paymentId, razorpay_signature: sign(rzpOrder, paymentId) }))
+      expect(c.status).toBe(200)
+      const ord = (await adminDb.doc(`licenseOrders/lic_${id}`).get()).data()!
+      expect(ord.status).toBe('paid')
+      expect(ord.amountPaise).toBe(STORED)                     // frozen — never re-priced to the catalog's ₹1,234
+      const r = await doPublish(id)                            // the grandfathered publish path still honours it
+      expect(r.status).toBe(200)
+      expect((await adminDb.doc(`eventLicenses/${r.body.slug}`).get()).data()!.tier).toBe('professional')
+    })
+  }, T)
 })

@@ -148,43 +148,9 @@ export async function getWorkspaceEntitlements(uid: string): Promise<WorkspaceEn
   }
 }
 
-// ─── Gates ──────────────────────────────────────────────────────────────────────
+// ─── Gates — REMOVED (RD-LEGACY-01) ────────────────────────────────────────────
 //
-// Drop-in replacements for the removed subscription primitives (requireFeature /
-// requireLimit). Same result shape; the tier is now an EventLicenseTier.
-
-export interface FeatureCheck { ok: boolean; status: number; error: string; tier: AnyEventLicenseTier }
-
-/**
- * Gate a boolean feature. Returns 402 (Payment Required) when the workspace's
- * effective license lacks it — the single enforcement primitive for feature flags.
- */
-export async function requireFeature(uid: string, feature: EventLicenseFeature): Promise<FeatureCheck> {
-  const ent = await getWorkspaceEntitlements(uid)
-  if (ent.features[feature]) return { ok: true, status: 200, error: '', tier: ent.effectiveTier }
-  return {
-    ok: false, status: 402, tier: ent.effectiveTier,
-    error: `Your ${ent.definition.name} license does not include ${feature}. Upgrade your event license to unlock it.`,
-  }
-}
-
-export interface LimitCheck { ok: boolean; status: number; error: string; limit: number; tier: AnyEventLicenseTier }
-
-/**
- * Resolve a numeric limit, optionally checking a requested total against it.
- *   requireLimit(uid, 'maxBroadcastRecipients')        → { limit }
- *   requireLimit(uid, 'maxBroadcastRecipients', 12000) → { ok: 12000 <= limit }
- * Returns 402 when the requested amount exceeds the effective license's limit.
- */
-export async function requireLimit(uid: string, type: EventLicenseLimitKey, requestedTotal?: number): Promise<LimitCheck> {
-  const ent   = await getWorkspaceEntitlements(uid)
-  const limit = ent.limits[type]
-  if (requestedTotal === undefined || requestedTotal <= limit) {
-    return { ok: true, status: 200, error: '', limit, tier: ent.effectiveTier }
-  }
-  const shown = isUnlimited(limit) ? 'unlimited' : limit.toLocaleString('en-IN')
-  return {
-    ok: false, status: 402, limit, tier: ent.effectiveTier,
-    error: `Your ${ent.definition.name} license allows up to ${shown} for ${type}. Upgrade your event license for more.`,
-  }
-}
+// `requireFeature` / `requireLimit` (402 "Upgrade your event license") had no callers since
+// RD-CAPACITY-01 removed every licence feature gate (tests/unit/capacityFeatureGatesRemoved). They
+// are deleted so no future surface can gate a feature on a licence tier again. What remains above
+// is a READ of the historical tier entitlement, used only by the admin Organizer 360 service.

@@ -363,7 +363,9 @@ describe('the license coupon preview route (RD-LICENSE-E2E-01)', () => {
     expect(src).toContain('pricePaise = quoted.quote.totalPaise')
   })
 
-  it('keeps the legacy tier path for requests without a capacity', () => {
-    expect(src).toContain('pricePaise = def.licensePricePaise')
+  // RD-LEGACY-01 — tier licences are retired: a preview without a capacity is refused before any pricing.
+  it('refuses a request without a capacity (no legacy tier price is previewed)', () => {
+    expect(src).toContain("failure: 'capacity_required'")
+    expect(src.indexOf("failure: 'capacity_required'")).toBeLessThan(src.indexOf('calculateActivationQuote('))
   })
 })

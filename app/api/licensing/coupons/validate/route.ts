@@ -11,7 +11,6 @@ import { authorizeWorkspace } from '@/lib/team/workspace'
 import { getEventBySlug }      from '@/lib/firebase/firestore/events'
 import { adminDb }             from '@/lib/firebase/admin'
 import { CURRENT_LICENSE_VERSION, isValidTierForVersion, defaultLicenseTierForVersion } from '@/lib/licensing/eventLicense'
-import { getEffectiveDefinitionForVersion } from '@/lib/licensing/resolveCatalog'
 import { calculateActivationQuote } from '@/lib/licensing/capacityPricing'
 import { getEventCommercialTerms }  from '@/lib/licensing/resolveCommercialTerms'
 import {
@@ -34,8 +33,13 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   // RD-LICENSE-E2E-01 · a request carrying `capacity` previews the CAPACITY activation, priced
   // exactly as /api/licensing/purchase prices it (same engine, same event-resolved terms, same
   // compatibility tier stamp) — otherwise the preview would discount a tier price the purchase
-  // never charges. A request without `capacity` keeps the legacy tier path unchanged.
+  // never charges.
   const isCapacity = 'capacity' in body && body.capacity !== undefined && body.capacity !== null
+  // RD-LEGACY-01 — tier licences are retired and /api/licensing/purchase refuses any activation
+  // without a capacity, so there is no tier price left to preview a coupon against.
+  if (!isCapacity) {
+    return NextResponse.json({ valid: false, failure: 'capacity_required', message: 'A registration capacity is required to preview a coupon.' }, { status: 400 })
+  }
   const tierInput  = isCapacity && body.tier === undefined ? defaultLicenseTierForVersion(CURRENT_LICENSE_VERSION) : body.tier
   // The tier being previewed is a NEW purchase → validate + price against the current version.
   if (!eventId || !isValidTierForVersion(tierInput, CURRENT_LICENSE_VERSION) || !code) {
@@ -45,16 +49,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const ctx  = authz
 
   // Effective (config-aware) base price + the event type (identity restriction).
-  let pricePaise: number
-  if (isCapacity) {
-    const quoted = calculateActivationQuote({ capacity: body.capacity, terms: await getEventCommercialTerms(eventId) })
-    if (!quoted.ok) return NextResponse.json({ valid: false, message: quoted.message }, { status: 422 })
-    pricePaise = quoted.quote.totalPaise
-  } else {
-    const def = await getEffectiveDefinitionForVersion(tier, CURRENT_LICENSE_VERSION)
-    if (!def) return NextResponse.json({ valid: false, message: 'Invalid tier.' }, { status: 400 })
-    pricePaise = def.licensePricePaise
-  }
+  const quoted = calculateActivationQuote({ capacity: body.capacity, terms: await getEventCommercialTerms(eventId) })
+  if (!quoted.ok) return NextResponse.json({ valid: false, message: quoted.message }, { status: 422 })
+  const pricePaise = quoted.quote.totalPaise
   if (pricePaise <= 0) {
     return NextResponse.json({ valid: false, message: 'This license is already free.' }, { status: 200 })
   }

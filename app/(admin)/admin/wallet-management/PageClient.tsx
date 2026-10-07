@@ -177,7 +177,7 @@ function WalletManagementInner() {
       <AdminToolbar
         title="Wallet Management"
         icon={WalletCards}
-        description="Communication wallets, media credits, event services, refunds and reconciliation. Only refund and carry-forward request decisions change anything."
+        description="Communication wallets, event services, refunds and reconciliation, plus historical Media Credit records (retired). Only refund and carry-forward request decisions change anything."
       />
 
       {denied ? (

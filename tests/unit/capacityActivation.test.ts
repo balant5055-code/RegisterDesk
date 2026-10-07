@@ -57,7 +57,9 @@ describe('the client cannot name a price', () => {
     expect(src).toContain('calculateActivationQuote({ capacity: capacityRequested, terms })')
     expect(src).toContain('quotedPricePaise = quoted.quote.totalPaise')
     // …and that quote is what the order + Razorpay order are built from.
-    expect(src).toContain('pricePaise: quotedPricePaise ?? effectivePricePaise')
+    // RD-LEGACY-01 — the quote ALONE: no tier price is looked up any more.
+    expect(src).toContain('pricePaise: quotedPricePaise,')
+    expect(src).not.toContain('effectivePricePaise')
   })
 
   // RD-LICENSE-PAYMENT-01 — the E2E-02 `|| capacitySnapshot` persist existed only for a
@@ -226,16 +228,17 @@ describe('publish', () => {
   // RD-LICENSE-E2E-01 — every capacity order carries the free tier as a compatibility stamp,
   // so the legacy Starter "one active event" rule refused an organizer's second event AFTER
   // its activation fee was captured (reproduced: 403 on a paid 1,206-capacity draft).
-  it('applies the legacy one-active-event rule ONLY to drafts with no chosen capacity', () => {
-    expect(src).toContain('if (requestedCapacity === null && isFreeTier(resolvedTier)) {')
-    // Resolved once, before that rule — the capacity gate below reuses the same value.
-    expect(src.indexOf('const requestedCapacity')).toBeLessThan(src.indexOf('if (requestedCapacity === null && isFreeTier'))
+  // RD-LEGACY-01 — the Starter "one active event" rule is gone (there is no Starter plan).
+  it('has no legacy one-active-event rule; the capacity is resolved once', () => {
+    expect(src).not.toMatch(/isFreeTier\(|starterActiveEventCount|validatePublishEligibility/)
     expect(src.match(/const requestedCapacity/g)).toHaveLength(1)
   })
 
   // RD-LICENSE-E2E-03 — a missing capacity used to fall through to free tier → pack_200 → 200.
   it('refuses a capacity-less draft unless it carries a PAID legacy licence', () => {
-    expect(src).toContain('const hasLegacyPaidEntitlement = isPaidTier && hasPaidOrder')
+    // RD-LEGACY-01 — the entitlement is a PAID, NON-capacity (historical) tier ORDER — never the draft.
+    expect(src).toContain('const hasLegacyPaidEntitlement = legacyTier !== null')
+    expect(src).toMatch(/order\.status === 'paid' && order\.commercialModel !== 'capacity'/)
     expect(src).toContain('if (requestedCapacity === null && !hasLegacyPaidEntitlement) {')
     expect(src).toContain("reason: 'CAPACITY_NOT_CONFIGURED'")
     // …and refuses BEFORE governance can record a publish baseline or anything is written.

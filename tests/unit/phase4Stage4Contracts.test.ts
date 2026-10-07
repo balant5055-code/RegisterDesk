@@ -134,7 +134,6 @@ describe('source contracts', () => {
       'app/api/organizer/registrations/[registrationId]/refund/route.ts',
       'app/api/organizer/donations/[donationId]/refund/route.ts',
       'app/api/razorpay/webhook/route.ts',
-      'app/api/admin/media-credits/grants/route.ts',
       'app/api/admin/media-credits/refunds/[refundId]/decide/route.ts',
       'app/api/admin/media-credits/refunds/[refundId]/retry/route.ts',
       'lib/clawbacks/clawbackService.ts', 'lib/admin/licenseCouponService.ts', 'lib/admin/licenseAdminService.ts',
@@ -144,7 +143,8 @@ describe('source contracts', () => {
     }
   })
   it('F3 · after money moved, the media-credit routes record audit failures instead of answering 503', () => {
-    for (const f of ['app/api/admin/media-credits/grants/route.ts', 'app/api/admin/media-credits/refunds/[refundId]/decide/route.ts', 'app/api/admin/media-credits/refunds/[refundId]/retry/route.ts']) {
+    // RD-LEGACY-01 — the grants POST no longer moves anything (410 retired), so it has no audit to record.
+    for (const f of ['app/api/admin/media-credits/refunds/[refundId]/decide/route.ts', 'app/api/admin/media-credits/refunds/[refundId]/retry/route.ts']) {
       expect(code(f), f).toMatch(/logAdminActionOrRecord\(/)
       expect(code(f), f).not.toMatch(/await logAdminAction\(/)
     }

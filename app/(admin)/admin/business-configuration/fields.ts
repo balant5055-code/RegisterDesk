@@ -32,13 +32,12 @@ export const SECTION_LABELS: Record<BusinessConfigSectionKey, string> = {
 
 // Flat-field sections. featureFlags is a dynamic map, handled specially by the editor.
 export const SECTION_FIELDS: Record<BusinessConfigSectionKey, FieldDef[]> = {
-  // RD-MEDIA-09 — Media Studio has a NESTED schema (per-tier limits), so it is edited by
+  // RD-MEDIA-09 — Media Studio has a NESTED schema, so it is edited by
   // MediaStudioEditor, not the flat SectionEditor. Left empty for the same reason
   // `communication` is.
   mediaStudio: [],
   licensing: [
     { key: 'defaultCurrency',  label: 'Default currency',           kind: 'text',    hint: 'ISO 4217, e.g. INR' },
-    { key: 'purchasesEnabled', label: 'License purchases enabled',  kind: 'boolean' },
   ],
   // Communication has a nested schema (email/whatsapp/sms/general) — edited by the
   // specialized CommunicationEditor, not the flat SectionEditor.

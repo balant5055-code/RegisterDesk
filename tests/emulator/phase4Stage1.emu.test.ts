@@ -102,8 +102,8 @@ describeEmu('RD-PHASE4-S1 · C1 / C3 / C4 on real Firestore', () => {
     await adminDb.doc(`users/${uid}/eventDrafts/${id}`).set({ id, uid, status: 'draft', licenseTier: 'starter', eventDetails: { seo: slug ? { urlSlug: slug } : {} }, ...extra })
     cleanup.add(`users/${uid}/eventDrafts/${id}`)
   }
-  async function liveEvent(slug: string, uid: string, draftId: string, tier = 'starter') {
-    await adminDb.doc(`events/${slug}`).set({ uid, draftId, slug, lifecycleStatus: 'published' }); cleanup.add(`events/${slug}`)
+  async function liveEvent(slug: string, uid: string, draftId: string, tier = 'starter', extra: Record<string, unknown> = {}) {
+    await adminDb.doc(`events/${slug}`).set({ uid, draftId, slug, lifecycleStatus: 'published', ...extra }); cleanup.add(`events/${slug}`)
     await adminDb.doc(`eventLicenses/${slug}`).set({ eventId: slug, organizerUid: uid, tier, status: 'active' }); cleanup.add(`eventLicenses/${slug}`)
   }
 
@@ -128,18 +128,25 @@ describeEmu('RD-PHASE4-S1 · C1 / C3 / C4 on real Firestore', () => {
     expect((await adminDb.doc(`events/${slug}`).get()).data()!.organizerOverride).toBeUndefined()
   }, T)
 
-  it('C1 · a FORGED draft.licenseTier cannot raise the ceiling (trusted tier = the live licence)', async () => {
-    const { resolveEffectiveLicense } = await import('@/lib/platform/pricing')
-    const starterMax = (await resolveEffectiveLicense({ license: { tier: 'starter' } })).maxRegistrations.value
-    const entMax     = (await resolveEffectiveLicense({ license: { tier: 'enterprise' } })).maxRegistrations.value
-    expect(typeof starterMax === 'number' && (entMax === null || (typeof entMax === 'number' && entMax > starterMax))).toBe(true)
+  // RD-LEGACY-01 — the ceiling is the event's PAID CAPACITY (events/{slug}.totalCapacity), not a tier.
+  it('C1 · a FORGED draft.licenseTier / capacity cannot raise the ceiling (trusted = the live event’s totalCapacity)', async () => {
     const slug = `p4s1-forge-${P}`, d = `p4s1-forge-d-${P}`
-    await liveEvent(slug, OWNER, d, 'starter')
-    await draft(OWNER, d, slug, { licenseTier: 'enterprise' })         // forged client-side
+    await liveEvent(slug, OWNER, d, 'free', { totalCapacity: 250 })
+    await draft(OWNER, d, slug, { licenseTier: 'enterprise', registrationCapacity: 1_000_000 })   // forged client-side
     h.who = OWNER
-    const over = await override(d, { registrationLimit: (starterMax as number) + 1 })
-    expect(over.status).toBe(400)                                       // above the TRUSTED (starter) ceiling
+    const over = await override(d, { registrationLimit: 251 })
+    expect(over.status).toBe(400)                                       // above the TRUSTED paid capacity
     expect((await adminDb.doc(`events/${slug}`).get()).data()!.organizerOverride).toBeUndefined()
+  }, T)
+
+  it('C1 · RD-LEGACY-01 — a paid 1,000-capacity event may set 800 (the old tier lookup capped it at 100)', async () => {
+    const slug = `p4s1-cap-${P}`, d = `p4s1-cap-d-${P}`
+    await liveEvent(slug, OWNER, d, 'free', { totalCapacity: 1_000 })
+    await draft(OWNER, d, slug)
+    h.who = OWNER
+    expect((await override(d, { registrationLimit: 800 })).status).toBe(200)
+    expect((await adminDb.doc(`events/${slug}`).get()).data()!.organizerOverride).toMatchObject({ registrationLimit: 800 })
+    expect((await override(d, { registrationLimit: 1_001 })).status).toBe(400)
   }, T)
 
   it('C1 · the OWNER of the event still sets a valid override (draft + live event); an unpublished draft stays draft-only', async () => {

@@ -3,10 +3,10 @@
 // Platform admin only — every endpoint behind it is gated by `resolveAdminUid`, so the page
 // itself carries no authorization logic of its own.
 //
-// READ-MOSTLY. Three mutations are reachable: refund decisions, payout retries, and — since
-// MC-09 — issuing credits manually. The last is gated more tightly than the page itself
-// (`resolveSuperAdminUid`, ADMIN_UIDS membership rather than the `admin: true` claim), so an
-// ordinary platform admin can open this console and read everything but cannot create value.
+// RD-LEGACY-01 — Media Credits are RETIRED (RD-PHOTO-01). This console is HISTORICAL: it reads
+// the old wallets, ledger, grants and refunds, and keeps the two wind-down actions that settle
+// what already exists — rejecting a pending refund request (releases its hold) and retrying the
+// payout of a refund approved before retirement. Nothing here can buy, grant or approve credits.
 
 import Link from 'next/link'
 import { SlidersHorizontal, Boxes } from 'lucide-react'
@@ -15,17 +15,18 @@ import { adminMetadata } from '@/app/(admin)/adminMetadata'
 import { ROUTES } from '@/config/navigation'
 
 export const metadata = adminMetadata(
-  'Media Credits',
-  'Photo credit wallets, refunds and reconciliation.',
+  'Media Credits (retired)',
+  'Historical Media Credit records and refunds still owed.',
 )
 
 export default function AdminMediaCreditsPage() {
   return (
     <div className="space-y-5">
       <div>
-        <h1 className="text-fs-2xl font-semibold text-foreground">Media Credits</h1>
+        <h1 className="text-fs-2xl font-semibold text-foreground">Media Credits (retired)</h1>
         <p className="mt-1 text-fs-sm text-muted-foreground">
-          Platform position, refund operations, session monitoring and scheduler health.
+          Media Credits are no longer sold, granted or used — photos are bought per event on License
+          &amp; Services. This page keeps the historical records and settles refunds still owed.
         </p>
 
         {/* ═══ RD-ADMIN-CLOSURE-01 · contextual navigation ═══════════════════
@@ -44,7 +45,7 @@ export default function AdminMediaCreditsPage() {
             className="inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-fs-2xs font-medium text-foreground transition-colors hover:bg-muted"
           >
             <SlidersHorizontal className="size-3.5 text-muted-foreground" aria-hidden />
-            Credit pricing &amp; media limits
+            Media limits
           </Link>
           <Link
             href={ROUTES.ADMIN_OPERATIONS_CENTER}

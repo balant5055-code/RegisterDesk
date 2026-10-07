@@ -232,17 +232,23 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   let pricePaise  = capacityCharge ? orderListPricePaise(preExisting, 0) : 0
 
   if (!capacityCharge) {
-    // A checkout confirm is a NEW purchase completion → validate + price against the
-    // CURRENT license version.
+    // RD-LEGACY-01 — HISTORICAL TIER SETTLEMENT ONLY. Licence tiers are retired and
+    // /api/licensing/purchase can no longer create a tier order, so this branch exists only to
+    // settle a tier order that was CREATED BEFORE RETIREMENT. It therefore requires that stored,
+    // server-written order (non-capacity, same tier as the request), and prices it from the
+    // ORDER's own frozen price — never from today's tier catalog, which a raw configuration write
+    // could change. With no such order there is nothing to settle and nothing is created.
     if (!isValidTierForVersion(body.tier, CURRENT_LICENSE_VERSION)) return NextResponse.json({ error: 'Invalid tier' }, { status: 400 })
+    if (!preExisting || preExisting.commercialModel === 'capacity' || preExisting.tier !== body.tier) {
+      return NextResponse.json({ error: 'Licence tiers are retired. Choose a registration capacity on License & Services.', code: 'TIER_RETIRED' }, { status: 410 })
+    }
     tier = body.tier
     const def = await getEffectiveDefinitionForVersion(tier, CURRENT_LICENSE_VERSION)
     if (!def) return NextResponse.json({ error: 'Invalid tier' }, { status: 400 })
-    if (def.contactSales || def.licensePricePaise === 0) {
-      return NextResponse.json({ error: 'This tier does not require payment' }, { status: 400 })
-    }
     licenseName = def.name
-    pricePaise  = def.licensePricePaise
+    // The order's own list price: the pre-coupon price it was created for, else what it charges.
+    pricePaise  = typeof preExisting.originalPricePaise === 'number' ? preExisting.originalPricePaise : preExisting.amountPaise
+    if (!(pricePaise > 0)) return NextResponse.json({ error: 'This tier does not require payment' }, { status: 400 })
   } else if (pricePaise <= 0) {
     // A ₹0 capacity activation never produced a payable order, so there is nothing to
     // confirm. Refusing is correct: silently succeeding would let a caller "confirm" an

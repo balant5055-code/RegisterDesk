@@ -46,8 +46,11 @@ export function validateLicenseCoupon(
 
   // Restrictions.
   const r = coupon.restrictions
-  // GA-02: compare as strings — a V2 purchase tier simply won't match a V1-only restriction.
-  if (r.tiers.length > 0 && !(r.tiers as readonly string[]).includes(ctx.tier)) return fail('tier_not_allowed', 'This coupon does not apply to the selected license.')
+  // RD-LEGACY-01 — `r.tiers` is a HISTORICAL restriction and is INERT: licence tiers are retired,
+  // every new order is a capacity order (its tier is only a compatibility stamp), and a coupon can
+  // never grant, select or unlock a tier. The stored value stays on the coupon for audit; it is
+  // deliberately not read, so a coupon that is otherwise valid applies to a capacity purchase.
+  // (No new tier restriction can be saved — licenseCouponService refuses it.)
   if (r.eventTypes.length > 0 && (!ctx.eventType || !r.eventTypes.includes(ctx.eventType)))
     return fail('event_type_not_allowed', 'This coupon does not apply to this event type.')
 

@@ -24,6 +24,8 @@ export interface OrganizerLicenseRow {
   // RD-LICENSE-01B Phase 3C: tier is the STORED tier (V1 or V2) resolved against `version`.
   tier:              AnyEventLicenseTier
   version:           LicenseVersion   // license schema version — drives client-side display
+  /** RD-LEGACY-01 — 'capacity' for every pay-as-you-go licence; null = a historical tier licence. */
+  commercialModel:   'capacity' | null
   status:            string    // 'active' | 'pending_approval' | 'changes_requested' | 'rejected' | 'cancelled' | 'pending_payment'
   maxRegistrations:  number | null   // null = unlimited
   used:              number
@@ -113,7 +115,14 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     const order   = orderId ? orderMap.get(orderId) : undefined
     const draftId = orderId && orderId.startsWith('lic_') ? orderId.slice(4) : null
 
-    const maxReg = resolveLicenseEntryForVersion(catalog, catalogV2, tier, version).registrationLimit
+    // RD-LEGACY-01 — a CAPACITY licence's limit is its paid capacity: the event's ENFORCED
+    // totalCapacity, else the licence's record of what was bought (null = uncapped admin grant).
+    // The free-tier compatibility stamp it carries is never a limit. Only a HISTORICAL tier
+    // licence still resolves its limit from the tier catalog.
+    const isCapacity = d.commercialModel === 'capacity'
+    const evCap  = ev && typeof ev.totalCapacity === 'number' && Number.isInteger(ev.totalCapacity) && ev.totalCapacity > 0 ? ev.totalCapacity : null
+    const licCap = typeof d.capacity === 'number' && Number.isInteger(d.capacity) && d.capacity > 0 ? d.capacity : null
+    const maxReg = isCapacity ? (evCap ?? licCap ?? Infinity) : resolveLicenseEntryForVersion(catalog, catalogV2, tier, version).registrationLimit
     const used   = usedMap.get(doc.id) ?? 0
     const maxRegistrations = isUnlimited(maxReg) ? null : maxReg
 
@@ -123,6 +132,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
         ? (str(ev, 'eventDetails', 'info', 'name') as string) : doc.id,
       tier,
       version,
+      commercialModel:   isCapacity ? 'capacity' : null,
       status:            deriveStatus(ev, typeof d.status === 'string' ? d.status : 'active'),
       maxRegistrations,
       used,

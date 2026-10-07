@@ -54,7 +54,13 @@ describe('the admin editors lock the SAME fields the server enforces', () => {
   const read = (p: string) => readFileSync(p, 'utf8')
   it('communication and media editors derive their locks from CENTRAL_PRICING_FIELDS', () => {
     expect(read('app/(admin)/admin/business-configuration/CommunicationEditor.tsx')).toContain('CENTRAL_PRICING_FIELDS.communication')
-    expect(read('app/(admin)/admin/business-configuration/MediaStudioEditor.tsx')).toContain('CENTRAL_PRICING_FIELDS.mediaStudio')
+    // RD-LEGACY-01 — the Media Studio editor's only centrally priced fields were the retired Media
+    // Credit prices, and they are no longer rendered at all: there is nothing left to lock. The
+    // server keeps enforcing CENTRAL_PRICING_FIELDS.mediaStudio for any write that still names one.
+    const mediaEditor = read('app/(admin)/admin/business-configuration/MediaStudioEditor.tsx')
+    const mediaCentral = CENTRAL_PRICING_FIELDS.mediaStudio
+    expect(Array.isArray(mediaCentral) && mediaCentral.length > 0).toBe(true)
+    for (const k of mediaCentral as readonly string[]) expect(mediaEditor, k).not.toContain(`'${k}'`)
     expect(read('app/(admin)/admin/business-configuration/PageClient.tsx').match(/canEditPricing=\{data\.permissions\?\.canEditPricing === true\}/g)).toHaveLength(6)   // RD-PHASE4-S2 — + fees, payment gateway, section editor
   })
 })

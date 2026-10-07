@@ -72,8 +72,8 @@ export const ORGANIZER_TOPICS: SupportTopic[] = [
   },
   {
     id:          'plans',
-    title:       'Plans & pricing',
-    description: 'What each event licence includes and what it costs.',
+    title:       'Pricing',
+    description: 'How pay-as-you-go event capacity and services are priced.',
     links: [{ label: 'Pricing', href: '/pricing' }],
   },
 ]

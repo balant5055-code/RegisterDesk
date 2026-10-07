@@ -1221,7 +1221,7 @@ export default function SettingsPage() {
       <Section
         icon={ShieldCheck}
         title="Billing"
-        description="View your plan, included limits, and features"
+        description="Event licences, capacity, payments and invoices"
       >
         <a
           href="/dashboard/settings/billing"

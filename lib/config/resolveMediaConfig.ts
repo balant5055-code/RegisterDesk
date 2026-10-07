@@ -4,19 +4,16 @@
 //
 //     Event override            mediaSettings/{organizerUid}.eventLimitOverrides[eventId]
 //            ↓
-//     Licence (plan) limit      businessConfig.mediaStudio.tierLimits[tier]
-//            ↓
 //     Global platform default   businessConfig.mediaStudio
+//
+// RD-LEGACY-01 — there is NO licence-tier ("plan") layer any more. RegisterDesk has no feature
+// tiers: an event's photo COUNT is its paid photo capacity (photoCapacityGate, max 3,000), and
+// every other media limit is the global default unless a Super Admin set an event override.
+// Stored `mediaStudio.tierLimits` values are left in the document but are not read.
 //
 // Highest wins, PER FIELD. The merge itself is pure and lives in `mediaLimitLayers.ts`;
 // this file is the I/O that feeds it.
 // ══════════════════════════════════════════════════════════════════════════════
-//
-// ─── What this deliberately does NOT do ──────────────────────────────────────
-// It never WRITES a licence, never defines a tier, and never changes the licensing model.
-// It READS the tier off `eventLicenses/{eventSlug}` and looks it up. Media limits live in
-// their own config section precisely so changing a photo cap is not an edit to the frozen
-// licence catalog.
 //
 // Every consumer — upload, gallery creation, album creation, duplicate scan, the organizer
 // limits panel — calls `resolveMediaConfig`. No route, page or repository may hardcode a
@@ -24,8 +21,6 @@
 
 import { adminDb } from '@/lib/firebase/admin'
 import { businessConfig } from '@/lib/config/businessConfigService'
-import { isEventLicenseTierV2, type EventLicenseTierV2 } from '@/lib/licensing/eventLicense'
-import { EVENT_LICENSES_COLLECTION } from '@/lib/licensing/schema'
 import { mergeMediaLayers, type ResolvedMediaConfig } from '@/lib/config/mediaLimitLayers'
 import type { MediaOverridableConfig, MediaStudioConfig } from '@/lib/config/businessConfig'
 
@@ -39,36 +34,8 @@ export interface MediaResolutionContext {
   organizerUid: string
   /** Draft/event id — the key an event override is stored under. */
   eventId?:     string
-  /** Public slug — the key `eventLicenses` is stored under. */
+  /** Public slug. Accepted for call-site compatibility; no limit depends on it (RD-LEGACY-01). */
   eventSlug?:   string
-}
-
-/**
- * The licence tier attached to an event.
- *
- * Returns null rather than guessing when there is no licence, the document is a V1-tier
- * record, or the read fails. A null tier resolves to the GLOBAL layer — the conservative
- * direction, since global defaults are the platform's baseline rather than a paid tier's
- * allowance.
- */
-export async function resolveEventTier(eventSlug: string): Promise<EventLicenseTierV2 | null> {
-  if (!eventSlug) return null
-  try {
-    const snap = await adminDb.collection(EVENT_LICENSES_COLLECTION).doc(eventSlug).get()
-    if (!snap.exists) return null
-    // RD-EVENT-COMMERCE-01 · M1 — a CAPACITY licence has no tier: it carries the version's free
-    // tier purely as a compatibility stamp. Resolving that stamp capped EVERY capacity event —
-    // including a paid 5,000-registration one — at the free tier's photo limit (50), below the
-    // global default an event with no licence gets. There are no plan-based feature limits
-    // under the capacity model, so these events resolve to the GLOBAL layer.
-    if (snap.get('commercialModel') === 'capacity') return null
-    const tier = snap.get('tier') as unknown
-    // A V1 tier ('growth') is not a V2 key. Historical licences therefore fall back to
-    // global rather than being mapped by a guess about which V2 tier they resemble.
-    return isEventLicenseTierV2(tier) ? tier : null
-  } catch {
-    return null
-  }
 }
 
 /**
@@ -105,14 +72,10 @@ export async function resolveMediaConfig(
 ): Promise<ResolvedMediaConfig> {
   const global = await businessConfig.getSection('mediaStudio')
 
-  const [tier, event] = await Promise.all([
-    context.eventSlug ? resolveEventTier(context.eventSlug) : Promise.resolve(null),
-    readEventOverride(context.organizerUid, context.eventId),
-  ])
+  const event = await readEventOverride(context.organizerUid, context.eventId)
 
-  const plan = tier ? (global.tierLimits?.[tier] ?? {}) : {}
-
-  return mergeMediaLayers(global, plan, event, tier)
+  // No plan layer and no tier (RD-LEGACY-01): event override → global.
+  return mergeMediaLayers(global, {}, event, null)
 }
 
 /** The global layer alone — for surfaces with no event in hand (the admin panel, defaults). */

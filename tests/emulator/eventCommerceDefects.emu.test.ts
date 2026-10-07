@@ -227,11 +227,17 @@ describeEmu('RD-EVENT-COMMERCE-01 · Phase C part 1 defect fixes', () => {
   }, T)
 
   // ═══ M1 ══════════════════════════════════════════════════════════════════════
-  it('M1 · a capacity licence resolves media limits from the GLOBAL layer, a tier licence from its tier', async () => {
-    const { resolveEventTier } = await import('@/lib/config/resolveMediaConfig')
+  it('M1 · RD-LEGACY-01 — media limits never come from a licence tier: capacity AND historical tier licences resolve event → global', async () => {
+    const { resolveMediaConfig } = await import('@/lib/config/resolveMediaConfig')
     await seedPublished(5000)
-    expect(await resolveEventTier(SLUG)).toBeNull()              // was 'free' ⇒ 50 photos
+    const cap = await resolveMediaConfig({ organizerUid: UID, eventId: DRAFT, eventSlug: SLUG })
+    expect(cap.tier).toBeNull()
+    expect(Object.values(cap.source)).not.toContain('plan')
+    // A historical V2 tier licence keeps its record, but no longer selects a media "plan" layer.
     await adminDb.doc(`eventLicenses/${SLUG}`).set({ eventId: SLUG, organizerUid: UID, tier: 'professional', status: 'active', version: 2 })
-    expect(await resolveEventTier(SLUG)).toBe('professional')    // historical tier licences unchanged
+    const hist = await resolveMediaConfig({ organizerUid: UID, eventId: DRAFT, eventSlug: SLUG })
+    expect(hist.tier).toBeNull()
+    expect(Object.values(hist.source)).not.toContain('plan')
+    expect((await adminDb.doc(`eventLicenses/${SLUG}`).get()).get('tier')).toBe('professional')   // history untouched
   }, T)
 })

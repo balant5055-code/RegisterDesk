@@ -49,8 +49,9 @@ describe('lifecycle + eligibility gates', () => {
     expect(validateLicenseCoupon(couponDoc({ perOrganizerLimit: 1 }), couponCtx({ organizerRedemptions: 1 }), NOW).ok).toBe(false)
   })
 
-  it('enforces tier + purchase-bound restrictions', () => {
-    expect(validateLicenseCoupon(couponDoc({ restrictions: { tiers: ['enterprise'], eventTypes: [] } }), couponCtx({ tier: 'professional' }), NOW).ok).toBe(false)
+  // RD-LEGACY-01 — a stored legacy tier restriction is INERT (tiers are retired); purchase bounds still apply.
+  it('ignores a legacy tier restriction; enforces purchase-bound restrictions', () => {
+    expect(validateLicenseCoupon(couponDoc({ restrictions: { tiers: ['enterprise'], eventTypes: [] } }), couponCtx({ tier: 'professional' }), NOW).ok).toBe(true)
     expect(validateLicenseCoupon(couponDoc({ minPurchasePaise: 500000 }), couponCtx({ pricePaise: 249900 }), NOW).ok).toBe(false)
   })
 })

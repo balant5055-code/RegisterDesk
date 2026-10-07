@@ -111,7 +111,7 @@ export function checkCount(
   if (current + adding <= limit) return { ok: true }
   return {
     ok: false, status: 409,
-    error: `This event's plan allows ${limit.toLocaleString('en-IN')} ${noun}. `
+    error: `This event allows ${limit.toLocaleString('en-IN')} ${noun}. `
       + `It already has ${current.toLocaleString('en-IN')}.`,
   }
 }

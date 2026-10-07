@@ -35,7 +35,7 @@ import {
 } from '@/lib/licensing/eventLicense'
 import { getLicenseCatalog, getLicenseCatalogV2, type LicenseCatalog, type LicenseCatalogV2 } from '@/lib/licensing/resolveCatalog'
 import { pickVersionedDefinition } from '@/lib/licensing/licenseCatalogShared'
-import { resolveEffectiveEventLicense, OVERRIDABLE_FEATURE_KEYS } from '@/lib/licensing/adminLicense'
+import { resolveEffectiveEventLicense } from '@/lib/licensing/adminLicense'
 import { capacityPlanForRegistrationLimit } from '@/lib/registrations/capacity'
 import { soldFromCounter } from '@/lib/licensing/capacityChange'
 import { atomicWalletCredit } from '@/lib/firebase/firestore/wallet'
@@ -506,6 +506,12 @@ export async function applyLicenseAction(
   if (action === 'grant' || action === 'upgrade' || action === 'downgrade') {
     throw new LicenseActionError('Tier licences are retired. RegisterDesk sells registration capacity pay-as-you-go; use a capacity override instead of a tier grant, upgrade or downgrade.', 410)
   }
+  // RD-LEGACY-01 — per-licence FEATURE overrides are retired too: there are no feature tiers, every
+  // feature is available to every organizer, and nothing enforces a licence feature flag. Overrides
+  // stored before retirement stay on the licence as history.
+  if (action === 'overrideFeatures') {
+    throw new LicenseActionError('Licence feature switches are retired — every feature is available to every organizer.', 410)
+  }
 
   // RD-LICENSE-GA-02: resolve BOTH catalogs; a stored license doc resolves at its OWN version.
   // (RD-EVENT-COMMERCE-05 retired the tier writes — grant / upgrade — that resolved at the
@@ -529,14 +535,6 @@ export async function applyLicenseAction(
     const v = req.limitValue
     if (v !== null && (typeof v !== 'number' || !Number.isInteger(v) || v < 0)) {
       throw new LicenseActionError('Registration/limit value must be a non-negative integer or null (unlimited)')
-    }
-  }
-  const featurePatch: Partial<Record<string, boolean>> = {}
-  if (action === 'overrideFeatures') {
-    for (const [k, val] of Object.entries(req.features ?? {})) {
-      if (!(OVERRIDABLE_FEATURE_KEYS as string[]).includes(k)) throw new LicenseActionError(`Unknown feature: ${k}`)
-      if (typeof val !== 'boolean') throw new LicenseActionError(`Feature ${k} must be boolean`)
-      featurePatch[k] = val
     }
   }
   let newExpiry: Timestamp | null = null
@@ -645,12 +643,6 @@ export async function applyLicenseAction(
         simpleHistory()
         return
       }
-      case 'overrideFeatures': {
-        tx.set(lRef, overlayPayload({ ...overlay, featureOverrides: { ...overlay.featureOverrides, ...featurePatch } }, adminUid), { merge: true })
-        simpleHistory()
-        return
-      }
-
       // ── Payment ──
       case 'markPaymentReceived': {
         // RD-EVENT-COMMERCE-04 — capacity activation is settled ONLY by a verified gateway payment

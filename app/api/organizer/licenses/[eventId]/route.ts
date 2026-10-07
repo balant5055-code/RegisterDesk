@@ -196,7 +196,8 @@ export async function GET(
     // organizer actually bought: free capacity, or pay-as-you-go above it.
     tierName:    isCapacityModel
       ? (capacityLimit != null && capacityLimit > 0 ? `${capacityLimit.toLocaleString('en-IN')} registrations` : 'Unlimited capacity')
-      : eff.definition.name,
+      // RD-LEGACY-01 — a historical tier licence keeps its name, marked as legacy (tiers are retired).
+      : `${eff.definition.name} (legacy)`,
     status,
     payment,
     complimentary: eff.complimentary,

@@ -31,8 +31,8 @@ export default function TermsPage() {
         { heading: 'Organizer responsibilities', body: [
           'As an organizer, you are responsible for the accuracy of your event information, for complying with applicable laws, and for handling your attendees’ data and refunds in line with your own published terms.',
         ] },
-        { heading: 'Plans, fees, and payments', body: [
-          'Paid plans and transaction fees apply as described on our pricing page. Fees may be exclusive of taxes, which you are responsible for where applicable. Payments are processed through our payment provider.',
+        { heading: 'Fees and payments', body: [
+          'Event capacity, prepaid event services and transaction fees apply as described on our pricing page. Fees may be exclusive of taxes, which you are responsible for where applicable. Payments are processed through our payment provider.',
         ] },
         { heading: 'Intellectual property', body: [
           'RegisterDesk and the platform are owned by us. You retain ownership of the content and data you upload, and you grant us the rights needed to operate the service for you.',

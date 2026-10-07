@@ -13,6 +13,6 @@ export const FINAL_CTA: FinalCtaContent = {
   primaryCta:   'startFree',
   secondaryCta: 'bookDemo',
   background:   'muted',
-  supportText:  'Start free and upgrade as you grow.',
+  supportText:  'Start free and pay only for what each event needs.',
   trustLabels:  ['Sports', 'Schools', 'Corporate', 'Communities', 'NGOs', 'Conferences'],
 }

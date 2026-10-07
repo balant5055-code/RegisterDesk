@@ -15,6 +15,11 @@ export interface FilterTabsProps<T> {
   onChange:  (value: T) => void
   className?: string
   'aria-label'?: string
+  /**
+   * Opt-in: on a narrow screen the tabs scroll horizontally INSIDE the control instead of
+   * widening the page (same approach as the Finance tab strip). No visual change when they fit.
+   */
+  scrollable?: boolean
 }
 
 export function FilterTabs<T extends string | number>({
@@ -23,12 +28,13 @@ export function FilterTabs<T extends string | number>({
   onChange,
   className,
   'aria-label': ariaLabel,
+  scrollable = false,
 }: FilterTabsProps<T>) {
   return (
     <div
       role="tablist"
       aria-label={ariaLabel}
-      className={cn('flex items-center gap-1 rounded-lg border border-border bg-card p-1', className)}
+      className={cn('flex items-center gap-1 rounded-lg border border-border bg-card p-1', scrollable && 'max-w-full overflow-x-auto', className)}
     >
       {options.map(o => {
         const active = value === o.value
@@ -41,6 +47,7 @@ export function FilterTabs<T extends string | number>({
             onClick={() => onChange(o.value)}
             className={cn(
               'rounded-md px-3 py-1 text-[13px] font-medium transition-colors',
+              scrollable && 'shrink-0 whitespace-nowrap',
               active ? 'bg-primary/[0.08] text-primary' : 'text-muted-foreground hover:text-foreground',
             )}
           >

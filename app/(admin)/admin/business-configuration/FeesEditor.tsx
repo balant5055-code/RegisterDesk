@@ -1,8 +1,9 @@
 'use client'
 
 // Specialized editor for the Fees section. Handles the two nullable overrides
-// (platformFeePercent / donationPlatformFee — null = inherit the per-license fee
-// matrix) and the rounding-mode enum, which the flat SectionEditor can't. Reuses
+// (platformFeePercent / donationPlatformFee — null = inherit: the ticket rate falls back to
+// Licensing → Commercial Model's attendee transaction fee; there is no per-licence matrix any
+// more, RD-LEGACY-01) and the rounding-mode enum, which the flat SectionEditor can't. Reuses
 // the config page's draft workflow + the engine's own validator. Some fields are
 // reserved (defined but not yet enforced — see RD-CONF-06).
 
@@ -121,7 +122,7 @@ export function FeesEditor({
       <fieldset disabled={!canEditPricing} className="m-0 min-w-0 space-y-4 border-0 p-4">
         <div className="rounded-lg border border-border/70 p-3">
           <p className="mb-2 text-[12px] font-semibold uppercase tracking-wide text-muted-foreground">Platform fee</p>
-          <p className="mb-2 text-[11px] text-muted-foreground">Override unchecked = inherit the per-license fee matrix. Type/flat/min/max are reserved (defined; the per-transaction calculation is unchanged).</p>
+          <p className="mb-2 text-[11px] text-muted-foreground">Override unchecked = inherit the attendee transaction fee from Licensing → Commercial Model (donations keep the platform default). Type/flat/min/max are reserved (defined; the per-transaction calculation is unchanged).</p>
           <div className="grid grid-cols-1 gap-x-4 gap-y-2.5 sm:grid-cols-2 lg:grid-cols-3">
             <BoolField label="Platform fee enabled" value={draft.platformFeeEnabled} onChange={v => set('platformFeeEnabled', v)} />
             <OverrideRow label="Platform fee %" value={(draft.platformFeePercent as number | null) ?? null} onChange={v => set('platformFeePercent', v)} />

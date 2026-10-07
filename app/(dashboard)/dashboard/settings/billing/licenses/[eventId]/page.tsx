@@ -1,8 +1,9 @@
 'use client'
 
 // Organizer License Center (RD-LIC-ORG-01) — the premium, per-event view of a
-// workspace's Event License: overview, usage, effective feature matrix, immutable
-// timeline, billing history, and upgrade path. Read-only; reuses the Billing
+// workspace's Event License: overview, usage, immutable timeline and billing history.
+// RD-LEGACY-01 — no feature matrix (there are no feature tiers: every organizer has every
+// feature) and no upgrade path (capacity is changed from the event). Read-only; reuses the Billing
 // Center design tokens. All data comes from /api/organizer/licenses/[eventId].
 
 import { useEffect, useState, type ReactNode } from 'react'
@@ -11,7 +12,7 @@ import { useParams } from 'next/navigation'
 import { auth } from '@/lib/firebase/auth'
 import { cn } from '@/lib/utils/cn'
 import {
-  Loader2, ArrowLeft, Check, Minus, ShieldCheck, Gift, Sparkles,
+  Loader2, ArrowLeft, ShieldCheck, Gift,
   Ticket, Clock, CreditCard, TrendingUp, AlertTriangle,
 } from 'lucide-react'
 import type {
@@ -115,7 +116,7 @@ export default function LicenseCenterPage() {
 
       {/* ── Overview KPIs ── */}
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
-        <Kpi label="License tier" value={d.tierName} />
+        <Kpi label="License" value={d.tierName} />
         <Kpi label="Reg. limit" value={regLabel(d.registrationLimit)} />
         <Kpi label="Used" value={d.used.toLocaleString('en-IN')} />
         <Kpi label="Remaining" value={d.remaining == null ? 'Unlimited' : d.remaining.toLocaleString('en-IN')} />
@@ -160,29 +161,6 @@ export default function LicenseCenterPage() {
             now: <span className="font-medium text-foreground">{regLabel(d.registrationLimit)}</span>.
           </p>
         )}
-      </Card>
-
-      {/* ── Feature matrix ── */}
-      <Card title="Features" icon={<Sparkles className="size-4" />} subtitle="Everything your license includes for this event.">
-        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-          {d.features.map(f => (
-            <div key={f.key} className={cn('flex items-center justify-between rounded-lg border px-3 py-2', f.included ? 'border-border bg-card' : 'border-border bg-muted/20')}>
-              <div className="flex items-center gap-2.5">
-                {f.included
-                  ? <span className="flex size-5 items-center justify-center rounded-full bg-emerald-500"><Check className="size-3 text-white" /></span>
-                  : <span className="flex size-5 items-center justify-center rounded-full bg-muted"><Minus className="size-3 text-muted-foreground" /></span>}
-                <span className={cn('text-[13px]', f.included ? 'font-medium text-foreground' : 'text-muted-foreground')}>{f.label}</span>
-              </div>
-              {f.adminGranted
-                ? <span className="rounded-full bg-violet-50 px-2 py-0.5 text-[10.5px] font-semibold text-violet-700">Admin granted</span>
-                : f.overridden
-                ? <span className="rounded-full bg-blue-50 px-2 py-0.5 text-[10.5px] font-semibold text-blue-700">Overridden</span>
-                : !f.included
-                ? <span className="text-[10.5px] font-medium text-muted-foreground/60">Unavailable</span>
-                : null}
-            </div>
-          ))}
-        </div>
       </Card>
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">

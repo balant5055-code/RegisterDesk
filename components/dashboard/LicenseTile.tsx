@@ -73,10 +73,8 @@ export function LicenseTile({ license, className }: { license: DashboardLicense;
   const tone = st.blocking ? 'critical' : usageTone(pct)
 
   /**
-   * The CTA is shown whenever a HIGHER PLAN GENUINELY EXISTS — not only under pressure.
-   * A plan with headroom is still upgradeable, and hiding the path to it made the card
-   * look like a read-only readout. On the top tier there is nothing to sell, so the card
-   * says so instead of rendering a button that goes nowhere.
+   * RD-LEGACY-01 — there are no plans or tiers to upgrade to. The card says where capacity comes
+   * from (the event's License & Services page) instead of offering an upgrade.
    */
 
   // ── Unavailable ────────────────────────────────────────────────────────────

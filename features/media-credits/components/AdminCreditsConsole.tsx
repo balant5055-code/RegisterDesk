@@ -25,11 +25,9 @@
 // help with, so each section degrades alone.
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { ROUTES } from '@/config/navigation'
-import Link from 'next/link'
 import {
   Activity, AlertTriangle, Ban, CheckCircle2, Clock, Coins, Gift, Layers,
-  RefreshCw, ThumbsDown, ThumbsUp, Timer, TrendingUp, Users, Wallet,
+  RefreshCw, ThumbsDown, Timer, TrendingUp, Users, Wallet,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import {
@@ -38,7 +36,6 @@ import {
 import { cn } from '@/lib/utils/cn'
 import { useAuth } from '@/components/auth/AuthProvider'
 import { useConfirm } from '@/components/ui/ConfirmDialog'
-import { GrantCreditsDialog } from './GrantCreditsDialog'
 import { RefundDecisionDialog } from './RefundDecisionDialog'
 
 // ─── Wire shapes ─────────────────────────────────────────────────────────────
@@ -142,9 +139,6 @@ export function AdminCreditsConsole() {
   const [sessions, setSessions] = useState<Loadable<SessionRow[]>>(initial)
   const [grants,   setGrants]   = useState<Loadable<GrantRow[]>>(initial)
 
-  // MC-09 · the grant dialog. Mounted only while true, so each opening mints a fresh
-  // idempotency key — see GrantCreditsDialog.
-  const [granting, setGranting] = useState(false)
   const [crons,    setCrons]    = useState<Loadable<CronRow[]>>(initial)
   const [auditLog, setAuditLog] = useState<Loadable<AuditRow[]>>(initial)
 
@@ -260,7 +254,7 @@ export function AdminCreditsConsole() {
     <div className="space-y-6">
       {/* ═══ 1 · Platform overview ═══ */}
       <section aria-labelledby="mc-overview">
-        <SectionHeading id="mc-overview" title="Platform overview" />
+        <SectionHeading id="mc-overview" title="Historical position (retired)" />
         {overview.loading ? (
           <StatGridSkeleton />
         ) : overview.error ? (
@@ -315,7 +309,7 @@ export function AdminCreditsConsole() {
 
       {/* ═══ 6 · Financial ═══ */}
       <section aria-labelledby="mc-financial">
-        <SectionHeading id="mc-financial" title="Financial" />
+        <SectionHeading id="mc-financial" title="Historical sales (retired)" />
         {o && (
           <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
             <Stat icon={Wallet} label="Revenue" value={rupees(o.revenue.revenuePaise)} emphasis />
@@ -329,30 +323,7 @@ export function AdminCreditsConsole() {
         )}
       </section>
 
-      {/* ═══ 2 · Pricing (read-only) ═══ */}
-      <section aria-labelledby="mc-pricing">
-        <SectionHeading id="mc-pricing" title="Pricing" />
-        <Card className="mt-3 p-4">
-          {o ? (
-            <>
-              <dl className="grid gap-3 sm:grid-cols-3">
-                <Line label="Credit price" value={rupees(o.pricing.unitPricePaise)} />
-                <Line label="Credits per photo" value={num(o.pricing.creditsPerPhoto)} />
-                <Line label="Credits" value={o.pricing.creditsEnabled ? 'Enabled' : 'Disabled'} />
-              </dl>
-              {/* Deliberately not editable here. Business Configuration is the single
-                  writable surface for every media policy; a second editor would be a second
-                  source of truth for pricing. */}
-              <p className="mt-3 border-t border-border/60 pt-3 text-fs-2xs text-muted-foreground">
-                Read-only. Change these in{' '}
-                <Link href={ROUTES.ADMIN_BUSINESS_CONFIG} className="text-primary underline-offset-2 hover:underline">
-                  Business Configuration
-                </Link>, which owns every media policy.
-              </p>
-            </>
-          ) : <Skeleton className="h-16 w-full rounded-md" />}
-        </Card>
-      </section>
+      {/* RD-LEGACY-01 — no "Pricing" section: Media Credits are retired and have no live price. */}
 
       {/* ═══ 4 · Refund operations ═══ */}
       <section aria-labelledby="mc-refunds">
@@ -397,21 +368,16 @@ export function AdminCreditsConsole() {
                     </td>
                     <td className="px-4 py-2.5"><StatusChip tone={refundTone(r.status)}>{r.status}</StatusChip></td>
                     <td className="px-4 py-2.5 text-right">
-                      {/* MC-12.1 · Approve and Reject. Both call the existing decide endpoint,
-                          which has been there since MC-05 with no caller — the gap MC-12
-                          found. Shown only on `requested`, because every other status is
-                          already decided and the endpoint would refuse. */}
+                      {/* MC-12.1 · Reject calls the existing decide endpoint; it only releases the
+                          organizer's held credits. RD-LEGACY-01 — Approve is gone: Media Credits
+                          are retired and the server refuses every approval (CREDITS_DISABLED),
+                          so offering it would only ever fail. Shown only on `requested`. */}
                       {r.status === 'requested' && (
                         <div className="flex justify-end gap-1.5">
                           <Button size="sm" variant="outline"
                                   onClick={() => setDeciding({ row: r, approve: false })}>
                             <ThumbsDown className="size-3.5" aria-hidden />
                             Reject
-                          </Button>
-                          <Button size="sm"
-                                  onClick={() => setDeciding({ row: r, approve: true })}>
-                            <ThumbsUp className="size-3.5" aria-hidden />
-                            Approve
                           </Button>
                         </div>
                       )}
@@ -471,18 +437,15 @@ export function AdminCreditsConsole() {
         </Card>
       </section>
 
-      {/* ═══ 3 · Manual credit grants ═══ */}
+      {/* ═══ 3 · Credit grants — HISTORICAL (RD-LEGACY-01) ═══
+          Media Credits are retired: no grant can be issued (the server refuses with
+          CREDITS_DISABLED), so there is no Issue button. The record stays readable. */}
       <section aria-labelledby="mc-grants">
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <SectionHeading id="mc-grants" title="Manual credit grants" />
-          <Button size="sm" onClick={() => setGranting(true)}>
-            <Gift className="size-3.5" aria-hidden />
-            Issue credits
-          </Button>
+          <SectionHeading id="mc-grants" title="Credit grants (historical)" />
         </div>
         <p className="mt-1 text-fs-sm text-muted-foreground">
-          Credits issued without a payment. Every grant is recorded here, in the ledger and in
-          the admin audit log, and requires super-admin access.
+          Credits issued before Media Credits were retired. New grants are not possible.
         </p>
         <Card className="mt-3 overflow-hidden">
           <Body state={grants} emptyIcon={Gift} emptyTitle="No grants issued"
@@ -618,12 +581,6 @@ export function AdminCreditsConsole() {
         />
       )}
 
-      {granting && (
-        <GrantCreditsDialog
-          onClose={() => setGranting(false)}
-          onGranted={() => { loadGrants(); loadOverview(); loadAudit() }}
-        />
-      )}
     </div>
   )
 }
@@ -656,15 +613,6 @@ function Stat({
       </p>
       {hint && <p className="mt-1 text-fs-2xs text-muted-foreground">{hint}</p>}
     </Card>
-  )
-}
-
-function Line({ label, value }: { label: string; value: string }) {
-  return (
-    <div>
-      <dt className="text-fs-2xs uppercase tracking-wide text-muted-foreground">{label}</dt>
-      <dd className="tabular-nums text-fs-base font-medium text-foreground">{value}</dd>
-    </div>
   )
 }
 

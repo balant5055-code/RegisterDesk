@@ -82,10 +82,17 @@ export function deriveLicenseCharge(
  * `basePricePaise`, so a combined capacity + services order is never mistaken for underpaid.
  */
 export function orderListPricePaise(
-  order: Pick<LicenseOrderDoc, 'capacityChange' | 'serviceItems'> | null | undefined,
+  order: (Pick<LicenseOrderDoc, 'capacityChange' | 'serviceItems'> & { originalPricePaise?: number; amountPaise?: number }) | null | undefined,
   tierFallbackPaise: number,
 ): number {
-  return (order?.capacityChange ? order.capacityChange.totalPaise : tierFallbackPaise) + sumServiceItems(order?.serviceItems)
+  // RD-LEGACY-01 — a HISTORICAL tier order is priced from what IT stored (its pre-coupon price, else
+  // its charged amount), never from today's tier catalog: a raw configuration write to a retired
+  // tier's price must not be able to change how an old order settles. The catalog figure is only
+  // the last resort for an order that stored neither.
+  const stored = typeof order?.originalPricePaise === 'number' && order.originalPricePaise > 0 ? order.originalPricePaise
+    : typeof order?.amountPaise === 'number' && order.amountPaise > 0 ? order.amountPaise : null
+  const base = order?.capacityChange ? order.capacityChange.totalPaise : (stored ?? tierFallbackPaise)
+  return base + sumServiceItems(order?.serviceItems)
 }
 
 export interface ActivateLicenseOrderInput {

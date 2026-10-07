@@ -313,16 +313,12 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     console.info(`[license] capacity quote · eventId=${eventId} capacity=${quoted.quote.capacity} chargeable=${quoted.quote.chargeableCapacity} base=${quoted.quote.basePaise} gst=${quoted.quote.gstPaise} total=${quoted.quote.totalPaise}`)
   }
 
-  // Legacy tier path: resolve the EFFECTIVE (config-aware) price for the CURRENT license
-  // version so the charge reflects any admin override. Invalid tiers fall through to the
-  // service's validation.
-  const effectivePricePaise = isValidTierForVersion(requestedTier, CURRENT_LICENSE_VERSION)
-    ? (await getEffectiveDefinitionForVersion(requestedTier, CURRENT_LICENSE_VERSION))?.licensePricePaise
-    : undefined
+  // RD-LEGACY-01 — no tier price is looked up: a request without a capacity was refused above
+  // (capacity_required), so the price is ALWAYS the server's capacity quote.
   const context: LicensePreparationContext = {
     eventExists: exists,
     currentTier,
-    pricePaise: quotedPricePaise ?? effectivePricePaise,
+    pricePaise: quotedPricePaise,
   }
 
   const prepared = createEventLicenseService(stubRepositories).purchaseLicense(request, context)

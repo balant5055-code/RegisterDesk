@@ -8,7 +8,7 @@
 
 import { NextRequest, NextResponse, after } from 'next/server'
 import { organizerPaysPricing } from '@/lib/events/builder/types'
-import { FieldValue, FieldPath } from 'firebase-admin/firestore'
+import { FieldValue } from 'firebase-admin/firestore'
 import { adminDb } from '@/lib/firebase/admin'
 import { authorizeWorkspace } from '@/lib/team/workspace'
 import { organizerStatusGuard }  from '@/lib/admin/organizerStatus'
@@ -30,12 +30,10 @@ import {
 } from '@/lib/licensing/eventLicense'
 import { getLicenseCatalog, getLicenseCatalogV2 } from '@/lib/licensing/resolveCatalog'
 import { pickVersionedDefinition } from '@/lib/licensing/licenseCatalogShared'
-import { validatePublishEligibility } from '@/lib/licensing/publishValidation'
 import { getPublishingMode }          from '@/lib/platform/publishing'
 import { sendEventReviewEmail }        from '@/lib/events/reviewNotifications'
 import { safeImageUrl }                from '@/lib/utils/imageUrl'
 import { governPublish, recordPublish, extractIdentity } from '@/lib/events/governance'
-import { deriveLifecycleStatus }       from '@/lib/events/lifecycle'
 import { buildEventSlug }              from '@/lib/events/slug'
 import { readDraftCoverage }           from '@/lib/licensing/draftCoverage'
 import { parseServiceSelection, serviceShortfall, SERVICE_KINDS, SERVICE_LABELS } from '@/lib/licensing/serviceAllowances'
@@ -197,26 +195,17 @@ export async function POST(req: NextRequest): Promise<NextResponse<PublishApiRes
   // document id. Normalizing after the check would re-open the same bug.
   const slug = buildEventSlug({ customSlug, eventName, draftId })
 
-  // ── Paid License reconciliation (F2.2.1) ─────────────────────────────────────
-  // The Event License must reflect the tier the organizer actually PAID for — not
-  // just the draft's selection. Resolve the authoritative tier from the draft
-  // selection validated against a PAID licenseOrders record (keyed by draft id,
-  // written by /api/licensing/checkout/confirm). A paid tier
-  // (Growth/Professional/Enterprise) without a matching paid order is rejected.
-  // Starter needs no payment. Every paid tier — Enterprise included — uses the
-  // identical purchase flow; there is no contact-sales or admin-grant path.
-  // RD-LICENSE-GA-02: NEW licenses are written under the CURRENT license version. The tier
-  // is validated + resolved against CURRENT_LICENSE_VERSION (never inferred by name), and a
-  // fallback stamps that version's free tier. At version 1 this is byte-for-byte identical
-  // to the previous V1-only path (isValidTierForVersion(t,1)===isEventLicenseTier(t),
-  // defaultLicenseTierForVersion(1)==='starter', pickVersionedDefinition(…,1)===catalog[tier]).
+  // ── RD-LEGACY-01 · licence tiers are retired ────────────────────────────────────
+  // A NEW event is priced ONLY by the capacity commercial model (below). The draft's
+  // `licenseTier` is client-writable and is NEVER read here, and no tier PRICE from the
+  // catalog (which a raw configuration write could change) decides whether a publish owes
+  // money. Every new licence carries the current version's free tier purely as a
+  // compatibility stamp. The one tier entitlement that still exists is a HISTORICAL paid tier
+  // order — see `legacyTier` below.
   const currentVersion = CURRENT_LICENSE_VERSION
   const [v1Catalog, v2Catalog] = await Promise.all([getLicenseCatalog(), getLicenseCatalogV2()])
   const defFor = (tier: string) => pickVersionedDefinition(v1Catalog, v2Catalog, tier, currentVersion)
-  const selectedTier: AnyEventLicenseTier = isValidTierForVersion(draft.licenseTier, currentVersion)
-    ? draft.licenseTier : defaultLicenseTierForVersion(currentVersion)
-  const selectedDef  = defFor(selectedTier)
-  const isPaidTier   = !selectedDef.contactSales && selectedDef.licensePricePaise > 0
+  const freeStamp: AnyEventLicenseTier = defaultLicenseTierForVersion(currentVersion)
 
   // RD-CE-FIX H4 — a pending activation checkout may already have been PAID (its confirm never ran,
   // the webhook has not arrived). Settle it BEFORE deciding what this publish owes: a captured payment
@@ -237,17 +226,18 @@ export async function POST(req: NextRequest): Promise<NextResponse<PublishApiRes
     tier?: unknown; status?: unknown; amountPaise?: unknown
     commercialModel?: unknown; capacityChange?: CapacityChargeSnapshot
   }) : null
-  const hasPaidOrder = !!order && order.status === 'paid' && order.tier === selectedTier
-
-  if (isPaidTier && !hasPaidOrder) {
-    console.warn(`[publish] failed · draftId=${draftId} reason=PAYMENT_REQUIRED tier=${selectedTier}`)
-    return NextResponse.json(
-      { canPublish: false, error: `Payment is required before publishing a ${selectedDef.name} event.` },
-      { status: 402 },
-    )
-  }
-
-  const resolvedTier: AnyEventLicenseTier = (isPaidTier && hasPaidOrder) ? selectedTier : defaultLicenseTierForVersion(currentVersion)
+  // RD-LEGACY-01 — the ONLY tier entitlement: a HISTORICAL tier order, i.e. a server-written,
+  // PAID `lic_{draftId}` order that is NOT a capacity order and names a paid tier of the current
+  // version. Such orders can no longer be created (/api/licensing/purchase refuses any activation
+  // without a capacity, and checkout/confirm settles only an existing tier order), so this path
+  // can only ever honour money paid before retirement. It reads the ORDER, never the draft, and
+  // never a catalog price.
+  const legacyTier: AnyEventLicenseTier | null =
+    !!order && order.status === 'paid' && order.commercialModel !== 'capacity'
+      && isValidTierForVersion(order.tier, currentVersion) && order.tier !== freeStamp
+      ? order.tier : null
+  const resolvedTier: AnyEventLicenseTier = legacyTier ?? freeStamp
+  const hasPaidOrder = !!order && order.status === 'paid' && order.tier === resolvedTier
 
   // ══ RD-LICENSE-E2E-03 · A MISSING CAPACITY FAILS CLOSED ═══════════════════════
   //
@@ -256,10 +246,8 @@ export async function POST(req: NextRequest): Promise<NextResponse<PublishApiRes
   // a capacity nobody chose, on an event whose Review screen had just shown "100 · Free".
   //
   // The ONLY pre-migration state that legitimately carries a tier-derived capacity is a
-  // PAID legacy licence: a draft whose `licenseTier` is a paid tier backed by a PAID,
-  // server-written order at `lic_{draftId}` (`isPaidTier && hasPaidOrder`, checked above;
-  // a paid tier WITHOUT a paid order was already refused with 402). That is money-backed
-  // and cannot be forged by the client, so it keeps the grandfathered path byte-for-byte.
+  // PAID historical tier order (`legacyTier` above). That is money-backed and cannot be forged
+  // by the client, so it keeps the grandfathered path.
   // Every other draft must carry an explicit capacity — the wizard's Step 7 Continue always
   // writes one (100 is free) — and is refused here otherwise, never inferred as free/200.
   //
@@ -267,7 +255,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<PublishApiRes
   // refused with EVENT_ALREADY_PUBLISHED; republish is a lifecycle route that never
   // recomputes capacity), so no historical event can reach this check.
   const requestedCapacity = typeof draft.registrationCapacity === 'number' ? draft.registrationCapacity : null
-  const hasLegacyPaidEntitlement = isPaidTier && hasPaidOrder
+  const hasLegacyPaidEntitlement = legacyTier !== null
   if (requestedCapacity === null && !hasLegacyPaidEntitlement) {
     console.warn(`[publish] failed · draftId=${draftId} reason=CAPACITY_NOT_CONFIGURED`)
     return NextResponse.json({
@@ -308,60 +296,9 @@ export async function POST(req: NextRequest): Promise<NextResponse<PublishApiRes
     )
   }
 
-  // ── EA-4 S1: free-tier "one active event" enforcement (previously a placeholder).
-  //    The rule targets the FREE license (Starter today) — resolved from the catalog
-  //    (licensePricePaise === 0), NOT a hardcoded tier name, so an admin price/config
-  //    override flows through. Counts the organizer's currently-LIVE free-tier events
-  //    (archived ones free the slot), reusing deriveLifecycleStatus + the rule. ─
-  //
-  //    RD-LICENSE-E2E-01 · LEGACY ONLY. Under the capacity model there is no Starter plan, and
-  //    every capacity order carries the free tier purely as a compatibility stamp — so
-  //    `resolvedTier` is the free tier for EVERY new event, including one whose organizer has
-  //    just paid for 1,206 registrations. Applying the rule there refused that publish with
-  //    "Starter allows only one active event" AFTER the money was captured. The discriminator
-  //    is the draft's requested capacity, the same one the capacity gate below keys on; a
-  //    draft without it is a pre-migration draft and keeps this rule byte-for-byte.
-  //
-  //    RD-LICENSE-E2E-03 · a capacity-less FREE-tier draft is now refused above
-  //    (CAPACITY_NOT_CONFIGURED), so this branch no longer runs for any request. It is left
-  //    in place deliberately — historical licence code, not removed as part of hardening.
-  const isFreeTier = (t: string): boolean => defFor(t).licensePricePaise === 0
-  if (requestedCapacity === null && isFreeTier(resolvedTier)) {
-    const LIVE = new Set(['published', 'pending_review', 'registration_closed'])
-    // M4: the "one active event" rule blocks as soon as ONE other live free-tier event
-    // exists (validatePublishEligibility fails at count >= 1). Scan the organizer's drafts
-    // in batches — ordered by document id, which needs no composite index — applying the
-    // SAME per-doc filter as before, and stop at the first match. This is correct for any
-    // number of drafts; the previous single .limit(500) could miss a live free event past
-    // the 500th doc (wrongly allowing a second free event). Behaviour is identical for
-    // organizers within the old 500-doc window.
-    const draftsCol = adminDb.collection(`users/${uid}/eventDrafts`)
-    const SCAN_BATCH = 500
-    let hasOtherActiveFreeEvent = false
-    let cursor: FirebaseFirestore.QueryDocumentSnapshot | null = null
-    for (;;) {
-      let q = draftsCol.orderBy(FieldPath.documentId()).limit(SCAN_BATCH)
-      if (cursor) q = q.startAfter(cursor)
-      const page = await q.get()
-      for (const ds of page.docs) {
-        if (ds.id === draftId) continue
-        const dd = ds.data() as Record<string, unknown>
-        const tier = isValidTierForVersion(dd.licenseTier, currentVersion) ? dd.licenseTier : defaultLicenseTierForVersion(currentVersion)
-        if (isFreeTier(tier) && LIVE.has(deriveLifecycleStatus(dd))) { hasOtherActiveFreeEvent = true; break }
-      }
-      if (hasOtherActiveFreeEvent || page.size < SCAN_BATCH) break
-      cursor = page.docs[page.docs.length - 1]
-    }
-    // Only the >= 1 threshold is consulted, so presence (0 or 1) is behaviourally exact.
-    const activeStarters = hasOtherActiveFreeEvent ? 1 : 0
-    const starterCheck = validatePublishEligibility({
-      intendedTier: resolvedTier, licenseStatus: 'active',
-      definition: defFor(resolvedTier), starterActiveEventCount: activeStarters,
-    })
-    if (!starterCheck.ok) {
-      return NextResponse.json({ canPublish: false, error: starterCheck.message }, { status: 403 })
-    }
-  }
+  // RD-LEGACY-01 — the free-tier "one active event" rule (Starter) is gone: there is no Starter
+  // plan, and the rule could only run for a capacity-less free draft, which is refused above
+  // (CAPACITY_NOT_CONFIGURED). The first 100 registrations of EVERY event are free.
 
   // Publishing mode: 'auto_publish' → go live immediately (legacy behaviour);
   // 'manual_approval' (default) → create the event as 'pending_review' awaiting
@@ -645,15 +582,8 @@ export async function POST(req: NextRequest): Promise<NextResponse<PublishApiRes
         throw err
       }
 
-      // Event License eligibility — validation only; throws to abort before writes.
-      // The resolved tier is either Starter (free) or a paid tier backed by a
-      // verified paid order, so it is treated as active.
-      const licenseCheck = validatePublishEligibility({ intendedTier: resolvedTier, licenseStatus: 'active', definition: defFor(resolvedTier) })
-      if (!licenseCheck.ok) {
-        const err = new Error(licenseCheck.message)
-        err.name  = licenseCheck.code
-        throw err
-      }
+      // RD-LEGACY-01 — no tier eligibility check here: the licence is either the free compatibility
+      // stamp (capacity priced above) or a historical tier backed by a verified paid order.
 
       // RD-HIGH-1 — the authoritative entitlement checks (see the fast refusal above).
       const draftNow = draftNowSnap.exists ? draftNowSnap.data() as Record<string, unknown> : null

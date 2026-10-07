@@ -261,10 +261,14 @@ export interface EventLicenseDefinitionV2 extends Omit<EventLicenseDefinition, '
 // ═══ featureList IS PUBLIC COPY ══════════════════════════════════════════════
 // The trailing "NONE of this is consumed yet" that used to close the paragraph above is no
 // longer true and was worth correcting, because it is exactly why a false claim survived
-// here. `featureList` is spread straight into the /pricing tier cards by
-// buildPricingTiers(), and the entitlement flags below are enforced for real — apiAccess by
-// the api-keys route, offlineCheckin by /api/checkin/cache, whiteLabel by branding/service,
-// customDomain by domains/service, advancedReports by the entitlements route.
+// here.
+//
+// RD-LEGACY-01 — THIS WHOLE CATALOG IS HISTORICAL. Licence tiers are retired: nothing sells them,
+// /pricing does not render them, and NONE of the entitlement flags below is enforced any more
+// (the api-keys route, /api/checkin/cache, branding, custom domains and reports all say "no longer
+// licensed"; /api/organizer/entitlements returns every feature enabled). The tables remain only to
+// read historical tier licences and orders, and the V2 `free` row as the compatibility stamp every
+// capacity licence and order carries.
 //
 // 'Waitlist' was listed on V2 Free and V1 Starter while WAITLIST_ENABLED is false
 // platform-wide (lib/registrations/gate.ts) — so /pricing advertised, as a headline Free

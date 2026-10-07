@@ -54,6 +54,10 @@ function validateNew(input: CouponInput): void {
   if (input.activatesAt !== undefined && !isIso(input.activatesAt)) throw new CouponAdminError('activatesAt must be an ISO date or null')
   if (input.expiresAt !== undefined && !isIso(input.expiresAt)) throw new CouponAdminError('expiresAt must be an ISO date or null')
   if (input.tiers && input.tiers.some(t => !isAnyLicenseTier(t))) throw new CouponAdminError('tiers contains an invalid license tier')
+  // RD-LEGACY-01 — licence tiers are retired, so no NEW tier restriction may be set (clearing one with
+  // `tiers: []` is still allowed). Coupons restricted to a tier before retirement keep their stored
+  // restriction, read as history by the validator.
+  if (input.tiers && input.tiers.length > 0) throw new CouponAdminError('Tier restrictions are retired — RegisterDesk has no licence tiers.')
 }
 
 function docFromInput(code: string, input: CouponInput, createdBy: string): LicenseCouponDoc {

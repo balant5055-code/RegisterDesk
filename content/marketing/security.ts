@@ -52,5 +52,5 @@ export const SECURITY_FUTURE: SecurityCapabilityDef[] = [
   { id: 'mfa',        title: 'Two-factor authentication',   description: 'An additional verification step at sign-in.',                     iconKey: 'security',  status: 'coming_soon' },
   { id: 'scim',       title: 'SCIM provisioning',           description: 'Automated team provisioning and de-provisioning.',                iconKey: 'workspace', status: 'coming_soon' },
   { id: 'compliance', title: 'Enterprise compliance',       description: 'A formal compliance program — no certifications are claimed yet.', iconKey: 'verify',   status: 'coming_soon' },
-  { id: 'byok',       title: 'Bring your own key',          description: 'Customer-managed encryption keys for enterprise plans.',          iconKey: 'domains',   status: 'coming_soon' },
+  { id: 'byok',       title: 'Bring your own key',          description: 'Customer-managed encryption keys for organizations that need them.',          iconKey: 'domains',   status: 'coming_soon' },
 ]

@@ -37,8 +37,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 })
   }
 
-  // Every paid tier (Growth / Professional / Enterprise) is purchased via Razorpay
-  // and verified identically here — there is no contact-sales exception.
+  // Signature check only (RD-LEGACY-01: licence tiers are retired; any `tier` in the body is
+  // ignored). No product UI calls this route; activation settles via checkout/confirm and the webhook.
   const orderId   = typeof body.razorpay_order_id   === 'string' ? body.razorpay_order_id   : ''
   const paymentId = typeof body.razorpay_payment_id === 'string' ? body.razorpay_payment_id : ''
   const signature = typeof body.razorpay_signature  === 'string' ? body.razorpay_signature  : ''

@@ -21,7 +21,7 @@ export const FAQ_CATEGORIES: FaqCategory[] = [
   { id: 'participants', label: 'Participants & certificates' },
   { id: 'payments',     label: 'Payments & settlements' },
   { id: 'trust',        label: 'Team & security' },
-  { id: 'plans',        label: 'Plans & access' },
+  { id: 'plans',        label: 'Pricing & access' },
 ]
 
 export const FAQ_ITEMS: FaqItem[] = [
@@ -64,7 +64,7 @@ export const FAQ_ITEMS: FaqItem[] = [
   { category: 'trust', order: 3, id: 'offline-checkin', question: 'Does check-in work offline?',
     answer: 'Yes. QR check-in keeps working without a network connection and syncs automatically when you reconnect.' },
 
-  // ── Plans & access ──
+  // ── Pricing & access (id 'plans' kept stable for anchors) ──
   { category: 'plans', order: 1, id: 'free-events', question: 'Does RegisterDesk support free events?',
     answer: 'Yes. Every event is free to run up to 100 registrations — no subscriptions and no monthly cost — and you can offer free, no-charge registrations. Above 100 you pay once for the extra capacity you need.',
     href: '/pricing' },

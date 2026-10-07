@@ -19,6 +19,8 @@ interface LicenseRow {
   // its `version`. A string, not a fixed union — so a V2 license renders without a crash.
   tier:              string
   version:           number
+  /** RD-LEGACY-01 — 'capacity' = pay-as-you-go; null = a historical tier licence. */
+  commercialModel?:  'capacity' | null
   status:            string
   maxRegistrations:  number | null
   used:              number
@@ -56,20 +58,20 @@ export default function LicensesTab() {
   const [loading, setLoading] = useState(true)
   const [error,   setError]   = useState<string | null>(null)
   const [query,   setQuery]   = useState('')
-  const [tierF,   setTierF]   = useState<'all' | string>('all')
   const [statusF, setStatusF] = useState<'all' | string>('all')
   const router = useRouter()
 
   // Version-aware display: each license resolves against the catalog for ITS stored
   // version (V1 today, V2 after cutover), so a historical 'growth' license never crashes.
   const resolve  = useLicenseEntryResolver()
-  const tierName = (r: LicenseRow): string => resolve(r.tier, r.version).name
+  // RD-LEGACY-01 — a pay-as-you-go licence is never shown with its compatibility tier stamp; only a
+  // historical tier licence shows its old tier name, marked as such.
+  const licenseLabel = (r: LicenseRow): string =>
+    r.commercialModel === 'capacity' ? 'Pay as you go' : `${resolve(r.tier, r.version).name} (legacy)`
   // RD-CAPACITY-02 · the per-row "Upgrade to <tier>" call to action is gone. It resolved from
   // the licence's TIER, and a capacity licence carries the version's free tier as a
   // compatibility stamp — so every capacity-model event was being offered "Upgrade to Starter",
   // a product that no longer exists. Capacity is changed from the event's own settings.
-  // Filter options derived from the licenses actually present (no hardcoded tier list).
-  const tierOptions = Array.from(new Map(rows.map(r => [r.tier, tierName(r)] as const)))
 
   useEffect(() => {
     let alive = true
@@ -92,11 +94,10 @@ export default function LicensesTab() {
 
   const q = query.trim().toLowerCase()
   const filtered = rows.filter(r => {
-    if (tierF !== 'all' && r.tier !== tierF) return false
     if (statusF !== 'all' && r.status !== statusF) return false
     if (!q) return true
     return r.eventName.toLowerCase().includes(q)
-      || tierName(r).toLowerCase().includes(q)
+      || licenseLabel(r).toLowerCase().includes(q)
       || (r.orderId ?? '').toLowerCase().includes(q)
   })
 
@@ -108,7 +109,7 @@ export default function LicensesTab() {
       {/* Hero */}
       <div>
         <h2 className="text-[16px] font-bold tracking-tight text-foreground">Event Licenses</h2>
-        <p className="text-[13px] text-muted-foreground">Every event runs on a license. See each event’s tier, status, capacity, and payment.</p>
+        <p className="text-[13px] text-muted-foreground">Every event runs on a license. See each event’s registration capacity, status and payment.</p>
       </div>
 
       {rows.length === 0 ? (
@@ -128,15 +129,10 @@ export default function LicensesTab() {
               <input
                 value={query}
                 onChange={e => setQuery(e.target.value)}
-                placeholder="Search event, tier, or order…"
+                placeholder="Search event or order…"
                 className="w-full rounded-lg border border-border bg-background py-1.5 pl-8 pr-3 text-[13px] text-foreground"
               />
             </div>
-            <select value={tierF} onChange={e => setTierF(e.target.value)} className="rounded-lg border border-border bg-background px-2 py-1.5 text-[13px]">
-              <option value="all">All tiers</option>
-              {/* Phase 3C: labels resolved version-aware from the tiers actually present. */}
-              {tierOptions.map(([tier, name]) => <option key={tier} value={tier}>{name}</option>)}
-            </select>
             <select value={statusF} onChange={e => setStatusF(e.target.value)} className="rounded-lg border border-border bg-background px-2 py-1.5 text-[13px]">
               <option value="all">All statuses</option>
               {Object.entries(STATUS_META).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
@@ -165,7 +161,7 @@ export default function LicensesTab() {
                         <div className="font-medium text-foreground">{r.eventName}</div>
                         <div className="text-[11.5px] text-muted-foreground">/{r.slug}</div>
                       </td>
-                      <td className="px-3 py-2.5"><span className="inline-flex rounded-full bg-muted px-2 py-0.5 text-[11.5px] font-semibold text-foreground">{tierName(r)}</span></td>
+                      <td className="px-3 py-2.5"><span className="inline-flex rounded-full bg-muted px-2 py-0.5 text-[11.5px] font-semibold text-foreground">{licenseLabel(r)}</span></td>
                       <td className="px-3 py-2.5"><StatusBadge status={r.status} /></td>
                       <td className="px-3 py-2.5 text-muted-foreground">{r.used.toLocaleString('en-IN')} / {regLabel(r.maxRegistrations)}{r.remaining != null && <span className="text-[11.5px]"> · {r.remaining.toLocaleString('en-IN')} left</span>}</td>
                       <td className="px-3 py-2.5 text-muted-foreground">{fmtDate(r.purchaseDate)}</td>
@@ -190,7 +186,7 @@ export default function LicensesTab() {
                     <StatusBadge status={r.status} />
                   </div>
                   <div className="mt-1 flex items-center gap-2 text-[12px] text-muted-foreground">
-                    <span className="rounded-full bg-muted px-1.5 py-0.5 font-semibold text-foreground">{tierName(r)}</span>
+                    <span className="rounded-full bg-muted px-1.5 py-0.5 font-semibold text-foreground">{licenseLabel(r)}</span>
                     <span>{r.used.toLocaleString('en-IN')} / {regLabel(r.maxRegistrations)}</span>
                     <span className="ml-auto font-semibold text-foreground">{r.amountPaidPaise > 0 ? rupees(r.amountPaidPaise) : 'Free'}</span>
                   </div>

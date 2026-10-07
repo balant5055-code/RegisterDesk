@@ -94,7 +94,7 @@ export const ROUTES = {
   // RD-PHOTO-01 — event photo branding. Not a licensing feature; every organizer.
   MEDIA_STUDIO_BRANDING:   '/dashboard/media-studio/branding',
   MEDIA_STUDIO_SETTINGS:   '/dashboard/media-studio/settings',
-  /** MC-08.1 — the destination for every "Buy credits" action. */
+  /** RD-PHOTO-01 — Media Credits are retired; this page only explains that photos are bought per event. */
   MEDIA_STUDIO_CREDITS:    '/dashboard/media-studio/credits',
   // RD-MEDIA-05 — manual maintenance. Platform-admin only, enforced by its API.
   MEDIA_STUDIO_MAINTENANCE: '/dashboard/media-studio/maintenance',
@@ -192,9 +192,9 @@ export const ADMIN_SIDEBAR_NAV: AdminNavGroup[] = [
       { label: 'License Center',      href: ROUTES.ADMIN_LICENSE_CENTER, icon: KeyRound,
         description: "Licences, coupons, orders and expiry", keywords: "license coupon orders expiry override promotion" },
       { label: 'Licenses',            href: ROUTES.ADMIN_LICENSES,       icon: KeyRound,
-        description: "Per-event licence console", keywords: "license grant upgrade downgrade reissue" },
+        description: "Per-event licence console", keywords: "license capacity licence reissue refund" },
       { label: 'Pricing Operations',  href: ROUTES.ADMIN_PRICING_OPS,    icon: Receipt,
-        description: "Pricing operations and overrides", keywords: "pricing price override tier" },
+        description: "Pricing operations and overrides", keywords: "pricing price override" },
     ],
   },
   {
@@ -212,11 +212,13 @@ export const ADMIN_SIDEBAR_NAV: AdminNavGroup[] = [
         description: "Event services, refund and carry-forward requests, reconciliation", keywords: "wallet balance allowance credits refund reconciliation organizer event ledger" },
       { label: 'Clawbacks',       href: ROUTES.ADMIN_CLAWBACKS,       icon: Undo2,
         description: "Recover funds already released", keywords: "clawback recover reverse chargeback" },
-      // MC-08.1 · Media Credits sits in Finance rather than Commerce: its primary figures
-      // are outstanding liability, refund payouts and reconciliation debt — money owed,
-      // not products sold.
-      { label: 'Media Credits',   href: ROUTES.ADMIN_MEDIA_CREDITS,   icon: Coins,
-        description: "Photo credit wallets, refunds and reconciliation", keywords: "media credits refund grant ledger photo purchase reconciliation session" },
+      // MC-08.1 · Media Credits sits in Finance rather than Commerce: its figures are
+      // outstanding liability, refund payouts and reconciliation debt — money owed.
+      // RD-LEGACY-01 — Media Credits are RETIRED (RD-PHOTO-01): nothing can be bought, granted or
+      // spent. The console stays reachable ONLY for historical records and for paying out refunds
+      // approved before retirement, and is labelled so it is never read as a live product.
+      { label: 'Media Credits (retired)', href: ROUTES.ADMIN_MEDIA_CREDITS, icon: Coins,
+        description: "Historical credit records and refunds still owed — no longer sold", keywords: "media credits retired historical refund payout ledger reconciliation" },
     ],
   },
   {

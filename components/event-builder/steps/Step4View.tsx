@@ -1015,7 +1015,7 @@ export function Step4View({ currentStep, completedValues, onNext, onBack, onSave
           Passes &amp; Pricing
         </h1>
         <p className="mt-1 text-[13px] text-muted-foreground">
-          Configure your plan, ticket types, and registration schedule.
+          Configure your passes, ticket types, and registration schedule.
         </p>
       </div>
 
