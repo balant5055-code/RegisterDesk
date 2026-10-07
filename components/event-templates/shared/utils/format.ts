@@ -19,7 +19,7 @@ import type { PassPublic } from '@/components/event-templates/types'
  * `resolvePassSaleState` (lib/registrations/salesWindow.ts) compares them date-first too,
  * so display and the sales gate stay consistent. No timezone conversion is introduced.
  */
-function parseCalendarDate(value: string | null | undefined): Date | null {
+export function parseCalendarDate(value: string | null | undefined): Date | null {
   const raw = typeof value === 'string' ? value.trim() : ''
   if (!raw) return null
   const m = /^(\d{4})-(\d{2})-(\d{2})(?:[T\s]|$)/.exec(raw)

@@ -15,9 +15,9 @@ Legend: ⛔ blocks launch · ⚠️ required before scaling · ✅ verify
 | 1.1 | Firebase project created; service-account key generated and base64-encoded into `FIREBASE_SERVICE_ACCOUNT_KEY` | ⛔ | Platform |
 | 1.2 | `NEXT_PUBLIC_FIREBASE_*` web config set (apiKey, authDomain, projectId, storageBucket, messagingSenderId, appId) | ⛔ | Platform |
 | 1.3 | **Authentication** → Email/Password provider enabled; email-verification (OTP) flow tested end-to-end | ⛔ | Platform |
-| 1.4 | **Firestore rules deployed** (`firebase deploy --only firestore:rules`) — default-deny; all financial/PII collections server-only | ⛔ | Platform |
-| 1.5 | **Firestore indexes deployed** (`firebase deploy --only firestore:indexes`) — includes `scheduledReminders(status,sendAt)` and `registrations(eventSlug,status)` added for the reminder engine | ⛔ | Platform |
-| 1.6 | **Storage rules deployed** (`firebase deploy --only storage`) — owner-scoped writes, size + content-type limits, wildcard deny | ⛔ | Platform |
+| 1.4 | **Firestore rules deployed** (`npm run deploy:firebase:production`) — default-deny; all financial/PII collections server-only | ⛔ | Platform |
+| 1.5 | **Firestore indexes deployed** (`npm run deploy:firebase:production`) — includes `scheduledReminders(status,sendAt)` and `registrations(eventSlug,status)` added for the reminder engine | ⛔ | Platform |
+| 1.6 | **Storage rules deployed** (`npm run deploy:firebase:production`) — owner-scoped writes, size + content-type limits, wildcard deny | ⛔ | Platform |
 | 1.7 | Storage bucket `NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET` set (needed for certificate uploads) | ⚠️ | Platform |
 | 1.8 | Firestore in **production mode** (not test mode); location chosen close to `ap-south-1` | ⛔ | Platform |
 
@@ -25,7 +25,7 @@ Legend: ⛔ blocks launch · ⚠️ required before scaling · ✅ verify
 > query throws `FAILED_PRECONDITION` without the composite index.
 >
 > **Deploy shortcut (GA-7E S1):** items 1.4–1.6 run together via `npm run deploy:firebase`
-> (`firebase deploy --only firestore:rules,firestore:indexes,storage`). These artifacts
+> (`npm run deploy:firebase:production`). These artifacts
 > deploy SEPARATELY from the Vercel code deploy — run this on **every** release that
 > changes `firestore.rules`, `firestore.indexes.json`, or `storage.rules`, and again on
 > any code rollback so rules/indexes never drift ahead of the code.
@@ -41,6 +41,7 @@ Legend: ⛔ blocks launch · ⚠️ required before scaling · ✅ verify
 | 2.4 | `NEXT_PUBLIC_RAZORPAY_KEY_ID` set (client checkout) — **silent checkout failure if missing** | ⛔ | Finance |
 | 2.5 | **BOTH webhook URLs registered** in Razorpay dashboard with the same secret: `/api/webhooks/razorpay` (registration + wallet top-up + registration refund) AND `/api/razorpay/webhook` (donations) | ⛔ | Finance |
 | 2.6 | Webhook events subscribed: `payment.captured`, `payment.failed`, `refund.processed` | ⛔ | Finance |
+| 2.7 | **Payment capture = Automatic** (Razorpay dashboard → Payment capture settings, all payments) and the late-authorization window reviewed. RegisterDesk creates orders WITHOUT a capture instruction and confirms a registration on the checkout signature, so correctness depends on account-level auto-capture. The recovery sweep refuses to settle a payment still `authorized` (RD-FIN-02 · R2), but verify-payment does not re-fetch status. | ⛔ | Finance |
 | 2.7 | Settlement/payout bank details configured in Razorpay | ⚠️ | Finance |
 
 > **Two-webhook note:** missing either URL silently disables crash-recovery
@@ -53,7 +54,7 @@ Legend: ⛔ blocks launch · ⚠️ required before scaling · ✅ verify
 | 3.1 | Sending domain verified + DKIM configured | ⛔ | Comms |
 | 3.2 | Moved out of **SES sandbox** (production sending access) | ⛔ | Comms |
 | 3.3 | `SES_FROM_EMAIL` set — **when blank, ALL email is silently disabled** (registrations still succeed, but no tickets/receipts/OTP) | ⛔ | Comms |
-| 3.4 | `AWS_REGION` (default `ap-south-1`), and either both `AWS_ACCESS_KEY_ID`+`AWS_SECRET_ACCESS_KEY` OR an attached IAM role | ⛔ | Comms |
+| 3.4 | `AWS_REGION` set EXPLICITLY to the SES sender's region (production: `ap-south-1`; production refuses to load email without it), and either both `AWS_ACCESS_KEY_ID`+`AWS_SECRET_ACCESS_KEY` OR an attached IAM role | ⛔ | Comms |
 | 3.5 | `SES_FROM_NAME` set (default `RegisterDesk`) | ✅ | Comms |
 | 3.6 | **Bounce/complaint handling** — see Known Gap below | ⚠️ | Comms |
 

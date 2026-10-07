@@ -7,7 +7,7 @@
 
 import { FieldValue, AggregateField } from 'firebase-admin/firestore'
 import { adminDb } from '@/lib/firebase/admin'
-import { logAdminAction } from '@/lib/admin/audit'
+import { stageAdminAudit } from '@/lib/admin/audit'
 import type { AdminAuditAction } from '@/lib/admin/auditConstants'
 import {
   LICENSE_COUPONS_COLLECTION, normalizeCouponCode, deriveCouponLifecycle,
@@ -86,8 +86,30 @@ function docFromInput(code: string, input: CouponInput, createdBy: string): Lice
   }
 }
 
-async function audit(adminUid: string, action: AdminAuditAction, code: string, reason: string, metadata: Record<string, unknown> = {}): Promise<void> {
-  void logAdminAction({ adminUid, action, entityType: 'license_coupon', entityId: code, metadata: { ...metadata, reason } }).catch(() => {})
+/**
+ * RD-PHASE4-S4 — the audit row is STAGED on the mutation's own transaction (it used to be a
+ * detached, swallowed write): the coupon change and its audit commit together or not at all.
+ */
+function stageAudit(
+  tx: FirebaseFirestore.Transaction, adminUid: string, action: AdminAuditAction, code: string, reason: string,
+  extra: { metadata?: Record<string, unknown>; before?: unknown; after?: unknown; changedFields?: string[] } = {},
+): void {
+  stageAdminAudit(tx, {
+    adminUid, actorRole: 'super_admin', action, entityType: 'license_coupon', entityId: code,
+    reason,
+    changedFields: extra.changedFields,
+    before: extra.before,
+    after:  extra.after,
+    metadata: { ...(extra.metadata ?? {}), reason },
+    correlation: { couponCode: code },
+  })
+}
+
+/** Firestore-safe comparable form of a coupon value (sentinels / timestamps → strings). */
+const plain = (v: unknown): unknown => {
+  if (v === undefined) return null
+  if (v && typeof (v as { toMillis?: () => number }).toMillis === 'function') return (v as { toMillis: () => number }).toMillis()
+  return v
 }
 
 // ─── Reads ──────────────────────────────────────────────────────────────────────
@@ -120,43 +142,65 @@ export async function createCoupon(input: CouponInput, adminUid: string, reason:
   if (!/^[A-Z0-9_-]{3,40}$/.test(code)) throw new CouponAdminError('code must be 3–40 chars: A–Z, 0–9, _ or -')
   validateNew(input)
   const ref = col().doc(code)
-  if ((await ref.get()).exists) throw new CouponAdminError('A coupon with this code already exists', 409)
   const doc = docFromInput(code, input, adminUid)
-  await ref.set(doc)
-  await audit(adminUid, 'license_coupon.created', code, reason, { type: doc.type, value: doc.value })
+  // RD-PHASE4-S4 · F11 — APPEND-ONLY create, in a transaction with its audit row: two concurrent
+  // creates of one code can no longer both "succeed" (the old get-then-set let the second
+  // silently overwrite the first, currentUses included).
+  await adminDb.runTransaction(async tx => {
+    if ((await tx.get(ref)).exists) throw new CouponAdminError('A coupon with this code already exists', 409)
+    tx.create(ref, doc)
+    stageAudit(tx, adminUid, 'license_coupon.created', code, reason, {
+      metadata: { type: doc.type, value: doc.value },
+      after: { type: doc.type, value: doc.value, usageLimit: doc.usageLimit, perOrganizerLimit: doc.perOrganizerLimit, enabled: doc.enabled },
+    })
+  })
   return { ...doc, lifecycle: deriveCouponLifecycle(doc, Date.now()) }
 }
 
 export async function updateCoupon(code: string, input: CouponInput, adminUid: string, reason: string): Promise<void> {
   const ref = col().doc(normalizeCouponCode(code))
-  const snap = await ref.get()
-  if (!snap.exists) throw new CouponAdminError('Coupon not found', 404)
-  const cur = snap.data() as LicenseCouponDoc
-  // Only editable fields (never code/currentUses/createdAt). Re-validate type/value if present.
-  validateNew({ type: input.type ?? cur.type, value: input.value ?? cur.value, ...input })
-  const patch: Record<string, unknown> = { updatedAt: FieldValue.serverTimestamp(), version: (cur.version ?? 1) + 1 }
-  const editable: (keyof CouponInput)[] = ['description', 'type', 'value', 'maxDiscountPaise', 'minPurchasePaise', 'maxPurchasePaise', 'activatesAt', 'expiresAt', 'usageLimit', 'perOrganizerLimit', 'enabled', 'priority', 'stackable', 'visibility', 'campaign', 'internalNotes']
-  for (const k of editable) if (input[k] !== undefined) patch[k] = input[k]
-  if (input.tiers !== undefined || input.eventTypes !== undefined) {
-    patch.restrictions = { tiers: (input.tiers ?? cur.restrictions.tiers).filter(isAnyLicenseTier), eventTypes: input.eventTypes ?? cur.restrictions.eventTypes }
-  }
-  await ref.set(patch, { merge: true })
-  await audit(adminUid, 'license_coupon.updated', cur.code, reason, { fields: Object.keys(patch) })
+  await adminDb.runTransaction(async tx => {
+    const snap = await tx.get(ref)
+    if (!snap.exists) throw new CouponAdminError('Coupon not found', 404)
+    const cur = snap.data() as LicenseCouponDoc
+    // Only editable fields (never code/currentUses/createdAt). Re-validate type/value if present.
+    validateNew({ type: input.type ?? cur.type, value: input.value ?? cur.value, ...input })
+    const patch: Record<string, unknown> = { updatedAt: FieldValue.serverTimestamp(), version: (cur.version ?? 1) + 1 }
+    const editable: (keyof CouponInput)[] = ['description', 'type', 'value', 'maxDiscountPaise', 'minPurchasePaise', 'maxPurchasePaise', 'activatesAt', 'expiresAt', 'usageLimit', 'perOrganizerLimit', 'enabled', 'priority', 'stackable', 'visibility', 'campaign', 'internalNotes']
+    for (const k of editable) if (input[k] !== undefined) patch[k] = input[k]
+    if (input.tiers !== undefined || input.eventTypes !== undefined) {
+      patch.restrictions = { tiers: (input.tiers ?? cur.restrictions.tiers).filter(isAnyLicenseTier), eventTypes: input.eventTypes ?? cur.restrictions.eventTypes }
+    }
+    tx.set(ref, patch, { merge: true })
+    // RD-PHASE4-S4 — before/after of exactly the fields this edit wrote.
+    const fields = Object.keys(patch).filter(k => k !== 'updatedAt' && k !== 'version')
+    const curRec = cur as unknown as Record<string, unknown>
+    stageAudit(tx, adminUid, 'license_coupon.updated', cur.code, reason, {
+      metadata: { fields: Object.keys(patch) },
+      changedFields: fields,
+      before: Object.fromEntries(fields.map(k => [k, plain(curRec[k])])),
+      after:  Object.fromEntries(fields.map(k => [k, plain(patch[k])])),
+    })
+  })
 }
 
 export async function cloneCoupon(code: string, newCode: string, adminUid: string, reason: string): Promise<CouponRow> {
-  const src = await col().doc(normalizeCouponCode(code)).get()
-  if (!src.exists) throw new CouponAdminError('Source coupon not found', 404)
-  const c = src.data() as LicenseCouponDoc
   const nc = normalizeCouponCode(newCode)
   if (!/^[A-Z0-9_-]{3,40}$/.test(nc)) throw new CouponAdminError('New code must be 3–40 chars: A–Z, 0–9, _ or -')
-  if ((await col().doc(nc).get()).exists) throw new CouponAdminError('A coupon with the new code already exists', 409)
-  const clone: LicenseCouponDoc = {
-    ...c, code: nc, currentUses: 0, enabled: false, paused: false, archived: false, version: 1,
-    createdBy: adminUid, createdAt: FieldValue.serverTimestamp(), updatedAt: FieldValue.serverTimestamp(),
-  }
-  await col().doc(nc).set(clone)
-  await audit(adminUid, 'license_coupon.cloned', nc, reason, { from: c.code })
+  // RD-PHASE4-S4 — append-only create of the clone, with its audit row, in one transaction.
+  const clone = await adminDb.runTransaction(async tx => {
+    const [src, dst] = await Promise.all([tx.get(col().doc(normalizeCouponCode(code))), tx.get(col().doc(nc))])
+    if (!src.exists) throw new CouponAdminError('Source coupon not found', 404)
+    if (dst.exists) throw new CouponAdminError('A coupon with the new code already exists', 409)
+    const c = src.data() as LicenseCouponDoc
+    const next: LicenseCouponDoc = {
+      ...c, code: nc, currentUses: 0, enabled: false, paused: false, archived: false, version: 1,
+      createdBy: adminUid, createdAt: FieldValue.serverTimestamp(), updatedAt: FieldValue.serverTimestamp(),
+    }
+    tx.create(col().doc(nc), next)
+    stageAudit(tx, adminUid, 'license_coupon.cloned', nc, reason, { metadata: { from: c.code } })
+    return next
+  })
   return { ...clone, lifecycle: deriveCouponLifecycle(clone, Date.now()) }
 }
 
@@ -164,13 +208,21 @@ export type CouponStateAction = 'pause' | 'resume' | 'archive'
 
 export async function setCouponState(code: string, action: CouponStateAction, adminUid: string, reason: string): Promise<void> {
   const ref = col().doc(normalizeCouponCode(code))
-  if (!(await ref.get()).exists) throw new CouponAdminError('Coupon not found', 404)
   const patch =
     action === 'pause'   ? { paused: true } :
     action === 'resume'  ? { paused: false } :
                            { archived: true, paused: true }
-  await ref.set({ ...patch, updatedAt: FieldValue.serverTimestamp() }, { merge: true })
   const auditAction: AdminAuditAction =
     action === 'pause' ? 'license_coupon.paused' : action === 'resume' ? 'license_coupon.resumed' : 'license_coupon.archived'
-  await audit(adminUid, auditAction, normalizeCouponCode(code), reason)
+  await adminDb.runTransaction(async tx => {
+    const snap = await tx.get(ref)
+    if (!snap.exists) throw new CouponAdminError('Coupon not found', 404)
+    const cur = snap.data() as LicenseCouponDoc
+    tx.set(ref, { ...patch, updatedAt: FieldValue.serverTimestamp() }, { merge: true })
+    stageAudit(tx, adminUid, auditAction, normalizeCouponCode(code), reason, {
+      changedFields: Object.keys(patch),
+      before: { paused: cur.paused ?? false, archived: cur.archived ?? false },
+      after:  { ...{ paused: cur.paused ?? false, archived: cur.archived ?? false }, ...patch },
+    })
+  })
 }

@@ -11,7 +11,9 @@
 import { adminDb } from '@/lib/firebase/admin'
 import { getEventBySlug } from '@/lib/firebase/firestore/events'
 import { bibKey } from '@/features/race-operations/utils/publicKeys'
+import { isRaceOperationsAvailable } from '@/lib/events/eventCapabilities'
 import type { RosterEntry } from '@/features/race-operations/import/validation/registrationMatch'
+import { resolveOwnedEventSlug } from '@/lib/events/liveEventRef'
 
 export interface ResolvedRace {
   eventId:   string
@@ -40,16 +42,16 @@ export async function resolveRace(
   eventId:      string,
   passId:       string,
 ): Promise<ResolveRaceOutcome> {
-  const draftSnap = await adminDb.doc(`users/${workspaceUid}/eventDrafts/${eventId}`).get()
-  if (!draftSnap.exists) return { ok: false, status: 404, error: 'Event not found' }
-
-  const draft = draftSnap.data() as Record<string, unknown>
+  // RD-RACEOPS-02B · ownership AND the event-type capability, before any event data is used.
+  const gate = await resolveRaceOpsEvent(workspaceUid, eventId)
+  if (!gate.ok) return gate
+  const draft = gate.draft
   const details = (draft.eventDetails as Record<string, unknown>) ?? {}
-  const seo     = (details.seo  as Record<string, unknown>) ?? {}
   const info    = (details.info as Record<string, unknown>) ?? {}
   const sched   = (details.schedule as Record<string, unknown>) ?? {}
 
-  const eventSlug = typeof seo.urlSlug === 'string' ? seo.urlSlug : ''
+  // RD-CE-FIX C1 · only a slug the live document proves is THIS workspace's event for THIS draft.
+  const eventSlug = (await resolveOwnedEventSlug(workspaceUid, eventId, draft)) ?? ''
   if (!eventSlug) return { ok: false, status: 409, error: 'This event has not been published yet.' }
 
   const eventName = typeof info.name === 'string' ? info.name : 'Untitled Event'
@@ -98,6 +100,48 @@ export async function resolveRace(
  * leading fields only. Bounded by `limit` so a pathological event cannot load unboundedly;
  * the cap is reported to the caller rather than silently truncating a correctness check.
  */
+/**
+ * RD-RACEOPS-02B · the event exists in THIS workspace and its TYPE admits Race Operations.
+ *
+ * ONE document — the draft the organizer owns — read before anything result-shaped is
+ * touched. The type rule is the platform's own (`isRaceOperationsAvailable`, the same
+ * predicate the sidebar row and the access gate use), so the API can never accept an event
+ * the UI refuses, or the reverse. Called by `resolveRace` (session creation, versions,
+ * rollback, export, snapshot build) and by the session-scoped services through
+ * `requireEligibleSession`, so an import session for an event whose type no longer admits
+ * results cannot be advanced or published either.
+ *
+ * A missing draft and a wrong-type draft answer differently on purpose: ownership is the
+ * security boundary (404, as before); capability is a product rule (409, like the
+ * "not published yet" refusal beside it) — an owner is told why, a stranger learns nothing.
+ */
+export const RACE_OPS_TYPE_ERROR =
+  'Race Operations is not available for this event type. Race results can be published for sports events only.'
+
+export type ResolveRaceOpsEventOutcome =
+  | { ok: true;  draft: Record<string, unknown>; eventType: string | null }
+  | { ok: false; status: number; error: string }
+
+export async function resolveRaceOpsEvent(
+  workspaceUid: string,
+  eventId:      string,
+): Promise<ResolveRaceOpsEventOutcome> {
+  let draftSnap: FirebaseFirestore.DocumentSnapshot
+  try {
+    draftSnap = await adminDb.doc(`users/${workspaceUid}/eventDrafts/${eventId}`).get()
+  } catch {
+    // A path that cannot name a document cannot name an event the caller owns.
+    return { ok: false, status: 404, error: 'Event not found' }
+  }
+  if (!draftSnap.exists) return { ok: false, status: 404, error: 'Event not found' }
+  const draft = draftSnap.data() as Record<string, unknown>
+  const eventType = typeof draft.eventType === 'string' ? draft.eventType : null
+  if (!isRaceOperationsAvailable(eventType)) {
+    return { ok: false, status: 409, error: RACE_OPS_TYPE_ERROR }
+  }
+  return { ok: true, draft, eventType }
+}
+
 export async function fetchEventRoster(params: {
   organizerUid: string
   eventSlug:    string

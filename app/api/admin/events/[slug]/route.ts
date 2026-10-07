@@ -6,6 +6,7 @@
 // (fire-and-forget — the admin action never fails if email fails).
 
 import { NextRequest, NextResponse } from 'next/server'
+import { financialViewFor } from '@/lib/admin/financialGuard'
 import { adminDb }                   from '@/lib/firebase/admin'
 import { resolveAdminUid }           from '@/lib/admin/auth'
 import { applyModeration, notifyOrganizerModeration } from '@/lib/admin/moderationService'
@@ -183,5 +184,6 @@ export async function GET(req: NextRequest, ctx: RouteContext): Promise<NextResp
     },
   }
 
-  return NextResponse.json({ detail }, { headers: { 'Cache-Control': 'no-store' } })
+  // RD-CLOSE — mixed moderation + money view: money fields are withheld unless Super Admin (ADMIN_UIDS).
+  return NextResponse.json(await financialViewFor(req, { detail }), { headers: { 'Cache-Control': 'no-store' } })
 }

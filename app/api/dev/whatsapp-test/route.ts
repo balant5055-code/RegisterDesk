@@ -13,16 +13,29 @@
 
 import { NextRequest, NextResponse } from 'next/server'
 import { getMetaProvider } from '@/lib/whatsapp'
+import { resolveSuperAdminUid } from '@/lib/admin/auth'
 
 export const dynamic = 'force-dynamic'
 
-// Fail-closed in production (Vercel sets VERCEL_ENV=production only for prod).
+// RD-SEC-01 · Fail-closed in EVERY production build — previews included. The old
+// `(VERCEL_ENV ?? NODE_ENV) === 'production'` left Vercel previews (VERCEL_ENV='preview',
+// NODE_ENV='production') open to unauthenticated paid template sends. Same test as dev/reset.
 function isDisabled(): boolean {
-  return (process.env.VERCEL_ENV ?? process.env.NODE_ENV) === 'production'
+  return process.env.NODE_ENV === 'production' || process.env.VERCEL_ENV === 'production'
 }
 
-export async function GET(): Promise<NextResponse> {
+// RD-SEC-01 · and even in development only a Super Admin (ADMIN_UIDS) may use it.
+async function refused(req: NextRequest): Promise<NextResponse | null> {
   if (isDisabled()) return NextResponse.json({ error: 'Not found' }, { status: 404 })
+  if (!(await resolveSuperAdminUid(req.headers.get('authorization')))) {
+    return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+  }
+  return null
+}
+
+export async function GET(req: NextRequest): Promise<NextResponse> {
+  const denied = await refused(req)
+  if (denied) return denied
 
   const provider = await getMetaProvider()
   if (!provider) return NextResponse.json({ error: 'WhatsApp is not configured' }, { status: 503 })
@@ -32,7 +45,8 @@ export async function GET(): Promise<NextResponse> {
 }
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
-  if (isDisabled()) return NextResponse.json({ error: 'Not found' }, { status: 404 })
+  const denied = await refused(req)
+  if (denied) return denied
 
   const provider = await getMetaProvider()
   if (!provider) return NextResponse.json({ error: 'WhatsApp is not configured' }, { status: 503 })

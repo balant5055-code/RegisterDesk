@@ -32,20 +32,26 @@ export const metadata: Metadata = buildMetadata({
 })
 
 const LINK_CLS =
-  'inline-flex items-center gap-1 rounded text-[13px] font-medium text-primary underline-offset-2 outline-none transition-colors hover:underline focus-visible:ring-2 focus-visible:ring-primary/50 focus-visible:ring-offset-2'
+  'inline-flex items-center gap-1 rounded text-[13px] font-medium text-action underline-offset-2 outline-none transition-colors hover:underline focus-visible:ring-2 focus-visible:ring-action/50 focus-visible:ring-offset-2'
 
 function TopicCard({ topic }: { topic: SupportTopic }) {
   return (
     <Card className="flex h-full flex-col p-6">
       <h3 className="text-[15px] font-semibold text-foreground">{topic.title}</h3>
       <p className="mt-1.5 flex-1 text-[13.5px] leading-relaxed text-muted-foreground">{topic.description}</p>
-      <ul className="mt-4 flex flex-wrap gap-x-4 gap-y-2">
-        {topic.links.map(l => (
-          <li key={l.href}>
-            <Link href={l.href} className={LINK_CLS}>{l.label}</Link>
-          </li>
-        ))}
-      </ul>
+      {/* Guarded: several topics lost every link when the Platform pages were retired, and
+          an empty <ul> still carries its top margin — a 16px gap under the description with
+          nothing in it. The card is the topic and its description; further reading is
+          optional. */}
+      {topic.links.length > 0 && (
+        <ul className="mt-4 flex flex-wrap gap-x-4 gap-y-2">
+          {topic.links.map(l => (
+            <li key={l.href}>
+              <Link href={l.href} className={LINK_CLS}>{l.label}</Link>
+            </li>
+          ))}
+        </ul>
+      )}
     </Card>
   )
 }
@@ -134,7 +140,7 @@ export default function SupportPage() {
                 <div className="divide-y divide-border/60 overflow-hidden rounded-2xl border border-border/60 bg-white">
                   {c.items.map(item => (
                     <details key={item.question} className="group px-5 sm:px-6">
-                      <summary className="flex cursor-pointer list-none items-center justify-between gap-4 py-4 text-[14.5px] font-semibold text-foreground outline-none focus-visible:ring-2 focus-visible:ring-primary/50 [&::-webkit-details-marker]:hidden">
+                      <summary className="flex cursor-pointer list-none items-center justify-between gap-4 py-4 text-[14.5px] font-semibold text-foreground outline-none focus-visible:ring-2 focus-visible:ring-action/50 [&::-webkit-details-marker]:hidden">
                         {item.question}
                         <span aria-hidden className="shrink-0 text-muted-foreground transition-transform duration-200 group-open:rotate-45">+</span>
                       </summary>
@@ -156,7 +162,7 @@ export default function SupportPage() {
         >
           <div className="mx-auto grid max-w-3xl gap-5 sm:grid-cols-3">
             <Card className="flex flex-col items-start p-6">
-              <IconChip className="size-10"><MessageCircle className="size-5 text-primary" aria-hidden /></IconChip>
+              <IconChip className="size-10"><MessageCircle className="size-5 text-action" aria-hidden /></IconChip>
               <h3 className="mt-3 text-[14.5px] font-semibold text-foreground">Send an enquiry</h3>
               <p className="mt-1 flex-1 text-[13px] leading-relaxed text-muted-foreground">
                 Tell us about your event or your issue and we will get back to you.
@@ -167,7 +173,7 @@ export default function SupportPage() {
             </Card>
 
             <Card className="flex flex-col items-start p-6">
-              <IconChip className="size-10"><Mail className="size-5 text-primary" aria-hidden /></IconChip>
+              <IconChip className="size-10"><Mail className="size-5 text-action" aria-hidden /></IconChip>
               <h3 className="mt-3 text-[14.5px] font-semibold text-foreground">Email support</h3>
               <p className="mt-1 flex-1 text-[13px] leading-relaxed text-muted-foreground">
                 Already registered for an event? Your event organiser can help fastest with
@@ -179,7 +185,7 @@ export default function SupportPage() {
             </Card>
 
             <Card className="flex flex-col items-start p-6">
-              <IconChip className="size-10"><Scale className="size-5 text-primary" aria-hidden /></IconChip>
+              <IconChip className="size-10"><Scale className="size-5 text-action" aria-hidden /></IconChip>
               <h3 className="mt-3 text-[14.5px] font-semibold text-foreground">Legal & policies</h3>
               <ul className="mt-2 flex flex-1 flex-col gap-1.5">
                 {LEGAL_LINKS.map(l => (
@@ -190,7 +196,7 @@ export default function SupportPage() {
           </div>
 
           <p className={cn(typography.body, 'mx-auto mt-8 max-w-2xl text-center text-muted-foreground')}>
-            <LifeBuoy className="mr-1.5 inline size-4 align-[-2px] text-primary" aria-hidden />
+            <LifeBuoy className="mr-1.5 inline size-4 align-[-2px] text-action" aria-hidden />
             Registration, ticket and refund questions for a specific event are handled by that
             event&apos;s organiser — their contact details are on the event page.
           </p>

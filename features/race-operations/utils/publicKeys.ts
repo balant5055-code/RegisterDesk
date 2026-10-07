@@ -76,3 +76,33 @@ export function nameKey(name: string): string {
  * Upper bound for a Firestore prefix range query. U+F8FF sorts above every ordinary
  * character, so [q, q + PREFIX_UPPER_BOUND] brackets exactly the strings beginning with q. */
 export const PREFIX_UPPER_BOUND = ""
+
+// ─── RD-RACEOPS-02C · leaderboard cursor ──────────────────────────────────────
+//
+// `overallRank` is NOT unique — tied finishers share it — so a cursor on the rank alone
+// skipped every other entry with the same rank at a page boundary (AUDIT-01 P0-1). The
+// cursor is now the pair Firestore actually orders by: (overallRank, document id), which
+// is total because entry ids are unique. It is encoded for the public URL as
+// `<rank>~<bibKey>`, opaque and short; anything that does not decode is treated as "no
+// cursor", never as an error.
+
+export interface LeaderboardCursor {
+  rank:   number
+  bibKey: string
+}
+
+const CURSOR_RE = /^(\d{1,7})~([A-Z0-9]{1,32})$/
+
+export function encodeLeaderboardCursor(c: LeaderboardCursor): string {
+  return `${c.rank}~${bibKey(c.bibKey)}`
+}
+
+/** Null for anything that is not a well-formed cursor — a stale link lands on page one. */
+export function decodeLeaderboardCursor(raw: string | null | undefined): LeaderboardCursor | null {
+  if (!raw) return null
+  const m = CURSOR_RE.exec(raw.trim())
+  if (!m) return null
+  const rank = Number(m[1])
+  if (!Number.isInteger(rank) || rank < 1) return null
+  return { rank, bibKey: m[2] }
+}

@@ -21,6 +21,7 @@ import {
 } from './firestore'
 
 import { chargeCertificate } from './billing'
+import { reserveServiceUnits, releaseServiceUnits, draftIdForEventSlug } from '@/lib/licensing/serviceAllowanceLedger'
 import { sendCertificateWhatsApp } from './whatsapp'
 import { uploadCertificateArtifact, deleteCertificateArtifact } from './artifact'
 import { safeFetchBytes, validateEventTemplateUrl, validateGlobalTemplateUrl } from './urlGuard'
@@ -207,6 +208,17 @@ export class CertificateInProgressError extends Error {
   }
 }
 
+/**
+ * RD-EVENT-COMMERCE-02 — raised when the event's PREPAID certificate allowance is used up and
+ * its exhaustion policy is 'block'. Nothing is rendered, stored, recorded or charged.
+ */
+export class CertificateAllowanceExhaustedError extends Error {
+  constructor() {
+    super('This event’s prepaid certificate allowance is used up. While the event is open, buy more with Increase limit on the event Wallet.')
+    this.name = 'CertificateAllowanceExhaustedError'
+  }
+}
+
 /** Raised when a template carries no builder design and therefore cannot produce a certificate. */
 export class CertificateTemplateNotDesignedError extends Error {
   constructor() {
@@ -312,6 +324,24 @@ export async function generateCertificate(
     throw new CertificateInProgressError()
   }
 
+  // 2b. RD-EVENT-COMMERCE-02 — the event's prepaid certificate allowance. One unit is
+  //     reserved for this certificateId BEFORE anything is rendered (so concurrent issuance can
+  //     never exceed it) and released if issuance fails. The unit key is the certificateId, so a
+  //     retry of the same tuple never takes a second unit. No allowance ⇒ the wallet path below,
+  //     unchanged. Exhausted ⇒ the allowance's policy: 'block' refuses issuance, 'wallet_payg'
+  //     falls back to the wallet charge.
+  const allowanceDraftId = await draftIdForEventSlug(input.eventSlug)
+  const certUnitKey = `cert_${certificateId}`
+  let fromAllowance = false
+  if (allowanceDraftId) {
+    const outcome = await reserveServiceUnits({ draftId: allowanceDraftId, service: 'certificates', unitKey: certUnitKey, source: source })
+    if (outcome.mode === 'exhausted' && outcome.policy === 'block') {
+      await releaseCertificateClaim(eventId, registrationId, certificateType)
+      throw new CertificateAllowanceExhaustedError()
+    }
+    fromAllowance = outcome.mode === 'allowance'
+  }
+
   // 3. We own generation. Any failure releases the claim so a retry can recover.
   try {
     const verificationToken = generateVerificationToken()
@@ -404,7 +434,8 @@ export async function generateCertificate(
     // only, so a re-issued/duplicate tuple (which returns early above) never charges
     // twice. Best-effort: an insufficient balance skips the charge but never fails an
     // already-issued certificate (the result carries the outcome for surfacing).
-    const billing = await chargeCertificate({
+    // A certificate covered by the prepaid allowance costs the wallet nothing.
+    const billing = fromAllowance ? null : await chargeCertificate({
       organizerUid: input.organizerUid, certificateId, eventId, eventName: input.eventName,
     }).catch(err => {
       // A billing infra error must not fail an already-issued certificate, but a
@@ -467,6 +498,11 @@ export async function generateCertificate(
     // Retry is unaffected: the claim is still released and the error still re-thrown.
     captureError(err, { scope: 'certificate_generation', area: 'certificate', eventId, registrationId, certificateType })
     await releaseCertificateClaim(eventId, registrationId, certificateType)
+    // Not issued ⇒ the reserved allowance unit is handed back.
+    if (fromAllowance && allowanceDraftId) {
+      await releaseServiceUnits({ draftId: allowanceDraftId, service: 'certificates', unitKey: certUnitKey })
+        .catch(e => console.error('[certificates] allowance release failed', e))
+    }
     throw err
   }
 }

@@ -1,7 +1,8 @@
 // RD-RACEOPS-01 · Race Operations — Publish Results.
 //
-// Sprint 1 shell: event + race selection are live; upload, validation, preview and
-// publish are declared placeholders. No backend logic, no writes.
+// The complete flow: event → race → prepare & upload → map → validate → verify → rank →
+// review → publish. Gated for the workspace owner / admin and for sports events
+// (RD-RACEOPS-02B); the flow itself lives in features/race-operations.
 
 import { PageHeader } from '@/components/ui'
 import { PublishResultsFlow, RaceOpsAccessGate } from '@/features/race-operations'
@@ -16,12 +17,11 @@ export default function PublishResultsPage() {
     <div className="space-y-5">
       <PageHeader
         title="Publish Results"
-        subtitle="Select an event and race, then upload, validate and publish finishing results."
+        subtitle="Select a race, prepare or upload its results file, check it against the start list, then rank and publish."
         breadcrumb={[
           { label: 'Race Operations', href: ROUTES.RACE_OPS },
           { label: 'Publish Results' },
         ]}
-        status={[{ label: 'Foundation', tone: 'warning' }]}
       />
       <RaceOpsAccessGate>
         <PublishResultsFlow />

@@ -20,11 +20,35 @@ function navColumn(menuId: string): FooterColumn {
   return { id: menuId, title: menu?.title ?? menuId, links }
 }
 
-const platformColumn = navColumn('platform')
-// Pricing is a top-level nav entry with no icon of its own, so the key is stated here.
-platformColumn.links.push({ label: 'Pricing', href: '/pricing', iconKey: 'invoice' })
+// The first column was Platform — navColumn('platform') with Pricing appended. When the
+// public Platform section was retired that menu left the registry, and navColumn's
+// fallbacks would have rendered the column anyway: an empty link list under the heading
+// 'platform', lower-cased, because the title falls back to the menu ID. Pricing would have
+// been its only entry.
+//
+// It is replaced by Discover rather than dropped, so Pricing keeps a home and the band
+// keeps three columns instead of leaving a gap. The composition mirrors HomeFooter, which
+// already made this exact column out of the flat top-level entries for the same reason —
+// every link here is a destination that footer has listed all along, resolved from the
+// registry rather than typed.
+const DISCOVER_IDS = ['events', 'causes', 'pricing', 'contact'] as const
+// Typed from FooterLink rather than as strings: the icon keys are a closed union, so a
+// typo here is a compile error instead of a silently missing glyph.
+const DISCOVER_ICONS: Record<string, NonNullable<FooterLink['iconKey']>> = {
+  events: 'sessions', causes: 'fundraiser', pricing: 'invoice', contact: 'communications',
+}
+const discoverColumn: FooterColumn = {
+  id: 'discover', title: 'Discover',
+  links: DISCOVER_IDS
+    .map((id): FooterLink | null => {
+      const menu = PRIMARY_NAV.find(m => m.id === id)
+      const href = menu?.href ?? menu?.featured?.href
+      return href ? { label: menu!.title, href, iconKey: DISCOVER_ICONS[id] } : null
+    })
+    .filter((l): l is FooterLink => l !== null),
+}
 
-// Phase V1.0.A — footer keeps only Platform, Solutions, Company, Legal. Company
+// Phase V1.0.A — footer keeps only Solutions, Company, Legal alongside Discover. Company
 // is explicit (About/Contact/Security are now top-level nav, not a dropdown).
 const companyColumn: FooterColumn = {
   id: 'company', title: 'Company',
@@ -37,7 +61,7 @@ const companyColumn: FooterColumn = {
 }
 
 export const FOOTER_COLUMNS: FooterColumn[] = [
-  platformColumn,
+  discoverColumn,
   navColumn('solutions'),
   companyColumn,
 ]

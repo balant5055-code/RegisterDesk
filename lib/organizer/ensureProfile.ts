@@ -26,6 +26,7 @@
 import { FieldValue }            from 'firebase-admin/firestore'
 import { adminAuth, adminDb }    from '@/lib/firebase/admin'
 import { ORGANIZER_ROLE }        from '@/lib/organizer/identity'
+import { isStaffEmail }          from '@/lib/staff/types'
 
 // Mirrors app/api/auth/verify-otp EMAIL_VERIFIED_SCORE (20 base + 25 email). Kept in
 // sync so a healed profile is byte-identical to what the canonical flows would write
@@ -54,11 +55,21 @@ export async function ensureOrganizerProfile(uid: string): Promise<Record<string
     let email = ''
     let displayName = ''
     let authEmailVerified = false
+    // RD-WORKSPACE-OWNERSHIP-01 · did we actually learn WHO this account is?
+    //
+    // This seam is the one profile-creation path a gate credential also reaches (staff
+    // sign in, hit the dashboard, and their users doc is reconstructed here), so unlike
+    // the other two it must not assert ownership blindly. When the Auth record is
+    // unreadable the account is unidentifiable, and the marker is then left ABSENT rather
+    // than guessed — a missing marker falls back to the legacy draft inference, i.e. to
+    // exactly the behaviour that existed before this field.
+    let authResolved = false
     try {
       const authUser = await adminAuth.getUser(uid)
       email             = authUser.email ?? ''
       displayName       = authUser.displayName ?? ''
       authEmailVerified = authUser.emailVerified
+      authResolved      = true
     } catch (err) {
       // Auth record unexpectedly unavailable (e.g. deleted mid-session). Still create a
       // minimal identity shell so downstream reads/notifications resolve + log rather
@@ -74,6 +85,21 @@ export async function ensureOrganizerProfile(uid: string): Promise<Record<string
       email,
       organizationName: '',
       role:             ORGANIZER_ROLE,
+      // RD-WORKSPACE-OWNERSHIP-01 · explicit ownership, decided from the reserved staff
+      // address namespace — the same unforgeable signal lib/team/access.ts derives
+      // `isStaffCredential` from. A gate operator healed through this seam gets an explicit
+      // `false`, which is what keeps them resolved into the workspace they were issued for
+      // instead of their own empty one. Omitted entirely when the Auth record could not be
+      // read (see authResolved) so an unidentifiable account inherits legacy behaviour.
+      ...(authResolved ? { workspaceOwner: !isStaffEmail(email) } : {}),
+      // RD-ORGANIZER-SIGNUP-02 · reflected from the same Auth flag as everything else
+      // in this object, because this file's contract is that a healed profile is
+      // byte-identical to what the canonical flows would write for the SAME
+      // verification state — and those flows now carry accountStatus. In practice a
+      // caller who reaches this seam is verified (it runs behind verifyCaller, which
+      // refuses an unverified token), so this resolves to 'active'; mirroring the flag
+      // rather than hard-coding it keeps the promise true if that ever changes.
+      accountStatus:    authEmailVerified ? 'active' : 'pending',
       emailVerified:    authEmailVerified,
       verification: {
         email: {

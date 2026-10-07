@@ -12,11 +12,11 @@ import type { ElementType, ComponentPropsWithoutRef } from 'react'
 import { cn } from '@/lib/utils/cn'
 
 /** The static card surface. Exported for the rare consumer that needs the raw class. */
-export const CARD_BASE = 'rounded-2xl border border-border/60 bg-white p-6'
+export const CARD_BASE = 'rounded-2xl border border-border/60 bg-card p-6'
 
 /** Opt-in interactive surface (border-first hover + focus ring). */
 const CARD_INTERACTIVE =
-  'transition-colors hover:border-primary/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary'
+  'transition-colors hover:border-action/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-action'
 
 type CardOwnProps = { interactive?: boolean; className?: string }
 

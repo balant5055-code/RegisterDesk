@@ -5,7 +5,8 @@
 
 import { NextRequest, NextResponse } from 'next/server'
 import { authorizeRaceOps } from '@/features/race-operations/services/authorize'
-import { getOwnedSession, serializeSession } from '@/features/race-operations/repositories/sessionRepo'
+import { serializeSession } from '@/features/race-operations/repositories/sessionRepo'
+import { requireEligibleSession } from '@/features/race-operations/services/eventGate'
 import { countStoredResults } from '@/features/race-operations/repositories/resultRepo'
 import type { ImportSessionView } from '@/features/race-operations/types/session'
 
@@ -22,8 +23,11 @@ export async function GET(req: NextRequest, { params }: Params): Promise<NextRes
   if (!authz.ok) return NextResponse.json({ error: authz.error }, { status: authz.status })
 
   const { sessionId } = await params
-  const session = await getOwnedSession(sessionId, authz.workspaceUid)
-  if (!session) return NextResponse.json({ error: 'Import session not found' }, { status: 404 })
+  // RD-RACEOPS-02B · owned AND the event admits Race Operations — nothing result-shaped
+  // is read for an event that does not.
+  const gated = await requireEligibleSession(sessionId, authz.workspaceUid)
+  if (!gated.ok) return NextResponse.json({ error: gated.error }, { status: gated.status })
+  const session = gated.session
 
   const payload: SessionDetailResponse = {
     session:          serializeSession(session),

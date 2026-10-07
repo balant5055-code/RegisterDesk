@@ -1,44 +1,41 @@
 'use client'
 
-import { useState }    from 'react'
-import Link             from 'next/link'
-import { ExternalLink, Copy, Check, ScanLine, CalendarDays, MapPin, Tag } from 'lucide-react'
-import { cn }           from '@/lib/utils/cn'
-import type { EventDetailResponse }  from '@/app/api/organizer/events/[eventId]/route'
-import type { EventLifecycleStatus } from '@/types/events'
-import EventActionsPanel             from './EventActionsPanel'
+// RD-EVENT-05 · The event command header.
+//
+// ═══ WHAT CHANGED, AND WHY ═══════════════════════════════════════════════════
+//
+// 1. ONE STATUS VOCABULARY. This file carried a THIRD hand-written lifecycle→label map
+//    (after `eventLifecycleMeta` and `presentEventStatus`), in raw palette hues with no
+//    dark-mode pair. It now uses `overviewStatus`, the composed resolver RD-EVENT-03
+//    established, so the events list, the overview and this header cannot disagree.
+//
+// 2. NUMBERS TELL THE TRUTH. `checkedInCount` and `totalRegistrations` rendered raw, so
+//    a failed counter read displayed "0 Registrations · 0 Checked In" with the same
+//    confidence as a measurement — even though `statsUnavailable` has been on the
+//    payload since RD-EVENT-03. Revenue was abbreviated to "₹3.4L", losing digits the
+//    organizer needs; it is now shown in full, as everywhere else in the product.
+//
+// 3. TOKENS. Every arbitrary pixel size and legacy radius is gone.
+//
+// RD-EVENT-08 · The banner and the four large KPI cards are gone from this shell. Both
+// were repeated above all eighteen tabs; together they cost ~220px of vertical space on
+// every sub-page. The figures survive as one compact strip. The banner DATA and the
+// public event page are untouched.
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-function formatINR(paise: number): string {
-  const r = paise / 100
-  if (r >= 100_000) return `₹${(r / 100_000).toFixed(1)}L`
-  if (r >= 1_000)   return `₹${(r / 1_000).toFixed(1)}K`
-  return `₹${r.toLocaleString('en-IN')}`
-}
-
-function formatDate(dateStr: string | null, timeStr: string | null): string | null {
-  if (!dateStr) return null
-  try {
-    const [y, m, d] = dateStr.split('-').map(Number)
-    const label = new Date(y, m - 1, d).toLocaleDateString('en-IN', {
-      day: 'numeric', month: 'short', year: 'numeric',
-    })
-    return timeStr ? `${label}, ${timeStr}` : label
-  } catch {
-    return dateStr
-  }
-}
-
-function getVenueLabel(e: EventDetailResponse): string | null {
-  if (e.venueType === 'online')   return e.onlinePlatform ?? 'Online'
-  if (e.venueType === 'physical') return [e.venueName, e.venueCity].filter(Boolean).join(', ') || null
-  if (e.venueType === 'hybrid') {
-    const parts = [e.venueName, e.venueCity].filter(Boolean)
-    return parts.length ? `${parts.join(', ')} + Online` : 'Hybrid'
-  }
-  return null
-}
+import { useState } from 'react'
+import Link from 'next/link'
+import { ExternalLink, Copy, Check, ScanLine, CalendarDays, MapPin, Tag, WalletCards } from 'lucide-react'
+import { useWorkspacePermissions } from '@/lib/hooks/useWorkspacePermissions'
+import { cn } from '@/lib/utils/cn'
+import { useToast } from '@/components/ui/Toast'
+import { useEventContext } from '@/components/dashboard/EventContextProvider'
+import {
+  UNAVAILABLE, capacityView, checkedInMetric, locationLabel,
+  overviewStatus, publicEventHref, registrationsMetric, revenueMetric, statusChipClass,
+  type MetricValue,
+} from '@/lib/events/eventOverview'
+import type { EventDetailResponse } from '@/app/api/organizer/events/[eventId]/route'
+import EventActionsPanel from './EventActionsPanel'
 
 const EVENT_TYPE_LABELS: Record<string, string> = {
   conference:  'Conference',
@@ -53,201 +50,231 @@ const EVENT_TYPE_LABELS: Record<string, string> = {
   custom:      'Custom Event',
 }
 
-// ── Status Badge ──────────────────────────────────────────────────────────────
+function formatDate(dateStr: string | null, timeStr: string | null): string | null {
+  if (!dateStr) return null
+  const [y, m, d] = dateStr.split('-').map(Number)
+  if (!y || !m || !d) return dateStr
+  const dt = new Date(y, m - 1, d)
+  if (Number.isNaN(dt.getTime())) return dateStr
+  const label = dt.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })
+  return timeStr ? `${label}, ${timeStr}` : label
+}
 
-function StatusBadge({ ls }: { ls: EventLifecycleStatus }) {
-  const map: Record<EventLifecycleStatus, { label: string; cls: string; dot: string }> = {
-    draft:               { label: 'Draft',       cls: 'bg-muted text-muted-foreground',  dot: 'bg-muted-foreground' },
-    pending_review:      { label: 'Pending Approval', cls: 'bg-amber-100 text-amber-700', dot: 'bg-amber-500'      },
-    changes_requested:   { label: 'Changes Requested', cls: 'bg-orange-100 text-orange-700', dot: 'bg-orange-500' },
-    published:           { label: 'Published',   cls: 'bg-emerald-100 text-emerald-700', dot: 'bg-emerald-500'      },
-    registration_closed: { label: 'Reg. Closed', cls: 'bg-amber-100 text-amber-700',     dot: 'bg-amber-500'        },
-    completed:           { label: 'Completed',   cls: 'bg-sky-100 text-sky-700',         dot: 'bg-sky-500'          },
-    cancelled:           { label: 'Cancelled',   cls: 'bg-red-100 text-red-600',         dot: 'bg-red-500'          },
-    archived:            { label: 'Archived',    cls: 'bg-muted text-muted-foreground',  dot: 'bg-muted-foreground' },
-    // Recognition only (Phase L2) — distinct from Draft; never emitted yet.
-    unpublished:         { label: 'Unpublished', cls: 'bg-slate-100 text-slate-600',     dot: 'bg-slate-400'        },
-  }
-  const { label, cls, dot } = map[ls] ?? map.draft
+// ─── Metric ───────────────────────────────────────────────────────────────────
+
+/**
+ * The headline figures as one compact line.
+ *
+ * Each entry keeps the zero-vs-unavailable contract: a figure that could not be read
+ * renders as an em dash with an "Unavailable" label for screen readers, never as a zero.
+ */
+function MetricStrip({ items }: { items: { label: string; metric: MetricValue }[] }) {
   return (
-    <span className={cn('inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[12px] font-semibold', cls)}>
-      <span className={cn('size-1.5 rounded-full', dot)} />
-      {label}
+    <dl className="mt-2.5 flex min-w-0 flex-wrap items-baseline gap-x-4 gap-y-1">
+      {items.map(({ label, metric }) => (
+        <div key={label} className="flex min-w-0 items-baseline gap-1.5">
+          <dd className={cn(
+            'text-fs-sm font-semibold tabular-nums',
+            metric.unavailable ? 'text-muted-foreground' : 'text-foreground',
+          )}>
+            {metric.unavailable
+              ? <><span aria-hidden>{UNAVAILABLE}</span><span className="sr-only">Unavailable</span></>
+              : metric.text}
+          </dd>
+          <dt className="truncate text-fs-xs text-muted-foreground">{label}</dt>
+        </div>
+      ))}
+    </dl>
+  )
+}
+
+function MetaChip({ icon: Icon, text }: { icon: React.ElementType; text: string }) {
+  return (
+    <span className="inline-flex min-w-0 items-center gap-1.5 rounded-pill border border-border bg-muted/40 px-2.5 py-0.5 text-fs-2xs text-muted-foreground">
+      <Icon className="size-3 shrink-0" aria-hidden />
+      <span className="truncate">{text}</span>
     </span>
   )
 }
 
-// ── Copy Button ───────────────────────────────────────────────────────────────
+// ─── Copy link ────────────────────────────────────────────────────────────────
 
-function CopyButton({ text, label = 'Copy Link' }: { text: string; label?: string }) {
+function CopyLinkButton({ url }: { url: string }) {
+  const { showToast } = useToast()
   const [copied, setCopied] = useState(false)
+
   async function handle() {
-    await navigator.clipboard.writeText(text)
-    setCopied(true)
-    setTimeout(() => setCopied(false), 2000)
+    try {
+      await navigator.clipboard.writeText(url)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    } catch {
+      // Clipboard access is refused in an insecure context or without permission. The
+      // old handler let that rejection go unhandled and gave the organizer no feedback.
+      showToast('Couldn’t copy the link. Copy it from the address bar instead.', 'error')
+    }
   }
+
   return (
     <button
       type="button"
       onClick={handle}
-      className="flex items-center gap-1.5 rounded-lg border border-border bg-card px-3 py-1.5 text-[13px] font-medium text-foreground transition-colors hover:bg-muted/60"
+      aria-label={copied ? 'Link copied' : 'Copy the public event link'}
+      className="inline-flex h-11 shrink-0 items-center gap-1.5 rounded-control border border-border bg-card px-3 text-fs-sm font-medium text-foreground transition-colors hover:bg-muted/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 sm:h-9"
     >
-      {copied ? <Check className="size-3.5 text-emerald-600" /> : <Copy className="size-3.5" />}
-      {copied ? 'Copied!' : label}
+      {copied
+        ? <Check className="size-3.5 text-[color:var(--accent-verify-fg)]" aria-hidden />
+        : <Copy className="size-3.5" aria-hidden />}
+      {copied ? 'Copied' : 'Copy link'}
     </button>
   )
 }
 
-// ── KPI Pill ──────────────────────────────────────────────────────────────────
+// ─── Main ─────────────────────────────────────────────────────────────────────
 
-function KpiPill({ label, value, highlight }: { label: string; value: string; highlight?: boolean }) {
-  return (
-    <div className={cn(
-      'flex min-w-[84px] flex-col rounded-xl border px-3.5 py-2.5',
-      highlight ? 'border-primary/20 bg-primary/[0.06]' : 'border-border bg-muted/30',
-    )}>
-      <span className={cn(
-        'text-[18px] font-bold tabular-nums leading-tight',
-        highlight ? 'text-primary' : 'text-foreground',
-      )}>
-        {value}
-      </span>
-      <span className="mt-0.5 text-[11px] text-muted-foreground">{label}</span>
-    </div>
-  )
-}
-
-// ── Meta Chip ─────────────────────────────────────────────────────────────────
-
-function MetaChip({ icon: Icon, text }: { icon: React.ElementType; text: string }) {
-  return (
-    <span className="inline-flex items-center gap-1 rounded-full border border-border bg-muted/50 px-2.5 py-0.5 text-[12px] text-muted-foreground">
-      <Icon className="size-3 shrink-0" />
-      <span className="max-w-[180px] truncate">{text}</span>
-    </span>
-  )
-}
-
-// ── Main ──────────────────────────────────────────────────────────────────────
-
-interface Props {
+export default function EventCommandHeader({
+  event, eventId, token, onSuccess,
+}: {
   event:     EventDetailResponse
   eventId:   string
   token:     string
   onSuccess: () => void
-}
+}) {
+  // `now` comes from the event context: a value fixed at mount. Calling Date.now()
+  // during render is impure and would also risk a server/client hydration mismatch.
+  const { now } = useEventContext()
+  const status    = overviewStatus(event, now)
+  const publicUrl = publicEventHref(event)
+  const absoluteUrl = publicUrl && typeof window !== 'undefined'
+    ? `${window.location.origin}${publicUrl}`
+    : publicUrl
 
-export default function EventCommandHeader({ event, eventId, token, onSuccess }: Props) {
-  const publicUrl = event.slug
-    ? `${typeof window !== 'undefined' ? window.location.origin : ''}${
-        event.campaignType === 'donation_only' ? '/campaign' : '/events'
-      }/${event.slug}`
-    : null
-
-  const showCheckin = ['published', 'registration_closed', 'completed'].includes(event.lifecycleStatus) && !!event.slug
-
-  const fillRate = !event.isFreeEvent && event.totalCapacity && event.totalCapacity > 0
-    ? Math.round((event.totalRegistrations / event.totalCapacity) * 100)
-    : null
+  const showCheckin = ['published', 'registration_closed', 'completed'].includes(event.lifecycleStatus)
+  const perms = useWorkspacePermissions()
+  const canSeeWallet = !perms.loading && perms.has('wallet') && event.campaignType !== 'donation_only'
+    && Boolean(event.slug)
 
   const dateLabel  = formatDate(event.startDate, event.startTime)
-  const venueLabel = getVenueLabel(event)
+  const venueLabel = locationLabel(event)
   const typeLabel  = event.eventType ? (EVENT_TYPE_LABELS[event.eventType] ?? event.eventType) : null
+  const capacity   = capacityView(event)
+
+  const capacityMetric: MetricValue = capacity
+    ? { text: `${capacity.pct}%`, unavailable: false, sub: `${capacity.remaining.toLocaleString('en-IN')} places left` }
+    : event.statsUnavailable
+      ? { text: UNAVAILABLE, unavailable: true, sub: null }
+      : { text: 'Unlimited', unavailable: false, sub: 'No limit set' }
 
   return (
-    <div className="border-b border-border">
-      {/* Compact banner */}
-      {event.bannerUrl ? (
-        <div className="relative h-[90px] w-full overflow-hidden sm:h-[108px]">
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img src={event.bannerUrl} alt="" className="h-full w-full object-cover" />
-          <div className="absolute inset-0 bg-gradient-to-t from-black/50 to-transparent" />
-        </div>
-      ) : (
-        <div className="h-14 w-full bg-gradient-to-br from-[var(--primary-from)]/15 via-[var(--primary)]/8 to-transparent" />
-      )}
-
-      {/* Content */}
-      <div className="space-y-3 px-5 py-4 sm:px-6">
-
-        {/* Row 1 — name + status */}
-        <div>
-          <div className="flex flex-wrap items-center gap-2">
-            <h1 className="text-[19px] font-bold leading-tight text-foreground">{event.name}</h1>
-            <StatusBadge ls={event.lifecycleStatus} />
+    // RD-EVENT-08 · No banner. The organizer shell is an operational surface, not the
+    // public event page: a 112px hero repeated above all eighteen tabs pushed the actual
+    // work below the fold on every single one. The banner data is untouched and the
+    // public page still uses it.
+    <header className="border-b border-border">
+      <div className="flex flex-col gap-3 px-4 py-4 sm:px-6 lg:flex-row lg:items-start lg:justify-between lg:gap-6">
+        {/* Identity */}
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1.5">
+            <h1 className="min-w-0 break-words text-fs-xl font-semibold leading-tight text-foreground">
+              {event.name}
+            </h1>
+            {/* Status carries a word, not only a hue — readable in grayscale. */}
+            <span className={cn(
+              'inline-flex shrink-0 items-center rounded-pill px-2 py-0.5 text-fs-2xs font-semibold',
+              statusChipClass(status.tone),
+            )}>
+              {status.label}
+            </span>
           </div>
+
           {event.tagline && (
-            <p className="mt-0.5 text-[13px] text-muted-foreground">{event.tagline}</p>
+            <p className="mt-1 line-clamp-2 break-words text-fs-sm text-muted-foreground">
+              {event.tagline}
+            </p>
           )}
+
+          {(typeLabel || dateLabel || venueLabel) && (
+            <div className="mt-2 flex min-w-0 flex-wrap items-center gap-1.5">
+              {typeLabel  && <MetaChip icon={Tag}          text={typeLabel}  />}
+              {dateLabel  && <MetaChip icon={CalendarDays} text={dateLabel}  />}
+              {venueLabel && <MetaChip icon={MapPin}       text={venueLabel} />}
+            </div>
+          )}
+
+          {/*
+            The four headline figures, as ONE compact line rather than four large cards.
+            The cards cost ~110px of vertical space above every tab and were the third
+            copy of these numbers on screen; this keeps every figure — and its
+            zero-vs-unavailable honesty — at roughly a fifth of the height.
+          */}
+          <MetricStrip
+            items={[
+              { label: 'registered',   metric: registrationsMetric(event) },
+              { label: 'checked in',   metric: checkedInMetric(event) },
+              ...(event.isFreeEvent ? [] : [{ label: 'revenue', metric: revenueMetric(event) }]),
+              { label: 'capacity',     metric: capacityMetric },
+            ]}
+          />
         </div>
 
-        {/* Row 2 — meta chips */}
-        {(typeLabel || dateLabel || venueLabel) && (
-          <div className="flex flex-wrap items-center gap-1.5">
-            {typeLabel  && <MetaChip icon={Tag}          text={typeLabel}  />}
-            {dateLabel  && <MetaChip icon={CalendarDays} text={dateLabel}  />}
-            {venueLabel && <MetaChip icon={MapPin}       text={venueLabel} />}
-          </div>
-        )}
-
-        {/* Row 3 — KPI pills */}
-        <div className="flex flex-wrap gap-2">
-          <KpiPill label="Registrations" value={event.totalRegistrations.toLocaleString('en-IN')} highlight />
-          {!event.isFreeEvent && (
-            <KpiPill label="Revenue" value={formatINR(event.estimatedRevenue)} />
-          )}
-          <KpiPill label="Checked In" value={event.checkedInCount.toLocaleString('en-IN')} />
-          {fillRate !== null && (
-            <KpiPill label="Capacity" value={`${fillRate}%`} />
-          )}
-        </div>
-
-        {/* Row 4 — actions */}
-        <div className="flex flex-wrap items-center gap-2">
-          {/* Primary: View Page */}
+        {/* Actions */}
+        <div className="flex shrink-0 flex-wrap items-center gap-2">
           {publicUrl && (
             <Link
               href={publicUrl}
               target="_blank"
               rel="noopener noreferrer"
-              className="flex items-center gap-1.5 rounded-lg border border-border bg-card px-3 py-1.5 text-[13px] font-medium text-foreground transition-colors hover:bg-muted/60"
+              aria-label={`${event.campaignType === 'donation_only' ? 'View campaign page' : 'View public page'} (opens in a new tab)`}
+              className="inline-flex h-11 shrink-0 items-center gap-1.5 rounded-control border border-border bg-card px-3 text-fs-sm font-medium text-foreground transition-colors hover:bg-muted/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 sm:h-9"
             >
-              <ExternalLink className="size-3.5" />
-              {event.campaignType === 'donation_only' ? 'View Campaign' : 'View Page'}
+              <ExternalLink className="size-3.5" aria-hidden />
+              {event.campaignType === 'donation_only' ? 'View campaign' : 'View page'}
             </Link>
           )}
 
-          {/* Primary: Check-In */}
           {showCheckin && (
             <Link
-              href={`/dashboard/events/${eventId}/checkin`}
-              className="flex items-center gap-1.5 rounded-lg border border-primary/30 bg-primary/5 px-3 py-1.5 text-[13px] font-medium text-primary transition-colors hover:bg-primary/10"
+              href={`/dashboard/events/${encodeURIComponent(eventId)}/checkin`}
+              className="inline-flex h-11 shrink-0 items-center gap-1.5 rounded-control bg-primary/[0.08] px-3 text-fs-sm font-semibold text-[color:var(--primary-text)] transition-colors hover:bg-primary/[0.14] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 sm:h-9"
             >
-              <ScanLine className="size-3.5" />
-              Check-In
+              <ScanLine className="size-3.5" aria-hidden />
+              Check-in
             </Link>
           )}
 
-          {/* Primary: Copy Link */}
-          {publicUrl && <CopyButton text={publicUrl} />}
+          {/* RD-CLOSE — this event's Wallet (services bought, used, refundable), one click away. */}
+          {canSeeWallet && (
+            <Link
+              href={`/dashboard/wallet?eventId=${encodeURIComponent(eventId)}`}
+              className="inline-flex h-11 shrink-0 items-center gap-1.5 rounded-control border border-border bg-card px-3 text-fs-sm font-medium text-foreground transition-colors hover:bg-muted/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 sm:h-9"
+            >
+              <WalletCards className="size-3.5" aria-hidden />
+              Wallet
+            </Link>
+          )}
 
-          {/* Divider + secondary actions dropdown */}
+          {absoluteUrl && <CopyLinkButton url={absoluteUrl} />}
+
           {token && (
             <>
-              <span className="hidden h-4 w-px bg-border sm:block" />
+              <span className="hidden h-4 w-px bg-border sm:block" aria-hidden />
               <EventActionsPanel event={event} token={token} onSuccess={onSuccess} mode="dropdown" />
             </>
           )}
         </div>
 
-        {/* Cancellation reason */}
-        {event.lifecycleStatus === 'cancelled' && event.cancelReason && (
-          <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3">
-            <p className="text-[13px] font-semibold text-red-700">Cancellation reason</p>
-            <p className="mt-0.5 text-[14px] text-red-600">{event.cancelReason}</p>
+        {/* Cancellation — the one notice that must never be a subtle chip. */}
+        {event.lifecycleStatus === 'cancelled' && (
+          <div className={cn('rounded-surface border p-3.5', 'border-destructive/30 bg-destructive/[0.04]')}>
+            <p className="text-fs-sm font-semibold text-foreground">This event is cancelled</p>
+            {event.cancelReason && (
+              <p className="mt-0.5 break-words text-fs-xs text-muted-foreground [overflow-wrap:anywhere]">
+                {event.cancelReason}
+              </p>
+            )}
           </div>
         )}
       </div>
-    </div>
+    </header>
   )
 }

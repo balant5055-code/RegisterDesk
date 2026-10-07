@@ -42,7 +42,7 @@ export function ConferenceNetworking() {
           transition={{ duration: 0.5, ease: [0.25, 0, 0, 1] }}
           className="mb-12"
         >
-          <p className="mb-2 text-[11px] font-bold uppercase tracking-[0.22em] text-primary">
+          <p className="mb-2 text-[11px] font-bold uppercase tracking-[0.22em] text-action">
             Networking
           </p>
           <div className="flex flex-wrap items-end justify-between gap-3">

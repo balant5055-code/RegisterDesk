@@ -13,6 +13,8 @@ import { RotateCcw, Undo2 } from 'lucide-react'
 import {
   CONFIG_SECTION_REGISTRY,
   BUSINESS_CONFIG_DEFAULTS,
+  CENTRAL_PRICING_FIELDS,
+  SUPER_ADMIN_ONLY_FIELDS,
   type BusinessConfigSectionKey,
 } from '@/lib/config/businessConfig'
 import { SECTION_FIELDS, SECTION_LABELS, type FieldDef } from './fields'
@@ -80,7 +82,7 @@ function FieldRow({ def, value, onChange }: { def: FieldDef; value: unknown; onC
 }
 
 export function SectionEditor({
-  sectionKey, published, draft, onDraftChange, onPublish, publishing,
+  sectionKey, published, draft, onDraftChange, onPublish, publishing, canEditPricing = false,
 }: {
   sectionKey:    BusinessConfigSectionKey
   published:     SectionDraft
@@ -88,8 +90,20 @@ export function SectionEditor({
   onDraftChange: (d: SectionDraft) => void
   onPublish:     () => void
   publishing:    boolean
+  /** RD-PHASE4-S2 — server-decided. Fields in CENTRAL_PRICING_FIELDS (e.g. settlement fee/tax) lock without it. */
+  canEditPricing?: boolean
 }) {
-  const validation = useMemo(() => CONFIG_SECTION_REGISTRY[sectionKey].validate(draft), [sectionKey, draft])
+  const pricingList = CENTRAL_PRICING_FIELDS[sectionKey]
+  const lockedKeys  = new Set(canEditPricing ? [] : pricingList === '*' ? SECTION_FIELDS[sectionKey].map(d => d.key) : (pricingList ?? []))
+  // RD-WALLET-CFG-01 — Super Admin-only fields are not SHOWN to anyone else (the server already left
+  // them out of the response, and refuses any change to them — this is presentation, not the boundary).
+  const hiddenKeys = useMemo(() => new Set(canEditPricing ? [] : (SUPER_ADMIN_ONLY_FIELDS[sectionKey] ?? [])), [canEditPricing, sectionKey])
+  const withoutHidden = (d: SectionDraft): SectionDraft => Object.fromEntries(Object.entries(d).filter(([k]) => !hiddenKeys.has(k)))
+  // The section validator needs every field; a hidden one is validated as its code default (the
+  // server validates the real stored value on save).
+  const validation = useMemo(() => CONFIG_SECTION_REGISTRY[sectionKey].validate(
+    hiddenKeys.size > 0 ? { ...toDraft(BUSINESS_CONFIG_DEFAULTS[sectionKey]), ...draft } : draft,
+  ), [sectionKey, draft, hiddenKeys])
   const dirty = useMemo(() => JSON.stringify(draft) !== JSON.stringify(published), [draft, published])
 
   const setField = (key: string, value: unknown) => onDraftChange({ ...draft, [key]: value })
@@ -108,7 +122,7 @@ export function SectionEditor({
           <Button type="button" variant="ghost" size="sm" disabled={!dirty || publishing} onClick={() => onDraftChange({ ...published })}>
             <Undo2 className="size-3.5" /> Revert
           </Button>
-          <Button type="button" variant="ghost" size="sm" disabled={publishing} onClick={() => onDraftChange(toDraft(BUSINESS_CONFIG_DEFAULTS[sectionKey]))}>
+          <Button type="button" variant="ghost" size="sm" disabled={publishing} onClick={() => onDraftChange(withoutHidden(toDraft(BUSINESS_CONFIG_DEFAULTS[sectionKey])))}>
             <RotateCcw className="size-3.5" /> Defaults
           </Button>
           <Button type="button" variant="primary" size="sm" disabled={!dirty || !validation.valid || publishing} isLoading={publishing} onClick={onPublish}>
@@ -119,10 +133,16 @@ export function SectionEditor({
 
       <div className="p-4">
         <div className="grid grid-cols-1 gap-x-5 gap-y-3 sm:grid-cols-2 lg:grid-cols-3">
-          {SECTION_FIELDS[sectionKey].map(def => (
-            <FieldRow key={def.key} def={def} value={draft[def.key]} onChange={v => setField(def.key, v)} />
+          {SECTION_FIELDS[sectionKey].filter(def => !hiddenKeys.has(def.key)).map(def => (
+            <FieldRow key={def.key} def={lockedKeys.has(def.key) ? { ...def, readOnly: true } : def} value={draft[def.key]} onChange={v => setField(def.key, v)} />
           ))}
         </div>
+
+        {hiddenKeys.size > 0 && (
+          <p className="mt-4 rounded-lg border border-border bg-muted/30 px-3 py-2 text-[12px] text-muted-foreground">
+            Financial controls (negative balance, freeze, refunds and top-up limits) are managed by a Super Admin and are not shown here.
+          </p>
+        )}
 
         {!validation.valid && (
           <ul className="mt-4 space-y-1 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-[12px] text-destructive">

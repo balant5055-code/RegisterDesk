@@ -24,10 +24,31 @@ export const SCREENSHOTS: ScreenshotDef[] = [
   { id: 'sessions',          title: 'Sessions & Agenda',       description: 'Multi-track session scheduling.',                    imagePath: null, alt: 'RegisterDesk sessions and agenda',        status: 'pending', frame: 'dashboard', width: DESK_W, height: DESK_H },
   { id: 'ticket',            title: 'Digital ticket',          description: "The attendee's ticket with QR and identifier.",      imagePath: null, alt: 'RegisterDesk digital ticket with QR code', status: 'pending', frame: 'browser',   width: DESK_W, height: DESK_H },
   { id: 'attendee-email',    title: 'Attendee email',          description: 'Confirmation and event update emails.',              imagePath: null, alt: 'RegisterDesk attendee confirmation email', status: 'pending', frame: 'browser',   width: DESK_W, height: DESK_H },
-  { id: 'developer-api',     title: 'Developer API',           description: 'API keys, webhooks, and the metadata platform.',     imagePath: null, alt: 'RegisterDesk developer API and webhooks', status: 'pending', frame: 'dashboard', width: DESK_W, height: DESK_H },
+  { id: 'developer-api',     title: 'Developer API',           description: 'API keys, signed webhooks, and delivery history.',     imagePath: null, alt: 'RegisterDesk developer API and webhooks', status: 'pending', frame: 'dashboard', width: DESK_W, height: DESK_H },
   { id: 'security-center',   title: 'Security & trust',        description: 'Roles, audit history, and workspace controls.',      imagePath: null, alt: 'RegisterDesk security and trust controls', status: 'pending', frame: 'dashboard', width: DESK_W, height: DESK_H },
 ]
 
 export function getScreenshot(id: string): ScreenshotDef | undefined {
   return SCREENSHOTS.find(s => s.id === id)
+}
+
+/**
+ * Is there a REAL capture behind this id?
+ *
+ * The same condition ScreenshotFrame uses to decide whether to render at all, exported so a
+ * layout can ask the question BEFORE it commits to a media column.
+ *
+ * It has to exist because `getScreenshot` returns a truthy entry for a pending screenshot —
+ * every consumer treated that as "there is an image here" and reserved space for one. The
+ * frame itself correctly rendered nothing, but the decorative backdrop wrapped around it did
+ * not: an `absolute -top-8 bottom-0` overlay inside a parent that had collapsed to 0px still
+ * paints a 24–40px tinted bar. On the two-up showcase that read as a card which had failed
+ * to load, and on a dashboard_preview section it was the entire body under the heading.
+ *
+ * Ask this first; render the media region only if it answers true.
+ */
+export function hasScreenshot(id: string | undefined | null): boolean {
+  if (!id) return false
+  const shot = getScreenshot(id)
+  return shot?.status === 'available' && !!shot.imagePath
 }

@@ -124,6 +124,30 @@ vi.mock('@/lib/whatsapp', () => ({
 }))
 
 // NOT mocked, deliberately: the real service and the real route are the code under test.
+// RD-CLOSE — an accepted message is now persisted by ONE acceptance transaction
+// (lib/whatsapp/acceptance.ts → recordMessageAcceptance): charge + usage + log + status, idempotent
+// per wamid. Its real atomicity/idempotency is proven on the emulator
+// (tests/emulator/closureAcceptance.emu.test.ts). Here it is a faithful stand-in that feeds this
+// file's capture arrays: one charge per wamid; a legacy base row (from an earlier message) puts a
+// NEW wamid on `<base>__<wamid>`; the in-transaction balance re-check never drives it negative.
+const acceptedWamids = new Set<string>()
+vi.mock('@/lib/whatsapp/acceptance', async orig => ({
+  ...(await orig<typeof import('@/lib/whatsapp/acceptance')>()),
+  withPersistRetry: <T,>(fn: () => Promise<T>) => fn(),
+  recordMessageAcceptance: async (i: { wamid: string; costPaise: number; baseLedgerId: string; registrationPatch?: { patch: Doc } }) => {
+    if (acceptedWamids.has(i.wamid)) return { already: true, chargedPaise: 0, chargeSkipped: false }
+    acceptedWamids.add(i.wamid)
+    let chargedPaise = 0
+    if (i.costPaise > 0 && walletBalance >= i.costPaise) {
+      walletDebits.push(i.costPaise)
+      ledgerWrites.push({ id: ledgerExists ? `${i.baseLedgerId}__${i.wamid}` : i.baseLedgerId, amountPaise: i.costPaise })
+      chargedPaise = i.costPaise
+    }
+    if (i.registrationPatch) regUpdates.push(i.registrationPatch.patch)
+    return { already: false, chargedPaise, chargeSkipped: false }
+  },
+}))
+
 const { POST } = await import('@/app/api/organizer/whatsapp-logs/[logId]/retry/route')
 const { retryWhatsAppConfirmation } = await import('@/lib/email-logs/whatsappRetry')
 
@@ -160,7 +184,7 @@ beforeEach(() => {
     ticketCode: 'TK-1', whatsappStatus: 'unknown',
   }
   eventDoc = { pricing: { whatsappEnabled: true } }
-  providerSends.length = 0; walletDebits.length = 0; ledgerWrites.length = 0; regUpdates.length = 0
+  providerSends.length = 0; walletDebits.length = 0; ledgerWrites.length = 0; regUpdates.length = 0; acceptedWamids.clear()
 })
 
 // ─── 1. The security matrix, through the REAL route ───────────────────────────
@@ -308,15 +332,17 @@ describe('no duplicate billing is introduced', () => {
     expect(ledgerWrites).toHaveLength(1)
   })
 
-  it('a confirmed retry of an ALREADY-BILLED registration does not charge again', async () => {
-    // The ledger id is per registration, so the original send's entry already exists.
+  it('RD-CLOSE — a confirmed retry that Meta accepts is a NEW billable message (its own wamid)', async () => {
+    // Approved rule (D3): Meta accepted ⇒ billable exactly once PER MESSAGE. The original
+    // (timed-out) message, if Meta did accept it, is billed by its own acceptance record when its
+    // status webhook arrives; this retry is a second accepted message and is billed separately.
     ledgerExists = true
     const r = await retryWhatsAppConfirmation(ARGS, { confirmUnknownDelivery: true })
 
-    expect(r.ok).toBe(true)          // the message is still re-sent…
+    expect(r.ok).toBe(true)
     expect(providerSends).toHaveLength(1)
-    expect(walletDebits).toEqual([]) // …but the wallet is untouched.
-    expect(ledgerWrites).toEqual([])
+    expect(walletDebits).toEqual([35])
+    expect(ledgerWrites).toHaveLength(1)
   })
 
   it('confirmation cannot be used to bypass the already-sent guard', async () => {

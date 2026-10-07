@@ -10,6 +10,7 @@ import type { PassPublic } from '@/components/event-templates/types'
 import type { PassAvailability } from '@/lib/registrations/types'
 import { passDisplayPrice } from '@/components/event-templates/shared/utils/format'
 import { formatBenefits } from '@/components/event-templates/shared/registration/benefitLabels'
+import { passAgeLimits } from '@/lib/passes/passRaceRules'
 
 export interface Challenge {
   id:          string
@@ -77,8 +78,8 @@ export function passesToChallenges(
         status,
         closesOn:    p.salesEndDate?.trim() || undefined,
         selectable:  status !== 'sold_out',
-        minAge:      p.raceDetails?.minAge ?? null,
-        maxAge:      p.raceDetails?.maxAge ?? null,
+        // RD-CE-FIX H2 · the age window only — a team size is never shown as an age.
+        ...passAgeLimits(p as unknown as Record<string, unknown>),
         notes:       passNotes(p),
       }
     })

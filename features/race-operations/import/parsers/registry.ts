@@ -11,17 +11,21 @@
 
 import { csvParser } from './csv/csvParser'
 import { excelParser } from './excel/excelParser'
+import { pdfParser } from './pdf/pdfParser'
 import {
   extensionOf, type ResultFileSource, type ResultParser,
 } from './types'
 import {
-  RESULTS_ACCEPTED_EXTENSIONS, RESULTS_MAX_FILE_BYTES, formatMaxFileSize,
+  RESULTS_ACCEPTED_EXTENSIONS, RESULTS_MAX_FILE_BYTES, formatAcceptedExtensions, formatMaxFileSize,
 } from '../constants'
 
 /** Vendor-specific providers go ABOVE the generic ones. */
 export const RESULT_PARSERS: readonly ResultParser[] = [
   excelParser,
   csvParser,
+  // RD-RACEOPS-RESULTS-06 · text PDFs. Last because its extension overlaps nothing; it
+  // parses on the SERVER (see pdf/pdfParser.ts) and returns the same ParsedTable.
+  pdfParser,
 ]
 
 export type ResolveParserOutcome =
@@ -37,16 +41,17 @@ export function resolveParser(file: ResultFileSource): ResolveParserOutcome {
   const ext = extensionOf(file.name)
 
   if (!ext) {
-    return { ok: false, message: `This file has no extension. Upload a ${RESULTS_ACCEPTED_EXTENSIONS.join(' or ')} file.` }
+    return { ok: false, message: `This file has no extension. Upload a ${formatAcceptedExtensions()} file.` }
   }
 
   if (!(RESULTS_ACCEPTED_EXTENSIONS as readonly string[]).includes(ext)) {
-    const future = ext === '.pdf' || ext === '.zip'
-      ? ` ${ext.slice(1).toUpperCase()} results are planned for a later release.`
+    // RD-RACEOPS-RESULTS-06 · PDF is supported now; ZIP remains future-only.
+    const future = ext === '.zip'
+      ? ' ZIP results are planned for a later release.'
       : ''
     return {
       ok: false,
-      message: `${ext} files are not supported. Upload a ${RESULTS_ACCEPTED_EXTENSIONS.join(' or ')} file.${future}`,
+      message: `${ext} files are not supported. Upload a ${formatAcceptedExtensions()} file.${future}`,
     }
   }
 

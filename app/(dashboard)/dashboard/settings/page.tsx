@@ -21,6 +21,10 @@ import { useToast }                    from '@/components/ui/Toast'
 import { PhoneField }                  from '@/components/auth'
 import { formatPhoneNumber }           from '@/lib/communication/phone'
 import { DEFAULT_DIAL_CODE, callingDigitsForDialCode } from '@/lib/communication/countryCodes'
+import { BUSINESS_CONFIG_DEFAULTS } from '@/lib/config/businessConfig'
+/** The PLATFORM support inbox — deliberately not the organizer's own public supportEmail,
+ *  which is attendee-facing and would send a closure request straight back to themselves. */
+const PLATFORM_SUPPORT_EMAIL = BUSINESS_CONFIG_DEFAULTS.branding.supportEmail
 
 // ─── Primitive components ─────────────────────────────────────────────────────
 
@@ -716,9 +720,6 @@ export default function SettingsPage() {
   const [accountMobileCode,     setAccountMobileCode]     = useState(DEFAULT_DIAL_CODE)
   const [accountMobileNational, setAccountMobileNational] = useState('')
   const [resetSent,    setResetSent]    = useState(false)
-  const [showDeleteZone,  setShowDeleteZone]  = useState(false)
-  const [deleteConfirm,   setDeleteConfirm]   = useState('')
-  const [deleting,        setDeleting]        = useState(false)
 
   // Session info (populated on mount from auth.currentUser)
   const [lastLogin,      setLastLogin]      = useState<string>('')
@@ -922,20 +923,10 @@ export default function SettingsPage() {
     } catch (e) { showToast(e instanceof Error ? e.message : 'Could not send the password reset email. Please try again.', 'error') }
   }
 
-  async function handleDeleteAccount() {
-    if (deleteConfirm !== 'DELETE') return
-    setDeleting(true)
-    try {
-      const token = await userRef.current?.getIdToken()
-      if (!token) return
-      await fetch('/api/organizer/settings', {
-        method:  'DELETE',
-        headers: { Authorization: `Bearer ${token}` },
-      })
-      await auth.signOut()
-    } catch (e) { showToast(e instanceof Error ? e.message : 'Could not delete your account. Please try again.', 'error') }
-    finally { setDeleting(false) }
-  }
+  // RD-ORGANIZER-REMAINING-ALL · self-deletion is gone. The endpoint it called deleted the
+  // profile and the Auth user and nothing else, orphaning every event, registration and
+  // settlement that referenced this uid. Deletion is now an admin operation behind a
+  // server-side eligibility gate — see lib/admin/organizerDeletion.ts.
 
   // ─── Render ─────────────────────────────────────────────────────────────────
 
@@ -1239,7 +1230,7 @@ export default function SettingsPage() {
           <div>
             <p className="text-[14px] font-medium text-foreground">Manage billing</p>
             <p className="mt-0.5 text-[13px] text-muted-foreground">
-              See your current plan, usage limits, and upgrade options.
+              See your event licences, payments and invoices.
             </p>
           </div>
           <span className="text-[13px] font-semibold text-primary">Open →</span>
@@ -1258,7 +1249,23 @@ export default function SettingsPage() {
           <div>
             <p className="text-[14px] font-medium text-foreground">Manage team</p>
             <p className="mt-0.5 text-[13px] text-muted-foreground">
-              Add admins, managers, check-in staff, and finance users.
+              Invite admins, managers, and finance users by email.
+            </p>
+          </div>
+          <span className="text-[13px] font-semibold text-primary">Open →</span>
+        </a>
+
+        {/* RD-CHECKIN-2.0 — staff accounts are a different lifecycle from an email
+            invite: the organizer issues the credential rather than the person
+            accepting one, so they are created and revoked on their own surface. */}
+        <a
+          href="/dashboard/settings/staff"
+          className="mt-3 flex items-center justify-between rounded-xl border border-border bg-muted/30 px-4 py-3.5 transition-colors hover:bg-muted/60"
+        >
+          <div>
+            <p className="text-[14px] font-medium text-foreground">Staff accounts</p>
+            <p className="mt-0.5 text-[13px] text-muted-foreground">
+              Username and password sign-ins for gate operators, scoped to the events they work.
             </p>
           </div>
           <span className="text-[13px] font-semibold text-primary">Open →</span>
@@ -1400,56 +1407,27 @@ export default function SettingsPage() {
           orgSupportEmail={orgSupportEmail}
         />
 
-        {/* ── Danger zone ── */}
-        <div className="rounded-xl border border-destructive/30 bg-destructive/[0.04] px-4 py-4">
-          <p className="text-[14px] font-semibold text-destructive">Delete Account</p>
-          <p className="mt-1 text-[13px] text-muted-foreground">
-            Permanently removes your account and all associated data. This cannot be undone.
-          </p>
+        {/* ── Account closure ──────────────────────────────────────────────────
+            RD-ORGANIZER-REMAINING-ALL · the self-delete control is gone. It called an endpoint
+            that removed this profile and its Auth user while leaving every event, registration,
+            settlement and staff credential pointing at a uid that no longer resolved.
 
-          {!showDeleteZone ? (
-            <button
-              type="button"
-              onClick={() => setShowDeleteZone(true)}
-              className="mt-3 rounded-lg border border-destructive/40 px-4 py-2 text-[14px] font-semibold text-destructive transition-colors hover:bg-destructive/[0.07]"
-            >
-              Delete my account
-            </button>
-          ) : (
-            <div className="mt-3 space-y-3">
-              <p className="text-[12px] text-muted-foreground">
-                Type{' '}
-                <span className="rounded bg-muted px-1 py-0.5 font-mono font-semibold text-foreground">
-                  DELETE
-                </span>{' '}
-                to confirm.
-              </p>
-              <input
-                value={deleteConfirm}
-                onChange={e => setDeleteConfirm(e.target.value)}
-                className="h-9 w-full rounded-lg border border-destructive/40 bg-card px-3 text-[13px] focus:outline-none focus:ring-2 focus:ring-destructive/25"
-                placeholder="DELETE"
-              />
-              <div className="flex gap-2">
-                <button
-                  type="button"
-                  disabled={deleteConfirm !== 'DELETE' || deleting}
-                  onClick={handleDeleteAccount}
-                  className="flex items-center gap-1.5 rounded-lg bg-destructive px-4 py-2 text-[14px] font-semibold text-white disabled:opacity-50"
-                >
-                  {deleting && <Loader2 className="size-3.5 animate-spin" />}
-                  Permanently delete
-                </button>
-                <button
-                  type="button"
-                  onClick={() => { setShowDeleteZone(false); setDeleteConfirm('') }}
-                  className="rounded-lg border border-border px-4 py-2 text-[13px] font-medium text-muted-foreground hover:bg-muted"
-                >
-                  Cancel
-                </button>
-              </div>
-            </div>
-          )}
+            It is not replaced by a disabled button: a control that cannot work is worse than no
+            control. This states who to ask and what will be checked, which is the honest
+            version of what the old button implied it was doing. */}
+        <div className="rounded-xl border border-border bg-muted/[0.04] px-4 py-4">
+          <p className="text-[14px] font-semibold text-foreground">Close your account</p>
+          <p className="mt-1 text-[13px] text-muted-foreground">
+            Account closure is handled by our team so that nothing you are responsible for is left
+            behind. An account can be closed once it has no events, no registrations and no
+            outstanding balance — we will tell you if something is still open.
+          </p>
+          <a
+            href={`mailto:${PLATFORM_SUPPORT_EMAIL}?subject=${encodeURIComponent('Account closure request')}`}
+            className="mt-3 inline-flex rounded-lg border border-border px-4 py-2 text-[14px] font-semibold text-foreground transition-colors hover:bg-muted/60"
+          >
+            Request account closure
+          </a>
         </div>
       </Section>
 

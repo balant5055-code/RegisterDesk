@@ -56,6 +56,9 @@ const REASON_STATUS: Record<string, number> = {
   insufficient_balance: 402,
   template_unresolved:  422,
   send_failed:          502,
+  // RD-INTEG — the event's prepaid allowance is used up under the 'block' policy: a payment
+  // problem the organizer resolves, not a server error.
+  allowance_exhausted:  402,
 }
 
 export async function POST(
@@ -93,6 +96,13 @@ export async function POST(
     if (!l.registrationId) {
       return { ok: false as const, status: 422, error: 'This log entry has no registration to re-send for.' }
     }
+    // RD-INTEG — WhatsApp ACCEPTED this message (it has a wamid) and a later webhook reported it
+    // undeliverable. Under charge-on-accept it is billed, and the confirmation is billed once
+    // per registration, so a resend from here would be refused as already sent. Say so plainly
+    // instead of claiming the row and failing with a misleading reason.
+    if (l.waStatus === 'failed' && l.providerMessageId) {
+      return { ok: false as const, status: 409, error: 'WhatsApp accepted this message and later reported it undeliverable (usually the recipient’s number or WhatsApp account). It cannot be re-sent from here.' }
+    }
 
     tx.update(logRef, { status: 'queued', updatedAt: FieldValue.serverTimestamp() })
     return { ok: true as const, log: l }
@@ -110,12 +120,17 @@ export async function POST(
   const body = await req.json().catch(() => null) as { confirmUnknownDelivery?: unknown } | null
   const confirmUnknownDelivery = body?.confirmUnknownDelivery === true
 
+  // RD-INTEG — an unexpected throw must not strand the row in 'queued' (never retryable again).
   const result = await retryWhatsAppConfirmation({
     registrationId: log.registrationId,
     organizerUid:   uid,
     eventSlug:      log.eventSlug,
     eventName:      log.eventName,
-  }, { confirmUnknownDelivery })
+  }, { confirmUnknownDelivery, attemptNonce: crypto.randomUUID().replace(/-/g, '') }).catch((err: unknown) => ({
+    ok: false as const, reason: 'send_failed' as const,
+    error: err instanceof Error ? err.message : 'WhatsApp retry failed',
+    code: undefined, httpStatus: undefined, providerResponse: undefined,
+  }))
 
   if (!result.ok) {
     // Release the claim so the row stays retryable, and persist the fresh diagnostics so
@@ -156,6 +171,10 @@ export async function POST(
     // attempt was delivered, and it must not: that is still unknowable, which is precisely
     // why resending it required an explicit confirmation.
     deliveryUnknown: FieldValue.delete(),
+    // RD-INTEG — the new wamid starts a fresh delivery history: a stale webhook status from
+    // the previous attempt would outrank 'sent' (rank rule) and keep the row showing Failed.
+    waStatus:  FieldValue.delete(),
+    failedAt:  FieldValue.delete(),
     costPaise: result.costPaise,
     ...(result.messageId ? { providerMessageId: result.messageId } : {}),
     error:     FieldValue.delete(),

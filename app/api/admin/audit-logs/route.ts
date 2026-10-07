@@ -6,7 +6,7 @@
 //   action, entityType, adminUid, entityId, startDate, endDate, cursor, pageSize
 
 import { NextRequest, NextResponse } from 'next/server'
-import { resolveAdminUid }           from '@/lib/admin/auth'
+import { requireSuperAdmin } from '@/lib/admin/financialGuard'
 import { listAuditLogs }             from '@/lib/admin/auditViewerService'
 import { AUDIT_ACTIONS, AUDIT_ENTITY_TYPES } from '@/lib/admin/audit'
 import type { AdminAuditAction, AdminAuditEntityType } from '@/lib/admin/audit'
@@ -20,8 +20,10 @@ function parseEntityType(s: string | null): AdminAuditEntityType | undefined {
 }
 
 export async function GET(req: NextRequest): Promise<NextResponse> {
-  const adminUid = await resolveAdminUid(req.headers.get('authorization'))
-  if (!adminUid) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+  // RD-PHASE4-S4 · D7 — the platform audit log holds the FINANCIAL audit trail (settlements,
+  // payouts, refunds, licences, clawbacks…): Super Admin only.
+  const guard = await requireSuperAdmin(req)
+  if (guard.response) return guard.response
 
   const { searchParams } = req.nextUrl
   const filters: AuditLogFilters = {

@@ -19,9 +19,7 @@
 
 import { storage } from '@/features/platform-storage'
 import { resolveRenditionUrl } from '@/features/media-studio/services/uploadService'
-import { getEventBySlug } from '@/lib/firebase/firestore/events'
-import { canExposePublicEvent } from '@/lib/events/publicVisibility'
-import { isContentTakenDown } from '@/lib/admin/moderation'
+import { findPublicEvent } from '@/lib/events/publicEventAccess'
 // RD-MS-CLOSURE-01 · the SAME resolver the organizer side uses. No parallel config path.
 import { resolveMediaConfig } from '@/lib/config/resolveMediaConfig'
 import { listGalleries, listAlbums } from '@/features/media-studio/repositories/galleryRepo'
@@ -60,12 +58,13 @@ export interface PublicEventContext {
  * for all of them, so none of them is distinguishable from outside.
  */
 export async function resolvePublicEvent(eventSlug: string): Promise<PublicEventContext | null> {
-  const event = await getEventBySlug(eventSlug)
+  // The public event boundary — existence, lifecycle allow-list, moderation takedown — is
+  // stated ONCE in lib/events/publicEventAccess and delegated to here. This function used
+  // to inline the same three checks; they were correct, but three other routes inlined
+  // their own weaker versions and drifted. Sharing the gate is what stops that recurring.
+  // Everything below remains gallery-specific.
+  const event = await findPublicEvent(eventSlug)
   if (!event) return null
-  if (!canExposePublicEvent(event.lifecycleStatus)) return null
-  // The same moderation gate the event detail page applies. A taken-down event has no
-  // gallery, exactly as it has no page.
-  if (isContentTakenDown(event.moderationStatus)) return null
 
   const raw = event as unknown as Record<string, unknown>
   const organizerUid = typeof raw.uid === 'string' ? raw.uid : ''

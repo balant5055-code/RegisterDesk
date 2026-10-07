@@ -13,8 +13,8 @@
 //   pageSize — records per page     (default: 20, max: 50)
 
 import { NextRequest, NextResponse } from 'next/server'
+import { requireSuperAdmin } from '@/lib/admin/financialGuard'
 import { adminDb }                   from '@/lib/firebase/admin'
-import { resolveAdminUid }           from '@/lib/admin/auth'
 
 // ─── Response types (imported by admin finance page) ─────────────────────────
 
@@ -33,7 +33,8 @@ export interface FailedRefundSummary {
    * parked for manual settlement. Records written before this field existed carry no `kind`
    * and are reported as 'failed_refund', so nothing had to be migrated.
    */
-  kind:           'failed_refund' | 'duplicate_hold'
+  // RD-FIN-02 · 'duplicate_payment_hold' — a SECOND captured payment on an already-paid order.
+  kind:           'failed_refund' | 'duplicate_hold' | 'duplicate_payment_hold'
   createdAt:      string | null
   updatedAt:      string | null
 }
@@ -80,8 +81,10 @@ function tsToISO(ts: unknown): string | null {
 // ─── Handler ──────────────────────────────────────────────────────────────────
 
 export async function GET(req: NextRequest): Promise<NextResponse> {
-  const adminUid = await resolveAdminUid(req.headers.get('authorization'))
-  if (!adminUid) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+  // RD-CLOSE — a financial read: Super Admin only (ADMIN_UIDS). A legacy `admin: true` claim
+  // alone gets 403 SUPER_ADMIN_REQUIRED (lib/admin/financialGuard.ts).
+  const superGate = await requireSuperAdmin(req)
+  if (superGate.response) return superGate.response
 
   const { searchParams } = new URL(req.url)
   const statusFilter = searchParams.get('status') ?? 'open'
@@ -91,10 +94,14 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   // Fetch all docs ordered by createdAt desc (single-field index, auto-created by Firestore)
   const allSnap = await adminDb.collection('failedRefunds').orderBy('createdAt', 'desc').get()
 
-  const allDocs = allSnap.docs.map(doc => ({
-    id: doc.id,
-    ...(doc.data() as FailedRefundDoc),
-  }))
+  // RD-EVENT-COMMERCE-02 — licensing wrote its failed refunds (coupon-exhausted remainder,
+  // stale capacity change) with status 'pending', a value this queue never listed or counted,
+  // so they were invisible in the default view and the "require attention" stats. They are open
+  // failed refunds; they are READ as 'open' here. Stored records are not rewritten.
+  const allDocs = allSnap.docs.map(doc => {
+    const d = doc.data() as FailedRefundDoc
+    return { id: doc.id, ...d, status: d.status === 'pending' ? 'open' : d.status }
+  })
 
   // Compute stats from open docs only (always global, regardless of filter)
   const openDocs = allDocs.filter(d => d.status === 'open')
@@ -125,7 +132,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     attendeeEmail:  d.attendeeEmail  ?? '',
     registrationId: d.registrationId ?? null,
     status:         (d.status as FailedRefundSummary['status']) ?? 'open',
-    kind:           d.kind === 'duplicate_hold' ? 'duplicate_hold' : 'failed_refund',
+    kind:           d.kind === 'duplicate_hold' || d.kind === 'duplicate_payment_hold' ? d.kind : 'failed_refund',
     createdAt:      tsToISO(d.createdAt),
     updatedAt:      tsToISO(d.updatedAt),
   }))

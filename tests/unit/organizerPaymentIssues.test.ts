@@ -20,6 +20,8 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { NextRequest } from 'next/server'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
+import { navItemForPath, WORKSPACE_NAV_ITEMS } from '@/config/workspaceNav'
+import { leafLabelFor } from '@/lib/navigation/breadcrumbs'
 
 type Doc = Record<string, unknown>
 
@@ -42,10 +44,13 @@ describe('workspace resolution: ownership always wins', () => {
   it('an owner who ALSO holds a membership still resolves to their own workspace', () => {
     // The defect: `memberships[0]` won unconditionally, so an invited organizer read the
     // inviting workspace's data under their own login.
-    expect(WORKSPACE).toContain('if (await ownsWorkspace(callerUid)) {')
-    const idx  = WORKSPACE.indexOf('if (await ownsWorkspace(callerUid))')
+    // RD-WORKSPACE-OWNERSHIP-01 passes `memberships` in, so ownership can be decided partly
+    // from them without a second query. The ordering property is what this case pins.
+    expect(WORKSPACE).toContain('if (await ownsWorkspace(callerUid, memberships)) {')
+    const idx  = WORKSPACE.indexOf('if (await ownsWorkspace(callerUid, memberships))')
     const memb = WORKSPACE.indexOf('const m = memberships[0]')
     expect(idx).toBeGreaterThan(-1)
+    expect(memb).toBeGreaterThan(-1)
     expect(idx).toBeLessThan(memb)          // ownership is decided BEFORE the membership
   })
 
@@ -54,17 +59,33 @@ describe('workspace resolution: ownership always wins', () => {
   // every account that has ever signed in carries `role: 'organizer'`, including both gate
   // operators, who own zero events. The requirement changed, so the assertion changed with
   // it, and it is now the stronger one: the profile row must NOT be the evidence.
-  it('ownership needs evidence of an owned workspace, not merely an organizer profile row', () => {
+  // UPDATED AGAIN by RD-WORKSPACE-OWNERSHIP-01. The property being protected is unchanged —
+  // the organizer ROLE on the profile row must never decide ownership, because every account
+  // that has ever signed in carries it, gate operators included. What changed is that this
+  // case used to enforce that property through a PROXY: "never read users/{uid} at all".
+  //
+  // That proxy is now wrong. Ownership is an explicit `workspaceOwner` marker on the profile
+  // row, which requires reading it — and the draft inference the proxy protected turned out
+  // to be the actual defect, because a brand-new or re-registered organizer owns no drafts
+  // and was silently resolved into somebody else's workspace.
+  //
+  // So the ban narrows from "the row" to "the role", which is what it always meant, and the
+  // marker is asserted positively alongside the fallback it did not replace.
+  it('ownership is the explicit marker, never the organizer role on the profile row', () => {
     const fn = WORKSPACE.slice(
       WORKSPACE.indexOf('async function ownsWorkspace'),
       WORKSPACE.indexOf('export async function resolveWorkspaceUid'),
     )
+    // The explicit fact, read through the shared three-state helper.
+    expect(fn).toContain('readWorkspaceOwnerMarker')
+    // The legacy inference is RETAINED, so no pre-existing account changes resolution.
     expect(fn).toContain('eventDrafts')
     expect(fn).toContain('.limit(1)')
-    // The profile row decides nothing.
+    // The role decides nothing — neither through the canonical predicate nor by hand.
     expect(fn).not.toContain('isOrganizer')
-    expect(fn).not.toMatch(/collection\('users'\)\.doc\(callerUid\)\.get\(\)/)
-    expect(WORKSPACE).not.toContain("from '@/lib/organizer/identity'")
+    expect(fn).not.toContain('ORGANIZER_ROLE')
+    expect(fn).not.toMatch(/\brole\b\s*===/)
+    expect(fn).not.toMatch(/===\s*'organizer'/)
   })
 
   it('an unreadable profile fails CLOSED — towards self, never towards a membership', () => {
@@ -75,8 +96,14 @@ describe('workspace resolution: ownership always wins', () => {
 
   it('the profile read happens ONLY in the ambiguous case', () => {
     // A caller with no memberships must not pay an extra read on every request.
-    const fn = WORKSPACE.slice(WORKSPACE.indexOf('export async function resolveWorkspaceUid'))
-    expect(fn.indexOf('memberships.length === 0')).toBeLessThan(fn.indexOf('ownsWorkspace(callerUid)'))
+    const fn    = WORKSPACE.slice(WORKSPACE.indexOf('export async function resolveWorkspaceUid'))
+    const early = fn.indexOf('memberships.length === 0')
+    const call  = fn.indexOf('ownsWorkspace(callerUid')
+    // Both must be PRESENT: comparing two -1s, or a real index against a -1, would let this
+    // pass for the wrong reason the moment either literal is renamed.
+    expect(early).toBeGreaterThan(-1)
+    expect(call).toBeGreaterThan(-1)
+    expect(early).toBeLessThan(call)
   })
 
   it('no permission, role or matrix behaviour changed', () => {
@@ -168,7 +195,10 @@ describe('the browser cannot influence what is settled', () => {
     // Shorthand `paymentId,` is the local assigned from the Razorpay match. Any `paymentId:`
     // form would mean an EXPRESSION — a fallback, a header, an override — so its absence is
     // the real assertion. (`??` appears legitimately elsewhere in the call, on the phone.)
-    expect(call).toContain('\n    paymentId,\n')
+    // Matched as a line rather than an LF-delimited literal: on a CRLF checkout the
+    // literal fails even though the shorthand is present. Still asserts SHORTHAND on its
+    // own line — the `paymentId:` expression form remains forbidden below.
+    expect(call).toMatch(/\r?\n\s*paymentId,\r?\n/)
     expect(call).not.toContain('paymentId:')
     expect(call).not.toContain('req.')
   })
@@ -327,11 +357,26 @@ describe('the page only offers Recover where it can work', () => {
 // ─── navigation + index ──────────────────────────────────────────────────────
 
 describe('navigation and index', () => {
-  it('sits UNDER the existing Finance group, not as a new section', () => {
-    const nav = read('config/workspaceNav.ts')
-    expect(nav).toContain("{ label: 'Payment Issues', href: '/dashboard/finance/payment-issues' }")
-    const finance = nav.slice(nav.indexOf("key: 'finance'"), nav.indexOf("key: 'wallet'"))
-    expect(finance).toContain('Payment Issues')
+  // RD-ORG-FOUNDATION — this assertion was rewritten, not weakened.
+  //
+  // It used to pin an exact source literal in config/workspaceNav.ts, back when the
+  // sidebar listed every sub-surface as its own child row. The canonical IA collapsed
+  // those: Finance is ONE sidebar entry, and transactions, ledger, settlements,
+  // payout profile and payment issues are surfaces inside it.
+  //
+  // The intent is unchanged and still enforced — Payment Issues must be a FINANCE
+  // surface, never its own top-level section — but it is now asserted against
+  // behaviour (which nav item owns the route) instead of against a string of source
+  // code, so a cosmetic edit to the nav file can no longer fail it.
+  it('sits UNDER Finance, not as a new section', () => {
+    const owner = navItemForPath('/dashboard/finance/payment-issues')
+    expect(owner?.key).toBe('finance')
+
+    // Not a sidebar entry of its own.
+    expect(WORKSPACE_NAV_ITEMS.some(i => i.href === '/dashboard/finance/payment-issues')).toBe(false)
+
+    // Still reachable and still named — the breadcrumb registers it as a Finance leaf.
+    expect(leafLabelFor('/dashboard/finance/payment-issues')).toBe('Payment Issues')
   })
 
   it('the composite index the list query needs is declared', () => {

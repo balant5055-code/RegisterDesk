@@ -19,6 +19,16 @@ import {
   type EventLicenseTierV2,
   type EventLicenseFeature,
 } from '@/lib/licensing/eventLicense'
+import {
+  DEFAULT_COMMERCIAL_TERMS,
+  validateCommercialTerms,
+  type CommercialTerms,
+} from '@/lib/licensing/capacityCommercial'
+import {
+  DEFAULT_SERVICE_ALLOWANCES,
+  validateServiceAllowances,
+  type ServiceAllowancesConfig,
+} from '@/lib/licensing/serviceAllowances'
 
 // ─── Section schemas ────────────────────────────────────────────────────────────
 
@@ -82,6 +92,25 @@ export interface LicensingConfig {
   // docs → resolves to the V2 code defaults. Never affects V1 resolution.
   tierOverridesV2?: Partial<Record<EventLicenseTierV2, LicenseTierOverrideV2>>
   coupons:          LicenseCouponsConfig
+  /**
+   * RD-CAPACITY-01 — the GLOBAL DEFAULTS for the capacity-based commercial model
+   * (free capacity, activation rate, GST, attendee transaction fee, decrease fee,
+   * maximum capacity). Super Admin editable; the shape and its validation live in
+   * lib/licensing/capacityCommercial.ts so the same six values can also be stored as a
+   * per-event override and as an immutable snapshot on every order.
+   *
+   * These are DEFAULTS, not the effective terms for any given event: an event resolves
+   * its own terms through lib/licensing/resolveCommercialTerms (global ⊕ event override)
+   * and an already-paid order reads its own snapshot, never this.
+   */
+  commercial:       CommercialTerms
+  /**
+   * RD-EVENT-COMMERCE-02 — prepaid per-event service allowances sold on the License &
+   * Services step (WhatsApp messages, certificates). OPTIONAL: absent on existing config
+   * docs ⇒ every service is unconfigured and NOT for sale. Nothing here has a code default
+   * price — see lib/licensing/serviceAllowances.ts.
+   */
+  serviceAllowances?: ServiceAllowancesConfig
 }
 
 /** Per-channel communication policy + per-message cost (paise). Email is free. */
@@ -341,12 +370,21 @@ export interface FeatureFlagsConfig {
   marketing:         boolean
   betaFeatures:      boolean
   aiAssistant:       boolean
+  /**
+   * WhatsApp Inbox (two-way attendee messaging). The ONE flag that is default FALSE: it is
+   * new, not current behaviour. Inbound messages are persisted and routed regardless (so
+   * nothing is lost before launch); this flag gates what organizers can READ — the Inbox
+   * APIs (404 while off), the page's content and new-message notifications. The sidebar row
+   * stays visible to owners/admins so they can reach the page's "not switched on" state.
+   */
+  whatsappInbox:     boolean
 }
 
 export const FEATURE_FLAG_KEYS: (keyof FeatureFlagsConfig)[] = [
   'earlyBird', 'coupons', 'donations', 'certificates', 'crm', 'broadcast',
   'customDomains', 'whiteLabel', 'publicApi', 'sms', 'whatsapp',
   'pushNotifications', 'analytics', 'marketing', 'betaFeatures', 'aiAssistant',
+  'whatsappInbox',
 ]
 
 /** Non-secret integration OPERATIONAL policy (RD-CONF-12). Secrets/tokens/keys
@@ -356,7 +394,7 @@ export interface IntegrationsConfig {
   whatsappProvider: string  // e.g. 'meta'
   metaApiVersion:  string    // Meta Graph API version, e.g. v21.0
   metaApiTimeoutMs: number   // Meta Graph API request timeout (ms)
-  emailProvider:   string   // e.g. 'ses'
+  emailProvider:   string   // NOT read (RD-EMAIL-PROVIDER-03): event mail defaults to SES, override is per event
 }
 
 /** Auth/session/OTP security POLICY knobs (RD-CONF-11). Policy only — never
@@ -518,12 +556,41 @@ export interface MediaStudioConfig extends MediaOverridableConfig, MediaCreditsC
   brandingEnabled: boolean
 }
 
+/**
+ * payments — which gateway NEW payment orders are created with.
+ *
+ * ═══ WHY THIS IS ITS OWN SECTION ═════════════════════════════════════════════
+ * Two gateway-ish settings already existed and neither means this:
+ *   · `fees.gatewayProvider` sits among gatewayFeeType/Min/Max — it describes the FEE
+ *     SCHEDULE being modelled, not where an attendee's money is sent;
+ *   · `pricing.gateway.provider` is hard-validated to 'razorpay' and its own header says
+ *     nothing consumes it.
+ * Overloading either would conflate fee modelling with payment ROUTING, and they would then
+ * be free to disagree with each other.
+ *
+ * ROUTING ONLY. It selects the gateway for orders that do not exist yet. It is never
+ * consulted to decide what an EXISTING payment was taken through — that is the provider
+ * persisted on the payment intent, and nothing here may override it.
+ */
+export interface PaymentsConfig {
+  /**
+   * The gateway new orders are created with. Razorpay is the default and the safe value:
+   * an absent, unreadable or invalid setting resolves to it.
+   *
+   * Selecting 'cashfree' is NOT sufficient to reach Cashfree — the provider gates
+   * (`isCashfreeEnabled`) still apply, so an unconfigured or unactivated environment
+   * continues on Razorpay rather than failing every payment.
+   */
+  activeProvider: 'razorpay' | 'cashfree'
+}
+
 export interface BusinessConfigSections {
   mediaStudio:   MediaStudioConfig
   licensing:     LicensingConfig
   communication: CommunicationConfig
   wallet:        WalletConfig
   fees:          FeesConfig
+  payments:      PaymentsConfig
   settlements:   SettlementsConfig
   branding:      BrandingConfig
   featureFlags:  FeatureFlagsConfig
@@ -546,7 +613,7 @@ export interface StoredBusinessConfig extends BusinessConfigSections {
 }
 
 export const CONFIG_SECTION_KEYS: BusinessConfigSectionKey[] = [
-  'licensing', 'communication', 'wallet', 'fees', 'settlements',
+  'licensing', 'communication', 'wallet', 'fees', 'payments', 'settlements',
   'branding', 'featureFlags', 'integrations', 'security', 'mediaStudio',
 ]
 
@@ -571,12 +638,21 @@ export const BUSINESS_CONFIG_DEFAULTS: BusinessConfigSections = {
       allowFreeLicense:      true,
       allowStacking:         false,   // reserved — stacking not supported in S2
     },
+    // RD-CAPACITY-01 — capacity-based commercial defaults (100 free · ₹1.50/registration ·
+    // 18% GST · 2.5% attendee fee · 1% decrease charge · 200,000 ceiling).
+    commercial: { ...DEFAULT_COMMERCIAL_TERMS },
+    // RD-EVENT-COMMERCE-02 — every prepaid service UNCONFIGURED (not for sale) by default.
+    serviceAllowances: {
+      whatsapp:     { ...DEFAULT_SERVICE_ALLOWANCES.whatsapp,     presets: [] },
+      certificates: { ...DEFAULT_SERVICE_ALLOWANCES.certificates, presets: [] },
+      media:        { ...DEFAULT_SERVICE_ALLOWANCES.media,        presets: [] },
+    },
   },
   communication: {
     email: {
       enabled: true, provider: 'ses', fromName: 'RegisterDesk', replyTo: '',
       dailyLimit: 0, hourlyLimit: 0, freeForAllLicenses: true,
-      sesRegion: 'ap-south-1', sesSender: '', sesReplyTo: '',
+      sesRegion: 'us-east-1', sesSender: '', sesReplyTo: '',
       displayName: 'Email', description: 'Transactional & broadcast emails — free on every license.',
       billingMode: 'free', pricePaise: 0, freeAllowance: 0, walletBilling: false,
     },
@@ -670,6 +746,12 @@ export const BUSINESS_CONFIG_DEFAULTS: BusinessConfigSections = {
     feeCollectionMethod:     'attendee',
     feeCollectionDescription: '',
   },
+  // Razorpay is the code default, and the default is the safe one: an environment with no
+  // stored config, an unreadable document or a corrupted value all resolve to the gateway
+  // that is in production today.
+  payments: {
+    activeProvider: 'razorpay',
+  },
   settlements: {
     enabled:                      true,
     holdHours:                    48,
@@ -717,7 +799,7 @@ export const BUSINESS_CONFIG_DEFAULTS: BusinessConfigSections = {
     // Env seeds the default deployment URL (NEXT_PUBLIC_* are inlined at build);
     // a stored config override wins at runtime. One source of truth for the base URL.
     baseUrl:         (process.env.NEXT_PUBLIC_BASE_URL ?? process.env.NEXT_PUBLIC_APP_URL ?? 'https://registerdesk.in').replace(/\/$/, ''),
-    logoUrl:         '/logo/logo-registerdesk.png',
+    logoUrl:         '/logo/RegisterDesk-Logo.svg',
     ogImageUrl:      '/og-image.png',
     defaultFromName: 'RegisterDesk',
     defaultReplyTo:  '',
@@ -731,6 +813,7 @@ export const BUSINESS_CONFIG_DEFAULTS: BusinessConfigSections = {
     crm: true, broadcast: true, customDomains: true, whiteLabel: true,
     publicApi: true, sms: true, whatsapp: true, pushNotifications: true,
     analytics: true, marketing: true, betaFeatures: true, aiAssistant: true,
+    whatsappInbox: false,
   },
   integrations: {
     paymentGateway:   'razorpay',
@@ -909,6 +992,12 @@ function validateLicensing(v: unknown): ConfigValidationResult {
     if (!isBool(cp.allowFreeLicense)) errors.push('licensing.coupons.allowFreeLicense must be a boolean')
     if (!isBool(cp.allowStacking)) errors.push('licensing.coupons.allowStacking must be a boolean')
   }
+  // RD-CAPACITY-01 — the capacity commercial defaults. Validated by the shared validator
+  // that also guards the per-event override, so global and per-event terms can never
+  // disagree about what a legal value is.
+  errors.push(...validateCommercialTerms(c?.commercial, 'licensing.commercial'))
+  // Additive: only validated when present, so existing config docs stay valid.
+  if (c?.serviceAllowances !== undefined) errors.push(...validateServiceAllowances(c.serviceAllowances))
   return { valid: errors.length === 0, errors }
 }
 
@@ -1053,6 +1142,17 @@ function validateFees(v: unknown): ConfigValidationResult {
     // Fee collection method.
     [c?.feeCollectionMethod === 'attendee' || c?.feeCollectionMethod === 'organizer' || c?.feeCollectionMethod === 'mixed', "fees.feeCollectionMethod must be 'attendee', 'organizer', or 'mixed'"],
     [typeof c?.feeCollectionDescription === 'string', 'fees.feeCollectionDescription must be a string'],
+  ])
+}
+
+function validatePayments(v: unknown): ConfigValidationResult {
+  const c = v as Partial<PaymentsConfig>
+  // An explicit allow-list, not a string check. This value decides where attendee money is
+  // sent, so anything outside the two supported providers is rejected at the write — the
+  // admin API cannot persist a typo, an unsupported gateway, or an injected value.
+  return collect([
+    [c?.activeProvider === 'razorpay' || c?.activeProvider === 'cashfree',
+      "payments.activeProvider must be 'razorpay' or 'cashfree'"],
   ])
 }
 
@@ -1274,12 +1374,23 @@ export const CONFIG_SECTION_REGISTRY: {
   [K in BusinessConfigSectionKey]: {
     default:  BusinessConfigSections[K]
     validate: (value: unknown) => ConfigValidationResult
+    /**
+     * RD-EVENT-COMMERCE-04A — resolve the stored section GROUP BY GROUP (top-level key) instead
+     * of all-or-nothing. Only for sections whose top-level keys are independent commercial
+     * groups; every other section keeps the whole-section rule.
+     */
+    groupwise?: true
   }
 } = {
-  licensing:     { default: BUSINESS_CONFIG_DEFAULTS.licensing,     validate: validateLicensing },
+  // Licensing is groupwise: one bad field in `serviceAllowances` (or coupons, or a legacy tier
+  // override) used to revert the WHOLE section — capacity pricing included — to code defaults.
+  // A corrupt `commercial` group still resolves to its default here, but charging paths do not
+  // trust that: resolveCommercialTerms.ts reads the RAW group and fails closed.
+  licensing:     { default: BUSINESS_CONFIG_DEFAULTS.licensing,     validate: validateLicensing, groupwise: true },
   communication: { default: BUSINESS_CONFIG_DEFAULTS.communication, validate: validateCommunication },
   wallet:        { default: BUSINESS_CONFIG_DEFAULTS.wallet,        validate: validateWallet },
   fees:          { default: BUSINESS_CONFIG_DEFAULTS.fees,          validate: validateFees },
+  payments:      { default: BUSINESS_CONFIG_DEFAULTS.payments,      validate: validatePayments },
   settlements:   { default: BUSINESS_CONFIG_DEFAULTS.settlements,   validate: validateSettlements },
   branding:      { default: BUSINESS_CONFIG_DEFAULTS.branding,      validate: validateBranding },
   featureFlags:  { default: BUSINESS_CONFIG_DEFAULTS.featureFlags,  validate: validateFeatureFlags },
@@ -1343,8 +1454,17 @@ export function resolveSection<K extends BusinessConfigSectionKey>(
   // ← firestore (only if the merged candidate validates)
   const storedSection = stored?.[key]
   if (storedSection !== undefined) {
-    const candidate = deepMerge(resolved, storedSection)
-    if (reg.validate(candidate).valid) resolved = candidate
+    if (reg.groupwise && typeof storedSection === 'object' && storedSection !== null && !Array.isArray(storedSection)) {
+      // Each stored group is accepted only if the section STILL validates with it applied, so an
+      // invalid group falls back to its own default without taking valid neighbours with it.
+      for (const [group, value] of Object.entries(storedSection as Record<string, unknown>)) {
+        const candidate = deepMerge(resolved, { [group]: value } as typeof storedSection)
+        if (reg.validate(candidate).valid) resolved = candidate
+      }
+    } else {
+      const candidate = deepMerge(resolved, storedSection)
+      if (reg.validate(candidate).valid) resolved = candidate
+    }
   }
   // ← runtime override (highest priority)
   const overrideSection = overrides?.[key]
@@ -1365,6 +1485,7 @@ export function resolveBusinessConfig(
     communication: resolveSection('communication', stored, overrides),
     wallet:        resolveSection('wallet',        stored, overrides),
     fees:          resolveSection('fees',          stored, overrides),
+    payments:      resolveSection('payments',      stored, overrides),
     settlements:   resolveSection('settlements',   stored, overrides),
     branding:      resolveSection('branding',      stored, overrides),
     featureFlags:  resolveSection('featureFlags',  stored, overrides),
@@ -1372,4 +1493,149 @@ export function resolveBusinessConfig(
     security:      resolveSection('security',      stored, overrides),
     mediaStudio:   resolveSection('mediaStudio',   stored, overrides),
   }
+}
+
+// ═══ RD-EVENT-COMMERCE-04B · centrally controlled pricing (Super Admin only) ════════
+//
+// Confirmed business rule: only a Super Admin may change CENTRALLY controlled pricing —
+// licence & capacity pricing, communication rates, certificate pricing and media / extra-photo
+// pricing. Organizers keep sole control of their own events' ticket and registration fees
+// (those live on the event, not here). Everything else in these sections stays editable by an
+// ordinary admin, so the gate is FIELD-level: only a patch that actually CHANGES a listed field
+// needs a Super Admin. `'*'` means the whole section is pricing.
+//
+// RD-PHASE4-S2 — the confirmed rule now also covers (Super Admin only): the whole `fees` section
+// (attendee platform fee, GST, gateway fee, convenience, donation fee — every field), the payment
+// provider (`payments.activeProvider`), media-credit ENABLEMENT and refund BOUNDS, and the settlement
+// fee / tax fields. Still NOT listed: settlement operations (holds, windows, schedules), media refund
+// PROCESS settings (refundsEnabled, auto-reject days, reason/note flags), feature flags.
+//
+// RD-WALLET-CFG-01 — the WALLET FINANCIAL CONTROLS are now Super Admin only as well (see
+// WALLET_FINANCIAL_CONTROL_FIELDS below): changing them goes through this same per-field check,
+// decided inside the save transaction on the fresh stored doc.
+const COMM_CHANNEL_PRICE = ['pricePaise', 'freeAllowance', 'billingMode', 'walletBilling'] as const
+
+/**
+ * RD-WALLET-CFG-01 — the wallet's financial controls: whether the balance may go negative, the
+ * freeze, whether wallet refunds are allowed, and every top-up limit / balance threshold. Only a
+ * Super Admin (ADMIN_UIDS — never the legacy `admin: true` claim alone) may CHANGE them (listed in
+ * CENTRAL_PRICING_FIELDS) or SEE them in Business Configuration (SUPER_ADMIN_ONLY_FIELDS).
+ * Every other wallet setting keeps its existing (admin) permission.
+ */
+export const WALLET_FINANCIAL_CONTROL_FIELDS = [
+  'allowNegativeBalance', 'frozen', 'allowWalletRefunds',
+  'minimumTopupPaise', 'maximumTopupPaise', 'maximumBalancePaise', 'minimumRequiredBalancePaise',
+  'lowBalanceThresholdPaise', 'autoTopupThresholdPaise', 'autoTopupAmountPaise',
+] as const satisfies readonly (keyof WalletConfig)[]
+
+/** Fields a non-Super Admin must not even SEE in the admin Business Configuration response / editor. */
+export const SUPER_ADMIN_ONLY_FIELDS: Partial<Record<BusinessConfigSectionKey, readonly string[]>> = {
+  wallet: WALLET_FINANCIAL_CONTROL_FIELDS,
+}
+
+/** Pure. A copy of the resolved config without the Super Admin-only fields (for any other caller). */
+export function redactSuperAdminOnlyFields(config: BusinessConfigSections): BusinessConfigSections {
+  const out = { ...config } as Record<string, unknown>
+  for (const [section, fields] of Object.entries(SUPER_ADMIN_ONLY_FIELDS)) {
+    const s = out[section]
+    if (!s || typeof s !== 'object' || !fields) continue
+    const copy = { ...(s as Record<string, unknown>) }
+    for (const f of fields) delete copy[f]
+    out[section] = copy
+  }
+  return out as unknown as BusinessConfigSections
+}
+
+/**
+ * RD-WALLET-CFG-01 — what the PUBLIC config feed may say about the wallet: exactly what the organizer
+ * product reads (the Add Funds gate, the top-up dialog's limits, the low-balance banner, labels).
+ * The organizer's own top-up limits are part of that product — the top-up route states them in its
+ * errors anyway. Negative balance, freeze, refunds, balance caps and auto top-up are not.
+ */
+export type PublicWalletConfig = Pick<WalletConfig,
+  'enabled' | 'currency' | 'precision' | 'displayName' | 'description' | 'mode'
+  | 'minimumTopupPaise' | 'maximumTopupPaise' | 'lowBalanceThresholdPaise' | 'showLowBalanceWarning'>
+export function toPublicWalletConfig(c: WalletConfig): PublicWalletConfig {
+  return {
+    enabled: c.enabled, currency: c.currency, precision: c.precision, displayName: c.displayName,
+    description: c.description, mode: c.mode, minimumTopupPaise: c.minimumTopupPaise,
+    maximumTopupPaise: c.maximumTopupPaise, lowBalanceThresholdPaise: c.lowBalanceThresholdPaise,
+    showLowBalanceWarning: c.showLowBalanceWarning,
+  }
+}
+export const CENTRAL_PRICING_FIELDS: Partial<Record<BusinessConfigSectionKey, readonly string[] | '*'>> = {
+  licensing: '*',
+  communication: [
+    ...(['email', 'whatsapp', 'sms', 'certificates'] as const).flatMap(ch => COMM_CHANNEL_PRICE.map(f => `${ch}.${f}`)),
+    'email.freeForAllLicenses',
+    'whatsapp.freeOrganizerNotifications',
+    'whatsapp.walletChargeAttendeeNotifications',
+  ],
+  mediaStudio: [
+    'creditUnitPricePaise', 'creditsPerPhoto', 'minCreditPurchase',
+    'refundServiceChargeMethod', 'refundServiceChargePercent', 'refundServiceChargeFixedPaise',
+    // RD-PHASE4-S2 — media-credit enablement and refund bounds
+    'creditsEnabled', 'minRefundablePaise', 'minRefundCredits', 'maxRefundPerRequestPaise', 'refundWindowDays',
+  ],
+  // RD-PHASE4-S2 — every fee field (the attendee platform fee, GST, gateway, convenience, donation fee).
+  fees: '*',
+  // RD-PHASE4-S2 — which gateway (and so which gateway fees) new orders use.
+  payments: ['activeProvider'],
+  // RD-PHASE4-S2 — settlement fee and tax (reserved today, but money).
+  // RD-PHASE4-S4 · D1 — plus the FUND-RELEASE controls: whether settlements run at all, whether
+  // held funds auto-release, the T+N hold before release, and the freeze. Other settlement
+  // operations (limits, windows, schedules) keep their existing permissions.
+  settlements: [
+    'settlementFeePercent', 'settlementFeeFlatPaise', 'settlementTaxPercent',
+    'enabled', 'autoRelease', 'holdHours', 'frozen',
+  ],
+  // RD-WALLET-CFG-01 — the wallet's financial controls (negative balance, freeze, refunds, limits).
+  wallet: WALLET_FINANCIAL_CONTROL_FIELDS,
+}
+
+const readPath = (obj: unknown, path: string): unknown =>
+  path.split('.').reduce<unknown>((o, k) => (o !== null && typeof o === 'object' ? (o as Record<string, unknown>)[k] : undefined), obj)
+
+/**
+ * The centrally controlled pricing fields a patch would CHANGE (compared on the merged result,
+ * so re-sending an unchanged value is not a change). Empty ⇒ no Super Admin needed. Pure —
+ * the server enforces it; the admin UI uses the same list to disable those inputs.
+ */
+export function changedCentralPricingFields(section: BusinessConfigSectionKey, current: unknown, patch: unknown): string[] {
+  const fields = CENTRAL_PRICING_FIELDS[section]
+  if (!fields) return []
+  const next = deepMerge(current, patch)
+  if (fields === '*') return JSON.stringify(next) === JSON.stringify(current) ? [] : [section]
+  return fields.filter(f => JSON.stringify(readPath(next, f)) !== JSON.stringify(readPath(current, f)))
+}
+
+/** Thrown when a non-Super-Admin publish would change centrally controlled pricing. */
+export class CentralPricingPermissionError extends Error {
+  constructor(public readonly fields: string[]) {
+    super(`Only a Super Admin can change centrally controlled pricing or financial controls: ${fields.join(', ')}`)
+    this.name = 'CentralPricingPermissionError'
+  }
+}
+
+/**
+ * RD-EVENT-COMMERCE-05A — merge a patch onto a STORED section exactly the way Firestore's
+ * `set(..., { merge: true })` will: maps merge recursively, and every other value — INCLUDING
+ * null — replaces what is stored. (The config layer's `deepMerge` treats null as "keep", which is
+ * right for READING a layer but wrong for predicting a WRITE: a patched null would look like "no
+ * change" while Firestore stores the null.)
+ */
+export function firestoreMergePatch(stored: unknown, patch: unknown): unknown {
+  const isMap = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v)
+  if (!isMap(patch)) return patch === undefined ? stored : patch
+  const base = isMap(stored) ? { ...stored } : {}
+  for (const [k, v] of Object.entries(patch)) if (v !== undefined) base[k] = firestoreMergePatch(base[k], v)
+  return base
+}
+
+/** The centrally controlled pricing fields that differ between two RESOLVED sections. */
+export function diffCentralPricingFields(section: BusinessConfigSectionKey, before: unknown, after: unknown): string[] {
+  const fields = CENTRAL_PRICING_FIELDS[section]
+  if (!fields) return []
+  if (fields === '*') return JSON.stringify(after) === JSON.stringify(before) ? [] : [section]
+  return fields.filter(f => JSON.stringify(readPath(after, f)) !== JSON.stringify(readPath(before, f)))
 }

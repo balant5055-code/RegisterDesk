@@ -7,6 +7,7 @@
 //   4. Status is written only after successful validation.
 
 import { NextRequest, NextResponse, after } from 'next/server'
+import { organizerPaysPricing } from '@/lib/events/builder/types'
 import { FieldValue, FieldPath } from 'firebase-admin/firestore'
 import { adminDb } from '@/lib/firebase/admin'
 import { authorizeWorkspace } from '@/lib/team/workspace'
@@ -15,6 +16,9 @@ import { validateEventPublish }  from '@/lib/events/validatePublish'
 import { ensureCounterExists }   from '@/lib/firebase/firestore/registrationCounters'
 import { isEmailProviderName } from '@/lib/email/providerName'
 import { resolveTotalCapacity, capacityPlanForRegistrationLimit } from '@/lib/registrations/capacity'
+import { calculateActivationQuote } from '@/lib/licensing/capacityPricing'
+import { getGlobalCommercialTerms } from '@/lib/licensing/resolveCommercialTerms'
+import { capacityChargeSnapshot, type CapacityChargeSnapshot } from '@/lib/licensing/schema'
 import type { PublishApiResponse }    from '@/types/events'
 import type { LinkedCampaignDraft }   from '@/lib/campaigns/linkedCampaignConfig'
 import { EVENT_LICENSES_COLLECTION, LICENSE_ORDERS_COLLECTION, eventLicenseConverter } from '@/lib/licensing/schema'
@@ -32,7 +36,22 @@ import { sendEventReviewEmail }        from '@/lib/events/reviewNotifications'
 import { safeImageUrl }                from '@/lib/utils/imageUrl'
 import { governPublish, recordPublish, extractIdentity } from '@/lib/events/governance'
 import { deriveLifecycleStatus }       from '@/lib/events/lifecycle'
+import { buildEventSlug }              from '@/lib/events/slug'
+import { readDraftCoverage }           from '@/lib/licensing/draftCoverage'
+import { parseServiceSelection, serviceShortfall, SERVICE_KINDS, SERVICE_LABELS } from '@/lib/licensing/serviceAllowances'
+import {
+  checkPublishAgreement, isPaidEventPricing, AGREEMENT_REQUIRED_MESSAGE, PUBLISH_AGREEMENT_DOCUMENTS,
+} from '@/lib/legal/organizerAgreement'
+import { checkDraftCommerceOwnership, DRAFT_COMMERCE_FORBIDDEN_MESSAGE } from '@/lib/licensing/draftOwnership'
+import { ledgerRef } from '@/lib/licensing/serviceAllowanceLedger'
+import { normalizeTypeDetails, passesForType } from '@/lib/events/builder/typeTransition'
+import { supersededActivationOrderId, RAZORPAY_ORDER_ID_RE } from '@/lib/licensing/manualRefundHold'
+import { settleCapturedActivation } from '@/lib/licensing/activationSelfHeal'
 
+
+/** RD-HIGH-1 — shown when a draft's paid capacity was already applied to its event. */
+const ENTITLEMENT_ALREADY_USED_MESSAGE =
+  'This event was already submitted, and its registration capacity is applied to it. Continue from the event dashboard (edit, resubmit or republish) — a new event needs its own draft and capacity.'
 
 export async function POST(req: NextRequest): Promise<NextResponse<PublishApiResponse>> {
   // ── 1. Verify Firebase ID token ────────────────────────────────────────────
@@ -87,6 +106,8 @@ export async function POST(req: NextRequest): Promise<NextResponse<PublishApiRes
     eventDetails:         draft.eventDetails         as Record<string, unknown> | null,
     communicationBilling: draft.communicationBilling as Record<string, unknown> | null | undefined,
     registrationForm:     draft.registrationForm     as Record<string, unknown> | null | undefined,
+    eventType:            typeof draft.eventType    === 'string' ? draft.eventType    : null,
+    eventSubtype:         typeof draft.eventSubtype === 'string' ? draft.eventSubtype : null,
   })
 
   if (!validation.canPublish) {
@@ -100,26 +121,81 @@ export async function POST(req: NextRequest): Promise<NextResponse<PublishApiRes
   }
   console.info(`[publish] validation ok · draftId=${draftId}`)
 
+  // ── 4b. RD-EVENT-COMMERCE-05F — the organizer's Publish Agreement, enforced HERE ─────────
+  // The wizard shows it unchecked on License & Services and blocks the button, but that is only
+  // the browser. Every required item must arrive as an explicit `true`; the fee-policy item is
+  // required for a paid event (decided from the STORED draft pricing, not the request).
+  // Placed after the lifecycle validation, so a repeated submission of an already-submitted
+  // event still answers EVENT_ALREADY_PUBLISHED, and before anything is written.
+  const agreement = checkPublishAgreement(
+    (body as Record<string, unknown> | null)?.agreement,
+    { paidEvent: isPaidEventPricing(draft.pricing) },
+  )
+  if (!agreement.ok) {
+    console.warn(`[publish] agreement missing · draftId=${draftId} missing=${agreement.missing.join(',')}`)
+    return NextResponse.json(
+      { canPublish: false, reason: 'AGREEMENT_REQUIRED', error: AGREEMENT_REQUIRED_MESSAGE },
+      { status: 422 },
+    )
+  }
+  // Recorded atomically with the submission (event + draft), inside the transaction below. No
+  // terms version exists for organizers, so none is recorded.
+  const publishAgreementRecord = {
+    items:      agreement.items,
+    documents:  PUBLISH_AGREEMENT_DOCUMENTS,
+    acceptedBy: authz.callerUid,
+  }
+
+  // ══ RD-HIGH-1 · A DRAFT PUBLISHES EXACTLY ONE EVENT ═══════════════════════════════
+  // Everything this draft paid for (the activation order lic_{draftId}, pre-publish add-ons,
+  // the prepaid-services ledger) is keyed by the draft id, so the draft IS the entitlement's
+  // binding. `validateEventPublish` only refused status 'published'; a draft that was already
+  // submitted but is now pending review, unpublished, rejected or restored could come back here
+  // with a NEW client-written slug and mint a second event on the same paid capacity.
+  // `publishedAt` is written only by the server (firestore.rules protects it) when the draft is
+  // first submitted, and no lifecycle transition clears it — so it means "this draft already
+  // produced its event". Such an event continues ONLY through its own flows (edit / Save
+  // Changes, resubmit, republish, capacity purchases), never through this route again. This is a
+  // fast refusal; the authoritative check is repeated inside the transaction below.
+  if (draft.publishedAt != null) {
+    const live = draft.status === 'published' || draft.status === 'pending_review'
+    console.warn(`[publish] refused · draftId=${draftId} reason=${live ? 'EVENT_ALREADY_PUBLISHED' : 'ENTITLEMENT_ALREADY_USED'} status=${String(draft.status)}`)
+    return NextResponse.json(live
+      ? { canPublish: false, reason: 'EVENT_ALREADY_PUBLISHED', error: 'This event has already been submitted.' }
+      : { canPublish: false, reason: 'ENTITLEMENT_ALREADY_USED', error: ENTITLEMENT_ALREADY_USED_MESSAGE },
+    { status: 409 })
+  }
+
+  // ══ RD-HIGH-2 · EVERY PAID RECORD UNDER THIS DRAFT ID MUST BE THIS ORGANIZER'S ══════════
+  // The draft id is a global key for the activation order, add-on orders, the services ledger
+  // and live events; it is client-choosable and publicly visible once an event is live. A draft
+  // whose id collides with another organizer's records can neither use them nor publish over them.
+  const ownership = await checkDraftCommerceOwnership(draftId, uid)
+  if (!ownership.ok) {
+    console.warn(`[publish] refused · draftId=${draftId} reason=ENTITLEMENT_INVALID record=${ownership.record} verdict=${ownership.verdict}`)
+    return NextResponse.json({ canPublish: false, reason: 'ENTITLEMENT_INVALID', error: DRAFT_COMMERCE_FORBIDDEN_MESSAGE }, { status: 403 })
+  }
+
   // ── 5. Resolve public slug ────────────────────────────────────────────────
   const rawDetails  = draft.eventDetails as Record<string, unknown> | null
+  const liveType    = typeof draft.eventType    === 'string' ? draft.eventType    : null
+  const liveSubtype = typeof draft.eventSubtype === 'string' ? draft.eventSubtype : null
   const rawSeo      = rawDetails?.seo    as Record<string, unknown> | null
   const rawInfo     = rawDetails?.info   as Record<string, unknown> | null
   const customSlug  = typeof rawSeo?.urlSlug === 'string' ? rawSeo.urlSlug.trim() : ''
   const eventName   = typeof rawInfo?.name   === 'string' ? rawInfo.name.trim()   : ''
 
-  function slugify(text: string): string {
-    return text
-      .toLowerCase().trim()
-      .replace(/[^\w\s-]/g, '')
-      .replace(/[\s_]+/g, '-')
-      .replace(/-{2,}/g, '-')
-      .replace(/^-|-$/g, '')
-      .slice(0, 80)
-  }
-
-  const slugifiedName = slugify(eventName)
-  const slug = customSlug
-    || (slugifiedName ? `${slugifiedName}-${draftId.slice(-6)}` : draftId)
+  // RD-EVENT-SLUG — ONE rule, in lib/events/slug.ts, shared with the wizard's validator.
+  //
+  // The suffix used to be `draftId.slice(-6)` appended VERBATIM. A Firestore auto-id is
+  // base62, so the generated slug usually carried an uppercase letter — which the wizard's
+  // slug input then "corrected" to lowercase, silently breaking the draft's only pointer to
+  // events/{slug} (Firestore ids are case-sensitive). buildEventSlug normalizes every
+  // branch, so what publish mints already satisfies the wizard's contract.
+  //
+  // This value is used for BOTH the uniqueness check (txn.get(slugRef) below) and the
+  // document id. Normalizing after the check would re-open the same bug.
+  const slug = buildEventSlug({ customSlug, eventName, draftId })
 
   // ── Paid License reconciliation (F2.2.1) ─────────────────────────────────────
   // The Event License must reflect the tier the organizer actually PAID for — not
@@ -142,9 +218,25 @@ export async function POST(req: NextRequest): Promise<NextResponse<PublishApiRes
   const selectedDef  = defFor(selectedTier)
   const isPaidTier   = !selectedDef.contactSales && selectedDef.licensePricePaise > 0
 
+  // RD-CE-FIX H4 — a pending activation checkout may already have been PAID (its confirm never ran,
+  // the webhook has not arrived). Settle it BEFORE deciding what this publish owes: a captured payment
+  // is activated, so the paid capacity and services are honoured below; an unknowable status changes
+  // nothing and publishes nothing. An unpaid pending order is superseded in the transaction.
+  const settled = await settleCapturedActivation(draftId, uid)
+  if (settled === 'unknown') {
+    console.warn(`[publish] refused · draftId=${draftId} reason=PAYMENT_STATUS_UNCONFIRMED`)
+    return NextResponse.json({
+      canPublish: false, reason: 'PAYMENT_STATUS_UNCONFIRMED',
+      error: 'We couldn’t confirm the status of an earlier payment for this event, so nothing was published. Please try again in a moment — you won’t be charged twice.',
+    }, { status: 409 })
+  }
+
   const orderRef  = adminDb.collection(LICENSE_ORDERS_COLLECTION).doc(`lic_${draftId}`)
   const orderSnap = await orderRef.get()
-  const order     = orderSnap.exists ? (orderSnap.data() as { tier?: unknown; status?: unknown; amountPaise?: unknown }) : null
+  const order     = orderSnap.exists ? (orderSnap.data() as {
+    tier?: unknown; status?: unknown; amountPaise?: unknown
+    commercialModel?: unknown; capacityChange?: CapacityChargeSnapshot
+  }) : null
   const hasPaidOrder = !!order && order.status === 'paid' && order.tier === selectedTier
 
   if (isPaidTier && !hasPaidOrder) {
@@ -156,6 +248,33 @@ export async function POST(req: NextRequest): Promise<NextResponse<PublishApiRes
   }
 
   const resolvedTier: AnyEventLicenseTier = (isPaidTier && hasPaidOrder) ? selectedTier : defaultLicenseTierForVersion(currentVersion)
+
+  // ══ RD-LICENSE-E2E-03 · A MISSING CAPACITY FAILS CLOSED ═══════════════════════
+  //
+  // Without a requested capacity this route used to fall through to the legacy
+  // tier → bucket path, which for the free tier stored `pack_200` / totalCapacity 200 —
+  // a capacity nobody chose, on an event whose Review screen had just shown "100 · Free".
+  //
+  // The ONLY pre-migration state that legitimately carries a tier-derived capacity is a
+  // PAID legacy licence: a draft whose `licenseTier` is a paid tier backed by a PAID,
+  // server-written order at `lic_{draftId}` (`isPaidTier && hasPaidOrder`, checked above;
+  // a paid tier WITHOUT a paid order was already refused with 402). That is money-backed
+  // and cannot be forged by the client, so it keeps the grandfathered path byte-for-byte.
+  // Every other draft must carry an explicit capacity — the wizard's Step 7 Continue always
+  // writes one (100 is free) — and is refused here otherwise, never inferred as free/200.
+  //
+  // This route only ever creates an event for the FIRST time (already-published drafts are
+  // refused with EVENT_ALREADY_PUBLISHED; republish is a lifecycle route that never
+  // recomputes capacity), so no historical event can reach this check.
+  const requestedCapacity = typeof draft.registrationCapacity === 'number' ? draft.registrationCapacity : null
+  const hasLegacyPaidEntitlement = isPaidTier && hasPaidOrder
+  if (requestedCapacity === null && !hasLegacyPaidEntitlement) {
+    console.warn(`[publish] failed · draftId=${draftId} reason=CAPACITY_NOT_CONFIGURED`)
+    return NextResponse.json({
+      canPublish: false, reason: 'CAPACITY_NOT_CONFIGURED',
+      error: 'Registration capacity has not been configured. Open the License step, choose how many registrations to accept, and continue.',
+    }, { status: 422 })
+  }
   const resolvedOrderId     = hasPaidOrder ? `lic_${draftId}` : null
   const resolvedAmountPaise = hasPaidOrder && typeof order?.amountPaise === 'number' ? order.amountPaise : 0
 
@@ -194,8 +313,20 @@ export async function POST(req: NextRequest): Promise<NextResponse<PublishApiRes
   //    (licensePricePaise === 0), NOT a hardcoded tier name, so an admin price/config
   //    override flows through. Counts the organizer's currently-LIVE free-tier events
   //    (archived ones free the slot), reusing deriveLifecycleStatus + the rule. ─
+  //
+  //    RD-LICENSE-E2E-01 · LEGACY ONLY. Under the capacity model there is no Starter plan, and
+  //    every capacity order carries the free tier purely as a compatibility stamp — so
+  //    `resolvedTier` is the free tier for EVERY new event, including one whose organizer has
+  //    just paid for 1,206 registrations. Applying the rule there refused that publish with
+  //    "Starter allows only one active event" AFTER the money was captured. The discriminator
+  //    is the draft's requested capacity, the same one the capacity gate below keys on; a
+  //    draft without it is a pre-migration draft and keeps this rule byte-for-byte.
+  //
+  //    RD-LICENSE-E2E-03 · a capacity-less FREE-tier draft is now refused above
+  //    (CAPACITY_NOT_CONFIGURED), so this branch no longer runs for any request. It is left
+  //    in place deliberately — historical licence code, not removed as part of hardening.
   const isFreeTier = (t: string): boolean => defFor(t).licensePricePaise === 0
-  if (isFreeTier(resolvedTier)) {
+  if (requestedCapacity === null && isFreeTier(resolvedTier)) {
     const LIVE = new Set(['published', 'pending_review', 'registration_closed'])
     // M4: the "one active event" rule blocks as soon as ONE other live free-tier event
     // exists (validatePublishEligibility fails at count >= 1). Scan the organizer's drafts
@@ -257,9 +388,103 @@ export async function POST(req: NextRequest): Promise<NextResponse<PublishApiRes
   // 2,500, Business 5,000) maps to the correct capacity bucket. At version 1 this equals
   // the previous getLicenseCatalog() value byte-for-byte; it no longer routes through the
   // dormant pricing engine's V1-only tier map (pricingEngineEnabled stays false).
-  const licenseMaxRegistrations = defFor(resolvedTier).limits.maxRegistrations
-  const capacityPlan  = capacityPlanForRegistrationLimit(licenseMaxRegistrations)
-  const totalCapacity = resolveTotalCapacity(capacityPlan)
+  // ══ RD-CAPACITY-01 · THE ENFORCED CAPACITY IS THE CAPACITY THE ORGANIZER CHOSE ══
+  //
+  // The previous derivation was licence limit -> CAPACITY_PLANS bucket -> that bucket's
+  // limit, which silently ROUNDED an organizer's choice UP to the next pack: a request for
+  // 437 was published as 500. Under the capacity model the organizer pays per registration,
+  // so 437 must be stored as 437 — anything else sells capacity that was never bought, or
+  // bills for capacity the event cannot use.
+  //
+  // Server-authoritative by construction: the draft carries only the organizer's REQUESTED
+  // capacity, and this route re-quotes it against the effective commercial terms. When the
+  // quote says payment is due, a PAID order that covers that capacity must exist. So a
+  // tampered draft capacity cannot publish — it can only fail with PAYMENT_REQUIRED.
+  //
+  // LEGACY / GRANDFATHERING: a draft with no requested capacity keeps the tier-derived
+  // bucket path byte-for-byte, so events created before this migration publish exactly as
+  // they did, and already-published events are never touched by this route at all.
+  // RD-LICENSE-E2E-03 · only a draft with a PAID legacy licence reaches that path now; any
+  // other capacity-less draft was refused above with CAPACITY_NOT_CONFIGURED.
+  // `requestedCapacity` is resolved above.
+  const paidCapacityCharge = order?.commercialModel === 'capacity' && order.status === 'paid'
+    ? order.capacityChange ?? null
+    : null
+
+  // ══ RD-EVENT-COMMERCE-02 · SELECTED PREPAID SERVICES MUST BE PAID ══════════════════
+  // The License & Services step records the organizer's selection on the draft. Only the
+  // allowance LEDGER (written by verified payments) proves purchase, so a selection above what
+  // was bought is refused — a draft edit can never turn an unpaid selection into an allowance.
+  const selectedServices = parseServiceSelection((draft as { serviceSelection?: unknown }).serviceSelection)
+  if (selectedServices.ok) {
+    const coverage  = await readDraftCoverage(draftId, uid)
+    const shortfall = serviceShortfall(selectedServices.selection, coverage.purchased)
+    const unpaid    = SERVICE_KINDS.filter(k => shortfall[k] > 0)
+    if (unpaid.length > 0) {
+      console.warn(`[publish] failed · draftId=${draftId} reason=SERVICES_PAYMENT_REQUIRED ${unpaid.map(k => `${k}=${shortfall[k]}`).join(' ')}`)
+      return NextResponse.json({
+        canPublish: false, reason: 'SERVICES_PAYMENT_REQUIRED',
+        error: `Payment is required for the selected ${unpaid.map(k => SERVICE_LABELS[k].units).join(' and ')} before publishing. Complete it on License & Services.`,
+      }, { status: 402 })
+    }
+  }
+
+  let capacityPlan: ReturnType<typeof capacityPlanForRegistrationLimit>
+  let totalCapacity: number | null
+  let activationCharge: CapacityChargeSnapshot | null = null
+
+  if (requestedCapacity !== null) {
+    // RD-CE-FIX M3 — PAID capacity is never silently given up. Publishing below what was paid for
+    // (activation and/or pre-publish add-ons) used to consume the paid order and store the smaller
+    // number: the difference vanished with no record. The event must publish with at least the paid
+    // capacity; unused paid capacity is then visible in the Wallet and refundable there (an explicit,
+    // Super-Admin-reviewed request) once the event closes.
+    {
+      const coverageNow = await readDraftCoverage(draftId, uid)
+      const paidFloor = Math.max(paidCapacityCharge?.capacity ?? 0, coverageNow.paidCapacity ?? 0)
+      if (paidFloor > 0 && requestedCapacity < paidFloor) {
+        console.warn(`[publish] refused · draftId=${draftId} reason=CAPACITY_BELOW_PAID requested=${requestedCapacity} paid=${paidFloor}`)
+        return NextResponse.json({
+          canPublish: false, reason: 'CAPACITY_BELOW_PAID',
+          error: `You’ve already paid for ${paidFloor.toLocaleString('en-IN')} registrations. Set the capacity to at least ${paidFloor.toLocaleString('en-IN')} to publish — after the event closes, unused paid capacity can be refunded from the Wallet.`,
+        }, { status: 409 })
+      }
+    }
+    const terms  = await getGlobalCommercialTerms()
+    const quoted = calculateActivationQuote({ capacity: requestedCapacity, terms })
+    if (!quoted.ok) {
+      console.warn(`[publish] failed · draftId=${draftId} reason=${quoted.code} capacity=${String(requestedCapacity)}`)
+      return NextResponse.json({ canPublish: false, reason: quoted.code, error: quoted.message }, { status: 422 })
+    }
+    // Payment due -> a paid capacity order must cover AT LEAST what is being published.
+    // ">=" rather than "===" so an organizer who paid for 500 and then trimmed the draft to
+    // 300 can still publish (they keep the smaller number they asked for; the decrease
+    // charge is a separate, deliberate operation and no refund is implied here).
+    if (quoted.quote.paymentRequired) {
+      // RD-EVENT-COMMERCE-02 — a paid pre-publish ADD-ON order can raise the paid capacity above
+      // the activation order's; coverage is read from server-written paid orders only.
+      const paidAddonCapacity = (await readDraftCoverage(draftId, uid)).paidCapacity
+      const covered = (paidCapacityCharge !== null && paidCapacityCharge.capacity >= quoted.quote.capacity)
+        || (paidAddonCapacity !== null && paidAddonCapacity >= quoted.quote.capacity)
+      if (!covered) {
+        console.warn(`[publish] failed · draftId=${draftId} reason=PAYMENT_REQUIRED capacity=${quoted.quote.capacity} paid=${paidCapacityCharge?.capacity ?? 'none'}`)
+        return NextResponse.json({
+          canPublish: false, reason: 'CAPACITY_PAYMENT_REQUIRED',
+          error: `Activation payment is required before publishing an event with ${quoted.quote.capacity.toLocaleString('en-IN')} registration capacity.`,
+        }, { status: 402 })
+      }
+    }
+    totalCapacity    = quoted.quote.capacity
+    activationCharge = capacityChargeSnapshot(quoted.quote)
+    // `capacityPlan` is retained ONLY for backward compatibility: legacy readers and
+    // `deriveStoredEventCapacity`'s fallback still look at it when `totalCapacity` is
+    // absent. It is derived FROM the exact capacity and never back onto it.
+    capacityPlan     = capacityPlanForRegistrationLimit(quoted.quote.capacity)
+  } else {
+    const licenseMaxRegistrations = defFor(resolvedTier).limits.maxRegistrations
+    capacityPlan  = capacityPlanForRegistrationLimit(licenseMaxRegistrations)
+    totalCapacity = resolveTotalCapacity(capacityPlan)
+  }
 
   // LS1: communication (WhatsApp/SMS) is billed PAY-AS-YOU-USE at actual send time
   // (attendee WhatsApp is charged per message on registration), NOT estimated and
@@ -350,6 +575,26 @@ export async function POST(req: NextRequest): Promise<NextResponse<PublishApiRes
       const existingRaw = (existingSnap.data() as { emailProvider?: unknown } | undefined)?.emailProvider
       const existingEmailProvider = isEmailProviderName(existingRaw) ? existingRaw : undefined
 
+      // RD-EVENT-15A · LEGACY ONLY.
+      //
+      // The canonical waitlist setting now lives at
+      // `registrationForm.registrationRules.waitlistEnabled` / `.waitlistCapacity`, which
+      // the set() below copies wholesale with the rest of `registrationForm` — so it
+      // needs no special handling and survives republish by construction.
+      //
+      // This carry-forward keeps the PRE-consolidation top-level pair alive for documents
+      // that still only have it (see lib/waitlist/waitlistSettings.ts). Without it a
+      // republish would erase the only setting such an event has. Any save from the
+      // builder or the Waitlist tab writes the canonical field and deletes this pair, so
+      // the branch stops applying to that event permanently. Zero extra reads — the
+      // snapshot was already read above — and an absent value stays absent.
+      const existingWl = existingSnap.data() as { waitlistEnabled?: unknown; waitlistLimit?: unknown } | undefined
+      const keepWaitlistEnabled = existingWl?.waitlistEnabled === true
+      const keepWaitlistLimit =
+        typeof existingWl?.waitlistLimit === 'number' && existingWl.waitlistLimit > 0
+          ? existingWl.waitlistLimit
+          : undefined
+
       // Campaign conflict check (event_plus_donation only)
       let existingCampaignSnap: FirebaseFirestore.DocumentSnapshot | null = null
       if (campaignRef) {
@@ -360,17 +605,40 @@ export async function POST(req: NextRequest): Promise<NextResponse<PublishApiRes
       // created below with the authoritative (paid) tier resolved pre-transaction.
       const licenseSnap = await txn.get(licenseRef)
 
+      // RD-HIGH-1 — the entitlement, re-read INSIDE the transaction: the draft (still never
+      // submitted?) and, when this publish relies on a paid activation, the order itself. Both
+      // docs are written below, so two concurrent publishes of one draft conflict and Firestore
+      // retries the loser, which then reads a submitted draft / consumed order and is refused.
+      const draftNowSnap = await txn.get(draftRef)
+      // RD-CE-FIX H4 — the activation order is ALWAYS re-read here: a pending (unpaid) checkout this
+      // publish does not use is superseded below, and one that became PAID since the pre-read aborts.
+      const orderNowSnap = await txn.get(orderRef)
+      const entitlementSnap = order?.status === 'paid' ? orderNowSnap : null
+      const orderNow = orderNowSnap.exists ? orderNowSnap.data() as Record<string, unknown> : null
+      const pendingRzp = orderNow?.status === 'created' && typeof orderNow.razorpayOrderId === 'string'
+        && RAZORPAY_ORDER_ID_RE.test(orderNow.razorpayOrderId) ? orderNow.razorpayOrderId : null
+      const pendingArchiveRef = pendingRzp ? orderRef.parent.doc(supersededActivationOrderId(draftId, pendingRzp)) : null
+      const pendingArchiveSnap = pendingArchiveRef ? await txn.get(pendingArchiveRef) : null
+      // RD-HIGH-2 — the services ledger this event will draw on, re-read in the transaction.
+      const ledgerNowSnap = await txn.get(ledgerRef(draftId))
+
       // ── VALIDATION (no writes yet) ─────────────────────────────────────────
 
-      if (existingSnap.exists && (existingSnap.data() as Record<string, unknown>)?.draftId !== draftId) {
+      // RD-SEC-01 · same draft AND same owner — a draftId match alone is not proof of ownership.
+      if (existingSnap.exists && (
+        (existingSnap.data() as Record<string, unknown>)?.draftId !== draftId ||
+        (existingSnap.data() as Record<string, unknown>)?.uid !== uid
+      )) {
         const err = new Error('SLUG_CONFLICT')
         err.name  = 'SLUG_CONFLICT'
         throw err
       }
 
       if (
-        existingCampaignSnap?.exists &&
-        (existingCampaignSnap.data() as Record<string, unknown>)?.draftId !== draftId
+        existingCampaignSnap?.exists && (
+          (existingCampaignSnap.data() as Record<string, unknown>)?.draftId !== draftId ||
+          (existingCampaignSnap.data() as Record<string, unknown>)?.uid !== uid
+        )
       ) {
         const err = new Error('SLUG_CONFLICT')
         err.name  = 'SLUG_CONFLICT'
@@ -385,6 +653,45 @@ export async function POST(req: NextRequest): Promise<NextResponse<PublishApiRes
         const err = new Error(licenseCheck.message)
         err.name  = licenseCheck.code
         throw err
+      }
+
+      // RD-HIGH-1 — the authoritative entitlement checks (see the fast refusal above).
+      const draftNow = draftNowSnap.exists ? draftNowSnap.data() as Record<string, unknown> : null
+      if (!draftNow || draftNow.publishedAt != null || draftNow.status !== 'draft') {
+        const err = new Error(ENTITLEMENT_ALREADY_USED_MESSAGE)
+        err.name  = 'ENTITLEMENT_ALREADY_USED'
+        throw err
+      }
+      if (order?.status !== 'paid' && orderNow?.status === 'paid') {
+        // A checkout for this draft was paid between the pre-read and now: publish again so the
+        // paid capacity/services are counted (and the M3 floor applies) instead of being bypassed.
+        const err = new Error('A payment for this event just completed. Please publish again — nothing was charged twice.')
+        err.name  = 'PAYMENT_JUST_COMPLETED'
+        throw err
+      }
+      if (ledgerNowSnap.exists && ledgerNowSnap.get('organizerUid') !== uid) {
+        console.warn(`[publish] refused · draftId=${draftId} reason=ENTITLEMENT_INVALID record=service allowance (in transaction)`)
+        const err = new Error(DRAFT_COMMERCE_FORBIDDEN_MESSAGE)
+        err.name  = 'ENTITLEMENT_INVALID'
+        throw err
+      }
+      if (entitlementSnap) {
+        const ent = entitlementSnap.exists ? entitlementSnap.data() as Record<string, unknown> : null
+        // Paid, for THIS draft, owned by THIS organizer — from server-written fields only. A record
+        // missing any of them (e.g. an unexpected historical shape) fails CLOSED, never guessed.
+        if (!ent || ent.status !== 'paid' || ent.eventId !== draftId
+            || typeof ent.organizerUid !== 'string' || ent.organizerUid !== uid) {
+          console.warn(`[publish] refused · draftId=${draftId} reason=ENTITLEMENT_INVALID status=${String(ent?.status)} eventIdMatch=${ent?.eventId === draftId} ownerMatch=${ent?.organizerUid === uid}`)
+          const err = new Error('The paid activation for this event could not be validated, so nothing was published. Please contact support.')
+          err.name  = 'ENTITLEMENT_INVALID'
+          throw err
+        }
+        // Already applied to an event — never a second time.
+        if (ent.consumed === true) {
+          const err = new Error(ENTITLEMENT_ALREADY_USED_MESSAGE)
+          err.name  = 'ENTITLEMENT_ALREADY_USED'
+          throw err
+        }
       }
 
       // The Event License is created atomically with the event below, so one must
@@ -404,11 +711,21 @@ export async function POST(req: NextRequest): Promise<NextResponse<PublishApiRes
         draftId,
         eventType:        draft.eventType    ?? null,
         eventSubtype:     draft.eventSubtype ?? null,
+        // RD-CE-FIX (trace #5) — the organizer's own "Other"/custom format text reaches the live event.
+        customEventSubtype: typeof draft.customEventSubtype === 'string' && draft.customEventSubtype.trim()
+          ? draft.customEventSubtype.trim() : null,
         campaignType:     (draft.campaignType as string | null) ?? null,
         visibility:       draft.visibility   ?? null,
-        pricing:          draft.pricing      ?? null,
+        // RD-PHASE4-S3 · Q1 — the draft is organizer-controlled; the live event stores organizer-pays.
+        // RD-CE-FIX H3 — passes carry sport details only when this event type has a sport block.
+        pricing:          (() => {
+          const p = organizerPaysPricing(draft.pricing ?? null) as Record<string, unknown> | null
+          return p ? { ...p, passes: passesForType(liveType, liveSubtype, p.passes) } : p
+        })(),
         eventDetails: {
           ...(draft.eventDetails as Record<string, unknown> ?? {}),
+          // RD-CE-FIX H3 — type details in exactly THIS type's shape (never another type's leftovers).
+          typeDetails: normalizeTypeDetails(liveType, liveSubtype, (draft.eventDetails as Record<string, unknown> | undefined)?.typeDetails),
           seo: { ...(rawSeo ?? {}), urlSlug: slug },
         },
         planType,
@@ -428,6 +745,11 @@ export async function POST(req: NextRequest): Promise<NextResponse<PublishApiRes
         // provider survive the lifecycle. Absent stays absent (⇒ SES), so legacy events
         // are untouched and nothing is backfilled.
         ...(existingEmailProvider ? { emailProvider: existingEmailProvider } : {}),
+        // RD-EVENT-15 — PRESERVED across republish, for the same reason.
+        ...(keepWaitlistEnabled ? { waitlistEnabled: true } : {}),
+        ...(keepWaitlistLimit !== undefined ? { waitlistLimit: keepWaitlistLimit } : {}),
+        // RD-EVENT-COMMERCE-05F — the consent this submission was made under.
+        publishAgreement:   { ...publishAgreementRecord, acceptedAt: FieldValue.serverTimestamp() },
         publishedAt:        FieldValue.serverTimestamp(),
         updatedAt:          FieldValue.serverTimestamp(),
       })
@@ -450,12 +772,46 @@ export async function POST(req: NextRequest): Promise<NextResponse<PublishApiRes
         upgradedAt:   null,
         createdAt:    FieldValue.serverTimestamp() as unknown as FirebaseFirestore.Timestamp,
         updatedAt:    FieldValue.serverTimestamp() as unknown as FirebaseFirestore.Timestamp,
+        // RD-CAPACITY-01 — the licence RECORDS what was bought; events/{slug}.totalCapacity
+        // remains the single ENFORCED value, and both are written in this one transaction so
+        // they can never disagree. Absent on a legacy tier-priced publish.
+        ...(activationCharge ? {
+          commercialModel: 'capacity' as const,
+          capacity:        totalCapacity,
+          activation:      activationCharge,
+          capacityOpSeq:   0,
+        } : {}),
       })
 
       // Reconcile the paid order onto the published event (traceability), so it is
       // no longer attached only to the draft.
-      if (resolvedOrderId) {
+      if (resolvedOrderId && !entitlementSnap) {
         txn.set(orderRef, { eventSlug: slug, updatedAt: FieldValue.serverTimestamp() }, { merge: true })
+      }
+      // RD-CE-FIX H4 — a pending checkout this publish did NOT use is superseded atomically with the
+      // event: archived as `lic_{draft}__sup_{rzp}` (failed/superseded, the F2A shape purchase writes)
+      // and `lic_` no longer carries its Razorpay order. A payment captured on it later is found by the
+      // webhook / confirm and HELD for Super Admin review — never granted after publish, never lost.
+      if (orderNow?.status === 'created') {
+        if (pendingArchiveRef && !pendingArchiveSnap?.exists) {
+          txn.create(pendingArchiveRef, {
+            ...orderNow, orderId: pendingArchiveRef.id, status: 'failed', failReason: 'superseded',
+            supersededFrom: orderRef.id, supersededBy: 'publish',
+            supersededAt: FieldValue.serverTimestamp(), updatedAt: FieldValue.serverTimestamp(),
+          })
+        }
+        txn.update(orderRef, {
+          status: 'failed', failReason: 'superseded', razorpayOrderId: null, supersededBy: 'publish',
+          supersededAt: FieldValue.serverTimestamp(), updatedAt: FieldValue.serverTimestamp(),
+        })
+      }
+      // RD-HIGH-1 — CONSUME the paid activation in the SAME transaction that creates the event
+      // (it used to be a best-effort write AFTER the commit, and nothing ever checked it).
+      if (entitlementSnap) {
+        txn.set(orderRef, {
+          consumed: true, boundEventId: draftId, eventSlug: slug,
+          consumedAt: FieldValue.serverTimestamp(), updatedAt: FieldValue.serverTimestamp(),
+        }, { merge: true })
       }
 
       txn.update(draftRef, {
@@ -467,6 +823,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<PublishApiRes
         publishedAt:                FieldValue.serverTimestamp(),
         updatedAt:                  FieldValue.serverTimestamp(),
         'eventDetails.seo.urlSlug': slug,
+        publishAgreement:           { ...publishAgreementRecord, acceptedAt: FieldValue.serverTimestamp() },
       })
 
       // Atomically publish the linked donation campaign alongside the event
@@ -479,6 +836,12 @@ export async function POST(req: NextRequest): Promise<NextResponse<PublishApiRes
       }
     })
   } catch (err) {
+    if (err instanceof Error && (err.name === 'ENTITLEMENT_ALREADY_USED' || err.name === 'ENTITLEMENT_INVALID')) {
+      return NextResponse.json(
+        { canPublish: false, reason: err.name as 'ENTITLEMENT_ALREADY_USED' | 'ENTITLEMENT_INVALID', error: err.message },
+        { status: err.name === 'ENTITLEMENT_INVALID' ? 403 : 409 },
+      )
+    }
     if (err instanceof Error && err.name === 'SLUG_CONFLICT') {
       return NextResponse.json(
         { canPublish: false, reason: 'SLUG_CONFLICT' as const, error: 'This URL is already taken by another published event. Choose a different custom URL.' },
@@ -494,6 +857,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<PublishApiRes
       STARTER_LIMIT_REACHED:  403,
       INVALID_LICENSE:        400,
       LICENSE_ALREADY_EXISTS: 409,
+      PAYMENT_JUST_COMPLETED: 409,   // RD-CE-FIX H4
     }
     if (err instanceof Error && licenseFailureStatus[err.name] !== undefined) {
       console.warn(`[publish] failed · draftId=${draftId} reason=${err.name}`)
@@ -517,12 +881,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<PublishApiRes
   //      event identity. Best-effort: on failure the next publish re-captures. ────
   try {
     await recordPublish(draftId, extractIdentity(draft), { orderId: resolvedOrderId, tier: resolvedTier, slug })
-    if (resolvedOrderId) {
-      await orderRef.set(
-        { consumed: true, boundEventId: draftId, consumedAt: FieldValue.serverTimestamp(), updatedAt: FieldValue.serverTimestamp() },
-        { merge: true },
-      )
-    }
+    // RD-HIGH-1 — the paid order is now consumed INSIDE the publish transaction above.
   } catch (e) {
     console.error('[publish] governance baseline/consume failed (non-fatal):', draftId, e)
   }

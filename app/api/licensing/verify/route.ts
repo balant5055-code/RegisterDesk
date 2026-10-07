@@ -10,8 +10,8 @@
 // billing, or registration. This endpoint only answers "is this payment genuine?".
 
 import { NextRequest, NextResponse } from 'next/server'
-import { verifyCaller }              from '@/lib/team/access'
 import { RazorpayDonationGateway }   from '@/lib/razorpay/donationGateway'
+import { authorizeWorkspace } from '@/lib/team/workspace'
 
 const NO_STORE = { 'Cache-Control': 'no-store' } as const
 
@@ -19,8 +19,11 @@ const NO_STORE = { 'Cache-Control': 'no-store' } as const
 const razorpaySignatureVerifier = new RazorpayDonationGateway()
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
-  const caller = await verifyCaller(req)
-  if (!caller) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  // RD-CE-FIX M5 · the same gate as the rest of licensing (capacity/*, checkout/confirm): verified
+  // token, the workspace it acts for, suspension of caller OR owner, and the `events` permission —
+  // a check-in-only or finance member, or a suspended workspace, cannot buy or read licences here.
+  const authz = await authorizeWorkspace(req, 'events')
+  if (!authz.ok) return NextResponse.json({ error: authz.error }, { status: authz.status })
 
   let body: {
     razorpay_order_id?:   unknown

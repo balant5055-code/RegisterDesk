@@ -32,7 +32,7 @@ export const FIELD_CONTROL =
   'text-fs-input sm:text-fs-base text-foreground placeholder:text-muted-foreground/50 ' +
   'transition-[color,border-color,box-shadow] duration-150 ' +
   'hover:border-border-strong ' +
-  'focus:border-primary/50 focus:outline-none focus:ring-2 focus:ring-primary/20 ' +
+  'focus:border-action/50 focus:outline-none focus:ring-2 focus:ring-action/20 ' +
   'disabled:cursor-not-allowed disabled:opacity-60'
 
 /** Invalid state — border + ring only, so the surface itself never forks. */
@@ -65,7 +65,7 @@ export function Field({ id, label, required, hint, error, className, children }:
     <div className={cn('space-y-1.5', className)}>
       <label htmlFor={id} className={cn(typography.caption, 'block font-semibold text-foreground')}>
         {label}
-        {required && <span className="text-primary" aria-hidden> *</span>}
+        {required && <span className="text-action" aria-hidden> *</span>}
       </label>
 
       {children}

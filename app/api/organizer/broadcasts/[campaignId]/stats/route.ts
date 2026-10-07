@@ -10,7 +10,9 @@ import type { WhatsAppDeliveryStatus, EmailLogStatus } from '@/lib/email-logs/ty
 
 export interface BroadcastWhatsAppStats {
   total:       number   // rows logged for this campaign
-  sent:        number   // accepted by Meta (total − failed)
+  sent:        number   // accepted by Meta (a wamid was returned) — what is billed
+  /** RD-INTEG — of `failed`: accepted (and billed) but later reported undeliverable by webhook. */
+  failedAfterAccept?: number
   delivered:   number
   read:        number
   failed:      number
@@ -43,20 +45,25 @@ export async function GET(
 
   const logsSnap = await adminDb.collection('emailLogs').where('campaignId', '==', campaignId).get()
 
-  let total = 0, delivered = 0, read = 0, failed = 0
+  // RD-INTEG — "sent" is what Meta ACCEPTED (a wamid came back), which is also exactly what
+  // the campaign is billed for. It used to be total − failed, which counted queued/skipped rows
+  // as sent and dropped accepted-then-undeliverable messages from it.
+  let total = 0, delivered = 0, read = 0, failed = 0, sent = 0, failedAfterAccept = 0
   for (const doc of logsSnap.docs) {
     total++
-    const d  = doc.data() as { waStatus?: WhatsAppDeliveryStatus; status?: EmailLogStatus }
+    const d  = doc.data() as { waStatus?: WhatsAppDeliveryStatus; status?: EmailLogStatus; providerMessageId?: unknown }
     const wa = d.waStatus
+    const accepted = (typeof d.providerMessageId === 'string' && d.providerMessageId.length > 0)
+      || d.status === 'sent' || d.status === 'delivered'
+    if (accepted) sent++
     if (wa === 'read')            { read++; delivered++ }
     else if (wa === 'delivered')  { delivered++ }
-    else if (wa === 'failed' || d.status === 'failed') { failed++ }
+    else if (wa === 'failed' || d.status === 'failed') { failed++; if (accepted) failedAfterAccept++ }
     // else: accepted ('sent'), awaiting a delivery callback.
   }
-  const sent = Math.max(0, total - failed)
 
   const stats: BroadcastWhatsAppStats = {
-    total, sent, delivered, read, failed,
+    total, sent, delivered, read, failed, failedAfterAccept,
     deliveryPct: pct(delivered, sent),
     readPct:     pct(read, delivered),
     failurePct:  pct(failed, total),

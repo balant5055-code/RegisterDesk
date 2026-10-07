@@ -203,7 +203,10 @@ describe('CheckinStaffGuard: a transient failure is not permanent', () => {
   })
 
   it('latches only AFTER a definitive answer', () => {
-    const latch = GUARD.indexOf('resolved.current = true\n')
+    // `\n` alone assumes an LF checkout; on CRLF the literal never matches and this
+    // reports -1 as though the latch were missing. The statement boundary is what
+    // matters, so it is matched as one.
+    const latch = GUARD.search(/resolved\.current = true\r?\n/)
     const parse = GUARD.indexOf('await res.json()')
     expect(latch).toBeGreaterThan(-1)
     expect(parse).toBeGreaterThan(-1)

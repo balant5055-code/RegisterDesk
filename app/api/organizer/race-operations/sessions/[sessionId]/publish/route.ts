@@ -16,6 +16,8 @@ import { NextRequest, NextResponse } from 'next/server'
 import { authorizeRaceOps } from '@/features/race-operations/services/authorize'
 import { publishSession } from '@/features/race-operations/services/importService'
 import { serializeSession } from '@/features/race-operations/repositories/sessionRepo'
+import { getLiveSnapshotByPass } from '@/features/race-operations/repositories/snapshotRepo'
+import { revalidatePublicResults } from '@/features/race-operations/services/publicRevalidate'
 import type { ImportSessionView } from '@/features/race-operations/types/session'
 
 type Params = { params: Promise<{ sessionId: string }> }
@@ -34,6 +36,11 @@ export async function POST(req: NextRequest, { params }: Params): Promise<NextRe
     sessionId, workspaceUid: authz.workspaceUid, callerUid: authz.callerUid,
   })
   if (!outcome.ok) return NextResponse.json({ error: outcome.error }, { status: outcome.status })
+
+  // RD-RACEOPS-02C · the live version changed: purge this race's public pages now rather
+  // than waiting out the ISR window. The snapshot carries the public pass slug.
+  const live = await getLiveSnapshotByPass(outcome.value.eventSlug, outcome.value.passId).catch(() => null)
+  if (live) revalidatePublicResults(live.eventSlug, live.passSlug)
 
   const payload: PublishResponse = { session: serializeSession(outcome.value) }
   return NextResponse.json(payload, { headers: { 'Cache-Control': 'no-store' } })

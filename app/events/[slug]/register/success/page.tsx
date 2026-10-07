@@ -10,7 +10,7 @@ import { getRegistration } from '@/lib/firebase/firestore/registrations'
 import { buildQrValue, signTicketToken } from '@/lib/tickets/generate'
 import { signReceiptToken }              from '@/lib/receipts/token'
 import type { EventDetailsDraft }        from '@/components/wizard/eventDetailsConfig'
-import { MarketingPageLayout } from '@/components/marketing/layout/MarketingPageLayout'
+import { EventUtilityLayout } from '@/components/marketing/layout/EventUtilityLayout'
 import { ToastProvider } from '@/components/ui/Toast'
 import { FreshRegistrationToast } from './FreshRegistrationToast'
 import { SuccessClient, type CalendarData } from './SuccessClient'
@@ -151,9 +151,9 @@ export default async function RegistrationSuccessPage({
   // public page uses. Composed here, exactly as the homepage and /causes do it — this
   // app has no (public) route group, so the shell is opt-in per page.
   return (
-    <MarketingPageLayout>
+    <EventUtilityLayout>
       <ToastProvider>
-        <FreshRegistrationToast ticketCode={ticketCode} isPending={isPending} />
+        <FreshRegistrationToast ticketCode={ticketCode} isPending={isPending} celebrate={status === 'confirmed'} />
         <SuccessClient
           registrationId={id}
           ticketCode={ticketCode}
@@ -177,6 +177,6 @@ export default async function RegistrationSuccessPage({
           shareUrl={`${baseUrl}/events/${slug}`}
         />
       </ToastProvider>
-    </MarketingPageLayout>
+    </EventUtilityLayout>
   )
 }

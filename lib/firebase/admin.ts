@@ -5,15 +5,14 @@ import { initializeApp, getApps, cert, type App } from 'firebase-admin/app'
 import { getFirestore }  from 'firebase-admin/firestore'
 import { getAuth }       from 'firebase-admin/auth'
 import { FIREBASE_SERVICE_ACCOUNT_KEY } from '@/lib/env'
-console.log(
-  '[ADMIN]',
-  'NEXT_RUNTIME =',
-  process.env.NEXT_RUNTIME,
-  'KEY EXISTS =',
-  !!process.env.FIREBASE_SERVICE_ACCOUNT_KEY,
-  'LEN =',
-  process.env.FIREBASE_SERVICE_ACCOUNT_KEY?.length
-)
+
+// RD-FIN-06A: a module-scope diagnostic printing the service-account key's LENGTH used to
+// live here, on every import in every environment. Length is not the key, but it is
+// information about a credential written to logs that outlive the process — and it bought
+// nothing that the explicit error a few lines below does not already say more clearly.
+//
+// Presence is still checked; it is simply no longer announced. If a boot-time signal is
+// ever needed again, log the boolean, never a property of the secret itself.
 function buildAdminApp(): App {
   if (getApps().length > 0) return getApps()[0]!
 

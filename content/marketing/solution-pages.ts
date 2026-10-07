@@ -210,7 +210,7 @@ export const SOLUTION_PAGES: Record<string, SolutionPageConfig> = {
       eyebrow: 'Built for giving', title: 'Raise funds with receipts and donor records',
       subtitle: 'Everything a campaign needs to collect and account for donations.', screenshotId: 'finance',
       highlights: [
-        { iconKey: 'fundraiser', title: 'Donation campaigns', description: 'Collect one-off and recurring donations.' },
+        { iconKey: 'fundraiser', title: 'Donation campaigns', description: 'Collect one-off donations from your supporters.' },
         { iconKey: 'invoice',    title: '80G receipts',        description: 'Issue 80G tax receipts where configured.' },
         { iconKey: 'crm',        title: 'Donor CRM',           description: 'Keep a record of every donor.' },
       ],
@@ -222,7 +222,7 @@ export const SOLUTION_PAGES: Record<string, SolutionPageConfig> = {
         { iconKey: 'fundraiser', title: 'Donation campaigns', description: 'Run campaigns with custom amounts.' },
         { iconKey: 'payments',   title: 'Secure payments',    description: 'Collect donations through secure checkout.' },
         { iconKey: 'invoice',    title: '80G receipts',        description: 'Issue 80G tax receipts where configured.' },
-        { iconKey: 'reuse',      title: 'Refund handling',    description: 'Issue refunds for donations when needed.' },
+        { iconKey: 'reuse',      title: 'Refund handling',    description: 'Donation refunds are handled by RegisterDesk under its refund policy.' },
         { iconKey: 'crm',        title: 'Donor CRM',           description: 'A record of every donor and contribution.' },
       ],
     },

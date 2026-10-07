@@ -8,10 +8,14 @@
 // Security: organizer must own the event.
 
 import { NextRequest, NextResponse } from 'next/server'
+import { Timestamp }                 from 'firebase-admin/firestore'
 import { adminDb }                   from '@/lib/firebase/admin'
 import { authorizeEvent }           from '@/lib/team/workspace'
 import { getEventStats, aggregateRegistrationStatusCounts } from '@/lib/firebase/firestore/registrationCounters'
+import { resolveIdentifierConfig }   from '@/lib/identifiers/config'
+import { todayHourRanges, hourRangeDate } from '@/lib/attendance/attendanceView'
 import type { RegistrationDocument } from '@/lib/registrations/types'
+import { resolveOwnedEventSlug } from '@/lib/events/liveEventRef'
 
 // ─── Response types ───────────────────────────────────────────────────────────
 
@@ -33,9 +37,15 @@ export interface PassAttendanceStat {
 }
 
 export interface HourlyBucket {
-  hour:  string   // "HH:00" — the bucket key
+  hour:  string   // "HH:00" — the bucket key, in the EVENT's timezone
   label: string   // "9 AM", "12 PM" etc.
-  count: number   // check-ins in this hour
+  /**
+   * Check-ins in this hour. RD-EVENT-11: `null` means this hour could NOT be counted
+   * — it is not zero, and the chart must draw it as a gap. Previously every hour was
+   * a number derived from a capped document window, so an unreadable hour and an
+   * empty hour were indistinguishable.
+   */
+  count: number | null
 }
 
 export interface AttendanceDashboardResponse {
@@ -52,12 +62,39 @@ export interface AttendanceDashboardResponse {
   // Per-pass breakdown
   passStats: PassAttendanceStat[]
 
-  // Hourly check-in trend (covers active hours only, min 1 bucket)
+  // Hourly check-in trend — the ELAPSED hours of today, in the event's timezone
   hourlyBuckets: HourlyBucket[]
 
   // Meta
   eventName:   string
   lastUpdated: string   // ISO timestamp of when the server computed this
+
+  // ─── RD-EVENT-11, all additive ────────────────────────────────────────────
+
+  /** The summary counts could not be read. Render "—", never 0. */
+  statsUnavailable: boolean
+  /** The hourly aggregates could not be read at all. */
+  hourlyUnavailable: boolean
+  /** The EVENT's timezone — the only clock a gate operator can act on. */
+  timeZone: string
+  /** The event-timezone day the hourly buckets cover, `YYYY-MM-DD`. */
+  hourlyDate: string
+  /** Exact check-ins today. `null` when any hour was unreadable — a partial sum is a lie. */
+  hourlyTotal: number | null
+
+  /**
+   * The organizer's OWN name for the thing this event issues ("Bib Number",
+   * "Delegate ID", "Visitor Pass"). `null` when the event issues nothing, in which
+   * case the column does not exist. Never hardcoded: RegisterDesk is not a
+   * marathon platform.
+   */
+  identifierLabel:   string | null
+  identifierEnabled: boolean
+
+  /** The lifecycle state, so the client can explain itself without a second read. */
+  lifecycleStatus: string | null
+  /** Whether this event accepts check-ins right now (mirrors lib/checkin/eventStatus). */
+  checkInAccepted: boolean
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -70,12 +107,9 @@ function toISO(val: unknown): string | null {
   return null
 }
 
-function hourLabel(h: number): string {
-  if (h === 0)  return '12 AM'
-  if (h < 12)   return `${h} AM`
-  if (h === 12) return '12 PM'
-  return `${h - 12} PM`
-}
+// `hourLabel` moved to lib/attendance/attendanceView, where the hour RANGES are built
+// — the label and the boundary it names must come from one place, or a chart can be
+// captioned "9 AM" over a bucket that is not 9 AM anywhere.
 
 interface CheckinRow {
   registrationId: string
@@ -87,53 +121,36 @@ interface CheckinRow {
 }
 
 /**
- * Builds the recent-check-ins list (newest 20) and hourly buckets from a set of
- * checked-in rows. Shared by both read paths: the O(1) path feeds it a bounded,
- * index-ordered window; the legacy fallback feeds it the full scan. Pure — no I/O.
+ * How many recent check-ins the widget shows. It has ALWAYS shown twenty; until
+ * RD-EVENT-11 it read a thousand documents to find them.
  */
-function buildCheckinViews(rows: CheckinRow[]): { recentCheckIns: RecentCheckIn[]; hourlyBuckets: HourlyBucket[] } {
-  const sorted = rows.filter(r => r.checkedInAt).sort((a, b) => b.checkedInAt.localeCompare(a.checkedInAt))
-
-  const recentCheckIns: RecentCheckIn[] = sorted.slice(0, 20).map(r => ({
-    registrationId: r.registrationId,
-    attendeeName:   r.attendeeName,
-    ticketCode:     r.ticketCode,
-    passName:       r.passName,
-    checkedInAt:    r.checkedInAt,
-  }))
-
-  const hourCounts: Record<number, number> = {}
-  for (const r of rows) {
-    if (!r.checkedInAt) continue
-    const hour = new Date(r.checkedInAt).getHours()
-    hourCounts[hour] = (hourCounts[hour] ?? 0) + 1
-  }
-  const activeHours = Object.keys(hourCounts).map(Number)
-  const minH = activeHours.length > 0 ? Math.max(0,  Math.min(...activeHours) - 1) : 8
-  const maxH = activeHours.length > 0 ? Math.min(23, Math.max(...activeHours) + 1) : 18
-
-  const hourlyBuckets: HourlyBucket[] = []
-  for (let h = minH; h <= maxH; h++) {
-    hourlyBuckets.push({ hour: `${String(h).padStart(2, '0')}:00`, label: hourLabel(h), count: hourCounts[h] ?? 0 })
-  }
-  return { recentCheckIns, hourlyBuckets }
-}
-
-const RECENT_CHECKIN_CAP = 1000
+const RECENT_CHECKIN_LIMIT = 20
 
 /**
- * The ONE bounded, index-ordered recent-check-in window (newest RECENT_CHECKIN_CAP),
- * shared by BOTH attendance read paths — the canonical (counter) path and the legacy
- * fallback. A registration carries `checkedInAt` IFF it is checked in (check-in sets it,
- * undo-checkin FieldValue.delete()s it), so ordering by `checkedInAt` yields exactly the
- * recent checked-in registrations via the existing (organizerUid, eventSlug, checkedInAt)
- * index. Projected (no full documents). Feeds recent check-ins + hourly buckets in both
- * paths, and per-pass checked-in in the fallback.
+ * The newest check-ins — exactly as many as are rendered.
+ *
+ * ═══ WHY THIS IS 20 AND NOT 1000 ═════════════════════════════════════════════
+ * This query used to `limit(1000)`, because the same window fed three things: the
+ * twenty-row recent list, the hourly chart, and (in the fallback) per-pass
+ * checked-in counts. So every attendance load billed up to a thousand document
+ * reads — and the tab auto-refreshes, so an organizer who left it open on a gate
+ * laptop spent 120,000 reads an hour looking at twenty rows.
+ *
+ * The hourly chart now comes from `count()` aggregates, which transfer no documents
+ * and are exact at any size. Per-pass checked-in comes from `passCheckedInCounts`
+ * on the counter, and from those same aggregates when the counter is not backfilled.
+ * Nothing needs the window any more, so it shrank to what it displays.
+ *
+ * A registration carries `checkedInAt` IFF it is checked in (check-in sets it,
+ * undo-checkin deletes it), so ordering by `checkedInAt` yields exactly the recent
+ * checked-in registrations through the existing (organizerUid, eventSlug,
+ * checkedInAt) index. Projected — no full documents, no attendee PII beyond the
+ * four fields the list renders.
  */
 async function fetchRecentCheckinRows(uid: string, slug: string): Promise<CheckinRow[]> {
   const ciSnap = await adminDb.collection('registrations')
     .where('organizerUid', '==', uid).where('eventSlug', '==', slug)
-    .orderBy('checkedInAt', 'desc').limit(RECENT_CHECKIN_CAP)
+    .orderBy('checkedInAt', 'desc').limit(RECENT_CHECKIN_LIMIT)
     .select('attendee.name', 'ticketCode', 'passName', 'passId', 'checkedInAt')
     .get()
   return ciSnap.docs.map(doc => {
@@ -147,6 +164,83 @@ async function fetchRecentCheckinRows(uid: string, slug: string): Promise<Checki
       checkedInAt:    toISO(r.checkedInAt) ?? '',
     }
   })
+}
+
+function toRecentCheckIns(rows: CheckinRow[]): RecentCheckIn[] {
+  return rows
+    .filter(r => r.checkedInAt)
+    .sort((a, b) => b.checkedInAt.localeCompare(a.checkedInAt))
+    .map(r => ({
+      registrationId: r.registrationId,
+      attendeeName:   r.attendeeName,
+      ticketCode:     r.ticketCode,
+      passName:       r.passName,
+      checkedInAt:    r.checkedInAt,
+    }))
+}
+
+/**
+ * Today's check-ins, hour by hour, in the EVENT's timezone — from `count()`
+ * aggregates that transfer ZERO documents.
+ *
+ * Two defects this closes beyond the read cost. The hours were the SERVER's
+ * (`new Date(iso).getHours()`), so a 09:30 arrival in Chennai landed in the 04:00
+ * bucket of a UTC server. And the window was "the newest 1000 check-ins" rather than
+ * a day, so a busy event silently folded several days into one 24-hour chart and
+ * captioned it "1000 check-ins shown" as though that were the total.
+ *
+ * Each bucket settles independently: a failed aggregate becomes `null`, which the
+ * chart draws as a gap. Bounded to 24 by construction — a day has no more hours.
+ * Served by the existing (organizerUid, eventSlug, checkedInAt) composite.
+ */
+async function fetchHourlyBuckets(
+  uid: string, slug: string, timeZone: string, now: Date,
+): Promise<{ buckets: HourlyBucket[]; total: number | null; unavailable: boolean }> {
+  const base = adminDb.collection('registrations')
+    .where('organizerUid', '==', uid).where('eventSlug', '==', slug)
+
+  const ranges = todayHourRanges(now, timeZone)
+  const counts = await Promise.all(ranges.map(r =>
+    base
+      .where('checkedInAt', '>=', Timestamp.fromDate(r.start))
+      .where('checkedInAt', '<',  Timestamp.fromDate(r.end))
+      .count().get()
+      .then(s => s.data().count as number)
+      // A failed bucket stays NULL. Rendering it as 0 would claim nobody arrived in
+      // that hour — the one thing this chart must never invent.
+      .catch(() => null),
+  ))
+
+  const buckets = ranges.map((r, i) => ({ hour: r.hour, label: r.label, count: counts[i] }))
+  const known   = counts.filter((c): c is number => c !== null)
+  return {
+    buckets,
+    total:       known.length === counts.length ? known.reduce((a, b) => a + b, 0) : null,
+    unavailable: known.length === 0 && counts.length > 0,
+  }
+}
+
+/**
+ * Per-pass checked-in counts for a legacy event whose counter is not backfilled —
+ * one `count()` aggregate per pass, zero documents.
+ *
+ * The fallback used to derive these by tallying the 1000-document window, which was
+ * exact only for events smaller than the cap and silently wrong above it. Passes are
+ * a handful per event, so this is a handful of aggregates and exact at any size.
+ */
+async function fetchPassCheckedInCounts(
+  uid: string, slug: string, passIds: string[],
+): Promise<Map<string, number | null>> {
+  const base = adminDb.collection('registrations')
+    .where('organizerUid', '==', uid).where('eventSlug', '==', slug)
+
+  const out = new Map<string, number | null>()
+  const counts = await Promise.all(passIds.map(id =>
+    base.where('passId', '==', id).where('checkedIn', '==', true)
+      .count().get().then(s => s.data().count as number).catch(() => null),
+  ))
+  passIds.forEach((id, i) => out.set(id, counts[i]))
+  return out
 }
 
 // ─── Handler ──────────────────────────────────────────────────────────────────
@@ -179,14 +273,46 @@ export async function GET(
   const draft    = draftSnap.data() as Record<string, unknown>
   const details  = (draft.eventDetails as Record<string, unknown>) ?? {}
   const info     = (details.info       as Record<string, unknown>) ?? {}
-  const seo      = (details.seo        as Record<string, unknown>) ?? {}
   const pricing  = (draft.pricing      as Record<string, unknown>) ?? {}
 
-  const slug      = typeof seo.urlSlug === 'string' && seo.urlSlug ? seo.urlSlug : null
+  // RD-CE-FIX C1 · only a slug proven to be THIS workspace's live event (counter stats have no owner filter).
+  const slug      = await resolveOwnedEventSlug(uid, eventId, draft)
   const eventName = typeof info.name   === 'string' ? info.name : 'Event'
 
+  const lifecycleStatus = typeof draft.lifecycleStatus === 'string' ? draft.lifecycleStatus : null
+
+  // RD-EVENT-11 · The lifecycle set is the ONE the check-in routes enforce
+  // (lib/checkin/eventStatus). Read here only so the client can explain itself
+  // without a second request; every mutation is still refused server-side.
+  const checkInAccepted = lifecycleStatus === 'published'
+    || lifecycleStatus === 'registration_closed'
+    || lifecycleStatus === 'completed'
+
+  // The EVENT's timezone, so an hour bucket is the organizer's hour — not the
+  // server's and not the viewer's. Falls back to the platform default rather than
+  // throwing on an unrecognised zone.
+  const schedule = (details.schedule as Record<string, unknown>) ?? {}
+  const rawZone  = typeof schedule.timezone === 'string' ? schedule.timezone : null
+  let timeZone = 'Asia/Kolkata'
+  if (rawZone) {
+    try { new Intl.DateTimeFormat('en-CA', { timeZone: rawZone }); timeZone = rawZone }
+    catch { /* unrecognised zone — keep the default */ }
+  }
+
   if (!slug) {
-    return NextResponse.json({ error: 'Event slug not resolved' }, { status: 404 })
+    // A draft has no slug and therefore no registrations. That is a STATE, not a
+    // fault: returning 404 made the tab render "Failed to load dashboard" on every
+    // unpublished event, which reads as a broken product rather than an early one.
+    return NextResponse.json({
+      totalRegistrations: 0, confirmedRegistrations: 0, cancelledRegistrations: 0,
+      checkedInCount: 0, attendanceRate: 0,
+      recentCheckIns: [], passStats: [], hourlyBuckets: [],
+      eventName, lastUpdated: new Date().toISOString(),
+      statsUnavailable: false, hourlyUnavailable: false,
+      timeZone, hourlyDate: hourRangeDate(new Date(), timeZone), hourlyTotal: 0,
+      identifierLabel: null, identifierEnabled: false,
+      lifecycleStatus, checkInAccepted: false,
+    })
   }
 
   // ── 3. Attendance statistics ───────────────────────────────────────────────
@@ -200,11 +326,26 @@ export async function GET(
     : []
 
   let totalRegistrations = 0, confirmedRegistrations = 0, cancelledRegistrations = 0, checkedInCount = 0
+  let statsUnavailable = false
   let passStats:      PassAttendanceStat[] = []
   let recentCheckIns: RecentCheckIn[]      = []
-  let hourlyBuckets:  HourlyBucket[]       = []
 
-  const { counter, complete } = await getEventStats(slug)
+  const now = new Date()
+
+  // ── The three independent reads, issued together ──────────────────────────
+  // Each settles on its own so one failure scopes to its own section: an unreadable
+  // counter must not blank the hourly chart, and an unreadable hour must not blank
+  // the summary. Identifiers are read here too — one document — because the column
+  // label is DATA the organizer configured, and the client must not guess it.
+  const [statsResult, rows, hourly, identifier] = await Promise.all([
+    getEventStats(slug).catch(() => null),
+    fetchRecentCheckinRows(uid, slug).catch(() => null),
+    fetchHourlyBuckets(uid, slug, timeZone, now)
+      .catch(() => ({ buckets: [] as HourlyBucket[], total: null, unavailable: true })),
+    resolveIdentifierConfig(slug).catch(() => null),
+  ])
+
+  const { counter, complete } = statsResult ?? { counter: null, complete: false }
   // passCounts (registered per pass) is ALWAYS maintained, so it is trusted in
   // both paths; only the per-pass CHECKED-IN source differs.
   const passCounts = counter?.passCounts ?? {}
@@ -222,6 +363,8 @@ export async function GET(
       return { passId, passName, capacity, registered, checkedIn, attendancePct }
     })
 
+  recentCheckIns = toRecentCheckIns(rows ?? [])
+
   if (complete && counter) {
     // ── O(1) path — summary + per-pass from the counter doc ───────────────────
     confirmedRegistrations = counter.totalCount     ?? 0
@@ -231,43 +374,44 @@ export async function GET(
 
     const passCheckedIn = counter.passCheckedInCounts ?? {}
     passStats = passStatOf(id => passCounts[id] ?? 0, id => passCheckedIn[id] ?? 0)
-
-    // Recent check-ins + hourly buckets — the ONE bounded, index-ordered window.
-    const rows = await fetchRecentCheckinRows(uid, slug)
-    ;({ recentCheckIns, hourlyBuckets } = buildCheckinViews(rows))
   } else {
-    // ── Fallback (legacy / not-yet-backfilled events) — BOUNDED (RD-REGISTRATIONS-01
-    //    Phase 3 / H3). The former unbounded, unprojected full-collection scan is gone.
-    //    Summary counts now come from indexed count() aggregates that transfer ZERO
-    //    documents (all served by existing indexes: (organizerUid,eventSlug) and
-    //    (…,status) and (…,checkedInAt)); recent check-ins, hourly buckets and per-pass
-    //    checked-in come from the SAME bounded window the canonical path uses. No scan. ──
-    // Phase 4 (M8): the summary counts come from the ONE shared statistics fallback
-    // (aggregateRegistrationStatusCounts) that the registrations list also uses — a single
-    // fallback implementation. The recent/hourly/per-pass window is fetched in parallel.
-    const [counts, rows] = await Promise.all([
-      aggregateRegistrationStatusCounts(uid, slug),
-      fetchRecentCheckinRows(uid, slug),
+    // ── Fallback (legacy / not-yet-backfilled events) ─────────────────────────
+    // Summary counts come from the ONE shared statistics fallback
+    // (aggregateRegistrationStatusCounts) that the registrations list also uses —
+    // indexed count() aggregates that transfer ZERO documents.
+    //
+    // RD-EVENT-11 · Per-pass checked-in is now its own small set of aggregates
+    // rather than a tally over a capped document window. The window was exact only
+    // for events smaller than the cap and quietly wrong above it, which is the worst
+    // way for a number to be wrong: invisibly, and only on the largest events.
+    const passIds = rawPasses.map(p => String(p.id ?? '')).filter(Boolean)
+    const [counts, passCheckedIn] = await Promise.all([
+      aggregateRegistrationStatusCounts(uid, slug).catch(() => null),
+      fetchPassCheckedInCounts(uid, slug, passIds).catch(() => new Map<string, number | null>()),
     ])
-    totalRegistrations     = counts.total
-    confirmedRegistrations = counts.confirmed
-    cancelledRegistrations = counts.cancelled
-    checkedInCount         = counts.checkedIn
 
-    // Per-pass checked-in from the bounded window (registered stays exact from the
-    // always-maintained counter). Exact for events within the window; a larger legacy
-    // event reflects the most-recent RECENT_CHECKIN_CAP check-ins — the same cap the
-    // recent/hourly widgets already document, and event-level checkedInCount stays exact.
-    const passCheckedInById = new Map<string, number>()
-    for (const r of rows) passCheckedInById.set(r.passId, (passCheckedInById.get(r.passId) ?? 0) + 1)
-    passStats = passStatOf(id => passCounts[id] ?? 0, id => passCheckedInById.get(id) ?? 0)
+    if (counts) {
+      totalRegistrations     = counts.total
+      confirmedRegistrations = counts.confirmed
+      cancelledRegistrations = counts.cancelled
+      checkedInCount         = counts.checkedIn
+    } else {
+      // Both the counter and the aggregate fallback failed. Say so — do not report
+      // an event with registrations as an event with none.
+      statsUnavailable = true
+    }
 
-    ;({ recentCheckIns, hourlyBuckets } = buildCheckinViews(rows))
+    passStats = passStatOf(id => passCounts[id] ?? 0, id => passCheckedIn.get(id) ?? 0)
   }
 
-  const attendanceRate = confirmedRegistrations > 0
+  // Kept for backward compatibility with existing consumers. `statsUnavailable` is
+  // what tells a caller whether this figure means anything; the tab reads the honest
+  // resolver in lib/attendance/attendanceView instead of this number.
+  const attendanceRate = !statsUnavailable && confirmedRegistrations > 0
     ? Math.round((checkedInCount / confirmedRegistrations) * 100)
     : 0
+
+  const idConfig = identifier?.config ?? null
 
   // ── 4. Return ──────────────────────────────────────────────────────────────
   return NextResponse.json({
@@ -278,8 +422,20 @@ export async function GET(
     attendanceRate,
     recentCheckIns,
     passStats,
-    hourlyBuckets,
+    hourlyBuckets: hourly.buckets,
     eventName,
-    lastUpdated: new Date().toISOString(),
+    lastUpdated: now.toISOString(),
+
+    statsUnavailable,
+    hourlyUnavailable: hourly.unavailable,
+    timeZone,
+    hourlyDate:  hourRangeDate(now, timeZone),
+    hourlyTotal: hourly.total,
+
+    identifierLabel:   idConfig?.enabled ? (idConfig.label ?? null) : null,
+    identifierEnabled: Boolean(idConfig?.enabled),
+
+    lifecycleStatus,
+    checkInAccepted,
   })
 }

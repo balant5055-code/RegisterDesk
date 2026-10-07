@@ -64,8 +64,8 @@ export function buildReminderContent(input: ReminderTemplateInput): ReminderCont
       return { subject, html: emailShell(subject, `${heading('Early bird pricing is ending')}${p(`Early bird pricing for <strong>${ev}</strong> is ending soon. This is a good moment to remind prospective attendees.`)}${cta}`) }
     }
     case 'low_wallet': {
-      const subject = 'Low wallet balance'
-      return { subject, html: emailShell(subject, `${heading('Your wallet balance is low')}${p(`Your organizer wallet balance is ${escHtml(input.balanceLabel ?? 'low')}. Top up to keep paid communications (WhatsApp/SMS) running for your events.`)}${input.eventUrl ? btn('Top up wallet', input.eventUrl) : ''}`) }
+      const subject = 'Low communication balance'
+      return { subject, html: emailShell(subject, `${heading('Your communication balance is low')}${p(`Your communication balance is ${escHtml(input.balanceLabel ?? 'low')}. Top up to keep pay-as-you-go WhatsApp messages running for your events.`)}${input.eventUrl ? btn('Top up communication balance', input.eventUrl) : ''}`) }
     }
   }
 }

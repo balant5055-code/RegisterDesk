@@ -1,6 +1,6 @@
 import { Globe, Mail, Phone, ExternalLink, BadgeCheck, ChevronRight } from 'lucide-react'
 import { cn } from '@/lib/utils/cn'
-import { buttonVariants } from '@/components/ui/button'
+import { marketingButton } from '@/lib/marketing/theme'
 import type { OrganizerInfo } from '@/components/wizard/eventDetailsConfig'
 import { SectionWrapper } from '@/components/event-templates/shared/ui/SectionWrapper'
 
@@ -31,7 +31,7 @@ export function OrganizerSection({ organizer, showSocial }: {
           ) : (
             <div
               className="flex size-[64px] items-center justify-center rounded-xl text-2xl font-extrabold text-white shadow-[var(--shadow-sm)]"
-              style={{ backgroundImage: 'var(--primary-gradient)' }}
+              style={{ backgroundImage: 'var(--action-gradient)' }}
             >
               {organizer.name.charAt(0).toUpperCase()}
             </div>
@@ -42,7 +42,7 @@ export function OrganizerSection({ organizer, showSocial }: {
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
             <p className="text-base font-bold text-foreground">{organizer.name}</p>
-            <BadgeCheck className="size-4 shrink-0 text-primary" aria-label="Verified organizer" />
+            <BadgeCheck className="size-4 shrink-0 text-action" aria-label="Verified organizer" />
           </div>
 
           {/* Contact links */}
@@ -52,7 +52,7 @@ export function OrganizerSection({ organizer, showSocial }: {
                 href={organizer.website}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="flex items-center gap-1 text-xs text-primary hover:underline"
+                className="flex items-center gap-1 text-xs text-action hover:underline"
               >
                 <Globe className="size-3 shrink-0" aria-hidden />
                 {organizer.website.replace(/^https?:\/\//, '').replace(/\/$/, '')}
@@ -84,7 +84,7 @@ export function OrganizerSection({ organizer, showSocial }: {
               {organizer.email && (
                 <a
                   href={`mailto:${organizer.email}`}
-                  className={cn(buttonVariants({ variant: 'outline', size: 'sm' }), 'gap-1.5')}
+                  className={cn(marketingButton({ variant: 'outline', size: 'sm' }), 'gap-1.5')}
                 >
                   <Mail className="size-3.5" aria-hidden />
                   Contact Organizer

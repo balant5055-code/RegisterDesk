@@ -9,6 +9,7 @@
 // SDK-free.
 
 import type { SetupModule, SetupContext, SetupCardResult } from './types'
+import { isChannelImplemented } from '@/lib/communications/health/channels'
 
 // ─── Shared helpers (pure) ──────────────────────────────────────────────────
 
@@ -210,7 +211,8 @@ export const SETUP_MODULES: SetupModule[] = [
       const p  = (event.pricing ?? {}) as Record<string, unknown>
       const on: string[] = ['Email']   // email (confirmation/ticket/receipt) is always sent — free
       if (p.whatsappEnabled === true) on.push('WhatsApp')
-      if (p.smsEnabled === true)      on.push('SMS')
+      // RD-INTEG — SMS has no transport: a legacy smsEnabled flag must not read as an active channel.
+      if (p.smsEnabled === true && isChannelImplemented('sms')) on.push('SMS')
       if (p.certEnabled === true)     on.push('Certificates')
       return { state: 'ready', reason: `Enabled: ${on.join(', ')}.`, primary: { label: 'Open communications', tab: 'communications' } }
     },
@@ -269,8 +271,9 @@ export const SETUP_MODULES: SetupModule[] = [
   },
   {
     key: 'wallet', group: 'finance', label: 'Wallet',
-    description: 'Communication & service credits.',
-    derive: workspaceModule('Wallet is managed at the workspace level.', '/dashboard/wallet', 'Open wallet'),
+    description: 'Purchases, usage and refunds for this event.',
+    // The Wallet is event-wise: open it on THIS event, not the last-selected one.
+    derive: ({ event }) => ({ state: 'ready', reason: 'See what this event bought, used and can refund.', primary: { label: 'Open wallet', href: `/dashboard/wallet?eventId=${encodeURIComponent(event.draftId)}` } }),
   },
   {
     key: 'settlements', group: 'finance', label: 'Settlements',

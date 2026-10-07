@@ -21,7 +21,7 @@ const DURATION_OPTIONS = [
   { value: 'other', label: 'Open to organiser preference' },
 ]
 
-const inputCls = 'w-full rounded-lg border border-border bg-background px-3 py-2.5 text-[14px] text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/30 focus:border-primary transition-colors'
+const inputCls = 'w-full rounded-lg border border-border bg-background px-3 py-2.5 text-[14px] text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-action/30 focus:border-action transition-colors'
 const labelCls = 'block text-[13px] font-medium text-foreground mb-1.5'
 const fieldCls = 'flex flex-col gap-0'
 
@@ -76,7 +76,7 @@ export default function SpeakerApplyClient({ slug, eventName, enabled, closingDa
             ? `The deadline for speaker applications for ${eventName} has passed.`
             : `Speaker applications are not currently open for ${eventName}.`}
         </p>
-        <TextLink href={`/events/${slug}`}>← Back to event</TextLink>
+        <TextLink href={`/events/${slug}`} className="text-action">← Back to event</TextLink>
       </div>
     )
   }
@@ -92,7 +92,7 @@ export default function SpeakerApplyClient({ slug, eventName, enabled, closingDa
         <p className="max-w-md text-[14px] text-muted-foreground">
           Thanks for applying to speak at <strong>{eventName}</strong>. We&apos;ll review your application and get back to you by email.
         </p>
-        <TextLink href={`/events/${slug}`}>← Back to event</TextLink>
+        <TextLink href={`/events/${slug}`} className="text-action">← Back to event</TextLink>
       </div>
     )
   }
@@ -108,8 +108,8 @@ export default function SpeakerApplyClient({ slug, eventName, enabled, closingDa
 
       {/* Header */}
       <div className="mb-8">
-        <div className="mb-3 inline-flex size-10 items-center justify-center rounded-xl bg-primary/10">
-          <Mic className="size-5 text-primary" />
+        <div className="mb-3 inline-flex size-10 items-center justify-center rounded-xl bg-action/10">
+          <Mic className="size-5 text-action" />
         </div>
         <h1 className="text-[24px] font-bold text-foreground">Apply to Speak</h1>
         <p className="mt-1 text-[14px] text-muted-foreground">{eventName}</p>
@@ -207,7 +207,7 @@ export default function SpeakerApplyClient({ slug, eventName, enabled, closingDa
         <button
           type="submit"
           disabled={submitting}
-          className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-primary px-6 py-3 text-[14px] font-semibold text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
+          className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-action px-6 py-3 text-[14px] font-semibold text-action-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
         >
           {submitting ? <><Loader2 className="size-4 animate-spin" /> Submitting…</> : 'Submit Application'}
         </button>

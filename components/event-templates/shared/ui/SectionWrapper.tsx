@@ -11,7 +11,7 @@ export function SectionWrapper({ title, subtitle, children, id }: {
       <div className="mb-3.5">
         <div
           className="mb-1.5 h-[3px] w-6 rounded-full"
-          style={{ backgroundImage: 'var(--primary-gradient)' }}
+          style={{ backgroundImage: 'var(--action-gradient)' }}
         />
         <h2 className="text-[14.5px] font-bold tracking-tight text-foreground sm:text-[16px]">
           {title}

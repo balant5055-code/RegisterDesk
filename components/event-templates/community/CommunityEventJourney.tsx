@@ -68,7 +68,7 @@ export function CommunityEventJourney({
           transition={{ duration: 0.5 }}
           className="mb-7"
         >
-          <p className="mb-1.5 text-[10px] font-bold uppercase tracking-[0.2em] text-primary">
+          <p className="mb-1.5 text-[10px] font-bold uppercase tracking-[0.2em] text-action">
             Event Programme
           </p>
           <h2 className="text-[1.25rem] font-black tracking-tight text-gray-900 sm:text-[1.625rem]">
@@ -165,7 +165,7 @@ export function CommunityEventJourney({
                     </h3>
 
                     {sessionSpeakers.length > 0 && (
-                      <p className="mt-1 text-[0.75rem] font-semibold text-primary/80">
+                      <p className="mt-1 text-[0.75rem] font-semibold text-action/80">
                         {sessionSpeakers.map(s => s.name).join(' · ')}
                       </p>
                     )}

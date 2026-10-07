@@ -26,6 +26,8 @@ import {
 } from 'lucide-react'
 import { cn } from '@/lib/utils/cn'
 import { useToast } from '@/components/ui/Toast'
+import { useConfirm } from '@/components/ui/ConfirmDialog'
+import { isAllowedNumber } from '@/lib/registrations/identity'
 import type { SerializedRegistration } from '@/app/api/organizer/events/[eventId]/registrations/route'
 
 // ─── Loose shapes for lazily-fetched data (existing endpoints) ──────────────────
@@ -37,7 +39,14 @@ interface CrmLite { tags?: string[]; notes?: string; name?: string }
 
 type Loadable<T> = 'idle' | 'loading' | T | 'error'
 
-const inputCls = 'h-8 rounded-xl border border-border bg-background px-3 text-[13px] text-foreground focus:outline-none focus:ring-2 focus:ring-primary/40'
+const inputCls = 'h-9 rounded-xl border border-border bg-background px-3 text-[13px] text-foreground focus:outline-none focus:ring-2 focus:ring-primary/40'
+
+/**
+ * The identifier panel's action buttons. RD-EVENT-21 · one class string instead of
+ * five copies of it, and a real 44px target: they were `py-1.5` — about 30px — on a
+ * panel an operator uses at a desk, often on a tablet.
+ */
+const ACT_BTN = 'inline-flex min-h-11 items-center rounded-control border border-border bg-background px-3 text-[13px] font-medium transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 disabled:opacity-50 sm:min-h-9'
 
 function fmtTs(iso: string | null | undefined): string {
   if (!iso) return ''
@@ -79,18 +88,39 @@ function Spinner() { return <div className="flex justify-center py-5"><Loader2 c
 
 export default function ParticipantWorkspace360({
   reg, eventId, token, onIdentifierChange,
+  identifierValue, identifierLabel, tagLabel, timingTag, assignmentBlockedBy,
+  allowedText, allowedRanges,
 }: {
   reg: SerializedRegistration
   eventId: string
   token: string
   onIdentifierChange?: (value: string | null) => void
+  /**
+   * RD-EVENT-21 · the identifier is now CONTROLLED by the drawer.
+   *
+   * It used to be this component's own state, seeded from `reg.bibNumber` — the
+   * legacy mirror, not the canonical one — which made it a second source of truth
+   * for a value the drawer header also displays. One owner, one value.
+   */
+  identifierValue: string | null
+  /** RD-BIB-01 - what this participant's pass allows, resolved by the caller. */
+  allowedText: string | null
+  allowedRanges: import('@/lib/identifiers/types').IdentifierRange[]
+  /** The event's own word for its identifier. Never "Bib" unless the organizer said so. */
+  identifierLabel: string
+  /** The event's own word for its timing credential. */
+  tagLabel: string
+  /** The CURRENTLY assigned tag, resolved by the caller; never a replaced one. */
+  timingTag: string | null
+  /** Non-null when the identifier engine would refuse this registration outright. */
+  assignmentBlockedBy: 'CANCELLED' | 'REJECTED' | null
 }) {
   const { showToast } = useToast()
+  const { confirm } = useConfirm()
   const base = `/api/organizer/events/${eventId}/identifiers`
   const headers = useMemo(() => ({ Authorization: `Bearer ${token}` }), [token])
 
-  // Identifier value is the engine mirror; track locally so actions reflect instantly.
-  const [identValue, setIdentValue] = useState<string | null>(reg.bibNumber ?? null)
+  const identValue = identifierValue
   const [history, setHistory] = useState<Loadable<HistoryEntry[]>>('idle')
   const [sessions, setSessions] = useState<Loadable<SessionLite[]>>('idle')
   const [certs, setCerts] = useState<Loadable<CertLite[]>>('idle')
@@ -155,7 +185,7 @@ export default function ParticipantWorkspace360({
       const j = await r.json() as { error?: string; value?: string }
       if (!r.ok) throw new Error(j.error ?? `HTTP ${r.status}`)
       const v = j.value ?? next
-      setIdentValue(v); onIdentifierChange?.(v); setHistory('idle')   // invalidate timeline
+      onIdentifierChange?.(v); setHistory('idle')   // invalidate timeline
     } catch (e) { showToast(e instanceof Error ? e.message : 'Action failed', 'error') } finally { setBusy(false) }
   }
 
@@ -177,12 +207,22 @@ export default function ParticipantWorkspace360({
     <div className="space-y-3" aria-label="Participant 360 workspace">
       {/* Overview */}
       <Panel title="Overview" icon={ActivityIcon} defaultOpen>
+        {/* RD-EVENT-21 · state first, then the credentials, then the extras.
+            Credential VALUES are rendered verbatim (`literal`): the tile used to
+            `capitalize` everything, which silently rewrote a lower-case delegate id
+            on screen — a number displayed differently from the number printed on the
+            badge is worse than no number at all. */}
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
           <Tile label="Registration" value={reg.status} />
-          <Tile label="Payment" value={reg.paymentStatus} />
-          <Tile label="Identifier" value={identValue ?? '—'} />
+          <Tile label="Payment" value={reg.paymentStatus.replace(/_/g, ' ')} />
+          <Tile label="Pass" value={reg.passName} literal />
+          <Tile label={identifierLabel} value={identValue ?? '—'} literal />
+          {/* The participant's THIRD credential, shown only when they actually carry
+              one — an event that issues no timing devices gains no empty tile. Read
+              from the registration mirror that already arrived with this row, so it
+              costs no request. Organizer-only: this never reaches a public page. */}
+          {timingTag && <Tile label={tagLabel} value={timingTag} literal />}
           <Tile label="Checked in" value={reg.checkedIn ? 'Yes' : 'No'} />
-          <Tile label="Pass" value={reg.passName} />
           <Tile label="Sessions" value={sessionCount} />
         </div>
       </Panel>
@@ -204,9 +244,11 @@ export default function ParticipantWorkspace360({
         )}
       </Panel>
 
-      {/* Identifier */}
-      <Panel title="Identifier" icon={IdCard} badge={identValue ?? ''}>
+      {/* Identifier — titled with the EVENT's own word for it */}
+      <Panel title={identifierLabel} icon={IdCard} badge={identValue ?? ''}>
         <IdentifierPanel value={identValue} busy={busy} regId={reg.id} base={base} headers={headers}
+          label={identifierLabel} blockedBy={assignmentBlockedBy} onConfirm={confirm}
+          allowedText={allowedText} allowedRanges={allowedRanges}
           history={history} onLoadHistory={() => void loadHistory(true)} onAction={idAction} />
       </Panel>
 
@@ -287,11 +329,18 @@ export default function ParticipantWorkspace360({
   )
 }
 
-function Tile({ label, value }: { label: string; value: string | number }) {
+/**
+ * `literal` — render the value EXACTLY as stored.
+ *
+ * Statuses read better capitalised ("confirmed" → "Confirmed"); credentials must not
+ * be touched at all. CSS `capitalize` would show a stored `del-0042` as `Del-0042`,
+ * which is a different string from the one printed on the person's badge.
+ */
+function Tile({ label, value, literal }: { label: string; value: string | number; literal?: boolean }) {
   return (
     <div className="rounded-xl border border-border bg-background px-3 py-2">
-      <p className="text-[11px] text-muted-foreground">{label}</p>
-      <p className="truncate text-[14px] font-semibold capitalize text-foreground">{value}</p>
+      <p className="truncate text-[11px] text-muted-foreground" title={label}>{label}</p>
+      <p className={cn('truncate text-[14px] font-semibold text-foreground', literal ? 'font-mono' : 'capitalize')}>{value}</p>
     </div>
   )
 }
@@ -300,13 +349,25 @@ function Tile({ label, value }: { label: string; value: string | number }) {
 
 function IdentifierPanel({
   value, busy, regId, base, headers, history, onLoadHistory, onAction,
+  label, blockedBy, onConfirm, allowedText, allowedRanges,
 }: {
   value: string | null; busy: boolean; regId: string; base: string; headers: Record<string, string>
   history: Loadable<HistoryEntry[]>; onLoadHistory: () => void
   onAction: (body: Record<string, unknown>, next: string | null) => Promise<void>
+  /** The event's own word for this credential — used in the copy, not just the title. */
+  label: string
+  /** RD-BIB-01 - the numbers this participant's pass allows, as text. Null = no limit. */
+  allowedText: string | null
+  /** The same ranges, for the live check while typing. */
+  allowedRanges: import('@/lib/identifiers/types').IdentifierRange[]
+  /** The engine's terminal rule (RD-EVENT-19A), evaluated on the row we already have. */
+  blockedBy: 'CANCELLED' | 'REJECTED' | null
+  onConfirm: (opts: { title?: string; message: string; confirmLabel?: string; tone?: 'default' | 'danger' }) => Promise<boolean>
 }) {
   const [mode, setMode] = useState<null | 'manual' | 'swap' | 'lookup'>(null)
   const [input, setInput] = useState('')
+  // null = cannot tell (no configured range, or a non-numeric value); never a refusal.
+  const outOfRange = isAllowedNumber(allowedRanges, input) === false
   const [lookup, setLookup] = useState<string | null>(null)
 
   async function doLookup() {
@@ -317,31 +378,90 @@ function IdentifierPanel({
     setLookup(j.exists && j.lock ? `${j.lock.state} · pool ${j.lock.poolId}` : 'available (no lock)')
   }
 
+  /**
+   * RD-EVENT-21 · releasing now asks first.
+   *
+   * Every other irreversible control in this drawer confirms — cancel, refund, reject,
+   * undo check-in — and this one did not, despite being irreversible in the same way:
+   * under the default `reusePolicy: 'never'` the released value can never be issued to
+   * anyone again, and the number is usually already printed on something.
+   */
+  async function release() {
+    const ok = await onConfirm({
+      title: `Release this ${label.toLowerCase()}?`,
+      message: `${value} will be taken back from this participant. Depending on the event's reuse policy the same value may never be issued again — and it may already be printed.`,
+      confirmLabel: 'Yes, release it',
+      tone: 'danger',
+    })
+    if (ok) await onAction({ action: 'release', registrationId: regId }, null)
+  }
+
+  // The identifier engine refuses cancelled and rejected registrations outright
+  // (ENGINE_TERMINAL_STATUSES). Offering Assign here would produce a toast reading
+  // REGISTRATION_TERMINAL, which is the server explaining a question the UI should
+  // never have asked. Lookup stays available: reading is not assigning.
+  if (blockedBy) {
+    return (
+      <div className="space-y-3">
+        <p className="rounded-xl border border-border bg-muted/30 px-3 py-2 text-[13px] text-muted-foreground">
+          {value
+            ? <>This registration is {blockedBy.toLowerCase()}, and still holds <span className="font-mono font-semibold text-foreground">{value}</span>. Restore the registration to change it.</>
+            : <>This registration is {blockedBy.toLowerCase()}. No {label.toLowerCase()} can be issued while it stays that way.</>}
+        </p>
+      </div>
+    )
+  }
+
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center gap-2">
         {value
-          ? <span className="flex items-center gap-1.5 rounded-full bg-primary/10 px-3 py-1 text-[13px] font-bold text-primary"><Hash className="size-3" />{value}</span>
-          : <span className="rounded-full bg-muted px-3 py-1 text-[12px] text-muted-foreground">Unassigned</span>}
+          ? <span className="flex items-center gap-1.5 rounded-full bg-primary/10 px-3 py-1 font-mono text-[13px] font-bold text-[color:var(--primary-text)]"><Hash className="size-3" aria-hidden />{value}</span>
+          : <span className="rounded-full bg-muted px-3 py-1 text-[12px] text-muted-foreground">Not assigned</span>}
         {value ? (
           <>
-            <button disabled={busy} onClick={() => { setMode(mode === 'swap' ? null : 'swap'); setInput('') }} className="rounded-xl border border-border bg-background px-3 py-1.5 text-[13px] font-medium hover:bg-muted disabled:opacity-50"><ArrowLeftRight className="mr-1 inline size-3.5" />Swap</button>
-            <button disabled={busy} onClick={() => void onAction({ action: 'release', registrationId: regId }, null)} className="rounded-xl border border-border bg-background px-3 py-1.5 text-[13px] font-medium text-destructive hover:bg-destructive/5 disabled:opacity-50"><XCircle className="mr-1 inline size-3.5" />Release</button>
+            <button disabled={busy} onClick={() => { setMode(mode === 'swap' ? null : 'swap'); setInput('') }} className={ACT_BTN}><ArrowLeftRight className="mr-1 inline size-3.5" aria-hidden />Replace</button>
+            <button disabled={busy} onClick={() => void release()} className={cn(ACT_BTN, 'text-destructive hover:bg-destructive/5')}><XCircle className="mr-1 inline size-3.5" aria-hidden />Release</button>
           </>
         ) : (
           <>
-            <button disabled={busy} onClick={() => void onAction({ action: 'assign', registrationId: regId }, null)} className="rounded-xl border border-border bg-background px-3 py-1.5 text-[13px] font-medium hover:bg-muted disabled:opacity-50">Auto assign</button>
-            <button disabled={busy} onClick={() => { setMode(mode === 'manual' ? null : 'manual'); setInput('') }} className="rounded-xl border border-border bg-background px-3 py-1.5 text-[13px] font-medium hover:bg-muted disabled:opacity-50">Manual</button>
+            <button disabled={busy} onClick={() => void onAction({ action: 'assign', registrationId: regId }, null)} className={ACT_BTN}>Auto assign</button>
+            <button disabled={busy} onClick={() => { setMode(mode === 'manual' ? null : 'manual'); setInput('') }} className={ACT_BTN}>Manual</button>
           </>
         )}
-        <button onClick={() => { setMode(mode === 'lookup' ? null : 'lookup'); setInput(''); setLookup(null) }} className="rounded-xl border border-border bg-background px-3 py-1.5 text-[13px] font-medium hover:bg-muted"><Search className="mr-1 inline size-3.5" />Lookup</button>
+        <button onClick={() => { setMode(mode === 'lookup' ? null : 'lookup'); setInput(''); setLookup(null) }} className={ACT_BTN}><Search className="mr-1 inline size-3.5" aria-hidden />Lookup</button>
       </div>
 
       {mode && mode !== 'lookup' && (
-        <div className="flex flex-wrap gap-2">
-          <input autoFocus value={input} onChange={e => setInput(e.target.value)} placeholder={mode === 'swap' ? 'New identifier' : 'Identifier value'} aria-label="Identifier value" className={cn(inputCls, 'w-44')} />
-          <button disabled={busy || !input.trim()} onClick={() => { const v = input.trim(); void onAction({ action: mode === 'swap' ? 'swap' : 'assign', registrationId: regId, value: v }, v); setMode(null); setInput('') }} className="h-8 rounded-xl bg-primary px-4 text-[13px] font-semibold text-primary-foreground hover:opacity-90 disabled:opacity-50">{mode === 'swap' ? 'Swap' : 'Assign'}</button>
-          <button onClick={() => setMode(null)} className="h-8 rounded-xl border border-border px-3 text-[13px] text-muted-foreground hover:text-foreground">Cancel</button>
+        <div className="space-y-2">
+          {/* RD-BIB-01 · what this pass is allowed, stated BEFORE anything is sent.
+              The engine refuses an out-of-range value in the same transaction as the
+              lock, so this cannot disagree with it — it is the same two pure
+              functions, reused. Without the hint the organizer typed a number, waited,
+              and got a rejection; with it they never type the wrong one. */}
+          {allowedText && (
+            <p className="text-[12px] text-muted-foreground">
+              Allowed for this pass: <span className="font-mono font-semibold text-foreground">{allowedText}</span>
+            </p>
+          )}
+          <div className="flex flex-wrap items-center gap-2">
+            <input autoFocus value={input} onChange={e => setInput(e.target.value)}
+              placeholder={mode === 'swap' ? 'New value for this participant' : 'Identifier value'}
+              aria-label="Identifier value"
+              aria-invalid={outOfRange ? true : undefined}
+              className={cn(inputCls, 'w-44', outOfRange && 'border-destructive focus:ring-destructive/40')} />
+            <button disabled={busy || !input.trim() || outOfRange}
+              onClick={() => { const v = input.trim(); void onAction({ action: mode === 'swap' ? 'swap' : 'assign', registrationId: regId, value: v }, v); setMode(null); setInput('') }}
+              className="h-9 rounded-xl bg-primary px-4 text-[13px] font-semibold text-primary-foreground hover:opacity-90 disabled:opacity-50">
+              {mode === 'swap' ? 'Replace' : 'Assign'}
+            </button>
+            <button onClick={() => setMode(null)} className="h-9 rounded-xl border border-border px-3 text-[13px] text-muted-foreground hover:text-foreground">Cancel</button>
+          </div>
+          {outOfRange
+            ? <p className="text-[12px] font-medium text-destructive">{input.trim()} is outside {allowedText}.</p>
+            : input.trim() && allowedText
+              ? <p className="text-[12px] text-muted-foreground">Inside the allowed range. Availability is checked when you assign.</p>
+              : null}
         </div>
       )}
       {mode === 'lookup' && (

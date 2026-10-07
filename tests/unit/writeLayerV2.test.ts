@@ -47,24 +47,13 @@ describe('purchase service — resolves against the CURRENT version (V2)', () =>
   })
 })
 
-describe('upgrade service — cross-version rank by limit (V2 vocabulary)', () => {
-  it('allows a genuine upgrade (starter → business)', () => {
-    const r = svc.upgradeLicense({ eventId: 'e', organizerUid: 'u', toTier: 'business', method: 'razorpay' }, { eventExists: true, currentTier: 'starter' })
-    expect(r.ok).toBe(true)
-    if (r.ok) expect(r.priceDifferencePaise).toBe(
-      getEventLicenseDefinitionV2('business').offerPricePaise - getEventLicenseDefinitionV2('starter').offerPricePaise,
-    )
-  })
-
-  it('rejects a downgrade (business → starter)', () => {
-    const r = svc.upgradeLicense({ eventId: 'e', organizerUid: 'u', toTier: 'starter', method: 'razorpay' }, { eventExists: true, currentTier: 'business' })
-    expect(r.ok).toBe(false)
-    if (!r.ok) expect(r.failureReason).toBe('downgrade_not_allowed')
-  })
-
-  it('rejects a same-tier "upgrade"', () => {
-    const r = svc.upgradeLicense({ eventId: 'e', organizerUid: 'u', toTier: 'business', method: 'razorpay' }, { eventExists: true, currentTier: 'business' })
-    expect(r.ok).toBe(false)
-    if (!r.ok) expect(r.failureReason).toBe('already_licensed')
+// RD-EVENT-COMMERCE-04 — the tier UPGRADE preparation (pay-the-difference between tiers) had no
+// caller and priced a retired commercial model; it was removed. Guard: it must not come back.
+describe('tier upgrade path is retired', () => {
+  it('the service exposes no upgrade / upgrade-price method', () => {
+    const proto = EventLicenseService.prototype as unknown as Record<string, unknown>
+    expect(proto.upgradeLicense).toBeUndefined()
+    expect(proto.calculateUpgradePrice).toBeUndefined()
+    expect(proto.validateUpgrade).toBeUndefined()
   })
 })

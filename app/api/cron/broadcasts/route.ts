@@ -45,7 +45,7 @@ async function handle(req: NextRequest): Promise<NextResponse> {
         recipientCount: d.recipientCount ?? 0,
       })
       if (result.ok) started++
-      else if (result.reason === 'insufficient_balance') failed++
+      else if (result.reason === 'insufficient_balance' || result.reason === 'allowance_exhausted') failed++
       else skipped++   // bad_state — already started by a concurrent run
     }
 

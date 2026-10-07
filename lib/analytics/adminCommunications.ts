@@ -9,7 +9,16 @@ import { adminDb } from '@/lib/firebase/admin'
 export interface Point { label: string; value: number }
 
 export interface AdminCommunications {
-  messages:   { total: number; sent: number; delivered: number; failed: number; skipped: number; queued: number; whatsapp: number }
+  /**
+   * RD-INTEG — status counts with ONE meaning each:
+   *   accepted  — status 'sent': accepted by the provider, no delivery confirmation (yet)
+   *   sent      — accepted + delivered: everything SUBMITTED to a provider (a delivered message was sent)
+   *   delivered — confirmed by the provider (email webhooks AND WhatsApp receipts)
+   *   failed    — rejected / bounced, EXCLUDING timeouts
+   *   unknown   — timed out: the provider never answered (delivery unknown, not failed)
+   * `unavailable` names every figure whose aggregate could not be read (shown as "—", never 0).
+   */
+  messages:   { total: number; sent: number; accepted: number; delivered: number; failed: number; unknown: number; skipped: number; queued: number; whatsapp: number; unavailable: string[] }
   broadcasts: { total: number; sent: number; scheduled: number; costPaise: number }
   reminders:  { total: number; scheduled: number; sent: number; failed: number; cancelled: number }
   spend:      { totalPaise: number; byChannel: Point[] }
@@ -19,6 +28,8 @@ export interface AdminCommunications {
 
 type Query = FirebaseFirestore.Query
 async function countOf(q: Query): Promise<number> { try { return (await q.count().get()).data().count } catch { return 0 } }
+/** RD-INTEG — a count that may not have been measured (null), so it is never reported as 0. */
+async function countOrNull(q: Query): Promise<number | null> { try { return (await q.count().get()).data().count } catch { return null } }
 async function sumOf(q: Query, field: string): Promise<number> { try { return (await q.aggregate({ s: AggregateField.sum(field) }).get()).data().s ?? 0 } catch { return 0 } }
 
 export async function getAdminCommunications(): Promise<AdminCommunications> {
@@ -28,20 +39,34 @@ export async function getAdminCommunications(): Promise<AdminCommunications> {
   const usageCol   = adminDb.collection('communicationUsage')
 
   const [
-    total, sent, delivered, failed, skipped, queued, whatsapp,
+    totalM, acceptedM, deliveredM, failedAllM, unknownM, skippedM, queuedM, whatsappM,
     bTotal, bSent, bScheduled, bCost,
     rTotal, rScheduled, rSent, rFailed, rCancelled,
     spendTotal,
   ] = await Promise.all([
-    countOf(emailLogs), countOf(emailLogs.where('status', '==', 'sent')), countOf(emailLogs.where('status', '==', 'delivered')),
-    countOf(emailLogs.where('status', '==', 'failed')), countOf(emailLogs.where('status', '==', 'skipped')),
-    countOf(emailLogs.where('status', '==', 'queued')), countOf(emailLogs.where('channel', '==', 'whatsapp')),
+    countOrNull(emailLogs), countOrNull(emailLogs.where('status', '==', 'sent')), countOrNull(emailLogs.where('status', '==', 'delivered')),
+    countOrNull(emailLogs.where('status', '==', 'failed')),
+    countOrNull(emailLogs.where('status', '==', 'failed').where('deliveryUnknown', '==', true)),
+    countOrNull(emailLogs.where('status', '==', 'skipped')),
+    countOrNull(emailLogs.where('status', '==', 'queued')), countOrNull(emailLogs.where('channel', '==', 'whatsapp')),
     countOf(broadcasts), countOf(broadcasts.where('status', '==', 'sent')), countOf(broadcasts.where('status', '==', 'scheduled')),
     sumOf(broadcasts, 'actualCostPaise'),
     countOf(reminders), countOf(reminders.where('status', '==', 'scheduled')), countOf(reminders.where('status', '==', 'sent')),
     countOf(reminders.where('status', '==', 'failed')), countOf(reminders.where('status', '==', 'cancelled')),
     sumOf(usageCol, 'costPaise'),
   ])
+
+  const measured = { total: totalM, accepted: acceptedM, delivered: deliveredM, failed: failedAllM, unknown: unknownM, skipped: skippedM, queued: queuedM, whatsapp: whatsappM }
+  const unavailable = Object.entries(measured).filter(([, v]) => v === null).map(([k]) => k)
+  const v = (x: number | null) => x ?? 0
+  const accepted = v(acceptedM), delivered = v(deliveredM), unknown = v(unknownM)
+  const messages: AdminCommunications['messages'] = {
+    total: v(totalM), accepted, delivered,
+    sent: accepted + delivered,
+    failed: Math.max(0, v(failedAllM) - unknown), unknown,
+    skipped: v(skippedM), queued: v(queuedM), whatsapp: v(whatsappM),
+    unavailable: [...unavailable, ...(acceptedM === null || deliveredM === null ? ['sent'] : [])],
+  }
 
   // ── Spend by channel + top organizers/events (one bounded recent scan) ──
   const byChannel = new Map<string, number>()
@@ -70,7 +95,7 @@ export async function getAdminCommunications(): Promise<AdminCommunications> {
   evDocs.forEach((d, i) => { if (d.exists) evName.set(topEvIds[i][0], (((d.data() as Record<string, unknown>).eventDetails as Record<string, unknown> | undefined)?.info as Record<string, unknown> | undefined)?.name as string || topEvIds[i][0]) })
 
   return {
-    messages:   { total, sent, delivered, failed, skipped, queued, whatsapp },
+    messages,
     broadcasts: { total: bTotal, sent: bSent, scheduled: bScheduled, costPaise: bCost },
     reminders:  { total: rTotal, scheduled: rScheduled, sent: rSent, failed: rFailed, cancelled: rCancelled },
     spend:      { totalPaise: spendTotal, byChannel: [...byChannel.entries()].map(([label, value]) => ({ label, value })).sort((a, b) => b.value - a.value) },

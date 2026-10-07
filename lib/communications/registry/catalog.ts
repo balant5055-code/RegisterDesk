@@ -16,7 +16,11 @@ export type CommRegistryCategory =
   | 'account' | 'security' | 'licensing' | 'billing' | 'platform'
   | 'events'  | 'communication' | 'compliance' | 'marketing' | 'system'
 
-export type CommRegistryAudience = 'user' | 'organizer' | 'attendee' | 'donor' | 'applicant'
+// RD-ORGANIZER-NOTIFY-03 · 'platform' is the platform's OWN support inbox — a notice
+// RegisterDesk sends to itself about its own operations, not to any account holder. It
+// is listed because this registry's purpose is to say truthfully who receives what, and
+// calling an internal ops email a 'user' notification would make the registry wrong.
+export type CommRegistryAudience = 'user' | 'organizer' | 'attendee' | 'donor' | 'applicant' | 'platform'
 export type CommRegistryPriority = 'high' | 'medium' | 'low'
 
 /** A canonical registry entry's declarative metadata (the parts that live only here). */
@@ -87,7 +91,13 @@ export const COMMUNICATION_REGISTRY: CommRegistryEntry[] = [
 
   // ── Licensing / Billing (platform → organizer) ───────────────────────────────
   { id: T.LICENSE_PURCHASED, category: 'licensing', displayName: 'License Purchased', description: 'Confirms an event license purchase.', trigger: 'License checkout confirmed', audience: 'organizer', priority: 'high', mandatory: true, supportsInApp: true, templateKey: 'organizer', futureRuleKey: 'licensing.purchased' },
+  { id: T.SERVICE_PURCHASED, category: 'billing', displayName: 'Event Services Purchased', description: 'Confirms a verified purchase of event capacity, WhatsApp, certificates or photos, with the updated balances.', trigger: 'Event service purchase verified and applied', audience: 'organizer', priority: 'high', mandatory: true, supportsInApp: false, templateKey: 'organizer', futureRuleKey: 'billing.service_purchased' },
+  { id: T.SERVICE_PURCHASE_ADMIN, category: 'billing', displayName: 'Event Services Purchase (Admin)', description: 'Tells the platform support inbox about a verified event-service purchase.', trigger: 'Event service purchase verified and applied', audience: 'platform', priority: 'medium', mandatory: false, supportsInApp: true, templateKey: 'organizer', futureRuleKey: 'billing.service_purchase_admin' },
   { id: T.WALLET_RECHARGED, category: 'billing', displayName: 'Wallet Recharged', description: 'Confirms a communication-wallet top-up.', trigger: 'Wallet top-up verified', audience: 'organizer', priority: 'medium', mandatory: false, supportsInApp: true, templateKey: 'organizer', futureRuleKey: 'billing.wallet_recharged' },
+
+  // ── Platform operations (platform → platform) ────────────────────────────────
+  { id: T.CAPACITY_THRESHOLD, category: 'platform', displayName: 'Capacity Threshold Reached', description: 'Tells the organizer their event has reached 50/70/85/95/100% of its registration capacity.', trigger: 'A capacity sweep observes a newly crossed utilisation threshold', audience: 'organizer', priority: 'high', mandatory: false, supportsInApp: false, templateKey: 'organizer', futureRuleKey: 'platform.capacity_threshold' },
+  { id: T.ORGANIZER_REGISTERED, category: 'platform', displayName: 'Organizer Registered', description: 'Tells the platform that a new organizer completed signup and email verification.', trigger: 'Organizer OTP verification activates the account', audience: 'platform', priority: 'medium', mandatory: true, supportsInApp: false, templateKey: 'organizer', futureRuleKey: 'platform.organizer_registered' },
 
   // ── Marketing / free-form ────────────────────────────────────────────────────
   { id: T.CUSTOM_EMAIL, category: 'marketing', displayName: 'Custom Email', description: 'Ad-hoc rendered email (team invites, one-offs).', trigger: 'Programmatic custom send', audience: 'organizer', priority: 'low', mandatory: false, supportsInApp: false, templateKey: 'custom', futureRuleKey: 'marketing.custom_email' },

@@ -14,9 +14,10 @@ import type {
 import { NON_FINISHING_STATUSES } from '@/features/race-operations/types/results'
 import { isUnrecognisedStatus } from '../mapping/applyMapping'
 import { parseRaceTime } from './time'
+import { parseRaceDistance } from './distance'
 import {
   severityOf,
-  type ValidatedRow, type ValidationIssue, type ValidationIssueCode,
+  type IssueSeverity, type ValidatedRow, type ValidationIssue, type ValidationIssueCode,
   type ValidationResult, type ValidationSummary,
 } from './types'
 
@@ -54,6 +55,23 @@ export interface ValidateOptions {
   unmappedHeaders?: readonly string[]
   /** The mapping in force — recorded so the caller can prove what was validated. */
   mapping?:         ColumnMapping
+  /**
+   * RD-RACEOPS-RESULTS-04 · headers RegisterDesk calculates for itself (provider ranks,
+   * pace, speed), from `autoMapColumns`. Reported as "calculated by RegisterDesk" rather
+   * than as unknown columns — a provider export is 20 columns wide and 12 of them are
+   * theirs to print and ours to compute.
+   */
+  calculatedHeaders?: readonly string[]
+  /**
+   * RD-RACEOPS-RESULTS-04 · issues raised while reading the SPLITS sheet and attaching it
+   * (orphan bib, duplicate checkpoint, backwards times, finish mismatch). They are produced
+   * by `import/splits/splitSheet.ts`, which is the only layer that sees both sheets, and are
+   * folded in here so one summary and one report describe the whole upload.
+   */
+  splitIssues?:     readonly {
+    code: ValidationIssueCode; severity: IssueSeverity; rowNumber: number | null
+    bibNumber: string | null;  message: string
+  }[]
 }
 
 export function validateResults(
@@ -134,10 +152,22 @@ export function validateResults(
         r.gunTimeRaw ?? '', 'gunTime'))
     }
 
+    // ── RD-RACEOPS-RESULTS-04 · distance ──
+    // Only a value that was SUPPLIED and could not be read is a problem; no column at all
+    // is the normal case and stays silent (pace and speed are then simply unavailable).
+    if (r.distanceRaw !== null && r.distanceMeters === null) {
+      const parsed = parseRaceDistance(r.distanceRaw)
+      rowIssues.push(issue('INVALID_DISTANCE', r.rowNumber,
+        !parsed.ok && parsed.reason === 'no_unit'
+          ? `Distance "${r.distanceRaw}" has no unit. Write 21.1 KM, 10 Km or 5000 m — RegisterDesk will not guess between kilometres and metres.`
+          : `Distance "${r.distanceRaw}" could not be read. Write it as a number and a unit, for example 10 KM.`,
+        r.distanceRaw, 'distance'))
+    }
+
     // ── Status ──
     if (r.statusRaw !== null && isUnrecognisedStatus(r.statusRaw)) {
       rowIssues.push(issue('UNRECOGNISED_STATUS', r.rowNumber,
-        `Status "${r.statusRaw}" was not recognised, so this row is treated as Finished.`,
+        `Status "${r.statusRaw}" was not recognised. Use Finished, DNF, DNS or DQ — this row is not imported until it is corrected.`,
         r.statusRaw, 'status'))
     }
 
@@ -157,12 +187,37 @@ export function validateResults(
   }
 
   // ── File-level issues ───────────────────────────────────────────────────────
-  const fileIssues: ValidationIssue[] = (options.unmappedHeaders ?? [])
-    .filter(h => h !== '')
-    .map(header => issue('UNMAPPED_COLUMN', null,
-      `Column "${header}" is not used and will be ignored.`, header))
+  const fileIssues: ValidationIssue[] = [
+    ...(options.unmappedHeaders ?? [])
+      .filter(h => h !== '')
+      .map(header => issue('UNMAPPED_COLUMN', null,
+        `Column "${header}" is not used and will be ignored.`, header)),
+    // RD-RACEOPS-RESULTS-04 · named, not merely ignored.
+    ...(options.calculatedHeaders ?? [])
+      .filter(h => h !== '')
+      .map(header => issue('PROVIDER_CALCULATED_COLUMN', null,
+        `Column "${header}" is calculated by RegisterDesk from the times and distance, so it is not imported.`, header)),
+  ]
 
-  const allIssues = [...rows.flatMap(r => r.issues), ...fileIssues]
+  // RD-RACEOPS-RESULTS-04 · splits issues are attributed to the RESULT row where one is
+  // known, so a blocking split problem makes that row unusable and cannot be published.
+  const splitIssues: ValidationIssue[] = (options.splitIssues ?? []).map(s => ({
+    code: s.code, severity: s.severity, rowNumber: s.rowNumber, message: s.message,
+    value: s.bibNumber ?? '', field: undefined,
+  }))
+  if (splitIssues.length > 0) {
+    for (const row of rows) {
+      const mine = splitIssues.filter(s => s.rowNumber === row.result.rowNumber)
+      if (mine.length === 0) continue
+      row.issues = [...row.issues, ...mine]
+      row.usable = row.usable && !mine.some(i => i.severity === 'error')
+    }
+  }
+  // Anything not attributable to a result row (a missing column, an orphan bib) is file-level.
+  const rowNumbers = new Set(rows.map(r => r.result.rowNumber))
+  const unattributed = splitIssues.filter(s => s.rowNumber === null || !rowNumbers.has(s.rowNumber))
+
+  const allIssues = [...rows.flatMap(r => r.issues), ...fileIssues, ...unattributed]
 
   const errorRows   = rows.filter(r => !r.usable).length
   const warningRows = rows.filter(r => r.usable && r.issues.length > 0).length

@@ -38,7 +38,7 @@ function MeetupSection({ td }: { td: MeetupTd | null }) {
         <div className="mb-5 flex flex-wrap gap-2">
           {features.map(({ icon: Icon, label }, i) => (
             <span key={i} className="inline-flex items-center gap-1.5 rounded-full border border-border bg-card px-3 py-1.5 text-[13px] font-medium text-foreground">
-              <Icon className="size-3.5 text-primary" aria-hidden />{label}
+              <Icon className="size-3.5 text-action" aria-hidden />{label}
             </span>
           ))}
         </div>

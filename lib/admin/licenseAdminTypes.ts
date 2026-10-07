@@ -69,6 +69,11 @@ export interface LicenseDetail {
     razorpayPaymentId: string | null
   } | null
   timeline: LicenseTimelineEntry[]
+  /** RD-EVENT-COMMERCE-04 — true for a capacity-model licence: its capacity was bought, so the
+   *  tier actions (upgrade/downgrade/grant) and "mark paid" do not apply (the server refuses them). */
+  capacityModel?: boolean
+  /** RD-EVENT-COMMERCE-04B — the CALLER may change licence pricing (Super Admin). Set by the route. */
+  canEditPricing?: boolean
 }
 
 // ─── Admin actions ────────────────────────────────────────────────────────────
@@ -116,5 +121,7 @@ export interface LicenseAdminActionResponse {
   action:  LicenseAdminActionType
   message?: string
   // Present for refunds so the UI can surface the outcome.
-  refund?: { gatewayRefunded: boolean; walletCreditedPaise: number }
+  refund?: { gatewayRefunded: boolean; walletCreditedPaise: number; servicesRetired?: Record<string, number>; otherPaidOrdersNotRefunded?: string[] }
+  /** RD-PHASE4-S4 · F3 — money moved but a follow-up step failed; recorded for reconciliation. */
+  reconciliation?: string[]
 }

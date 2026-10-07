@@ -34,7 +34,7 @@ export function SponsorGrid({ sponsors }: { sponsors: Sponsor[] }) {
                   rel="noopener noreferrer"
                   aria-label={sponsor.name}
                   className={cn(
-                    'flex items-center justify-center rounded-xl border border-border/60 bg-card p-3 transition-all hover:border-primary/30 hover:bg-primary/5',
+                    'flex items-center justify-center rounded-xl border border-border/60 bg-card p-3 transition-all hover:border-action/30 hover:bg-action/5',
                     !sponsor.website && 'pointer-events-none',
                   )}
                 >

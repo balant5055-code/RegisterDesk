@@ -8,8 +8,15 @@
 //   status   — registration status equality filter
 //   payment  — paymentStatus equality filter
 //   passId   — passId equality filter
-//   checkin  — 'yes' → checkedIn==true (see note: 'no' is NOT server-filtered because the
-//              field is absent on never-checked-in docs — the client refines that case)
+//   checkin  — 'yes' → checkedIn==true; 'no' → checkedIn==false.
+//              RD-EVENT-11: 'no' IS server-filtered now. `createRegistration` writes
+//              `checkedIn: !!input.checkInOnCreate` on every registration and
+//              `uncheckInRegistration` sets it back to `false`, so the field is present
+//              on documents written by the current code — the note that used to stand
+//              here (that the field is absent) describes only pre-existing legacy rows.
+//              Because Firestore cannot match an ABSENT field, such rows would be
+//              silently omitted, so the response carries `checkinFilterComplete` and the
+//              caller is told rather than quietly under-listing who has not arrived.
 //   coupon   — 'with' → any coupon; or an exact coupon CODE. There is deliberately no
 //              'without': `couponCode` is not written at all when no coupon is used
 //              (see createRegistration), and Firestore cannot query for an absent field —
@@ -23,10 +30,38 @@
 
 import { NextRequest, NextResponse } from 'next/server'
 import { Timestamp }      from 'firebase-admin/firestore'
+import { parseTrendDays, trendRanges } from '@/lib/events/registrationTrend'
 import { adminDb }        from '@/lib/firebase/admin'
 import { authorizeWorkspace } from '@/lib/team/workspace'
 import { getEventStats, aggregateRegistrationStatusCounts } from '@/lib/firebase/firestore/registrationCounters'
+import {
+  classifySearch, isSearchable, normalizeEmail, normalizeTicket,
+  rowMatches, searchMeta, type SearchKind, type TextSearchMeta,
+} from '@/lib/registrations/search'
 import type { RegistrationDocument }  from '@/lib/registrations/types'
+import { resolveOwnedEventSlug } from '@/lib/events/liveEventRef'
+
+/**
+ * How many documents a free-text search may scan, and how many matches it returns.
+ *
+ * The scan is SERVER-side and projected by `serializeDoc`, so the browser receives at
+ * most `SEARCH_RESULT_CAP` rows regardless. The ceiling is reported to the caller
+ * (`search.truncated`) rather than silently applied.
+ */
+const SEARCH_SCAN_CAP   = 1000
+const SEARCH_RESULT_CAP = 50
+
+/**
+ * RD-REPORT-02 · how many passes the summary breakdown will measure.
+ *
+ * Each pass costs exactly two `count()` aggregates, which transfer no documents, so the
+ * cost is bounded by the number of PASSES an organizer configured — never by how many
+ * people registered. The ceiling exists only so a pathological pass list cannot turn one
+ * request into hundreds of aggregates; it is REPORTED (`passStatsTruncated`) rather than
+ * silently applied, because a breakdown that quietly omits passes is exactly the class of
+ * defect this phase exists to remove.
+ */
+const MAX_BREAKDOWN_PASSES = 40
 
 // ─── Serialized shape (Timestamps → ISO strings) ──────────────────────────────
 
@@ -55,6 +90,47 @@ export interface RegistrationsApiResponse {
   hasMore:    boolean
   nextCursor: string | null
   totalCount: number
+  /**
+   * RD-REPORT-02 · per-pass registration counts over the WHOLE event.
+   *
+   * Present only in `?view=summary`, which is the mode whose job is aggregates. The
+   * Reports tab used to build this by grouping the 50-row page it happened to hold, so a
+   * 1,200-person event reported single-digit pass counts. These come from `count()`
+   * aggregates over the full dataset instead.
+   *
+   * `confirmed` / `cancelled` are `number | null`: null means the aggregate did not run,
+   * and the client must render "—". A failed count is never 0 — 0 asserts that nobody
+   * chose that pass, which is a different and much worse claim than "not measured".
+   */
+  passStats?: { id: string; name: string; confirmed: number | null; cancelled: number | null }[]
+  /** True when the event has more passes than the breakdown measured. */
+  passStatsTruncated?: boolean
+
+  /**
+   * RD-EVENT-11 · present ONLY when `checkin=no` was requested. Additive.
+   *
+   * `false` means some registrations carry no `checkedIn` field at all — legacy rows
+   * written before it was set on create — and Firestore cannot match an absent field,
+   * so those people are missing from the list. Attendance says so out loud: an
+   * incomplete "who has not arrived" list is worse at a gate than no list.
+   */
+  checkinFilterComplete?: boolean
+
+  /**
+   * RD-EVENT-12 · present ONLY when `q` was a searchable query. Additive.
+   *
+   * `kind` says how the query was resolved; `truncated` says the free-text scan hit its
+   * ceiling, so there may be matches it never saw. The UI must state that rather than
+   * present a bounded scan as a complete answer.
+   */
+  search?: { kind: SearchKind } & TextSearchMeta
+
+  /** RD-EVENT-07 · present ONLY in `?trend=<days>` mode, which returns no rows.
+   *  A null count means that bucket could not be read — it is NOT zero. Additive. */
+  trend?: {
+    timeZone: string
+    buckets:  { date: string; count: number | null }[]
+  }
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -67,10 +143,18 @@ function toISO(ts: unknown): string | null {
   return null
 }
 
-function serializeDoc(doc: { data(): unknown }): SerializedRegistration {
+function serializeDoc(doc: { id: string; data(): unknown }): SerializedRegistration {
   const data = doc.data() as RegistrationDocument
   return {
     ...data,
+    // RD-EVENT-21 · the id comes from the DOCUMENT, not from a field inside it.
+    // `createRegistration` writes `id` into the body and every real registration has
+    // it, so this changes nothing for them — the two are equal by construction. But
+    // `id` is what every row action addresses (`/registrations/{id}/cancel`, refund,
+    // audit) and what React keys the table by, so a document that somehow lacked the
+    // field produced rows keyed `undefined` and actions posted to `/undefined/`.
+    // Deriving it removes that possibility entirely.
+    id:           doc.id,
     registeredAt: toISO(data.registeredAt),
     updatedAt:    toISO(data.updatedAt),
     emailSentAt:  toISO(data.emailSentAt),
@@ -104,9 +188,9 @@ export async function GET(
 
   // ── 3. Extract event metadata ───────────────────────────────────────────────
   const rawDetails = draft.eventDetails as Record<string, unknown> | null
-  const rawSeo     = rawDetails?.seo  as Record<string, unknown> | null
   const rawInfo    = rawDetails?.info as Record<string, unknown> | null
-  const slug       = typeof rawSeo?.urlSlug === 'string' ? rawSeo.urlSlug : ''
+  // RD-CE-FIX C1 · only a slug proven to be THIS workspace's live event (counter stats have no owner filter).
+  const slug       = (await resolveOwnedEventSlug(uid, eventId, draft)) ?? ''
   const eventName  = typeof rawInfo?.name   === 'string' ? rawInfo.name   : 'Event'
   if (!slug) return NextResponse.json({ error: 'Event slug not resolved' }, { status: 404 })
 
@@ -179,28 +263,208 @@ export async function GET(
     stats.checkedIn  = c.checkedIn
   }
 
+  // ── 8·0. TREND MODE (RD-EVENT-07) — additive, opt-in, zero documents ───────
+  //
+  // `?trend=<days>` answers "how did registrations arrive over time" with one
+  // `count()` aggregate per local day. It returns NO registration rows: drawing an
+  // aggregate chart must never transfer attendee PII (§8).
+  //
+  // Overview previously computed this in the browser from the 51-document page, which
+  // made the chart wrong for any event past 51 registrations and bucketed on a UTC date
+  // while labelling with a local weekday. Buckets are now day boundaries in the EVENT's
+  // timezone, counted over the whole dataset.
+  //
+  // Served by the existing (organizerUid, eventSlug, registeredAt) composite — no new
+  // index. Bounded to 31 days, so the aggregate count can never grow with the event.
+  const trendDays = parseTrendDays(params.get('trend'))
+  if (trendDays !== null) {
+    // The EVENT's own timezone, so a bucket boundary is the organizer's midnight — not
+    // the server's and not the viewer's. Falls back to the platform default when the
+    // draft carries no zone or an unrecognised one.
+    const details  = (draft.eventDetails as Record<string, unknown> | undefined) ?? {}
+    const schedule = (details.schedule as Record<string, unknown> | undefined) ?? {}
+    const rawZone  = typeof schedule.timezone === 'string' ? schedule.timezone : null
+    let timeZone = 'Asia/Kolkata'
+    if (rawZone) {
+      try { new Intl.DateTimeFormat('en-CA', { timeZone: rawZone }); timeZone = rawZone }
+      catch { /* unrecognised zone — keep the default rather than throwing */ }
+    }
+    const ranges = trendRanges(new Date(), timeZone, trendDays)
+
+    const counts = await Promise.all(ranges.map(r =>
+      adminDb.collection('registrations')
+        .where('organizerUid', '==', uid)
+        .where('eventSlug', '==', slug)
+        .where('registeredAt', '>=', Timestamp.fromDate(r.start))
+        .where('registeredAt', '<',  Timestamp.fromDate(r.end))
+        .count().get()
+        .then(s => s.data().count as number)
+        // A failed bucket stays NULL. Rendering it as 0 would claim nobody registered
+        // that day — the one thing the chart must never invent.
+        .catch(() => null),
+    ))
+
+    return NextResponse.json({
+      registrations: [],
+      eventName, eventSlug: slug, passes, fieldLabels,
+      stats, hasMore: false, nextCursor: null, totalCount: stats.total,
+      trend: { timeZone, buckets: ranges.map((r, i) => ({ date: r.date, count: counts[i] })) },
+    } satisfies RegistrationsApiResponse)
+  }
+
+  // ── 7b. SUMMARY MODE (RD-EVENT-12) — additive, opt-in, zero documents ──────
+  //
+  // `?view=summary` answers "how many, and in what state" and returns NO rows.
+  //
+  // The Event → Registrations tab used to render a five-row preview of attendee names
+  // and email addresses, which meant the shell fetched a full 51-document page — fifty
+  // registrations' worth of PII — to decorate a page whose real job is to hand the
+  // organizer over to the Registration Manager. The tab now shows counts only, and
+  // counts already exist: `stats` above is served from `registrationCounters/{slug}`,
+  // one document, or from count() aggregates that transfer none at all.
+  if (params.get('view') === 'summary') {
+    // RD-REPORT-02 · the per-pass breakdown, over the whole event.
+    //
+    // Two `count()` aggregates per pass, both served by the EXISTING
+    // (organizerUid, eventSlug, status, passId) composite — zero documents transferred and
+    // no new index. This is the same shape the event already uses for its status counts,
+    // applied one level down.
+    const measured = passes.slice(0, MAX_BREAKDOWN_PASSES)
+    const countFor = (passId: string, status: string) =>
+      adminDb.collection('registrations')
+        .where('organizerUid', '==', uid)
+        .where('eventSlug',    '==', slug)
+        .where('status',       '==', status)
+        .where('passId',       '==', passId)
+        .count().get()
+        .then(s => s.data().count as number)
+        // Stays null. See `passStats` on the response type: a failed aggregate must not
+        // become a zero that reads as "nobody bought this pass".
+        .catch(() => null)
+
+    const passStats = await Promise.all(measured.map(async p => {
+      const [confirmed, cancelled] = await Promise.all([
+        countFor(p.id, 'confirmed'),
+        countFor(p.id, 'cancelled'),
+      ])
+      return { id: p.id, name: p.name, confirmed, cancelled }
+    }))
+
+    return NextResponse.json({
+      registrations: [],
+      eventName, eventSlug: slug, passes, fieldLabels,
+      stats, hasMore: false, nextCursor: null, totalCount: stats.total,
+      passStats, passStatsTruncated: passes.length > measured.length,
+    } satisfies RegistrationsApiResponse)
+  }
+
   let registrations: SerializedRegistration[]
   let hasMore    = false
   let nextCursor: string | null = null
 
-  // ── 8a. Exact search (ticket code / email) — bypasses pagination + filters ──
-  // Firestore has no substring search, so `q` is an EXACT lookup that finds a specific
-  // attendee at any scale. ticketCode is globally unique (single-field indexed) and email
-  // uses the existing (eventSlug, attendee.email) index; ownership is re-verified in memory.
-  // A free-text (name) `q` falls through to the filtered/paginated path for client refinement.
-  const looksLikeTicket = /^rd[-_ ]?[a-z0-9]/i.test(q) || /^[a-z0-9]{6,}$/i.test(q)
-  if (q && q.includes('@')) {
-    const snap = await adminDb.collection('registrations')
-      .where('eventSlug', '==', slug).where('attendee.email', '==', q.toLowerCase())
-      .limit(50).get()
-    registrations = snap.docs.map(serializeDoc).filter(r => r.organizerUid === uid)
-    return NextResponse.json({ registrations, eventName, eventSlug: slug, passes, fieldLabels, stats, hasMore: false, nextCursor: null, totalCount: stats.total })
-  }
-  if (q && looksLikeTicket) {
-    const code = q.replace(/\s+/g, '').toUpperCase()
-    const snap = await adminDb.collection('registrations').where('ticketCode', '==', code).limit(5).get()
-    registrations = snap.docs.map(serializeDoc).filter(r => r.organizerUid === uid && r.eventSlug === slug)
-    return NextResponse.json({ registrations, eventName, eventSlug: slug, passes, fieldLabels, stats, hasMore: false, nextCursor: null, totalCount: stats.total })
+  // ── 8a. Search — resolved ENTIRELY server-side ─────────────────────────────
+  //
+  // RD-EVENT-12 · This block used to classify a query with
+  //   /^rd[-_ ]?[a-z0-9]/i.test(q) || /^[a-z0-9]{6,}$/i.test(q)
+  // whose second alternative matches any single ASCII word of six characters or more.
+  // "Bartholomew" and "Murugan" were therefore looked up as TICKET CODES and returned
+  // empty — a present attendee reported as no match, which is what the organizer saw as
+  // "search is not working". Anything that heuristic missed had no name predicate at
+  // all, so the client asked for `all=true` and filtered 2,000 documents in the browser:
+  // correct only below the 2,000 ceiling, and invisible above it.
+  //
+  // Now: exact lookups stay O(1) on their existing indexes, and free text is matched on
+  // the SERVER over a bounded, PROJECTED window — the browser receives matches, never a
+  // collection. The window's ceiling is reported rather than hidden (§16, §23).
+  if (q && isSearchable(q)) {
+    const kind = classifySearch(q)
+    const reply = (rows: SerializedRegistration[], meta?: TextSearchMeta) =>
+      NextResponse.json({
+        registrations: rows, eventName, eventSlug: slug, passes, fieldLabels, stats,
+        hasMore: false, nextCursor: null, totalCount: stats.total,
+        search: { kind, ...(meta ?? { scanned: rows.length, scanLimit: 0, truncated: false, capped: false }) },
+      })
+
+    if (kind === 'email') {
+      const snap = await adminDb.collection('registrations')
+        .where('eventSlug', '==', slug).where('attendee.email', '==', normalizeEmail(q))
+        .limit(SEARCH_RESULT_CAP).get()
+      return reply(snap.docs.map(serializeDoc).filter(r => r.organizerUid === uid))
+    }
+
+    if (kind === 'ticket') {
+      const snap = await adminDb.collection('registrations')
+        .where('ticketCode', '==', normalizeTicket(q)).limit(5).get()
+      // Ownership AND event scope re-verified in memory: `ticketCode` is globally
+      // unique and single-field indexed, so the query itself is not event-scoped.
+      const exact = snap.docs.map(serializeDoc).filter(r => r.organizerUid === uid && r.eventSlug === slug)
+      // A miss FALLS THROUGH to the text search. No prefix rule can be perfect — someone
+      // named "RD Sharma" exists — and the old code's mistake was not the heuristic
+      // itself but that a misclassified query dead-ended in an empty result instead of
+      // being searched as what it also might be: a name.
+      if (exact.length > 0) return reply(exact)
+    }
+
+    if (kind === 'phone') {
+      // Served by the existing (eventSlug, attendee.phone) index when the stored value
+      // matches exactly. Digits rarely round-trip identically (`+91` prefixes, spaces),
+      // so a miss falls through to the scan rather than reporting "no such person".
+      const snap = await adminDb.collection('registrations')
+        .where('eventSlug', '==', slug).where('attendee.phone', '==', q.trim())
+        .limit(SEARCH_RESULT_CAP).get()
+      const exact = snap.docs.map(serializeDoc).filter(r => r.organizerUid === uid)
+      if (exact.length > 0) return reply(exact)
+    }
+
+    // ── Identifier: exact, indexed, and tried before the scan ────────────────
+    //
+    // RD-EVENT-20 · "who is bib 5001?" is the most-typed query at an event desk and
+    // it used to return NOTHING: the value classified as free text, and free text had
+    // no identifier field to match. A scan alone would not have fixed it either —
+    // `SEARCH_SCAN_CAP` is 1,000, so at 20,000 registrations the holder is usually
+    // outside the window.
+    //
+    // `bibNumber` is the LEGACY mirror the engine writes in the same transaction as
+    // the lock, and it already carries a single composite index (eventSlug,
+    // bibNumber). So this is one exact indexed read, event-scoped, with ownership
+    // re-checked in memory — and a miss FALLS THROUGH to the text search, because a
+    // conference identifier like "DEL-0001" is also a plausible thing to type at a
+    // person whose name nobody can spell.
+    // (An email query has already returned above, so anything reaching here could
+    // legitimately be an identifier.)
+    const idSnap = await adminDb.collection('registrations')
+      .where('eventSlug', '==', slug).where('bibNumber', '==', q.trim())
+      .limit(SEARCH_RESULT_CAP).get()
+    const idExact = idSnap.docs.map(serializeDoc).filter(r => r.organizerUid === uid)
+    if (idExact.length > 0) return reply(idExact)
+
+    // ── Free text: bounded, projected, server-side ───────────────────────────
+    // Firestore has no substring index and this schema carries no normalized name
+    // field to build one on, so a name search is a scan. It is bounded, it never
+    // leaves the server unfiltered, and its ceiling is REPORTED (see `search.truncated`)
+    // so the UI can say what it actually searched instead of implying it saw everyone.
+    const scanSnap = await adminDb.collection('registrations')
+      .where('organizerUid', '==', uid).where('eventSlug', '==', slug)
+      .orderBy('registeredAt', 'desc').limit(SEARCH_SCAN_CAP)
+      .get()
+
+    const matchedDocs = scanSnap.docs.filter(d => {
+      const r = d.data() as RegistrationDocument
+      return rowMatches({
+        name:       r.attendee?.name  ?? '',
+        email:      r.attendee?.email ?? '',
+        phone:      r.attendee?.phone,
+        ticketCode: r.ticketCode,
+        // The generic mirror first, falling back to the legacy one, so an event
+        // predating RD-EVENT-19A is searchable by its identifier too.
+        identifier: r.identifier?.value ?? r.bibNumber ?? null,
+      }, q)
+    })
+
+    return reply(
+      matchedDocs.slice(0, SEARCH_RESULT_CAP).map(serializeDoc),
+      searchMeta(scanSnap.size, SEARCH_SCAN_CAP, matchedDocs.length, SEARCH_RESULT_CAP),
+    )
   }
 
   // ── 8b. Filtered + sorted + cursor-paginated query (indexed) ────────────────
@@ -216,7 +480,15 @@ export async function GET(
       if (statusF)            query = query.where('status', '==', statusF)
       if (paymentF)           query = query.where('paymentStatus', '==', paymentF)
       if (passF)              query = query.where('passId', '==', passF)
-      if (checkinF === 'yes') query = query.where('checkedIn', '==', true)
+      // RD-EVENT-11 · BOTH directions are server-side now. "Who has not arrived yet"
+      // is the single most operational question Attendance asks, and answering it by
+      // filtering a 50-row page in the browser is correct only until the 51st
+      // registration. `checkedIn` is stored on every registration and the
+      // (organizerUid, eventSlug, checkedIn, registeredAt) composite already exists —
+      // the same one `yes` uses — so this paginates over the WHOLE matching set and
+      // needs no new index.
+      if (checkinF === 'yes')     query = query.where('checkedIn', '==', true)
+      else if (checkinF === 'no') query = query.where('checkedIn', '==', false)
       // 'WITH' uses a range predicate because every stored code is a non-empty string, so
       // >= '' matches exactly the documents that HAVE the field. Documents without a coupon
       // are absent from this index entirely, which is precisely why the inverse is impossible.
@@ -257,6 +529,22 @@ export async function GET(
     registrations = docs.map(serializeDoc)
   }
 
+  // RD-EVENT-11 · One `count()` aggregate (zero documents), and ONLY for the
+  // not-checked-in filter. Every registration is either checked in or not, so
+  // `count(checkedIn == false)` must equal `total - checkedIn`. A shortfall means
+  // documents without the field, which this query cannot see — so the caller learns
+  // the list is partial instead of trusting a quietly incomplete roll call.
+  let checkinFilterComplete: boolean | undefined
+  if (checkinF === 'no') {
+    const seen = await adminDb.collection('registrations')
+      .where('organizerUid', '==', uid).where('eventSlug', '==', slug)
+      .where('checkedIn', '==', false)
+      .count().get()
+      .then(s => s.data().count as number)
+      .catch(() => null)
+    checkinFilterComplete = seen === null ? undefined : seen >= (stats.total - stats.checkedIn)
+  }
+
   return NextResponse.json({
     registrations,
     eventName,
@@ -267,6 +555,7 @@ export async function GET(
     hasMore,
     nextCursor,
     totalCount: stats.total,
+    ...(checkinFilterComplete === undefined ? {} : { checkinFilterComplete }),
   })
   } catch (error) {
     // Logged server-side; return a generic message rather than the raw exception.

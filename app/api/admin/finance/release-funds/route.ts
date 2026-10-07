@@ -6,9 +6,8 @@
 // logic itself lives in lib/settlements/releaseFunds.ts.
 
 import { NextRequest, NextResponse } from 'next/server'
-import { captureFinancialError }     from '@/lib/monitoring/sentry'
-import { resolveAdminUid }           from '@/lib/admin/auth'
-import { logAdminAction }            from '@/lib/admin/audit'
+import { logAdminActionOrRecord }    from '@/lib/admin/audit'
+import { requireSuperAdmin, parseFinancialReason, reasonErrorResponse } from '@/lib/admin/financialGuard'
 import { releaseEligibleFunds }      from '@/lib/settlements/releaseFunds'
 
 // Response shape is preserved for existing callers.
@@ -19,24 +18,36 @@ export interface ReleaseFundsResponse {
 }
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
-  const adminUid = await resolveAdminUid(req.headers.get('authorization'))
-  if (!adminUid) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+  // RD-PHASE4-S4 · D1 + D3 — Super Admin only, with a reason.
+  const guard = await requireSuperAdmin(req)
+  if (guard.response) return guard.response
+  const adminUid = guard.uid
+
+  let body: { reason?: unknown } = {}
+  try { body = await req.json() as { reason?: unknown } } catch { body = {} }
+  const r = parseFinancialReason(body.reason)
+  if (!r.ok) return reasonErrorResponse(r)
 
   const result = await releaseEligibleFunds()
 
-  if (result.processed > 0) {
-    void logAdminAction({
-      adminUid,
-      action:     'finance.release_funds',
-      entityType: 'finance',
-      entityId:   'release-funds',
-      metadata:   {
-        releasedTransactions: result.processed,
-        releasedAmountPaise:  result.releasedAmountPaise,
-        skippedTransactions:  result.failures,
-      },
-    }).catch(err => captureFinancialError(err, { scope: 'settlement_release', area: 'settlement_release', detail: 'admin audit log failed' }))
-  }
+  // The release is many per-transaction ledger moves, so its audit cannot share one
+  // transaction with them. It is AWAITED (not detached) and, if the write fails, the failure is
+  // durably recorded for reconciliation (adminAuditFailures) — the response still reports the
+  // true outcome of the release that already happened. Recorded for every run, including a
+  // run that found nothing to release: the decision itself is what is audited.
+  await logAdminActionOrRecord({
+    adminUid,
+    actorRole:  'super_admin',
+    action:     'finance.release_funds',
+    entityType: 'finance',
+    entityId:   'release-funds',
+    reason:     r.reason,
+    metadata:   {
+      releasedTransactions: result.processed,
+      releasedAmountPaise:  result.releasedAmountPaise,
+      skippedTransactions:  result.failures,
+    },
+  })
 
   return NextResponse.json({
     releasedTransactions: result.processed,

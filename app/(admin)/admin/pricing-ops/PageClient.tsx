@@ -10,6 +10,7 @@ import {
   StatusPill, ErrorBanner, TableFrame, THead, Th, TBody, Tr, Td, type PillTone,
 } from '@/components/admin'
 import { useToast } from '@/components/ui/Toast'
+import { useConfirm } from '@/components/ui/ConfirmDialog'
 import { cn } from '@/lib/utils/cn'
 
 async function getToken(): Promise<string> {
@@ -22,6 +23,8 @@ type Health = 'green' | 'yellow' | 'red'
 type Dist = Record<string, number>
 
 interface OpsData {
+  /** RD-PHASE4-S2 — server-decided from the verified token. */
+  permissions?: { canEditPricing: boolean }
   status: { pricingEngineEnabled: boolean; configurationVersion: number; lastUpdated: string }
   liveMetrics: Record<string, number>
   rates: {
@@ -93,14 +96,26 @@ export default function PricingOpsPage() {
   // RD-PAYMENT-06: flip the ALREADY-BUILT pricingEngineEnabled runtime flag via the
   // EXISTING PATCH endpoint. No new API, no new setting — just exposing the switch.
   // On success we re-load the ops data so the status reflects the persisted source of truth.
+  // RD-PHASE4-S2 — Super Admin only (the server refuses anyone else), and never a one-click change:
+  // it switches whether attendees are charged fees, so it needs a confirmation AND a reason (audited).
+  const { confirm, prompt } = useConfirm()
   const toggleEngine = useCallback(async (next: boolean) => {
+    const ok = await confirm({
+      message: next
+        ? 'Turn ON the pricing engine? New checkouts will charge attendees platform fees where the event collects them from the attendee. Existing orders are not changed.'
+        : 'Turn OFF the pricing engine? New checkouts will charge the ticket price only. Existing orders are not changed.',
+      tone: 'danger',
+    })
+    if (!ok) return
+    const reason = (await prompt({ title: 'Reason required', message: 'Reason for changing the pricing engine:', required: true }))?.trim()
+    if (!reason) return
     setSaving(true)
     try {
       const token = await getToken()
       const res = await fetch('/api/admin/platform-settings', {
         method:  'PATCH',
         headers: { authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-        body:    JSON.stringify({ features: { pricingEngineEnabled: next } }),
+        body:    JSON.stringify({ features: { pricingEngineEnabled: next }, reason }),
       })
       if (!res.ok) {
         const j = await res.json().catch(() => null) as { error?: string } | null
@@ -113,14 +128,14 @@ export default function PricingOpsPage() {
     } finally {
       setSaving(false)
     }
-  }, [load, showToast])
+  }, [load, showToast, confirm, prompt])
 
   return (
     <div className="mx-auto max-w-5xl space-y-5 p-4">
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-xl font-semibold text-foreground">Pricing Engine Operations</h1>
-          <p className="text-[13px] text-muted-foreground">Snapshot pipeline health · diagnostics only · read-only.</p>
+          <p className="text-[13px] text-muted-foreground">Snapshot pipeline health and diagnostics. The pricing engine switch is Super Admin only.</p>
         </div>
         <button onClick={load} disabled={loading}
           className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-card px-3 py-1.5 text-[13px] text-foreground hover:bg-muted disabled:opacity-50">
@@ -167,7 +182,8 @@ export default function PricingOpsPage() {
                   role="switch"
                   aria-checked={data.status.pricingEngineEnabled}
                   aria-label="Attendee Pays Fees"
-                  disabled={saving}
+                  disabled={saving || data.permissions?.canEditPricing !== true}
+                  title={data.permissions?.canEditPricing === true ? undefined : 'Only a Super Admin can change the pricing engine.'}
                   onClick={() => void toggleEngine(!data.status.pricingEngineEnabled)}
                   className={cn(
                     'relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary disabled:opacity-50',

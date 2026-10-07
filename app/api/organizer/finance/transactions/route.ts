@@ -56,6 +56,11 @@ export interface FinanceTransaction {
   platformFeeGstPaise:     number
   /** Null until Razorpay settlement reconciliation exists — never inferred. */
   gatewayFeeActualPaise:   number | null
+  gatewayTaxPaise:         number | null
+  /** `actual ?? estimate`. Read this with `gatewayFeeBasis`, never on its own. */
+  gatewayFeePaise:         number
+  /** Server-computed platformFeeTotal + gatewayFee. The UI must not re-derive it. */
+  totalFeesPaise:          number
   gatewayFeeBasis:         'estimated' | 'actual'
   /** Alias of netSettlementPaise under an unambiguous name. */
   organizerNetPaise:       number
@@ -166,6 +171,9 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       platformFeeBasePaise:    view.platformFeeBasePaise,
       platformFeeGstPaise:     view.platformFeeGstPaise,
       gatewayFeeActualPaise:   view.gatewayFeeActualPaise,
+      gatewayTaxPaise:         view.gatewayTaxPaise,
+      gatewayFeePaise:         view.gatewayFeePaise,
+      totalFeesPaise:          view.totalFeesPaise,
       gatewayFeeBasis:         view.gatewayFeeBasis,
       organizerNetPaise:       view.organizerNetPaise,
       refundAmountPaise:       view.refundAmountPaise,

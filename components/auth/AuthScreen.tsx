@@ -1,35 +1,37 @@
 'use client'
 
 import type { ReactNode } from 'react'
-import Link from 'next/link'
 import { motion, type Variants } from 'framer-motion'
-import { ArrowLeft } from 'lucide-react'
-import { ROUTES } from '@/config/navigation'
+import { BrandLockup } from '@/components/marketing/BrandLockup'
 import { EASE, fadeUp } from './authMotion'
 import { AuthShell } from './AuthShell'
-import { OrganizerAuthHero } from './OrganizerAuthHero'
 import { AuthCard } from './AuthCard'
 import { AuthFooter } from './AuthFooter'
+import { PublicAccentScope } from './PublicAccentScope'
 
 // ─── AuthScreen ───────────────────────────────────────────────────────────────
-// THE single organizer authentication shell. Every organizer auth entry screen
-// (login, signup, forgot-password, verify-email/OTP, verify-email-success)
-// renders its center-card content through this so the marketing panel, gradient,
-// aurora, card width, paddings, radius, shadow, responsive breakpoints, top-right
-// helper link and bottom trust line are IDENTICAL everywhere — the only thing a
-// page supplies is `children` (what goes inside the card).
+// THE shared shell for the organizer auth steps that are not /login itself:
+// forgot-password, verify-email (OTP) and verify-email-success. A page supplies only
+// `children` — what goes inside the card — so the three steps are identical around it.
 //
-// This is a verbatim extraction of the login page's chrome — migrating a page to
-// it changes nothing visually; it only removes duplicated markup.
+// ═══ 2026-09-24 · ONE CENTRED COLUMN (owner: "I don't want this layout") ══════
+// The magenta marketing panel and the mobile gradient strip are gone. These screens now
+// share /login's composition: the tinted auth canvas, the 2px brand rule on the top
+// edge, the canonical lockup, and one centred card — so moving from sign-in to the
+// verification code no longer looks like arriving on a different product.
+//
+// ═══ THE PUBLIC ACCENT, SCOPED ═══════════════════════════════════════════════
+// The step pages were written against the organizer accent (bg-primary/10, the
+// `primary` Button, OTP focus in --primary) — magenta. Rather than rewrite three
+// pages, this shell re-points the --primary family at --action for the duration of the
+// screen, exactly as the public register route does (app/events/[slug]/register/
+// layout.tsx). The organizer dashboard, which never mounts AuthScreen, is untouched.
 
-// Right-column entrance (slide in) + stagger for the card/links.
-const slideIn: Variants = {
-  hidden: { opacity: 0, x: 28 },
-  show:   { opacity: 1, x: 0, transition: { duration: 0.7, ease: EASE, delay: 0.12 } },
-}
+// (The token remap itself lives in PublicAccentScope, shared with /welcome.)
+
 const stagger: Variants = {
   hidden: {},
-  show:   { transition: { staggerChildren: 0.09, delayChildren: 0.2 } },
+  show:   { transition: { staggerChildren: 0.08, delayChildren: 0.1 } },
 }
 
 export interface AuthScreenProps {
@@ -38,84 +40,45 @@ export interface AuthScreenProps {
 }
 
 export function AuthScreen({ children }: AuthScreenProps) {
-  const formColumn = (
-    <div className="relative flex flex-col md:h-full md:overflow-hidden">
+  const column = (
+    <div className="flex min-h-dvh flex-col px-5 py-8 sm:px-8">
+      {/* The 2px brand rule across the top edge — the same signature /login carries. */}
+      <span aria-hidden className="rd-brand-gradient fixed inset-x-0 top-0 z-10 h-0.5" />
 
-      {/* Top-right helper — pinned to the panel's top-right edge, hidden on mobile. */}
-      <div className="absolute right-8 top-7 z-10 hidden md:block xl:right-12 xl:top-9">
-        <p className="text-[13px] text-muted-foreground">
-          Not an organizer?{' '}
-          <Link
-            href={ROUTES.HOME}
-            className="font-semibold text-foreground underline-offset-4 hover:underline"
-          >
-            Browse events
-          </Link>
-        </p>
-      </div>
+      <motion.div
+        initial={{ opacity: 0, y: -8 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.45, ease: EASE }}
+        className="flex justify-center"
+      >
+        <BrandLockup size="sm" />
+      </motion.div>
 
-      {/* Scroll wrapper — fills the locked shell height, scrolls INTERNALLY when
-          the card is taller than the viewport; the page itself never scrolls. */}
-      <div className="flex flex-col md:h-full md:overflow-y-auto">
+      <motion.div
+        variants={stagger}
+        initial="hidden"
+        animate="show"
+        className="mx-auto mt-[clamp(1.5rem,6vh,4.5rem)] w-full max-w-[480px]"
+      >
+        {/* No back link out here: every step carries its own inside the card (Back to
+            Sign In / Back to Home), and a second one below it repeated the same exit. */}
+        <AuthCard>{children}</AuthCard>
+      </motion.div>
 
-        {/* Mobile brand strip */}
-        <motion.div
-          initial={{ opacity: 0, y: -12 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.5, ease: EASE }}
-          className="px-6 pb-8 pt-8 md:hidden"
-          style={{ backgroundImage: 'var(--primary-gradient)' }}
-        >
-          <div className="flex flex-col items-center gap-3 text-center">
-            <div className="flex size-11 items-center justify-center rounded-[12px] bg-primary-foreground/15 ring-1 ring-primary-foreground/25">
-              <span className="text-[13px] font-bold tracking-widest text-primary-foreground">RD</span>
-            </div>
-            <div>
-              <p className="text-base font-semibold text-primary-foreground">RegisterDesk</p>
-              <p className="mt-0.5 text-sm text-primary-foreground/65">
-                Your command center for every event.
-              </p>
-            </div>
-          </div>
-        </motion.div>
-
-        {/* Form area — vertically centres the card in the locked panel height. */}
-        <motion.div
-          variants={slideIn}
-          initial="hidden"
-          animate="show"
-          className="flex flex-1 items-center justify-center px-5 py-6 sm:px-8 md:min-h-full"
-        >
-          <motion.div
-            variants={stagger}
-            initial="hidden"
-            animate="show"
-            className="w-full max-w-[560px]"
-          >
-            {/* Desktop back link */}
-            <motion.div variants={fadeUp} className="mb-6 hidden lg:block">
-              <Link
-                href={ROUTES.HOME}
-                className="inline-flex items-center gap-1.5 text-sm font-medium text-muted-foreground transition-colors duration-150 hover:text-foreground"
-              >
-                <ArrowLeft className="size-3.5" aria-hidden />
-                Back to home
-              </Link>
-            </motion.div>
-
-            <AuthCard>{children}</AuthCard>
-
-            {/* Bottom trust line */}
-            <motion.div variants={fadeUp} className="mt-6">
-              <AuthFooter>
-                Secure and trusted by thousands of organizers worldwide.
-              </AuthFooter>
-            </motion.div>
-          </motion.div>
-        </motion.div>
-      </div>
+      {/* The closing line — what RegisterDesk is, no claim, no number. */}
+      <motion.div variants={fadeUp} initial="hidden" animate="show" className="mt-auto pt-10">
+        <div className="mx-auto max-w-[480px] border-t border-border/60 pt-4">
+          <AuthFooter>
+            RegisterDesk — event operations for organizers.
+          </AuthFooter>
+        </div>
+      </motion.div>
     </div>
   )
 
-  return <AuthShell left={<OrganizerAuthHero from="md" />} right={formColumn} />
+  return (
+    <PublicAccentScope>
+      <AuthShell right={column} />
+    </PublicAccentScope>
+  )
 }

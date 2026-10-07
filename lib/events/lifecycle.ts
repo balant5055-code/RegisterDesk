@@ -6,6 +6,7 @@ import { FieldValue }    from 'firebase-admin/firestore'
 import { adminDb }       from '@/lib/firebase/admin'
 import type { EventLifecycleStatus, LifecycleAction, EventReviewMeta } from '@/types/events'
 import { targetStatus, isValidTransition, deriveLifecycleStatus } from './lifecycleStateMachine'
+import { liveEventBelongsTo } from './liveEventRef'
 
 // Re-export the pure state machine so existing importers of this module are
 // unaffected (the machine now lives in ./lifecycleStateMachine for testability).
@@ -220,6 +221,12 @@ export async function applyLifecycleTransition(
     if (eventRef) {
       const eventSnap = await txn.get(eventRef)
       eventExists = eventSnap.exists
+      // RD-CE-FIX C1 · the slug came from the client-writable draft. A live document that is not
+      // THIS workspace's event for THIS draft is never touched, and the transition is refused so
+      // the draft cannot drift from its real live page.
+      if (eventExists && !liveEventBelongsTo(eventSnap.data(), uid, eventId)) {
+        return { success: false, error: 'Event not found', statusCode: 404 }
+      }
     }
     txn.update(draftRef, draftUpdate)
     if (eventRef && eventExists) txn.update(eventRef, eventUpdate)

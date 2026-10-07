@@ -3,7 +3,7 @@
 // event/payment/override/audit sources merged newest-first).
 
 import { NextRequest, NextResponse } from 'next/server'
-import { resolveAdminUid }           from '@/lib/admin/auth'
+import { resolveAdminUid, resolveSuperAdminUid } from '@/lib/admin/auth'
 import { getOrganizer360Timeline }   from '@/lib/admin/organizer360Service'
 
 interface RouteContext { params: Promise<{ uid: string }> }
@@ -14,7 +14,8 @@ export async function GET(req: NextRequest, ctx: RouteContext): Promise<NextResp
 
   const { uid } = await ctx.params
   try {
-    const data = await getOrganizer360Timeline(uid)
+    // RD-PHASE4-S4 · D7 — financial audit rows are returned to a Super Admin only.
+    const data = await getOrganizer360Timeline(uid, { includeFinancialAudit: (await resolveSuperAdminUid(req.headers.get('authorization'))) !== null })
     if (!data) return NextResponse.json({ error: 'Organizer not found' }, { status: 404 })
     return NextResponse.json(data, { headers: { 'Cache-Control': 'no-store' } })
   } catch (e) {

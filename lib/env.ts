@@ -126,11 +126,13 @@ export const APP_URL = required(
 
 // ─── Category B — Email provider (Amazon SES) ────────────────────────────────
 // SES is the sole email provider. When SES_FROM_EMAIL is blank, email is disabled
-// and all sends are silently skipped (registrations still succeed). Region
-// defaults to Mumbai (ap-south-1). Credentials are optional — omit them to use an
+// and all sends are silently skipped (registrations still succeed). Region: a PRODUCTION
+// deployment with email enabled must set AWS_REGION explicitly (any valid region — production
+// uses ap-south-1; lib/email/sesRegion.ts, enforced at the email boundary like the credential
+// pair). Unset outside production it defaults to us-east-1. Credentials are optional — omit them to use an
 // attached IAM role via the SDK's default credential chain.
 
-export const AWS_REGION            = optional('AWS_REGION', 'ap-south-1')
+export const AWS_REGION            = optional('AWS_REGION', 'us-east-1')
 export const AWS_ACCESS_KEY_ID     = optional('AWS_ACCESS_KEY_ID')
 export const AWS_SECRET_ACCESS_KEY = optional('AWS_SECRET_ACCESS_KEY')
 export const SES_FROM_EMAIL        = optional('SES_FROM_EMAIL')

@@ -7,13 +7,15 @@
 // why it must never be reachable from an organizer-authenticated route.
 
 import { NextRequest, NextResponse } from 'next/server'
-import { resolveAdminUid } from '@/lib/admin/auth'
+import { requireSuperAdmin } from '@/lib/admin/financialGuard'
 import { refundService } from '@/features/media-credits/services/refundService'
 import { CREDIT_REFUND_STATUSES, type CreditRefundStatus } from '@/features/media-credits/types'
 
 export async function GET(req: NextRequest): Promise<NextResponse> {
-  const adminUid = await resolveAdminUid(req.headers.get('authorization'))
-  if (!adminUid) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+  // RD-CLOSE — a financial read: Super Admin only (ADMIN_UIDS). A legacy `admin: true` claim
+  // alone gets 403 SUPER_ADMIN_REQUIRED (lib/admin/financialGuard.ts).
+  const superGate = await requireSuperAdmin(req)
+  if (superGate.response) return superGate.response
 
   const url    = new URL(req.url)
   const raw    = url.searchParams.get('status') ?? 'requested'

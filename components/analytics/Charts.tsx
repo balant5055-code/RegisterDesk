@@ -14,22 +14,69 @@ const nf = (n: number) => n.toLocaleString('en-IN')
 
 // ─── Vertical bar chart (time series: registrations/day, revenue/day) ──────────
 
-export function Bars({ data, height = 120, format, label }: { data: ChartPoint[]; height?: number; format?: (n: number) => string; label?: string }) {
+/**
+ * Vertical bar chart.
+ *
+ * ⚠ The column's `h-full` is LOAD-BEARING, not cosmetic. The track is `flex items-end`,
+ * so without an explicit height each column is content-sized — i.e. 0 — and the fill's
+ * `height: N%` resolves against 0 and paints nothing. Every vertical bar chart in the
+ * app (organizer dashboard trend, admin analytics, license center) was rendering an
+ * empty box. Measured in the browser before the fix: 30 columns present, each 0px tall.
+ */
+export function Bars({ data, height = 120, format, label, axis = false, barClassName }: {
+  data: ChartPoint[]
+  /**
+   * Track height. Accepts a CSS length string ('100%') as well as px, so a chart can
+   * FILL a flexible container instead of leaving dead space beneath it — which is
+   * what happens when a fixed-height chart sits in a stretched grid cell.
+   */
+  height?: number | string
+  format?: (n: number) => string
+  label?: string
+  /**
+   * Render a y-axis gutter with gridlines (0 · mid · max).
+   *
+   * Off by default so every existing caller is untouched. A bare bar field asks the
+   * reader to guess magnitude; four labelled steps turn the same bars into a
+   * measurement. Opt-in because the gutter costs horizontal room a small sparkline
+   * cannot spare.
+   */
+  axis?: boolean
+  /** Bar colour. Defaults to the brand primary. */
+  barClassName?: string
+}) {
   const max = Math.max(1, ...data.map(d => d.value))
+  const ticks = axis ? [max, Math.round(max / 2), 0] : []
   return (
-    <div className="w-full" role={label ? 'img' : undefined} aria-label={label}>
-      <div className="flex items-end gap-[3px]" style={{ height }}>
-        {data.map((d, i) => (
-          <div key={i} className="group relative flex flex-1 items-end" title={`${d.label}: ${format ? format(d.value) : nf(d.value)}`}>
-            <div
-              className="w-full rounded-t bg-primary/80 transition-colors group-hover:bg-primary"
-              style={{ height: `${Math.max(2, (d.value / max) * 100)}%` }}
-            />
+    // `h-full` gives a percentage `height` a resolved parent to measure against. In a
+    // normal block parent it collapses to auto, so every existing caller is unaffected.
+    <div className="flex h-full w-full flex-col" role={label ? 'img' : undefined} aria-label={label}>
+      <div className="flex flex-1 gap-2" style={{ height, minHeight: 120 }}>
+        {axis && (
+          <div className="flex w-8 shrink-0 flex-col justify-between py-px text-right text-[10px] tabular-nums text-muted-foreground">
+            {ticks.map((t, i) => <span key={i}>{format ? format(t) : nf(t)}</span>)}
           </div>
-        ))}
+        )}
+        <div className="relative flex flex-1 items-end gap-[3px]">
+          {/* Gridlines sit BEHIND the bars and are aria-hidden — they are a reading
+              aid, not content. */}
+          {axis && (
+            <div className="pointer-events-none absolute inset-0 flex flex-col justify-between" aria-hidden>
+              {ticks.map((_, i) => <span key={i} className="h-px w-full bg-border/70" />)}
+            </div>
+          )}
+          {data.map((d, i) => (
+            <div key={i} className="group relative flex h-full flex-1 items-end" title={`${d.label}: ${format ? format(d.value) : nf(d.value)}`}>
+              <div
+                className={cn('w-full rounded-t transition-colors', barClassName ?? 'bg-primary/80 group-hover:bg-primary')}
+                style={{ height: `${Math.max(2, (d.value / max) * 100)}%` }}
+              />
+            </div>
+          ))}
+        </div>
       </div>
       {data.length > 0 && (
-        <div className="mt-1.5 flex justify-between text-[10.5px] text-muted-foreground">
+        <div className={cn('mt-1.5 flex justify-between text-[10.5px] text-muted-foreground', axis && 'pl-10')}>
           <span>{data[0].label}</span>
           {data.length > 2 && <span>{data[Math.floor(data.length / 2)].label}</span>}
           <span>{data[data.length - 1].label}</span>
@@ -41,7 +88,19 @@ export function Bars({ data, height = 120, format, label }: { data: ChartPoint[]
 
 // ─── Horizontal bars (breakdowns: pass sales, coupons) ─────────────────────────
 
-export function HBars({ data, format, label }: { data: ChartPoint[]; format?: (n: number) => string; label?: string }) {
+export function HBars({ data, format, label, colors }: {
+  data: ChartPoint[]; format?: (n: number) => string; label?: string
+  /**
+   * RD-DASHBOARD-03 — optional SEMANTIC colours, one per datum.
+   *
+   * Additive and backward compatible: without it the rotating CHART_COLORS palette is
+   * used exactly as before, so every existing admin consumer is untouched. The
+   * organizer dashboard passes real colours because a rotating palette makes
+   * "Cancelled" green whenever it happens to land on index 1 — colour that carries no
+   * meaning is worse than none.
+   */
+  colors?: string[]
+}) {
   const max = Math.max(1, ...data.map(d => d.value))
   return (
     <ul className="space-y-2" role={label ? 'img' : undefined} aria-label={label}>
@@ -52,7 +111,7 @@ export function HBars({ data, format, label }: { data: ChartPoint[]; format?: (n
             <span className="shrink-0 font-semibold tabular-nums text-muted-foreground">{format ? format(d.value) : nf(d.value)}</span>
           </div>
           <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
-            <div className="h-full rounded-full" style={{ width: `${Math.max(2, (d.value / max) * 100)}%`, backgroundColor: CHART_COLORS[i % CHART_COLORS.length] }} />
+            <div className="h-full rounded-full transition-[width] duration-500 ease-out" style={{ width: `${Math.max(2, (d.value / max) * 100)}%`, backgroundColor: colors?.[i] ?? CHART_COLORS[i % CHART_COLORS.length] }} />
           </div>
         </li>
       ))}
@@ -62,7 +121,11 @@ export function HBars({ data, format, label }: { data: ChartPoint[]; format?: (n
 
 // ─── Donut (payment status, distribution) ──────────────────────────────────────
 
-export function Donut({ segments, size = 132, label }: { segments: ChartPoint[]; size?: number; label?: string }) {
+export function Donut({ segments, size = 132, label, colors }: {
+  segments: ChartPoint[]; size?: number; label?: string
+  /** Optional semantic colours, one per segment. See HBars. */
+  colors?: string[]
+}) {
   const total = segments.reduce((s, d) => s + d.value, 0)
   const r = size / 2 - 12
   const c = 2 * Math.PI * r
@@ -76,7 +139,7 @@ export function Donut({ segments, size = 132, label }: { segments: ChartPoint[];
           const dash = frac * c
           const el = (
             <circle key={i} cx={size / 2} cy={size / 2} r={r} fill="none"
-              stroke={CHART_COLORS[i % CHART_COLORS.length]} strokeWidth={12}
+              stroke={colors?.[i] ?? CHART_COLORS[i % CHART_COLORS.length]} strokeWidth={12}
               strokeDasharray={`${dash} ${c - dash}`} strokeDashoffset={-offset}
               transform={`rotate(-90 ${size / 2} ${size / 2})`} strokeLinecap="butt" />
           )
@@ -90,7 +153,7 @@ export function Donut({ segments, size = 132, label }: { segments: ChartPoint[];
         {segments.map((d, i) => (
           <li key={i} className="flex items-center justify-between gap-2 text-[12.5px]">
             <span className="flex min-w-0 items-center gap-1.5">
-              <span className="size-2.5 shrink-0 rounded-full" style={{ backgroundColor: CHART_COLORS[i % CHART_COLORS.length] }} />
+              <span className="size-2.5 shrink-0 rounded-full" style={{ backgroundColor: colors?.[i] ?? CHART_COLORS[i % CHART_COLORS.length] }} />
               <span className="truncate text-muted-foreground">{d.label}</span>
             </span>
             <span className="shrink-0 font-semibold tabular-nums text-foreground">{nf(d.value)}</span>

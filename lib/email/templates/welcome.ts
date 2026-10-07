@@ -1,6 +1,13 @@
 // Premium welcome email — sent after successful OTP verification.
 // Celebrates the moment, introduces 3 quick-start actions.
 
+// RD-ORGANIZER-ROUTE-HARDENING-09 · the Create Event link comes from the canonical route
+// table rather than a literal. It was `${appUrl}/dashboard/events/new/visibility`, which was
+// correct but had no link to the constant every in-app caller uses — so moving the wizard
+// entry would have left this email pointing at a 404 with nothing to catch it. An email is
+// the worst place to discover a stale route: it is already in someone's inbox.
+import { ROUTES } from '@/config/navigation'
+
 export interface WelcomeEmailParams {
   to:      string
   name:    string    // full name
@@ -192,7 +199,7 @@ export function welcomeTemplate(p: WelcomeEmailParams): { subject: string; html:
                 '📅',
                 'Create your first event',
                 'Set up ticketing, registration, and check-in in minutes.',
-                `${appUrl}/dashboard/events/new/visibility`,
+                `${appUrl}${ROUTES.NEW_EVENT}`,
                 'Create an event',
               )}
               ${actionRow(

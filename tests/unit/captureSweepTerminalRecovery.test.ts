@@ -67,21 +67,21 @@ describe('a registration_failed intent with a later capture is now detected', ()
 describe('payment selection is deterministic and order-scoped', () => {
   it('3 · it is a predicate match, never "the first payment"', () => {
     expect(SWEEP).toContain("(p.status === 'captured' || p.status === 'authorized') &&")
-    expect(SWEEP).toContain("p.currency === 'INR' && p.amount === intent.amount")
+    expect(SWEEP).toContain("p.currency === 'INR' && p.amountPaise === intent.amount")
     // `.find(p => …)` with a predicate — not `items[0]`.
     expect(SWEEP).not.toMatch(/items\s*\)?\s*\[0\]/)
     expect(SWEEP).not.toContain('.find(p => p.status')
   })
 
   it('4 · the lookup is scoped to the intent’s OWN order', () => {
-    expect(SWEEP).toContain('razorpay.orders.fetchPayments(intent.orderId)')
+    expect(SWEEP).toContain('resolvePaymentProvider(intent.provider).fetchOrderPayments(intent.orderId)')
     // No cross-order search of any kind.
     expect(SWEEP).not.toContain('payments.all(')
     expect(SWEEP).not.toContain('orders.all(')
   })
 
   it('5+3 · amount and currency are both required', () => {
-    expect(SWEEP).toContain('p.amount === intent.amount')
+    expect(SWEEP).toContain('p.amountPaise === intent.amount')
     expect(SWEEP).toContain("p.currency === 'INR'")
   })
 
@@ -149,12 +149,15 @@ describe('the recovery authorization reaches terminal intents only', () => {
     }
   })
 
-  it('9 · a substantive refusal DEFERS and never refunds', () => {
+  it('9 · a substantive refusal DEFERS for recovery and HOLDS otherwise — never refunds', () => {
     expect(SETTLE).toContain("return { kind: 'deferred', reason: `recovery_blocked:${gate.reason ?? 'gate_blocked'}` }")
-    const guard  = SETTLE.indexOf('if (!(isRecovery && gate.reason && TIMING_ONLY.has(gate.reason)))')
-    const refund = SETTLE.indexOf('await refundInFull(orderId, paymentId, intent.amount, `gate_blocked:')
+    const guard = SETTLE.indexOf('if (!(isRecovery && gate.reason && TIMING_ONLY.has(gate.reason)))')
+    // The branch inside that guard used to refund in full. It now records a hold, so the
+    // captured payment survives a gate-blocked settlement for a human to decide on.
+    const hold  = SETTLE.indexOf('await recordCapturedHold(orderId, paymentId, intent.amount, `gate_blocked:')
     expect(guard).toBeGreaterThan(-1)
-    expect(refund).toBeGreaterThan(guard)   // the refund branch sits INSIDE the non-recovery guard
+    expect(hold).toBeGreaterThan(guard)     // the hold branch sits INSIDE the non-recovery guard
+    expect(SETTLE).not.toMatch(/refundInFull/)
   })
 })
 
@@ -171,9 +174,15 @@ describe('the sweep can never move money on its own', () => {
     expect(SWEEP).not.toContain('markPaymentIntentFailed')
   })
 
-  it('the ONLY Razorpay call is a read', () => {
-    const calls = SWEEP.match(/razorpay\.[a-zA-Z.]+\(/g) ?? []
-    expect(calls).toEqual(['razorpay.orders.fetchPayments('])
+  it('the ONLY provider call is a read', () => {
+    // RD-PAYMENT-PROVIDER-CONTRACT-04 — the sweep reaches the gateway through the contract
+    // now, so this asserts the same property against the contract's surface: it may LOOK
+    // (fetchOrderPayments) and nothing else. No createOrder, and above all no refund — the
+    // sweep settling or parking a payment must never move money outward.
+    const calls = SWEEP.match(/resolvePaymentProvider\([^)]*\)\.[a-zA-Z]+\(/g) ?? []
+    expect(calls).toEqual(['resolvePaymentProvider(intent.provider).fetchOrderPayments('])
+    expect(SWEEP).not.toMatch(/\.refund\(/)
+    expect(SWEEP).not.toMatch(/\.createOrder\(/)
   })
 })
 
@@ -246,10 +255,15 @@ describe('recoverOrphanedCapture remains strict and unwired', () => {
 // ─── the webhook is untouched in this phase ──────────────────────────────────
 
 describe('the webhook is unchanged', () => {
-  it('still skips a terminal intent and still writes the terminal status', () => {
+  it('now recovers a terminal intent, and still writes the terminal status', () => {
+    // The four-step trap this file documents had the sweep as its ONLY backstop. RD-FIN-04A
+    // closed it at step 3 as well: the webhook no longer returns on a terminal intent that
+    // carries no registration — it settles it through the same recovery authorization the
+    // sweep uses. The sweep remains the second observer, not the only one.
     const wh = strip(read('app/api/webhooks/razorpay/route.ts'))
-    expect(wh).toContain("if (intent.status === 'registration_failed')")
+    expect(wh).toContain('terminalNoRegistration')
+    expect(wh).toContain('verifiedCapturedPaymentId')
+    // Step 1 is unchanged — the failure handler still writes the terminal status.
     expect(wh).toContain('await markPaymentIntentFailed(fOrderId, reason)')
-    expect(wh).not.toContain('verifiedCapturedPaymentId')
   })
 })

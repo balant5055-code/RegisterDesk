@@ -16,6 +16,7 @@
 // can share it — the same arrangement resolveAttendeeIdentity uses for identity.
 
 import type { FieldType } from '@/components/wizard/registrationFormConfig'
+import { passAgeLimits } from '@/lib/passes/passRaceRules'
 
 export interface AgeLimits {
   minAge: number | null
@@ -130,12 +131,8 @@ export function resolveServerEligibility(
   const schedule  = eventDetails?.schedule as Record<string, unknown> | null | undefined
   const eventDate = typeof schedule?.startDate === 'string' ? schedule.startDate : null
 
-  const rd = pass?.raceDetails as Record<string, unknown> | null | undefined
-  return {
-    eventDate,
-    minAge: typeof rd?.minAge === 'number' ? rd.minAge : null,
-    maxAge: typeof rd?.maxAge === 'number' ? rd.maxAge : null,
-  }
+  // RD-CE-FIX H2 · the age window only — a team size (legacy-stored in minAge) is never an age rule.
+  return { eventDate, ...passAgeLimits(pass) }
 }
 
 /**

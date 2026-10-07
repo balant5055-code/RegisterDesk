@@ -271,7 +271,11 @@ describe('8 · a zero fee must not be mistaken for a broken one', () => {
   })
 
   it('no debit is attempted at zero cost', () => {
-    expect(src).toContain('const debited = costPaise > 0 ? await deductWhatsAppCharge(args, costPaise) : 0')
+    // RD-INTEG — the debit is guarded by costPaise > 0 and a billing error after the send no
+    // longer turns an accepted message into a failure.
+    // RD-CLOSE — the charge is decided inside the acceptance record: a zero cost writes no ledger row.
+    expect(read('lib/whatsapp/acceptance.ts')).toContain('if (input.costPaise > 0) {')
+    expect(src).toContain('fromAllowance, writeLog: false, source: \'retry\',')
   })
 
   it('no truthiness check treats a zero fee as unset', () => {

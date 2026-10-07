@@ -26,8 +26,12 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ eventId: st
 // Whitelist of fields an organizer may patch (prevents arbitrary doc writes).
 const ALLOWED: (keyof IdentifierConfig)[] = [
   'enabled', 'label', 'preset', 'type', 'format', 'reusePolicy', 'assignmentStrategy',
+  // RD-BIB-01 - which participant gets the first number.
+  'assignmentOrder',
   'autoTrigger', 'allowManualOverride', 'allowDuplicate', 'pools', 'templates',
   'defaultPoolId', 'visibility',
+  // RD-EVENT-19F-B - the timing-tag capability lives on this same document.
+  'tagMapping',
 ]
 
 export async function PUT(req: NextRequest, ctx: { params: Promise<{ eventId: string }> }): Promise<NextResponse> {
@@ -47,7 +51,10 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ eventId: st
   }
 
   try {
-    const config = await saveIdentifierConfig(scope.slug, patch, scope.callerUid)
+    // RD-BIB-01 · same explicit acknowledgement as the pools route, for the same reason.
+    const config = await saveIdentifierConfig(scope.slug, patch, scope.callerUid, 'config updated', {
+      acknowledgeStranding: raw.acknowledgeStranding === true,
+    })
     return NextResponse.json({ ok: true, config })
   } catch (err) {
     if (err instanceof IdentifierConfigError) {

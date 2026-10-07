@@ -4,13 +4,29 @@
 
 import { FieldValue } from 'firebase-admin/firestore'
 import { adminDb }    from '@/lib/firebase/admin'
-import type { FeeBreakdownRecord } from '@/lib/fees/types'
+import type { FeeBreakdownRecord, CheckoutFeeInputs } from '@/lib/fees/types'
+// Types only — the payment domain never imports a provider SDK.
+import { readProvider, type PaymentProvider } from '@/lib/payments/providers/types'
 
 export type PaymentIntentStatus = 'created' | 'paid' | 'failed' | 'registration_failed'
 export type RefundStatus        = 'pending' | 'processed' | 'failed'
 
 export interface PaymentIntentRecord {
-  orderId:      string           // Razorpay order ID
+  orderId:      string           // the PROVIDER's order id
+  /**
+   * RD-PAYMENT-PROVIDER-CONTRACT-04 — which gateway this payment belongs to.
+   *
+   * REQUIRED on the type, and that is the point: `createPaymentIntent` takes
+   * `Omit<PaymentIntentRecord, 'status'|'createdAt'|'updatedAt'>`, so every new-payment call
+   * site must name its provider or fail to compile. A payment is routed to the gateway it
+   * was created for — never to a guess.
+   *
+   * READS are different. Documents written before this field existed have no `provider`,
+   * because Razorpay was the only possibility at the time; `getPaymentIntent` normalizes
+   * those to 'razorpay' via `readProvider`. That is a statement of fact about history, not a
+   * default for new money, and it means no backfill is needed.
+   */
+  provider:     PaymentProvider
   eventSlug:    string
   passId:       string
   passName:     string
@@ -56,6 +72,9 @@ export interface PaymentIntentRecord {
   // every prior intent; `amount` above remains the authoritative charged value and is
   // untouched. Written from Phase 2 onward; nothing populates it yet.
   financials?:     FeeBreakdownRecord
+  // RD-PHASE4-S2 — the fee inputs in force at checkout (engine OFF). Written ONCE, when the intent is
+  // created; never rewritten by retries, webhooks or sweeps. Absent on intents created before it.
+  feeInputs?:      CheckoutFeeInputs
   createdAt:       unknown       // Firestore Timestamp
   updatedAt:       unknown       // Firestore Timestamp
 }
@@ -135,7 +154,12 @@ export async function createPaymentIntent(
 export async function getPaymentIntent(orderId: string): Promise<PaymentIntentRecord | null> {
   const snap = await adminDb.collection('paymentIntents').doc(orderId).get()
   if (!snap.exists) return null
-  return snap.data() as PaymentIntentRecord
+  const data = snap.data() as PaymentIntentRecord
+  // Backward compatibility, read-side only: an intent written before the discriminator
+  // existed has no `provider`. Razorpay was the only gateway then, so reading it as Razorpay
+  // is a fact rather than a default — and it means no historical document has to be
+  // rewritten for this phase. See `readProvider`.
+  return { ...data, provider: readProvider((data as { provider?: unknown }).provider) }
 }
 
 // ─── RD-PAY-P0-2 · attempt claims ─────────────────────────────────────────────
@@ -197,14 +221,31 @@ export async function claimPaymentAttempt(
   }
 }
 
+/**
+ * Marks an intent terminal (`registration_failed`).
+ *
+ * RD-FIN-01 · NEVER over a PAID intent. Callers decide "this attempt failed" from a read taken
+ * OUTSIDE any transaction (the settlement gate, the payment.failed webhook), so a concurrent
+ * settlement may already have turned the intent `paid` + registrationId. An unconditional
+ * update flipped that paid intent to failed and let a spurious settlement hold be filed for a
+ * payment that HAS a registration. Read-and-write in one transaction instead.
+ *
+ * @returns true when the intent was marked; false when it was already `paid` (left untouched).
+ */
 export async function markPaymentIntentFailed(
   orderId:       string,
   failureReason?: string,
-): Promise<void> {
-  await adminDb.collection('paymentIntents').doc(orderId).update({
-    status: 'registration_failed',
-    ...(failureReason ? { failureReason } : {}),
-    updatedAt: FieldValue.serverTimestamp(),
+): Promise<boolean> {
+  const ref = adminDb.collection('paymentIntents').doc(orderId)
+  return adminDb.runTransaction(async txn => {
+    const snap = await txn.get(ref)
+    if (snap.exists && snap.get('status') === 'paid') return false
+    txn.update(ref, {
+      status: 'registration_failed',
+      ...(failureReason ? { failureReason } : {}),
+      updatedAt: FieldValue.serverTimestamp(),
+    })
+    return true
   })
 }
 

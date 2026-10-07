@@ -55,13 +55,19 @@ describeEmu('RD-RESULTS-FINAL-01 · the marathon results workflow, end to end', 
     snapshotRepo       = await import('@/features/race-operations/repositories/snapshotRepo')
     certificateResults = await import('@/features/race-operations/services/certificateResults')
     snapshotTypes      = await import('@/features/race-operations/types/snapshot')
-  })
+  // RD-RACEOPS-02B · the cold import of firebase-admin plus six service modules, and the
+  // per-test wipe + seed, both exceed vitest's 10 s default hook timeout on a busy machine.
+  // A harness timeout, not a product one: the assertions are untouched.
+  }, WORKFLOW_TIMEOUT_MS)
 
   /** The event, its published pass list, and a confirmed start list with bibs. */
   async function seed() {
     const batch = adminDb.batch()
 
     batch.set(adminDb.doc(`users/${UID}/eventDrafts/${EVENT}`), {
+      // RD-RACEOPS-02B · the wizard always stores the type; Race Operations now requires
+      // a sports event, so the fixture says what a real draft says.
+      eventType: 'sports',
       eventDetails: {
         seo:      { urlSlug: SLUG },
         info:     { name: 'Emulator Marathon' },
@@ -120,7 +126,7 @@ describeEmu('RD-RESULTS-FINAL-01 · the marathon results workflow, end to end', 
   const chunked = <T,>(xs: readonly T[], n: number): T[][] =>
     xs.length === 0 ? [] : [xs.slice(0, n) as T[], ...chunked(xs.slice(n), n)]
 
-  beforeEach(async () => { await wipe(); await seed() })
+  beforeEach(async () => { await wipe(); await seed() }, WORKFLOW_TIMEOUT_MS)
 
   /** One canonical row. */
   const row = (rowNumber: number, bib: string, chipTimeMs: number | null, status = 'finished') => ({

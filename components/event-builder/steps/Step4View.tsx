@@ -12,7 +12,7 @@
 //
 // Everything in this file belongs ONLY to Step 4: the pass-id helper (generatePassId) and the
 // Step-4 presentational sub-components (RegTypeCard, EventTypeSelectorSection, PassesSection,
-// RegistrationPeriodSection, AdvancedSettingsSection, Step4SummaryPanel). The shared bits —
+// RegistrationPeriodSection, Step4SummaryPanel). The shared bits —
 // the AddPassEditor overlay, the fee-preview helpers (calcFees/feeRatesFrom/FEE_MODEL_LABELS),
 // and the fee/services sections consumed by Step 7 — are NOT here: the AddPassEditor is
 // imported, and the Step-7-consumed fee code stays in the parent. The shared autosave-emit
@@ -26,10 +26,8 @@ import {
   ArrowRight,
   Calendar,
   Check,
-  ChevronDown,
   Copy,
   Eye,
-  Hash,
   Headphones,
   Heart,
   IndianRupee,
@@ -37,11 +35,8 @@ import {
   Lock,
   Pencil,
   Plus,
-  Settings2,
-  Tag,
   Ticket,
   Trash2,
-  TrendingUp,
   Users,
   Zap,
 } from 'lucide-react'
@@ -52,14 +47,14 @@ import { Stepper } from '@/components/event-builder/Stepper'
 import { AddPassEditor } from '@/components/wizard/AddPassEditor'
 import { EASE, WIZARD_STEPS, PASS_COLORS } from '@/lib/events/builder/constants'
 import type { StepViewProps, EventPass, EventPricingDraft, EventPricingType } from '@/lib/events/builder/types'
-import { SUPPORTED_FEE_MODEL, normalizeFeeModel } from '@/lib/events/builder/types'
-import { useFeesConfig } from '@/lib/fees/feesConfigClient'
+import { SUPPORTED_FEE_MODEL } from '@/lib/events/builder/types'
 import { formatINR } from '@/lib/events/builder/format'
 import { validateStep } from '@/lib/events/builder/stepValidation'
 import { useAutosaveEmit } from '@/lib/events/builder/useAutosaveEmit'
 import { ROUTES } from '@/config/navigation'
 import { cn } from '@/lib/utils/cn'
 import { MILESTONE_THRESHOLD_MAX, MILESTONE_MESSAGE_MAX } from '@/lib/events/milestoneAlerts'
+import { lockPublishedPricing } from '@/lib/events/editing/publishedPricingLock'
 import type { MilestoneAlert } from '@/lib/events/milestoneAlerts'
 
 function generatePassId(): string {
@@ -73,10 +68,13 @@ function generatePassId(): string {
 // FeeModel / FeeBreakdown / FeeRates types → lib/events/builder/types.ts (RD-PRODUCT-01G Phase 4).
 
 function RegTypeCard({
-  selected, onClick, icon: Icon, title, subtitle, description, examples, dividerClass,
+  selected, onClick, icon: Icon, title, subtitle, description, examples, dividerClass, disabled = false, describedBy,
 }: {
   selected:     boolean
   onClick:      () => void
+  /** RD-PRICING-UI-LOCK-01 — published event: the free/paid choice is read-only. */
+  disabled?:    boolean
+  describedBy?: string
   icon:         LucideIcon
   title:        string
   subtitle:     string
@@ -150,19 +148,22 @@ function RegTypeCard({
       </AnimatePresence>
 
       <motion.div
-        whileHover={{ y: selected ? 0 : -2 }}
-        whileTap={{ scale: 0.998 }}
-        onClick={onClick}
+        whileHover={{ y: selected || disabled ? 0 : -2 }}
+        whileTap={{ scale: disabled ? 1 : 0.998 }}
+        onClick={disabled ? undefined : onClick}
         role="button"
         tabIndex={0}
         aria-pressed={selected}
-        onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') onClick() }}
+        aria-disabled={disabled || undefined}
+        aria-describedby={disabled ? describedBy : undefined}
+        onKeyDown={e => { if (!disabled && (e.key === 'Enter' || e.key === ' ')) onClick() }}
         className={cn(
-          'relative cursor-pointer flex-col p-6 text-left transition-all duration-200 sm:p-7',
+          'relative flex-col p-6 text-left transition-all duration-200 sm:p-7',
+          disabled ? 'cursor-not-allowed' : 'cursor-pointer',
           dividerClass,
           selected
             ? 'bg-primary/[0.04] shadow-md ring-2 ring-inset ring-primary/20'
-            : 'bg-card hover:shadow-lg',
+            : disabled ? 'bg-card opacity-55' : 'bg-card hover:shadow-lg',
         )}
       >
         {selected && (
@@ -209,13 +210,31 @@ function RegTypeCard({
   )
 }
 
+/**
+ * RD-PRICING-UI-LOCK-01 — the single, concise note shown where a published event's pricing
+ * controls are locked. The server refuses these changes regardless (save-changes 409).
+ */
+export const PRICING_LOCKED_MESSAGE = 'Ticket pricing is locked after publication. Contact support if a pricing change is required.'
+
+function PricingLockedNote({ id, className }: { id?: string; className?: string }) {
+  return (
+    <p id={id} className={cn('flex items-start gap-1.5 text-[12.5px] text-muted-foreground', className)}>
+      <Lock className="mt-0.5 size-3.5 shrink-0" aria-hidden />
+      <span>{PRICING_LOCKED_MESSAGE}</span>
+    </p>
+  )
+}
+
 // Section 1: Registration Type — simple free / paid selector
 function EventTypeSelectorSection({
   value,
   onChange,
+  locked = false,
 }: {
   value:    EventPricingType
   onChange: (v: EventPricingType) => void
+  /** RD-PRICING-UI-LOCK-01 — a published event cannot switch between free and paid. */
+  locked?:  boolean
 }) {
   return (
     <div className="overflow-hidden rounded-2xl border border-border bg-card shadow-sm">
@@ -229,6 +248,7 @@ function EventTypeSelectorSection({
           <p className="mt-0.5 text-[13px] text-muted-foreground">
             Choose whether attendees will register for free or pay during registration.
           </p>
+          {locked && <PricingLockedNote id="registration-type-locked" className="mt-1.5" />}
         </div>
       </div>
 
@@ -237,6 +257,8 @@ function EventTypeSelectorSection({
         <RegTypeCard
           selected={value === 'free'}
           onClick={() => onChange('free')}
+          disabled={locked}
+          describedBy="registration-type-locked"
           icon={Heart}
           title="Free Registration"
           subtitle="No payment required"
@@ -247,6 +269,8 @@ function EventTypeSelectorSection({
         <RegTypeCard
           selected={value === 'paid'}
           onClick={() => onChange('paid')}
+          disabled={locked}
+          describedBy="registration-type-locked"
           icon={IndianRupee}
           title="Paid Registration"
           subtitle="Online payment at checkout"
@@ -265,12 +289,15 @@ function PassesSection({
   onUpdate,
   onAddNew,
   onEdit,
+  locked = false,
 }: {
   passes:      EventPass[]
   isFreeEvent: boolean
   onUpdate:    (passes: EventPass[]) => void
   onAddNew:    () => void
   onEdit:      (pass: EventPass) => void
+  /** RD-PRICING-UI-LOCK-01 — published: ticket categories cannot be added or removed. */
+  locked?:     boolean
 }) {
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null)
 
@@ -461,17 +488,21 @@ function PassesSection({
                             </button>
                             <button
                               type="button"
-                              onClick={() => handleDuplicate(pass)}
-                              className="flex size-6 items-center justify-center rounded-md text-muted-foreground/50 hover:bg-muted/60 hover:text-foreground"
-                              aria-label={`Duplicate ${pass.name}`}
+                              onClick={() => { if (!locked) handleDuplicate(pass) }}
+                              disabled={locked}
+                              title={locked ? 'Ticket categories are locked after publication' : undefined}
+                              className="flex size-6 items-center justify-center rounded-md text-muted-foreground/50 hover:bg-muted/60 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-muted-foreground/50"
+                              aria-label={locked ? `Duplicate ${pass.name} (locked after publication)` : `Duplicate ${pass.name}`}
                             >
                               <Copy className="size-3.5" aria-hidden />
                             </button>
                             <button
                               type="button"
-                              onClick={() => setDeleteConfirmId(pass.id)}
-                              className="flex size-6 items-center justify-center rounded-md text-muted-foreground/50 hover:bg-red-50 hover:text-red-500"
-                              aria-label={`Delete ${pass.name}`}
+                              onClick={() => { if (!locked) setDeleteConfirmId(pass.id) }}
+                              disabled={locked}
+                              title={locked ? 'Ticket categories are locked after publication' : undefined}
+                              className="flex size-6 items-center justify-center rounded-md text-muted-foreground/50 hover:bg-red-50 hover:text-red-500 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-muted-foreground/50"
+                              aria-label={locked ? `Delete ${pass.name} (locked after publication)` : `Delete ${pass.name}`}
                             >
                               <Trash2 className="size-3.5" aria-hidden />
                             </button>
@@ -487,8 +518,11 @@ function PassesSection({
         </div>
       )}
 
+      {/* RD-PRICING-UI-LOCK-01 — published: no add link; one concise note in its place. */}
+      {locked && passes.length > 0 && <PricingLockedNote className="mt-3" />}
+
       {/* Secondary add link — only shown when table already has entries */}
-      {passes.length > 0 && (
+      {!locked && passes.length > 0 && (
         <button
           type="button"
           onClick={onAddNew}
@@ -739,99 +773,6 @@ function RegistrationPeriodSection({
   )
 }
 
-function AdvancedSettingsSection({
-  isOpen,
-  onToggle,
-}: {
-  isOpen:   boolean
-  onToggle: () => void
-}) {
-  const ITEMS = [
-    {
-      icon:  Hash,
-      label: 'Taxes',
-      desc:  'Configure GST and applicable tax rates',
-      badge: '0 configured',
-    },
-    {
-      icon:  IndianRupee,
-      label: 'Convenience Fees',
-      desc:  'Platform and payment gateway fees',
-      badge: '0 configured',
-    },
-    {
-      icon:  Tag,
-      label: 'Coupons & Promo Codes',
-      desc:  'Discount codes for attendees',
-      badge: '0 active',
-    },
-    {
-      icon:  TrendingUp,
-      label: 'Group Discounts',
-      desc:  'Volume discounts for group registrations',
-      badge: '0 configured',
-    },
-  ]
-
-  return (
-    <div>
-      <button
-        type="button"
-        onClick={onToggle}
-        className="flex w-full items-center justify-between rounded-xl border border-border bg-card px-4 py-3.5 shadow-sm transition-colors hover:bg-muted/[0.03]"
-        aria-expanded={isOpen}
-      >
-        <div className="flex items-center gap-2.5">
-          <Settings2 className="size-4 text-muted-foreground" aria-hidden />
-          <p className="text-[13px] font-semibold text-foreground">Advanced Settings</p>
-          <span className="rounded-full bg-muted/60 px-2 py-[2px] text-[12px] font-medium text-muted-foreground">
-            Optional
-          </span>
-        </div>
-        <ChevronDown
-          className={cn('size-4 text-muted-foreground transition-transform duration-200', isOpen && 'rotate-180')}
-          aria-hidden
-        />
-      </button>
-
-      <AnimatePresence>
-        {isOpen && (
-          <motion.div
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: 'auto', opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
-            transition={{ duration: 0.2, ease: EASE }}
-            className="overflow-hidden"
-          >
-            <div className="grid grid-cols-1 gap-3 pt-3 sm:grid-cols-2">
-              {ITEMS.map(item => {
-                const Icon = item.icon
-                return (
-                  <button
-                    key={item.label}
-                    type="button"
-                    className="flex items-start gap-3 rounded-xl border border-border bg-card px-4 py-3.5 text-left shadow-sm transition-colors hover:border-border/80 hover:bg-muted/[0.04]"
-                  >
-                    <div className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted/40">
-                      <Icon className="size-3.5 text-muted-foreground" aria-hidden />
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <p className="text-[14px] font-semibold text-foreground">{item.label}</p>
-                      <p className="mt-0.5 text-[13px] text-muted-foreground">{item.desc}</p>
-                    </div>
-                    <span className="mt-0.5 shrink-0 rounded-full bg-muted/50 px-2 py-0.5 text-[12px] font-medium text-muted-foreground">
-                      {item.badge}
-                    </span>
-                  </button>
-                )
-              })}
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-    </div>
-  )
-}
 function Step4SummaryPanel({ pricing }: { pricing: EventPricingDraft }) {
   const activePasses     = pricing.passes.filter(p => p.status === 'active')
   const paidActivePasses = activePasses.filter(p => pricing.eventType === 'paid' && p.price > 0)
@@ -953,9 +894,18 @@ function Step4SummaryPanel({ pricing }: { pricing: EventPricingDraft }) {
 export function Step4View({ currentStep, completedValues, onNext, onBack, onSaveDraft, onAutosave, initialData, wizardSteps }: StepViewProps) {
   const eventTypeId  = (initialData?.eventTypeId  as string | null) ?? null
   const eventSubtype = (initialData?.eventSubtype as string | null) ?? null
-  // RD-PAYMENT-02 Phase 7: gate the stored fee-model normalization by the pricing engine so
-  // a flag-on Attendee-Pays selection survives Back-navigation. Dormant → organizer_absorbs.
-  const feeEngineEnabled = useFeesConfig().pricingEngineEnabled
+
+  // RD-PRICING-UI-LOCK-01 — a PUBLISHED event's commercial pricing is read-only here.
+  //
+  // `status` is the draft's lifecycle status. It is written only by the server (the publish
+  // route and lifecycle transitions); firestore.rules refuse any client update that touches it,
+  // so no client flag can unlock this. `'published'` is exactly the state in which POST
+  // /save-changes accepts a save — and in which it refuses commercial changes (409).
+  //
+  // The baseline is the RAW saved pricing (before the legacy early-bird migration below), so a
+  // locked event never acquires a commercial difference from what was published.
+  const pricingLocked     = initialData?.status === 'published'
+  const [publishedPricing] = useState<EventPricingDraft | null>(() => (pricingLocked ? (initialData?.pricing as EventPricingDraft | null) ?? null : null))
 
   const [pricing, setPricing] = useState<EventPricingDraft>(() => {
     const savedRaw = initialData?.pricing as (EventPricingDraft & { earlyBirdEndDate?: unknown }) | null
@@ -974,15 +924,17 @@ export function Step4View({ currentStep, completedValues, onNext, onBack, onSave
               : p,
           )
         : saved.passes
-      return {
+      const restored: EventPricingDraft = {
         ...saved,
         passes,
-        feeModel:               normalizeFeeModel(saved.feeModel, feeEngineEnabled),
+        // RD-PHASE4-S3 · Q1 — fee collection is fixed to organizer-pays; a stored value is not honoured.
+        feeModel:               SUPPORTED_FEE_MODEL,
         estimatedRegistrations: saved.estimatedRegistrations ?? 100,
         whatsappEnabled:        saved.whatsappEnabled        ?? false,
         smsEnabled:             saved.smsEnabled             ?? false,
         certEnabled:            saved.certEnabled            ?? false,
       }
+      return publishedPricing ? lockPublishedPricing(publishedPricing, restored) : restored
     }
     return {
       eventType:              'paid',
@@ -998,14 +950,20 @@ export function Step4View({ currentStep, completedValues, onNext, onBack, onSave
       advancedSettings:       { taxes: [], fees: [], coupons: [], discounts: [] },
     }
   })
-  const [advancedOpen,  setAdvancedOpen]  = useState(false)
   const [addPassOpen,   setAddPassOpen]   = useState(false)
   const [editingPass,   setEditingPass]   = useState<EventPass | null>(null)
 
+  // Defence in depth: on a published event EVERY pricing update is re-locked to the published
+  // commercial values, so a stray control or stale editor state can never put a price change
+  // into the draft (the server would refuse it on Save anyway).
   const updatePricing = (partial: Partial<EventPricingDraft>) =>
-    setPricing(prev => ({ ...prev, ...partial }))
+    setPricing(prev => {
+      const next = { ...prev, ...partial }
+      return publishedPricing ? lockPublishedPricing(publishedPricing, next) : next
+    })
 
   const handleSavePass = (saved: EventPass) => {
+    if (pricingLocked && !editingPass) { setEditingPass(null); return }   // no new category
     if (editingPass) {
       updatePricing({ passes: pricing.passes.map(p => p.id === saved.id ? saved : p) })
     } else {
@@ -1020,6 +978,7 @@ export function Step4View({ currentStep, completedValues, onNext, onBack, onSave
   }
 
   const handleAddNew = () => {
+    if (pricingLocked) return
     setEditingPass(null)
     setAddPassOpen(true)
   }
@@ -1070,6 +1029,7 @@ export function Step4View({ currentStep, completedValues, onNext, onBack, onSave
           <EventTypeSelectorSection
             value={pricing.eventType}
             onChange={v => updatePricing({ eventType: v })}
+            locked={pricingLocked}
           />
 
           {/* SECTION 2: Ticket Types & Pricing */}
@@ -1108,9 +1068,13 @@ export function Step4View({ currentStep, completedValues, onNext, onBack, onSave
                 <button
                   type="button"
                   onClick={handleAddNew}
+                  disabled={pricingLocked}
+                  title={pricingLocked ? 'Ticket categories are locked after publication' : undefined}
+                  aria-label={pricingLocked ? 'Add Pass (locked after publication)' : undefined}
                   className={cn(
                     buttonVariants({ variant: 'outline' }),
                     'shrink-0 gap-1.5 border-primary/30 text-primary hover:border-primary/60 hover:bg-primary/[0.03] text-[12px]',
+                    'disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent',
                   )}
                 >
                   <Plus className="size-3.5" aria-hidden />
@@ -1127,6 +1091,7 @@ export function Step4View({ currentStep, completedValues, onNext, onBack, onSave
                 onUpdate={passes => updatePricing({ passes })}
                 onAddNew={handleAddNew}
                 onEdit={handleEditPass}
+                locked={pricingLocked}
               />
             </div>
 
@@ -1142,11 +1107,9 @@ export function Step4View({ currentStep, completedValues, onNext, onBack, onSave
             onUpdate={updatePricing}
           />
 
-          {/* Advanced Settings */}
-          <AdvancedSettingsSection
-            isOpen={advancedOpen}
-            onToggle={() => setAdvancedOpen(v => !v)}
-          />
+          {/* RD-PHASE4-S3 — the "Advanced Settings" tiles (Taxes / Convenience Fees / Coupons / Group
+              Discounts) are removed: they had no action and implied organizer control of fees.
+              Coupons are managed from the event's Coupons tab. */}
 
         </div>
 
@@ -1181,6 +1144,7 @@ export function Step4View({ currentStep, completedValues, onNext, onBack, onSave
         eventTypeId={eventTypeId}
         eventSubtype={eventSubtype}
         isFreeEvent={pricing.eventType === 'free'}
+        pricingLocked={pricingLocked}
       />
 
     </motion.div>

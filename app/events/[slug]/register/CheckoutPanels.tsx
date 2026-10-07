@@ -89,18 +89,18 @@ function CheckoutSection({ id, icon, title, description, emphasis, children }: {
       className={cn(
         PANEL,
         'mt-4 scroll-mt-24 outline-none transition-shadow duration-300',
-        emphasis && 'border-primary/35 shadow-[0_1px_2px_rgb(15_23_42_/_0.04),0_20px_44px_-28px_rgb(var(--primary-rgb)_/_0.35)]',
+        emphasis && 'border-hero-ink/25 shadow-[0_1px_2px_rgb(15_23_42_/_0.04),0_24px_48px_-30px_rgb(15_23_42_/_0.35)]',
       )}
     >
-      <div className={cn(PANEL_HEAD, 'flex items-start gap-3 rounded-t-2xl')}>
+      <div className={cn(PANEL_HEAD, 'flex items-start gap-3 rounded-t-xl')}>
         <span
           aria-hidden
-          className="mt-px flex size-7 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary"
+          className="mt-px flex size-8 shrink-0 items-center justify-center rounded-[var(--radius-control)] border border-hero-accent-rule/40 text-hero-accent-rule"
         >
           {icon}
         </span>
         <div className="min-w-0 flex-1">
-          <h2 className={TYPE.cardTitle}>{title}</h2>
+          <h2 className="font-display text-fs-lg font-light tracking-[-0.01em] text-hero-ink leading-snug sm:text-fs-xl">{title}</h2>
           {description && <p className={cn('mt-0.5', TYPE.cardBody)}>{description}</p>}
         </div>
       </div>
@@ -277,7 +277,7 @@ export function OrderSummaryPanel({
           <dt className="text-fs-md font-bold text-foreground">
             {paymentRequired ? 'Total payable' : 'Total'}
           </dt>
-          <dd className="text-fs-2xl font-extrabold leading-none tabular-nums tracking-tight text-foreground">
+          <dd className="font-display text-fs-3xl font-light leading-none tabular-nums text-hero-ink">
             {totalPaise === 0 ? 'Free' : fmtPaise(totalPaise)}
           </dd>
         </div>
@@ -372,7 +372,7 @@ export function PaymentSummaryDialog({
         <span className="text-fs-2xs font-bold uppercase tracking-[0.1em] text-muted-foreground">
           {paymentRequired ? 'Total payable' : 'Total'}
         </span>
-        <span className="text-fs-2xl font-extrabold leading-none tabular-nums tracking-tight text-foreground">
+        <span className="font-display text-fs-3xl font-light leading-none tabular-nums text-hero-ink">
           {totalPaise === 0 ? 'Free' : fmtPaise(totalPaise)}
         </span>
       </div>
@@ -413,7 +413,10 @@ export function PaymentSummaryDialog({
       {paymentRequired && (
         <p className="mt-3 flex items-center justify-center gap-1.5 text-fs-2xs font-medium text-muted-foreground">
           <Lock className="size-3 shrink-0 text-emerald-600" aria-hidden />
-          You will be taken to Razorpay to complete payment
+          {/* RD-PAYMENT-CHECKOUT-COPY-06.1 — provider-neutral. RegisterDesk now opens
+              whichever gateway the SERVER selected for this order, so naming one here was
+              wrong the moment a second provider became reachable. */}
+          You will be taken to a secure payment page to complete payment
         </p>
       )}
     </Dialog>
@@ -520,7 +523,7 @@ export function PaymentProcessingLock({ open, free = false }: {
       >
         <span
           aria-hidden
-          className="mx-auto mb-4 flex size-12 items-center justify-center rounded-2xl bg-primary/10"
+          className="mx-auto mb-4 flex size-12 items-center justify-center rounded-xl bg-primary/10"
         >
           <span className="size-6 animate-spin rounded-full border-[2.5px] border-primary border-t-transparent motion-reduce:animate-none" />
         </span>
@@ -541,7 +544,8 @@ export function PaymentProcessingLock({ open, free = false }: {
         {!free && (
           <p className="mt-4 flex items-center justify-center gap-1.5 text-fs-2xs font-medium text-muted-foreground">
             <Lock className="size-3 shrink-0 text-emerald-600" aria-hidden />
-            Secured by Razorpay
+            {/* RD-PAYMENT-CHECKOUT-COPY-06.1 — see the note on the review dialog above. */}
+            Encrypted, secure payment
           </p>
         )}
 

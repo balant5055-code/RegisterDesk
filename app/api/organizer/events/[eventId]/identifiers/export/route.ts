@@ -8,6 +8,7 @@
 import { NextRequest } from 'next/server'
 import { adminDb } from '@/lib/firebase/admin'
 import { resolveIdentifierScope } from '@/lib/identifiers/organizerScope'
+import { resolveIdentifierConfig } from '@/lib/identifiers/config'
 import type { IdentifierLockDoc } from '@/lib/identifiers/types'
 
 export const dynamic = 'force-dynamic'
@@ -41,6 +42,12 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ eventId: st
     })
   }
 
+  // RD-BIB-TIMING-02 · the download speaks the ORGANIZER's vocabulary, not the
+  // engine's. "Pool" and "Value" are internal nouns; the header now carries the
+  // event's own configured label and the range wording the workspace uses. One
+  // extra document read for the whole export.
+  const { config } = await resolveIdentifierConfig(scope.slug)
+
   const encoder = new TextEncoder()
   const nodeStream = adminDb.collection('identifierLocks')
     .where('eventSlug', '==', scope.slug)
@@ -49,7 +56,7 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ eventId: st
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
       controller.enqueue(encoder.encode(csvRow([
-        'Value', 'Numeric', 'Pool', 'Template', 'State',
+        config.label, 'Numeric', 'Number range', 'Template', 'State',
         'Registration ID', 'Ever Checked In', 'Reason', 'Assigned At', 'Released At',
       ])))
 

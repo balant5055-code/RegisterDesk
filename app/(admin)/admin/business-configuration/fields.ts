@@ -21,6 +21,7 @@ export const SECTION_LABELS: Record<BusinessConfigSectionKey, string> = {
   communication: 'Communication',
   wallet:        'Wallet',
   fees:          'Fees',
+  payments:      'Payment Gateway',
   settlements:   'Settlements',
   branding:      'Branding',
   featureFlags:  'Feature Flags',
@@ -59,6 +60,7 @@ export const SECTION_FIELDS: Record<BusinessConfigSectionKey, FieldDef[]> = {
     { key: 'marketing',         label: 'Marketing pages',     kind: 'boolean' },
     { key: 'betaFeatures',      label: 'Beta features',       kind: 'boolean' },
     { key: 'aiAssistant',       label: 'AI assistant',        kind: 'boolean' },
+    { key: 'whatsappInbox',     label: 'WhatsApp Inbox',      kind: 'boolean', hint: 'Organizer inbox for attendee WhatsApp replies. Messages are stored either way.' },
   ],
   wallet: [
     { key: 'enabled',                     label: 'Wallet enabled',                kind: 'boolean' },
@@ -89,6 +91,10 @@ export const SECTION_FIELDS: Record<BusinessConfigSectionKey, FieldDef[]> = {
   // Fees has nullable overrides + a rounding-mode enum — edited by the specialized
   // FeesEditor, not the flat SectionEditor.
   fees: [],
+  // Edited by PaymentGatewayEditor, not the flat SectionEditor: choosing a gateway needs
+  // readiness state and a confirmation step, which a plain field list cannot express.
+  // Empty for the same reason `fees` and `communication` are.
+  payments: [],
   settlements: [
     { key: 'enabled',                      label: 'Settlements enabled',      kind: 'boolean' },
     { key: 'displayName',                  label: 'Display name',             kind: 'text' },
@@ -138,7 +144,10 @@ export const SECTION_FIELDS: Record<BusinessConfigSectionKey, FieldDef[]> = {
     { key: 'whatsappProvider', label: 'WhatsApp provider', kind: 'text' },
     { key: 'metaApiVersion',   label: 'Meta API version',  kind: 'text', hint: 'e.g. v21.0' },
     { key: 'metaApiTimeoutMs', label: 'Meta API timeout (ms)', kind: 'number' },
-    { key: 'emailProvider',    label: 'Email provider',    kind: 'text' },
+    // RD-EMAIL-PROVIDER-03 · read by nothing: event mail defaults to Amazon SES and is
+    // overridden only per event (admin event Governance). Read-only so it cannot imply otherwise.
+    { key: 'emailProvider',    label: 'Email provider (not used)', kind: 'text', readOnly: true,
+      hint: 'Event email always defaults to Amazon SES. Override a single event from its Governance tab.' },
   ],
   security: [
     { key: 'otpDigits',                 label: 'OTP digits',                  kind: 'number', hint: '4–10' },

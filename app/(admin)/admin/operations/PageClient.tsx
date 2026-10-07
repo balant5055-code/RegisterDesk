@@ -93,6 +93,10 @@ export default function OperationsPage() {
         { label: 'Pending settlements', value: health.financial.pendingSettlements },
         { label: 'Failed refunds', value: health.financial.failedRefunds, danger: health.financial.failedRefunds > 0 },
         { label: 'Pending wallet topups', value: health.financial.pendingWalletTopups },
+        // RD-WALLET-W2.g — held top-ups (Super Admin review); each blocks its organizer's next top-up.
+        { label: 'Top-ups needing review', value: health.financial.walletTopupsNeedsReview, danger: health.financial.walletTopupsNeedsReview > 0 },
+        { label: 'Top-ups retry-exhausted', value: health.financial.walletTopupsExhausted, danger: health.financial.walletTopupsExhausted > 0 },
+        { label: 'Duplicate top-up payments', value: health.financial.walletTopupDuplicatePayments, danger: health.financial.walletTopupDuplicatePayments > 0 },
         { label: 'Pending registration recon', value: health.financial.pendingRegistrationReconciliation },
         { label: 'Pending donation recon', value: health.financial.pendingDonationReconciliation },
         { label: 'Outstanding clawbacks', value: health.financial.outstandingClawbacks, danger: health.financial.outstandingClawbacks > 0 },
@@ -183,7 +187,7 @@ export default function OperationsPage() {
                   <th className="px-4 py-2.5">Queue</th><th className="px-4 py-2.5 text-right">Count</th><th className="px-4 py-2.5">Oldest</th><th className="px-4 py-2.5">Retry</th>
                 </tr></thead>
                 <tbody className="divide-y divide-border">
-                  {([recovery.deadLetter.webhooks, recovery.deadLetter.refunds, recovery.deadLetter.reconciliations, recovery.deadLetter.settlements, recovery.deadLetter.broadcasts] as DeadLetterEntry[]).map(q => (
+                  {([recovery.deadLetter.webhooks, recovery.deadLetter.refunds, recovery.deadLetter.reconciliations, recovery.deadLetter.settlements, recovery.deadLetter.broadcasts, recovery.deadLetter.walletTopupsHeld] as DeadLetterEntry[]).map(q => (
                     <tr key={q.key} className={cn(q.count > 0 && 'bg-amber-50/40')}>
                       <td className="px-4 py-2.5 font-medium text-foreground">{q.label}</td>
                       <td className={cn('px-4 py-2.5 text-right tabular-nums font-bold', q.count > 0 ? 'text-amber-600' : 'text-foreground')}>{q.count < 0 ? '—' : q.count}</td>

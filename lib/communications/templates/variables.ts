@@ -33,6 +33,9 @@ export const TEMPLATE_VARIABLES: TemplateVariable[] = [
   v('InvoiceNumber',     'Invoice number',      'INV-2026-000123',              'billing'),
   v('SettlementId',      'Settlement id',       'STL-2026-00045',               'billing'),
   v('AccountHolderName', 'Account holder name', 'Priya Sharma',                 'billing'),
+  // RD-CAPACITY-01 — the capacity-threshold message states the numbers, not just a ratio.
+  v('CapacityUsedPercent','Capacity used (%)',  '85',                           'event'),
+  v('RegistrationCapacity','Registration capacity','1,000',                     'event'),
   v('VerificationCode',  'Verification code',   '482913',                       'security'),
 ]
 

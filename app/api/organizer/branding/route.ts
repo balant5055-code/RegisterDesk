@@ -1,11 +1,11 @@
 // GET /api/organizer/branding  — current white-label branding.
 // PUT /api/organizer/branding  — update branding.
 //
-// Owner-only + plan-gated: white-label-disabled plans return 402.
+// Owner-only. (RD-CAPACITY-01: white-label branding is no longer a licensed feature — there is no
+// plan/tier gate and no 402.)
 
 import { NextRequest, NextResponse } from 'next/server'
 import { verifyCaller, requireOwner } from '@/lib/team/access'
-import { requireFeature }             from '@/lib/licensing/workspaceEntitlements'
 import { getBranding, setBranding, type BrandingPatch } from '@/lib/branding/service'
 import { RATE_POLICY, checkPolicy }   from '@/lib/rateLimit/policies'
 
@@ -14,8 +14,8 @@ async function gate(req: NextRequest): Promise<{ uid: string } | NextResponse> {
   if (!caller) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   const access = requireOwner(caller.uid, caller.uid)
   if (!access.ok) return NextResponse.json({ error: access.reason }, { status: access.status })
-  const feat = await requireFeature(caller.uid, 'whiteLabel')
-  if (!feat.ok) return NextResponse.json({ error: feat.error }, { status: feat.status })
+  // RD-CAPACITY-01 · white-label branding is no longer a licensed feature. Ownership is
+  // still enforced above — this gate only ever decided ENTITLEMENT, never access.
   return { uid: caller.uid }
 }
 

@@ -3,6 +3,7 @@
 import { FieldValue, AggregateField }  from 'firebase-admin/firestore'
 import type { Transaction, DocumentReference } from 'firebase-admin/firestore'
 import { adminDb }     from '@/lib/firebase/admin'
+import { ATTENDEE_FEE_FIELD } from '@/lib/registrations/revenueBasis'
 import { EVENT_STATS_VERSION, type RegistrationCounter } from '@/lib/registrations/types'
 
 const col = () => adminDb.collection('registrationCounters')
@@ -48,10 +49,22 @@ export function attendanceReconShardRef(eventSlug: string): DocumentReference {
 
 interface AttendanceShardData { checkedInCount?: number; passCheckedInCounts?: Record<string, number> }
 
+/**
+ * RD-DASH-11B — the shape `getAttendanceShardSums` already returned, given a name.
+ *
+ * Purely additive: a caller that folds the shards itself (the dashboard route now folds each
+ * slug exactly once and shares the result with two consumers) needs to type the value it is
+ * carrying. No new query, no new helper, no behaviour change.
+ */
+export interface AttendanceShardSums {
+  checkedInCount:      number
+  passCheckedInCounts: Record<string, number>
+}
+
 /** Sums the check-in fields across all attendance shards for an event. */
 export async function getAttendanceShardSums(
   eventSlug: string,
-): Promise<{ checkedInCount: number; passCheckedInCounts: Record<string, number> }> {
+): Promise<AttendanceShardSums> {
   const snap = await attendanceShardsCol(eventSlug).get()
   let checkedInCount = 0
   const passCheckedInCounts: Record<string, number> = {}
@@ -68,7 +81,7 @@ export async function getAttendanceShardSums(
 /** Folds attendance shard sums into a base counter object (pure). */
 export function foldAttendanceShards(
   base: RegistrationCounter,
-  shards: { checkedInCount: number; passCheckedInCounts: Record<string, number> },
+  shards: AttendanceShardSums,
 ): RegistrationCounter {
   if (shards.checkedInCount === 0 && Object.keys(shards.passCheckedInCounts).length === 0) return base
   const passCI: Record<string, number> = { ...(base.passCheckedInCounts ?? {}) }
@@ -126,13 +139,69 @@ export async function getEventStats(
  * Never throws (returns 0 on aggregate failure). Served by the existing (eventSlug, status) index.
  */
 export async function sumConfirmedRevenueFromLedger(eventSlug: string): Promise<number> {
+  return (await sumConfirmedRevenueFromLedgerChecked(eventSlug)).value
+}
+
+/**
+ * RD-EVENT-02 (H1) — the SAME aggregate as `sumConfirmedRevenueFromLedger`, reporting
+ * whether it actually ran.
+ *
+ * The swallow-to-zero above is correct for a caller that has no way to say "unknown",
+ * but it is exactly what turned an unreadable event into a confident "₹0" on the Events
+ * list. This variant is now the one source of that number and the legacy export is a
+ * thin projection of it, so every existing caller (Dashboard, Finance, Registrations)
+ * keeps byte-identical behaviour and there is still only ONE revenue definition.
+ *
+ * `ok: false` means the read failed — `value` is then 0 only because a number has to be
+ * returned, and a caller MUST NOT display it.
+ */
+export async function sumConfirmedRevenueFromLedgerChecked(
+  eventSlug: string,
+): Promise<{ value: number; ok: boolean }> {
+  const [agg, fees] = await Promise.all([
+    adminDb.collection('registrations')
+      .where('eventSlug', '==', eventSlug)
+      .where('status',    '==', 'confirmed')
+      .aggregate({ s: AggregateField.sum('amount') })
+      .get()
+      .catch(() => null),
+    sumConfirmedAttendeeFeesChecked(eventSlug),
+  ])
+  if (!agg || !fees.ok) return { value: 0, ok: false }
+  // RD-FIN-02 B5 · Ticket revenue = Σ ticket base = Σ amount − Σ attendee fees (see revenueBasis.ts).
+  return { value: Math.max(0, (agg.data().s ?? 0) - fees.value), ok: true }
+}
+
+// RD-FIN-02 B5 · does ANY registration on the platform carry an attendee fee? A single-field range
+// query (automatic index — no deploy needed). While none does (attendee-pays has never been used) the
+// per-event fee sum is exactly 0 and its composite index is never touched, so this change cannot fail
+// a production read before `(eventSlug, status, attendeeFeePaise)` is deployed. Cached 60 s.
+let feeExistence: { value: boolean; at: number } | null = null
+async function anyAttendeeFeeExists(): Promise<boolean | null> {
+  if (feeExistence && Date.now() - feeExistence.at < 60_000) return feeExistence.value
+  try {
+    const snap = await adminDb.collection('registrations').where(ATTENDEE_FEE_FIELD, '>', 0).limit(1).select().get()
+    feeExistence = { value: !snap.empty, at: Date.now() }
+    return feeExistence.value
+  } catch { return null }
+}
+/** Test seam: forget the cached existence answer. */
+export function resetAttendeeFeeExistenceCache(): void { feeExistence = null }
+
+/** Σ attendee-borne fees over CONFIRMED registrations of one event. ok:false ⇒ unknown (never shown as 0). */
+export async function sumConfirmedAttendeeFeesChecked(eventSlug: string): Promise<{ value: number; ok: boolean }> {
+  const exists = await anyAttendeeFeeExists()
+  if (exists === false) return { value: 0, ok: true }
+  if (exists === null) return { value: 0, ok: false }
+  // Its OWN aggregate (never folded into the amount sum): a doc without the field drops out of a
+  // multi-field aggregate index, which would undercount `amount`.
   const agg = await adminDb.collection('registrations')
     .where('eventSlug', '==', eventSlug)
     .where('status',    '==', 'confirmed')
-    .aggregate({ s: AggregateField.sum('amount') })
+    .aggregate({ s: AggregateField.sum(ATTENDEE_FEE_FIELD) })
     .get()
     .catch(() => null)
-  return agg?.data().s ?? 0
+  return agg ? { value: agg.data().s ?? 0, ok: true } : { value: 0, ok: false }
 }
 
 export interface RegistrationStatusCounts {

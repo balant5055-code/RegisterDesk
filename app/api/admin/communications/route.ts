@@ -2,12 +2,14 @@
 // (admin-only). Aggregation-based; see lib/analytics/adminCommunications.
 
 import { NextRequest, NextResponse } from 'next/server'
-import { resolveAdminUid } from '@/lib/admin/auth'
+import { requireSuperAdmin } from '@/lib/admin/financialGuard'
 import { getAdminCommunications } from '@/lib/analytics/adminCommunications'
 
 export async function GET(req: NextRequest): Promise<NextResponse> {
-  const adminUid = await resolveAdminUid(req.headers.get('authorization'))
-  if (!adminUid) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+  // RD-CLOSE — a financial read: Super Admin only (ADMIN_UIDS). A legacy `admin: true` claim
+  // alone gets 403 SUPER_ADMIN_REQUIRED (lib/admin/financialGuard.ts).
+  const superGate = await requireSuperAdmin(req)
+  if (superGate.response) return superGate.response
   try {
     const data = await getAdminCommunications()
     return NextResponse.json({ data }, { headers: { 'Cache-Control': 'no-store' } })

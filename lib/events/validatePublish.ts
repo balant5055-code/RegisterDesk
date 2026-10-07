@@ -11,6 +11,7 @@
 
 import type { PublishValidationResult } from '@/types/events'
 import { validatePublish, toPublishBlocker } from './publishRequirements'
+import { publishValueIssues } from './eventValueRules'
 
 // Minimal shape we expect from a Firestore draft document
 interface DraftSnapshot {
@@ -19,6 +20,9 @@ interface DraftSnapshot {
   eventDetails:         Record<string, unknown> | null
   communicationBilling: Record<string, unknown> | null | undefined
   registrationForm:     Record<string, unknown> | null | undefined
+  // RD-CE-FIX H3 — the event's own type, so a form built for another type is refused.
+  eventType?:           string | null
+  eventSubtype?:        string | null
 }
 
 export function validateEventPublish(draft: DraftSnapshot): PublishValidationResult {
@@ -56,6 +60,23 @@ export function validateEventPublish(draft: DraftSnapshot): PublishValidationRes
           title: 'Invalid Timezone', description: 'Select a valid timezone in Schedule settings.',
         })],
       }
+    }
+  }
+
+  // ── RD-CE-FIX H1 · the VALUES, not just their presence ─────────────────────
+  // Dates in order and not already over, prices/quantities/purchase limits sane, sales and
+  // registration windows ordered. Drafts are client-written, so this is the authoritative check.
+  const valueIssues = publishValueIssues({
+    eventDetails: draft.eventDetails, pricing: draft.pricing, registrationForm: draft.registrationForm,
+    eventType: draft.eventType ?? null, eventSubtype: draft.eventSubtype ?? null,
+  })
+  if (valueIssues.length > 0) {
+    return {
+      canPublish: false,
+      reason:     'INVALID_EVENT_VALUES',
+      blockers:   valueIssues.map(i => toPublishBlocker({
+        id: i.id, passed: false, stepName: i.stepName, stepIndex: i.stepIndex, title: i.title, description: i.message,
+      })),
     }
   }
 

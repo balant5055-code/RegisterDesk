@@ -2,11 +2,11 @@
 // POST   /api/organizer/domain  — set/update the custom domain.
 // DELETE /api/organizer/domain  — remove the custom domain.
 //
-// Owner-only + plan-gated (customDomain feature → 402 when not entitled).
+// Owner-only. (RD-CAPACITY-01: custom domains are no longer a licensed feature — there is no
+// plan/tier gate and no 402.)
 
 import { NextRequest, NextResponse } from 'next/server'
 import { verifyCaller, requireOwner } from '@/lib/team/access'
-import { requireFeature }             from '@/lib/licensing/workspaceEntitlements'
 import { getDomainConfig, setDomain, removeDomain } from '@/lib/domains/service'
 import { logDomainAction }            from '@/lib/domains/audit'
 
@@ -15,8 +15,7 @@ async function gate(req: NextRequest): Promise<{ uid: string } | NextResponse> {
   if (!caller) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   const access = requireOwner(caller.uid, caller.uid)
   if (!access.ok) return NextResponse.json({ error: access.reason }, { status: access.status })
-  const feat = await requireFeature(caller.uid, 'customDomain')
-  if (!feat.ok) return NextResponse.json({ error: feat.error }, { status: feat.status })
+  // RD-CAPACITY-01 · a custom domain is no longer a licensed feature. Ownership stands.
   return { uid: caller.uid }
 }
 

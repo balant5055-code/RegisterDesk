@@ -25,7 +25,7 @@ export function FactsStrip({ startDate, startTime, endDate, endTime, doorsOpenTi
 
   const cells: Cell[] = [
     startDate ? {
-      icon:  <Calendar className="size-4 shrink-0 text-primary" aria-hidden />,
+      icon:  <Calendar className="size-4 shrink-0 text-action" aria-hidden />,
       label: 'DATE',
       value: startDate === endDate
         ? formatDate(startDate)
@@ -33,14 +33,14 @@ export function FactsStrip({ startDate, startTime, endDate, endTime, doorsOpenTi
       sub: doorsOpenTime ? `Doors open ${formatTime(doorsOpenTime)}` : undefined,
     } : null,
     startTime ? {
-      icon:  <Clock className="size-4 shrink-0 text-primary" aria-hidden />,
+      icon:  <Clock className="size-4 shrink-0 text-action" aria-hidden />,
       label: 'TIME',
       value: `${formatTime(startTime)}${endTime ? ` – ${formatTime(endTime)}` : ''}`,
     } : null,
     venueName ? {
       icon:  venueType === 'online'
-        ? <Globe  className="size-4 shrink-0 text-primary" aria-hidden />
-        : <MapPin className="size-4 shrink-0 text-primary" aria-hidden />,
+        ? <Globe  className="size-4 shrink-0 text-action" aria-hidden />
+        : <MapPin className="size-4 shrink-0 text-action" aria-hidden />,
       label: venueType === 'online' ? 'PLATFORM' : 'LOCATION',
       value: venueName,
       sub:   physical?.city
@@ -99,7 +99,7 @@ export function FactsStrip({ startDate, startTime, endDate, endTime, doorsOpenTi
                   href={cell.href}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="mt-1.5 inline-flex items-center gap-1 text-[11px] font-semibold text-primary hover:underline"
+                  className="mt-1.5 inline-flex items-center gap-1 text-[11px] font-semibold text-action hover:underline"
                 >
                   Get directions
                   <ExternalLink className="size-2.5" aria-hidden />

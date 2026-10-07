@@ -10,7 +10,7 @@
 import { FieldValue }   from 'firebase-admin/firestore'
 import { adminDb }      from '@/lib/firebase/admin'
 import { captureFinancialError } from '@/lib/monitoring/sentry'
-import { logAdminAction } from '@/lib/admin/audit'
+import { logAdminActionOrRecord, stageAdminAudit } from '@/lib/admin/audit'
 import type {
   ClawbackDocument, ClawbackStatus, ClawbackReason, ClawbackSourceType, ClawbackView,
 } from '@/lib/clawbacks/types'
@@ -23,10 +23,20 @@ type ClawbackAuditAction =
   | 'clawback.created' | 'clawback.recovered' | 'clawback.partially_recovered' | 'clawback.waived'
 
 /** Audit a clawback event. actorUid is 'system' for automated events. Best-effort. */
+/**
+ * RD-PHASE4-S4 — a SYSTEM clawback event (creation / automatic recovery), written after the
+ * reversal or recovery transaction committed. Never throws; a failed write is durably recorded
+ * (adminAuditFailures) for reconciliation. Callers AWAIT it — it is no longer detached.
+ * Admin waive / mark-recovered do NOT use this: their audit is staged in their own transaction.
+ */
 export async function logClawbackEvent(
   actorUid: string, action: ClawbackAuditAction, id: string, metadata?: Record<string, unknown>,
-): Promise<void> {
-  await logAdminAction({ adminUid: actorUid, action, entityType: 'clawback', entityId: id, metadata })
+): Promise<boolean> {
+  return logAdminActionOrRecord({
+    adminUid: actorUid, actorRole: actorUid === 'system' ? 'system' : 'super_admin',
+    action, entityType: 'clawback', entityId: id, metadata,
+    correlation: { clawbackId: id },
+  })
 }
 
 // ─── Detection (called INSIDE a reversal transaction) ─────────────────────────
@@ -162,12 +172,12 @@ export async function recoverClawbacks(organizerUid: string, budgetPaise: number
   }
 
   for (const e of events) {
-    void logClawbackEvent(
+    await logClawbackEvent(
       'system',
       e.fullyRecovered ? 'clawback.recovered' : 'clawback.partially_recovered',
       e.clawbackId,
       { recoveredPaise: e.recoveredPaise, auto: true },
-    ).catch(() => {})
+    )
   }
 }
 
@@ -237,7 +247,8 @@ export type AdminClawbackResult =
  * Admin write-off. Transactionally guards against acting on an already-resolved
  * clawback. Does NOT touch the wallet (a waiver forgives the debt; no debit).
  */
-export async function waiveClawback(id: string, adminUid: string, note?: string): Promise<AdminClawbackResult> {
+export async function waiveClawback(id: string, adminUid: string, reason: string): Promise<AdminClawbackResult> {
+  const note = reason
   const ref = clawbackRef(id)
   const result = await adminDb.runTransaction<AdminClawbackResult>(async tx => {
     const snap = await tx.get(ref)
@@ -253,9 +264,18 @@ export async function waiveClawback(id: string, adminUid: string, note?: string)
       updatedAt:  FieldValue.serverTimestamp(),
       ...(note ? { resolutionNote: note.slice(0, 500) } : {}),
     })
+    // RD-PHASE4-S4 — the audit row commits WITH the waiver (or neither does).
+    stageAdminAudit(tx, {
+      adminUid, actorRole: 'super_admin', action: 'clawback.waived', entityType: 'clawback', entityId: id,
+      reason,
+      changedFields: ['status', 'resolvedAt', 'resolvedBy', 'resolutionNote'],
+      before: { status: c.status, outstandingAmountPaise: c.outstandingAmountPaise },
+      after:  { status: 'waived', outstandingAmountPaise: c.outstandingAmountPaise },
+      metadata: { note, organizerUid: c.organizerUid, outstandingAmountPaise: c.outstandingAmountPaise },
+      correlation: { clawbackId: id, organizerUid: c.organizerUid, transactionId: c.transactionId },
+    })
     return { ok: true, view: { ...toClawbackView(c), status: 'waived', resolvedBy: adminUid } }
   })
-  if (result.ok) void logClawbackEvent(adminUid, 'clawback.waived', id, { note: note ?? null }).catch(() => {})
   return result
 }
 
@@ -264,7 +284,8 @@ export async function waiveClawback(id: string, adminUid: string, note?: string)
  * (e.g. funds collected via a separate channel). Zeroes the outstanding without
  * debiting the wallet (the money came from elsewhere).
  */
-export async function markClawbackRecovered(id: string, adminUid: string, note?: string): Promise<AdminClawbackResult> {
+export async function markClawbackRecovered(id: string, adminUid: string, reason: string): Promise<AdminClawbackResult> {
+  const note = reason
   const ref = clawbackRef(id)
   const result = await adminDb.runTransaction<AdminClawbackResult>(async tx => {
     const snap = await tx.get(ref)
@@ -282,8 +303,17 @@ export async function markClawbackRecovered(id: string, adminUid: string, note?:
       updatedAt:  FieldValue.serverTimestamp(),
       ...(note ? { resolutionNote: note.slice(0, 500) } : {}),
     })
+    // RD-PHASE4-S4 — the audit row commits WITH the resolution (or neither does).
+    stageAdminAudit(tx, {
+      adminUid, actorRole: 'super_admin', action: 'clawback.recovered', entityType: 'clawback', entityId: id,
+      reason,
+      changedFields: ['status', 'recoveredAmountPaise', 'outstandingAmountPaise', 'resolvedAt', 'resolvedBy', 'resolutionNote'],
+      before: { status: c.status, recoveredAmountPaise: c.recoveredAmountPaise, outstandingAmountPaise: c.outstandingAmountPaise },
+      after:  { status: 'recovered', recoveredAmountPaise: c.reversalAmountPaise, outstandingAmountPaise: 0 },
+      metadata: { manual: true, note, organizerUid: c.organizerUid },
+      correlation: { clawbackId: id, organizerUid: c.organizerUid, transactionId: c.transactionId },
+    })
     return { ok: true, view: { ...toClawbackView(c), recoveredAmountPaise: c.reversalAmountPaise, outstandingAmountPaise: 0, status: 'recovered', resolvedBy: adminUid } }
   })
-  if (result.ok) void logClawbackEvent(adminUid, 'clawback.recovered', id, { manual: true, note: note ?? null }).catch(() => {})
   return result
 }

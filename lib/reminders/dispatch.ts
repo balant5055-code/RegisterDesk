@@ -5,6 +5,7 @@
 // communication code. Email is the live channel; the channel field is reserved for
 // WhatsApp/SMS once approved reminder templates exist.
 
+import { COMMUNICATION_BALANCE_HREF } from '@/lib/wallet/communicationBalance'
 import { FieldValue, Timestamp, FieldPath } from 'firebase-admin/firestore'
 import { adminDb } from '@/lib/firebase/admin'
 import { notificationEngine, NotificationType, NotificationChannel } from '@/lib/notifications'
@@ -105,7 +106,7 @@ async function buildContent(data: ReminderDocData): Promise<{ subject: string; h
     return { subject: c.subject, html: () => c.html }
   }
   if (data.kind === 'low_wallet') {
-    const built = (r: Recipient) => buildReminderContent({ kind: 'low_wallet', eventName: data.eventName, recipientName: r.name, eventUrl: `${APP_URL}/dashboard/wallet` })
+    const built = (r: Recipient) => buildReminderContent({ kind: 'low_wallet', eventName: data.eventName, recipientName: r.name, eventUrl: `${APP_URL}${COMMUNICATION_BALANCE_HREF}` })
     return { subject: built({ email: '', name: '' }).subject, html: r => built(r).html }
   }
   // Event-anchored kinds — fetch fresh event schedule/venue.

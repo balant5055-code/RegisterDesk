@@ -33,6 +33,7 @@ export interface GraphTemplateMessageBody {
   recipient_type:    'individual'
   to:                string
   type:              'template'
+  biz_opaque_callback_data?: string
   template: {
     name:        string
     language:    { code: string }
@@ -85,6 +86,7 @@ export function buildTemplatePayload(msg: WhatsAppTemplateMessage): GraphTemplat
     recipient_type:    'individual',
     to:                normalizeRecipient(msg.to),
     type:              'template',
+    ...(msg.callbackData ? { biz_opaque_callback_data: msg.callbackData.slice(0, 512) } : {}),
     template: {
       name:     msg.templateName,
       language: { code: msg.languageCode },

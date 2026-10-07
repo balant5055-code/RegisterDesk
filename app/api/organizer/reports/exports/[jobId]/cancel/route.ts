@@ -4,7 +4,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { authorizeAnyWorkspace } from '@/lib/team/workspace'
 import { cancelJob }            from '@/lib/jobs/kernel'
-import { getReportExportJob, REPORT_EXPORT_JOBS } from '@/lib/reports/exportJob'
+import { getReportExportJob, permissionForExportJob, REPORT_EXPORT_JOBS } from '@/lib/reports/exportJob'
 
 export async function POST(
   req: NextRequest, { params }: { params: Promise<{ jobId: string }> },
@@ -15,6 +15,13 @@ export async function POST(
 
   const job = await getReportExportJob(jobId)
   if (!job || job.organizerUid !== authz.workspaceUid) {
+    return NextResponse.json({ success: false, error: 'Export not found' }, { status: 404 })
+  }
+  // RD-ANALYTICS-12-03 · re-check the report's permission. Cancelling is an availability
+  // impact, not just an information one: without this a member who may not see a financial
+  // export could still destroy someone else's in-flight one.
+  const need = permissionForExportJob(job)
+  if (!need || !authz.permissions.includes(need)) {
     return NextResponse.json({ success: false, error: 'Export not found' }, { status: 404 })
   }
 

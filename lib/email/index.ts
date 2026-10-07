@@ -2,7 +2,9 @@
 //
 // Amazon SES is the sole production email provider. Environment variables are
 // validated at startup by lib/env.ts:
-//   AWS_REGION             SES region (defaults to ap-south-1 / Mumbai)
+//   AWS_REGION             SES region (production: ap-south-1). REQUIRED explicitly in a
+//                          production deployment — see ./sesRegion; us-east-1 is only the
+//                          local/test default when unset
 //   AWS_ACCESS_KEY_ID      Static IAM credentials (optional when running under an
 //   AWS_SECRET_ACCESS_KEY    attached IAM role — the SDK default chain is used then)
 //   SES_FROM_EMAIL         Verified sender address; unset ⇒ email disabled
@@ -20,6 +22,7 @@ import { SESProvider }        from './ses'
 import { Resend }             from 'resend'
 import { ResendProvider }     from './resend'
 import { DEFAULT_EMAIL_PROVIDER, type EmailProviderName } from './providerName'
+import { sesRegionProblem, SES_REGION } from './sesRegion'
 import {
   AWS_REGION, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, SES_FROM_EMAIL, SES_FROM_NAME,
   RESEND_API_KEY, RESEND_FROM_EMAIL, RESEND_FROM_NAME,
@@ -38,6 +41,13 @@ if (process.env.NEXT_PHASE !== 'phase-production-build' && SES_FROM_EMAIL &&
     '[env] AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY must be set together. ' +
     'Provide both for static credentials, or neither to use an attached IAM role.',
   )
+}
+
+// RD-PREPROD · production must name the SES region explicitly (us-east-1). Same boundary and
+// same fail-fast shape as the credential-pair rule above; skipped during `next build`.
+if (process.env.NEXT_PHASE !== 'phase-production-build') {
+  const problem = sesRegionProblem(process.env)
+  if (problem) throw new Error(problem)
 }
 
 // The DEFAULT provider identifier. Retained as a constant for the log sites that have no
@@ -60,7 +70,7 @@ function buildSesProvider(): EmailProvider | null {
   // default credential chain (IAM role / instance profile). maxAttempts: 1
   // disables the SDK's built-in retries — retry is out of scope for this phase.
   const client = new SESv2Client({
-    region:      AWS_REGION || 'ap-south-1',
+    region:      AWS_REGION || SES_REGION,
     maxAttempts: 1,
     ...(AWS_ACCESS_KEY_ID && AWS_SECRET_ACCESS_KEY
       ? { credentials: { accessKeyId: AWS_ACCESS_KEY_ID, secretAccessKey: AWS_SECRET_ACCESS_KEY } }

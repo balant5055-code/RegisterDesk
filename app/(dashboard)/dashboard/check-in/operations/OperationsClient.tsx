@@ -14,6 +14,11 @@ import Link from 'next/link'
 import { auth } from '@/lib/firebase/auth'
 import { cn } from '@/lib/utils/cn'
 import { registrationStatusCls } from '@/lib/ui/statusColors'
+import { foldForSearch } from '@/lib/registrations/search'
+import {
+  resolveIdentifierValue, resolveTimingTag,
+  IDENTIFIER_GENERIC_LABEL, TIMING_TAG_GENERIC_LABEL, type EventIdentity,
+} from '@/lib/registrations/identity'
 import { useToast } from '@/components/ui/Toast'
 import { PageHeader, buttonVariants, EmptyState } from '@/components/ui'
 import {
@@ -54,6 +59,8 @@ export function OperationsClient() {
   const [dataLoading, setDataLoading] = useState(false)
   const [att, setAtt]   = useState<AttendanceDashboardResponse | null>(null)
   const [regs, setRegs] = useState<SerializedRegistration[] | null>(null)
+  // What this event calls its identifier and timing credential. Null = not known.
+  const [identity, setIdentity] = useState<EventIdentity | null>(null)
   const [tab, setTab]   = useState<Tab>('dashboard')
 
   // Participant directory search + selected participant (Participant 360 drawer).
@@ -91,12 +98,33 @@ export function OperationsClient() {
     setDataLoading(true)
     try {
       const headers = await authed()
-      const [aRes, rRes] = await Promise.all([
+      // RD-EVENT-21 · the identity read rides along with the two the page already
+      // makes: one config document, once per selected event, so every participant
+      // drawer opened afterwards knows what this event calls its identifier without
+      // fetching anything of its own.
+      const [aRes, rRes, iRes] = await Promise.all([
         fetch(`/api/organizer/events/${id}/attendance`, { headers, cache: 'no-store' }),
         fetch(`/api/organizer/events/${id}/registrations?all=true`, { headers, cache: 'no-store' }),
+        fetch(`/api/organizer/events/${id}/identifiers/config`, { headers, cache: 'no-store' }),
       ])
       if (aRes.ok) setAtt(await aRes.json() as AttendanceDashboardResponse)
       else { setAtt(null); showToast('Could not load attendance', 'error') }
+      // A failure leaves identity null — the honest unknown, never a claim that this
+      // event issues no identifiers.
+      if (iRes.ok) {
+        const body = await iRes.json() as { configured?: boolean; config?: Record<string, unknown> }
+        // Only a config the organizer actually saved carries this event's vocabulary.
+        // `configured: false` is the platform default, whose label is "Bib Number" —
+        // not something to show above a conference's delegate numbers.
+        const cfg = body.configured === true ? body.config : null
+        const tag = cfg?.tagMapping as { enabled?: unknown; label?: unknown } | undefined
+        setIdentity(cfg ? {
+          identifierEnabled: cfg.enabled === true,
+          identifierLabel:   typeof cfg.label === 'string' && cfg.label.trim() ? cfg.label : IDENTIFIER_GENERIC_LABEL,
+          tagsEnabled:       tag?.enabled === true,
+          tagLabel:          typeof tag?.label === 'string' && tag.label.trim() ? tag.label : TIMING_TAG_GENERIC_LABEL,
+        } : null)
+      } else setIdentity(null)
       // Registrations power ONLY the walk-in + active-operator cards. A limited
       // role without the registrations permission simply leaves those as “—”.
       setRegs(rRes.ok ? (await rRes.json() as RegistrationsApiResponse).registrations : null)
@@ -129,12 +157,24 @@ export function OperationsClient() {
 
   // Participant directory: rich client-side search over the already-loaded list —
   // name / registration id / ticket / email / phone / company / category / pass.
+  //
+  // RD-EVENT-20 · the ISSUED identifier was missing here, and this is the surface
+  // standing at the venue: someone holds a printed number and asks who it belongs
+  // to. The haystack searched `bibCategory` — the CATEGORY ("5 KM"), never the
+  // number — so typing the one thing physically in the operator's hand matched
+  // nobody. It is matched WHOLE and separately from the haystack, the same rule the
+  // Registration Manager uses: "500" must not return 5001, 5002 and 5003.
   const passNames = useMemo(() => [...new Set((regs ?? []).map(r => r.passName).filter(Boolean))], [regs])
   const participants = useMemo(() => {
     const q = pQuery.trim().toLowerCase()
+    const folded = foldForSearch(pQuery)
     return (regs ?? []).filter(r => {
       if (pPass && r.passName !== pPass) return false
       if (!q) return true
+      // RD-EVENT-21 · the precedence rule is no longer written out here; it lives
+      // once, in lib/registrations/identity, shared with the Registration Manager.
+      const ident = resolveIdentifierValue(r)
+      if (ident && foldForSearch(ident) === folded) return true
       const hay = [r.attendee.name, r.id, r.ticketCode, r.attendee.email, r.attendee.phone, r.companyName, r.bibCategory, r.passType, r.passName]
         .filter(Boolean).join(' ').toLowerCase()
       return hay.includes(q)
@@ -273,7 +313,7 @@ export function OperationsClient() {
               <div className="flex flex-wrap items-center gap-2 rounded-2xl border border-border bg-card p-3">
                 <div className="relative min-w-[220px] flex-1">
                   <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" aria-hidden />
-                  <input value={pQuery} onChange={e => setPQuery(e.target.value)} placeholder="Search name, registration, ticket, email, phone, company, category…"
+                  <input value={pQuery} onChange={e => setPQuery(e.target.value)} placeholder="Search name, identifier, registration, ticket, email, phone, company, category…"
                     className="w-full rounded-lg border border-border bg-background py-1.5 pl-8 pr-3 text-[13px]" />
                 </div>
                 <select value={pPass} onChange={e => setPPass(e.target.value)} className="rounded-lg border border-border bg-background px-2.5 py-1.5 text-[13px]">
@@ -307,7 +347,23 @@ export function OperationsClient() {
                               onChange={e => setPicked(prev => { const nx = new Set(prev); if (e.target.checked) nx.add(r.id); else nx.delete(r.id); return nx })} />
                           </td>
                           <td className="cursor-pointer px-4 py-2.5" onClick={() => void openParticipant(r.id)}><p className="font-medium text-foreground">{r.attendee.name || '—'}</p><p className="text-[11px] text-muted-foreground">{r.attendee.email}</p></td>
-                          <td className="cursor-pointer px-4 py-2.5 font-mono text-[11.5px] text-muted-foreground" onClick={() => void openParticipant(r.id)}>{r.ticketCode || '—'}</td>
+                          {/* The issued identifier sits with the ticket, and only when
+                              there is one: an event that issues none gains no column of
+                              dashes. Searching a number and being shown it back is what
+                              lets the operator confirm the person in front of them. */}
+                          <td className="cursor-pointer px-4 py-2.5 font-mono text-[11.5px] text-muted-foreground" onClick={() => void openParticipant(r.id)}>
+                            {r.ticketCode || '—'}
+                            {resolveIdentifierValue(r) && (
+                              <span className="mt-0.5 block font-semibold text-foreground">{resolveIdentifierValue(r)}</span>
+                            )}
+                            {/* RD-EVENT-21 · the timing tag, when this event maps them and
+                                this person carries one. Muted and one step smaller than the
+                                identifier above it, because they are different credentials
+                                and must never read as one number. */}
+                            {identity?.tagsEnabled && resolveTimingTag(r) && (
+                              <span className="mt-0.5 block text-[10.5px] text-muted-foreground/80">{resolveTimingTag(r)}</span>
+                            )}
+                          </td>
                           <td className="cursor-pointer px-4 py-2.5 text-muted-foreground" onClick={() => void openParticipant(r.id)}>{r.passName}</td>
                           <td className="cursor-pointer px-4 py-2.5 capitalize text-muted-foreground" onClick={() => void openParticipant(r.id)}>{r.status}</td>
                           <td className="cursor-pointer px-4 py-2.5" onClick={() => void openParticipant(r.id)}>{r.checkedIn ? <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[11px] font-semibold text-emerald-700">Yes</span> : <span className="text-muted-foreground">—</span>}</td>
@@ -337,7 +393,7 @@ export function OperationsClient() {
       {/* Participant 360 drawer (composition over existing APIs) */}
       {selected && selReg && (
         <Participant360Drawer
-          reg={selReg} eventId={eventId} token={selected.token}
+          reg={selReg} eventId={eventId} token={selected.token} identity={identity}
           onClose={() => setSelected(null)}
           onChanged={() => void loadData(eventId)}
         />

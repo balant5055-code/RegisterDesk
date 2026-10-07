@@ -23,6 +23,7 @@ import { LicensingEditor } from './LicensingEditor'
 import { CommunicationEditor } from './CommunicationEditor'
 import { FeesEditor } from './FeesEditor'
 import { MediaStudioEditor } from './MediaStudioEditor'
+import { PaymentGatewayEditor } from './PaymentGatewayEditor'
 import type { BusinessConfigResponse } from '@/app/api/admin/business-config/route'
 
 type SectionDraft = Record<string, unknown>
@@ -211,6 +212,10 @@ export default function BusinessConfigurationPage() {
           onDraftChange={d => setDrafts(prev => ({ ...(prev as DraftMap), licensing: d }))}
           onPublish={() => { setReasonText(''); setBanner(null); setReasonFor('licensing') }}
           publishing={publishing && reasonFor === 'licensing'}
+          // RD-EVENT-COMMERCE-04A — both decided by the server from the verified token / stored doc.
+          canEditPricing={data.permissions?.canEditPricing === true}
+          commercialIntegrity={data.commercialIntegrity ?? { ok: true }}
+          serviceSaleStates={data.serviceSaleStates}
         />
       )}
       {active === 'communication' && (
@@ -220,6 +225,8 @@ export default function BusinessConfigurationPage() {
           onDraftChange={d => setDrafts(prev => ({ ...(prev as DraftMap), communication: d }))}
           onPublish={() => { setReasonText(''); setBanner(null); setReasonFor('communication') }}
           publishing={publishing && reasonFor === 'communication'}
+          // RD-EVENT-COMMERCE-04B — server-decided from the verified token.
+          canEditPricing={data.permissions?.canEditPricing === true}
         />
       )}
       {active === 'fees' && (
@@ -229,6 +236,19 @@ export default function BusinessConfigurationPage() {
           onDraftChange={d => setDrafts(prev => ({ ...(prev as DraftMap), fees: d }))}
           onPublish={() => { setReasonText(''); setBanner(null); setReasonFor('fees') }}
           publishing={publishing && reasonFor === 'fees'}
+          // RD-PHASE4-S2 — server-decided from the verified token.
+          canEditPricing={data.permissions?.canEditPricing === true}
+        />
+      )}
+      {active === 'payments' && (
+        <PaymentGatewayEditor
+          published={clone(data.config.payments)}
+          draft={drafts.payments}
+          onDraftChange={d => setDrafts(prev => ({ ...(prev as DraftMap), payments: d }))}
+          onPublish={() => { setReasonText(''); setBanner(null); setReasonFor('payments') }}
+          publishing={publishing && reasonFor === 'payments'}
+          gateways={data.gateways}
+          canEditPricing={data.permissions?.canEditPricing === true}
         />
       )}
       {active === 'mediaStudio' && (
@@ -238,9 +258,11 @@ export default function BusinessConfigurationPage() {
           onDraftChange={d => setDrafts(prev => ({ ...(prev as DraftMap), mediaStudio: d }))}
           onPublish={() => { setReasonText(''); setBanner(null); setReasonFor('mediaStudio') }}
           publishing={publishing && reasonFor === 'mediaStudio'}
+          // RD-EVENT-COMMERCE-04B — server-decided from the verified token.
+          canEditPricing={data.permissions?.canEditPricing === true}
         />
       )}
-      {active !== 'overview' && active !== 'history' && active !== 'licensing' && active !== 'communication' && active !== 'fees' && active !== 'mediaStudio' && (
+      {active !== 'overview' && active !== 'history' && active !== 'licensing' && active !== 'communication' && active !== 'fees' && active !== 'mediaStudio' && active !== 'payments' && (
         <SectionEditor
           sectionKey={active}
           published={clone(data.config[active])}
@@ -248,6 +270,7 @@ export default function BusinessConfigurationPage() {
           onDraftChange={d => setDrafts(prev => ({ ...(prev as DraftMap), [active]: d }))}
           onPublish={() => { setReasonText(''); setBanner(null); setReasonFor(active) }}
           publishing={publishing && reasonFor === active}
+          canEditPricing={data.permissions?.canEditPricing === true}
         />
       )}
 

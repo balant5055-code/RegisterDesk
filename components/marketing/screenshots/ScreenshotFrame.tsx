@@ -16,16 +16,16 @@ function Chrome({ variant }: { variant: ScreenshotFrameVariant }) {
         <span className="size-2.5 rounded-full bg-rose-300" />
         <span className="size-2.5 rounded-full bg-amber-300" />
         <span className="size-2.5 rounded-full bg-emerald-300" />
-        <span className="ml-2 h-4 flex-1 rounded-full bg-white" />
+        <span className="ml-2 h-4 flex-1 rounded-full bg-card" />
       </div>
     )
   }
   if (variant === 'dashboard') {
     return (
       <div className="flex items-center gap-2 border-b border-border/60 bg-muted/60 px-3 py-2" aria-hidden>
-        <span className="size-4 rounded bg-primary/30" />
-        <span className="h-3 w-24 rounded bg-white" />
-        <span className="ml-auto h-3 w-10 rounded bg-white" />
+        <span className="size-4 rounded bg-action/30" />
+        <span className="h-3 w-24 rounded bg-card" />
+        <span className="ml-auto h-3 w-10 rounded bg-card" />
       </div>
     )
   }

@@ -24,7 +24,18 @@ export interface ResultFileSource {
 }
 
 export type ParseOutcome =
-  | { ok: true;  table: ParsedTable }
+  | {
+      ok: true
+      table: ParsedTable
+      /**
+       * RD-RACEOPS-RESULTS-04 · the OPTIONAL checkpoint sheet, when the workbook has one.
+       *
+       * Additive: a provider that returns only `table` is unchanged, and CSV — one sheet by
+       * definition — never sets it. Undefined and an empty sheet mean the same thing to
+       * every caller: this upload has no splits.
+       */
+      splitTable?: ParsedTable | null
+    }
   /** `message` is organizer-facing and must never contain a stack trace. */
   | { ok: false; message: string }
 

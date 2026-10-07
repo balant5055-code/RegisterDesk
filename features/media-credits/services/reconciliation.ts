@@ -207,7 +207,14 @@ export async function detectOrphans(limit = 100): Promise<OrphanReport> {
 
 export interface FullReconciliationReport {
   grants:  ReconciliationReport
+  /**
+   * RD-EVENT-COMMERCE-04B — the scheduler NO LONGER pays refunds. `scanned` / `skipped` count
+   * approved refunds whose payout has not completed (awaiting a manual payout retry by an
+   * admin); `resolved` is always 0.
+   */
   refunds: ReconciliationReport
+  /** RD-EVENT-COMMERCE-04B — approved refunds awaiting a MANUAL payout (admin retry route). */
+  refundsAwaitingManualPayout: number
   orphans: OrphanReport
   /** MC-12.1 · Stale requests declined automatically. Moves no money. */
   autoRejected: AutoRejectReport
@@ -233,18 +240,26 @@ export async function runReconciliation(
   const half      = Math.floor(budgetMs / 2)
 
   const grants  = await retryPendingGrants({ limit, budgetMs: half })
-  const refunds = await retryPendingRefunds({
-    limit,
-    // Whatever the grant drain did not use, floored so a slow grant pass cannot leave the
-    // refund pass with a negative budget that would skip it entirely.
-    budgetMs: Math.max(5_000, budgetMs - (Date.now() - startedAt)),
-  })
+  // ═══ RD-EVENT-COMMERCE-04B · NO REFUND FROM A SCHEDULED JOB ═══════════════════
+  // Confirmed business rule: no refund is executed by a background job or scheduled task. The
+  // scheduler used to re-drive the gateway payout of approved-but-unpaid refunds
+  // (`retryPendingRefunds`). It now only COUNTS them; the payout happens when an admin retries
+  // it explicitly (POST /api/admin/media-credits/refunds/[refundId]/retry), which runs the
+  // same claim + gateway pre-check (`refundPayment` adopts a refund Razorpay already made, so a
+  // crash between "paid" and "recorded" is still healed — by that manual retry).
+  // `retryPendingRefunds` remains exported for that reason and for tests; no job calls it.
+  const [awaitingPayout, abandonedSettling] = await Promise.all([
+    refundRepo.listByStatus('approved', limit),
+    refundRepo.listStaleSettling(limit),
+  ])
+  const awaitingManualPayout = new Set([...awaitingPayout, ...abandonedSettling].map(r => r.refundId)).size
+  const refunds: ReconciliationReport = { scanned: awaitingManualPayout, resolved: 0, failed: 0, skipped: awaitingManualPayout, durationMs: 0 }
   const orphans = await detectOrphans(limit)
   // MC-12.1 · Moves no money — see autoRejectStaleRefunds. Runs last so a slow sweep can
   // never delay the two passes that DO settle money.
   const autoRejected = await autoRejectStaleRefunds({ limit })
 
-  return { grants, refunds, orphans, autoRejected, durationMs: Date.now() - startedAt }
+  return { grants, refunds, refundsAwaitingManualPayout: awaitingManualPayout, orphans, autoRejected, durationMs: Date.now() - startedAt }
 }
 
 // ─── MC-12.1 · Auto-rejecting stale refund requests ───────────────────────────

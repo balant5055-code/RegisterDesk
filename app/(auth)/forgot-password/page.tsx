@@ -49,14 +49,14 @@ export default function ForgotPasswordPage() {
               initial={{ opacity: 0, scale: 0.6 }}
               animate={{ opacity: 1, scale: 1 }}
               transition={{ duration: 0.55, ease: EASE }}
-              className="flex size-16 items-center justify-center rounded-2xl bg-primary/10 ring-1 ring-primary/20"
+              className="flex size-14 items-center justify-center rounded-[var(--radius-control)] border border-hero-accent-rule/40 bg-card"
             >
               <BadgeCheck className="size-8 text-primary" aria-hidden />
             </motion.div>
           </div>
 
           <div className="mb-8 text-center">
-            <h2 className="text-[1.45rem] font-bold tracking-tight text-foreground">
+            <h2 className="font-display text-fs-2xl font-light tracking-[-0.01em] text-hero-ink">
               Check your inbox
             </h2>
             <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
@@ -83,14 +83,14 @@ export default function ForgotPasswordPage() {
             <motion.div
               animate={{ scale: [1, 1.06, 1] }}
               transition={{ duration: 3, repeat: Infinity, ease: 'easeInOut' }}
-              className="flex size-16 items-center justify-center rounded-2xl bg-primary/10 ring-1 ring-primary/20"
+              className="flex size-14 items-center justify-center rounded-[var(--radius-control)] border border-hero-accent-rule/40 bg-card"
             >
               <Mail className="size-8 text-primary" aria-hidden />
             </motion.div>
           </div>
 
           <div className="mb-2 text-center">
-            <h2 className="text-[1.45rem] font-bold tracking-tight text-foreground">
+            <h2 className="font-display text-fs-2xl font-light tracking-[-0.01em] text-hero-ink">
               Forgot your password?
             </h2>
           </div>
@@ -103,7 +103,7 @@ export default function ForgotPasswordPage() {
             <div className="mb-4">
               <label
                 htmlFor="reset-email"
-                className="mb-1.5 block text-sm font-medium text-foreground"
+                className="mb-1.5 block text-fs-2xs font-semibold uppercase tracking-[0.16em] text-hero-eyebrow"
               >
                 Email address
               </label>
@@ -115,7 +115,7 @@ export default function ForgotPasswordPage() {
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 disabled={loading}
-                className="w-full rounded-xl border border-border bg-background px-3.5 py-2.5 text-sm text-foreground placeholder:text-muted-foreground/60 outline-none transition-[border-color,box-shadow] duration-150 focus:border-primary focus:ring-2 focus:ring-primary/20 disabled:cursor-not-allowed disabled:opacity-60"
+                className="h-12 w-full rounded-[var(--radius-control)] border border-border bg-background px-3.5 text-fs-base text-foreground placeholder:text-muted-foreground/60 outline-none transition-[border-color,box-shadow] duration-150 focus:border-primary focus:ring-2 focus:ring-primary/20 disabled:cursor-not-allowed disabled:opacity-60"
               />
             </div>
 
@@ -125,7 +125,7 @@ export default function ForgotPasswordPage() {
                 role="alert"
                 initial={{ opacity: 0, y: -6 }}
                 animate={{ opacity: 1, y: 0 }}
-                className="mb-4 rounded-lg border border-destructive/20 bg-destructive/10 px-3.5 py-2.5 text-center text-sm text-destructive"
+                className="mb-4 rounded-[var(--radius-control)] border border-destructive/20 bg-destructive/10 px-3.5 py-2.5 text-center text-sm text-destructive"
               >
                 {error}
               </motion.p>
@@ -136,7 +136,7 @@ export default function ForgotPasswordPage() {
               type="submit"
               variant="primary"
               size="lg"
-              className="w-full cursor-pointer"
+              className="w-full cursor-pointer rounded-[var(--radius-control)]"
               disabled={!email.trim() || loading}
               isLoading={loading}
             >

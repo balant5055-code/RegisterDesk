@@ -46,7 +46,7 @@ describe('rankPassBenefits', () => {
       pass('A', ['Hydration', '', '   ']),
       pass('B', ['Hydration'], 'inactive'),
     ])
-    expect(out).toEqual([{ label: 'Hydration', count: 1, total: 1 }])
+    expect(out).toEqual([{ id: 'Hydration', label: 'Hydration', count: 1, total: 1 }])
   })
 
   it('returns an empty list when no benefits exist, so the strip can hide', () => {
@@ -68,12 +68,12 @@ describe('rankPassBenefits', () => {
 
 describe('benefitCoverage', () => {
   it('states full coverage without inventing a number', () => {
-    expect(benefitCoverage({ label: 'Medal', count: 3, total: 3 })).toBe('Included with every entry')
+    expect(benefitCoverage({ id: 'Medal', label: 'Medal', count: 3, total: 3 })).toBe('Included with every entry')
   })
   it('states partial coverage exactly', () => {
-    expect(benefitCoverage({ label: 'Medal', count: 2, total: 3 })).toBe('Included with 2 of 3 entries')
+    expect(benefitCoverage({ id: 'Medal', label: 'Medal', count: 2, total: 3 })).toBe('Included with 2 of 3 entries')
   })
   it('avoids "1 of 1" phrasing for single-pass events', () => {
-    expect(benefitCoverage({ label: 'Medal', count: 1, total: 1 })).toBe('Included with your entry')
+    expect(benefitCoverage({ id: 'Medal', label: 'Medal', count: 1, total: 1 })).toBe('Included with your entry')
   })
 })

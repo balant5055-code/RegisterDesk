@@ -17,8 +17,10 @@
 // An admin hammering this button races the cron harmlessly.
 
 import { NextRequest, NextResponse } from 'next/server'
-import { resolveAdminUid } from '@/lib/admin/auth'
-import { logAdminAction } from '@/lib/admin/audit'
+// RD-PHASE4-S1 · C3 — money out of a credit purchase: Super Admin only (ADMIN_UIDS), like every refund path.
+import { resolveSuperAdminUid } from '@/lib/admin/auth'
+import { parseFinancialReason, reasonErrorResponse } from '@/lib/admin/financialGuard'
+import { logAdminActionOrRecord } from '@/lib/admin/audit'
 import { settleApprovedRefund } from '@/features/media-credits/services/refundService'
 import {
   InvalidCreditOperationError, RefundNotAllowedError, RefundSettlementDeferredError,
@@ -27,19 +29,29 @@ import {
 type Params = { params: Promise<{ refundId: string }> }
 
 export async function POST(req: NextRequest, { params }: Params): Promise<NextResponse> {
-  const adminUid = await resolveAdminUid(req.headers.get('authorization'))
+  const adminUid = await resolveSuperAdminUid(req.headers.get('authorization'))
   if (!adminUid) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
 
   const { refundId } = await params
 
+  // RD-PHASE4-S4 · D3 — a retry of a refund payout carries a reason.
+  let body: { reason?: unknown } = {}
+  try { body = await req.json() as { reason?: unknown } } catch { body = {} }
+  const reasonCheck = parseFinancialReason(body.reason)
+  if (!reasonCheck.ok) return reasonErrorResponse(reasonCheck)
+
   try {
     const result = await settleApprovedRefund(refundId)
-    await logAdminAction({
+    // RD-PHASE4-S4 · F3 — the payout SETTLED; a failed audit write is recorded, never a 503.
+    await logAdminActionOrRecord({
       adminUid,
+      actorRole:  'super_admin',
       action:     'media_credit_refund.approved',
       entityType: 'media_credit_refund',
       entityId:   refundId,
+      reason:     reasonCheck.reason,
       metadata:   { manualRetry: true, gatewayRefundId: result.gatewayRefundId },
+      correlation: { refundId, gatewayRefundId: result.gatewayRefundId },
     })
     return NextResponse.json({ status: 'settled', ...result })
   } catch (err) {

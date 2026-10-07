@@ -14,7 +14,11 @@ import {
   type RegistrationCheckCounts,
 } from '@/features/race-operations/types/session'
 import type { SnapshotVersionRecord } from '@/features/race-operations/types/snapshot'
+import {
+  findDuplicateVersion, inconsistentHistoryMessage, versionAlreadyPublished,
+} from '@/features/race-operations/utils/snapshotVersions'
 import type { ColumnMapping } from '@/features/race-operations/types/results'
+import type { GroupTotals, RankDimension } from '@/features/race-operations/ranking/groups'
 import { decideTransition, type SessionAction } from '@/features/race-operations/lifecycle/transitions'
 
 const col = () => adminDb.collection(RACE_IMPORT_SESSIONS)
@@ -168,6 +172,18 @@ export async function bumpStoredRows(sessionId: string, delta: number): Promise<
   await col().doc(sessionId).update({ storedRows: FieldValue.increment(delta) })
 }
 
+/**
+ * RD-RACEOPS-02C · `storedRows` is the COUNT of stored rows, not a running increment.
+ *
+ * An increment double-counted a chunk the client retried after a lost response, which
+ * left `storedRows` above the real count and the session permanently unpublishable
+ * (AUDIT-01 probe P-B). Setting the aggregate's answer after every chunk makes a retry
+ * idempotent: the same rows overwrite the same documents and the count does not move.
+ */
+export async function setStoredRows(sessionId: string, storedRows: number): Promise<void> {
+  await col().doc(sessionId).update({ storedRows })
+}
+
 /** Persists the resumable rank cursor mid-walk. */
 export async function saveRankProgress(
   sessionId: string,
@@ -176,18 +192,37 @@ export async function saveRankProgress(
   await col().doc(sessionId).update({ rankCursor: cursor, rankedRows: cursor.processed })
 }
 
-/** Marks the ranking pass complete. `rankedAt` is the precondition for publishing. */
-export async function completeRanking(sessionId: string, rankedRows: number): Promise<void> {
+/**
+ * Marks the ranking pass complete. `rankedAt` is the precondition for publishing.
+ *
+ * RD-RACEOPS-RESULTS-04 · the gender / age-group sizes are written HERE, in the same update
+ * that declares the ranking finished, because a group's size is only known once its last
+ * member has been counted. The snapshot build reads them back as the denominators, so a
+ * rank and the total beside it always come from the same completed pass.
+ */
+export async function completeRanking(
+  sessionId:  string,
+  rankedRows: number,
+  groups?: { groups: GroupTotals; abandoned: RankDimension[] },
+): Promise<void> {
   await col().doc(sessionId).update({
     rankCursor: null,
     rankedRows,
     rankedAt:   FieldValue.serverTimestamp(),
+    ...(groups
+      ? { rankGroups: groups.groups, rankAbandoned: groups.abandoned }
+      : {}),
   })
 }
 
 /** Clears rank state so a re-rank starts from the beginning (e.g. after more rows land). */
 export async function resetRanking(sessionId: string): Promise<void> {
-  await col().doc(sessionId).update({ rankCursor: null, rankedRows: 0, rankedAt: null })
+  // RD-RACEOPS-RESULTS-04 · the group totals are cleared with the rest of the rank state.
+  // Leaving them would let a rebuilt ranking publish last time's denominators.
+  await col().doc(sessionId).update({
+    rankCursor: null, rankedRows: 0, rankedAt: null,
+    rankGroups: null, rankAbandoned: null,
+  })
 }
 
 // ─── Lifecycle transition (transactional) ─────────────────────────────────────
@@ -272,8 +307,8 @@ export async function transitionSession(params: {
         // version being published is `pendingVersion`, not `version` (which still names
         // the live one during a republish).
         const snapDoc = snapshotSnap.data() as {
-          version?: number; status?: string
-          pendingVersion?: number | null
+          version?: number; status?: string; maxVersion?: number | null
+          pendingVersion?: number | null; pendingSessionId?: string | null
           pendingTotalCount?: number; pendingFinisherCount?: number
           versions?: SnapshotVersionRecord[]
         }
@@ -281,6 +316,39 @@ export async function transitionSession(params: {
           return {
             ok: false, status: 409,
             error: 'The public snapshot changed while publishing. Rebuild it and try again.',
+          }
+        }
+        // RD-RACEOPS-02G · the lane must still be THIS session's. `resolveBuildState` only
+        // hands a session its own pending version, but that was a read outside this
+        // transaction; the owner is re-checked here so a lane claimed by another session
+        // in between can never be promoted under this one's name.
+        if (snapDoc.pendingSessionId !== sessionId) {
+          return {
+            ok: false, status: 409,
+            error: 'The public snapshot changed while publishing. Rebuild it and try again.',
+          }
+        }
+        // RD-RACEOPS-02G · versions[].version is unique — the invariant rollback depends on.
+        // A history that already breaks it, or a lane whose number already went live, is
+        // refused without touching the live pointer; nothing here may deepen the corruption.
+        const duplicate = findDuplicateVersion(snapDoc.versions)
+        if (duplicate !== null) {
+          return { ok: false, status: 409, error: inconsistentHistoryMessage(duplicate) }
+        }
+        if (versionAlreadyPublished(snapDoc.versions, goLiveSnapshot.version)) {
+          return {
+            ok: false, status: 409,
+            error: `Version ${goLiveSnapshot.version} of this race's results has already been published. Rebuild the snapshot and try again.`,
+          }
+        }
+        // RD-RACEOPS-02C · COMPLETENESS. Every stored row is one entry (bibs are unique per
+        // session), so a pending count below `storedRows` is a build that stopped early or
+        // was reset by a later append. It is refused here, inside the transaction, with the
+        // session document just read — never from a count the client reported.
+        if ((snapDoc.pendingTotalCount ?? 0) !== doc.storedRows) {
+          return {
+            ok: false, status: 409,
+            error: `The public snapshot is incomplete — ${(snapDoc.pendingTotalCount ?? 0).toLocaleString('en-IN')} of ${doc.storedRows.toLocaleString('en-IN')} rows are prepared. Rebuild it and try again.`,
           }
         }
 
@@ -309,6 +377,9 @@ export async function transitionSession(params: {
           publishedBy:   actorUid,
           sessionId,
           versions:      [...(snapDoc.versions ?? []), record],
+          // RD-RACEOPS-02G · the allocator never falls below a number that went live. On a
+          // document written before `maxVersion` existed this is where it is established.
+          maxVersion:    Math.max(snapDoc.maxVersion ?? 0, goLiveSnapshot.version),
           pendingVersion:       null,
           pendingSessionId:     null,
           pendingTotalCount:    0,

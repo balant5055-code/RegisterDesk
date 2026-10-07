@@ -92,7 +92,7 @@ export function BadgeStatusClient() {
     setProgress(0)
 
     try {
-      let cursor: number | null = null
+      let cursor: string | null = null
       let done = false
       let calls = 0
       let total = 0
@@ -100,7 +100,7 @@ export function BadgeStatusClient() {
       while (!done) {
         if (++calls > MAX_CALLS) throw new Error('Generation did not finish. Please try again.')
 
-        const body: { eventId: string; passSlug: string; force: boolean; cursor?: number } = {
+        const body: { eventId: string; passSlug: string; force: boolean; cursor?: string } = {
           eventId: event.eventId, passSlug: race.passSlug, force,
         }
         if (cursor !== null) body.cursor = cursor

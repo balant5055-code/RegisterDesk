@@ -85,13 +85,15 @@ function SelectField({ label, value, options, onChange }: { label: string; value
 }
 
 export function FeesEditor({
-  published, draft, onDraftChange, onPublish, publishing,
+  published, draft, onDraftChange, onPublish, publishing, canEditPricing,
 }: {
   published:     SectionDraft
   draft:         SectionDraft
   onDraftChange: (d: SectionDraft) => void
   onPublish:     () => void
   publishing:    boolean
+  /** RD-PHASE4-S2 — server-decided from the verified token. Every fee field is Super Admin only. */
+  canEditPricing: boolean
 }) {
   const validation = useMemo(() => CONFIG_SECTION_REGISTRY.fees.validate(draft), [draft])
   const dirty      = useMemo(() => JSON.stringify(draft) !== JSON.stringify(published), [draft, published])
@@ -105,12 +107,18 @@ export function FeesEditor({
         {validation.valid ? <Badge variant="success" className="text-[11px]">Valid</Badge> : <Badge variant="destructive" className="text-[11px]">{validation.errors.length} error{validation.errors.length === 1 ? '' : 's'}</Badge>}
         <div className="ml-auto flex items-center gap-2">
           <Button type="button" variant="ghost" size="sm" disabled={!dirty || publishing} onClick={() => onDraftChange({ ...published })}><Undo2 className="size-3.5" /> Revert</Button>
-          <Button type="button" variant="ghost" size="sm" disabled={publishing} onClick={() => onDraftChange(toDraft(BUSINESS_CONFIG_DEFAULTS.fees))}><RotateCcw className="size-3.5" /> Defaults</Button>
-          <Button type="button" variant="primary" size="sm" disabled={!dirty || !validation.valid || publishing} isLoading={publishing} onClick={onPublish}>Publish</Button>
+          <Button type="button" variant="ghost" size="sm" disabled={!canEditPricing || publishing} onClick={() => onDraftChange(toDraft(BUSINESS_CONFIG_DEFAULTS.fees))}><RotateCcw className="size-3.5" /> Defaults</Button>
+          <Button type="button" variant="primary" size="sm" disabled={!canEditPricing || !dirty || !validation.valid || publishing} isLoading={publishing} onClick={onPublish}>Publish</Button>
         </div>
       </div>
+      {/* RD-PHASE4-S2 — the server refuses a non-Super-Admin publish (403 SUPER_ADMIN_REQUIRED); say so up front. */}
+      {!canEditPricing && (
+        <p role="status" className="border-b border-border bg-muted/40 px-4 py-2 text-[11.5px] text-muted-foreground">
+          View only. Changing fees, GST and gateway charges requires a Super Admin.
+        </p>
+      )}
 
-      <div className="space-y-4 p-4">
+      <fieldset disabled={!canEditPricing} className="m-0 min-w-0 space-y-4 border-0 p-4">
         <div className="rounded-lg border border-border/70 p-3">
           <p className="mb-2 text-[12px] font-semibold uppercase tracking-wide text-muted-foreground">Platform fee</p>
           <p className="mb-2 text-[11px] text-muted-foreground">Override unchecked = inherit the per-license fee matrix. Type/flat/min/max are reserved (defined; the per-transaction calculation is unchanged).</p>
@@ -194,7 +202,7 @@ export function FeesEditor({
             {validation.errors.map((err, i) => <li key={i}>• {err}</li>)}
           </ul>
         )}
-      </div>
+      </fieldset>
     </div>
   )
 }

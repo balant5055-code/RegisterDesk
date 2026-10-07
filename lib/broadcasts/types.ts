@@ -103,7 +103,20 @@ export interface BroadcastCampaign {
   status:         BroadcastStatus
   scheduledFor:   string | null   // ISO — set when status='scheduled'
   estimatedCostPaise: number      // computed at creation from channel + recipients
-  actualCostPaise:    number      // charged at send time (0 for email)
+  actualCostPaise:    number      // charged at send time (0 for email); NET of any settlement refund
+  /**
+   * RD-INTEG · D3 — charge on Meta accept. A WhatsApp campaign is paid for upfront (all
+   * recipients) and settled when it ends: money / prepaid units for recipients WhatsApp did not
+   * accept are given back. Absent on campaigns that were never charged or predate settlement.
+   */
+  billing?: {
+    fundedBy:      'wallet' | 'prepaid_allowance'
+    settled:       boolean
+    chargedUnits:  number | null
+    billedUnits:   number | null
+    refundedUnits: number | null
+    refundedPaise: number | null
+  } | null
   failReason:     string | null   // e.g. 'insufficient_balance'
   createdAt:      string       // ISO
   sentAt:         string | null

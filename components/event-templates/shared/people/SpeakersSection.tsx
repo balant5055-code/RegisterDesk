@@ -41,7 +41,7 @@ export function SpeakersSection({ speakers, eyebrow, title = 'Speakers', subtitl
                 <div
                   aria-hidden
                   className="flex h-full w-full items-center justify-center text-lg font-bold text-white"
-                  style={{ backgroundImage: 'var(--primary-gradient)' }}
+                  style={{ backgroundImage: 'var(--action-gradient)' }}
                 >
                   {speaker.name.charAt(0).toUpperCase()}
                 </div>
@@ -52,21 +52,21 @@ export function SpeakersSection({ speakers, eyebrow, title = 'Speakers', subtitl
                   rendering identical to the <p> it replaces (preflight resets headings). */}
               <h3 className={cn('truncate', TYPE.cardTitle)}>{speaker.name}</h3>
               {speaker.title   && <p className={cn('truncate', TYPE.metaSm)}>{speaker.title}</p>}
-              {speaker.company && <p className="truncate text-fs-2xs font-semibold text-primary">{speaker.company}</p>}
+              {speaker.company && <p className="truncate text-fs-2xs font-semibold text-action">{speaker.company}</p>}
             </div>
             {(speaker.social?.linkedin || speaker.social?.twitter) && (
               <div className="flex gap-2">
                 {speaker.social.linkedin && (
                   <a href={speaker.social.linkedin} target="_blank" rel="noopener noreferrer"
                     aria-label={`${speaker.name} on LinkedIn`}
-                    className="rounded text-muted-foreground outline-none transition-colors hover:text-primary focus-visible:ring-2 focus-visible:ring-primary/50 focus-visible:ring-offset-2">
+                    className="rounded text-muted-foreground outline-none transition-colors hover:text-action focus-visible:ring-2 focus-visible:ring-action/50 focus-visible:ring-offset-2">
                     <Link2 className="size-3" aria-hidden />
                   </a>
                 )}
                 {speaker.social.twitter && (
                   <a href={speaker.social.twitter} target="_blank" rel="noopener noreferrer"
                     aria-label={`${speaker.name} on X`}
-                    className="rounded text-muted-foreground outline-none transition-colors hover:text-primary focus-visible:ring-2 focus-visible:ring-primary/50 focus-visible:ring-offset-2">
+                    className="rounded text-muted-foreground outline-none transition-colors hover:text-action focus-visible:ring-2 focus-visible:ring-action/50 focus-visible:ring-offset-2">
                     <ExternalLink className="size-3" aria-hidden />
                   </a>
                 )}

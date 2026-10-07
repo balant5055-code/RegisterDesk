@@ -8,7 +8,10 @@
 // Firestore-touching functions are covered by their types and by these invariants, not by
 // integration tests (see "Not verified" in the changelog).
 
+import { encodeLeaderboardCursor, decodeLeaderboardCursor } from '@/features/race-operations/utils/publicKeys'
 import { describe, it, expect } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import {
   bibKey, isPlausibleBib, nameKey, passSlug, PREFIX_UPPER_BOUND,
 } from '@/features/race-operations/utils/publicKeys'
@@ -179,22 +182,20 @@ describe('ordinal — the {{position}} placeholder', () => {
 
 // ─── Pagination ───────────────────────────────────────────────────────────────
 
-describe('leaderboard pagination contract', () => {
-  /** Mirrors fetchLeaderboardPage's cursor rule: a SHORT page means the end. */
-  function nextCursor(returned: number, pageSize: number, lastRank: number | null) {
-    return returned === pageSize ? lastRank : null
-  }
-
-  it('returns a cursor only when the page was full', () => {
-    expect(nextCursor(50, 50, 50)).toBe(50)
-    expect(nextCursor(49, 50, 49)).toBeNull()
-    expect(nextCursor(0, 50, null)).toBeNull()
+describe('leaderboard pagination contract (RD-RACEOPS-02C · tie-safe)', () => {
+  // The cursor is the pair Firestore orders by — (overallRank, entry) — so tied finishers at
+  // a page boundary are never skipped. It is encoded for URLs as rank~bibKey.
+  it('encodes and decodes the (rank, entry) pair; anything else decodes to null', () => {
+    expect(encodeLeaderboardCursor({ rank: 2, bibKey: 'a-101' })).toBe('2~A101')
+    expect(decodeLeaderboardCursor('2~A101')).toEqual({ rank: 2, bibKey: 'A101' })
+    for (const bad of ['', '50', 'x~1', '0~101', '2~', '2~bad bib', null, undefined]) {
+      expect(decodeLeaderboardCursor(bad)).toBeNull()
+    }
   })
 
-  it('the cursor is a RANK, not an offset — page N costs the same as page 1', () => {
-    // startAfter(rank) is an indexed seek; an offset would have to read and discard.
-    const cursor = nextCursor(50, 50, 50)
-    expect(typeof cursor).toBe('number')
+  it('the cursor is a SEEK key, not an offset — page N costs the same as page 1', () => {
+    // startAfter(rank, id) is an indexed seek; an offset would have to read and discard.
+    expect(typeof decodeLeaderboardCursor('50~X')?.rank).toBe('number')
   })
 })
 
@@ -209,5 +210,25 @@ describe('404 inputs are rejected before any read', () => {
 
   it('an empty search yields no query rather than an unbounded scan', () => {
     expect(nameKey('   ')).toBe('')
+  })
+})
+
+// ─── RD-RACEOPS-02E · sport-neutral public wording ───────────────────────────
+
+describe('RD-RACEOPS-02E · the public results surface is sport-neutral', () => {
+  const read = (rel: string) => readFileSync(join(process.cwd(), rel), 'utf8')
+  it('the leaderboard column is "Participant", never "Runner"', () => {
+    const chrome = read('features/race-operations/components/public/ResultsChrome.tsx')
+    expect(chrome).toContain('<th scope="col" className="px-4 py-3">Participant</th>')
+    expect(chrome).not.toMatch(/>Runner</)
+  })
+  it('public page copy says "participant name"', () => {
+    for (const f of ['app/results/page.tsx', 'app/results/[eventSlug]/page.tsx', 'app/results/[eventSlug]/[passSlug]/page.tsx']) {
+      const src = read(f)
+      expect(src, f).toContain('participant name')
+      // running-specific words may remain only inside comments; none in rendered strings
+      const rendered = src.split('\n').filter(l => !/^\s*(\/\/|\*|\/\*|\{\/\*)/.test(l)).join('\n')
+      expect(rendered, f).not.toMatch(/runner name|runner's name|>Runner</i)
+    }
   })
 })

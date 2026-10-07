@@ -680,10 +680,21 @@ export interface CreditPolicySnapshot {
  *
  * Frozen so a caller cannot mutate a shared snapshot.
  */
+/**
+ * RD-PHOTO-01 (2026-10-06) — Media Credits are RETIRED as an active product. Photos are a paid
+ * EVENT service bought only on the event's License & Services step (lib/licensing/photoCapacity.ts);
+ * an organizer-level credit balance is a second photo entitlement and a second purchase path, both
+ * of which the business rule forbids. The policy therefore reports credits OFF regardless of the
+ * stored `mediaStudio.creditsEnabled`, which turns every credit purchase, grant, session and credit
+ * refund request off at the one switch they all already obey. Historical records stay readable in
+ * the Super Admin console; nothing is deleted.
+ */
+export const MEDIA_CREDITS_RETIRED = true
+
 export async function getCreditPolicy(): Promise<Readonly<CreditPolicySnapshot>> {
   const m = await businessConfig.getSection('mediaStudio')
   return Object.freeze({
-    creditsEnabled:       m.creditsEnabled,
+    creditsEnabled:       MEDIA_CREDITS_RETIRED ? false : m.creditsEnabled,
     creditsPerPhoto:      m.creditsPerPhoto,
     creditUnitPricePaise: m.creditUnitPricePaise,
     refundsEnabled:       m.refundsEnabled,

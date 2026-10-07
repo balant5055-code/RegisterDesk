@@ -10,8 +10,9 @@
 // Modifies nothing. No pricing calculation, no writes.
 
 import { NextRequest, NextResponse } from 'next/server'
+import { requireSuperAdmin } from '@/lib/admin/financialGuard'
 import { adminDb } from '@/lib/firebase/admin'
-import { resolveAdminUid } from '@/lib/admin/auth'
+import { resolveSuperAdminUid } from '@/lib/admin/auth'
 import { getPricingMetrics, resolvePlatformPricing } from '@/lib/platform/pricing'
 import type { PlatformTransactionDocument } from '@/lib/fees/types'
 
@@ -22,8 +23,10 @@ const pct = (n: number, d: number): number => (d > 0 ? Math.round((n / d) * 1000
 type Health = 'green' | 'yellow' | 'red'
 
 export async function GET(req: NextRequest): Promise<NextResponse> {
-  const adminUid = await resolveAdminUid(req.headers.get('authorization'))
-  if (!adminUid) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  // RD-CLOSE — a financial read: Super Admin only (ADMIN_UIDS). A legacy `admin: true` claim
+  // alone gets 403 SUPER_ADMIN_REQUIRED (lib/admin/financialGuard.ts).
+  const superGate = await requireSuperAdmin(req)
+  if (superGate.response) return superGate.response
 
   // ── Engine status ────────────────────────────────────────────────────────────
   const settings = await resolvePlatformPricing()
@@ -99,7 +102,11 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     healthReasons.push('snapshots valid and matching production; lib/fees fallback healthy')
   }
 
+  // RD-PHASE4-S2 — server-decided (verified token): may this caller switch the pricing engine?
+  const canEditPricing = (await resolveSuperAdminUid(req.headers.get('authorization'))) !== null
+
   return NextResponse.json({
+    permissions: { canEditPricing },
     status: {
       pricingEngineEnabled: settings.features.pricingEngineEnabled,
       configurationVersion: settings.metadata.version,

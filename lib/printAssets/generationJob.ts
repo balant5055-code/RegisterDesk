@@ -35,6 +35,8 @@ import type { PublicBranding } from '@/lib/branding/types'
 import { mergePreviewImageSources, type EventPreviewAssets } from '@/lib/printAssets/designer/previewData'
 import type { PrintAssetType } from '@/lib/printAssets/types'
 import type { RegistrationDocument } from '@/lib/registrations/types'
+import { identifierRosterVisible, ROSTER_STATUSES } from '@/lib/identifiers/eligibility'
+import { checkInBlockReason }      from '@/lib/registrations/checkinEligibility'
 
 export const PRINT_GENERATION_JOBS = 'printGenerationJobs'
 
@@ -44,6 +46,28 @@ const PRINT_PAGE_SIZE  = 10
 const PRINT_BUDGET_MS  = 50_000
 const PRINT_LEASE_MS   = 120_000
 const EXPIRY_MS        = 24 * 60 * 60 * 1000   // download links valid for 24h
+
+// Seeding tunables (RD-PRINT-SCALE-IMPLEMENTATION-01). One read page = one write batch,
+// so this is BOTH the page size and the batch size: peak memory during job creation is
+// SEED_PAGE_SIZE registrations at any event size. 400 keeps the batch inside the 500-op
+// Firestore limit and matches the batch size this module already used.
+const SEED_PAGE_SIZE   = 400
+/** Fan-out for the explicit-selection document-id lookup. */
+const GETALL_CHUNK     = 300
+/**
+ * The status every credential-issuing job in this repo selects on, taken from the
+ * roster definition itself rather than copied — lib/identifiers/assignmentJob.ts reads
+ * it the same way. A second literal here is exactly how two "canonical" rules drift.
+ */
+const ISSUABLE_STATUS  = ROSTER_STATUSES[0]   // 'confirmed'
+
+/**
+ * Hard ceiling on an explicit "Selected registrations" request. Exceeding it is an
+ * ERROR, never a silent truncation: the create route rejects with 413 and reports the
+ * requested count, because a job that quietly prints the first 5,000 of 20,000 badges
+ * is discovered at the print shop.
+ */
+export const MAX_EXPLICIT_SELECTION = 5000
 
 // ─── Filters (create-time selection only — no designer changes) ─────────────────
 export interface PrintGenerationFilters {
@@ -99,59 +123,192 @@ const itemsCol = (jobId: string) =>
 
 const str = (v: unknown): string => (v === null || v === undefined ? '' : String(v))
 
-// ─── Item resolution (filters applied ONCE, at create) ──────────────────────────
-// Reuses the same `organizerUid + eventSlug` index the broadcast composer uses; the
-// Pass / Category / Selected filters are applied in memory (no new composite index).
-async function resolvePrintItems(
-  organizerUid: string, eventSlug: string, filters: PrintGenerationFilters,
-): Promise<{ items: PrintItemSeed[]; eventName: string }> {
-  const snap = await adminDb.collection('registrations')
-    .where('organizerUid', '==', organizerUid)
-    .where('eventSlug',    '==', eventSlug)
-    .get()
+// ─── Credential eligibility (RD-PRINT-SCALE-IMPLEMENTATION-01) ──────────────────
+//
+// A printed badge / ID card IS an event credential — it is what the holder presents
+// at the gate. Issuing one to somebody the gate will refuse is the defect this closes.
+//
+// REUSE — no third status model is introduced here:
+//   • the ROSTER arm is `identifierRosterVisible` (lib/identifiers/eligibility): the
+//     same 'confirmed'-only rule BIB assignment and certificate generation select on.
+//   • the REFUND arm is delegated to `checkInBlockReason` (lib/registrations/
+//     checkinEligibility): the ONE canonical gate rule, so a card is never printed
+//     for somebody check-in would turn away.
+//
+// The admitted set is therefore a strict SUBSET of what the gate admits, which is the
+// invariant worth having: every card this job prints is a card that actually works.
+//
+//   INCLUDED   status 'confirmed' AND paymentStatus ≠ 'refunded'
+//              (i.e. paymentStatus paid / not_required / pending / refund_pending)
+//   EXCLUDED   'cancelled' · 'rejected' · 'pending' · 'waitlisted', and any
+//              'confirmed' registration whose payment has been refunded
+//   UNKNOWN    a status outside the RegistrationStatus union fails CLOSED — it is not
+//              on the roster, so it receives no credential. Never silently issued.
+export type PrintCredentialBlock = 'NOT_ON_ROSTER' | 'REFUNDED'
 
-  const idSet = filters.registrationIds && filters.registrationIds.length
-    ? new Set(filters.registrationIds)
-    : null
+export function printCredentialBlockReason(
+  reg: { status?: unknown; paymentStatus?: unknown },
+): PrintCredentialBlock | null {
+  if (!identifierRosterVisible(reg)) return 'NOT_ON_ROSTER'
+  // Status is 'confirmed' by the line above, so the only verdict the gate can still
+  // return is REFUNDED. Delegated rather than re-implemented so the two cannot drift.
+  const status        = typeof reg.status === 'string' ? reg.status : ''
+  const paymentStatus = typeof reg.paymentStatus === 'string' ? reg.paymentStatus : null
+  return checkInBlockReason({ status, paymentStatus }) ? 'REFUNDED' : null
+}
 
-  const items: PrintItemSeed[] = []
-  let eventName = ''
-  for (const doc of snap.docs) {
-    const r = doc.data() as RegistrationDocument
-    if (idSet && !idSet.has(doc.id)) continue
-    if (filters.pass && r.passId !== filters.pass) continue
-    if (filters.category) {
-      const cat = filters.category
-      if (r.bibCategory !== cat && r.passType !== cat && r.passName !== cat) continue
-    }
-    if (!eventName) eventName = str(r.eventName)
-
-    const responses: Record<string, string> = {}
-    for (const [k, v] of Object.entries(r.attendee.formResponses ?? {})) {
-      if (v !== null && v !== undefined && typeof v !== 'object') responses[k] = String(v)
-    }
-
-    // Reuse buildQrValue() for the fallback when a legacy row lacks ticket.qrValue.
-    const ticketCode = str(r.ticketCode)
-    const qrValue = str(r.ticket?.qrValue) || (ticketCode ? buildQrValue(eventSlug, doc.id, ticketCode) : '')
-
-    items.push({
-      registrationId: doc.id,
-      name:        str(r.attendee.name),
-      email:       str(r.attendee.email),
-      phone:       str(r.attendee.phone),
-      ticketCode,
-      qrValue,
-      company:     str(r.companyName),
-      designation: str(r.designation),
-      category:    str(r.bibCategory ?? r.passType ?? ''),
-      bibNumber:   str(r.bibNumber),
-      passId:      str(r.passId),
-      passName:    str(r.passName),
-      formResponses: responses,
-    })
+/**
+ * What a filter MEANS — the single source of truth, used by BOTH intake paths.
+ *
+ * `pass` is additionally pushed into Firestore on the scan path, but it is still
+ * evaluated here: the server-side `where` is an OPTIMISATION that must never change
+ * the answer, and keeping this predicate authoritative is what makes the scan path and
+ * the explicit-id path provably identical.
+ *
+ * `category` deliberately stays in memory. It matches ANY of bibCategory / passType /
+ * passName — a three-field OR that no single Firestore equality can express, and
+ * collapsing it into one would silently change which registrations are selected.
+ */
+export function matchesPrintFilters(
+  r: { passId?: unknown; bibCategory?: unknown; passType?: unknown; passName?: unknown },
+  filters: PrintGenerationFilters,
+): boolean {
+  if (filters.pass && r.passId !== filters.pass) return false
+  if (filters.category) {
+    const cat = filters.category
+    if (r.bibCategory !== cat && r.passType !== cat && r.passName !== cat) return false
   }
-  return { items, eventName }
+  return true
+}
+
+/** The per-registration snapshot the job carries. Pure — no I/O. */
+function buildPrintItemSeed(
+  registrationId: string, r: RegistrationDocument, eventSlug: string,
+): PrintItemSeed {
+  const responses: Record<string, string> = {}
+  for (const [k, v] of Object.entries(r.attendee.formResponses ?? {})) {
+    if (v !== null && v !== undefined && typeof v !== 'object') responses[k] = String(v)
+  }
+
+  // Reuse buildQrValue() for the fallback when a legacy row lacks ticket.qrValue.
+  const ticketCode = str(r.ticketCode)
+  const qrValue = str(r.ticket?.qrValue) || (ticketCode ? buildQrValue(eventSlug, registrationId, ticketCode) : '')
+
+  return {
+    registrationId,
+    name:        str(r.attendee.name),
+    email:       str(r.attendee.email),
+    phone:       str(r.attendee.phone),
+    ticketCode,
+    qrValue,
+    company:     str(r.companyName),
+    designation: str(r.designation),
+    category:    str(r.bibCategory ?? r.passType ?? ''),
+    bibNumber:   str(r.bibNumber),
+    passId:      str(r.passId),
+    passName:    str(r.passName),
+    formResponses: responses,
+  }
+}
+
+// ─── Item seeding (bounded — RD-PRINT-SCALE-IMPLEMENTATION-01) ──────────────────
+//
+// THE BUG THIS REPLACES. `resolvePrintItems` read EVERY registration for the event
+// with one unbounded `.get()`, filtered in memory, and returned the whole set as an
+// array which was then written in 400-doc batches. At 20,000 registrations that is
+// 20,000 documents materialised inside a single request, and a create that dies
+// part-way has to redo all of it.
+//
+// The read is now a keyset walk: one page in, one batch out, page discarded. Peak
+// memory is SEED_PAGE_SIZE registrations regardless of event size, and every page
+// already committed is durable work a retry does not repeat.
+//
+// INDEX NOTE — the query shape here is deliberately the one lib/certificates/jobs.ts
+// and lib/identifiers/assignmentJob.ts already run in production: equality filters
+// plus orderBy(__name__). Both variants are covered by indexes already declared in
+// firestore.indexes.json, so this phase deploys nothing:
+//   without pass →  organizerUid, eventSlug, status, __name__
+//   with pass    →  organizerUid, eventSlug, status, passId   (__name__ implicit)
+async function seedPrintItems(
+  jobId: string, organizerUid: string, eventSlug: string, filters: PrintGenerationFilters,
+): Promise<{ total: number; eventName: string }> {
+  const col  = itemsCol(jobId)
+  const regs = adminDb.collection('registrations')
+  let total     = 0
+  let eventName = ''
+
+  /**
+   * Ownership + event scope are re-derived from the STORED document on every path,
+   * never from the request. The explicit-id path is the one that matters: those ids
+   * arrive from the browser, so a caller who substitutes another organizer's — or
+   * another event's — registration id gets it dropped here rather than printed.
+   */
+  const accept = (id: string, r: RegistrationDocument): PrintItemSeed | null => {
+    if (r.organizerUid !== organizerUid)  return null
+    if (r.eventSlug    !== eventSlug)     return null
+    if (printCredentialBlockReason(r))    return null
+    if (!matchesPrintFilters(r, filters)) return null
+    if (!eventName) eventName = str(r.eventName)
+    return buildPrintItemSeed(id, r, eventSlug)
+  }
+
+  /** One page in ⇒ one batch out. Never more than SEED_PAGE_SIZE docs are held. */
+  const flush = async (seeds: PrintItemSeed[]): Promise<void> => {
+    if (!seeds.length) return
+    const batch = adminDb.batch()
+    for (const s of seeds) batch.set(col.doc(s.registrationId), s)
+    await batch.commit()
+    total += seeds.length
+  }
+
+  const ids = filters.registrationIds
+  if (ids && ids.length) {
+    // Explicit selection ("Selected registrations"). A document-id lookup, so the read
+    // is proportional to the SELECTION and never scans the collection. The size is
+    // capped by MAX_EXPLICIT_SELECTION at the route, which rejects rather than truncates.
+    for (let i = 0; i < ids.length; i += GETALL_CHUNK) {
+      const refs  = ids.slice(i, i + GETALL_CHUNK).map(id => regs.doc(id))
+      const snaps = await adminDb.getAll(...refs)
+      const seeds: PrintItemSeed[] = []
+      for (const snap of snaps) {
+        if (!snap.exists) continue
+        const seed = accept(snap.id, snap.data() as RegistrationDocument)
+        if (seed) seeds.push(seed)
+      }
+      await flush(seeds)
+    }
+    return { total, eventName }
+  }
+
+  // Whole-event scan, paged by document id.
+  let cursor: string | null = null
+  for (;;) {
+    let q = regs
+      .where('organizerUid', '==', organizerUid)
+      .where('eventSlug',    '==', eventSlug)
+      .where('status',       '==', ISSUABLE_STATUS)
+    if (filters.pass) q = q.where('passId', '==', filters.pass)
+    q = q.orderBy(FieldPath.documentId())
+    if (cursor) q = q.startAfter(cursor)
+
+    const snap = await q.limit(SEED_PAGE_SIZE).get()
+    if (snap.empty) break
+
+    const seeds: PrintItemSeed[] = []
+    for (const doc of snap.docs) {
+      const seed = accept(doc.id, doc.data() as RegistrationDocument)
+      if (seed) seeds.push(seed)
+    }
+    await flush(seeds)
+
+    if (snap.size < SEED_PAGE_SIZE) break
+    // The cursor advances on the last FETCHED document, not the last KEPT one — a page
+    // whose every row was filtered out must still move the walk forward, or the loop
+    // re-reads it for ever.
+    cursor = snap.docs[snap.docs.length - 1].id
+  }
+
+  return { total, eventName }
 }
 
 // ─── Job creation ────────────────────────────────────────────────────────────────
@@ -159,10 +316,16 @@ export async function createPrintGenerationJob(meta: {
   templateId: string; eventId: string; eventSlug: string; assetType: PrintAssetType
   filters: PrintGenerationFilters; organizerUid: string; createdBy: string
 }): Promise<PrintGenerationJob> {
-  const { items, eventName } = await resolvePrintItems(meta.organizerUid, meta.eventSlug, meta.filters)
   const jobId = `pgen_${crypto.randomUUID()}`
 
-  const job = await kernelCreateJob<PrintGenerationJob>(
+  // Items are seeded BEFORE the job document exists, on purpose. The job doc is what
+  // every driver looks for — the cron scans `listActiveJobs`, the reaper revives from
+  // it — so creating it last means no driver can ever observe a half-seeded job and
+  // read a total that is still climbing. If this request dies mid-seed the orphaned
+  // item docs are unreachable (no job doc references them) rather than harmful.
+  const { total, eventName } = await seedPrintItems(jobId, meta.organizerUid, meta.eventSlug, meta.filters)
+
+  return kernelCreateJob<PrintGenerationJob>(
     PRINT_GENERATION_JOBS,
     jobId,
     {
@@ -175,18 +338,8 @@ export async function createPrintGenerationJob(meta: {
       assetType:    meta.assetType,
       filters:      meta.filters,
     },
-    items.length,
+    total,
   )
-
-  const col = itemsCol(jobId)
-  for (let i = 0; i < items.length; i += 400) {
-    const batch = adminDb.batch()
-    for (let j = i; j < Math.min(i + 400, items.length); j++) {
-      batch.set(col.doc(items[j].registrationId), items[j])
-    }
-    await batch.commit()
-  }
-  return job
 }
 
 // ─── Strategy ────────────────────────────────────────────────────────────────────

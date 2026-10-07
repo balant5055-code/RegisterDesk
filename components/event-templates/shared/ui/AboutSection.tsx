@@ -23,7 +23,7 @@ export function AboutSection({ description, highlights }: {
         {isLong && (
           <button
             onClick={() => setExpanded(e => !e)}
-            className="flex items-center gap-1 text-xs font-semibold text-primary hover:underline"
+            className="flex items-center gap-1 text-xs font-semibold text-action hover:underline"
           >
             {expanded
               ? <><ChevronUp className="size-3.5" aria-hidden />Show less</>
@@ -39,7 +39,7 @@ export function AboutSection({ description, highlights }: {
               key={label}
               className="flex items-center gap-1.5 rounded-full border border-border/60 bg-muted/20 px-3 py-1 text-[10.5px] font-medium text-foreground"
             >
-              <span className="text-primary">{icon}</span>
+              <span className="text-action">{icon}</span>
               {label}
             </div>
           ))}

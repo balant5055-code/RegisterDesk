@@ -5,7 +5,7 @@ import Link from 'next/link'
 import { motion, AnimatePresence, useReducedMotion } from 'framer-motion'
 import { Ticket } from 'lucide-react'
 import { cn } from '@/lib/utils/cn'
-import { buttonVariants } from '@/components/ui/button'
+import { marketingButton } from '@/lib/marketing/theme'
 import type { PassPublic } from '@/components/event-templates/types'
 import { formatINR, minPassPrice } from '@/components/event-templates/shared/utils/format'
 
@@ -75,7 +75,7 @@ export function StickyMobileCTA({ visible, showDesktop = false, title, isFreeEve
               </div>
               <Link
                 href={`#${targetId}`}
-                className={cn(buttonVariants({ variant: 'primary', size: 'sm' }), 'shrink-0 gap-1.5')}
+                className={cn(marketingButton({ emphasis: 'gradient', variant: 'primary', size: 'sm' }), 'shrink-0 gap-1.5')}
               >
                 <Ticket className="size-3.5" aria-hidden />
                 {ctaLabel}
@@ -105,7 +105,7 @@ export function StickyMobileCTA({ visible, showDesktop = false, title, isFreeEve
                   <span className="text-fs-2xs font-medium text-muted-foreground">{priceLine}</span>
                   <span className="max-w-[180px] truncate text-fs-xs font-bold text-foreground">{title}</span>
                 </span>
-                <span className={cn(buttonVariants({ variant: 'primary', size: 'sm' }), 'shrink-0 gap-1.5')}>
+                <span className={cn(marketingButton({ emphasis: 'gradient', variant: 'primary', size: 'sm' }), 'shrink-0 gap-1.5')}>
                   <Ticket className="size-3.5" aria-hidden />
                   {ctaLabel}
                 </span>

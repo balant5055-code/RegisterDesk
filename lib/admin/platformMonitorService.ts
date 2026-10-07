@@ -11,6 +11,7 @@
 
 import { Timestamp, AggregateField } from 'firebase-admin/firestore'
 import { adminDb } from '@/lib/firebase/admin'
+import { isFinancialAuditEntry } from '@/lib/admin/auditConstants'
 import { getAdminAnalytics } from '@/lib/analytics/adminAnalytics'
 import { getAdminCommunications } from '@/lib/analytics/adminCommunications'
 import { ENGINES } from '@/lib/admin/operationsCenterService'
@@ -202,14 +203,17 @@ function mapAudit(id: string, x: Record<string, unknown>): SecurityAuditEntry {
   }
 }
 
-export async function getPlatformSecurity(): Promise<PlatformSecurity> {
+export async function getPlatformSecurity(opts: { includeFinancial?: boolean } = {}): Promise<PlatformSecurity> {
   const dayAgo = Timestamp.fromMillis(Date.now() - 24 * 3600 * 1000)
   const [snap, last24h] = await Promise.all([
     adminDb.collection('adminAuditLogs').orderBy('createdAt', 'desc').limit(120).get().catch(() => null),
     tryCount(adminDb.collection('adminAuditLogs').where('createdAt', '>=', dayAgo)),
   ])
 
-  const entries = (snap?.docs ?? []).map(d => mapAudit(d.id, d.data() as Record<string, unknown>))
+  const entries = (snap?.docs ?? [])
+    // RD-PHASE4-S4 · D7 — financial rows only for a Super Admin (safe default: excluded).
+    .filter(d => opts.includeFinancial === true || !isFinancialAuditEntry(d.data()))
+    .map(d => mapAudit(d.id, d.data() as Record<string, unknown>))
   const isOverride = (e: SecurityAuditEntry) => OVERRIDE_HINTS.some(h => e.action.includes(h)) || e.entityType === 'license_coupon' || e.entityType === 'billing'
   const isModeration = (e: SecurityAuditEntry) => MODERATION_HINTS.some(h => e.action.includes(h))
   const isFinance = (e: SecurityAuditEntry) => FINANCE_ENTITIES.has(e.entityType)

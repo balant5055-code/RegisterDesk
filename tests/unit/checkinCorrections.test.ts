@@ -26,7 +26,11 @@ const code = (src: string) =>
 const CORRECT = code(read('app/api/checkin/correct/route.ts'))
 const UNDO    = code(read('app/api/checkin/undo/route.ts'))
 const SCOPE   = code(read('lib/identifiers/organizerScope.ts'))
-const OPS     = code(read('app/ops/checkin/[eventId]/OpsCheckinClient.tsx'))
+// RD-CHECKIN-2.0 re-anchor: the gate console and the organizer check-in page now
+// render ONE shared workspace, so the assertions that used to name OpsCheckinClient
+// name that component instead. Every rule below is unchanged — only the file that
+// has to satisfy it moved, and there is now one file rather than two.
+const OPS     = code(read('components/checkin/workspace/CheckinWorkspace.tsx'))
 const CONFIRM = code(read('components/checkin/AttendeeConfirmation.tsx'))
 
 // ─── 1. No new permission ───────────────────────────────────────────────────

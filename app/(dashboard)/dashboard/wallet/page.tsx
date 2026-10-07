@@ -1,14 +1,14 @@
 import { Suspense } from 'react'
-import { WalletOverviewClient } from './WalletOverviewClient'
+import { EventWalletClient } from './EventWalletClient'
 
 export const metadata = {
-  title: 'Wallet — RegisterDesk',
+  title: 'Event Wallet — RegisterDesk',
 }
 
 export default function WalletPage() {
   return (
     <Suspense>
-      <WalletOverviewClient />
+      <EventWalletClient />
     </Suspense>
   )
 }

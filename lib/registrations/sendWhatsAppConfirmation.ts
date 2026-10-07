@@ -13,18 +13,27 @@
 //   • Wallet has < 1 msg   → WhatsApp skipped, status 'skipped_insufficient_balance'
 //                            logged (dashboard warning surface), email already sent.
 //   • Wallet is deducted ONLY after a successful send (idempotent ledger id).
+//
+// RD-EVENT-COMMERCE-02 — an event with a PREPAID WhatsApp allowance is billed from that
+// allowance instead of the wallet: one unit is reserved before the send (so concurrent sends
+// can never exceed it) and released again if the provider does not accept the message, so a
+// unit is consumed exactly when PAYG would have charged. Exhausted ⇒ the allowance's policy:
+// 'block' skips with a recorded status + log, 'wallet_payg' falls back to the wallet path
+// below, unchanged. Events without an allowance take the wallet path exactly as before.
 
 import { FieldValue } from 'firebase-admin/firestore'
 import { adminDb }     from '@/lib/firebase/admin'
-import { getWalletBalance, txnDeductWallet } from '@/lib/firebase/firestore/wallet'
+import { getWalletBalance } from '@/lib/firebase/firestore/wallet'
 import { getCommunicationConfig } from '@/lib/communications/resolveCommunicationConfig'
 import { getWalletConfig } from '@/lib/wallet/resolveWalletConfig'
 import { getMetaProvider, resolveWhatsAppTemplate } from '@/lib/whatsapp'
 import { NotificationType } from '@/lib/notifications'
 import { writeEmailLog } from '@/lib/email-logs/write'
 import { validatePhoneNumber } from '@/lib/communication/phone'
-import type { OrganizerWallet } from '@/types/events'
 import type { RegistrationDocument } from './types'
+import { reserveServiceUnits, releaseServiceUnits, draftIdForEventSlug, type ReserveOutcome } from '@/lib/licensing/serviceAllowanceLedger'
+import { acceptConfirmation } from './whatsappConfirmationAcceptance'
+import { callbackDataFor, unknownLogId } from '@/lib/whatsapp/acceptance'
 
 export interface WhatsAppConfirmationArgs {
   registrationId: string
@@ -51,8 +60,15 @@ function recordStatus(
   } else if (extra?.reason) {
     patch.whatsappFailureReason = extra.reason
   }
-  adminDb.collection('registrations').doc(registrationId).update(patch)
-    .catch(err => console.error(`[whatsapp] status persist failed for ${registrationId}:`, err))
+  // RD-CLOSE — never DOWNGRADE a recorded send: Meta's status webhook may already have recorded
+  // this message as accepted (sent) while our own request was still timing out.
+  const ref = adminDb.collection('registrations').doc(registrationId)
+  adminDb.runTransaction(async txn => {
+    const cur = await txn.get(ref)
+    if (!cur.exists) return
+    if (status !== 'sent' && (cur.data() as { whatsappStatus?: unknown }).whatsappStatus === 'sent') return
+    txn.update(ref, patch)
+  }).catch(err => console.error(`[whatsapp] status persist failed for ${registrationId}:`, err))
 }
 
 // Unified communication log (emailLogs, channel='whatsapp') — makes attendee
@@ -87,61 +103,18 @@ function logComm(
   })
 }
 
-// Atomic, idempotent wallet debit + immutable ledger entry — mirrors the broadcast
-// billing pattern. Deterministic ledger id ⇒ a replayed confirmation never double
-// charges. Called ONLY after a confirmed successful send.
-async function deductWhatsAppCharge(args: WhatsAppConfirmationArgs, costPaise: number): Promise<void> {
-  const walletRef = adminDb.doc(`organizerWallets/${args.organizerUid}`)
-  const ledgerRef = adminDb.collection('walletTransactions').doc(`whatsapp_${args.registrationId}`)
-  const walletCfg = await getWalletConfig()
-
-  await adminDb.runTransaction(async (txn) => {
-    const ledgerSnap = await txn.get(ledgerRef)
-    if (ledgerSnap.exists) return   // already charged — idempotent no-op
-
-    const walletSnap = await txn.get(walletRef)
-    const balance    = walletSnap.exists ? ((walletSnap.data() as OrganizerWallet).balancePaise ?? 0) : 0
-    const newBalance = balance - costPaise
-    // RD-PAY-GA-01B — re-check the balance INSIDE the txn (the caller's pre-check is a
-    // TOCTOU with concurrent charges). Never drive the wallet negative: the message was
-    // already sent best-effort, so on insufficient funds we skip the charge (platform absorbs).
-    if (!walletCfg.allowNegativeBalance && balance < costPaise) return
-
-    txnDeductWallet(txn, args.organizerUid, costPaise)
-    txn.set(ledgerRef, {
-      organizerUid:  args.organizerUid,
-      type:          'whatsapp_charge',
-      amountPaise:   costPaise,
-      balancePaise:  newBalance,
-      status:        'completed',
-      referenceType: 'communication',
-      referenceId:   args.registrationId,
-      description:   `WhatsApp confirmation — ${args.eventName}`,
-      metadata:      { eventId: args.eventSlug, eventSlug: args.eventSlug, channel: 'whatsapp', units: 1 },
-      createdAt:     FieldValue.serverTimestamp(),
-    })
-  })
-
-  // Usage tracking — reconciles with the ledger (existing communicationUsage collection).
-  void adminDb.collection('communicationUsage').add({
-    organizerUid: args.organizerUid,
-    eventId:      args.eventSlug,
-    eventSlug:    args.eventSlug,
-    eventName:    args.eventName,
-    channel:      'whatsapp',
-    quantity:     1,
-    costPaise,
-    campaignId:   '',
-    templateKey:  'registration_confirmation',
-    createdAt:    FieldValue.serverTimestamp(),
-  }).catch(() => { /* usage log is best-effort */ })
-}
+// RD-CLOSE — the charge, usage record, log row and registration status for an ACCEPTED message are
+// written by ONE idempotent transaction (acceptConfirmation → lib/whatsapp/acceptance.ts), retried,
+// and replayable from Meta's status webhook. The former separate debit + fire-and-forget usage/log/
+// status writes could each fail on their own and turn an accepted message into a free one.
 
 /**
  * Send the attendee WhatsApp confirmation, applying the communication policy and
  * wallet charging. Never throws — the registration and its email are already done.
  */
 export async function sendWhatsAppConfirmation(args: WhatsAppConfirmationArgs): Promise<void> {
+  // Set once a prepaid unit is reserved, so an unexpected error can hand it back.
+  let releaseOnError: () => Promise<unknown> = async () => undefined
   try {
     // 1. Provider configured? (WhatsApp disabled platform-wide ⇒ nothing to do.)
     const provider = await getMetaProvider()
@@ -159,10 +132,13 @@ export async function sendWhatsAppConfirmation(args: WhatsAppConfirmationArgs): 
       adminDb.collection('registrations').doc(args.registrationId).get(),
     ])
 
-    const pricing = eventSnap.exists
-      ? (eventSnap.data() as { pricing?: { whatsappEnabled?: boolean } }).pricing
-      : undefined
+    const eventData = eventSnap.exists ? eventSnap.data() as { pricing?: { whatsappEnabled?: boolean }; draftId?: unknown } : undefined
+    const pricing = eventData?.pricing
     if (!pricing?.whatsappEnabled) return   // organizer did not enable WhatsApp for this event
+    // RD-INTEG — the prepaid ledger key through the owner-checked resolver (the same one
+    // broadcasts use), never the raw events.draftId: a draft-id collision must not let this
+    // event consume another organizer's prepaid units.
+    const allowanceDraftId = typeof eventData?.draftId === 'string' && eventData.draftId ? await draftIdForEventSlug(args.eventSlug) : null
 
     if (!regSnap.exists) return
     const reg = regSnap.data() as RegistrationDocument
@@ -185,9 +161,30 @@ export async function sendWhatsAppConfirmation(args: WhatsAppConfirmationArgs): 
     }
     const normalizedPhone = phoneCheck.normalizedPhone as string
 
+    // 2b. RD-EVENT-COMMERCE-02 — prepaid allowance first, when the event has one.
+    const unitKey = `wa_reg_${args.registrationId}`
+    let allowance: ReserveOutcome = { mode: 'none' }
+    if (allowanceDraftId) {
+      allowance = await reserveServiceUnits({ draftId: allowanceDraftId, service: 'whatsapp', unitKey, source: 'registration_confirmation' })
+      if (allowance.mode === 'exhausted' && allowance.policy === 'block') {
+        recordStatus(args.registrationId, 'skipped_allowance_exhausted', { reason: 'Prepaid WhatsApp allowance used up' })
+        logComm(args, email, normalizedPhone, 'skipped', { error: 'Prepaid WhatsApp allowance used up — while the event is open, buy more on the event Wallet' })
+        return
+      }
+    }
+    const fromAllowance = allowance.mode === 'allowance'
+    // RD-INTEG — only a unit THIS call took is ever given back: when the reservation already
+    // existed (a concurrent duplicate of this confirmation holds it), releasing on our failure
+    // would free the unit the other send consumed.
+    const giveBack = () => fromAllowance && allowance.mode === 'allowance' && !allowance.already && allowanceDraftId
+      ? releaseServiceUnits({ draftId: allowanceDraftId, service: 'whatsapp', unitKey }).catch(err => console.error('[whatsapp] allowance release failed', err))
+      : Promise.resolve()
+    releaseOnError = giveBack
+
     // 3. Communication policy: attendee WhatsApp is paid (unless disabled) — the
-    // price and the wallet-charge toggle come from Business Configuration.
-    const costPaise = comm.whatsapp.walletChargeAttendeeNotifications ? comm.whatsapp.pricePaise : 0
+    // price and the wallet-charge toggle come from Business Configuration. A send covered by
+    // the prepaid allowance costs the wallet nothing.
+    const costPaise = fromAllowance ? 0 : (comm.whatsapp.walletChargeAttendeeNotifications ? comm.whatsapp.pricePaise : 0)
     const wallet    = await getWalletConfig()
     const balance   = await getWalletBalance(args.organizerUid)
     if (!wallet.allowNegativeBalance && costPaise > 0 && balance < costPaise) {
@@ -204,6 +201,7 @@ export async function sendWhatsAppConfirmation(args: WhatsAppConfirmationArgs): 
       { attendeeName: args.attendeeName, eventName: args.eventName, ticketCode: args.ticketCode },
     )
     if (!resolved.ok) {
+      await giveBack()
       recordStatus(args.registrationId, 'failed', { reason: resolved.error })
       logComm(args, email, normalizedPhone, 'failed', { error: resolved.error })
       return
@@ -215,7 +213,9 @@ export async function sendWhatsAppConfirmation(args: WhatsAppConfirmationArgs): 
       ` · Template=${resolved.message.templateName} · Original=${phone} · Normalized=${normalizedPhone}`,
     )
     const startedAt = Date.now()
-    const result    = await provider.sendTemplate(resolved.message)
+    // RD-CLOSE — the callback data lets Meta's status webhook recover this acceptance (and its
+    // charge) if anything after the provider call fails, including a transport timeout.
+    const result    = await provider.sendTemplate({ ...resolved.message, callbackData: callbackDataFor({ kind: 'registration', registrationId: args.registrationId, unitKey }) })
     const durationMs = Date.now() - startedAt
     // ═══ OBSERVABILITY ═════════════════════════════════════════════════════════
     // One structured line per attempt so a timeout is diagnosable after the fact: how long we
@@ -253,20 +253,61 @@ export async function sendWhatsAppConfirmation(args: WhatsAppConfirmationArgs): 
         ? `Delivery status unknown — no response from Meta (${result.error ?? 'transport failure'})`
         : (result.error ?? 'WhatsApp send failed')
 
-      recordStatus(args.registrationId, deliveryUnknown ? 'unknown' : 'failed', { reason })
+      // Not accepted (or unknown) ⇒ nothing consumed — exactly as PAYG charges nothing here.
+      // (A unit Meta's webhook has already proven accepted is never released — releaseServiceUnits.)
+      await giveBack()
       // The log row keeps status 'failed' so every existing consumer stays byte-identical;
       // deliveryUnknown is the additive flag the WhatsApp surfaces read.
-      logComm(args, email, phone, 'failed', { error: reason, providerResponse, deliveryUnknown })
+      if (deliveryUnknown) {
+        // RD-CLOSE — the UNKNOWN status and its deterministic log row are written TOGETHER, in one
+        // transaction keyed on the registration, and only if Meta's webhook has not already
+        // recorded the message as accepted ('sent'). The acceptance record reads the same
+        // registration, so the two serialise: whichever lands second sees the other — the
+        // webhook upgrades this row in place, or this write steps aside. One row per message.
+        const regRef = adminDb.collection('registrations').doc(args.registrationId)
+        const logRef = adminDb.collection('emailLogs').doc(unknownLogId(unitKey))
+        await adminDb.runTransaction(async txn => {
+          const cur = await txn.get(regRef)
+          if (cur.exists && (cur.data() as { whatsappStatus?: unknown }).whatsappStatus === 'sent') return
+          if (cur.exists) txn.update(regRef, { whatsappStatus: 'unknown', whatsappFailureReason: reason })
+          txn.set(logRef, {
+            organizerUid: args.organizerUid, eventId: args.eventSlug, eventSlug: args.eventSlug, eventName: args.eventName,
+            templateKey: 'registration_confirmation', recipientEmail: email, recipientName: args.attendeeName,
+            subject: `WhatsApp: Registration confirmation — ${args.eventName}`, status: 'failed', provider: 'meta', channel: 'whatsapp',
+            recipientPhone: phone, costPaise: 0, error: reason, providerResponse, deliveryUnknown: true, registrationId: args.registrationId,
+            createdAt: FieldValue.serverTimestamp(), updatedAt: FieldValue.serverTimestamp(),
+          }, { merge: true })
+        }).catch(err => console.error('[whatsapp] unknown-outcome write failed', err))
+      } else {
+        recordStatus(args.registrationId, 'failed', { reason })
+        logComm(args, email, phone, 'failed', { error: reason, providerResponse, deliveryUnknown })
+      }
       return
     }
 
-    // 6. Success → deduct wallet (idempotent, only when there's a charge) + log.
-    if (costPaise > 0) await deductWhatsAppCharge(args, costPaise)
-    recordStatus(args.registrationId, 'sent', { messageId: result.messageId })
-    logComm(args, email, phone, 'sent', { costPaise, messageId: result.messageId })
+    // 6. Accepted → ONE idempotent acceptance record: charge + usage + log + status (retried).
+    // From here on the message IS sent: a persistence problem must never relabel it failed or
+    // hand back the unit it consumed (the catch below would do both). If every retry fails, the
+    // status webhook replays the same record from the callback data.
+    releaseOnError = async () => undefined
+    if (!result.messageId) {
+      console.error(`[whatsapp] accepted without a wamid — cannot record acceptance for ${args.registrationId}`)
+    } else {
+      try {
+        await acceptConfirmation({
+          registrationId: args.registrationId, organizerUid: args.organizerUid, eventSlug: args.eventSlug, eventName: args.eventName,
+          attendeeName: args.attendeeName, email, phone, wamid: result.messageId, fromAllowance, writeLog: true, source: 'send',
+          unitKey, ...(fromAllowance && allowanceDraftId ? { allowanceUnit: { draftId: allowanceDraftId, unitKey } } : {}),
+        })
+      } catch (err) {
+        console.error(`[whatsapp] acceptance not persisted for ${args.registrationId} — the status webhook will recover it:`, err)
+      }
+    }
+    if (fromAllowance) console.info(`[whatsapp] registration confirmation billed to prepaid allowance · registrationId=${args.registrationId}`)
   } catch (err) {
     // Never let a WhatsApp problem surface to the caller — registration is done.
     console.error(`[whatsapp] confirmation error for ${args.registrationId}:`, err)
+    await releaseOnError()
     recordStatus(args.registrationId, 'failed', {
       reason: err instanceof Error ? err.message : 'Unknown WhatsApp error',
     })

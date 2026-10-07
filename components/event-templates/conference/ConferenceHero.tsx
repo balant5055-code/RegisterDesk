@@ -128,9 +128,9 @@ export function ConferenceHero({
 
             {/* Category badge */}
             <motion.div {...fadein(0)} className="mb-5">
-              <span className="inline-flex items-center gap-2 rounded-full border border-primary/20 bg-primary/[0.05] px-3.5 py-1.5">
-                <span className="size-1.5 rounded-full bg-primary" aria-hidden />
-                <span className="text-[11px] font-bold uppercase tracking-[0.20em] text-primary">
+              <span className="inline-flex items-center gap-2 rounded-full border border-action/20 bg-action/[0.05] px-3.5 py-1.5">
+                <span className="size-1.5 rounded-full bg-action" aria-hidden />
+                <span className="text-[11px] font-bold uppercase tracking-[0.20em] text-action">
                   {eventSubtype ?? 'Conference'}
                 </span>
               </span>
@@ -208,8 +208,8 @@ export function ConferenceHero({
                 <>
                   <Link
                     href="#tickets"
-                    className="inline-flex items-center gap-2.5 rounded-full px-8 py-3.5 text-[0.9375rem] font-bold text-white shadow-lg shadow-primary/20 transition-all duration-200 hover:opacity-90 hover:shadow-xl hover:shadow-primary/30 active:scale-[0.97]"
-                    style={{ backgroundImage: 'var(--primary-gradient)' }}
+                    className="inline-flex items-center gap-2.5 rounded-full px-8 py-3.5 text-[0.9375rem] font-bold text-white shadow-lg shadow-action/20 transition-all duration-200 hover:opacity-90 hover:shadow-xl hover:shadow-action/30 active:scale-[0.97]"
+                    style={{ backgroundImage: 'var(--action-gradient)' }}
                   >
                     {isFreeEvent ? 'Register Free' : 'Get Your Pass'}
                     <ArrowRight className="size-4" aria-hidden />
@@ -248,7 +248,7 @@ export function ConferenceHero({
               ) : (
                 <div
                   className="flex h-full min-h-[220px] w-full items-center justify-center"
-                  style={{ backgroundImage: 'var(--primary-gradient)' }}
+                  style={{ backgroundImage: 'var(--action-gradient)' }}
                 >
                   <span className="text-6xl font-black text-white/20">{title.charAt(0)}</span>
                 </div>
@@ -280,8 +280,8 @@ export function ConferenceHero({
               {stats.map(({ icon: Icon, val, label }, i) => (
                 <div key={label} className="flex items-center gap-3">
                   {i > 0 && <div className="hidden h-7 w-px bg-gray-150 sm:block" aria-hidden />}
-                  <div className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-primary/[0.06]">
-                    <Icon className="size-4 text-primary" aria-hidden />
+                  <div className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-action/[0.06]">
+                    <Icon className="size-4 text-action" aria-hidden />
                   </div>
                   <div>
                     <p className="text-[1.125rem] font-black leading-tight text-gray-900">

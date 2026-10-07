@@ -1,20 +1,56 @@
 'use client'
 
-import { useState, useEffect, useMemo, useRef } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { useAuth }                              from '@/components/auth/AuthProvider'
 import Link                                      from 'next/link'
 import {
   BarChart3, CalendarDays, Users, TrendingUp, TrendingDown,
   IndianRupee, Loader2, AlertCircle, ArrowRight, RefreshCw,
-  ChevronDown, Trophy, Target, Minus,
+  Trophy, Target, Minus,
 } from 'lucide-react'
 import { cn }                        from '@/lib/utils/cn'
 import { PageHeader, EmptyState }    from '@/components/ui'
-import type { EventsListResponse, EventListItem } from '@/app/api/organizer/events/route'
-import type { AllRegistrationsResponse }          from '@/app/api/organizer/registrations/route'
+import type { DashboardData, DashboardEvent } from '@/app/api/organizer/dashboard/route'
+import {
+  buildPerformanceInsights,
+  type PerformanceInsight, type PerformanceInsightTone,
+} from '@/lib/dashboard/insights'
+// RD-ANALYTICS-05 · the ONE event-selection architecture. The provider is already mounted
+// in app/(dashboard)/layout.tsx, so this page has always been inside it — it simply kept
+// its own copy instead. The canonical one adds URL sync, persistence, search and a shared
+// "All events" state that this page's local copy never had.
+import { PRESET_DAYS } from '@/lib/analytics/dateRange'
+import { EventSelector } from '@/components/dashboard/EventSelector'
+import { useEventContext } from '@/components/dashboard/EventContextProvider'
 
-type DateRange = '7d' | '30d' | '90d' | 'all'
-type Reg = AllRegistrationsResponse['registrations'][number]
+/**
+ * ═══ RD-REPORT-02 · WHY THIS PAGE CHANGED ════════════════════════════════════
+ *
+ * Every number here was computed in the browser from two capped requests:
+ *
+ *   GET /api/organizer/events          → 25 events   (default page size; cursor ignored)
+ *   GET /api/organizer/registrations   → 300 rows    (NO orderBy — an arbitrary slice
+ *                                                     by document id, then sorted in
+ *                                                     memory and charted as a time series)
+ *
+ * So "Total Registrations" meant "across your first 25 events", and the trend charts and
+ * the week-over-week insight were drawn from an arbitrary 300 of however many
+ * registrations existed. Neither limit was disclosed anywhere in the UI.
+ *
+ * This page now reads ONE endpoint — the same one the organizer Dashboard uses — whose
+ * figures are already correct and already exact:
+ *
+ *   events[]            EVERY event the organizer owns (the route pages its entire
+ *                       eventDrafts collection; there is no 25 or 500 ceiling)
+ *   registrationTotals  organizer-wide, all-time, from the registrationCounters docs
+ *   trendDays[]         90 days of {count, revenuePaise} from organizerDailyStats
+ *                       rollups — ONE document read per day, independent of volume
+ *   trendRanges[]       the 7/30/90 windows with totals and deltas already resolved
+ *                       server-side, so this page never reduces a series into a claim
+ *
+ * No new endpoint, no new query, no new index, and strictly fewer reads than before.
+ */
+type DateRange = '7d' | '30d' | '90d'
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -33,72 +69,26 @@ function fmtDate(dateStr: string | null): string {
   })
 }
 
-function getRangeStart(range: DateRange): Date | null {
-  if (range === 'all') return null
+/**
+ * RD-REPORT-02 · the chart series, taken straight from the server rollups.
+ *
+ * There is no bucketing left to do here. `trendDays` arrives as 90 ordered daily rows
+ * (oldest → newest) built from organizerDailyStats, so a window is a SLICE — not a
+ * re-derivation from rows the browser happened to hold.
+ */
+function sliceTrend(
+  trendDays: { date: string; count: number; revenuePaise: number | null }[],
+  range: DateRange,
+): { label: string; registrations: number; revenue: number | null }[] {
   const days = range === '7d' ? 7 : range === '30d' ? 30 : 90
-  const d = new Date()
-  d.setDate(d.getDate() - days)
-  d.setHours(0, 0, 0, 0)
-  return d
-}
-
-type Bucket = { label: string; registrations: number; revenue: number }
-
-function buildBuckets(range: DateRange): Map<string, Bucket> {
-  const now = new Date()
-  const m   = new Map<string, Bucket>()
-
-  if (range === 'all') {
-    for (let i = 11; i >= 0; i--) {
-      const d   = new Date(now.getFullYear(), now.getMonth() - i, 1)
-      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
-      m.set(key, {
-        label: d.toLocaleDateString('en-IN', { month: 'short', year: '2-digit' }),
-        registrations: 0, revenue: 0,
-      })
+  return trendDays.slice(-days).map(d => {
+    const [y, m, dd] = d.date.split('-').map(Number)
+    return {
+      label: new Date(y, m - 1, dd).toLocaleDateString('en-IN', { month: 'short', day: 'numeric' }),
+      registrations: d.count,
+      revenue: d.revenuePaise,
     }
-    return m
-  }
-
-  if (range === '90d') {
-    for (let i = 12; i >= 0; i--) {
-      const anchor = new Date(now)
-      anchor.setDate(anchor.getDate() - i * 7)
-      const key = anchor.toISOString().slice(0, 10)
-      m.set(key, {
-        label: anchor.toLocaleDateString('en-IN', { month: 'short', day: 'numeric' }),
-        registrations: 0, revenue: 0,
-      })
-    }
-    return m
-  }
-
-  const days = range === '7d' ? 7 : 30
-  for (let i = days - 1; i >= 0; i--) {
-    const d   = new Date(now)
-    d.setDate(d.getDate() - i)
-    const key = d.toISOString().slice(0, 10)
-    m.set(key, {
-      label: d.toLocaleDateString('en-IN', { month: 'short', day: 'numeric' }),
-      registrations: 0, revenue: 0,
-    })
-  }
-  return m
-}
-
-function getBucketKey(date: Date, range: DateRange): string {
-  if (range === 'all') {
-    return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`
-  }
-  if (range === '90d') {
-    const now       = new Date()
-    const daysDiff  = Math.floor((now.getTime() - date.getTime()) / 86_400_000)
-    const weekIdx   = Math.min(12, Math.floor(daysDiff / 7))
-    const anchor    = new Date(now)
-    anchor.setDate(anchor.getDate() - weekIdx * 7)
-    return anchor.toISOString().slice(0, 10)
-  }
-  return date.toISOString().slice(0, 10)
+  })
 }
 
 // ─── BarChart ─────────────────────────────────────────────────────────────────
@@ -154,96 +144,23 @@ function BarChart({
 
 // ─── EventSelector ────────────────────────────────────────────────────────────
 
-function EventSelector({
-  events, loading, eventId, onSelect,
-}: {
-  events: EventListItem[]; loading: boolean; eventId: string | null
-  onSelect: (id: string | null) => void
-}) {
-  const [open, setOpen] = useState(false)
-  const ref = useRef<HTMLDivElement>(null)
+// RD-ANALYTICS-05 · the inline EventSelector that stood here is GONE.
+//
+// It was a second event picker: its own dropdown, its own search, its own option list
+// captured from the unscoped payload, and no URL synchronisation — so a scoped analytics
+// view could not be linked to or restored, and switching events here did not move the rest
+// of the workspace. components/dashboard/EventSelector.tsx does all of that already and is
+// what every other event-scoped surface uses.
 
-  useEffect(() => {
-    if (!open) return
-    function handler(e: MouseEvent) {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
-    }
-    document.addEventListener('mousedown', handler)
-    return () => document.removeEventListener('mousedown', handler)
-  }, [open])
-
-  useEffect(() => {
-    function handler(e: KeyboardEvent) { if (e.key === 'Escape') setOpen(false) }
-    document.addEventListener('keydown', handler)
-    return () => document.removeEventListener('keydown', handler)
-  }, [])
-
-  const publishedEvents = events.filter(
-    e => e.status === 'published' &&
-         e.lifecycleStatus !== 'cancelled' &&
-         e.lifecycleStatus !== 'archived' &&
-         e.lifecycleStatus !== 'unpublished',   // Phase L2 recognition — never emitted yet; keeps future totals correct
-  )
-  const selected = publishedEvents.find(e => e.draftId === eventId)
-  const label    = selected ? selected.name : 'All Events'
-
-  return (
-    <div ref={ref} className="relative">
-      <button
-        onClick={() => setOpen(o => !o)}
-        disabled={loading}
-        className="flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 text-[13px] font-medium text-foreground shadow-sm transition-colors hover:bg-muted/50 disabled:opacity-60"
-      >
-        {loading && <Loader2 className="size-3.5 animate-spin text-muted-foreground" />}
-        <span className="max-w-[160px] truncate">{label}</span>
-        <ChevronDown className={cn('size-3.5 text-muted-foreground transition-transform', open && 'rotate-180')} />
-      </button>
-
-      {open && (
-        <div className="absolute right-0 top-full z-50 mt-1 w-64 overflow-hidden rounded-xl border border-border bg-card shadow-lg">
-          <button
-            onClick={() => { onSelect(null); setOpen(false) }}
-            className={cn(
-              'flex w-full items-center px-3 py-2.5 text-left text-[13px] transition-colors hover:bg-muted/50',
-              !eventId && 'font-semibold text-primary',
-            )}
-          >
-            All Events
-          </button>
-          {publishedEvents.length === 0 ? (
-            <p className="border-t border-border px-3 py-2.5 text-[13px] text-muted-foreground">
-              No published events available
-            </p>
-          ) : (
-            <div className="max-h-60 overflow-y-auto border-t border-border">
-              {publishedEvents.map(e => (
-                <button
-                  key={e.draftId}
-                  onClick={() => { onSelect(e.draftId); setOpen(false) }}
-                  className={cn(
-                    'flex w-full items-center px-3 py-2.5 text-left text-[13px] transition-colors hover:bg-muted/50',
-                    eventId === e.draftId && 'font-semibold text-primary',
-                  )}
-                >
-                  <span className="line-clamp-1">{e.name}</span>
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
-    </div>
-  )
-}
-
-// ─── DateRangeSelector ────────────────────────────────────────────────────────
-
-const DATE_RANGE_OPTIONS: { value: DateRange; label: string }[] = [
-  { value: '7d',  label: '7D'  },
-  { value: '30d', label: '30D' },
-  { value: '90d', label: '90D' },
-  { value: 'all', label: 'All' },
-]
+/**
+ * RD-ANALYTICS-05 · the window options are DERIVED from the canonical preset table.
+ *
+ * This was a private list of three literals that happened to agree with
+ * lib/analytics/dateRange.ts. Deriving it means the page cannot offer a window the shared
+ * model does not define, and a preset added there appears here without an edit.
+ */
+const DATE_RANGE_OPTIONS: { value: DateRange; label: string }[] =
+  (Object.keys(PRESET_DAYS) as DateRange[]).map(value => ({ value, label: value.toUpperCase() }))
 
 function DateRangeSelector({ value, onChange }: { value: DateRange; onChange: (v: DateRange) => void }) {
   return (
@@ -289,7 +206,15 @@ function StatCard({
 
 // ─── RevenueHeroCard ──────────────────────────────────────────────────────────
 
-function RevenueHeroCard({ paise, paidEventCount }: { paise: number; paidEventCount: number }) {
+/**
+ * `paise: null` means revenue was not readable for every event in scope (a caller without
+ * the finance permission receives no per-event figure). The card shows "—": a ₹0 hero
+ * would report a business result the page did not measure.
+ *
+ * "Estimated Revenue" was a misnomer. The figure is `registrationCounters.revenuePaise` —
+ * the platform's canonical CONFIRMED revenue — so the label now says what it is.
+ */
+function RevenueHeroCard({ paise, eventCount }: { paise: number | null; eventCount: number }) {
   return (
     <div
       className="relative overflow-hidden rounded-2xl p-6 text-white"
@@ -297,15 +222,17 @@ function RevenueHeroCard({ paise, paidEventCount }: { paise: number; paidEventCo
     >
       <div className="relative z-10">
         <p className="text-[12px] font-semibold uppercase tracking-widest opacity-80">
-          Estimated Revenue
+          Confirmed Revenue
         </p>
         <p className="mt-1.5 text-[40px] font-bold leading-none tracking-tight">
-          {fmtINR(paise)}
+          {paise === null ? '—' : fmtINR(paise)}
         </p>
         <p className="mt-2 text-[13px] opacity-70">
-          {paise === 0
-            ? 'No paid registrations yet'
-            : `across ${paidEventCount} paid event${paidEventCount !== 1 ? 's' : ''}`}
+          {paise === null
+            ? 'Revenue is not available for your role'
+            : paise === 0
+              ? 'No confirmed revenue yet'
+              : `across ${eventCount} event${eventCount !== 1 ? 's' : ''}`}
         </p>
       </div>
       <div className="pointer-events-none absolute -right-8 -top-8 size-44 rounded-full bg-white/10" />
@@ -322,10 +249,10 @@ const RANK_BADGE: Record<number, string> = {
   3: 'bg-orange-100 text-orange-700',
 }
 
-function EventRow({ event, rank }: { event: EventListItem; rank: number }) {
-  const pct       = event.totalCapacity
-    ? Math.round((event.totalRegistrations / event.totalCapacity) * 100)
-    : null
+function EventRow({ event, rank }: { event: DashboardEvent; rank: number }) {
+  // `fillPct` is resolved server-side against the event's real capacity, so this row no
+  // longer divides two numbers it fetched separately. Null capacity ⇒ no rate exists.
+  const pct       = event.capacity ? event.fillPct : null
   const badgeColor = RANK_BADGE[rank] ?? 'bg-muted/60 text-muted-foreground'
 
   return (
@@ -342,7 +269,7 @@ function EventRow({ event, rank }: { event: EventListItem; rank: number }) {
         )}
       </td>
       <td className="hidden px-4 py-3 text-right tabular-nums text-[13px] font-semibold text-foreground sm:table-cell">
-        {event.totalRegistrations.toLocaleString('en-IN')}
+        {event.registered.toLocaleString('en-IN')}
       </td>
       <td className="hidden px-4 py-3 md:table-cell">
         {pct !== null ? (
@@ -362,8 +289,13 @@ function EventRow({ event, rank }: { event: EventListItem; rank: number }) {
         )}
       </td>
       <td className="hidden px-4 py-3 text-right text-[13px] lg:table-cell">
-        <span className={event.estimatedRevenue > 0 ? 'font-semibold text-foreground' : 'text-muted-foreground'}>
-          {event.estimatedRevenue > 0 ? fmtINR(event.estimatedRevenue) : 'Free'}
+        {/* null ⇒ the caller holds no finance permission. Omitted, never rendered as ₹0.
+            RD-ANALYTICS-12-21 (F1) ⇒ `revenueUnavailable` means the read failed, so the 0 on
+            the wire is a placeholder. Both absences render the dash; neither invents a zero. */}
+        <span className={event.confirmedRevenuePaise && !event.revenueUnavailable
+          ? 'font-semibold text-foreground' : 'text-muted-foreground'}>
+          {event.confirmedRevenuePaise === null || event.revenueUnavailable ? '—'
+            : event.confirmedRevenuePaise > 0 ? fmtINR(event.confirmedRevenuePaise) : '₹0'}
         </span>
       </td>
       <td className="px-4 py-3 text-right">
@@ -381,16 +313,24 @@ function EventRow({ event, rank }: { event: EventListItem; rank: number }) {
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function ReportsHubPage() {
-  const [events,        setEvents]        = useState<EventListItem[]>([])
-  const [registrations, setRegistrations] = useState<Reg[]>([])
+  const [data,          setData]          = useState<DashboardData | null>(null)
+  /**
+   * The selector's option list, captured from the UNSCOPED load.
+   *
+   * A scoped response contains only the selected event, so reading the list off `data`
+   * would collapse the picker to one option the moment anything was picked.
+   */
+  // RD-ANALYTICS-05 · the option list is no longer captured from the payload; the context
+  // owns it. What remains local is only what THIS page fetches.
   const [loading,       setLoading]       = useState(true)
   const [error,         setError]         = useState<string | null>(null)
   const [refreshKey,    setRefreshKey]    = useState(0)
   const [refreshing,    setRefreshing]    = useState(false)
-  const [selectedEventId, setSelectedEventId] = useState<string | null>(null)
+  const { selectedEventId, selectedEvent } = useEventContext()
   const [dateRange,     setDateRange]     = useState<DateRange>('30d')
   // Plan gate — advanced reports is a Pro+ feature. null = unknown (loading).
-  const [advancedReports, setAdvancedReports] = useState<boolean | null>(null)
+  // RD-CAPACITY-02 · the `advancedReports` entitlement flag is gone. Analytics is included for
+  // every organizer, so there is no plan state to hold and nothing to gate on.
 
   const { user, getToken } = useAuth()
 
@@ -399,7 +339,7 @@ export default function ReportsHubPage() {
     let cancelled = false
     const run = async () => {
       // Show full loading spinner only on first load; not on explicit refresh
-      if (events.length === 0) setLoading(true)
+      if (!data) setLoading(true)
       setError(null)
 
       if (!user) { setLoading(false); return }
@@ -407,26 +347,23 @@ export default function ReportsHubPage() {
         const token   = await getToken()
         if (cancelled || !token) return
         const headers = { Authorization: `Bearer ${token}` }
-        // Entitlement check first — gate the page before loading analytics data.
-        try {
-          const entRes = await fetch('/api/organizer/entitlements', { headers, cache: 'no-store' })
-          if (entRes.ok) {
-            const ent = await entRes.json() as { features?: { advancedReports?: boolean } }
-            if (!cancelled) setAdvancedReports(ent.features?.advancedReports ?? false)
-          } else { if (!cancelled) setAdvancedReports(false) }
-        } catch { if (!cancelled) setAdvancedReports(false) }
-        const [evRes, regRes] = await Promise.all([
-          fetch('/api/organizer/events',        { headers }),
-          fetch('/api/organizer/registrations', { headers }),
-        ])
-        if (!evRes.ok) throw new Error('Failed to load events')
-        const evData = await evRes.json() as EventsListResponse
+        // RD-REPORT-02 · scope is resolved on the SERVER. The event id travels as
+        // `?eventId=`, whose ownership is proven by the `users/{uid}/eventDrafts/{id}`
+        // path — so a scoped view narrows this organizer's own data and can never widen.
+        // The page used to filter the fetched arrays instead, which meant a scoped view
+        // was a subset of an already-wrong sample.
+        const res = await fetch(
+          selectedEventId
+            ? `/api/organizer/dashboard?eventId=${encodeURIComponent(selectedEventId)}`
+            : '/api/organizer/dashboard',
+          { headers, cache: 'no-store' },
+        )
+        if (!res.ok) throw new Error('Failed to load analytics')
+        const payload = await res.json() as DashboardData
         if (cancelled) return
-        setEvents(evData.events)
-        if (regRes.ok) {
-          const regData = await regRes.json() as AllRegistrationsResponse
-          if (!cancelled) setRegistrations(regData.registrations)
-        }
+        setData(payload)
+        // Only an unscoped response carries every event, so only it may refresh the picker.
+        // The picker's options are the context's concern now — nothing to capture here.
       } catch (e) {
         if (!cancelled) setError(e instanceof Error ? e.message : 'Error loading analytics')
       } finally {
@@ -436,155 +373,108 @@ export default function ReportsHubPage() {
     run()
     return () => { cancelled = true }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user, getToken, refreshKey])
+  }, [user, getToken, refreshKey, selectedEventId])
 
   function handleRefresh() {
     setRefreshing(true)
     setRefreshKey(k => k + 1)
   }
 
-  // ── Filtered slices ────────────────────────────────────────────────────────
+  // ── Derived views ──────────────────────────────────────────────────────────
+  //
+  // Nothing below re-derives a business figure from rows. Each value is either read
+  // straight off the payload or is a presentation-level arrangement of values the server
+  // already resolved.
 
-  const selectedEvent = useMemo(
-    () => events.find(e => e.draftId === selectedEventId) ?? null,
-    [events, selectedEventId],
-  )
-
-  const filteredEvents = useMemo(() => {
-    if (!selectedEventId) return events
-    return events.filter(e => e.draftId === selectedEventId)
-  }, [events, selectedEventId])
-
-  const filteredRegistrations = useMemo(() => {
-    const slug = selectedEvent?.slug
-    if (!slug) return registrations
-    return registrations.filter(r => r.eventSlug === slug)
-  }, [registrations, selectedEvent])
-
-  // ── Summary stats (event-filtered; not date-filtered) ─────────────────────
+  /** The events in the CURRENT scope — all of them when unscoped, one when scoped. */
+  const scopedEvents  = useMemo(() => data?.events ?? [], [data])
+  // `selectedEvent` now comes from the context above, resolved from the SAME event list
+  // the selector renders — so the heading and the picker can no longer disagree.
 
   const summary = useMemo(() => {
-    const total          = filteredEvents.length
-    const published      = filteredEvents.filter(e => e.status === 'published').length
-    const totalRegs      = filteredEvents.reduce((s, e) => s + e.totalRegistrations, 0)
-    const totalRevPaise  = filteredEvents.reduce((s, e) => s + e.estimatedRevenue, 0)
-    const paidEvents     = filteredEvents.filter(e => !e.isFreeEvent && e.estimatedRevenue > 0)
-    // Fill rate: paid events with explicit capacity only (free events have a dummy 100 cap)
-    const paidWithCap    = filteredEvents.filter(e => !e.isFreeEvent && e.totalCapacity)
-    const paidCap        = paidWithCap.reduce((s, e) => s + (e.totalCapacity ?? 0), 0)
-    const paidRegs       = paidWithCap.reduce((s, e) => s + e.totalRegistrations, 0)
-    const fillRate       = paidCap > 0 ? Math.round((paidRegs / paidCap) * 100) : null
-    const topEvents      = [...filteredEvents]
-      .sort((a, b) => b.totalRegistrations - a.totalRegistrations)
-      .slice(0, 10)
-    return { total, published, totalRegs, totalRevPaise, fillRate, paidEvents, topEvents }
-  }, [filteredEvents])
+    const totals = data?.registrationTotals ?? null
+    // A published event is one that left draft. `lifecycleStatus` is archive-accurate,
+    // unlike the legacy `status` field, which reports archived events as drafts forever.
+    const published = scopedEvents.filter(e => e.lifecycleStatus !== 'draft').length
 
-  // ── Trend charts (event + date filtered) ──────────────────────────────────
+    // Revenue is `number | null` per event, where null means the caller holds no finance
+    // permission. One null makes the SUM unknowable, so the card shows "—" rather than a
+    // total that silently omits events.
+    //
+    // RD-ANALYTICS-12-21 (F1) · an UNREADABLE event is equally unknowable, and its `0` on
+    // the wire is a placeholder. Summing it would understate the total by an unknown amount
+    // while presenting it as exact — the same defect, one field down.
+    const revenueKnown  = scopedEvents.every(
+      e => e.confirmedRevenuePaise !== null && !e.revenueUnavailable)
+    const totalRevPaise = revenueKnown
+      ? scopedEvents.reduce((s, e) => s + (e.confirmedRevenuePaise ?? 0), 0)
+      : null
 
-  const { regTrend, revTrend } = useMemo(() => {
-    const buckets    = buildBuckets(dateRange)
-    const rangeStart = getRangeStart(dateRange)
+    // Fill rate over every event that HAS a capacity. (The former rule excluded free
+    // events on the belief that they carried a dummy capacity of 100; they do not — the
+    // events API computes real capacity and returns null when a pass is unlimited.)
+    const withCap = scopedEvents.filter(e => e.capacity !== null && e.capacity > 0)
+    const cap     = withCap.reduce((s, e) => s + (e.capacity ?? 0), 0)
+    const regs    = withCap.reduce((s, e) => s + e.registered, 0)
 
-    filteredRegistrations.forEach(r => {
-      if (!r.registeredAt) return
-      const date = new Date(r.registeredAt)
-      if (rangeStart && date < rangeStart) return
-      const key    = getBucketKey(date, dateRange)
-      const bucket = buckets.get(key)
-      if (bucket) {
-        bucket.registrations++
-        bucket.revenue += r.amount ?? 0
-      }
-    })
-
-    const arr = [...buckets.values()]
     return {
-      regTrend: arr.map(b => ({ label: b.label, value: b.registrations })),
-      revTrend: arr.map(b => ({ label: b.label, value: Math.round(b.revenue / 100) })),
+      total:        scopedEvents.length,
+      published,
+      registrations: totals?.total ?? null,     // all statuses; null ⇒ unmeasured
+      confirmed:     totals?.confirmed ?? null,
+      totalRevPaise,
+      fillRate:      cap > 0 ? Math.round((regs / cap) * 100) : null,
+      topEvents:     [...scopedEvents].sort((a, b) => b.registered - a.registered).slice(0, 10),
     }
-  }, [filteredRegistrations, dateRange])
+  }, [data, scopedEvents])
+
+  // Both charts are a SLICE of the server's daily rollups — exact at any event size.
+  const { regTrend, revTrend, revVisible } = useMemo(() => {
+    const series = sliceTrend(data?.trendDays ?? [], dateRange)
+    return {
+      regTrend: series.map(b => ({ label: b.label, value: b.registrations })),
+      // RD-PREPROD · null revenue ⇒ the caller may not see money: the revenue chart is not drawn.
+      revVisible: series.length > 0 && series.every(b => b.revenue !== null),
+      revTrend: series.map(b => ({ label: b.label, value: Math.round((b.revenue ?? 0) / 100) })),
+    }
+  }, [data, dateRange])
 
   // ── Smart insights ─────────────────────────────────────────────────────────
+  //
+  // RD-ANALYTICS-04 · the rules moved to lib/dashboard/insights.ts.
+  //
+  // They used to live in this useMemo — correct, but a second insight engine sitting in a
+  // render function beside the pure, tested one the dashboard uses. What remains here is
+  // the only part that is genuinely presentational: mapping a rule's stable `kind` to an
+  // icon. The rules themselves no longer know that icons exist.
 
-  type InsightType = 'positive' | 'neutral' | 'warning'
-  type InsightEntry = { icon: React.ElementType; text: string; type: InsightType }
+  const insights: PerformanceInsight[] = useMemo(() => buildPerformanceInsights({
+    events: scopedEvents.map(e => ({
+      name:            e.name,
+      lifecycleStatus: e.lifecycleStatus,
+      registered:      e.registered,
+      capacity:        e.capacity,
+      fillPct:         e.fillPct,
+    })),
+    week:             data?.trendRanges?.find(r => r.days === 7)?.registrations ?? null,
+    trendUnavailable: data?.trendUnavailable ?? false,
+  }), [scopedEvents, data])
 
-  const insights = useMemo((): InsightEntry[] => {
-    const result: InsightEntry[] = []
-
-    // Best event
-    const best = [...filteredEvents].sort((a, b) => b.totalRegistrations - a.totalRegistrations)[0]
-    if (best && best.totalRegistrations > 0) {
-      result.push({
-        icon: Trophy,
-        text: `"${best.name}" leads with ${best.totalRegistrations.toLocaleString('en-IN')} registration${best.totalRegistrations !== 1 ? 's' : ''}`,
-        type: 'positive',
-      })
-    }
-
-    // Week-over-week velocity
-    const now = new Date()
-    const d7  = new Date(now); d7.setDate(d7.getDate() - 7);   d7.setHours(0, 0, 0, 0)
-    const d14 = new Date(now); d14.setDate(d14.getDate() - 14); d14.setHours(0, 0, 0, 0)
-    const recent = filteredRegistrations.filter(r => r.registeredAt && new Date(r.registeredAt) >= d7).length
-    const prev   = filteredRegistrations.filter(r => r.registeredAt && new Date(r.registeredAt) >= d14 && new Date(r.registeredAt) < d7).length
-
-    if (recent > 0 && prev > 0) {
-      const delta = recent - prev
-      const pct   = Math.abs(Math.round((delta / prev) * 100))
-      if (delta > 0) {
-        result.push({ icon: TrendingUp,   text: `${pct}% more registrations in the last 7 days vs the prior week`, type: 'positive' })
-      } else if (delta < 0) {
-        result.push({ icon: TrendingDown, text: `${pct}% fewer registrations in the last 7 days vs the prior week`, type: 'warning' })
-      } else {
-        result.push({ icon: Minus,        text: `Registration pace is steady week-over-week`,                       type: 'neutral' })
-      }
-    } else if (recent > 0) {
-      result.push({
-        icon: TrendingUp,
-        text: `${recent} new registration${recent !== 1 ? 's' : ''} in the last 7 days`,
-        type: 'positive',
-      })
-    }
-
-    // Published events with no registrations
-    const emptyPublished = filteredEvents.filter(e => e.status === 'published' && e.totalRegistrations === 0)
-    if (emptyPublished.length > 0) {
-      result.push({
-        icon: AlertCircle,
-        text: emptyPublished.length === 1
-          ? `"${emptyPublished[0].name}" has no registrations yet — consider promoting it`
-          : `${emptyPublished.length} published events have no registrations yet`,
-        type: 'warning',
-      })
-    }
-
-    // High fill-rate events (paid, 80%+)
-    const highFill = filteredEvents.filter(
-      e => !e.isFreeEvent && e.totalCapacity && (e.totalRegistrations / e.totalCapacity) >= 0.8,
-    )
-    if (highFill.length > 0) {
-      result.push({
-        icon: Target,
-        text: `${highFill.length} event${highFill.length !== 1 ? 's are' : ' is'} at 80%+ capacity — consider opening a waitlist`,
-        type: 'positive',
-      })
-    }
-
-    return result.slice(0, 4)
-  }, [filteredEvents, filteredRegistrations])
+  const INSIGHT_ICON: Record<PerformanceInsight['kind'], React.ElementType> = {
+    top_event:       Trophy,
+    velocity_up:     TrendingUp,
+    velocity_down:   TrendingDown,
+    velocity_flat:   Minus,
+    velocity_total:  TrendingUp,
+    empty_published: AlertCircle,
+    nearly_full:     Target,
+  }
 
   // ── Header slot ───────────────────────────────────────────────────────────
 
   const headerAction = (
     <div className="flex items-center gap-2">
-      <EventSelector
-        events={events}
-        loading={loading}
-        eventId={selectedEventId}
-        onSelect={setSelectedEventId}
-      />
+      <EventSelector />
       <button
         onClick={handleRefresh}
         disabled={loading || refreshing}
@@ -596,23 +486,6 @@ export default function ReportsHubPage() {
       </button>
     </div>
   )
-
-  // ── Plan gate: advanced reports requires Pro+ ──────────────────────────────
-  if (advancedReports === false) {
-    return (
-      <div className="space-y-6">
-        <PageHeader title="Analytics" subtitle="Advanced reports are a Pro feature." />
-        <div className="flex flex-col items-center justify-center gap-3 rounded-2xl border border-dashed border-border py-20 text-center">
-          <div className="flex size-12 items-center justify-center rounded-full bg-primary/[0.08]"><BarChart3 className="size-6 text-primary" aria-hidden /></div>
-          <p className="text-[16px] font-semibold text-foreground">Advanced reports aren&apos;t on your plan</p>
-          <p className="max-w-sm text-[13.5px] text-muted-foreground">Upgrade to Pro to unlock detailed analytics, trends, and performance insights across your events.</p>
-          <Link href="/dashboard/settings/billing" className="mt-2 inline-flex items-center gap-2 rounded-lg px-4 py-2 text-[14px] font-semibold text-primary-foreground shadow-sm hover:opacity-90" style={{ backgroundImage: 'var(--primary-gradient)' }}>
-            View plans <ArrowRight className="size-4" aria-hidden />
-          </Link>
-        </div>
-      </div>
-    )
-  }
 
   return (
     <div className="space-y-6">
@@ -628,7 +501,7 @@ export default function ReportsHubPage() {
       />
 
       {/* ── Initial loading ── */}
-      {loading && events.length === 0 && (
+      {loading && !data && (
         <div className="flex items-center justify-center py-16">
           <Loader2 className="size-6 animate-spin text-muted-foreground" />
         </div>
@@ -642,12 +515,21 @@ export default function ReportsHubPage() {
       )}
 
       {/* ── Content (visible once data is loaded; stays visible on refresh) ── */}
-      {events.length > 0 && !error && (
+      {data && !error && (
         <>
+          {/* RD-REPORT-02 · at least one event's counts could not be read, so the totals
+              below cover less than they appear to. Said plainly rather than absorbed. */}
+          {data.analyticsUnavailable && (
+            <div className="flex items-center gap-2 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-[13px] text-amber-800">
+              <AlertCircle className="size-4 shrink-0" />
+              Some events&rsquo; registration counts could not be read, so these totals are incomplete.
+            </div>
+          )}
+
           {/* ── Revenue hero ── */}
           <RevenueHeroCard
             paise={summary.totalRevPaise}
-            paidEventCount={summary.paidEvents.length}
+            eventCount={summary.total}
           />
 
           {/* ── Summary stat cards ── */}
@@ -661,20 +543,21 @@ export default function ReportsHubPage() {
             />
             <StatCard
               label="Total Registrations"
-              value={summary.totalRegs.toLocaleString('en-IN')}
+              value={summary.registrations !== null ? summary.registrations.toLocaleString('en-IN') : '—'}
+              sub={summary.confirmed !== null ? `${summary.confirmed.toLocaleString('en-IN')} confirmed` : 'all statuses'}
               icon={Users}
               color="bg-emerald-100"
             />
             <StatCard
               label="Fill Rate"
               value={summary.fillRate !== null ? `${summary.fillRate}%` : '—'}
-              sub={summary.fillRate !== null ? 'across paid events with capacity' : 'no paid events with capacity'}
+              sub={summary.fillRate !== null ? 'across events with capacity' : 'no events with capacity'}
               icon={TrendingUp}
               color="bg-amber-100"
             />
             <StatCard
-              label="Estimated Revenue"
-              value={fmtINR(summary.totalRevPaise)}
+              label="Confirmed Revenue"
+              value={summary.totalRevPaise !== null ? fmtINR(summary.totalRevPaise) : '—'}
               icon={IndianRupee}
               color="bg-sky-100"
             />
@@ -686,20 +569,31 @@ export default function ReportsHubPage() {
               <h2 className="text-[16px] font-semibold text-foreground">Registration Trends</h2>
               <DateRangeSelector value={dateRange} onChange={setDateRange} />
             </div>
-            <div className="grid gap-6 sm:grid-cols-2">
-              <div>
-                <p className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-                  Registrations
-                </p>
-                <BarChart data={regTrend} useGradient />
+            {/* The rollups could not be read. A chart of zeros would assert that nobody
+                registered on any of these days — so the failure is stated instead. */}
+            {data.trendUnavailable ? (
+              <div className="flex items-center gap-2 rounded-lg border border-border bg-muted/30 px-4 py-6 text-[13px] text-muted-foreground">
+                <AlertCircle className="size-4 shrink-0" />
+                Trend data could not be loaded. Try refreshing.
               </div>
-              <div>
-                <p className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-                  Revenue (₹)
-                </p>
-                <BarChart data={revTrend} useGradient={false} />
+            ) : (
+              <div className="grid gap-6 sm:grid-cols-2">
+                <div>
+                  <p className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                    Registrations
+                  </p>
+                  <BarChart data={regTrend} useGradient />
+                </div>
+                {revVisible && (
+                  <div>
+                    <p className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                      Revenue (₹)
+                    </p>
+                    <BarChart data={revTrend} useGradient={false} />
+                  </div>
+                )}
               </div>
-            </div>
+            )}
           </div>
 
           {/* ── Smart insights ── */}
@@ -708,15 +602,16 @@ export default function ReportsHubPage() {
               <h2 className="mb-4 text-[16px] font-semibold text-foreground">Smart Insights</h2>
               <div className="space-y-2.5">
                 {insights.map((ins, i) => {
-                  const Icon = ins.icon
+                  const Icon = INSIGHT_ICON[ins.kind]
+                  const tone: PerformanceInsightTone = ins.tone
                   return (
                     <div
                       key={i}
                       className={cn(
                         'flex items-start gap-3 rounded-lg px-3 py-2.5 text-[13px]',
-                        ins.type === 'positive' ? 'bg-emerald-50 text-emerald-800' :
-                        ins.type === 'warning'  ? 'bg-amber-50 text-amber-800'    :
-                                                  'bg-muted/40 text-foreground',
+                        tone === 'positive' ? 'bg-emerald-50 text-emerald-800' :
+                        tone === 'warning'  ? 'bg-amber-50 text-amber-800'    :
+                                              'bg-muted/40 text-foreground',
                       )}
                     >
                       <Icon className="mt-0.5 size-4 shrink-0" />
@@ -776,7 +671,7 @@ export default function ReportsHubPage() {
               <h2 className="mb-3 text-[18px] font-semibold text-foreground">Event Status Breakdown</h2>
               <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
                 {(['draft', 'published', 'registration_closed', 'completed', 'cancelled', 'archived'] as const).map(s => {
-                  const count  = events.filter(e => e.lifecycleStatus === s).length
+                  const count  = scopedEvents.filter(e => e.lifecycleStatus === s).length
                   const labels: Record<string, string> = {
                     draft:               'Draft',
                     published:           'Published',

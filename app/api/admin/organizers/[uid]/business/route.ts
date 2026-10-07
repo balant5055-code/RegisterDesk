@@ -2,14 +2,16 @@
 // settlements / entitlements. Admin-gated, lazy. Reuses getOrganizer360Business.
 
 import { NextRequest, NextResponse } from 'next/server'
-import { resolveAdminUid }           from '@/lib/admin/auth'
+import { requireSuperAdmin } from '@/lib/admin/financialGuard'
 import { getOrganizer360Business }   from '@/lib/admin/organizer360Service'
 
 interface RouteContext { params: Promise<{ uid: string }> }
 
 export async function GET(req: NextRequest, ctx: RouteContext): Promise<NextResponse> {
-  const adminUid = await resolveAdminUid(req.headers.get('authorization'))
-  if (!adminUid) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+  // RD-CLOSE — a financial read: Super Admin only (ADMIN_UIDS). A legacy `admin: true` claim
+  // alone gets 403 SUPER_ADMIN_REQUIRED (lib/admin/financialGuard.ts).
+  const superGate = await requireSuperAdmin(req)
+  if (superGate.response) return superGate.response
 
   const { uid } = await ctx.params
   try {

@@ -15,8 +15,40 @@ service cloud.firestore {
       match /auditLog/{auditId} {
         allow read, write: if false;
       }
+      // RD-CHECKIN-2.0 — the append-only check-in history. Server-only, written
+      // via the Admin SDK, and it carries operator identity, so it needs the same
+      // explicit deny for the same reason as auditLog above: rules do NOT cascade
+      // into subcollections, and relying on implicit default-deny is exactly the
+      // gap EA-3 closed here.
+      match /checkinHistory/{entryId} {
+        allow read, write: if false;
+      }
     }
     match /registrationCounters/{docId} {
+      allow read, write: if false;
+    }
+    // WhatsApp Inbox (Phase 1a) — attendee message content. Admin SDK only: every read goes
+    // through a server route that enforces organizer ownership or Super Admin, so a client
+    // can never select another organizer's conversation by id. Rules do NOT cascade into
+    // subcollections, hence the explicit deny on messages as well.
+    match /whatsappInbound/{docId} {
+      allow read, write: if false;
+    }
+    match /whatsappConversations/{conversationId} {
+      allow read, write: if false;
+      match /messages/{messageId} {
+        allow read, write: if false;
+      }
+    }
+    // RD-CHECKIN-2.0 — staff account profiles and the username uniqueness locks.
+    // Both are written only by lib/staff/service.ts through the Admin SDK. Denied
+    // to the client SDK outright: the profile carries a gate operator's event
+    // assignment, and the lock collection would otherwise let any signed-in caller
+    // enumerate every username on the platform.
+    match /staffAccounts/{docId} {
+      allow read, write: if false;
+    }
+    match /staffUsernames/{username} {
       allow read, write: if false;
     }
     match /registrationClaims/{docId} {
@@ -66,6 +98,18 @@ service cloud.firestore {
     }
     match /bibCounters/{docId} {
       allow read, write: if false;
+    }
+    // RD-EVENT-19F-B — timing tag locks and their import jobs. Tag ids are
+    // organizer/provider operational data and are never exposed to a participant,
+    // so the client has no read path either.
+    match /identifierTagLocks/{docId} {
+      allow read, write: if false;
+    }
+    match /timingTagImportJobs/{docId} {
+      allow read, write: if false;
+      match /items/{itemId} {
+        allow read, write: if false;
+      }
     }
 
     // Published donation campaigns and their counters are written exclusively
@@ -297,9 +341,36 @@ service cloud.firestore {
     // collection never becomes a second copy of participant data.
     match /photoBibLinks/{linkId} { allow read, write: if false; }
 
+    // RD-DASHBOARD-02 — organizer daily rollups + their coverage markers.
+    // Written ONLY inside the registration transactions that already maintain
+    // registrationCounters, and read ONLY by the dashboard API. Both use the Admin
+    // SDK, which bypasses these rules; an explicit deny keeps a future client-side
+    // read from quietly becoming possible.
+    match /organizerDailyStats/{docId} { allow read, write: if false; }
+
     // ── Organizer profile ──────────────────────────────────────────────────────
     match /users/{userId} {
       allow read: if request.auth != null && request.auth.uid == userId;
+
+      // RD-PHASE4-C7 closeout — profile keys written ONLY by trusted server code (Admin SDK):
+      // the admin comp/override tier (PATCH /api/admin/organizers/[uid]/plan) and every
+      // custom-domain field (lib/domains/service.ts). A client may never supply them.
+      function userServerOwnedKeys() {
+        return ['entitlementOverrideTier', 'entitlementUpdatedBy', 'entitlementUpdatedAt',
+                'customDomain', 'customDomainStatus', 'customDomainSslStatus', 'customDomainToken',
+                'customDomainVerifiedAt', 'customDomainError', 'customDomainUpdatedAt',
+                // RD-PHASE4 signup transition — validated server-side by lib/branding/service.ts
+                // (https-only images, hex colours, sanitised sender name); signup never sends it.
+                'branding'];
+      }
+      // A missing `mobile` map reads as unverified on both sides, so an update that does not
+      // touch mobile always passes; a non-map `mobile` errors, and an error denies.
+      function userMobileVerificationUnchanged() {
+        let before = resource.data.get('mobile', {});
+        let after  = request.resource.data.get('mobile', {});
+        return after.get('verified', false) == before.get('verified', false)
+            && after.get('verifiedAt', null) == before.get('verifiedAt', null);
+      }
 
       // Owner may create their own profile doc (createOrganizerProfile, run once right
       // after Auth signup). Constrained to the canonical initial shape so a client can't
@@ -312,7 +383,21 @@ service cloud.firestore {
         && request.resource.data.emailVerified == false
         && request.resource.data.verification.email.verified == false
         && request.resource.data.trust.score == 0
-        && !('accountStatus' in request.resource.data);
+        // RD-PHASE4 signup transition — an OLDER app bundle sends no accountStatus; the current
+        // one sends 'pending'. Both are accepted; any client-supplied other value ('active',
+        // 'suspended', 'banned', …) is refused. verify-otp activates either shape only after a
+        // successful OTP. Tighten back to == 'pending' once older bundles are gone.
+        && (!('accountStatus' in request.resource.data)
+            || request.resource.data.accountStatus == 'pending')
+        // RD-PHASE4-C7 closeout · server-owned fields may not be SELF-ASSIGNED at create either
+        // (the update deny-list below only covers later writes). No client bundle has ever sent
+        // them: createOrganizerProfile writes none of these keys.
+        && !request.resource.data.keys().hasAny(userServerOwnedKeys())
+        // mobile is optional (older bundles did not send it); when present it must be the
+        // unverified initial shape — verification is server-owned (no phone OTP exists yet).
+        && (!('mobile' in request.resource.data)
+            || (request.resource.data.mobile.get('verified', false) == false
+                && request.resource.data.mobile.get('verifiedAt', null) == null));
 
       // Owner may update their editable profile fields, but NOT server-owned
       // moderation / identity / trust fields. Those are written exclusively by the
@@ -328,40 +413,75 @@ service cloud.firestore {
             .affectedKeys()
             .hasAny(['role', 'accountStatus', 'statusReason', 'statusUpdatedAt',
                      'statusUpdatedBy', 'emailVerified', 'verification', 'trust',
+                     // RD-WORKSPACE-OWNERSHIP-01 · `workspaceOwner` decides which workspace
+                     // a caller resolves into (lib/team/workspace.ts), so it is identity,
+                     // not preference. Immutable after create: the signup path writes it
+                     // once, and the Admin SDK (verify-otp backfill, ensureOrganizerProfile)
+                     // bypasses rules. Blocking UPDATE and not CREATE is deliberate — a
+                     // create constraint would reject any still-deployed older client bundle
+                     // that does not send the field, and the create case is not the risk:
+                     // the only workspace a self-asserted owner resolves into is their own.
+                     'workspaceOwner',
                      // Server-owned — written ONLY by the branding/domain services via
                      // the Admin SDK. Guarding them stops a client SDK from forging a
                      // 'verified' custom domain (bypassing DNS + plan checks, squatting a
                      // victim's domain) or writing unvalidated / plan-gated branding
                      // directly on its own user doc (RD-ORG-GA-04 F1/F2).
                      'branding', 'customDomain', 'customDomainStatus',
-                     'customDomainSslStatus', 'customDomainToken', 'customDomainVerifiedAt']);
+                     'customDomainSslStatus', 'customDomainToken', 'customDomainVerifiedAt',
+                     // RD-PHASE4-C7 closeout — also written only by lib/domains/service.ts.
+                     'customDomainError', 'customDomainUpdatedAt',
+                     // RD-PHASE4-S1 · C7 — the admin comp/override tier and its stamps are written ONLY by
+                     // PATCH /api/admin/organizers/[uid]/plan (Admin SDK). A client that could write
+                     // them would grant itself a higher workspace entitlement tier.
+                     'entitlementOverrideTier', 'entitlementUpdatedBy', 'entitlementUpdatedAt'])
+        // RD-PHASE4-C7 closeout · phone verification is server-owned: the client may not flip
+        // mobile.verified / mobile.verifiedAt (the rest of `mobile` is untouched by this rule).
+        && userMobileVerificationUnchanged();
 
       // ── Event drafts ──────────────────────────────────────────────────────────
       // Clients may read and update wizard fields freely.
       // Server-controlled fields (status, communicationBilling, publishedAt)
       // are write-protected — only the Admin SDK (API routes) may set them.
+      // RD-CE-FIX M2 · an ALLOW-list, not a deny-list. The wizard now saves through
+      // /api/organizer/drafts (Admin SDK, same allow-list in lib/events/draftWrite.ts); these rules
+      // only bound what a direct client write could still do, and stay compatible with an older
+      // client that writes wizard fields directly. A key outside the list — every lifecycle,
+      // review, billing, publish and commerce stamp (lifecycleStatus, completedAt, restoredAt,
+      // reviewStatus, publishedAt, …) or any unknown key — is refused on create AND update.
+      function draftWizardKeys() {
+        return ['currentStep', 'completedValues', 'eventType', 'eventSubtype', 'customEventSubtype',
+                'campaignType', 'visibility', 'accessControl', 'pricing', 'registrationForm',
+                'eventDetails', 'linkedCampaign', 'licenseTier', 'registrationCapacity',
+                'serviceSelection', 'updatedAt'];
+      }
+      function draftSlugOf(d) {
+        return d.get('eventDetails', {}).get('seo', {}).get('urlSlug', null);
+      }
       match /eventDrafts/{draftId} {
         allow read: if request.auth != null && request.auth.uid == userId;
 
-        // Allow creating a new draft — must start as 'draft', billing must be null
+        // A new draft: wizard keys plus the fixed initial stamps only — it must start as an
+        // unpublished, unbilled 'draft'.
         allow create: if request.auth != null
           && request.auth.uid == userId
+          && request.resource.data.keys().hasOnly(
+               draftWizardKeys().concat(['id', 'status', 'communicationBilling', 'publishedAt', 'createdAt']))
           && request.resource.data.status == 'draft'
-          && request.resource.data.communicationBilling == null;
+          && request.resource.data.get('communicationBilling', null) == null
+          && request.resource.data.get('publishedAt', null) == null;
 
-        // Allow updating wizard fields, but block the server-controlled lifecycle /
-        // moderation / billing fields. `lifecycleStatus` MUST be here (RD-EVENT-GA-02A):
-        // deriveLifecycleStatus reads it first, so a client that could forge it would
-        // control the `from` state of a lifecycle transition (resurrecting an
-        // archived/cancelled event to public without admin review) and the free-tier
-        // active-event count. The Admin SDK (server transitions) bypasses rules.
+        // Updates touch wizard keys only. Once the draft has produced its live event
+        // (`publishedAt` set by the server), its identity is frozen (H5): the public slug and the
+        // type / visibility / licence fields belong to the live event and cannot be rewritten here.
         allow update: if request.auth != null
           && request.auth.uid == userId
-          && !request.resource.data.diff(resource.data)
-              .affectedKeys()
-              .hasAny(['status', 'lifecycleStatus', 'communicationBilling', 'publishedAt',
-                       'cancelledAt', 'cancelledBy', 'cancelReason', 'archivedAt',
-                       'unpublishedAt', 'completedAt', 'reviewStatus', 'approvedAt', 'rejectedAt']);
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(draftWizardKeys())
+          && (resource.data.get('publishedAt', null) == null
+              || (draftSlugOf(request.resource.data) == draftSlugOf(resource.data)
+                  && !request.resource.data.diff(resource.data).affectedKeys().hasAny(
+                       ['eventType', 'eventSubtype', 'customEventSubtype', 'campaignType',
+                        'visibility', 'licenseTier'])));
       }
 
       // ── Campaign drafts ───────────────────────────────────────────────────────

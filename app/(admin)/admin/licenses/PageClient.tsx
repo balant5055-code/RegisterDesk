@@ -14,8 +14,8 @@ import { cn } from '@/lib/utils/cn'
 import { IconButton } from '@/components/ui'
 import {
   Loader2, X, Eye, Download, KeyRound, PauseCircle, PlayCircle, XCircle,
-  ArrowUpCircle, ArrowDownCircle, IndianRupee, Users, ToggleRight, BadgeCheck,
-  Undo2, RefreshCw, StickyNote, Gift, ExternalLink,
+  IndianRupee, Users, ToggleRight, BadgeCheck,
+  Undo2, RefreshCw, StickyNote, ExternalLink,
 } from 'lucide-react'
 import {
   AdminToolbar, StatusPill, TableFrame, THead, Th, TBody, Tr, Td, TableStateRow,
@@ -23,11 +23,11 @@ import {
 } from '@/components/admin'
 import type { PillTone } from '@/components/admin'
 import { useConfirm } from '@/components/ui/ConfirmDialog'
-import { currentLicenseTierIds, isValidTierForVersion, CURRENT_LICENSE_VERSION, type AnyEventLicenseTier } from '@/lib/licensing/eventLicense'
 import type {
   LicenseRow, LicenseListResponse, LicenseDetail, LicenseDisplayStatus,
   LicensePaymentStatus, LicenseAdminActionType, LicenseAdminActionRequest,
 } from '@/lib/admin/licenseAdminTypes'
+import { AdminEventCommercialPanel } from '@/components/admin/AdminEventCommercialPanel'
 
 const STATUS_FILTERS: { value: string; label: string }[] = [
   { value: '',              label: 'All' },
@@ -300,16 +300,6 @@ function LicenseDetailModal({ eventId, onClose, onChanged }: {
     void act(action, { ...extra, reason })
   }
 
-  async function promptTier(action: 'upgrade' | 'downgrade' | 'grant') {
-    const tier = (await prompt({ title: 'Select tier', message: `Target tier (${currentLicenseTierIds().join(' / ')}):`, placeholder: currentLicenseTierIds().join(' / ') }))?.trim() as AnyEventLicenseTier
-    if (!isValidTierForVersion(tier, CURRENT_LICENSE_VERSION)) { if (tier) setError('Invalid tier'); return }
-    if (action === 'grant') {
-      const comp = await confirm({ title: 'Grant type', message: 'Complimentary (free) grant?', confirmLabel: 'Complimentary', cancelLabel: 'Normal grant' })
-      await withReason('grant', { tier, complimentary: comp })
-    } else {
-      await withReason(action, { tier })
-    }
-  }
 
   async function promptPrice() {
     const v = (await prompt({ title: 'Override price', message: 'Override price in ₹ (e.g. 499):', placeholder: '499' }))?.trim()
@@ -396,18 +386,24 @@ function LicenseDetailModal({ eventId, onClose, onChanged }: {
                   ? <ActBtn icon={PlayCircle} label="Reactivate" tone="emerald" busy={busy === 'reactivate'} onClick={() => withReason('reactivate', {}, 'Reactivate this license?')} />
                   : <ActBtn icon={PauseCircle} label="Suspend" tone="amber" busy={busy === 'suspend'} onClick={() => withReason('suspend')} />}
                 {lifecycle !== 'cancelled' && <ActBtn icon={XCircle} label="Cancel" tone="red" busy={busy === 'cancel'} onClick={() => withReason('cancel', {}, 'Cancel this license?')} />}
-                <ActBtn icon={ArrowUpCircle} label="Upgrade" busy={busy === 'upgrade'} onClick={() => promptTier('upgrade')} />
-                <ActBtn icon={ArrowDownCircle} label="Downgrade" busy={busy === 'downgrade'} onClick={() => promptTier('downgrade')} />
-                <ActBtn icon={IndianRupee} label="Override price" busy={busy === 'overridePrice'} onClick={promptPrice} />
+                {/* RD-EVENT-COMMERCE-04B — licence pricing is Super Admin only (server-enforced). */}
+                {detail?.canEditPricing === true && <ActBtn icon={IndianRupee} label="Override price" busy={busy === 'overridePrice'} onClick={promptPrice} />}
                 <ActBtn icon={Users} label="Override limit" busy={busy === 'overrideLimit'} onClick={promptLimit} />
                 <ActBtn icon={ToggleRight} label="Override feature" busy={busy === 'overrideFeatures'} onClick={promptFeature} />
-                <ActBtn icon={BadgeCheck} label="Mark paid" tone="emerald" busy={busy === 'markPaymentReceived'} onClick={() => withReason('markPaymentReceived', {}, 'Mark payment as received?')} />
-                <ActBtn icon={Gift} label="Grant/Comp" tone="emerald" busy={busy === 'grant'} onClick={() => promptTier('grant')} />
+                {!detail?.capacityModel && <ActBtn icon={BadgeCheck} label="Mark paid" tone="emerald" busy={busy === 'markPaymentReceived'} onClick={() => withReason('markPaymentReceived', {}, 'Mark payment as received?')} />}
+                {/* RD-EVENT-COMMERCE-05 — no tier Upgrade / Downgrade / Grant: retired (410). "Mark paid"
+                    stays hidden for capacity licences (04A). */}
                 <ActBtn icon={RefreshCw} label="Reissue" busy={busy === 'reissue'} onClick={() => withReason('reissue', {}, 'Reissue this license?')} />
                 <ActBtn icon={Undo2} label="Refund" tone="red" busy={busy === 'refund'} onClick={() => withReason('refund', {}, 'Refund this license? This cancels it and refunds any payment.')} />
                 <ActBtn icon={StickyNote} label="Add note" busy={busy === 'addNote'} onClick={addNote} />
               </div>
             </div>
+
+            {/* RD-CAPACITY-01 · Commercial configuration + capacity payments.
+                Between Actions and Timeline deliberately: it is what an admin reads BEFORE
+                acting, and every change it makes appends an audit row that appears in the
+                Timeline immediately below. */}
+            <AdminEventCommercialPanel eventId={eventId} getToken={getToken} />
 
             {/* Timeline */}
             <div>

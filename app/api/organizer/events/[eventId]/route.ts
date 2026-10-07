@@ -5,14 +5,48 @@
 
 import { NextRequest, NextResponse } from 'next/server'
 import { adminDb }                   from '@/lib/firebase/admin'
-import { getEventStats, sumConfirmedRevenueFromLedger } from '@/lib/firebase/firestore/registrationCounters'
+import { getEventStats, sumConfirmedRevenueFromLedgerChecked } from '@/lib/firebase/firestore/registrationCounters'
+import { evaluatePublishRequirements, severityOf } from '@/lib/events/publishRequirements'
 import { authorizeWorkspace }        from '@/lib/team/workspace'
 import { deriveLifecycleStatus, isArchivedEvent } from '@/lib/events/lifecycle'
 import { runEventDeletion }          from '@/lib/events/eventDeletion'
-import { getFreeEventCapacity }      from '@/lib/licensing/resolveCatalog'
+import { revenueStateFrom, toConfirmedRevenueFields } from '@/lib/finance/revenueState'
+import { resolveIdentifierConfig }   from '@/lib/identifiers/config'
+import { resolveLiveEventRef, resolveOwnedEventSlug } from '@/lib/events/liveEventRef'
+import { deriveStoredEventCapacity, resolveEventCapacitySummary } from '@/lib/registrations/capacity'
 import type { EventLifecycleStatus } from '@/types/events'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
+
+/**
+ * One publish requirement and whether it is currently satisfied — the full roll-call,
+ * passed and failing alike.
+ *
+ * RD-EVENT-04 · This exists so the Setup Center can render "Ready" from the SAME
+ * evaluator that decides whether the event can actually publish. Before it, Setup
+ * derived its own answers from the draft, which is how a card could read "Ready" for
+ * an event the platform would refuse to publish.
+ */
+export interface EventPublishCheck {
+  id:          string
+  title:       string
+  description: string
+  stepName:    string
+  /** Wizard step to jump to when fixing it. */
+  stepIndex:   number
+  severity:    'critical' | 'warning' | 'suggestion'
+  passed:      boolean
+}
+
+/** One unmet publish requirement, projected for the overview's attention list. */
+export interface EventSetupIssue {
+  id:       string
+  title:    string
+  /** 'critical' blocks publishing; 'warning' does not. Suggestions are counted, not listed. */
+  severity: 'critical' | 'warning'
+  /** The setup step that fixes it — used to deep-link into the existing setup flow. */
+  stepName: string
+}
 
 export interface PassDetail {
   id:            string
@@ -25,6 +59,35 @@ export interface PassDetail {
   status:        string
   salesStartDate: string | null
   salesEndDate:   string | null
+
+  // ─── RD-EVENT-13, all additive ────────────────────────────────────────────
+  //
+  // Read from the SAME draft document the fields above come from, so every one of
+  // these costs zero additional reads. They exist because an organizer configures
+  // twenty-seven fields per pass in the builder and could then see none of them: the
+  // Passes tab showed a name, a price and three numbers, so "why is this pass not
+  // appearing on my registration page?" had no answer anywhere in the workspace.
+
+  /** The code printed on tickets. Null when the organizer left it blank. */
+  code:          string | null
+  /** 'paid' | 'free' | 'complimentary' | 'invite_only' — the pass's own kind. */
+  type:          string | null
+  /** 'public' | 'private' | 'invite_only'. A private pass is why it is not listed. */
+  visibility:    string | null
+  /** Promoted on the public page. */
+  featured:      boolean
+  /** Disappears from the page once it sells out, rather than showing as sold out. */
+  hideWhenSoldOut: boolean
+  /** Shows the remaining count publicly. */
+  showRemainingSeats: boolean
+  /** Per-order limits, when the organizer set them away from the defaults. */
+  minPurchase:   number | null
+  maxPurchase:   number | null
+  /** Early-bird pricing, when configured. `price` remains the standard price. */
+  earlyBirdPrice:   number | null
+  earlyBirdEndDate: string | null
+  /** How many inclusions this pass lists — the detail itself lives in the builder. */
+  benefitsCount: number
 }
 
 export interface SpeakerDetail {
@@ -85,13 +148,70 @@ export interface EventDetailResponse {
   onlineMeetingUrl: string | null
   // Metrics
   totalCapacity:    number | null
+  /**
+   * RD-EVENT-COMMERCE-01 · D2 — the capacity the registration gate ENFORCES: `events/{slug}`
+   * read through `deriveStoredEventCapacity`, the same derivation the registration transaction
+   * uses. `null` = unlimited. ABSENT when the event has no readable live document (unpublished,
+   * or the read failed) — a money surface must then show 'unavailable', never guess a number.
+   * `totalCapacity` above is a display estimate from the draft's passes and is NOT enforced.
+   */
+  enforcedCapacity?: number | null
   totalRegistrations: number
   checkedInCount:   number
-  estimatedRevenue: number   // paise — CANONICAL confirmed revenue (registrationCounters.revenuePaise / ledger fallback); field name kept for contract stability
+  /**
+   * RD-ANALYTICS-12-19 · THE CANONICAL NAME for this figure.
+   *
+   * Canonical confirmed ticket revenue in integer PAISE, refund-stable. Identical in
+   * definition, unit, permission and source-resolution to the sibling LIST route, whose
+   * declaration carries the full reasoning — including why the same name in
+   * `EventAnalytics.financial` is a `MaybeMoney` and not this shape.
+   *
+   * Three states, none collapsible: `number` measured · `number` + `revenueUnavailable`
+   * unreadable · `null` the caller lacks `transactions`.
+   */
+  confirmedRevenuePaise: number | null
   isFreeEvent:      boolean
   passes:           PassDetail[]
   publishedAt:      string | null
   updatedAt:        string
+
+  // ── RD-EVENT-03 · ADDITIVE. Fifteen surfaces consume this payload; every field
+  //    below is optional and no existing field changed name, type or meaning. ──
+
+  /** `totalRegistrations` / `checkedInCount` / `passes[].sold` could not be read.
+   *  The numbers are still 0 for wire compatibility — this flag says not to believe them. */
+  statsUnavailable?:   boolean
+  /** `confirmedRevenuePaise` could not be resolved. Absent/false ⇒ the figure is real. */
+  revenueUnavailable?: boolean
+
+  /** Admin review outcome, same field and semantics as the events LIST payload.
+   *  Lets the overview say "Changes requested" instead of rendering the event as a Draft. */
+  reviewStatus?:    'rejected' | 'changes_requested' | null
+  rejectionReason?: string | null
+  changesComment?:  string | null
+
+  /** Unmet publish requirements, from `evaluatePublishRequirements` — the platform's
+   *  existing evaluator, which is PURE over the draft this handler already read. No
+   *  extra query, no second setup-health definition. Critical + warning only. */
+  setupIssues?: EventSetupIssue[]
+  /** Total unmet requirements including suggestions, so the UI can say "+3 more"
+   *  without being sent every one of them. */
+  setupIssueCount?: number
+
+  /** Every publish requirement with its pass/fail state — the Setup Center reads this
+   *  instead of re-deriving readiness from the draft. Additive and optional. */
+  publishChecks?: EventPublishCheck[]
+
+  /**
+   * RD-BIB-UX-04 · the event's configured identifier name — "BIB Number",
+   * "Delegate Number", "Badge Number" — so the workspace tab can be labelled in the
+   * organizer's own vocabulary rather than the generic "Identifiers".
+   *
+   * NULL when the event has never configured one, and null on any read failure: the
+   * tab then keeps its existing generic label, so this can only ever improve the
+   * wording and never break the bar. Additive and optional.
+   */
+  identifierLabel?: string | null
   // Organizer info
   organizerName:     string | null
   organizerEmail:    string | null
@@ -101,6 +221,16 @@ export interface EventDetailResponse {
   speakers:         SpeakerDetail[]
   sponsors:         SponsorDetail[]
   galleryImages:    string[]
+  /**
+   * RD-EVENT-16 · `eventDetails.applications` — whether this event invites speaker or
+   * sponsor applications.
+   *
+   * The PUBLIC event page already gates its forms on exactly this (`applications.speaker
+   * .enabled === true`); exposing it here lets the Event Command Center hide the tabs that
+   * REVIEW those submissions when the event never asks for them. Read from the same draft
+   * document as every other field — zero additional Firestore reads.
+   */
+  applications:     { speaker: { enabled: boolean }; sponsor: { enabled: boolean } } | null
   // SEO (slug is locked)
   metaTitle:        string | null
   metaDescription:  string | null
@@ -140,6 +270,16 @@ export async function GET(
   if (!authz.ok) return NextResponse.json({ error: authz.error }, { status: authz.status })
   const uid = authz.workspaceUid
 
+  /**
+   * RD-ANALYTICS-12-17 · the financial boundary, declared before the reads it gates.
+   *
+   * The event LIST and this route expose the same canonical revenue figure, so gating only
+   * the list would have moved the gap rather than closed it. `events` (above) is event
+   * authority and is unchanged; `transactions` is financial authority and is what decides
+   * whether this caller is told the number.
+   */
+  const financeAllowed = authz.permissions.includes('transactions')
+
   // ── Load draft ─────────────────────────────────────────────────────────────
   const draftSnap = await adminDb.doc(`users/${uid}/eventDrafts/${eventId}`).get()
   if (!draftSnap.exists) {
@@ -162,42 +302,118 @@ export async function GET(
   const coverBanner = (media.coverBanner as Record<string, unknown>) ?? {}
   const logoAsset   = (media.logo        as Record<string, unknown>) ?? {}
 
-  const slug    = str(seo.urlSlug)
+  // RD-CE-FIX C1 · the draft's urlSlug is client-writable: every counter, revenue, donation and
+  // identifier read below is keyed by slug with no owner filter, so only a slug the live document
+  // proves is THIS workspace's event is used. One read, reused for the enforced capacity.
+  const live    = str(seo.urlSlug) ? await resolveLiveEventRef(eventId, d, uid).catch(() => null) : null
+  const slug    = live?.ok ? live.slug : null
   const isFree  = pricing?.eventType === 'free'
-  // Free-event capacity = the effective Starter registration limit (SSOT), not a literal.
-  const freeCapacity = await getFreeEventCapacity()
 
-  // ── Load registration counter + canonical revenue (RD-EVENTS-01 Phase 1 / H1) ──
-  // getEventStats folds attendance shards (checkedInCount) AND exposes the `complete`
-  // gate. Revenue = refund-stable registrationCounters.revenuePaise when complete, else
-  // the source-of-truth ledger sum — the SAME resolver/pattern the Dashboard uses,
-  // replacing the former Σ(pass.price × pass.sold) estimate.
-  let counter: { totalCount: number; passCounts: Record<string, number>; checkedInCount: number } | null = null
-  let revenuePaise = 0
-  if (slug) {
-    const { counter: cd, complete } = await getEventStats(slug)
-    if (cd) {
-      counter = {
-        totalCount:     cd.totalCount     ?? 0,
-        passCounts:     cd.passCounts      ?? {},
-        checkedInCount: cd.checkedInCount ?? 0,
-      }
-    }
-    revenuePaise = complete ? (cd?.revenuePaise ?? 0) : await sumConfirmedRevenueFromLedger(slug)
+  // ── RD-EVENT-03 · counters, revenue and donations, isolated and parallel ────
+  //
+  // These three reads share only `slug`, which the draft above already produced, so
+  // they were queueing behind each other for no reason: five serial waves where three
+  // do. They also had NO error handling — one unreadable attendance shard rejected the
+  // whole handler and the organizer got a full-page error instead of an event page
+  // with one unavailable metric.
+  //
+  // Each now settles independently and reports whether it actually ran. `0` stays on
+  // the wire for the fifteen existing consumers of this payload; the FLAGS are what
+  // let a caller tell "nobody registered" from "we could not read it".
+  interface EventCounterView {
+    totalCount: number; passCounts: Record<string, number>; checkedInCount: number
+  }
+  interface StatsResult {
+    counter: EventCounterView | null
+    revenuePaise: number
+    statsUnavailable: boolean
+    revenueUnavailable: boolean
   }
 
-  // ── Load donation counter (event_plus_donation only) ───────────────────────
+  const loadStats = async (): Promise<StatsResult> => {
+    const none: StatsResult = {
+      counter: null, revenuePaise: 0, statsUnavailable: false, revenueUnavailable: false,
+    }
+    if (!slug) return none                  // unpublished: no counter exists, zeros are real
+
+    const stats = await getEventStats(slug).then(
+      value => ({ ok: true as const, value }),
+      ()    => ({ ok: false as const, value: null }),
+    )
+    if (!stats.ok || !stats.value) {
+      return { ...none, statsUnavailable: true, revenueUnavailable: true }
+    }
+
+    const { counter: cd, complete } = stats.value
+    const view: EventCounterView | null = cd
+      ? {
+          totalCount:     cd.totalCount     ?? 0,
+          passCounts:     cd.passCounts     ?? {},
+          checkedInCount: cd.checkedInCount ?? 0,
+        }
+      : null
+
+    if (complete) return { ...none, counter: view, revenuePaise: cd?.revenuePaise ?? 0 }
+
+    /**
+     * RD-ANALYTICS-12-17 · not issued for a caller who may not see money.
+     *
+     * `getEventStats` above stays: it carries the registration counts, which are not
+     * financial. This aggregate is purely the money fallback, so an unauthorized caller
+     * neither receives the figure nor costs the workspace the read. The counter view is
+     * still returned, so counts are unaffected.
+     */
+    if (!financeAllowed) return { ...none, counter: view }
+
+    // Not yet backfilled: the SAME ledger sum, via the variant that distinguishes a real
+    // zero from a failed aggregate. The revenue DEFINITION is untouched.
+    const sum = await sumConfirmedRevenueFromLedgerChecked(slug).catch(() => ({ value: 0, ok: false }))
+    return sum.ok
+      ? { ...none, counter: view, revenuePaise: sum.value }
+      : { ...none, counter: view, revenueUnavailable: true }
+  }
+
   const linkedCampaignSlug = d.campaignType === 'event_plus_donation' ? slug : null
-  let donationTotalPaise = 0
-  let donorCount         = 0
-  if (linkedCampaignSlug) {
-    const donationCounterSnap = await adminDb.collection('donationCounters').doc(linkedCampaignSlug).get()
-    if (donationCounterSnap.exists) {
-      const dc = donationCounterSnap.data() as { totalRaisedPaise?: number; donorCount?: number }
-      donationTotalPaise = dc.totalRaisedPaise ?? 0
-      donorCount         = dc.donorCount       ?? 0
-    }
+  const loadDonations = async (): Promise<{ totalRaisedPaise: number; donorCount: number }> => {
+    if (!linkedCampaignSlug) return { totalRaisedPaise: 0, donorCount: 0 }
+    const snap = await adminDb.collection('donationCounters').doc(linkedCampaignSlug).get()
+      .catch(() => null)
+    if (!snap?.exists) return { totalRaisedPaise: 0, donorCount: 0 }
+    const dc = snap.data() as { totalRaisedPaise?: number; donorCount?: number }
+    return { totalRaisedPaise: dc.totalRaisedPaise ?? 0, donorCount: dc.donorCount ?? 0 }
   }
+
+  // Free-event capacity = the effective Starter registration limit (SSOT), not a literal.
+  // RD-BIB-UX-04 · the event's configured identifier name, so the workspace tab can
+  // read "BIB Numbers" / "Delegate Numbers" instead of the generic "Identifiers".
+  //
+  // ═══ WHY THIS READ EXISTS ════════════════════════════════════════════════════
+  // The label lives in `identifierConfigs/{slug}`, which the shell deliberately
+  // never read — the tab is listed in UNGATED_BY_DESIGN precisely to avoid one.
+  // There is no cheaper source: it is not on the draft, and fetching the whole
+  // `/identifiers` endpoint from the shell would run every capacity aggregate to
+  // obtain one string.
+  //
+  // So this is ONE document read, issued in parallel with reads the route already
+  // makes, exposed as an ADDITIVE optional field. It fails safe: any error, or an
+  // event with no configuration, yields null and the tab keeps its generic label.
+  // Nothing is written, no schema changed, and no existing field moved.
+  const [stats, donations, identifierLabel, enforcedCapacity] = await Promise.all([
+    loadStats(),
+    loadDonations(),
+    slug
+      ? resolveIdentifierConfig(slug).then(r => r.isStored ? r.config.label : null).catch(() => null)
+      : Promise.resolve(null),
+    // RD-EVENT-COMMERCE-01 · D2 — one read of the live doc (reverse-pointer checked).
+    Promise.resolve(live?.ok ? deriveStoredEventCapacity(live.snap.data() ?? null) : undefined),
+  ])
+
+  const counter            = stats.counter
+  const revenuePaise       = stats.revenuePaise
+  const statsUnavailable   = stats.statsUnavailable
+  const revenueUnavailable = stats.revenueUnavailable
+  const donationTotalPaise = donations.totalRaisedPaise
+  const donorCount         = donations.donorCount
 
   // ── Build passes ───────────────────────────────────────────────────────────
   const rawPasses = (pricing?.passes as unknown[]) ?? []
@@ -211,10 +427,28 @@ export async function GET(
       price:         typeof pass.price    === 'number'  ? pass.price    : 0,
       unlimited:     pass.unlimited === true,
       capacity:      pass.unlimited ? null : (typeof pass.quantity === 'number' ? pass.quantity : null),
+      // 0 for wire compatibility ONLY. `statsUnavailable` above says whether to believe
+      // it; every consumer must check that flag before treating this as a measurement.
       sold:          counter?.passCounts?.[id] ?? 0,
       status:        str(pass.status) ?? 'active',
       salesStartDate: str(pass.salesStartDate),
       salesEndDate:   str(pass.salesEndDate),
+
+      // RD-EVENT-13 · additive; same document, no extra read.
+      code:          str(pass.code),
+      type:          str(pass.type),
+      visibility:    str(pass.visibility),
+      featured:           pass.featured === true,
+      hideWhenSoldOut:    pass.hideWhenSoldOut === true,
+      showRemainingSeats: pass.showRemainingSeats === true,
+      minPurchase:   typeof pass.minPurchase === 'number' ? pass.minPurchase : null,
+      maxPurchase:   typeof pass.maxPurchase === 'number' ? pass.maxPurchase : null,
+      earlyBirdPrice: pass.earlyBirdEnabled === true && typeof pass.earlyBirdPrice === 'number'
+        ? pass.earlyBirdPrice
+        : null,
+      earlyBirdEndDate: pass.earlyBirdEnabled === true ? str(pass.earlyBirdEndDate) : null,
+      benefitsCount: (Array.isArray(pass.benefits) ? pass.benefits.length : 0)
+        + (Array.isArray(pass.customBenefits) ? pass.customBenefits.length : 0),
     }
   })
 
@@ -239,6 +473,18 @@ export async function GET(
     order:    typeof s.order === 'number' ? s.order : i,
   }))
 
+  // ── Applications ───────────────────────────────────────────────────────────
+  // RD-EVENT-16 · read from `eventDetails.applications`, the same place the public event
+  // page reads before offering either form. `enabled === true` is the whole contract:
+  // anything else — absent, null, a string — is not an invitation to apply.
+  const rawApps = details.applications as Record<string, unknown> | null | undefined
+  const applications = rawApps && typeof rawApps === 'object'
+    ? {
+        speaker: { enabled: (rawApps.speaker as Record<string, unknown> | null)?.enabled === true },
+        sponsor: { enabled: (rawApps.sponsor as Record<string, unknown> | null)?.enabled === true },
+      }
+    : null
+
   // ── Sponsors ───────────────────────────────────────────────────────────────
   const rawSponsors = Array.isArray(typeDet.sponsors)
     ? (typeDet.sponsors as Record<string, unknown>[])
@@ -260,6 +506,43 @@ export async function GET(
   const galleryImages = rawGallery
     .map(g => str(g.value) ?? '')
     .filter(Boolean)
+
+  // ── RD-EVENT-03 · setup health, at zero read cost ──────────────────────────
+  // `evaluatePublishRequirements` is the platform's existing publish evaluator and is
+  // PURE over the draft document — the same one the dashboard's Attention Center runs.
+  // Every field it needs was already read above, so this adds no query and introduces
+  // no second definition of "is this event ready".
+  //
+  // Only critical and warning issues are serialised; suggestions are counted so the UI
+  // can say how many remain without carrying all of them over the wire.
+  // RD-EVENT-04 · `evaluatePublishRequirements` returns EVERY requirement carrying a
+  // `passed` flag — not just the failing ones. RD-EVENT-03 read the whole array as the
+  // issue list, so a fully configured draft reported ten "issues" and a count of twelve.
+  // `.filter(r => !r.passed)` is what every other consumer does (the dashboard's
+  // `publishedGaps`, `hasIncompletePublishRequirements`); this now matches them.
+  const requirements = evaluatePublishRequirements({
+    eventDetails:     d.eventDetails     as Record<string, unknown> | null,
+    pricing:          d.pricing          as Record<string, unknown> | null,
+    registrationForm: d.registrationForm as Record<string, unknown> | null,
+  })
+  const unmet = requirements.filter(r => !r.passed)
+  const setupIssues: EventSetupIssue[] = unmet
+    .filter(r => severityOf(r) !== 'suggestion')
+    .map(r => ({
+      id: r.id, title: r.title, stepName: r.stepName,
+      severity: severityOf(r) as 'critical' | 'warning',
+    }))
+  const setupIssueCount = unmet.length
+
+  // The full requirement roll-call, so the Setup Center can show what is READY as well
+  // as what is missing without re-deriving any of it. Same evaluator, same ids, one
+  // definition — Setup and the publish flow can no longer disagree.
+  const publishChecks: EventPublishCheck[] = requirements.map(r => ({
+    id: r.id, title: r.title, description: r.description,
+    stepName: r.stepName, stepIndex: r.stepIndex,
+    severity: severityOf(r),
+    passed:   r.passed,
+  }))
 
   const result: EventDetailResponse = {
     draftId:          draftSnap.id,
@@ -290,13 +573,55 @@ export async function GET(
     venueAddress:     str(phys.addressLine1),
     onlinePlatform:   str(online.platform),
     onlineMeetingUrl: str(online.meetingUrl),
-    totalCapacity:    isFree ? freeCapacity : null,
+    // RD-EVENT-03 · FIXED. A paid event always reported `null` here, i.e. "unlimited",
+    // even with finite pass capacities — while the events LIST computed the real number
+    // from the same passes. The same event therefore showed "2,295 / 5,000" on one page
+    // and "Unlimited capacity" on the next.
+    //
+    // This is not a new definition: the expression below is the LIST route's existing
+    // formula verbatim (capacity is known only when EVERY pass is capped; one unlimited
+    // pass makes the event uncapped). The proof it was always intended is
+    // EventCommandHeader's `!event.isFreeEvent && event.totalCapacity` fill-rate branch,
+    // which could never once have executed.
+    // RD-EVENT-COMMERCE-04/04A — a free event's capacity is the ENFORCED value on its live doc
+    // (null there = unlimited, kept as null). With no live doc yet (a draft) it is the capacity
+    // the organizer SELECTED on the draft, else unknown (null) — never the retired Free tier's
+    // 200, which the 04 change still used as the draft fallback.
+    // RD-FIN-02 · ONE capacity for free AND paid events: the enforced value of the live doc
+    // (lib/registrations/capacity.ts resolveEventCapacitySummary). Paid events used to show the
+    // client-writable DRAFT pass sums. With no live doc yet, the draft's selected capacity.
+    totalCapacity:    resolveEventCapacitySummary({
+      eventDoc:    live?.ok ? (live.snap.data() ?? null) : null,
+      counter:     counter ?? null,
+      draftIntent: d.registrationCapacity,
+    }).total,
+    ...(enforcedCapacity !== undefined ? { enforcedCapacity } : {}),
     totalRegistrations: counter?.totalCount ?? 0,
     checkedInCount:   counter?.checkedInCount ?? 0,
-    estimatedRevenue: revenuePaise,
+    /**
+     * RD-ANALYTICS-12-17 · null without `transactions`. The calculation above is untouched;
+     * this decides only whether the caller is told the answer.
+     *
+     * RD-ANALYTICS-12-22 · the figure and its flag are now DERIVED from one `RevenueState`
+     * through the shared serializer, so this route cannot emit the contradictory pair
+     * (unavailable with the flag false) that the dashboard shipped as F1.
+     */
+    ...toConfirmedRevenueFields(revenueStateFrom({ financeAllowed, unavailable: revenueUnavailable, paise: revenuePaise })),
     isFreeEvent:      isFree,
     passes,
     publishedAt:      toIso(d.publishedAt),
+    statsUnavailable,
+    // `revenueUnavailable` is emitted by the spread above, from the same state as the figure.
+    // It is deliberately NOT repeated here: a later key would silently win over the
+    // serializer and reopen the drift this consolidation exists to close.
+    reviewStatus:     d.reviewStatus === 'rejected' || d.reviewStatus === 'changes_requested'
+      ? d.reviewStatus : null,
+    rejectionReason:  str(d.rejectionReason),
+    changesComment:   str(d.changesComment),
+    setupIssues,
+    setupIssueCount,
+    publishChecks,
+    identifierLabel,
     updatedAt:        toIso(d.updatedAt) ?? new Date().toISOString(),
     organizerName:    str(orgInfo.name),
     organizerEmail:   str(orgInfo.email),
@@ -305,6 +630,7 @@ export async function GET(
     speakers,
     sponsors,
     galleryImages,
+    applications,
     metaTitle:        str(seo.metaTitle),
     metaDescription:  str(seo.metaDescription),
     keywords:         Array.isArray(seo.keywords)
@@ -367,9 +693,9 @@ export async function DELETE(
     )
   }
 
-  const details = (draft.eventDetails as Record<string, unknown>) ?? {}
-  const seo     = (details.seo as Record<string, unknown>) ?? {}
-  const slug    = typeof seo.urlSlug === 'string' ? seo.urlSlug : ''
+  // RD-CE-FIX C1 · deletion is keyed by slug with no owner filter downstream, so the slug MUST be
+  // proven to be this workspace's live event — never taken from the client-writable draft pointer.
+  const slug    = (await resolveOwnedEventSlug(uid, eventId, draft)) ?? ''
   if (!slug) {
     return NextResponse.json(
       { error: 'This event has no resolvable slug, so its data cannot be located safely.' },

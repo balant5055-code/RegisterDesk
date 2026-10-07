@@ -1,6 +1,7 @@
 import { notFound }       from 'next/navigation'
 import { getEventBySlug } from '@/lib/firebase/firestore/events'
 import { canExposePublicEvent } from '@/lib/events/publicVisibility'
+import { HomeShell }     from '@/components/discovery/home/HomeShell'
 import SpeakerApplyClient from './SpeakerApplyClient'
 import type { Metadata }  from 'next'
 
@@ -36,12 +37,14 @@ export default async function SpeakPage({ params }: Props) {
   const message     = typeof speakerCfg?.message     === 'string' ? speakerCfg.message     : ''
 
   return (
-    <SpeakerApplyClient
-      slug={slug}
-      eventName={eventName}
-      enabled={enabled}
-      closingDate={closingDate}
-      customMessage={message}
-    />
+    <HomeShell>
+      <SpeakerApplyClient
+        slug={slug}
+        eventName={eventName}
+        enabled={enabled}
+        closingDate={closingDate}
+        customMessage={message}
+      />
+    </HomeShell>
   )
 }

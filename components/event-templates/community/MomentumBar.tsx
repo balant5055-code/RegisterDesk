@@ -70,7 +70,7 @@ export function MomentumBar({
         {/* Attending count */}
         {showCount && (
           <div className="flex items-center gap-1.5">
-            <Users className="size-3.5 shrink-0 text-primary" aria-hidden />
+            <Users className="size-3.5 shrink-0 text-action" aria-hidden />
             <span className="text-xs">
               <span className="font-semibold text-foreground">
                 {totalCount.toLocaleString('en-IN')}
@@ -94,7 +94,7 @@ export function MomentumBar({
             ) : (
               <div
                 className="flex size-4 shrink-0 items-center justify-center rounded text-[8px] font-bold text-white"
-                style={{ backgroundImage: 'var(--primary-gradient)' }}
+                style={{ backgroundImage: 'var(--action-gradient)' }}
                 aria-hidden
               >
                 {hostName.charAt(0).toUpperCase()}

@@ -11,12 +11,15 @@
 
 import { NextRequest, NextResponse } from 'next/server'
 import { adminDb }                   from '@/lib/firebase/admin'
-import { authorizeWorkspace }        from '@/lib/team/workspace'
+import { authorizeAnyWorkspace }     from '@/lib/team/workspace'
 
-import { getEventStats, sumConfirmedRevenueFromLedger } from '@/lib/firebase/firestore/registrationCounters'
+import { getEventStats, sumConfirmedRevenueFromLedgerChecked } from '@/lib/firebase/firestore/registrationCounters'
 import { parseListingTab, eventInListingTab, effectiveLifecycleStatus } from '@/lib/events/listingTabs'
 import { LICENSE_ORDERS_COLLECTION } from '@/lib/licensing/schema'
+import { revenueStateFrom, toConfirmedRevenueFields } from '@/lib/finance/revenueState'
 import type { EventLifecycleStatus } from '@/types/events'
+import { resolveOwnedEvents } from '@/lib/events/liveEventRef'
+import { resolveEventCapacitySummary } from '@/lib/registrations/capacity'
 
 // ─── Shared types ─────────────────────────────────────────────────────────────
 
@@ -46,7 +49,31 @@ export interface EventListItem {
   isFreeEvent:        boolean
   totalCapacity:      number | null
   totalRegistrations: number
-  estimatedRevenue:   number         // paise — CANONICAL confirmed revenue (registrationCounters.revenuePaise / ledger fallback); field name kept for contract stability
+  /**
+   * RD-ANALYTICS-12-19 · THE CANONICAL NAME for this figure.
+   *
+   * Canonical confirmed ticket revenue in integer PAISE: Σ `amount` over registrations
+   * with `status === 'confirmed'`. Refund-stable — a refund changes neither the status
+   * nor the amount — so this answers "what did this event sell", never "what did it keep".
+   *
+   * ═══ THE SAME NAME EXISTS IN ANALYTICS, AND IT IS NOT THE SAME SHAPE ═══════
+   * `EventAnalytics.financial.confirmedRevenuePaise` is the same QUANTITY under the same
+   * definition, permission and unit — but it is a `MaybeMoney` (`{ok,paise}｜{ok,reason}`),
+   * and it is ABSENT entirely for a caller without `transactions` rather than null.
+   *
+   * They also differ in SOURCE on the common path, which is worth knowing before treating
+   * a mismatch as a bug: Analytics always issues the live ledger aggregate, while this
+   * route prefers the denormalized `registrationCounters.revenuePaise` and falls back to
+   * that same aggregate only when the counter is not current (`statsVersion`). The two
+   * reconcile by construction — the counter is a maintained cache of exactly that sum —
+   * and `complete` is what refuses the cache when it cannot be trusted.
+   *
+   * Three states, none collapsible (RD-ANALYTICS-12-17):
+   *   number  · measured. `0` means the event earned nothing.
+   *   number + `revenueUnavailable: true` · the read failed; do not believe the 0.
+   *   null    · the caller lacks `transactions`. NOT zero, NOT unavailable.
+   */
+  confirmedRevenuePaise: number | null
   passes:             EventPassSummary[]
   updatedAt:          string
   publishedAt:        string | null
@@ -59,6 +86,19 @@ export interface EventListItem {
   // organizer UI to hide the permanent-delete affordance for paid events
   // (the delete API is the authoritative guard). Optional/absent ⇒ not paid.
   hasPaidLicense?:    boolean
+
+  // ── RD-EVENT-02 (H1/H2) · availability flags — ADDITIVE, never load-bearing ──
+  // The numeric fields above keep their types and their existing values so all eight
+  // consumers of this endpoint are unaffected. These flags say whether those numbers
+  // were actually READ or merely defaulted, so a surface that cares can render "—"
+  // instead of asserting a zero it does not know. Absent/false ⇒ the number is real.
+  /** `totalRegistrations` and `passes[].sold` could not be read for this event. */
+  statsUnavailable?:   boolean
+  /** `confirmedRevenuePaise` could not be resolved for this event. */
+  revenueUnavailable?: boolean
+  /** The licence-order read failed, so `hasPaidLicense` is UNKNOWN (not "false").
+   *  A client must withhold paid-gated affordances; the delete API stays authoritative. */
+  licenseUnavailable?: boolean
 }
 
 export interface EventsListResponse {
@@ -100,9 +140,63 @@ function draftMatchesSearch(d: Record<string, unknown>, term: string): boolean {
 const DEFAULT_PAGE_SIZE = 25
 
 export async function GET(req: NextRequest): Promise<NextResponse> {
-  const authz = await authorizeWorkspace(req, 'events')
+  /**
+   * RD-ANALYTICS-12-15 · was `authorizeWorkspace(req, 'events')`.
+   *
+   * ═══ WHY THIS ONE HAD TO MOVE TOO ════════════════════════════════════════════
+   * This is the ONLY source of the workspace event list: `EventContextProvider` makes
+   * exactly one call to it and every event-scoped surface reads the selection from there.
+   * So a role that cannot call this route has no event to select — and Analytics is
+   * event-scoped. Reconciling the analytics routes alone would have given `finance` a
+   * working API and an empty selector, which is worse than an honest refusal.
+   *
+   * ═══ WHY THIS IS SAFE, STATED IN FULL ════════════════════════════════════════
+   * This is the one genuinely debatable change in RD-ANALYTICS-12-15, because unlike the
+   * analytics routes this endpoint is shared by a dozen surfaces. Each claim below was
+   * checked rather than assumed:
+   *
+   *   • GET is the only exported method here. There is no mutation to widen — every
+   *     `.set(`/`.add(` in this file is a Map or Set, not a write.
+   *   • Reads are scoped to `users/{authz.workspaceUid}/eventDrafts`. Tenancy is proven by
+   *     the PATH and comes from the session, so no caller can widen the result set.
+   *   • NOT used by Admin. Repository search finds zero references under app/(admin), so
+   *     Admin authorization is untouched by construction.
+   *   • The delta is exactly ONE role. `authorizeAnyWorkspace` admits non-gate members:
+   *     owner, admin and manager already held `events`; gate-only roles are still refused,
+   *     now by `isCheckinOnlyRole`. Only `finance` is added.
+   *   • `finance` gains no new CLASS of data. The payload's one money field,
+   *     `confirmedRevenuePaise`, is exactly what `transactions` protects elsewhere — and finance
+   *     holds `transactions`. The counts are aggregates it already receives from
+   *     /api/organizer/dashboard today.
+   *   • Every consumer keeps its own guard. Reaching this list has never been permission to
+   *     act on an event: publish, edit, cancel, pricing and waitlist all still require
+   *     `events` on their own routes, and none of them changed.
+   *
+   * ═══ WHAT THIS DID NOT FIX (SUPERSEDED — fixed by RD-ANALYTICS-12-17, below) ═══
+   * As written in 12-15, the money field was returned unconditionally, so `admin` and `manager` — who hold no
+   * `transactions` — receive a per-event money figure here while being refused money
+   * everywhere else. That is PRE-EXISTING, is not made worse by this change (both roles
+   * already reached this route), and is the same defect class as the legacy dashboard's
+   * ungated `attendeeName`. It belongs with RD-ANALYTICS-12-16, not here: fixing a money
+   * boundary inside an authorization-reconciliation diff would mix two changes that need
+   * separate review.
+   */
+  const authz = await authorizeAnyWorkspace(req)
   if (!authz.ok) return NextResponse.json({ error: authz.error }, { status: authz.status })
   const uid = authz.workspaceUid
+
+  /**
+   * RD-ANALYTICS-12-17 · the financial boundary, declared before the reads it gates.
+   *
+   * This figure is canonical confirmed revenue, and this route
+   * returned it to every workspace member — so `admin` and `manager`, neither of whom holds
+   * `transactions`, read a per-event money figure that /api/organizer/finance refuses them
+   * and that Analytics withholds. The SAME figure has been gated on
+   * /api/organizer/dashboard since RD-DASH-12: two endpoints, one data class, two answers.
+   *
+   * This is the same permission that endpoint uses, so the two now agree.
+   */
+  const financeAllowed = authz.permissions.includes('transactions')
 
   // ── Cursor pagination (cursor = the last draftId from the previous page) ────
   const url        = new URL(req.url)
@@ -177,11 +271,16 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   }
 
   // ── Collect slugs for published events, then batch-fetch counters ──────────
+  // RD-CE-FIX C1 · only slugs the live documents prove belong to THIS workspace's drafts (one getAll):
+  // the draft pointer is client-writable, and the counters/revenue below are keyed by slug alone.
+  // RD-FIN-02 · the same one getAll, keeping the live event data it read (enforced capacity).
+  const ownedEvents = await resolveOwnedEvents(uid, pageDocs.map(doc => ({ id: doc.id, data: doc.data() as Record<string, unknown> })))
+  const ownedSlugs  = new Map([...ownedEvents].map(([id, v]) => [id, v.slug] as [string, string]))
   const slugList: string[] = []
   pageDocs.forEach(doc => {
     const d    = doc.data() as Record<string, unknown>
-    const slug = ((d.eventDetails as Record<string, unknown>)?.seo as Record<string, unknown>)?.urlSlug
-    if (d.status === 'published' && typeof slug === 'string') slugList.push(slug)
+    const slug = ownedSlugs.get(doc.id)
+    if (d.status === 'published' && slug) slugList.push(slug)
   })
 
   // Counts AND revenue come from registrationCounters via getEventStats — the SAME
@@ -192,21 +291,64 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   // and Finance report one revenue truth.
   const counterMap = new Map<string, { totalCount: number; passCounts: Record<string, number> }>()
   const revBySlug  = new Map<string, number>()
-  if (slugList.length > 0) {
-    const statsList = await Promise.all(slugList.map(s => getEventStats(s)))
+  // RD-EVENT-02 (H1/H2) · which slugs could NOT be read. A slug in one of these sets
+  // has no trustworthy number, which is a different fact from "its number is zero".
+  const statsFailed = new Set<string>()
+  const revFailed   = new Set<string>()
+
+  // RD-EVENT-02 (H2) · per-event failure isolation. Previously a single unreadable
+  // counter rejected this `Promise.all` and 500'd the WHOLE list, taking every healthy
+  // event down with it. Each read now settles independently: one bad event costs that
+  // event's metrics and nothing else. The reads are NOT retried, so isolation cannot
+  // multiply the read count — it is the same one read per event either way.
+  const loadCounters = async () => {
+    if (slugList.length === 0) return
+    const statsList = await Promise.all(
+      slugList.map(s => getEventStats(s).then(
+        value => ({ ok: true as const, value }),
+        ()    => ({ ok: false as const, value: null }),
+      )),
+    )
     const incompleteSlugs: string[] = []
-    statsList.forEach((st, i) => {
+    statsList.forEach((res, i) => {
       const slug = slugList[i]
-      const c    = st.counter
+      if (!res.ok || !res.value) {
+        // Unknown, not zero. `counterMap` stays unset so the response builder below
+        // falls back to 0 for wire compatibility while the flag tells the truth.
+        statsFailed.add(slug)
+        revFailed.add(slug)
+        return
+      }
+      const st = res.value
+      const c  = st.counter
       counterMap.set(slug, { totalCount: c?.totalCount ?? 0, passCounts: c?.passCounts ?? {} })
       if (st.complete) revBySlug.set(slug, c?.revenuePaise ?? 0)
       else             incompleteSlugs.push(slug)
     })
     // Legacy / not-yet-backfilled counters: recompute revenue from the ledger (one
-    // indexed aggregate each, empty in steady state after reconciliation).
-    if (incompleteSlugs.length > 0) {
-      const sums = await Promise.all(incompleteSlugs.map(s => sumConfirmedRevenueFromLedger(s)))
-      incompleteSlugs.forEach((s, i) => revBySlug.set(s, sums[i]))
+    // indexed aggregate each, empty in steady state after reconciliation). The
+    // `Checked` variant is the SAME aggregate and the SAME revenue definition — it
+    // just distinguishes "the sum is 0" from "the sum could not be taken".
+    /**
+     * RD-ANALYTICS-12-17 · `financeAllowed &&` — an unauthorized caller does not pay for
+     * these reads either.
+     *
+     * `getEventStats` above cannot be skipped: it returns the registration COUNTS in the
+     * same read, and those are not financial. This aggregate is purely the money fallback,
+     * so for a caller who may not see money it is not issued at all — the dashboard's rule
+     * ("an unauthorized caller must not cost the workspace those queries") applied to the
+     * one read here that is exclusively financial.
+     */
+    if (financeAllowed && incompleteSlugs.length > 0) {
+      const sums = await Promise.all(
+        incompleteSlugs.map(s => sumConfirmedRevenueFromLedgerChecked(s).catch(
+          () => ({ value: 0, ok: false }),
+        )),
+      )
+      incompleteSlugs.forEach((s, i) => {
+        if (sums[i].ok) revBySlug.set(s, sums[i].value)
+        else            revFailed.add(s)
+      })
     }
   }
 
@@ -214,26 +356,43 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   // A draft backed by a PAID license order must not offer permanent delete.
   // The order id is deterministic (`lic_{draftId}`) so this is a batched read
   // of existing licensing records — no new collection, no write.
+  //
+  // RD-EVENT-02 (§23) · N individual `.get()` round trips became ONE `getAll`, the
+  // same batching the dashboard uses (app/api/organizer/dashboard/route.ts). Identical
+  // documents, identical semantics, one round trip instead of N.
   const paidDraftIds = new Set<string>()
-  const orderSnaps = await Promise.all(
-    pageDocs.map(doc => adminDb.collection(LICENSE_ORDERS_COLLECTION).doc(`lic_${doc.id}`).get()),
-  )
-  orderSnaps.forEach((snap, i) => {
-    if (snap.exists && (snap.data() as { status?: unknown }).status === 'paid') {
-      paidDraftIds.add(pageDocs[i].id)
+  let licenseReadFailed = false
+  const loadLicenses = async () => {
+    if (pageDocs.length === 0) return
+    const refs = pageDocs.map(doc =>
+      adminDb.collection(LICENSE_ORDERS_COLLECTION).doc(`lic_${doc.id}`))
+    const orderSnaps = await adminDb.getAll(...refs).catch(() => null)
+    if (!orderSnaps) {
+      // getAll is all-or-nothing, so this is a page-level unknown rather than a
+      // per-event one. Reported honestly instead of silently reading as "not paid".
+      licenseReadFailed = true
+      return
     }
-  })
+    orderSnaps.forEach((snap, i) => {
+      if (snap.exists && (snap.data() as { status?: unknown }).status === 'paid') {
+        paidDraftIds.add(pageDocs[i].id)
+      }
+    })
+  }
+
+  // The counter wave and the licence wave read disjoint collections and neither
+  // depends on the other, so they share one round trip instead of queueing.
+  await Promise.all([loadCounters(), loadLicenses()])
 
   // ── Build response ─────────────────────────────────────────────────────────
   const events: EventListItem[] = pageDocs.map(doc => {
     const d       = doc.data() as Record<string, unknown>
     const details = (d.eventDetails as Record<string, unknown>) ?? {}
     const info    = (details.info     as Record<string, unknown>) ?? {}
-    const seo     = (details.seo      as Record<string, unknown>) ?? {}
     const sched   = (details.schedule as Record<string, unknown>) ?? {}
     const media   = (details.media    as Record<string, unknown>) ?? {}
 
-    const slug      = typeof seo.urlSlug === 'string' ? seo.urlSlug : null
+    const slug      = ownedSlugs.get(doc.id) ?? null
     const counter   = slug ? counterMap.get(slug) : undefined
     const isFree    = (d.pricing as Record<string, unknown>)?.eventType === 'free'
     const rawPasses = ((d.pricing as Record<string, unknown>)?.passes as unknown[]) ?? []
@@ -251,9 +410,29 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     })
 
     // Canonical confirmed revenue (registrationCounters.revenuePaise / ledger fallback),
-    // NOT the former Σ(pass.price × pass.sold) estimate. Field name kept for contract
-    // stability; the value is now the platform's one revenue truth.
-    const estimatedRevenue = slug ? (revBySlug.get(slug) ?? 0) : 0
+    // NOT the former Σ(pass.price × pass.sold) estimate. The name now says what it is.
+    //
+    // RD-ANALYTICS-12-17 · null for a caller without `transactions`. The CALCULATION is
+    // untouched — this gates who is told the answer, it does not compute a different one.
+    /**
+     * RD-ANALYTICS-12-22 · ONE state, serialized once.
+     *
+     * This used to be two hand-built expressions — a ternary for the figure and another for
+     * the flag — which is the shape that let the dashboard publish an unmeasured figure as a
+     * confident ₹0 (RD-12-20 F1). Both fields now come from a single `RevenueState`, so
+     * "unavailable with the flag false" is not something this route can express.
+     *
+     * The inputs are unchanged: entitlement first, then the failure Set, then the figure.
+     * An UNPUBLISHED event has no slug and therefore no counter to read — its zero is a real
+     * zero, never a failed read (RD-EVENT-02 H1).
+     */
+    const revenueState = revenueStateFrom({
+      financeAllowed,
+      unavailable: slug ? revFailed.has(slug) : false,
+      paise:       slug ? (revBySlug.get(slug) ?? 0) : 0,
+    })
+
+    const statsUnavailable   = slug ? statsFailed.has(slug) : false
 
     return {
       draftId:            doc.id,
@@ -280,13 +459,15 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       eventSubtype:       typeof d.eventSubtype === 'string' ? d.eventSubtype : null,
       campaignType:       typeof d.campaignType === 'string' ? d.campaignType : null,
       isFreeEvent:        isFree,
-      // Real capacity: sum of pass capacities; null when any pass is unlimited
-      // (or there are no passes) — never a hardcoded number.
-      totalCapacity:      passes.length > 0 && passes.every(p => p.capacity !== null)
-        ? passes.reduce((sum, p) => sum + (p.capacity ?? 0), 0)
-        : null,
+      // RD-FIN-02 · the ENFORCED capacity of the live event (the gate's own value) — never the
+      // client-writable draft pass sums. An unpublished draft shows its intended capacity.
+      totalCapacity:      resolveEventCapacitySummary({
+        eventDoc:    ownedEvents.get(doc.id)?.data ?? null,
+        counter:     counter ?? null,
+        draftIntent: d.status === 'published' ? undefined : d.registrationCapacity,
+      }).total,
       totalRegistrations: counter?.totalCount ?? 0,
-      estimatedRevenue,
+      ...toConfirmedRevenueFields(revenueState),
       passes,
       updatedAt:          toIso(d.updatedAt)   ?? new Date().toISOString(),
       publishedAt:        toIso(d.publishedAt),
@@ -294,6 +475,8 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       rejectionReason:    typeof d.rejectionReason === 'string' && d.rejectionReason ? d.rejectionReason : null,
       changesComment:     typeof d.changesComment  === 'string' && d.changesComment  ? d.changesComment  : null,
       hasPaidLicense:     paidDraftIds.has(doc.id),
+      statsUnavailable,
+      licenseUnavailable: licenseReadFailed,
     }
   })
 

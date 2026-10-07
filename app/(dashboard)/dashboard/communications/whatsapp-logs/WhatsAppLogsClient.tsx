@@ -36,11 +36,12 @@ const TEMPLATE_KEY_LABELS: Record<string, string> = {
 
 const STATUS_OPTIONS: { value: string; label: string }[] = [
   { value: '',          label: 'All Statuses' },
-  { value: 'sent',      label: 'Sent' },
+  { value: 'queued',    label: 'Pending' },
+  { value: 'sent',      label: 'Sent / submitted' },
   { value: 'delivered', label: 'Delivered' },
   { value: 'failed',    label: 'Failed' },
+  { value: 'unknown',   label: 'Status unknown' },
   { value: 'skipped',   label: 'Skipped' },
-  { value: 'queued',    label: 'Queued' },
 ]
 
 // Broadcast vs transactional. Only the broadcast half is an indexed equality server-side;
@@ -61,8 +62,8 @@ function effectiveStatus(log: WhatsAppLog): string {
 }
 
 const STATUS_LABELS: Record<string, string> = {
-  queued: 'Queued', sent: 'Sent', delivered: 'Delivered',
-  read: 'Read', failed: 'Failed', skipped: 'Skipped', unknown: 'Unknown',
+  queued: 'Pending', sent: 'Sent / submitted', delivered: 'Delivered',
+  read: 'Read', failed: 'Failed', skipped: 'Skipped', unknown: 'Status unknown',
 }
 
 function fmtTime(iso: string): string {

@@ -1,51 +1,106 @@
-// Pricing content — RD-LICENSE-01B Phase 3B (Licensing V2).
+// Pricing content — RD-CAPACITY-02.
 //
-// ONE EVENT = ONE LICENSE. Every figure is derived from the V2 catalog VIEW
-// (buildLicenseCatalogView) — the single source of truth for tier, registration limit,
-// regular/offer price, features, and display order. No price, limit, tier name, or order
-// is hardcoded here; only marketing taglines + which card is highlighted are added.
+// ═══ WHAT CHANGED AND WHY ════════════════════════════════════════════════════
+// This module used to build FIVE tier cards (Free / Starter / Professional / Business /
+// Enterprise) from the V2 licence catalog, each with its own price, registration limit,
+// feature list and transaction fee. RegisterDesk no longer sells any of that: there are two
+// commercial states, no feature is held back by plan, and the cost is a function of
+// registration capacity.
+//
+// The old builder was not merely out of date — it was actively misleading. A prospect read
+// "Professional · ₹1,499 · 2,500 registrations · API access" and then met a capacity slider.
+//
+// ═══ EVERY FIGURE IS DERIVED ═════════════════════════════════════════════════
+// Nothing here is hardcoded. The free allowance, the per-registration rate, the GST rate, the
+// attendee transaction fee and the maximum all come from the effective commercial terms the
+// server resolves, so the page cannot drift from what the checkout actually charges. The only
+// things this file adds are taglines and which card is highlighted.
 
 import type { PricingTier } from '@/lib/marketing/types'
-import { isUnlimited, EVENT_LICENSE_TIERS_V2, type EventLicenseTierV2 } from '@/lib/licensing/eventLicense'
+import type { CommercialTerms } from '@/lib/licensing/capacityCommercial'
+import { calculateActivationQuote, formatPaise } from '@/lib/licensing/capacityPricing'
 
-const isV2Tier = (t: string): t is EventLicenseTierV2 => (EVENT_LICENSE_TIERS_V2 as readonly string[]).includes(t)
-import { buildLicenseCatalogView, type LicenseCatalogV2 } from '@/lib/licensing/licenseCatalogShared'
+const count = (n: number): string => n.toLocaleString('en-IN')
 
-const inr = (paise: number): string => `₹${Math.round(paise / 100).toLocaleString('en-IN')}`
-const lim = (n: number): string => (isUnlimited(n) ? 'Unlimited' : n.toLocaleString('en-IN'))
+/** A percentage for display: 2.5 → "2.5", 18 → "18" (no trailing ".0"). */
+const pct = (n: number): string => String(Number(n.toFixed(2)))
 
-// Presentation only (tagline + which card is highlighted) — never figures. Keyed by the
-// V2 tiers; the display order comes from the catalog view, not this map.
-const TIER_PRESENTATION: Record<EventLicenseTierV2, { tagline: string; highlighted: boolean }> = {
-  free:         { tagline: 'Everything you need to launch your first event.',      highlighted: false },
-  starter:      { tagline: 'For growing organizers getting started.',              highlighted: false },
-  professional: { tagline: 'Advanced tooling, API access, and white-label.',       highlighted: true  },
-  business:     { tagline: 'For established organizers running large events.',      highlighted: false },
-  enterprise:   { tagline: 'Unlimited scale, white-label, and dedicated support.',  highlighted: false },
-}
+/**
+ * The two commercial states, built from the EFFECTIVE terms.
+ *
+ * `features[0]` is always the capacity line and one entry always matches /transaction fee/ —
+ * the page's card layout pulls those two out into their own blocks, so the ordering is part of
+ * the contract rather than incidental.
+ */
+export function buildPricingPlans(terms: CommercialTerms): PricingTier[] {
+  const free = terms.freeRegistrationCapacity
+  const rate = formatPaise(terms.activationRatePaise)
+  const fee  = `${pct(terms.attendeeTransactionFeePercent)}% transaction fee`
 
-// Build the pricing-page tiers from the EFFECTIVE V2 catalog (code defaults + config
-// overrides). The caller resolves the catalog (server: getLicenseCatalogV2).
-export function buildPricingTiers(catalog: LicenseCatalogV2): PricingTier[] {
-  return buildLicenseCatalogView(catalog).map(v => {
-    const p       = isV2Tier(v.tier) ? TIER_PRESENTATION[v.tier] : { tagline: '', highlighted: false }
-    const isFree  = v.offerPricePaise === 0
-    const hasDiscount = !isFree && v.regularPricePaise > v.offerPricePaise
-    return {
-      id:          v.tier,
-      name:        v.name,
-      priceLabel:  isFree ? 'Free' : inr(v.offerPricePaise),          // charged/offer price
-      regularPriceLabel: hasDiscount ? inr(v.regularPricePaise) : null, // struck; null for ₹0 / no discount
-      // One-time, per published event — never a recurring period.
-      period:      isFree ? null : '/event',
-      tagline:     p.tagline,
-      highlighted: p.highlighted,
+  return [
+    {
+      id:          'free',
+      name:        'Free',
+      priceLabel:  'Free',
+      period:      null,
+      tagline:     `Run a real event at no cost, up to ${count(free)} registrations.`,
+      highlighted: false,
       ctaKey:      'startFree',
       features: [
-        `${lim(v.registrationLimit)} registrations`,
-        ...v.featureList,
-        `${v.transactionFeePercent}% transaction fee`,
+        `Up to ${count(free)} registrations`,
+        'All available features — no feature plans',
+        'No activation fee',
+        'Unlimited email',
+        fee,
       ],
-    }
-  })
+    },
+    {
+      id:          'payg',
+      name:        'Pay as you go',
+      priceLabel:  rate,
+      period:      '/registration',
+      tagline:     `Only for capacity beyond the first ${count(free)}. Pay once, per event.`,
+      highlighted: true,
+      ctaKey:      'startFree',
+      features: [
+        `${count(free + 1)} – ${count(terms.maximumEventCapacity)} registrations`,
+        'All available features — no feature plans',
+        `${rate} per registration above the free ${count(free)}`,
+        `GST ${pct(terms.gstRatePercent)}% applies to the activation fee`,
+        'One-time activation — no subscription',
+        fee,
+      ],
+    },
+  ]
+}
+
+/**
+ * A worked example, computed by the REAL pricing engine from the REAL terms.
+ *
+ * Included because a per-unit rate is genuinely harder to picture than a tier price: "₹1.50 per
+ * registration" leaves a prospect doing arithmetic, and any arithmetic a marketing page invents
+ * is arithmetic that can disagree with the invoice. Running the actual engine means this example
+ * is the amount the organizer would really be charged, or it is nothing at all.
+ */
+export interface PricingExample {
+  capacity:   string
+  chargeable: string
+  base:       string
+  gstLabel:   string
+  gst:        string
+  total:      string
+}
+
+export function buildPricingExample(terms: CommercialTerms, capacity: number): PricingExample | null {
+  const r = calculateActivationQuote({ capacity, terms })
+  if (!r.ok) return null
+  const q = r.quote
+  return {
+    capacity:   count(q.capacity),
+    chargeable: count(q.chargeableCapacity),
+    base:       formatPaise(q.basePaise),
+    gstLabel:   `GST ${pct(q.gstRatePercent)}%`,
+    gst:        formatPaise(q.gstPaise),
+    total:      formatPaise(q.totalPaise),
+  }
 }

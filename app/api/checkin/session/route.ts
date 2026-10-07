@@ -4,8 +4,11 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { adminDb } from '@/lib/firebase/admin'
 import { authorizeWorkspace } from '@/lib/team/workspace'
+import { isEventSlugInScope } from '@/lib/team/eventScope'
+import { isEventOpenForCheckin } from '@/lib/checkin/readiness'
 import { sessionCheckIn } from '@/lib/sessions/service'
 import { SessionError } from '@/lib/sessions/types'
+import type { RegistrationDocument } from '@/lib/registrations/types'
 
 export const dynamic = 'force-dynamic'
 
@@ -26,6 +29,28 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     registrationId = snap.docs[0].id
   }
   if (!registrationId) return NextResponse.json({ error: 'ticketCode or registrationId required' }, { status: 400 })
+
+  // ── Ownership + event assignment (RD-CHECKIN-2.0) ─────────────────────────
+  //
+  // This route accepted a client-supplied `registrationId` and enforced neither.
+  // The audit flagged it as the one check-in endpoint checking neither the event
+  // gate nor staff scope — and unlike the scan path it takes an id directly, so a
+  // caller could name any registration in any event. Both checks are derived from
+  // the stored document, never from the request.
+  const regSnap = await adminDb.collection('registrations').doc(registrationId).get()
+  if (!regSnap.exists) return NextResponse.json({ error: 'Registration not found' }, { status: 404 })
+  const reg = regSnap.data() as RegistrationDocument
+  if (reg.organizerUid !== authz.workspaceUid) {
+    return NextResponse.json({ error: 'Registration not found' }, { status: 404 })
+  }
+  if (!await isEventSlugInScope(authz, reg.eventSlug)) {
+    return NextResponse.json({ error: 'EVENT_NOT_ASSIGNED' }, { status: 403 })
+  }
+  // The SAME readiness rule every other check-in route applies. A cancelled or
+  // archived event stops admitting people to its sessions too.
+  if (!await isEventOpenForCheckin(reg.eventSlug)) {
+    return NextResponse.json({ error: 'EVENT_NOT_ACCEPTING_CHECKINS' }, { status: 422 })
+  }
 
   try {
     const result = await sessionCheckIn({ workspaceUid: authz.workspaceUid, sessionId, registrationId })

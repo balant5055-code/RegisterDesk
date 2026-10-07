@@ -1,10 +1,19 @@
 // GET /api/organizer/wallet/usage
 // Returns communication usage history for the organizer.
+//
+// RD-WALLET-REQ — optional, all additive: `event=<draftId>` (the workspace's own draft; records are
+// attributed ONLY by the `eventSlug` every writer sets — `eventId` is inconsistent historically, so
+// it is never used to attribute), `channel`, `from` / `to` (YYYY-MM-DD, India time) and `cursor`.
+// Bounded per request by lib/wallet/activityScan.ts. Without them the behaviour is unchanged.
 
 import { NextRequest, NextResponse } from 'next/server'
+import { resolveOwnedEventSlug } from '@/lib/events/liveEventRef'
 import { authorizeWorkspace }        from '@/lib/team/workspace'
 import { adminDb }                   from '@/lib/firebase/admin'
 import type { CommunicationUsage, CommChannel } from '@/lib/wallet/types'
+import { scanActivity, dayBound }   from '@/lib/wallet/activityScan'
+
+const CHANNELS = new Set(['email', 'whatsapp', 'sms'])
 
 function tsToIso(ts: unknown): string {
   if (!ts) return new Date().toISOString()
@@ -31,7 +40,7 @@ function docToUsage(id: string, d: Record<string, unknown>): CommunicationUsage 
 }
 
 export type GetCommUsageResponse =
-  | { success: true;  usage: CommunicationUsage[] }
+  | { success: true;  usage: CommunicationUsage[]; nextCursor?: string | null; scanLimited?: boolean; event?: { draftId: string; name: string; slug: string | null } }
   | { success: false; error: string }
 
 export async function GET(req: NextRequest): Promise<NextResponse<GetCommUsageResponse>> {
@@ -41,14 +50,41 @@ export async function GET(req: NextRequest): Promise<NextResponse<GetCommUsageRe
 
   const { searchParams } = new URL(req.url)
   const limitParam = parseInt(searchParams.get('limit') ?? '100', 10)
-  const limit      = Math.min(Math.max(limitParam, 1), 500)
+  const limit      = Math.min(Math.max(Number.isFinite(limitParam) ? limitParam : 100, 1), 500)
+  const channelParam = searchParams.get('channel')
+  const channel    = channelParam && CHANNELS.has(channelParam) ? channelParam : null
+  const from       = dayBound(searchParams.get('from'), 'start')
+  const to         = dayBound(searchParams.get('to'), 'end')
+  if (from && to && from > to) return NextResponse.json({ success: false, error: 'The start date is after the end date.' }, { status: 400 })
 
-  const snap = await adminDb.collection('communicationUsage')
-    .where('organizerUid', '==', uid)
-    .orderBy('createdAt', 'desc')
-    .limit(limit)
-    .get()
+  let event: { draftId: string; name: string; slug: string | null } | null = null
+  const eventParam = searchParams.get('event')
+  if (eventParam !== null) {
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(eventParam)) return NextResponse.json({ success: false, error: 'Invalid event.' }, { status: 400 })
+    const draft = await adminDb.doc(`users/${uid}/eventDrafts/${eventParam}`).get()
+    if (!draft.exists) return NextResponse.json({ success: false, error: 'Event not found.' }, { status: 404 })
+    const details = ((draft.data() as Record<string, unknown>).eventDetails ?? {}) as Record<string, Record<string, unknown> | undefined>
+    event = {
+      draftId: draft.id,
+      // RD-INTEG — the slug only once events/{slug} confirms THIS organizer and THIS draft (the
+      // draft's own urlSlug is client-writable, so it could name another event's records).
+      slug: await resolveOwnedEventSlug(uid, draft.id, draft.data() as Record<string, unknown>),
+      name: typeof details.info?.name === 'string' ? details.info.name : 'Untitled event',
+    }
+    // No public slug yet: nothing can be attributed to it.
+    if (!event.slug) return NextResponse.json({ success: true, usage: [], nextCursor: null, scanLimited: false, event })
+  }
 
-  const usage = snap.docs.map(doc => docToUsage(doc.id, doc.data() as Record<string, unknown>))
-  return NextResponse.json({ success: true, usage })
+  const slug = event?.slug ?? null
+  const filtered = slug !== null || channel !== null
+  const page = await scanActivity({
+    collection: 'communicationUsage', uid, limit, cursor: searchParams.get('cursor'), from, to,
+    keep: filtered ? d => (slug === null || d.eventSlug === slug) && (channel === null || d.channel === channel) : null,
+    map: docToUsage,
+  })
+  return NextResponse.json({
+    success: true, usage: page.rows, nextCursor: page.nextCursor,
+    ...(event ? { event } : {}),
+    ...(filtered ? { scanLimited: page.scanLimited } : {}),
+  })
 }

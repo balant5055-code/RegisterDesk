@@ -18,7 +18,7 @@ import {
   Loader2, RefreshCw, KeyRound, Gift, IndianRupee, Ticket, TrendingUp, ScrollText,
   ShieldCheck, ExternalLink, X, PlusCircle, PauseCircle, PlayCircle,
   Archive, Copy, PencilLine, Building2, LayoutGrid, CalendarClock, Percent,
-  ArrowUpCircle, ArrowDownCircle, BadgeCheck, Undo2, XCircle, RotateCcw,
+  BadgeCheck, Undo2, XCircle, RotateCcw,
   CalendarPlus, CalendarMinus, CalendarX, Zap, Unlock, Fingerprint, ShieldAlert,
 } from 'lucide-react'
 import {
@@ -27,7 +27,6 @@ import {
 import type { PillTone } from '@/components/admin'
 import { useConfirm } from '@/components/ui/ConfirmDialog'
 import { Bars, HBars } from '@/components/analytics/Charts'
-import { currentLicenseTierIds, isValidTierForVersion, CURRENT_LICENSE_VERSION, type AnyEventLicenseTier } from '@/lib/licensing/eventLicense'
 import type {
   LicenseRow, LicenseListResponse, LicenseDetail,
   LicenseAdminActionType, LicenseAdminActionRequest,
@@ -325,11 +324,6 @@ function LicenseDrawer({ eventId, onClose, onChanged }: { eventId: string; onClo
     if (!reason) return
     await act(action, { ...extra, reason })
   }
-  async function promptTier(action: 'upgrade' | 'downgrade') {
-    const tier = (await prompt({ title: 'Select tier', message: `Target tier (${currentLicenseTierIds().join(' / ')}):`, placeholder: currentLicenseTierIds().join(' / ') }))?.trim() as AnyEventLicenseTier
-    if (!isValidTierForVersion(tier, CURRENT_LICENSE_VERSION)) { if (tier) setErr('Invalid tier'); return }
-    await withReason(action, { tier })
-  }
   async function promptDays(action: 'extendExpiry' | 'reduceExpiry') {
     const v = (await prompt({ title: action === 'extendExpiry' ? 'Extend expiry' : 'Reduce expiry', message: 'New expiry window in days:', placeholder: 'e.g. 30' }))?.trim()
     if (!v) return
@@ -380,8 +374,6 @@ function LicenseDrawer({ eventId, onClose, onChanged }: { eventId: string; onClo
                 ? <Act icon={PlayCircle} label="Reactivate" tone="emerald" busy={busy === 'reactivate'} onClick={() => void withReason('reactivate', {}, 'Reactivate this license?')} />
                 : <Act icon={PauseCircle} label="Suspend" tone="amber" busy={busy === 'suspend'} onClick={() => void withReason('suspend')} />}
               <Act icon={XCircle} label="Cancel" tone="red" busy={busy === 'cancel'} onClick={() => void withReason('cancel', {}, 'Cancel this license?', true)} />
-              <Act icon={ArrowUpCircle} label="Upgrade" busy={busy === 'upgrade'} onClick={() => void promptTier('upgrade')} />
-              <Act icon={ArrowDownCircle} label="Downgrade" busy={busy === 'downgrade'} onClick={() => void promptTier('downgrade')} />
               <Act icon={BadgeCheck} label="Mark paid" tone="emerald" busy={busy === 'markPaymentReceived'} onClick={() => void withReason('markPaymentReceived', {}, 'Mark payment received?')} />
               <Act icon={Undo2} label="Refund" tone="red" busy={busy === 'refund'} onClick={() => void withReason('refund', {}, 'Refund and cancel this license?', true)} />
               <Act icon={RefreshCw} label="Reissue" busy={busy === 'reissue'} onClick={() => void withReason('reissue', {}, 'Reissue this license?')} />
@@ -449,12 +441,14 @@ function CouponsWorkspace() {
   const [reloadKey, setReloadKey] = useState(0)
   const [creating, setCreating] = useState(false)
   const [detailCode, setDetailCode] = useState<string | null>(null)
+  // RD-PHASE4-S2 — server-decided (verified token). The server refuses a non-Super-Admin write anyway.
+  const [canEdit, setCanEdit] = useState(false)
   const { confirm, prompt } = useConfirm()
 
   useEffect(() => {
     let alive = true
     void (async () => {
-      try { const d = await authedGet<CouponListResponse>('/api/admin/license-coupons?includeArchived=1'); if (alive) { setErr(null); setCoupons(d.coupons) } }
+      try { const d = await authedGet<CouponListResponse>('/api/admin/license-coupons?includeArchived=1'); if (alive) { setErr(null); setCoupons(d.coupons); setCanEdit(d.permissions?.canEditPricing === true) } }
       catch (e) { if (alive) setErr(e instanceof Error ? e.message : 'Failed to load coupons') }
     })()
     return () => { alive = false }
@@ -487,8 +481,11 @@ function CouponsWorkspace() {
       <div className="flex flex-wrap items-center gap-3">
         <SearchInput value={search} onChange={setSearch} placeholder="Search code, campaign, description…" className="max-w-xs flex-1" />
         <FilterTabs options={COUPON_FILTERS} value={lifecycle} onChange={setLifecycle} aria-label="Filter by lifecycle" />
-        <button onClick={() => setCreating(true)} className={cn(btnOutline, 'ml-auto')}><PlusCircle className="size-3.5" /> New coupon</button>
+        {canEdit && <button onClick={() => setCreating(true)} className={cn(btnOutline, 'ml-auto')}><PlusCircle className="size-3.5" /> New coupon</button>}
       </div>
+      {!canEdit && coupons !== null && (
+        <p role="status" className="text-[11.5px] text-muted-foreground">View only. Issuing or changing licence coupons requires a Super Admin.</p>
+      )}
       {err && <ErrorBanner>{err}</ErrorBanner>}
 
       <Card title="Coupons" icon={Gift}>
@@ -514,14 +511,14 @@ function CouponsWorkspace() {
                     <td className="px-4 py-2 text-right tabular-nums">{num(c.currentUses)}{c.usageLimit != null ? `/${num(c.usageLimit)}` : ''}</td>
                     <td className="px-4 py-2 text-muted-foreground">{c.expiresAt ? fmtDay(c.expiresAt) : 'Never'}</td>
                     <td className="px-4 py-2">
-                      <div className="flex items-center justify-end gap-1">
+                      {canEdit ? <div className="flex items-center justify-end gap-1">
                         {c.lifecycle === 'paused'
                           ? <IconBtn title="Resume" onClick={() => void couponAction(c.code, 'resume', 'Resume')}><PlayCircle className="size-3.5" /></IconBtn>
                           : <IconBtn title="Pause" onClick={() => void couponAction(c.code, 'pause', 'Pause')}><PauseCircle className="size-3.5" /></IconBtn>}
                         <IconBtn title="Clone" onClick={() => void couponAction(c.code, 'clone', 'Clone')}><Copy className="size-3.5" /></IconBtn>
                         <IconBtn title="Edit" onClick={() => setDetailCode(c.code)}><PencilLine className="size-3.5" /></IconBtn>
                         {!c.archived && <IconBtn title="Archive" onClick={() => void couponAction(c.code, 'archive', 'Archive')}><Archive className="size-3.5" /></IconBtn>}
-                      </div>
+                      </div> : <div className="text-right text-[11px] text-muted-foreground">View only</div>}
                     </td>
                   </tr>
                 ))}
@@ -530,7 +527,7 @@ function CouponsWorkspace() {
         </div>
       </Card>
 
-      {creating && <CouponCreateDialog onClose={() => setCreating(false)} onCreated={() => { setCreating(false); reload() }} />}
+      {creating && canEdit && <CouponCreateDialog onClose={() => setCreating(false)} onCreated={() => { setCreating(false); reload() }} />}
       {detailCode && <CouponDrawer code={detailCode} onClose={() => setDetailCode(null)} onChanged={reload} />}
     </div>
   )
@@ -655,12 +652,12 @@ function CouponDrawer({ code, onClose, onChanged }: { code: string; onClose: () 
                 {c.restrictions.eventTypes.length > 0 && <p className="text-muted-foreground">Event types: {c.restrictions.eventTypes.join(', ')}</p>}
               </div>
             )}
-            <ActionGroup title="Edit (audited)">
+            {data.permissions?.canEditPricing === true && <ActionGroup title="Edit (audited)">
               <Act icon={PencilLine} label="Description" onClick={() => void editField('description', 'description')} />
               <Act icon={PencilLine} label="Campaign" onClick={() => void editField('campaign', 'campaign')} />
               <Act icon={CalendarClock} label="Usage limit" onClick={() => void editField('usageLimit', 'usageLimit')} />
               <Act icon={CalendarClock} label="Expiry" onClick={() => void editField('expiresAt', 'expiresAt')} />
-            </ActionGroup>
+            </ActionGroup>}
           </div>
         )}
       </div>

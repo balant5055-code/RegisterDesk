@@ -60,6 +60,21 @@ export async function createOrganizerProfile(
       verifiedAt:  null,
     },
     role:             ORGANIZER_ROLE,
+    // RD-WORKSPACE-OWNERSHIP-01 · the EXPLICIT ownership fact.
+    //
+    // This function is the organizer self-signup path and nothing else. A gate credential
+    // is created server-side by lib/staff/service.ts (adminAuth.createUser on the reserved
+    // .invalid domain) and never reaches here, so setting the marker unconditionally cannot
+    // promote a staff account. Without it, an organizer who has not yet created an event
+    // has no positive evidence of owning their workspace — see readWorkspaceOwnerMarker.
+    workspaceOwner:   true,
+    // RD-ORGANIZER-SIGNUP-02 · created, not activated. The row exists from this
+    // moment (orphan recovery and the signup's own form data both depend on it),
+    // but it is not an organizer the admin console lists or counts until the email
+    // OTP is verified — app/api/auth/verify-otp flips this to 'active' inside the
+    // same transaction that records the verification. Organizer APIs are already
+    // closed to it: verifyCaller refuses any token whose email_verified is false.
+    accountStatus:    'pending',
     emailVerified:    false,
     verification: {
       email: {

@@ -8,13 +8,13 @@
 // index) computes all three, so reconcileEvents/reconcilePasses share the path and
 // the cron's reconcileEventsAndPasses scans each event exactly once.
 
-import { FieldValue, FieldPath, AggregateField } from 'firebase-admin/firestore'
+import { FieldValue, FieldPath } from 'firebase-admin/firestore'
 import { adminDb } from '@/lib/firebase/admin'
 import { captureError } from '@/lib/monitoring/sentry'
 import { mismatch, RECON_PAGE_DEFAULT, RECON_BUDGET_MS, RECON_CURSOR_FLUSH, type CounterMismatch, type ReconcileOptions, type ReconcileResult } from '@/lib/reconciliation/types'
 import { readCursor, writeCursor } from '@/lib/reconciliation/cursor'
 import { EVENT_STATS_VERSION } from '@/lib/registrations/types'
-import { getAttendanceShardSums, attendanceReconShardRef } from '@/lib/firebase/firestore/registrationCounters'
+import { getAttendanceShardSums, attendanceReconShardRef, sumConfirmedRevenueFromLedgerChecked } from '@/lib/firebase/firestore/registrationCounters'
 
 const COUNTERS = 'registrationCounters'
 
@@ -22,10 +22,6 @@ const COUNTERS = 'registrationCounters'
 async function countQ(q: FirebaseFirestore.Query): Promise<number> {
   const snap = await q.count().get()
   return snap.data().count
-}
-async function sumQ(q: FirebaseFirestore.Query, field: string): Promise<number> {
-  const snap = await q.aggregate({ s: AggregateField.sum(field) }).get()
-  return Number(snap.data().s ?? 0)
 }
 
 interface CounterData {
@@ -36,7 +32,8 @@ interface CounterData {
   passCheckedInCounts?: Record<string, number>
 }
 
-async function reconcileOneEvent(slug: string, scope: { events: boolean; passes: boolean }, repair: boolean): Promise<CounterMismatch[]> {
+/** Exported for tests (RD-FIN-02). */
+export async function reconcileOneEvent(slug: string, scope: { events: boolean; passes: boolean }, repair: boolean): Promise<CounterMismatch[]> {
   const counterSnap = await adminDb.collection(COUNTERS).doc(slug).get()
   if (!counterSnap.exists) return []
   const c = counterSnap.data() as CounterData
@@ -87,7 +84,9 @@ async function reconcileOneEvent(slug: string, scope: { events: boolean; passes:
     countQ(regsCol.where('status', '==', 'cancelled')),
     countQ(regsCol.where('status', '==', 'rejected')),
     countQ(regsCol.where('checkedIn', '==', true)),
-    sumQ(regsCol.where('status', '==', 'confirmed'), 'amount'),
+    // RD-FIN-02 B5 · the SAME ticket-basis definition the counter maintains (Σ amount − Σ attendee
+    // fees). Throws on an unreadable aggregate so the counter is never "repaired" to a guess.
+    sumConfirmedRevenueFromLedgerChecked(slug).then(r => { if (!r.ok) throw new Error('revenue_aggregate_failed'); return r.value }),
     // Per-pass confirmed + checked-in counts (bounded by pass count, all in parallel).
     Promise.all(passIds.map(async pid => {
       const [pc, pci] = await Promise.all([

@@ -13,10 +13,10 @@ import { notificationEngine, NotificationChannel } from '@/lib/notifications'
 import { resolveEventEmailProvider } from '@/lib/email/resolveEventProvider'
 import { getOrganiserSuppressionSet } from '@/lib/firebase/firestore/emailSuppressionList'
 import { resolveMaxRecipientsPerBroadcast } from '@/lib/broadcasts/limits'
-import { chargeAndStartCampaign, type StartResult } from '@/lib/communications/billing'
+import { chargeAndStartCampaign, settleBroadcastBilling, type StartResult } from '@/lib/communications/billing'
 import { logBroadcastAction }      from '@/lib/broadcasts/audit'
 import { getMetaProvider, hasWhatsAppTemplate } from '@/lib/whatsapp'
-import { createWhatsAppBroadcastJob, processWhatsAppBroadcastChunk } from './whatsappJob'
+import { createWhatsAppBroadcastJob, processWhatsAppBroadcastChunk, WHATSAPP_BROADCAST_JOBS } from './whatsappJob'
 import { createEmailBroadcastJob, processEmailBroadcastChunk } from './emailJob'
 import { dedupeRecipientsByEmail, dedupeRecipientsByPhone } from './dedupeRecipients'
 import { applyRegistrationDateRange, persistedDateBounds } from '@/lib/broadcasts/registrationDateFilter'
@@ -66,6 +66,8 @@ interface CampaignData {
   registeredTo?:   unknown
   /** WHATSAPP ONLY — 'Ignore duplicate WhatsApp numbers'. See BroadcastCampaign.dedupePhones. */
   dedupePhones?:  boolean
+  /** RD-INTEG — units paid for upfront (chargeAndStartCampaign); absent on unbilled/legacy campaigns. */
+  chargedUnits?:  number
 }
 
 // ─── Bill + start (the only entry point for kicking off a campaign) ───────────
@@ -85,10 +87,10 @@ export async function startBroadcastCampaign(args: {
   })
 
   if (!result.ok) {
-    if (result.reason === 'insufficient_balance') {
+    if (result.reason === 'insufficient_balance' || result.reason === 'allowance_exhausted') {
       void logBroadcastAction({
         organizerUid: args.organizerUid, actorUid: args.actorUid,
-        action: 'broadcast.failed', campaignId: args.campaignId, metadata: { reason: 'insufficient_balance' },
+        action: 'broadcast.failed', campaignId: args.campaignId, metadata: { reason: result.reason },
       }).catch(() => { /* best-effort */ })
     }
     return result   // bad_state ⇒ replay, no-op
@@ -202,6 +204,17 @@ async function deliverWhatsAppCampaign(
 ): Promise<void> {
   let jobId = c.whatsappJobId
 
+  // RD-INTEG — a crash between creating the job and linking it (below) left an orphan job the
+  // cron still drives, and a re-delivery would have snapshotted a SECOND job for the same
+  // campaign (every recipient messaged twice). Adopt the existing job instead.
+  if (!jobId) {
+    const orphan = await adminDb.collection(WHATSAPP_BROADCAST_JOBS).where('campaignId', '==', campaignId).limit(1).get()
+    if (!orphan.empty && (orphan.docs[0].data() as { campaignId?: unknown }).campaignId === campaignId) {
+      jobId = orphan.docs[0].id
+      await ref.update({ whatsappJobId: jobId })
+    }
+  }
+
   if (!jobId) {
     // Recipients: same audience query; require a phone. Email suppression is an
     // email-channel concept and does not apply to WhatsApp (opt-out is WA-2/WA-5).
@@ -228,9 +241,17 @@ async function deliverWhatsAppCampaign(
     //
     // Reads the flag off the persisted campaign, so an immediate send and a scheduled one
     // resolved by the cron behave identically.
-    const recipients: Recipient[] = c.dedupePhones
+    const audience: Recipient[] = c.dedupePhones
       ? dedupeRecipientsByPhone(withPhone)
       : withPhone
+    // RD-INTEG — never message more people than were paid for. A SCHEDULED campaign is charged
+    // for the count previewed at creation, and the audience is resolved again now; anyone who
+    // registered in between is beyond the charge. (Fewer is fine: settlement returns the rest.)
+    const paidFor = typeof c.chargedUnits === 'number' && c.chargedUnits >= 0 ? c.chargedUnits : null
+    const recipients: Recipient[] = paidFor !== null && audience.length > paidFor ? audience.slice(0, paidFor) : audience
+    if (recipients.length < audience.length) {
+      await ref.update({ unbilledRecipientsSkipped: audience.length - recipients.length })
+    }
 
     const provider      = await getMetaProvider()
     const validTemplate = typeof c.templateType === 'string' && hasWhatsAppTemplate(c.templateType)
@@ -248,6 +269,9 @@ async function deliverWhatsAppCampaign(
         action: finalStatus === 'sent' ? 'broadcast.sent' : 'broadcast.failed',
         metadata: { recipientCount: recipients.length, reason: failReason },
       }).catch(() => {})
+      // RD-INTEG · D3 — nothing reached WhatsApp: every unit/rupee charged upfront goes back.
+      try { await settleBroadcastBilling(campaignId, 0) }
+      catch (err) { console.error('[broadcast] billing settlement failed — the sweep retries it:', { campaignId, err: err instanceof Error ? err.message : err }) }
       return
     }
 

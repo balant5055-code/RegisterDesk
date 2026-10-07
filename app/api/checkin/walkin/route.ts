@@ -14,7 +14,9 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { authorizeWorkspace }        from '@/lib/team/workspace'
 import { getEventBySlug }            from '@/lib/firebase/firestore/events'
-import { getEventCheckInStatus }     from '@/lib/checkin/eventStatus'
+import { isEventOpenForCheckin }     from '@/lib/checkin/readiness'
+import { isEventSlugInScope }        from '@/lib/team/eventScope'
+import { appendCheckinHistorySafe }  from '@/lib/checkin/history'
 import { adminDb }                   from '@/lib/firebase/admin'
 import {
   createRegistration, writeAuditEntry,
@@ -59,17 +61,39 @@ async function loadOwnedEvent(slug: string, workspaceUid: string): Promise<LoadR
 // ─── GET — passes + remaining capacity for the walk-in form ───────────────────
 
 export async function GET(req: NextRequest): Promise<NextResponse> {
-  // RD-CHECKIN-STAFF-01 — walk-in CREATES a registration, so it is gated on
-  // `registrations`, not `checkin`. Owner/admin/manager keep it unchanged; the
-  // gate-only `checkin_staff` loses it, which is the intent. Gated on the GET too:
-  // the form's pass list and remaining-capacity numbers are exactly the data a
-  // gate-only operator should not be reading.
-  const authz = await authorizeWorkspace(req, 'registrations')
+  // RD-CHECKIN-2.0 — walk-in is gated on its OWN permission, `walkin`.
+  //
+  // ═══ THE MISMATCH THIS RESOLVES ═══════════════════════════════════════════
+  // This route required `registrations` while its own header comment said
+  // `checkin`, and every surface that offers walk-in calls itself check-in. The
+  // consequence was not cosmetic: the only way to let a gate operator register a
+  // walk-up was to grant them the ENTIRE registration module — edit, cancel,
+  // refund-adjacent state, bulk export. So the product hid the button instead, and
+  // gate staff could reach neither it nor the route.
+  //
+  // `walkin` is strictly narrower than `registrations`: one operation, on an event
+  // this caller is assigned to. Owner/admin/manager hold it in the matrix, so
+  // nobody who could perform a walk-in before has lost it. The gate role that needs
+  // it — `checkin_lead` — now holds it; plain `checkin_staff` still does not. The
+  // server check and the UI finally say the same thing.
+  //
+  // Gated on the GET as well: the pass list and remaining-capacity numbers are
+  // exactly the data an operator without this permission should not be reading.
+  const authz = await authorizeWorkspace(req, 'walkin')
   if (!authz.ok) return NextResponse.json({ error: authz.error }, { status: authz.status })
   const uid = authz.workspaceUid
 
   const slug = req.nextUrl.searchParams.get('slug')?.trim()
   if (!slug) return NextResponse.json({ error: 'MISSING_SLUG' }, { status: 400 })
+
+  // RD-CHECKIN-2.0 — event assignment, which this route never enforced. Without it
+  // an operator assigned to Event A could read Event B's pass list and remaining
+  // capacity by changing one query parameter — the same hole the offline cache had
+  // and closed. Derived from the caller's own team record, so it cannot be
+  // sidestepped from the request.
+  if (!await isEventSlugInScope(authz, slug)) {
+    return NextResponse.json({ error: 'EVENT_NOT_ASSIGNED' }, { status: 403 })
+  }
 
   const loaded = await loadOwnedEvent(slug, uid)
   if (!loaded.ok) return loaded.error
@@ -98,8 +122,8 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
 // ─── POST — register + check in at the gate ───────────────────────────────────
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
-  // See the GET above — walk-in is registration creation and requires `registrations`.
-  const authz = await authorizeWorkspace(req, 'registrations')
+  // See the GET above — walk-in is registration creation and requires `walkin`.
+  const authz = await authorizeWorkspace(req, 'walkin')
   if (!authz.ok) return NextResponse.json({ error: authz.error }, { status: authz.status })
   const uid       = authz.workspaceUid    // authorization / ownership scope
   const callerUid = authz.callerUid       // attribution: the registering operator
@@ -121,12 +145,20 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   if (!PAYMENT_MODES.includes(paymentMode)) return NextResponse.json({ error: 'Invalid payment mode' }, { status: 400 })
 
   // ── Load + authorize event ─────────────────────────────────────────────────
+  // Event assignment first, before the event is loaded at all — the same rule the
+  // GET applies, so neither verb can be used to reach an unassigned event.
+  if (!await isEventSlugInScope(authz, slug)) {
+    return NextResponse.json({ error: 'EVENT_NOT_ASSIGNED' }, { status: 403 })
+  }
+
   const loaded = await loadOwnedEvent(slug, uid)
   if (!loaded.ok) return loaded.error
 
-  // Event must currently accept check-ins (same lifecycle gate as QR scanning).
-  const status = await getEventCheckInStatus(slug)
-  if (status !== 'ok') return NextResponse.json({ error: 'This event is not currently accepting check-ins.' }, { status: 422 })
+  // Event must currently accept check-ins — the ONE readiness rule (RD-CHECKIN-2.0),
+  // identical to the QR gate's.
+  if (!await isEventOpenForCheckin(slug)) {
+    return NextResponse.json({ error: 'This event is not currently accepting check-ins.' }, { status: 422 })
+  }
 
   const pass = loaded.passes.find(p => p.id === passId)
   if (!pass || pass.status === 'inactive') {
@@ -169,6 +201,23 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     // Audit: attribute to the operator (callerUid) + record the workspace.
     void writeAuditEntry(result.registrationId, 'walkin_created', callerUid, 'organizer', uid)
       .catch(err => console.error('[walkin] audit failed:', err))
+
+    // RD-CHECKIN-2.0 — a walk-in IS an admission, so it appends the same
+    // CHECK_IN history entry a scanned ticket does. `createRegistration` performed
+    // the check-in inside its own transaction via `checkInOnCreate`, which is why
+    // this is recorded here rather than in the shared check-in helper: there is
+    // exactly one admission and exactly one history entry for it.
+    // Awaited, like every other history append: the entry is the evidence, and the
+    // response must not describe an admission whose record has not been written.
+    await appendCheckinHistorySafe({
+      registrationId: result.registrationId,
+      action:         'CHECK_IN',
+      eventSlug:      slug,
+      organizerUid:   uid,
+      operatorUid:    callerUid,
+      workspaceUid:   uid,
+      method:         'walkin',
+    })
 
     // Identity engine: walk-ins flow through the SAME allocateIdentifier path —
     // no duplicate assignment logic. No-op unless the event opted into auto

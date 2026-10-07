@@ -9,6 +9,22 @@ import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { deriveLifecycleStatus, isArchivedEvent } from '@/lib/events/lifecycleStateMachine'
+import {
+  actionAvailability, isReadOnlyLifecycle,
+} from '@/app/(dashboard)/dashboard/events/presentation'
+import type { EventListItem } from '@/app/api/organizer/events/route'
+import type { EventLifecycleStatus } from '@/types/events'
+
+/** Minimal list item — only the fields the availability rules actually read. */
+const EV = (over: { lifecycleStatus: EventLifecycleStatus }): EventListItem => ({
+  draftId: 'd', status: 'draft', name: 'E', slug: null, tagline: null,
+  startDate: null, endDate: null, bannerUrl: null, eventType: null, eventSubtype: null,
+  campaignType: null, isFreeEvent: false, totalCapacity: null, totalRegistrations: 0,
+  confirmedRevenuePaise: 0, passes: [], updatedAt: '', publishedAt: null,
+  reviewStatus: null, rejectionReason: null, changesComment: null, hasPaidLicense: false,
+  ...over,
+})
+const OPTS = { canDeleteDraft: true }
 
 /** The route's canonical predicate, applied to one draft document. */
 const inDashboardScope = (d: Record<string, unknown>) =>
@@ -62,7 +78,11 @@ describe('the route enforces the scope at the data boundary', () => {
   })
 
   it('the recent-registration scan is scoped by the canonical slugs', () => {
-    expect(src).toMatch(/dashboardSlugs\.has\(r\.eventSlug\)/)
+    // RD-DASH-03: the canonical set is now pushed INTO the feed query rather than filtering
+    // a limited read afterwards — the same rule, enforced a step earlier.
+    const feed = readFileSync(resolve(process.cwd(), 'lib/dashboard/activityFeed.ts'), 'utf8')
+    expect(feed).toMatch(/where\('eventSlug', 'in', scope\.dashboardSlugs\)/)
+    expect(feed).toMatch(/if \(!allowed\.has\(slug\)\) continue/)
   })
 })
 
@@ -337,21 +357,31 @@ describe('THE OBSERVED PREVIEW CASE — two unpublished events', () => {
 })
 
 describe('Events UI semantics are unchanged by the dashboard fix', () => {
-  const src = readFileSync(resolve(process.cwd(), 'app/(dashboard)/dashboard/events/EventsClient.tsx'), 'utf8')
+  // RD-EVENT-02 · These rules did not change; they MOVED. The events landing page split
+  // its presentation decisions out of EventsClient.tsx into a pure module, so the same
+  // three guarantees are now asserted by CALLING them rather than by pattern-matching the
+  // component source — a strictly stronger check of the identical behaviour.
+  const card = readFileSync(resolve(process.cwd(), 'app/(dashboard)/dashboard/events/EventCard.tsx'), 'utf8')
 
   it('unpublished stays EDITABLE — isReadOnly does not include it', () => {
-    expect(src).toMatch(/const isReadOnly\s+= ls === 'archived' \|\| ls === 'completed' \|\| ls === 'cancelled'/)
+    expect(isReadOnlyLifecycle('unpublished')).toBe(false)
+    expect(isReadOnlyLifecycle('archived')).toBe(true)
+    expect(isReadOnlyLifecycle('completed')).toBe(true)
+    expect(isReadOnlyLifecycle('cancelled')).toBe(true)
+    expect(actionAvailability(EV({ lifecycleStatus: 'unpublished' }), OPTS).edit).toBe(true)
   })
 
   it('unpublished does NOT show Delete Permanently', () => {
     // Still gated on the GENUINE archived state, never on tab membership.
-    expect(src).toMatch(/const canDeleteForever = ls === 'archived'/)
-    expect(src).not.toMatch(/canDeleteForever = isArchivedTabEvent/)
+    expect(actionAvailability(EV({ lifecycleStatus: 'unpublished' }), OPTS).deleteForever).toBe(false)
+    expect(actionAvailability(EV({ lifecycleStatus: 'completed' }), OPTS).deleteForever).toBe(false)
+    expect(actionAvailability(EV({ lifecycleStatus: 'cancelled' }), OPTS).deleteForever).toBe(false)
   })
 
   it('genuine archived events still show it', () => {
-    expect(src).toMatch(/\{canDeleteForever && \(/)
-    expect(src).toMatch(/Delete Permanently/)
+    expect(actionAvailability(EV({ lifecycleStatus: 'archived' }), OPTS).deleteForever).toBe(true)
+    expect(card).toMatch(/avail\.deleteForever/)
+    expect(card).toMatch(/Delete permanently/)
   })
 })
 
@@ -399,6 +429,21 @@ describe('the dashboard applies the scope once, at the data boundary', () => {
 
   it('alerts and communication cost derive from the scoped list', () => {
     expect(src).toMatch(/const communicationCostPaise = dashboardDrafts\.reduce\(/)
-    expect(src).toMatch(/dashboardDrafts\.forEach\(/)
+    // RD-DASHBOARD-05: the alert loops walk `lookupDrafts` — `dashboardDrafts` plus the
+    // DELIBERATELY SELECTED event, which may be filed under Archived. That addition is the
+    // point: an operator reviewing a finished race gets that event's own alerts, and the
+    // merge step filters the list to the selected event anyway. It still never walks the
+    // raw `drafts` array, which is what this suite exists to prevent.
+    expect(src).toMatch(/lookupDrafts\.forEach\(/)
+  })
+
+  it('the lookup set widens ONLY for the explicitly selected event', () => {
+    // One event, named by the caller's own selection — not a relaxation of the archive
+    // rule for everything. `slugList` (the workspace aggregate set) is untouched, so an
+    // archived event still contributes nothing to a workspace total.
+    // RD-DASHBOARD-06: also widens for an UNPUBLISHED selection (`selectedSlug === null`),
+    // because the Event Selector lists drafts and a selected draft must describe itself.
+    expect(src).toMatch(/const lookupDrafts\s+= selectedDraft && \(selectedSlug === null \|\| !dashboardSlugs\.has\(selectedSlug\)\)/)
+    expect(src).toMatch(/const slugList = Array\.from\(new Set\(\s*\n?\s*dashboardDrafts\.map/)
   })
 })

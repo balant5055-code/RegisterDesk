@@ -7,6 +7,7 @@
 // effect — exactly the codebase's standard post-commit pattern. No event is
 // generated here; these only record events that already happened.
 
+import { COMMUNICATION_BALANCE_HREF } from '@/lib/wallet/communicationBalance'
 import { fmtMoney } from '@/lib/reports/format'
 import { writeNotification } from './write'
 
@@ -77,7 +78,7 @@ export function notifyWalletRecharged(args: {
     workspaceUid, category: 'wallet', type: 'WALLET_RECHARGED',
     title: 'Wallet recharged',
     body:  `${fmtMoney(amountPaise)} added. New balance: ${fmtMoney(newBalancePaise)}.`,
-    severity: 'success', link: '/dashboard/wallet',
+    severity: 'success', link: COMMUNICATION_BALANCE_HREF,
     dedupeId: topupId ? `wallet-topup-${topupId}` : undefined,
   })
 }

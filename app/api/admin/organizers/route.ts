@@ -6,7 +6,9 @@
 //   pageSize — results per page (default 25, max 100)
 //   cursor   — last uid from the previous page (createdAt-desc cursor)
 //   search   — case-insensitive substring over name / email / organizationName
-//   status   — 'active' | 'suspended' | 'banned' (effective; missing → active)
+//   status   — 'active' | 'pending' | 'suspended' | 'banned' (effective; missing → active)
+//              'pending' (an unverified signup) is EXCLUDED from the default, unfiltered
+//              list and returned only when asked for by name.
 //
 // Search + status are applied IN MEMORY per fetched page (Firestore has no
 // substring search, and 'active' is the absence of a field which can't be
@@ -19,10 +21,11 @@ import type { DocumentSnapshot }     from 'firebase-admin/firestore'
 import { adminDb }                   from '@/lib/firebase/admin'
 import { resolveAdminUid }           from '@/lib/admin/auth'
 import { isOrganizer }               from '@/lib/organizer/identity'
-import type {
-  AccountStatus,
-  AdminOrganizerSummary,
-  AdminOrganizersListResponse,
+import {
+  resolveAccountStatus,
+  type AccountStatus,
+  type AdminOrganizerSummary,
+  type AdminOrganizersListResponse,
 } from '@/lib/admin/organizerTypes'
 
 function tsToISO(ts: unknown): string | null {
@@ -42,9 +45,11 @@ interface UserDoc {
   createdAt?:        unknown
 }
 
-function effectiveStatus(s: AccountStatus | undefined): AccountStatus {
-  return s === 'suspended' || s === 'banned' ? s : 'active'
-}
+// RD-ORGANIZER-SIGNUP-02 · the local copy of this rule was one of three that each
+// coerced an unrecognised value to 'active'. It now delegates to the one resolver that
+// lives beside the type (lib/admin/organizerTypes.ts), so a new lifecycle value can
+// never read as 'active' here by omission.
+const effectiveStatus = resolveAccountStatus
 
 export async function GET(req: NextRequest): Promise<NextResponse> {
   const adminUid = await resolveAdminUid(req.headers.get('authorization'))
@@ -56,7 +61,8 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   const search   = (searchParams.get('search') ?? '').trim().toLowerCase()
   const statusRaw = searchParams.get('status') ?? ''
   const status: AccountStatus | null =
-    statusRaw === 'active' || statusRaw === 'suspended' || statusRaw === 'banned' ? statusRaw : null
+    statusRaw === 'active' || statusRaw === 'pending'
+    || statusRaw === 'suspended' || statusRaw === 'banned' ? statusRaw : null
 
   // ── Scan-until-enough (RD-AUTH-01 Phase 5 / M-C + M-D) ──────────────────────
   // Previously status/search were filtered in memory AFTER a pageSize+1 limit, so a
@@ -108,6 +114,11 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
         statusReason:     d.statusReason ?? null,
         createdAt:        tsToISO(d.createdAt),
       }
+      // RD-ORGANIZER-SIGNUP-02 · a signup that has not verified its email is not an
+      // organizer this list describes. It is excluded from the DEFAULT view (no status
+      // filter) and reachable only by asking for it explicitly with ?status=pending, so
+      // the unfiltered list cannot present an unverified row as an active organizer.
+      if (!status && item.accountStatus === 'pending') continue
       if (status && item.accountStatus !== status) continue
       if (!matchesSearch(item)) continue
       items.push(item)

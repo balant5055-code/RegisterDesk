@@ -115,12 +115,21 @@ describe('resolveParser — the upload gate', () => {
     expect(!out.ok && out.message).toMatch(/not supported/i)
   })
 
-  it('names PDF and ZIP as future formats rather than a flat refusal', () => {
-    for (const ext of ['pdf', 'zip']) {
-      const out = resolveParser({ name: `r.${ext}`, size: 10 })
-      expect(out.ok).toBe(false)
-      expect(!out.ok && out.message).toMatch(/planned for a later release/i)
-    }
+  // RD-RACEOPS-RESULTS-06 · PDF is no longer a future format — a text PDF now resolves to
+  // its own provider. ZIP keeps the "planned" wording, and the assertion is stronger than
+  // before: it now also proves the refusal message stopped claiming PDF is unsupported.
+  it('accepts PDF, and still names ZIP as a future format rather than a flat refusal', () => {
+    const pdf = resolveParser({ name: 'r.pdf', size: 10 })
+    expect(pdf.ok).toBe(true)
+    if (pdf.ok) expect(pdf.parser.id).toBe('pdf')
+
+    const zip = resolveParser({ name: 'r.zip', size: 10 })
+    expect(zip.ok).toBe(false)
+    expect(!zip.ok && zip.message).toMatch(/planned for a later release/i)
+    // PDF now appears in the message as an ACCEPTED format; what must be gone is the claim
+    // that it is still to come.
+    expect(!zip.ok && zip.message).not.toMatch(/PDF results are planned/i)
+    expect(!zip.ok && zip.message).toMatch(/\.pdf/)
   })
 
   it('rejects a file with no extension', () => {

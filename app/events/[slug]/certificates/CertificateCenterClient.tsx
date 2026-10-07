@@ -17,9 +17,10 @@ import { Search, Loader2, Award, Download, ExternalLink, Share2 } from 'lucide-r
 import { cn } from '@/lib/utils/cn'
 import { Dialog } from '@/components/ui/Dialog'
 import type { CertificateVerifyResponse } from '@/app/api/verify/certificate/[certificateId]/route'
-import { buttonVariants } from '@/components/ui/button'
+import { marketingButton } from '@/lib/marketing/theme'
 import { AttendeePhotoCard } from '@/components/certificates/AttendeePhotoCard'
 import { applyPhotoBusy } from '@/lib/certificates/photoBusyState'
+import { PAGE_TITLE } from '@/lib/marketing/pageTitle'
 
 type Mode = 'email' | 'mobile' | 'ticketCode' | 'registrationId' | 'bibNumber'
 
@@ -117,10 +118,10 @@ async function readHasPhoto(slug: string, certificateId: string, grant: string):
 }
 
 const inputCls =
-  'h-12 w-full rounded-xl border border-border bg-card px-4 text-fs-sm text-foreground ' +
-  'placeholder:text-muted-foreground/70 transition-colors ' +
-  'focus-visible:border-primary/40 focus-visible:outline-none focus-visible:ring-2 ' +
-  'focus-visible:ring-primary/40 focus-visible:ring-offset-2 disabled:opacity-60'
+  'h-12 w-full rounded-[var(--radius-control)] border border-border bg-card px-4 text-fs-base text-foreground ' +
+  'placeholder:text-muted-foreground/70 transition-[border-color,box-shadow] ' +
+  'focus-visible:border-action/60 focus-visible:outline-none ' +
+  'focus-visible:shadow-[0_0_0_4px_rgb(var(--action-rgb)_/_0.12)] disabled:opacity-60'
 
 export function CertificateCenterClient({ slug, eventName }: { slug: string; eventName: string }) {
   const reduce = useReducedMotion()
@@ -144,6 +145,17 @@ export function CertificateCenterClient({ slug, eventName }: { slug: string; eve
   // has re-rendered with the new state.
   const inFlight = useRef(false)
   const resultsRef = useRef<HTMLDivElement>(null)
+  // When a lookup returns, bring the outcome into view (owner, 2026-09-25) — on a laptop the
+  // result opened below the fold and looked like nothing happened. Runs once per NEW result
+  // set; reduced motion jumps instead of gliding. scroll-mt keeps it clear of the header.
+  useEffect(() => {
+    if (!results) return
+    const el = resultsRef.current
+    if (!el) return
+    const smooth = !window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    const t = requestAnimationFrame(() => el.scrollIntoView({ behavior: smooth ? 'smooth' : 'auto', block: 'start' }))
+    return () => cancelAnimationFrame(t)
+  }, [results])
   // Photo flow state, one entry per certificateId. Absent ⇒ no session yet (or it failed),
   // in which case the card is simply not offered and the ordinary download is used.
   const [photo, setPhoto] = useState<Record<string, PhotoState>>({})
@@ -207,14 +219,15 @@ export function CertificateCenterClient({ slug, eventName }: { slug: string; eve
     if (!results || results.length === 0) return
     let cancelled = false
 
-    const open = async (certificateId: string) => {
+    const open = async (certificateId: string, capability: string) => {
       if (sessions.current.has(certificateId)) return
       sessions.current.add(certificateId)
       try {
         const res = await fetch(`/api/events/${encodeURIComponent(slug)}/certificates/photo/session`, {
           method:  'POST',
           headers: { 'Content-Type': 'application/json' },
-          body:    JSON.stringify({ certificateId }),
+          // RD-SEC-01 · the lookup's capability proves this caller found the certificate.
+          body:    JSON.stringify({ certificateId, capability }),
         })
         if (!res.ok) return
         const body = await res.json() as { grant?: string; photoSupported?: boolean }
@@ -244,7 +257,7 @@ export function CertificateCenterClient({ slug, eventName }: { slug: string; eve
       }
     }
 
-    void Promise.all(results.map(r => open(r.certificateId)))
+    void Promise.all(results.map(r => open(r.certificateId, r.downloadCapability)))
     return () => { cancelled = true }
   }, [results, slug])
 
@@ -433,25 +446,68 @@ export function CertificateCenterClient({ slug, eventName }: { slug: string; eve
   const count = results?.length ?? 0
 
   return (
-    <div className="mx-auto w-full max-w-3xl px-4 py-10 sm:px-6 sm:py-14">
+    // 2026-09-25 luxury pass (owner: "I don't like this"): a two-column spread on the page
+    // ground — the certificate itself, drawn as a keepsake beside three quiet steps, and a
+    // compact lookup card with the identifier choice as ONE segmented row instead of five
+    // big buttons. Every behaviour (modes, lookup, results, downloads) is unchanged.
+    <div className="min-h-[60vh] bg-background">
+    <div className="mx-auto w-full max-w-5xl px-4 py-10 sm:px-6 sm:py-14">
       <div className="text-center">
-        <span className="inline-flex items-center gap-1.5 rounded-full bg-[rgb(var(--primary-rgb)_/_0.08)] px-3 py-1 text-fs-2xs font-bold uppercase tracking-[0.14em] text-primary">
-          <Award className="size-3.5" aria-hidden /> Certificate Center
-        </span>
-        <h1 className="mt-4 text-fs-2xl font-bold tracking-tight text-foreground">
+        <p className="inline-flex items-center gap-2.5 text-fs-2xs font-semibold uppercase tracking-[0.22em] text-hero-eyebrow">
+          <span aria-hidden className="h-px w-6 bg-hero-accent-rule" />
+          Certificate Center
+          <span aria-hidden className="h-px w-6 bg-hero-accent-rule" />
+        </p>
+        <h1 className={`mt-3 ${PAGE_TITLE}`}>
           Download Your Certificate
         </h1>
-        <p className="mt-2 text-fs-md font-semibold text-foreground">{eventName}</p>
-        <p className="mx-auto mt-2 max-w-md text-fs-sm leading-relaxed text-muted-foreground">
-          Enter the email address or registration ID you used to register.
-        </p>
+        <p className="mt-2 text-fs-sm font-semibold uppercase tracking-[0.14em] text-hero-accent-rule">{eventName}</p>
       </div>
 
+      <div className="mt-10 grid items-stretch gap-6 lg:grid-cols-[minmax(0,5fr)_minmax(0,6fr)] lg:gap-10">
+
+        {/* ── The keepsake + how it works ─────────────────────────────────────── */}
+        {/* On a phone the form leads; the keepsake follows it. */}
+        <div className="order-2 flex flex-col lg:order-1">
+          <div aria-hidden className="relative mx-auto w-full max-w-sm rounded-[var(--radius-panel)] border border-hero-accent-rule/40 bg-card p-2.5 lg:mx-0 lg:max-w-none">
+            <div className="relative flex aspect-[1.414/1] flex-col items-center justify-center border border-hero-accent-rule/30 px-6 text-center">
+              <span className="absolute inset-2 border border-dashed border-hero-accent-rule/25" />
+              <p className="text-fs-2xs font-semibold uppercase tracking-[0.24em] text-hero-accent-rule">Certificate of Participation</p>
+              <p className="mt-3 font-display text-fs-2xl font-light italic text-hero-ink">Your Name</p>
+              <span className="mt-3 block h-px w-24 bg-hero-accent-rule/60" />
+              <p className="mt-3 max-w-[18rem] truncate text-fs-xs text-hero-ink-soft">{eventName}</p>
+              <span className="absolute bottom-5 right-6 inline-flex size-11 items-center justify-center rounded-full border-2 border-hero-accent-rule/60 text-hero-accent-rule">
+                <Award className="size-5" strokeWidth={1.5} />
+              </span>
+            </div>
+          </div>
+
+          <ol className="mt-6 hidden gap-4 lg:grid">
+            {[
+              ['Choose how to look up', 'Email, mobile, ticket code, registration ID or bib.'],
+              ['Enter what you registered with', 'We only show certificates issued for this event.'],
+              ['Download your certificate', 'A print-ready PDF, yours to keep and share.'],
+            ].map(([t, d], i) => (
+              <li key={t} className="flex gap-3.5">
+                <span className="w-6 shrink-0 pt-0.5 text-fs-xs font-semibold tabular-nums text-hero-accent-rule">{String(i + 1).padStart(2, '0')}</span>
+                <div>
+                  <p className="text-fs-sm font-semibold text-hero-ink">{t}</p>
+                  <p className="mt-0.5 text-fs-sm text-hero-ink-soft">{d}</p>
+                </div>
+              </li>
+            ))}
+          </ol>
+        </div>
+
       {/* ── Lookup ─────────────────────────────────────────────────────────── */}
-      <form onSubmit={lookup} autoComplete="off" className="mt-8 rounded-2xl border border-border bg-card p-5 shadow-sm sm:p-6">
-        {/* Two columns still, so four options stack 2×2 rather than squeezing onto one row
-            on a phone — the same control height and touch target as before. */}
-        <div role="radiogroup" aria-label="Look up by" className="mb-4 grid grid-cols-2 gap-2">
+      <form onSubmit={lookup} autoComplete="off" className="order-1 flex flex-col rounded-[var(--radius-panel)] lg:order-2 border border-border/70 bg-card p-5 shadow-elevation-1 sm:p-7">
+        <p className="font-display text-fs-xl font-light text-hero-ink">Find your certificate</p>
+        <p className="mt-1 text-fs-sm text-hero-ink-soft">Enter the email address or registration ID you used to register.</p>
+
+        <p className="mt-6 text-fs-2xs font-semibold uppercase tracking-[0.18em] text-hero-eyebrow">Look up by</p>
+        {/* One segmented row that wraps on a phone; the selected choice carries the action
+            colour and an underline, the others are quiet type. */}
+        <div role="radiogroup" aria-label="Look up by" className="mt-2.5 flex flex-wrap gap-1.5">
           {MODES.map(({ id, label }) => (
             <button
               key={id}
@@ -460,11 +516,11 @@ export function CertificateCenterClient({ slug, eventName }: { slug: string; eve
               aria-checked={mode === id}
               onClick={() => { setMode(id); setValue(''); setResults(null); setError(null) }}
               className={cn(
-                'h-11 rounded-xl border text-fs-sm font-semibold transition-colors',
-                'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 focus-visible:ring-offset-2',
+                'h-9 rounded-[var(--radius-control)] border px-3 text-fs-xs font-semibold transition-colors',
+                'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-action/40 focus-visible:ring-offset-2',
                 mode === id
-                  ? 'border-primary/30 bg-[rgb(var(--primary-rgb)_/_0.06)] text-foreground'
-                  : 'border-border bg-muted/25 text-muted-foreground hover:bg-muted/45',
+                  ? 'border-hero-ink bg-hero-ink text-ink-on-media'
+                  : 'border-border/70 bg-card text-hero-ink-soft hover:border-border-strong hover:text-hero-ink',
               )}
             >
               {label}
@@ -472,30 +528,39 @@ export function CertificateCenterClient({ slug, eventName }: { slug: string; eve
           ))}
         </div>
 
-        <label htmlFor="cc-input" className="mb-1.5 block text-fs-2xs font-semibold uppercase tracking-wider text-muted-foreground">
+        <label htmlFor="cc-input" className="mb-1.5 mt-5 block text-fs-2xs font-semibold uppercase tracking-[0.18em] text-hero-eyebrow">
           {active.label}
         </label>
-        <input
-          id="cc-input"
-          className={inputCls}
-          type={active.type}
-          inputMode={active.inputMode}
-          autoComplete={active.autoComplete}
-          placeholder={active.placeholder}
-          value={value}
-          disabled={busy}
-          onChange={e => setValue(e.target.value)}
-        />
+        <div className="relative">
+          <Search aria-hidden className="pointer-events-none absolute left-4 top-1/2 size-4 -translate-y-1/2 text-hero-accent-rule" />
+          <input
+            id="cc-input"
+            className={cn(inputCls, 'pl-11')}
+            type={active.type}
+            inputMode={active.inputMode}
+            autoComplete={active.autoComplete}
+            placeholder={active.placeholder}
+            value={value}
+            disabled={busy}
+            onChange={e => setValue(e.target.value)}
+          />
+        </div>
 
         <button
           type="submit"
           disabled={busy || !value.trim()}
-          className={cn(buttonVariants({ variant: 'primary', size: 'lg' }), 'mt-4 w-full gap-2')}
+          className={cn(marketingButton({ emphasis: 'gradient', variant: 'primary', size: 'lg' }), 'mt-5 h-12 w-full gap-2 rounded-[var(--radius-control)]')}
         >
           {busy
             ? <><Loader2 className="size-4 animate-spin" aria-hidden /> Searching…</>
-            : <><Search className="size-4" aria-hidden /> Find My Certificate</>}
+            : <><Award className="size-4" aria-hidden /> Find My Certificate</>}
         </button>
+
+        <p className="mt-4 flex items-center justify-center gap-2 text-fs-xs text-hero-ink-soft">
+          <span aria-hidden className="h-px w-4 bg-hero-accent-rule" />
+          Your details are only used to find your certificate.
+          <span aria-hidden className="h-px w-4 bg-hero-accent-rule" />
+        </p>
 
         {/* Announced without stealing focus, so a screen-reader user hears the outcome
             while the caret stays in the field they were typing in. */}
@@ -503,9 +568,10 @@ export function CertificateCenterClient({ slug, eventName }: { slug: string; eve
           {busy ? 'Searching for certificates' : results ? `${count} certificates found` : ''}
         </p>
       </form>
+      </div>
 
       {error && (
-        <p role="alert" className="mt-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-fs-sm font-medium text-red-700">
+        <p role="alert" className="mt-4 border-l-2 border-destructive py-1 pl-3 text-left text-fs-sm font-medium text-destructive">
           {error}
         </p>
       )}
@@ -517,12 +583,12 @@ export function CertificateCenterClient({ slug, eventName }: { slug: string; eve
           initial={reduce ? false : { opacity: 0, y: 8 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.35, ease: [0.22, 1, 0.36, 1] }}
-          className="mt-8"
+          className="mt-8 scroll-mt-[calc(var(--disc-nav-h,4.5rem)+1.5rem)]"
         >
           {count === 0 ? (
             // Uniform wording — it must not reveal whether the identifier exists in some
             // other event, or exists here but was revoked.
-            <div className="rounded-2xl border border-border bg-muted/20 px-5 py-8 text-center">
+            <div className="rounded-panel border border-border bg-muted/20 px-5 py-8 text-center">
               <p className="text-fs-md font-semibold text-foreground">No certificate found for this event.</p>
               <p className="mt-1.5 text-fs-sm text-muted-foreground">
                 Check the spelling, or try the other lookup option.
@@ -547,7 +613,7 @@ export function CertificateCenterClient({ slug, eventName }: { slug: string; eve
                     : `/api/certificates/${encodeURIComponent(r.certificateId)}/file?token=${encodeURIComponent(r.downloadCapability)}`
 
                   return (
-                  <li key={r.certificateId} className="overflow-hidden rounded-2xl border border-border bg-card shadow-sm">
+                  <li key={r.certificateId} className="overflow-hidden rounded-panel border border-border bg-card shadow-sm">
                     <div className="px-5 py-4">
                       {/* Participant name is the dominant identity — with three siblings
                           on one email, this is the only thing that tells them apart. */}
@@ -582,7 +648,7 @@ export function CertificateCenterClient({ slug, eventName }: { slug: string; eve
                       <button
                         type="button"
                         onClick={() => setViewing({ certificateId: r.certificateId, participantName: r.participantName })}
-                        className={cn(buttonVariants({ variant: 'outline', size: 'lg' }), 'min-h-12 flex-1 gap-2')}
+                        className={cn(marketingButton({ variant: 'outline', size: 'lg' }), 'min-h-12 flex-1 gap-2')}
                       >
                         <ExternalLink className="size-4" aria-hidden />
                         View Certificate
@@ -598,7 +664,7 @@ export function CertificateCenterClient({ slug, eventName }: { slug: string; eve
                         type="button"
                         disabled={!!action[r.certificateId] || !p || p.readiness === 'resolving'}
                         onClick={() => { void downloadPdf(r.certificateId, downloadHref) }}
-                        className={cn(buttonVariants({ variant: 'primary', size: 'lg' }), 'min-h-12 flex-1 gap-2')}
+                        className={cn(marketingButton({ emphasis: 'gradient', variant: 'primary', size: 'lg' }), 'min-h-12 flex-1 gap-2')}
                       >
                         {action[r.certificateId] === 'pdf'
                           ? <><Loader2 className="size-4 animate-spin" aria-hidden /> Preparing…</>
@@ -610,7 +676,7 @@ export function CertificateCenterClient({ slug, eventName }: { slug: string; eve
                         type="button"
                         disabled={!!action[r.certificateId]}
                         onClick={() => { void shareCertificate(r.certificateId, r.participantName, r.eventName) }}
-                        className={cn(buttonVariants({ variant: 'outline', size: 'lg' }), 'min-h-12 flex-1 gap-2')}
+                        className={cn(marketingButton({ variant: 'outline', size: 'lg' }), 'min-h-12 flex-1 gap-2')}
                       >
                         <Share2 className="size-4" aria-hidden />
                         Share
@@ -664,6 +730,7 @@ export function CertificateCenterClient({ slug, eventName }: { slug: string; eve
           onClose={() => setViewing(null)}
         />
       )}
+    </div>
     </div>
   )
 }

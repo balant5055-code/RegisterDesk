@@ -10,6 +10,40 @@ const isDev = process.env.NODE_ENV === 'development'
 // other than the exact string 'true' leaves the production CSP untouched.
 const useEmulator = process.env.NEXT_PUBLIC_FIREBASE_EMULATOR === 'true'
 
+/**
+ * RD-PAYMENT-CASHFREE-CHECKOUT-06 — Cashfree's browser checkout, CSP side.
+ *
+ * Cashfree's SDK is served from sdk.cashfree.com and renders its modal in an iframe from its
+ * own origin, so without these the checkout is refused by default-src before a single line
+ * of our code runs.
+ *
+ * ═══ WHY THIS NOW TRACKS THE PROVIDER GATES, NOT NODE_ENV ═══════════════════
+ *
+ * It used to be `SANDBOX_ENABLED && NODE_ENV !== 'production'`, which meant a production
+ * deployment could enable Cashfree server-side and still have its own CSP block the SDK —
+ * a failure that appears only in a real browser, on the payment screen.
+ *
+ * It now mirrors the two server-side gates exactly: sandbox opt-in outside production, OR
+ * the production opt-in inside production. A deployment with NEITHER flag — which is every
+ * deployment today — emits a BYTE-IDENTICAL CSP to before this phase, so no environment
+ * gains a script or frame origin because Cashfree was merely prepared.
+ */
+const cashfreeSandbox =
+  process.env.CASHFREE_SANDBOX_ENABLED === 'true' &&
+  // Mirrors `isCashfreeSandboxEnabled()` exactly. Without this the CSP was BROADER than the
+  // server gate: with CASHFREE_ENV=production on a dev machine the SDK origin was allowed
+  // while the server would never issue a Cashfree handoff. Harmless in itself, but a CSP
+  // that permits more than the app can use is drift, and drift is what gets missed later.
+  process.env.CASHFREE_ENV !== 'production' &&
+  process.env.NODE_ENV !== 'production'
+
+const cashfreeProduction =
+  process.env.CASHFREE_PRODUCTION_ENABLED === 'true' &&
+  process.env.CASHFREE_ENV === 'production' &&
+  process.env.NODE_ENV === 'production'
+
+const cashfreeEnabled = cashfreeSandbox || cashfreeProduction
+
 // ─── Content-Security-Policy ─────────────────────────────────────────────────
 //
 // Key decisions:
@@ -69,6 +103,10 @@ function buildCSP(): string {
   // Gated on the same explicit opt-in flag as the SDK wiring, so a real production build —
   // where the variable is unset or 'false' — emits a byte-identical CSP.
   ...(useEmulator ? ['http://127.0.0.1:9099', 'http://127.0.0.1:8080', 'http://127.0.0.1:9199', 'ws://127.0.0.1:*'] : []),
+
+  // The Cashfree SDK calls its own API from the browser while the modal is open.
+  // Sandbox-only — absent from a production CSP.
+  ...(cashfreeEnabled ? ['https://sandbox.cashfree.com', 'https://api.cashfree.com', 'https://sdk.cashfree.com', 'https://payments.cashfree.com'] : []),
 ]
 
   const scriptSrc = [
@@ -77,6 +115,8 @@ function buildCSP(): string {
     // Turbopack and React DevTools require eval() in development
     ...(isDev ? ["'unsafe-eval'"] : []),
     'checkout.razorpay.com',
+    // Sandbox-only; absent from a production CSP. See `cashfreeSandbox`.
+    ...(cashfreeEnabled ? ['https://sdk.cashfree.com'] : []),
   ]
 
   return [
@@ -90,7 +130,11 @@ function buildCSP(): string {
     // www.google.com is required as well: maps.google.com/maps?…&output=embed REDIRECTS
     // to www.google.com/maps/embed?…, and CSP is re-evaluated on the redirect target, so
     // allow-listing only the first host still fails on the hop.
-    "frame-src 'self' blob: checkout.razorpay.com api.razorpay.com https://www.youtube.com https://www.youtube-nocookie.com https://player.vimeo.com https://maps.google.com https://www.google.com",
+    // The Cashfree entries are sandbox-only (see `cashfreeSandbox`) — a production CSP is
+    // byte-identical to before this phase. The modal is framed from the sandbox origin, and
+    // payments.cashfree.com is the host its bank/UPI hop lands on.
+    `frame-src 'self' blob: checkout.razorpay.com api.razorpay.com https://www.youtube.com https://www.youtube-nocookie.com https://player.vimeo.com https://maps.google.com https://www.google.com${
+      cashfreeEnabled ? ' https://sandbox.cashfree.com https://api.cashfree.com https://payments.cashfree.com https://sdk.cashfree.com' : ''}`,
     "frame-ancestors 'none'",
     "object-src 'none'",
     "base-uri 'self'",
@@ -121,10 +165,43 @@ const securityHeaders = [
     key:   'Referrer-Policy',
     value: 'strict-origin-when-cross-origin',
   },
-  // Disable browser features not used by this application.
+  // ─── Permissions-Policy ─────────────────────────────────────────────────────
+  //
+  // ═══ WHY THE SEPARATOR IS A COMMA ═════════════════════════════════════════
+  // This header is a Structured Field DICTIONARY (RFC 8941), whose members are
+  // separated by COMMAS. It previously used semicolons — borrowed from CSP, which is a
+  // different grammar — so Chrome failed to parse the header and discarded it ENTIRELY,
+  // logging "Parse of permissions policy failed" on every page load. The policy was
+  // therefore enforcing nothing at all, anywhere on the site, since it was written.
+  //
+  // ═══ WHY camera AND geolocation ARE (self) AND NOT () ══════════════════════
+  // The old comment said "features not used by this application". That was true when it
+  // was written and is not true now — and because the header was being discarded, both
+  // features kept working and nobody found out:
+  //
+  //   • camera      — the gate check-in QR scanner. `@zxing/browser`'s
+  //                   `decodeFromVideoDevice` opens a video device, so the dependency
+  //                   calls getUserMedia on our behalf (which is why a source-level
+  //                   search for getUserMedia finds nothing).
+  //                   app/(dashboard)/dashboard/events/[eventId]/checkin/QrScanner.tsx
+  //   • geolocation — "Use my location" on the public events discovery page.
+  //                   components/marketing/discovery/LocationPicker.tsx
+  //
+  // Shipping `camera=()` alongside a working parse would have silently killed check-in
+  // scanning at the gate, on race day, with no error the operator could act on. So the
+  // policy is corrected to match what the product actually does.
+  //
+  // `(self)` is still a RESTRICTION, not a new capability: it permits only same-origin
+  // documents and denies every embedded third-party iframe, which is the whole job of
+  // this header. Nothing gains an ability it did not already exercise.
+  //
+  // `microphone=()` stays fully disabled — genuinely unused, and now genuinely enforced.
+  //
+  // Adding a feature that needs camera/microphone/geolocation in a THIRD-PARTY frame
+  // means changing this line deliberately; it will now actually be enforced.
   {
     key:   'Permissions-Policy',
-    value: 'camera=(); microphone=(); geolocation=()',
+    value: 'camera=(self), microphone=(), geolocation=(self)',
   },
   {
     key:   'Content-Security-Policy',

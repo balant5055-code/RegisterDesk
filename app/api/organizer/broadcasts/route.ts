@@ -14,7 +14,6 @@ import { organizerStatusGuard }        from '@/lib/admin/organizerStatus'
 import { authorizeWorkspace }          from '@/lib/team/workspace'
 import { startBroadcastCampaign }      from '@/lib/broadcasts/send'
 import { logBroadcastAction }          from '@/lib/broadcasts/audit'
-import { requireLimit }                from '@/lib/licensing/workspaceEntitlements'
 import { getFeatureFlags }             from '@/lib/config/resolveFeatureFlags'
 import { hasWhatsAppTemplate, getWhatsAppTemplate } from '@/lib/whatsapp'
 import { isSendableMetaStatus } from '@/lib/whatsapp/registry'
@@ -63,6 +62,14 @@ function docToCampaign(id: string, d: Record<string, unknown>): BroadcastCampaig
     scheduledFor:       tsToIso(d.scheduledFor),
     estimatedCostPaise: typeof d.estimatedCostPaise === 'number' ? d.estimatedCostPaise : 0,
     actualCostPaise:    typeof d.actualCostPaise    === 'number' ? d.actualCostPaise    : 0,
+    billing: d.billingSettlement === 'pending' || d.billingSettlement === 'settled' ? {
+      fundedBy:      d.fundedBy === 'prepaid_allowance' ? 'prepaid_allowance' : 'wallet',
+      settled:       d.billingSettlement === 'settled',
+      chargedUnits:  typeof d.chargedUnits  === 'number' ? d.chargedUnits  : null,
+      billedUnits:   typeof d.billedUnits   === 'number' ? d.billedUnits   : null,
+      refundedUnits: typeof d.refundedUnits === 'number' ? d.refundedUnits : null,
+      refundedPaise: typeof d.refundedPaise === 'number' ? d.refundedPaise : null,
+    } : null,
     failReason:     typeof d.failReason      === 'string' ? d.failReason      : null,
     createdAt:      tsToIso(d.createdAt) ?? new Date().toISOString(),
     sentAt:         tsToIso(d.sentAt),
@@ -128,7 +135,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<PostBroadcast
   try { body = await req.json() }
   catch { return NextResponse.json({ success: false, error: 'Invalid JSON' }, { status: 400 }) }
 
-  const { eventId, eventSlug, eventName, audience, subject, html, channel, templateType, languageCode, variables, scheduledFor } =
+  const { eventSlug, eventName, audience, subject, html, channel, templateType, languageCode, variables, scheduledFor } =
     body as Record<string, unknown>
 
   // "Ignore duplicate email IDs". Strict `=== true` so any other value — absent, null, a
@@ -140,6 +147,15 @@ export async function POST(req: NextRequest): Promise<NextResponse<PostBroadcast
   if (typeof eventSlug !== 'string' || !eventSlug) {
     return NextResponse.json({ success: false, error: 'eventSlug is required' }, { status: 400 })
   }
+  // RD-INTEG — the event must be THIS workspace's live event. The slug decides which prepaid
+  // allowance a WhatsApp campaign is billed from and which event's Wallet/analytics it counts
+  // toward, so it is verified here rather than trusted from the body.
+  const liveEvent = await adminDb.collection('events').doc(eventSlug).get().catch(() => null)
+  const liveData  = liveEvent?.exists ? liveEvent.data() as { uid?: unknown; draftId?: unknown } : null
+  if (!liveData || liveData.uid !== uid) {
+    return NextResponse.json({ success: false, error: 'Event not found' }, { status: 404 })
+  }
+  const liveDraftId = typeof liveData.draftId === 'string' && liveData.draftId ? liveData.draftId : null
   if (!AUDIENCES.includes(audience as BroadcastAudience)) {
     return NextResponse.json({ success: false, error: 'Invalid audience' }, { status: 400 })
   }
@@ -321,11 +337,10 @@ export async function POST(req: NextRequest): Promise<NextResponse<PostBroadcast
 
   const recipientCount = recipients.length
 
-  // ── Plan gate — broadcasts are capped by plan (maxBroadcastRecipients) ────
-  const planLimit = await requireLimit(uid, 'maxBroadcastRecipients', recipientCount)
-  if (!planLimit.ok) {
-    return NextResponse.json({ success: false, error: planLimit.error }, { status: planLimit.status })
-  }
+  // RD-CAPACITY-01 · the per-plan recipient cap is gone with the tiers. The operational
+  // guard below — checkBroadcastLimits, the free email quota and the rate limits — is what
+  // protects the sending infrastructure, and it is untouched. The removed check was a
+  // COMMERCIAL cap, not an abuse control.
 
   // ── Broadcast rate limit check (free email quota) ─────────────────────────
   const limitCheck = await checkBroadcastLimits(uid, recipientCount)
@@ -362,7 +377,12 @@ export async function POST(req: NextRequest): Promise<NextResponse<PostBroadcast
   await campaignRef.set({
     organizerUid:   uid,           // workspace owner (authorization/ownership)
     createdBy:      callerUid,     // operator who created the broadcast (attribution)
-    eventId:        typeof eventId   === 'string' ? eventId   : eventSlug,
+    // RD-INTEG — eventId is the verified event SLUG, the key every transactional log, usage row
+    // and analytics/Event-Communications query filters on (the client used to send the draft id
+    // here, so broadcast messages were missing from per-event counts). The draft id is kept
+    // alongside, from the live event — never from the body.
+    eventId:        eventSlug,
+    ...(liveDraftId ? { eventDraftId: liveDraftId } : {}),
     eventSlug,
     eventName:      typeof eventName === 'string' ? eventName : '',
     channel:        chosenChannel,
@@ -422,6 +442,12 @@ export async function POST(req: NextRequest): Promise<NextResponse<PostBroadcast
     if (!result.ok && result.reason === 'insufficient_balance') {
       return NextResponse.json(
         { success: false, error: 'Insufficient wallet balance for this broadcast.' },
+        { status: 402 },
+      )
+    }
+    if (!result.ok && result.reason === 'allowance_exhausted') {
+      return NextResponse.json(
+        { success: false, error: 'This event’s prepaid WhatsApp allowance cannot cover this broadcast. While the event is open, buy more with Increase limit on the event Wallet.' },
         { status: 402 },
       )
     }

@@ -16,7 +16,7 @@ import { getFeatureFlags }           from '@/lib/config/resolveFeatureFlags'
 import { checkRateLimit }            from '@/lib/rateLimit'
 import { getActiveTemplate, getTemplateById, getSettings, CertificateIneligibleError } from '@/lib/certificates/firestore'
 import {
-  generateCertificate, CertificateInProgressError, CertificateTemplateNotDesignedError,
+  generateCertificate, CertificateInProgressError, CertificateTemplateNotDesignedError, CertificateAllowanceExhaustedError,
 } from '@/lib/certificates/generate'
 import { buildAssignmentContext, resolveAssignment } from '@/lib/certificates/assignment'
 import { isCertificateType }         from '@/lib/certificates/validation'
@@ -188,6 +188,9 @@ export async function POST(req: NextRequest, { params }: Params): Promise<NextRe
     // arrive as a message they can act on rather than an opaque 500.
     if (err instanceof CertificateTemplateNotDesignedError) {
       return NextResponse.json({ error: err.message }, { status: 422 })
+    }
+    if (err instanceof CertificateAllowanceExhaustedError) {
+      return NextResponse.json({ error: err.message }, { status: 402 })
     }
     if (err instanceof CertificateIneligibleError) {
       return NextResponse.json({ error: `Registration is not eligible for a certificate (${err.reason}).` }, { status: 422 })

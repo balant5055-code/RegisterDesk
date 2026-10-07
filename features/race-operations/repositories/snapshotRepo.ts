@@ -10,18 +10,24 @@
 //
 // No public reader ever touches `raceImportSessions`.
 
-import { FieldValue } from 'firebase-admin/firestore'
+import { FieldPath, FieldValue } from 'firebase-admin/firestore'
 import { adminDb } from '@/lib/firebase/admin'
 import {
   RACE_SNAPSHOTS, RACE_SNAPSHOT_SCHEMA_VERSION, SNAPSHOT_ENTRIES_SUBCOLLECTION,
-  snapshotId,
-  type PublicRaceSummary, type PublicResultRow, type RaceSnapshotDoc,
-  type SnapshotEntryDoc, type SnapshotVersionRecord,
+  SNAPSHOT_SPLITS_SUBCOLLECTION, snapshotId,
+  type PublicRaceSummary, type PublicResultRow, type PublicSplitRow, type RaceSnapshotDoc,
+  type SnapshotEntryDoc, type SnapshotSplitsDoc, type SnapshotVersionRecord,
 } from '@/features/race-operations/types/snapshot'
-import { PREFIX_UPPER_BOUND, bibKey, entryKey, nameKey } from '@/features/race-operations/utils/publicKeys'
+import { totalFor, type GroupTotals } from '@/features/race-operations/ranking/groups'
+import {
+  PREFIX_UPPER_BOUND, bibKey, entryKey, nameKey, type LeaderboardCursor,
+} from '@/features/race-operations/utils/publicKeys'
+import {
+  findDuplicateVersion, inconsistentHistoryMessage, nextAllocatableVersion,
+} from '@/features/race-operations/utils/snapshotVersions'
 // The public projections are PURE and live outside this module, so the security boundary is
 // unit-testable without booting Firebase Admin.
-import { toPublicRace, toPublicRow } from '@/features/race-operations/utils/publicProjection'
+import { toPublicRace, toPublicRow, toPublicSplits } from '@/features/race-operations/utils/publicProjection'
 export { toPublicRace } from '@/features/race-operations/utils/publicProjection'
 import type { StoredRaceResultDoc } from '@/features/race-operations/types/session'
 
@@ -29,6 +35,7 @@ const MAX_BATCH_WRITES = 500
 
 const snapshots     = () => adminDb.collection(RACE_SNAPSHOTS)
 const entriesCol    = (id: string) => snapshots().doc(id).collection(SNAPSHOT_ENTRIES_SUBCOLLECTION)
+const splitsCol     = (id: string) => snapshots().doc(id).collection(SNAPSHOT_SPLITS_SUBCOLLECTION)
 
 
 // ══════════════════════════ WRITE (publish pipeline) ══════════════════════════
@@ -44,63 +51,104 @@ export interface SnapshotSeed {
   eventId:      string
   sessionId:    string
   publishedBy:  string
-  version:      number
 }
 
+export type OpenSnapshotBuildOutcome =
+  | { ok: true;  state: SnapshotBuildState }
+  | { ok: false; status: number; error: string }
+
 /**
- * Creates or re-opens the snapshot in `building` state.
+ * Opens (or resumes) ONE session's build, allocating its version transactionally.
+ *
+ * RD-RACEOPS-02G · this replaces `beginSnapshot`, which took a version the caller had
+ * computed from a plain read and wrote it with `set({ merge })`. Two builds could read the
+ * same document and both claim the same number, and after a rollback the number came from
+ * the rolled-back live pointer, so it collided with a version that already had entries.
+ * Now the version is read, chosen and claimed in ONE transaction:
+ *
+ *   - the session already owns the pending lane → resume it, nothing is written;
+ *   - otherwise → `nextAllocatableVersion` (strictly above every number this race ever
+ *     handed out — `maxVersion`, the live pointer, the pending lane and the published
+ *     history), written together with `maxVersion` so a concurrent claim either sees this
+ *     one and steps past it or is retried by Firestore.
+ *
+ * A history with a duplicate version is the corruption this exists to prevent; a build on
+ * such a race fails closed here rather than deepening it.
  *
  * `building` is never publicly readable, so a partially-copied snapshot can never be
- * served — the flip to `live` happens once, transactionally, at the end.
+ * served — the flip to `live` happens once, transactionally, at go-live.
  */
-export async function beginSnapshot(seed: SnapshotSeed): Promise<RaceSnapshotDoc> {
+export async function openSnapshotBuild(seed: SnapshotSeed): Promise<OpenSnapshotBuildOutcome> {
   const id  = snapshotId(seed.eventSlug, seed.passId)
   const ref = snapshots().doc(id)
-  const existing = await ref.get()
-  const live = existing.exists ? existing.data() as RaceSnapshotDoc : null
 
-  // RD-RESULTS-FIX-01 · a build NEVER disturbs the live version.
-  //
-  // On a REPUBLISH the live fields (`status`, `version`, `totalCount`, `finisherCount`,
-  // `publishedAt`) are left exactly as they are and the new rows accumulate in the pending
-  // lane, so the public keeps seeing the current results for the whole rebuild — including
-  // if the organizer abandons it. Promotion happens only in the go-live transaction.
-  //
-  // On a FIRST publish there is nothing live to protect, so the document is seeded in
-  // `building` exactly as before and the public sees nothing until go-live.
-  const pending = {
-    pendingVersion:       seed.version,
-    pendingSessionId:     seed.sessionId,
-    pendingBuiltAt:       FieldValue.serverTimestamp(),
-    pendingTotalCount:    0,
-    pendingFinisherCount: 0,
-    // RD-RESULTS-CLOSURE-02 · a fresh build starts from the top. Resetting the cursor
-    // together with the counts is what makes "begin" mean the same thing to both.
-    pendingCursor:        null,
-  }
+  return adminDb.runTransaction<OpenSnapshotBuildOutcome>(async tx => {
+    const existing = await tx.get(ref)
+    const live = existing.exists ? existing.data() as RaceSnapshotDoc : null
 
-  await ref.set(live?.status === 'live'
-    ? {
-        // Display identity is refreshed — an organizer may have renamed the pass — but the
-        // version, status and counts the public reads are untouched.
-        eventName: seed.eventName, eventDate: seed.eventDate,
-        passSlug:  seed.passSlug,  passName:  seed.passName,
-        ...pending,
+    if (live) {
+      const duplicate = findDuplicateVersion(live.versions)
+      if (duplicate !== null) return { ok: false, status: 409, error: inconsistentHistoryMessage(duplicate) }
+
+      const pending = typeof live.pendingVersion === 'number' && live.pendingVersion > 0 ? live.pendingVersion : null
+      if (pending !== null && live.pendingSessionId === seed.sessionId) {
+        // This session's own build. Resume it — that is what makes the chunked drive loop
+        // idempotent rather than version-forking.
+        return {
+          ok: true,
+          state: { version: pending, owns: true, cursor: typeof live.pendingCursor === 'number' ? live.pendingCursor : null },
+        }
       }
-    : {
-        ...seed,
-        snapshotId:    id,
-        schemaVersion: RACE_SNAPSHOT_SCHEMA_VERSION,
-        status:        'building',
-        builtAt:       FieldValue.serverTimestamp(),
-        publishedAt:   null,
-        totalCount:    0,
-        finisherCount: 0,
-        ...pending,
-      },
-  { merge: true })
+    }
 
-  return (await ref.get()).data() as RaceSnapshotDoc
+    const version = nextAllocatableVersion(live ?? {})
+
+    // RD-RESULTS-FIX-01 · a build NEVER disturbs the live version.
+    //
+    // On a REPUBLISH the live fields (`status`, `version`, `totalCount`, `finisherCount`,
+    // `publishedAt`) are left exactly as they are and the new rows accumulate in the pending
+    // lane, so the public keeps seeing the current results for the whole rebuild — including
+    // if the organizer abandons it. Promotion happens only in the go-live transaction.
+    //
+    // On a FIRST publish there is nothing live to protect, so the document is seeded in
+    // `building` exactly as before and the public sees nothing until go-live.
+    const pending = {
+      pendingVersion:       version,
+      pendingSessionId:     seed.sessionId,
+      pendingBuiltAt:       FieldValue.serverTimestamp(),
+      pendingTotalCount:    0,
+      pendingFinisherCount: 0,
+      // RD-RESULTS-CLOSURE-02 · a fresh build starts from the top. Resetting the cursor
+      // together with the counts is what makes "begin" mean the same thing to both.
+      pendingCursor:        null,
+      // RD-RACEOPS-02G · the allocator moves WITH the claim. Never decremented — see rollback.
+      maxVersion:           version,
+    }
+
+    tx.set(ref, live?.status === 'live'
+      ? {
+          // Display identity is refreshed — an organizer may have renamed the pass — but the
+          // version, status and counts the public reads are untouched.
+          eventName: seed.eventName, eventDate: seed.eventDate,
+          passSlug:  seed.passSlug,  passName:  seed.passName,
+          ...pending,
+        }
+      : {
+          ...seed,
+          version,
+          snapshotId:    id,
+          schemaVersion: RACE_SNAPSHOT_SCHEMA_VERSION,
+          status:        'building',
+          builtAt:       FieldValue.serverTimestamp(),
+          publishedAt:   null,
+          totalCount:    0,
+          finisherCount: 0,
+          ...pending,
+        },
+    { merge: true })
+
+    return { ok: true, state: { version, owns: false, cursor: null } }
+  })
 }
 
 /** RD-RESULTS-CLOSURE-02 · everything a build needs to know, from ONE read. */
@@ -130,6 +178,11 @@ export interface SnapshotBuildState {
  * fresh version, so the abandoned entries stay unreachable — every public query filters
  * `v == snapshot.version`, and that version is never promoted. No deletes, no migration,
  * and no rewrite of any live race.
+ *
+ * RD-RACEOPS-02G · READ-ONLY. The version this returns for a session that does NOT own the
+ * lane is the number an allocation WOULD receive; the allocation itself happens only in
+ * `openSnapshotBuild`, transactionally. It comes from `nextAllocatableVersion` — never from
+ * `doc.version + 1`, which after a rollback named a version that already had entries.
  */
 export async function resolveBuildState(
   eventSlug: string, passId: string, sessionId: string,
@@ -152,18 +205,13 @@ export async function resolveBuildState(
         cursor:  typeof doc.pendingCursor === 'number' ? doc.pendingCursor : null,
       }
     }
-    // Someone else's lane, finished or abandoned. Step past BOTH it and the live version so
-    // neither this build nor a promotion can collide with entries we did not write.
-    return { version: Math.max(pending, doc.version ?? 0) + 1, owns: false, cursor: null }
   }
 
-  // No pending lane. A pre-RD-RESULTS-FIX-01 snapshot left half-built reuses its own
-  // version, exactly as before; a live one moves on.
-  return {
-    version: doc.status === 'building' ? doc.version : doc.version + 1,
-    owns:    false,
-    cursor:  null,
-  }
+  // Someone else's lane (finished or abandoned), or no lane at all: the next number above
+  // everything this race ever allocated. A pre-RD-RESULTS-FIX-01 snapshot left half-built
+  // no longer reuses its own version either — its entries stay unreachable like any other
+  // abandoned build's.
+  return { version: nextAllocatableVersion(doc), owns: false, cursor: null }
 }
 
 /**
@@ -191,15 +239,23 @@ export async function writeSnapshotChunk(
   id:      string,
   version: number,
   rows:    readonly StoredRaceResultDoc[],
-): Promise<{ written: number; finishers: number }> {
-  if (rows.length === 0) return { written: 0, finishers: 0 }
-  if (rows.length > MAX_BATCH_WRITES) {
-    throw new Error(`Snapshot chunk too large: ${rows.length} exceeds ${MAX_BATCH_WRITES}.`)
+  /** RD-RACEOPS-RESULTS-04 · group sizes from the completed ranking pass, for the denominators. */
+  groupTotals?: GroupTotals | null,
+): Promise<{ written: number; finishers: number; splitDocs: number }> {
+  if (rows.length === 0) return { written: 0, finishers: 0, splitDocs: 0 }
+  // RD-RACEOPS-RESULTS-04 · a row can now cost TWO writes (its entry and, when it has
+  // checkpoints, its splits document), so the ceiling is half the batch limit. The caller's
+  // chunk size is set from SNAPSHOT_CHUNK_SIZE in snapshotService, which was halved to match;
+  // this throws rather than committing an invalid batch if the two ever drift apart.
+  if (rows.length > MAX_BATCH_WRITES / 2) {
+    throw new Error(`Snapshot chunk too large: ${rows.length} rows may need ${rows.length * 2} writes, over the ${MAX_BATCH_WRITES}-write batch limit.`)
   }
 
   const batch = adminDb.batch()
   const col   = entriesCol(id)
+  const splits = splitsCol(id)
   let finishers = 0
+  let splitDocs = 0
 
   for (const r of rows) {
     // A row with no bib cannot be addressed publicly. Validation already rejects it, so
@@ -220,16 +276,73 @@ export async function writeSnapshotChunk(
       status:      r.status,
       overallRank: r.overallRank,
       passRank:    r.passRank,
+      // RD-RACEOPS-RESULTS-04 · the facts that used to stop at the publish boundary, plus
+      // the group ranks this pipeline computed. `?? null` throughout: a row stored before
+      // this sprint carries none of them, and Firestore rejects `undefined`.
+      gender:         r.gender ?? null,
+      category:       r.category ?? null,
+      ageGroup:       r.ageGroup ?? null,
+      distanceMeters: r.distanceMeters ?? null,
+      distanceRaw:    r.distanceRaw ?? null,
+      genderRank:     r.genderRank ?? null,
+      ageGroupRank:   r.ageGroupRank ?? null,
+      // Denominators come from the completed ranking pass, looked up with the SAME key that
+      // counted the group — so "4 / 56" can never pair a rank with another group's size.
+      genderTotal:    r.genderRank   != null ? totalFor(groupTotals, 'gender', r.gender) : null,
+      ageGroupTotal:  r.ageGroupRank != null ? totalFor(groupTotals, 'ageGroup', r.ageGroup) : null,
     }
     if (r.status === 'finished') finishers++
 
     // RD-RESULTS-FIX-01 · versioned id. A republish no longer overwrites the version it
     // replaces, which is what makes rollback possible at all.
     batch.set(col.doc(entryKey(version, r.bibNumber)), entry)
+
+    // RD-RACEOPS-RESULTS-04 · checkpoints go to their own document, in the SAME batch as
+    // the entry. Entries and checkpoints therefore commit together: there is no instant at
+    // which a published version has a result but not its splits, or the reverse. A row with
+    // no checkpoints writes nothing — an absent document is the honest "no splits".
+    if (r.splits?.length) {
+      const doc: SnapshotSplitsDoc = {
+        v:         version,
+        bibNumber: r.bibNumber,
+        bibKey:    key,
+        splits: r.splits.map(s => ({
+          sequence:         s.sequence,
+          splitKey:         s.splitKey,
+          name:             s.name,
+          distanceMeters:   s.distanceMeters ?? null,
+          segmentMeters:    s.segmentMeters ?? null,
+          cumulativeTimeMs: s.cumulativeTimeMs ?? null,
+          segmentTimeMs:    s.segmentTimeMs ?? null,
+          timeOfDay:        s.timeOfDay ?? null,
+        })),
+      }
+      batch.set(splits.doc(entryKey(version, r.bibNumber)), doc)
+      splitDocs++
+    }
   }
 
   await batch.commit()
-  return { written: rows.length, finishers }
+  return { written: rows.length, finishers, splitDocs }
+}
+
+/**
+ * RD-RACEOPS-RESULTS-04 · one participant's published checkpoints.
+ *
+ * A single document GET — the id carries the version, so this can only ever return the
+ * version asked for, and an abandoned build's checkpoints are unreachable exactly as its
+ * entries are. Returns [] when the race published none, which is the common case.
+ */
+export async function fetchSplitsByBib(
+  id: string, version: number, bib: string,
+): Promise<PublicSplitRow[]> {
+  const snap = await splitsCol(id).doc(entryKey(version, bib)).get()
+  if (!snap.exists) return []
+  const doc = snap.data() as SnapshotSplitsDoc
+  // Belt-and-braces: the id already pins the version, so a mismatch would mean a hand-edited
+  // document. Refuse it rather than show one version's splits under another's result.
+  if (doc.v !== version) return []
+  return toPublicSplits(doc.splits ?? [])
 }
 
 /**
@@ -243,14 +356,28 @@ export async function writeSnapshotChunk(
  * copies the NEXT page instead of re-copying the last one and inflating `pendingTotalCount`.
  * Previously the cursor came from the request body, so the client could rewind it — by
  * accident on a retry, or deliberately.
+ *
+ * RD-RACEOPS-02G · credited only while the lane still belongs to THIS session and version.
+ * A build that lost the lane to another session between reading its state and finishing
+ * its chunk must not count its rows against the new owner's lane. Returns false in that
+ * case; the entries it wrote carry its own (never promoted) version and stay unreachable.
  */
 export async function advanceSnapshotProgress(
-  id: string, cursor: number | null, deltaTotal: number, deltaFinishers: number,
-): Promise<void> {
-  await snapshots().doc(id).update({
-    pendingTotalCount:    FieldValue.increment(deltaTotal),
-    pendingFinisherCount: FieldValue.increment(deltaFinishers),
-    pendingCursor:        cursor,
+  id: string, sessionId: string, version: number,
+  cursor: number | null, deltaTotal: number, deltaFinishers: number,
+): Promise<boolean> {
+  const ref = snapshots().doc(id)
+  return adminDb.runTransaction(async tx => {
+    const snap = await tx.get(ref)
+    if (!snap.exists) return false
+    const doc = snap.data() as RaceSnapshotDoc
+    if (doc.pendingSessionId !== sessionId || doc.pendingVersion !== version) return false
+    tx.update(ref, {
+      pendingTotalCount:    FieldValue.increment(deltaTotal),
+      pendingFinisherCount: FieldValue.increment(deltaFinishers),
+      pendingCursor:        cursor,
+    })
+    return true
   })
 }
 
@@ -261,6 +388,28 @@ export async function advanceSnapshotProgress(
  * draft→published flip and the snapshot's building→live flip commit TOGETHER. There is no
  * window in which one is true and the other is not.
  */
+/**
+ * RD-RACEOPS-02C · rows were appended AFTER a pending build began: the copied entries carry
+ * ranks that ranking will now recompute, so the build must start over. Keeps the reserved
+ * `pendingVersion` (the version number stays this session's) and resets the cursor and the
+ * running counts to zero, so `resolveBuildState` copies every row again from the top; each
+ * entry is keyed by bib and is overwritten in place. Only the OWNING session's build is
+ * touched — another session's pending build is not this session's to reset.
+ */
+export async function resetPendingSnapshot(
+  eventSlug: string, passId: string, sessionId: string,
+): Promise<boolean> {
+  const ref = snapshots().doc(snapshotId(eventSlug, passId))
+  return adminDb.runTransaction(async tx => {
+    const snap = await tx.get(ref)
+    if (!snap.exists) return false
+    const doc = snap.data() as RaceSnapshotDoc
+    if (doc.pendingSessionId !== sessionId || typeof doc.pendingVersion !== 'number') return false
+    tx.update(ref, { pendingCursor: null, pendingTotalCount: 0, pendingFinisherCount: 0 })
+    return true
+  })
+}
+
 export function snapshotRef(eventSlug: string, passId: string) {
   return snapshots().doc(snapshotId(eventSlug, passId))
 }
@@ -318,11 +467,19 @@ export async function rollbackSnapshot(params: {
       return { ok: false, status: 409, error: 'That version is already the published one.' }
     }
 
+    // RD-RACEOPS-02G · a history with the same version recorded twice cannot say which
+    // counts and session the number stands for. Refuse rather than guess.
+    const duplicate = findDuplicateVersion(doc.versions)
+    if (duplicate !== null) return { ok: false, status: 409, error: inconsistentHistoryMessage(duplicate) }
+
     const target = (doc.versions ?? []).find(v => v.version === params.toVersion)
     if (!target) {
       return { ok: false, status: 404, error: 'That version was never published for this race.' }
     }
 
+    // Only the live pointer and its counts move. `maxVersion` — the allocator — is
+    // deliberately NOT touched: a restored race must still build v(max+1) next, never a
+    // number that already has entries.
     const restoredAt = new Date().toISOString()
     tx.update(ref, {
       version:       target.version,
@@ -413,37 +570,64 @@ export async function listRecentResultEvents(limit = 24): Promise<PublicRaceSumm
 
 export interface LeaderboardPage {
   rows:       PublicResultRow[]
-  nextCursor: number | null   // last overallRank returned
+  /** Cursor for the page AFTER this one; null at the end. */
+  nextCursor: LeaderboardCursor | null
+  /** Cursor for the page BEFORE this one; null on the first page. */
+  prevCursor: LeaderboardCursor | null
 }
 
 /**
- * One page of the leaderboard, ordered by overall rank.
+ * One leaderboard page, in rank order.
  *
- * Cursor-paginated on `overallRank`, never offset — so page N costs the same as page 1 and
- * nothing scans the whole collection. Non-finishers have a null rank and are excluded here;
- * they are reachable by direct bib lookup.
+ * RD-RACEOPS-02C · TIE-SAFE. The order is (overallRank, document id) — a TOTAL order,
+ * because entry ids are unique — and the cursor carries both parts, so
+ * `startAfter(rank, id)` resumes exactly after one entry instead of after every entry
+ * that shares its rank. Served by the existing `entries (v, overallRank)` composite: the
+ * document id is the implicit trailing key of every Firestore index, and the backward
+ * page reverses every sort direction, which Firestore serves from the same index scanned
+ * in reverse. No new index.
+ *
+ * `direction: 'before'` returns the page that ENDS just before the cursor (used by the
+ * public "Previous" link), in the same ascending order as a forward page.
  */
 export async function fetchLeaderboardPage(
-  id: string, version: number, pageSize: number, afterRank?: number | null,
+  id:        string,
+  version:   number,
+  pageSize:  number,
+  cursor?:   LeaderboardCursor | null,
+  direction: 'after' | 'before' = 'after',
 ): Promise<LeaderboardPage> {
+  const backward = direction === 'before' && !!cursor
+  const order: FirebaseFirestore.OrderByDirection = backward ? 'desc' : 'asc'
   let q = entriesCol(id)
     .where('v', '==', version)
-    .orderBy('overallRank', 'asc')
-    .limit(pageSize)
-
-  if (typeof afterRank === 'number') q = q.startAfter(afterRank)
-
+    .orderBy('overallRank', order)
+    .orderBy(FieldPath.documentId(), order)
+    .limit(pageSize + 1)                       // one extra row answers "is there another page"
+  if (cursor) q = q.startAfter(cursor.rank, entryKey(version, cursor.bibKey))
   const snap = await q.get()
-  const rows = snap.docs
-    .map(d => d.data() as SnapshotEntryDoc)
-    .filter(e => e.overallRank !== null)
-    .map(toPublicRow)
-
-  const last = rows.length > 0 ? rows[rows.length - 1].overallRank : null
-  return { rows, nextCursor: snap.size === pageSize ? last : null }
+  const entries = snap.docs.map(d => d.data() as SnapshotEntryDoc).filter(e => e.overallRank !== null)
+  const more = snap.size > pageSize
+  const page = (more ? entries.slice(0, pageSize) : entries)
+  if (backward) page.reverse()
+  const rows = page.map(toPublicRow)
+  const first = page[0] ?? null
+  const last  = page[page.length - 1] ?? null
+  const toCursor = (e: SnapshotEntryDoc | null): LeaderboardCursor | null =>
+    e && e.overallRank !== null ? { rank: e.overallRank, bibKey: e.bibKey } : null
+  if (backward) {
+    // Going back: there is a page before this one only if the reverse query had more rows;
+    // there is always a page after it — the one the reader came from.
+    return { rows, nextCursor: toCursor(last), prevCursor: more ? toCursor(first) : null }
+  }
+  return {
+    rows,
+    nextCursor: more ? toCursor(last) : null,
+    // A forward page reached through a cursor has something before it by definition.
+    prevCursor: cursor ? toCursor(first) : null,
+  }
 }
 
-/** Bib lookup — a single document GET. O(1), no query, no scan. */
 export async function fetchByBib(
   id: string, version: number, bib: string,
 ): Promise<PublicResultRow | null> {

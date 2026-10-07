@@ -68,7 +68,7 @@ for those single-instance jobs — so the client timeout must exceed the server 
    (GitHub only runs scheduled workflows from the **default branch**.)
 6. **Confirm prerequisites are deployed**: the RD-OPS-GA-01 fencing token (overlap
    safety) and the RD-PERF-GA-01 Firestore indexes
-   (`firebase deploy --only firestore:indexes`), so reconciliation/report queries
+   (`npm run deploy:firebase:production`), so reconciliation/report queries
    don't throw.
 
 ---
@@ -117,7 +117,7 @@ for those single-instance jobs — so the client timeout must exceed the server 
 - [ ] `CRON_BASE_URL` GitHub secret = production origin, no trailing slash.
 - [ ] `vercel.json` `crons` stays `[]` (GitHub is the sole scheduler).
 - [ ] RD-OPS-GA-01 fencing token deployed (overlap/double-execution safety).
-- [ ] RD-PERF-GA-01 Firestore indexes deployed (`firebase deploy --only firestore:indexes`).
+- [ ] RD-PERF-GA-01 Firestore indexes deployed (`npm run deploy:firebase:production`).
 - [ ] Four workflow files merged to the **default branch**.
 - [ ] Auth smoke test passes: `200` with the bearer, `401` without.
 - [ ] Each workflow dispatched manually once and inspected (all endpoints reached).

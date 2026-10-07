@@ -18,8 +18,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { motion, useReducedMotion } from 'framer-motion'
-import { Send, CheckCircle2, CalendarClock } from 'lucide-react'
-import { IconChip } from '@/components/marketing/IconChip'
+import { Send, CheckCircle2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Field, fieldControl, fieldErrorId } from '@/components/ui/field'
 import { cn } from '@/lib/utils/cn'
@@ -28,27 +27,18 @@ import { fadeUp } from '@/lib/marketing/motion'
 
 // ─── Field option registries (presentation config, not business data) ─────────────
 
-const EVENT_TYPES = [
-  'Marathon', 'Conference', 'Corporate Event', 'Workshop', 'NGO',
-  'School', 'College', 'Festival', 'Sports Tournament', 'Other',
-] as const
-
-const ATTENDEE_RANGES = [
-  '1–100', '100–500', '500–1000', '1000–5000', '5000+',
-] as const
-
-/** Empty <select> reads as placeholder text until a real value is chosen. */
-const SELECT_PLACEHOLDER = 'text-muted-foreground/60'
+// Country, event type, expected attendees and preferred demo date were removed from the
+// form on 2026-09-23 (owner). The API still accepts them as optional fields, so older
+// clients and the stored enquiries are unaffected; this form simply stops asking.
 
 interface FormState {
   fullName: string; organization: string; workEmail: string; phone: string
-  country: string; eventType: string; attendees: string; demoDate: string
   subject: string; message: string; agree: boolean
 }
 
 const EMPTY: FormState = {
-  fullName: '', organization: '', workEmail: '', phone: '', country: '',
-  eventType: '', attendees: '', demoDate: '', subject: '', message: '', agree: false,
+  fullName: '', organization: '', workEmail: '', phone: '',
+  subject: '', message: '', agree: false,
 }
 
 // ─── Component ─────────────────────────────────────────────────────────────────────
@@ -61,7 +51,7 @@ export function ContactInquiryForm() {
   // made a request.
   const [sending,    setSending]    = useState(false)
   const [sendError,  setSendError]  = useState<string | null>(null)
-  const demoRef  = useRef<HTMLInputElement>(null)
+  const messageRef = useRef<HTMLTextAreaElement>(null)
   const errorRef = useRef<HTMLParagraphElement>(null)
   // Honeypot — hidden from humans; a bot that fills every input completes it.
   const [website, setWebsite] = useState('')
@@ -107,8 +97,7 @@ export function ContactInquiryForm() {
         headers: { 'Content-Type': 'application/json' },
         body:    JSON.stringify({
           fullName: v.fullName, workEmail: v.workEmail, message: v.message,
-          organization: v.organization, phone: v.phone, country: v.country,
-          eventType: v.eventType, attendees: v.attendees, demoDate: v.demoDate,
+          organization: v.organization, phone: v.phone,
           subject: v.subject,
           website,   // honeypot
         }),
@@ -141,8 +130,10 @@ export function ContactInquiryForm() {
   // "Book a Demo" — pre-tags demo intent and jumps to the date field (no route/backend).
   function prefillDemo() {
     setV(prev => ({ ...prev, subject: prev.subject || 'Book a demo' }))
-    demoRef.current?.focus()
-    demoRef.current?.scrollIntoView({ block: 'center', behavior: reduce ? 'auto' : 'smooth' })
+    // With no demo-date field, Book a Demo names the subject and hands the visitor to the
+    // message, where they can say when suits them.
+    messageRef.current?.focus()
+    messageRef.current?.scrollIntoView({ block: 'center', behavior: reduce ? 'auto' : 'smooth' })
   }
 
   if (submitted) {
@@ -151,18 +142,19 @@ export function ContactInquiryForm() {
         {...panelMotion}
         className="flex min-h-full flex-col items-center justify-center py-10 text-center"
       >
-        <IconChip className="size-12 rounded-2xl">
-          <CheckCircle2 className="size-6 text-primary" aria-hidden />
-        </IconChip>
-        <h2 className={cn(typography.subsectionHeading, 'mt-5 text-foreground')}>Thanks for reaching out</h2>
-        <p className={cn(typography.body, 'mt-2 max-w-sm text-muted-foreground')}>
+        <span aria-hidden className="inline-flex size-12 items-center justify-center rounded-[var(--radius-control)] border border-hero-accent-rule/50 text-hero-accent-rule">
+          <CheckCircle2 className="size-5" strokeWidth={1.5} />
+        </span>
+        <span aria-hidden className="mt-5 h-px w-8 bg-hero-accent-rule" />
+        <h2 className="mt-5 font-display text-fs-2xl font-light text-hero-ink">Thanks for reaching out</h2>
+        <p className={cn(typography.body, 'mt-2 max-w-sm text-hero-ink-soft')}>
           We&apos;ve got your details. Our team will follow up at{' '}
           <span className="font-medium text-foreground">{v.workEmail}</span>.
         </p>
         <button
           type="button"
           onClick={() => { setV(EMPTY); setSubmitted(false) }}
-          className={cn(typography.caption, 'mt-6 rounded font-semibold text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary')}
+          className={cn(typography.caption, 'mt-6 rounded font-semibold text-action hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-action')}
         >
           Send another inquiry
         </button>
@@ -172,20 +164,20 @@ export function ContactInquiryForm() {
 
   return (
     <form onSubmit={handleSubmit} noValidate aria-label="Enterprise inquiry">
-      <div className="grid gap-x-4 gap-y-4 sm:grid-cols-2">
+      <div className="grid gap-x-5 gap-y-5 sm:grid-cols-2">
 
         <Field id="cf-name" label="Full name" required error={errors.fullName}>
           <input id="cf-name" type="text" autoComplete="name" placeholder="Priya Sharma"
             value={v.fullName} onChange={e => set('fullName', e.target.value)}
             aria-required aria-invalid={!!errors.fullName}
             aria-describedby={errors.fullName ? fieldErrorId('cf-name') : undefined}
-            className={fieldControl({ invalid: !!errors.fullName })} />
+            className={fieldControl({ invalid: !!errors.fullName, className: 'h-11 rounded-[var(--radius-control)]' })} />
         </Field>
 
         <Field id="cf-org" label="Organization" error={errors.organization}>
           <input id="cf-org" type="text" autoComplete="organization" placeholder="Acme Events"
             value={v.organization} onChange={e => set('organization', e.target.value)}
-            className={fieldControl()} />
+            className={fieldControl({ className: 'h-11 rounded-[var(--radius-control)]' })} />
         </Field>
 
         <Field id="cf-email" label="Work email" required error={errors.workEmail}>
@@ -193,71 +185,40 @@ export function ContactInquiryForm() {
             value={v.workEmail} onChange={e => set('workEmail', e.target.value)}
             aria-required aria-invalid={!!errors.workEmail}
             aria-describedby={errors.workEmail ? fieldErrorId('cf-email') : undefined}
-            className={fieldControl({ invalid: !!errors.workEmail })} />
+            className={fieldControl({ invalid: !!errors.workEmail, className: 'h-11 rounded-[var(--radius-control)]' })} />
         </Field>
 
         <Field id="cf-phone" label="Phone number" error={errors.phone}>
           <input id="cf-phone" type="tel" autoComplete="tel" placeholder="+91 98765 43210"
             value={v.phone} onChange={e => set('phone', e.target.value)}
-            className={fieldControl()} />
-        </Field>
-
-        <Field id="cf-country" label="Country" error={errors.country}>
-          <input id="cf-country" type="text" autoComplete="country-name" placeholder="India"
-            value={v.country} onChange={e => set('country', e.target.value)}
-            className={fieldControl()} />
-        </Field>
-
-        <Field id="cf-type" label="Event type" error={errors.eventType}>
-          <select id="cf-type" value={v.eventType} onChange={e => set('eventType', e.target.value)}
-            className={fieldControl({ className: !v.eventType ? SELECT_PLACEHOLDER : undefined })}>
-            <option value="">Select event type…</option>
-            {EVENT_TYPES.map(t => <option key={t} value={t} className="text-foreground">{t}</option>)}
-          </select>
-        </Field>
-
-        <Field id="cf-attendees" label="Expected attendees" error={errors.attendees}>
-          <select id="cf-attendees" value={v.attendees} onChange={e => set('attendees', e.target.value)}
-            className={fieldControl({ className: !v.attendees ? SELECT_PLACEHOLDER : undefined })}>
-            <option value="">Select a range…</option>
-            {ATTENDEE_RANGES.map(r => <option key={r} value={r} className="text-foreground">{r}</option>)}
-          </select>
-        </Field>
-
-        <Field id="cf-demo" label="Preferred demo date" error={errors.demoDate}>
-          <div className="relative">
-            <CalendarClock className="pointer-events-none absolute left-3.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground/60" aria-hidden />
-            <input id="cf-demo" ref={demoRef} type="date"
-              value={v.demoDate} onChange={e => set('demoDate', e.target.value)}
-              className={fieldControl({ className: 'pl-10' })} />
-          </div>
+            className={fieldControl({ className: 'h-11 rounded-[var(--radius-control)]' })} />
         </Field>
 
         <Field id="cf-subject" label="Subject" error={errors.subject} className="sm:col-span-2">
           <input id="cf-subject" type="text" placeholder="How can we help?"
             value={v.subject} onChange={e => set('subject', e.target.value)}
-            className={fieldControl()} />
+            className={fieldControl({ className: 'h-11 rounded-[var(--radius-control)]' })} />
         </Field>
 
         <Field id="cf-message" label="Message" required error={errors.message} className="sm:col-span-2">
-          <textarea id="cf-message" rows={4} placeholder="Tell us about your event, timeline and goals…"
+          <textarea id="cf-message" ref={messageRef} rows={5} placeholder="Tell us about your event, timeline and goals…"
             value={v.message} onChange={e => set('message', e.target.value)}
             aria-required aria-invalid={!!errors.message}
             aria-describedby={errors.message ? fieldErrorId('cf-message') : undefined}
-            className={fieldControl({ invalid: !!errors.message, className: 'h-auto resize-y py-2.5 leading-relaxed' })} />
+            className={fieldControl({ invalid: !!errors.message, className: 'h-auto resize-y rounded-[var(--radius-control)] py-3 leading-relaxed' })} />
         </Field>
       </div>
 
       {/* Privacy consent */}
-      <div className="mt-4">
+      <div className="mt-5">
         <label htmlFor="cf-agree" className={cn(typography.caption, 'flex items-start gap-3 leading-relaxed text-muted-foreground')}>
           <input id="cf-agree" type="checkbox" checked={v.agree} onChange={e => set('agree', e.target.checked)}
             aria-invalid={!!errors.agree}
             aria-describedby={errors.agree ? fieldErrorId('cf-agree') : undefined}
-            className="mt-0.5 size-4 shrink-0 rounded border-border text-primary focus:ring-2 focus:ring-primary/30" />
+            className="mt-0.5 size-4 shrink-0 rounded border-border text-action focus:ring-2 focus:ring-action/30" />
           <span>
             I agree to the{' '}
-            <a href="/privacy" className="font-medium text-foreground underline underline-offset-2 hover:text-primary">privacy policy</a>.
+            <a href="/privacy" className="font-medium text-foreground underline underline-offset-2 hover:text-action">privacy policy</a>.
           </span>
         </label>
         {errors.agree && (
@@ -288,19 +249,31 @@ export function ContactInquiryForm() {
           ref={errorRef}
           role="alert"
           tabIndex={-1}
-          className={cn(fs.sm, 'mt-5 rounded-xl border border-destructive/30 bg-destructive/[0.04] px-4 py-3 font-medium text-destructive focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-destructive/40')}
+          className={cn(fs.sm, 'mt-5 border-l-2 border-destructive py-1 pl-3 font-medium text-destructive focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-destructive/40')}
         >
           {sendError}
         </motion.p>
       )}
 
       {/* Actions — full-width on mobile so the primary action is thumb-reachable. */}
-      <div className="mt-5 flex flex-col gap-2.5 sm:flex-row sm:items-center sm:gap-3">
-        <Button type="submit" variant="gradient" size="lg" isLoading={sending} className="w-full sm:w-auto">
+      <div className="mt-6 grid gap-2.5 border-t border-border/60 pt-6 sm:grid-cols-2 sm:gap-3">
+        {/* The shared Button's `gradient` variant paints --primary-gradient inline, and that
+            button is product-wide — organizer and admin surfaces still run on --primary, so
+            the variant itself must not change. It spreads the caller's `style` LAST, so
+            naming the public brand ramp here overrides just this instance. The token is
+            named, not re-typed: there is still exactly one definition of the gradient. */}
+        <Button
+          type="submit"
+          variant="gradient"
+          size="lg"
+          isLoading={sending}
+          style={{ backgroundImage: 'var(--action-gradient)' }}
+          className="h-12 w-full rounded-[var(--radius-control)] focus-visible:ring-action"
+        >
           {!sending && <Send className="size-4" aria-hidden />}
           {sending ? 'Sending…' : 'Send Inquiry'}
         </Button>
-        <Button type="button" variant="outline" size="lg" onClick={prefillDemo} disabled={sending} className="w-full sm:w-auto">
+        <Button type="button" variant="outline" size="lg" onClick={prefillDemo} disabled={sending} className="h-12 w-full rounded-[var(--radius-control)] border-hero-ink/25 text-hero-ink shadow-none hover:border-action hover:bg-transparent hover:text-action focus-visible:ring-action">
           Book a Demo
         </Button>
       </div>

@@ -33,16 +33,51 @@ export async function getLicenseCoupon(code: string): Promise<LicenseCouponDoc |
   return snap.exists ? (snap.data() as LicenseCouponDoc) : null
 }
 
+/**
+ * RD-M5 — the query that DEFINES a per-organizer redemption: this organizer's licence orders
+ * that used this coupon and are currently `paid` — or `refunding`: a use is released only when its
+ * refund is CONFIRMED (`refunded`), never while the gateway call is pending (RD-M5 refund race).
+ * Shared by the pre-check below and the in-transaction counter seeding in activateLicenseOrder,
+ * so the two can never disagree. `in` on the last equality field uses the existing
+ * (organizerUid, couponCode, status) composite index.
+ */
+export const ORGANIZER_REDEMPTION_STATUSES = ['paid', 'refunding'] as const
+export function organizerPaidRedemptionsQuery(code: string, organizerUid: string) {
+  return adminDb.collection(LICENSE_ORDERS_COLLECTION)
+    .where('organizerUid', '==', organizerUid)
+    .where('couponCode', '==', normalizeCouponCode(code))
+    .where('status', 'in', [...ORGANIZER_REDEMPTION_STATUSES])
+}
+
+/** RD-M5 — typed so a failed lookup can never be read as "0 prior uses". */
+export type OrganizerRedemptionCount = { ok: true; count: number } | { ok: false }
+
 /** This organizer's prior PAID redemptions of a coupon — counted from licenseOrders. */
-export async function countOrganizerCouponRedemptions(code: string, organizerUid: string): Promise<number> {
+export async function countOrganizerCouponRedemptions(code: string, organizerUid: string): Promise<OrganizerRedemptionCount> {
   try {
-    const snap = await adminDb.collection(LICENSE_ORDERS_COLLECTION)
-      .where('organizerUid', '==', organizerUid)
-      .where('couponCode', '==', normalizeCouponCode(code))
-      .where('status', '==', 'paid')
-      .count().get()
-    return snap.data().count
+    const snap = await organizerPaidRedemptionsQuery(code, organizerUid).count().get()
+    const count = snap.data().count
+    // A result that is not a whole, non-negative number cannot establish usage either.
+    if (typeof count !== 'number' || !Number.isInteger(count) || count < 0) return { ok: false }
+    return { ok: true, count }
   } catch {
-    return 0   // missing-index / transient → treat as no prior redemptions (global cap still guards)
+    // RD-M5 D2 — FAIL CLOSED. This used to return 0 ("no prior redemptions"), which silently
+    // disabled perOrganizerLimit whenever the read failed. Callers now refuse and ask to retry.
+    return { ok: false }
   }
+}
+
+/** RD-M5 — the retryable refusal both coupon routes return when usage cannot be verified. */
+export const COUPON_USAGE_UNVERIFIED_MESSAGE = 'We couldn’t verify this coupon’s usage. Please try again.'
+
+/**
+ * RD-M5 D1 — the per-(coupon, organizer) redemption counter, read and written inside the
+ * activation transaction (the contention point that makes perOrganizerLimit atomic):
+ *   licenseCoupons/{CODE}/organizerRedemptions/{organizerUid}  →  { count, updatedAt }
+ * Created only for coupons WITH a perOrganizerLimit (seeded from paid orders on first use);
+ * once it exists it is kept current on every redemption and released on refund.
+ */
+export const ORGANIZER_REDEMPTIONS_SUBCOLLECTION = 'organizerRedemptions'
+export function organizerRedemptionCounterRef(code: string, organizerUid: string) {
+  return licenseCouponRef(code).collection(ORGANIZER_REDEMPTIONS_SUBCOLLECTION).doc(organizerUid)
 }

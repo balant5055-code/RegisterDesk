@@ -6,8 +6,7 @@
 // wallet ledger (billing). It creates/modifies nothing.
 
 import { NextRequest, NextResponse } from 'next/server'
-import { verifyCaller }        from '@/lib/team/access'
-import { resolveWorkspaceUid } from '@/lib/team/workspace'
+import { authorizeWorkspace } from '@/lib/team/workspace'
 import { adminDb }             from '@/lib/firebase/admin'
 import {
   EVENT_LICENSES_COLLECTION, LICENSE_ORDERS_COLLECTION, LICENSE_HISTORY_COLLECTION,
@@ -15,11 +14,12 @@ import {
 } from '@/lib/licensing/schema'
 import {
   isValidTierForVersion, isUnlimited,
-  type EventLicenseFeature, type AnyEventLicenseTier,
+  type EventLicenseFeature,
 } from '@/lib/licensing/eventLicense'
 import { getLicenseCatalog, getLicenseCatalogV2 } from '@/lib/licensing/resolveCatalog'
-import { pickVersionedDefinition, resolveLicenseEntryForVersion } from '@/lib/licensing/licenseCatalogShared'
+import { pickVersionedDefinition } from '@/lib/licensing/licenseCatalogShared'
 import { resolveEffectiveEventLicense } from '@/lib/licensing/adminLicense'
+import { deriveStoredEventCapacity } from '@/lib/registrations/capacity'
 import {
   FEATURE_LABELS,
   type LicenseCenterDetail, type LicenseCenterStatus, type LicenseCenterPayment,
@@ -56,9 +56,12 @@ export async function GET(
   req: NextRequest,
   { params }: { params: Promise<{ eventId: string }> },
 ): Promise<NextResponse> {
-  const caller = await verifyCaller(req)
-  if (!caller) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-  const ctx = await resolveWorkspaceUid(caller.uid)
+  // RD-CE-FIX M5 · the same gate as the rest of licensing (capacity/*, checkout/confirm): verified
+  // token, the workspace it acts for, suspension of caller OR owner, and the `events` permission —
+  // a check-in-only or finance member, or a suspended workspace, cannot buy or read licences here.
+  const authz = await authorizeWorkspace(req, 'events')
+  if (!authz.ok) return NextResponse.json({ error: authz.error }, { status: authz.status })
+  const ctx = authz
 
   const { eventId } = await params
   const snap = await adminDb.collection(EVENT_LICENSES_COLLECTION).doc(eventId).get()
@@ -108,20 +111,45 @@ export async function GET(
     return 'free'
   })()
 
+  // RD-EVENT-COMMERCE-01 · D3 — declared BEFORE the feature matrix reads it. It used to sit below
+  // the synchronous FEATURE_KEYS.map, a temporal-dead-zone ReferenceError on EVERY request.
+  const isCapacityModel = doc.commercialModel === 'capacity'
+
   // ── Feature matrix (from the effective definition) ──
   const features: LicenseFeatureCell[] = FEATURE_KEYS.map(key => {
-    const included    = eff.definition.features[key] === true
+    // Every RegisterDesk feature is included for every organizer under the capacity model.
+    // Reading the tier's flags here told a paying organizer that nothing was available.
+    const included    = isCapacityModel ? true : eff.definition.features[key] === true
     const overridden  = overlay?.featureOverrides != null && typeof overlay.featureOverrides[key] === 'boolean'
     const adminGranted = overridden && included && baseDef.features[key] === false
     return { key, label: FEATURE_LABELS[key], included, overridden, adminGranted }
   })
 
+  // ── RD-CAPACITY-02 · which commercial model is this licence on? ──────────────
+  //
+  // A capacity licence stamps the version's FREE tier for schema compatibility, so EVERY value
+  // derived from the tier is wrong for it: the limit, the remaining count and the feature
+  // matrix. `commercialModel` is the discriminator that says so.
+  // (`isCapacityModel` itself is declared above the feature matrix — RD-EVENT-COMMERCE-01 · D3.)
+
   // ── Registration usage ──
   const effMax  = eff.definition.limits.maxRegistrations
   const baseMax = baseDef.limits.maxRegistrations
   const used    = counterSnap.exists ? ((counterSnap.data() as { totalCount?: number }).totalCount ?? 0) : 0
-  const registrationLimit = isUnlimited(effMax) ? null : effMax
-  const limitOverridden   = overlay?.limitOverrides != null && overlay.limitOverrides.maxRegistrations !== undefined
+
+  // Under the capacity model the limit is the event's ENFORCED capacity — the same value the
+  // registration gate reads — not a tier's `maxRegistrations`. `deriveStoredEventCapacity` is
+  // the canonical derivation, so this page, the gate and the public event page agree.
+  const capacityLimit = isCapacityModel
+    ? deriveStoredEventCapacity(
+        (eventSnap.exists ? eventSnap.data() : null) as Parameters<typeof deriveStoredEventCapacity>[0],
+      )
+    : null
+  const registrationLimit = isCapacityModel
+    ? capacityLimit
+    : (isUnlimited(effMax) ? null : effMax)
+  const limitOverridden   = !isCapacityModel
+    && overlay?.limitOverrides != null && overlay.limitOverrides.maxRegistrations !== undefined
 
   // ── Billing ──
   const walletUsedPaise = chargeSnap.exists ? ((chargeSnap.data() as { amountPaise?: number }).amountPaise ?? 0) : 0
@@ -144,18 +172,18 @@ export async function GET(
     .filter(t => t.action !== 'note')
     .sort((a, b) => (b.createdAt ?? '').localeCompare(a.createdAt ?? ''))
 
-  // ── Upgrade option (hidden at Enterprise / top tier) — version-aware next tier ──
-  const entry   = resolveLicenseEntryForVersion(catalog, catalogV2, tier, version)
-  const nextDef = entry.nextTier ? pickVersionedDefinition(catalog, catalogV2, entry.nextTier, version) : null
-  const upgrade = entry.nextTier && nextDef ? {
-    // entry.nextTier is produced by the version-aware resolver → a valid tier for this version.
-    nextTier:             entry.nextTier as AnyEventLicenseTier,
-    nextTierName:         entry.nextTierName ?? nextDef.name,
-    currentPricePaise:    baseDef.licensePricePaise,
-    nextPricePaise:       nextDef.licensePricePaise,
-    priceDifferencePaise: Math.max(0, nextDef.licensePricePaise - baseDef.licensePricePaise),
-    benefits:             nextDef.featureList,
-  } : null
+  // ── Upgrade option — HISTORICAL tier licences only ───────────────────────────
+  //
+  // There is no tier to upgrade to any more. A capacity licence sits on the version's free
+  // tier, so the version-aware resolver would happily offer "Upgrade to Starter · ₹999" —
+  // selling a product that no longer exists. The organizer changes CAPACITY instead, from the
+  // event's own settings.
+  //
+  // RD-EVENT-COMMERCE-05 — and not for HISTORICAL tier licences either: tiers are no longer sold
+  // at all, so "Upgrade to <next tier> · ₹<difference>" (and its support mailto) was a purchase
+  // option for a retired product. The field is kept in the response shape (always null) so older
+  // clients render nothing rather than break.
+  const upgrade: LicenseCenterDetail['upgrade'] = null
 
   const detail: LicenseCenterDetail = {
     eventId,
@@ -164,7 +192,11 @@ export async function GET(
     eventStatus: eventSnap.exists && typeof (eventSnap.data() as Record<string, unknown>).lifecycleStatus === 'string'
       ? ((eventSnap.data() as Record<string, unknown>).lifecycleStatus as string) : null,
     tier,
-    tierName:    eff.definition.name,
+    // Under the capacity model the licence has no tier to name, so it is named for what the
+    // organizer actually bought: free capacity, or pay-as-you-go above it.
+    tierName:    isCapacityModel
+      ? (capacityLimit != null && capacityLimit > 0 ? `${capacityLimit.toLocaleString('en-IN')} registrations` : 'Unlimited capacity')
+      : eff.definition.name,
     status,
     payment,
     complimentary: eff.complimentary,

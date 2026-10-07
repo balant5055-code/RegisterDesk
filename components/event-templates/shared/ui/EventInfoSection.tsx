@@ -35,16 +35,16 @@ import {
 // This file has NO 'use client' and must keep it that way: hover lift and shadow are
 // pure CSS at the framework's own values, so the whole section stays a Server Component.
 
-function languageLabel(id: string): string {
+export function languageLabel(id: string): string {
   return LANGUAGE_OPTIONS.find(o => o.id === id)?.label ?? id
 }
-function timezoneLabel(id: string): string {
+export function timezoneLabel(id: string): string {
   return TIMEZONE_OPTIONS.find(o => o.id === id)?.label ?? id
 }
 
 // One clause per line. The refund window is the only essential with several independent
 // facts, and joining them with ' · ' made the longest value the hardest one to read.
-function refundLines(rw: RefundWindow): string[] {
+export function refundLines(rw: RefundWindow): string[] {
   const day = (n: number) => `${n} day${n === 1 ? '' : 's'}`
   const parts: string[] = []
   if (rw.fullRefundDaysBefore != null)    parts.push(`Full refund up to ${day(rw.fullRefundDaysBefore)} before`)
@@ -85,7 +85,7 @@ function EssentialCard({ item }: { item: Essential }) {
         <ul className={cn('mt-1.5 flex flex-col gap-1', TYPE.cardBody)}>
           {item.lines.map(line => (
             <li key={line} className="flex gap-2">
-              <span aria-hidden className="mt-[0.5em] size-1 shrink-0 rounded-full bg-primary/50" />
+              <span aria-hidden className="mt-[0.5em] size-1 shrink-0 rounded-full bg-action/50" />
               {line}
             </li>
           ))}
@@ -97,7 +97,7 @@ function EssentialCard({ item }: { item: Essential }) {
           href={item.href}
           target="_blank"
           rel="noopener noreferrer"
-          className="mt-auto inline-flex w-fit items-center gap-1 pt-3 text-fs-sm font-semibold text-primary outline-none hover:underline focus-visible:ring-2 focus-visible:ring-primary/50 focus-visible:ring-offset-2"
+          className="mt-auto inline-flex w-fit items-center gap-1 pt-3 text-fs-sm font-semibold text-action outline-none hover:underline focus-visible:ring-2 focus-visible:ring-action/50 focus-visible:ring-offset-2"
         >
           Open
           <ExternalLink className="size-3" aria-hidden />

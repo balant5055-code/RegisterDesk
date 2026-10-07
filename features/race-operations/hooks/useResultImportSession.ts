@@ -16,7 +16,8 @@ import { useCallback, useMemo, useState } from 'react'
 import {
   applyMapping, autoMapColumns, missingRequiredFields, resolveParser,
   validateResults, RESULTS_MAX_ROWS,
-  type ValidationResult,
+  attachSplits, autoMapSplitColumns, parseSplitSheet,
+  type SplitAutoMapResult, type ValidationResult,
 } from '@/features/race-operations/import'
 import type {
   ColumnMapping, NormalizedRaceResult, ParsedTable, ResultField,
@@ -49,7 +50,25 @@ export interface ResultImportSession {
    *  it on the Import Session as provenance. */
   fileHash:         string
   table:            ParsedTable | null
+  /**
+   * RD-RACEOPS-RESULTS-04 · the OPTIONAL checkpoint sheet, when the workbook had one.
+   *
+   * Held separately from `table` and never merged into it: the Results sheet is one row per
+   * bib and must stay that way, so checkpoints are attached to the normalized results
+   * instead (see `normalized` below).
+   */
+  splitTable:       ParsedTable | null
+  /** How the checkpoint sheet's headers were read, including the columns we calculate. */
+  splitMapping:     SplitAutoMapResult | null
+  /** How many participants ended up with at least one checkpoint. */
+  splitParticipants: number
   mapping:          ColumnMapping
+  /**
+   * RD-RACEOPS-02C · how each mapped field was decided: `exact` (an unambiguous alias),
+   * `review` (a generic alias, a substring guess, or two competing columns — shown as
+   * "Review required", never as a tick) or `manual` (the organizer chose it).
+   */
+  mappingSource:    Partial<Record<ResultField, 'exact' | 'review' | 'manual'>>
   unmappedHeaders:  string[]
   missingRequired:  ResultField[]
   normalized:       NormalizedRaceResult[]
@@ -72,14 +91,18 @@ export function useResultImportSession(): ResultImportSession {
   const [fileSize,  setFileSize]  = useState(0)
   const [fileHash,  setFileHash]  = useState('')
   const [table,     setTable]     = useState<ParsedTable | null>(null)
+  const [splitTable, setSplitTable] = useState<ParsedTable | null>(null)
+  const [calculated, setCalculated] = useState<string[]>([])
+  const [splitMap,   setSplitMap]   = useState<SplitAutoMapResult | null>(null)
   const [mapping,   setMapping]   = useState<ColumnMapping>({})
+  const [mappingSource, setMappingSource] = useState<ResultImportSession['mappingSource']>({})
   const [unmapped,  setUnmapped]  = useState<string[]>([])
   const [error,     setError]     = useState<string | null>(null)
   const [history,   setHistory]   = useState<ImportSessionEntry[]>([])
 
   const reset = useCallback(() => {
     setPhase('idle'); setFileName(null); setFileSize(0); setFileHash('')
-    setTable(null); setMapping({}); setUnmapped([]); setError(null)
+    setTable(null); setMapping({}); setMappingSource({}); setUnmapped([]); setError(null)
   }, [])
 
   const selectFile = useCallback(async (file: File) => {
@@ -87,7 +110,7 @@ export function useResultImportSession(): ResultImportSession {
     setFileName(file.name)
     setFileSize(file.size)
     setFileHash('')
-    setTable(null); setMapping({}); setUnmapped([]); setError(null)
+    setTable(null); setMapping({}); setMappingSource({}); setUnmapped([]); setError(null)
 
     const record = (
       outcome: ImportSessionEntry['outcome'],
@@ -142,15 +165,30 @@ export function useResultImportSession(): ResultImportSession {
     const auto = autoMapColumns(outcome.table.headers)
     const initialMapping: ColumnMapping = { ...auto.mapping, ...(resolved.parser.presetMapping ?? {}) }
 
+    // RD-RACEOPS-RESULTS-04 · the checkpoint sheet is mapped by its own exact aliases. There
+    // is no manual override for it: it is an advanced, optional sheet whose template names
+    // every column, and offering a mapping UI for six columns nobody renamed would add a
+    // step to the common path for the rare one.
+    const splits = outcome.splitTable ?? null
+    setSplitTable(splits)
+    setSplitMap(splits ? autoMapSplitColumns(splits.headers) : null)
+
     setTable(outcome.table)
     setMapping(initialMapping)
+    setMappingSource(auto.confidence)
     setUnmapped(auto.unmappedHeaders)
+    setCalculated(auto.calculatedHeaders)
     setPhase('mapping')
 
     // History is recorded against the parse outcome; validation counts are derived
     // reactively below, so the entry reflects the file as uploaded.
-    const preview = validateResults(applyMapping(outcome.table, initialMapping), {
-      unmappedHeaders: auto.unmappedHeaders,
+    const previewRows = applyMapping(outcome.table, initialMapping)
+    const previewSplits = splits
+      ? attachSplits(previewRows, parseSplitSheet(splits)).results
+      : previewRows
+    const preview = validateResults(previewSplits, {
+      unmappedHeaders:   auto.unmappedHeaders,
+      calculatedHeaders: auto.calculatedHeaders,
     })
     record('parsed', resolved.parser.id, null, {
       rowsFound:    preview.summary.rowsFound,
@@ -167,15 +205,30 @@ export function useResultImportSession(): ResultImportSession {
       else                 next[field] = header
       return next
     })
+    // A choice the organizer made is neither a guess nor a detection.
+    setMappingSource(prev => {
+      const next = { ...prev }
+      if (header === null) delete next[field]
+      else                 next[field] = 'manual'
+      return next
+    })
   }, [])
 
   // ── Derived: mapping → normalized → validation ──────────────────────────────
   // Recomputed synchronously from state rather than stored, so a mapping change can
   // never leave a stale validation result on screen.
-  const normalized = useMemo(
-    () => (table ? applyMapping(table, mapping) : []),
-    [table, mapping],
-  )
+  // RD-RACEOPS-RESULTS-04 · checkpoints are attached HERE, after mapping, because attaching
+  // needs the mapped bibs — and because this is the only layer that can see both sheets, it
+  // is also where an orphan bib, a duplicate checkpoint or a backwards course is detected.
+  const attached = useMemo(() => {
+    const rows = table ? applyMapping(table, mapping) : []
+    if (!table || !splitTable) return { results: rows, issues: [], withSplits: 0 }
+    const parsed = parseSplitSheet(splitTable, splitMap ?? undefined)
+    const outcome = attachSplits(rows, parsed)
+    return { results: outcome.results, issues: [...parsed.issues, ...outcome.issues], withSplits: outcome.withSplits }
+  }, [table, mapping, splitTable, splitMap])
+
+  const normalized = attached.results
 
   const missingRequired = useMemo(() => missingRequiredFields(mapping), [mapping])
 
@@ -185,9 +238,13 @@ export function useResultImportSession(): ResultImportSession {
     const used = new Set(Object.values(mapping).filter(Boolean) as string[])
     return validateResults(normalized, {
       unmappedHeaders: unmapped.filter(h => !used.has(h)),
+      calculatedHeaders: calculated,
+      // Everything the splits sheet had to say, folded into the same report — so the
+      // organizer reads one list, and a blocking checkpoint problem blocks the publish.
+      splitIssues: attached.issues,
       mapping,
     })
-  }, [table, mapping, normalized, unmapped, missingRequired])
+  }, [table, mapping, normalized, unmapped, calculated, attached.issues, missingRequired])
 
   const effectivePhase: ImportPhase = useMemo(() => {
     if (phase !== 'mapping') return phase
@@ -196,7 +253,8 @@ export function useResultImportSession(): ResultImportSession {
 
   return {
     phase: effectivePhase,
-    fileName, fileSize, fileHash, table, mapping,
+    fileName, fileSize, fileHash, table, mapping, mappingSource,
+    splitTable, splitMapping: splitMap, splitParticipants: attached.withSplits,
     unmappedHeaders: unmapped,
     missingRequired,
     normalized,

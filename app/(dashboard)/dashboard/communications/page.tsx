@@ -7,7 +7,9 @@
 // existing endpoints for the new Overview / Templates / Analytics / Billing views.
 // No runtime, storage, or communication logic is changed here.
 
-import { Suspense, useState } from 'react'
+import { Suspense, useCallback } from 'react'
+import { usePathname, useRouter, useSearchParams } from 'next/navigation'
+import { CommunicationBalanceCard } from '@/components/wallet/CommunicationBalanceCard'
 import { cn } from '@/lib/utils/cn'
 import { Radio } from 'lucide-react'
 import { CommOverview, CommAnalytics, CommBilling, TemplateCenter } from '@/components/communications/CommTabs'
@@ -27,8 +29,29 @@ const TABS: { key: Tab; label: string }[] = [
   { key: 'billing',    label: 'Billing' },
 ]
 
+const isTab = (v: string | null): v is Tab => !!v && TABS.some(x => x.key === v)
+
 export default function CommunicationCenter() {
-  const [tab, setTab] = useState<Tab>('overview')
+  return <Suspense fallback={null}><CommunicationCenterInner /></Suspense>
+}
+
+function CommunicationCenterInner() {
+  // RD-INTEG — the URL IS the tab. ?tab=billing (lib/wallet/communicationBalance) opens the
+  // Billing tab — the communication balance and its top-up live there. It used to be read once on
+  // mount, so a ?tab= link followed while already on this page (an event Wallet "Communication
+  // balance" link, the Back button) changed the URL but not the tab, and clicking a tab never
+  // updated the URL (no shareable / reload-safe tab).
+  const searchParams = useSearchParams()
+  const router = useRouter()
+  const pathname = usePathname()
+  const requested = searchParams.get('tab')
+  const tab: Tab = isTab(requested) ? requested : 'overview'
+  const setTab = useCallback((next: Tab) => {
+    const p = new URLSearchParams(searchParams.toString())
+    if (next === 'overview') p.delete('tab'); else p.set('tab', next)
+    const qs = p.toString()
+    router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false })
+  }, [router, pathname, searchParams])
 
   return (
     <div className="space-y-5">
@@ -57,7 +80,7 @@ export default function CommunicationCenter() {
       {tab === 'reminders'  && <Suspense fallback={null}><RemindersView /></Suspense>}
       {tab === 'templates'  && <TemplateCenter />}
       {tab === 'analytics'  && <CommAnalytics />}
-      {tab === 'billing'    && <CommBilling />}
+      {tab === 'billing'    && <div className="space-y-4"><CommunicationBalanceCard /><CommBilling /></div>}
     </div>
   )
 }

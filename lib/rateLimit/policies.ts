@@ -31,7 +31,12 @@ const HOUR = 60 * MIN
 export const RATE_POLICY = {
   // Sensitive account mutations (per organizer uid) — abuse / accidental-repeat guard.
   accountDeletion: { route: 'account-delete',  limit: 3,  windowMs: HOUR },  // irreversible
-  teamInvite:      { route: 'team-invite',      limit: 20, windowMs: HOUR },  // sends email
+  // RD-TEAM-IMPL-01 — this bounded team invitations, which sent mail. That flow is
+  // gone; the budget now bounds STAFF CREATION, which sends nothing but mints a
+  // credential and an Auth user. The key is left unchanged so an in-flight window
+  // is not reset by a rename, and the limit still suits the shape: issuing gate
+  // credentials is deliberate work, never a burst.
+  teamInvite:      { route: 'team-invite',      limit: 20, windowMs: HOUR },  // mints workspace access
   brandingUpdate:  { route: 'branding-update',  limit: 30, windowMs: HOUR },
   apiKeyCreate:    { route: 'api-key-create',   limit: 10, windowMs: HOUR },  // creates a credential
 

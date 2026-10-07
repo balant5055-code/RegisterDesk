@@ -107,6 +107,27 @@ jobs:
             -H "Authorization: Bearer $CRON_SECRET" \
             --retry 2 --retry-delay 5 --max-time 65 --fail-with-body
 
+      # RD-EVENT-19E — identifier assignment runs. The organizer's browser drives the
+      # first chunks while they watch; this tick finishes anything they navigated away
+      # from, and picks up a run whose lease expired. Exactly one scheduler drives this
+      # route — it must NOT also be added to vercel.json.
+      - name: identifier-assign
+        continue-on-error: true
+        run: |
+          curl -sS -X POST "$CRON_BASE_URL/api/cron/identifier-assign" \
+            -H "Authorization: Bearer $CRON_SECRET" \
+            --retry 2 --retry-delay 5 --max-time 65 --fail-with-body
+
+      # RD-EVENT-19F-B — timing tag imports. Its own step rather than a second job
+      # collection inside identifier-assign: a route named for one job kind must not
+      # quietly drain another. One scheduler per route — never also vercel.json.
+      - name: timing-tags
+        continue-on-error: true
+        run: |
+          curl -sS -X POST "$CRON_BASE_URL/api/cron/timing-tags" \
+            -H "Authorization: Bearer $CRON_SECRET" \
+            --retry 2 --retry-delay 5 --max-time 65 --fail-with-body
+
       # MS-BULK-01 — Media Studio bulk batches (delete / move / visibility over a gallery
       # or album), plus the reclamation sweep that follows them. This group's header has
       # always named "bulk" among the runners it drives, but the step was never added, so
@@ -136,6 +157,16 @@ jobs:
         continue-on-error: true
         run: |
           curl -sS -X POST "$CRON_BASE_URL/api/cron/ai-jobs" \
+            -H "Authorization: Bearer $CRON_SECRET" \
+            --retry 2 --retry-delay 5 --max-time 65 --fail-with-body
+
+      # WhatsApp Inbox (Phase 1a) — recovery for inbound messages whose post-ACK routing
+      # never finished. The webhook stores a durable receipt before acknowledging Meta, so
+      # nothing is lost; this re-routes receipts still 'received' after 2 minutes.
+      - name: whatsapp-inbound (re-route stuck inbound messages)
+        continue-on-error: true
+        run: |
+          curl -sS -X POST "$CRON_BASE_URL/api/cron/whatsapp-inbound" \
             -H "Authorization: Bearer $CRON_SECRET" \
             --retry 2 --retry-delay 5 --max-time 65 --fail-with-body
 

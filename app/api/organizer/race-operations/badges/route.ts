@@ -11,10 +11,11 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { authorizeRaceOps } from '@/features/race-operations/services/authorize'
 import { resolveOwnedEvent } from '@/features/media-studio/services/authorize'
+import { resolveRaceOpsEvent } from '@/features/race-operations/repositories/eventReadRepo'
 import { listLiveRacesForEvent, fetchLeaderboardPage } from '@/features/race-operations/repositories/snapshotRepo'
 import { countForRace, generatedBibKeys } from '@/features/finisher-badges/repositories/badgeRepo'
 import { ensureBadge } from '@/features/finisher-badges/services/badgeService'
-import { bibKey } from '@/features/race-operations/utils/publicKeys'
+import { bibKey, decodeLeaderboardCursor, encodeLeaderboardCursor } from '@/features/race-operations/utils/publicKeys'
 import type { BadgeRaceStatusView } from '@/features/finisher-badges/types'
 
 export interface BadgeStatusResponse {
@@ -26,7 +27,8 @@ export interface BadgeGenerateResponse {
   failed:     number
   skipped:    number
   done:       boolean
-  nextCursor: number | null
+  /** RD-RACEOPS-02C · opaque tie-safe leaderboard cursor; pass it back verbatim. */
+  nextCursor: string | null
 }
 
 /** Badges rendered per POST. Rendering is CPU-bound (Satori + resvg), so this is small on
@@ -39,6 +41,10 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
 
   const eventId = new URL(req.url).searchParams.get('eventId')?.trim() ?? ''
   if (!eventId) return NextResponse.json({ error: 'eventId is required' }, { status: 400 })
+
+  // RD-RACEOPS-02B · the event must admit Race Operations before any race is read.
+  const gate = await resolveRaceOpsEvent(authz.workspaceUid, eventId)
+  if (!gate.ok) return NextResponse.json({ error: gate.error }, { status: gate.status })
 
   const event = await resolveOwnedEvent(authz.workspaceUid, eventId)
   if (!event.ok) return NextResponse.json({ error: event.error }, { status: event.status })
@@ -83,12 +89,17 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const eventId  = typeof raw.eventId  === 'string' ? raw.eventId.trim()  : ''
   const passSlug = typeof raw.passSlug === 'string' ? raw.passSlug.trim() : ''
   const force    = raw.force === true
-  const after    = typeof raw.cursor === 'number' && Number.isFinite(raw.cursor)
-    ? raw.cursor : null
+  // RD-RACEOPS-02C · the same (rank, entry) cursor the public leaderboard uses, so a tie at
+  // a chunk boundary can no longer leave a finisher without a badge.
+  const after    = typeof raw.cursor === 'string' ? decodeLeaderboardCursor(raw.cursor) : null
 
   if (!eventId || !passSlug) {
     return NextResponse.json({ error: 'eventId and passSlug are required' }, { status: 400 })
   }
+
+  // RD-RACEOPS-02B · the event must admit Race Operations before any race is read.
+  const gate = await resolveRaceOpsEvent(authz.workspaceUid, eventId)
+  if (!gate.ok) return NextResponse.json({ error: gate.error }, { status: gate.status })
 
   const event = await resolveOwnedEvent(authz.workspaceUid, eventId)
   if (!event.ok) return NextResponse.json({ error: event.error }, { status: event.status })
@@ -130,7 +141,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const body: BadgeGenerateResponse = {
     generated, failed, skipped,
     done:       page.nextCursor === null,
-    nextCursor: page.nextCursor,
+    nextCursor: page.nextCursor ? encodeLeaderboardCursor(page.nextCursor) : null,
   }
   return NextResponse.json(body, { headers: { 'Cache-Control': 'no-store' } })
 }

@@ -1,16 +1,25 @@
 // Team management business logic. Routes stay thin and call these functions;
 // they never query teamMembers or build permissions directly.
+//
+// ═══ THE INVITATION PATH IS GONE (RD-TEAM-IMPL-01) ═══════════════════════════
+// `inviteMember` and `acceptInvite` lived here and were the only way a row entered
+// `teamMembers` by email. RegisterDesk now issues gate credentials directly
+// (lib/staff/service.ts), so there is no invitation, no token, no acceptance and no
+// mail. Nothing in this file can create a member row any more.
+//
+// What remains is deliberate: `teamMembers` is still the authorization substrate —
+// the staff path writes it, every organizer route reads it — and rows created by the
+// old flow are still live grants. `listTeam`, `changeRole`, `setMemberStatus` and
+// `removeMember` therefore stay, so an organizer can still see and retire the people
+// they invited before this change. They operate on EXISTING rows only.
 
-import { randomBytes, createHash } from 'crypto'
-import { FieldValue }              from 'firebase-admin/firestore'
-import { adminDb }                 from '@/lib/firebase/admin'
-import { APP_URL }                 from '@/lib/env'
-import { notificationEngine, NotificationType } from '@/lib/notifications'
-import { teamInviteTemplate }      from '@/lib/email/templates/team-invite'
-import { logTeamAction }           from '@/lib/team/audit'
+import { FieldValue }   from 'firebase-admin/firestore'
+import { adminDb }      from '@/lib/firebase/admin'
+import { logTeamAction } from '@/lib/team/audit'
+import { isStaffEmail } from '@/lib/staff/types'
 import {
-  TEAM_COLLECTION, INVITE_TTL_MS, permissionsForRole, isAssignableRole, sanitizeEventIds,
-  type TeamRole, type TeamMemberDocument, type TeamMemberView, type TeamStatus,
+  TEAM_COLLECTION, permissionsForRole, isAssignableRole, sanitizeEventIds,
+  type TeamRole, type TeamMemberDocument, type TeamMemberView,
 } from '@/lib/team/types'
 
 // ─── Result type ────────────────────────────────────────────────────────────
@@ -23,21 +32,11 @@ const fail = (status: number, error: string): ServiceResult<never> => ({ ok: fal
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
-function normalizeEmail(email: string): string {
-  return email.trim().toLowerCase()
-}
-
 function tsToISO(ts: unknown): string | null {
   if (ts && typeof (ts as { toDate?: () => Date }).toDate === 'function') {
     return (ts as { toDate: () => Date }).toDate().toISOString()
   }
   return null
-}
-
-// Deterministic doc id per (workspace, email) so a duplicate invite cannot
-// create a second row — the second write collides on the same id.
-function memberId(organizerUid: string, email: string): string {
-  return createHash('sha256').update(`${organizerUid}:${email}`).digest('hex').slice(0, 32)
 }
 
 function toView(doc: TeamMemberDocument): TeamMemberView {
@@ -56,157 +55,56 @@ function toView(doc: TeamMemberDocument): TeamMemberView {
   }
 }
 
-const ROLE_LABELS: Record<TeamRole, string> = {
-  owner: 'Owner', admin: 'Admin', manager: 'Manager',
-  checkin_staff: 'Check-in Staff', finance: 'Finance',
-}
+/**
+ * RD-CHECKIN-2.0 — a member row created by the STAFF ACCOUNT flow, not by an email
+ * invite.
+ *
+ * Staff rows live in the same collection on purpose (one authorization model, one
+ * matrix, one scope check), but they are owned by lib/staff/service.ts, which also
+ * owns a Firebase Auth user, a username lock and a profile document. Editing or
+ * deleting one through the email-invite routes would update the grant and orphan
+ * the other three — a credential that still signs in with no workspace behind it.
+ *
+ * Derived from the reserved address namespace rather than a stored flag, so it
+ * cannot be forged by a request and cannot drift out of sync with reality.
+ */
+const isStaffRow = (email: string): boolean => isStaffEmail(email)
+
+const STAFF_ROW_REFUSAL = 'This is a staff account. Manage it from Staff Accounts.'
 
 // ─── List ───────────────────────────────────────────────────────────────────
 
-export async function listTeam(organizerUid: string): Promise<{ members: TeamMemberView[]; invites: TeamMemberView[] }> {
-  // Single-equality query — served by Firestore's automatic index. Splitting and
-  // ordering happen in memory (team lists are small).
+/**
+ * The LEGACY members of a workspace — people invited by email before
+ * RD-TEAM-IMPL-01 removed that flow.
+ *
+ * Bounded: a single equality served by the automatic index, capped at
+ * MAX_LEGACY_MEMBERS. This list can only ever shrink now (nothing creates a row
+ * here any more), so the cap is a safety rail rather than pagination.
+ *
+ * Two exclusions, for different reasons:
+ *   • STAFF rows — they own a credential and a username lock as well as a grant, so
+ *     they are presented and revoked on the staff surface. Removing one from here
+ *     would delete half an account. See isStaffRow.
+ *   • `status: 'invited'` rows — an unaccepted invitation has `memberUid: null` and
+ *     grants nothing (resolveTeamAccess requires 'active'). With no acceptance route
+ *     left they can never become active, so showing them would offer the organizer
+ *     an action that cannot complete. The documents are left untouched in Firestore.
+ */
+export const MAX_LEGACY_MEMBERS = 200
+
+export async function listTeam(organizerUid: string): Promise<{ members: TeamMemberView[] }> {
   const snap = await adminDb.collection(TEAM_COLLECTION)
     .where('organizerUid', '==', organizerUid)
+    .limit(MAX_LEGACY_MEMBERS + 1)
     .get()
-  const all = snap.docs.map(d => toView({ ...(d.data() as TeamMemberDocument), id: d.id }))
+  const all = snap.docs
+    .map(d => toView({ ...(d.data() as TeamMemberDocument), id: d.id }))
+    .filter(m => !isStaffRow(m.email))
   all.sort((a, b) => (b.invitedAt ?? '').localeCompare(a.invitedAt ?? ''))
   return {
     members: all.filter(m => m.status === 'active' || m.status === 'suspended'),
-    invites: all.filter(m => m.status === 'invited'),
   }
-}
-
-// ─── Invite ─────────────────────────────────────────────────────────────────
-
-export async function inviteMember(args: {
-  organizerUid: string; ownerUid: string; ownerEmail: string | null; email: string; role: string
-  /** RD-CHECKIN-STAFF-01 — events this member may work. Omitted/[] = all events. */
-  eventIds?: unknown
-}): Promise<ServiceResult<TeamMemberView>> {
-  const email = normalizeEmail(args.email)
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return fail(400, 'Enter a valid email address.')
-  if (!isAssignableRole(args.role))              return fail(400, 'Invalid role.')
-  const eventIds = sanitizeEventIds(args.eventIds)
-  if (eventIds === null) return fail(400, 'Invalid event assignment.')
-  if (args.ownerEmail && normalizeEmail(args.ownerEmail) === email) {
-    return fail(400, 'You cannot invite yourself — you already own this workspace.')
-  }
-
-  const id    = memberId(args.organizerUid, email)
-  const ref   = adminDb.collection(TEAM_COLLECTION).doc(id)
-  const token = randomBytes(32).toString('hex')
-  const role  = args.role as TeamRole
-
-  // Transaction: reject if an active/invited/suspended row already exists.
-  const created = await adminDb.runTransaction(async txn => {
-    const existing = await txn.get(ref)
-    if (existing.exists) {
-      const cur = existing.data() as TeamMemberDocument
-      return { conflict: cur.status as TeamStatus }
-    }
-    const now = FieldValue.serverTimestamp()
-    txn.set(ref, {
-      organizerUid: args.organizerUid,
-      memberUid:    null,
-      email,
-      role,
-      permissions:  permissionsForRole(role),
-      eventIds,
-      status:       'invited',
-      invitedBy:    args.ownerUid,
-      invitedAt:    now,
-      acceptedAt:   null,
-      createdAt:    now,
-      updatedAt:    now,
-      inviteToken:  token,
-    })
-    return { conflict: null }
-  })
-
-  if (created.conflict) {
-    const msg = created.conflict === 'invited'
-      ? 'An invitation for this email is already pending.'
-      : 'This email is already a member of your team.'
-    return fail(409, msg)
-  }
-
-  // Send the invite email (best-effort — never fails the invite if email is down).
-  try {
-    const ownerSnap = await adminDb.doc(`users/${args.ownerUid}`).get()
-    const orgName   = (ownerSnap.data()?.organizationName as string) || 'a RegisterDesk organization'
-    await notificationEngine.send(NotificationType.CUSTOM_EMAIL, {
-      to:      email,
-      ...teamInviteTemplate({
-        organizationName: orgName,
-        inviterEmail:     args.ownerEmail ?? 'The organizer',
-        roleLabel:        ROLE_LABELS[role],
-        acceptUrl:        `${APP_URL}/team/accept?token=${encodeURIComponent(token)}`,
-      }),
-    })
-  } catch (err) {
-    console.error('[team] invite email failed:', err)
-  }
-
-  void logTeamAction({
-    organizerUid: args.organizerUid, actorUid: args.ownerUid,
-    action: 'team.invited', memberId: id, metadata: { email, role },
-  }).catch(() => { /* audit is best-effort */ })
-
-  const doc = (await ref.get()).data() as TeamMemberDocument
-  return { ok: true, data: toView({ ...doc, id }) }
-}
-
-// ─── Accept ─────────────────────────────────────────────────────────────────
-
-export async function acceptInvite(args: {
-  token: string; callerUid: string; callerEmail: string | null
-}): Promise<ServiceResult<{ organizerUid: string }>> {
-  if (!args.token) return fail(400, 'Missing invitation token.')
-
-  const snap = await adminDb.collection(TEAM_COLLECTION)
-    .where('inviteToken', '==', args.token)
-    .limit(1)
-    .get()
-  if (snap.empty) return fail(404, 'This invitation is invalid or has already been used.')
-
-  const ref = snap.docs[0].ref
-  const id  = snap.docs[0].id
-
-  const result = await adminDb.runTransaction<ServiceResult<{ organizerUid: string }>>(async txn => {
-    const fresh = await txn.get(ref)
-    if (!fresh.exists) return fail(404, 'This invitation no longer exists.')
-    const m = fresh.data() as TeamMemberDocument
-
-    // Replay protection: a consumed/expired invite can never be re-accepted.
-    if (m.status !== 'invited' || !m.inviteToken) return fail(409, 'This invitation has already been used.')
-
-    const invitedMs = (m.invitedAt as { toMillis?: () => number })?.toMillis?.() ?? 0
-    if (invitedMs && Date.now() - invitedMs > INVITE_TTL_MS) return fail(410, 'This invitation has expired.')
-
-    // The accepting account's verified email must match the invited email.
-    if (!args.callerEmail || normalizeEmail(args.callerEmail) !== m.email) {
-      return fail(403, 'This invitation was sent to a different email address.')
-    }
-    if (args.callerUid === m.organizerUid) return fail(400, 'You already own this workspace.')
-
-    txn.update(ref, {
-      memberUid:   args.callerUid,
-      status:      'active',
-      acceptedAt:  FieldValue.serverTimestamp(),
-      inviteToken: null,              // consume the token
-      updatedAt:   FieldValue.serverTimestamp(),
-    })
-    return { ok: true, data: { organizerUid: m.organizerUid } }
-  })
-
-  if (result.ok) {
-    void logTeamAction({
-      organizerUid: result.data.organizerUid, actorUid: args.callerUid,
-      action: 'team.accepted', memberId: id, metadata: { email: args.callerEmail },
-    }).catch(() => { /* best-effort */ })
-  }
-  return result
 }
 
 // ─── Change role ──────────────────────────────────────────────────────────────
@@ -222,6 +120,7 @@ export async function changeRole(args: {
   if (!snap.exists) return fail(404, 'Team member not found.')
   const m = snap.data() as TeamMemberDocument
   if (m.organizerUid !== args.organizerUid) return fail(404, 'Team member not found.')
+  if (isStaffRow(m.email)) return fail(409, STAFF_ROW_REFUSAL)
 
   // Absent means "don't touch the assignment"; [] means "all events". These are
   // deliberately different, so an unrelated role change cannot silently widen a
@@ -261,6 +160,7 @@ export async function setMemberStatus(args: {
   if (!snap.exists) return fail(404, 'Team member not found.')
   const m = snap.data() as TeamMemberDocument
   if (m.organizerUid !== args.organizerUid) return fail(404, 'Team member not found.')
+  if (isStaffRow(m.email)) return fail(409, STAFF_ROW_REFUSAL)
   if (m.status === 'invited') return fail(409, 'Pending invitations cannot be suspended.')
 
   await ref.update({ status: args.status, updatedAt: FieldValue.serverTimestamp() })
@@ -284,6 +184,7 @@ export async function removeMember(args: {
   if (!snap.exists) return fail(404, 'Team member not found.')
   const m = snap.data() as TeamMemberDocument
   if (m.organizerUid !== args.organizerUid) return fail(404, 'Team member not found.')
+  if (isStaffRow(m.email)) return fail(409, STAFF_ROW_REFUSAL)
   // Owner can never remove themselves (defensive — the owner has no member row).
   if (m.memberUid && m.memberUid === args.callerUid) return fail(400, 'You cannot remove yourself.')
 

@@ -10,7 +10,11 @@ import { cn } from '@/lib/utils/cn'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Undo2, RotateCcw } from 'lucide-react'
-import { CONFIG_SECTION_REGISTRY, BUSINESS_CONFIG_DEFAULTS } from '@/lib/config/businessConfig'
+import { CONFIG_SECTION_REGISTRY, BUSINESS_CONFIG_DEFAULTS, CENTRAL_PRICING_FIELDS } from '@/lib/config/businessConfig'
+
+// RD-EVENT-COMMERCE-04B — communication rates (incl. certificate pricing) are Super Admin only.
+// The SAME field list the server enforces, so the lock here can never disagree with a 403.
+const PRICE_FIELDS = new Set(CENTRAL_PRICING_FIELDS.communication === '*' ? [] : (CENTRAL_PRICING_FIELDS.communication ?? []))
 
 type SectionDraft = Record<string, unknown>
 type SubKey       = 'email' | 'whatsapp' | 'sms' | 'certificates' | 'general'
@@ -76,23 +80,25 @@ const SUBSECTIONS: Array<{ key: SubKey; title: string; fields: FieldSpec[] }> = 
 
 const inputCls = 'h-8 w-full rounded-lg border border-border bg-background px-2.5 text-[12.5px] text-foreground focus:border-border-strong focus:outline-none focus:ring-2 focus:ring-primary/15'
 
-function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
+function Toggle({ checked, onChange, disabled = false }: { checked: boolean; onChange: (v: boolean) => void; disabled?: boolean }) {
   return (
-    <button type="button" role="switch" aria-checked={checked} onClick={() => onChange(!checked)}
-      className={cn('relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors', checked ? 'bg-primary' : 'bg-muted')}>
+    <button type="button" role="switch" aria-checked={checked} disabled={disabled} onClick={() => onChange(!checked)}
+      className={cn('relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-50', checked ? 'bg-primary' : 'bg-muted')}>
       <span className={cn('inline-block size-4 rounded-full bg-white shadow transition-transform', checked ? 'translate-x-4' : 'translate-x-0.5')} />
     </button>
   )
 }
 
 export function CommunicationEditor({
-  published, draft, onDraftChange, onPublish, publishing,
+  published, draft, onDraftChange, onPublish, publishing, canEditPricing = false,
 }: {
   published:     SectionDraft
   draft:         SectionDraft
   onDraftChange: (d: SectionDraft) => void
   onPublish:     () => void
   publishing:    boolean
+  /** RD-EVENT-COMMERCE-04B — server-decided (verified token); rates are locked when false. */
+  canEditPricing?: boolean
 }) {
   const validation = useMemo(() => CONFIG_SECTION_REGISTRY.communication.validate(draft), [draft])
   const dirty      = useMemo(() => JSON.stringify(draft) !== JSON.stringify(published), [draft, published])
@@ -123,21 +129,22 @@ export function CommunicationEditor({
             <div key={sub.key} className="rounded-lg border border-border/70 p-3">
               <p className="mb-2 text-[12px] font-semibold uppercase tracking-wide text-muted-foreground">{sub.title}</p>
               <div className="grid grid-cols-1 gap-x-4 gap-y-2.5 sm:grid-cols-2 lg:grid-cols-3">
-                {sub.fields.map(f => (
+                {sub.fields.map(f => { const locked = !canEditPricing && PRICE_FIELDS.has(`${sub.key}.${f.key}`); return (
                   <label key={f.key} className="flex flex-col gap-1">
-                    <span className="text-[11.5px] text-muted-foreground">{f.label}</span>
+                    <span className="text-[11.5px] text-muted-foreground">{f.label}{locked ? ' · Super Admin' : ''}</span>
                     {f.kind === 'boolean' ? (
-                      <div className="flex h-8 items-center gap-2"><Toggle checked={val[f.key] === true} onChange={v => setField(sub.key, f.key, v)} /><span className="text-[11.5px] text-muted-foreground">{val[f.key] === true ? 'On' : 'Off'}</span></div>
+                      <div className="flex h-8 items-center gap-2"><Toggle checked={val[f.key] === true} disabled={locked} onChange={v => setField(sub.key, f.key, v)} /><span className="text-[11.5px] text-muted-foreground">{val[f.key] === true ? 'On' : 'Off'}</span></div>
                     ) : (
                       <input
+                        disabled={locked}
                         type={f.kind === 'number' ? 'number' : 'text'}
                         value={f.kind === 'number' ? (typeof val[f.key] === 'number' && Number.isFinite(val[f.key]) ? String(val[f.key]) : '') : (typeof val[f.key] === 'string' ? String(val[f.key]) : '')}
                         onChange={e => setField(sub.key, f.key, f.kind === 'number' ? (e.target.value === '' ? NaN : Number(e.target.value)) : e.target.value)}
-                        className={inputCls}
+                        className={cn(inputCls, 'disabled:cursor-not-allowed disabled:opacity-60')}
                       />
                     )}
                   </label>
-                ))}
+                ) })}
               </div>
             </div>
           )

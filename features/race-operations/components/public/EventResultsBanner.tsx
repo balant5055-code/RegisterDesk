@@ -27,7 +27,7 @@ export async function EventResultsBanner({ eventSlug }: { eventSlug: string }) {
     <div className="border-b border-border bg-muted/40">
       <div className="mx-auto flex max-w-7xl flex-col gap-3 px-4 py-3 sm:flex-row sm:items-center sm:justify-between sm:px-6">
         <p className="flex items-center gap-2.5 text-fs-sm text-foreground">
-          <Trophy className="size-4 shrink-0 text-primary" aria-hidden />
+          <Trophy className="size-4 shrink-0 text-action" aria-hidden />
           <span>
             <span className="font-semibold">Results are published.</span>{' '}
             <span className="text-muted-foreground">
@@ -38,7 +38,7 @@ export async function EventResultsBanner({ eventSlug }: { eventSlug: string }) {
         </p>
         <Link
           href={`/results/${encodeURIComponent(eventSlug)}`}
-          className="inline-flex h-9 shrink-0 items-center justify-center gap-1.5 rounded-lg border border-border bg-background px-4 text-fs-sm font-semibold text-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+          className="inline-flex h-9 shrink-0 items-center justify-center gap-1.5 rounded-lg border border-border bg-background px-4 text-fs-sm font-semibold text-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-action"
         >
           View results
           <ArrowRight className="size-3.5" aria-hidden />

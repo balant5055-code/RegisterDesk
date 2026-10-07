@@ -58,14 +58,27 @@ export async function recordPublish(
  *  Written by the admin license console with a reason. Reads-merges-writes so a
  *  single override field never clobbers the others (or the identity snapshot). */
 export async function setBaselineOverrides(eventId: string, patch: GovernanceOverrides): Promise<void> {
-  const ref = col().doc(eventId)
+  const ref = baselineRef(eventId)
   await adminDb.runTransaction(async txn => {
-    const snap = await txn.get(ref)
-    const current = (snap.exists ? (snap.data() as PublishBaseline).overrides : undefined) ?? {}
-    txn.set(ref, {
-      eventId,
-      overrides: { ...current, ...patch, setAt: FieldValue.serverTimestamp() },
-      updatedAt: FieldValue.serverTimestamp(),
-    }, { merge: true })
+    stageBaselineOverrides(txn, await txn.get(ref), eventId, patch)
   })
+}
+
+/** RD-PHASE4-S4 — the baseline doc, for a caller that reads it inside its OWN transaction. */
+export const baselineRef = (eventId: string) => col().doc(eventId)
+
+/**
+ * RD-PHASE4-S4 — the write half of setBaselineOverrides, on the caller's transaction (which has
+ * already read `snap` = baselineRef(eventId)), so a licence governance override commits with its
+ * audit rows. Same merge semantics as setBaselineOverrides.
+ */
+export function stageBaselineOverrides(
+  txn: FirebaseFirestore.Transaction, snap: FirebaseFirestore.DocumentSnapshot, eventId: string, patch: GovernanceOverrides,
+): void {
+  const current = (snap.exists ? (snap.data() as PublishBaseline).overrides : undefined) ?? {}
+  txn.set(baselineRef(eventId), {
+    eventId,
+    overrides: { ...current, ...patch, setAt: FieldValue.serverTimestamp() },
+    updatedAt: FieldValue.serverTimestamp(),
+  }, { merge: true })
 }

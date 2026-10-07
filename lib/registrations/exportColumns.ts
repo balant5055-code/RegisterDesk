@@ -28,6 +28,9 @@
 
 import type { ReportColumn, ReportRow, ReportCell } from '@/lib/reports/types'
 import { refundLabel } from './paymentDisplay'
+// Pure as well — it reaches only lib/payments/providers/types.ts, which has no imports at
+// all — so this module stays unit-testable in the `node` environment.
+import { resolveRegistrationOrderId, type RegistrationPaymentIdentifiers } from './paymentIdentifiers'
 
 /** Everything the row builder needs that does not live on the registration itself. */
 export interface RegistrationExportContext {
@@ -68,7 +71,12 @@ const FIXED_COLUMNS: ReportColumn[] = [
   { key: 'discountAmount',  label: 'Discount Amount',   type: 'money' },
   { key: 'couponCode',      label: 'Coupon Code',       type: 'text'  },
   { key: 'paymentId',       label: 'Payment ID',        type: 'text'  },
-  { key: 'razorpayOrderId', label: 'Razorpay Order ID', type: 'text'  },
+  // The KEY stays `razorpayOrderId` on purpose: it is the column name in every export an
+  // organizer has already downloaded or scripted against, and renaming it would break those
+  // for no gain. The LABEL is provider-neutral because the value no longer is — a Cashfree
+  // registration's order id under a heading saying "Razorpay" is exactly the misstatement
+  // this phase removes.
+  { key: 'razorpayOrderId', label: 'Payment Order ID', type: 'text'  },
   { key: 'paymentMethod',   label: 'Payment Method',    type: 'text'  },
   { key: 'referenceNumber', label: 'Reference Number',  type: 'text'  },
   { key: 'refundStatus',    label: 'Refund Status',     type: 'text'  },
@@ -91,6 +99,21 @@ const FIXED_COLUMNS: ReportColumn[] = [
   // Sports / exhibition — populated only for those event types, blank otherwise.
   { key: 'bibNumber',        label: 'Bib Number',        type: 'text' },
   { key: 'bibCategory',      label: 'Bib Category',      type: 'text' },
+  /**
+   * RD-REPORT-04 · the timing device, beside the number it depends on.
+   *
+   * The field was already stored on the registration and already selected by the
+   * BIB roster and the start-list export, but this file — the ONE canonical column
+   * definition both participant-export buttons share — omitted it. So an organizer
+   * exporting participants received the number and not the device, and had to run a
+   * second, differently-shaped export to see both together.
+   *
+   * ONE column, blank when there is none, and only ever the ASSIGNED value: a
+   * removed or replaced device leaves a `timingTag` whose state is no longer
+   * `assigned`, and printing that would report a device the participant is not
+   * carrying.
+   */
+  { key: 'timingTag',        label: 'Timing Chip',       type: 'text' },
   { key: 'waiverAcceptedAt', label: 'Waiver Accepted At', type: 'text' },
   { key: 'companyName',      label: 'Company Name',      type: 'text' },
   { key: 'designation',      label: 'Designation',       type: 'text' },
@@ -197,7 +220,10 @@ export function buildRegistrationExportRow(
     discountAmount:  num(raw.discountAmount),
     couponCode:      str(raw.couponCode),
     paymentId:       str(raw.paymentId),
-    razorpayOrderId: str(raw.razorpayOrderId),
+    // Resolved, not read raw: a Cashfree registration stores its order id in
+    // `paymentOrderId` and has no `razorpayOrderId`, so reading the legacy field alone
+    // would export a blank cell for it.
+    razorpayOrderId: str(resolveRegistrationOrderId(raw as RegistrationPaymentIdentifiers) ?? undefined),
     paymentMethod:   str(raw.paymentMethod),
     referenceNumber: str(raw.referenceNumber),
     refundStatus:    refundLabel(raw as { paymentStatus?: string | null; refundId?: string | null }),
@@ -220,6 +246,13 @@ export function buildRegistrationExportRow(
 
     bibNumber:        str(raw.bibNumber),
     bibCategory:      str(raw.bibCategory),
+    // RD-REPORT-04 · only while the device is actually attached. `timingTag` survives
+    // a removal with a non-`assigned` state, and the lock keeps it for provenance —
+    // so the state, not the presence of the field, decides whether a value prints.
+    timingTag:        (() => {
+      const t = raw.timingTag as { tag?: unknown; state?: unknown } | null | undefined
+      return t?.state === 'assigned' && typeof t.tag === 'string' ? t.tag : ''
+    })(),
     waiverAcceptedAt: toISO(raw.waiverAcceptedAt),
     companyName:      str(raw.companyName),
     designation:      str(raw.designation),
@@ -285,7 +318,10 @@ export function registrationMatchesQuery(
   const attendee = (raw.attendee as Record<string, unknown> | undefined) ?? {}
   const haystack = [
     attendee.name, attendee.email, attendee.phone,
-    raw.ticketCode, raw.id, raw.paymentId, raw.razorpayOrderId,
+    raw.ticketCode, raw.id, raw.paymentId,
+    // Both, so support can find a registration by whichever order id they were given —
+    // the legacy field for historical records, the neutral one for everything new.
+    raw.razorpayOrderId, raw.paymentOrderId,
   ]
   for (const v of haystack) {
     if (typeof v === 'string' && v.toLowerCase().includes(q)) return true

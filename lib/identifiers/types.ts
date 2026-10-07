@@ -38,6 +38,21 @@ export type IdentifierType = 'numeric' | 'alphanumeric' | 'random' | 'pattern'
 
 export type AssignmentStrategy = 'manual' | 'auto'
 
+/**
+ * RD-BIB-01 · which participant gets the first number.
+ *
+ *   'document'     — Firestore document id order. Random UUIDs, so the order is
+ *                    arbitrary but stable. THE DEFAULT, because it is what every
+ *                    existing event already did and changing it silently would
+ *                    re-order numbers nobody asked to re-order.
+ *   'registration' — oldest sign-up first, ties broken by document id.
+ *
+ * Name-based ordering is deliberately absent: the platform stores no normalised name
+ * field, so sorting on `attendee.name` would be locale-dependent and would need both
+ * a denormalised field and a backfill. Recorded as deferred rather than half-built.
+ */
+export type AssignmentOrder = 'document' | 'registration'
+
 export type AutoTrigger = 'on_confirmation' | 'on_payment' | 'on_checkin'
 
 export type IdentifierSource = 'manual' | 'auto' | 'bulk' | 'import' | 'api' | 'walkin'
@@ -58,6 +73,13 @@ export type HistoryAction =
 
 // ─── Format / template / pool ───────────────────────────────────────────────
 
+/**
+ * RD-EVENT-19A · how a manually-supplied value is folded before it becomes the
+ * authoritative lock identity. `preserve` is the DEFAULT and reproduces today's
+ * behaviour byte-for-byte — existing events never change meaning.
+ */
+export type IdentifierCaseMode = 'preserve' | 'upper' | 'lower'
+
 export interface IdentifierFormat {
   prefix:      string
   suffix:      string
@@ -66,6 +88,17 @@ export interface IdentifierFormat {
   pattern?:    string          // for type 'pattern', e.g. "RUN-{YEAR}-{0001}"
   alphabet?:   string          // for type 'random'
   randomLength?: number        // for type 'random'
+  /** RD-EVENT-19A · case policy for manual values. Absent ⇒ 'preserve'. */
+  caseMode?:   IdentifierCaseMode
+}
+
+/**
+ * RD-EVENT-19A · one contiguous, INCLUSIVE numeric range: 5001–6500 is
+ * `{ start: 5001, end: 6500 }` and holds 1500 identifiers.
+ */
+export interface IdentifierRange {
+  start: number
+  end:   number
 }
 
 /**
@@ -78,9 +111,27 @@ export interface IdentifierPool {
   prefix?:    string
   suffix?:    string
   padding?:   number
-  rangeStart?: number | null   // inclusive; null = unbounded
-  rangeEnd?:   number | null   // inclusive; null = unbounded
+  rangeStart?: number | null   // inclusive; null = unbounded  (legacy single range)
+  rangeEnd?:   number | null   // inclusive; null = unbounded  (legacy single range)
   templateId?: string | null
+  /**
+   * RD-EVENT-19A · FIRST-CLASS pass association. A registration whose `passId` is
+   * listed here resolves to this pool. This is what lets one event issue
+   * 5001–6500 for one pass and 7000–7500 for another without a line of
+   * pass-specific code anywhere in the engine.
+   *
+   * An EMPTY array is NOT "all passes" — it is "no pass restriction declared",
+   * i.e. exactly the same as the field being absent. A pool that should serve
+   * every pass simply omits the field and is reached through the existing
+   * category / default-pool behaviour.
+   */
+  passIds?:   string[]
+  /**
+   * RD-EVENT-19A · multiple non-overlapping ranges, walked in ascending order.
+   * AUTHORITATIVE when present: `rangeStart`/`rangeEnd` are then ignored rather
+   * than merged, so the two can never silently combine into a third range.
+   */
+  ranges?:    IdentifierRange[]
   /** How a registration maps to this pool. Absent ⇒ only matched explicitly. */
   matchRule?: {
     by:     'pass' | 'category' | 'registration_type' | 'custom'
@@ -127,6 +178,23 @@ export interface IdentifierConfig {
   reusePolicy:         ReusePolicy
   assignmentStrategy:  AssignmentStrategy
   autoTrigger?:        AutoTrigger
+  /**
+   * RD-BIB-01 · the order a bulk run walks the roster in, and therefore the order
+   * numbers come out in.
+   *
+   * ABSENT ⇒ `'document'`, which is what every existing event has been doing: the
+   * roster is paged by document id, and document ids are random UUIDs, so the first
+   * number goes to an arbitrary participant. Deterministic and stable, but not
+   * meaningful — observed in the audit, where 5001 went to the 24th person to sign up.
+   *
+   * `'registration'` walks the roster oldest-first, so the first person to sign up
+   * gets the first number. Ties on the timestamp are broken by document id, which is
+   * what keeps the cursor stable across pages.
+   *
+   * NOT changed for any existing event: absent means the old behaviour, and the
+   * organizer has to choose the new one.
+   */
+  assignmentOrder?:    AssignmentOrder
   allowManualOverride: boolean
   allowDuplicate:      boolean            // default false
   pools:               IdentifierPool[]
@@ -134,6 +202,14 @@ export interface IdentifierConfig {
   defaultPoolId:       string
   visibility:          IdentifierVisibility
   version:             number
+  /**
+   * RD-EVENT-19F-B · timing-tag capability, stored on the config document this
+   * event already has rather than in a new collection or a new toggle system.
+   *
+   * ABSENT ⇒ off. Every event that predates the feature therefore shows nothing,
+   * with no migration and no backfill. Read it through `resolveTagMapping`.
+   */
+  tagMapping?:         import('./timingTags').TagMappingConfig
   updatedAt?:          unknown
   createdAt?:          unknown
 }
@@ -210,6 +286,32 @@ export interface AllocateInput {
   templateId?:    string | null
   category?:      string | null
   reason?:        string | null
+  /**
+   * RD-EVENT-19A · the registration's pass, used ONLY to resolve which pool the
+   * identifier comes from. Optional: every caller that omits it keeps the exact
+   * pre-19A behaviour (explicit pool → category matchRule → default pool).
+   *
+   * The engine never reads a pass document for this — callers supply the id they
+   * already hold, so pass-aware allocation costs zero additional Firestore reads.
+   */
+  passId?:        string | null
+  /**
+   * RD-EVENT-19E · IDEMPOTENCY for repeat execution.
+   *
+   * When true, a registration that ALREADY holds an identifier is left exactly as
+   * it is: the transaction returns its current value and writes nothing — no
+   * counter advance, no lock, no history entry.
+   *
+   * Without it, allocating for someone who already holds a value takes the next
+   * number and SWAPS them onto it. That is correct for an operator who deliberately
+   * asked for a new one, and catastrophic for a retried bulk chunk or a double
+   * click, which would walk a participant from 5001 to 5002 to 5003.
+   *
+   * The check happens INSIDE the transaction, against a fresh read, so it also
+   * closes the window where two callers both believed the participant was
+   * unassigned. Absent/false ⇒ behaviour identical to before this option existed.
+   */
+  skipIfAssigned?: boolean
 }
 
 export interface AllocateResult {
@@ -217,6 +319,11 @@ export interface AllocateResult {
   poolId:     string
   label:      string
   reused:     boolean
+  /**
+   * RD-EVENT-19E · true when `skipIfAssigned` prevented a write because the
+   * registration already held this value. Nothing changed; `value` is what it has.
+   */
+  alreadyAssigned?: boolean
 }
 
 export interface MutateInput {
@@ -245,10 +352,30 @@ export type IdentifierErrorCode =
   | 'INVALID_STATE_TRANSITION'
   | 'IDENTIFIER_NOT_FOUND'
   | 'OUT_OF_RANGE'
+  | 'INVALID_VALUE'          // RD-EVENT-19A: empty / over-length manual value
+  // RD-BIB-TIMING-01 · a timing device depends on this number, so it cannot be
+  // taken away while the device is attached. The device is removed first.
+  | 'IDENTIFIER_HELD_BY_TIMING_TAG'
 
 export class IdentifierError extends Error {
   constructor(public readonly code: IdentifierErrorCode, message?: string) {
     super(message ?? code)
     this.name = 'IdentifierError'
+  }
+}
+
+/**
+ * Rejects invalid pool / config values BEFORE they are persisted, so the
+ * allocator never reads a corrupt config. The API layer maps it to HTTP 400.
+ *
+ * RD-EVENT-19A moved this here (from ./config) so the PURE range validator can
+ * throw it without importing the Admin SDK. `lib/identifiers/config` still
+ * re-exports it, so every existing `from '@/lib/identifiers/config'` import is
+ * unchanged.
+ */
+export class IdentifierConfigError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'IdentifierConfigError'
   }
 }

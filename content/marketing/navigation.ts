@@ -4,8 +4,15 @@
 // ONLY pages that exist and are in scope — every link resolves to a real page, so
 // nothing reachable from the nav 404s. Removed for V1: Resources, Support, the
 // Company dropdown, Blog, Docs, Roadmap, Status, Customers, Careers, Help,
-// Integrations, the public API, and Cookies. Solutions are listed explicitly to
+// Integrations, and Cookies. Solutions are listed explicitly to
 // match the built /solutions/* pages (the SOLUTIONS registry uses different slugs).
+//
+// The public API was on that removed list and has come back — deliberately, and only after
+// the page it points at was made truthful. /platform/api describes three key-gated read
+// endpoints, HMAC-signed webhooks and hashed API keys, all shipped; the metadata-platform
+// and "API reference" claims it used to carry were removed first, because they were not
+// deliverable. The V1 rule is unchanged and is the reason for that order: a nav entry may
+// only point at a page that keeps its promises.
 //
 // Marketing Nav Update (Phase 1): the discovery surfaces (Home, Discover Events,
 // Discover Causes) are now exposed at the top level so the event/cause marketplace
@@ -19,24 +26,6 @@ export const PRIMARY_NAV: NavMenu[] = [
   { id: 'home',   title: 'Home',            href: '/' },
   { id: 'events', title: 'Events', href: '/events' },
   { id: 'causes', title: 'Causes', href: '/causes' },
-  {
-    id: 'platform', title: 'Platform', description: 'Everything to run an event, end to end.',
-    groups: [
-      { id: 'product', title: 'Product', items: [
-        { id: 'registration', title: 'Registration & Ticketing', description: 'Forms, passes, coupons, waitlists', iconKey: 'registration', href: '/platform/registration' },
-        { id: 'payments',     title: 'Payments',                  description: 'Online checkout & refunds',        iconKey: 'payments',     href: '/platform/payments' },
-        { id: 'participants', title: 'Participants',              description: 'Profiles, custom fields, history',  iconKey: 'workspace',    href: '/platform/participants' },
-        { id: 'identifier',   title: 'Identifier Engine',         description: 'Bibs, badges, delegate IDs',        iconKey: 'identifier',   href: '/platform/identifiers' },
-        { id: 'checkin',      title: 'Check-in & Attendance',     description: 'QR & offline check-in',             iconKey: 'checkin',      href: '/platform/check-in' },
-        { id: 'certificates', title: 'Certificates',              description: 'Design, issue, verify',             iconKey: 'certificates', href: '/platform/certificates' },
-      ] },
-      { id: 'operate', title: 'Operate & grow', items: [
-        { id: 'crm',     title: 'CRM & Audience',    description: 'Unified contacts',             iconKey: 'crm',     href: '/platform/crm' },
-        { id: 'finance', title: 'Finance & Payouts', description: 'Revenue, wallet, settlements', iconKey: 'finance', href: '/platform/finance' },
-      ] },
-    ],
-    featured: { id: 'platform-overview', title: 'Platform overview', description: 'See how the whole operations loop fits together.', iconKey: 'workspace', href: '/platform' },
-  },
   {
     id: 'solutions', title: 'Solutions', description: 'Built for every event type.',
     groups: [{ id: 'verticals', items: [

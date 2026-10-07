@@ -32,9 +32,14 @@ const SCAN     = code(read('app/api/checkin/scan/route.ts'))
 const CACHE    = code(read('app/api/checkin/cache/route.ts'))
 const OFFLINE  = code(read('lib/checkin/useOfflineCheckin.ts'))
 const PROMPT   = code(read('components/checkin/IdentifierPrompt.tsx'))
-const OPS      = code(read('app/ops/checkin/[eventId]/OpsCheckinClient.tsx'))
-const DASH     = code(read('app/(dashboard)/dashboard/events/[eventId]/checkin/CheckInClient.tsx'))
-const SEARCH   = code(read('app/(dashboard)/dashboard/events/[eventId]/checkin/AttendeeSearch.tsx'))
+// RD-CHECKIN-2.0 re-anchor. The three clients (ops console, dashboard client and
+// lookup component) were replaced by ONE shared workspace rendered by both doors.
+// Assertions that used to be made three times are made once — a strengthening, not
+// a relaxation: the triple existed so three copies could be checked against each
+// other, and the point of the rewrite is that there is no longer anything to keep
+// in sync.
+const OPS      = code(read('components/checkin/workspace/CheckinWorkspace.tsx'))
+const LIST     = code(read('components/checkin/workspace/SearchResults.tsx'))
 
 /**
  * The check-in transaction BODY only.
@@ -143,7 +148,13 @@ describe('4 — the label always comes from config', () => {
   it('the default config supplies one, and it is only a default', () => {
     // Asserted from source rather than by importing config.ts, which boots the
     // Admin SDK at module load and cannot be imported in this node-env suite.
-    expect(code(read('lib/identifiers/config.ts'))).toMatch(/label:\s+'Bib Number'/)
+    // RD-BIB-01 · the default is now event-type NEUTRAL. It used to be 'Bib Number',
+    // which put a running-race word on every unconfigured conference and expo.
+    // RD-BIB-TIMING-04 · REVERTED to 'Identifier'. RD-BIB-TIMING-03 briefly made
+    // this 'Number'; swapping one generic default for another only moved the
+    // problem. The label an organizer reads comes from the event's configuration.
+    expect(code(read('lib/identifiers/config.ts'))).toMatch(/label:\s+'Identifier'/)
+    expect(code(read('lib/identifiers/config.ts'))).not.toMatch(/label:\s+'Bib Number'/)
   })
 
   it('no surface hardcodes "Bib" in its logic', () => {
@@ -166,29 +177,25 @@ describe('5 — QR, manual and lookup share one implementation', () => {
     expect(OPS).toContain('const submitCode = useCallback(async (rawCode: string, identifierValue?: string)')
     expect(OPS).toContain('onCode={resolveAttendee}')            // QR
     expect(OPS).toContain('void resolveAttendee(manualCode)')     // manual
-    expect(OPS).toContain('void resolveAttendee(r.ticketCode)')   // lookup
+    expect(OPS).toContain('onSelect={row => void resolveAttendee(row.ticketCode)}')   // lookup
     // …and exactly one place performs the check-in.
     expect(OPS.match(/fetch\('\/api\/checkin\/scan'/g)).toHaveLength(1)
   })
 
-  it('every check-in surface posts to the ONE canonical endpoint', () => {
-    for (const [name, src] of [['ops', OPS], ['dashboard', DASH], ['lookup', SEARCH]] as const) {
-      expect(src, name).toContain("fetch('/api/checkin/scan'")
-    }
+  it('the ONE canonical endpoint is called from exactly one place', () => {
+    expect(OPS).toContain("fetch('/api/checkin/scan'")
+    // The result list must never grow a second call site.
+    expect(LIST).not.toContain('/api/checkin')
   })
 
-  it('all three surfaces render the SAME prompt component', () => {
-    for (const [name, src] of [['ops', OPS], ['dashboard', DASH], ['lookup', SEARCH]] as const) {
-      expect(src, name).toContain('IdentifierPrompt')
-      expect(src, name).toContain('requiresIdentifier')
-    }
+  it('the workspace renders the SHARED prompt component', () => {
+    expect(OPS).toContain('IdentifierPrompt')
+    expect(OPS).toContain('requiresIdentifier')
   })
 
   it('the retry carries the SAME ticket code, not a re-scan', () => {
     // Prompting must not lose which attendee is being admitted.
     expect(OPS).toContain('submitCode(prompt.ticketCode, value)')
-    expect(DASH).toContain('submitCode(idPrompt.ticketCode, value)')
-    expect(SEARCH).toContain('handleCheckIn(idPrompt.reg, value)')
   })
 })
 
@@ -200,7 +207,7 @@ describe('6 — cancelling the prompt does not admit anyone', () => {
     // render an AttendeeConfirmation with its own onCancel (which simply dismisses,
     // having written nothing), so slicing from the first `onCancel=` would test the
     // wrong control.
-    for (const [name, src] of [['ops', OPS], ['dashboard', DASH], ['lookup', SEARCH]] as const) {
+    for (const [name, src] of [['workspace', OPS]] as const) {
       const promptAt = src.indexOf('<IdentifierPrompt')
       expect(promptAt, name).toBeGreaterThan(-1)
       // Sliced to the END OF THE ELEMENT rather than a fixed character count — the
@@ -279,7 +286,7 @@ describe('8 — two operators cannot both take one value', () => {
   })
 
   it('no surface relies on a disabled button or local state for uniqueness', () => {
-    for (const [name, src] of [['ops', OPS], ['dashboard', DASH], ['lookup', SEARCH], ['prompt', PROMPT]] as const) {
+    for (const [name, src] of [['workspace', OPS], ['list', LIST], ['prompt', PROMPT]] as const) {
       expect(src, name).not.toContain('identifierLocks')
     }
   })

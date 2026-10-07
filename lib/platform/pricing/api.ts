@@ -149,27 +149,31 @@ export async function resolveEffectivePlatformConfiguration(
     globalTier.registrationLimit, tierLimitPresent(raw, engineTier), defaultTier.registrationLimit,
   ))
 
-  // platform fee / gst — organizer may NOT override (undefined at that level).
+  // RD-PHASE4-S3 · Q4 — adminOverride / organizerOverride are RETIRED as pricing layers: none of the
+  // money fields below reads them any more (stored legacy values are ignored, never deleted). The one
+  // event pricing layer is events/{slug}.commercial, applied to the attendee fee by
+  // lib/fees/resolveEventFeeConfig. registrationLimit (above) keeps its existing precedence.
+  // platform fee / gst — no override layer.
   const platformFeePaise = paise(pick<number>(
-    admin?.platformFeeAmount, undefined,
+    undefined, undefined,
     settings.pricing.platformFeeAmount, platformFeePresent(raw), defaults.pricing.platformFeeAmount,
   ))
   const platformGstPercent = pick<number>(
-    admin?.platformGstPercent, undefined,
+    undefined, undefined,
     settings.pricing.platformGstPercent, fieldPresent(raw, 'pricing', 'platformGstPercent'), defaults.pricing.platformGstPercent,
   )
 
-  // gateway — organizer may NOT override percent/gst; MAY override convenience fee.
+  // gateway — no override layer (RD-PHASE4-S3).
   const gatewayPercent = pick<number>(
-    admin?.gatewayPercent, undefined,
+    undefined, undefined,
     settings.gateway.gatewayPercent, fieldPresent(raw, 'gateway', 'gatewayPercent'), defaults.gateway.gatewayPercent,
   )
   const gatewayGstPercent = pick<number>(
-    admin?.gatewayGstPercent, undefined,
+    undefined, undefined,
     settings.gateway.gatewayGstPercent, fieldPresent(raw, 'gateway', 'gatewayGstPercent'), defaults.gateway.gatewayGstPercent,
   )
   const convenienceFeePaise = paise(pick<number>(
-    admin?.convenienceFee, organizer?.convenienceFee,
+    undefined, undefined,
     settings.gateway.convenienceFee, fieldPresent(raw, 'gateway', 'convenienceFee'), defaults.gateway.convenienceFee,
   ))
 

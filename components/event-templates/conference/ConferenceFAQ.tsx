@@ -64,7 +64,7 @@ export function ConferenceFAQ({ faqUrl, supportEmail, supportPhone, termsUrl, re
           transition={{ duration: 0.5, ease: [0.25, 0, 0, 1] }}
           className="mb-12"
         >
-          <p className="mb-2 text-[11px] font-bold uppercase tracking-[0.22em] text-primary">Support</p>
+          <p className="mb-2 text-[11px] font-bold uppercase tracking-[0.22em] text-action">Support</p>
           <h2 className="text-2xl font-black tracking-tight text-gray-950 sm:text-[2rem]">
             Frequently Asked Questions
           </h2>
@@ -125,7 +125,7 @@ export function ConferenceFAQ({ faqUrl, supportEmail, supportPhone, termsUrl, re
               href={faqUrl}
               target="_blank"
               rel="noopener noreferrer"
-              className="inline-flex items-center gap-2 text-base font-semibold text-primary hover:underline"
+              className="inline-flex items-center gap-2 text-base font-semibold text-action hover:underline"
             >
               View Full FAQ
               <ArrowRight className="size-4" aria-hidden />
@@ -151,7 +151,7 @@ export function ConferenceFAQ({ faqUrl, supportEmail, supportPhone, termsUrl, re
                       href={faqUrl}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="flex items-center gap-2 text-sm font-semibold text-primary hover:underline"
+                      className="flex items-center gap-2 text-sm font-semibold text-action hover:underline"
                     >
                       <ArrowRight className="size-3.5" aria-hidden />
                       Visit Help Centre
@@ -160,7 +160,7 @@ export function ConferenceFAQ({ faqUrl, supportEmail, supportPhone, termsUrl, re
                   {supportEmail && (
                     <a
                       href={`mailto:${supportEmail}`}
-                      className="flex items-center gap-2 text-sm text-gray-600 transition-colors hover:text-primary"
+                      className="flex items-center gap-2 text-sm text-gray-600 transition-colors hover:text-action"
                     >
                       <Mail className="size-3.5 shrink-0 text-gray-400" aria-hidden />
                       {supportEmail}
@@ -169,7 +169,7 @@ export function ConferenceFAQ({ faqUrl, supportEmail, supportPhone, termsUrl, re
                   {supportPhone && (
                     <a
                       href={`tel:${supportPhone}`}
-                      className="flex items-center gap-2 text-sm text-gray-600 transition-colors hover:text-primary"
+                      className="flex items-center gap-2 text-sm text-gray-600 transition-colors hover:text-action"
                     >
                       <Phone className="size-3.5 shrink-0 text-gray-400" aria-hidden />
                       {supportPhone}
@@ -190,7 +190,7 @@ export function ConferenceFAQ({ faqUrl, supportEmail, supportPhone, termsUrl, re
                       href={termsUrl}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="flex items-center gap-2 text-sm text-gray-600 transition-colors hover:text-primary"
+                      className="flex items-center gap-2 text-sm text-gray-600 transition-colors hover:text-action"
                     >
                       <FileText className="size-3.5 shrink-0 text-gray-400" aria-hidden />
                       Terms & Conditions
@@ -201,7 +201,7 @@ export function ConferenceFAQ({ faqUrl, supportEmail, supportPhone, termsUrl, re
                       href={refundPolicyUrl}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="flex items-center gap-2 text-sm text-gray-600 transition-colors hover:text-primary"
+                      className="flex items-center gap-2 text-sm text-gray-600 transition-colors hover:text-action"
                     >
                       <FileText className="size-3.5 shrink-0 text-gray-400" aria-hidden />
                       Refund Policy
@@ -212,7 +212,7 @@ export function ConferenceFAQ({ faqUrl, supportEmail, supportPhone, termsUrl, re
                       href={privacyPolicyUrl}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="flex items-center gap-2 text-sm text-gray-600 transition-colors hover:text-primary"
+                      className="flex items-center gap-2 text-sm text-gray-600 transition-colors hover:text-action"
                     >
                       <ShieldCheck className="size-3.5 shrink-0 text-gray-400" aria-hidden />
                       Privacy Policy

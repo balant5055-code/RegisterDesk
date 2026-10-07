@@ -10,6 +10,51 @@ import { adminDb }                   from '@/lib/firebase/admin'
 import { authorizeWorkspace }        from '@/lib/team/workspace'
 import { deriveLifecycleStatus }     from '@/lib/events/lifecycle'
 import { EVENT_LICENSES_COLLECTION, LICENSE_ORDERS_COLLECTION } from '@/lib/licensing/schema'
+import { sanitizeDraftPayload, pinPublishedDraftFields, serializeDraft } from '@/lib/events/draftWrite'
+import { resolveOwnedEventSlug, liveEventBelongsTo } from '@/lib/events/liveEventRef'
+
+// RD-CE-FIX M2/H6 · GET + PATCH: the wizard's ONLY read/write path for an event draft. The draft
+// always lives under the WORKSPACE (users/{workspaceUid}/eventDrafts), so a team member with the
+// `events` permission edits the same document the owner, publish and licensing read. Writes go
+// through the allow-list in lib/events/draftWrite.ts; nothing else reaches the document.
+
+export async function GET(
+  req:     NextRequest,
+  context: { params: Promise<{ draftId: string }> },
+): Promise<NextResponse> {
+  const { draftId } = await context.params
+  const authz = await authorizeWorkspace(req, 'events')
+  if (!authz.ok) return NextResponse.json({ error: authz.error }, { status: authz.status })
+  const snap = await adminDb.doc(`users/${authz.workspaceUid}/eventDrafts/${draftId}`).get()
+  if (!snap.exists) return NextResponse.json({ error: 'Draft not found' }, { status: 404 })
+  return NextResponse.json({ draft: serializeDraft(snap.id, snap.data() as Record<string, unknown>) },
+    { headers: { 'Cache-Control': 'no-store' } })
+}
+
+export async function PATCH(
+  req:     NextRequest,
+  context: { params: Promise<{ draftId: string }> },
+): Promise<NextResponse> {
+  const { draftId } = await context.params
+  const authz = await authorizeWorkspace(req, 'events')
+  if (!authz.ok) return NextResponse.json({ error: authz.error }, { status: authz.status })
+
+  let body: unknown
+  try { body = await req.json() } catch { return NextResponse.json({ error: 'Invalid request body' }, { status: 400 }) }
+  const check = sanitizeDraftPayload(body)
+  if (!check.ok) return NextResponse.json({ error: check.error, field: check.field ?? null }, { status: 400 })
+
+  const ref = adminDb.doc(`users/${authz.workspaceUid}/eventDrafts/${draftId}`)
+  const result = await adminDb.runTransaction(async txn => {
+    const snap = await txn.get(ref)
+    if (!snap.exists) return null
+    const { fields, refused } = pinPublishedDraftFields(check.fields, snap.data() as Record<string, unknown>)
+    txn.update(ref, { ...fields, updatedAt: FieldValue.serverTimestamp(), updatedBy: authz.callerUid })
+    return { refused }
+  })
+  if (!result) return NextResponse.json({ error: 'Draft not found' }, { status: 404 })
+  return NextResponse.json({ ok: true, dropped: check.dropped, refused: result.refused })
+}
 
 export async function DELETE(
   req:     NextRequest,
@@ -37,9 +82,9 @@ export async function DELETE(
   const currentStatus = deriveLifecycleStatus(d)
 
   // ── 3. Resolve slug (present if event was ever published) ──────────────────
-  const details = (d.eventDetails as Record<string, unknown>) ?? {}
-  const seo     = (details.seo    as Record<string, unknown>) ?? {}
-  const slug    = typeof seo.urlSlug === 'string' && seo.urlSlug ? seo.urlSlug : null
+  // RD-CE-FIX C1 · the pointer is client-writable and draft ids are client-chosen: only a live
+  // document stamped with THIS workspace and THIS draft is ever looked at, let alone deleted.
+  const slug    = await resolveOwnedEventSlug(uid, draftId, d)
 
   // ── 4. Phase L1: NEVER permanently delete a paid/licensed event ────────────
   // Payment happens BEFORE publish — the purchase writes a PAID order keyed
@@ -84,8 +129,8 @@ export async function DELETE(
     const eventSnap = await eventRef.get()
     if (eventSnap.exists) {
       const eventData = eventSnap.data() as Record<string, unknown>
-      // Only delete the public doc if it belongs to this draft
-      if (eventData.draftId === draftId) {
+      // Only delete the public doc if it belongs to this draft AND this workspace
+      if (liveEventBelongsTo(eventData, uid, draftId)) {
         batch.delete(eventRef)
       }
     }
@@ -98,7 +143,7 @@ export async function DELETE(
   }
 
   // ── 7. Audit log (organizer-scoped, fire-and-forget — never blocks delete) ──
-  const info      = (details.info as Record<string, unknown>) ?? {}
+  const info      = ((d.eventDetails as Record<string, unknown> | undefined)?.info as Record<string, unknown>) ?? {}
   const eventName = typeof info.name === 'string' ? info.name : null
   void adminDb.collection('teamAuditLogs').add({
     organizerUid: uid,

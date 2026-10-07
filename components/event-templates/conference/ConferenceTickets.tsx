@@ -3,6 +3,7 @@
 import Link from 'next/link'
 import { motion } from 'framer-motion'
 import { buildRegisterHref } from '@/lib/events/registerHref'
+import { DownloadTicketLink } from '@/components/event-templates/shared/registration/DownloadTicketLink'
 import { CheckCircle2, Clock, Users, Lock, ArrowRight, ShieldCheck, Zap } from 'lucide-react'
 import { cn } from '@/lib/utils/cn'
 import type { PassAvailability } from '@/lib/registrations/types'
@@ -11,6 +12,7 @@ import { AvailabilityBadge } from '@/components/event-templates/shared/registrat
 import { passDisplayPrice } from '@/components/event-templates/shared/utils/format'
 import { organizerFeaturedPassId } from '@/components/event-templates/shared/utils/featuredPass'
 import { MilestoneNotice } from '@/components/event-templates/shared/registration/MilestoneNotice'
+import { formatBenefits } from '@/components/event-templates/shared/registration/benefitLabels'
 import type { ResolvedMilestoneAlert } from '@/lib/events/milestoneAlerts'
 
 // ─── Helpers ───────────────────────────────────────────────────────────────────
@@ -69,7 +71,7 @@ export function ConferenceTickets({
           transition={{ duration: 0.5, ease: [0.25, 0, 0, 1] }}
           className="mb-12 text-center"
         >
-          <p className="mb-2 text-[11px] font-bold uppercase tracking-[0.22em] text-primary">Passes</p>
+          <p className="mb-2 text-[11px] font-bold uppercase tracking-[0.22em] text-action">Passes</p>
           <h2 className="text-2xl font-black tracking-tight text-gray-950 sm:text-[2rem]">
             {isFreeEvent ? 'Reserve Your Spot' : 'Choose Your Pass'}
           </h2>
@@ -122,7 +124,7 @@ export function ConferenceTickets({
                     className={cn(
                       'flex flex-col overflow-hidden rounded-2xl border bg-white transition-all duration-200',
                       soldOut   ? 'border-gray-100 opacity-55'
-                        : featured ? 'border-primary/20 shadow-[0_20px_60px_-12px_rgba(124,58,237,0.16)]'
+                        : featured ? 'border-action/20 shadow-[0_20px_60px_-12px_rgba(124,58,237,0.16)]'
                         : 'border-gray-100 hover:border-gray-200 hover:shadow-[0_8px_32px_-6px_rgba(0,0,0,0.09)]',
                     )}
                   >
@@ -131,7 +133,7 @@ export function ConferenceTickets({
                     {featured && (
                       <div
                         className="h-[3px] w-full shrink-0"
-                        style={{ backgroundImage: 'var(--primary-gradient)' }}
+                        style={{ backgroundImage: 'var(--action-gradient)' }}
                         aria-hidden
                       />
                     )}
@@ -139,7 +141,7 @@ export function ConferenceTickets({
                     {/* ── Upper: pass info + price ── */}
                     <div className={cn(
                       'px-5 pb-5 pt-5 sm:px-6 sm:pt-6',
-                      featured && 'bg-primary/[0.018]',
+                      featured && 'bg-action/[0.018]',
                     )}>
 
                       {/* Most popular chip */}
@@ -147,7 +149,7 @@ export function ConferenceTickets({
                         <div className="mb-4">
                           <span
                             className="inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-[10.5px] font-bold text-white"
-                            style={{ backgroundImage: 'var(--primary-gradient)' }}
+                            style={{ backgroundImage: 'var(--action-gradient)' }}
                           >
                             <Zap className="size-3" aria-hidden />
                             Most Popular
@@ -209,11 +211,11 @@ export function ConferenceTickets({
                       {/* Booking Milestone Alert — informational only; resolved server-side. */}
                       <MilestoneNotice alert={pass.milestoneAlert} />
 
-                      {pass.benefits && pass.benefits.length > 0 && (
+                      {formatBenefits(pass.benefits).length > 0 && (
                         <ul className="mb-6 flex flex-col gap-2.5">
-                          {pass.benefits.map((b, i) => (
+                          {formatBenefits(pass.benefits).map((b, i) => (
                             <li key={i} className="flex items-start gap-2.5 text-[0.8125rem] text-gray-600">
-                              <CheckCircle2 className="mt-[1px] size-3.5 shrink-0 text-primary" aria-hidden />
+                              <CheckCircle2 className="mt-[1px] size-3.5 shrink-0 text-action" aria-hidden />
                               {b}
                             </li>
                           ))}
@@ -231,10 +233,10 @@ export function ConferenceTickets({
                             className={cn(
                               'flex w-full items-center justify-center gap-2 rounded-xl py-3.5 text-[0.9375rem] font-bold transition-all duration-200 active:scale-[0.97]',
                               featured
-                                ? 'text-white shadow-md shadow-primary/25 hover:opacity-95 hover:shadow-lg hover:shadow-primary/30'
+                                ? 'text-white shadow-md shadow-action/25 hover:opacity-95 hover:shadow-lg hover:shadow-action/30'
                                 : 'bg-gray-900 text-white hover:bg-gray-800',
                             )}
-                            style={featured ? { backgroundImage: 'var(--primary-gradient)' } : {}}
+                            style={featured ? { backgroundImage: 'var(--action-gradient)' } : {}}
                           >
                             {isFree ? 'Register Free' : 'Get This Pass'}
                             <ArrowRight className="size-4" aria-hidden />
@@ -257,9 +259,15 @@ export function ConferenceTickets({
               transition={{ duration: 0.5, delay: 0.2 }}
               className="mt-8 flex items-center justify-center gap-2 text-center text-[11.5px] text-gray-400"
             >
-              <ShieldCheck className="size-4 shrink-0 text-primary/50" aria-hidden />
+              <ShieldCheck className="size-4 shrink-0 text-action/50" aria-hidden />
               Secure checkout · Instant confirmation · Group discounts available for 10+ attendees
             </motion.p>
+
+            {/* 2026-10-06: the way back to an existing ticket — this bespoke section never
+                carried the shared TicketSection's link. Same placement as there. */}
+            <div className="mt-5 flex justify-center">
+              <DownloadTicketLink slug={slug} />
+            </div>
           </>
         )}
 

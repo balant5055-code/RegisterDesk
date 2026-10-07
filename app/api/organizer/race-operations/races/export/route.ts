@@ -22,6 +22,7 @@ import {
   fetchLeaderboardPage, getLiveSnapshotByPass,
 } from '@/features/race-operations/repositories/snapshotRepo'
 import { csvCell } from '@/lib/utils/csv'
+import type { LeaderboardCursor } from '@/features/race-operations/utils/publicKeys'
 import { formatRaceTime } from '@/features/race-operations/import/validation/time'
 import type { RaceResultStatus } from '@/features/race-operations/types/results'
 
@@ -65,7 +66,8 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
 
   // ── Walk the live version ────────────────────────────────────────────────
   const lines: string[] = [COLUMNS.map(csvCell).join(',')]
-  let after: number | null = null
+  // RD-RACEOPS-02C · tie-safe (rank, entry) cursor — the export walks every entry once.
+  let after: LeaderboardCursor | null = null
   let rows = 0
 
   for (;;) {

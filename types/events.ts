@@ -102,6 +102,8 @@ export interface EventEditPayload {
   keywords?:        string[]
   // Pass capacity updates
   passCapacityUpdates?: Array<{ passId: string; newCapacity: number | null }>
+  // RD-EVENT-COMMERCE-05E — Fee Collection Method (pricing.feeModel); future checkouts only.
+  feeModel?: 'attendee_pays' | 'organizer_absorbs'
   // RD-PRODUCT-01F — optional edit reason, recorded in version history (not a field edit).
   reason?: string
 }
@@ -109,6 +111,8 @@ export interface EventEditPayload {
 export interface EventEditResponse {
   success: boolean
   error?:  string
+  /** RD-PHASE4-S3 — a stable machine code for a refusal (e.g. PRICING_NOT_ORGANIZER_EDITABLE). */
+  code?:   string
   // RD-PRODUCT-01F — post-publish edit metadata.
   changedFields?:        string[]
   impactfulFields?:      string[]
@@ -165,17 +169,33 @@ export type PublishValidationResult =
 
 export type PublishBlockReason =
   | 'COMMUNICATION_PAYMENT_REQUIRED'   // deprecated — kept for backward compat
-  | 'WALLET_INSUFFICIENT'
+  | 'AGREEMENT_REQUIRED'               // RD-EVENT-COMMERCE-05F — the Publish Agreement was not accepted
+  | 'ENTITLEMENT_ALREADY_USED'         // RD-HIGH-1 — this draft's capacity was already applied to its event
+  | 'ENTITLEMENT_INVALID'              // RD-HIGH-1 — the paid activation is not this organizer's / this draft's
   | 'INCOMPLETE_REQUIRED_FIELDS'
   | 'EVENT_ALREADY_PUBLISHED'
   | 'DRAFT_NOT_FOUND'
   | 'SLUG_CONFLICT'
   | 'INVALID_TIMEZONE'
+  | 'INVALID_EVENT_VALUES'             // RD-CE-FIX H1 — dates/prices/quantities/limits fail the server's value rules
+  | 'PAYMENT_STATUS_UNCONFIRMED'       // RD-CE-FIX H4 — an earlier checkout's payment status could not be established
+  | 'CAPACITY_BELOW_PAID'              // RD-CE-FIX M3 — capacity below what was already paid for
   | 'WRONG_FLOW'
   // EA-4 S1 — Publish Governance
   | 'IDENTITY_CHANGED'                 // major identity drift → block, offer Duplicate
   | 'IDENTITY_CONFIRMATION_REQUIRED'   // moderate drift → confirm to proceed
   | 'LICENSE_EXPIRED'                  // license expired before consumption
+  // RD-CAPACITY-01 — the capacity-based commercial model.
+  | 'CAPACITY_PAYMENT_REQUIRED'        // the chosen capacity is not covered by a paid order
+  | 'CAPACITY_NOT_CONFIGURED'          // RD-LICENSE-E2E-03 — no capacity chosen; never inferred as free/200
+  | 'SERVICES_PAYMENT_REQUIRED'        // RD-EVENT-COMMERCE-02 — selected prepaid services not covered by the allowance ledger
+  | 'INVALID_CAPACITY'                 // not a whole, finite, positive number
+  | 'CAPACITY_BELOW_MINIMUM'
+  | 'CAPACITY_ABOVE_MAXIMUM'           // above the configured maximumEventCapacity
+  | 'INVALID_TERMS'                    // the event's commercial configuration is unusable
+  | 'INVALID_CURRENT_CAPACITY'
+  | 'NOT_AN_INCREASE'
+  | 'NOT_A_DECREASE'
 
 // EA-4 S1 — publish-governance detail attached to a governed block/warn response.
 export interface PublishGovernanceInfo {

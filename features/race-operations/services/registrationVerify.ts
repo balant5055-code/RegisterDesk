@@ -16,7 +16,8 @@
 
 import { fetchEventRoster } from '@/features/race-operations/repositories/eventReadRepo'
 import { fetchStoredRowPage } from '@/features/race-operations/repositories/resultRepo'
-import { getOwnedSession, saveRegistrationCheck } from '@/features/race-operations/repositories/sessionRepo'
+import { saveRegistrationCheck } from '@/features/race-operations/repositories/sessionRepo'
+import { requireEligibleSession } from '@/features/race-operations/services/eventGate'
 import { bibKey } from '@/features/race-operations/utils/publicKeys'
 import {
   hasBlockingRegistrationIssues, matchAgainstRoster,
@@ -58,8 +59,9 @@ export async function verifySessionRegistrations(params: {
   sessionId:    string
   workspaceUid: string
 }): Promise<ServiceOutcome<RegistrationCheckResult>> {
-  const session = await getOwnedSession(params.sessionId, params.workspaceUid)
-  if (!session) return { ok: false, status: 404, error: 'Import session not found' }
+  const gated = await requireEligibleSession(params.sessionId, params.workspaceUid)
+  if (!gated.ok) return gated
+  const session = gated.session
   if (session.status !== 'draft') {
     return { ok: false, status: 409, error: `Cannot verify a ${session.status} import.` }
   }

@@ -22,12 +22,14 @@ import {
   loadEditHistory, getEditHistoryRecord, writeEditHistory, buildChangeNotice,
 } from '@/lib/events/editing/editHistory'
 import type { EventEditPayload } from '@/types/events'
+import { resolveOwnedEventSlug } from '@/lib/events/liveEventRef'
 
-function loadDraftContext(d: Record<string, unknown>) {
+// RD-CE-FIX C1 · the slug is the one the live document proves is THIS workspace's event for THIS
+// draft — never the client-writable draft pointer (history reads and rollback writes are keyed by it).
+async function loadDraftContext(uid: string, eventId: string, d: Record<string, unknown>) {
   const details = (d.eventDetails as Record<string, unknown>) ?? {}
   const info    = (details.info as Record<string, unknown>) ?? {}
-  const seo     = (details.seo  as Record<string, unknown>) ?? {}
-  const slug    = typeof seo.urlSlug === 'string' && seo.urlSlug ? seo.urlSlug : null
+  const slug    = await resolveOwnedEventSlug(uid, eventId, d)
   const name    = typeof info.name === 'string' ? info.name : 'your event'
   return { slug, name }
 }
@@ -42,7 +44,7 @@ export async function GET(
 
   const draftSnap = await adminDb.doc(`users/${authz.workspaceUid}/eventDrafts/${eventId}`).get()
   if (!draftSnap.exists) return NextResponse.json({ error: 'Event not found' }, { status: 404 })
-  const { slug, name } = loadDraftContext(draftSnap.data() as Record<string, unknown>)
+  const { slug, name } = await loadDraftContext(authz.workspaceUid, eventId, draftSnap.data() as Record<string, unknown>)
   if (!slug) return NextResponse.json({ history: [] })
 
   const noticeFor = req.nextUrl.searchParams.get('noticeFor')
@@ -77,7 +79,7 @@ export async function POST(
   const draftSnap = await draftRef.get()
   if (!draftSnap.exists) return NextResponse.json({ success: false, error: 'Event not found' }, { status: 404 })
   const d = draftSnap.data() as Record<string, unknown>
-  const { slug } = loadDraftContext(d)
+  const { slug } = await loadDraftContext(uid, eventId, d)
   if (!slug) return NextResponse.json({ success: false, error: 'Event is not published' }, { status: 400 })
 
   const record = await getEditHistoryRecord(slug, recordId)

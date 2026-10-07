@@ -164,7 +164,11 @@ export async function GET(req: NextRequest): Promise<NextResponse<GetResponse>> 
       .where('channel',      '==', 'whatsapp') as FirebaseFirestore.Query
 
     if (withFilters) {
-      if (status)      q = q.where('status',      '==', status)
+      // RD-INTEG — the filter means what the row SHOWS. "unknown" = a timed-out send (stored as
+      // failed + deliveryUnknown); "failed" excludes those (refined below), exactly as the
+      // table labels them.
+      if (status === 'unknown') q = q.where('status', '==', 'failed').where('deliveryUnknown', '==', true)
+      else if (status) q = q.where('status',      '==', status)
       if (templateKey) q = q.where('templateKey', '==', templateKey)
       if (eventSlug)   q = q.where('eventSlug',   '==', eventSlug)
       if (campaignId)  q = q.where('campaignId',  '==', campaignId)
@@ -188,7 +192,9 @@ export async function GET(req: NextRequest): Promise<NextResponse<GetResponse>> 
     return q.orderBy('createdAt', 'desc')
   }
 
-  const needsRefine = type === 'transactional'
+  const needsRefine = type === 'transactional' || status === 'failed'
+  const keepRow = (x: { templateKey?: string; deliveryUnknown?: unknown }) =>
+    (type !== 'transactional' || x.templateKey !== BROADCAST_KEY) && (status !== 'failed' || x.deliveryUnknown !== true)
 
   // Cursor pagination: startAfter a DOCUMENT SNAPSHOT, never an offset. Offset paging bills
   // every skipped document, so page 40 would cost 40 pages of reads; startAfter seeks.
@@ -226,7 +232,7 @@ export async function GET(req: NextRequest): Promise<NextResponse<GetResponse>> 
       const slice = more ? raw.slice(0, limit) : raw
 
       const kept = needsRefine
-        ? slice.filter(d => (d.data() as { templateKey?: string }).templateKey !== BROADCAST_KEY)
+        ? slice.filter(d => keepRow(d.data() as { templateKey?: string; deliveryUnknown?: unknown }))
         : slice
 
       docs.push(...kept)
@@ -249,7 +255,9 @@ export async function GET(req: NextRequest): Promise<NextResponse<GetResponse>> 
     lastDoc     = slice[slice.length - 1] ?? null
     docs = slice.filter(d => {
       const x = d.data() as Record<string, unknown>
-      if (status      && x.status      !== status)      return false
+      if (status === 'unknown') { if (x.status !== 'failed' || x.deliveryUnknown !== true) return false }
+      else if (status && x.status !== status) return false
+      if (status === 'failed' && x.deliveryUnknown === true) return false
       if (templateKey && x.templateKey !== templateKey) return false
       if (eventSlug   && x.eventSlug   !== eventSlug)   return false
       if (campaignId  && x.campaignId  !== campaignId)  return false
@@ -328,6 +336,10 @@ export async function GET(req: NextRequest): Promise<NextResponse<GetResponse>> 
       retryAvailable:    (logStatus === 'failed'
                           || isWalletSkippedWhatsAppLog({ status: logStatus, error: strOrNull(d.error) }))
                          && key === RETRYABLE_TEMPLATE_KEY
+                         // RD-INTEG — accepted by WhatsApp (wamid) then reported undeliverable by
+                         // webhook: billed under charge-on-accept and not re-sendable here (the
+                         // retry endpoint refuses it with the reason).
+                         && !(waStatus === 'failed' && !!strOrNull(d.providerMessageId))
                          // deliveryUnknown is deliberately NOT excluded here. Withholding the
                          // button left the organizer with no recovery at all; the duplicate
                          // risk is carried by requiresUnknownConfirmation above and enforced

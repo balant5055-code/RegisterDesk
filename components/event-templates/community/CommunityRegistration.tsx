@@ -11,10 +11,11 @@ import type { PassAvailability } from '@/lib/registrations/types'
 import { formatINR, formatDateShort, passDisplayPrice } from '@/components/event-templates/shared/utils/format'
 import { organizerFeaturedPassId } from '@/components/event-templates/shared/utils/featuredPass'
 import { MilestoneNotice } from '@/components/event-templates/shared/registration/MilestoneNotice'
+import { formatBenefits } from '@/components/event-templates/shared/registration/benefitLabels'
 import type { ResolvedMilestoneAlert } from '@/lib/events/milestoneAlerts'
 
 const PASS_ACCENTS = [
-  'from-rose-400 to-pink-500',
+  'from-action to-action-end',
   'from-violet-500 to-purple-600',
   'from-blue-600 to-indigo-700',
   'from-teal-500 to-emerald-600',
@@ -57,7 +58,7 @@ export function CommunityRegistration({
           transition={{ duration: 0.5 }}
           className="mb-8"
         >
-          <p className="mb-1.5 text-[10px] font-bold uppercase tracking-[0.2em] text-primary">
+          <p className="mb-1.5 text-[10px] font-bold uppercase tracking-[0.2em] text-action">
             {isFreeEvent ? 'Community Invitation' : 'Access Passes'}
           </p>
           <h2 className="text-[1.25rem] font-black tracking-tight text-gray-900 sm:text-[1.625rem]">
@@ -112,7 +113,7 @@ export function CommunityRegistration({
             className="overflow-hidden rounded-2xl bg-white ring-1 ring-black/5"
           >
             {/* Top accent bar */}
-            <div className="h-1 w-full bg-gradient-to-r from-rose-400 to-violet-500" />
+            <div className="h-1 w-full rd-brand-gradient" />
 
             <div className="grid gap-0 lg:grid-cols-[minmax(0,1fr)_auto]">
               {/* Left — invitation content */}
@@ -130,9 +131,9 @@ export function CommunityRegistration({
                 )}
 
                 {/* Benefits */}
-                {(visiblePasses[0]!.benefits?.length ?? 0) > 0 && (
+                {formatBenefits(visiblePasses[0]!.benefits).length > 0 && (
                   <ul className="mt-5 space-y-2">
-                    {visiblePasses[0]!.benefits!.map((b, i) => (
+                    {formatBenefits(visiblePasses[0]!.benefits).map((b, i) => (
                       <li key={i} className="flex items-center gap-2.5 text-[0.875rem] text-gray-600">
                         <CheckCircle2 className="size-4 shrink-0 text-emerald-500" aria-hidden />
                         {b}
@@ -144,7 +145,7 @@ export function CommunityRegistration({
                 <Link
                   href={buildRegisterHref(slug, visiblePasses[0]!.id)}
                   className="group mt-7 inline-flex items-center gap-2 rounded-full px-7 py-3 text-[0.875rem] font-bold text-white shadow-sm transition-all hover:opacity-90 hover:shadow-md active:scale-[0.98]"
-                  style={{ backgroundImage: 'var(--primary-gradient)' }}
+                  style={{ backgroundImage: 'var(--action-gradient)' }}
                 >
                   Register Now — It&apos;s Free
                   <ArrowRight className="size-4 transition-transform group-hover:translate-x-0.5" aria-hidden />
@@ -209,7 +210,7 @@ export function CommunityRegistration({
                       <div className="absolute right-3.5 top-3.5">
                         <span
                           className="rounded-full px-2.5 py-0.5 text-[10px] font-bold text-white"
-                          style={{ backgroundImage: 'var(--primary-gradient)' }}
+                          style={{ backgroundImage: 'var(--action-gradient)' }}
                         >
                           Most Popular
                         </span>
@@ -254,9 +255,9 @@ export function CommunityRegistration({
                       {/* Booking Milestone Alert — informational only; resolved server-side. */}
                       <MilestoneNotice alert={pass.milestoneAlert} />
 
-                      {(pass.benefits?.length ?? 0) > 0 && (
+                      {formatBenefits(pass.benefits).length > 0 && (
                         <ul className="mb-4 flex-1 space-y-1.5">
-                          {pass.benefits!.map((b, i) => (
+                          {formatBenefits(pass.benefits).map((b, i) => (
                             <li key={i} className="flex items-start gap-2 text-[0.8125rem] text-gray-500">
                               <CheckCircle2 className="mt-0.5 size-3.5 shrink-0 text-gray-300" aria-hidden />
                               {b}
@@ -274,7 +275,7 @@ export function CommunityRegistration({
                           <Link
                             href={buildRegisterHref(slug, pass.id)}
                             className="group flex w-full items-center justify-center gap-2 rounded-xl py-2.5 text-[0.8125rem] font-bold text-white shadow-sm transition-all hover:opacity-90 hover:shadow-md active:scale-[0.98]"
-                            style={{ backgroundImage: 'var(--primary-gradient)' }}
+                            style={{ backgroundImage: 'var(--action-gradient)' }}
                           >
                             {isFree ? 'Join Free' : 'Register Now'}
                             <ArrowRight className="size-3.5 transition-transform group-hover:translate-x-0.5" aria-hidden />

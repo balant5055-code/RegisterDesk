@@ -51,5 +51,31 @@ export default defineConfig({
         storageState: 'e2e/.auth/organizer.json',
       },
     },
+    {
+      // RD-AUTH-VIEWPORT · the only functional project in this config.
+      //
+      // /login must fit one viewport exactly, at every supported desktop size, in BOTH
+      // modes. That is a measurement of the rendered box — source assertions cannot make
+      // it, and vitest here runs on `environment: 'node'` with no DOM at all.
+      //
+      // Signed out, so no `setup` dependency and no storageState: the sign-in screen is
+      // precisely the page a signed-out visitor sees. Like the profiling projects it does
+      // NOT start a server — point RD_PROFILE_BASE_URL at a `next start` instance.
+      //
+      // Additive: `testMatch` keeps it disjoint from setup/profile, so the existing
+      // profiling commands behave exactly as before.
+      name: 'auth-viewport',
+      testMatch: /authViewport\.spec\.ts/,
+      use: { ...devices['Desktop Chrome'] },
+    },
+    {
+      // RD-PUBLIC-CHROME · the public shell, measured: one banner / main / contentinfo
+      // per route from the real accessibility tree, no horizontal overflow at ten
+      // widths, no retired colour in any computed style. Signed out, no server started —
+      // same contract as auth-viewport. See e2e/publicChrome.spec.ts.
+      name: 'public-chrome',
+      testMatch: /publicChrome\.spec\.ts/,
+      use: { ...devices['Desktop Chrome'] },
+    },
   ],
 })

@@ -51,7 +51,7 @@ function TournamentSection({ td }: { td: Partial<TeamSportDetails> | null }) {
         </ul>
       )}
       {td.rulesUrl?.trim() && (
-        <a href={td.rulesUrl.trim()} target="_blank" rel="noopener noreferrer" className="mt-4 inline-flex items-center gap-1.5 text-sm font-semibold text-primary hover:underline">
+        <a href={td.rulesUrl.trim()} target="_blank" rel="noopener noreferrer" className="mt-4 inline-flex items-center gap-1.5 text-sm font-semibold text-action hover:underline">
           Tournament rules
           <ExternalLink className="size-3.5" aria-hidden />
         </a>

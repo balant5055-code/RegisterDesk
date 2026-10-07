@@ -141,7 +141,8 @@ function MarkPaidModal({ settlement, onClose, onConfirm }: MarkPaidModalProps) {
     return () => window.removeEventListener('keydown', handler)
   }, [onClose])
 
-  const canSubmit = utrNumber.trim().length > 0 && !submitting
+  // RD-PHASE4-S4 · D3 — the note is the required reason (3–500 characters).
+  const canSubmit = utrNumber.trim().length > 0 && adminNote.trim().length >= 3 && adminNote.trim().length <= 500 && !submitting
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
@@ -263,14 +264,16 @@ function MarkPaidModal({ settlement, onClose, onConfirm }: MarkPaidModalProps) {
           {/* Admin Note — optional */}
           <div>
             <label htmlFor="admin-note-paid" className="mb-1 block text-[13px] font-medium text-foreground">
-              Admin Note <span className="text-[12px] font-normal text-muted-foreground">(optional)</span>
+              Reason <span className="text-[12px] font-normal text-muted-foreground">(required, 3–500 characters)</span>
             </label>
             <input
               id="admin-note-paid"
               type="text"
               value={adminNote}
               onChange={e => setAdminNote(e.target.value)}
-              placeholder="Internal note visible to admin only"
+              placeholder="Why this payout is being recorded (audited)"
+              maxLength={500}
+              required
               className="w-full rounded-lg border border-border bg-background px-3 py-2 text-[13.5px] text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/40"
             />
           </div>
@@ -700,7 +703,7 @@ function RetryRefundModal({ refund, onClose, onConfirm }: RetryRefundModalProps)
 // ─── Main page ─────────────────────────────────────────────────────────────────
 
 export default function AdminFinancePage() {
-  const { confirm } = useConfirm()   // GA-7D S2: gate money-moving approve
+  const { confirm, prompt } = useConfirm()   // GA-7D S2: gate money-moving approve · RD-PHASE4-S1: reasons
   const [activeTab,    setActiveTab]    = useState<TabId>('overview')
   const [settlements,  setSettlements]  = useState<AdminSettlement[]>([])
   const [stats,        setStats]        = useState<AdminSettlementsStats | null>(null)
@@ -886,10 +889,14 @@ export default function AdminFinancePage() {
   useEffect(() => { void fetchFailedRefundsStats() }, [fetchFailedRefundsStats])
 
   async function runRetry(fr: FailedRefundSummary) {
+    // RD-PHASE4-S4 · D3 — a refund retry carries a reason.
+    const reason = (await prompt({ title: 'Reason required', message: 'Reason for retrying this refund:', required: true }))?.trim()
+    if (!reason) throw new Error('A reason is required to retry a refund.')
     const token = await getToken()
     const res   = await fetch(`/api/admin/failed-refunds/${fr.id}/retry`, {
       method:  'POST',
-      headers: { authorization: `Bearer ${token}` },
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      body:    JSON.stringify({ reason }),
     })
     if (!res.ok) {
       const body = await res.json() as { error?: string }
@@ -902,14 +909,48 @@ export default function AdminFinancePage() {
     )
   }
 
+  // RD-PHASE4-S4 · D4 — captured-payment holds ('review'): approve for refund, or resolve on a
+  // verified outcome. The server decides whether the evidence exists; nothing moves money here.
+  async function runReview(id: string, action: 'approve_refund' | 'resolve') {
+    const reason = (await prompt({
+      title:   'Reason required',
+      message: action === 'approve_refund' ? 'Reason for approving this hold for refund:' : 'Reason for closing this hold:',
+      required: true,
+    }))?.trim()
+    if (!reason) return
+    setFrProcessing(id)
+    try {
+      const token = await getToken()
+      const res   = await fetch(`/api/admin/failed-refunds/${id}/review`, {
+        method:  'POST',
+        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+        body:    JSON.stringify({ action, reason }),
+      })
+      const body = await res.json().catch(() => ({})) as { error?: string; status?: 'open' | 'resolved' }
+      if (!res.ok) {
+        showToast(body.error ?? `Action failed (${res.status})`, 'error')
+        return
+      }
+      setFailedRefunds(prev => prev.map(r => r.id !== id ? r : { ...r, status: body.status ?? r.status }))
+      showToast(action === 'approve_refund' ? 'Approved for refund — retry it to issue the refund.' : 'Hold closed.', 'success')
+    } catch {
+      showToast('Network error — please try again.', 'error')
+    } finally {
+      setFrProcessing(null)
+    }
+  }
+
   async function runFrAction(id: string, action: 'resolved' | 'ignored') {
+    // RD-PHASE4-S1 · C3 — the server requires a reason (Super Admin only).
+    const reason = (await prompt({ title: 'Reason required', message: `Reason for marking this refund record ${action}:`, required: true }))?.trim()
+    if (!reason) return
     setFrProcessing(id)
     try {
       const token = await getToken()
       const res   = await fetch(`/api/admin/failed-refunds/${id}`, {
         method:  'PATCH',
         headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
-        body:    JSON.stringify({ action }),
+        body:    JSON.stringify({ action, reason }),
       })
       if (!res.ok) {
         const body = await res.json() as { error?: string }
@@ -931,17 +972,40 @@ export default function AdminFinancePage() {
     }
   }
 
-  async function runPayoutAction(uid: string, action: 'verify' | 'reject', note?: string) {
+  type PayoutAction = 'verify' | 'reject' | 'vendor_mark_reviewed' | 'vendor_request_changes'
+
+  async function runPayoutAction(uid: string, action: PayoutAction, note?: string, expectedUpdatedAt?: string | null) {
     const token = await getToken()
+    // The two vendor actions carry `reviewNote`; verify/reject carry `rejectionNote`. Same
+    // route, same admin gate, same audit mechanism — extended, not duplicated.
+    const isVendor = action === 'vendor_mark_reviewed' || action === 'vendor_request_changes'
     const res   = await fetch(`/api/admin/payout-profiles/${uid}`, {
       method:  'PATCH',
       headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
-      body:    JSON.stringify({ action, rejectionNote: note }),
+      body:    JSON.stringify(
+        isVendor            ? { action, reviewNote: note }
+        : action === 'verify' ? { action, reason: note, expectedUpdatedAt: expectedUpdatedAt ?? undefined }
+        :                       { action, rejectionNote: note, expectedUpdatedAt: expectedUpdatedAt ?? undefined },
+      ),
     })
     if (!res.ok) {
       const body = await res.json() as { error?: string }
       throw new Error(body.error ?? `HTTP ${res.status}`)
     }
+
+    if (isVendor) {
+      // ONLY the local preparation status moves. `hasCashfreeVendor` is deliberately not
+      // touched: no vendor was created, and showing one would be a lie the admin would act on.
+      setPayoutProfiles(prev => prev.map(p =>
+        p.uid !== uid ? p : {
+          ...p,
+          vendorStatus:     action === 'vendor_mark_reviewed' ? 'locally_reviewed' : 'changes_requested',
+          vendorReviewedAt: new Date().toISOString(),
+        },
+      ))
+      return
+    }
+
     // Optimistic update: remove from list or update isVerified
     setPayoutProfiles(prev => prev.map(p =>
       p.uid !== uid ? p : {
@@ -950,16 +1014,21 @@ export default function AdminFinancePage() {
         verifiedAt:    action === 'verify' ? new Date().toISOString() : null,
         verifiedBy:    action === 'verify' ? 'admin' : null,
         rejectionNote: action === 'reject' ? (note ?? null) : null,
+        // The server stamped a new updatedAt; the next review must reload the profile.
+        updatedAt:     null,
       },
     ))
   }
 
   async function runRelease() {
     setReleaseError(null)
+    const reason = (await prompt({ title: 'Reason required', message: 'Reason for releasing eligible funds now:', required: true }))?.trim()
+    if (!reason) throw new Error('A reason is required to release funds.')
     const token = await getToken()
     const res   = await fetch('/api/admin/finance/release-funds', {
       method:  'POST',
-      headers: { authorization: `Bearer ${token}` },
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      body:    JSON.stringify({ reason }),
     })
     if (!res.ok) {
       const body = await res.json() as { error?: string }
@@ -1010,7 +1079,9 @@ export default function AdminFinancePage() {
       const res   = await fetch(`/api/admin/settlements/${id}`, {
         method:  'PATCH',
         headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
-        body:    JSON.stringify({ action, adminNote: note ?? '', ...proof }),
+        body:    JSON.stringify(action === 'approve'
+          ? { action, reason: note ?? '', adminNote: '' }
+          : { action, reason: note ?? '', adminNote: note ?? '', ...proof }),
       })
       if (!res.ok) {
         const body = await res.json() as { error?: string }
@@ -1026,7 +1097,7 @@ export default function AdminFinancePage() {
           status:        action === 'approve' ? 'approved' : action === 'reject' ? 'rejected' : 'paid',
           approvedAt:    action === 'approve' ? now : s.approvedAt,
           paidAt:        action === 'paid'    ? now : s.paidAt,
-          adminNote:     note ?? s.adminNote,
+          adminNote:     action === 'approve' ? s.adminNote : (note ?? s.adminNote),
           ...(action === 'paid' && proof ? proof : {}),
         } satisfies AdminSettlement
       }))
@@ -1336,7 +1407,10 @@ export default function AdminFinancePage() {
                                         confirmLabel: 'Approve',
                                         tone: 'danger',
                                       })
-                                      if (ok) await runAction(s.id, 'approve')
+                                      if (!ok) return
+                                      // RD-PHASE4-S4 · D3 — every settlement decision carries a reason.
+                                      const reason = (await prompt({ title: 'Reason required', message: 'Reason for approving this settlement:', required: true }))?.trim()
+                                      if (reason) await runAction(s.id, 'approve', reason)
                                     }}
                                     className="rounded-md bg-primary px-2.5 py-1.5 text-[12px] font-semibold text-primary-foreground hover:opacity-90 disabled:opacity-50"
                                   >
@@ -1743,6 +1817,22 @@ export default function AdminFinancePage() {
                               <Clock className="size-3" aria-hidden /> Pending
                             </span>
                           )}
+                          {/* Cashfree vendor PREPARATION — RegisterDesk's own review state,
+                              shown separately from the payout verification above because
+                              they are different judgements. The wording says "reviewed",
+                              never "approved": Cashfree has not been contacted. */}
+                          <span className="mt-1 block text-[11px] text-muted-foreground">
+                            Cashfree:{' '}
+                            <span className="font-medium text-foreground">
+                              {p.vendorStatus === 'locally_reviewed'  ? 'reviewed locally'
+                                : p.vendorStatus === 'changes_requested' ? 'changes requested'
+                                : p.vendorStatus === 'profile_submitted' ? 'awaiting review'
+                                : 'not started'}
+                            </span>
+                            {p.hasCashfreeVendor
+                              ? <span className="ml-1">· vendor created</span>
+                              : <span className="ml-1">· no vendor yet</span>}
+                          </span>
                         </td>
                         <td className="px-4 py-3.5">
                           <div className="flex items-center gap-2">
@@ -1935,6 +2025,24 @@ export default function AdminFinancePage() {
                                 </button>
                               </div>
                             )}
+                            {fr.status === 'review' && (
+                              <div className="flex flex-wrap items-center gap-1.5">
+                                <button
+                                  disabled={busy}
+                                  onClick={() => void runReview(fr.id, 'approve_refund')}
+                                  className="flex items-center gap-1 rounded-md bg-primary px-2.5 py-1.5 text-[12px] font-semibold text-primary-foreground hover:opacity-90 disabled:opacity-50"
+                                >
+                                  <RotateCcw className="size-3" aria-hidden /> Approve refund
+                                </button>
+                                <button
+                                  disabled={busy}
+                                  onClick={() => void runReview(fr.id, 'resolve')}
+                                  className="flex items-center gap-1 rounded-md bg-emerald-600 px-2.5 py-1.5 text-[12px] font-semibold text-white hover:bg-emerald-700 disabled:opacity-50"
+                                >
+                                  <CheckCircle2 className="size-3" aria-hidden /> Resolve
+                                </button>
+                              </div>
+                            )}
                           </td>
                         </tr>
                       )
@@ -2005,7 +2113,11 @@ export default function AdminFinancePage() {
         <VerifyProfileModal
           profile={verifyModal}
           onClose={() => setVerifyModal(null)}
-          onConfirm={() => runPayoutAction(verifyModal.uid, 'verify')}
+          onConfirm={async () => {
+            const reason = (await prompt({ title: 'Reason required', message: 'Reason for verifying this payout destination:', required: true }))?.trim()
+            if (!reason) throw new Error('A reason is required to verify.')
+            await runPayoutAction(verifyModal.uid, 'verify', reason, verifyModal.updatedAt)
+          }}
         />
       )}
 
@@ -2014,7 +2126,7 @@ export default function AdminFinancePage() {
         <RejectProfileModal
           profile={rejectModal}
           onClose={() => setRejectModal(null)}
-          onConfirm={(note) => runPayoutAction(rejectModal.uid, 'reject', note)}
+          onConfirm={(note) => runPayoutAction(rejectModal.uid, 'reject', note, rejectModal.updatedAt)}
         />
       )}
 

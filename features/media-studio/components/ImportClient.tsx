@@ -37,7 +37,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  FolderOpen, FolderPlus, Images, Plus, RefreshCw, Upload, Wallet, X,
+  FolderOpen, FolderPlus, Images, Plus, RefreshCw, Upload, X,
 } from 'lucide-react'
 import {
   Banner, Button, EmptyState, StatusChip, TextLink, useConfirm, useToast,
@@ -48,11 +48,9 @@ import { UploadRow } from './UploadProgress'
 // RD-MEDIA-UX-01 — the workspace shell pieces.
 import { ImportWorkspaceBar } from './ImportWorkspaceBar'
 import { ImportSummaryRail, type RailState } from './ImportSummaryRail'
-import { BuyCreditsDialog } from '@/features/media-credits/components/BuyCreditsDialog'
-import {
-  ImportCreditsCard, creditVerdict, estimateCost,
-  type ImportSessionStatus,
-} from './ImportCreditsCard'
+// RD-PHOTO-01 — the event's PAID photo capacity gates the import (no credits, no purchase here).
+import { PhotoCapacityCard, photoCapacityVerdict, type PhotoCapacityView } from './PhotoCapacityCard'
+import type { MediaLimitsResponse } from '@/app/api/organizer/media-studio/limits/route'
 // RD-MEDIA-UX-07 — the rail column owns `sticky`, so the grid item is content-sized rather
 // than stretched to the workflow column's height.
 import { MEDIA_RAIL_COLUMN } from './workspace'
@@ -119,26 +117,13 @@ function formatDuration(seconds: number): string {
 export function ImportClient() {
   const { getToken } = useAuth()
 
-  // ── MS-IMPORT-01 · credits ────────────────────────────────────────────────
-  // Read on mount, and again after a purchase completes here (MC-08.2). Still deliberately
-  // NOT polled: the balance an organizer needs is the one they had when they queued the
-  // batch, and a number that shifts under them mid-review is worse than a slightly stale
-  // one. A purchase is the exception because they caused it and are waiting to see it. The
-  // authoritative check happens server-side at session open, which is what actually refuses
-  // an unaffordable upload.
-  const [credits, setCredits] = useState<{
-    enabled: boolean; balance: number; held: number; available: number; creditsPerPhoto: number
-  } | null>(null)
-  const [creditsLoading, setCreditsLoading] = useState(true)
-  const [creditsError, setCreditsError] = useState<string | null>(null)
-
-  // MC-08.2 · Shortfall the Buy dialog should open on, or false when it is closed.
-  // Buying happens HERE rather than on the Credits page because the queued files live in
-  // browser state — navigating away to buy would discard the batch being prepared.
-  const [buyingShortfall, setBuyingShortfall] = useState<number | false>(false)
-  // Server unit price, needed to price the packs. Read from the same balance response, so
-  // there is no second endpoint and no rate invented on the client.
-  const [unitPricePaise, setUnitPricePaise] = useState(0)
+  // ── RD-PHOTO-01 · the event's paid photo capacity ─────────────────────────────
+  // Read for the active event on mount / event change, and again when an upload finishes. The
+  // server re-checks every photo at /uploads/prepare; this only lets the page refuse a batch
+  // that cannot fit BEFORE anything is uploaded, and point at the one place capacity is bought.
+  const [capacity, setCapacity] = useState<PhotoCapacityView | null>(null)
+  const [capacityLoading, setCapacityLoading] = useState(true)
+  const [capacityError, setCapacityError] = useState<string | null>(null)
   const { showToast } = useToast()
   const { prompt }    = useConfirm()
 
@@ -413,98 +398,45 @@ export function ImportClient() {
 
   const destinationRef = useRef<HTMLDivElement>(null)
 
-  // Loads the credit position. A failure is surfaced in the card rather than blocking the
-  // page: credits may be switched off entirely, and an unreadable balance must not stop an
-  // organizer from preparing an import.
-  // MC-08.2 · Extracted from the mount effect so a completed purchase can re-read the
-  // balance in place. Still not polled — see the note above; this fires only when the
-  // organizer has actually done something that changes the number.
-  const loadCredits = useCallback(async () => {
+  const capacityEventId = event?.eventId ?? null
+  const loadCapacity = useCallback(async () => {
+    if (!capacityEventId) { setCapacity(null); setCapacityLoading(false); return }
     try {
       const token = await getToken()
-      const res = await fetch('/api/organizer/media-credits/balance', {
-        headers: { Authorization: `Bearer ${token}` },
+      const res = await fetch(`/api/organizer/media-studio/limits?eventId=${encodeURIComponent(capacityEventId)}`, {
+        headers: { Authorization: `Bearer ${token}` }, cache: 'no-store',
       })
-      if (!res.ok) throw new Error('Could not read your credit balance.')
-      const body = await res.json() as {
-        balance: number; held: number; available: number
-        creditsEnabled: boolean; creditsPerPhoto: number; unitPricePaise: number
-      }
-      setCredits({
-        enabled:   body.creditsEnabled,
-        balance:   body.balance,
-        held:      body.held,
-        available: body.available,
-        creditsPerPhoto: body.creditsPerPhoto,
-      })
-      setUnitPricePaise(body.unitPricePaise)
-      setCreditsError(null)
+      if (!res.ok) throw new Error('Could not read this event’s photo capacity.')
+      const body = await res.json() as MediaLimitsResponse
+      setCapacity(body.photoCapacity)
+      setCapacityError(null)
     } catch (e) {
-      setCreditsError(e instanceof Error ? e.message : 'Could not read your credit balance.')
+      setCapacity(null)
+      setCapacityError(e instanceof Error ? e.message : 'Could not read this event’s photo capacity.')
     } finally {
-      setCreditsLoading(false)
+      setCapacityLoading(false)
     }
-  }, [getToken])
+  }, [getToken, capacityEventId])
 
   useEffect(() => {
-    // Wrapped rather than called directly so the mount read stays asynchronous — the first
-    // state write happens after the token and the fetch resolve, never during the effect.
-    //
-    // The previous version carried a `cancelled` flag to suppress a write after unmount.
-    // It is gone with the extraction, deliberately: the writes now live inside `loadCredits`,
-    // which is also called from the purchase callback where a mount-scoped token means
-    // nothing. A late write to an unmounted component is a no-op in React 19, and a flag
-    // that reads like a guard while guarding nothing is worse than its absence.
-    void (async () => { await loadCredits() })()
-  }, [loadCredits])
+    // Asynchronous on purpose: the first state write happens after the token and fetch resolve.
+    void (async () => { await loadCapacity() })()
+  }, [loadCapacity])
 
-  // MC-10.6 · Re-read the balance the moment a cancellation has finished releasing its
-  // sessions. Watching the flag fall — rather than firing inside `cancelAll` — means the
-  // read happens AFTER settlement has committed, so the number shown is the recovered one
-  // and not the pre-release balance.
-  const wasReleasing = useRef(false)
+  // Re-read once an upload run ends, so "Used / Remaining" reflect what was just stored.
+  const wasRunning = useRef(false)
   useEffect(() => {
-    if (wasReleasing.current && !queue.releasing) {
-      void (async () => { await loadCredits() })()
-    }
-    wasReleasing.current = queue.releasing
-  }, [queue.releasing, loadCredits])
+    if (wasRunning.current && !queue.running) void (async () => { await loadCapacity() })()
+    wasRunning.current = queue.running
+  }, [queue.running, loadCapacity])
 
-  // ONE definition of affordability, shared by the card and the Start gate below. Two
-  // separate rules is how a green card ends up beside a disabled button.
-  const creditVerdictNow = credits?.enabled
-    ? creditVerdict({
-        available: credits.available,
-        cost: estimateCost(estimate.photoCount, credits.creditsPerPhoto),
-        photoCount: estimate.photoCount,
-      })
-    : 'ok'
-  const canAffordImport = creditVerdictNow !== 'insufficient'
-
-  // MC-10.5 · The queue hit a 402. Distinct from `creditVerdictNow`, which is the PRE-flight
-  // estimate: this one is the server's own verdict, with the numbers it refused on, and it is
-  // the only one that can appear mid-batch after the balance moved under us.
-  const creditStop = queue.failures.find(f => f.kind === 'insufficient_credits')?.credits ?? null
-  // MC-10.5 · Whether the stop has been cleared. DERIVED from the balance the purchase
-  // refreshed, not from a "did they buy something" flag: a flag would stay true after a
-  // partial top-up that still leaves the batch unaffordable, and would offer Resume for an
-  // upload certain to stop again at the same photo.
-  const creditStopCleared =
-    creditStop !== null && (credits?.available ?? 0) >= creditStop.required
-
-  // Re-queues the stopped photos and drives them. Completed photos are untouched — retry
-  // only moves `failed` items, and each keeps the slot it was given (MC-10.2), so nothing
-  // re-uploads and no second credit slot is consumed.
-  const resumeAfterPurchase = useCallback(() => {
-    queue.retryFailed()
-    startUpload()
-  }, [queue, startUpload])
-
-  /** The page's own view of the session. There is no endpoint that reads one. */
-  const sessionStatus: ImportSessionStatus =
-    railState === 'uploading' ? 'active'
-    : railState === 'complete' ? 'finished'
-    : 'not_started'
+  // ONE rule for the card and both Start buttons.
+  // Only photos still to upload count (completed, failed, cancelled or duplicate items in the list do not).
+  const photosToUpload = queue.counts.queued
+  const capacityVerdict = photoCapacityVerdict(capacity, capacityLoading, photosToUpload)
+  const capacityAllowsStart = capacityVerdict === 'ok'
+  // The server's own refusal mid-batch (another tab used the last units, or a refund lowered them).
+  const capacityStop = queue.failures.find(f => f.kind === 'photo_capacity') ?? null
 
   return (
     <div className="space-y-4">
@@ -741,11 +673,9 @@ export function ImportClient() {
                   {queue.paused && (
                     <Button size="xs" variant="outline" onClick={queue.resume}>Resume</Button>
                   )}
-                  {/* MC-10.5 · Hidden while the stop is a credit shortfall: retrying is
-                      guaranteed to fail until credits are bought, and offering it is how an
-                      organizer ends up clicking Retry six times and then contacting support.
-                      It returns the moment the shortfall is cleared. */}
-                  {queue.counts.failed > 0 && !creditStop && (
+                  {/* RD-PHOTO-01 · Hidden while the stop is a photo-capacity refusal: retrying is
+                      guaranteed to fail until more capacity is bought on License & Services. */}
+                  {queue.counts.failed > 0 && !capacityStop && (
                     <Button size="xs" variant="outline" onClick={queue.retryFailed}>
                       <RefreshCw className="size-3.5" aria-hidden /> Retry {queue.counts.failed}
                     </Button>
@@ -756,16 +686,6 @@ export function ImportClient() {
                 </div>
               }
             >
-              {/* MC-10.6 · The organizer cancelled and the held credits are coming back.
-                  Named explicitly, because "cancelled" alone leaves them wondering whether
-                  the credits they paid for went with it. */}
-              {queue.releasing && (
-                <Banner tone="info" title="Finalising session…" className="mt-2">
-                  Returning the credits this upload was holding. Photos already uploaded are
-                  kept and charged; the rest is released.
-                </Banner>
-              )}
-
               <div className="flex flex-wrap gap-1.5">
                 <StatusChip tone="neutral">{queue.counts.queued} queued</StatusChip>
                 <StatusChip tone="info">{queue.counts.uploading + queue.counts.processing} in progress</StatusChip>
@@ -786,7 +706,7 @@ export function ImportClient() {
               )}
 
               {/* MS-FINAL-01 · duplicates found. The decision is the organizer's, and until
-                  they make it these photos hold no credit slot and upload nothing. */}
+                  they make it these photos upload nothing. */}
               {queue.counts.duplicate > 0 && (
                 <Banner
                   tone="warning"
@@ -794,8 +714,8 @@ export function ImportClient() {
                   className="mt-2"
                 >
                   <p>
-                    These match photos already in this event. Skipping them costs nothing —
-                    they hold no credits and will not be uploaded.
+                    These match photos already in this event. Skipped photos use no photo
+                    capacity and will not be uploaded.
                   </p>
                   <div className="mt-2.5 flex flex-wrap gap-1.5">
                     <Button size="xs" onClick={() => queue.resolveDuplicates('skip')}>
@@ -811,55 +731,21 @@ export function ImportClient() {
                 </Banner>
               )}
 
-              {/* ── MC-10.5 · running out of credits gets its own answer ──────────────
-                   The generic failure banner says "retry"; retrying is the one thing that
-                   cannot work here. This states the numbers the server refused on and offers
-                   the single action that changes them. */}
-              {creditStop && (
-                <Banner
-                  tone="error"
-                  title="Not enough Media Credits"
-                  className="mt-2"
-                >
-                  <p>
-                    {creditStopCleared
-                      ? 'Your credits have been topped up. Resume to upload the remaining photos — the ones already uploaded are kept.'
-                      : 'Uploads stopped because your available credits are lower than this upload requires. Photos already uploaded are kept.'}
-                  </p>
-                  <dl className="mt-2 flex flex-wrap gap-x-6 gap-y-1 text-fs-2xs">
-                    <div className="flex gap-1.5">
-                      <dt className="text-muted-foreground">Available</dt>
-                      <dd className="font-semibold tabular-nums">{creditStop.available.toLocaleString('en-IN')}</dd>
-                    </div>
-                    <div className="flex gap-1.5">
-                      <dt className="text-muted-foreground">Required</dt>
-                      <dd className="font-semibold tabular-nums">{creditStop.required.toLocaleString('en-IN')}</dd>
-                    </div>
-                    <div className="flex gap-1.5">
-                      <dt className="text-muted-foreground">Short by</dt>
-                      <dd className="font-semibold tabular-nums text-destructive">{creditStop.shortfall.toLocaleString('en-IN')}</dd>
-                    </div>
-                  </dl>
-                  {creditStopCleared ? (
-                    <Button size="xs" className="mt-2.5" onClick={resumeAfterPurchase}>
-                      <Upload className="size-3.5" aria-hidden />
-                      Resume upload
-                    </Button>
-                  ) : (
-                    <Button
-                      size="xs"
-                      className="mt-2.5"
-                      onClick={() => setBuyingShortfall(creditStop.shortfall)}
-                    >
-                      <Wallet className="size-3.5" aria-hidden />
-                      Buy credits
-                    </Button>
+              {/* RD-PHOTO-01 · the server refused photos for lack of paid capacity. Retrying cannot
+                   help until more capacity is bought for this event on License & Services. */}
+              {capacityStop && (
+                <Banner tone="error" title={`Photo capacity reached — ${capacityStop.count} photo${capacityStop.count === 1 ? '' : 's'} not uploaded`} className="mt-2">
+                  <p>{capacityStop.reason} {capacityStop.action}</p>
+                  {capacity && (
+                    <a href={capacity.purchaseHref} className="mt-2.5 inline-flex text-fs-sm font-semibold text-primary underline-offset-2 hover:underline">
+                      Go to License &amp; Services
+                    </a>
                   )}
                 </Banner>
               )}
 
               {/* RD-MEDIA-03: causes, not a count. Each says what to do about it. */}
-              {queue.failures.filter(f => f.kind !== 'insufficient_credits').map(f => (
+              {queue.failures.filter(f => f.kind !== 'photo_capacity').map(f => (
                 <Banner
                   key={f.kind}
                   tone={f.retryable ? 'warning' : 'error'}
@@ -898,19 +784,13 @@ export function ImportClient() {
 
         {/* ═══ RIGHT · summary rail ═══ */}
         <div className={MEDIA_RAIL_COLUMN}>
-          {/* Above the rail deliberately: 'can I afford this' is the question that gates
-              the primary action, so it is answered before the action is offered. */}
-          <ImportCreditsCard
-            enabled={credits?.enabled ?? false}
-            loading={creditsLoading}
-            error={creditsError}
-            balance={credits?.balance ?? 0}
-            held={credits?.held ?? 0}
-            available={credits?.available ?? 0}
-            creditsPerPhoto={credits?.creditsPerPhoto ?? 1}
-            photoCount={estimate.photoCount}
-            sessionStatus={sessionStatus}
-            onBuy={setBuyingShortfall}
+          {/* Above the rail deliberately: 'does this batch fit the paid photo capacity' is the
+              question that gates the primary action, so it is answered before it is offered. */}
+          <PhotoCapacityCard
+            capacity={capacity}
+            loading={capacityLoading}
+            error={capacityError}
+            photoCount={photosToUpload}
           />
           <ImportSummaryRail
             state={railState}
@@ -923,7 +803,7 @@ export function ImportClient() {
             hasEvent={Boolean(event)}
             hasGallery={Boolean(gallery)}
             brandingResolved={canImport}
-            canStart={Boolean(gallery) && canImport && queue.items.length > 0 && canAffordImport}
+            canStart={Boolean(gallery) && canImport && queue.items.length > 0 && capacityAllowsStart}
             photoCount={estimate.photoCount}
             estimatedBytes={estimate.estimatedBytes}
             savingsPercent={estimate.savingsPercent}
@@ -954,7 +834,7 @@ export function ImportClient() {
             </div>
             <Button
               variant="primary" size="sm"
-              disabled={!gallery || !canImport}
+              disabled={!gallery || !canImport || !capacityAllowsStart}
               onClick={startUpload}
             >
               Start Upload
@@ -963,20 +843,6 @@ export function ImportClient() {
         </div>
       )}
 
-      {/* MC-08.2 · The SAME purchase dialog the Credits dashboard uses. Mounted only while
-          open, so each opening starts from a clean phase. On success the balance is re-read
-          from the server rather than adjusted locally — the wallet stays the one source of
-          truth for the number that gates the upload. */}
-      {buyingShortfall !== false && (
-        <BuyCreditsDialog
-          open
-          onClose={() => setBuyingShortfall(false)}
-          unitPricePaise={unitPricePaise}
-          creditsPerPhoto={credits?.creditsPerPhoto ?? 1}
-          suggestedCredits={buyingShortfall}
-          onPurchased={() => { void loadCredits() }}
-        />
-      )}
     </div>
   )
 }

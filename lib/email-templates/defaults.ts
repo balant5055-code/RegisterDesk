@@ -18,7 +18,7 @@ function infoTable(rows: [string, string][]): string {
 }
 
 function primaryBtn(label: string, url: string): string {
-  return `<a href="${url}" style="display:inline-block;background:#e5277e;color:#ffffff;text-decoration:none;font-size:13.5px;font-weight:600;padding:11px 22px;border-radius:8px;margin:0 8px 8px 0;line-height:1.4;">${label}</a>`
+  return `<a href="${url}" style="display:inline-block;background:#4F46E5;color:#ffffff;text-decoration:none;font-size:13.5px;font-weight:600;padding:11px 22px;border-radius:8px;margin:0 8px 8px 0;line-height:1.4;">${label}</a>`
 }
 
 function heading(text: string): string {

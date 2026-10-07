@@ -44,7 +44,7 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     const result = await runReconciliation({ limit: 100, budgetMs: 45_000 })
     ok = true
     detail = `grants=${result.grants.resolved}/${result.grants.scanned} `
-           + `refunds=${result.refunds.resolved}/${result.refunds.scanned} `
+           + `refundsAwaitingManualPayout=${result.refundsAwaitingManualPayout} `
            + `orphans=${result.orphans.unrecordedPaidPurchases.length + result.orphans.stuckRefunds.length}`
     return NextResponse.json(result)
   } catch (err) {

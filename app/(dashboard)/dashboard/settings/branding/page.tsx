@@ -114,9 +114,12 @@ export default function BrandingPage() {
         <Header />
         <div className="flex flex-col items-center justify-center gap-3 rounded-2xl border border-dashed border-border py-20 text-center">
           <div className="flex size-12 items-center justify-center rounded-full bg-primary/[0.08]"><Lock className="size-6 text-primary" aria-hidden /></div>
-          <p className="text-[16px] font-semibold text-foreground">White-label branding is a Pro feature</p>
-          <p className="max-w-sm text-[13.5px] text-muted-foreground">Upgrade to Pro to customize your logo, colors, sender name, and remove RegisterDesk branding.</p>
-          <a href="/dashboard/settings/billing" className="mt-2 inline-flex items-center gap-2 rounded-lg px-4 py-2 text-[14px] font-semibold text-primary-foreground shadow-sm hover:opacity-90" style={{ backgroundImage: 'var(--primary-gradient)' }}>View plans</a>
+          {/* RD-CLOSE — white-label branding is no longer a licensed (Starter/Pro/Business) feature
+              (RD-CAPACITY-01): the API never refuses on a tier. This state now only means the
+              workspace could not be verified (e.g. signed out), and says exactly that. */}
+          <p className="text-[16px] font-semibold text-foreground">Branding settings are unavailable</p>
+          <p className="max-w-sm text-[13.5px] text-muted-foreground">Sign in as the workspace owner to customize your logo, colors and sender name.</p>
+          <a href="/contact" className="mt-2 inline-flex items-center gap-2 rounded-lg px-4 py-2 text-[14px] font-semibold text-primary-foreground shadow-sm hover:opacity-90" style={{ backgroundImage: 'var(--primary-gradient)' }}>Contact support</a>
         </div>
       </div>
     )
@@ -187,7 +190,7 @@ export default function BrandingPage() {
       <section className="rounded-2xl border border-border bg-card p-5">
         <h2 className="mb-4 flex items-center gap-2 text-[15px] font-bold text-foreground"><Globe className="size-4 text-primary" aria-hidden /> Custom Domain</h2>
         {!domainGated ? (
-          <p className="text-[13.5px] text-muted-foreground">Custom domains are available on the Enterprise plan. <a href="/dashboard/settings/billing" className="font-semibold text-primary">View plans</a></p>
+          <p className="text-[13.5px] text-muted-foreground">Custom domains are not available for this workspace right now. <a href="/contact" className="font-semibold text-primary">Contact support</a></p>
         ) : (
           <div className="space-y-4">
             <div className="flex flex-wrap items-end gap-2">

@@ -6,9 +6,9 @@ import {
   Heart, Shield, Users, Calendar, Target,
   CheckCircle, ExternalLink, ArrowLeft,
 } from 'lucide-react'
-import { MarketingNavbar } from '@/components/marketing/navigation/MarketingNavbar'
+import { HomeShell }      from '@/components/discovery/home/HomeShell'
 import { Container }      from '@/components/ui/Container'
-import { buttonVariants } from '@/components/ui/button'
+import { marketingButton } from '@/lib/marketing/theme'
 import { getCampaignBySlug, getCampaignCounter } from '@/lib/firebase/firestore/campaigns'
 import { isValidImageUrl, safeImageUrl } from '@/lib/utils/imageUrl'
 import { isContentTakenDown } from '@/lib/admin/moderation'
@@ -136,8 +136,7 @@ export default async function CampaignPage({ params }: PageProps) {
       }
 
   return (
-    <div className="min-h-screen bg-background">
-      <MarketingNavbar />
+    <HomeShell>
 
       {/* ── Hero image ───────────────────────────────────────────────────────── */}
       {isValidImageUrl(cd.media.coverImageUrl) ? (
@@ -152,7 +151,7 @@ export default async function CampaignPage({ params }: PageProps) {
           <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-black/20 to-transparent" />
         </div>
       ) : (
-        <div className="h-[120px] w-full bg-gradient-to-br from-orange-50 via-rose-50 to-pink-50 sm:h-[160px]" />
+        <div className="h-[120px] w-full bg-muted sm:h-[160px]" />
       )}
 
       {/* ── Body ─────────────────────────────────────────────────────────────── */}
@@ -304,7 +303,7 @@ export default async function CampaignPage({ params }: PageProps) {
                     href={cd.taxConfig.certificateUrl}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className={buttonVariants({ variant: 'outline', size: 'sm' })}
+                    className={marketingButton({ variant: 'outline', size: 'sm' })}
                   >
                     View <ExternalLink className="ml-1.5 size-3.5" aria-hidden />
                   </a>
@@ -330,7 +329,7 @@ export default async function CampaignPage({ params }: PageProps) {
                         href={cd.organizer.website}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="mt-1 inline-flex items-center gap-1 text-sm text-primary hover:underline"
+                        className="mt-1 inline-flex items-center gap-1 text-sm text-action hover:underline"
                       >
                         {cd.organizer.website.replace(/^https?:\/\//, '')}
                         <ExternalLink className="size-3" aria-hidden />
@@ -370,7 +369,7 @@ export default async function CampaignPage({ params }: PageProps) {
           <ReportButton targetType="campaign" targetId={slug} label="Report this campaign" />
         </div>
       </Container>
-    </div>
+    </HomeShell>
   )
 }
 

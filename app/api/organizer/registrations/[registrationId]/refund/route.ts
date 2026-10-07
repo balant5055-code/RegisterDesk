@@ -13,17 +13,24 @@
 import { NextRequest, NextResponse }    from 'next/server'
 import { FieldValue }                   from 'firebase-admin/firestore'
 import { adminDb }           from '@/lib/firebase/admin'
-import { authorizeWorkspace }           from '@/lib/team/workspace'
+import { resolveSuperAdminUid }        from '@/lib/admin/auth'
+import { parseFinancialReason }        from '@/lib/admin/financialGuard'
+import { logAdminActionOrRecord }      from '@/lib/admin/audit'
 import { razorpay }                     from '@/lib/razorpay/client'
 import { updatePaymentIntentRefund }    from '@/lib/firebase/firestore/paymentIntents'
 import { writeAuditEntry, loadOwnedRegistration } from '@/lib/firebase/firestore/registrations'
 import { reversePlatformTransactionAndDebit } from '@/lib/firebase/firestore/platformTransactions'
 import { recordRefundLedgerReconciliation } from '@/lib/payments/registrationReconciliation'
+import { ensureRegistrationRefundRecord, finalizePendingRegistrationRefund } from '@/lib/refunds/registrationRefunds'
 import { checkRateLimit }               from '@/lib/rateLimit'
 import { sendRefundEmail }              from '@/lib/registrations/sendRefundEmail'
 import { releaseIdentifier }            from '@/lib/identifiers/engine'
+// RD-BIB-TIMING-01 · the device is surrendered with the number, and goes first.
+import { detachTimingTagByRegistration } from '@/lib/identifiers/timingTagEngine'
 import type { RegistrationDocument }    from '@/lib/registrations/types'
 import type { PaymentIntentRecord }     from '@/lib/firebase/firestore/paymentIntents'
+import { readProvider }                from '@/lib/payments/providers/types'
+import { captureFinancialError }       from '@/lib/monitoring/sentry'
 
 export interface RefundRegistrationResponse {
   success:      boolean
@@ -53,16 +60,51 @@ export async function POST(
   req:     NextRequest,
   context: { params: Promise<{ registrationId: string }> },
 ): Promise<NextResponse<RefundRegistrationResponse>> {
-  // ── 1. Auth ────────────────────────────────────────────────────────────────
-  // GA-7B P2: a refund moves real money out (Razorpay refund + revenue-wallet
-  // debit), so it must require a FINANCE permission — not the operational
-  // `registrations` permission (held by manager/admin, who are denied every
-  // finance permission by design). Owner (all permissions) and the finance role
-  // hold `transactions`; manager/admin no longer reach this money-out path.
-  const authz = await authorizeWorkspace(req, 'transactions')
-  if (!authz.ok) return NextResponse.json({ success: false, error: authz.error }, { status: authz.status })
-  const uid = authz.workspaceUid
-  const callerUid = authz.callerUid
+  // ── 1. Auth — SUPER ADMIN ONLY ─────────────────────────────────────────────
+  //
+  // RD-PAYMENT-REFUND-AUTHORITY-02. This was `authorizeWorkspace(req, 'transactions')`,
+  // which GA-7B had already narrowed from the operational `registrations` permission to a
+  // finance one. That was the right direction and still not far enough: `transactions` is
+  // held by the workspace OWNER and by the delegated `finance` role, so an organizer could
+  // return an attendee's money — and a delegate could do it on the organizer's behalf —
+  // with no platform involvement.
+  //
+  // A refund is money leaving the platform to a third party. It is now gated on
+  // `resolveSuperAdminUid`, which requires the uid to be in the ADMIN_UIDS deployment
+  // configuration and not merely to carry an `admin: true` Firebase claim — a compromised
+  // admin session cannot widen it, because widening it requires a deploy.
+  const superAdminUid = await resolveSuperAdminUid(req.headers.get('authorization'))
+  if (!superAdminUid) {
+    return NextResponse.json(
+      { success: false, error: 'Refunds can only be initiated by a platform super administrator.' },
+      { status: 403 },
+    )
+  }
+  const callerUid = superAdminUid
+
+  // RD-PHASE4-S4 · D3 — a reason (3–500 characters), checked before anything moves.
+  let reqBody: { reason?: unknown } = {}
+  try { reqBody = await req.json() as { reason?: unknown } } catch { reqBody = {} }
+  const reasonCheck = parseFinancialReason(reqBody.reason)
+  if (!reasonCheck.ok) {
+    return NextResponse.json({ success: false, error: reasonCheck.error, code: reasonCheck.code }, { status: 400 })
+  }
+  const refundReason = reasonCheck.reason
+
+  // The organizer is no longer derived from the caller's workspace — a super admin has
+  // none. It comes from the registration itself, so every downstream write (ledger debit,
+  // audit entry, wallet) still lands on the workspace that actually owns the money.
+  const ownerSnap = await adminDb.collection('registrations').doc((await context.params).registrationId ?? '').get()
+  if (!ownerSnap.exists) {
+    return NextResponse.json({ success: false, error: 'Registration not found' }, { status: 404 })
+  }
+  const uid = (ownerSnap.data() as { organizerUid?: unknown }).organizerUid
+  if (typeof uid !== 'string' || !uid) {
+    return NextResponse.json(
+      { success: false, error: 'This registration has no organizer and cannot be refunded automatically.' },
+      { status: 409 },
+    )
+  }
 
   // ── 1b. Rate limit — 10 refunds per hour per organizer (H-3) ────────────────
   const rl = checkRateLimit(uid, 'organizer-refund', 10, 60 * 60 * 1000)
@@ -126,6 +168,35 @@ export async function POST(
   const pi = piSnap.docs[0].data() as PaymentIntentRecord
   const { paymentId, amount: refundAmount, orderId } = pi
 
+  // ═══ PROVIDER OWNERSHIP · THIS ROUTE REFUNDS THROUGH RAZORPAY ONLY ═════════
+  //
+  // Everything below calls `razorpay.payments.refund` directly. It reads the payment intent
+  // but never looked at `provider`, so refunding a Cashfree registration would have handed a
+  // Cashfree `cf_payment_id` to Razorpay's refund API — against the wrong gateway, for a
+  // payment Razorpay has never heard of.
+  //
+  // It REFUSES rather than routing to Cashfree's adapter, and the distinction matters: the
+  // Cashfree refund CREATE contract is verified, but nothing that resolves a refund to a
+  // terminal state is. No Cashfree refund-status webhook event and no refund status value
+  // set exists anywhere in this repository, so a refund opened here would sit PENDING with
+  // no webhook, no poller and no reconciliation to finish it. Creating money movement we
+  // cannot track is worse than declining to start it.
+  //
+  // `readProvider` keeps historical intents (no discriminator) reading as Razorpay, so this
+  // changes nothing for any payment that exists today.
+  const intentProvider = readProvider(pi.provider)
+  if (intentProvider !== 'razorpay') {
+    captureFinancialError('refund_provider_unsupported', {
+      scope: 'refund.provider_unsupported', registrationId, orderId,
+      provider: intentProvider,
+      detail: 'refund declined: this route settles through Razorpay only — nothing was charged or refunded',
+    })
+    return NextResponse.json(
+      { success: false, error: 'Refunds for this payment method are not available yet. No refund was issued.' },
+      { status: 422 },
+    )
+  }
+
   if (!paymentId) {
     return NextResponse.json(
       { success: false, error: 'Razorpay payment ID not recorded — cannot issue refund' },
@@ -143,6 +214,9 @@ export async function POST(
     if (latest.paymentStatus !== 'paid') return false
     txn.update(regRef, {
       paymentStatus: 'refund_pending',
+      // RD-FIN-02 · the claim records WHICH payment and HOW MUCH, so the refund.processed webhook can
+      // finish this refund (with evidence) if this request dies after the gateway call.
+      refundClaim:   { paymentId, amountPaise: refundAmount, by: callerUid, at: FieldValue.serverTimestamp() },
       updatedAt:     FieldValue.serverTimestamp(),
     })
     return true
@@ -181,8 +255,13 @@ export async function POST(
   } catch (err) {
     console.error('[refund] Razorpay API error:', { registrationId, paymentId, err })
     // Revert to 'paid' so the organizer can retry — refund_pending would block future attempts.
-    await regRef.update({ paymentStatus: 'paid', updatedAt: FieldValue.serverTimestamp() })
-      .catch(e => console.error('[refund] Failed to revert refund_pending to paid:', e))
+    // RD-FIN-02 · CONDITIONAL: a gateway timeout may hide a refund that DID happen, and the webhook
+    // may already have finalized it as 'refunded' — that must never be overwritten back to 'paid'.
+    await adminDb.runTransaction(async tx => {
+      if ((await tx.get(regRef)).get('paymentStatus') === 'refund_pending') {
+        tx.update(regRef, { paymentStatus: 'paid', refundClaim: FieldValue.delete(), updatedAt: FieldValue.serverTimestamp() })
+      }
+    }).catch(e => console.error('[refund] Failed to revert refund_pending to paid:', e))
     return NextResponse.json(
       { success: false, error: 'Razorpay refund failed. Please try again or contact support.' },
       { status: 502 },
@@ -190,13 +269,41 @@ export async function POST(
   }
 
   // ── 7. Persist successful refund ──────────────────────────────────────────
-  await regRef.update({
-    paymentStatus: 'refunded',
-    refundId,
-    refundAmount,
-    refundedAt: FieldValue.serverTimestamp(),
-    updatedAt:  FieldValue.serverTimestamp(),
+  //
+  // RD-FIN-01: the gateway record is written FIRST and keyed by the Razorpay refund id,
+  // so this path and the `refund.processed` webhook converge on ONE document. Whichever
+  // observes the refund first creates it; the other finds it and does not duplicate.
+  // Without this, an organizer-initiated refund would exist only as three fields on the
+  // registration and the webhook would later record it as if it were a separate event.
+  await ensureRegistrationRefundRecord({
+    razorpayRefundId: refundId,
+    gatewayPaymentId: paymentId,
+    gatewayOrderId:   orderId,
+    amountPaise:      refundAmount,
+    origin:           'organizer',
+    initiatedBy:      callerUid,
+    reason:           'organizer_initiated',
+    registrationId,
+    eventSlug:        typeof reg.eventSlug === 'string' ? reg.eventSlug : null,
+    organizerUid:     typeof reg.organizerUid === 'string' ? reg.organizerUid : null,
+  }).catch(err => {
+    // Never fails the refund: the gateway has already returned the money, and refusing
+    // here would leave the organizer retrying a refund that already happened. The
+    // reconciliation surface picks up anything this drops.
+    console.error('[refund] refund record write failed:', { registrationId, refundId, err })
   })
+
+  // RD-FIN-02 · the ONE evidence-checked transition (shared with the refund.processed webhook).
+  const fin = await finalizePendingRegistrationRefund(registrationId, { refundId, amountPaise: refundAmount, gatewayPaymentId: paymentId })
+  if (fin === 'already_refunded') {
+    // The webhook finished it first — its side effects already ran exactly once.
+    return NextResponse.json({ success: true, refundId, refundAmount })
+  }
+  if (fin !== 'won') {
+    captureFinancialError('refund_finalize_unexpected', { scope: 'refund.finalize', registrationId, refundId, fin,
+      detail: 'gateway refund exists; registration not in the claimed state — reconcile manually' })
+    return NextResponse.json({ success: true, refundId, refundAmount })   // money moved: report it truthfully
+  }
 
   // Update paymentIntents (best-effort — Razorpay refund already succeeded)
   updatePaymentIntentRefund(orderId, refundId, 'processed', refundAmount).catch(err =>
@@ -225,16 +332,35 @@ export async function POST(
     })
   }
 
-  // ── 8. Audit entry (fire-and-forget) ──────────────────────────────────────
-  writeAuditEntry(registrationId, 'refunded', callerUid, 'organizer', uid).catch(err =>
+  // ── 8. Audit (RD-PHASE4-S4 · F4) ──────────────────────────────────────────
+  // The money has already moved, so neither write may turn this into a failure. Both are
+  // AWAITED (no longer detached): the registration's own audit trail names the real actor — a
+  // Super Admin, not the organizer — and the platform audit row carries the actor, reason,
+  // amount and gateway refund id; if THAT write fails it is durably recorded for reconciliation.
+  await writeAuditEntry(registrationId, 'refunded', callerUid, 'super_admin', uid).catch(err =>
     console.error('[refund] Failed to write audit entry:', err),
   )
+  await logAdminActionOrRecord({
+    adminUid:    callerUid,
+    actorRole:   'super_admin',
+    action:      'registration.refunded',
+    entityType:  'registration',
+    entityId:    registrationId,
+    reason:      refundReason,
+    metadata:    { organizerUid: uid, refundAmountPaise: refundAmount, refundId, paymentId, orderId },
+    correlation: { registrationId, refundId, paymentId, orderId, organizerUid: uid },
+  })
 
   // ── 8c. Release any held identifier (fire-and-forget, idempotent). A refunded
   //        participant should not retain their identifier. ──────────────────────
-  void releaseIdentifier(registrationId, callerUid, 'refunded').catch(err =>
-    console.error('[refund] Failed to release identifier:', err),
-  )
+  // RD-BIB-TIMING-01 · a refunded participant surrenders BOTH credentials, device
+  // first. The identifier engine refuses a release while a device depends on the
+  // number; a refund is one of the two cases where the number must go anyway, so
+  // the flag is passed explicitly here rather than the guard being relaxed globally.
+  void detachTimingTagByRegistration(registrationId, callerUid, 'refunded')
+    .catch(err => console.error('[refund] Failed to remove timing tag:', err))
+    .then(() => releaseIdentifier(registrationId, callerUid, 'refunded', { allowWhileTagged: true }))
+    .catch(err => console.error('[refund] Failed to release identifier:', err))
 
   // ── 9. Refund confirmation email (fire-and-forget) ────────────────────────
   sendRefundEmail(registrationId).catch(err =>

@@ -1,4 +1,26 @@
-@import "tailwindcss";
+/* ─── Tailwind source scanning — EXPLICIT, never auto-detected ──────────────
+   Tailwind v4 crawls the project for class candidates. Twice that crawl has
+   poisoned the build:
+
+     1. prose in docs/*.md produced `.text-[length:var(--fs-*)]` wildcards;
+     2. Turbopack fed an RSC response back through the CSS graph in dev, so a
+        class that straddled a flight chunk boundary compiled as
+        `.px-[var(--butto"])</script><script>self.__next_f.push([1,"n-px-md)]`
+        and PostCSS refused the file — every route 500ed.
+
+   `source(none)` turns the crawl off; the directories below are the only
+   places this app writes class names. Add a directory here when you add one
+   that renders markup, or its utilities will silently not be generated. */
+@import "tailwindcss" source(none);
+@source "../app";
+@source "../components";
+@source "../features";
+@source "../lib/ds";
+@source "../lib/marketing";
+/* The dashboard accent scale writes complete class names (bar/tile/chip per tone) that
+   components read through accent(tone). Unscanned, the table-only ones — every
+   `bg-accent-*-solid` bar — were never emitted: capacity bars rendered transparent. */
+@source "../lib/dashboard/accents.ts";
 @import "../styles/tokens.css";
 
 /* Enable .dark class-based dark mode for Tailwind utilities */
@@ -13,6 +35,9 @@
   /* Primary */
   --color-primary:            var(--primary);
   --color-primary-hover:      var(--primary-hover);
+  /* RD-DASH-15 · `text-primary-text` — the accessible brand pink for TEXT. Distinct
+     from `--color-primary`, which stays the FILL used by buttons, gradients and rings. */
+  --color-primary-text:       var(--primary-text);
   --color-primary-foreground: var(--primary-foreground);
   /* Gradient stops — enables from-primary-from / to-primary-to utilities */
   --color-primary-from:       var(--primary-from);
@@ -69,6 +94,8 @@
 
   /* Typography — font families */
   --font-sans: var(--font-geist);
+  /* RD-HERO-03 · the hero headline face (app/layout.tsx → --font-fraunces). */
+  --font-display: var(--font-fraunces), Georgia, 'Times New Roman', serif;
   --font-mono: ui-monospace, 'Cascadia Code', 'Source Code Pro', Menlo, Consolas, monospace;
 
   /* Typography — font-size scale (LS2.1A infrastructure fix).
@@ -109,6 +136,33 @@
   --color-surface-2: var(--surface-2);
   --color-surface-3: var(--surface-3);
 
+  /* RD-NAV-01 · the public action colour → bg-action, text-action-foreground, … */
+  --color-action:            var(--action);
+  --color-action-end:        var(--action-end);
+  --color-action-hover:      var(--action-hover);
+  --color-action-foreground: var(--action-foreground);
+
+  /* RD-HERO-02 · landing hero → text-hero-ink, bg-hero-accent, border-hero-rule, … */
+  --color-hero-ink:       var(--hero-ink);
+  --color-hero-ink-soft:  var(--hero-ink-soft);
+  --color-hero-eyebrow:   var(--hero-eyebrow);
+  --color-hero-cobalt:    var(--hero-cobalt);
+
+  --color-hero-violet:    var(--hero-violet);
+  --color-hero-accent:    var(--hero-accent);
+  --color-hero-rule:      var(--hero-rule);
+  --color-hero-track:     var(--hero-track);
+  /* The hero's WARM accent: the Sports panel rule and the "Create Impact" chip.
+     Distinct from --hero-accent (cobalt) and --hero-rule (the eyebrow hairline). */
+  --color-hero-accent-rule: var(--hero-accent-rule);
+
+  /* Inverse band + ink-on-media → bg-surface-inverse, text-ink-on-media, … */
+  --color-surface-inverse:            var(--surface-inverse);
+  --color-surface-inverse-foreground: var(--surface-inverse-foreground);
+  --color-ink-on-media:       var(--ink-on-media);
+  --color-ink-on-media-muted: var(--ink-on-media-muted);
+  --color-ink-on-media-scrim: var(--ink-on-media-scrim);
+
   /* Elevation → shadow-elevation-0…4, shadow-brand */
   --shadow-elevation-0: var(--elevation-0);
   --shadow-elevation-1: var(--elevation-1);
@@ -119,6 +173,89 @@
 
   /* Radius → rounded-xs (sm…full already mapped above) */
   --radius-xs: var(--radius-xs);
+
+  /* RD-ORG-FOUNDATION — restrained radius utilities for the organizer shell:
+     rounded-control / rounded-surface / rounded-panel / rounded-pill. */
+  --radius-control: var(--radius-control);
+  --radius-surface: var(--radius-surface);
+  --radius-panel:   var(--radius-panel);
+  --radius-pill:    var(--radius-pill);
+
+  /* RD-DASHBOARD-03 — semantic metric accents → bg-accent-people / text-accent-money …
+     Both halves of each pair are registered so a tile can set its surface and its
+     glyph from the same meaning. Dark values come from the .dark override in
+     styles/tokens.css, so no component needs a dark: variant. */
+  --color-accent-people-bg:   var(--accent-people-bg);
+  --color-accent-people-fg:   var(--accent-people-fg);
+  --color-accent-money-bg:    var(--accent-money-bg);
+  --color-accent-money-fg:    var(--accent-money-fg);
+  --color-accent-event-bg:    var(--accent-event-bg);
+  --color-accent-event-fg:    var(--accent-event-fg);
+  --color-accent-verify-bg:   var(--accent-verify-bg);
+  --color-accent-verify-fg:   var(--accent-verify-fg);
+  --color-accent-pending-bg:  var(--accent-pending-bg);
+  --color-accent-pending-fg:  var(--accent-pending-fg);
+  --color-accent-critical-bg: var(--accent-critical-bg);
+  --color-accent-critical-fg: var(--accent-critical-fg);
+  --color-accent-neutral-bg:  var(--accent-neutral-bg);
+  --color-accent-neutral-fg:  var(--accent-neutral-fg);
+  /* Bright non-text fills — rules and meters. See the note in styles/tokens.css. */
+  --color-accent-people-solid:   var(--accent-people-solid);
+  --color-accent-money-solid:    var(--accent-money-solid);
+  --color-accent-event-solid:    var(--accent-event-solid);
+  --color-accent-verify-solid:   var(--accent-verify-solid);
+  --color-accent-pending-solid:  var(--accent-pending-solid);
+  --color-accent-critical-solid: var(--accent-critical-solid);
+  --color-accent-neutral-solid:  var(--accent-neutral-solid);
+  /* Card surface tints — see styles/tokens.css. */
+  --color-accent-people-surface:   var(--accent-people-surface);
+  --color-accent-money-surface:    var(--accent-money-surface);
+  --color-accent-event-surface:    var(--accent-event-surface);
+  --color-accent-verify-surface:   var(--accent-verify-surface);
+  --color-accent-pending-surface:  var(--accent-pending-surface);
+  --color-accent-critical-surface: var(--accent-critical-surface);
+  --color-accent-neutral-surface:  var(--accent-neutral-surface);
+  /* Icon chips — solid accent + its own foreground. See styles/tokens.css. */
+  --color-accent-people-chip:      var(--accent-people-chip);
+  --color-accent-people-chip-fg:   var(--accent-people-chip-fg);
+  --color-accent-money-chip:       var(--accent-money-chip);
+  --color-accent-money-chip-fg:    var(--accent-money-chip-fg);
+  --color-accent-event-chip:       var(--accent-event-chip);
+  --color-accent-event-chip-fg:    var(--accent-event-chip-fg);
+  --color-accent-verify-chip:      var(--accent-verify-chip);
+  --color-accent-verify-chip-fg:   var(--accent-verify-chip-fg);
+  --color-accent-pending-chip:     var(--accent-pending-chip);
+  --color-accent-pending-chip-fg:  var(--accent-pending-chip-fg);
+  --color-accent-critical-chip:    var(--accent-critical-chip);
+  --color-accent-critical-chip-fg: var(--accent-critical-chip-fg);
+  --color-accent-neutral-chip:     var(--accent-neutral-chip);
+  --color-accent-neutral-chip-fg:  var(--accent-neutral-chip-fg);
+  /* Product accents — see styles/tokens.css. Accents only, never card backgrounds. */
+  --color-accent-violet:     var(--accent-violet);
+  --color-accent-gold:       var(--accent-gold);
+  --color-accent-rose:       var(--accent-rose);
+  --color-accent-coral:      var(--accent-coral);
+  --color-accent-violet-bg2: var(--accent-violet-bg2);
+  --color-accent-gold-bg2:   var(--accent-gold-bg2);
+  --color-accent-rose-bg2:   var(--accent-rose-bg2);
+  --color-accent-coral-bg2:  var(--accent-coral-bg2);
+  --color-accent-violet-fg2: var(--accent-violet-fg2);
+  --color-accent-gold-fg2:   var(--accent-gold-fg2);
+  --color-accent-rose-fg2:   var(--accent-rose-fg2);
+  --color-accent-coral-fg2:  var(--accent-coral-fg2);
+  /* Brand accents — see styles/tokens.css. Accents only, never card backgrounds. */
+  --color-brand-violet:    var(--brand-violet);
+  --color-brand-gold:      var(--brand-gold);
+  --color-brand-rose:      var(--brand-rose);
+  --color-brand-coral:     var(--brand-coral);
+  --color-brand-violet-bg: var(--brand-violet-bg);
+  --color-brand-gold-bg:   var(--brand-gold-bg);
+  --color-brand-rose-bg:   var(--brand-rose-bg);
+  --color-brand-coral-bg:  var(--brand-coral-bg);
+  --color-brand-violet-fg: var(--brand-violet-fg);
+  --color-brand-gold-fg:   var(--brand-gold-fg);
+  --color-brand-rose-fg:   var(--brand-rose-fg);
+  --color-brand-coral-fg:  var(--brand-coral-fg);
 
   /* Typography roles → text-display-xl … text-overline (font-size only) */
   --text-display-xl:  var(--type-display-xl);
@@ -193,7 +330,13 @@ html {
 }
 
 body {
- /*  background-color: var(--background); */
+  /* RD-THEME-01 · restored. This was commented out, so <body> painted NO ground and
+     every section had to carry its own bg-white literal to look right — which is why
+     the marketing pages went white-on-white the moment the organizer theme toggle put
+     `.dark` on <html>. In the light theme --background is #FFFFFF, so re-enabling it
+     changes nothing that renders today; it is what lets the surface tokens mean
+     something. */
+  background-color: var(--background);
   color: var(--foreground);
   font-family: var(--font-sans, 'Geist', system-ui, sans-serif);
   -webkit-font-smoothing: antialiased;
@@ -283,7 +426,7 @@ body {
 .hero-swiper .swiper-pagination-bullet-active {
   width: 20px !important;
   border-radius: 4px !important;
-  background-color: var(--primary) !important;
+  background-color: var(--action) !important;
   opacity: 1 !important;
 }
 
@@ -313,7 +456,7 @@ body {
 .hero-ext-pagination .swiper-pagination-bullet-active {
   width: 22px !important;
   border-radius: 4px !important;
-  background-color: var(--primary) !important;
+  background-color: var(--action) !important;
   opacity: 1 !important;
 }
 
@@ -364,7 +507,7 @@ body {
 }
 
 /* The opacity channel below must be Tailwind's own `--tw-*-opacity`, NOT `--primary`.
-   `--primary` is the brand COLOUR token (#e5277e, styles/tokens.css). Assigning it the
+   `--primary` is the brand COLOUR token (styles/tokens.css). Assigning it the
    number 1 here re-declared it in this rule's scope, and custom properties inherit — so
    every descendant resolving `var(--primary)` as a colour (text-primary, border-primary,
    --color-primary → var(--primary)) would receive `1`, an invalid colour. Both rules
@@ -372,18 +515,109 @@ body {
    stylesheet). The sibling `.text-muted` below was already written correctly, which is what
    identifies this as a find-and-replace slip rather than intent. Rendering is unchanged:
    the channel resolved to 1 before and resolves to 1 now. */
+/* 2026-09-29: indigo, following --primary off the retired magenta. */
 .bg-brand-50 {
     --tw-bg-opacity: 1;
-    background-color: rgb(253 238 245 / var(--tw-bg-opacity, 1));
+    background-color: rgb(238 242 255 / var(--tw-bg-opacity, 1));
 }
 .text-brand-600 {
     --tw-text-opacity: 1;
-    color: rgb(229 39 126 / var(--tw-text-opacity, 1));
+    color: rgb(79 70 229 / var(--tw-text-opacity, 1));
 }
 .text-muted{
     --tw-text-opacity: 1;
     color: rgb(107 101 128 / var(--tw-text-opacity, 1));
 }
+
+/* ─── RD-HERO-03 · landing hero ────────────────────────────────────────────────
+   The hero is ONE photograph at a time, edge to edge, with the statement set over it.
+   Three behaviours live here rather than in React state, so the photographs — rendered
+   on the server with next/image — never have to cross into the client bundle:
+
+   1 · Which backdrop is showing. The stage publishes the slide index as data-active;
+       every backdrop is in the DOM and the matching one is faded in. A crossfade, not a
+       cut: the outgoing photograph is still there under the incoming one for 1.4s.
+   2 · The drift. The active photograph scales from 1 to 1.06 over the whole dwell —
+       --hero-autoplay, the SAME token the JS timer reads — so the movement ends exactly
+       when the slide does. Slow enough that nothing reads as animation; the picture
+       simply breathes.
+   3 · The progress hairline, driven by the same token, paused by data-paused together
+       with the timer, so the line can never finish early or late.
+   All three are inert under prefers-reduced-motion: the photographs cut, the line is
+   drawn full, nothing moves by itself.
+   ──────────────────────────────────────────────────────────────────────────────── */
+@keyframes rdHeroProgress {
+  from { transform: scaleX(0); }
+  to   { transform: scaleX(1); }
+}
+.rd-hero-progress {
+  transform-origin: left center;
+  animation: rdHeroProgress var(--hero-autoplay) linear forwards;
+}
+[data-hero-stage][data-paused='true'] .rd-hero-progress { animation-play-state: paused; }
+
+@keyframes rdHeroBackdropDrift {
+  from { transform: scale(1); }
+  to   { transform: scale(1.06); }
+}
+[data-hero-backdrop] {
+  opacity: 0;
+  transition: opacity 1400ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+[data-hero-backdrop] > img { transform-origin: 50% 40%; }
+[data-hero-stage][data-active='0'] [data-hero-backdrop='0'],
+[data-hero-stage][data-active='1'] [data-hero-backdrop='1'],
+[data-hero-stage][data-active='2'] [data-hero-backdrop='2'] {
+  opacity: 1;
+  z-index: 1;
+}
+[data-hero-stage][data-active='0'] [data-hero-backdrop='0'] > img,
+[data-hero-stage][data-active='1'] [data-hero-backdrop='1'] > img,
+[data-hero-stage][data-active='2'] [data-hero-backdrop='2'] > img {
+  animation: rdHeroBackdropDrift calc(var(--hero-autoplay) + 1400ms) linear forwards;
+}
+[data-hero-stage][data-paused='true'] [data-hero-backdrop] > img { animation-play-state: paused; }
+
+/* Paper grain over the photograph: an inline SVG turbulence tile, 160px, repeated.
+   Static by design — a moving grain is film, a still grain is print. */
+.rd-hero-grain {
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns=%27http://www.w3.org/2000/svg%27 width=%27160%27 height=%27160%27><filter id=%27n%27><feTurbulence type=%27fractalNoise%27 baseFrequency=%270.9%27 numOctaves=%272%27 stitchTiles=%27stitch%27/></filter><rect width=%27100%25%27 height=%27100%25%27 filter=%27url(%23n)%27/></svg>");
+  background-size: 160px 160px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rd-hero-progress { animation: none; transform: scaleX(1); }
+  [data-hero-backdrop] { transition: none; }
+  [data-hero-stage][data-active] [data-hero-backdrop] > img { animation: none; transform: none; }
+}
+
+/* ─── RD-LANDING-01 · the brand gradient ─────────────────────────────────────
+   The ONE place the public brand ramp is applied. Its two stops live in
+   --action / --action-end (styles/tokens.css); this utility only references them, so
+   the gradient cannot be re-typed with slightly different hex values in a component.
+
+   background-image, not background: the element keeps whatever background-color it is
+   given, which is what lets a disabled or loading state flatten the gradient by simply
+   clearing the image. */
+.rd-brand-gradient {
+  background-image: var(--action-gradient);
+}
+
+/* ─── RD-AUTH-UI · the sign-in column ─────────────────────────────────────────
+   There is deliberately NO utility here.
+
+   A previous pass gave the /login form column a bottom-weighted indigo/violet wash
+   to fill the space below the form. It was rejected on sight: on a screen whose
+   whole job is a name, a password and a button, a tinted ground reads as decoration
+   applied to hide an empty area rather than as depth. The column is --background,
+   flat, and the space below the form is white space — which is what a premium
+   composition spends, not what it apologises for.
+
+   The seam between the form column and the brand panel needs no hairline either:
+   the panel is a photograph, and its own edge is the boundary.
+
+   Nothing on that screen carries a shadow, a fill or a wash. Its only structure is
+   type, measure and 1px rules in --border. */
 
 /* ─── Global cursor utility ──────────────────────────────────────────────── */
 .interactive {
@@ -526,111 +760,4 @@ body {
 @keyframes rdAuroraLogo {
   0%, 100% { transform: translate3d(0, 0, 0); }
   50%      { transform: translate3d(2px, 2px, 0); }
-}
-/* ═══ RD-ST5.6 — Premium animated hero background ══════════════════════════════
-   Replaces the photographic hero backdrop with a calm, enterprise gradient field.
-   Three layers, all pure CSS: brand orbs (radial gradients — no filter:blur, so
-   there is nothing for the compositor to rasterise every frame), a barely-there
-   mesh, and a noise grain. Only transform and opacity animate, so every frame
-   stays on the GPU. Motion is opt-IN via prefers-reduced-motion: no-preference,
-   matching the existing rd-aurora / rd-atmo convention in this file. */
-
-.rd-hero-bg {
-  position: absolute;
-  inset: 0;
-  overflow: hidden;
-  background: var(--background);
-}
-
-/* ── Layer 1 · brand orbs ─────────────────────────────────────────────────── */
-.rd-hero-orb {
-  position: absolute;
-  border-radius: 9999px;
-  opacity: 0.85;
-  transform: translate3d(0, 0, 0);
-  will-change: transform, opacity;
-}
-.rd-hero-orb--a {
-  width: 860px; height: 860px; top: -280px; left: -200px;
-  background: radial-gradient(closest-side, rgb(var(--primary-from-rgb) / 0.08), transparent 100%);
-}
-.rd-hero-orb--b {
-  width: 780px; height: 780px; top: -140px; right: -180px;
-  background: radial-gradient(closest-side, rgb(var(--primary-rgb) / 0.06), transparent 100%);
-}
-.rd-hero-orb--c {
-  width: 720px; height: 720px; bottom: -320px; left: 22%;
-  background: radial-gradient(closest-side, rgb(var(--info-rgb) / 0.05), transparent 100%);
-}
-
-/* ── Layer 2 · mesh (kept under 5%) ───────────────────────────────────────── */
-.rd-hero-mesh {
-  position: absolute;
-  inset: -10%;
-  opacity: 0.04;
-  background:
-    radial-gradient(60% 55% at 18% 12%, rgb(var(--primary-from-rgb) / 1), transparent 70%),
-    radial-gradient(55% 50% at 82% 30%, rgb(var(--primary-rgb) / 1), transparent 72%),
-    radial-gradient(50% 45% at 50% 96%, rgb(var(--info-rgb) / 1), transparent 70%);
-}
-
-/* ── Layer 3 · grain (kept under 2%) ──────────────────────────────────────── */
-.rd-hero-noise {
-  position: absolute;
-  inset: 0;
-  opacity: 0.015;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
-}
-
-/* ── Soft glow behind the registration card ───────────────────────────────── */
-.rd-hero-cardglow {
-  position: absolute;
-  inset: -12%;
-  border-radius: 9999px;
-  opacity: 0.08;
-  background: radial-gradient(closest-side, rgb(var(--primary-rgb) / 1), transparent 100%);
-  transform: translate3d(0, 0, 0);
-  will-change: transform, opacity;
-}
-
-/* ── Motion — opt-in, 10–14s, ease-in-out, infinite ───────────────────────── */
-@media (prefers-reduced-motion: no-preference) {
-  .rd-hero-orb--a     { animation: rdHeroDriftA 13s ease-in-out infinite; }
-  .rd-hero-orb--b     { animation: rdHeroDriftB 11s ease-in-out infinite; }
-  .rd-hero-orb--c     { animation: rdHeroDriftC 14s ease-in-out infinite; }
-  .rd-hero-cardglow   { animation: rdHeroGlow   12s ease-in-out infinite; }
-}
-@keyframes rdHeroDriftA {
-  0%, 100% { transform: translate3d(0, 0, 0) scale(1);    opacity: 0.85; }
-  50%      { transform: translate3d(26px, -20px, 0) scale(1.05); opacity: 1; }
-}
-@keyframes rdHeroDriftB {
-  0%, 100% { transform: translate3d(0, 0, 0) scale(1);    opacity: 0.85; }
-  50%      { transform: translate3d(-24px, 22px, 0) scale(1.05); opacity: 1; }
-}
-@keyframes rdHeroDriftC {
-  0%, 100% { transform: translate3d(0, 0, 0) scale(1);    opacity: 0.85; }
-  50%      { transform: translate3d(20px, -28px, 0) scale(1.04); opacity: 1; }
-}
-@keyframes rdHeroGlow {
-  0%, 100% { transform: translate3d(0, 0, 0) scale(1);    opacity: 0.08; }
-  50%      { transform: translate3d(0, -10px, 0) scale(1.05); opacity: 0.1; }
-}
-
-/* ── Sports hero — mobile glow containment (RD-ST5.x) ──────────────────────────
-   The shared hero orbs are sized for a desktop canvas: 860 / 780 / 720px. On a
-   332–412px viewport each one is WIDER THAN THE SCREEN, so the radial never
-   reaches its transparent outer stop — the hero is covered by the dense centre of
-   three stacked brand washes (coral 8% + magenta 6% + rose 5%, each at .85), plus
-   the mesh and the card glow. The result reads as a pink flood rather than a halo.
-
-   Scoped to .sports-hero and to mobile only: the shared .rd-hero-* rules, the
-   global shadow/gradient tokens and every other template are untouched, and the
-   desktop glow is unchanged. Brand presence is reduced, not removed. */
-@media (max-width: 767px) {
-  /* The orbs ANIMATE their own opacity, so a declaration on them loses to the
-     keyframes. Dimming their non-animated parent multiplies through instead. */
-  .sports-hero .rd-hero-bg      { opacity: 0.34; }
-  .sports-hero .rd-hero-mesh    { opacity: 0.02; }
-  .sports-hero .rd-hero-cardglow{ opacity: 0.04 !important; }
 }

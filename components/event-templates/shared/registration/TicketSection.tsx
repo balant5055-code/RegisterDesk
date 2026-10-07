@@ -2,7 +2,7 @@ import Link from 'next/link'
 import { Lock, Ticket, Users, Clock, CheckCircle2, ShieldCheck, ArrowRight } from 'lucide-react'
 import { buildRegisterHref } from '@/lib/events/registerHref'
 import { cn } from '@/lib/utils/cn'
-import { buttonVariants } from '@/components/ui/button'
+import { marketingButton } from '@/lib/marketing/theme'
 import type { PassAvailability } from '@/lib/registrations/types'
 import type { PassPublic } from '@/components/event-templates/types'
 import { SectionWrapper } from '@/components/event-templates/shared/ui/SectionWrapper'
@@ -11,6 +11,8 @@ import { formatINR, formatDateShort, passDisplayPrice } from '@/components/event
 import { organizerFeaturedPassId } from '@/components/event-templates/shared/utils/featuredPass'
 import { TAX_INCLUSIVE_NOTE } from '@/lib/pricing/copy'
 import { MilestoneNotice } from './MilestoneNotice'
+import { formatBenefits } from './benefitLabels'
+import { DownloadTicketLink } from './DownloadTicketLink'
 import type { ResolvedMilestoneAlert } from '@/lib/events/milestoneAlerts'
 
 export function TicketSection({ passes, isFreeEvent, slug, availability, eventMilestoneAlert, registrationOpen, closedMessage }: {
@@ -78,14 +80,14 @@ export function TicketSection({ passes, isFreeEvent, slug, availability, eventMi
                     unavailable
                       ? 'border-border opacity-60'
                       : isPopular
-                        ? 'border-primary/50 shadow-[var(--shadow-brand-md)]'
-                        : 'border-border hover:border-primary/30 hover:shadow-[var(--shadow-md)]',
+                        ? 'border-action/50 shadow-[var(--shadow-brand-md)]'
+                        : 'border-border hover:border-action/30 hover:shadow-[var(--shadow-md)]',
                   )}
                 >
                   {isPopular && !unavailable && (
                     <div
                       className="absolute -top-3 left-1/2 -translate-x-1/2 rounded-full px-3 py-0.5 text-[10px] font-bold text-white"
-                      style={{ backgroundImage: 'var(--primary-gradient)' }}
+                      style={{ backgroundImage: 'var(--action-gradient)' }}
                     >
                       Most Popular
                     </div>
@@ -136,11 +138,11 @@ export function TicketSection({ passes, isFreeEvent, slug, availability, eventMi
                     {/* Booking Milestone Alert — informational only; resolved server-side. */}
                     <MilestoneNotice alert={pass.milestoneAlert} />
 
-                    {pass.benefits && pass.benefits.length > 0 && (
+                    {formatBenefits(pass.benefits).length > 0 && (
                       <ul className="mt-2.5 flex flex-col gap-1 border-t border-border/40 pt-2.5">
-                        {pass.benefits.map((b, i) => (
+                        {formatBenefits(pass.benefits).map((b, i) => (
                           <li key={i} className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
-                            <CheckCircle2 className="size-3 shrink-0 text-primary" aria-hidden />
+                            <CheckCircle2 className="size-3 shrink-0 text-action" aria-hidden />
                             {b}
                           </li>
                         ))}
@@ -152,7 +154,7 @@ export function TicketSection({ passes, isFreeEvent, slug, availability, eventMi
                     <div className="mt-3">
                       {unavailable ? (
                         <span className={cn(
-                          buttonVariants({ variant: 'outline', size: 'md' }),
+                          marketingButton({ variant: 'outline', size: 'md' }),
                           'w-full cursor-not-allowed opacity-40',
                         )}>
                           {soldOut
@@ -164,7 +166,7 @@ export function TicketSection({ passes, isFreeEvent, slug, availability, eventMi
                       ) : (
                         <Link
                           href={buildRegisterHref(slug, pass.id)}
-                          className={cn(buttonVariants({ variant: 'primary', size: 'sm' }), 'w-full gap-1.5')}
+                          className={cn(marketingButton({ emphasis: 'gradient', variant: 'primary', size: 'sm' }), 'w-full gap-1.5')}
                         >
                           Register Now
                           <ArrowRight className="size-3.5" aria-hidden />
@@ -178,10 +180,18 @@ export function TicketSection({ passes, isFreeEvent, slug, availability, eventMi
           </div>
 
           <p className="mt-4 flex items-center justify-center gap-1 text-center text-[10.5px] text-muted-foreground">
-            <ShieldCheck className="size-3.5 shrink-0 text-primary/60" aria-hidden />
+            <ShieldCheck className="size-3.5 shrink-0 text-action/60" aria-hidden />
             Group discounts available for 10+ participants
           </p>
         </>
+      )}
+
+      {/* The way back to an existing ticket, shown whenever the event has passes, including
+          once registration has closed (that is when people most need it). */}
+      {visiblePasses.length > 0 && (
+        <div className="mt-5 flex justify-center">
+          <DownloadTicketLink slug={slug} />
+        </div>
       )}
     </SectionWrapper>
   )

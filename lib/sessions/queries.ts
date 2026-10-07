@@ -4,7 +4,7 @@
 
 import { adminDb } from '@/lib/firebase/admin'
 import {
-  SESSIONS, TRACKS, HALLS, SPEAKERS,
+  SESSIONS, TRACKS, HALLS, SPEAKERS, SESSION_CHECKINS,
   type EventSessionDoc, type EventTrackDoc, type EventHallDoc, type EventSpeakerDoc,
   type SessionView, type ScheduleBundle, type SessionAnalytics,
 } from '@/lib/sessions/types'
@@ -62,20 +62,52 @@ export function computeAnalytics(bundle: ScheduleBundle): SessionAnalytics {
   }
 }
 
-/** Registrations that selected a given session (in-memory filter; no extra index). */
+/**
+ * Registrations that selected a given session.
+ *
+ * ═══ RD-EVENT-17 · WHAT THIS USED TO COST ═════════════════════════════════════
+ * It read EVERY registration for the event and filtered `selectedSessions` in memory:
+ *
+ *     registrations.where('organizerUid',…).where('eventSlug',…).get()
+ *
+ * so exporting one 40-seat session's attendee list from an event with 25,000
+ * registrations transferred 25,000 documents — each carrying a name, an email address and
+ * a phone number. `array-contains` on `selectedSessions` returns exactly the holders and
+ * needs no composite index (single-field auto-index), which is the same query
+ * `cancelSession` already uses to detach a cancelled session.
+ *
+ * The ownership filter stays: `array-contains` is a global query, so the organizer/slug
+ * check is what keeps one workspace's export out of another's.
+ */
 export async function listSessionAttendees(uid: string, slug: string, sessionId: string): Promise<{ name: string; email: string; phone: string; ticketCode: string; checkedIn: boolean }[]> {
-  const snap = await adminDb.collection('registrations')
-    .where('organizerUid', '==', uid).where('eventSlug', '==', slug).get()
+  const [regSnap, ciSnap] = await Promise.all([
+    adminDb.collection('registrations').where('selectedSessions', 'array-contains', sessionId).get(),
+    // Scoped by workspace as well as session: `sessionId` is a random uuid so a collision
+    // is not a practical risk, but an unscoped read of a check-in collection is not a
+    // pattern to leave lying around.
+    adminDb.collection(SESSION_CHECKINS)
+      .where('sessionId', '==', sessionId)
+      .where('organizerUid', '==', uid)
+      .get(),
+  ])
+
+  const checkedEmails = new Set(
+    ciSnap.docs.map(d => (d.data() as { attendeeEmail?: string }).attendeeEmail ?? '').filter(Boolean),
+  )
+
   const out: { name: string; email: string; phone: string; ticketCode: string; checkedIn: boolean }[] = []
-  for (const doc of snap.docs) {
-    const r = doc.data() as { selectedSessions?: string[]; attendee?: { name?: string; email?: string; phone?: string }; ticketCode?: string }
-    if (!Array.isArray(r.selectedSessions) || !r.selectedSessions.includes(sessionId)) continue
-    out.push({ name: r.attendee?.name ?? '', email: r.attendee?.email ?? '', phone: r.attendee?.phone ?? '', ticketCode: r.ticketCode ?? '', checkedIn: false })
+  for (const doc of regSnap.docs) {
+    const r = doc.data() as {
+      organizerUid?: string; eventSlug?: string
+      attendee?: { name?: string; email?: string; phone?: string }; ticketCode?: string
+    }
+    if (r.organizerUid !== uid || r.eventSlug !== slug) continue
+    const email = r.attendee?.email ?? ''
+    out.push({
+      name: r.attendee?.name ?? '', email, phone: r.attendee?.phone ?? '',
+      ticketCode: r.ticketCode ?? '', checkedIn: email !== '' && checkedEmails.has(email),
+    })
   }
-  // Mark session-level check-in.
-  const ci = await adminDb.collection('sessionCheckIns').where('sessionId', '==', sessionId).get()
-  const checkedEmails = new Set(ci.docs.map(d => (d.data() as { attendeeEmail?: string }).attendeeEmail ?? ''))
-  for (const a of out) if (checkedEmails.has(a.email)) a.checkedIn = true
   return out.sort((a, b) => a.name.localeCompare(b.name))
 }
 

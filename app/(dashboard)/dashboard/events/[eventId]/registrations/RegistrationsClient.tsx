@@ -5,6 +5,7 @@ import { useSearchParams }           from 'next/navigation'
 import { useAuth }               from '@/components/auth/AuthProvider'
 import Link                      from 'next/link'
 import { cn }                    from '@/lib/utils/cn'
+import { accent }                from '@/lib/dashboard/accents'
 import { csvCell as csvEscape }  from '@/lib/utils/csv'
 import {
   buildRegistrationExportColumns, buildRegistrationExportRow, exportCellValue,
@@ -17,9 +18,20 @@ import {
   Ticket, Mail, Phone, Calendar, Tag, Eye, Send, Loader2,
   FileDown, BanIcon, Undo2, ChevronDown, ChevronUp,
   AlertTriangle, History, RotateCw, Pencil, CreditCard, Copy, Check,
+  IdCard, Radio,
 } from 'lucide-react'
 import type { SerializedRegistration, RegistrationsApiResponse } from '@/app/api/organizer/events/[eventId]/registrations/route'
 import { registrationStatusCls } from '@/lib/ui/statusColors'
+// RD-EVENT-21 · ONE precedence rule for the identifier mirrors, one vocabulary for
+// the three credentials. Pure — nothing here reads Firestore.
+import {
+  resolveIdentifierValue, resolveTimingTag, identifierPatch,
+  identifierColumnMode, identifierColumnLabel, emptyIdentifierText, showTimingTagColumn,
+  IDENTIFIER_UNASSIGNED, TIMING_TAG_GENERIC_LABEL, IDENTIFIER_GENERIC_LABEL,
+  allowedNumbersForPass,
+  type EventIdentity,
+} from '@/lib/registrations/identity'
+import { identifierAssignmentBlockedBy } from '@/lib/identifiers/eligibility'
 import { useConfirm } from '@/components/ui/ConfirmDialog'
 import { useFocusTrap } from '@/lib/hooks/useFocusTrap'
 import type { ResendEmailResponse } from '@/app/api/organizer/registrations/[registrationId]/resend-email/route'
@@ -38,6 +50,7 @@ import type { BulkApproveResponse }  from '@/app/api/organizer/registrations/bul
 import type { BulkRejectResponse }   from '@/app/api/organizer/registrations/bulk-reject/route'
 import type { ApproveRegistrationResponse } from '@/app/api/organizer/registrations/[registrationId]/approve/route'
 import type { RejectRegistrationResponse }  from '@/app/api/organizer/registrations/[registrationId]/reject/route'
+import { resolveRegistrationOrderId } from '@/lib/registrations/paymentIdentifiers'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -146,27 +159,28 @@ function auditActionLabel(action: string): string {
 
 function auditActionColor(action: string): string {
   switch (action) {
-    case 'cancelled':   return 'text-red-600'
-    case 'restored':    return 'text-emerald-600'
-    case 'checked_in':       return 'text-sky-600'
-    case 'check_in_undone':  return 'text-sky-400'
-    case 'refunded':         return 'text-amber-600'
+    case 'cancelled':   return 'text-red-700'
+    case 'restored':    return 'text-emerald-800'
+    case 'checked_in':       return 'text-sky-800'
+    case 'check_in_undone':  return 'text-sky-700'
+    case 'refunded':         return 'text-amber-800'
     case 'email_sent':
-    case 'email_resent': return 'text-violet-600'
-    case 'approved':    return 'text-emerald-600'
-    case 'rejected':    return 'text-rose-600'
-    case 'updated':     return 'text-indigo-600'
+    case 'email_resent': return 'text-violet-800'
+    case 'approved':    return 'text-emerald-800'
+    case 'rejected':    return 'text-rose-800'
+    case 'updated':     return 'text-indigo-800'
     default:            return 'text-muted-foreground'
   }
 }
 
-// RD-ORGANIZER-01 P0-2: an EXACT lookup the server resolves at any scale (email or an
-// RD ticket code). Everything else is a free-text NAME query — Firestore has no substring
-// search, so those stay a client refinement over the loaded window (no regression).
-function isExactSearch(q: string): boolean {
-  const s = q.trim()
-  return s.includes('@') || /^rd[-_ ]?[a-z0-9]{4,}$/i.test(s)
-}
+/** The only load-error codes this screen recognises; anything else becomes `unavailable`. */
+const KNOWN_LOAD_ERRORS = new Set(['forbidden', 'not-found', 'signed-out', 'unavailable'])
+
+// RD-EVENT-12 · `isExactSearch` is gone. It decided, in the BROWSER, whether a query
+// could be resolved server-side — and everything it judged "not exact" triggered an
+// `all=true` load of up to 2,000 registrations to filter locally. Classification now
+// happens once, on the server, in lib/registrations/search.ts, where it belongs: the
+// client no longer has an opinion about how a query is resolved.
 
 // Selection export. Uses THE canonical column definition — the same one the server route
 // uses — so the two "Export CSV" buttons no longer produce different data for the same
@@ -298,6 +312,7 @@ function RegistrationDrawer({
   eventId,
   fieldLabels,
   token,
+  identity,
   onClose,
   onUpdate,
 }: {
@@ -305,11 +320,13 @@ function RegistrationDrawer({
   eventId:     string
   fieldLabels: Record<string, string>
   token:       string
+  /** The event's identity vocabulary; null when it could not be read. */
+  identity:    EventIdentity | null
   onClose:     () => void
   onUpdate:    (updates: Partial<SerializedRegistration>) => void
 }) {
   const formResponses = reg.attendee.formResponses as Record<string, unknown> | null | undefined
-  const { confirm } = useConfirm()
+  const { confirm, prompt } = useConfirm()
   // RD-ORGANIZER-01 P0-4: trap Tab within the drawer, focus the first control on open, and
   // restore focus to the trigger on close (the shared hook the ConfirmDialog already uses).
   const drawerRef = useFocusTrap<HTMLDivElement>()
@@ -325,7 +342,26 @@ function RegistrationDrawer({
 
   const [localCheckedIn, setLocalCheckedIn] = useState(reg.checkedIn)
   useEffect(() => { setLocalCheckedIn(reg.checkedIn) }, [reg.checkedIn])
+
+  // RD-EVENT-21 · the identifier now has ONE owner inside the drawer.
+  // It used to live in <ParticipantWorkspace360>, which meant the value shown at the
+  // top of the drawer and the value the identifier panel was editing were two pieces
+  // of state that could disagree after an action. The panel is now controlled.
+  const [identValue, setIdentValue] = useState<string | null>(resolveIdentifierValue(reg))
+  useEffect(() => { setIdentValue(resolveIdentifierValue(reg)) }, [reg])
   /* eslint-enable react-hooks/set-state-in-effect */
+
+  const timingTag  = resolveTimingTag(reg)
+  const identLabel = identity?.identifierLabel ?? reg.identifier?.label ?? IDENTIFIER_GENERIC_LABEL
+  const tagLabel   = identity?.tagLabel ?? TIMING_TAG_GENERIC_LABEL
+  // An identifier is only OFFERED where the engine would accept one. A cancelled or
+  // rejected registration is terminal to the identifier engine (RD-EVENT-19A), so the
+  // drawer must not present controls the server is certain to refuse.
+  const identBlocked = identifierAssignmentBlockedBy(reg)
+  // RD-BIB-01 - which numbers this participant's pass allows. Resolved from the
+  // event configuration the drawer already has, by the same pure functions the
+  // engine uses, so the hint and the refusal can never disagree.
+  const allowed = allowedNumbersForPass(identity, reg.passId)
 
   // ── Edit attendee details ──────────────────────────────────────────────────
   const responseEntries = Object.entries(formResponses ?? {})
@@ -666,12 +702,16 @@ function RegistrationDrawer({
   const [refundError,   setRefundError]   = useState<string | null>(null)
 
   async function handleRefund() {
+    // RD-PHASE4-S4 · D3 — a refund is a Super Admin decision and carries a reason.
+    const reason = (await prompt({ title: 'Reason required', message: 'Reason for refunding this registration:', required: true }))?.trim()
+    if (!reason) { setConfirmRefund(false); return }
     setRefunding(true)
     setRefundError(null)
     try {
       const res  = await fetch(`/api/organizer/registrations/${reg.id}/refund`, {
         method:  'POST',
-        headers: { Authorization: `Bearer ${token}` },
+        headers: { Authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+        body:    JSON.stringify({ reason }),
       })
       const body = await res.json() as RefundRegistrationResponse
       if (body.success) {
@@ -761,56 +801,60 @@ function RegistrationDrawer({
         <div className="flex-1 overflow-y-auto px-5 py-5">
           <div className="flex flex-col gap-5">
 
-            {/* ── Edit attendee details ── */}
-            {editing ? (
-              <div className="space-y-3 rounded-xl border border-primary/30 bg-primary/[0.03] p-4">
-                <p className="text-[12px] font-semibold uppercase tracking-wider text-muted-foreground">Edit Registration</p>
-                <label className="block">
-                  <span className="mb-1 block text-[12px] font-medium text-muted-foreground">Name</span>
-                  <input value={eName} onChange={e => setEName(e.target.value)} className={editInputCls} />
-                </label>
-                <label className="block">
-                  <span className="mb-1 block text-[12px] font-medium text-muted-foreground">Email</span>
-                  <input type="email" value={eEmail} onChange={e => setEEmail(e.target.value)} className={editInputCls} />
-                </label>
-                <label className="block">
-                  <span className="mb-1 block text-[12px] font-medium text-muted-foreground">Phone</span>
-                  <input value={ePhone} onChange={e => setEPhone(e.target.value)} className={editInputCls} />
-                </label>
-                {responseEntries.map(([k]) => (
-                  <label key={k} className="block">
-                    <span className="mb-1 block text-[12px] font-medium text-muted-foreground">{fieldLabels[k] ?? k}</span>
-                    <input value={eResp[k] ?? ''} onChange={e => setEResp(prev => ({ ...prev, [k]: e.target.value }))} className={editInputCls} />
-                  </label>
-                ))}
-                {editError && <p className="text-[13px] text-destructive">{editError}</p>}
-                <div className="flex justify-end gap-2 pt-1">
-                  <button type="button" onClick={cancelEdit} disabled={savingEdit}
-                    className="rounded-lg border border-border px-3 py-1.5 text-[13px] font-medium text-foreground hover:bg-muted disabled:opacity-60">
-                    Cancel
-                  </button>
-                  <button type="button" onClick={handleSaveEdit} disabled={!editDirty || savingEdit}
-                    className="rounded-lg bg-primary px-3 py-1.5 text-[13px] font-semibold text-primary-foreground hover:opacity-90 disabled:opacity-60">
-                    {savingEdit ? 'Saving…' : 'Save'}
-                  </button>
+            {/* ══ OPERATIONAL IDENTITY ══════════════════════════════════════════
+                RD-EVENT-21 · the three credentials a participant carries, together,
+                first, and never merged:
+
+                  Registration Ticket  the CHECK-IN credential (what the QR encodes)
+                  <configured label>   the PRINTED number the person wears
+                  <tag label>          the physical TIMING DEVICE
+
+                They used to be scattered — ticket code here, identifier and tag in a
+                collapsed panel BELOW the Cancel Registration button — so answering
+                "which number is this person wearing?" meant scrolling past a
+                destructive control. Each credential keeps its own label and its own
+                typographic weight precisely so an organizer cannot read one as
+                another. */}
+            <div className="overflow-hidden rounded-xl border border-border bg-card">
+              <p className="border-b border-border/60 bg-muted/[0.03] px-4 py-2 text-[12px] font-semibold uppercase tracking-wider text-muted-foreground">
+                Operational Identity
+              </p>
+
+              <div className="flex items-center gap-3 px-4 py-3">
+                <Ticket className="size-4 shrink-0 text-muted-foreground/60" aria-hidden />
+                <div className="min-w-0">
+                  <p className="text-[12px] font-semibold uppercase tracking-wider text-muted-foreground">Registration Ticket</p>
+                  <p className="mt-0.5 font-mono text-[18px] font-bold tracking-[0.1em] text-foreground">{reg.ticketCode}</p>
+                  <p className="text-fs-2xs text-muted-foreground">Used for check-in</p>
                 </div>
               </div>
-            ) : (
-              <button type="button" onClick={() => { resetEdit(); setEditing(true) }}
-                className="flex items-center justify-center gap-2 rounded-xl border border-border px-4 py-2.5 text-[13px] font-semibold text-foreground hover:bg-muted">
-                <Pencil className="size-3.5" aria-hidden /> Edit Registration
-              </button>
-            )}
 
-            {/* Ticket code */}
-            <div className="flex flex-col items-center rounded-xl border border-border bg-muted/[0.03] px-5 py-5 text-center">
-              <Ticket className="mb-2 size-5 text-muted-foreground" aria-hidden />
-              <p className="text-[12px] font-semibold uppercase tracking-widest text-muted-foreground">
-                Ticket Code
-              </p>
-              <p className="mt-1 font-mono text-[22px] font-bold tracking-[0.12em] text-foreground">
-                {reg.ticketCode}
-              </p>
+              {/* Shown whenever the event issues identifiers, or this person already
+                  holds one — an unassigned participant at an event that issues them is
+                  a fact worth stating, not a row to hide. */}
+              {(identity?.identifierEnabled || identValue) && (
+                <div className="flex items-center gap-3 border-t border-border/60 px-4 py-3">
+                  <IdCard className="size-4 shrink-0 text-muted-foreground/60" aria-hidden />
+                  <div className="min-w-0">
+                    <p className="text-[12px] font-semibold uppercase tracking-wider text-muted-foreground">{identLabel}</p>
+                    {identValue
+                      ? <p className="mt-0.5 font-mono text-[18px] font-bold tabular-nums text-foreground">{identValue}</p>
+                      : <p className="mt-0.5 text-[13px] font-medium text-muted-foreground">{IDENTIFIER_UNASSIGNED}</p>}
+                    <p className="text-fs-2xs text-muted-foreground">Printed number · {reg.passName}</p>
+                  </div>
+                </div>
+              )}
+
+              {timingTag && (
+                <div className="flex items-center gap-3 border-t border-border/60 px-4 py-3">
+                  <Radio className="size-4 shrink-0 text-muted-foreground/60" aria-hidden />
+                  <div className="min-w-0">
+                    <p className="text-[12px] font-semibold uppercase tracking-wider text-muted-foreground">{tagLabel}</p>
+                    <p className="mt-0.5 break-all font-mono text-[15px] font-semibold text-foreground">{timingTag}</p>
+                    <p className="text-fs-2xs text-muted-foreground">Timing device · organizer only</p>
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* Status row */}
@@ -911,8 +955,13 @@ function RegistrationDrawer({
                     {reg.couponCode   && <PayRow label="Coupon Code" value={reg.couponCode} />}
                     {reg.paymentMethod && <PayRow label="Payment Method" value={reg.paymentMethod} />}
                     {reg.referenceNumber && <PayRow label="Reference" value={reg.referenceNumber} />}
-                    {reg.paymentId       && <IdRow label="Razorpay Payment ID" value={reg.paymentId} />}
-                    {reg.razorpayOrderId && <IdRow label="Razorpay Order ID"   value={reg.razorpayOrderId} />}
+                    {/* Provider-neutral labels: these ids belong to whichever gateway took
+                        the money, and a Cashfree id under a "Razorpay" heading is wrong.
+                        The order id is RESOLVED, so a registration that stores it in the
+                        new field still shows one. */}
+                    {reg.paymentId && <IdRow label="Payment ID" value={reg.paymentId} />}
+                    {resolveRegistrationOrderId(reg) &&
+                      <IdRow label="Payment Order ID" value={resolveRegistrationOrderId(reg)!} />}
                     {(reg.paymentStatus === 'refunded' || reg.paymentStatus === 'refund_pending' || reg.refundId) && (
                       <>
                         <PayRow
@@ -968,11 +1017,148 @@ function RegistrationDrawer({
               </div>
             )}
 
+            {/* ── Participant 360° — cross-domain orchestration (Phase H.4.4) ── */}
+            <ParticipantWorkspace360
+              reg={reg}
+              eventId={eventId}
+              token={token}
+              identifierLabel={identLabel}
+              tagLabel={tagLabel}
+              timingTag={timingTag}
+              identifierValue={identValue}
+              assignmentBlockedBy={identBlocked}
+              allowedText={allowed.text} allowedRanges={allowed.ranges}
+              // RD-EVENT-21 · BOTH mirrors move together. Patching only `bibNumber`
+              // left `identifier.value` holding the released number, and since the
+              // canonical mirror wins the precedence, the table went on showing an
+              // identifier the panel had just cleared.
+              onIdentifierChange={(v) => { setIdentValue(v); onUpdate(identifierPatch(reg, v)) }}
+            />
+
+            {/* ── Audit history ── */}
+            <div className="overflow-hidden rounded-xl border border-border bg-card">
+              <button
+                type="button"
+                onClick={toggleAudit}
+                className="flex w-full items-center justify-between px-4 py-3 text-left hover:bg-muted/30"
+              >
+                <div className="flex items-center gap-2">
+                  <History className="size-4 text-muted-foreground" aria-hidden />
+                  <p className="text-[14px] font-semibold text-foreground">Audit History</p>
+                  {auditEntries !== null && (
+                    <span className="rounded-full bg-muted px-1.5 py-0.5 text-[12px] font-semibold text-muted-foreground">
+                      {auditEntries.length}
+                    </span>
+                  )}
+                </div>
+                {auditOpen
+                  ? <ChevronUp className="size-4 text-muted-foreground" aria-hidden />
+                  : <ChevronDown className="size-4 text-muted-foreground" aria-hidden />
+                }
+              </button>
+
+              {auditOpen && (
+                <div className="border-t border-border">
+                  {auditLoading && (
+                    <div className="flex items-center justify-center gap-2 py-6">
+                      <Loader2 className="size-4 animate-spin text-muted-foreground" aria-hidden />
+                      <p className="text-[13px] text-muted-foreground">Loading history…</p>
+                    </div>
+                  )}
+                  {auditError && (
+                    <div className="flex items-center justify-between px-4 py-3">
+                      <p className="text-[13px] text-red-600">{auditError}</p>
+                      <button
+                        type="button"
+                        onClick={loadAuditLog}
+                        className="inline-flex min-h-11 items-center rounded-control px-1 text-fs-xs font-medium text-[color:var(--primary-text)] transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 sm:min-h-9"
+                      >
+                        Retry
+                      </button>
+                    </div>
+                  )}
+                  {!auditLoading && !auditError && auditEntries !== null && (
+                    auditEntries.length === 0 ? (
+                      <p className="px-4 py-4 text-[13px] italic text-muted-foreground/60">
+                        No audit entries yet.
+                      </p>
+                    ) : (
+                      <div className="divide-y divide-border/40">
+                        {auditEntries.map(entry => (
+                          <div key={entry.id} className="px-4 py-3">
+                            <div className="flex items-start justify-between gap-2">
+                              <p className={cn(
+                                'text-[14px] font-semibold',
+                                auditActionColor(entry.action),
+                              )}>
+                                {auditActionLabel(entry.action)}
+                              </p>
+                              <p className="shrink-0 text-[13px] text-muted-foreground">
+                                {entry.timestamp ? fmtDate(entry.timestamp) : '—'}
+                              </p>
+                            </div>
+                            <p className="mt-0.5 text-[13px] text-muted-foreground">
+                              {entry.actorType === 'system'
+                                ? 'System'
+                                : entry.actorType === 'super_admin'
+                                  ? 'RegisterDesk admin'
+                                  : `Organizer · ${entry.actor.slice(0, 8)}…`}
+                            </p>
+                          </div>
+                        ))}
+                      </div>
+                    )
+                  )}
+                </div>
+              )}
+            </div>
+
             {/* ── Actions panel ── */}
             <div className="rounded-xl border border-border bg-card p-4">
               <p className="mb-3 text-[12px] font-semibold uppercase tracking-wider text-muted-foreground">
                 Actions
               </p>
+              {/* ── Edit attendee details ── */}
+              {editing ? (
+                <div className="space-y-3 rounded-xl border border-primary/30 bg-primary/[0.03] p-4">
+                  <p className="text-[12px] font-semibold uppercase tracking-wider text-muted-foreground">Edit Registration</p>
+                  <label className="block">
+                    <span className="mb-1 block text-[12px] font-medium text-muted-foreground">Name</span>
+                    <input value={eName} onChange={e => setEName(e.target.value)} className={editInputCls} />
+                  </label>
+                  <label className="block">
+                    <span className="mb-1 block text-[12px] font-medium text-muted-foreground">Email</span>
+                    <input type="email" value={eEmail} onChange={e => setEEmail(e.target.value)} className={editInputCls} />
+                  </label>
+                  <label className="block">
+                    <span className="mb-1 block text-[12px] font-medium text-muted-foreground">Phone</span>
+                    <input value={ePhone} onChange={e => setEPhone(e.target.value)} className={editInputCls} />
+                  </label>
+                  {responseEntries.map(([k]) => (
+                    <label key={k} className="block">
+                      <span className="mb-1 block text-[12px] font-medium text-muted-foreground">{fieldLabels[k] ?? k}</span>
+                      <input value={eResp[k] ?? ''} onChange={e => setEResp(prev => ({ ...prev, [k]: e.target.value }))} className={editInputCls} />
+                    </label>
+                  ))}
+                  {editError && <p className="text-[13px] text-destructive">{editError}</p>}
+                  <div className="flex justify-end gap-2 pt-1">
+                    <button type="button" onClick={cancelEdit} disabled={savingEdit}
+                      className="rounded-lg border border-border px-3 py-1.5 text-[13px] font-medium text-foreground hover:bg-muted disabled:opacity-60">
+                      Cancel
+                    </button>
+                    <button type="button" onClick={handleSaveEdit} disabled={!editDirty || savingEdit}
+                      className="rounded-lg bg-primary px-3 py-1.5 text-[13px] font-semibold text-primary-foreground hover:opacity-90 disabled:opacity-60">
+                      {savingEdit ? 'Saving…' : 'Save'}
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <button type="button" onClick={() => { resetEdit(); setEditing(true) }}
+                  className="flex items-center justify-center gap-2 rounded-xl border border-border px-4 py-2.5 text-[13px] font-semibold text-foreground hover:bg-muted">
+                  <Pencil className="size-3.5" aria-hidden /> Edit Registration
+                </button>
+              )}
+
 
               {/* Email row */}
               <div className="mb-3 space-y-2">
@@ -1117,7 +1303,7 @@ function RegistrationDrawer({
                 {localCheckedIn ? (
                   <div className="space-y-2">
                     <div className="text-[13px]">
-                      <span className="font-semibold text-emerald-700">✓ Checked in</span>
+                      <span className={cn('font-semibold', accent('verify').fg)}>✓ Checked in</span>
                       {reg.checkedInAt && (
                         <span className="ml-2 text-muted-foreground">{fmtDate(reg.checkedInAt)}</span>
                       )}
@@ -1197,114 +1383,40 @@ function RegistrationDrawer({
                 </div>
               )}
 
-              {/* Danger zone (only for non-cancelled, non-rejected) */}
-              {localStatus !== 'cancelled' && localStatus !== 'rejected' && localStatus !== 'pending' && (
-                <div className="border-t border-border/50 pt-3">
-                  <p className="mb-2 text-[12px] font-semibold uppercase tracking-wider text-red-500">
-                    Danger Zone
-                  </p>
-                  <button
-                    type="button"
-                    onClick={() => { setCancelError(null); setConfirmCancel(true) }}
-                    disabled={cancelling || !token}
-                    className="flex w-full items-center justify-center gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2.5 text-[14px] font-semibold text-red-600 transition-colors hover:bg-red-100 disabled:opacity-50"
-                  >
-                    <BanIcon className="size-3.5" aria-hidden />
-                    Cancel Registration
-                  </button>
-                  {cancelError && (
-                    <p className="mt-1.5 text-center text-[12px] font-medium text-red-600">{cancelError}</p>
-                  )}
-                </div>
-              )}
             </div>
 
-            {/* ── Participant 360° — cross-domain orchestration (Phase H.4.4) ── */}
-            <ParticipantWorkspace360
-              reg={reg}
-              eventId={eventId}
-              token={token}
-              onIdentifierChange={(v) => onUpdate({ bibNumber: v })}
-            />
-
-            {/* ── Audit history ── */}
-            <div className="overflow-hidden rounded-xl border border-border bg-card">
-              <button
-                type="button"
-                onClick={toggleAudit}
-                className="flex w-full items-center justify-between px-4 py-3 text-left hover:bg-muted/30"
-              >
-                <div className="flex items-center gap-2">
-                  <History className="size-4 text-muted-foreground" aria-hidden />
-                  <p className="text-[14px] font-semibold text-foreground">Audit History</p>
-                  {auditEntries !== null && (
-                    <span className="rounded-full bg-muted px-1.5 py-0.5 text-[12px] font-semibold text-muted-foreground">
-                      {auditEntries.length}
-                    </span>
-                  )}
-                </div>
-                {auditOpen
-                  ? <ChevronUp className="size-4 text-muted-foreground" aria-hidden />
-                  : <ChevronDown className="size-4 text-muted-foreground" aria-hidden />
-                }
-              </button>
-
-              {auditOpen && (
-                <div className="border-t border-border">
-                  {auditLoading && (
-                    <div className="flex items-center justify-center gap-2 py-6">
-                      <Loader2 className="size-4 animate-spin text-muted-foreground" aria-hidden />
-                      <p className="text-[13px] text-muted-foreground">Loading history…</p>
-                    </div>
-                  )}
-                  {auditError && (
-                    <div className="flex items-center justify-between px-4 py-3">
-                      <p className="text-[13px] text-red-600">{auditError}</p>
-                      <button
-                        type="button"
-                        onClick={loadAuditLog}
-                        className="text-[12px] font-medium text-primary hover:underline"
-                      >
-                        Retry
-                      </button>
-                    </div>
-                  )}
-                  {!auditLoading && !auditError && auditEntries !== null && (
-                    auditEntries.length === 0 ? (
-                      <p className="px-4 py-4 text-[13px] italic text-muted-foreground/60">
-                        No audit entries yet.
-                      </p>
-                    ) : (
-                      <div className="divide-y divide-border/40">
-                        {auditEntries.map(entry => (
-                          <div key={entry.id} className="px-4 py-3">
-                            <div className="flex items-start justify-between gap-2">
-                              <p className={cn(
-                                'text-[14px] font-semibold',
-                                auditActionColor(entry.action),
-                              )}>
-                                {auditActionLabel(entry.action)}
-                              </p>
-                              <p className="shrink-0 text-[13px] text-muted-foreground">
-                                {entry.timestamp ? fmtDate(entry.timestamp) : '—'}
-                              </p>
-                            </div>
-                            <p className="mt-0.5 text-[13px] text-muted-foreground">
-                              {entry.actorType === 'system'
-                                ? 'System'
-                                : `Organizer · ${entry.actor.slice(0, 8)}…`}
-                            </p>
-                          </div>
-                        ))}
-                      </div>
-                    )
-                  )}
-                </div>
-              )}
-            </div>
+            {/* ══ DANGER ZONE ═══════════════════════════════════════════════════
+                RD-EVENT-21 · structurally last, and no longer a footnote inside the
+                actions card. It was nested among Resend Email and Download PDF — one
+                more button in a column of buttons — while the identifier and the timing
+                tag sat BELOW it. Operational information now comes first, and the only
+                irreversible control on this screen stands alone at the end, behind its
+                own border, in the destructive token rather than a raw palette red. */}
+            {localStatus !== 'cancelled' && localStatus !== 'rejected' && localStatus !== 'pending' && (
+              <div className="rounded-xl border border-destructive/30 bg-destructive/[0.03] p-4">
+                <p className="mb-1 text-[12px] font-semibold uppercase tracking-wider text-destructive">
+                  Danger Zone
+                </p>
+                <p className="mb-3 text-fs-2xs text-muted-foreground">
+                  Cancelling releases this person&apos;s place, and any identifier they hold.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => { setCancelError(null); setConfirmCancel(true) }}
+                  disabled={cancelling || !token}
+                  className="flex min-h-11 w-full items-center justify-center gap-2 rounded-control border border-destructive/40 bg-background px-3 py-2.5 text-[14px] font-semibold text-destructive transition-colors hover:bg-destructive/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-destructive/40 disabled:opacity-50"
+                >
+                  <BanIcon className="size-3.5" aria-hidden />
+                  Cancel Registration
+                </button>
+                {cancelError && (
+                  <p className="mt-1.5 text-center text-[12px] font-medium text-destructive">{cancelError}</p>
+                )}
+              </div>
+            )}
 
             {/* Internal ID */}
-            <p className="text-center font-mono text-[12px] text-muted-foreground/40">
+            <p className="text-center font-mono text-fs-2xs text-muted-foreground">
               ID: {reg.id}
             </p>
           </div>
@@ -1440,6 +1552,11 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
   // The event's REAL configured coupon codes. Fetched ONCE on mount from the existing
   // authorized coupons endpoint — one bounded read, never per row and never per page.
   const [couponCodes,     setCouponCodes]     = useState<string[]>([])
+  // RD-EVENT-21 · the event's identity VOCABULARY — what this event calls its
+  // identifier, and whether it maps timing tags at all. `null` means "not known
+  // yet, or could not be read", which is deliberately NOT the same as "disabled":
+  // see identifierColumnMode.
+  const [identity,        setIdentity]        = useState<EventIdentity | null>(null)
   const [dateFrom,        setDateFrom]        = useState('')
   const [dateTo,          setDateTo]          = useState('')
   const [debouncedSearch, setDebouncedSearch] = useState('')
@@ -1461,6 +1578,14 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
   const [hasMore,     setHasMore]     = useState(false)
   const [totalCount,  setTotalCount]  = useState(0)
   const [isAllMode,   setIsAllMode]   = useState(false)
+  /**
+   * RD-EVENT-12 · What the SERVER did with the query.
+   *
+   * A free-text search is a bounded scan — Firestore has no substring index and this
+   * schema has no normalized name field to build one on. When that scan hits its
+   * ceiling the operator must be TOLD, not handed a partial answer that looks complete.
+   */
+  const [searchInfo,  setSearchInfo]  = useState<RegistrationsApiResponse['search'] | null>(null)
 
   // ── Bulk selection ─────────────────────────────────────────────────────────
   const [selectedIds,  setSelectedIds]  = useState<Set<string>>(new Set())
@@ -1487,7 +1612,8 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
     if (statusFilter)  p.set('status',  statusFilter)
     if (paymentFilter) p.set('payment', paymentFilter)
     if (passFilter)    p.set('passId',  passFilter)
-    if (checkinFilter === 'checked_in') p.set('checkin', 'yes')
+    if (checkinFilter === 'checked_in')     p.set('checkin', 'yes')
+    else if (checkinFilter === 'not_checked_in') p.set('checkin', 'no')
     if (couponFilter)  p.set('coupon',  couponFilter)
     if (dateFrom) p.set('from', dateFrom)
     if (dateTo)   p.set('to',   dateTo)
@@ -1510,9 +1636,15 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
       const res = await fetch(`/api/organizer/events/${eventId}/registrations?${p}`, {
         headers: { Authorization: `Bearer ${token}` },
       })
+      // RD-EVENT-12 · Normalised to a CODE at the boundary. The server's own message
+      // used to be thrown and then rendered verbatim, so a Firestore string could reach
+      // the organizer's screen. The code only ever selects fixed copy.
       if (!res.ok) {
-        const j = await res.json() as { error?: string }
-        throw new Error(j.error ?? `HTTP ${res.status}`)
+        throw new Error(
+          res.status === 403 ? 'forbidden'
+          : res.status === 404 ? 'not-found'
+          : 'unavailable',
+        )
       }
       const json = await res.json() as RegistrationsApiResponse
       setData(json)
@@ -1520,8 +1652,10 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
       setHasMore(json.hasMore)
       setTotalCount(json.totalCount)
       setIsAllMode(allMode)
+      setSearchInfo(json.search ?? null)
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to load registrations')
+      const code = e instanceof Error ? e.message : ''
+      setError(KNOWN_LOAD_ERRORS.has(code) ? code : 'unavailable')
     } finally {
       setLoading(false)
       setPageLoading(false)
@@ -1575,11 +1709,11 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
     if (isFirstFilterRun.current) { isFirstFilterRun.current = false; return }
     if (!authTokenRef.current) return
     setCursorStack([])
-    const qTrim      = debouncedSearch.trim()
-    const nameSearch = qTrim.length > 0 && !isExactSearch(qTrim)
-    const clientOnly = nameSearch || checkinFilter === 'not_checked_in'
-    if (clientOnly) doFetch({ allMode: true })
-    else            doFetch({ allMode: false, limit: pageSize })
+    // RD-EVENT-12 · EVERY predicate is server-side now — search included — so no filter
+    // combination needs `all=true` any more. That path loaded up to 2,000 unprojected
+    // registrations into the browser per search, and was silently incomplete above the
+    // 2,000 ceiling: on a 20,000-person event the search could not see most of the event.
+    doFetch({ allMode: false, limit: pageSize })
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [debouncedSearch, passFilter, statusFilter, checkinFilter, paymentFilter, couponFilter, dateFrom, dateTo, sortKey, sortDir])
 
@@ -1602,6 +1736,48 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
         setCouponCodes([...new Set(codes)].sort())
       })
       .catch(() => { /* filter simply stays hidden */ })
+    return () => { live = false }
+  }, [authToken, eventId])
+
+  // ── The event's identity vocabulary ───────────────────────────────────────
+  // RD-EVENT-21 · ONE request, on mount, to the EXISTING config endpoint — the same
+  // shape and cadence as the coupon read above. Deliberately not folded into the
+  // registrations response, which is re-fetched on every filter change and every
+  // debounced keystroke: the event's label for its identifier does not change
+  // between keystrokes, and paying a config read for each one would be a needless
+  // Firestore cost on the busiest screen in the product.
+  //
+  // A failure leaves `identity` null, and null is honest: the table then shows the
+  // identifiers the ROWS carry rather than claiming, of an event whose configuration
+  // it could not read, that nobody has one.
+  useEffect(() => {
+    if (!authToken) return
+    let live = true
+    fetch(`/api/organizer/events/${eventId}/identifiers/config`, { headers: { Authorization: `Bearer ${authToken}` } })
+      .then(r => (r.ok ? r.json() as Promise<{ configured?: boolean; config?: Record<string, unknown> }> : null))
+      .then(body => {
+        // `configured: false` means the organizer has never set this event up and the
+        // endpoint answered with the platform DEFAULT — which is labelled "Bib Number".
+        // Adopting that would print a running-race word over the identifier column of a
+        // conference nobody has configured. An unconfigured event has no vocabulary, so
+        // identity stays null and the table falls back to what the ROWS were issued
+        // under. (Found in browser QA, not in a test.)
+        if (!live || !body?.config || body.configured !== true) return
+        const cfg = body.config
+        const tag = cfg.tagMapping as { enabled?: unknown; label?: unknown } | undefined
+        setIdentity({
+          identifierEnabled: cfg.enabled === true,
+          identifierLabel:   typeof cfg.label === 'string' && cfg.label.trim() ? cfg.label : IDENTIFIER_GENERIC_LABEL,
+          tagsEnabled:       tag?.enabled === true,
+          tagLabel:          typeof tag?.label === 'string' && tag.label.trim() ? tag.label : TIMING_TAG_GENERIC_LABEL,
+          // RD-BIB-01 · the configured ranges travel with the vocabulary, so manual
+          // entry can say which numbers this participant's pass allows BEFORE
+          // anything is submitted. The engine still decides; this only means the
+          // organizer finds out while typing instead of after pressing a button.
+          pools:             Array.isArray(cfg.pools) ? (cfg.pools as EventIdentity['pools']) : undefined,
+        })
+      })
+      .catch(() => { /* identity stays null — the honest unknown */ })
     return () => { live = false }
   }, [authToken, eventId])
 
@@ -1641,7 +1817,6 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
 
   const filtered = useMemo(() => {
     if (!data) return []
-    const q = search.toLowerCase().trim()
     return data.registrations
       .filter(r => {
         if (passFilter    && r.passId        !== passFilter)    return false
@@ -1657,18 +1832,17 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
           const to = new Date(dateTo + 'T23:59:59')
           if (!r.registeredAt || new Date(r.registeredAt) > to)   return false
         }
-        // Matches the export's registrationMatchesQuery so a search that narrows the
-        // table narrows the download identically — including the identifiers an operator
-        // reconciles with (registration id, Razorpay payment/order id).
-        if (q) return (
-          r.attendee.name.toLowerCase().includes(q)  ||
-          r.attendee.email.toLowerCase().includes(q) ||
-          r.ticketCode.toLowerCase().includes(q)     ||
-          (r.attendee.phone ?? '').includes(q)       ||
-          r.id.toLowerCase().includes(q)             ||
-          (r.paymentId ?? '').toLowerCase().includes(q) ||
-          (r.razorpayOrderId ?? '').toLowerCase().includes(q)
-        )
+        // RD-EVENT-12 · No text predicate here any more.
+        //
+        // Search is resolved SERVER-side, so re-matching its results could only remove
+        // rows the server deliberately returned. Worse, this ran on `search` — the
+        // UNDEBOUNCED value — while the request used `debouncedSearch`, so the table
+        // emptied itself letter by letter while the real query was still in flight. That
+        // is what an organizer experienced as "search is not working".
+        //
+        // The structured predicates above stay: they are the documented safety net for
+        // the server's index-miss fallback (`buildQuery(false)`), which returns a wider
+        // set on a filter combination no composite index covers.
         return true
       })
       .sort((a, b) => {
@@ -1678,7 +1852,7 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
         else                           { av = a.registeredAt ?? ''; bv = b.registeredAt ?? '' }
         return sortDir === 'asc' ? av.localeCompare(bv) : bv.localeCompare(av)
       })
-  }, [data, search, passFilter, statusFilter, checkinFilter, paymentFilter, dateFrom, dateTo, sortKey, sortDir])
+  }, [data, passFilter, statusFilter, checkinFilter, paymentFilter, dateFrom, dateTo, sortKey, sortDir])
 
   // GA-7C S2/P5: bound the number of RENDERED rows. all-mode (search/filter) can load
   // up to 2000 rows; rendering them all — across BOTH the mobile-card and desktop-table
@@ -1688,6 +1862,15 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
   const RENDER_CAP = 250
   const visible = filtered.length > RENDER_CAP ? filtered.slice(0, RENDER_CAP) : filtered
   const renderCapped = filtered.length > RENDER_CAP
+
+  // RD-EVENT-21 · the operational identity columns. Derived from the event's own
+  // configuration where it is known and from the rows themselves where it is not, so
+  // an event that issues no identifiers gains no column of dashes and an event whose
+  // config could not be read still shows the numbers its people are carrying.
+  const idMode   = identifierColumnMode(identity, visible)
+  const idLabel  = identifierColumnLabel(identity, visible)
+  const showTags = showTimingTagColumn(identity)
+  const tagLabel = identity?.tagLabel ?? TIMING_TAG_GENERIC_LABEL
 
   function toggleSort(key: SortKey) {
     if (sortKey === key) setSortDir(d => d === 'asc' ? 'desc' : 'asc')
@@ -1726,22 +1909,38 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
   }
 
   if (error) {
+    // RD-EVENT-12 · Fixed copy per code — the raw server message used to be printed
+    // here. 404 and 403 deliberately share one sentence: telling an unauthorised caller
+    // that an event exists is itself a disclosure.
+    const copy = error === 'forbidden' || error === 'not-found'
+      ? { title: 'Registrations are not available',
+          body:  'This event does not exist in your workspace, or your access to it was removed.' }
+      : error === 'signed-out'
+        ? { title: 'You are signed out', body: 'Sign in again to manage registrations.' }
+        : { title: "Registrations couldn't be loaded",
+            body:  'Nothing has changed — this is a problem reading the list, not a problem with your event.' }
+
     return (
-      <div className="flex min-h-[60vh] flex-col items-center justify-center gap-4 p-6 text-center">
-        <div className="flex size-12 items-center justify-center rounded-full bg-destructive/10">
+      <div role="alert" className="flex min-h-[60vh] flex-col items-center justify-center gap-4 p-6 text-center">
+        <div className="flex size-12 items-center justify-center rounded-pill bg-destructive/10">
           <XCircle className="size-6 text-destructive" aria-hidden />
         </div>
         <div>
-          <p className="text-[16px] font-bold text-foreground">Failed to load registrations</p>
-          <p className="mt-1 text-[13.5px] text-muted-foreground">{error}</p>
+          <p className="text-fs-md font-semibold text-foreground">{copy.title}</p>
+          <p className="mt-1 max-w-md text-fs-sm text-muted-foreground">{copy.body}</p>
         </div>
-        <button
-          type="button"
-          onClick={() => { setError(null); setLoading(true); window.location.reload() }}
-          className="flex items-center gap-2 rounded-xl border border-border px-4 py-2 text-[13px] font-semibold hover:bg-muted/50"
-        >
-          <RotateCcw className="size-3.5" aria-hidden /> Retry
-        </button>
+        {error !== 'forbidden' && error !== 'not-found' && (
+          <button
+            type="button"
+            // RD-EVENT-12 · This was `window.location.reload()`, which throws away the
+            // whole page — filters, selection and scroll included — to re-run one
+            // request. Retry now issues that request and nothing else.
+            onClick={() => { setError(null); refreshList() }}
+            className="inline-flex h-11 items-center gap-2 rounded-control border border-border px-4 text-fs-sm font-semibold text-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+          >
+            <RotateCcw className="size-3.5" aria-hidden /> Try again
+          </button>
+        )}
       </div>
     )
   }
@@ -1765,11 +1964,20 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
     if (rows.length > 0) exportToCsv(rows, eventSlug, fieldLabels, eventId)
   }
 
+  /**
+   * Re-run the CURRENT query — same filters, same page.
+   *
+   * RD-EVENT-12 · This used to branch: with any filter active it reloaded in `all=true`
+   * mode, because filtering was a browser concern and the browser needed the whole set.
+   * Every predicate is server-side now, so refreshing a filtered view is just the same
+   * paginated request again — and no longer costs up to 2,000 document reads.
+   */
   function refreshList() {
-    const anyActive = !!(debouncedSearch || passFilter || statusFilter || checkinFilter || paymentFilter || dateFrom || dateTo)
-    void (anyActive
-      ? doFetch({ allMode: true })
-      : doFetch({ allMode: false, limit: pageSize, cursor: cursorStack.length > 0 ? cursorStack[cursorStack.length - 1] : null }))
+    void doFetch({
+      allMode: false,
+      limit:   pageSize,
+      cursor:  cursorStack.length > 0 ? cursorStack[cursorStack.length - 1] : null,
+    })
   }
 
   async function handleBulkAction(action: 'check_in' | 'cancel' | 'restore' | 'resend_email') {
@@ -1861,10 +2069,7 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
       if (!res.ok || !body.success) { setBulkFeedback(body.error ?? 'Bulk approve failed.'); return }
       setBulkFeedback(`${body.succeeded} of ${body.processed} approved successfully.`)
       clearSelection()
-      const anyActive = !!(debouncedSearch || passFilter || statusFilter || checkinFilter || paymentFilter || dateFrom || dateTo)
-      void (anyActive
-        ? doFetch({ allMode: true })
-        : doFetch({ allMode: false, limit: pageSize, cursor: cursorStack.length > 0 ? cursorStack[cursorStack.length - 1] : null }))
+      refreshList()
     } catch {
       setBulkFeedback('Network error. Please try again.')
     } finally {
@@ -1887,10 +2092,7 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
       if (!res.ok || !body.success) { setBulkFeedback(body.error ?? 'Bulk reject failed.'); return }
       setBulkFeedback(`${body.succeeded} of ${body.processed} rejected.`)
       clearSelection()
-      const anyActive = !!(debouncedSearch || passFilter || statusFilter || checkinFilter || paymentFilter || dateFrom || dateTo)
-      void (anyActive
-        ? doFetch({ allMode: true })
-        : doFetch({ allMode: false, limit: pageSize, cursor: cursorStack.length > 0 ? cursorStack[cursorStack.length - 1] : null }))
+      refreshList()
     } catch {
       setBulkFeedback('Network error. Please try again.')
     } finally {
@@ -1960,7 +2162,7 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
           <button
             type="button"
             onClick={() => setImportOpen(true)}
-            className="flex shrink-0 items-center gap-2 rounded-xl border border-border bg-card px-4 py-2 text-[13px] font-semibold text-foreground shadow-sm hover:bg-muted/50"
+            className="inline-flex h-11 shrink-0 items-center gap-2 rounded-control border border-border bg-card px-3.5 text-fs-sm font-semibold text-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 sm:h-9"
           >
             <Upload className="size-4" aria-hidden />
             Import
@@ -1969,7 +2171,7 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
             type="button"
             onClick={() => downloadExport('csv')}
             disabled={totalCount === 0}
-            className="flex shrink-0 items-center gap-2 rounded-xl border border-border bg-card px-4 py-2 text-[13px] font-semibold text-foreground shadow-sm hover:bg-muted/50 disabled:opacity-40"
+            className="inline-flex h-11 shrink-0 items-center gap-2 rounded-control border border-border bg-card px-3.5 text-fs-sm font-semibold text-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 disabled:opacity-40 sm:h-9"
           >
             <Download className="size-4" aria-hidden />
             Export CSV
@@ -1978,7 +2180,7 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
             type="button"
             onClick={() => downloadExport('xlsx')}
             disabled={totalCount === 0}
-            className="flex shrink-0 items-center gap-2 rounded-xl border border-border bg-card px-4 py-2 text-[13px] font-semibold text-foreground shadow-sm hover:bg-muted/50 disabled:opacity-40"
+            className="inline-flex h-11 shrink-0 items-center gap-2 rounded-control border border-border bg-card px-3.5 text-fs-sm font-semibold text-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 disabled:opacity-40 sm:h-9"
           >
             <Download className="size-4" aria-hidden />
             Export Excel
@@ -2016,7 +2218,7 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
             placeholder="Search name, email, ticket code…"
             value={search}
             onChange={e => setSearch(e.target.value)}
-            className="h-10 w-full rounded-xl border border-border bg-background pl-9 pr-3.5 text-[13px] text-foreground placeholder:text-muted-foreground/50 outline-none focus:border-primary/60 focus:ring-2 focus:ring-primary/20"
+            className="h-11 w-full rounded-control border border-border bg-background pl-9 pr-3.5 text-fs-sm text-foreground outline-none placeholder:text-muted-foreground focus:border-primary/60 focus:ring-2 focus:ring-primary/20 sm:h-10"
           />
           {search && (
             <button
@@ -2036,7 +2238,7 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
             <select
               value={passFilter}
               onChange={e => setPassFilter(e.target.value)}
-              className="h-10 rounded-xl border border-border bg-background pl-8 pr-3 text-[13px] text-foreground outline-none focus:border-primary/60 focus:ring-2 focus:ring-primary/20"
+              className="h-11 rounded-control border border-border bg-background pl-8 pr-3 text-fs-sm text-foreground outline-none focus:border-primary/60 focus:ring-2 focus:ring-primary/20 sm:h-10"
               aria-label="Filter by pass"
             >
               <option value="">All Passes</option>
@@ -2050,7 +2252,7 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
           <select
             value={statusFilter}
             onChange={e => setStatusFilter(e.target.value)}
-            className="h-10 rounded-xl border border-border bg-background pl-8 pr-3 text-[13px] text-foreground outline-none focus:border-primary/60 focus:ring-2 focus:ring-primary/20"
+            className="h-11 rounded-control border border-border bg-background pl-8 pr-3 text-fs-sm text-foreground outline-none focus:border-primary/60 focus:ring-2 focus:ring-primary/20 sm:h-10"
             aria-label="Filter by registration status"
           >
             <option value="">All Statuses</option>
@@ -2067,7 +2269,7 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
           <select
             value={checkinFilter}
             onChange={e => setCheckinFilter(e.target.value)}
-            className="h-10 rounded-xl border border-border bg-background pl-8 pr-3 text-[13px] text-foreground outline-none focus:border-primary/60 focus:ring-2 focus:ring-primary/20"
+            className="h-11 rounded-control border border-border bg-background pl-8 pr-3 text-fs-sm text-foreground outline-none focus:border-primary/60 focus:ring-2 focus:ring-primary/20 sm:h-10"
             aria-label="Filter by check-in status"
           >
             <option value="">Check-In: All</option>
@@ -2092,7 +2294,7 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
             <select
               value={couponFilter}
               onChange={e => setCouponFilter(e.target.value)}
-              className="h-10 rounded-xl border border-border bg-background pl-8 pr-3 text-[13px] text-foreground outline-none focus:border-primary/60 focus:ring-2 focus:ring-primary/20"
+              className="h-11 rounded-control border border-border bg-background pl-8 pr-3 text-fs-sm text-foreground outline-none focus:border-primary/60 focus:ring-2 focus:ring-primary/20 sm:h-10"
               aria-label="Filter by coupon"
             >
               <option value="">All Coupons</option>
@@ -2107,7 +2309,7 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
           <select
             value={paymentFilter}
             onChange={e => setPaymentFilter(e.target.value)}
-            className="h-10 rounded-xl border border-border bg-background pl-8 pr-3 text-[13px] text-foreground outline-none focus:border-primary/60 focus:ring-2 focus:ring-primary/20"
+            className="h-11 rounded-control border border-border bg-background pl-8 pr-3 text-fs-sm text-foreground outline-none focus:border-primary/60 focus:ring-2 focus:ring-primary/20 sm:h-10"
             aria-label="Filter by payment status"
           >
             <option value="">Payment: All</option>
@@ -2161,13 +2363,13 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
           <button
             type="button"
             onClick={filtered.every(r => selectedIds.has(r.id)) ? clearSelection : selectPage}
-            className="text-[12px] font-medium text-primary hover:underline"
+            className="inline-flex min-h-11 items-center rounded-control px-1 text-fs-xs font-medium text-[color:var(--primary-text)] transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 sm:min-h-9"
           >
             {filtered.every(r => selectedIds.has(r.id)) ? 'Deselect page' : `Select page (${filtered.length})`}
           </button>
           {selectedIds.size > 0 && (
             <>
-              <span className="text-muted-foreground/30" aria-hidden>·</span>
+              
               <span className="text-[12px] text-muted-foreground">{selectedIds.size} selected</span>
               <button type="button" onClick={clearSelection}
                 className="text-[12px] font-medium text-muted-foreground hover:text-foreground">
@@ -2276,6 +2478,33 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
         </div>
       )}
 
+      {/* RD-EVENT-12 · What the search actually searched.
+          A free-text query is a bounded server-side scan. When it reaches its ceiling
+          there may be matches it never saw, and saying so is the difference between an
+          answer and a guess. An exact email/ticket/phone lookup is unbounded, so it says
+          nothing at all. */}
+      {searchInfo?.truncated && (
+        <div
+          role="status"
+          className="mb-3 flex items-start gap-2 rounded-control border border-warning/30 bg-warning/[0.06] px-3.5 py-2.5"
+        >
+          <AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-warning" aria-hidden />
+          <p className="text-fs-xs text-muted-foreground">
+            Searched the {searchInfo.scanLimit.toLocaleString('en-IN')} most recent
+            registrations — there may be older matches this did not reach. Search by email
+            address or registration code to find anyone at any point in the event.
+          </p>
+        </div>
+      )}
+      {searchInfo?.capped && !searchInfo.truncated && (
+        <div role="status" className="mb-3 rounded-control border border-border bg-muted/30 px-3.5 py-2.5">
+          <p className="text-fs-xs text-muted-foreground">
+            More than {filtered.length} registrations match. Narrow the search, or export
+            the filtered set for the full list.
+          </p>
+        </div>
+      )}
+
       {/* Result count */}
       <div className="mb-2 flex items-center gap-2 text-[12px] text-muted-foreground">
         {pageLoading && <Loader2 className="size-3.5 animate-spin" aria-hidden />}
@@ -2292,13 +2521,24 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
       {filtered.length === 0 ? (
         <div className="flex flex-col items-center gap-3 rounded-2xl border border-border bg-card py-16 text-center">
           <Users className="size-10 text-muted-foreground/20" aria-hidden />
+          {/* RD-EVENT-12 · Three different facts, three different sentences. "No results"
+              on an event with no registrations reads as a broken filter; "no registrations
+              yet" on a search that matched nothing reads as a broken event. A FAILED
+              request never reaches here — `error` is rendered above, so an error can
+              never be mistaken for an empty result. */}
           <p className="text-[14px] font-semibold text-foreground">
-            {totalCount === 0 ? 'No registrations yet' : 'No results for your search'}
+            {totalCount === 0
+              ? 'No registrations yet'
+              : hasActiveFilters
+                ? 'No one matches these filters'
+                : 'Nothing to show on this page'}
           </p>
           <p className="text-[13px] text-muted-foreground">
             {totalCount === 0
               ? 'Registrations will appear here once attendees sign up.'
-              : 'Try adjusting your search or filters.'}
+              : hasActiveFilters
+                ? 'Try a different search, or clear the filters to see everyone.'
+                : 'Go back a page, or clear the filters to start again.'}
           </p>
         </div>
       ) : (
@@ -2310,7 +2550,7 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
           )}
 
           {/* Mobile card list — shown below md */}
-          <div className="space-y-2 md:hidden">
+          <div className="space-y-2 xl:hidden">
             {visible.map(reg => {
               const sm = statusMeta(reg.status)
               return (
@@ -2324,15 +2564,40 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
                       <span className={`rounded-full px-2.5 py-0.5 text-[12px] font-semibold ${sm.cls}`}>
                         {sm.label}
                       </span>
-                      <input
-                        type="checkbox"
-                        checked={selectedIds.has(reg.id)}
-                        onChange={e => { e.stopPropagation(); toggleSelect(reg.id) }}
-                        aria-label={`Select ${reg.attendee.name}`}
-                        className="size-4 cursor-pointer"
-                      />
+                      <label className="flex min-h-11 min-w-11 cursor-pointer items-center justify-center">
+                        <input
+                          type="checkbox"
+                          checked={selectedIds.has(reg.id)}
+                          onChange={e => { e.stopPropagation(); toggleSelect(reg.id) }}
+                          aria-label={`Select ${reg.attendee.name}`}
+                          className="size-4 cursor-pointer"
+                        />
+                      </label>
                     </div>
                   </div>
+                  {/* RD-EVENT-21 · on a phone the identifier gets its own line rather
+                      than a place in the metadata run: this is the value an operator is
+                      matching against something printed, and it must be findable at a
+                      glance in a stack of cards. The pass sits beside it because the
+                      identifier is pass-aware — "5001" means something different in the
+                      5 KM pool than in the 10 KM one. */}
+                  {idMode !== 'hidden' && (
+                    <div className="mt-2.5 flex items-baseline justify-between gap-3 rounded-control border border-border bg-muted/[0.04] px-3 py-2">
+                      <span className="text-fs-2xs uppercase tracking-wider text-muted-foreground">{idLabel}</span>
+                      {(() => {
+                        const v = resolveIdentifierValue(reg)
+                        return v
+                          ? <span className="font-mono text-fs-md font-bold tabular-nums text-foreground">{v}</span>
+                          : <span className="text-fs-xs text-muted-foreground">{emptyIdentifierText(idMode)}</span>
+                      })()}
+                    </div>
+                  )}
+                  {showTags && resolveTimingTag(reg) && (
+                    <div className="mt-1.5 flex items-baseline justify-between gap-3 px-3">
+                      <span className="text-fs-2xs uppercase tracking-wider text-muted-foreground">{tagLabel}</span>
+                      <span className="font-mono text-fs-xs text-muted-foreground">{resolveTimingTag(reg)}</span>
+                    </div>
+                  )}
                   <div className="mt-2.5 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[13px] text-muted-foreground">
                     <span className="font-mono">{reg.ticketCode}</span>
                     <span aria-hidden>·</span>
@@ -2340,16 +2605,16 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
                     <span aria-hidden>·</span>
                     <span>{fmtDateShort(reg.registeredAt)}</span>
                     {reg.checkedIn && (
-                      <><span aria-hidden>·</span><span className="font-medium text-emerald-600">Checked in</span></>
+                      <><span aria-hidden>·</span><span className={cn('font-medium', accent('verify').fg)}>Checked in</span></>
                     )}
                     {reg.paymentStatus === 'refunded' && (
-                      <><span aria-hidden>·</span><span className="font-medium text-amber-600">Refunded</span></>
+                      <><span aria-hidden>·</span><span className={cn('font-medium', accent('pending').fg)}>Refunded</span></>
                     )}
                   </div>
                   <button
                     type="button"
                     onClick={() => setSelected(reg)}
-                    className="mt-3 flex w-full items-center justify-center gap-1.5 rounded-lg border border-border bg-muted/20 py-1.5 text-[12px] font-medium text-foreground hover:bg-muted/50"
+                    className="mt-3 inline-flex min-h-11 w-full items-center justify-center gap-1.5 rounded-control border border-border bg-muted/20 text-fs-xs font-medium text-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
                   >
                     <Eye className="size-3.5" aria-hidden />
                     View Details
@@ -2360,42 +2625,76 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
           </div>
 
           {/* Desktop table — shown md and above */}
-          <div className="hidden overflow-hidden rounded-2xl border border-border bg-card shadow-sm md:block">
+          <div className="hidden overflow-hidden rounded-2xl border border-border bg-card shadow-sm xl:block">
             <div className="overflow-x-auto">
               <table className="w-full text-[13px]" role="table">
                 <thead>
                   <tr className="border-b border-border/60 bg-muted/[0.03]">
-                    <th scope="col" className="w-10 px-3 py-3">
-                      <input
-                        type="checkbox"
-                        checked={filtered.length > 0 && filtered.every(r => selectedIds.has(r.id))}
-                        onChange={e => e.target.checked ? selectPage() : clearSelection()}
-                        aria-label="Select all on page"
-                        className="cursor-pointer"
-                      />
+                    {/* RD-EVENT-21 · the box stays 13px, its TARGET becomes 44px.
+                        A label around the input enlarges the hit area without changing
+                        the visual density of the table — measured at 13px in the
+                        browser, which is unusable on the tablets this table serves. */}
+                    <th scope="col" className="w-12 px-3 py-1">
+                      <label className="flex min-h-11 cursor-pointer items-center justify-center">
+                        <input
+                          type="checkbox"
+                          checked={filtered.length > 0 && filtered.every(r => selectedIds.has(r.id))}
+                          onChange={e => e.target.checked ? selectPage() : clearSelection()}
+                          aria-label="Select all on page"
+                          className="cursor-pointer"
+                        />
+                      </label>
                     </th>
+                    {/* RD-EVENT-21 · columns in OPERATIONAL priority, and only the
+                        columns this event actually has.
+                        • Participant absorbs the former separate Email column, and the
+                          Phone column is gone: a phone number down every row is PII on
+                          screen that the drawer, the search and the export all still
+                          provide.
+                        • The identifier sits immediately after the participant, because
+                          it is the second thing a desk operator looks for.
+                        • `cls` hides the lower-priority columns on narrower desktops
+                          instead of letting ten columns crush each other. */}
                     {[
-                      { key: null,                      label: 'Ticket'    },
-                      { key: 'name'        as SortKey,  label: 'Name'      },
-                      { key: null,                      label: 'Email'     },
-                      { key: null,                      label: 'Phone'     },
-                      { key: null,                      label: 'Pass'      },
-                      { key: null,                      label: 'Discount'  },
-                      { key: 'registeredAt' as SortKey, label: 'Date'      },
-                      { key: 'status'      as SortKey,  label: 'Status'    },
-                      { key: null,                      label: 'Check-In'  },
-                      { key: null,                      label: ''          },
-                    ].map(({ key, label }) => (
+                      { key: 'name'        as SortKey,  label: 'Participant', cls: '' },
+                      ...(idMode !== 'hidden' ? [{ key: null, label: idLabel, cls: '' }] : []),
+                      ...(showTags          ? [{ key: null, label: tagLabel, cls: 'hidden 2xl:table-cell' }] : []),
+                      { key: null,                      label: 'Pass',      cls: '' },
+                      // Measured, not guessed: at 1280 — a very common laptop — Ticket
+                      // and Discount together pushed Check-In and the row action off
+                      // the right edge. The ticket code is in the drawer, in the mobile
+                      // card, in the export and in search; Check-In is what an operator
+                      // scans a list for, so the ticket is the one that waits for width.
+                      { key: null,                      label: 'Ticket',    cls: 'hidden 2xl:table-cell' },
+                      { key: null,                      label: 'Discount',  cls: 'hidden 2xl:table-cell' },
+                      // Stays visible at every desktop width: this header IS the
+                      // registeredAt sort control, and hiding it would take the sort
+                      // away rather than just the column.
+                      { key: 'registeredAt' as SortKey, label: 'Date',      cls: '' },
+                      { key: 'status'      as SortKey,  label: 'Status',    cls: '' },
+                      { key: null,                      label: 'Payment',   cls: '' },
+                      { key: null,                      label: 'Check-In',  cls: '' },
+                      { key: null,                      label: '',          cls: '' },
+                    ].map(({ key, label, cls }) => (
                       <th
                         key={label || 'actions'}
                         scope="col"
                         aria-sort={key ? (sortKey === key ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none') : undefined}
-                        className="px-4 py-3 text-left text-[12px] font-semibold uppercase tracking-wider text-muted-foreground"
+                        className={cn('px-4 py-3 text-left text-[12px] font-semibold uppercase tracking-wider text-muted-foreground', cls)}
                       >
                         {key ? (
-                          <button type="button" onClick={() => toggleSort(key)} className="flex items-center gap-1 hover:text-foreground">
+                          <button
+                            type="button"
+                            onClick={() => toggleSort(key)}
+                            // RD-EVENT-12 · A real target and a visible focus ring. The
+                            // sort control was a bare flex row with neither.
+                            className="inline-flex min-h-11 items-center gap-1 rounded-control px-1 transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 sm:min-h-9"
+                          >
                             {label}
-                            <span className="text-muted-foreground/30" aria-hidden>
+                            {/* The arrow was `text-muted-foreground/30` — 1.62:1, invisible.
+                                It is decorative (the column carries `aria-sort`), but a
+                                decoration nobody can see is not a decoration. */}
+                            <span className={cn(sortKey === key ? 'text-foreground' : 'text-muted-foreground')} aria-hidden>
                               {sortKey === key ? (sortDir === 'asc' ? '↑' : '↓') : '↕'}
                             </span>
                           </button>
@@ -2409,27 +2708,72 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
                     const sm = statusMeta(reg.status)
                     return (
                       <tr key={reg.id} className={cn('border-b border-border/30 transition-colors last:border-0', selectedIds.has(reg.id) ? 'bg-primary/[0.03]' : 'hover:bg-muted/[0.03]')}>
-                        <td className="px-3 py-3">
-                          <input
-                            type="checkbox"
-                            checked={selectedIds.has(reg.id)}
-                            onChange={() => toggleSelect(reg.id)}
-                            aria-label={`Select ${reg.attendee.name}`}
-                            className="cursor-pointer"
-                          />
+                        <td className="px-3 py-1">
+                          <label className="flex min-h-11 cursor-pointer items-center justify-center">
+                            <input
+                              type="checkbox"
+                              checked={selectedIds.has(reg.id)}
+                              onChange={() => toggleSelect(reg.id)}
+                              aria-label={`Select ${reg.attendee.name}`}
+                              className="cursor-pointer"
+                            />
+                          </label>
                         </td>
-                        <td className="px-4 py-3 font-mono text-[12px] text-muted-foreground">{reg.ticketCode}</td>
-                        <td className="px-4 py-3 font-medium text-foreground">{reg.attendee.name}</td>
-                        <td className="px-4 py-3 text-muted-foreground">{reg.attendee.email}</td>
-                        <td className="px-4 py-3 text-muted-foreground">{reg.attendee.phone || '—'}</td>
-                        <td className="px-4 py-3 text-muted-foreground">{reg.passName}</td>
+                        {/* PARTICIPANT — the person, and the one secondary field that
+                            identifies them. Two lines instead of two columns. */}
+                        {/* A very long name wrapped to four lines and made the row three
+                            times the height of its neighbours, which breaks a table an
+                            operator scans down. Bounded and truncated, with the full
+                            value on hover and in the drawer. */}
+                        <td className="max-w-[240px] px-4 py-3">
+                          <p className="truncate font-medium text-foreground" title={reg.attendee.name}>{reg.attendee.name}</p>
+                          <p className="truncate text-fs-2xs text-muted-foreground" title={reg.attendee.email}>{reg.attendee.email}</p>
+                        </td>
+                        {/* IDENTIFIER — the number the person is physically carrying, and
+                            the reason a desk operator is looking at this table at all. It
+                            is the strongest thing in the row after the name: tabular so a
+                            column of numbers aligns, and never dressed as a pill, because
+                            it is a value and not a state. */}
+                        {idMode !== 'hidden' && (
+                          <td className="whitespace-nowrap px-4 py-3">
+                            {(() => {
+                              const v = resolveIdentifierValue(reg)
+                              if (v) return <span className="font-mono text-fs-sm font-bold tabular-nums text-foreground">{v}</span>
+                              return (
+                                <span className="text-fs-xs text-muted-foreground">
+                                  <span aria-hidden>{idMode === 'configured' ? IDENTIFIER_UNASSIGNED : '—'}</span>
+                                  <span className="sr-only">{`${idLabel}: ${emptyIdentifierText(idMode)}`}</span>
+                                </span>
+                              )
+                            })()}
+                          </td>
+                        )}
+                        {/* TIMING TAG — a DIFFERENT credential, deliberately styled
+                            differently from the identifier so the two can never be read
+                            as the same number. Only the currently assigned one. */}
+                        {showTags && (
+                          <td className="hidden whitespace-nowrap px-4 py-3 2xl:table-cell">
+                            {(() => {
+                              const t = resolveTimingTag(reg)
+                              if (t) return <span className="font-mono text-fs-2xs text-muted-foreground">{t}</span>
+                              return (
+                                <span className="text-fs-xs text-muted-foreground">
+                                  <span aria-hidden>—</span>
+                                  <span className="sr-only">{`${tagLabel}: none assigned`}</span>
+                                </span>
+                              )
+                            })()}
+                          </td>
+                        )}
+                        <td className="whitespace-nowrap px-4 py-3 text-muted-foreground">{reg.passName}</td>
+                        <td className="hidden whitespace-nowrap px-4 py-3 font-mono text-[12px] text-muted-foreground 2xl:table-cell">{reg.ticketCode}</td>
                         {/* DISCOUNT — derived from values already on the row, so this column
                             costs no query and no extra read. Silent for an ordinary paid
                             registration: repeating "No discount" down the page is noise. */}
-                        <td className="whitespace-nowrap px-4 py-3">
+                        <td className="hidden whitespace-nowrap px-4 py-3 2xl:table-cell">
                           {(() => {
                             const cell = couponCellText(reg)
-                            if (!cell) return <span className="text-[13px] text-muted-foreground/40">—</span>
+                            if (!cell) return <span className="text-fs-sm text-muted-foreground"><span aria-hidden>—</span><span className="sr-only">Not provided</span></span>
                             return (
                               <span className="inline-flex flex-col leading-tight">
                                 {cell.code && (
@@ -2446,20 +2790,51 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
                             {sm.label}
                           </span>
                         </td>
+                        {/* PAYMENT — the screen has a payment FILTER and had no payment
+                            column, so a filtered view gave no feedback about what it had
+                            filtered to. Typography, not another pill: a second pill beside
+                            Status turns the row into a wall of badges. The refund wording
+                            is the canonical one, shared with the export. */}
+                        <td className="whitespace-nowrap px-4 py-3">
+                          {(() => {
+                            const refund = refundLabel(reg)
+                            if (refund) return <span className={cn('text-fs-sm font-medium', accent('pending').fg)}>{refund}</span>
+                            if (reg.paymentStatus === 'paid')    return <span className={cn('text-fs-sm font-medium', accent('money').fg)}>Paid</span>
+                            if (reg.paymentStatus === 'pending') return <span className={cn('text-fs-sm font-medium', accent('pending').fg)}>Pending</span>
+                            return (
+                              <span className="text-fs-sm text-muted-foreground">
+                                <span aria-hidden>{reg.amount === 0 ? 'Free' : '—'}</span>
+                                <span className="sr-only">{reg.amount === 0 ? 'Free registration' : 'No payment required'}</span>
+                              </span>
+                            )
+                          })()}
+                        </td>
                         <td className="px-4 py-3">
+                          {/* RD-EVENT-12 · `text-emerald-600` measured 3.65:1 and the
+                              placeholder dash 1.93:1 — a column an operator scans at a
+                              gate, in two colours neither of which met AA. The dash also
+                              needs a screen-reader word: "—" alone is announced as
+                              nothing, so a row reads as if the column were missing. */}
                           {reg.checkedIn ? (
-                            <span className="inline-flex items-center gap-1 text-[13px] font-medium text-emerald-600">
+                            <span className={cn('inline-flex items-center gap-1 text-fs-sm font-medium', accent('verify').fg)}>
                               <CheckCircle className="size-3.5" aria-hidden /> Yes
                             </span>
                           ) : (
-                            <span className="text-[13px] text-muted-foreground/40">—</span>
+                            <span className="text-fs-sm text-muted-foreground">
+                              <span aria-hidden>—</span>
+                              <span className="sr-only">Not checked in</span>
+                            </span>
                           )}
                         </td>
                         <td className="px-4 py-3">
                           <button
                             type="button"
                             onClick={() => setSelected(reg)}
-                            className="flex size-7 items-center justify-center rounded-lg text-muted-foreground/50 hover:bg-muted/60 hover:text-foreground"
+                            // RD-EVENT-21 · was `size-7` — a 28px target, below the 44px
+                            // minimum on the tablets this "desktop" table also serves, and
+                            // at `text-muted-foreground/50` it was nearly invisible. Full
+                            // touch target up to lg, compact on a mouse-driven desktop.
+                            className="flex min-h-11 min-w-11 items-center justify-center rounded-control text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 lg:min-h-9 lg:min-w-9"
                             aria-label={`View details for ${reg.attendee.name}`}
                           >
                             <Eye className="size-3.5" aria-hidden />
@@ -2491,10 +2866,13 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
                   doFetch({ allMode: false, limit: n, cursor: null })
                 }}
                 className={cn(
-                  'rounded-lg border px-2.5 py-1 text-[12px] font-medium transition-colors',
+                  'inline-flex min-h-11 items-center rounded-control border px-2.5 text-fs-xs font-medium transition-colors sm:min-h-9',
+                  'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40',
+                  // `text-primary` on a primary tint measures 4.27:1 — the known
+                  // product-wide ceiling. `--primary-text` is the AA pair for brand TEXT.
                   pageSize === n
-                    ? 'border-primary/50 bg-primary/10 text-primary'
-                    : 'border-border bg-card text-foreground hover:bg-muted/50',
+                    ? 'border-primary/40 bg-primary/[0.08] text-[color:var(--primary-text)]'
+                    : 'border-border bg-card text-foreground hover:bg-muted',
                 )}
               >
                 {n}
@@ -2519,7 +2897,7 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
                   const prevCursor = newStack.length > 0 ? newStack[newStack.length - 1] : null
                   doFetch({ allMode: false, limit: pageSize, cursor: prevCursor })
                 }}
-                className="flex h-8 items-center gap-1 rounded-lg border border-border bg-card px-3 text-[12px] font-medium text-foreground hover:bg-muted/50 disabled:cursor-not-allowed disabled:opacity-40"
+                className="inline-flex h-11 items-center gap-1 rounded-control border border-border bg-card px-3 text-fs-xs font-medium text-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 disabled:cursor-not-allowed disabled:opacity-40 sm:h-9"
               >
                 <ChevronLeft className="size-3.5" aria-hidden /> Prev
               </button>
@@ -2532,7 +2910,7 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
                   setCursorStack(prev => [...prev, cur])
                   doFetch({ allMode: false, limit: pageSize, cursor: cur })
                 }}
-                className="flex h-8 items-center gap-1 rounded-lg border border-border bg-card px-3 text-[12px] font-medium text-foreground hover:bg-muted/50 disabled:cursor-not-allowed disabled:opacity-40"
+                className="inline-flex h-11 items-center gap-1 rounded-control border border-border bg-card px-3 text-fs-xs font-medium text-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 disabled:cursor-not-allowed disabled:opacity-40 sm:h-9"
               >
                 Next <ChevronRight className="size-3.5" aria-hidden />
               </button>
@@ -2548,6 +2926,7 @@ export function RegistrationsClient({ eventId }: { eventId: string }) {
           eventId={eventId}
           fieldLabels={fieldLabels}
           token={authToken}
+          identity={identity}
           onClose={() => setSelected(null)}
           onUpdate={updates => handleRegistrationUpdate(selected.id, updates)}
         />

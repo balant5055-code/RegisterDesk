@@ -14,10 +14,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { storage } from '@/features/platform-storage'
 import { authorizeMedia } from '@/features/media-studio/services/authorize'
 import { getOwnedAlbum, getOwnedGallery } from '@/features/media-studio/repositories/galleryRepo'
-import { registerAsset, serializeAsset } from '@/features/media-studio/repositories/assetRepo'
-// MC-03 — Media Credits. Inert unless businessConfig.mediaStudio.creditsEnabled is true.
-import { getCreditPolicy, consumeInTx } from '@/features/media-credits/services'
-import { InvalidCreditOperationError, SessionNotActiveError } from '@/features/media-credits/errors'
+import { registerAsset, serializeAsset, UnreservedAssetError } from '@/features/media-studio/repositories/assetRepo'
 import { resolveRenditionUrl } from '@/features/media-studio/services/uploadService'
 // RD-MS-CLOSURE-01 · ONE configuration source for the upload path.
 //
@@ -150,17 +147,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     if (c.rendition === 'original') { width = c.w; height = c.h; mimeType = meta.mimeType }
   }
 
-  // Resolved once, before the write. With credits off this is the only extra work the
-  // completion path performs — one cached config read, no wallet and no reservation touched.
-  const creditsOn = (await getCreditPolicy()).creditsEnabled
-
-  // ── MC-06B: the slot transition rides the asset write ───────────────────────
-  // `consumeInTx` runs INSIDE `registerAsset`'s transaction, so the asset record and the
-  // reservation's move to `consumed` commit together or not at all. It also reads the
-  // session there, which is what arms the seal barrier — see the catch below.
-  //
-  // No wallet and no ledger are touched: the credits were held when the session opened, and
-  // the balance moves once, at settlement.
+  // RD-PHOTO-01 — the photo's unit of paid event capacity was taken at /uploads/prepare, together
+  // with its `pending` reservation. `registerAsset` only promotes THAT reservation (same organizer,
+  // event and object keys) to `ready`; a completion without one is refused (UnreservedAssetError).
+  // The organizer-level Media Credits consumption that used to ride this write is retired.
   const runRegister = () => registerAsset({
     assetId,
     organizerUid: authz.workspaceUid,
@@ -184,42 +174,13 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     // reaches the photo it was set for.
     visibility: mediaConfig.defaultVisibility,
     uploadedBy: authz.callerUid,
-  }, {
-    // ── MC-03: consume the credit hold ATOMICALLY with the asset write ────────
-    //
-    // `beforeCommit` runs inside `registerAsset`'s own transaction, so the debit, the ledger
-    // entry, the reservation transition and the asset record commit together — or none of
-    // them do. Two separate transactions would leave a window in which the organizer is
-    // charged for a photo that was never registered, and the sweep would then purge the
-    // asset while the reservation stayed `consumed`, silently losing the credit.
-    //
-    // Undefined when credits are off, so the hook is not merely a no-op — it is absent, and
-    // `registerAsset` takes exactly the path it took before MC-03.
-    beforeCommit: creditsOn
-      ? tx => consumeInTx(tx, {
-          organizerUid: authz.workspaceUid,
-          assetId,
-          actorUid:     authz.callerUid,
-        })
-      : undefined,
   })
 
-  // MC-06B removed the per-organizer queue. It existed only to serialise contention on the
-  // wallet document, and the wallet is no longer on this path — `consumeInTx` now writes just
-  // the reservation. Serialising uploads that share nothing would be pure lost throughput.
   let asset: Awaited<ReturnType<typeof registerAsset>>
   try {
     asset = await runRegister()
   } catch (err) {
-    // ── The seal barrier fired (Spec v1.0 §6) ──
-    // The session was sealed while this completion was in flight, so Firestore aborted the
-    // whole transaction: no asset registered, no slot consumed, nothing partially committed.
-    // A race, not a fault — 409 so the client can surface it as "this batch was closed"
-    // rather than as a server error.
-    if (err instanceof SessionNotActiveError) {
-      return NextResponse.json({ error: err.message, code: err.code }, { status: 409 })
-    }
-    if (err instanceof InvalidCreditOperationError) {
+    if (err instanceof UnreservedAssetError) {
       return NextResponse.json({ error: err.message, code: err.code }, { status: 409 })
     }
     throw err

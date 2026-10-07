@@ -8,6 +8,7 @@ import { Timestamp } from 'firebase-admin/firestore'
 import { adminDb } from '@/lib/firebase/admin'
 import { isOrganizer } from '@/lib/organizer/identity'
 import { ENGINES } from '@/lib/admin/operationsCenterService'
+import { resolveAccountStatus } from '@/lib/admin/organizerTypes'
 import type { SupportOverview, SupportOrganizer, SupportEvent, SupportHealth } from '@/lib/admin/supportTypes'
 
 const JOB_COLLECTIONS = [...new Set(ENGINES.flatMap(e => e.collections))]
@@ -24,9 +25,11 @@ const rec = (v: unknown): Record<string, unknown> =>
 async function countOf(q: FirebaseFirestore.Query): Promise<number> {
   try { return (await q.count().get()).data().count } catch { return 0 }
 }
-function effectiveStatus(s: unknown): string {
-  return s === 'suspended' || s === 'banned' ? s : 'active'
-}
+// RD-ORGANIZER-SIGNUP-FIX-02 (D2) · the second surviving copy of the status rule. It
+// coerced 'pending' to 'active' in recentOrganizers(), which orders by createdAt desc —
+// so a brand-new, unverified signup was the MOST likely row in the support workspace and
+// rendered as a green "active" pill. Delegates to the canonical resolver now.
+const effectiveStatus = resolveAccountStatus
 
 async function recentOrganizers(): Promise<SupportOrganizer[]> {
   try {

@@ -103,7 +103,10 @@ describe('transactional email still carries both lines', () => {
       'lib/email/templates/registration.ts', 'lib/email/templates/certificate.ts',
       'lib/email/templates/refund.ts', 'lib/email/templates/settlement.ts',
       'lib/email/templates/ticket.ts', 'lib/email/templates/otp.ts',
-      'lib/email/templates/team-invite.ts', 'lib/reminders/templates.ts',
+      // RD-TEAM-IMPL-01 — team-invite.ts was in this list. The email invitation flow
+      // it belonged to is removed, so the file no longer exists; every OTHER
+      // transactional template is still enumerated here.
+      'lib/reminders/templates.ts',
     ]) {
       expect(read(f), f).not.toContain('hideOwnershipLine')
     }

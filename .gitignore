@@ -15,6 +15,8 @@
 
 # next.js
 /.next/
+# Temporary / parallel Next.js build output (NEXT_DIST_DIR=.next-<name>), e.g. .next-footerqa/
+.next-*/
 /out/
 
 # production
@@ -53,6 +55,12 @@ ui-debug.log
 .emulator-data/
 e2e/.shots/
 .next-emulator/
+
+# RD-CHECKIN-05 — browser acceptance output (scripts/qa/checkin-acceptance.mjs).
+# Regenerated on every run, ~8 MB of screenshots, and the images capture the
+# one-time staff password the fixture issues. Emulator-only credentials for a
+# demo- project, but there is no reason for any of it to enter history.
+.qa/
 
 # Firebase service account credentials
 registerdesk-c91a3-firebase-adminsdk-fbsvc-7124b9379b.json

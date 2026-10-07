@@ -1,6 +1,7 @@
 import { notFound }       from 'next/navigation'
 import { getEventBySlug } from '@/lib/firebase/firestore/events'
 import { canExposePublicEvent } from '@/lib/events/publicVisibility'
+import { HomeShell }     from '@/components/discovery/home/HomeShell'
 import SponsorApplyClient from './SponsorApplyClient'
 import type { Metadata }  from 'next'
 
@@ -36,12 +37,14 @@ export default async function SponsorPage({ params }: Props) {
   const message     = typeof sponsorCfg?.message     === 'string' ? sponsorCfg.message     : ''
 
   return (
-    <SponsorApplyClient
-      slug={slug}
-      eventName={eventName}
-      enabled={enabled}
-      closingDate={closingDate}
-      customMessage={message}
-    />
+    <HomeShell>
+      <SponsorApplyClient
+        slug={slug}
+        eventName={eventName}
+        enabled={enabled}
+        closingDate={closingDate}
+        customMessage={message}
+      />
+    </HomeShell>
   )
 }

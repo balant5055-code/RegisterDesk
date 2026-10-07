@@ -2,13 +2,14 @@
 // Admin-gated. Reuses getLicenseCenterTimeline (adminAuditLogs + licenseHistory).
 
 import { NextRequest, NextResponse } from 'next/server'
-import { resolveAdminUid }             from '@/lib/admin/auth'
+import { requireSuperAdmin } from '@/lib/admin/financialGuard'
 import { getLicenseCenterTimeline }    from '@/lib/admin/licenseCenterService'
 import type { LicenseCenterTimelineResponse } from '@/lib/admin/licenseCenterTypes'
 
 export async function GET(req: NextRequest): Promise<NextResponse> {
-  const adminUid = await resolveAdminUid(req.headers.get('authorization'))
-  if (!adminUid) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+  // RD-PHASE4-S4 · D7 — licence history + licence/coupon audit is financial: Super Admin only.
+  const guard = await requireSuperAdmin(req)
+  if (guard.response) return guard.response
   try {
     const entries = await getLicenseCenterTimeline()
     return NextResponse.json({ entries } satisfies LicenseCenterTimelineResponse, { headers: { 'Cache-Control': 'no-store' } })

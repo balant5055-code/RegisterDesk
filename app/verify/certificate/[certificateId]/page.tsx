@@ -8,6 +8,7 @@
 
 import type { Metadata } from 'next'
 import Link              from 'next/link'
+import { HomeShell }     from '@/components/discovery/home/HomeShell'
 import { verifyCertificate } from '@/lib/certificates/verify'
 
 type PageProps = { params: Promise<{ certificateId: string }> }
@@ -33,18 +34,31 @@ export default async function VerifyCertificatePage({ params }: PageProps) {
   const result = await verifyCertificate(certificateId)
   const c      = result.certificate
 
+  // ═══ CHROME ══════════════════════════════════════════════════════════════
+  // The canonical public shell, the same one `/`, the marketing pages and the results
+  // surface render. This page used to hand-roll its own: a #f7f8fa canvas and a strip
+  // holding a "RegisterDesk" wordmark linked to `/` — the same wordmark, linked to the same
+  // place, that HomeNavbar already provides — with no way to reach anything else on the
+  // site. Someone scanning a QR code on a printed certificate landed on an island.
+  //
+  // HomeShell is used DIRECTLY rather than through a shell of this page's own: there is one
+  // route in this experience, so a CertificateVerificationShell would be indirection with no
+  // second consumer. It composes safely because this page declares no <main>, <header> or
+  // <footer> of its own — HomeShell owns the single <main id="main-content">.
+  //
+  // Only the frame changed. Every state, every field, the metadata and the robots rule are
+  // exactly as they were.
   return (
-    <div className="min-h-screen bg-[#f7f8fa] font-sans">
-      {/* Header */}
-      <div className="border-b border-border bg-white px-4 py-3">
-        <div className="mx-auto flex max-w-lg items-center justify-between">
-          <Link href="/" className="text-[13px] font-bold text-foreground">RegisterDesk</Link>
-          <span className="text-[12px] text-muted-foreground">Certificate Verification</span>
-        </div>
-      </div>
-
+    <HomeShell>
       <div className="mx-auto max-w-md px-4 py-12">
-        <div className="overflow-hidden rounded-2xl border border-border bg-white shadow-md">
+        {/* The page's H1. It was a <p>, so this page — reached by scanning a QR code on a
+            printed certificate, often by a recruiter or registrar using a screen reader —
+            had NO headings at all and no entry in the document outline. Same size, same
+            colour, same position: only the element changed. */}
+        <h1 className="mb-4 text-center text-[12px] text-muted-foreground">Certificate Verification</h1>
+        {/* bg-card, not bg-white: the shell is theme-aware, and a hardcoded white card
+            would stay white on a dark page. Same colour in light mode. */}
+        <div className="overflow-hidden rounded-2xl border border-border bg-card shadow-md">
 
           {/* ── Banner ─────────────────────────────────────────────────────── */}
           {result.state === 'valid' && (
@@ -119,7 +133,7 @@ export default async function VerifyCertificatePage({ params }: PageProps) {
           <Link href="/" className="font-semibold text-foreground hover:underline">RegisterDesk</Link>
         </p>
       </div>
-    </div>
+    </HomeShell>
   )
 }
 
@@ -156,7 +170,11 @@ function Banner({
         </svg>
       </div>
       <div>
-        <p className={`text-[14px] font-bold ${t.title}`}>{title}</p>
+        {/* The verdict — "Certificate is Valid", "Certificate Revoked" — is the single most
+            important thing on the page, and it was a <p>. As an h2 under the h1 it becomes
+            the first thing a screen-reader user finds when jumping by heading, which is
+            exactly how someone checks a certificate. Styling is untouched. */}
+        <h2 className={`text-[14px] font-bold ${t.title}`}>{title}</h2>
         <p className={`text-[12px] ${t.sub}`}>{subtitle}</p>
       </div>
     </div>

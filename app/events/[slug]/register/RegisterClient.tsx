@@ -5,7 +5,7 @@ import { useRouter }              from 'next/navigation'
 import { useAuth }                from '@/components/auth/AuthProvider'
 // RD-RT1.0: framer-motion, Fragment and the event-meta icons left with the presentation
 // components that moved to ./RegistrationUI — this module no longer renders them.
-import { ShieldCheck, RotateCcw, Check, AlertTriangle, Tag, ChevronUp, Lock, Clock3, KeyRound, UserRound, Ruler } from 'lucide-react'
+import { ShieldCheck, RotateCcw, Check, AlertTriangle, Tag, ChevronUp, Lock, Clock3, UserRound, Ruler } from 'lucide-react'
 import { cn }                     from '@/lib/utils/cn'
 import { buildRegisterHref }      from '@/lib/events/registerHref'
 import { buttonVariants }         from '@/components/ui/button'
@@ -29,7 +29,7 @@ import type { FeeBreakdownRecord } from '@/lib/fees/types'
 import { buildAttendeeFeeBreakdown, formatPaise, type AttendeeFeeBreakdown } from '@/lib/fees/attendeeBreakdown'
 // RD-RT1.0: the presentation layer now lives in RegistrationUI. Logic stays here.
 import {
-  CheckoutTopBar, RegistrationMasthead, FormSectionCard,
+  CheckoutTopBar, CheckoutBreadcrumb, CheckoutFooter, RegistrationMasthead, FormSectionCard,
   SummaryPanel, SummaryDigest, PassSwitcher, estimateMinutes,
   type EventIdentity, type SummaryPricing,
 } from './RegistrationUI'
@@ -41,6 +41,7 @@ import {
   RadioOption, CheckOption, TogglePill, ErrorSummary,
 } from './formControls'
 import { PassPrice } from './PassPrice'
+import { InviteGate } from './InviteGate'
 // RD-RT3.5: the recovery surface for the existing draft mechanism.
 import { RecoveryBanner, AutosaveStatus, RecoveryReassurance } from './RecoveryUI'
 // RD-RT5.0: the checkout blocks that live INSIDE the one form — consent and the itemised
@@ -55,56 +56,43 @@ import { MilestoneNotice } from '@/components/event-templates/shared/registratio
 import { Dialog } from '@/components/ui/Dialog'
 import type { ResolvedMilestoneAlert } from '@/lib/events/milestoneAlerts'
 
-// ─── Razorpay checkout (loaded dynamically from checkout.razorpay.com) ─────────
+// ─── Checkout (provider-neutral) ──────────────────────────────────────────────
+//
+// RD-PAYMENT-CASHFREE-CHECKOUT-06 — the Razorpay script loader and checkout call that used
+// to live here moved to lib/payments/checkout/clientCheckout.ts, together with Cashfree's.
+// This file no longer names a gateway: it asks the server which provider the order belongs
+// to and hands that answer to `openCheckout`.
+import {
+  openCheckout, prefetchRazorpay,
+  type RazorpayCheckoutPayload,
+} from '@/lib/payments/checkout/clientCheckout'
+import type { CheckoutHandoff } from '@/lib/payments/providers/types'
 
-interface RazorpayPaymentSuccess {
-  razorpay_payment_id: string
-  razorpay_order_id:   string
-  razorpay_signature:  string
-}
-// Window.Razorpay is declared once, globally, in types/razorpay.d.ts.
+/** Razorpay's signed browser result — the body verify-payment expects, unchanged. */
+type RazorpayPaymentSuccess = RazorpayCheckoutPayload
 
-function loadRazorpayScript(): Promise<void> {
-  if (typeof window !== 'undefined' && window.Razorpay) return Promise.resolve()
-  return new Promise((resolve, reject) => {
-    const script    = document.createElement('script')
-    script.src      = 'https://checkout.razorpay.com/v1/checkout.js'
-    script.onload   = () => resolve()
-    script.onerror  = () => reject(new Error('Failed to load Razorpay checkout'))
-    document.body.appendChild(script)
-  })
-}
-
-function openRazorpayCheckout(opts: {
-  keyId:         string
-  orderId:       string
-  amount:        number    // paise
-  currency:      string
-  eventName:     string
-  passName:      string
-  attendeeName:  string
-  attendeeEmail: string
-  attendeePhone?: string
-}): Promise<RazorpayPaymentSuccess> {
-  return new Promise((resolve, reject) => {
-    const rzp = new window.Razorpay({
-      key:         opts.keyId,
-      amount:      opts.amount,
-      currency:    opts.currency,
-      order_id:    opts.orderId,
-      name:        opts.eventName,
-      description: opts.passName,
-      prefill: {
-        name:    opts.attendeeName,
-        email:   opts.attendeeEmail,
-        contact: opts.attendeePhone,
-      },
-      handler: resolve,
-      modal:   { ondismiss: () => reject(new Error('PAYMENT_CANCELLED')) },
-      theme:   { color: '#e5277e' },   // GA-7D S2: brand primary (was an off-brand violet); Razorpay needs a hex, not a token
-    })
-    rzp.open()
-  })
+/**
+ * An order as the browser holds it.
+ *
+ * `keyId` became `checkout` in this phase: the server now says WHICH provider the order
+ * belongs to and supplies exactly what that provider's checkout needs. A Razorpay order
+ * still carries its publishable key — inside the handoff — so nothing about Razorpay's
+ * behaviour changed.
+ */
+interface CheckoutOrder {
+  orderId:  string
+  amount:   number
+  currency: string
+  /**
+   * OPTIONAL, because two real states have no handoff and must not pretend to:
+   *   · a PARKED attempt (P0-2 / P0-5) that is only ever polled, never re-opened;
+   *   · an attempt whose create-order response never arrived, so no provider was named.
+   *
+   * It was `keyId: string` before, which those paths satisfied with `''` — an empty
+   * Razorpay key that looked like a handoff and was not one. `runPayment` fails closed if
+   * it is asked to open checkout without one.
+   */
+  checkout?: CheckoutHandoff
 }
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -617,7 +605,7 @@ interface CouponState {
  * unreachable, so no second order can originate from either case.
  */
 interface ParkedPayment {
-  order:    { orderId: string; amount: number; currency: string; keyId: string }
+  order:    CheckoutOrder
   attendee: { name: string; email: string; phone?: string }
   /** Present once Razorpay's handler fired — money has very likely been taken. */
   payment?: RazorpayPaymentSuccess
@@ -691,7 +679,7 @@ export function RegisterClient({
   // H-4: a cancelled/failed Razorpay payment parks the still-valid order here so the
   // attendee can retry the SAME order (no new order, no duplicate registration) or return.
   const [paymentRecovery, setPaymentRecovery] = useState<{
-    order:    { orderId: string; amount: number; currency: string; keyId: string }
+    order:    CheckoutOrder
     attendee: { name: string; email: string; phone?: string }
   } | null>(null)
   // RD-PAY-P0-2 — THE double-charge guard.
@@ -724,7 +712,7 @@ export function RegisterClient({
   // here with its canonical breakdown so the exact charge is shown and explicitly confirmed
   // BEFORE Razorpay opens. Null for organizer_absorbs / free → checkout is unchanged.
   const [feeConfirm, setFeeConfirm] = useState<{
-    order:     { orderId: string; amount: number; currency: string; keyId: string }
+    order:     CheckoutOrder
     attendee:  { name: string; email: string; phone?: string }
     breakdown: AttendeeFeeBreakdown
   } | null>(null)
@@ -856,13 +844,18 @@ export function RegisterClient({
   // M5: prefetch the Razorpay checkout script the moment registration becomes likely —
   // i.e. once the attendee starts filling a PAID form — so it's already loaded when they
   // submit, instead of being fetched after order creation (latency at the worst moment).
-  // Idempotent (loadRazorpayScript no-ops if already present); never runs for free passes.
+  // Idempotent (prefetchRazorpay no-ops if the script is already present); never runs for
+  // free passes. The name `loadRazorpayScript` in an earlier note refers to a function that
+  // moved into lib/payments/checkout/clientCheckout.ts in RD-PAYMENT-CASHFREE-CHECKOUT-06.
   const rzpPrefetchedRef = useRef(false)
   useEffect(() => {
     if (!isPaid || rzpPrefetchedRef.current) return
     if (Object.keys(values).length === 0) return
     rzpPrefetchedRef.current = true
-    void loadRazorpayScript().catch(() => {})
+    // Razorpay only. The provider is not known until create-order answers, and Cashfree's
+    // SDK is pointless to prefetch for an order that will almost always be Razorpay's —
+    // this is a latency optimisation, not part of the payment path.
+    void prefetchRazorpay()
   }, [values, isPaid])
 
   // ── Invite code gate ──────────────────────────────────────────────────────
@@ -1206,6 +1199,63 @@ export function RegisterClient({
   }, [rememberPayment, clearSavedForm, router, eventSlug])
 
   /**
+   * RD-PAYMENT-CASHFREE-CHECKOUT-06 — waits for the SERVER to decide a payment the browser
+   * cannot judge.
+   *
+   * Used after a Cashfree checkout closes. It asks the read-only status endpoint, which
+   * creates nothing, and keeps asking while the provider reports the payment as in flight.
+   * It never concludes anything itself: `confirmed` comes from the server having settled,
+   * and every other terminal answer is the server's too.
+   *
+   * If it gives up, the attempt stays PARKED — the form is not released and the recovery
+   * card takes over — because "we stopped asking" must never read as "nothing was paid".
+   */
+  async function awaitServerOutcome(p: ParkedPayment): Promise<void> {
+    setVerifying(true)
+    try {
+      // ~75s of polling: comfortably past the ~30s a sandbox UPI collect took to settle,
+      // with the webhook as the real backstop for anything slower.
+      for (let attempt = 0; attempt < 25; attempt++) {
+        await new Promise(r => setTimeout(r, attempt === 0 ? 1500 : 3000))
+        type StatusBody = { state?: string; registrationId?: string }
+        let json: StatusBody | null = null
+        try {
+          const res = await fetch('/api/registrations/payment-status', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ orderId: p.order.orderId }),
+          })
+          json = await res.json() as StatusBody
+        } catch { continue }   // a failed poll is "we learned nothing", never "unpaid"
+
+        if (json?.state === 'confirmed' && json.registrationId) {
+          rememberPayment(null)
+          clearSavedForm()
+          router.push(`/events/${eventSlug}/register/success?fresh=1&id=${json.registrationId}`)
+          return
+        }
+        if (json?.state === 'failed') {
+          rememberPayment(null)
+          setSubmitError('That payment could not be used to register. If you were charged, our team will resolve it.')
+          return
+        }
+        if (json?.state === 'awaiting_payment') {
+          // The provider holds nothing at all for this order — the attendee closed the flow
+          // without paying. Safe to offer the SAME order again.
+          rememberPayment(null)
+          setPaymentRecovery({ order: p.order, attendee: p.attendee })
+          return
+        }
+        // payment_pending | captured_unsettled | unknown → keep waiting. Each of these
+        // means a payment may exist, so the form stays locked.
+      }
+      // Still undecided. Parked, not released.
+      rememberPayment(p)
+    } finally {
+      setVerifying(false)
+    }
+  }
+
+  /**
    * The recovery card's action. Re-runs verification when we hold the signed result (which
    * both QUERIES and SETTLES, idempotently); otherwise asks the read-only status endpoint,
    * which reports what Razorpay actually holds without creating anything.
@@ -1246,10 +1296,19 @@ export function RegisterClient({
         return
       }
       if (json.state === 'failed') {
-        // Terminal server-side: anything captured was refunded before the intent was marked
-        // failed, so releasing the form here cannot double-charge.
+        // Terminal server-side, so releasing the form here cannot double-charge. RD-EVENT-COMMERCE-04B:
+        // nothing is refunded automatically any more — a captured payment is HELD for manual
+        // review — so this must not promise a refund.
         rememberPayment(null)
-        setSubmitError('That payment could not be used to register. If you were charged, a full refund has been initiated.')
+        setSubmitError('That payment could not be used to register. If you were charged, the payment is on hold for review — nothing further will be charged.')
+        return
+      }
+      if (json.state === 'payment_pending') {
+        // RD-PAYMENT-CASHFREE-CHECKOUT-06 — a payment is IN FLIGHT at the provider. Neither
+        // success nor failure, and emphatically not a retry: offering one here offers a
+        // second charge for a payment that is about to land. Stay parked.
+        rememberPayment(p)
+        setSubmitError('Your payment is still being confirmed. Please wait a moment — do not pay again.')
         return
       }
       if (json.state === 'awaiting_payment') {
@@ -1305,31 +1364,35 @@ export function RegisterClient({
   // the initial submit AND retryPayment, so a retry re-opens the SAME order — no second
   // create-order, no duplicate registration (verify-payment is idempotent per its intent).
   async function runPayment(
-    order:    { orderId: string; amount: number; currency: string; keyId: string },
+    order:    CheckoutOrder,
     attendee: { name: string; email: string; phone?: string },
     headers:  Record<string, string>,
   ): Promise<void> {
-    try {
-      await loadRazorpayScript()
-    } catch {
+    // Fail closed: no handoff means the server never named a provider for this order, and
+    // guessing one is exactly what this phase exists to stop.
+    if (!order.checkout) {
+      setSubmitError('We could not start that payment. Nothing was charged — please try again.')
+      return
+    }
+
+    // The provider is the SERVER's answer, carried on the order. Nothing here chooses one.
+    const outcome = await openCheckout(order.checkout, {
+      orderId:       order.orderId,
+      amountPaise:   order.amount,
+      currency:      order.currency,
+      eventName,
+      passName:      pass.name,
+      attendeeName:  attendee.name,
+      attendeeEmail: attendee.email,
+      attendeePhone: attendee.phone,
+    })
+
+    if (outcome.kind === 'unavailable') {
       setSubmitError('Failed to load payment checkout. Please check your connection.')
       return
     }
 
-    let paymentResult: RazorpayPaymentSuccess
-    try {
-      paymentResult = await openRazorpayCheckout({
-        keyId:         order.keyId,
-        orderId:       order.orderId,
-        amount:        order.amount,
-        currency:      order.currency,
-        eventName,
-        passName:      pass.name,
-        attendeeName:  attendee.name,
-        attendeeEmail: attendee.email,
-        attendeePhone: attendee.phone,
-      })
-    } catch {
+    if (outcome.kind === 'dismissed') {
       // Cancelled or failed → recovery card (retry reuses THIS order).
       // RD-RT5.0: the recovery card renders inside the one form, which is already on
       // screen, so there is no step to return to.
@@ -1337,11 +1400,28 @@ export function RegisterClient({
       return
     }
 
+    if (outcome.kind === 'submitted') {
+      // ═══ CASHFREE · THE BROWSER DOES NOT KNOW WHETHER THIS SUCCEEDED ═══════
+      //
+      // Cashfree's checkout closes while a UPI collect may still be PENDING — ~30 seconds,
+      // measured live in RD-PAYMENT-CASHFREE-SANDBOX-05B. There is no signed payload to
+      // verify and nothing here may be read as success.
+      //
+      // So the attempt is PARKED exactly as a Razorpay payment is (which suppresses every
+      // Pay affordance — the P0-2 double-charge guard), with no `payment` field, and the
+      // SERVER is asked what is true. Registration is created by settlement, reached through
+      // the webhook or the capture sweep; this only watches for the answer.
+      const pending = { order, attendee }
+      rememberPayment(pending)
+      await awaitServerOutcome(pending)
+      return
+    }
+
     // RD-PAY-P0-2 — THE critical line. Razorpay's handler has fired, which means the money
     // has been taken. Record that BEFORE any network call, so every subsequent failure mode
     // — timeout, 429, 500, tab close, crash — lands on the recovery state instead of on a
     // form whose Pay button would mint a second order.
-    const pending = { order, attendee, payment: paymentResult }
+    const pending = { order, attendee, payment: outcome.payload }
     rememberPayment(pending)
 
     // settlePayment owns the outcome: retries transient failures, redirects on success, and
@@ -1580,7 +1660,15 @@ export function RegisterClient({
         // stops the WAIT; it says nothing about whether the server created an order, which
         // is why the outcome below is treated as unknown rather than as a failure.
         type OrderJson = {
-          orderId?: string; amount?: number; currency?: string; keyId?: string; error?: string
+          orderId?: string; amount?: number; currency?: string; error?: string
+          /**
+           * RD-PAYMENT-CASHFREE-CHECKOUT-06 — the server's answer about WHICH gateway holds
+           * this order, and what the browser needs to open it. `keyId` is the legacy mirror
+           * of `checkout.keyId`, still sent for Razorpay and never for Cashfree.
+           */
+          provider?: 'razorpay' | 'cashfree'
+          checkout?: CheckoutHandoff
+          keyId?: string
           reason?: string; reused?: boolean
           alreadyRegistered?: boolean; registrationId?: string
           financials?: FeeBreakdownRecord
@@ -1601,7 +1689,7 @@ export function RegisterClient({
         // holds a payment against this attempt's previous order. Park it; do not offer Pay.
         if (orderRes?.status === 409 && orderJson?.reason === 'PAYMENT_IN_PROGRESS' && orderJson.orderId) {
           rememberPayment({
-            order: { orderId: orderJson.orderId, amount: effectivePricePaise, currency: 'INR', keyId: '' },
+            order: { orderId: orderJson.orderId, amount: effectivePricePaise, currency: 'INR' },
             attendee,
           })
           return
@@ -1628,7 +1716,7 @@ export function RegisterClient({
           // through the attempt claim. `orderId` is empty because we never received one —
           // `attemptKey` is the handle instead.
           rememberPayment({
-            order: { orderId: '', amount: effectivePricePaise, currency: 'INR', keyId: '' },
+            order: { orderId: '', amount: effectivePricePaise, currency: 'INR' },
             attendee,
             attemptKey: idempotencyKey,
           })
@@ -1647,7 +1735,18 @@ export function RegisterClient({
         // `reused: true` means this is the SAME order a previous call minted for this
         // attempt — the server declined to create a second one. Checkout opens on it
         // exactly as it would on a new order.
-        const order = { orderId: orderJson.orderId, amount: orderJson.amount!, currency: orderJson.currency ?? 'INR', keyId: orderJson.keyId! }
+        //
+        // The handoff is taken from `checkout` — the server's provider-neutral answer. The
+        // `keyId` fallback keeps a Razorpay order working against a server that has not yet
+        // been redeployed with this phase; it is only ever applied as a RAZORPAY handoff, so
+        // it can never manufacture one for Cashfree.
+        const order: CheckoutOrder = {
+          orderId:  orderJson.orderId,
+          amount:   orderJson.amount!,
+          currency: orderJson.currency ?? 'INR',
+          checkout: orderJson.checkout
+            ?? (orderJson.keyId ? { provider: 'razorpay', keyId: orderJson.keyId } : undefined),
+        }
 
         // RD-PAYMENT-05 B1: when the attendee bears fees, show the EXACT canonical breakdown
         // (from the server financials — total === order.amount) and require explicit
@@ -1699,55 +1798,26 @@ export function RegisterClient({
   }
 
   // ── Invite code gate screen ────────────────────────────────────────────────
-  // RD-RT4.0: the gates now open on the same canvas + checkout bar as the form, so an
-  // invite-only or sign-in-required event does not feel like a different product before
-  // it feels like a registration. Behaviour, handlers and copy are unchanged.
+  // RD-RT4.0: the gates open on the same canvas + checkout bar as the form. The invite
+  // screen itself lives in InviteGate.tsx; state and verification stay here, unchanged.
   if (requiresInviteCode && !inviteCodeVerified) {
     return (
-      <div style={CANVAS_STYLE} className={cn('min-h-screen', CANVAS)}>
-        <CheckoutTopBar eventSlug={eventSlug} secure={false} />
-        <div className={cn(PAGE, 'flex min-h-[calc(100vh-3.5rem)] items-center justify-center py-12')}>
-          <div className="w-full max-w-md">
-            <div className="mb-6 text-center">
-              <div className="mx-auto mb-4 flex size-12 items-center justify-center rounded-2xl bg-primary/10 text-primary">
-                <KeyRound className="size-6" aria-hidden />
-              </div>
-              <h1 className="text-fs-lg font-bold tracking-tight text-foreground">Invite Only</h1>
-              <p className="mt-2 text-fs-base text-muted-foreground">
-                This event requires an invite code to register.
-              </p>
-            </div>
-
-            <div className={cn(PANEL, PANEL_BODY)}>
-              <label htmlFor="invite-code" className="mb-1.5 block text-fs-sm font-semibold text-foreground">
-                Invite Code
-              </label>
-              <input
-                id="invite-code"
-                type="text"
-                autoFocus
-                placeholder="Enter invite code"
-                value={inviteCodeInput}
-                onChange={e => { setInviteCodeInput(e.target.value); setInviteCodeError(null) }}
-                onKeyDown={e => { if (e.key === 'Enter') void handleVerifyInviteCode() }}
-                className={cn(controlCls(!!inviteCodeError), 'font-mono tracking-widest placeholder:font-sans placeholder:tracking-normal')}
-                aria-invalid={!!inviteCodeError}
-              />
-              {inviteCodeError && (
-                <FieldError id="invite-code-error">{inviteCodeError}</FieldError>
-              )}
-              <button
-                type="button"
-                onClick={() => void handleVerifyInviteCode()}
-                disabled={inviteCodeChecking}
-                className={cn(buttonVariants({ variant: 'primary', size: 'lg' }), 'mt-4 w-full')}
-              >
-                {inviteCodeChecking ? 'Verifying…' : 'Continue'}
-              </button>
-            </div>
-          </div>
-        </div>
-      </div>
+      <InviteGate
+        eventSlug={eventSlug}
+        eventName={eventName}
+        bannerUrl={bannerUrl}
+        startDate={startDate}
+        startTime={startTime}
+        venueName={venueName}
+        venueCity={venueCity}
+        venueType={venueType}
+        passName={pass?.name ?? null}
+        value={inviteCodeInput}
+        error={inviteCodeError}
+        checking={inviteCodeChecking}
+        onChange={v => { setInviteCodeInput(v); setInviteCodeError(null) }}
+        onSubmit={() => void handleVerifyInviteCode()}
+      />
     )
   }
 
@@ -1764,25 +1834,29 @@ export function RegisterClient({
   // ── Auth gate ──────────────────────────────────────────────────────────────
   if (requireLogin && !isLoggedIn) {
     return (
-      <div style={CANVAS_STYLE} className={cn('min-h-screen', CANVAS)}>
+      <div style={CANVAS_STYLE} className={cn('flex min-h-screen flex-col', CANVAS)}>
         <CheckoutTopBar eventSlug={eventSlug} secure={false} />
-        <div className={cn(PAGE, 'flex min-h-[calc(100vh-3.5rem)] items-center justify-center py-12')}>
-          <div className={cn(PANEL, PANEL_BODY, 'w-full max-w-md text-center')}>
-            <div className="mx-auto mb-4 flex size-12 items-center justify-center rounded-2xl bg-primary/10 text-primary">
-              <UserRound className="size-6" aria-hidden />
+        <main className={cn(PAGE, 'flex flex-1 flex-col pt-5 sm:pt-7')}>
+          <CheckoutBreadcrumb eventSlug={eventSlug} eventName={eventName} />
+          <div className="flex flex-1 items-center justify-center py-10">
+            <div className={cn(PANEL, PANEL_BODY, 'w-full max-w-md text-center')}>
+              <div className="mx-auto mb-4 flex size-12 items-center justify-center rounded-xl bg-primary/10 text-primary">
+                <UserRound className="size-6" aria-hidden />
+              </div>
+              <h1 className="text-fs-lg font-bold tracking-tight text-foreground">Sign in to Register</h1>
+              <p className="mx-auto mt-2 max-w-sm text-fs-base leading-relaxed text-muted-foreground">
+                The organiser requires you to be signed in before registering for this event.
+              </p>
+              <a
+                href={`/login?redirect=${encodeURIComponent(buildRegisterHref(eventSlug, pass.id))}`}
+                className={cn(buttonVariants({ variant: 'primary', size: 'lg' }), 'mt-6 w-full')}
+              >
+                Sign In to Continue
+              </a>
             </div>
-            <h1 className="text-fs-lg font-bold tracking-tight text-foreground">Sign in to Register</h1>
-            <p className="mx-auto mt-2 max-w-sm text-fs-base leading-relaxed text-muted-foreground">
-              The organiser requires you to be signed in before registering for this event.
-            </p>
-            <a
-              href={`/login?redirect=${encodeURIComponent(buildRegisterHref(eventSlug, pass.id))}`}
-              className={cn(buttonVariants({ variant: 'primary', size: 'lg' }), 'mt-6 w-full')}
-            >
-              Sign In to Continue
-            </a>
           </div>
-        </div>
+        </main>
+        <CheckoutFooter />
       </div>
     )
   }
@@ -1953,8 +2027,9 @@ export function RegisterClient({
           is answerable from any scroll position. */}
       <CheckoutTopBar eventSlug={eventSlug} secure={isPaid} />
 
-      {/* pb-32 (mobile) clears the sticky checkout bar and its safe-area inset. */}
-      <div className={cn(PAGE, 'relative pb-32 lg:pb-20')}>
+      {/* The CheckoutFooter below this block carries the mobile checkout-bar clearance now,
+          so the content only needs its own breathing room. */}
+      <div className={cn(PAGE, 'relative pb-12 lg:pb-16')}>
 
         {/* Breadcrumb → eyebrow → title → one sentence → three quiet facts. The poster,
             pass, price and venue live in the summary, which is on screen the whole
@@ -2107,7 +2182,7 @@ export function RegisterClient({
 
             {/* Coupon applied badge (with remove) */}
             {isPaid && couponApplied && (
-              <div className="mt-4 flex items-center justify-between gap-3 rounded-2xl border border-emerald-500/25 bg-emerald-500/[0.06] p-4">
+              <div className="mt-4 flex items-center justify-between gap-3 rounded-xl border border-emerald-500/25 bg-emerald-500/[0.06] p-4">
                 <div className="flex min-w-0 items-start gap-3">
                   <span aria-hidden className="flex size-7 shrink-0 items-center justify-center rounded-xl bg-emerald-500/15 text-emerald-600">
                     <Check className="size-3.5" strokeWidth={3} />
@@ -2136,7 +2211,7 @@ export function RegisterClient({
 
             {/* Approval mode note */}
             {approvalMode === 'manual' && (
-              <div className="mt-4 flex items-start gap-3 rounded-2xl border border-amber-500/25 bg-amber-500/[0.06] p-4">
+              <div className="mt-4 flex items-start gap-3 rounded-xl border border-amber-500/25 bg-amber-500/[0.06] p-4">
                 <span aria-hidden className="flex size-7 shrink-0 items-center justify-center rounded-xl bg-amber-500/15 text-amber-600">
                   <Clock3 className="size-3.5" />
                 </span>
@@ -2268,7 +2343,7 @@ export function RegisterClient({
               </div>
             ) : submitError ? (
               /* Submit error — assertive live region so failures are announced */
-              <div role="alert" className="mt-4 flex items-start gap-3 rounded-2xl border border-destructive/25 bg-destructive/[0.04] p-4 text-fs-sm leading-relaxed text-destructive">
+              <div role="alert" className="mt-4 flex items-start gap-3 rounded-xl border border-destructive/25 bg-destructive/[0.04] p-4 text-fs-sm leading-relaxed text-destructive">
                 <AlertTriangle className="mt-0.5 size-4 shrink-0" aria-hidden />
                 <span className="min-w-0">{submitError}</span>
               </div>
@@ -2297,10 +2372,10 @@ export function RegisterClient({
                 {/* RD-RT4.0: one quiet closing block instead of two stacked footnotes —
                     the legal line, the security line and the draft reassurance are all
                     the same register of information, so they share one strip. */}
-                <div className="mt-6 rounded-2xl border border-border/60 bg-card/60 px-4 py-3.5">
+                <div className="mt-6 rounded-xl border border-border/60 bg-card/60 px-4 py-3.5">
                   <p className="flex items-center justify-center gap-1.5 text-fs-2xs font-semibold text-muted-foreground">
                     <Lock className="size-3 shrink-0 text-emerald-600" aria-hidden />
-                    {isPaid ? 'Encrypted payment via Razorpay' : 'Your details are sent securely'}
+                    {isPaid ? 'Encrypted, secure payment' : 'Your details are sent securely'}
                   </p>
                   <p className="mt-2 text-center text-fs-2xs leading-relaxed text-muted-foreground">
                     By registering, you agree to the event organiser&apos;s terms and conditions.
@@ -2323,7 +2398,7 @@ export function RegisterClient({
           {/* RD-RT3.3: bounded to the viewport and scrollable internally, so a summary
               taller than the screen no longer hides its own CTA. Overflow lives on the
               STICKY element itself, never an ancestor, so stickiness is unaffected.
-              RD-RT4.0: `top-20` clears the 56px sticky checkout bar with a 24px gutter.
+              RD-RT4.0: `top-24` clears the 64px sticky checkout bar with a 32px gutter.
 
               The horizontal `-mx-3 px-3` that used to be here is GONE: it existed only to
               stop `overflow-y-auto` (which forces overflow-x to `auto`) from clipping the
@@ -2335,7 +2410,7 @@ export function RegisterClient({
               below its border box (18px offset + 36px blur / 2 − 28px spread), and
               box-shadow does not contribute to scrollable overflow, so a smaller pad cuts
               the bottom of the shadow off at the scroll container's padding edge. */}
-          <div className="sticky top-20 max-h-[calc(100vh-6.5rem)] overflow-y-auto overscroll-contain pb-2">
+          <div className="sticky top-24 max-h-[calc(100vh-7.5rem)] overflow-y-auto overscroll-contain pb-2">
             {/* RD-RT5.0: ONE action, not two. There is no review branch left — this
                 submits the form, which validates and goes straight to Razorpay.
                 Deliberately NOT disabled on missing consent: a disabled button fires no
@@ -2358,7 +2433,7 @@ export function RegisterClient({
                   </button>
                   <p className="mt-2.5 flex items-center justify-center gap-1.5 text-fs-2xs font-medium text-muted-foreground">
                     <Lock className="size-3 shrink-0 text-emerald-600" aria-hidden />
-                    {isPaid ? 'Encrypted payment via Razorpay' : 'Your details are sent securely'}
+                    {isPaid ? 'Encrypted, secure payment' : 'Your details are sent securely'}
                   </p>
                 </>
               )}
@@ -2368,6 +2443,8 @@ export function RegisterClient({
 
       </div>
       </div>
+
+      <CheckoutFooter clearMobileBar />
 
       {/* C-2: mobile-only sticky checkout bar (Total + Pay). Desktop keeps the right-column
           sticky SummaryCard — this is `lg:hidden`, so the desktop summary is never duplicated.

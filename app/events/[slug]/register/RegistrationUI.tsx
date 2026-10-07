@@ -34,7 +34,8 @@ import {
 } from 'lucide-react'
 import { cn } from '@/lib/utils/cn'
 import { Breadcrumbs } from '@/components/ui/Breadcrumbs'
-import { MarketingLogo } from '@/components/marketing/MarketingLogo'
+import { BrandLockup, BRAND_NAME } from '@/components/marketing/BrandLockup'
+import { FOOTER_LEGAL } from '@/content/marketing/footer'
 import { PassPrice } from './PassPrice'
 import { TYPE, BRAND_GRADIENT } from '@/components/event-templates/shared/ui/framework'
 // RD-RT4.0: the route's surface tokens live in a server-safe module so the pass picker
@@ -67,8 +68,10 @@ export function CheckoutTopBar({ eventSlug, secure = true }: {
 }) {
   return (
     <header className="sticky top-0 z-50 border-b border-border/70 bg-card/85 backdrop-blur-xl">
-      <div className={cn(PAGE, 'flex h-14 items-center justify-between gap-4')}>
-        <MarketingLogo className="h-6 w-auto sm:h-7" />
+      <div className={cn(PAGE, 'flex h-16 items-center justify-between gap-4')}>
+        {/* The full lockup (mark + name + tagline): the same identity the public header
+            carries, so arriving here from "Register now" does not read as a different site. */}
+        <BrandLockup size="sm" />
 
         <div className="flex items-center gap-2.5 sm:gap-3.5">
           {secure && (
@@ -89,11 +92,65 @@ export function CheckoutTopBar({ eventSlug, secure = true }: {
             )}
           >
             <ArrowLeft className="size-3.5" aria-hidden />
-            Back to Event
+            {/* Under 380px the lockup + full label overflowed the bar by ~22px. */}
+            <span>Back<span className="hidden min-[380px]:inline"> to Event</span></span>
           </Link>
         </div>
       </div>
     </header>
+  )
+}
+
+/**
+ * The crumb trail for every screen of this route (form masthead, invite gate, auth gate).
+ * The SAME Breadcrumbs component the event page uses, so the trail does not change
+ * character between the two pages.
+ */
+export function CheckoutBreadcrumb({ eventSlug, eventName, className }: {
+  eventSlug: string; eventName: string; className?: string
+}) {
+  return (
+    <Breadcrumbs
+      className={className}
+      items={[
+        { label: 'Home',   href: '/' },
+        { label: 'Events', href: '/events' },
+        { label: eventName, href: `/events/${eventSlug}` },
+        { label: 'Registration' },
+      ]}
+    />
+  )
+}
+
+/**
+ * The checkout footer. Deliberately NOT the public HomeFooter: /register is a focused
+ * checkout and must not reach the public chrome (publicChromeRetirement §6,
+ * publicChromeUnification §G). It carries only what a checkout needs (whose page this is,
+ * and the legal links) from the same FOOTER_LEGAL registry the public footer reads.
+ *
+ * `clearMobileBar` adds room under it for the form's fixed mobile checkout bar.
+ */
+export function CheckoutFooter({ clearMobileBar = false }: { clearMobileBar?: boolean }) {
+  return (
+    <footer className={cn('border-t border-border/70 bg-card/60', clearMobileBar && 'pb-28 lg:pb-0')}>
+      <div className={cn(PAGE, 'flex flex-col items-center gap-3 py-5 text-fs-xs text-muted-foreground sm:flex-row sm:justify-between')}>
+        <p className="flex items-center gap-1.5">
+          <Lock className="size-3 shrink-0" aria-hidden />
+          © {new Date().getFullYear()} {BRAND_NAME} · Secure event registration
+        </p>
+        <nav aria-label="Legal" className="flex flex-wrap items-center justify-center gap-x-5 gap-y-1">
+          {FOOTER_LEGAL.map(l => (
+            <Link
+              key={l.href}
+              href={l.href}
+              className={cn('rounded-sm transition-colors hover:text-foreground', FOCUS_RING)}
+            >
+              {l.label}
+            </Link>
+          ))}
+        </nav>
+      </div>
+    </footer>
   )
 }
 
@@ -117,41 +174,53 @@ export function RegistrationMasthead({ eventSlug, eventName, estimate, isPaid }:
   ].filter(Boolean) as { key: string; Icon: typeof Clock3; text: string }[]
 
   return (
-    <div className="pt-6 pb-5 sm:pt-8 sm:pb-7">
+    <div className="pt-6 pb-5 sm:pt-8 sm:pb-6">
       {/* The SAME breadcrumb component the event page uses, so the crumb trail does not
           change character between the two pages. */}
-      <Breadcrumbs
-        items={[
-          { label: 'Home',   href: '/' },
-          { label: 'Events', href: '/events' },
-          { label: eventName, href: `/events/${eventSlug}` },
-          { label: 'Registration' },
-        ]}
-      />
+      <CheckoutBreadcrumb eventSlug={eventSlug} eventName={eventName} />
 
-      <p className={cn('mt-4', TYPE.eyebrow)}>Event Registration</p>
+      {/* Editorial voice, matching the public event page: bronze-ruled small caps over a
+          light serif title. */}
+      <p className="mt-5 flex items-center gap-2.5 text-fs-2xs font-semibold uppercase tracking-[0.22em] text-hero-eyebrow">
+        <span aria-hidden className="h-px w-6 shrink-0 bg-hero-accent-rule" />
+        Event registration
+      </p>
 
-      <h1 className="mt-1.5 max-w-2xl text-balance text-fs-xl font-bold leading-tight tracking-tight text-foreground sm:text-fs-2xl">
-        Register for {eventName}
+      {/* 2026-09-27 luxury pass (owner): the EVENT is the title — "Register for" is said
+          by the eyebrow above, so it is read out to assistive tech but not repeated in
+          display type. Owner, second pass: "reduce the title size and keep in one line" —
+          this is a checkout, not a landing page, so it sits BELOW the shared PAGE_TITLE
+          scale (24 → 28 → 32px) and holds one line from sm up, truncating an unusually
+          long name (the full name is in `title` and in the summary card). A phone lets
+          it wrap: truncating most of the name at 390px would hide what you are buying. */}
+      <h1
+        title={eventName}
+        className="mt-2.5 text-balance font-display text-fs-xl font-light leading-tight tracking-[-0.01em] text-hero-ink sm:truncate md:text-fs-2xl lg:text-fs-3xl"
+      >
+        <span className="sr-only">Register for </span>{eventName}
       </h1>
 
-      {/* The time estimate lives in the chip below, NOT here. Stating the same number
+      {/* The sentence and the facts share ONE ruled row on desktop, stacking on a phone.
+          The time estimate lives in the facts, NOT the sentence: stating the same number
           twice within 40px reads as a template that forgot to pick a placement. */}
-      <p className="mt-2 max-w-xl text-fs-base leading-relaxed text-muted-foreground">
+      <div className="mt-4 flex flex-col gap-3 border-t border-border/60 pt-4 lg:flex-row lg:items-center lg:justify-between lg:gap-8">
+      <p className="text-fs-sm leading-relaxed text-hero-ink-soft">
         A few details, one secure payment, and your ticket is on its way.
       </p>
 
-      <ul className="mt-4 flex flex-wrap items-center gap-x-2 gap-y-2">
+      {/* One line of small caps, not three pills. */}
+      <ul className="flex flex-wrap items-center gap-x-5 gap-y-2 lg:shrink-0">
         {chips.map(c => (
           <li
             key={c.key}
-            className="inline-flex items-center gap-1.5 rounded-full border border-border/70 bg-card px-2.5 py-1 text-fs-2xs font-semibold text-muted-foreground shadow-[0_1px_2px_rgb(15_23_42_/_0.04)]"
+            className="inline-flex items-center gap-2 text-fs-2xs font-semibold uppercase tracking-[0.14em] text-hero-ink-soft"
           >
-            <c.Icon className="size-3 shrink-0 text-primary" aria-hidden />
+            <c.Icon className="size-3.5 shrink-0 text-hero-accent-rule" strokeWidth={1.75} aria-hidden />
             {c.text}
           </li>
         ))}
       </ul>
+      </div>
     </div>
   )
 }
@@ -206,33 +275,35 @@ export function FormSectionCard({ title, description, index, complete, active, c
       className={cn(
         PANEL,
         'transition-shadow duration-300',
-        active && 'border-primary/35 shadow-[0_1px_2px_rgb(15_23_42_/_0.04),0_20px_44px_-28px_rgb(var(--primary-rgb)_/_0.35)]',
+        active && 'border-hero-ink/25 shadow-[0_1px_2px_rgb(15_23_42_/_0.04),0_24px_48px_-30px_rgb(15_23_42_/_0.35)]',
       )}
     >
       {title && (
-        <div className={cn(PANEL_HEAD, 'flex items-start gap-3 rounded-t-2xl')}>
+        <div className={cn(PANEL_HEAD, 'flex items-start gap-3 rounded-t-xl')}>
+          {/* 2026-09-27: a squared numeral — ink when current, bronze outline ahead,
+              a success outline with a tick once done. */}
           <span
             aria-hidden
             className={cn(
-              'mt-px flex size-7 shrink-0 items-center justify-center rounded-xl text-fs-2xs font-bold transition-all duration-200',
+              'mt-px flex size-8 shrink-0 items-center justify-center rounded-[var(--radius-control)] border text-fs-xs font-semibold tabular-nums transition-colors duration-200',
               complete
-                ? 'bg-emerald-500/10 text-emerald-600 ring-1 ring-emerald-500/25'
+                ? 'border-success/40 text-success'
                 : active
-                  ? cn(BRAND_GRADIENT, 'text-white shadow-[0_2px_10px_rgb(var(--primary-rgb)_/_0.30)]')
-                  : 'bg-muted text-muted-foreground/70',
+                  ? 'border-hero-ink bg-hero-ink text-ink-on-media'
+                  : 'border-hero-accent-rule/40 text-hero-accent-rule',
             )}
           >
-            {complete ? <Check className="size-3.5" strokeWidth={3} /> : index}
+            {complete ? <Check className="size-4" strokeWidth={2.5} /> : String(index).padStart(2, '0')}
           </span>
 
           <div className="min-w-0 flex-1">
-            <h2 className={TYPE.cardTitle}>{title}</h2>
+            <h2 className="font-display text-fs-lg font-light tracking-[-0.01em] text-hero-ink leading-snug sm:text-fs-xl">{title}</h2>
             {description && <p className={cn('mt-0.5', TYPE.cardBody)}>{description}</p>}
           </div>
 
           {complete && (
-            <span className="mt-0.5 inline-flex shrink-0 items-center gap-1 rounded-full bg-emerald-500/[0.08] px-2 py-0.5 text-fs-2xs font-semibold text-emerald-700">
-              <Check className="size-3" strokeWidth={3} aria-hidden />
+            <span className="mt-1.5 inline-flex shrink-0 items-center gap-1.5 text-fs-2xs font-semibold uppercase tracking-[0.14em] text-success">
+              <span aria-hidden className="h-px w-4 bg-success/60" />
               Complete
             </span>
           )}
@@ -260,13 +331,13 @@ export function PassSwitcher({ passes, selectedId, onSelect, switching }: {
 }) {
   return (
     <section className={cn(PANEL, 'mb-4')}>
-      <div className={cn(PANEL_HEAD, 'flex items-center justify-between gap-3 rounded-t-2xl')}>
+      <div className={cn(PANEL_HEAD, 'flex items-center justify-between gap-3 rounded-t-xl')}>
         <div className="flex min-w-0 items-center gap-3">
           <span aria-hidden className="flex size-7 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary">
             <Ticket className="size-3.5" />
           </span>
           <div className="min-w-0">
-            <h2 className={TYPE.cardTitle}>Choose your pass</h2>
+            <h2 className="font-display text-fs-lg font-normal text-hero-ink leading-snug">Choose your pass</h2>
             <p className={cn('mt-0.5', TYPE.cardBody)}>Switch any time — your answers are kept.</p>
           </div>
         </div>
@@ -290,7 +361,7 @@ export function PassSwitcher({ passes, selectedId, onSelect, switching }: {
               disabled={switching}
               onClick={() => onSelect(p.id)}
               className={cn(
-                'group relative flex items-center gap-3.5 overflow-hidden rounded-xl border p-3.5 text-left',
+                'group relative flex items-center gap-3.5 overflow-hidden rounded-lg border p-3.5 text-left',
                 'transition-[border-color,background-color,box-shadow,transform] duration-200',
                 'disabled:cursor-not-allowed disabled:opacity-60',
                 FOCUS_RING,
@@ -382,9 +453,9 @@ export function SummaryPanel({
     closesLabel && { key: 'closes', Icon: CalendarClock, text: `Registration closes ${closesLabel}` },
   ].filter(Boolean) as { key: string; Icon: typeof Calendar; text: string }[]
 
-  // RD-RT4.0 QA: "Secured by Razorpay" was dropped from this list. It is not missing —
-  // the line directly above this strip, under the CTA, already says "Encrypted payment
-  // via Razorpay". Before RT4.0 the trust list and the CTA sat in separate blocks and the
+  // RD-RT4.0 QA: a payment-security line was dropped from this list. It is not missing —
+  // the line directly above this strip, under the CTA, already says "Encrypted, secure
+  // payment". Before RT4.0 the trust list and the CTA sat in separate blocks and the
   // repetition was invisible; putting the guarantees in a footer directly beneath the
   // action made the two adjacent, and the same claim twice in 40px reads as padding.
   const guarantees = [
@@ -399,28 +470,43 @@ export function SummaryPanel({
     <div className={PANEL}>
       {/* ── Poster ── Always present: a real banner when the organiser set one, the
           brand surface when they did not, so the panel never opens on a blank rectangle. */}
-      <div className="relative aspect-[21/7] overflow-hidden rounded-t-2xl">
-        {bannerUrl ? (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img src={bannerUrl} alt="" className="absolute inset-0 size-full object-cover" />
-        ) : (
-          <div className={cn('absolute inset-0', BRAND_GRADIENT)} aria-hidden />
-        )}
-        <div aria-hidden className="absolute inset-0 bg-gradient-to-t from-slate-950/80 via-slate-950/25 to-transparent" />
-        <div className="absolute inset-x-0 bottom-0 p-4">
-          <p className="text-fs-2xs font-bold uppercase tracking-[0.14em] text-white/70">You are registering for</p>
-          <p className="mt-0.5 truncate text-fs-md font-bold leading-snug text-white">{eventName}</p>
+      {/* The poster is organiser artwork, usually dense with its own type. It is shown
+          WHOLE on a recessed mat (object-contain) instead of cropped under a dark scrim with
+          the event name laid over it, where the two sets of lettering fought. */}
+      {bannerUrl ? (
+        <>
+          <div className="rounded-t-xl border-b border-border/60 bg-surface-3/60 p-3">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src={bannerUrl} alt="" className="mx-auto block h-auto max-h-48 w-full rounded-md object-contain" />
+          </div>
+          <div className="px-5 pt-4">
+            <p className="flex items-center gap-2 text-fs-2xs font-semibold uppercase tracking-[0.2em] text-hero-eyebrow">
+              <span aria-hidden className="h-px w-5 shrink-0 bg-hero-accent-rule" />
+              You are registering for
+            </p>
+            <p className="mt-1.5 text-balance font-display text-fs-lg text-hero-ink leading-snug">{eventName}</p>
+          </div>
+        </>
+      ) : (
+        // 2026-09-27: with no poster, the card opens on the event's own ink — the ticket
+        // header — instead of an empty gradient rectangle.
+        <div className="rounded-t-xl bg-hero-ink px-5 pb-5 pt-5">
+          <p className="flex items-center gap-2 text-fs-2xs font-semibold uppercase tracking-[0.2em] text-hero-accent-rule">
+            <span aria-hidden className="h-px w-5 shrink-0 bg-hero-accent-rule" />
+            You are registering for
+          </p>
+          <p className="mt-2 text-balance font-display text-fs-lg font-light text-ink-on-media leading-snug">{eventName}</p>
         </div>
-      </div>
+      )}
 
       {/* ── What you are buying ── */}
       <div className="px-5 pt-4 pb-5">
-        <div className="flex items-start justify-between gap-3">
+        <div className="flex items-start justify-between gap-3 border-t border-border/60 pt-4">
           <div className="min-w-0">
             <p className={TYPE.label}>Your pass</p>
-            <p className="mt-1 truncate text-fs-md font-bold text-foreground">{passName}</p>
+            <p className="mt-1 truncate text-fs-md font-semibold text-hero-ink">{passName}</p>
           </div>
-          <span aria-hidden className="flex size-8 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary">
+          <span aria-hidden className="flex size-8 shrink-0 items-center justify-center rounded-full border border-hero-accent-rule/50 text-hero-accent-rule">
             <Ticket className="size-4" />
           </span>
         </div>
@@ -429,8 +515,8 @@ export function SummaryPanel({
           <ul className="mt-4 flex flex-col gap-2.5">
             {facts.map(f => (
               <li key={f.key} className="flex items-start gap-2.5 text-fs-xs leading-relaxed">
-                <f.Icon className="mt-px size-3.5 shrink-0 text-primary/70" aria-hidden />
-                <span className="min-w-0 text-foreground">{f.text}</span>
+                <f.Icon className="mt-px size-3.5 shrink-0 text-hero-accent-rule" aria-hidden />
+                <span className="min-w-0 text-hero-ink">{f.text}</span>
               </li>
             ))}
           </ul>
@@ -482,8 +568,8 @@ export function SummaryPanel({
               <p className="text-fs-2xs text-muted-foreground line-through">{strikeLabel}</p>
             )}
             <p className={cn(
-              'text-fs-2xl font-extrabold leading-none tracking-tight tabular-nums',
-              strikeLabel ? 'text-emerald-600' : 'text-foreground',
+              'font-display text-fs-3xl font-light leading-none tabular-nums',
+              strikeLabel ? 'text-emerald-600' : 'text-hero-ink',
             )}>
               {priceLabel}
             </p>
@@ -498,10 +584,10 @@ export function SummaryPanel({
 
       {/* ── Guarantees ── quiet, factual, and last: they exist to support the button
           above, not to compete with it. */}
-      <ul className="flex flex-col gap-2 rounded-b-2xl border-t border-border/60 bg-muted/40 px-5 py-4">
+      <ul className="flex flex-col gap-2 rounded-b-xl border-t border-border/60 bg-muted/40 px-5 py-4">
         {guarantees.map(g => (
           <li key={g.key} className="flex items-center gap-2 text-fs-2xs text-muted-foreground">
-            <g.Icon className="size-3.5 shrink-0 text-emerald-600/80" aria-hidden />
+            <g.Icon className="size-3.5 shrink-0 text-hero-accent-rule" strokeWidth={1.75} aria-hidden />
             {g.text}
           </li>
         ))}
@@ -542,7 +628,7 @@ export function SummaryDigest({ identity, passName, pricing }: {
         <ul className="flex flex-col gap-1.5 border-t border-border/60 pt-3">
           {facts.map(f => (
             <li key={f.key} className="flex items-start gap-2 text-fs-xs">
-              <f.Icon className="mt-0.5 size-3.5 shrink-0 text-primary/70" aria-hidden />
+              <f.Icon className="mt-0.5 size-3.5 shrink-0 text-hero-accent-rule" aria-hidden />
               <span className="text-foreground">{f.text}</span>
             </li>
           ))}

@@ -24,9 +24,9 @@ import { NextRequest, NextResponse } from 'next/server'
 import { authorizeWorkspace } from '@/lib/team/workspace'
 import { adminDb } from '@/lib/firebase/admin'
 import {
-  getLedgerTotals, getStatusBreakdown, getAttendeePaid, getRegistrationSplit,
+  getLedgerTotals, getStatusBreakdown, getAttendeePaid, getRegistrationSplit, getRefundTotals,
   getCouponTotals, getPassBreakdown, getTrend, buildHealth, MAX_TREND_BUCKETS,
-  type FinanceScope, type LedgerTotals, type StatusRow, type AttendeePaid,
+  type FinanceScope, type LedgerTotals, type StatusRow, type AttendeePaid, type RefundTotals,
   type RegistrationSplit, type CouponTotals, type PassRow, type TrendPoint, type HealthItem,
 } from '@/lib/finance/financeAnalytics'
 
@@ -41,7 +41,9 @@ export const dynamic = 'force-dynamic'
 const LEDGER_STATUSES = ['completed', 'pending', 'refunded', 'failed', 'disputed'] as const
 
 /** Registration payment states written by the registration path. Same reasoning. */
-const PAYMENT_STATUSES = ['paid', 'not_required', 'refunded', 'pending', 'failed'] as const
+// RD-FIN-02 · every stored PaymentStatus ('failed' is not one; 'refund_pending' was missing), so the
+// canonical Paid count (paid + refund_pending + refunded) is computed from real statuses.
+const PAYMENT_STATUSES = ['paid', 'not_required', 'refunded', 'refund_pending', 'pending'] as const
 
 /** Registration lifecycle states that attendee-paid is summed across. */
 const REG_STATUSES = ['confirmed', 'cancelled'] as const
@@ -59,10 +61,20 @@ export interface FinanceAnalyticsResponse {
     eventSlug: string | null
     from:      string | null
     to:        string | null
+    /** RD-FIN-02 · every total on this response is LIFETIME; from/to bound the TREND only. */
+    totals:    'lifetime'
     bucket:    'day' | 'week'
     events:    EventOption[]
   }
   ledger:        LedgerTotals
+  /**
+   * Money actually returned through the gateway, from the refund ledger.
+   *
+   * Deliberately NOT derived from `statuses.rows[refunded]`, which measures the ticket
+   * VALUE of transactions flagged refunded — a different quantity that answers a
+   * different question and does not equal what was paid back.
+   */
+  refunds:       RefundTotals
   attendeePaid:  AttendeePaid
   registrations: RegistrationSplit
   statuses:      { rows: StatusRow[]; scoped: boolean }
@@ -128,12 +140,18 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   }
   const eventSlug = rawSlug && owned.has(rawSlug) ? rawSlug : null
 
-  // Default window: the last 30 days, so the trend has a defined range without the client
-  // having to supply one.
+  // RD-FIN-02 · ONE meaning for the date range. It used to bound the refunds and the trend while
+  // every ledger / registration total stayed lifetime — so "Refunds (last 7 days)" sat beside
+  // "Ticket value (all time)" under one toggle. Windowing the totals would need five new composite
+  // indexes (the ledger sums are only indexed on paidAt for the trend) and would mix two clocks
+  // (paidAt vs registeredAt). So: every TOTAL is lifetime, and from/to bound the TREND only — which
+  // the response and the UI now say. Instants are ISO-8601 UTC, half-open [from, to); default is a
+  // rolling 30×24h window ending now (not IST calendar days).
   const to   = parseDate(sp.get('to'))   ?? new Date()
   const from = parseDate(sp.get('from')) ?? new Date(to.getTime() - 30 * DAY_MS)
 
-  const scope: FinanceScope = { organizerUid: uid, eventSlug, from, to }
+  const scope:      FinanceScope = { organizerUid: uid, eventSlug, from: null, to: null }
+  const trendScope: FinanceScope = { organizerUid: uid, eventSlug, from, to }
 
   // Attendee-paid runs ONLY over owned slugs — scoped to one event when filtered, otherwise
   // across the workspace's own events. Never a slug from the query string directly.
@@ -145,8 +163,9 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   const budget = { remaining: FANOUT_BUDGET }
 
   // Independent aggregate groups run concurrently; each is internally bounded.
-  const [ledger, attendeePaid, registrations, statuses] = await Promise.all([
+  const [ledger, refunds, attendeePaid, registrations, statuses] = await Promise.all([
     getLedgerTotals(scope),
+    getRefundTotals(scope),
     getAttendeePaid(paidSlugs, REG_STATUSES),
     getRegistrationSplit(scope, PAYMENT_STATUSES),
     getStatusBreakdown(scope, LEDGER_STATUSES),
@@ -162,13 +181,13 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   const effective = span / bucketMs > MAX_TREND_BUCKETS
     ? Math.ceil(span / MAX_TREND_BUCKETS)
     : bucketMs
-  const trend = await getTrend(scope, effective)
+  const trend = await getTrend(trendScope, effective)
 
-  const health = buildHealth({ ledger, coupons, passes: passRes, attendeePaid })
+  const health = buildHealth({ ledger, coupons, passes: passRes, attendeePaid, refunds })
 
   const body: FinanceAnalyticsResponse = {
-    scope: { eventSlug, from: from.toISOString(), to: to.toISOString(), bucket, events },
-    ledger, attendeePaid, registrations, statuses,
+    scope: { eventSlug, from: from.toISOString(), to: to.toISOString(), totals: 'lifetime', bucket, events },
+    ledger, refunds, attendeePaid, registrations, statuses,
     coupons, passes: passRes, trend, health,
   }
   return NextResponse.json(body, { headers: { 'Cache-Control': 'no-store' } })

@@ -31,6 +31,7 @@
 import { adminDb } from '@/lib/firebase/admin'
 import { readFinanceFromLedger } from '@/lib/platform/pricing'
 import type { PlatformTransactionDocument } from '@/lib/fees/types'
+import { resolveRegistrationOrderId } from '@/lib/registrations/paymentIdentifiers'
 
 /**
  * Who bore a fee.
@@ -73,9 +74,18 @@ export interface FinanceTransactionView {
   platformFeeGstPaise:     number
   platformFeeTotalPaise:   number
   gatewayFeeEstimatePaise: number
-  /** Null until a Razorpay settlement reconciliation exists. Never inferred. */
+  /** What the gateway actually charged, when the row carries it. Never inferred. */
   gatewayFeeActualPaise:   number | null
+  /** GST CONTAINED WITHIN the actual gateway fee. Never added to it. */
+  gatewayTaxPaise:         number | null
+  /** `actual ?? estimate` — THE gateway figure to display, with the basis beside it. */
+  gatewayFeePaise:         number
   gatewayFeeBasis:         GatewayFeeBasis
+  /**
+   * platformFeeTotal + gatewayFee, computed HERE so no component can compute it from the
+   * estimate while labelling it actual. The components stay separately available above.
+   */
+  totalFeesPaise:          number
   /** The organizer's settlement basis, straight from the ledger. */
   organizerNetPaise:       number
   refundAmountPaise:       number
@@ -211,7 +221,15 @@ export interface RegistrationJoin {
   refundAmount?:   unknown
   refundStatus?:   unknown
   paymentId?:      unknown
+  /**
+   * LEGACY order id. Present on historical records and on new RAZORPAY ones; ABSENT on a
+   * Cashfree registration, which carries `paymentOrderId` instead.
+   *
+   * Read both through `resolveRegistrationOrderId` — never this field alone, or a Cashfree
+   * registration reports no order id at all in Finance.
+   */
   razorpayOrderId?: unknown
+  paymentOrderId?:  unknown
 }
 
 /**
@@ -245,11 +263,13 @@ export function buildFinanceTransactionView(
   // whose stored figures disagree, which is the exact failure mode being fixed.
   const chargeAmountPaise = intOrNull(fig.chargeAmountPaise) ?? intOrNull(reg?.amount)
 
-  // gatewayFeeActualPaise has NO writer anywhere in the codebase and the Razorpay
-  // Settlements API is not integrated, so this is null in practice. It is read rather than
-  // assumed so that the day a reconciliation job lands, this surface reports actuals with no
-  // further change — and until then the basis is honestly 'estimated'.
+  // RD-FIN-15: `gatewayFeeActualPaise` IS written now — by the payment.captured webhook,
+  // and by reconciliation for historical rows. It is read here and resolved per
+  // transaction; a row that carries no actual keeps its estimate and says so, because a
+  // ₹0 'actual' would be a fabricated fact rather than a missing one.
   const gatewayFeeActualPaise = intOrNull(doc.gatewayFeeActualPaise)
+  const gatewayTaxPaise       = gatewayFeeActualPaise === null ? null : intOrNull(doc.gatewayTaxPaise)
+  const gatewayFeePaise       = gatewayFeeActualPaise ?? fig.gatewayFeeEstimatePaise
 
   return {
     id:         doc.id,
@@ -274,7 +294,11 @@ export function buildFinanceTransactionView(
     platformFeeTotalPaise:   fig.platformFeeTotalPaise,
     gatewayFeeEstimatePaise: fig.gatewayFeeEstimatePaise,
     gatewayFeeActualPaise,
+    gatewayTaxPaise,
+    gatewayFeePaise,
     gatewayFeeBasis:         gatewayFeeActualPaise === null ? 'estimated' : 'actual',
+    // Tax is INSIDE the gateway fee, so it is never a third term here.
+    totalFeesPaise:          fig.platformFeeTotalPaise + gatewayFeePaise,
     organizerNetPaise:       fig.netSettlementPaise,
     refundAmountPaise:       int(reg?.refundAmount),
 
@@ -287,7 +311,9 @@ export function buildFinanceTransactionView(
     status:       doc.status,
     refundStatus: str(reg?.refundStatus),
     paymentId:    str(doc.gatewayPaymentId) ?? str(reg?.paymentId),
-    orderId:      str(doc.gatewayOrderId)   ?? str(reg?.razorpayOrderId),
+    // The ledger's own value first, then the registration — RESOLVED, so a Cashfree
+    // registration falls back to its `paymentOrderId` rather than to nothing.
+    orderId:      str(doc.gatewayOrderId)   ?? resolveRegistrationOrderId(reg),
     paidAt:       tsToISO((doc as Record<string, unknown>).paidAt),
     figuresSource: fig.source,
   }

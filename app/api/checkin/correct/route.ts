@@ -36,7 +36,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { adminDb }                    from '@/lib/firebase/admin'
 import { authorizeWorkspace }         from '@/lib/team/workspace'
 import { isEventSlugInScope }         from '@/lib/team/eventScope'
-import { getEventCheckInStatus }      from '@/lib/checkin/eventStatus'
+import { isEventOpenForCheckin }      from '@/lib/checkin/readiness'
 import { checkRateLimit }             from '@/lib/rateLimit'
 import { uncheckInRegistration }      from '@/lib/firebase/firestore/registrations'
 import { swapIdentifier }             from '@/lib/identifiers/engine'
@@ -116,8 +116,8 @@ export async function POST(req: NextRequest): Promise<NextResponse<CheckInCorrec
     return NextResponse.json({ success: false, error: 'EVENT_NOT_ASSIGNED' }, { status: 403 })
   }
 
-  const eventStatus = await getEventCheckInStatus(reg.eventSlug)
-  if (eventStatus !== 'ok') {
+  // The ONE readiness rule (RD-CHECKIN-2.0), shared with every check-in surface.
+  if (!await isEventOpenForCheckin(reg.eventSlug)) {
     return NextResponse.json({ success: false, error: 'EVENT_NOT_ACCEPTING_CHECKINS' }, { status: 422 })
   }
 

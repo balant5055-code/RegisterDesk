@@ -5,6 +5,7 @@
 // Returns { draftId } of the new draft so the caller can redirect to the wizard.
 
 import { NextRequest, NextResponse }   from 'next/server'
+import { organizerPaysPricing } from '@/lib/events/builder/types'
 import { FieldValue }                  from 'firebase-admin/firestore'
 import { adminDb }                     from '@/lib/firebase/admin'
 import { authorizeWorkspace }          from '@/lib/team/workspace'
@@ -52,7 +53,8 @@ export async function POST(
     ...pass,
     id: randomUUID(),
   }))
-  const newPricing  = { ...srcPricing, passes: newPasses }
+  // RD-PHASE4-S3 · Q1 — a copy never carries a fee-collection choice forward: organizer-pays.
+  const newPricing  = organizerPaysPricing({ ...srcPricing, passes: newPasses })
 
   // ── 4. Create the new draft — IDEMPOTENT (M1) ─────────────────────────────
   // A client-supplied idempotency key makes a double-submit / retry safe: the copy is

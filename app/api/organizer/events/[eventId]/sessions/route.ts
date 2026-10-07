@@ -9,7 +9,7 @@
 
 import { NextRequest, NextResponse } from 'next/server'
 import { authorizeWorkspace } from '@/lib/team/workspace'
-import { resolveOwnedEvent } from '@/lib/sessions/eventScope'
+import { resolveOwnedEvent, UNPUBLISHED } from '@/lib/sessions/eventScope'
 import { getSchedule, computeAnalytics, listSessionAttendees, speakerSchedule } from '@/lib/sessions/queries'
 import {
   createSession, updateSession, cancelSession,
@@ -17,6 +17,7 @@ import {
   setRegistrationSessions,
 } from '@/lib/sessions/service'
 import { SessionError } from '@/lib/sessions/types'
+import { conferenceEditable, conferenceLockReason } from '@/lib/sessions/conferenceView'
 import { tableToCsv } from '@/lib/reports/csv'
 import type { ReportTable } from '@/lib/reports/types'
 
@@ -41,6 +42,16 @@ export async function GET(req: NextRequest, ctx: Params): Promise<NextResponse> 
   if (!authz.ok) return NextResponse.json({ error: authz.error }, { status: authz.status })
   const event = await resolveOwnedEvent(authz.workspaceUid, eventId)
   if (!event) return NextResponse.json({ error: 'Event not found' }, { status: 404 })
+  if (event === UNPUBLISHED) {
+    // RD-EVENT-17 · sessions are keyed by the event's public slug, which it gets at
+    // publish. A draft cannot hold one yet — a STATE about the caller's own event, not
+    // an error, and certainly not a 404 that the UI would render as a failed read.
+    return NextResponse.json({
+      sessions: [], tracks: [], halls: [], speakers: [],
+      analytics: null, eventName: null, published: false,
+      editable: false, lockReason: null,
+    }, { headers: { 'Cache-Control': 'no-store' } })
+  }
 
   // Session attendee export
   if (wantAttendees) {
@@ -76,7 +87,14 @@ export async function GET(req: NextRequest, ctx: Params): Promise<NextResponse> 
   }
 
   const analytics = computeAnalytics(bundle)
-  return NextResponse.json({ ...bundle, analytics, eventName: event.eventName }, { headers: { 'Cache-Control': 'no-store' } })
+  // RD-EVENT-17 · `editable` travels with the payload so the workspace shows the same
+  // answer the POST handler above enforces, rather than guessing from the shell.
+  return NextResponse.json({
+    ...bundle, analytics, eventName: event.eventName,
+    published: true,
+    editable: conferenceEditable(event.lifecycleStatus),
+    lockReason: conferenceLockReason(event.lifecycleStatus),
+  }, { headers: { 'Cache-Control': 'no-store' } })
 }
 
 // ─── POST (action dispatch) ───────────────────────────────────────────────────
@@ -92,7 +110,27 @@ export async function POST(req: NextRequest, ctx: Params): Promise<NextResponse>
   const uid = authz.workspaceUid
   const event = await resolveOwnedEvent(uid, eventId)
   if (!event) return NextResponse.json({ error: 'Event not found' }, { status: 404 })
+  if (event === UNPUBLISHED) {
+    return NextResponse.json(
+      { error: 'EVENT_UNPUBLISHED', detail: 'Publish this event before building its schedule.' },
+      { status: 409 },
+    )
+  }
   const slug = event.slug
+
+  // RD-EVENT-17 · this route had NO lifecycle check, so a session could be added to a
+  // cancelled or archived event. `conferenceEditable` mirrors `isLocked` in
+  // lib/eventSetup/readiness — the rule the rest of the product already applies — and
+  // costs nothing: the lifecycle came from the draft `resolveOwnedEvent` already read.
+  //
+  // `set_registration_sessions` is exempt: it is the ATTENDEE-side allocation path, and
+  // its own service already refuses cancelled sessions and ineligible registrations.
+  if (action !== 'set_registration_sessions' && !conferenceEditable(event.lifecycleStatus)) {
+    return NextResponse.json(
+      { error: 'EVENT_LOCKED', detail: conferenceLockReason(event.lifecycleStatus) },
+      { status: 409 },
+    )
+  }
 
   try {
     switch (action) {

@@ -57,10 +57,23 @@ describe('usage-limit arithmetic', () => {
     expect(r.percentUsed).toBe(100)
   })
 
-  it('over-redemption (cap lowered after the fact) clamps instead of going negative', () => {
-    const r = toPerformanceRow({ code: 'LOWERED', currentUses: 120, maxUses: 100 })
+  it('over-redemption reports the TRUE figure and flags itself', () => {
+    // RD-DASH-07 removed the `Math.min(100, …)` that used to sit on percentUsed. A cap
+    // lowered after redemptions leaves a coupon genuinely past its limit, and clamping the
+    // FIGURE made that indistinguishable from a coupon sitting exactly at its cap — which is
+    // the one case on this card worth looking at. Bar WIDTHS are clamped where they are drawn.
+    const r = toPerformanceRow({ code: 'LOWERED', currentUses: 120, maxUses: 100 }, '2026-01-01')
+    expect(r.percentUsed).toBe(120)
+    expect(r.exceeded).toBe(true)
+    // `remaining` stays floored — a negative remaining is not a quantity.
     expect(r.remaining).toBe(0)
+  })
+
+  it('a coupon exactly at its cap is NOT flagged as exceeded', () => {
+    const r = toPerformanceRow({ code: 'FULL', currentUses: 50, maxUses: 50 }, '2026-01-01')
     expect(r.percentUsed).toBe(100)
+    expect(r.exceeded).toBe(false)
+    expect(r.state).toBe('exhausted')
   })
 
   it('missing / zero / negative counters degrade to zero, never NaN', () => {
@@ -155,7 +168,11 @@ describe('coupon analytics do not scale with registrations', () => {
   })
 
   it('a coupon-performance failure cannot take the analytics payload down', () => {
-    expect(read(ANALYT)).toMatch(/getCouponPerformance\([\s\S]{0,80}?\.catch\(\(\) => EMPTY_COUPON_PERFORMANCE\)/)
+    // RD-ANALYTICS-12-26 (F-1) · the catch is still there — the payload still survives —
+    // but the substitute now carries `discountUnavailable: true`, so a failed read is no
+    // longer rendered as "₹0 of discount given". Same resilience, honest absence.
+    expect(read(ANALYT)).toMatch(
+      /getCouponPerformance\([\s\S]{0,120}?\.catch\(\(\) => \(\{ \.\.\.EMPTY_COUPON_PERFORMANCE, discountUnavailable: true \}\)\)/)
   })
 })
 
@@ -283,8 +300,20 @@ describe('the coupon card lives on the page that serves /dashboard', () => {
   const page  = read(DASH)
   const api   = read(API)
 
+  // RD-DASHBOARD-02 — these two assertions were rewritten, not weakened.
+  //
+  // They used to pin the exact JSX of the card's container (`DashboardCard title=…`).
+  // The dashboard redesign moved every panel onto `SectionCard`, so the literal no
+  // longer matches even though BOTH guarantees the test exists to protect — the card
+  // is on /dashboard, and it links to the existing analytics route instead of
+  // inventing one — are still true and still enforced below. Asserting the container
+  // component's name made this a test of markup rather than of behaviour.
+  // RD-DASH-07 — the card became its own component, so the page proves it MOUNTS it and the
+  // component proves what it says. Same two guarantees, split across the two files that now
+  // own them; see the `<CouponPanel` assertion above.
   it('the /dashboard page renders a Coupon performance card', () => {
-    expect(page).toMatch(/DashboardCard title="Coupon performance"/)
+    expect(page).toMatch(/<CouponPanel/)
+    expect(panel).toMatch(/title="Coupon performance"/)
   })
 
   it('it reads from the dashboard payload, not a second fetch', () => {
@@ -293,21 +322,57 @@ describe('the coupon card lives on the page that serves /dashboard', () => {
     expect(page).not.toMatch(/fetch\([^)]*coupons/)
   })
 
+  // RD-DASH-07 — the card is now components/dashboard/CouponPanel, the way
+  // RecentActivityCard and CommunicationPanel are. Every guarantee below is asserted
+  // against that component; what /dashboard must still prove is that it RENDERS it.
+  const panel = read('components/dashboard/CouponPanel.tsx')
+
+  it('the /dashboard page renders the coupon card', () => {
+    expect(page).toMatch(/<CouponPanel/)
+    expect(page).toMatch(/from '@\/components\/dashboard\/CouponPanel'/)
+  })
+
   it('links to the existing analytics page rather than inventing a route', () => {
-    expect(page).toMatch(/title="Coupon performance" viewHref="\/dashboard\/analytics"/)
+    // The guarantee is the DESTINATION — that this card sends the organizer to the
+    // EXISTING analytics route instead of a coupon page that does not exist.
+    //
+    // Asserted over the card's own JSX span rather than as an adjacent
+    // `title="…" href="…"` pair: attribute order and intervening props (the accent
+    // glyph, for one) are presentation details, and pinning them made this test fail
+    // on a purely visual change while the real guarantee held throughout.
+    // Scanned to end-of-line rather than to the next '>': the card's props include a
+    // nested JSX element (the accent glyph), whose own '/>' would truncate the slice.
+    // The destination is a DEFAULT on the component, so it is one string in one place.
+    expect(panel).toMatch(/title="Coupon performance"/)
+    expect(panel).toContain("href = '/dashboard/analytics'")
+    // …and that route really does carry coupon detail, so the link is not a dead end.
+    expect(read('app/(dashboard)/dashboard/analytics/page.tsx')).toMatch(/title="Coupon performance"/)
   })
 
   it('has an empty state that does not fabricate zeros', () => {
-    expect(page).toMatch(/No coupons created yet/)
+    expect(panel).toMatch(/No coupons created yet/)
+    expect(panel).toContain('totalCoupons === 0 ?')
   })
 
-  it('an unavailable discount aggregate renders a dash, never ₹0', () => {
-    expect(page).toMatch(/coupons\.discountUnavailable \? '—'/)
+  it('an unavailable discount aggregate says so, never ₹0', () => {
+    // RD-DASH-07 replaced the bare em-dash with the word, because a dash beside "Discount
+    // given" reads as "nothing" to most people rather than as "not measured".
+    expect(panel).toContain('discountUnavailable ? (')
+    expect(panel).toMatch(/>\s*Unavailable\s*</)
+    // And nothing anywhere substitutes a zero for it.
+    expect(panel).not.toMatch(/discountUnavailable\s*\?\s*0/)
   })
 
-  it('draws a progress bar ONLY for capped coupons', () => {
-    expect(page).toMatch(/c\.percentUsed !== null && \(/)
-    expect(page).toMatch(/c\.maxUses === null \? 'Unlimited'/)
+  it('draws a meter ONLY for capped coupons', () => {
+    // A share of unlimited is not 0% and not 100% — it is not a share, so nothing is drawn
+    // and the row says so in words instead.
+    expect(panel).toContain('{row.maxUses !== null && (')
+    expect(panel).toContain("if (row.maxUses === null)  return 'No limit'")
+  })
+
+  it('the meter WIDTH is clamped even though the figure is not', () => {
+    // Prevents a >100% bar escaping its track, without touching the number beside it.
+    expect(panel).toMatch(/width: `\$\{Math\.min\(100, Math\.max\(row\.percentUsed \?\? 0/)
   })
 
   it('MUTATION: the client must not import the server-only coupon module', () => {
@@ -322,11 +387,19 @@ describe('the coupon card lives on the page that serves /dashboard', () => {
   })
 
   it('the API reuses the existing bounded event set — it does not enumerate events itself', () => {
-    expect(api).toMatch(/getOrganizerCouponPerformance\(\s*\n?\s*uid,\s*\n?\s*slugList\.map/)
+    // RD-DASHBOARD-05: the bounded set is now `scopedSlugs` — `slugList` narrowed to the
+    // selected event, or the whole set in all-events mode. What this test actually guards
+    // is unchanged: the helper is handed an ALREADY-BOUNDED list and never goes looking
+    // for events of its own.
+    expect(api).toMatch(/getOrganizerCouponPerformance\(\s*\n?\s*uid,\s*\n?\s*(scopedSlugs|slugList)\.map/)
   })
 
   it('a coupon failure cannot take the dashboard down', () => {
-    expect(api).toMatch(/\.catch\(\(\) => EMPTY_ORGANIZER_COUPON_PERFORMANCE\)/)
+    // RD-DASH-15 · it still degrades instead of taking the page down — but the empty
+    // constant carries `unavailable: false` (it is also the honest answer for an organizer
+    // with no events to look in), so the FAILURE path now sets the flag. Without it the
+    // card said "No coupons created yet" about a workspace whose read had thrown.
+    expect(api).toMatch(/\.catch\(\(\) => \(\{ \.\.\.EMPTY_ORGANIZER_COUPON_PERFORMANCE, unavailable: true \}\)\)/)
   })
 })
 
@@ -335,7 +408,12 @@ describe('organizer-wide aggregation stays bounded', () => {
 
   it('uses ONE aggregate for the whole organizer — not one per event, not one per coupon', () => {
     const fn = perf.slice(perf.indexOf('export async function getOrganizerCouponPerformance'))
-    expect((fn.match(/\.aggregate\(/g) ?? []).length).toBe(1)
+    // RD-DASH-15 · the DISCOUNT aggregate is still exactly one for the whole organizer,
+    // which is the rule this guards. A second aggregate — sum(currentUses) — now exists,
+    // issued ONLY for an event past the document budget, and it is what keeps
+    // `totalRedemptions` exact without reading every coupon.
+    expect((fn.match(/AggregateField\.sum\('discountAmount'\)/g) ?? []).length).toBe(1)
+    expect((fn.match(/AggregateField\.sum\('currentUses'\)/g) ?? []).length).toBe(1)
     expect(fn).toMatch(/\.where\('organizerUid', '==', organizerUid\)/)
   })
 
@@ -352,7 +430,10 @@ describe('organizer-wide aggregation stays bounded', () => {
 
   it('one unreadable event does not remove every other event from the card', () => {
     const fn = perf.slice(perf.indexOf('export async function getOrganizerCouponPerformance'))
-    expect(fn).toMatch(/catch \{[\s\S]{0,120}?return \[\] as OrganizerCouponRow\[\]/)
+    // RD-DASH-15 · same rule, new shape: a per-event result now carries counts beside its
+    // rows, so an unreadable event contributes nothing without erasing the others.
+    expect(fn).toMatch(/catch \{[\s\S]{0,240}?readFailed = true/)
+    expect(fn).toMatch(/rows: \[\] as OrganizerCouponRow\[\], complete: false, count: 0, uses: 0/)
   })
 
   it('reuses the SAME row shaping as the per-event view — one source of truth', () => {

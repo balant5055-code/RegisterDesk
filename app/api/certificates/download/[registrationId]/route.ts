@@ -15,6 +15,7 @@ import { adminDb }                           from '@/lib/firebase/admin'
 import {
   getTemplate,
   getCertificateByRegistrationId,
+  findCertificate,
   createCertificateRecord,
   incrementDownloadCount,
   getSettings,
@@ -35,7 +36,9 @@ const APP_URL = () => getEmailAppUrl()
 
 export interface CertificateEligibilityResponse {
   eligible: false
-  reason:   'not_enabled' | 'checkin_required' | 'not_confirmed' | 'not_found' | 'refunded' | 'downloads_disabled' | 'verification_required'
+  // RD-CERT-03 · 'revoked' is additive: a modern certificate can be revoked, and the
+  // attendee must be told that rather than silently handed a regenerated PDF.
+  reason:   'not_enabled' | 'checkin_required' | 'not_confirmed' | 'not_found' | 'refunded' | 'downloads_disabled' | 'verification_required' | 'revoked'
 }
 
 function fmtDate(iso: string): string {
@@ -130,6 +133,48 @@ export async function GET(req: NextRequest, { params }: Params): Promise<NextRes
     if (!recToken || token !== recToken) {
       return NextResponse.json({ eligible: false, reason: 'verification_required' } satisfies CertificateEligibilityResponse, { status: 403 })
     }
+  }
+
+  // ═══ RD-CERT-03 · THE MODERN CERTIFICATE COMES FIRST ═══════════════════════
+  //
+  // ═══ THE DEFECT THIS CLOSES ═════════════════════════════════════════════════
+  // This route did find-or-create against `certificateRecords` ALONE. It is reached
+  // from the attendee's own ticket page and from the organizer's check-in drawer, so
+  // an attendee whose certificate had already been issued through the modern engine
+  // clicked "Download" and:
+  //
+  //   • their real certificate was not found (wrong collection),
+  //   • a SECOND certificate was created for them in the legacy collection,
+  //   • with a DIFFERENT certificateId — so the PDF they received carried a
+  //     verification id the organizer had never issued and Reports had never seen,
+  //   • and the download was counted against that phantom record.
+  //
+  // One participant, two certificates, two inventories, and the two surfaces
+  // permanently disagreeing. A public button forked the certificate inventory.
+  //
+  // So: if a modern certificate exists for this registration, it IS the certificate.
+  // The attendee is redirected to the canonical `/file` route, which serves the
+  // stored R2 artifact, applies the same download settings, and increments the
+  // download on the RIGHT document.
+  //
+  // The legacy find-or-create below is untouched and still runs for events that only
+  // ever used the MVP path — no migration, no behaviour change for them.
+  const modern = await findCertificate(eventId, registrationId, template.type)
+  if (modern) {
+    // Revoked is refused here rather than by redirecting into a 410, so the attendee
+    // sees this route's own vocabulary.
+    if (modern.status === 'revoked') {
+      return NextResponse.json(
+        { eligible: false, reason: 'revoked' } satisfies CertificateEligibilityResponse,
+        { status: 410 },
+      )
+    }
+    const token = req.nextUrl.searchParams.get('token')
+    const target = `/api/certificates/${encodeURIComponent(modern.certificateId)}/file`
+      + (token ? `?token=${encodeURIComponent(token)}` : '')
+    // 307 preserves the method and lets `/file` own the artifact, the settings gate
+    // and the download counter — one implementation, not two.
+    return NextResponse.redirect(new URL(target, req.nextUrl.origin), 307)
   }
 
   // Find existing or create new certificate record

@@ -19,7 +19,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getPaymentIntent, getAttemptClaim } from '@/lib/firebase/firestore/paymentIntents'
 import { normalizeIdempotencyKey, attemptClaimId } from '@/lib/registrations/paymentAttempt'
-import { razorpay }         from '@/lib/razorpay/client'
+import { resolvePaymentProvider } from '@/lib/payments/providers'
 import { getClientIp }      from '@/lib/rateLimit'
 import { checkDistributedRateLimit } from '@/lib/rateLimit/redis'
 import { captureFinancialError }     from '@/lib/monitoring/sentry'
@@ -37,6 +37,14 @@ export type PaymentStatusState =
   | 'failed'
   /** No payment has been taken against this order. The SAME order may be paid. */
   | 'awaiting_payment'
+  /**
+   * RD-PAYMENT-CASHFREE-CHECKOUT-06. A payment for this order is IN FLIGHT at the provider —
+   * Cashfree's PENDING, which a real UPI collect holds for ~30 seconds before succeeding.
+   *
+   * Neither success nor failure, and deliberately NOT retryable: offering a retry here is
+   * offering a second charge for a payment that is about to land.
+   */
+  | 'payment_pending'
   /**
    * RD-PAY-P0-5. Looked up by ATTEMPT, and that attempt never claimed an order — so the
    * browser's create-order call did not get far enough to produce one it could have paid.
@@ -118,18 +126,34 @@ export async function POST(req: NextRequest): Promise<NextResponse<PaymentStatus
 
   // Still 'created'. Ask the authority whether money was actually taken.
   try {
-    const res = await razorpay.orders.fetchPayments(orderId) as {
-      items?: Array<{ status?: string; amount?: number; currency?: string }>
-    }
-    const live = (res.items ?? []).find(p =>
+    // Through the contract, asked of the intent's own provider. Same predicate as before.
+    const payments = await resolvePaymentProvider(intent.provider).fetchOrderPayments(orderId)
+    const live = payments.find(p =>
       (p.status === 'captured' || p.status === 'authorized') &&
-      p.currency === 'INR' && p.amount === intent.amount)
+      p.currency === 'INR' && p.amountPaise === intent.amount)
 
     if (live) {
       // Money exists, registration does not — yet. The webhook is the backstop.
       return NextResponse.json({ state: 'captured_unsettled', canRetry: false })
     }
-    // Nothing captured and nothing authorized: the attendee may pay THIS order. The client
+
+    // ═══ RD-PAYMENT-CASHFREE-CHECKOUT-06 · A PAYMENT IN FLIGHT IS NOT AN ABSENT ONE ══
+    //
+    // Razorpay hands back an already-captured payment, so "nothing captured, nothing
+    // authorized" safely meant "nobody has paid". Cashfree breaks that: a real sandbox UPI
+    // collect sits at PENDING for ~30 seconds (measured in RD-PAYMENT-CASHFREE-SANDBOX-05B)
+    // and only then turns SUCCESS.
+    //
+    // Reporting that as `awaiting_payment · canRetry: true` invites the attendee to pay again
+    // while their first payment is still travelling — the double charge this route exists to
+    // prevent. `pending` is reported instead, and it is explicitly NOT retryable: the client
+    // waits, and the webhook or the next poll resolves it.
+    if (payments.some(p => p.status === 'pending' &&
+        p.currency === 'INR' && p.amountPaise === intent.amount)) {
+      return NextResponse.json({ state: 'payment_pending', canRetry: false })
+    }
+
+    // Nothing captured, authorized or in flight: the attendee may pay THIS order. The client
     // reopens checkout on the same orderId rather than creating a second one.
     return NextResponse.json({ state: 'awaiting_payment', canRetry: true })
   } catch (err) {

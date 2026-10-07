@@ -224,6 +224,7 @@ describe('every pass-rendering template uses the one shared component', () => {
 
 import { transformSync } from 'esbuild'
 import { resolveEffectivePriceRupees } from '@/lib/pricing/earlyBird'
+import { passAgeLimits } from '@/lib/passes/passRaceRules'
 import { resolveMilestoneAlert } from '@/lib/events/milestoneAlerts'
 
 /** Lift `extractPasses` out of the real page and make it callable. */
@@ -242,12 +243,13 @@ function loadRealExtractPasses(): (pricing: Record<string, unknown> | null) => R
 
   // `resolveEffectivePriceRupees` is the only external it closes over — inject the REAL one,
   // so the price branch behaves exactly as in production rather than being faked away.
+  // RD-CE-FIX H2 — the age window now comes from the shared passAgeLimits (a team size is never an age).
   const factory = new Function(
-    'resolveEffectivePriceRupees',
+    'resolveEffectivePriceRupees', 'passAgeLimits',
     `${js}; return extractPasses;`,
-  ) as (f: typeof resolveEffectivePriceRupees) => (p: Record<string, unknown> | null) => Record<string, unknown>[]
+  ) as (f: typeof resolveEffectivePriceRupees, a: typeof passAgeLimits) => (p: Record<string, unknown> | null) => Record<string, unknown>[]
 
-  return factory(resolveEffectivePriceRupees)
+  return factory(resolveEffectivePriceRupees, passAgeLimits)
 }
 
 /** A pass exactly as it is stored on the event document. */

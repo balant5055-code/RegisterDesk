@@ -11,6 +11,7 @@
 
 import { adminDb } from '@/lib/firebase/admin'
 import { authorizeWorkspace } from '@/lib/team/workspace'
+import { resolveOwnedEventSlug } from '@/lib/events/liveEventRef'
 
 export type MediaAuthz =
   | { ok: true;  callerUid: string; workspaceUid: string }
@@ -57,10 +58,11 @@ export async function resolveOwnedEvent(
 
   const draft   = snap.data() as Record<string, unknown>
   const details = (draft.eventDetails as Record<string, unknown>) ?? {}
-  const seo     = (details.seo  as Record<string, unknown>) ?? {}
   const info    = (details.info as Record<string, unknown>) ?? {}
 
-  const eventSlug = typeof seo.urlSlug === 'string' ? seo.urlSlug : ''
+  // RD-CE-FIX C1 · the slug is a STORAGE PATH — only one the live document proves is THIS
+  // workspace's event for THIS draft (the draft pointer is client-writable).
+  const eventSlug = (await resolveOwnedEventSlug(workspaceUid, eventId, draft)) ?? ''
   if (!eventSlug) {
     return {
       ok: false, status: 409,

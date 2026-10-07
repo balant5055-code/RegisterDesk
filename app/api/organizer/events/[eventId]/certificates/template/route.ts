@@ -6,6 +6,7 @@
 import { NextRequest, NextResponse }  from 'next/server'
 import { adminDb }                    from '@/lib/firebase/admin'
 import { authorizeWorkspace }         from '@/lib/team/workspace'
+import { checkDraftCommerceOwnership } from '@/lib/licensing/draftOwnership'
 import { getTemplate, saveTemplate }  from '@/lib/certificates/firestore'
 import { validateStorageUrl }         from '@/lib/certificates/urlGuard'
 import { defaultTemplateInput }       from '@/lib/certificates/types'
@@ -25,6 +26,13 @@ async function resolveOwner(
 
   const draftSnap = await adminDb.doc(`users/${uid}/eventDrafts/${eventId}`).get()
   if (!draftSnap.exists) {
+    return { error: NextResponse.json({ error: 'Event not found' }, { status: 404 }) }
+  }
+  // RD-SEC-01 · the settings/template docs are GLOBAL, keyed by draft id alone, and a draft id is
+  // neither secret nor unique to its owner (a client can create a draft under its own path with
+  // another organizer's id). Every global record bound to this id must be the caller's — same
+  // non-disclosing 404 as a missing event.
+  if (!(await checkDraftCommerceOwnership(eventId, uid)).ok) {
     return { error: NextResponse.json({ error: 'Event not found' }, { status: 404 }) }
   }
 

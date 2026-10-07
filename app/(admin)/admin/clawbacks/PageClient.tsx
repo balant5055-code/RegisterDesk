@@ -47,7 +47,7 @@ export default function AdminClawbacksPage() {
   const [selected, setSelected] = useState<ClawbackView | null>(null)
   const [history,  setHistory]  = useState<HistoryEntry[]>([])
   const [busy,     setBusy]     = useState(false)
-  const { confirm } = useConfirm()
+  const { confirm, prompt } = useConfirm()
   const { showToast } = useToast()
 
   const load = useCallback((f: { status: string; organizer: string }) => {
@@ -88,12 +88,15 @@ export default function AdminClawbacksPage() {
     if (!selected) return
     const label = action === 'waive' ? 'Waive this clawback (write off the debt)?' : 'Mark this clawback fully recovered (collected out-of-band)?'
     if (!(await confirm({ title: action === 'waive' ? 'Waive clawback' : 'Mark recovered', message: label, tone: 'danger' }))) return
+    // RD-PHASE4-S4 · D3 — the server requires a reason (Super Admin only).
+    const reason = (await prompt({ title: 'Reason required', message: 'Reason for this clawback decision:', required: true }))?.trim()
+    if (!reason) return
     setBusy(true)
     try {
       const token = await getToken()
       const res = await fetch(`/api/admin/clawbacks/${selected.clawbackId}`, {
         method: 'PATCH', headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
-        body: JSON.stringify({ action }),
+        body: JSON.stringify({ action, reason }),
       })
       const data = await res.json().catch(() => null) as { error?: string } | null
       if (!res.ok) throw new Error(data?.error ?? 'Action failed')

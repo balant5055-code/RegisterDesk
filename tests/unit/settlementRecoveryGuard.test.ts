@@ -58,16 +58,20 @@ describe('the gate refund is lifted for timing only', () => {
 
   it('a recovery blocked for a substantive reason is REPORTED, never refunded', () => {
     expect(SETTLE).toContain("return { kind: 'deferred', reason: `recovery_blocked:${gate.reason ?? 'gate_blocked'}` }")
-    // The refund branch is reachable only when this is NOT a recovery.
+    // RD-PAYMENT-REFUND-AUTHORITY-02 — this used to locate the REFUND branch and assert it
+    // sat inside the non-recovery guard. There is no refund branch any more; the same
+    // position now holds a hold, and the structural point is unchanged.
     const guard = SETTLE.indexOf('if (!(isRecovery && gate.reason && TIMING_ONLY.has(gate.reason)))')
-    const refund = SETTLE.indexOf('await refundInFull(orderId, paymentId, intent.amount, `gate_blocked:')
+    const hold  = SETTLE.indexOf('await recordCapturedHold(orderId, paymentId, intent.amount, `gate_blocked:')
     expect(guard).toBeGreaterThan(-1)
-    expect(refund).toBeGreaterThan(guard)
+    expect(hold).toBeGreaterThan(guard)
   })
 
-  it('the non-recovery refund path is untouched', () => {
-    expect(SETTLE).toContain("await markPaymentIntentFailed(orderId, gate.reason)")
-    expect(SETTLE).toContain("return { kind: 'refunded', reason: gate.reason ?? 'gate_blocked', gateBlocked: true }")
+  it('the non-recovery path marks the intent terminal and HOLDS the captured payment', () => {
+    expect(SETTLE).toContain('await markPaymentIntentFailed(orderId, gateReason)')
+    expect(SETTLE).toContain("return { kind: 'held', reason: gateReason, gateBlocked: true }")
+    // And the outcome it used to return no longer exists anywhere in the module.
+    expect(SETTLE).not.toContain("kind: 'refunded'")
   })
 })
 
@@ -92,12 +96,20 @@ describe('duplicate protection is unchanged', () => {
 })
 
 describe('the untouched systems stay untouched', () => {
-  it('the webhook still skips a terminal intent — payment.failed handling is unchanged', () => {
+  it('the webhook RECOVERS a terminal intent — payment.failed handling is unchanged', () => {
+    // RD-FIN-04A reversed the first half of this. When RD-RECOVER-01 shipped, leaving the
+    // webhook alone was the safe choice; the Aug-2026 audit then found six captures
+    // (₹3,110.40) stranded by exactly that skip, because a 200 tells Razorpay the delivery
+    // succeeded and it never retries. A verified capture now outranks an earlier failure.
     const wh = strip(read('app/api/webhooks/razorpay/route.ts'))
-    expect(wh).toContain("if (intent.status === 'registration_failed')")
+    expect(wh).toContain('terminalNoRegistration')
+    expect(wh).toContain('recovery: { verifiedCapturedPaymentId: paymentId }')
+
+    // The second half is genuinely unchanged and still matters: payment.failed still marks
+    // only a `created` intent, and the webhook still does not reach for the ADMIN
+    // single-order recovery helper — it delegates to the shared settlement.
     expect(wh).toContain('await markPaymentIntentFailed(fOrderId, reason)')
     expect(wh).not.toContain('recoverOrphanedCapture')
-    expect(wh).not.toContain('verifiedCapturedPaymentId')
   })
 
   it('the sweep scans `created` AND orphaned `registration_failed` intents', () => {

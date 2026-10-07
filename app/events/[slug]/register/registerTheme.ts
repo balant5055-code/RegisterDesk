@@ -36,7 +36,7 @@ export const PAGE = 'mx-auto w-full max-w-7xl px-4 sm:px-6 lg:px-8'
  * A single heavy shadow reads as a drop-shadow; this reads as elevation.
  */
 export const PANEL =
-  'rounded-2xl border border-border/70 bg-card ' +
+  'rounded-xl border border-border/70 bg-card ' +
   'shadow-[0_1px_2px_rgb(15_23_42_/_0.04),0_18px_36px_-28px_rgb(15_23_42_/_0.28)]'
 
 export const PANEL_HEAD = 'border-b border-border/60 px-5 py-4 sm:px-6'

@@ -18,7 +18,8 @@
 // (RadioIndicator), the approved-contact helpers (lib/events/builder/contacts), and the
 // step-vocabulary types/constants are IMPORTED from their shared modules — not duplicated.
 
-import { useRef, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
+import { useAutosaveEmit } from '@/lib/events/builder/useAutosaveEmit'
 import Link from 'next/link'
 import { AnimatePresence, motion } from 'framer-motion'
 import {
@@ -1546,7 +1547,7 @@ interface Step3State { accessControl: { type: AccessControlId } | null }
 
 // --- Step 3 view --------------------------------------------------------------
 
-export function Step3View({ currentStep, completedValues, onNext, onBack, onSaveDraft, initialData, wizardSteps }: StepViewProps) {
+export function Step3View({ currentStep, completedValues, onNext, onBack, onSaveDraft, onAutosave, initialData, wizardSteps }: StepViewProps) {
   // Cast the saved access-control snapshot (may be null on first visit)
   const savedAC = initialData as {
     type?:             AccessControlId | null
@@ -1594,6 +1595,16 @@ export function Step3View({ currentStep, completedValues, onNext, onBack, onSave
       approvedContacts: selectedAccess === 'approved_contacts' ? approvedContacts : [],
     })
   }
+
+  // RD-CE-FIX (Access Control Back) — this step only saved on Continue / Save Draft, so Back or
+  // "Back to Dashboard" lost its edits. It now autosaves as edited, like Passes, Form and Details.
+  const accessData = useMemo(() => ({
+    type:             selectedAccess,
+    confirmationMode,
+    inviteCode:       selectedAccess === 'invite_code' ? inviteCodeDraft : null,
+    approvedContacts: selectedAccess === 'approved_contacts' ? approvedContacts : [],
+  }), [selectedAccess, confirmationMode, inviteCodeDraft, approvedContacts])
+  useAutosaveEmit(accessData, onAutosave)
 
   return (
     <motion.div

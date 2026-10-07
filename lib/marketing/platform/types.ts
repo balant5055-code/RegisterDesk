@@ -19,7 +19,16 @@ export interface PlatformHeroConfig {
 
 // ─── Product section item shapes ────────────────────────────────────────────
 
-export interface PlatformCapabilityItem  { iconKey: MarketingIconKey; title: string; description: string }
+/**
+ * `status` is OPTIONAL and defaults to shipped. It exists for one reason: /security lists a
+ * roadmap section beside its shipped controls, and the two were rendering identically.
+ * SECURITY_FUTURE already carried `status: 'coming_soon'`, but the field died here — the
+ * projection into this type dropped it — so SSO, 2FA, SCIM, enterprise compliance and BYOK
+ * appeared as cards indistinguishable from the nine controls that actually exist. On a page
+ * whose entire job is being trustworthy, that is the worst possible place for a silent
+ * downgrade. Omit it and a card reads as available, which is what every other page means.
+ */
+export interface PlatformCapabilityItem  { iconKey: MarketingIconKey; title: string; description: string; status?: 'coming_soon' }
 export interface PlatformHighlightItem   { iconKey?: MarketingIconKey; title: string; description: string }
 export interface PlatformIntegrationItem { iconKey: MarketingIconKey; title: string; description: string }
 export interface PlatformUseCaseItem     { title: string; description: string }

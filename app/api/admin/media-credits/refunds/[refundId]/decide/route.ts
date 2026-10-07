@@ -15,8 +15,9 @@
 // thing that must not read as "try harder".
 
 import { NextRequest, NextResponse } from 'next/server'
-import { resolveAdminUid } from '@/lib/admin/auth'
-import { logAdminAction } from '@/lib/admin/audit'
+// RD-PHASE4-S1 · C3 — money out of a credit purchase: Super Admin only (ADMIN_UIDS), like every refund path.
+import { resolveSuperAdminUid } from '@/lib/admin/auth'
+import { logAdminActionOrRecord } from '@/lib/admin/audit'
 import { getCreditPolicy } from '@/features/media-credits/services'
 import { validateDecisionNote } from '@/features/media-credits/utils/refundEligibility'
 import { refundService } from '@/features/media-credits/services/refundService'
@@ -28,7 +29,7 @@ import {
 type Params = { params: Promise<{ refundId: string }> }
 
 export async function POST(req: NextRequest, { params }: Params): Promise<NextResponse> {
-  const adminUid = await resolveAdminUid(req.headers.get('authorization'))
+  const adminUid = await resolveSuperAdminUid(req.headers.get('authorization'))
   if (!adminUid) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
 
   const { refundId } = await params
@@ -44,8 +45,10 @@ export async function POST(req: NextRequest, { params }: Params): Promise<NextRe
     // MC-12.1 · `refundNoteRequired` is now enforced. Shared validator — the admin dialogs
     // gate their submit button on the SAME function, so a note the dialog accepts is never
     // one this route refuses.
-    const policy = await getCreditPolicy()
-    const checked = validateDecisionNote(body.note, policy.refundNoteRequired)
+    // RD-PHASE4-S4 · D3 — a refund DECISION always carries a reason now, whatever the policy flag
+    // says (the stricter existing note minimum applies). The policy read is kept for parity.
+    await getCreditPolicy()
+    const checked = validateDecisionNote(body.note, true)
     if (!checked.ok) {
       return NextResponse.json({ error: checked.message }, { status: 400 })
     }
@@ -59,17 +62,21 @@ export async function POST(req: NextRequest, { params }: Params): Promise<NextRe
       await refundService.rejectRefund({ refundId, adminUid, note })
       // Audited AFTER the decision commits — logging an action that then failed to happen
       // would make the audit trail a record of intentions rather than of events.
-      await logAdminAction({
-        adminUid, action: 'media_credit_refund.rejected',
-        entityType: 'media_credit_refund', entityId: refundId, metadata: { note },
+      await logAdminActionOrRecord({
+        adminUid, actorRole: 'super_admin', action: 'media_credit_refund.rejected',
+        entityType: 'media_credit_refund', entityId: refundId, reason: note ?? undefined, metadata: { note },
+        correlation: { refundId },
       })
       return NextResponse.json({ refundId, status: 'rejected' })
     }
 
     const result = await refundService.approveRefund({ refundId, adminUid, note })
-    await logAdminAction({
-      adminUid, action: 'media_credit_refund.approved',
-      entityType: 'media_credit_refund', entityId: refundId,
+    // RD-PHASE4-S4 · F3 — the refund has SETTLED (money moved). An audit-write failure must not
+    // become a 503 "Could not record this decision"; it is recorded for reconciliation instead.
+    await logAdminActionOrRecord({
+      adminUid, actorRole: 'super_admin', action: 'media_credit_refund.approved',
+      entityType: 'media_credit_refund', entityId: refundId, reason: note ?? undefined,
+      correlation: { refundId, gatewayRefundId: result.gatewayRefundId },
       metadata: {
         note,
         refundAmountPaise: result.refundAmountPaise,
@@ -81,11 +88,12 @@ export async function POST(req: NextRequest, { params }: Params): Promise<NextRe
     if (err instanceof RefundSettlementDeferredError) {
       // The debit COMMITTED. Audit it — the credits really did leave the wallet — and report
       // the payout as pending rather than as a failure.
-      await logAdminAction({
-        adminUid, action: 'media_credit_refund.approved_payout_pending',
-        entityType: 'media_credit_refund', entityId: refundId,
+      await logAdminActionOrRecord({
+        adminUid, actorRole: 'super_admin', action: 'media_credit_refund.approved_payout_pending',
+        entityType: 'media_credit_refund', entityId: refundId, reason: note ?? undefined,
         metadata: { note, cause: err.cause },
-      }).catch(() => { /* the refund record is the source of truth, not the audit log */ })
+        correlation: { refundId },
+      })
       return NextResponse.json(
         { refundId, status: 'approved', pending: true, error: err.message, code: err.code },
         { status: 202 },

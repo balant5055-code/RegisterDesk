@@ -7,6 +7,7 @@ import { FieldValue } from 'firebase-admin/firestore'
 import { adminDb }     from '@/lib/firebase/admin'
 import { getClientIp } from '@/lib/rateLimit'
 import { checkDistributedRateLimit } from '@/lib/rateLimit/redis'
+import { isModerated } from '@/lib/admin/organizerStatus'
 import {
   type ApiKeyDocument, type ApiKeyView, type ApiKeyPermission, isApiKeyPermission,
 } from '@/lib/integrations/types'
@@ -156,6 +157,11 @@ export async function authenticateApiKey(
 
   const auth = await verifyApiKey(req)
   if (!auth) return { ok: false, status: 401, error: 'Invalid or revoked API key.' }
+  // RD-SEC-01 · a suspended/banned organizer is refused at verifyCaller for every session
+  // route; an API key used to bypass that seam and keep exporting attendee data.
+  if (await isModerated(auth.organizerUid)) {
+    return { ok: false, status: 403, error: 'This account is suspended.' }
+  }
   if (!auth.permissions.includes(required)) {
     return { ok: false, status: 403, error: `API key is missing the ${required} permission.` }
   }

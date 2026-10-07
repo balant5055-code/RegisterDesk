@@ -39,31 +39,28 @@ export const ORGANIZER_TOPICS: SupportTopic[] = [
     id:          'events',
     title:       'Creating & managing events',
     description: 'Build an event, configure registration, publish it, and manage it once it is live.',
-    links: [
-      { label: 'Registration & forms',   href: '/platform/registration' },
-      { label: 'Participants',           href: '/platform/participants' },
-      { label: 'Identifiers & bibs',     href: '/platform/identifiers' },
-    ],
+    // No links: these pointed at /platform/registration, /participants and /identifiers,
+    // which are gone. The topic and its description still answer the question, so the card
+    // stays and simply carries no further reading.
+    links: [],
   },
   {
     id:          'checkin',
     title:       'Check-in on event day',
     description: 'Scan QR tickets, admit participants, and handle entries without a connection.',
-    links: [{ label: 'Check-in', href: '/platform/check-in' }],
+    links: [],
   },
   {
     id:          'certificates',
     title:       'Certificates',
     description: 'Design certificates and issue them to participants after the event.',
-    links: [{ label: 'Certificates', href: '/platform/certificates' }],
+    links: [],
   },
   {
     id:          'money',
     title:       'Payments, refunds & settlements',
     description: 'How money reaches you, how refunds are issued, and how settlements are tracked.',
     links: [
-      { label: 'Payments',       href: '/platform/payments' },
-      { label: 'Finance',        href: '/platform/finance' },
       { label: 'Refund Policy',  href: '/refund-policy' },
     ],
   },
@@ -71,7 +68,7 @@ export const ORGANIZER_TOPICS: SupportTopic[] = [
     id:          'crm',
     title:       'Attendees & communication',
     description: 'Keep participant records together and send event emails from one place.',
-    links: [{ label: 'CRM & communication', href: '/platform/crm' }],
+    links: [],
   },
   {
     id:          'plans',

@@ -24,6 +24,19 @@ import type { RaceResultStatus } from './results'
 
 export const RACE_SNAPSHOTS = 'raceResultSnapshots'
 export const SNAPSHOT_ENTRIES_SUBCOLLECTION = 'entries'
+/**
+ * RD-RACEOPS-RESULTS-04 · published checkpoints, ONE DOCUMENT PER PARTICIPANT PER VERSION.
+ *
+ * Deliberately not on the entry document: the public leaderboard reads entries fifty at a
+ * time and shows no checkpoints, so embedding 10–30 of them would multiply the payload of
+ * the most-read page in the module for data it never renders. Deliberately not one document
+ * per checkpoint either: 20,000 runners × 20 points is 400,000 documents per version, and
+ * nothing here ever deletes.
+ *
+ * The id carries the version exactly as `entries` does (`v7__10571`), so a rollback exposes
+ * that version's checkpoints by construction and an abandoned build's can never be read.
+ */
+export const SNAPSHOT_SPLITS_SUBCOLLECTION = 'entrySplits'
 
 export const RACE_SNAPSHOT_SCHEMA_VERSION = 1
 
@@ -78,6 +91,18 @@ export interface RaceSnapshotDoc {
   /** The version the public is served. Never changed by a build — only by go-live. */
   version: number
   status:  SnapshotStatus
+  /**
+   * RD-RACEOPS-02G · the highest version this race has EVER allocated — the allocator.
+   *
+   * `version` is a pointer and rollback moves it backwards; the next build used to be
+   * `version + 1`, which after a rollback named a number that already had entries (an
+   * abandoned lane, or a published version whose rows were then overwritten). A new build
+   * is now `maxVersion + 1`, claimed in the same transaction that advances `maxVersion`,
+   * and rollback never touches it. Absent on documents written before this sprint: derived
+   * from the live pointer, the pending lane and `versions[]`, then established on the next
+   * allocation or go-live (see `utils/snapshotVersions.ts`).
+   */
+  maxVersion?: number
 
   // ── RD-RESULTS-FIX-01 · the PENDING build lane ─────────────────────────────
   //
@@ -158,6 +183,67 @@ export interface SnapshotEntryDoc {
   status:      RaceResultStatus
   overallRank: number | null
   passRank:    number | null
+
+  // ── RD-RACEOPS-RESULTS-04 · what the participant's own result page needs ─────
+  //
+  // Before this sprint these facts were collected, validated and stored on the draft import
+  // and then dropped at the publish boundary, so nothing public, certificate, badge or
+  // export could ever reach them (03 audit, P1-1). They are carried here — the ONE document
+  // a runner result page reads — rather than fetched from the session, which is organizer-
+  // private and may be cancelled.
+  //
+  // Every one is optional: an entry published before this sprint has none, and each public
+  // surface renders an unavailable state rather than a zero.
+  /** As recorded in the timing FILE. Never reconciled against registration form data. */
+  gender?:     string | null
+  category?:   string | null
+  ageGroup?:   string | null
+  /** Race distance in metres — what pace and speed are derived from. */
+  distanceMeters?: number | null
+  /** The distance exactly as the file wrote it, for display when it is more precise. */
+  distanceRaw?: string | null
+
+  /**
+   * Position within this participant's own gender / age group, and the size of that group.
+   *
+   * COMPUTED BY REGISTERDESK from the published set (ranking/groups.ts) — a provider's own
+   * rank column is never imported. Null when the file carried no group value for this row,
+   * when the row is not a finisher, or when the column held too many distinct values to be
+   * a group at all.
+   */
+  genderRank?:    number | null
+  genderTotal?:   number | null
+  ageGroupRank?:  number | null
+  ageGroupTotal?: number | null
+}
+
+/**
+ * RD-RACEOPS-RESULTS-04 · raceResultSnapshots/{snapshotId}/entrySplits/v{n}__{bibKey}
+ *
+ * One participant's published checkpoints. Read by a single document GET on the runner
+ * result page — no query, no index — and written in the same batch as the entry it belongs
+ * to, so entries and checkpoints are never half a version apart.
+ */
+export interface SnapshotSplitsDoc {
+  /** Version these checkpoints belong to. Matches the id and the entry's `v`. */
+  v:         number
+  bibNumber: string
+  bibKey:    string
+  /** In course order. Empty arrays are never written — the document simply does not exist. */
+  splits:    SnapshotSplitEntry[]
+}
+
+/** One published checkpoint. Pace and speed are absent: both are derived at read time. */
+export interface SnapshotSplitEntry {
+  sequence:         number
+  splitKey:         string
+  name:             string
+  distanceMeters:   number | null
+  segmentMeters:    number | null
+  cumulativeTimeMs: number | null
+  segmentTimeMs:    number | null
+  /** Wall clock "HH:MM:SS", never an elapsed duration. */
+  timeOfDay:        string | null
 }
 
 // ─── Public projections (what actually reaches a browser) ─────────────────────
@@ -170,6 +256,45 @@ export interface PublicResultRow {
   gunTimeMs:   number | null
   status:      RaceResultStatus
   overallRank: number | null
+
+  // ── RD-RACEOPS-RESULTS-04 · published facts, plus what RegisterDesk derived ──
+  // Null throughout for a race published before this sprint, or one whose file carried
+  // no such column. A consumer renders "—", never a 0 and never an invented value.
+  gender:         string | null
+  category:       string | null
+  ageGroup:       string | null
+  distanceMeters: number | null
+  distanceRaw:    string | null
+  genderRank:     number | null
+  genderTotal:    number | null
+  ageGroupRank:   number | null
+  ageGroupTotal:  number | null
+  /** DERIVED from chip time and distance — never imported. Null when either is missing. */
+  paceMsPerKm:    number | null
+  speedKmh:       number | null
+}
+
+/**
+ * RD-RACEOPS-RESULTS-04 · one checkpoint as the public sees it.
+ *
+ * Both readings the participant asked for — where they were, and how the leg went — with
+ * pace and speed derived for each. Nothing here identifies the organizer, the session or
+ * the import.
+ */
+export interface PublicSplitRow {
+  sequence:         number
+  name:             string
+  distanceMeters:   number | null
+  segmentMeters:    number | null
+  cumulativeTimeMs: number | null
+  segmentTimeMs:    number | null
+  timeOfDay:        string | null
+  /** Derived from (cumulativeTimeMs, distanceMeters). */
+  cumulativePaceMsPerKm: number | null
+  cumulativeSpeedKmh:    number | null
+  /** Derived from (segmentTimeMs, segmentMeters). */
+  segmentPaceMsPerKm:    number | null
+  segmentSpeedKmh:       number | null
 }
 
 /** A race's public header. Carries NO organizer identifiers. */
@@ -188,4 +313,9 @@ export interface PublicRaceSummary {
 export interface PublicRunnerResult {
   race:   PublicRaceSummary
   result: PublicResultRow
+  /**
+   * RD-RACEOPS-RESULTS-04 · this participant's checkpoints, or [] when the race published
+   * none. An empty array renders NO split section at all — never an empty table.
+   */
+  splits: PublicSplitRow[]
 }

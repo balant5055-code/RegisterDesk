@@ -21,6 +21,8 @@ import { useToast } from '@/components/ui/Toast'
 import { useFocusTrap } from '@/lib/hooks/useFocusTrap'
 import { rankBy } from '@/lib/commandPalette/fuzzy'
 import { useCommandData } from '@/lib/commandPalette/useCommandData'
+import { useFeatureFlags } from '@/lib/config/featureFlagsClient'
+import { navHrefEnabled } from '@/config/workspaceNav'
 import { OPEN_EVENT, SET_TAB_EVENT, REFRESH_EVENT } from '@/lib/commandPalette/bridge'
 import {
   buildNavigationCommands, buildEventTabCommands, buildEventActionCommands,
@@ -47,6 +49,8 @@ export function CommandPalette() {
   const { showToast } = useToast()
   const [open, setOpen]           = useState(false)
   const { perms, loadEvents, searchAttendees } = useCommandData(open)
+  // Business-config context — already loaded for the dashboard, so no request here.
+  const flags = useFeatureFlags()
 
   const [query, setQuery]         = useState('')
   const [activeIdx, setActiveIdx] = useState(0)
@@ -152,13 +156,23 @@ export function CommandPalette() {
     // Ignore detail still belonging to a previously-viewed event.
     const detail  = eventDetail?.draftId === currentEventId ? eventDetail : null
     const name    = detail?.name
-    const tabs    = buildEventTabCommands(currentEventId, detail?.eventType, name)
+    // RD-EVENT-16 · the palette offers exactly the sections the tab bar shows, resolved
+    // by the same function. `null` until the detail arrives — see buildEventTabCommands.
+    const capabilities = detail
+      ? {
+          eventType:         detail.eventType,
+          registrationRules: detail.registrationRules,
+          applications:      detail.applications,
+          gate:              { flags, has: perms.has },
+        }
+      : null
+    const tabs    = buildEventTabCommands(currentEventId, capabilities, name)
     const actions = detail
       ? buildEventActionCommands(currentEventId, detail.lifecycleStatus, name)
           .filter(a => !a.permission || perms.has(a.permission))
       : []
     return [...tabs, ...actions]
-  }, [currentEventId, eventDetail, perms])
+  }, [currentEventId, eventDetail, perms, flags])
 
   // ── Dynamic record commands (events + attendees) ────────────────────────────
   const dynamicCommands = useMemo<PaletteCommand[]>(() => {
@@ -187,13 +201,18 @@ export function CommandPalette() {
 
   // ── Final ordered result list ───────────────────────────────────────────────
   const results = useMemo<PaletteCommand[]>(() => {
+    // The sidebar's own two gates (config/workspaceNav + Sidebar): the workspace feature flag
+    // for the destination, then the permission the command carries. Without them the
+    // palette offered rows the sidebar hides — including the flag-gated WhatsApp Inbox.
     const nav = buildNavigationCommands()
+      .filter(c => !c.href || navHrefEnabled(c.href, flags))
+      .filter(c => !c.permission || perms.has(c.permission))
     if (!query.trim()) {
       return [...contextCommands, ...nav]                       // default: context first, then all nav
     }
     const ranked = rankBy(query, [...contextCommands, ...nav], commandStrings)
     return [...ranked, ...dynamicCommands]                      // matched commands, then live records
-  }, [query, contextCommands, dynamicCommands])
+  }, [query, contextCommands, dynamicCommands, flags, perms])
 
   // Clamp the highlight into range as results shrink (derived, not effect state).
   const safeIdx = results.length ? Math.min(activeIdx, results.length - 1) : 0
@@ -233,8 +252,14 @@ export function CommandPalette() {
     }
   }, [router, currentEventId, close, showToast])
 
+  const dupKeyRef   = useRef<string | null>(null)
+  const dupInFlight = useRef(false)
+
   // ── Perform a confirmed reversible action (reuse existing routes) ───────────
   const performAction = useCallback(async (cmd: PaletteCommand) => {
+    // RD-CE-FIX (duplicate) — busy state cannot stop a double action in one render; the route's
+    // idempotency key can: one key per duplicate attempt, cleared once it succeeds.
+    if (cmd.action === 'duplicate' && dupInFlight.current) return
     setBusy(true)
     try {
       const user = auth.currentUser
@@ -242,11 +267,15 @@ export function CommandPalette() {
       const token = await user.getIdToken()
 
       if (cmd.action === 'duplicate') {
+        dupInFlight.current = true
+        dupKeyRef.current ??= `pal${crypto.randomUUID().replace(/-/g, '')}`.slice(0, 64)
         const res  = await fetch(`/api/organizer/events/${cmd.eventId}/duplicate`, {
-          method: 'POST', headers: { Authorization: `Bearer ${token}` },
-        })
+          method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body:   JSON.stringify({ idempotencyKey: dupKeyRef.current }),
+        }).finally(() => { dupInFlight.current = false })
         const json = await res.json() as { success: boolean; draftId?: string; error?: string }
         if (json.success && json.draftId) {
+          dupKeyRef.current = null
           showToast('Event duplicated.', 'success')
           router.push(`/dashboard/events/new/visibility?draftId=${json.draftId}`)
         } else {

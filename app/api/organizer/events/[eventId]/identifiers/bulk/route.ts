@@ -15,6 +15,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { allocateIdentifier, releaseIdentifier, lookupIdentifier } from '@/lib/identifiers/engine'
 import { IdentifierError } from '@/lib/identifiers/types'
 import { resolveIdentifierScope, assertRegistrationInScope } from '@/lib/identifiers/organizerScope'
+import { resolveEventAssignmentGate } from '@/lib/identifiers/assignmentDecision'
 
 export const dynamic = 'force-dynamic'
 
@@ -59,6 +60,17 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ eventId: s
   }
   const mode = body.mode === 'commit' ? 'commit' : 'preview'
 
+  // RD-EVENT-19C · the same lifecycle gate the single-assignment route uses, so
+  // bulk cannot be the way around it. Applied to COMMIT only: a preview writes
+  // nothing, and an organizer looking at a cancelled event should still be able
+  // to see what would have happened.
+  if (mode === 'commit') {
+    const gate = resolveEventAssignmentGate(scope.lifecycleStatus)
+    if (!gate.open) {
+      return NextResponse.json({ error: gate.detail, code: gate.reason }, { status: 409 })
+    }
+  }
+
   let rows: Row[] = Array.isArray(body.rows)
     ? body.rows.filter(r => r && typeof r.registrationId === 'string' && r.registrationId)
     : typeof body.csv === 'string' ? parseCsv(body.csv) : []
@@ -94,6 +106,10 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ eventId: s
         const r = await allocateIdentifier({
           eventSlug: scope.slug, registrationId: row.registrationId, actor: scope.callerUid,
           source: 'bulk', explicitValue: row.value, category: row.category ?? null,
+          // RD-EVENT-19A · the pass from the row's OWN stored registration (read
+          // by the scope guard above), never from the request body — so a bulk
+          // row cannot be steered into another pass's pool.
+          passId: guard.passId,
         })
         results.push({ registrationId: row.registrationId, ok: true, value: r.value })
       } else {

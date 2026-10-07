@@ -46,6 +46,7 @@ import { validateStep } from '@/lib/events/builder/stepValidation'
 import { EASE, WIZARD_STEPS } from '@/lib/events/builder/constants'
 import type { StepViewProps } from '@/lib/events/builder/types'
 import { getTemplate } from '@/lib/events/templateRegistry'
+import { EVENT_SUBTYPE_NAMES, EVENT_TYPE_NAMES } from '@/lib/events/taxonomy'
 import {
   type CampaignType,
   type DonationCampaignSubtype,
@@ -92,7 +93,7 @@ interface EventTypeOption {
 const EVENT_TYPES: EventTypeOption[] = [
   {
     id: 'conference',
-    name: 'Conference',
+    name: EVENT_TYPE_NAMES.conference,
     description: 'Large-scale meetings with speakers, sessions and attendees.',
     examples: 'Business, Corporate, Rotary, Summit',
     icon: Users,
@@ -101,7 +102,7 @@ const EVENT_TYPES: EventTypeOption[] = [
   },
   {
     id: 'exhibition',
-    name: 'Exhibition & Expo',
+    name: EVENT_TYPE_NAMES.exhibition,
     description: 'Exhibitions, trade shows and product showcases.',
     examples: 'Trade Show, Expo, Fair, Showcase',
     icon: Store,
@@ -110,7 +111,7 @@ const EVENT_TYPES: EventTypeOption[] = [
   },
   {
     id: 'sports',
-    name: 'Sports & Fitness',
+    name: EVENT_TYPE_NAMES.sports,
     description: 'Sports events, marathons, tournaments and fitness activities.',
     examples: 'Marathon, Cycling, Cricket, Football, Tennis',
     icon: Trophy,
@@ -120,7 +121,7 @@ const EVENT_TYPES: EventTypeOption[] = [
   },
   {
     id: 'workshop',
-    name: 'Workshop & Training',
+    name: EVENT_TYPE_NAMES.workshop,
     description: 'Educational workshops, training programs and bootcamps.',
     examples: 'Workshop, Training, Certification, Masterclass',
     icon: GraduationCap,
@@ -129,16 +130,16 @@ const EVENT_TYPES: EventTypeOption[] = [
   },
   {
     id: 'meetup',
-    name: 'Business Meetup',
+    name: EVENT_TYPE_NAMES.meetup,
     description: 'Networking events and professional business gatherings.',
     examples: 'Meetup, Networking, Startup, Investor',
     icon: Coffee,
-    iconBg: 'bg-rose-100',
-    iconColor: 'text-rose-500',
+    iconBg: 'bg-cyan-100',
+    iconColor: 'text-cyan-700',
   },
   {
     id: 'community',
-    name: 'Community & Awareness',
+    name: EVENT_TYPE_NAMES.community,
     description: 'Community programs, NGO activities and awareness campaigns.',
     examples: 'Awareness, NGO, Volunteer, Social Impact',
     icon: Heart,
@@ -147,7 +148,7 @@ const EVENT_TYPES: EventTypeOption[] = [
   },
   {
     id: 'cultural',
-    name: 'Cultural & Entertainment',
+    name: EVENT_TYPE_NAMES.cultural,
     description: 'Music, arts, cultural programs and entertainment events.',
     examples: 'Concert, Festival, Show, DJ Night',
     icon: Music,
@@ -156,7 +157,7 @@ const EVENT_TYPES: EventTypeOption[] = [
   },
   {
     id: 'awards',
-    name: 'Awards & Recognition',
+    name: EVENT_TYPE_NAMES.awards,
     description: 'Award ceremonies and recognition programs.',
     examples: 'Awards Night, Graduation, Excellence Awards',
     icon: Award,
@@ -165,16 +166,16 @@ const EVENT_TYPES: EventTypeOption[] = [
   },
   {
     id: 'fundraising',
-    name: 'Fundraising & Charity',
+    name: EVENT_TYPE_NAMES.fundraising,
     description: 'Donation drives and fundraising events.',
     examples: 'Charity Run, Fundraiser, Donation Campaign',
     icon: Gift,
-    iconBg: 'bg-pink-100',
-    iconColor: 'text-pink-600',
+    iconBg: 'bg-teal-100',
+    iconColor: 'text-teal-700',
   },
   {
     id: 'custom',
-    name: 'Custom Event',
+    name: EVENT_TYPE_NAMES.custom,
     description: 'Create a fully customized event experience.',
     examples: 'Custom, Special Event, Hybrid Event',
     icon: Wand2,
@@ -187,100 +188,58 @@ const EVENT_TYPES: EventTypeOption[] = [
 interface SubtypeOption { id: string; name: string }
 interface SubtypeConfig { label: string; hint: string; options: SubtypeOption[] }
 
-function sub(id: string, name: string): SubtypeOption { return { id, name } }
+// Names come from lib/events/taxonomy.ts so the wizard and the Dashboard header cannot
+// drift apart. `sub(id)` looks the name up; passing one explicitly is no longer possible,
+// which is what makes the drift impossible rather than merely unlikely.
+function subsOf(typeId: string, ids: string[]): SubtypeOption[] {
+  return ids.map(id => ({ id, name: EVENT_SUBTYPE_NAMES[typeId]?.[id] ?? id }))
+}
 
 const SUBTYPES_BY_EVENT_TYPE: Record<string, SubtypeConfig> = {
   conference: {
     label: 'Conference Style',
     hint:  'Select the format that best describes your conference.',
-    options: [
-      sub('business',  'Business'),     sub('corporate', 'Corporate'),
-      sub('rotary',    'Rotary'),       sub('summit',    'Summit'),
-      sub('academic',  'Academic'),     sub('medical',   'Medical'),
-      sub('tech',      'Tech'),         sub('other',     'Other'),
-    ],
+    options: subsOf('conference', ['business', 'corporate', 'rotary', 'summit', 'academic', 'medical', 'tech', 'other']),
   },
   exhibition: {
     label: 'Expo Type',
     hint:  'What kind of exhibition or expo are you organising?',
-    options: [
-      sub('trade_show', 'Trade Show'),        sub('fair',       'Fair'),
-      sub('product',    'Product Showcase'),   sub('auto',       'Auto Expo'),
-      sub('education',  'Education Expo'),     sub('property',   'Property Expo'),
-      sub('other',      'Other'),
-    ],
+    options: subsOf('exhibition', ['trade_show', 'fair', 'product', 'auto', 'education', 'property', 'other']),
   },
   sports: {
     label: 'Sport Discipline',
     hint:  'Select the specific sport or fitness discipline.',
-    options: [
-      sub('running',    'Running'),      sub('cycling',    'Cycling'),
-      sub('cricket',    'Cricket'),      sub('football',   'Football'),
-      sub('hockey',     'Hockey'),       sub('tennis',     'Tennis'),
-      sub('badminton',  'Badminton'),    sub('swimming',   'Swimming'),
-      sub('basketball', 'Basketball'),   sub('volleyball', 'Volleyball'),
-      sub('triathlon',  'Triathlon'),    sub('other',      'Other'),
-    ],
+    options: subsOf('sports', ['running', 'cycling', 'cricket', 'football', 'hockey', 'tennis', 'badminton', 'swimming', 'basketball', 'volleyball', 'triathlon', 'other']),
   },
   workshop: {
     label: 'Training Type',
     hint:  'What kind of workshop or training is this?',
-    options: [
-      sub('workshop',      'Workshop'),          sub('bootcamp',     'Bootcamp'),
-      sub('certification', 'Certification Course'), sub('masterclass', 'Masterclass'),
-      sub('seminar',       'Seminar'),           sub('live_training','Live Training'),
-      sub('other',         'Other'),
-    ],
+    options: subsOf('workshop', ['workshop', 'bootcamp', 'certification', 'masterclass', 'seminar', 'live_training', 'other']),
   },
   meetup: {
     label: 'Meetup Focus',
     hint:  'What is the primary focus of this meetup?',
-    options: [
-      sub('networking', 'Networking'),    sub('startup',   'Startup Meetup'),
-      sub('investor',   'Investor Meetup'), sub('founder',  'Founder Circle'),
-      sub('corporate',  'Corporate Meetup'), sub('alumni',  'Alumni Meetup'),
-      sub('other',      'Other'),
-    ],
+    options: subsOf('meetup', ['networking', 'startup', 'investor', 'founder', 'corporate', 'alumni', 'other']),
   },
   community: {
     label: 'Cause Type',
     hint:  'What cause or community program is this for?',
-    options: [
-      sub('awareness', 'Awareness'),      sub('ngo',       'NGO Event'),
-      sub('volunteer', 'Volunteer Program'), sub('donation', 'Donation Drive'),
-      sub('cleanup',   'Clean-up Drive'), sub('social',    'Social Impact'),
-      sub('other',     'Other'),
-    ],
+    options: subsOf('community', ['awareness', 'ngo', 'volunteer', 'donation', 'cleanup', 'social', 'other']),
   },
   cultural: {
     label: 'Entertainment Type',
     hint:  'What kind of cultural or entertainment event is this?',
-    options: [
-      sub('concert',   'Concert'),        sub('festival',  'Festival'),
-      sub('dance',     'Dance Show'),     sub('drama',     'Drama'),
-      sub('dj_night',  'DJ Night'),       sub('talent',    'Talent Show'),
-      sub('cultural',  'Cultural Program'), sub('other',   'Other'),
-    ],
+    options: subsOf('cultural', ['concert', 'festival', 'dance', 'drama', 'dj_night', 'talent', 'cultural', 'other']),
   },
   awards: {
     label: 'Recognition Type',
     hint:  'What kind of recognition ceremony is this?',
-    options: [
-      sub('awards_night', 'Awards Night'),   sub('recognition',  'Recognition Ceremony'),
-      sub('graduation',   'Graduation'),     sub('felicitation', 'Felicitation'),
-      sub('excellence',   'Excellence Awards'), sub('summit',    'Summit Awards'),
-      sub('other',        'Other'),
-    ],
+    options: subsOf('awards', ['awards_night', 'recognition', 'graduation', 'felicitation', 'excellence', 'summit', 'other']),
   },
   fundraising: {
     label: 'Fundraising Type',
     hint:  'What type of fundraising or charity event is this?',
-    options: [
-      sub('charity_run',    'Charity Run'),     sub('donation_drive', 'Donation Drive'),
-      sub('benefit_dinner', 'Benefit Dinner'),  sub('gala',           'Gala Night'),
-      sub('campaign',       'Campaign Event'),  sub('fundraiser',     'Fundraiser'),
-      sub('other',          'Other'),
-    ],
+    options: subsOf('fundraising', ['charity_run', 'donation_drive', 'benefit_dinner', 'gala', 'campaign', 'fundraiser', 'other']),
   },
 }
 
@@ -302,72 +261,58 @@ function EventTypeCard({
   onSelect:     (id: string) => void
   recommended?: boolean
 }) {
+  // 2026-10-01 luxury pass (owner: "smooth to create a new event"): a TILE in a grid rather
+  // than a full-width row, so all ten categories read at a glance. On a phone it is icon +
+  // name only (two columns); the description joins from sm up. The tick sits in the corner.
   return (
     <motion.button
       type="button"
       onClick={() => onSelect(type.id)}
-      whileTap={{ scale: 0.993 }}
-      whileHover={
-        selected
-          ? {}
-          : { y: -1, transition: { duration: 0.15, ease: [0.22, 1, 0.36, 1] } }
-      }
+      whileTap={{ scale: 0.985 }}
       aria-pressed={selected}
       aria-label={`Select ${type.name}`}
       className={cn(
-        'group relative flex w-full cursor-pointer items-center gap-4 rounded-xl border px-5 py-[15px] text-left',
-        'transition-[border-color,box-shadow,background-color] duration-200 ease-out',
+        'group relative flex h-full w-full cursor-pointer flex-col items-start gap-3 rounded-surface border p-3.5 text-left sm:p-4',
+        // Custom Event is the escape hatch, not a peer: where the grid runs three across it
+        // becomes one full-width dashed strip instead of an orphan tile on the last row.
+        type.id === 'custom' && 'sm:flex-row sm:items-center sm:gap-4 lg:flex-col lg:items-start lg:gap-3 xl:flex-row xl:items-center xl:gap-4',
+        type.id === 'custom' && !selected && 'border-dashed',
+        'transition-[border-color,box-shadow,background-color,transform] duration-200 ease-out',
+        'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 focus-visible:ring-offset-2',
         selected
-          ? 'border-primary/50 bg-primary/[0.025] shadow-[0_0_0_2px_rgba(var(--tw-shadow-color,0,0,0),0),0_4px_20px_rgba(0,0,0,0.06)] ring-2 ring-primary/[0.12]'
-          : 'border-border bg-card shadow-[0_1px_3px_rgba(0,0,0,0.04)] hover:border-border-strong hover:shadow-[0_4px_14px_rgba(0,0,0,0.08)]',
+          ? 'border-primary bg-primary/[0.04] shadow-[0_10px_28px_-18px_rgb(var(--primary-rgb)_/_0.6)] ring-1 ring-inset ring-primary'
+          : 'border-border/80 bg-card shadow-[0_1px_2px_rgb(15_23_42_/_0.04)] hover:-translate-y-0.5 hover:border-border-strong hover:shadow-[0_14px_30px_-22px_rgb(15_23_42_/_0.35)] motion-reduce:hover:translate-y-0',
       )}
     >
-      {/* Left accent bar on selection */}
-      <AnimatePresence>
-        {selected && (
-          <motion.span
-            key="accent"
-            initial={{ scaleY: 0, opacity: 0 }}
-            animate={{ scaleY: 1, opacity: 1 }}
-            exit={{ scaleY: 0, opacity: 0 }}
-            transition={{ duration: 0.18, ease: [0.22, 1, 0.36, 1] }}
-            className="pointer-events-none absolute left-2 top-1/2 h-6 w-[3px] -translate-y-1/2 rounded-full bg-primary"
-            aria-hidden
-          />
-        )}
-      </AnimatePresence>
-
-      {/* Icon */}
-      <div
+      {/* Icon — the category's own hue; a quiet neutral plate in dark mode */}
+      <span
         className={cn(
-          'flex size-11 shrink-0 items-center justify-center rounded-xl transition-shadow duration-200',
+          'flex size-10 shrink-0 items-center justify-center rounded-control transition-transform duration-200 group-hover:scale-105 dark:bg-muted',
           type.iconBg,
-          selected && 'shadow-[0_2px_8px_rgba(0,0,0,0.10)]',
         )}
         aria-hidden
       >
-        <type.icon className={cn('size-[20px]', type.iconColor)} />
-      </div>
+        <type.icon className={cn('size-5', type.iconColor)} strokeWidth={1.75} />
+      </span>
 
-      {/* Content */}
-      <div className="min-w-0 flex-1">
-        <p className={cn(
-          'text-[13.5px] font-semibold leading-snug tracking-tight transition-colors duration-200',
-          selected ? 'text-foreground' : 'text-foreground/90 group-hover:text-foreground',
+      <span className="block min-w-0 pr-5">
+        <span className={cn(
+          'block text-fs-sm font-semibold leading-snug tracking-[-0.01em] transition-colors duration-200',
+          selected ? 'text-[color:var(--primary-text)]' : 'text-foreground',
         )}>
           {type.name}
-        </p>
-        <p className="mt-0.5 line-clamp-2 text-[12px] leading-relaxed text-muted-foreground">
+        </span>
+        <span className="mt-1 hidden text-fs-xs leading-relaxed text-muted-foreground sm:line-clamp-2">
           {type.description}
-        </p>
-      </div>
+        </span>
+      </span>
 
-      {/* Selection indicator */}
+      {/* Selection tick — top-right corner */}
       <span
         className={cn(
-          'ml-1 flex size-5 shrink-0 items-center justify-center rounded-full transition-all duration-200',
+          'absolute right-3 top-3 flex size-5 shrink-0 items-center justify-center rounded-full transition-all duration-200',
           selected
-            ? 'bg-primary shadow-[0_2px_6px_rgba(0,0,0,0.18)]'
+            ? 'bg-primary text-primary-foreground shadow-[0_2px_6px_rgb(var(--primary-rgb)_/_0.4)]'
             : 'border border-border bg-card group-hover:border-border-strong',
         )}
         aria-hidden
@@ -381,7 +326,7 @@ function EventTypeCard({
               exit={{ scale: 0, opacity: 0 }}
               transition={{ type: 'spring', stiffness: 500, damping: 25 }}
             >
-              <Check className="size-3 text-white" />
+              <Check className="size-3" strokeWidth={3} />
             </motion.span>
           )}
         </AnimatePresence>
@@ -427,7 +372,7 @@ function SubtypeSelector({
   }, [isOther])
 
   const inputCls =
-    'h-9 w-full rounded-lg border border-border bg-background px-3 text-[14px] text-foreground placeholder:text-muted-foreground/60 outline-none transition-colors focus:border-primary/50 focus:ring-2 focus:ring-primary/20'
+    'h-11 w-full rounded-control border border-border bg-background px-3.5 text-fs-sm text-foreground placeholder:text-muted-foreground/60 outline-none transition-colors focus:border-primary/50 focus:ring-2 focus:ring-primary/20 sm:h-10'
 
   return (
     <motion.div
@@ -438,46 +383,40 @@ function SubtypeSelector({
       transition={{ duration: 0.2, ease: EASE }}
       className="flex flex-col gap-3"
     >
-      <div className="rounded-xl border border-border bg-card p-5 shadow-[0_1px_4px_rgba(0,0,0,0.05)]">
+      {/* 2026-10-01: the follow-up question as its own panel — the chosen category on the
+          left of its header, the question beside it, a hairline, then the answers. */}
+      <div className="overflow-hidden rounded-surface border border-border/80 bg-card shadow-[0_1px_2px_rgb(15_23_42_/_0.04)]">
         {/* Header */}
-        <div className="mb-3 flex items-center gap-2.5">
+        <div className="flex items-center gap-3 border-b border-border/70 bg-muted/25 px-4 py-3.5 sm:px-5">
           {et && (
-            <div className={cn('flex size-7 shrink-0 items-center justify-center rounded-lg', et.iconBg)}>
-              <et.icon className={cn('size-3.5', et.iconColor)} aria-hidden />
+            <div className={cn('flex size-9 shrink-0 items-center justify-center rounded-control dark:bg-muted', et.iconBg)}>
+              <et.icon className={cn('size-[18px]', et.iconColor)} strokeWidth={1.75} aria-hidden />
             </div>
           )}
-          <div className="min-w-0 flex-1">
+          <div className="relative min-w-0 flex-1">
             {/* Brief accent highlight on first reveal */}
-            <div className="relative">
-              <motion.div
-                key={eventTypeId}
-                initial={{ opacity: 1 }}
-                animate={{ opacity: 0 }}
-                transition={{ delay: 0.3, duration: 0.8, ease: 'easeOut' }}
-                className="pointer-events-none absolute -inset-x-1 -inset-y-0.5 rounded bg-primary/10"
-                aria-hidden
-              />
-              {isCustomType ? (
-                <p className="relative text-[13px] font-semibold text-foreground">
-                  Custom Event Category
-                </p>
-              ) : (
-                <div className="relative flex items-center gap-1.5">
-                  <Sparkles className="size-[12px] shrink-0 text-muted-foreground/60" aria-hidden />
-                  <span className="text-[11px] font-semibold uppercase tracking-[0.1em] text-muted-foreground/60">
-                    Event Format
-                  </span>
-                  <span className="ml-0.5 text-[10px] text-red-500">*</span>
-                </div>
-              )}
-            </div>
-            <p className="text-[12px] text-muted-foreground">
+            <motion.div
+              key={eventTypeId}
+              initial={{ opacity: 1 }}
+              animate={{ opacity: 0 }}
+              transition={{ delay: 0.3, duration: 0.8, ease: 'easeOut' }}
+              className="pointer-events-none absolute -inset-x-1.5 -inset-y-1 rounded-control bg-primary/10"
+              aria-hidden
+            />
+            <p className="relative flex items-center gap-1.5 text-fs-2xs font-semibold uppercase tracking-[0.14em] text-[color:var(--primary-text)]">
+              <Sparkles className="size-3 shrink-0" aria-hidden />
+              {isCustomType ? 'Custom category' : `${et?.name ?? 'Event'} · Format`}
+              {!isCustomType && <span className="text-destructive" aria-hidden>*</span>}
+            </p>
+            <p className="relative mt-0.5 text-fs-sm font-semibold text-foreground">
               {isCustomType
-                ? 'Describe your event type or create a custom category.'
-                : 'Choose the specific format for your event.'}
+                ? 'Describe your event type'
+                : 'Which format fits best?'}
             </p>
           </div>
         </div>
+
+        <div className="px-4 py-4 sm:px-5">
 
         {/* Custom Event — text input (no autoFocus, uses ref) */}
         {isCustomType ? (
@@ -495,7 +434,7 @@ function SubtypeSelector({
             <div
               role="radiogroup"
               aria-label={config.label}
-              className="flex flex-wrap gap-1.5"
+              className="flex flex-wrap gap-2"
             >
               {config.options.map(opt => {
                 const sel = subtype === opt.id
@@ -506,13 +445,14 @@ function SubtypeSelector({
                     aria-pressed={sel}
                     onClick={() => onSubtype(opt.id)}
                     className={cn(
-                      'flex items-center gap-1 rounded-full border px-3 py-[5px] text-[12px] font-medium transition-all duration-150',
+                      'inline-flex min-h-10 items-center gap-1.5 rounded-control border px-3.5 text-fs-sm font-medium transition-all duration-150 sm:min-h-9',
+                      'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40',
                       sel
-                        ? 'border-primary bg-primary text-white shadow-sm'
-                        : 'border-border bg-card text-foreground hover:border-border-strong hover:bg-muted/60',
+                        ? 'border-primary bg-primary/[0.08] text-[color:var(--primary-text)] ring-1 ring-inset ring-primary'
+                        : 'border-border/80 bg-card text-foreground hover:border-border-strong hover:bg-muted/50',
                     )}
                   >
-                    {sel && <Check className="size-2.5 shrink-0" aria-hidden />}
+                    {sel && <Check className="size-3.5 shrink-0" strokeWidth={2.5} aria-hidden />}
                     {opt.name}
                   </button>
                 )
@@ -539,7 +479,7 @@ function SubtypeSelector({
                       onChange={e => onCustomSubtype(e.target.value)}
                       maxLength={60}
                     />
-                    <p className="mt-1 text-[12px] text-muted-foreground">
+                    <p className="mt-1.5 text-fs-xs text-muted-foreground">
                       e.g. 15K Run, Ultra Marathon, Product Demo Day…
                     </p>
                   </div>
@@ -548,6 +488,7 @@ function SubtypeSelector({
             </AnimatePresence>
           </>
         ) : null}
+        </div>
       </div>
 
       {/* Selection summary strip */}
@@ -555,15 +496,16 @@ function SubtypeSelector({
         <motion.div
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
-          className="flex items-center gap-2 rounded-lg border border-primary/20 bg-card px-3.5 py-2.5 shadow-[0_1px_3px_rgba(0,0,0,0.04)]"
+          className="flex items-center gap-2.5 rounded-control border border-success/25 bg-success/[0.06] px-3.5 py-2.5"
         >
-          <CheckCircle2 className="size-3.5 shrink-0 text-primary" aria-hidden />
-          <p className="min-w-0 truncate text-[14px] font-medium text-foreground">
+          <CheckCircle2 className="size-4 shrink-0 text-success" aria-hidden />
+          <span className="shrink-0 text-fs-2xs font-semibold uppercase tracking-[0.14em] text-success">Selected</span>
+          <p className="min-w-0 truncate text-fs-sm font-medium text-foreground">
             {et?.name}
             {resolvedName && (
               <>
                 <ChevronRight className="mx-0.5 inline size-3.5 shrink-0 text-muted-foreground/60" aria-hidden />
-                <span className="text-primary">{resolvedName}</span>
+                <span className="text-[color:var(--primary-text)]">{resolvedName}</span>
               </>
             )}
           </p>
@@ -611,12 +553,13 @@ function CampaignTypeSelector({
       initial={{ opacity: 0, y: 6 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.25, ease: EASE }}
-      className="rounded-xl border border-border bg-card p-4 shadow-sm"
+      className="rounded-surface border border-border/80 bg-card p-4 shadow-[0_1px_2px_rgb(15_23_42_/_0.04)] sm:p-5"
     >
-      <p className="mb-3 text-[14px] font-semibold text-foreground">
+      <p className="text-fs-2xs font-semibold uppercase tracking-[0.14em] text-[color:var(--primary-text)]">Fundraising · Model</p>
+      <p className="mb-3.5 mt-0.5 text-fs-sm font-semibold text-foreground">
         How do you want to raise funds?
       </p>
-      <div className="space-y-2.5">
+      <div className="grid gap-2.5 sm:grid-cols-3">
         {options.map(opt => (
           <button
             key={opt.id}
@@ -624,12 +567,13 @@ function CampaignTypeSelector({
             disabled={opt.comingSoon}
             onClick={() => !opt.comingSoon && onChange(opt.id)}
             className={cn(
-              'relative flex w-full items-start gap-3 rounded-xl border-[1.5px] px-4 py-3 text-left transition-all duration-150',
+              'relative flex h-full w-full items-start gap-3 rounded-control border px-3.5 py-3 text-left transition-all duration-150',
+              'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40',
               value === opt.id
-                ? 'border-primary bg-primary/[0.03] shadow-sm'
+                ? 'border-primary bg-primary/[0.05] ring-1 ring-inset ring-primary'
                 : opt.comingSoon
                 ? 'cursor-not-allowed border-border bg-muted/20 opacity-60'
-                : 'border-border bg-card hover:border-primary/30 hover:bg-muted/[0.03]',
+                : 'border-border/80 bg-card hover:border-border-strong hover:bg-muted/40',
             )}
           >
             <div className={cn('mt-0.5 flex size-[16px] shrink-0 items-center justify-center rounded-full border-2', value === opt.id ? 'border-primary bg-primary' : 'border-border')}>
@@ -637,14 +581,14 @@ function CampaignTypeSelector({
             </div>
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-2">
-                <span className="text-[14px] font-medium text-foreground">{opt.label}</span>
+                <span className="text-fs-sm font-semibold text-foreground">{opt.label}</span>
                 {opt.comingSoon && (
-                  <span className="rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
+                  <span className="rounded-control bg-muted px-1.5 py-0.5 text-fs-2xs font-semibold uppercase tracking-[0.08em] text-muted-foreground">
                     Coming soon
                   </span>
                 )}
               </div>
-              <p className="mt-0.5 text-[12.5px] text-muted-foreground">{opt.description}</p>
+              <p className="mt-1 text-fs-xs leading-relaxed text-muted-foreground">{opt.description}</p>
             </div>
           </button>
         ))}
@@ -661,8 +605,9 @@ function DonationSubtypeSelector({
   onSubtype: (id: string) => void
 }) {
   return (
-    <div className="rounded-xl border border-border bg-card p-4 shadow-sm">
-      <p className="mb-3 text-[14px] font-semibold text-foreground">
+    <div className="rounded-surface border border-border/80 bg-card p-4 shadow-[0_1px_2px_rgb(15_23_42_/_0.04)] sm:p-5">
+      <p className="text-fs-2xs font-semibold uppercase tracking-[0.14em] text-[color:var(--primary-text)]">Fundraising · Cause</p>
+      <p className="mb-3.5 mt-0.5 text-fs-sm font-semibold text-foreground">
         What is your cause?
       </p>
       <div className="flex flex-wrap gap-2">
@@ -672,13 +617,14 @@ function DonationSubtypeSelector({
             type="button"
             onClick={() => onSubtype(opt.id)}
             className={cn(
-              'flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-[13px] font-medium transition-all duration-150',
+              'inline-flex min-h-10 items-center gap-1.5 rounded-control border px-3.5 text-fs-sm font-medium transition-all duration-150 sm:min-h-9',
+              'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40',
               subtype === opt.id
-                ? 'border-primary bg-primary/[0.07] text-primary'
-                : 'border-border bg-card text-foreground/70 hover:border-primary/30',
+                ? 'border-primary bg-primary/[0.08] text-[color:var(--primary-text)] ring-1 ring-inset ring-primary'
+                : 'border-border/80 bg-card text-foreground hover:border-border-strong hover:bg-muted/50',
             )}
           >
-            {subtype === opt.id && <Check className="size-[12px]" />}
+            {subtype === opt.id && <Check className="size-3.5" strokeWidth={2.5} aria-hidden />}
             {opt.label}
           </button>
         ))}
@@ -689,7 +635,7 @@ function DonationSubtypeSelector({
 
 // --- Step 1 view --------------------------------------------------------------
 
-export function Step1View({ currentStep, completedValues, onNext, onSaveDraft, initialData, wizardSteps }: StepViewProps) {
+export function Step1View({ currentStep, completedValues, onNext, onSaveDraft, initialData, wizardSteps, locked }: StepViewProps) {
   const [step1, setStep1] = useState<Step1State>({
     eventType:    (initialData?.eventType         as string | null)       ?? null,
     subtype:      (initialData?.eventSubtype       as string | null)       ?? null,
@@ -725,6 +671,7 @@ export function Step1View({ currentStep, completedValues, onNext, onSaveDraft, i
   const userPickedTypeRef = useRef(false)
 
   const handleSelectType = (id: string) => {
+    if (locked) return   // RD-CE-FIX H5 — a published event's type is frozen
     userPickedTypeRef.current = true
     setStep1(prev => ({
       eventType:    id,
@@ -784,7 +731,7 @@ export function Step1View({ currentStep, completedValues, onNext, onSaveDraft, i
     >
       <Link
         href={ROUTES.DASHBOARD_EVENTS}
-        className="mb-5 inline-flex items-center gap-1.5 text-[13px] font-medium text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary rounded"
+        className="mb-4 inline-flex w-fit items-center gap-1.5 rounded-control text-fs-sm font-medium text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary sm:mb-5"
       >
         <ArrowLeft className="size-4" aria-hidden />
         Back to Dashboard
@@ -792,53 +739,47 @@ export function Step1View({ currentStep, completedValues, onNext, onSaveDraft, i
 
       <Stepper currentStep={currentStep} completedValues={completedValues} steps={wizardSteps ?? WIZARD_STEPS} />
 
-      <div className="mt-6">
-        <h1 className="text-[22px] font-bold tracking-tight text-foreground">
-          Event Category
+      {/* 2026-10-01: a question, not a label — the organizer is being asked something. */}
+      <div className="mt-6 sm:mt-8">
+        <p className="text-fs-2xs font-semibold uppercase tracking-[0.16em] text-[color:var(--primary-text)]">
+          New event · Step {currentStep + 1}
+        </p>
+        <h1 className="mt-1.5 text-fs-xl font-bold tracking-[-0.02em] text-foreground sm:text-fs-2xl">
+          What kind of event is it?
         </h1>
-        <p className="mt-1 text-[13px] text-muted-foreground">
-          Choose the category that best represents your event.
+        <p className="mt-1 text-fs-sm text-muted-foreground">
+          Pick a category — we&apos;ll tailor the form, passes and page to it. You can refine the format next.
         </p>
       </div>
 
+      {locked && (
+        <p role="status" className="mt-4 rounded-control border border-border bg-muted px-3 py-2 text-fs-sm text-muted-foreground">
+          This event is published, so its type and format can’t be changed. Duplicate it to create an event of a different type.
+        </p>
+      )}
+
       <div
-        className="mt-5 grid flex-1 items-start gap-5 sm:mt-6 lg:grid-cols-[minmax(0,1fr)_296px]"
+        className="mt-5 grid flex-1 items-start gap-5 sm:mt-6 lg:grid-cols-[minmax(0,1fr)_280px] xl:gap-6"
         aria-label="Event type selection"
       >
-        {/* Left: cards grid + secondary selector */}
-        <div className="flex flex-col gap-4">
+        {/* Left: cards grid + secondary selector (inert once published — RD-CE-FIX H5) */}
+        <div className={locked ? 'flex flex-col gap-4 opacity-60' : 'flex flex-col gap-4'} inert={locked || undefined}>
           <div
             role="group"
             aria-label="Event types"
-            className="grid grid-cols-1 gap-2.5"
+            // Two tiles a row on a phone and at lg (beside the preview), three from sm and xl.
+            className="grid grid-cols-2 gap-2.5 sm:grid-cols-3 sm:gap-3 lg:grid-cols-2 xl:grid-cols-3"
           >
             {EVENT_TYPES.map(et => (
+              <div key={et.id} className={cn(et.id === 'custom' && 'sm:col-span-3 lg:col-span-1 xl:col-span-3')}>
               <EventTypeCard
-                key={et.id}
                 type={et}
                 selected={selectedType === et.id}
                 onSelect={handleSelectType}
                 recommended={getTemplate(et.id)?.recommended}
               />
+              </div>
             ))}
-          </div>
-
-          {/* Mobile inline preview — shows below cards when a template is selected */}
-          <div className="lg:hidden">
-            <AnimatePresence mode="wait">
-              {selectedType && getTemplate(selectedType) && (
-                <motion.div
-                  key={`mobile-preview-${selectedType}`}
-                  initial={{ opacity: 0, height: 0 }}
-                  animate={{ opacity: 1, height: 'auto' }}
-                  exit={{ opacity: 0, height: 0 }}
-                  transition={{ duration: 0.25, ease: [0.22, 1, 0.36, 1] }}
-                  className="overflow-hidden"
-                >
-                  <TemplatePreviewPanel selectedTypeId={selectedType} />
-                </motion.div>
-              )}
-            </AnimatePresence>
           </div>
 
           {/* Secondary selector — subtype or campaign-type intercept */}
@@ -894,10 +835,28 @@ export function Step1View({ currentStep, completedValues, onNext, onSaveDraft, i
               </div>
             )}
           </AnimatePresence>
+
+          {/* Mobile inline preview — AFTER the format question on a phone, so the next choice is the next thing on screen */}
+          <div className="lg:hidden">
+            <AnimatePresence mode="wait">
+              {selectedType && getTemplate(selectedType) && (
+                <motion.div
+                  key={`mobile-preview-${selectedType}`}
+                  initial={{ opacity: 0, height: 0 }}
+                  animate={{ opacity: 1, height: 'auto' }}
+                  exit={{ opacity: 0, height: 0 }}
+                  transition={{ duration: 0.25, ease: [0.22, 1, 0.36, 1] }}
+                  className="overflow-hidden"
+                >
+                  <TemplatePreviewPanel selectedTypeId={selectedType} />
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
         </div>
 
         {/* Desktop preview panel — sticky right column */}
-        <div className="hidden lg:block">
+        <div className="hidden lg:sticky lg:top-6 lg:block">
           <TemplatePreviewPanel selectedTypeId={selectedType} />
         </div>
       </div>

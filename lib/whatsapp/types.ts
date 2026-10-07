@@ -30,6 +30,12 @@ export interface WhatsAppTemplateMessage {
   headerParameters?: WhatsAppParameter[]
   bodyParameters?:   WhatsAppParameter[]
   buttonParameters?: WhatsAppButtonParameter[]
+  /**
+   * RD-CLOSE — sent to Meta as `biz_opaque_callback_data` and echoed on every status webhook
+   * for this message. It is how an acceptance whose local persistence was lost (write failure,
+   * crash, transport timeout) is recovered. See lib/whatsapp/acceptance.ts.
+   */
+  callbackData?:     string
 }
 
 // Normalized send result — never contains a raw Meta payload.

@@ -19,7 +19,7 @@ export function CommunityImpactSection({
   return (
     <section className="py-10 sm:py-12" aria-label="Mission and Impact">
 
-      <p className="mb-5 text-[10px] font-semibold uppercase tracking-widest text-primary">
+      <p className="mb-5 text-[10px] font-semibold uppercase tracking-widest text-action">
         Why It Matters
       </p>
 
@@ -30,13 +30,13 @@ export function CommunityImpactSection({
       )}
 
       {hasGoal && (
-        <div className="mt-6 rounded-xl border border-primary/20 bg-gradient-to-br from-primary/8 to-primary/3 px-5 py-4">
+        <div className="mt-6 rounded-xl border border-action/20 bg-gradient-to-br from-action/8 to-action/3 px-5 py-4">
           <div className="flex items-start gap-3">
-            <div className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-lg bg-primary/15">
-              <Target className="size-3.5 text-primary" aria-hidden />
+            <div className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-lg bg-action/15">
+              <Target className="size-3.5 text-action" aria-hidden />
             </div>
             <div>
-              <p className="text-[10px] font-semibold uppercase tracking-wider text-primary">
+              <p className="text-[10px] font-semibold uppercase tracking-wider text-action">
                 Impact Goal
               </p>
               <p className="mt-1 text-[0.9375rem] font-semibold leading-snug text-foreground">
@@ -55,8 +55,8 @@ export function CommunityImpactSection({
 
       {hasVolunteer && (
         <div className="mt-6 flex items-start gap-3 rounded-xl bg-muted/30 px-4 py-4">
-          <div className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-lg bg-primary/10">
-            <Heart className="size-3.5 text-primary" aria-hidden />
+          <div className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-lg bg-action/10">
+            <Heart className="size-3.5 text-action" aria-hidden />
           </div>
           <div>
             <p className="text-[0.8125rem] font-semibold text-foreground">

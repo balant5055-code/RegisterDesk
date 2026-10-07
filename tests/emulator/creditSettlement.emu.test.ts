@@ -12,7 +12,12 @@
 import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest'
 
 const EMULATOR = process.env.FIRESTORE_EMULATOR_HOST
-const describeEmu = EMULATOR ? describe : describe.skip
+// RD-PHOTO-01 (2026-10-06) — Media Credits are RETIRED: getCreditPolicy() reports credits OFF no matter
+// what is stored, so the credit purchase / session / spend / refund engine this suite drives can no longer
+// be switched on. Photos are a paid EVENT service (tests/emulator/photoCapacity.emu.test.ts and the
+// RD-PHOTO-01 block in serviceAllowances.emu.test.ts). Kept, not deleted, as the record of that engine.
+void EMULATOR
+const describeEmu = describe.skip
 
 /**
  * These tests drive real uploads — one transaction per photo — so a 100-photo session is a

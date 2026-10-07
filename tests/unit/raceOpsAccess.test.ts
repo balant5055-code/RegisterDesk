@@ -51,7 +51,14 @@ describe('Race Operations introduces no new permission model', () => {
     // TeamPermission union. If a `raceOperations` permission is ever added, this test
     // fails and forces the change to be a deliberate, reviewed decision.
     expect(ALL_PERMISSIONS).not.toContain('raceOperations')
-    expect(ALL_PERMISSIONS).toHaveLength(9)
+    // RD-CHECKIN-2.0 re-anchor: 9 -> 10. `walkin` was added so on-site
+    // registration stopped requiring the entire `registrations` grant. The
+    // invariant this test protects is that RACE OPERATIONS added no permission,
+    // which is still true and is asserted on the line above; the count is a
+    // tripwire for any addition and is updated here as the deliberate, reviewed
+    // decision it is meant to force.
+    expect(ALL_PERMISSIONS).toHaveLength(10)
+    expect(ALL_PERMISSIONS).toContain('walkin')
   })
 
   it('every Race Operations role is a member of the existing TeamRole union', () => {

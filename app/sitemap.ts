@@ -34,31 +34,22 @@ function isPrivate(visibility: unknown): boolean {
 
 const STATIC_PATHS: Array<[string, number]> = [
   ['',                       1.0],
-  ['/events',                0.9],
+  // /events is NOT listed. It is a 307 to '' (see app/events/page.tsx), and a sitemap
+  // that advertises a redirect asks every crawler to spend a fetch discovering it is not
+  // a page. The URL stays live and linked — it just is not a canonical destination.
+  // The per-event '/events/{id}' entries below are unaffected: those are real pages.
   // RD-RESULTS-PUBLIC-FIX-01 · the results index. The per-race URLs below are dynamic.
   ['/results',               0.8],
   ['/causes',                0.8],
   ['/pricing',               0.7],
-  ['/platform',              0.7],
   ['/support',               0.6],
   ['/about',                 0.5],
   ['/contact',               0.5],
-  ['/resources',             0.5],
   ['/security',              0.4],
   ['/privacy',               0.3],
   ['/terms',                 0.3],
   ['/refund-policy',         0.3],
   ['/cookie-policy',         0.3],
-  ['/platform/api',          0.4],
-  ['/platform/payments',     0.4],
-  ['/platform/registration', 0.4],
-  ['/platform/check-in',     0.4],
-  ['/platform/certificates', 0.4],
-  ['/platform/crm',          0.4],
-  ['/platform/finance',      0.4],
-  ['/platform/identifiers',  0.4],
-  ['/platform/participants', 0.4],
-  ['/platform/security',     0.4],
   ['/solutions/conferences', 0.4],
   ['/solutions/corporate',   0.4],
   ['/solutions/fundraisers', 0.4],
@@ -84,8 +75,14 @@ export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
       // Visibility and moderation are filtered IN MEMORY, exactly as listPublishedEvents
       // does: 'active' moderation is the ABSENCE of the field so it cannot be queried, and
       // keeping one equality filter means this needs no composite index.
+      // Every lifecycle state the PAGE serves as public, except 'cancelled': a completed
+      // event is still a live page (certificates, results, photos) and was missing from the
+      // sitemap — measured, the one published-then-completed event had no entry. Cancelled
+      // events stay out: their page is a cancellation notice, not something to advertise.
+      // Kept to the same single-field filter (one 'in' clause) so no composite index is
+      // needed; visibility and moderation are still filtered in memory below.
       adminDb.collection('events')
-        .where('lifecycleStatus', '==', 'published')
+        .where('lifecycleStatus', 'in', ['published', 'registration_closed', 'completed'])
         .select('publishedAt', 'updatedAt', 'visibility', 'moderationStatus').limit(5000).get(),
       // Mirrors the canonical /causes gate (listCampaigns): active + publicly visible.
       // Served by the existing (status, visibility, publishedAt) composite index.

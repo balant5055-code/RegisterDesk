@@ -122,11 +122,12 @@ export async function POST(req: Request): Promise<NextResponse> {
   if (existingSnap.exists) {
     const windowStart = (existingSnap.data()!.windowStart as { toMillis?(): number })?.toMillis?.() ?? 0
     const inWindow    = now - windowStart < HOUR_MS
-    batch.update(limitRef, {
-      count:       inWindow ? FieldValue.increment(1) : 1,
-      windowStart: inWindow ? FieldValue.delete()     : new Date(now),
-      lastSentAt:  new Date(now),
-    })
+    // RD-SEC-01 · inside the window the ORIGINAL windowStart must survive. This used to write
+    // FieldValue.delete() here, so the next send read windowStart as 0, treated the window as
+    // expired and reset count to 1 — the count cycled 1,2,1,2 and the hourly cap never fired.
+    batch.update(limitRef, inWindow
+      ? { count: FieldValue.increment(1), lastSentAt: new Date(now) }
+      : { count: 1, windowStart: new Date(now), lastSentAt: new Date(now) })
   } else {
     batch.set(limitRef, {
       count:       1,

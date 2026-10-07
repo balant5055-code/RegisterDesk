@@ -18,6 +18,9 @@ import {
   type EventLicenseLimitKey,
   type LicenseVersion,
 } from './eventLicense'
+import type { CommercialTerms } from './capacityCommercial'
+import type { CapacityQuote, CapacityQuoteKind } from './capacityPricing'
+import type { ServiceChargeItem, ServiceSelection } from './serviceAllowances'
 
 // ─── Collection names ───────────────────────────────────────────────────────────
 
@@ -26,6 +29,71 @@ export const LICENSE_ORDERS_COLLECTION   = 'licenseOrders'
 export const LICENSE_HISTORY_COLLECTION  = 'licenseHistory'
 
 type Timestamp = FirebaseFirestore.Timestamp
+
+// ─── RD-CAPACITY-01 · the immutable record of one capacity charge ────────────────
+//
+// Written onto the ORDER when the order is created, and onto the LICENSE when the
+// activation commits. It is a flat VALUE — no references, no ids to resolve later — for
+// one reason: "why was this organizer charged ₹708?" must be answerable from the document
+// alone, years later, after the global rate has changed twice and the event has been
+// deleted. Storing the terms by reference would make every historical amount a function
+// of today's configuration, which is the opposite of an audit trail.
+//
+// Nothing ever rewrites one of these. A capacity change appends a NEW order with a NEW
+// snapshot; it never edits the previous one.
+
+export interface CapacityChargeSnapshot {
+  /** What was charged for: a first activation, an increase, a decrease, or nothing. */
+  operation:           CapacityQuoteKind
+  /** The capacity the event holds after the operation. */
+  capacity:            number
+  /** The capacity before it. `null` for a first activation. */
+  previousCapacity:    number | null
+  /** The free allowance in force — NOT assumed to be 100. */
+  freeCapacity:        number
+  activationRatePaise: number
+  /** Slots billed (slots removed, for a decrease). */
+  chargeableCapacity:  number
+  basePaise:           number
+  gstRatePercent:      number
+  gstPaise:            number
+  /** basePaise + gstPaise — the amount actually collected. */
+  totalPaise:          number
+  /** Decrease only: the gross value of the removed capacity, before the percentage. */
+  removedCapacityValuePaise?: number
+  /** Decrease only: the percentage applied to that value. */
+  decreaseFeePercent?: number
+  /** The full commercial terms the amounts were computed from. */
+  terms:               CommercialTerms
+}
+
+/**
+ * Freeze a quote into a snapshot. PURE. Deep-copies the terms so a later mutation of the
+ * live terms object can never reach a stored snapshot.
+ */
+export function capacityChargeSnapshot(quote: CapacityQuote): CapacityChargeSnapshot {
+  return {
+    operation:           quote.kind,
+    capacity:            quote.capacity,
+    previousCapacity:    quote.previousCapacity,
+    freeCapacity:        quote.freeCapacity,
+    activationRatePaise: quote.activationRatePaise,
+    chargeableCapacity:  quote.chargeableCapacity,
+    basePaise:           quote.basePaise,
+    gstRatePercent:      quote.gstRatePercent,
+    gstPaise:            quote.gstPaise,
+    totalPaise:          quote.totalPaise,
+    ...(quote.removedCapacityValuePaise !== undefined ? { removedCapacityValuePaise: quote.removedCapacityValuePaise } : {}),
+    ...(quote.decreaseFeePercent !== undefined ? { decreaseFeePercent: quote.decreaseFeePercent } : {}),
+    terms:               { ...quote.terms },
+  }
+}
+
+/** The doc id of a capacity-change order. Deterministic in the event AND the sequence
+ *  number, so a retry of the SAME change re-uses the same document (idempotent) while a
+ *  genuinely new change gets a new one. Never collides with `lic_<eventId>`, which is the
+ *  event's single ACTIVATION order and must stay a singleton. */
+export const capacityOrderDocId = (eventId: string, seq: number): string => `cap_${eventId}_${seq}`
 
 // ─── eventLicenses/{eventId} ────────────────────────────────────────────────────
 //
@@ -57,6 +125,20 @@ export interface EventLicenseDoc {
   expiresAt?:   Timestamp | null
   consumed?:    boolean
   consumedAt?:  Timestamp | null
+  // ─── RD-CAPACITY-01 · the capacity-based commercial model. ALL ADDITIVE + OPTIONAL,
+  // so every historical (tier-priced) license document remains valid and readable. ───
+  /** `'capacity'` marks a license issued under the capacity model. Absent ⇒ a historical
+   *  tier-priced license, which keeps resolving through the V1/V2 catalogs for ever. */
+  commercialModel?: 'capacity'
+  /** The registration capacity this license paid for. `null` = uncapped (admin grant).
+   *  This is the license's RECORD of what was bought; `events/{slug}.totalCapacity`
+   *  remains the single ENFORCED value, and the two are written together. */
+  capacity?:        number | null
+  /** The immutable pricing record of the first activation. */
+  activation?:      CapacityChargeSnapshot
+  /** Monotonic counter of capacity-change operations, used to key their order documents.
+   *  Starts absent (0 changes); incremented inside the capacity-change transaction. */
+  capacityOpSeq?:   number
 }
 
 // How a license came to exist. Self-serve purchase/publish, or an admin grant.
@@ -87,7 +169,31 @@ export interface EventLicenseAdminOverlay {
 // A one-time purchase/upgrade order for an event license (doc id = orderId).
 
 export type LicenseOrderStatus  = 'created' | 'paid' | 'failed' | 'refunded'
-export type LicenseOrderPurpose = 'purchase' | 'upgrade'
+/**
+ * Why an order exists.
+ *
+ *   purchase          — the event's ACTIVATION order (id `lic_<eventId>`, one per event)
+ *   upgrade           — historical tier upgrade (pay-the-difference). Retained for records.
+ *   capacity_increase — RD-CAPACITY-01: buying additional registration capacity
+ *   capacity_decrease — RD-CAPACITY-01: the charge for GIVING BACK capacity
+ *
+ * A decrease is deliberately NOT modelled as an `upgrade`: it is a different operation
+ * with different arithmetic (a percentage of the removed capacity's value, not the value
+ * itself) and it must be distinguishable in the ledger for ever. Reusing `upgrade` would
+ * make "what did this organizer pay to shrink their event?" unanswerable by query.
+ */
+export type LicenseOrderPurpose =
+  | 'purchase' | 'upgrade'
+  | 'capacity_increase' | 'capacity_decrease'
+  // RD-EVENT-COMMERCE-02 — a PRE-PUBLISH top-up after the activation order was paid: more
+  // capacity and/or more prepaid service units for the same draft. Id `add_<draftId>_<n>`.
+  | 'addon'
+
+/** The purposes that represent a capacity CHANGE (not the first activation). */
+export const CAPACITY_CHANGE_PURPOSES: LicenseOrderPurpose[] = ['capacity_increase', 'capacity_decrease']
+
+export const isCapacityChangePurpose = (p: unknown): p is 'capacity_increase' | 'capacity_decrease' =>
+  p === 'capacity_increase' || p === 'capacity_decrease'
 
 export interface LicenseOrderDoc {
   orderId:           string            // doc id (also stored for convenience)
@@ -103,9 +209,10 @@ export interface LicenseOrderDoc {
   status:            LicenseOrderStatus
   razorpayOrderId:   string | null
   razorpayPaymentId: string | null
-  // The exact paise amount the Razorpay ORDER was created for (the wallet-first
-  // remainder). Persisted at purchase so /checkout/confirm can bind the captured
-  // payment to it (amount + order id) instead of trusting the client split.
+  // The exact paise amount the Razorpay ORDER was created for — since RD-LICENSE-PAYMENT-01
+  // the WHOLE price (orders written earlier may hold a wallet-first remainder; those are
+  // refused as underpaid). Persisted at purchase so /checkout/confirm can bind the captured
+  // payment to it (amount + order id) instead of trusting the client.
   razorpayAmountPaise?: number | null
   // Set at publish once the order is reconciled onto its published event (F2.2.1),
   // so a paid order is traceable to its event and not left attached only to a draft.
@@ -131,6 +238,26 @@ export interface LicenseOrderDoc {
   discountPaise?:      number
   finalPricePaise?:    number
   couponSnapshot?:     LicenseCouponSnapshotDoc | null
+  // ─── RD-CAPACITY-01 · capacity-model accounting. ADDITIVE + OPTIONAL. ──────────
+  /** `'capacity'` marks an order priced by registration capacity rather than by tier. */
+  commercialModel?:  'capacity'
+  /** The full, immutable pricing record: capacities, rate, base, GST, total, and the
+   *  exact terms used. `amountPaise` above stays = the FINAL charged amount, so every
+   *  existing revenue aggregate over `amountPaise` keeps working unchanged. */
+  capacityChange?:   CapacityChargeSnapshot
+  /** The capacity-change sequence number this order represents (see capacityOpSeq). */
+  capacityOpSeq?:    number
+  // ─── RD-EVENT-COMMERCE-02 · prepaid service lines. ADDITIVE + OPTIONAL. ─────────
+  /** Immutable pricing record of each prepaid service bought in this order. Applied to the
+   *  event's service-allowance ledger exactly once, by the payment activation transaction. */
+  serviceItems?:       ServiceChargeItem[]
+  /** Σ serviceItems[].totalPaise — the services share of `amountPaise` (never discounted). */
+  servicesTotalPaise?: number
+  /** What the organizer asked to buy, so a changed selection is never settled by an old order. */
+  selection?:          { capacity: number; services: ServiceSelection }
+  /** RD-EVENT-COMMERCE-03 — on a capacity-change order carrying service lines: the event's
+   *  draft id, i.e. the allowance-ledger key those lines are applied to. */
+  allowanceDraftId?:   string
   createdAt:         Timestamp
   updatedAt:         Timestamp
   paidAt:            Timestamp | null
@@ -160,6 +287,11 @@ export type LicenseHistoryAction =
   // EA-4 S1 — governance / expiry / consumption
   | 'expiry_extended' | 'expiry_reduced' | 'expiry_disabled'
   | 'governance_override' | 'force_consumed' | 'reset'
+  // RD-CAPACITY-01 — the capacity-based commercial model. `capacity_activated` records a
+  // first activation; the other two record a paid change. Each APPENDS; nothing is edited.
+  | 'capacity_activated' | 'capacity_increased' | 'capacity_decreased'
+  // An admin change to an event's commercial terms (rate / free capacity / GST / …).
+  | 'commercial_terms_override'
 export type LicenseHistorySource = 'self_serve' | 'admin' | 'system'
 
 export interface LicenseHistoryDoc {

@@ -37,6 +37,7 @@ import {
 } from '@/components/ui'
 import { cn } from '@/lib/utils/cn'
 import { useAuth } from '@/components/auth/AuthProvider'
+import { useConfirm } from '@/components/ui/ConfirmDialog'
 import { GrantCreditsDialog } from './GrantCreditsDialog'
 import { RefundDecisionDialog } from './RefundDecisionDialog'
 
@@ -154,7 +155,9 @@ export function AdminCreditsConsole() {
   const [deciding, setDeciding] = useState<{ row: RefundRow; approve: boolean } | null>(null)
   // From Business Configuration, so the dialog gates its note field the same way the route
   // does. Read off the overview endpoint, which already resolves the policy.
-  const noteRequired = Boolean(overview.data?.pricing?.refundNoteRequired)
+  // RD-PHASE4-S4 · D3 — every refund decision carries a reason (the server always requires it).
+  const noteRequired = true
+  const { prompt } = useConfirm()
 
   const load = useCallback(async <T,>(
     path: string,
@@ -224,11 +227,15 @@ export function AdminCreditsConsole() {
   useEffect(() => { loadSessions(sessionView) }, [loadSessions, sessionView])
 
   async function retryRefund(refundId: string) {
+    // RD-PHASE4-S4 · D3 — the server requires a reason for a payout retry.
+    const reason = (await prompt({ title: 'Reason required', message: 'Reason for retrying this refund payout:', required: true }))?.trim()
+    if (!reason) return
     setBusyRefund(refundId)
     try {
       const token = await getToken()
       const res = await fetch(`/api/admin/media-credits/refunds/${refundId}/retry`, {
-        method: 'POST', headers: { Authorization: `Bearer ${token}` },
+        method: 'POST', headers: { Authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ reason }),
       })
       // 202 is not a failure — the payout is queued and still owed.
       if (res.status === 202) showToast('Payout is still processing. It will retry.', 'info')

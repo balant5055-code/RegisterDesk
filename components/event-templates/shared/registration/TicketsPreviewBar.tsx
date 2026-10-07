@@ -1,7 +1,7 @@
 import Link from 'next/link'
 import { Ticket, ArrowRight } from 'lucide-react'
 import { cn } from '@/lib/utils/cn'
-import { buttonVariants } from '@/components/ui/button'
+import { marketingButton } from '@/lib/marketing/theme'
 import type { PassPublic } from '@/components/event-templates/types'
 import { formatINR, minPassPrice } from '@/components/event-templates/shared/utils/format'
 
@@ -37,7 +37,7 @@ export function TicketsPreviewBar({
         dark ? 'border-white/10 bg-white/[0.06] backdrop-blur-sm' : 'border-border bg-card shadow-sm',
       )}>
         <div className="flex items-center gap-2.5">
-          <Ticket className={cn('size-4 shrink-0', dark ? 'text-white/70' : 'text-primary')} aria-hidden />
+          <Ticket className={cn('size-4 shrink-0', dark ? 'text-white/70' : 'text-action')} aria-hidden />
           <span className={cn('text-[13.5px] font-semibold', dark ? 'text-white' : 'text-foreground')}>{label}</span>
         </div>
         {dark ? (
@@ -49,7 +49,7 @@ export function TicketsPreviewBar({
             <ArrowRight className="size-3.5" aria-hidden />
           </Link>
         ) : (
-          <Link href={`#${targetId}`} className={cn(buttonVariants({ variant: 'primary', size: 'sm' }), 'shrink-0 gap-1.5')}>
+          <Link href={`#${targetId}`} className={cn(marketingButton({ emphasis: 'gradient', variant: 'primary', size: 'sm' }), 'shrink-0 gap-1.5')}>
             {cta}
             <ArrowRight className="size-3.5" aria-hidden />
           </Link>

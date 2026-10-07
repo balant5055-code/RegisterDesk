@@ -15,7 +15,8 @@
 // Safety (inherited from the generic runner + kernel — unchanged):
 //   - Leases: a job already being driven returns `busy` and is skipped cheaply.
 //   - No duplicate messages: each recipient is marked `sent` (awaited); a resumed chunk skips it.
-//   - No duplicate billing: the wallet was charged once, up-front (chargeAndStartCampaign).
+//   - No duplicate billing: the wallet was charged once, up-front (chargeAndStartCampaign), and
+//     trued up once at the end (settleBroadcastBilling — charge on Meta accept).
 //   - Per-page atomic commit + cursor: an interrupted chunk resumes, never restarts.
 //
 // Auth: Vercel Cron / GitHub Actions / the chain send `Authorization: Bearer <CRON_SECRET>`.
@@ -34,6 +35,7 @@ import {
 import {
   processWhatsAppBroadcastChunk, WHATSAPP_BROADCAST_JOBS, type WhatsAppBroadcastJob,
 } from '@/lib/broadcasts/whatsappJob'
+import { sweepBroadcastSettlements } from '@/lib/broadcasts/settlementSweep'
 
 export const dynamic     = 'force-dynamic'
 export const maxDuration = 60
@@ -81,6 +83,15 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     }
   }
 
+  // RD-INTEG · D3 — backstop: settle any ended campaign still billed for recipients WhatsApp
+  // never accepted, and recover campaigns stuck in 'sending'. Scheduled ticks only (depth 0).
+  let settlement: Awaited<ReturnType<typeof sweepBroadcastSettlements>> | null = null
+  if (depth === 0 && Date.now() - start < CRON_BUDGET_MS) {
+    try { settlement = await sweepBroadcastSettlements() } catch (err) {
+      captureError(err, { scope: 'cron.whatsapp_broadcasts.settlement', area: 'broadcast' })
+    }
+  }
+
   const chain = shouldChain({ advanced, nonTerminal, depth })
   if (chain === 'dispatched') after(() => triggerChain(SELF_PATH, depth))
 
@@ -88,11 +99,11 @@ async function handle(req: NextRequest): Promise<NextResponse> {
   void recordCronExecution('whatsapp-broadcasts', {
     ok: errored === 0,
     durationMs,
-    detail: JSON.stringify({ scanned: jobs.length, advanced, busy, errored, nonTerminal, depth, chain }),
+    detail: JSON.stringify({ scanned: jobs.length, advanced, busy, errored, nonTerminal, depth, chain, settlement }),
   }).catch(() => {})
 
   await flushMonitoring()   // deliver captured events before the serverless run ends
-  return NextResponse.json({ scanned: jobs.length, durationMs, advanced, busy, errored, depth, chain, jobs: outcomes })
+  return NextResponse.json({ scanned: jobs.length, durationMs, advanced, busy, errored, depth, chain, settlement, jobs: outcomes })
 }
 
 export const GET  = handle

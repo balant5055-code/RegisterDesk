@@ -22,7 +22,11 @@ import { Badge } from '@/components/ui/badge'
 import Link from 'next/link'
 import { RotateCcw, Coins } from 'lucide-react'
 import { ROUTES } from '@/config/navigation'
-import { CONFIG_SECTION_REGISTRY, BUSINESS_CONFIG_DEFAULTS } from '@/lib/config/businessConfig'
+import { CONFIG_SECTION_REGISTRY, BUSINESS_CONFIG_DEFAULTS, CENTRAL_PRICING_FIELDS } from '@/lib/config/businessConfig'
+
+// RD-EVENT-COMMERCE-04B — media / extra-photo pricing is Super Admin only. The SAME field list the
+// server enforces, so a lock here can never disagree with a 403.
+const MEDIA_PRICE_FIELDS = new Set(CENTRAL_PRICING_FIELDS.mediaStudio === '*' ? [] : (CENTRAL_PRICING_FIELDS.mediaStudio ?? []))
 import { EVENT_LICENSE_TIERS_V2 } from '@/lib/licensing/eventLicense'
 
 type SectionDraft = Record<string, unknown>
@@ -41,8 +45,9 @@ function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean
 }
 
 /** Fields a licence tier may override. Numbers only — the booleans are global policy. */
+// RD-PHOTO-01 — no photo-count field here: an event's photo capacity is the PAID units bought on
+// License & Services (max 3,000), so `maxPhotosPerEvent` grants nothing and is no longer editable.
 const TIER_FIELDS = [
-  { key: 'maxPhotosPerEvent',      label: 'Max photos' },
   { key: 'maxUploadBatchSize',     label: 'Max batch' },
   { key: 'maxUploadFileSizeBytes', label: 'Max file bytes' },
   { key: 'maxGalleriesPerEvent',   label: 'Max galleries' },
@@ -68,7 +73,6 @@ const TIER_BOOLEANS = [
 ] as const
 
 const GLOBAL_NUMBERS = [
-  { key: 'maxPhotosPerEvent',      label: 'Maximum photos per event', hint: 'Blank = unlimited' },
   { key: 'maxUploadBatchSize',     label: 'Maximum upload batch size', hint: 'Files per request' },
   { key: 'maxUploadFileSizeBytes', label: 'Maximum upload file size',  hint: 'Bytes · 52428800 = 50 MB' },
   { key: 'maxGalleriesPerEvent',   label: 'Maximum galleries per event', hint: '' },
@@ -129,14 +133,17 @@ const SERVICE_CHARGE_METHODS = [
 ] as const
 
 export function MediaStudioEditor({
-  published, draft, onDraftChange, onPublish, publishing,
+  published, draft, onDraftChange, onPublish, publishing, canEditPricing = false,
 }: {
   published:     SectionDraft
   draft:         SectionDraft
   onDraftChange: (d: SectionDraft) => void
   onPublish:     () => void
   publishing:    boolean
+  /** RD-EVENT-COMMERCE-04B — server-decided (verified token); price fields locked when false. */
+  canEditPricing?: boolean
 }) {
+  const priceLocked = (key: string) => !canEditPricing && MEDIA_PRICE_FIELDS.has(key)
   const validation = useMemo(() => CONFIG_SECTION_REGISTRY.mediaStudio.validate(draft), [draft])
   const dirty      = useMemo(() => JSON.stringify(draft) !== JSON.stringify(published), [draft, published])
 
@@ -166,8 +173,9 @@ export function MediaStudioEditor({
   const resetToDefaults = () =>
     onDraftChange(JSON.parse(JSON.stringify(BUSINESS_CONFIG_DEFAULTS.mediaStudio)) as SectionDraft)
 
-  // MC-01 — every credit field except the master switch is gated on this.
-  const creditsOn = Boolean(draft.creditsEnabled)
+  // MC-01 — every credit field is gated on this. RD-PHOTO-01: Media Credits are RETIRED, so it is
+  // always off here (the server policy ignores the stored flag too — getCreditPolicy).
+  const creditsOn = false
 
   return (
     <div className="space-y-4">
@@ -205,7 +213,7 @@ export function MediaStudioEditor({
 
         <div className="grid gap-4 p-4 sm:grid-cols-2 lg:grid-cols-3">
           {GLOBAL_NUMBERS.map(f => {
-            const nullable = f.key === 'maxPhotosPerEvent'
+            const nullable = false
             const raw = draft[f.key]
             return (
               <label key={f.key} className="flex flex-col gap-1">
@@ -265,15 +273,15 @@ export function MediaStudioEditor({
         <div className="border-b border-border px-4 py-3">
           <h2 className="text-[14px] font-semibold text-foreground">Media Credits</h2>
           <p className="mt-0.5 text-[12.5px] text-muted-foreground">
-            {creditsOn
-              ? 'Credits are enabled. The spend path ships in MC-02 — no credit is charged yet.'
-              : 'Credits are disabled. Media Studio behaves exactly as it does today and no credit is charged.'}
+            Retired. Photos are a paid event service sold only on each event’s License &amp; Services
+            step (maximum 3,000 per event); Media Credits grant no uploads and cannot be bought.
+            Historical credit records stay in the Media Credits console.
           </p>
         </div>
         <div className="grid gap-4 p-4 sm:grid-cols-2 lg:grid-cols-3">
           <div className="flex items-center justify-between gap-2 rounded-lg border border-border/60 px-3 py-2">
             <span className="text-[12.5px] text-foreground">Credits enabled</span>
-            <Toggle checked={creditsOn} onChange={v => set('creditsEnabled', v)} />
+            <span className="text-[12px] font-semibold text-muted-foreground">Retired</span>
           </div>
 
           {/* A plain checkbox, not the shared Toggle: Toggle exposes no `disabled` prop and
@@ -317,11 +325,11 @@ export function MediaStudioEditor({
           {/* MC-05 — the method decides which of the two charge fields below actually
               applies. Rendered before them so the numbers read in context. */}
           <label className="flex flex-col gap-1">
-            <span className="text-[11.5px] text-muted-foreground">Service charge method</span>
+            <span className="text-[11.5px] text-muted-foreground">Service charge method{priceLocked('refundServiceChargeMethod') ? ' · Super Admin' : ''}</span>
             <select
               className={inputCls}
               value={String(draft.refundServiceChargeMethod ?? 'percent')}
-              disabled={!creditsOn}
+              disabled={!creditsOn || priceLocked('refundServiceChargeMethod')}
               onChange={e => set('refundServiceChargeMethod', e.target.value)}
             >
               {SERVICE_CHARGE_METHODS.map(m => (
@@ -335,12 +343,12 @@ export function MediaStudioEditor({
 
           {CREDIT_NUMBERS.map(f => (
             <label key={f.key} className="flex flex-col gap-1">
-              <span className="text-[11.5px] text-muted-foreground">{f.label}</span>
+              <span className="text-[11.5px] text-muted-foreground">{f.label}{priceLocked(f.key) ? ' · Super Admin' : ''}</span>
               <input
                 type="number"
                 className={inputCls}
                 value={String(draft[f.key] ?? '')}
-                disabled={!creditsOn}
+                disabled={!creditsOn || priceLocked(f.key)}
                 onChange={e => set(f.key, e.target.value === '' ? 0 : Number(e.target.value))}
               />
               <span className="text-[11px] text-muted-foreground/80">{f.hint}</span>

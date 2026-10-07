@@ -216,8 +216,13 @@ describe('the drawer surfaces coupon facts outside the payment gate', () => {
   })
 
   it('still renders payment id and order id for reconciliation', () => {
-    expect(client).toMatch(/Razorpay Payment ID/)
-    expect(client).toMatch(/Razorpay Order ID/)
+    // Labels are provider-NEUTRAL since the identifier normalization: these ids belong to
+    // whichever gateway settled the registration, so naming one gateway was a misstatement
+    // for any other. The rows themselves are still here, which is what this guards.
+    expect(client).toMatch(/label="Payment ID"/)
+    expect(client).toMatch(/label="Payment Order ID"/)
+    expect(client).not.toMatch(/Razorpay Payment ID/)
+    expect(client).not.toMatch(/Razorpay Order ID/)
   })
 
   it('the discount column derives from the already-loaded row — no per-row query', () => {

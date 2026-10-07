@@ -35,7 +35,7 @@ interface Gate {
   eventId:   string
   eventName: string
   /** Present only when the gate is open; the counts come from the gate API itself. */
-  counts:    { checkedIn: number, totalExpected: number } | null
+  counts:    { checkedIn: number | null, totalExpected: number | null } | null
   /** Set when the gate refused — shown instead of a link that would fail on arrival. */
   closed:    string | null
 }
@@ -155,7 +155,8 @@ export default function OpsIndexClient() {
                       <span className="block truncate text-fs-sm font-semibold text-foreground">{gate.eventName}</span>
                       {gate.counts && (
                         <span className="block text-fs-2xs text-muted-foreground">
-                          {gate.counts.checkedIn} of {gate.counts.totalExpected} checked in
+                          {/* An unavailable aggregate reads as a dash, never as zero. */}
+                          {gate.counts.checkedIn ?? String.fromCharCode(8212)} of {gate.counts.totalExpected ?? String.fromCharCode(8212)} checked in
                         </span>
                       )}
                     </span>

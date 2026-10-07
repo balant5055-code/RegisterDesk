@@ -115,7 +115,9 @@ export function ConfirmProvider({ children }: { children: React.ReactNode }) {
 
       <AnimatePresence>
         {pending && (
-          <div className="fixed inset-0 z-[300] flex items-center justify-center p-4">
+          // z-[310]: a confirmation opened FROM a Dialog (z-[300]) must sit above it — the provider
+          // renders earlier in the DOM, so at an equal z-index the dialog covered it.
+          <div className="fixed inset-0 z-[310] flex items-center justify-center p-4">
             <motion.div
               initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
               transition={{ duration: 0.15 }}

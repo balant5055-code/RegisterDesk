@@ -61,7 +61,7 @@ export function emailShell(subject: string, bodyHtml: string, unsubscribeUrl?: s
     ? `\n            <br>\n            <span style="font-size:11px;color:#9ca3af;display:block;margin-top:6px;">\n              Don&apos;t want these emails?\n              <a href="${escAttr(unsubscribeUrl)}" style="color:#9ca3af;text-decoration:underline;">Unsubscribe</a>\n            </span>`
     : ''
 
-  const headerColor = isHex(branding?.primaryColor) ? branding!.primaryColor! : '#e5277e'
+  const headerColor = isHex(branding?.primaryColor) ? branding!.primaryColor! : '#4F46E5'   // 2026-10-06: brand indigo (was magenta #e5277e)
   const headerLabel = branding?.companyName?.trim() || 'RegisterDesk'
   // Header: prefer the organization/event logo; fall back to the uppercase label.
   const headerInner = isHttp(branding?.logoUrl)
@@ -139,7 +139,7 @@ export function emailShell(subject: string, bodyHtml: string, unsubscribeUrl?: s
 
 /** Renders a primary or secondary CTA button. */
 export function btn(label: string, url: string, primary = true): string {
-  const bg = primary ? '#e5277e' : '#f3f4f6'
+  const bg = primary ? '#4F46E5' : '#f3f4f6'   // brand indigo (was magenta)
   const fg = primary ? '#ffffff' : '#374151'
   const border = primary ? 'none' : '1px solid #d1d5db'
   return `<a href="${escAttr(url)}" style="display:inline-block;background:${bg};color:${fg};text-decoration:none;font-size:13.5px;font-weight:600;padding:11px 22px;border-radius:8px;border:${border};margin:0 8px 8px 0;line-height:1.4;">${escHtml(label)}</a>`

@@ -1,62 +1,73 @@
 // Phase P.2 (UX redesign) — Platform hero. Server Component (zero client JS).
 //
-// Premium product-page hero: pill eyebrow, large display headline, the page's
-// single <h1>, prominent CTAs, and a large framed product screenshot sitting on a
-// soft brand backdrop. Reuses the CTA registry, button variants, display type,
-// and ScreenshotFrame (placeholder — never a fake screenshot). No animation.
+// The page's single <h1>, its CTAs and (when one exists) a framed product screenshot.
+// Reuses the CTA registry, button variants and ScreenshotFrame (placeholder — never a
+// fake screenshot). No animation.
+//
+// 2026-09-23 LUXURY PASS (owner): a centred editorial masthead on a quiet band — the
+// breadcrumb, a bronze-ruled small-caps label in place of the pill, the headline in the
+// display face set LIGHT, soft editorial ink, and squared (6px) actions. The radial brand
+// wash went: the band's tint and the type carry the page now.
 
 import Link from 'next/link'
 import { ArrowRight } from 'lucide-react'
 import { cn } from '@/lib/utils/cn'
-import { buttonVariants } from '@/components/ui/button'
+import { marketingButton } from '@/lib/marketing/theme'
 import { getCta } from '@/lib/marketing/cta'
-import { marketingType } from '@/lib/marketing/theme'
 import { MARKETING_CONTAINER } from '@/lib/marketing/layout'
-import { Eyebrow } from '@/components/marketing/Eyebrow'
+import { EditorialOverline } from '@/components/marketing/EditorialOverline'
 import { MarketingBreadcrumb } from '@/components/marketing/MarketingBreadcrumb'
 import { ScreenshotFrame } from '@/components/marketing/screenshots/ScreenshotFrame'
-import { getScreenshot } from '@/content/marketing/screenshots'
+import { getScreenshot, hasScreenshot } from '@/content/marketing/screenshots'
 import type { PlatformHeroConfig } from '@/lib/marketing/platform/types'
+import { PAGE_TITLE } from '@/lib/marketing/pageTitle'
+
+/** Squared, a touch taller than the default lg — the editorial action size. */
+const ACTION = 'h-12 rounded-[var(--radius-control)] px-6'
 
 export function PlatformHero({ hero }: { hero: PlatformHeroConfig }) {
   const primary   = getCta(hero.primaryCta)
   const secondary = getCta(hero.secondaryCta)
-  const shot      = hero.screenshotId ? getScreenshot(hero.screenshotId) : undefined
+  const shot      = hero.screenshotId && hasScreenshot(hero.screenshotId)
+    ? getScreenshot(hero.screenshotId)
+    : undefined
 
   return (
-    <section aria-labelledby="platform-hero-heading" className="relative overflow-hidden bg-white pt-8 pb-4 sm:pt-10 lg:pt-14">
-      {/* Soft brand backdrop */}
-      <div aria-hidden className="pointer-events-none absolute inset-x-0 top-0 -z-10 h-[560px] bg-[radial-gradient(80%_60%_at_50%_0%,rgb(var(--primary-rgb)_/_0.10),transparent_70%)]" />
-
-      <div className={MARKETING_CONTAINER.page}>
+    <section aria-labelledby="platform-hero-heading" className="border-b border-border/60 bg-surface-3/40">
+      <div className={cn(MARKETING_CONTAINER.page, 'py-10 sm:py-14 lg:py-16')}>
         <div className="mx-auto max-w-3xl text-center">
-          <MarketingBreadcrumb className="mb-4 justify-center" />
-          {hero.eyebrow && <Eyebrow>{hero.eyebrow}</Eyebrow>}
-          <h1 id="platform-hero-heading" className={cn(marketingType.hero, 'mt-5 text-foreground')}>
+          <MarketingBreadcrumb className="mb-7 justify-center" />
+          {hero.eyebrow && <EditorialOverline>{hero.eyebrow}</EditorialOverline>}
+          <h1
+            id="platform-hero-heading"
+            className={`mt-5 ${PAGE_TITLE}`}
+          >
             {hero.headline}
           </h1>
-          <p className="mx-auto mt-5 max-w-2xl text-fs-lg leading-relaxed text-muted-foreground">
+          <p className="mx-auto mt-5 max-w-2xl text-fs-md leading-relaxed text-hero-ink-soft sm:text-fs-lg">
             {hero.subheadline}
           </p>
-          <div className="mt-8 flex flex-wrap items-center justify-center gap-3">
+          <div className="mt-8 flex flex-col items-stretch justify-center gap-3 sm:flex-row sm:items-center">
             <Link
               href={primary.href}
-              className={buttonVariants({ variant: primary.variant, size: 'lg' })}
-              style={primary.variant === 'gradient' ? { backgroundImage: 'var(--primary-gradient)' } : undefined}
+              className={cn(marketingButton({ variant: primary.variant, size: 'lg' }), ACTION)}
+              style={primary.variant === 'gradient' ? { backgroundImage: 'var(--action-gradient)' } : undefined}
             >
               {primary.label}
               <ArrowRight className="size-4" aria-hidden />
             </Link>
-            <Link href={secondary.href} className={buttonVariants({ variant: secondary.variant, size: 'lg' })}>
+            <Link
+              href={secondary.href}
+              className={cn(marketingButton({ variant: secondary.variant, size: 'lg' }), ACTION, 'border-hero-ink/25 bg-transparent text-hero-ink shadow-none hover:border-action hover:bg-transparent hover:text-action')}
+            >
               {secondary.label}
             </Link>
           </div>
         </div>
 
         {shot && (
-          <div className="relative mx-auto mt-10 max-w-5xl">
-            <div aria-hidden className="pointer-events-none absolute -inset-x-6 -top-6 bottom-0 -z-10 rounded-[2.5rem] bg-gradient-to-b from-primary/[0.08] via-primary/[0.04] to-transparent" />
-            <ScreenshotFrame screenshot={shot} variant="dashboard" className="shadow-lg ring-1 ring-border/70" />
+          <div className="mx-auto mt-12 max-w-5xl">
+            <ScreenshotFrame screenshot={shot} variant="dashboard" className="shadow-elevation-1 ring-1 ring-border/70" />
           </div>
         )}
       </div>

@@ -9,14 +9,54 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { adminDb }                   from '@/lib/firebase/admin'
 import { verifyCaller }              from '@/lib/team/access'
+import { resolveSuperAdminUid }      from '@/lib/admin/auth'
 import { razorpay }                  from '@/lib/razorpay/client'
 import { checkRateLimit }            from '@/lib/rateLimit'
-import { logAdminAction }            from '@/lib/admin/audit'
+import { logAdminActionOrRecord }    from '@/lib/admin/audit'
+import { parseFinancialReason }      from '@/lib/admin/financialGuard'
 import { getDonation }               from '@/lib/firebase/firestore/donations'
 import {
   reserveRefund, releaseReservation, ensureRefundRecord, applyDonationRefundAccounting,
 } from '@/lib/donations/refundService'
 import type { DonationRefundDocument } from '@/lib/donations/types'
+
+type ExistingRefundLookup =
+  | { kind: 'found'; refundId: string; status: string }
+  | { kind: 'none' }
+  | { kind: 'uncertain'; why: string }
+
+/**
+ * RD-PHASE4-S4 · F5 — the Stage 1 C4 pattern, adapted to donations (which may carry several
+ * LEGITIMATE partial refunds). Before creating a gateway refund, ask Razorpay which refunds this
+ * payment already has and compare them with the ones RECORDED here (donationRefunds/{refundId}).
+ * An unrecorded refund is one a previous attempt created but never recorded (its response was
+ * lost). Fails CLOSED: a lookup failure, or any unrecorded refund that is not exactly one of this
+ * amount, is 'uncertain' — and an uncertain refund never calls the gateway.
+ */
+async function findUnrecordedGatewayRefund(paymentId: string, amountPaise: number): Promise<ExistingRefundLookup> {
+  let res: { items?: unknown } | null | undefined
+  try {
+    res = await razorpay.payments.fetchMultipleRefund(paymentId) as { items?: unknown } | null | undefined
+  } catch {
+    return { kind: 'uncertain', why: 'lookup_failed' }
+  }
+  if (!res || !Array.isArray(res.items)) return { kind: 'uncertain', why: 'lookup_malformed' }
+  const live = (res.items as Array<{ id?: unknown; amount?: unknown; status?: unknown } | null>)
+    .filter((r): r is { id: string; amount?: unknown; status?: unknown } => !!r && r.status !== 'failed' && typeof r.id === 'string' && r.id !== '')
+  if (live.length === 0) return { kind: 'none' }
+  let recorded: FirebaseFirestore.DocumentSnapshot[]
+  try {
+    recorded = await adminDb.getAll(...live.map(r => adminDb.collection('donationRefunds').doc(r.id)))
+  } catch {
+    return { kind: 'uncertain', why: 'local_lookup_failed' }
+  }
+  const unrecorded = live.filter((_, i) => !recorded[i]?.exists)
+  if (unrecorded.length === 0) return { kind: 'none' }
+  if (unrecorded.length === 1 && unrecorded[0].amount === amountPaise) {
+    return { kind: 'found', refundId: unrecorded[0].id, status: typeof unrecorded[0].status === 'string' ? unrecorded[0].status : 'pending' }
+  }
+  return { kind: 'uncertain', why: 'unrecorded_refund_on_payment' }
+}
 
 export interface DonationRefundSummary {
   refundId:    string
@@ -92,12 +132,25 @@ export async function POST(
   req:     NextRequest,
   context: { params: Promise<{ donationId: string }> },
 ): Promise<NextResponse<DonationRefundResponse>> {
-  // ── 1. Auth — canonical caller verification (email-verification gate) ─────
-  const caller = await verifyCaller(req)
-  if (!caller) return NextResponse.json({ success: false, error: 'Unauthorized' }, { status: 401 })
-  const uid = caller.uid
+  // ── 1. Auth — SUPER ADMIN ONLY ────────────────────────────────────────────
+  //
+  // RD-PAYMENT-REFUND-AUTHORITY-02. This was `verifyCaller` plus an ownership check, so the
+  // organizer who received a donation could refund it themselves. A donation is a donor's
+  // money; returning it is a platform financial action with a counterparty, and it now needs
+  // the same authority as every other refund.
+  //
+  // The ownership check further down is DELIBERATELY LEFT IN PLACE. It is no longer an
+  // authorization gate — a super admin passes it by construction below — but it still
+  // guarantees the donation and the organizer agree before any accounting is applied.
+  const superAdminUid = await resolveSuperAdminUid(req.headers.get('authorization'))
+  if (!superAdminUid) {
+    return NextResponse.json(
+      { success: false, error: 'Refunds can only be initiated by a platform super administrator.' },
+      { status: 403 },
+    )
+  }
 
-  const rl = checkRateLimit(uid, 'donation-refund', 20, 60 * 60 * 1000)
+  const rl = checkRateLimit(superAdminUid, 'donation-refund', 20, 60 * 60 * 1000)
   if (rl.limited) return NextResponse.json({ success: false, error: 'Too many refund requests. Please wait.' }, { status: 429 })
 
   const { donationId } = await context.params
@@ -115,11 +168,22 @@ export async function POST(
     return NextResponse.json({ success: false, error: 'amountPaise must be a positive integer' }, { status: 400 })
   }
   if (!reason) return NextResponse.json({ success: false, error: 'reason is required' }, { status: 400 })
+  // RD-PHASE4-S4 · D3 — 3–500 characters (the existing required-reason check above is kept).
+  const reasonCheck = parseFinancialReason(reason)
+  if (!reasonCheck.ok) return NextResponse.json({ success: false, error: reasonCheck.error, code: reasonCheck.code }, { status: 400 })
 
   // ── 3. Load + validate ─────────────────────────────────────────────────────
   const donation = await getDonation(donationId)
   if (!donation) return NextResponse.json({ success: false, error: 'Donation not found' }, { status: 404 })
-  if (donation.organizerUid !== uid) return NextResponse.json({ success: false, error: 'Forbidden' }, { status: 403 })
+  // The caller is a super admin, so there is no workspace to match against. What still has
+  // to hold is that the donation knows which workspace it belongs to — the refund accounting
+  // below debits that organizer, and debiting nobody would silently skip the reversal.
+  if (typeof donation.organizerUid !== 'string' || !donation.organizerUid) {
+    return NextResponse.json(
+      { success: false, error: 'This donation has no organizer and cannot be refunded automatically.' },
+      { status: 409 },
+    )
+  }
   if (donation.status !== 'successful') {
     return NextResponse.json({ success: false, error: 'Only successful donations can be refunded' }, { status: 400 })
   }
@@ -147,22 +211,46 @@ export async function POST(
   // ── 5. Razorpay refund (no local financial change persists on failure) ─────
   let refundId: string
   let gatewayStatus: string
+  // RD-PHASE4-S4 · F5 — fail-closed existing-refund lookup BEFORE any new gateway refund.
+  const existing = await findUnrecordedGatewayRefund(donation.razorpayPaymentId, amountPaise)
+  if (existing.kind === 'uncertain') {
+    await releaseReservation(donationId, amountPaise)
+    await logAdminActionOrRecord({
+      adminUid: superAdminUid, actorRole: 'super_admin', action: 'donation.refund_failed', entityType: 'donation', entityId: donationId,
+      reason,
+      metadata: { amountPaise, outcome: 'refund_status_uncertain', why: existing.why },
+      correlation: { donationId, paymentId: donation.razorpayPaymentId },
+    })
+    return NextResponse.json({
+      success: false,
+      code:    'REFUND_STATUS_UNCERTAIN',
+      error:   'Razorpay shows a refund on this payment that RegisterDesk has not recorded (or the refund status could not be checked). No new refund was issued; reconcile this donation before retrying.',
+    }, { status: 409 })
+  }
   try {
-    const refund = await razorpay.payments.refund(donation.razorpayPaymentId, {
-      amount:  amountPaise,
-      speed:   'optimum',
-      notes:   { donationId, reason: 'organizer_initiated' },
-      receipt: `rfnd_don_${donationId}`.slice(0, 40),
-    }) as { id: string; status: string }
-    refundId      = refund.id
-    gatewayStatus = refund.status
+    if (existing.kind === 'found') {
+      // A previous attempt's refund whose response was lost — adopt it, never create a second.
+      refundId      = existing.refundId
+      gatewayStatus = existing.status
+    } else {
+      const refund = await razorpay.payments.refund(donation.razorpayPaymentId, {
+        amount:  amountPaise,
+        speed:   'optimum',
+        notes:   { donationId, reason: 'organizer_initiated' },
+        receipt: `rfnd_don_${donationId}`.slice(0, 40),
+      }) as { id: string; status: string }
+      refundId      = refund.id
+      gatewayStatus = refund.status
+    }
   } catch (err) {
     await releaseReservation(donationId, amountPaise)   // undo the reservation
     console.error('[donation/refund] Razorpay refund failed:', { donationId, err })
-    void logAdminAction({
-      adminUid: uid, action: 'donation.refund_failed', entityType: 'donation', entityId: donationId,
+    await logAdminActionOrRecord({
+      adminUid: superAdminUid, actorRole: 'super_admin', action: 'donation.refund_failed', entityType: 'donation', entityId: donationId,
+      reason,
       metadata: { amountPaise, reason },
-    }).catch(() => {})
+      correlation: { donationId, paymentId: donation.razorpayPaymentId },
+    })
     return NextResponse.json({ success: false, error: 'Razorpay refund failed. Please try again.' }, { status: 502 })
   }
 
@@ -171,25 +259,29 @@ export async function POST(
     refundId, donationId,
     campaignId:        donation.campaignId,
     campaignSlug:      donation.campaignSlug,
-    organizerUid:      uid,
+    organizerUid:      donation.organizerUid,
     razorpayPaymentId: donation.razorpayPaymentId,
     amountPaise,
     reason,
-    initiatedBy:       uid,
+    initiatedBy:       superAdminUid,
   })
-  void logAdminAction({
-    adminUid: uid, action: 'donation.refund_initiated', entityType: 'donation', entityId: donationId,
-    metadata: { amountPaise, reason, refundId },
-  }).catch(() => {})
+  // Money has moved: awaited, never throws; a failed audit write is recorded for reconciliation.
+  await logAdminActionOrRecord({
+    adminUid: superAdminUid, actorRole: 'super_admin', action: 'donation.refund_initiated', entityType: 'donation', entityId: donationId,
+    reason,
+    metadata: { amountPaise, reason, refundId, adoptedExisting: existing.kind === 'found' },
+    correlation: { donationId, refundId, paymentId: donation.razorpayPaymentId },
+  })
 
   // ── 7. Apply accounting now if the gateway already settled it ──────────────
   if (gatewayStatus === 'processed') {
     try {
       await applyDonationRefundAccounting(refundId)
-      void logAdminAction({
-        adminUid: uid, action: 'donation.refund_processed', entityType: 'donation', entityId: donationId,
+      await logAdminActionOrRecord({
+        adminUid: superAdminUid, actorRole: 'super_admin', action: 'donation.refund_processed', entityType: 'donation', entityId: donationId,
         metadata: { amountPaise, refundId },
-      }).catch(() => {})
+        correlation: { donationId, refundId },
+      })
     } catch (err) {
       // Reservation stays; the refund.processed webhook will complete accounting.
       console.error('[donation/refund] accounting deferred to webhook:', { donationId, refundId, err })

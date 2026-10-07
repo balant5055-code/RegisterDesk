@@ -3,7 +3,6 @@
 
 import { NextRequest, NextResponse } from 'next/server'
 import { verifyCaller, requireOwner } from '@/lib/team/access'
-import { requireFeature }             from '@/lib/licensing/workspaceEntitlements'
 import { verifyDomain }               from '@/lib/domains/service'
 import { logDomainAction }            from '@/lib/domains/audit'
 
@@ -12,8 +11,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   if (!caller) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   const access = requireOwner(caller.uid, caller.uid)
   if (!access.ok) return NextResponse.json({ error: access.reason }, { status: access.status })
-  const feat = await requireFeature(caller.uid, 'customDomain')
-  if (!feat.ok) return NextResponse.json({ error: feat.error }, { status: feat.status })
+  // RD-CAPACITY-01 · a custom domain is no longer a licensed feature. Ownership stands.
 
   const result = await verifyDomain(caller.uid)
   if (result.ok) {

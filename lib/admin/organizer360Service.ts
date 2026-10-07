@@ -3,7 +3,7 @@
 // Thin READ aggregation over EXISTING data + services. Resolves one organizer
 // (users/{uid}) and reuses:
 //   • getWorkspaceEntitlements  → effective tier / features / limits / overrides
-//   • listTeam                  → members + invites
+//   • listTeam                  → legacy members (invitations removed, RD-TEAM-IMPL-01)
 //   • organizerRevenueWallets   → wallet / revenue summary (O(1))
 //   • organizerPayoutProfiles   → payout verification (O(1))
 //   • registrationCounters      → O(1) per-event registration/revenue rollup
@@ -13,6 +13,7 @@
 // missing index/field degrades to a neutral signal instead of failing the request.
 
 import { adminDb } from '@/lib/firebase/admin'
+import { isFinancialAuditEntry } from '@/lib/admin/auditConstants'
 import { ORGANIZER_ROLE } from '@/lib/organizer/identity'
 import { getAttendanceShardSums } from '@/lib/firebase/firestore/registrationCounters'
 import { getWorkspaceEntitlements } from '@/lib/licensing/workspaceEntitlements'
@@ -23,7 +24,7 @@ import type {
   Organizer360License, Organizer360Job, Organizer360TimelineEntry,
   HealthIndicator, HealthLevel, OrgTimelineSource,
 } from '@/lib/admin/organizer360Types'
-import type { AccountStatus } from '@/lib/admin/organizerTypes'
+import { resolveAccountStatus, type AccountStatus } from '@/lib/admin/organizerTypes'
 
 const EVENTS_CAP     = 60    // bounded per-organizer event fan-out
 const LICENSES_CAP   = 200
@@ -61,9 +62,9 @@ function chunk<T>(arr: T[], n: number): T[][] {
   for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n))
   return out
 }
-function effectiveStatus(s: unknown): AccountStatus {
-  return s === 'suspended' || s === 'banned' ? s : 'active'
-}
+// RD-ORGANIZER-SIGNUP-02 · delegates to the one resolver beside the type, so 'pending'
+// is reported as pending here rather than silently read as 'active'.
+const effectiveStatus = (s: unknown): AccountStatus => resolveAccountStatus(s)
 function payoutMethodOf(v: unknown): 'bank' | 'upi' | null {
   return v === 'bank' ? 'bank' : v === 'upi' ? 'upi' : null
 }
@@ -125,7 +126,7 @@ export async function getOrganizer360Overview(uid: string): Promise<Organizer360
       adminDb.collection('events').where('uid', '==', uid).where('lifecycleStatus', '==', 'published').count().get().catch(() => null),
       adminDb.collection('donationCampaigns').where('uid', '==', uid).count().get().catch(() => null),
       getWorkspaceEntitlements(uid).catch(() => null),
-      listTeam(uid).catch(() => ({ members: [], invites: [] })),
+      listTeam(uid).catch(() => ({ members: [] })),
       loadEventsWithCounters(uid),
       loadLicenseRollup(uid),
     ])
@@ -196,7 +197,9 @@ export async function getOrganizer360Overview(uid: string): Promise<Organizer360
     },
     account,
     verification,
-    team: { memberCount: team.members.length, inviteCount: team.invites.length },
+    // `inviteCount` is retained at 0 so the admin response shape is unchanged for
+    // existing consumers; the invitation flow that produced it is gone.
+    team: { memberCount: team.members.length, inviteCount: 0 },
     entitlements: {
       effectiveTier:        entitlements?.effectiveTier ?? 'starter',
       source:               entitlements?.source ?? 'fallback',
@@ -248,7 +251,7 @@ export async function getOrganizer360Operations(uid: string): Promise<Organizer3
 
   const [certs, comms, jobs] = await Promise.all([
     countByEventId('certificates', eventIds),
-    countCommunications(eventIds),
+    countCommunications(uid),
     loadJobs(uid),
   ])
 
@@ -272,19 +275,21 @@ async function countByEventId(collection: string, eventIds: string[]): Promise<n
   return total
 }
 
-async function countCommunications(eventIds: string[]): Promise<{ sent: number; failed: number }> {
-  if (!eventIds.length) return { sent: 0, failed: 0 }
-  let sent = 0, failed = 0
-  for (const c of chunk(eventIds, 30)) {
-    try {
-      const snap = await adminDb.collection('emailLogs').where('eventId', 'in', c).limit(500).get()
-      for (const d of snap.docs) {
-        const st = String((d.data() as { status?: unknown }).status ?? '')
-        if (st === 'failed') failed++; else sent++
-      }
-    } catch { /* skip chunk */ }
-  }
-  return { sent, failed }
+/**
+ * RD-INTEG — exact count() aggregates over the organizer's OWN logs. It used to read at most 500
+ * rows per 30-event chunk by eventId (broadcast rows were keyed by draft id, so they were missed)
+ * and counted every non-failed row — queued and skipped included — as sent.
+ *   sent   = submitted to a provider: 'sent' + 'delivered'
+ *   failed = rejected/bounced, timeouts (deliveryUnknown) excluded
+ */
+async function countCommunications(uid: string): Promise<{ sent: number; failed: number }> {
+  const logs = adminDb.collection('emailLogs').where('organizerUid', '==', uid)
+  const c = (q: FirebaseFirestore.Query) => q.count().get().then(r => r.data().count).catch(() => 0)
+  const [sent, delivered, failedAll, unknown] = await Promise.all([
+    c(logs.where('status', '==', 'sent')), c(logs.where('status', '==', 'delivered')),
+    c(logs.where('status', '==', 'failed')), c(logs.where('status', '==', 'failed').where('deliveryUnknown', '==', true)),
+  ])
+  return { sent: sent + delivered, failed: Math.max(0, failedAll - unknown) }
 }
 
 async function loadJobs(uid: string): Promise<Organizer360Operations['jobs']> {
@@ -389,17 +394,18 @@ export async function getOrganizer360Business(uid: string): Promise<Organizer360
 
 // ─── Governance (/governance) ─────────────────────────────────────────────────
 
-export async function getOrganizer360Governance(uid: string): Promise<Organizer360Governance | null> {
+export async function getOrganizer360Governance(uid: string, opts: { includeFinancialAudit?: boolean } = {}): Promise<Organizer360Governance | null> {
   const userSnap = await adminDb.doc(`users/${uid}`).get()
   if (!userSnap.exists) return null
 
   const [auditSnap, entitlements, team] = await Promise.all([
     adminDb.collection('adminAuditLogs').where('entityId', '==', uid).limit(AUDIT_CAP).get().catch(() => null),
     getWorkspaceEntitlements(uid).catch(() => null),
-    listTeam(uid).catch(() => ({ members: [], invites: [] })),
+    listTeam(uid).catch(() => ({ members: [] })),
   ])
 
-  const audit = (auditSnap?.docs ?? []).map(d => {
+  // RD-PHASE4-S4 · D7 — financial audit rows only for a Super Admin (safe default: excluded).
+  const audit = (auditSnap?.docs ?? []).filter(d => opts.includeFinancialAudit === true || !isFinancialAuditEntry(d.data())).map(d => {
     const x = d.data() as Record<string, unknown>
     const meta = rec(x.metadata)
     return {
@@ -414,7 +420,7 @@ export async function getOrganizer360Governance(uid: string): Promise<Organizer3
 
   const overrideTier = entitlements?.source === 'admin_override' ? entitlements.effectiveTier : null
 
-  const teamView = [...team.members, ...team.invites].map(m => {
+  const teamView = [...team.members].map(m => {
     const anyM = m as unknown as Record<string, unknown>
     const perms = anyM.permissions
     return {
@@ -441,7 +447,7 @@ export async function getOrganizer360Governance(uid: string): Promise<Organizer3
 
 // ─── Timeline (/timeline) ─────────────────────────────────────────────────────
 
-export async function getOrganizer360Timeline(uid: string): Promise<Organizer360Timeline | null> {
+export async function getOrganizer360Timeline(uid: string, opts: { includeFinancialAudit?: boolean } = {}): Promise<Organizer360Timeline | null> {
   const userSnap = await adminDb.doc(`users/${uid}`).get()
   if (!userSnap.exists) return null
   const u = userSnap.data() as Record<string, unknown>
@@ -474,6 +480,7 @@ export async function getOrganizer360Timeline(uid: string): Promise<Organizer360
   // Admin actions / overrides / payments (from audit)
   for (const d of auditSnap?.docs ?? []) {
     const x = d.data() as Record<string, unknown>
+    if (opts.includeFinancialAudit !== true && isFinancialAuditEntry(x)) continue   // RD-PHASE4-S4 · D7
     const action = String(x.action ?? 'admin.action')
     const entityType = String(x.entityType ?? '')
     const source: OrgTimelineSource = action.startsWith('plan') || entityType === 'billing' ? 'override'

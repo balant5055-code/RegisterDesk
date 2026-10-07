@@ -4,7 +4,6 @@
 
 import { FieldValue } from 'firebase-admin/firestore'
 import { adminDb }     from '@/lib/firebase/admin'
-import { requireFeature } from '@/lib/licensing/workspaceEntitlements'
 import {
   HEX_COLOR_RE, MAX_COMPANY_NAME_LEN, MAX_SENDER_NAME_LEN,
   type Branding, type PublicBranding,
@@ -119,8 +118,8 @@ function updateToNested(flat: Record<string, unknown>): Record<string, unknown> 
  * The single gate for every public surface (emails, pages, PDFs, certificates).
  */
 export async function resolvePublicBranding(organizerUid: string): Promise<PublicBranding | null> {
-  const feat = await requireFeature(organizerUid, 'whiteLabel')
-  if (!feat.ok) return null
+  // RD-CAPACITY-01 · white-label branding is available to every organizer, so this resolver
+  // no longer withholds it. Every caller's default-branding fallback is unchanged.
   const b = await getBranding(organizerUid)
   return {
     logoUrl:                  b.logoUrl,

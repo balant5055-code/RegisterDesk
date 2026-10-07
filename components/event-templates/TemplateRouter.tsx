@@ -9,6 +9,7 @@ import { ExhibitionTemplate }  from './exhibition/ExhibitionTemplate'
 import { CulturalTemplate }   from './cultural/CulturalTemplate'
 import { AwardsTemplate }    from './awards/AwardsTemplate'
 import { MeetupTemplate }    from './meetup/MeetupTemplate'
+import { CustomTemplate }    from './custom/CustomTemplate'
 
 export type { EventDetailProps }
 
@@ -28,5 +29,6 @@ export function TemplateRouter(props: EventDetailProps) {
   if (props.eventType === 'cultural')   return <CulturalTemplate   {...props} />
   if (props.eventType === 'awards')     return <AwardsTemplate     {...props} />
   if (props.eventType === 'meetup')     return <MeetupTemplate     {...props} />
+  if (props.eventType === 'custom')     return <CustomTemplate     {...props} />
   return <EventDetailClient {...props} />
 }

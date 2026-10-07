@@ -332,6 +332,19 @@ export const WHATSAPP_TEMPLATE_REGISTRY = {
     category:          'utility',
     version:           1,
   },
+  // RD-CAPACITY-01 · the organizer is told as their event fills. `metaStatus: unverified`
+  // like every sibling here: the template must be approved in Meta before a real send
+  // succeeds, and until then sendOrganizerWhatsApp logs a skip and the EMAIL still goes out.
+  CAPACITY_THRESHOLD: {
+    templateName:      'organizer_capacity_threshold',
+    language:          'en_US',
+    languages:         ['en_US'],
+    channels:          ['whatsapp'],
+    requiredVariables: ['organizerName', 'eventName', 'threshold', 'capacity'],
+    metaStatus:        'unverified',
+    category:          'utility',
+    version:           1,
+  },
   WALLET_RECHARGED: {
     templateName:      'organizer_wallet_recharged',
     language:          'en_US',

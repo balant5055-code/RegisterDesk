@@ -17,7 +17,7 @@
 // without infrastructure is what makes it cheap enough to keep passing.
 
 import { describe, it, expect } from 'vitest'
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
 import { resolve } from 'node:path'
 import {
   ROLE_PERMISSIONS, ALL_PERMISSIONS, permissionsForRole, isCheckinOnlyRole,
@@ -70,13 +70,19 @@ describe('2 — the other roles are untouched (no collateral damage)', () => {
     expect(permissionsForRole('owner').sort()).toEqual([...ALL_PERMISSIONS].sort())
   })
 
-  it('admin is unchanged', () => {
+  // RD-CHECKIN-2.0 — admin and manager GAINED `walkin`, and that is the point of
+  // the change rather than collateral damage from it. Both already held
+  // `registrations`, which is what walk-in used to require, so this preserves a
+  // capability they had rather than granting a new one. The assertion below is
+  // written as "the previous grant, plus walkin, and nothing else", so a genuinely
+  // unrelated widening would still fail here.
+  it('admin gains only walkin', () => {
     expect(ROLE_PERMISSIONS.admin)
-      .toEqual(['events', 'registrations', 'broadcasts', 'certificates', 'checkin', 'participants'])
+      .toEqual(['events', 'registrations', 'broadcasts', 'certificates', 'checkin', 'walkin', 'participants'])
   })
 
-  it('manager is unchanged', () => {
-    expect(ROLE_PERMISSIONS.manager).toEqual(['events', 'registrations', 'checkin', 'participants'])
+  it('manager gains only walkin', () => {
+    expect(ROLE_PERMISSIONS.manager).toEqual(['events', 'registrations', 'checkin', 'walkin', 'participants'])
   })
 
   it('finance is unchanged', () => {
@@ -96,23 +102,87 @@ describe('2 — the other roles are untouched (no collateral damage)', () => {
   })
 })
 
+// ═══ RE-ANCHORED BY RD-CHECKIN-2.0 ═══════════════════════════════════════════
+// "Exactly one role is gate-only" was a fact about the matrix at the time, not the
+// invariant. The invariant is CONTAINMENT: a gate-only role holds nothing outside
+// GATE_PERMISSIONS, and everything that keys on isCheckinOnlyRole (event-assignment
+// enforcement, exclusion from organizer aggregates) applies to every such role.
+//
+// RD-CHECKIN-2.0 adds `checkin_lead` — checkin + walkin, both gate work — because
+// resolving the walk-in permission mismatch required a role that can register a
+// walk-up without holding the entire registration module. Pinning the old literal
+// would have failed for the RIGHT reason and been "fixed" the wrong way: by
+// exempting the new role from containment.
+//
+// What is pinned instead is stronger: the gate set itself, that every gate-only role
+// stays inside it, and that no role holding an organizer permission is ever counted
+// as gate-only.
 describe('3 — isCheckinOnlyRole is derived from the matrix, not hard-coded', () => {
   it('identifies checkin_staff', () => {
     expect(isCheckinOnlyRole('checkin_staff')).toBe(true)
+  })
+
+  it('identifies checkin_lead — a second gate role inherits containment automatically', () => {
+    expect(isCheckinOnlyRole('checkin_lead')).toBe(true)
   })
 
   it.each(['owner', 'admin', 'manager', 'finance'] as TeamRole[])('does not identify %s', role => {
     expect(isCheckinOnlyRole(role)).toBe(false)
   })
 
-  it('exactly one role in the matrix is gate-only', () => {
-    expect(ALL_ROLES.filter(isCheckinOnlyRole)).toEqual(['checkin_staff'])
+  it('the gate permission set is exactly check-in and walk-in', async () => {
+    const { GATE_PERMISSIONS } = await import('@/lib/team/types')
+    expect([...GATE_PERMISSIONS].sort()).toEqual(['checkin', 'walkin'])
+  })
+
+  it('every gate-only role holds NOTHING outside the gate set', async () => {
+    const { GATE_PERMISSIONS } = await import('@/lib/team/types')
+    const gateRoles = ALL_ROLES.filter(isCheckinOnlyRole)
+    expect(gateRoles.length).toBeGreaterThan(0)
+    for (const role of gateRoles) {
+      for (const perm of permissionsForRole(role)) {
+        expect(GATE_PERMISSIONS, `${role} holds ${perm}`).toContain(perm)
+      }
+    }
+  })
+
+  it('no role holding an organizer permission is counted as gate-only', () => {
+    for (const role of ALL_ROLES) {
+      const perms = permissionsForRole(role)
+      const hasOrganizerPerm = perms.some(p => p !== 'checkin' && p !== 'walkin')
+      if (hasOrganizerPerm) expect(isCheckinOnlyRole(role), role).toBe(false)
+    }
+  })
+
+  it('an empty grant is NOT a gate role', () => {
+    // Otherwise a role with nothing would inherit gate routing and the gate landing.
+    for (const role of ALL_ROLES) {
+      if (ROLE_PERMISSIONS[role].length === 0) expect(isCheckinOnlyRole(role), role).toBe(false)
+    }
   })
 })
 
 // ─── 4. Routes that must no longer accept `checkin` ──────────────────────────
 
-describe('4 — undo and walk-in require `registrations`, not `checkin`', () => {
+// ═══ RE-ANCHORED BY RD-CHECKIN-2.0 ═══════════════════════════════════════════
+// Walk-in no longer requires `registrations`. It requires `walkin`.
+//
+// The old rule was a workaround, and the audit named its cost: the route demanded
+// `registrations` (the entire registration module — edit, cancel, refund-adjacent
+// state, bulk export) while its own header comment and every UI label said
+// check-in. The only way to let a gate operator register a walk-up was to hand them
+// all of it, so the product hid the button instead and gate staff could reach
+// neither. RD-CHECKIN-2.0 §7 requires the server check and the UI to agree, and
+// explicitly forbids resolving it by hiding the control.
+//
+// What actually needed protecting was never the word `registrations` — it was that
+// `checkin` must not become a way to create registrations. That is now enforced by
+// a SEPARATE permission, which is strictly narrower, and by the assertions below:
+// plain `checkin_staff` still cannot walk in, and `checkin` alone still does not
+// reach the route. Every role that could perform a walk-in before still can.
+//
+// Undo is UNCHANGED and still requires `registrations`.
+describe('4 — undo requires `registrations`; walk-in requires its own `walkin`', () => {
   const undo   = code(read('app/api/checkin/undo/route.ts'))
   const walkin = code(read('app/api/checkin/walkin/route.ts'))
 
@@ -121,14 +191,50 @@ describe('4 — undo and walk-in require `registrations`, not `checkin`', () => 
     expect(undo).not.toContain("authorizeWorkspace(req, 'checkin')")
   })
 
-  it('walk-in is gated on registrations on BOTH verbs', () => {
+  it('walk-in is gated on `walkin` on BOTH verbs', () => {
     // The GET leaks pass lists and remaining capacity, so it matters as much as the POST.
-    expect(walkin.match(/authorizeWorkspace\(req, 'registrations'\)/g)).toHaveLength(2)
+    expect(walkin.match(/authorizeWorkspace\(req, 'walkin'\)/g)).toHaveLength(2)
     expect(walkin).not.toContain("authorizeWorkspace(req, 'checkin')")
+    expect(walkin).not.toContain("authorizeWorkspace(req, 'registrations')")
   })
 
-  it('a gate-only role therefore fails both — it lacks `registrations`', () => {
+  it('`checkin` alone still cannot create a registration', () => {
+    expect(permissionsForRole('checkin_staff')).toEqual(['checkin'])
+    expect(permissionsForRole('checkin_staff')).not.toContain('walkin')
     expect(permissionsForRole('checkin_staff')).not.toContain('registrations')
+  })
+
+  it('every role that could walk in before still can', () => {
+    // owner / admin / manager held `registrations`; they now hold `walkin` too, so
+    // this change removed the capability from nobody.
+    for (const role of ['owner', 'admin', 'manager'] as TeamRole[]) {
+      expect(permissionsForRole(role), role).toContain('walkin')
+    }
+  })
+
+  it('`walkin` is strictly narrower than `registrations` — it grants no other route', () => {
+    // If any route other than walk-in ever accepts `walkin`, this permission has
+    // stopped being the one narrow door it was introduced as. Walks the whole API
+    // tree, because a single-route assertion cannot establish that.
+    const routes: string[] = []
+    const walk = (dir: string) => {
+      for (const entry of readdirSync(resolve(process.cwd(), dir), { withFileTypes: true })) {
+        const rel = `${dir}/${entry.name}`
+        if (entry.isDirectory()) walk(rel)
+        else if (entry.name === 'route.ts') routes.push(rel)
+      }
+    }
+    walk('app/api')
+    expect(routes.length).toBeGreaterThan(50)
+    const gated = routes.filter(f => /authorize\w*\(req, 'walkin'\)/.test(code(read(f))))
+    expect(gated).toEqual(['app/api/checkin/walkin/route.ts'])
+  })
+
+  it('walk-in also enforces EVENT ASSIGNMENT, which it previously did not', () => {
+    // Without this an operator assigned to Event A could read Event B's pass list
+    // and remaining capacity by changing one query parameter.
+    expect(walkin.match(/isEventSlugInScope\(authz, slug\)/g)?.length ?? 0).toBeGreaterThanOrEqual(2)
+    expect(walkin).toContain('EVENT_NOT_ASSIGNED')
   })
 })
 
@@ -308,22 +414,21 @@ describe('10 — ticketCodeFromQr', () => {
     expect(ticketCodeFromQr('')).toBe('')
   })
 
-  it('both check-in surfaces use the ONE parser — no second implementation', () => {
-    for (const p of [
-      'app/(dashboard)/dashboard/events/[eventId]/checkin/CheckInClient.tsx',
-      'app/ops/checkin/[eventId]/OpsCheckinClient.tsx',
-    ]) {
-      const src = code(read(p))
-      expect(src, p).toContain('ticketCodeFromQr')
-      expect(src, p).not.toMatch(/parts\[0\]\s*===\s*'RD'/)
-    }
+  it('the check-in surface uses the ONE parser — no second implementation', () => {
+    // RD-CHECKIN-2.0: there is now ONE workspace behind both doors, so "both
+    // surfaces agree" became "there is only one surface".
+    const src = code(read('components/checkin/workspace/CheckinWorkspace.tsx'))
+    expect(src).toContain('ticketCodeFromQr')
+    expect(src).not.toMatch(/parts\[0\]\s*===\s*'RD'/)
   })
 })
 
 // ─── 11. The gate surface carries no organizer chrome ────────────────────────
 
 describe('11 — /ops is isolated from the organizer dashboard', () => {
-  const client = read('app/ops/checkin/[eventId]/OpsCheckinClient.tsx')
+  // RD-CHECKIN-2.0: the gate page renders the shared workspace, so the isolation
+  // assertions apply to that component.
+  const client = read('components/checkin/workspace/CheckinWorkspace.tsx')
   const layout = read('app/ops/layout.tsx')
 
   it('renders no organizer navigation component', () => {
@@ -345,18 +450,39 @@ describe('11 — /ops is isolated from the organizer dashboard', () => {
     expect(organizerNav).toEqual([])
   })
 
-  it('imports no organizer data surface — only the shared scanner', () => {
+  it('imports no organizer data surface', () => {
     const imports = code(client).split('\n').filter(l => /^\s*import\b/.test(l)).join('\n')
     expect(imports).toContain('checkin/QrScanner')
-    for (const banned of ['/crm/', '/finance/', '/wallet/', '/reports/', '/team/', 'WalkInForm']) {
+    for (const banned of ['/crm/', '/finance/', '/wallet/', '/reports/', '/team/']) {
       expect(imports, banned).not.toContain(banned)
     }
   })
 
-  it('offers no undo and no walk-in control', () => {
+  // ═══ RE-ANCHORED BY RD-CHECKIN-2.0 ══════════════════════════════════════
+  // "Offers no walk-in control" was the workaround, not the rule. §7 of the
+  // approved architecture forbids resolving the permission mismatch by hiding
+  // the control, and requires the server check and the UI to match. So the
+  // workspace DOES render walk-in — for a caller the SERVER says holds the
+  // `walkin` permission. What is pinned now is the thing that actually
+  // protects the role: the control is drawn from a server-sent capability, not
+  // from a client-side role guess, and the route re-checks independently.
+  it('the broad undo route is still never called from the gate', () => {
+    expect(code(client)).not.toContain('/api/checkin/undo')
+  })
+
+  it('walk-in is drawn from a SERVER-SENT capability, never a client role guess', () => {
     const src = code(client)
-    expect(src).not.toContain('/api/checkin/undo')
-    expect(src).not.toContain('/api/checkin/walkin')
+    expect(src).toContain('ctx.canWalkIn')
+    // No role name is compared anywhere in the client.
+    for (const role of ['checkin_staff', 'checkin_lead', 'manager', 'admin']) {
+      expect(src, role).not.toContain(role)
+    }
+  })
+
+  it('the capability itself is derived from the resolved permissions server-side', () => {
+    const ops = code(read('app/api/checkin/ops/[eventId]/route.ts'))
+    expect(ops).toContain("authz.permissions.includes('walkin')")
+    expect(ops).not.toMatch(/role === '/)
   })
 
   it('lives outside the (dashboard) route group, so it inherits no organizer layout', () => {
@@ -367,7 +493,7 @@ describe('11 — /ops is isolated from the organizer dashboard', () => {
 
   it('the page itself claims no authority — the API is the gate', () => {
     const page = code(read('app/ops/checkin/[eventId]/page.tsx'))
-    expect(page).toContain('OpsCheckinClient')
+    expect(page).toContain('CheckinWorkspace')
     expect(page).not.toContain('authorize')
   })
 })

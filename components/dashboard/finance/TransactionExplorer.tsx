@@ -42,12 +42,16 @@ const PAGE = 50
  * attendee on top of the ticket and showing it as a deduction is what made the old table
  * read as 250 − 9.20 = 250.
  *
- * The gateway component is labelled by its BASIS. `gatewayFeeActualPaise` has no writer and
- * the Razorpay Settlements API is not integrated, so today this is always "est." — never
- * presented as a reconciled Razorpay charge.
+ * ═══ THE GATEWAY AMOUNT AND ITS LABEL COME FROM THE SAME PLACE ═══════════════
+ * This cell used to print the ESTIMATE while labelling it with `gatewayFeeBasis`, so a
+ * reconciled row read "₹8,350.30 actual" — the estimate wearing the word actual, which is
+ * worse than showing an estimate. Both now derive from the same resolved figure, so the
+ * amount and the word can never disagree.
  */
 function FeeCell({ t }: { t: FinanceTransaction }) {
-  const basis = t.gatewayFeeBasis === 'actual' ? 'actual' : 'est.'
+  const isActual    = t.gatewayFeeBasis === 'actual'
+  const basis       = isActual ? 'actual' : 'estimated'
+  const gatewayFee  = t.gatewayFeeActualPaise ?? t.gatewayFeeEstimatePaise
 
   if (t.feeBearer === 'none') return <span className="text-muted-foreground">—</span>
 
@@ -56,7 +60,7 @@ function FeeCell({ t }: { t: FinanceTransaction }) {
     // asserting who paid them rather than pick one and be silently wrong.
     return (
       <span>
-        {formatCompactINR(t.platformFeeTotalPaise)} + {formatCompactINR(t.gatewayFeeEstimatePaise)} {basis}
+        {formatCompactINR(t.platformFeeTotalPaise)} + {formatCompactINR(gatewayFee)} {basis}
         <span className="mt-0.5 block text-[11.5px] text-amber-600">bearer unconfirmed</span>
       </span>
     )
@@ -70,7 +74,7 @@ function FeeCell({ t }: { t: FinanceTransaction }) {
       {organizerBorne ? '− ' : ''}{formatCompactINR(amount)}
       <span className="mt-0.5 block text-[11.5px] text-muted-foreground">
         {t.feeBearer === 'attendee' ? 'paid by attendee' : t.feeBearer === 'split' ? 'split' : 'from payout'}
-        {' · gateway '}{basis}
+        {' · Razorpay fee · '}{basis}
       </span>
     </span>
   )

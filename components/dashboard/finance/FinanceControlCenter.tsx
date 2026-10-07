@@ -10,10 +10,21 @@
 // computed one fee total in React and rendered `250 − 9.20 = 250` for months.
 //
 // ═══ UNAVAILABLE IS A FIRST-CLASS STATE ══════════════════════════════════════
-// Several figures genuinely cannot be computed: the actual gateway fee has no writer, and
-// per-pass / per-coupon money needs indexes that were deliberately not created. Those render
-// as "Not reconciled" / "Requires index" — never as ₹0, which would be a claim rather than
-// an absence.
+// Several figures genuinely cannot be computed — per-pass and per-coupon money need indexes
+// that were deliberately not created. Those render as "Requires index", never as ₹0, which
+// would be a claim rather than an absence.
+//
+// ═══ FOUR FEES, FOUR CONCEPTS, NEVER MERGED ══════════════════════════════════
+// Platform fee and Platform GST are what RegisterDesk charged. Razorpay fee is what the
+// GATEWAY charged, and Razorpay tax is a COMPONENT INSIDE that fee — not a fifth charge, so
+// it is never added to it. "Total fees" exists as an aggregate and is always rendered
+// alongside its components, never in place of them: two different companies took this money
+// and an organizer reading one blended number cannot act on it.
+//
+// Refunds come from the refund ledger, not from a registration status. A cancellation is not
+// a refund and a refund is not a cancellation; the two are counted from different sources on
+// purpose. Settlement — money moved to the bank — is not revenue and appears nowhere in the
+// money flow below.
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
@@ -26,7 +37,17 @@ import { ErrorState } from '@/components/ui'
 import type {
   FinanceAnalyticsResponse, EventOption,
 } from '@/app/api/organizer/finance/analytics/route'
-import type { MaybeMoney, HealthItem } from '@/lib/finance/financeAnalytics'
+import type { MaybeMoney, HealthItem, GatewayFeeBasis } from '@/lib/finance/financeAnalytics'
+
+/**
+ * What the gateway figure is made of, in the card's own title. The server decides the basis;
+ * this only names it, so an estimate can never be read as a settled fact.
+ */
+const BASIS_LABEL: Record<GatewayFeeBasis, string> = {
+  actual:    'actual',
+  estimated: 'estimate',
+  mixed:     'part actual',
+}
 
 // ─── Formatting (the only transformation this file performs) ─────────────────
 
@@ -180,10 +201,13 @@ export function FinanceControlCenter({ token }: { token: string }) {
     )
   }
 
-  const { ledger, attendeePaid, registrations, statuses, coupons, passes, trend, health, scope } = data
-  const platformEarned: MaybeMoney = ledger.platformFeeBase.ok && ledger.platformFeeGst.ok
-    ? { ok: true, paise: ledger.platformFeeBase.paise + ledger.platformFeeGst.paise }
-    : { ok: false, reason: 'query_failed' }
+  const { ledger, refunds, attendeePaid, registrations, statuses, coupons, passes, trend, health, scope } = data
+  // Both totals are summed on the server; these two are the only figures this file reads
+  // straight off the ledger object, and neither is arithmetic — they are named fields.
+  const platformEarned: MaybeMoney = ledger.platformFeeTotal
+  const gatewayBasis = ledger.gateway.basis
+  // The reversal ROW is the ticket value of transactions flagged refunded — a different
+  // quantity from money returned, kept only for the status table further down.
   const refundRow = statuses.rows.find(r => r.status === 'refunded')
   // Hoisted so the null-narrowing survives into the map callbacks below.
   const regTotal = registrations.total
@@ -205,7 +229,8 @@ export function FinanceControlCenter({ token }: { token: string }) {
             <option key={e.slug} value={e.slug}>{e.slug}</option>
           ))}
         </select>
-        <div role="group" aria-label="Date range" className="flex items-center gap-px rounded-lg border border-border bg-muted p-0.5">
+        <span className="text-[12px] text-muted-foreground">Trend</span>
+        <div role="group" aria-label="Trend window" className="flex items-center gap-px rounded-lg border border-border bg-muted p-0.5">
           {RANGES.map(r => (
             <button key={r.key} onClick={() => setRangeKey(r.key)} aria-pressed={rangeKey === r.key}
               className={cn('rounded-md px-2.5 py-1 text-[12px] font-medium',
@@ -220,6 +245,10 @@ export function FinanceControlCenter({ token }: { token: string }) {
           </span>
         )}
       </div>
+      {/* RD-FIN-02 · one meaning for the range: totals are lifetime; it bounds the trend only. */}
+      <p className="text-[12px] text-muted-foreground">
+        Totals are lifetime{scope.eventSlug ? ' for this event' : ' across all events'}; the range applies to the trend.
+      </p>
 
       {/* ── A · KPI cards ─────────────────────────────────────────────────── */}
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
@@ -229,8 +258,8 @@ export function FinanceControlCenter({ token }: { token: string }) {
         <Kpi icon={Ticket} label="Ticket value" value={<Money v={ledger.grossPaise} />}
           hint="Ticket value after discount — the base the platform fee was charged on."
           sub={`${ledger.transactions ?? 0} transactions`} />
-        <Kpi icon={Wallet} label="Organizer payable" value={<Money v={ledger.organizerPayable} />} tone="primary"
-          hint="Organizer-attributable revenue per the stored ledger (netSettlementPaise)." />
+        <Kpi icon={Wallet} label="Organizer payable (after refunds)" value={<Money v={ledger.organizerPayable} />} tone="primary"
+          hint="Net settlement of every transaction, less refunded registrations (their net was debited from the wallet when the refund was issued). Approved-but-unissued refunds are not deducted." />
         <Kpi icon={Landmark} label="Platform earned" value={<Money v={platformEarned} />}
           hint="RegisterDesk platform fee plus GST on that fee."
           sub={<>fee <Money v={ledger.platformFeeBase} /> · GST <Money v={ledger.platformFeeGst} /></>} />
@@ -241,12 +270,33 @@ export function FinanceControlCenter({ token }: { token: string }) {
           hint="Stored per transaction at the rate that applied then — never recomputed." />
         <Kpi icon={Percent} label="Platform GST" value={<Money v={ledger.platformFeeGst} />}
           hint="GST on the RegisterDesk platform fee, stored per transaction." />
-        <Kpi icon={TrendingUp} label="Gateway fee (estimate)" value={<Money v={ledger.gatewayEstimate} />} tone="warn"
-          hint="Calculated estimate. NOT reconciled against gateway settlement data."
-          sub={<span className="text-warning">Actual: <Money v={ledger.gatewayActual} /></span>} />
-        <Kpi icon={RotateCcw} label="Refunds" value={refundRow ? <Money v={refundRow.grossPaise} /> : <span className="text-muted-foreground text-[13px]">—</span>}
-          hint="Reversed transactions. Never counted as successful revenue."
+        <Kpi icon={TrendingUp} label={`Razorpay fee (${BASIS_LABEL[gatewayBasis]})`}
+          value={<Money v={ledger.gateway.fee} />}
+          tone={gatewayBasis === 'actual' ? undefined : 'warn'}
+          hint="What the PAYMENT GATEWAY charged — a different company's fee from the platform fee, and never merged with it. Resolved per transaction: the settled figure where recorded, the stored estimate elsewhere."
+          sub={gatewayBasis === 'estimated'
+            ? <span className="text-warning">No transaction reconciled yet</span>
+            : <>{ledger.gateway.coverage.withActual ?? 0} of {ledger.gateway.coverage.total ?? 0} reconciled</>} />
+        <Kpi icon={RotateCcw} label="Refunds" value={<Money v={refunds.amount} />}
+          hint="Money actually returned through the gateway, read from the refund ledger. A refund is not a cancellation, so this is never derived from registration status."
+          sub={refunds.count === null
+            ? 'Unavailable'
+            : `${refunds.count} refund${refunds.count === 1 ? '' : 's'}${refunds.unlinked ? ` · ${refunds.unlinked} unlinked` : ''}`} />
+      </div>
+
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+        <Kpi icon={Percent} label="Razorpay tax" value={<Money v={ledger.gateway.tax} />}
+          hint="GST CONTAINED WITHIN the Razorpay fee, not charged on top of it. Razorpay reports amount − fee = credit, so adding this to the fee above would count the tax twice."
+          sub="Component of the Razorpay fee" />
+        <Kpi icon={Landmark} label="Total fees" value={<Money v={ledger.totalFees} />}
+          hint="Platform fee + GST + Razorpay fee. An aggregate of two companies' charges, shown only alongside the components above."
+          sub={<>platform <Money v={ledger.platformFeeTotal} /> · gateway <Money v={ledger.gateway.fee} /></>} />
+        <Kpi icon={Ticket} label="Reversed transactions"
+          value={refundRow ? <Money v={refundRow.grossPaise} /> : <span className="text-muted-foreground text-[13px]">—</span>}
+          hint="Ticket VALUE of transactions flagged refunded — not the amount returned. Shown beside Refunds because the two answer different questions and rarely match."
           sub={refundRow ? `${refundRow.count ?? 0} transactions` : 'Select an event'} />
+        <Kpi icon={Wallet} label="Net after fees" value={<Money v={ledger.organizerPayable} />}
+          hint="The settlement BASIS — what the organizer is owed. Not a payout: money moved to the bank is a settlement and is never counted as revenue." />
       </div>
 
       {/* ── B · Waterfall ─────────────────────────────────────────────────── */}
@@ -257,7 +307,10 @@ export function FinanceControlCenter({ token }: { token: string }) {
             ['Ticket value',      ledger.grossPaise,       'Platform-fee base, after discount'],
             ['Platform fee',      ledger.platformFeeBase,  'RegisterDesk fee'],
             ['Platform GST',      ledger.platformFeeGst,   'GST on the RegisterDesk fee'],
-            ['Organizer payable', ledger.organizerPayable, 'Settlement basis'],
+            ['Razorpay fee',      ledger.gateway.fee,      `Gateway fee (${BASIS_LABEL[gatewayBasis]}) — tax included, not added`],
+            ['Total fees',        ledger.totalFees,        'Platform + gateway, components above'],
+            ['Refunds',           refunds.amount,          'Returned through the gateway — not a cancellation'],
+            ['Organizer payable (after refunds)', ledger.organizerPayable, 'Settlement basis less refunded registrations — not a payout'],
           ].map(([label, v, note], i, arr) => (
             <div key={label as string} className={cn('flex items-baseline justify-between gap-3 py-1',
               i < arr.length - 1 && 'border-b border-border/60')}>
@@ -271,8 +324,12 @@ export function FinanceControlCenter({ token }: { token: string }) {
             </div>
           ))}
           <p className="pt-1 text-[11.5px] text-muted-foreground">
-            Gateway fee is listed separately because it is an estimate and, under the stored fee
-            model, may have been borne by the attendee rather than deducted from the payout.
+            Razorpay fee is listed separately from the platform fee because a different company
+            charged it and, under the stored fee model, it may have been borne by the attendee
+            rather than deducted from the payout. Razorpay tax sits <em>inside</em> that fee and
+            is never added to it. Refunds are money returned through the gateway, which is not
+            the same as a cancellation. Settlements — transfers to the bank — are not revenue and
+            do not appear above.
           </p>
         </div>
       </DashboardCard>
@@ -338,7 +395,7 @@ export function FinanceControlCenter({ token }: { token: string }) {
       </DashboardCard>
 
       {/* ── H · Trend ─────────────────────────────────────────────────────── */}
-      <DashboardCard title="Ticket value over time">
+      <DashboardCard title={`Ticket value over time · ${RANGES.find(r => r.key === rangeKey)?.label ?? 'last 30 days'}`}>
         {trend.points.length > 0 ? (
           <div className="space-y-1.5 p-1">
             {trend.points.filter(p => p.grossPaise > 0).map(p => (

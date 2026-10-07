@@ -11,12 +11,11 @@
 //   4. If capacity is exceeded or registration fails after payment is captured,
 //      a Razorpay refund is triggered automatically and logged (M2).
 
-import crypto                         from 'crypto'
 import { NextRequest, NextResponse }  from 'next/server'
 import { adminAuth }                  from '@/lib/firebase/admin'
 import { captureFinancialError }      from '@/lib/monitoring/sentry'
 import { getPaymentIntent }           from '@/lib/firebase/firestore/paymentIntents'
-import { RAZORPAY_KEY_SECRET }        from '@/lib/razorpay/client'  // C1: throws if absent
+import { resolvePaymentProvider, type PaymentProvider } from '@/lib/payments/providers'
 import { getClientIp }                   from '@/lib/rateLimit'
 import { checkDistributedRateLimit }     from '@/lib/rateLimit/redis'
 // RD-PAY-P0-4 — THE one settlement, shared with the payment.captured webhook and the
@@ -44,23 +43,21 @@ export interface VerifyPaymentResponse {
 // H1: Reject malformed signatures before comparison to prevent length-extension
 //     attacks and avoid panics inside timingSafeEqual.
 //     HMAC-SHA256 is always 32 bytes = 64 lowercase hex chars.
-const HEX_64 = /^[0-9a-f]{64}$/
 
-function verifyRazorpaySignature(
+// RD-PAYMENT-PROVIDER-CONTRACT-04 — the HMAC implementation moved into the Razorpay
+// adapter unchanged (same HEX_64 pre-check, same raw-Buffer digest, same timingSafeEqual).
+// The route no longer knows how a signature is built, only that the provider vouched for it.
+async function verifyCheckoutSignature(
+  provider:  PaymentProvider,
   orderId:   string,
   paymentId: string,
   signature: string,
-): boolean {
-  if (!HEX_64.test(signature)) return false   // reject malformed before any crypto
-
-  const expected = crypto
-    .createHmac('sha256', RAZORPAY_KEY_SECRET)
-    .update(`${orderId}|${paymentId}`)
-    .digest()                                  // raw Buffer — same length as actual
-
-  const actual = Buffer.from(signature, 'hex') // always 32 bytes if regex passed
-
-  return crypto.timingSafeEqual(expected, actual)
+): Promise<boolean> {
+  return resolvePaymentProvider(provider).verifyCheckoutSignature({
+    providerOrderId:   orderId,
+    providerPaymentId: paymentId,
+    signature,
+  })
 }
 
 // RD-PAY-P0-4: the local FailedRefundContext / InviteCodeError / triggerRefund helpers
@@ -117,7 +114,20 @@ export async function POST(
   }
 
   // ── 3. H1: Verify HMAC-SHA256 signature with timing-safe comparison ────────
-  if (!verifyRazorpaySignature(razorpay_order_id, razorpay_payment_id, razorpay_signature)) {
+  //
+  // Verified as RAZORPAY, deliberately, and BEFORE the intent is loaded.
+  //
+  // This endpoint's request shape IS Razorpay's — `razorpay_order_id`, `razorpay_payment_id`,
+  // `razorpay_signature` are that gateway's field names, so a request arriving here is a
+  // Razorpay checkout callback by definition. Cashfree gets its own verify route, exactly as
+  // it gets its own webhook route (a shared endpoint would mean one provider's signature
+  // check could be reached with another's body).
+  //
+  // The ordering is also deliberate and unchanged: a forged request is rejected before it
+  // can cause a Firestore read. Taking the provider from the intent would require loading
+  // the intent first, i.e. reading the database on unauthenticated input. The intent's own
+  // provider is cross-checked immediately after it loads, below.
+  if (!await verifyCheckoutSignature('razorpay', razorpay_order_id, razorpay_payment_id, razorpay_signature)) {
     return NextResponse.json(
       { success: false, error: 'Payment verification failed.', reason: 'INVALID_SIGNATURE' },
       { status: 400 },
@@ -131,6 +141,22 @@ export async function POST(
     return NextResponse.json(
       { success: false, error: 'Payment record not found.', reason: 'INTENT_NOT_FOUND' },
       { status: 404 },
+    )
+  }
+
+  // ── 4a. Provider cross-check ───────────────────────────────────────────────
+  // The signature above proved a RAZORPAY signature over this order. If the stored intent
+  // says the order belongs to a different gateway, the two disagree about where the money
+  // is and nothing here may settle it. Unreachable today (Razorpay is the only enabled
+  // provider); it exists so that adding one cannot make this route settle the wrong order.
+  if (intent.provider !== 'razorpay') {
+    captureFinancialError('provider_mismatch', {
+      scope: 'verify-payment.provider_mismatch',
+      orderId: razorpay_order_id, intentProvider: intent.provider,
+    })
+    return NextResponse.json(
+      { success: false, error: 'Payment record does not match this payment method.', reason: 'PROVIDER_MISMATCH' },
+      { status: 409 },
     )
   }
 
@@ -156,7 +182,9 @@ export async function POST(
       {
         success: false,
         reason:  'PAYMENT_REFUNDED',
-        error:   'This payment was refunded and cannot be used to register. If you were charged, the refund will appear within 5–7 business days.',
+        // RD-FIN-01 · NOT "refunded": nothing refunds automatically any more. A terminal intent is
+        // a failed attempt or a payment held for review — the money is safe and is reviewed.
+        error:   'This payment could not complete your registration automatically and is being reviewed. Please do not pay again — if it cannot be honoured it will be refunded in full.',
       },
       { status: 409 },
     )
@@ -190,13 +218,30 @@ export async function POST(
   // promise one. The payment is held for manual review; saying "a refund has been initiated"
   // here would be a false statement to someone who has actually been charged.
   if (outcome.kind === 'held') {
+    // RD-PAYMENT-REFUND-AUTHORITY-02 — every refusal now lands here, not just duplicates.
+    //
+    // Each message names the real reason and then says the same true thing: the payment was
+    // received and a person will deal with it. None of them promises a refund, because
+    // nothing automatic issues one any more. Promising money back and then not sending it is
+    // worse than the refusal itself.
+    const held: Record<string, string> = {
+      DUPLICATE_EMAIL:     'A registration with this email address already exists for this event.',
+      DUPLICATE_MOBILE:    'A registration with this mobile number already exists for this event.',
+      EVENT_CAPACITY_FULL: 'This event became full before your registration could be completed.',
+      PASS_CAPACITY_FULL:  'This pass sold out before your registration could be completed.',
+      PASS_NOT_AVAILABLE:  'This pass is no longer available.',
+      COUPON_EXHAUSTED:    'The coupon reached its usage limit before your registration could be completed.',
+      INVITE_CODE_INVALID: 'Registration is not permitted for this event.',
+      ticket_code_exhausted: 'Your registration could not be assigned a ticket code.',
+    }
+    const why = held[outcome.reason]
+      ?? (outcome.gateBlocked ? 'Registration for this event is no longer open.' : 'Your registration could not be completed.')
+
     return NextResponse.json(
       {
         success: false,
         reason:  outcome.reason,
-        error:   outcome.reason === 'DUPLICATE_EMAIL'
-          ? 'A registration with this email address already exists for this event, so this registration could not be completed. Your payment has been received and is under review — our team will contact you shortly.'
-          : 'A registration with this mobile number already exists for this event, so this registration could not be completed. Your payment has been received and is under review — our team will contact you shortly.',
+        error:   `${why} Your payment has been received and is under review — our team will contact you shortly. Please do not pay again.`,
       },
       { status: 409 },
     )
@@ -211,74 +256,15 @@ export async function POST(
     )
   }
 
-  // Refused, and refunded in full by the shared settlement.
-  const r = outcome.reason
-
-  if (outcome.gateBlocked) {
-    return NextResponse.json(
-      {
-        success: false,
-        reason:  r,
-        error:   'Payment received but registration is no longer available. A full refund has been initiated and will appear within 5–7 business days.',
-      },
-      { status: 409 },
-    )
-  }
-
-  // NOTE: DUPLICATE_EMAIL / DUPLICATE_MOBILE no longer reach here. Settlement returns
-  // `kind: 'held'` for them (handled above) because a duplicate is refused WITHOUT an
-  // automatic refund. The old branch that promised "a full refund has been initiated" was
-  // removed rather than left unreachable — it would be a false promise if it ever ran again.
-
-  if (r === 'EVENT_CAPACITY_FULL' || r === 'PASS_CAPACITY_FULL' || r === 'PASS_NOT_AVAILABLE') {
-    return NextResponse.json(
-      {
-        success: false,
-        reason:  r,
-        error:   r === 'EVENT_CAPACITY_FULL'
-          ? 'Payment received but this event is now full. A full refund has been initiated and will appear within 5–7 business days.'
-          : r === 'PASS_NOT_AVAILABLE'
-          ? 'Payment received but this pass is no longer available. A full refund has been initiated and will appear within 5–7 business days.'
-          : 'Payment received but this pass is now sold out. A full refund has been initiated and will appear within 5–7 business days.',
-      },
-      { status: 409 },
-    )
-  }
-
-  if (r === 'COUPON_EXHAUSTED') {
-    return NextResponse.json(
-      {
-        success: false,
-        reason:  'COUPON_EXHAUSTED',
-        error:   'Payment received but the coupon reached its usage limit. A full refund has been initiated and will appear within 5–7 business days.',
-      },
-      { status: 409 },
-    )
-  }
-
-  if (r === 'INVITE_CODE_INVALID') {
-    return NextResponse.json(
-      {
-        success: false,
-        reason:  r,
-        error:   'Payment received but registration is not permitted for this event. A full refund has been initiated and will appear within 5–7 business days.',
-      },
-      { status: 403 },
-    )
-  }
-
-  if (r === 'ticket_code_exhausted') {
-    return NextResponse.json(
-      { success: false, error: 'Registration could not be completed. Please try again or contact support.' },
-      { status: 500 },
-    )
-  }
-
+  // Unreachable: settled / already_settled / held / deferred are the only outcomes, and
+  // each returns above. Kept as an explicit, honest fallback rather than a throw — if a
+  // new outcome is ever added, an attendee who has been charged still gets a true sentence
+  // instead of a 500 with no explanation.
   return NextResponse.json(
     {
       success: false,
-      error:   'Payment received but registration could not be completed. A full refund has been initiated and will appear within 5–7 business days.',
+      error:   `Your payment has been received but the registration could not be completed. It is under review — our team will contact you shortly. Please do not pay again.`,
     },
-    { status: 500 },
+    { status: 409 },
   )
 }

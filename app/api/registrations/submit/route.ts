@@ -26,7 +26,7 @@ import { validateInviteCode }       from '@/app/api/registrations/validate-invit
 import { validateTermsConsent }     from '@/lib/legal/platformTerms'
 import { sendConfirmationEmail }    from '@/lib/registrations/sendConfirmationEmail'
 import { validateCoupon }           from '@/lib/coupons/validate'
-import { resolveEffectivePassPricePaise } from '@/lib/pricing/earlyBird'
+import { resolveEffectivePassPricePaise, eventTimezone } from '@/lib/pricing/earlyBird'
 import { validateFormResponses, sanitizeFormResponses } from '@/lib/registrations/validateFormResponses'
 import { resolveServerEligibility }  from '@/lib/registrations/ageEligibility'
 import { resolveAttendeeIdentity }   from '@/lib/registrations/attendeeIdentity'
@@ -320,7 +320,7 @@ export async function POST(
   // Effective base amount (integer paise) via the ONE canonical resolver — early-bird
   // while active, else regular. Mirrors create-order so a paid-pass-discounted-to-zero
   // coupon re-validates against the identical base.
-  const originalPaise = resolveEffectivePassPricePaise(pass, Date.now())
+  const originalPaise = resolveEffectivePassPricePaise(pass, Date.now(), eventTimezone(event))
 
   let couponInfo: {
     couponDocId:    string

@@ -52,7 +52,10 @@ describe('1 · first payment attempt', () => {
   it('no prior claim → the route mints a fresh order (nothing to reuse)', () => {
     // Asserted at the wiring level: the reuse block only runs when a claim exists.
     const src = readFileSync(join(process.cwd(), 'app/api/registrations/create-order/route.ts'), 'utf8')
-    expect(src).toMatch(/const claim = await getAttemptClaim\(claimId\)/)
+    // RD-EVENT-COMMERCE-05E — the claim is read once, earlier (to keep an open attempt's fee
+    // model), and the reuse block uses that read.
+    expect(src).toMatch(/const priorClaim  = claimId \? await getAttemptClaim\(claimId\)/)
+    expect(src).toMatch(/const claim = priorClaim/)
     expect(src).toMatch(/if \(claim\?\.orderId\)/)
   })
 
@@ -160,8 +163,8 @@ describe('7 & 12 · captured payment can never produce a second order', () => {
   it('a supersede is gated on asking Razorpay FIRST', () => {
     const src = readFileSync(join(process.cwd(), 'app/api/registrations/create-order/route.ts'), 'utf8')
     const block = src.slice(src.indexOf("decision.kind === 'supersede'"))
-    const ask   = block.indexOf('findCapturedRegistrationPayment(claim.orderId')
-    const mint  = block.indexOf('razorpay.orders.create')
+    const ask   = block.indexOf('findCapturedRegistrationPayment(')
+    const mint  = block.indexOf('.createOrder')
     expect(ask).toBeGreaterThan(-1)
     expect(mint).toBeGreaterThan(-1)
     expect(ask).toBeLessThan(mint)                 // ask BEFORE minting
@@ -183,10 +186,21 @@ describe('7 & 12 · captured payment can never produce a second order', () => {
 
   it('only states that PROVE no payment can exist report canRetry: true', () => {
     const src = readFileSync(join(process.cwd(), 'app/api/registrations/payment-status/route.ts'), 'utf8')
-    const retryLines = src.split('\n').filter(l => l.includes('canRetry: true'))
-    // 'failed' (already refunded) · 'awaiting_payment' (Razorpay holds nothing) ·
+    // Comments are stripped first: this asserts what the route DOES, and a prose line that
+    // happens to quote `canRetry: true` while explaining why it must not be used is not a
+    // behaviour. (It caught exactly that when RD-PAYMENT-CASHFREE-CHECKOUT-06 documented the
+    // Cashfree pending case.)
+    const code = src.split('\n')
+      .filter(l => !l.trim().startsWith('//') && !l.trim().startsWith('*'))
+      .join('\n')
+    const retryLines = code.split('\n').filter(l => l.includes('canRetry: true'))
+    // 'failed' (already refunded) · 'awaiting_payment' (the provider holds nothing) ·
     // 'no_order' (the attempt never claimed an order, so checkout never opened).
     expect(retryLines.length).toBe(3)
+    // RD-PAYMENT-CASHFREE-CHECKOUT-06 — a payment IN FLIGHT is not one of them. Cashfree's
+    // PENDING must never be offered as retryable, or the attendee is invited to pay twice.
+    expect(code).toMatch(/state: 'payment_pending', canRetry: false/)
+    expect(code).not.toMatch(/state: 'payment_pending', canRetry: true/)
     expect(src).toMatch(/state: 'captured_unsettled', canRetry: false/)
     expect(src).toMatch(/state: 'confirmed'[\s\S]{0,80}canRetry: false/)
     expect(src).toMatch(/state: 'unknown', canRetry: false/)
@@ -214,7 +228,9 @@ describe('8–11 · webhook and client callback are idempotent in any order', ()
   const settle  = readFileSync(join(process.cwd(), 'lib/payments/settleCapturedRegistration.ts'), 'utf8')
 
   it('9 · client first, webhook second → the webhook no-ops', () => {
-    expect(webhook).toMatch(/if \(intent\.status === 'paid' && intent\.registrationId\)[\s\S]{0,200}received: true/)
+    // RD-FIN-02 · the paid branch now also records a DIFFERENT payment as a review hold (B6); the
+    // same-payment replay still ends in the plain acknowledgement.
+    expect(webhook).toMatch(/if \(intent\.status === 'paid' && intent\.registrationId\)[\s\S]{0,2200}Already processed — skipping[\s\S]{0,200}received: true/)
     expect(settle).toMatch(/if \(intentData\.status === 'paid' && intentData\.registrationId\) \{[\s\S]{0,160}alreadySettled = true/)
   })
 
@@ -236,14 +252,35 @@ describe('8–11 · webhook and client callback are idempotent in any order', ()
   })
 
   it('a duplicate refund webhook is claimed once by refund id', () => {
-    expect(webhook).toMatch(/async function claimRefundEvent/)
-    expect(webhook).toMatch(/if \(snap\.exists\) return false/)
+    // RD-FIN-01 moved the claim from the `refundWebhookEvents` marker onto
+    // `registrationRefunds/{refundId}` — the record that holds the money. Same
+    // exactly-once guarantee, keyed by the same Razorpay refund id.
+    //
+    // The marker was claimed BEFORE the refund was stored and before attribution was
+    // attempted, so a refund with no resolvable registration consumed its own idempotency
+    // token and became unrecoverable. Two real refunds were lost that way.
+    expect(webhook).toMatch(/claimRefundSideEffects\(razorpayRefundId\)/)
+    // Asserted on USE, not on mention — the comment above the handler names the retired
+    // marker deliberately, so that the reason it went away survives the code that used it.
+    expect(webhook).not.toMatch(/collection\('refundWebhookEvents'\)/)
+    // The record is written BEFORE the claim and before any lookup that can fail.
+    const recordAt = webhook.indexOf('ensureRegistrationRefundRecord')
+    const claimAt  = webhook.indexOf('claimRefundSideEffects')
+    expect(recordAt).toBeGreaterThan(-1)
+    expect(recordAt).toBeLessThan(claimAt)
+  })
+
+  it('an unattributable refund is recorded rather than dropped', () => {
+    // The old handler returned empty-handed on a missing intent/registration. It must now
+    // fall through to a recorded, UNLINKED refund that reconciliation can still complete.
+    expect(webhook).toMatch(/recorded UNLINKED/)
   })
 
   it('no path re-sends email or re-credits the wallet on the no-op branch', () => {
-    expect(settle).toMatch(/if \(alreadySettled\) return \{ kind: 'already_settled'/)
+    // RD-FIN-02 · the early return now first records a DIFFERENT payment as a review hold (B6).
+    expect(settle).toMatch(/if \(alreadySettled\) \{[\s\S]{0,900}return \{ kind: 'already_settled', registrationId: settledId \}/)
     // Email + ledger live AFTER that early return, so a replay cannot reach them.
-    const post = settle.slice(settle.indexOf("if (alreadySettled) return { kind: 'already_settled'"))
+    const post = settle.slice(settle.indexOf("return { kind: 'already_settled', registrationId: settledId }"))
     expect(post).toMatch(/recordPlatformTransactionAndCredit/)
     expect(post).toMatch(/sendConfirmationEmail/)
   })
@@ -413,9 +450,9 @@ describe('P0-5 · create-order outcome classification', () => {
 
   it('THE INVARIANT: every 4xx create-order returns is emitted BEFORE the Razorpay order', () => {
     // This is what makes "4xx ⇒ definite" sound. If a 4xx is ever added after
-    // razorpay.orders.create, releasing the form on it could strand a real order.
+    // .createOrder, releasing the form on it could strand a real order.
     const src = readFileSync(join(process.cwd(), 'app/api/registrations/create-order/route.ts'), 'utf8')
-    const orderCreate = src.indexOf('razorpay.orders.create')
+    const orderCreate = src.indexOf('.createOrder')
     expect(orderCreate).toBeGreaterThan(-1)
     const after = src.slice(orderCreate)
     const statusesAfter = [...after.matchAll(/status:\s*(\d{3})/g)].map(m => Number(m[1]))

@@ -7,7 +7,6 @@ import { Award, Download, Mail, AlertCircle, Loader2, ExternalLink } from 'lucid
 import type {
   OrganizerCertificatesResponse,
 } from '@/app/api/organizer/certificates/route'
-import type { SerializedCertificateRecord } from '@/lib/certificates/types'
 
 function fmtDate(iso: string): string {
   return new Date(iso).toLocaleDateString('en-IN', {
@@ -18,7 +17,8 @@ function fmtDate(iso: string): string {
 function StatCard({
   label, value, icon: Icon, color,
 }: {
-  label: string; value: number; icon: React.ElementType; color: string
+  // RD-CERT-02 · a string, because an unread aggregate renders as an em dash.
+  label: string; value: number | string; icon: React.ElementType; color: string
 }) {
   return (
     <div className="flex items-center gap-3 rounded-xl border border-border bg-card p-4">
@@ -66,11 +66,21 @@ export default function CertificatesDashboardPage() {
     return () => { cancelled = true }
   }, [user, getToken])
 
-  const certs: SerializedCertificateRecord[] = data?.certificates ?? []
+  const certs = data?.certificates ?? []
 
-  const generated  = certs.length
-  const downloaded = certs.filter(c => c.downloadCount > 0).length
-  const emailed    = certs.filter(c => c.emailStatus === 'sent').length
+  /**
+   * RD-CERT-02 · these three were counted in the browser — `certs.length` and
+   * `certs.filter(...).length` — over a 100-row page of the LEGACY collection. So they
+   * were capped at 100 AND read 0 on any modern event, because the engine stopped
+   * writing there. They are server-side aggregates over the whole workspace now.
+   *
+   * A figure the server could not read arrives null and renders as an em dash, never 0.
+   */
+  const fmt = (n: number | null | undefined) =>
+    typeof n === 'number' ? n.toLocaleString('en-IN') : '—'
+  const generated  = fmt(data?.counts?.generated)
+  const downloaded = fmt(data?.counts?.downloads)
+  const emailed    = fmt(data?.counts?.emailed)
 
   return (
     <div className="space-y-6">
@@ -102,7 +112,7 @@ export default function CertificatesDashboardPage() {
           {/* Summary cards */}
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
             <StatCard label="Total Generated"  value={generated}  icon={Award}    color="bg-primary/[0.08]" />
-            <StatCard label="Downloaded"        value={downloaded} icon={Download} color="bg-emerald-100"   />
+            <StatCard label="Downloads"         value={downloaded} icon={Download} color="bg-emerald-100"   />
             <StatCard label="Emailed"           value={emailed}    icon={Mail}     color="bg-blue-100"      />
           </div>
 
@@ -145,7 +155,7 @@ export default function CertificatesDashboardPage() {
                             <span className="font-mono text-[12px] text-muted-foreground">{cert.certificateId}</span>
                           </td>
                           <td className="px-4 py-3 text-muted-foreground">
-                            {fmtDate(cert.issuedAt)}
+                            {cert.generatedAt ? fmtDate(cert.generatedAt) : "—"}
                           </td>
                           <td className="px-4 py-3 text-center text-muted-foreground">
                             {cert.downloadCount}
@@ -160,8 +170,14 @@ export default function CertificatesDashboardPage() {
                           </td>
                           <td className="px-4 py-3">
                             <div className="flex items-center justify-end gap-2">
+                              {/* RD-CERT-02 · `/api/certificates/{id}` reads the LEGACY
+                                  collection and 404s on anything the modern engine
+                                  produced. This table now lists modern certificates, so
+                                  the link had to move with it: `/file` is the same
+                                  capability model over the authoritative store, and it
+                                  is what serves the R2 artifact. */}
                               <a
-                                href={`/api/certificates/${cert.certificateId}`}
+                                href={`/api/certificates/${cert.certificateId}/file`}
                                 target="_blank"
                                 rel="noopener noreferrer"
                                 className="inline-flex items-center gap-1 rounded-lg border border-border bg-card px-2.5 py-1 text-[13px] font-medium text-foreground transition-colors hover:bg-muted/60"

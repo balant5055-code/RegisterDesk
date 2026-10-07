@@ -19,8 +19,9 @@
 // server-side from the wallet inside the transaction.
 
 import { NextRequest, NextResponse } from 'next/server'
+import { requireSuperAdmin } from '@/lib/admin/financialGuard'
 import { resolveSuperAdminUid } from '@/lib/admin/auth'
-import { logAdminAction } from '@/lib/admin/audit'
+import { logAdminActionOrRecord } from '@/lib/admin/audit'
 import { checkRateLimit } from '@/lib/rateLimit'
 import { grantService } from '@/features/media-credits/services/grantService'
 import { CreditsDisabledError, InvalidCreditOperationError } from '@/features/media-credits/errors'
@@ -82,9 +83,17 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
     // Only a real grant is audited. A replay returning the original is not a second event,
     // and logging it would make the audit trail overstate how often credits were created.
+    //
+    // RD-PHASE4-S4 · F3 — by this point the credits EXIST (the grant committed). The audit write can
+    // no longer turn that into "Nothing was credited" (a false 503 an admin would answer with a
+    // second grant under a new key). It never throws; a failed write is durably recorded
+    // (adminAuditFailures) for reconciliation, and the response reports the real grant.
     if (result.created) {
-      await logAdminAction({
+      await logAdminActionOrRecord({
         adminUid,
+        actorRole:  'super_admin',
+        reason:     result.grant.note,
+        correlation: { grantId: result.grant.grantId, organizerUid: result.grant.organizerUid, entryId: result.grant.entryId },
         action:     'media_credit_grant.created',
         entityType: 'media_credit_grant',
         entityId:   result.grant.grantId,
@@ -121,11 +130,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 }
 
 export async function GET(req: NextRequest): Promise<NextResponse> {
-  // Reading history is not creating value, so this uses the ordinary admin gate — an admin
-  // who can see the ledger can already see every grant in it.
-  const { resolveAdminUid } = await import('@/lib/admin/auth')
-  const adminUid = await resolveAdminUid(req.headers.get('authorization'))
-  if (!adminUid) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+  // RD-CLOSE — a financial read: Super Admin only (ADMIN_UIDS). A legacy `admin: true` claim
+  // alone gets 403 SUPER_ADMIN_REQUIRED (lib/admin/financialGuard.ts).
+  const superGate = await requireSuperAdmin(req)
+  if (superGate.response) return superGate.response
 
   const url    = req.nextUrl
   const limit  = Number(url.searchParams.get('limit') ?? '25')

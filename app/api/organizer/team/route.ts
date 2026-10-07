@@ -1,15 +1,23 @@
-// GET  /api/organizer/team  — list this owner's team members + pending invites.
-// POST /api/organizer/team  — invite a new member (owner only).
+// GET /api/organizer/team — list the LEGACY members of this workspace.
 //
-// The workspace is always the caller's own (organizerUid = caller uid), so a
-// team member calling this only ever sees/manages their own (empty) workspace,
-// never the owner's. All permission logic comes from lib/team/access.
+// ═══ THERE IS NO LONGER A POST (RD-TEAM-IMPL-01) ═════════════════════════════
+// This route used to invite a member by email. RegisterDesk now issues gate
+// credentials directly (POST /api/organizer/staff), so there is no invitation, no
+// token, no acceptance and no mail — and therefore nothing here to create.
+//
+// The GET remains, and is not vestigial: rows created by the old flow are still LIVE
+// authorization grants. `teamMembers` is the substrate every organizer route reads,
+// so an organizer must still be able to SEE the people they invited before this
+// change, and retire them through PATCH/DELETE on /api/organizer/team/[memberId].
+// It returns no `invites` list any more, because nothing can be in the invited state
+// going forward; historical `status: 'invited'` rows are filtered out by listTeam.
+//
+// The workspace is always the caller's own (organizerUid = caller uid), never a
+// value from the request. All permission logic comes from lib/team/access.
 
 import { NextRequest, NextResponse } from 'next/server'
-import { verifyCaller, requireOwner, requireAdmin } from '@/lib/team/access'
-import { listTeam, inviteMember }     from '@/lib/team/service'
-import { requireFeature, requireLimit } from '@/lib/licensing/workspaceEntitlements'
-import { RATE_POLICY, checkPolicy }   from '@/lib/rateLimit/policies'
+import { verifyCaller, requireAdmin } from '@/lib/team/access'
+import { listTeam }                   from '@/lib/team/service'
 
 export async function GET(req: NextRequest): Promise<NextResponse> {
   const caller = await verifyCaller(req)
@@ -21,39 +29,4 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
 
   const data = await listTeam(caller.uid)
   return NextResponse.json(data)
-}
-
-export async function POST(req: NextRequest): Promise<NextResponse> {
-  const caller = await verifyCaller(req)
-  if (!caller) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-
-  const access = requireOwner(caller.uid, caller.uid)
-  if (!access.ok) return NextResponse.json({ error: access.reason }, { status: access.status })
-
-  // Throttle invites (each sends an email) against automation / abuse.
-  const rl = checkPolicy(caller.uid, RATE_POLICY.teamInvite)
-  if (rl.limited) return NextResponse.json(
-    { error: 'Too many invitations. Please try again later.' },
-    { status: 429, headers: { 'Retry-After': String(rl.retryAfter) } },
-  )
-
-  // Plan gate — team access is a paid feature, and the plan caps team size.
-  const feat = await requireFeature(caller.uid, 'teamAccess')
-  if (!feat.ok) return NextResponse.json({ error: feat.error }, { status: feat.status })
-  const { members, invites } = await listTeam(caller.uid)
-  const lim = await requireLimit(caller.uid, 'maxTeamMembers', members.length + invites.length + 1)
-  if (!lim.ok) return NextResponse.json({ error: lim.error }, { status: lim.status })
-
-  let body: { email?: unknown; role?: unknown; eventIds?: unknown }
-  try { body = await req.json() } catch { return NextResponse.json({ error: 'Invalid request body.' }, { status: 400 }) }
-  if (typeof body.email !== 'string' || typeof body.role !== 'string') {
-    return NextResponse.json({ error: 'Email and role are required.' }, { status: 400 })
-  }
-
-  const result = await inviteMember({
-    organizerUid: caller.uid, ownerUid: caller.uid, ownerEmail: caller.email,
-    email: body.email, role: body.role, eventIds: body.eventIds,
-  })
-  if (!result.ok) return NextResponse.json({ error: result.error }, { status: result.status })
-  return NextResponse.json({ member: result.data }, { status: 201 })
 }

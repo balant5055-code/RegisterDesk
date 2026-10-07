@@ -54,7 +54,7 @@ export function CommunityVenue({
           transition={{ duration: 0.5 }}
           className="mb-7"
         >
-          <p className="mb-1.5 text-[10px] font-bold uppercase tracking-[0.2em] text-primary">
+          <p className="mb-1.5 text-[10px] font-bold uppercase tracking-[0.2em] text-action">
             Location
           </p>
           <h2 className="text-[1.25rem] font-black tracking-tight text-gray-900 sm:text-[1.625rem]">

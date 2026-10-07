@@ -13,6 +13,8 @@
 import { verifyCaller, requirePermission, activeMemberships, type AccessResult } from '@/lib/team/access'
 import { adminDb } from '@/lib/firebase/admin'
 import { permissionsForRole, isCheckinOnlyRole, isEventInScope, type TeamRole, type TeamPermission } from '@/lib/team/types'
+import { isModerated, MODERATION_DENIAL_MESSAGE } from '@/lib/admin/organizerStatus'
+import { readWorkspaceOwnerMarker } from '@/lib/organizer/identity'
 
 export interface WorkspaceContext {
   callerUid:    string
@@ -20,8 +22,14 @@ export interface WorkspaceContext {
   role:         TeamRole
   permissions:  TeamPermission[]
   isOwner:      boolean
-  /** Events this caller may act on. [] = unrestricted. See requireEventScope. */
+  /** Events this caller may act on. [] = unrestricted for a PERSON. See requireEventScope. */
   eventIds:     string[]
+  /**
+   * RD-CHECKIN-11 — true when the grant behind this context is a gate CREDENTIAL
+   * rather than a person who was invited to a team. An empty assignment on one of
+   * those DENIES instead of widening; see isEventInScope for why the cases differ.
+   */
+  isStaffCredential: boolean
 }
 
 /**
@@ -40,10 +48,21 @@ export interface WorkspaceContext {
  * from the event they are assigned to — trading a rare exposure bug for a certain outage.
  *
  * ═══ WHAT COUNTS AS EVIDENCE ═════════════════════════════════════════════════
- * An owned workspace is one that CONTAINS something. `users/{uid}/eventDrafts` is that
- * evidence and is the superset: publishing derives `events/{slug}` from a draft, so an
- * organizer with any event — published or not — has a draft. A single `limit(1)` read, and
- * only in the ambiguous branch below.
+ * RD-WORKSPACE-OWNERSHIP-01 replaced the inference with an explicit fact. Ownership is now
+ * `users/{uid}.workspaceOwner`, written by the organizer profile-creation paths and never
+ * for a gate credential.
+ *
+ * It had to be replaced. The previous rule was "an owned workspace is one that CONTAINS
+ * something", evidenced by `users/{uid}/eventDrafts`. That is evidence of a USED workspace,
+ * not of owning one, and it is false for precisely one account: a brand-new or freshly
+ * re-registered organizer who has not created anything yet. Such an account holding any
+ * active membership fell through to `memberships[0]` and was silently resolved into the
+ * OTHER organizer's workspace under that membership's restricted role — which is how it
+ * gets reported: "my new organizer account is missing features it should have".
+ *
+ * The draft read survives as the fallback for documents that predate the marker, so no
+ * existing account changes resolution and no backfill is required. Both reads happen ONLY
+ * in the ambiguous branch below; a caller with no memberships pays for neither.
  *
  * ═══ FAIL CLOSED ═════════════════════════════════════════════════════════════
  * An unreadable subcollection resolves the caller to THEMSELVES, never to a membership.
@@ -51,7 +70,46 @@ export interface WorkspaceContext {
  * own data, while resolving to a membership on bad information can show them someone
  * else's. A transient read failure must not be able to open another organizer's workspace.
  */
-async function ownsWorkspace(callerUid: string): Promise<boolean> {
+async function ownsWorkspace(
+  callerUid:   string,
+  memberships: readonly { isStaffCredential: boolean }[],
+): Promise<boolean> {
+  // ═══ 0 · A GATE CREDENTIAL IS NEVER AN OWNER (RD-SEC-01) ═══════════════════
+  // Checked BEFORE the marker. A staff credential never receives a profile from the server,
+  // but the users CREATE rule lets a client write its own profile with `workspaceOwner: true`
+  // (the signup page's orphan-recovery does exactly that when handed a staff login), which
+  // turned a gate credential into the owner of its own workspace. `isStaffCredential` comes
+  // from the reserved .invalid namespace on the membership row and cannot be forged; see step 2.
+  if (memberships.some(m => m.isStaffCredential)) return false
+
+  // ═══ 1 · THE EXPLICIT MARKER WINS (RD-WORKSPACE-OWNERSHIP-01) ══════════════
+  // `workspaceOwner` is the positive fact this function used to have to guess at. It is
+  // written only by the organizer profile-creation paths, never for a gate credential,
+  // and firestore.rules forbids a client from changing it after create. A three-state
+  // read: true/false are authoritative, null means the document predates the field.
+  try {
+    const snap = await adminDb.collection('users').doc(callerUid).get()
+    const marker = readWorkspaceOwnerMarker(snap.data())
+    if (marker !== null) return marker
+  } catch {
+    return true   // fail closed — towards self
+  }
+
+  // ═══ 2 · LEGACY DOCUMENT · positively identify a gate CREDENTIAL first ══════
+  // Costs no read: `isStaffCredential` is derived from the reserved .invalid address
+  // namespace on the membership row already in hand, and cannot be forged by a request.
+  // A staff credential's uid is always minted by adminAuth.createUser inside
+  // lib/staff/service.ts, so it can never coincide with an organizer's own uid — which
+  // makes this a sound negative answer, and one that no longer depends on the account
+  // happening to own zero drafts.
+  if (memberships.some(m => m.isStaffCredential)) return false
+
+  // ═══ 3 · LEGACY DOCUMENT · the original draft inference, retained verbatim ══
+  // Deliberately unchanged, including its "no drafts ⇒ not an owner" outcome. Every
+  // account created from now on carries the marker and never reaches this branch, so
+  // widening it here would change the resolution of existing accounts for no gain —
+  // and the fix for a legacy organizer is the marker (backfilled on their next email
+  // verification), not a looser guess.
   try {
     const drafts = await adminDb.collection('users').doc(callerUid)
       .collection('eventDrafts').limit(1).get()
@@ -95,16 +153,19 @@ export async function resolveWorkspaceUid(callerUid: string): Promise<WorkspaceC
   if (memberships.length === 0) {
     return {
       callerUid, workspaceUid: callerUid, role: 'owner',
-      permissions: permissionsForRole('owner'), isOwner: true, eventIds: [],
+      permissions: permissionsForRole('owner'), isOwner: true, eventIds: [], isStaffCredential: false,
     }
   }
 
   // Ambiguous: the caller holds at least one membership. Ownership still wins. The profile
   // read happens ONLY here — a caller with no memberships never pays for it.
-  if (await ownsWorkspace(callerUid)) {
+  //
+  // `memberships` is passed in so ownership can be decided partly FROM them (a gate
+  // credential identifies itself, see step 2 of ownsWorkspace) without a second query.
+  if (await ownsWorkspace(callerUid, memberships)) {
     return {
       callerUid, workspaceUid: callerUid, role: 'owner',
-      permissions: permissionsForRole('owner'), isOwner: true, eventIds: [],
+      permissions: permissionsForRole('owner'), isOwner: true, eventIds: [], isStaffCredential: false,
     }
   }
 
@@ -112,6 +173,7 @@ export async function resolveWorkspaceUid(callerUid: string): Promise<WorkspaceC
   return {
     callerUid, workspaceUid: m.organizerUid, role: m.role,
     permissions: permissionsForRole(m.role), isOwner: false, eventIds: m.eventIds,
+    isStaffCredential: m.isStaffCredential,
   }
 }
 
@@ -135,9 +197,61 @@ export interface WorkspaceAuthz extends WorkspaceContext {
   error:  string            // '' when ok; a message when !ok (always a string for route typing)
 }
 
+// A denial carries no identity. `isStaffCredential: true` is the safe value for the
+// placeholder: should a caller ever read scope off a denied context, an empty
+// assignment must not read as unrestricted.
 const denied = (status: number, error: string): WorkspaceAuthz => ({
-  ok: false, status, error, callerUid: '', workspaceUid: '', role: 'owner', permissions: [], isOwner: false, eventIds: [],
+  ok: false, status, error, callerUid: '', workspaceUid: '', role: 'owner', permissions: [], isOwner: false,
+  eventIds: [], isStaffCredential: true,
 })
+
+// ═══ RD-ORGANIZER-MODERATION-ENFORCEMENT-12 · moderation is enforced HERE ══════
+//
+// Before this, suspending or banning an organizer did not stop them using the organizer
+// APIs. The only mechanism was `setOrganizerAccountStatus` calling `revokeRefreshTokens`,
+// which invalidates tokens issued BEFORE the revocation — but suspension does not disable
+// the Auth user, so signing in again minted a perfectly valid token and every organizer
+// endpoint answered 200. RD-ORGANIZER-LIFECYCLE-AUDIT-11 measured it: suspended and banned
+// both returned 200 from /api/organizer/dashboard and /api/organizer/events.
+//
+// The check lives in the two top-level authorizers rather than in a route, because
+// `authorizeEvent` and `authorizeWorkspaceDownload` both delegate to `authorizeWorkspace`
+// — so one seam covers every organizer API instead of ~189 individual call sites.
+//
+// WHOSE status: the WORKSPACE OWNER's, and the CALLER's when they differ. Suspending an
+// organizer freezes their workspace for their whole team, not just for them; and a
+// suspended person must not keep acting inside somebody else's workspace either. The two
+// reads are issued together, and for the common case (an owner acting on their own
+// workspace) they collapse to one.
+//
+// WHICH statuses: suspended and banned only. `pending` is already refused upstream by
+// `verifyCaller`, which rejects any token whose email is unverified — adding a second
+// denial for it here would duplicate a working control. A MISSING accountStatus stays
+// allowed: that is the grandfathering contract every pre-field organizer depends on, and
+// `resolveAccountStatus` is the one place that decides it.
+// RD-ORGANIZER-MODERATION-COVERAGE-14 — the set and the predicate now come from
+// lib/admin/organizerStatus so this authorizer and the token seam in lib/team/access
+// cannot disagree about what a sanction means.
+
+/** The message is deliberately identical for suspended and banned: an account under
+ *  moderation learns that it is restricted and who to talk to, never which sanction.
+ *  Shared with the 13 mutation routes that guard via organizerStatusGuard, so the whole
+ *  platform refuses a moderated organizer in the same words. */
+const MODERATION_ERROR = MODERATION_DENIAL_MESSAGE
+
+async function moderationBlocked(ctx: WorkspaceContext): Promise<boolean> {
+  // BOTH subjects, still checked here rather than deferred to verifyCaller:
+  //   • workspaceUid — suspending an owner must freeze the whole workspace, including
+  //     members they invited. A token identifies the caller, never the workspace, so
+  //     this dimension can only be enforced after resolveWorkspaceUid.
+  //   • callerUid    — checked here too because these authorizers pass
+  //     skipModeration to verifyCaller, trading its 401 for the specific 403 below.
+  const uids = ctx.callerUid && ctx.callerUid !== ctx.workspaceUid
+    ? [ctx.workspaceUid, ctx.callerUid]
+    : [ctx.workspaceUid]
+
+  return (await Promise.all(uids.map(isModerated))).some(Boolean)
+}
 
 /**
  * One-call route guard for workspace-scoped routes (lists, creates, subcollection
@@ -145,9 +259,15 @@ const denied = (status: number, error: string): WorkspaceAuthz => ({
  * checks the permission. On success, use `authz.workspaceUid` as the owner uid.
  */
 export async function authorizeWorkspace(req: Request, permission: TeamPermission): Promise<WorkspaceAuthz> {
-  const caller = await verifyCaller(req)
+  // skipModeration: moderationBlocked below is STRICTER (it also checks the workspace
+  // owner) and answers 403 with a reason instead of a bare 401 — so the read there is
+  // the one worth paying for. Route handlers must never pass this.
+  const caller = await verifyCaller(req, { skipModeration: true })
   if (!caller) return denied(401, 'Unauthorized')
   const ctx = await resolveWorkspaceUid(caller.uid)
+  if (await moderationBlocked(ctx)) {
+    return { ...ctx, ok: false, status: 403, error: MODERATION_ERROR }
+  }
   if (!ctx.permissions.includes(permission)) {
     return { ...ctx, ok: false, status: 403, error: `Missing required permission: ${permission}.` }
   }
@@ -165,9 +285,15 @@ export async function authorizeWorkspace(req: Request, permission: TeamPermissio
  * any other permission are unaffected.
  */
 export async function authorizeAnyWorkspace(req: Request): Promise<WorkspaceAuthz> {
-  const caller = await verifyCaller(req)
+  // skipModeration: moderationBlocked below is STRICTER (it also checks the workspace
+  // owner) and answers 403 with a reason instead of a bare 401 — so the read there is
+  // the one worth paying for. Route handlers must never pass this.
+  const caller = await verifyCaller(req, { skipModeration: true })
   if (!caller) return denied(401, 'Unauthorized')
   const ctx = await resolveWorkspaceUid(caller.uid)
+  if (await moderationBlocked(ctx)) {
+    return { ...ctx, ok: false, status: 403, error: MODERATION_ERROR }
+  }
   if (!ctx.isOwner && isCheckinOnlyRole(ctx.role)) {
     return { ...ctx, ok: false, status: 403, error: 'This account is limited to event check-in.' }
   }

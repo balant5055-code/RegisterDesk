@@ -11,8 +11,7 @@ import {
   ResultsBreadcrumb, ResultsHeader, ResultsShell,
 } from '@/features/race-operations/components/public/ResultsChrome'
 import { getRecentResults, groupRacesByEvent } from '@/features/race-operations/services/publicResults'
-
-const BASE_URL = process.env.NEXT_PUBLIC_BASE_URL ?? 'https://registerdesk.in'
+import { buildMetadata } from '@/lib/marketing/seo'
 
 /** Results change only when an organizer publishes, so a short ISR window is ample and
  *  keeps the landing page off the database on every hit. */
@@ -20,20 +19,14 @@ export const revalidate = 300
 
 const TITLE = 'Race Results — RegisterDesk'
 const DESCRIPTION =
-  'Official race results. Search by bib number or runner name to find your finish time, '
+  'Official race results. Search by bib number or participant name to find your finish time, '
   + 'chip time and overall position.'
 
+// Through the shared helper: the hand-rolled block carried everything but `images`, so
+// this page shared to social with no preview. keywords is page-specific and layered on.
 export const metadata: Metadata = {
-  title:        TITLE,
-  description:  DESCRIPTION,
-  metadataBase: new URL(BASE_URL),
-  alternates:   { canonical: `${BASE_URL}/results` },
-  keywords:     ['race results', 'marathon results', 'timing results', 'finish time', 'bib number', 'RegisterDesk'],
-  openGraph: {
-    type: 'website', url: `${BASE_URL}/results`, siteName: 'RegisterDesk',
-    title: TITLE, description: DESCRIPTION,
-  },
-  twitter: { card: 'summary_large_image', title: TITLE, description: DESCRIPTION },
+  ...buildMetadata({ title: TITLE, description: DESCRIPTION, path: '/results' }),
+  keywords: ['race results', 'marathon results', 'timing results', 'finish time', 'bib number', 'RegisterDesk'],
 }
 
 function fmtDate(iso: string | null): string | null {
@@ -67,7 +60,7 @@ export default async function ResultsLandingPage() {
           </p>
           <Link
             href="/events"
-            className="mt-5 inline-flex items-center gap-1.5 text-fs-base font-semibold text-primary hover:opacity-80"
+            className="mt-5 inline-flex items-center gap-1.5 text-fs-base font-semibold text-action hover:opacity-80"
           >
             Browse upcoming events
           </Link>
@@ -85,7 +78,7 @@ export default async function ResultsLandingPage() {
                 <li key={event.eventSlug}>
                   <Link
                     href={`/results/${event.eventSlug}`}
-                    className="flex h-full flex-col gap-2 rounded-xl border border-border bg-card p-4 transition-colors hover:border-border-strong hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+                    className="flex h-full flex-col gap-2 rounded-xl border border-border bg-card p-4 transition-colors hover:border-border-strong hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-action"
                   >
                     <p className="text-fs-md font-semibold text-foreground">{event.eventName}</p>
                     <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-fs-sm text-muted-foreground">

@@ -104,21 +104,29 @@ function mergeOntoDefaults(stored: Record<string, unknown>): PlatformSettings {
 }
 
 /**
+ * RD-PHASE4-S2 — the pure half of resolvePlatformPricing: stored document data (null = absent) →
+ * effective settings, with the SAME fallback (code defaults when absent or invalid). Shared with the
+ * transactional write so a write resolves the fresh document exactly as a read would.
+ */
+export function resolveStoredPlatformSettings(stored: Record<string, unknown> | null): PlatformSettings {
+  if (!stored) return cloneDefaultPlatformSettings()
+  const merged = mergeOntoDefaults(stored)
+  const check  = validatePlatformSettings(merged)
+  if (!check.ok) {
+    console.warn('[platform-pricing] stored settings invalid — using code defaults:', check.errors)
+    return cloneDefaultPlatformSettings()
+  }
+  return merged
+}
+
+/**
  * Resolve the effective platform pricing settings. Firestore overlaid on code
  * defaults; falls back to defaults on missing doc / read error / invalid data.
  */
 export async function resolvePlatformPricing(): Promise<PlatformSettings> {
   try {
     const snap = await platformSettingsRef().get()
-    if (!snap.exists) return cloneDefaultPlatformSettings()
-
-    const merged = mergeOntoDefaults((snap.data() ?? {}) as Record<string, unknown>)
-    const check  = validatePlatformSettings(merged)
-    if (!check.ok) {
-      console.warn('[platform-pricing] stored settings invalid — using code defaults:', check.errors)
-      return cloneDefaultPlatformSettings()
-    }
-    return merged
+    return resolveStoredPlatformSettings(snap.exists ? (snap.data() ?? {}) as Record<string, unknown> : null)
   } catch (err) {
     console.error('[platform-pricing] resolve failed — using code defaults:', err)
     return cloneDefaultPlatformSettings()

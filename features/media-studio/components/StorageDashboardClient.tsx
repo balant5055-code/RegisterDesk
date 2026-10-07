@@ -135,12 +135,13 @@ export function StorageDashboardClient() {
       }))
   }, [galleries])
 
+  // RD-PHOTO-01 — the event's PAID photo capacity (0 until bought on License & Services).
   const photoLimit = limits?.limits.maxPhotosPerEvent ?? null
   const photosUsed = limits?.used.photos ?? usage?.photoCount ?? 0
   const photoPct   = photoLimit && photoLimit > 0
     ? Math.round((photosUsed / photoLimit) * 100)
     : 0
-  const nearPhotoLimit = photoLimit !== null && photoPct >= 80
+  const nearPhotoLimit = photoLimit !== null && photoLimit > 0 && photoPct >= 80
 
   return (
     <div className={MEDIA_PAGE_STACK}>
@@ -160,7 +161,7 @@ export function StorageDashboardClient() {
           />
           <MediaMetricCard
             icon={Sigma} label="Photos" value={usage.photoCount.toLocaleString('en-IN')}
-            hint={photoLimit ? `of ${photoLimit.toLocaleString('en-IN')} allowed` : 'No photo limit'}
+            hint={photoLimit === null ? '—' : photoLimit > 0 ? `of ${photoLimit.toLocaleString('en-IN')} paid capacity` : 'No paid photo capacity yet'}
             tone={nearPhotoLimit ? 'warning' : 'default'}
           />
           <MediaMetricCard
@@ -248,9 +249,7 @@ export function StorageDashboardClient() {
           <Panel
             label="Plan"
             title="Limits for this event"
-            action={limits?.tier
-              ? <StatusChip tone="neutral">{limits.tier}</StatusChip>
-              : undefined}
+            /* RD-PHOTO-01 — no licence-tier chip: photo capacity is paid per event, not a plan. */
           >
             {loading ? (
               <MediaLoadingState rows={2} />
@@ -260,8 +259,8 @@ export function StorageDashboardClient() {
                   <RailMetric
                     label="Photos"
                     value={photoLimit === null
-                      ? `${photosUsed.toLocaleString('en-IN')} · unlimited`
-                      : `${photosUsed.toLocaleString('en-IN')} of ${photoLimit.toLocaleString('en-IN')}`}
+                      ? photosUsed.toLocaleString('en-IN')
+                      : `${photosUsed.toLocaleString('en-IN')} of ${photoLimit.toLocaleString('en-IN')} paid`}
                   />
                   {photoLimit !== null && (
                     <UsageBar percent={photoPct} tone={nearPhotoLimit ? 'warning' : 'default'} />
@@ -279,7 +278,7 @@ export function StorageDashboardClient() {
                 </dl>
 
                 {nearPhotoLimit && (
-                  <Banner tone="warning" title="Approaching the photo limit">
+                  <Banner tone="warning" title="Approaching the paid photo capacity">
                     {(photoLimit! - photosUsed).toLocaleString('en-IN')} photos remaining on
                     this event.
                   </Banner>

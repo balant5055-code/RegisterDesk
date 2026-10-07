@@ -31,6 +31,9 @@ export const CATEGORY_META: Record<NotificationCategory, CategoryMeta> = {
   settlement:   { category: 'settlement',   label: 'Settlements',   iconKey: 'banknote',      defaultSeverity: 'info',    visibility: 'settlements'   },
   system:       { category: 'system',       label: 'Announcements', iconKey: 'megaphone',     defaultSeverity: 'info',    visibility: null            },
   alert:        { category: 'alert',        label: 'Alerts',        iconKey: 'alert-triangle',defaultSeverity: 'warning', visibility: null            },
+  // WhatsApp Inbox — `broadcasts` is exactly the Inbox's own gate (owner + admin), so a
+  // member who cannot open the Inbox never sees that a message arrived either.
+  message:      { category: 'message',      label: 'Messages',      iconKey: 'message-circle',defaultSeverity: 'info',    visibility: 'broadcasts'    },
 }
 
 export const NOTIFICATION_CATEGORIES = Object.keys(CATEGORY_META) as NotificationCategory[]

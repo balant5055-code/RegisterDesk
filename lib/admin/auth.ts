@@ -1,12 +1,9 @@
 // Server-only. Verifies that a decoded token belongs to a platform admin.
 //
-// Admin identity is resolved via two mechanisms (either is sufficient):
-//   1. Firebase custom claim:  { admin: true }
-//      Set with: adminAuth.setCustomUserClaims(uid, { admin: true })
-//   2. ADMIN_UIDS env var: comma-separated list of Firebase UIDs in .env.local
-//      e.g. ADMIN_UIDS=uid1,uid2
-//
-// To bootstrap without custom claims, add the admin UID to ADMIN_UIDS.
+// RD-SEC-01 · There are exactly two roles: Organizer and Super Admin. Super Admin identity is
+// ADMIN_UIDS (deployment configuration, comma-separated Firebase UIDs) and NOTHING else. The legacy
+// `admin: true` custom claim, `isAdmin`, `role` and every profile field grant no admin access —
+// a claim-only caller is refused like any organizer (legacyAdminClaimOnly only picks its message).
 
 import { adminAuth }        from '@/lib/firebase/admin'
 import type { DecodedIdToken } from 'firebase-admin/auth'
@@ -28,24 +25,27 @@ export async function resolveAdminUid(
   try { decoded = await adminAuth.verifyIdToken(token, true) }
   catch { return null }
 
-  if (decoded.admin === true) return decoded.uid
-  if (isAdminUid(decoded.uid)) return decoded.uid
-
-  return null
+  return isAdminUid(decoded.uid) ? decoded.uid : null
 }
 
 /**
- * MC-09 · The narrower of the two admin mechanisms, for actions that CREATE value.
- *
- * `resolveAdminUid` accepts either the `admin: true` claim or `ADMIN_UIDS`. This accepts
- * only the second. That is a real distinction rather than a label: the claim is data in
- * Firebase and can be set by anything holding admin credentials, whereas `ADMIN_UIDS` is
- * deployment configuration and changing it requires a deploy. Minting credits out of nothing
- * is the one Media Credits operation with no counterparty — no payment, no refund request —
- * so it is gated on the mechanism that a compromised admin session cannot widen.
- *
- * Deliberately NOT a new role, claim or permission matrix: it composes the two checks that
- * already exist. Every other admin route keeps using `resolveAdminUid` unchanged.
+ * RD-SEC-01 · Diagnostics only — NEVER an authorization input. True when the caller holds the
+ * legacy `admin: true` claim but is not in ADMIN_UIDS, so a refusal can say "Super Admin required"
+ * instead of a bare Forbidden. Grants nothing.
+ */
+export async function legacyAdminClaimOnly(authHeader: string | null): Promise<boolean> {
+  const token = (authHeader ?? '').replace('Bearer ', '').trim()
+  if (!token) return false
+  try {
+    const decoded = await adminAuth.verifyIdToken(token, true)
+    return decoded.admin === true && !isAdminUid(decoded.uid)
+  } catch { return false }
+}
+
+/**
+ * MC-09 · Super Admin (ADMIN_UIDS). Since RD-SEC-01 `resolveAdminUid` is ADMIN_UIDS-only too, so
+ * the two are equivalent; the explicit re-check stays so that a future widening of
+ * `resolveAdminUid` can never silently widen the financial routes with it.
  */
 export async function resolveSuperAdminUid(
   authHeader: string | null,

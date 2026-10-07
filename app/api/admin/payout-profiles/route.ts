@@ -12,6 +12,7 @@
 import { NextRequest, NextResponse }           from 'next/server'
 import { adminDb }                             from '@/lib/firebase/admin'
 import { resolveAdminUid }                     from '@/lib/admin/auth'
+import { readVendorPreparationStatus, readCashfreeVendorId } from '@/lib/payout/vendorStatus'
 import type { OrganizerPayoutProfileDoc }      from '@/lib/payout/types'
 import type {
   AdminPayoutProfileSummary,
@@ -103,6 +104,13 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
         verifiedAt:          tsToISO(d.verifiedAt),
         verifiedBy:          d.verifiedBy    ?? null,
         rejectionNote:       d.rejectionNote ?? null,
+        // Phase C — LOCAL vendor preparation. Read through the safe reader so an absent or
+        // malformed value presents as `not_started` rather than as reviewed.
+        vendorStatus:        readVendorPreparationStatus(d.vendorStatus),
+        // Whether a Cashfree vendor EXISTS, as a boolean. The id itself is an external
+        // account identifier with no purpose in a list view, so it is not sent.
+        hasCashfreeVendor:   readCashfreeVendorId(d.cashfreeVendorId) !== null,
+        vendorReviewedAt:    tsToISO(d.vendorReviewedAt),
         createdAt:           tsToISO(d.createdAt),
         updatedAt:           tsToISO(d.updatedAt),
       } satisfies AdminPayoutProfileSummary

@@ -3,7 +3,7 @@
 
 import { NextRequest, NextResponse } from 'next/server'
 import { authorizeAnyWorkspace } from '@/lib/team/workspace'
-import { getReportExportJob, toExportJobView, type ReportExportJobView } from '@/lib/reports/exportJob'
+import { getReportExportJob, permissionForExportJob, toExportJobView, type ReportExportJobView } from '@/lib/reports/exportJob'
 
 export type GetReportExportResponse =
   | { success: true;  job: ReportExportJobView }
@@ -18,6 +18,13 @@ export async function GET(
 
   const job = await getReportExportJob(jobId)
   if (!job || job.organizerUid !== authz.workspaceUid) {
+    return NextResponse.json({ success: false, error: 'Export not found' }, { status: 404 })
+  }
+  // RD-ANALYTICS-12-03 · the report's own permission, re-checked. Polling a job exposes its
+  // kind, filename and row count, so workspace membership alone was never enough. 404 rather
+  // than 403 for the same reason as the download route: the caller supplied only a jobId.
+  const need = permissionForExportJob(job)
+  if (!need || !authz.permissions.includes(need)) {
     return NextResponse.json({ success: false, error: 'Export not found' }, { status: 404 })
   }
   return NextResponse.json({ success: true, job: toExportJobView(job) }, { headers: { 'Cache-Control': 'no-store' } })

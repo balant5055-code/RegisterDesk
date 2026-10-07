@@ -3,7 +3,7 @@
 import { useState } from 'react'
 import { ArrowLeft, CheckCircle, Download, Eye, Heart, Loader2 } from 'lucide-react'
 import { cn } from '@/lib/utils/cn'
-import { buttonVariants } from '@/components/ui/button'
+import { marketingButton } from '@/lib/marketing/theme'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -301,7 +301,7 @@ export function CampaignDetailClient({ settings, campaignSlug, campaignTitle }: 
                 target="_blank"
                 rel="noopener noreferrer"
                 className={cn(
-                  buttonVariants({ variant: 'outline' }),
+                  marketingButton({ variant: 'outline' }),
                   'flex-1 gap-1.5 text-sm',
                 )}
               >
@@ -312,7 +312,7 @@ export function CampaignDetailClient({ settings, campaignSlug, campaignTitle }: 
                 href={`/api/donations/receipt/${successData.receiptId}?token=${successData.receiptToken}`}
                 download
                 className={cn(
-                  buttonVariants({ variant: 'outline' }),
+                  marketingButton({ variant: 'outline' }),
                   'flex-1 gap-1.5 text-sm',
                 )}
               >
@@ -325,7 +325,7 @@ export function CampaignDetailClient({ settings, campaignSlug, campaignTitle }: 
           <button
             type="button"
             onClick={handleReset}
-            className={cn(buttonVariants({ variant: 'outline' }), 'mt-1 w-full')}
+            className={cn(marketingButton({ variant: 'outline' }), 'mt-1 w-full')}
           >
             Donate Again
           </button>
@@ -503,7 +503,7 @@ export function CampaignDetailClient({ settings, campaignSlug, campaignTitle }: 
             type="submit"
             disabled={isLoading}
             className={cn(
-              buttonVariants({ variant: 'primary' }),
+              marketingButton({ emphasis: 'gradient', variant: 'primary' }),
               'mt-1 w-full gap-2 py-3 text-base disabled:cursor-not-allowed disabled:opacity-50',
             )}
           >
@@ -595,7 +595,7 @@ export function CampaignDetailClient({ settings, campaignSlug, campaignTitle }: 
         disabled={!isValidAmount}
         onClick={() => { if (isValidAmount) setStep('details') }}
         className={cn(
-          buttonVariants({ variant: 'primary' }),
+          marketingButton({ emphasis: 'gradient', variant: 'primary' }),
           'w-full gap-2 py-3 text-base disabled:cursor-not-allowed disabled:opacity-50',
         )}
       >

@@ -12,7 +12,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import type { LucideIcon } from 'lucide-react'
 import {
-  Camera, Coins, HardDrive, Images, Layers, Settings2, Sparkles, Upload, Wand2, Wrench,
+  Camera, HardDrive, Images, Layers, Settings2, Sparkles, Upload, Wand2, Wrench,
 } from 'lucide-react'
 import { StudioNavCard } from './MediaStudioShell'
 import { ROUTES } from '@/config/navigation'
@@ -55,12 +55,8 @@ const ENTRIES: HubEntry[] = [
     icon: HardDrive, title: 'Storage Usage', href: ROUTES.MEDIA_STUDIO_STORAGE,
     description: 'Storage used, photo count, compression savings and average file size.',
   },
-  {
-    // MC-08.1 · Before this, Credits was reachable ONLY from the Import page's low-balance
-    // link — an organizer with a healthy balance had no way to find it at all.
-    icon: Coins, title: 'Credits', href: ROUTES.MEDIA_STUDIO_CREDITS,
-    description: 'Balance, purchases, transaction history and upload usage.',
-  },
+  // RD-PHOTO-01 — no Credits tile: Media Studio sells nothing. Photo capacity is bought per event
+  // on License & Services and shown on Import Media / Storage Usage.
   {
     icon: Settings2, title: 'Settings', href: ROUTES.MEDIA_STUDIO_SETTINGS,
     description: 'Default compression profile, renditions to generate, and visibility.',

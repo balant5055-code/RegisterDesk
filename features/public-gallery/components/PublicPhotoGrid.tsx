@@ -9,6 +9,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Camera, Check, Copy, Download, Loader2, Share2 } from 'lucide-react'
+import { marketingButtonSkin } from '@/lib/marketing/theme'
 import { Button, EmptyState } from '@/components/ui'
 import { cn } from '@/lib/utils/cn'
 import { photoAltText } from '@/features/public-gallery/utils/projection'
@@ -165,11 +166,11 @@ export function PublicPhotoGrid({
         </p>
         <div className="flex flex-wrap gap-2">
           {canNativeShare && (
-            <Button size="sm" variant="outline" onClick={() => void nativeShare()}>
+            <Button size="sm" variant="outline" className={marketingButtonSkin.ring} onClick={() => void nativeShare()}>
               <Share2 className="size-4" aria-hidden /> Share
             </Button>
           )}
-          <Button size="sm" variant="outline" onClick={() => void copyLink()}>
+          <Button size="sm" variant="outline" className={marketingButtonSkin.ring} onClick={() => void copyLink()}>
             {copied ? <Check className="size-4" aria-hidden /> : <Copy className="size-4" aria-hidden />}
             {copied ? 'Link copied' : 'Copy link'}
           </Button>
@@ -189,7 +190,7 @@ export function PublicPhotoGrid({
               className={cn(
                 'block w-full overflow-hidden rounded-xl border border-border bg-muted',
                 'transition-opacity hover:opacity-90',
-                'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2',
+                'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-action focus-visible:ring-offset-2',
               )}
             >
               {/* A plain <img>: the source is a durable public object-storage URL already
@@ -237,7 +238,7 @@ export function PublicPhotoGrid({
       {/* Both the trigger for infinite scroll and the accessible way through it. */}
       <div ref={sentinelRef} className="flex justify-center py-2">
         {cursor ? (
-          <Button variant="outline" size="sm" disabled={busy} onClick={() => void loadMore()}>
+          <Button variant="outline" size="sm" className={marketingButtonSkin.ring} disabled={busy} onClick={() => void loadMore()}>
             {busy && <Loader2 className="size-4 animate-spin" aria-hidden />}
             {busy ? 'Loading…' : 'Load more photos'}
           </Button>

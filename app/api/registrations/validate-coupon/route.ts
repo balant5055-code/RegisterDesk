@@ -7,7 +7,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getEventBySlug }            from '@/lib/firebase/firestore/events'
 import { validateCoupon }            from '@/lib/coupons/validate'
-import { resolveEffectivePassPricePaise } from '@/lib/pricing/earlyBird'
+import { resolveEffectivePassPricePaise, eventTimezone } from '@/lib/pricing/earlyBird'
 import { checkRateLimit, getClientIp } from '@/lib/rateLimit'
 import { getFeatureFlags }           from '@/lib/config/resolveFeatureFlags'
 
@@ -85,7 +85,7 @@ export async function POST(
   // while active, else regular. Previously this used the raw regular `pass.price`, so
   // during an active early bird the preview discounted a higher base than the charge,
   // making the amount shown at checkout differ from the amount charged.
-  const originalPaise = resolveEffectivePassPricePaise(pass, Date.now())
+  const originalPaise = resolveEffectivePassPricePaise(pass, Date.now(), eventTimezone(event))
 
   const result = await validateCoupon(slug, couponCode, passId, originalPaise)
 

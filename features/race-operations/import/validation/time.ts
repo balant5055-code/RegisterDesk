@@ -20,6 +20,18 @@ export const MS_PER_HOUR   = 60 * MS_PER_MINUTE
  *  cell) being accepted as a 900-hour finish time. Covers multi-day ultras. */
 export const MAX_RACE_DURATION_MS = 240 * MS_PER_HOUR   // 10 days
 
+// ─── RD-RACEOPS-RESULTS-04 · three different questions, three parsers ─────────
+// `parseRaceTime`      an overall RESULT. Zero is refused — nobody finishes a race in 0:00,
+//                      so a 0 there is a blank or broken cell, and 02E's rule that an
+//                      unreadable result must never become a ranked finish still holds.
+// `parseSplitElapsed`  a CHECKPOINT elapsed time. Zero IS valid: every provider writes the
+//                      Start split as 0:00 (Provider A, 03 audit). Same forms otherwise.
+// `parseTimeOfDay`     a WALL CLOCK reading. Returned as a normalised "HH:MM:SS" STRING, not
+//                      milliseconds, because it is not a duration — "06:28:51" would parse
+//                      as a 6-hour elapsed time through either parser above, and a split
+//                      table showing a 6-hour first segment is the exact failure 02E closed
+//                      for headings. Hours must be 0–23; anything else is not a clock time.
+
 export type TimeParseFailure =
   | 'empty'
   | 'unparseable'
@@ -82,6 +94,60 @@ export function parseRaceTime(raw: string | null | undefined): TimeParseResult {
  * is present). Used by the preview so a normalised value can be shown beside the
  * organizer's raw one.
  */
+// ─── RD-RACEOPS-RESULTS-04 · split elapsed time (zero allowed) ────────────────
+
+/**
+ * Parses a checkpoint's elapsed time. Identical to `parseRaceTime` except that `0:00` —
+ * the Start split — is a valid answer rather than 'out_of_range'.
+ */
+export function parseSplitElapsed(raw: string | null | undefined): TimeParseResult {
+  const value = (raw ?? '').trim()
+  if (value === '') return { ok: false, reason: 'empty' }
+
+  // '0', '0:00', '00:00:00' and '0.0' all mean "at the start line".
+  if (/^0+(?:[:.,]0+)*$/.test(value)) return { ok: true, ms: 0 }
+
+  return parseRaceTime(value)
+}
+
+// ─── RD-RACEOPS-RESULTS-04 · time of day (a clock, never a duration) ──────────
+
+/** HH:MM(:SS) with an optional fraction and an optional AM/PM marker. */
+const TIME_OF_DAY_RE = /^([01]?\d|2[0-3]):([0-5]\d)(?::([0-5]\d))?(?:[.,]\d{1,3})?$/
+const TIME_OF_DAY_12H_RE = /^(0?[1-9]|1[0-2]):([0-5]\d)(?::([0-5]\d))?(?:[.,]\d{1,3})?\s*(am|pm)$/i
+
+export type TimeOfDayResult =
+  | { ok: true;  value: string }          // normalised "HH:MM:SS"
+  | { ok: false; reason: 'empty' | 'unparseable' }
+
+/**
+ * Parses a wall-clock reading and returns it NORMALISED as "HH:MM:SS".
+ *
+ * A string, deliberately: the only honest thing to say about "06:28:51" without the event's
+ * date and timezone is the clock reading itself. Storing it as milliseconds would make it
+ * indistinguishable from an elapsed time to every later reader.
+ */
+export function parseTimeOfDay(raw: string | null | undefined): TimeOfDayResult {
+  const value = (raw ?? '').trim()
+  if (value === '') return { ok: false, reason: 'empty' }
+
+  const pm = TIME_OF_DAY_12H_RE.exec(value)
+  if (pm) {
+    const h12 = Number(pm[1]) % 12
+    const hours = pm[4].toLowerCase() === 'pm' ? h12 + 12 : h12
+    return { ok: true, value: pad(hours, Number(pm[2]), Number(pm[3] ?? 0)) }
+  }
+
+  const m = TIME_OF_DAY_RE.exec(value)
+  if (!m) return { ok: false, reason: 'unparseable' }
+  return { ok: true, value: pad(Number(m[1]), Number(m[2]), Number(m[3] ?? 0)) }
+}
+
+function pad(h: number, m: number, s: number): string {
+  const two = (n: number) => String(n).padStart(2, '0')
+  return `${two(h)}:${two(m)}:${two(s)}`
+}
+
 export function formatRaceTime(ms: number): string {
   if (!Number.isFinite(ms) || ms < 0) return '—'
   const total   = Math.round(ms)

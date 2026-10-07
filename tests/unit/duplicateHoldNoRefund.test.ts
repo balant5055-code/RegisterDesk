@@ -66,7 +66,8 @@ vi.mock('@/lib/razorpay/client', () => ({
 }))
 
 vi.mock('@/lib/firebase/firestore/paymentIntents', () => ({
-  markPaymentIntentFailed: async (orderId: string, reason?: string) => { intentFailed.push({ orderId, reason }) },
+  // RD-FIN-01 · returns true = marked (false would mean the intent was already paid).
+  markPaymentIntentFailed: async (orderId: string, reason?: string) => { intentFailed.push({ orderId, reason }); return true },
   updatePaymentIntentRefund: async () => {},
 }))
 
@@ -93,56 +94,66 @@ beforeEach(() => {
   holdAlreadyExists = false; refundThrows = false
 })
 
-describe('1 · ONLY the duplicate branches bypass the refund', () => {
-  it('DuplicateRegistrationError routes to holdForReview, not refuse', () => {
-    expect(SRC).toMatch(/if \(err instanceof DuplicateRegistrationError\)\s+return holdForReview\(err\.reason\)/)
-  })
+// ═══ SUPERSEDED BY RD-PAYMENT-REFUND-AUTHORITY-02 ════════════════════════════
+// Blocks 1 and 2 used to assert the opposite of the rule that now holds: that a duplicate
+// was the ONLY refusal which skipped the refund, and that `refuse()`/`refundInFull()` were
+// deliberately left refunding for the other seven reasons. That was true, and it was the
+// defect — a transient Firestore error auto-refunded a captured payment.
+//
+// The assertions are inverted rather than deleted. The file's job is unchanged: pin what
+// happens to money on a refusal. What changed is the answer.
 
+describe('1 · NO refusal branch refunds — the duplicate case is now the rule, not the exception', () => {
   it.each([
-    ['CapacityExceededError', /if \(err instanceof CapacityExceededError\)\s+return refuse\(/],
-    ['CouponExhaustedError',  /if \(err instanceof CouponExhaustedError\)\s+return refuse\(/],
-    ['InviteCodeError',       /if \(err instanceof InviteCodeError\)\s+return refuse\(/],
-  ])('%s still routes to refuse() — its refund is unchanged', (_n, re) => {
+    ['DuplicateRegistrationError', /if \(err instanceof DuplicateRegistrationError\)\s+return holdForReview\(/],
+    ['CapacityExceededError',      /if \(err instanceof CapacityExceededError\)\s+return holdForReview\(/],
+    ['CouponExhaustedError',       /if \(err instanceof CouponExhaustedError\)\s+return holdForReview\(/],
+    ['InviteCodeError',            /if \(err instanceof InviteCodeError\)\s+return holdForReview\(/],
+  ])('%s holds instead of refunding', (_n, re) => {
     expect(SRC).toMatch(re)
   })
 
-  it('ticket-code exhaustion and transaction errors still refuse()', () => {
-    expect(SRC).toMatch(/return refuse\('ticket_code_exhausted'\)/)
-    expect(SRC).toMatch(/return refuse\('transaction_error'\)/)
+  it('ticket-code exhaustion holds, and a transient transaction error DEFERS', () => {
+    expect(SRC).toMatch(/return holdForReview\('ticket_code_exhausted'\)/)
+    // P0: deferred, not held and certainly not refunded — the capture sweep retries it.
+    expect(SRC).toMatch(/kind: 'deferred', reason: 'transaction_error'/)
   })
 
-  it('the gate-blocked path still refunds in full', () => {
+  it('the gate-blocked path records a hold instead of refunding', () => {
     expect(SRC).toMatch(/gate_blocked/)
-    expect(SRC).toMatch(/await refundInFull\(orderId, paymentId, intent\.amount, `gate_blocked/)
+    expect(SRC).toMatch(/recordCapturedHold\(orderId, paymentId, intent\.amount, `gate_blocked/)
   })
 })
 
-describe('2 · refuse() and refundInFull() were not globally changed', () => {
-  it('refuse() still marks the intent failed AND refunds in full', () => {
-    const body = SRC.slice(SRC.indexOf('async function refuse('))
-    expect(body).toMatch(/await markPaymentIntentFailed\(orderId, reason\)/)
-    expect(body).toMatch(/await refundInFull\(orderId, paymentId, intent\.amount, reason, refundCtx\)/)
+describe('2 · the refund machinery is GONE from settlement, not merely unused', () => {
+  it('there is no refuse() helper left to call', () => {
+    expect(SRC).not.toMatch(/async function refuse\(/)
   })
 
-  it('refundInFull() still calls the gateway and still records a failedRefunds fallback', () => {
-    const body = SRC.slice(SRC.indexOf('async function refundInFull('), SRC.indexOf('// ─── Duplicate hold'))
-    expect(body).toMatch(/razorpay\.payments\.refund\(paymentId/)
-    expect(body).toMatch(/status: 'open'/)         // genuine failed refunds stay 'open'
-    expect(body).not.toMatch(/duplicate_hold/)     // and are never tagged as a hold
+  it('there is no refundInFull() helper left to call', () => {
+    expect(SRC).not.toMatch(/async function refundInFull\(/)
   })
 
-  it('holdForReview never calls refundInFull', () => {
-    const body = SRC.slice(SRC.indexOf('async function holdForReview('), SRC.indexOf('// Mark failed + refund in full'))
+  it('the module never reaches the gateway refund API at all', () => {
+    // The strongest statement available here: not "the refusal branches avoid it", but
+    // "no line in this module can refund". Deleting the helper is what makes that true —
+    // a disabled helper would be one edit from coming back.
+    const code = SRC.replace(/\/\*[\s\S]*?\*\//g, '')
+      .split('\n').filter(l => !l.trim().startsWith('//')).join('\n')
+    expect(code).not.toMatch(/payments\.refund\s*\(/)
+  })
+
+  it('holdForReview marks the intent terminal and writes the hold, and touches no gateway', () => {
+    const body = SRC.slice(SRC.indexOf('async function holdForReview('))
     expect(body).toMatch(/await markPaymentIntentFailed\(orderId, reason\)/)
-    expect(body).toMatch(/await recordDuplicateHold\(/)
-    expect(body).not.toMatch(/refundInFull/)
+    expect(body).toMatch(/await recordCapturedHold\(/)
     expect(body).not.toMatch(/razorpay/)
   })
 })
 
 describe('3 · the hold record is unmistakable and idempotent', () => {
   const hold = async (orderId = 'order_1') => {
-    // recordDuplicateHold is internal; drive it through the same collection contract.
+    // recordCapturedHold is internal; drive it through the same collection contract.
     const { adminDb } = await import('@/lib/firebase/admin')
     await (adminDb as unknown as { collection: (n: string) => { doc: (i: string) => { create: (d: Doc) => Promise<void> } } })
       .collection('failedRefunds').doc(`duplicate_hold_${orderId}`)
@@ -150,29 +161,32 @@ describe('3 · the hold record is unmistakable and idempotent', () => {
       .catch(() => {})
   }
 
-  it('is written with kind=duplicate_hold and status=review', () => {
-    // Asserted against the source so the exact stored shape is pinned.
-    const body = SRC.slice(SRC.indexOf('async function recordDuplicateHold('))
-    expect(body).toMatch(/kind:\s+'duplicate_hold'/)
+  it('is written with the caller-supplied kind and status=review', () => {
+    // The writer is now shared by both hold kinds, so `kind` arrives as a parameter
+    // instead of being hard-coded. `status: 'review'` is the part that must never move —
+    // the admin retry endpoint only accepts 'open', which is what keeps a hold out of the
+    // refund path.
+    const body = SRC.slice(SRC.indexOf('async function recordCapturedHold('))
+    expect(body).toMatch(/\bkind,/)
     expect(body).toMatch(/status:\s+'review'/)
     expect(body).toMatch(/orderId, paymentId, amountPaise: amount, reason,/)
     expect(body).toMatch(/eventSlug: ctx\.eventSlug, attendeeEmail: ctx\.attendeeEmail/)
   })
 
   it('uses a DETERMINISTIC id so a replay cannot open a second hold', async () => {
-    expect(SRC).toMatch(/doc\(`duplicate_hold_\$\{orderId\}`\)/)
+    expect(SRC).toMatch(/doc\(`\$\{kind\}_\$\{orderId\}`\)/)
     await hold(); await hold()                    // replay
     expect(holdCreates).toHaveLength(1)
   })
 
   it('uses create(), not add() — add() would mint a new doc on every replay', () => {
-    const body = SRC.slice(SRC.indexOf('async function recordDuplicateHold('))
+    const body = SRC.slice(SRC.indexOf('async function recordCapturedHold('))
     expect(body).toMatch(/await ref\.create\(/)
     expect(body).not.toMatch(/\.add\(/)
   })
 
   it('swallows ALREADY_EXISTS quietly — a replay is expected, not an incident', () => {
-    const body = SRC.slice(SRC.indexOf('async function recordDuplicateHold('))
+    const body = SRC.slice(SRC.indexOf('async function recordCapturedHold('))
     expect(body).toMatch(/code === 6 \|\| code === 'already-exists'/)
   })
 })
@@ -187,9 +201,13 @@ describe('4 · zero Razorpay refunds on the duplicate path', () => {
     expect(refundCalls).toEqual([])
   })
 
-  it('the settlement outcome for a duplicate is `held`, not `refunded`', () => {
-    expect(SRC).toMatch(/return \{ kind: 'held', reason \}/)
-    expect(SRC).toMatch(/\| \{ kind: 'held';\s+reason: 'DUPLICATE_EMAIL' \| 'DUPLICATE_MOBILE' \}/)
+  it('the settlement outcome for a duplicate is `held`, and `refunded` no longer exists', () => {
+    expect(SRC).toMatch(/kind: 'held', reason \}/)
+    // The union was widened from the two duplicate reasons to every refusal reason, and the
+    // `refunded` member was removed outright — there is no outcome left that means
+    // "we gave the money back".
+    expect(SRC).toMatch(/\| \{ kind: 'held';\s+reason: SettlementRefusal/)
+    expect(SRC).not.toMatch(/kind: 'refunded'/)
   })
 
   it('the module still exports the settlement entry point unchanged', () => {
@@ -206,9 +224,13 @@ describe('5 · the attendee is not told a refund was initiated', () => {
     expect(held).not.toMatch(/refund has been initiated/i)
   })
 
-  it('normal refund messages are untouched', () => {
-    expect(VERIFY).toMatch(/this event is now full\. A full refund has been initiated/)
-    expect(VERIFY).toMatch(/no longer available\. A full refund has been initiated/)
+  it('NO response promises a refund any more — nothing automatic issues one', () => {
+    // Inverted by RD-PAYMENT-REFUND-AUTHORITY-02. These messages used to be correct: the
+    // capacity and pass-unavailable branches really did refund. They no longer do, so the
+    // copy would be a false promise to someone who has actually been charged.
+    expect(VERIFY).not.toMatch(/A full refund has been initiated/)
+    expect(VERIFY).toMatch(/under review/i)
+    expect(VERIFY).toMatch(/do not pay again/i)
   })
 
   it('the old duplicate "refund initiated" copy is gone', () => {
@@ -220,11 +242,16 @@ describe('6 · a duplicate hold can never be retried as a refund', () => {
   const RETRY = readFileSync(join(process.cwd(), 'app/api/admin/failed-refunds/[id]/retry/route.ts'), 'utf8')
 
   it('the retry endpoint refuses kind=duplicate_hold explicitly', () => {
-    expect(RETRY).toMatch(/if \(d\.kind === 'duplicate_hold'\)/)
+    // RD-PHASE4-S4 · D4 — still refused, unless a Super Admin approved THIS hold for refund in the
+    // review workflow (recorded as `reviewApproval`).
+    // RD-FIN-02 · plus the second-capture hold (B6) — refundable only after review approval, like the others.
+    expect(RETRY).toMatch(/const HOLD_KINDS = new Set\(\['duplicate_hold', 'settlement_hold', 'duplicate_payment_hold'\]\)/)
+    expect(RETRY).toMatch(/if \(d\.kind && HOLD_KINDS\.has\(d\.kind\) && !d\.reviewApproval\?\.by\)/)
   })
 
   it('and still refuses anything whose status is not open — the pre-existing guard', () => {
-    expect(RETRY).toMatch(/if \(d\.status !== 'open'\)/)
+    // RD-EVENT-COMMERCE-02 — 'pending' is the legacy licensing spelling of 'open'; nothing else passes.
+    expect(RETRY).toMatch(/if \(d\.status !== 'open' && d\.status !== 'pending'\)/)
   })
 
   it('the kind guard runs BEFORE the gateway call', () => {

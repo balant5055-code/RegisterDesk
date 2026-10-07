@@ -26,6 +26,9 @@ export const SAFE_EDIT_KEYS: readonly string[] = [
   'speakers', 'sponsors', 'galleryImages',
   'metaTitle', 'metaDescription', 'keywords',
   'passCapacityUpdates',
+  // RD-PHASE4-S3 · Q1 — `feeModel` is NO LONGER here: fee collection is fixed to organizer-pays and
+  // organizers do not choose it (it was organizer-editable under RD-EVENT-COMMERCE-05E). The edit
+  // route refuses it with 403 PRICING_NOT_ORGANIZER_EDITABLE.
 ] as const
 
 /**

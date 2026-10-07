@@ -13,8 +13,6 @@ import {
   EVENT_LICENSE_TIERS,
   EVENT_LICENSE_TIERS_V2,
   LICENSE_VERSION_V2,
-  CURRENT_LICENSE_VERSION,
-  defaultLicenseTierForVersion,
   getEventLicenseDefinition,
   getEventLicenseDefinitionV2,
   isEventLicenseTier,
@@ -70,26 +68,6 @@ export async function getLicenseCatalog(): Promise<LicenseCatalog> {
 export async function getEffectiveLicenseDefinition(tier: EventLicenseTier): Promise<EventLicenseDefinition> {
   const licensing = await businessConfig.getSection('licensing')
   return applyLicenseOverride(getEventLicenseDefinition(tier), (licensing.tierOverrides ?? {})[tier])
-}
-
-/** Tiers that are self-serve purchasable under the effective catalog (paid + not
- *  contact-sales). Derived, so it tracks price overrides automatically. */
-export async function getEffectivePurchasableTiers(): Promise<EventLicenseTier[]> {
-  const catalog = await getLicenseCatalog()
-  return EVENT_LICENSE_TIERS.filter(t => !catalog[t].contactSales && catalog[t].licensePricePaise > 0)
-}
-
-/**
- * The registration cap assumed for a FREE event's fill / "nearly full" surfaces — the
- * CURRENT version's free tier `maxRegistrations` (config-resolved): V1 Starter (100) today,
- * V2 Free (200) after the cutover. NOT a hardcoded literal. Returns null when the free tier
- * is unlimited. Single source of truth for the free-event capacity heuristic across routes.
- */
-export async function getFreeEventCapacity(): Promise<number | null> {
-  const freeTier = defaultLicenseTierForVersion(CURRENT_LICENSE_VERSION)
-  const def = await getEffectiveDefinitionForVersion(freeTier, CURRENT_LICENSE_VERSION)
-  const cap = def?.limits.maxRegistrations ?? UNLIMITED
-  return Number.isFinite(cap) ? cap : null
 }
 
 // ─── RD-LICENSE-01B — V2 catalog resolution (additive, no cutover) ──────────────────

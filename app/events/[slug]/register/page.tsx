@@ -6,8 +6,8 @@
 
 import { notFound }            from 'next/navigation'
 import Link                    from 'next/link'
-import { getEventBySlug }      from '@/lib/firebase/firestore/events'
-import { resolveEffectivePriceRupees } from '@/lib/pricing/earlyBird'
+import { findPublicEvent }     from '@/lib/events/publicEventAccess'
+import { resolveEffectivePriceRupees, eventTimezone } from '@/lib/pricing/earlyBird'
 import { checkRegistrationGate, GATE_REASON_LABELS } from '@/lib/registrations/gate'
 import { resolveMilestoneAlert } from '@/lib/events/milestoneAlerts'
 import type { MilestoneAlert } from '@/lib/events/milestoneAlerts'
@@ -22,7 +22,7 @@ import { WaitlistJoinClient }  from './WaitlistJoinClient'
 // RD-RT4.0 — presentation only. `registerTheme` is intentionally NOT a client module, so
 // these are real strings here rather than client references; CheckoutTopBar is the one
 // client component the server screens render.
-import { CheckoutTopBar }      from './RegistrationUI'
+import { CheckoutTopBar, CheckoutBreadcrumb, CheckoutFooter } from './RegistrationUI'
 import { CANVAS_STYLE, CANVAS, PAGE, PANEL, PANEL_HEAD, PANEL_BODY, FOCUS_RING } from './registerTheme'
 import { buttonVariants }      from '@/components/ui/button'
 import { Ticket, ArrowRight, ShieldCheck, CalendarX2 } from 'lucide-react'
@@ -31,6 +31,7 @@ import type {
   ConditionalRule,
   RegistrationFormDraft,
 } from '@/components/wizard/registrationFormConfig'
+import { passAgeLimits } from '@/lib/passes/passRaceRules'
 
 // RD-LAUNCH-07 — registration links are shared constantly (WhatsApp, Slack, DMs) and
 // previously produced a preview with no title, description or image at all. Built from
@@ -39,7 +40,7 @@ export async function generateMetadata(
   { params }: { params: Promise<{ slug: string }> },
 ): Promise<Metadata> {
   const { slug } = await params
-  const event = await getEventBySlug(slug)
+  const event = await findPublicEvent(slug)
   const name  = typeof (event?.eventDetails as { info?: { name?: string } } | null)?.info?.name === 'string'
     ? (event!.eventDetails as { info: { name: string } }).info.name
     : 'Event'
@@ -85,7 +86,7 @@ interface PassPublic {
 
 // ─── Pass extraction ──────────────────────────────────────────────────────────
 
-function extractPasses(pricing: Record<string, unknown> | null): PassPublic[] {
+function extractPasses(pricing: Record<string, unknown> | null, tz?: string): PassPublic[] {
   if (!pricing) return []
   const raw = Array.isArray(pricing.passes) ? pricing.passes as Record<string, unknown>[] : []
   const now = Date.now()
@@ -103,6 +104,7 @@ function extractPasses(pricing: Record<string, unknown> | null): PassPublic[] {
           earlyBirdEndDate: typeof p.earlyBirdEndDate === 'string' ? p.earlyBirdEndDate : undefined,
         },
         now,
+        tz,   // RD-CE-FIX — the cutoff is in the event timezone (same as create-order charges)
       )
       return {
         id:          String(p.id ?? ''),
@@ -123,13 +125,8 @@ function extractPasses(pricing: Record<string, unknown> | null): PassPublic[] {
         ...(Array.isArray(p.milestoneAlerts)
           ? { milestoneAlerts: p.milestoneAlerts as PassPublic['milestoneAlerts'] }
           : {}),
-        ...(() => {
-          const rd = p.raceDetails as Record<string, unknown> | null | undefined
-          return {
-            minAge: typeof rd?.minAge === 'number' ? rd.minAge : null,
-            maxAge: typeof rd?.maxAge === 'number' ? rd.maxAge : null,
-          }
-        })(),
+        // RD-CE-FIX H2 · the age window only — a team size is never shown or enforced as an age.
+        ...passAgeLimits(p as Record<string, unknown>),
       }
     })
 }
@@ -151,11 +148,11 @@ function BlockedScreen({
     : 'Registration is not available'
 
   return (
-    <div style={CANVAS_STYLE} className={`min-h-screen ${CANVAS}`}>
+    <div style={CANVAS_STYLE} className={`flex min-h-screen flex-col ${CANVAS}`}>
       <CheckoutTopBar eventSlug={eventSlug} secure={false} />
-      <div className={`${PAGE} flex min-h-[calc(100vh-3.5rem)] items-center justify-center py-12`}>
+      <div className={`${PAGE} flex flex-1 items-center justify-center py-12`}>
         <div className={`${PANEL} ${PANEL_BODY} w-full max-w-md text-center`}>
-          <div className="mx-auto mb-4 flex size-12 items-center justify-center rounded-2xl bg-muted text-muted-foreground">
+          <div className="mx-auto mb-4 flex size-12 items-center justify-center rounded-xl bg-muted text-muted-foreground">
             <CalendarX2 className="size-6" aria-hidden />
           </div>
           <h1 className="text-fs-lg font-bold tracking-tight text-foreground">Registration Unavailable</h1>
@@ -168,6 +165,7 @@ function BlockedScreen({
           </Link>
         </div>
       </div>
+      <CheckoutFooter />
     </div>
   )
 }
@@ -194,15 +192,16 @@ function PassSelectionScreen({
   }
 
   return (
-    <div style={CANVAS_STYLE} className={`relative min-h-screen ${CANVAS}`}>
+    <div style={CANVAS_STYLE} className={`relative flex min-h-screen flex-col ${CANVAS}`}>
       <div
         aria-hidden
         className="pointer-events-none absolute inset-x-0 top-0 h-[420px] bg-[radial-gradient(100%_100%_at_50%_0%,rgb(var(--primary-rgb)_/_0.06)_0%,transparent_70%)]"
       />
       <CheckoutTopBar eventSlug={eventSlug} secure={false} />
 
-      <div className={`${PAGE} relative py-10 sm:py-14`}>
-        <div className="mx-auto max-w-2xl">
+      <div className={`${PAGE} relative flex-1 pb-10 pt-5 sm:pb-14 sm:pt-7`}>
+        <CheckoutBreadcrumb eventSlug={eventSlug} eventName={eventName} />
+        <div className="mx-auto mt-6 max-w-2xl sm:mt-8">
           <div className="mb-7 text-center">
             <p className="text-fs-xs font-bold uppercase tracking-[0.14em] text-primary">Event Registration</p>
             <h1 className="mt-2 text-fs-xl font-bold leading-tight tracking-tight text-foreground sm:text-fs-2xl">
@@ -214,12 +213,12 @@ function PassSelectionScreen({
           </div>
 
           <div className={PANEL}>
-            <div className={`${PANEL_HEAD} flex items-center justify-between gap-3 rounded-t-2xl`}>
+            <div className={`${PANEL_HEAD} flex items-center justify-between gap-3 rounded-t-xl`}>
               <div className="flex min-w-0 items-center gap-3">
                 <span aria-hidden className="flex size-7 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary">
                   <Ticket className="size-3.5" />
                 </span>
-                <h2 className="text-fs-md font-bold leading-snug text-foreground">Choose your pass</h2>
+                <h2 className="font-display text-fs-lg font-normal text-hero-ink leading-snug">Choose your pass</h2>
               </div>
               <span className="shrink-0 text-fs-2xs font-semibold text-muted-foreground">
                 {passes.length} {passes.length === 1 ? 'option' : 'options'}
@@ -292,6 +291,7 @@ function PassSelectionScreen({
           </p>
         </div>
       </div>
+      <CheckoutFooter />
     </div>
   )
 }
@@ -308,14 +308,17 @@ export default async function RegisterPage({
   const { slug }   = await params
   const { passId } = await searchParams
 
-  const event = await getEventBySlug(slug)
+  // findPublicEvent, not a bare document read: registration used to render for a draft or
+  // taken-down event because it only checked that the document existed. The layout above
+  // has already 404'd those; this keeps the rule true if that layout ever moves.
+  const event = await findPublicEvent(slug)
   if (!event) notFound()
 
   const rawDetails  = event.eventDetails as Record<string, unknown>
   const rawInfo     = rawDetails?.info as Record<string, unknown> | null
   const eventName   = typeof rawInfo?.name === 'string' ? rawInfo.name : 'Event'
   const rawPricing  = event.pricing as Record<string, unknown> | null
-  const passes      = extractPasses(rawPricing)
+  const passes      = extractPasses(rawPricing, eventTimezone(event))
 
   // No passId → show pass picker
   if (!passId) {
@@ -422,7 +425,13 @@ export default async function RegisterPage({
   const startTime   = typeof rawSchedule?.startTime === 'string' ? rawSchedule.startTime : null
 
   const rawMedia  = rawDetails?.media as Record<string, unknown> | null
-  const bannerUrl = typeof rawMedia?.bannerUrl === 'string' ? rawMedia.bannerUrl : ''
+  // The event builder stores the poster at media.coverBanner.value — the same field the
+  // public event page reads (app/events/[slug]/page.tsx). This route only read the legacy
+  // media.bannerUrl, so for current events the poster never reached the invite screen or
+  // the summary ticket. Read the canonical field first; keep the legacy one as fallback.
+  const rawCover  = rawMedia?.coverBanner as Record<string, unknown> | null | undefined
+  const bannerUrl = (typeof rawCover?.value === 'string' && rawCover.value.trim())
+    || (typeof rawMedia?.bannerUrl === 'string' ? rawMedia.bannerUrl : '')
 
   const rawVenue    = rawDetails?.venue as Record<string, unknown> | null
   const venueType   = typeof rawVenue?.type === 'string' ? rawVenue.type : 'physical'

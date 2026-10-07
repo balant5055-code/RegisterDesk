@@ -18,7 +18,7 @@
 // can test without standing up a database.
 
 import { NextRequest, NextResponse } from 'next/server'
-import { resolveAdminUid } from '@/lib/admin/auth'
+import { requireSuperAdmin } from '@/lib/admin/financialGuard'
 import * as walletRepo from '@/features/media-credits/repositories/walletRepo'
 import * as purchaseRepo from '@/features/media-credits/repositories/purchaseRepo'
 import { sessionMetrics } from '@/features/media-credits/services/sessionCleanupService'
@@ -33,8 +33,10 @@ const DEFAULT_LIMIT = 1000
 const MAX_LIMIT     = 5000
 
 export async function GET(req: NextRequest): Promise<NextResponse> {
-  const adminUid = await resolveAdminUid(req.headers.get('authorization'))
-  if (!adminUid) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+  // RD-CLOSE — a financial read: Super Admin only (ADMIN_UIDS). A legacy `admin: true` claim
+  // alone gets 403 SUPER_ADMIN_REQUIRED (lib/admin/financialGuard.ts).
+  const superGate = await requireSuperAdmin(req)
+  if (superGate.response) return superGate.response
 
   const raw   = Number(req.nextUrl.searchParams.get('limit') ?? DEFAULT_LIMIT)
   const limit = Math.min(Math.max(1, Number.isFinite(raw) ? Math.trunc(raw) : DEFAULT_LIMIT), MAX_LIMIT)

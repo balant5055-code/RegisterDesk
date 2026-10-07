@@ -14,8 +14,8 @@ import { NextRequest, NextResponse } from 'next/server'
 import { adminDb }                    from '@/lib/firebase/admin'
 import { authorizeWorkspace }         from '@/lib/team/workspace'
 import { isEventSlugInScope }         from '@/lib/team/eventScope'
+import { isEventOpenForCheckin }      from '@/lib/checkin/readiness'
 import { resolveIdentifierConfig }    from '@/lib/identifiers/config'
-import { requireFeature }             from '@/lib/licensing/workspaceEntitlements'
 import type { RegistrationDocument }  from '@/lib/registrations/types'
 
 // Hard cap — Phase 1 caches a single event's list in one request. Events larger
@@ -71,9 +71,9 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   if (!authz.ok) return NextResponse.json({ error: authz.error }, { status: authz.status })
   const uid = authz.workspaceUid
 
-  // Plan gate — offline check-in (attendee cache) is a paid feature.
-  const feat = await requireFeature(uid, 'offlineCheckin')
-  if (!feat.ok) return NextResponse.json({ error: feat.error }, { status: feat.status })
+  // RD-CAPACITY-01 · offline check-in is no longer a paid feature. The workspace
+  // authorization above and the per-event staff scoping below are untouched: this gate only
+  // ever decided entitlement, and the bulk download it guards is still scoped and capped.
 
   const slug = req.nextUrl.searchParams.get('slug')?.trim()
   if (!slug) return NextResponse.json({ error: 'MISSING_SLUG' }, { status: 400 })
@@ -84,6 +84,14 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   // query parameter, which would be a larger disclosure than any single scan.
   if (!await isEventSlugInScope(authz, slug)) {
     return NextResponse.json({ error: 'EVENT_NOT_ASSIGNED' }, { status: 403 })
+  }
+
+  // RD-CHECKIN-2.0 — the SAME readiness rule every other check-in route applies.
+  // A cancelled, archived or moderated event must not hand a device a fresh copy of
+  // its attendee list to admit people from offline: this is the one endpoint whose
+  // output outlives the request.
+  if (!await isEventOpenForCheckin(slug)) {
+    return NextResponse.json({ error: 'EVENT_NOT_ACCEPTING_CHECKINS' }, { status: 422 })
   }
 
   // Ownership enforced by the compound filter (organizerUid + eventSlug). RD-ORGANIZER-02 P1:

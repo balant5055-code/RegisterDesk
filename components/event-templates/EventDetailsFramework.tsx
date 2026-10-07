@@ -60,7 +60,7 @@ function StandardBar({ icon: Icon, children }: { icon: LucideIcon; children: Rea
   return (
     <div className="border-b border-border/60 bg-muted/40">
       <div className={cn(EVENT_CONTAINER, STRIP_PY, 'flex items-center gap-2.5')}>
-        <Icon className="size-4 shrink-0 text-primary" aria-hidden />
+        <Icon className="size-4 shrink-0 text-action" aria-hidden />
         <p className="text-fs-xs font-semibold text-foreground">{children}</p>
       </div>
     </div>

@@ -26,14 +26,23 @@ import path from 'node:path'
 const read = (p: string) => readFileSync(path.join(process.cwd(), p), 'utf8')
 
 const LIGHTBOX = read('components/event-templates/shared/ui/ImageLightbox.tsx')
-const NAVBAR   = read('components/marketing/navigation/MarketingNavbar.tsx')
+// The public navbar is HomeNavbar (MarketingNavbar was retired with the legacy chrome).
+// Its HEADER is the z-[100] root-context element this file is about; the mobile panel
+// beneath it is z-[99], so the navbar's tier is the HIGHEST z-[N] in the file, not the first.
+const NAVBAR   = read('components/discovery/home/HomeNavbar.tsx')
 const DIALOG   = read('components/ui/Dialog.tsx')
-const HERO     = read('components/event-templates/sports/SportsHero.tsx')
+const HERO     = read('components/event-templates/sports/editorial/SportsCover.tsx')
 
 /** First `z-[N]` in a source file. */
 function zIndexOf(src: string): number | null {
   const m = /z-\[(\d+)\]/.exec(src)
   return m ? Number(m[1]) : null
+}
+
+/** Highest `z-[N]` in a source file — a component with several tiers is ranked by its top. */
+function maxZIndexOf(src: string): number | null {
+  const all = [...src.matchAll(/z-\[(\d+)\]/g)].map(m => Number(m[1]))
+  return all.length ? Math.max(...all) : null
 }
 
 describe('ImageLightbox renders through a portal', () => {
@@ -60,9 +69,9 @@ describe('ImageLightbox renders through a portal', () => {
 })
 
 describe('stacking order is correct once the portal is in place', () => {
-  it('the lightbox outranks the marketing navbar', () => {
+  it('the lightbox outranks the public navbar', () => {
     const lightbox = zIndexOf(LIGHTBOX)
-    const navbar   = zIndexOf(NAVBAR)
+    const navbar   = maxZIndexOf(NAVBAR)
     expect(lightbox, 'lightbox z-index').not.toBeNull()
     expect(navbar, 'navbar z-index').not.toBeNull()
     expect(lightbox!).toBeGreaterThan(navbar!)
@@ -70,21 +79,23 @@ describe('stacking order is correct once the portal is in place', () => {
 
   it('keeps the ORIGINAL z-index — the fix was the portal, not a bigger number', () => {
     expect(zIndexOf(LIGHTBOX)).toBe(120)
-    expect(zIndexOf(NAVBAR)).toBe(100)
+    expect(maxZIndexOf(NAVBAR)).toBe(100)
   })
 })
 
-describe('the stacking context that caused this still exists', () => {
-  it('the sports hero section is still isolated', () => {
-    // Documents WHY the portal is required. If `isolate` is ever removed the portal is
-    // still correct — but this records the original trap so it is not re-introduced by
-    // someone "simplifying" the lightbox back to an in-place render.
-    // Matches the `isolate` utility wherever it sits in the class list, rather than
-    // requiring it to be the first token. The original regex was anchored to
-    // `className="relative isolate`, so adding any earlier class — e.g. the
-    // `sports-hero` scoping hook — failed the test without the stacking context
-    // having changed at all. What matters is that `isolate` is still applied.
-    expect(HERO).toMatch(/className="[^"]*\bisolate\b/)
+describe('the hero still opens the SHARED lightbox, through the portal', () => {
+  // The original trap: SportsHero's <section> carried `isolate`, so an in-place lightbox
+  // ranked against the section's contents while the navbar painted over it from the ROOT
+  // context. The sports cover no longer opens a stacking context of its own — but the
+  // portal is still what makes z-[120] comparable to the navbar's z-[100] on EVERY page
+  // (any ancestor with transform/filter/isolation would reintroduce the trap), so what is
+  // pinned now is that the cover renders the shared ImageLightbox rather than an in-place
+  // overlay of its own, and passes the poster through the same props.
+  it('the sports cover mounts ImageLightbox for the poster and duplicates none of its logic', () => {
+    expect(HERO).toMatch(/import\s*\{\s*ImageLightbox\s*\}\s*from\s*'@\/components\/event-templates\/shared\/ui\/ImageLightbox'/)
+    expect(HERO).toContain('<ImageLightbox')
+    expect(HERO).toContain('downloadHref={bannerUrl}')
+    expect(HERO).not.toMatch(/createPortal|z-\[\d+\]/)   // no overlay of its own
   })
 })
 
@@ -156,9 +167,9 @@ describe('ImageCropperModal escapes page stacking contexts', () => {
     expect(CROPPER).toContain("typeof document === 'undefined'")
   })
 
-  it('outranks the marketing navbar', () => {
+  it('outranks the public navbar', () => {
     const cropper = zIndexOf(CROPPER_CODE)
-    const navbar  = zIndexOf(NAVBAR)
+    const navbar  = maxZIndexOf(NAVBAR)
     expect(cropper, 'cropper z-index').not.toBeNull()
     expect(cropper!).toBeGreaterThan(navbar!)
   })
@@ -206,7 +217,7 @@ describe('the photo editor behaves as a modal', () => {
     // Comment-stripped: the explanatory comment above the portal NAMES MarketingNavbar,
     // precisely to record that the fix leaves it alone. Scanning raw source would fail on
     // its own documentation.
-    expect(CROPPER_CODE).not.toMatch(/MarketingNavbar|display:\s*'none'/)
+    expect(CROPPER_CODE).not.toMatch(/MarketingNavbar|HomeNavbar|display:\s*'none'/)
   })
 })
 

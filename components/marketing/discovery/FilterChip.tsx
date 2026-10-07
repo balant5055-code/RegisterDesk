@@ -24,8 +24,8 @@ export function FilterChip({
       className={cn(
         'shrink-0 cursor-pointer rounded-full px-3.5 py-1.5 text-[12.5px] font-semibold transition-all',
         active
-          ? 'bg-primary text-white shadow-sm'
-          : 'border border-border/70 bg-card text-foreground hover:border-primary/30 hover:bg-primary/[0.04] hover:text-primary',
+          ? 'bg-action text-white shadow-sm'
+          : 'border border-border/70 bg-card text-foreground hover:border-action/30 hover:bg-action/[0.04] hover:text-action',
         className,
       )}
     >

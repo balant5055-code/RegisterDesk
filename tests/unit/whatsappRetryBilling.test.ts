@@ -99,6 +99,31 @@ vi.mock('@/lib/whatsapp', () => ({
   }),
 }))
 
+// RD-CLOSE — an accepted message is now persisted by ONE acceptance transaction
+// (lib/whatsapp/acceptance.ts → recordMessageAcceptance): charge + usage + log + status, idempotent
+// per wamid. Its real atomicity/idempotency is proven on the emulator
+// (tests/emulator/closureAcceptance.emu.test.ts). Here it is a faithful stand-in that feeds this
+// file's capture arrays: one charge per wamid; a legacy base row (from an earlier message) puts a
+// NEW wamid on `<base>__<wamid>`; the in-transaction balance re-check never drives it negative.
+const acceptedWamids = new Set<string>()
+vi.mock('@/lib/whatsapp/acceptance', async orig => ({
+  ...(await orig<typeof import('@/lib/whatsapp/acceptance')>()),
+  withPersistRetry: <T,>(fn: () => Promise<T>) => fn(),
+  recordMessageAcceptance: async (i: { wamid: string; costPaise: number; baseLedgerId: string; ledgerReferenceId: string; registrationPatch?: { patch: Doc } }) => {
+    if (acceptedWamids.has(i.wamid)) return { already: true, chargedPaise: 0, chargeSkipped: false }
+    acceptedWamids.add(i.wamid)
+    let chargedPaise = 0
+    const balance = txnWalletBalance ?? walletBalance
+    if (i.costPaise > 0 && balance >= i.costPaise) {
+      deductions.push(i.costPaise)
+      ledgerWrites.push({ id: ledgerExists ? `${i.baseLedgerId}__${i.wamid}` : i.baseLedgerId, data: { type: 'whatsapp_charge', amountPaise: i.costPaise, referenceId: i.ledgerReferenceId } })
+      chargedPaise = i.costPaise
+    }
+    if (i.registrationPatch) registrationUpdates.push(i.registrationPatch.patch)
+    return { already: false, chargedPaise, chargeSkipped: i.costPaise > 0 && chargedPaise === 0 }
+  },
+}))
+
 const { retryWhatsAppConfirmation } = await import('@/lib/email-logs/whatsappRetry')
 
 const ARGS = { registrationId: 'reg-1', organizerUid: 'org-1', eventSlug: 'evt-1', eventName: 'Marathon' }
@@ -107,7 +132,7 @@ beforeEach(() => {
   ledgerExists = false; walletBalance = 10_000; txnWalletBalance = null; sendOutcome = 'ok'
   registration = { attendee: { name: 'Balaganapathy NT', phone: '+919080452223', email: 'a@b.c' }, ticketCode: 'TK-1' }
   eventDoc = { pricing: { whatsappEnabled: true } }
-  ledgerWrites.length = 0; deductions.length = 0
+  ledgerWrites.length = 0; deductions.length = 0; acceptedWamids.clear()
   collectionsWritten.length = 0; registrationUpdates.length = 0
 })
 
@@ -145,14 +170,16 @@ describe('successful send ⇒ EXACTLY ONE ledger entry', () => {
     expect(ledgerWrites[0].data).toMatchObject({ type: 'whatsapp_charge', amountPaise: 35, referenceId: 'reg-1' })
   })
 
-  it('does NOT charge again when the registration was already billed', async () => {
-    ledgerExists = true                       // a prior successful attempt already charged
+  it('RD-CLOSE — a retry Meta accepts is a NEW message: billed once under its own wamid', async () => {
+    // Approved rule (D3): billable when Meta accepts; a retry that Meta accepts is a separate
+    // message. The registration's first message keeps `whatsapp_<reg>`; this one is `…__<wamid>`.
+    ledgerExists = true                       // an earlier, different message was already charged
     const r = await retryWhatsAppConfirmation(ARGS)
 
     expect(r.ok).toBe(true)
-    expect(ledgerWrites).toEqual([])
-    expect(deductions).toEqual([])
-    expect((r as { costPaise: number }).costPaise).toBe(0)   // reported honestly
+    expect(deductions).toEqual([35])
+    expect(ledgerWrites.map(w => w.id)).toEqual(['whatsapp_reg-1__wamid.OK'])
+    expect((r as { costPaise: number }).costPaise).toBe(35)
   })
 
   it('marks the registration sent with the new wamid', async () => {

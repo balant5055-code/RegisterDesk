@@ -51,7 +51,12 @@ export const PRINT_VARIABLES: readonly PrintVariableDef[] = [
   { token: 'company',      source: 'registration', label: 'Company',      description: 'Company / organisation.',    example: 'Acme Corp' },
   { token: 'designation',  source: 'registration', label: 'Designation',  description: 'Job title / role.',          example: 'Head of Product' },
   { token: 'category',     source: 'registration', label: 'Category',     description: 'Registration category.',     example: 'Delegate' },
-  { token: 'bibNumber',    source: 'registration', label: 'Bib Number',   description: 'Assigned race bib number.',   example: '1024' },
+  { token: 'bibNumber',    source: 'registration', label: 'Bib Number',   description: 'Assigned participant number (legacy token name).', example: '1024' },
+  // RD-BIB-01 · the SAME value under an event-type-neutral name. Additive: every
+  // existing template keeps working, and a conference no longer has to print a token
+  // called 'bib' to show a delegate number. The organizer's own word for it lives in
+  // the identifier configuration and is shown beside the token in the picker.
+  { token: 'identifier',   source: 'registration', label: 'Participant number', description: 'The number this participant was issued — bib, delegate, badge, whatever this event calls it.', example: '1024' },
   { token: 'event',        source: 'event',        label: 'Event',        description: 'Event name.',                example: 'Tech Summit 2026' },
   { token: 'eventDate',    source: 'event',        label: 'Event Date',   description: 'Event date.',                example: '15 June 2026' },
   { token: 'eventLocation',source: 'event',        label: 'Event Location',description: 'Event venue / city.',        example: 'Chennai, India' },
@@ -81,6 +86,7 @@ export function buildVariableMap(sources: PrintVariableSources): Map<string, str
     ['designation',  str(r.designation)],
     ['category',     str(r.category)],
     ['bibNumber',    str(r.bibNumber)],
+    ['identifier',   str(r.bibNumber)],   // RD-BIB-01 · one value, two token names
     ['event',        str(sources.event?.name)],
     ['eventDate',    str(sources.event?.date)],
     ['eventLocation',str(sources.event?.location)],

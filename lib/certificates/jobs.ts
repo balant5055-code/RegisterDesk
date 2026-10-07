@@ -25,6 +25,7 @@ import type { CertificateJob, CertificateTemplateDoc } from './types'
 import type { RegistrationDocument } from '@/lib/registrations/types'
 // RD-RACEOPS-01 (D3): supplies the race values for {{distance}}/{{finishTime}}/{{position}}.
 import { resolveCertificateRaceResult } from '@/features/race-operations/services/certificateResults'
+import { resolveOwnedEventSlug } from '@/lib/events/liveEventRef'
 
 // Event-level fields resolved once per process() call from the event draft.
 export interface JobEventContext {
@@ -66,11 +67,11 @@ export async function loadEventContext(
 
   const draft   = draftSnap.data() as Record<string, unknown>
   const details = (draft.eventDetails as Record<string, unknown>) ?? {}
-  const seo     = (details.seo      as Record<string, unknown>) ?? {}
   const info    = (details.info     as Record<string, unknown>) ?? {}
   const sched   = (details.schedule as Record<string, unknown>) ?? {}
 
-  const eventSlug = typeof seo.urlSlug === 'string' ? seo.urlSlug : ''
+  // RD-CE-FIX C1 · only a slug the live document proves is THIS workspace's event for THIS draft.
+  const eventSlug = (await resolveOwnedEventSlug(organizerUid, eventId, draft)) ?? ''
   if (!eventSlug) return { ok: false, code: 'not_published' }
 
   return {

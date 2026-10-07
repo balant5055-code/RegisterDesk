@@ -11,7 +11,7 @@
 //      best-effort — deliberately, so a storage hiccup cannot block an organizer from
 //      deleting a photo. But nothing retried.
 //
-// (1) is closed by `reserveAsset` writing a `pending` record before the URLs are issued.
+// (1) is closed by the photo-capacity gate writing a `pending` record before the URLs are issued.
 // (2) leaves a `deleted` record that keeps its rendition paths.
 //
 // Both are therefore FINDABLE BY STATUS, and this sweep reclaims them.

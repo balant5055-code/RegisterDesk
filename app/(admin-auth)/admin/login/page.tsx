@@ -14,119 +14,73 @@
 //   authenticateUser()  → GET /api/admin/auth-check
 //     200 → /admin/dashboard
 //     403 → sign out immediately, show "no Platform Admin access"
+//
+// ═══ 2026-09-23 · ONE COLUMN, NO PINK ════════════════════════════════════════
+// The owner retired this screen's magenta split (a --primary-gradient brand panel beside
+// the form) and asked for the luxury treatment the rest of the site now has. It is the
+// SAME composition as the public /login: a centred white column, the brand lockup, a
+// bronze-ruled small-caps eyebrow, a light serif headline, and the form in a hairline
+// panel (no shadow). LoginForm renders in its opt-in `editorial` tone: the --action
+// accent, icon-free 6px fields, and the flat brand-ramp button. The auth flow above is
+// unchanged line for line.
 
 import { useState } from 'react'
 import Link from 'next/link'
 import { motion } from 'framer-motion'
 import { signOut } from 'firebase/auth'
-import { ShieldCheck, ShieldAlert } from 'lucide-react'
+import { ShieldAlert, Lock, ArrowRight } from 'lucide-react'
 import { auth, authenticateUser, mapAuthError } from '@/lib/firebase/auth'
-import {
-  AuthShell,
-  AuthCard,
-  AuthHeader,
-  AuthFooter,
-  LoginForm,
-} from '@/components/auth'
-import { EASE, fadeUp } from '@/components/auth/authMotion'
-import { Button, buttonVariants } from '@/components/ui'
+import { LoginForm } from '@/components/auth'
+import { fadeUp } from '@/components/auth/authMotion'
+import { BrandLockup } from '@/components/marketing/BrandLockup'
+import { AUTH_CANVAS_BG } from '@/components/auth/AuthSplitLayout'
+import { Button } from '@/components/ui'
 import { ROUTES } from '@/config/navigation'
 import { cn } from '@/lib/utils/cn'
 
-// ─── Admin brand panel (left slot) ────────────────────────────────────────────
+/** The hairline panel the form sits in — the same object /login uses. */
+const PANEL = 'rounded-[var(--radius-panel)] border border-border/70 bg-card shadow-elevation-1 px-6 py-6 sm:px-8 [@media(min-height:760px)]:py-8'
 
-function AdminBrandPanel() {
-  return (
-    <motion.aside
-      initial={{ opacity: 0, x: -32 }}
-      animate={{ opacity: 1, x: 0 }}
-      transition={{ duration: 0.75, ease: EASE }}
-      aria-hidden="true"
-      className="relative hidden overflow-hidden lg:flex lg:flex-col lg:justify-between"
-      style={{ backgroundImage: 'var(--primary-gradient)' }}
-    >
-      <div className="pointer-events-none absolute inset-0 select-none">
-        <div
-          className="absolute inset-0 opacity-[0.045]"
-          style={{
-            backgroundImage: `radial-gradient(circle, var(--primary-foreground) 1px, transparent 1px)`,
-            backgroundSize: '30px 30px',
-          }}
-        />
-        <div className="absolute -right-32 -top-32 h-[480px] w-[480px] rounded-full border border-primary-foreground/15" />
-        <div className="absolute -bottom-28 -left-28 h-[320px] w-[320px] rounded-full bg-primary-foreground/5 blur-3xl" />
-      </div>
-
-      <div className="relative flex flex-col gap-8 px-12 pt-12 xl:px-16 xl:pt-16">
-        <div className="flex items-center gap-3">
-          <div className="flex size-10 items-center justify-center rounded-[12px] bg-primary-foreground/15 ring-1 ring-primary-foreground/25 backdrop-blur-sm">
-            <span className="text-sm font-bold tracking-widest text-primary-foreground">RD</span>
-          </div>
-          <span className="text-lg font-semibold text-primary-foreground">
-            Register<span className="text-primary-foreground/60">Desk</span>
-          </span>
-        </div>
-
-        <div className="space-y-4">
-          <span className="inline-flex items-center gap-1.5 rounded-full bg-primary-foreground/15 px-3 py-1 text-xs font-semibold text-primary-foreground ring-1 ring-primary-foreground/20">
-            <ShieldCheck className="size-3.5" aria-hidden />
-            Platform Administration
-          </span>
-          <h1 className="text-fs-3xl font-bold leading-[1.15] tracking-tight text-primary-foreground xl:text-fs-4xl">
-            Platform control,
-            <br />
-            secured.
-          </h1>
-          <p className="max-w-[340px] text-base leading-relaxed text-primary-foreground/65">
-            Restricted access. Sign in with a Platform Admin account to manage
-            operations, finance, moderation, and configuration.
-          </p>
-        </div>
-      </div>
-
-      <div className="relative px-12 pb-12 xl:px-16 xl:pb-16">
-        <p className="text-xs font-medium text-primary-foreground/55">
-          Authorized personnel only. All actions are audit-logged.
-        </p>
-      </div>
-    </motion.aside>
-  )
-}
+const LINK =
+  'font-semibold text-action underline-offset-4 hover:underline ' +
+  'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-action focus-visible:ring-offset-2'
 
 // ─── Unauthorized state ───────────────────────────────────────────────────────
 
-function UnauthorizedCard({ onTryAnother }: { onTryAnother: () => void }) {
+function UnauthorizedPanel({ onTryAnother }: { onTryAnother: () => void }) {
   return (
-    <AuthCard>
-      <div className="mb-6 flex flex-col items-center text-center">
-        <div className="mb-4 flex size-14 items-center justify-center rounded-full bg-destructive/10">
-          <ShieldAlert className="size-7 text-destructive" aria-hidden />
-        </div>
-        <AuthHeader title="Access restricted" />
-        <p className="-mt-4 text-sm leading-relaxed text-muted-foreground">
-          This account doesn&apos;t have Platform Admin access.
-        </p>
-      </div>
+    <div className={cn(PANEL, 'text-center')}>
+      <span aria-hidden className="mx-auto inline-flex size-12 items-center justify-center rounded-[var(--radius-control)] border border-destructive/30 text-destructive">
+        <ShieldAlert className="size-5" strokeWidth={1.75} />
+      </span>
+      <h2 className="mt-5 font-display text-fs-2xl font-light text-hero-ink">Access restricted</h2>
+      <p className="mt-2 text-fs-sm leading-relaxed text-hero-ink-soft">
+        This account doesn&apos;t have Platform Admin access.
+      </p>
 
-      <div className="space-y-3">
+      <div className="mt-7 space-y-3">
         <Link
           href={ROUTES.LOGIN}
-          className={cn(buttonVariants({ variant: 'gradient', size: 'lg' }), 'w-full')}
-          style={{ backgroundImage: 'var(--primary-gradient)' }}
+          className={cn(
+            'rd-brand-gradient inline-flex h-12 w-full items-center justify-center gap-2 rounded-[var(--radius-control)]',
+            'text-fs-base font-semibold text-white ring-1 ring-inset ring-white/15 transition-opacity hover:opacity-90',
+            'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-action focus-visible:ring-offset-2',
+          )}
         >
           Return to Organizer Login
+          <ArrowRight className="size-4" aria-hidden />
         </Link>
         <Button
           type="button"
           variant="outline"
           size="lg"
           onClick={onTryAnother}
-          className="w-full cursor-pointer"
+          className="h-12 w-full cursor-pointer rounded-[var(--radius-control)] border-border text-hero-ink shadow-none"
         >
           Try Another Account
         </Button>
       </div>
-    </AuthCard>
+    </div>
   )
 }
 
@@ -175,71 +129,75 @@ export default function AdminLoginPage() {
     setPassword('')
   }
 
-  const formColumn = (
-    <div className="flex flex-col lg:h-full lg:overflow-y-auto">
+  return (
+    <main className={cn('flex min-h-dvh flex-col', AUTH_CANVAS_BG)}>
+      {/* The 2px brand rule across the top edge — the same signature /login carries. */}
+      <span aria-hidden className="rd-brand-gradient fixed inset-x-0 top-0 z-10 h-0.5" />
 
-      {/* Mobile brand strip */}
-      <div
-        className="px-6 pb-8 pt-8 lg:hidden"
-        style={{ backgroundImage: 'var(--primary-gradient)' }}
-      >
-        <div className="flex flex-col items-center gap-3 text-center">
-          <div className="flex size-11 items-center justify-center rounded-[12px] bg-primary-foreground/15 ring-1 ring-primary-foreground/25">
-            <ShieldCheck className="size-5 text-primary-foreground" aria-hidden />
+      <div className="flex flex-1 flex-col px-5 pb-[clamp(0.75rem,2.5vh,2rem)] pt-[clamp(0.875rem,2.5vh,3rem)] sm:px-8">
+        <div className="flex justify-center">
+          <BrandLockup size="sm" />
+        </div>
+
+        <motion.div
+          variants={fadeUp}
+          initial="hidden"
+          animate="show"
+          className="mx-auto mt-[clamp(1rem,3.5vh,4.5rem)] w-full max-w-[440px]"
+        >
+          {/* ── Intro ── */}
+          <div className="text-center">
+            <p className="inline-flex items-center gap-2.5 text-fs-2xs font-semibold uppercase tracking-[0.22em] text-hero-eyebrow">
+              <span aria-hidden className="h-px w-6 bg-hero-accent-rule" />
+              Platform Administration
+              <span aria-hidden className="h-px w-6 bg-hero-accent-rule" />
+            </p>
+            <h1 className="mt-3 text-balance font-display text-fs-3xl font-light leading-[1.08] tracking-[-0.02em] text-hero-ink [@media(min-height:760px)]:sm:text-fs-4xl">
+              Platform control, secured.
+            </h1>
+            <p className="mx-auto mt-3 max-w-[38ch] text-fs-base leading-relaxed text-hero-ink-soft">
+              Sign in with your Platform Admin account to manage operations, finance, moderation and configuration.
+            </p>
           </div>
-          <div>
-            <p className="text-base font-semibold text-primary-foreground">RegisterDesk Admin</p>
-            <p className="mt-0.5 text-sm text-primary-foreground/65">Platform Administration</p>
+
+          {/* ── The form ── */}
+          <div className="mt-[clamp(1rem,3vh,2.25rem)]">
+            {unauthorized ? (
+              <UnauthorizedPanel onTryAnother={tryAnother} />
+            ) : (
+              <div className={PANEL}>
+                <LoginForm
+                  email={email}
+                  password={password}
+                  onEmailChange={setEmail}
+                  onPasswordChange={setPassword}
+                  onSubmit={handleSubmit}
+                  loading={loading}
+                  error={error}
+                  submitLabel="Sign In to Admin Console"
+                  emailPlaceholder="admin@registerdesk.in"
+                  forgotPasswordHref={ROUTES.FORGOT_PASSWORD}
+                  tone="editorial"
+                />
+              </div>
+            )}
           </div>
+
+          <p className="mt-5 text-center text-fs-sm text-hero-ink-soft">
+            Not an admin?{' '}
+            <Link href={ROUTES.LOGIN} className={LINK}>Organizer login</Link>
+          </p>
+        </motion.div>
+
+        {/* Closing line — the restricted-access notice, pinned to the bottom of the column. */}
+        <div className="mt-auto pt-[clamp(1rem,3vh,2.5rem)]">
+          <p className="mx-auto flex max-w-[440px] flex-col items-center gap-1.5 border-t border-border pt-3.5 text-center text-fs-2xs uppercase tracking-[0.14em] text-hero-eyebrow sm:flex-row sm:justify-center sm:gap-2">
+            <Lock className="size-3.5 shrink-0 text-hero-accent-rule" aria-hidden />
+            <span>Authorized personnel only</span>
+            <span className="text-hero-ink-soft/80 normal-case tracking-normal">All actions are audit-logged.</span>
+          </p>
         </div>
       </div>
-
-      {/* Form area */}
-      <motion.div
-        variants={fadeUp}
-        initial="hidden"
-        animate="show"
-        className="flex flex-1 items-center justify-center px-5 py-12 sm:px-8 lg:min-h-full"
-      >
-        <div className="w-full max-w-[420px]">
-          {unauthorized ? (
-            <UnauthorizedCard onTryAnother={tryAnother} />
-          ) : (
-            <AuthCard>
-              <AuthHeader
-                title="Platform Admin"
-                subtitle="Sign in with your Platform Admin account."
-              />
-              <LoginForm
-                email={email}
-                password={password}
-                onEmailChange={setEmail}
-                onPasswordChange={setPassword}
-                onSubmit={handleSubmit}
-                loading={loading}
-                error={error}
-                submitLabel="Sign In to Admin Console"
-                emailPlaceholder="admin@registerdesk.in"
-                forgotPasswordHref={ROUTES.FORGOT_PASSWORD}
-              />
-            </AuthCard>
-          )}
-
-          <div className="mt-6">
-            <AuthFooter>
-              Not an admin?{' '}
-              <Link
-                href={ROUTES.LOGIN}
-                className="font-semibold text-foreground underline-offset-4 hover:underline"
-              >
-                Organizer login
-              </Link>
-            </AuthFooter>
-          </div>
-        </div>
-      </motion.div>
-    </div>
+    </main>
   )
-
-  return <AuthShell left={<AdminBrandPanel />} right={formColumn} />
 }

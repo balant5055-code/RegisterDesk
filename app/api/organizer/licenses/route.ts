@@ -6,8 +6,7 @@
 // "Licenses" tab needs. Read-only; it modifies nothing.
 
 import { NextRequest, NextResponse } from 'next/server'
-import { verifyCaller }        from '@/lib/team/access'
-import { resolveWorkspaceUid } from '@/lib/team/workspace'
+import { authorizeWorkspace } from '@/lib/team/workspace'
 import { adminDb }             from '@/lib/firebase/admin'
 import {
   EVENT_LICENSES_COLLECTION, LICENSE_ORDERS_COLLECTION,
@@ -65,9 +64,12 @@ function deriveStatus(ev: Record<string, unknown> | undefined, licenseStatus: st
 }
 
 export async function GET(req: NextRequest): Promise<NextResponse> {
-  const caller = await verifyCaller(req)
-  if (!caller) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-  const ctx = await resolveWorkspaceUid(caller.uid)
+  // RD-CE-FIX M5 · the same gate as the rest of licensing (capacity/*, checkout/confirm): verified
+  // token, the workspace it acts for, suspension of caller OR owner, and the `events` permission —
+  // a check-in-only or finance member, or a suspended workspace, cannot buy or read licences here.
+  const authz = await authorizeWorkspace(req, 'events')
+  if (!authz.ok) return NextResponse.json({ error: authz.error }, { status: authz.status })
+  const ctx = authz
 
   const snap = await adminDb
     .collection(EVENT_LICENSES_COLLECTION)

@@ -13,6 +13,7 @@ import { normalizeEmail, normalizePhone } from '@/lib/registrations/editValidati
 import type { ImportValidationContext } from '@/lib/registrations/importValidation'
 import type { RegistrationFormDraft } from '@/components/wizard/registrationFormConfig'
 import type { CapacityPlan } from '@/lib/registrations/types'
+import { resolveOwnedEventSlug } from '@/lib/events/liveEventRef'
 
 const EVENT_STOP_REASONS = new Set([
   'EVENT_NOT_FOUND', 'EVENT_UNAVAILABLE', 'EVENT_CANCELLED',
@@ -38,8 +39,8 @@ export async function buildImportContext(
   const draftSnap = await adminDb.doc(`users/${uid}/eventDrafts/${eventId}`).get()
   if (!draftSnap.exists) return { ok: false, status: 404, error: 'Event not found' }
   const d    = draftSnap.data() as Record<string, unknown>
-  const seo  = ((d.eventDetails as Record<string, unknown>)?.seo as Record<string, unknown>) ?? {}
-  const slug = typeof seo.urlSlug === 'string' && seo.urlSlug ? seo.urlSlug : ''
+  // RD-CE-FIX C1 · only a slug the live document proves is THIS workspace's event for THIS draft.
+  const slug = (await resolveOwnedEventSlug(uid, eventId, d)) ?? ''
   if (!slug) return { ok: false, status: 400, error: 'Event is not published' }
 
   const event = await getEventBySlug(slug)

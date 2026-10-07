@@ -16,6 +16,7 @@ export type NotificationCategory =
   | 'settlement'    // payout request / status change / fund release
   | 'system'        // platform announcements
   | 'alert'         // warning / error notices
+  | 'message'       // incoming WhatsApp message (WhatsApp Inbox) — never carries message text
 
 export type NotificationSeverity = 'info' | 'success' | 'warning' | 'error'
 

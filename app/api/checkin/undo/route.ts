@@ -13,7 +13,8 @@ import { NextRequest, NextResponse }  from 'next/server'
 import { adminDb }                     from '@/lib/firebase/admin'
 import { uncheckInRegistration }       from '@/lib/firebase/firestore/registrations'
 import { authorizeWorkspace }          from '@/lib/team/workspace'
-import { getEventCheckInStatus }       from '@/lib/checkin/eventStatus'
+import { isEventOpenForCheckin }       from '@/lib/checkin/readiness'
+import { isEventSlugInScope }          from '@/lib/team/eventScope'
 import { checkRateLimit }              from '@/lib/rateLimit'
 import type { RegistrationDocument }   from '@/lib/registrations/types'
 
@@ -88,9 +89,18 @@ export async function POST(req: NextRequest): Promise<NextResponse<CheckInUndoRe
     return NextResponse.json({ success: false, error: 'UNAUTHORIZED' }, { status: 403 })
   }
 
-  // ── Event lifecycle check ─────────────────────────────────────────────────
-  const eventStatus = await getEventCheckInStatus(reg.eventSlug)
-  if (eventStatus !== 'ok') {
+  // ── Staff event assignment (RD-CHECKIN-2.0) ───────────────────────────────
+  // This route enforced ownership but never event assignment. Every other gate
+  // route derives scope from the registration's real event, and undo — which
+  // MUTATES attendance — is the last one that should be the exception. A caller
+  // holding `registrations` is not a gate-only role, so this is a no-op for them
+  // by design; it exists so no route in this module is missing the check.
+  if (!await isEventSlugInScope(authz, reg.eventSlug)) {
+    return NextResponse.json({ success: false, error: 'EVENT_NOT_ASSIGNED' }, { status: 403 })
+  }
+
+  // ── Event lifecycle check — the ONE readiness rule ────────────────────────
+  if (!await isEventOpenForCheckin(reg.eventSlug)) {
     return NextResponse.json({ success: false, error: 'EVENT_NOT_ACCEPTING_CHECKINS' }, { status: 422 })
   }
 

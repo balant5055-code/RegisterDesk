@@ -54,9 +54,12 @@ export function useToast() {
 const DISMISS_MS = 4500
 
 const STYLES: Record<ToastType, { icon: typeof Info; border: string; bg: string; text: string; assertive: boolean }> = {
-  success: { icon: CheckCircle2,  border: 'border-emerald-200', bg: 'bg-emerald-50', text: 'text-emerald-800', assertive: false },
-  error:   { icon: AlertCircle,   border: 'border-red-200',     bg: 'bg-red-50',     text: 'text-red-800',     assertive: true  },
-  warning: { icon: AlertTriangle, border: 'border-amber-200',   bg: 'bg-amber-50',   text: 'text-amber-800',   assertive: true  },
+  // RD-THEME-01 · the semantic accent pairs, not raw palette weights. Each pair has a
+  // `.dark` override in styles/tokens.css, which the 50/200/800 literals did not — a
+  // toast under the dark theme used to paint a light-mode tint behind dark-mode chrome.
+  success: { icon: CheckCircle2,  border: 'border-accent-money-fg/20',    bg: 'bg-accent-money-bg',    text: 'text-accent-money-fg',    assertive: false },
+  error:   { icon: AlertCircle,   border: 'border-accent-critical-fg/20', bg: 'bg-accent-critical-bg', text: 'text-accent-critical-fg', assertive: true  },
+  warning: { icon: AlertTriangle, border: 'border-accent-pending-fg/20',  bg: 'bg-accent-pending-bg',  text: 'text-accent-pending-fg',  assertive: true  },
   info:    { icon: Info,          border: 'border-border',      bg: 'bg-card',       text: 'text-foreground',  assertive: false },
 }
 
@@ -145,7 +148,9 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
       {children}
 
       {/* One visual stack; TWO live regions — urgent (error/warning) above transient. */}
-      <div className="pointer-events-none fixed bottom-4 right-4 z-[200] flex w-[calc(100vw-2rem)] flex-col gap-2 sm:w-auto sm:max-w-sm">
+      {/* RD-EVENT-COMMERCE-05D — sits ABOVE a fixed wizard footer (WizardFooter publishes its height as
+          --wizard-footer-h), so a toast never covers the footer's Continue / Save buttons. */}
+      <div className="pointer-events-none fixed bottom-[calc(var(--wizard-footer-h,0px)+1rem)] right-4 z-[200] flex w-[calc(100vw-2rem)] flex-col gap-2 sm:w-auto sm:max-w-sm">
         <div role="alert" aria-live="assertive" aria-atomic="false" className="flex flex-col gap-2">
           {region(assertive)}
         </div>

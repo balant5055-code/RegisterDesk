@@ -278,6 +278,20 @@ export function useUploadQueue(): UploadQueue {
     const prepared = await prepareRes.json() as PrepareUploadResponse
     setItemStage(item.id, 'prepare')
 
+    // RD-PHOTO-01 — the prepare above took one unit of the event's PAID photo capacity. If this photo
+    // then fails, give the unit back straight away (delete the pending reservation) instead of
+    // leaving it held until the 6-hour reclamation sweep; a retry prepares a fresh reservation.
+    try {
+      await putAndComplete(prepared)
+    } catch (e) {
+      await fetch(`${API}/assets/${encodeURIComponent(prepared.assetId)}`, {
+        method: 'DELETE', headers: { Authorization: `Bearer ${token}` },
+      }).catch(() => null)
+      throw e
+    }
+
+    async function putAndComplete(prepared: PrepareUploadResponse) {
+
     // 3. PUT each rendition straight to object storage.
     const byRendition = new Map<MediaRendition, typeof processed.renditions[number]>(
       processed.renditions.map(r => [r.rendition, r]),
@@ -323,6 +337,7 @@ export function useUploadQueue(): UploadQueue {
       storedBytes: done.asset.bytesStored, checksum: processed.checksum,
       error: null, failure: null, stage: 'complete',
     })
+    }
   }, [setItemState, setItemStage])
 
   /** The driver: keeps MAX_CONCURRENT_UPLOADS in flight until nothing is queued. */

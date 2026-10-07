@@ -14,7 +14,7 @@ import { getEventBySlug }    from '@/lib/firebase/firestore/events'
 import { buildQrValue, signTicketToken } from '@/lib/tickets/generate'
 import { signReceiptToken }  from '@/lib/receipts/token'
 import { getTemplate }       from '@/lib/certificates/firestore'
-import { MarketingPageLayout } from '@/components/marketing/layout/MarketingPageLayout'
+import { EventUtilityLayout } from '@/components/marketing/layout/EventUtilityLayout'
 import { TicketActions, type TicketCalendar } from './TicketActions'
 import { TicketSuccessBanner } from './TicketSuccessBanner'
 import type { RegistrationDocument } from '@/lib/registrations/types'
@@ -172,7 +172,7 @@ export default async function TicketPage({ params, searchParams }: PageProps) {
 
   // ── Render ────────────────────────────────────────────────────────────────
   return (
-    <MarketingPageLayout>
+    <EventUtilityLayout>
       {/*
         LAYOUT — the ticket is the primary artifact, so it owns the wide main column and
         the QR keeps its full size at every breakpoint. Supporting material (actions,
@@ -180,7 +180,7 @@ export default async function TicketPage({ params, searchParams }: PageProps) {
         mobile. The page previously used max-w-lg, which rendered a phone-width card
         centred in a desktop viewport; the grid is what fixes that, not extra decoration.
       */}
-      <div className="h-full bg-[#f7f8fa] font-sans print:bg-white">
+      <div className="h-full bg-muted font-sans print:bg-white">
         <div className="mx-auto w-full max-w-5xl px-4 py-8 sm:px-6 sm:py-10 lg:py-12">
 
           {justRegistered && <TicketSuccessBanner eventName={reg.eventName} />}
@@ -212,7 +212,7 @@ export default async function TicketPage({ params, searchParams }: PageProps) {
                     </div>
                   </div>
                 ) : (
-                  <div className="flex h-28 items-end bg-gradient-to-br from-[var(--primary-from)]/30 via-[var(--primary)]/20 to-transparent px-5 pb-4 sm:h-36">
+                  <div className="flex h-28 items-end bg-gradient-to-br from-[var(--action)]/30 via-[var(--action-end)]/20 to-transparent px-5 pb-4 sm:h-36">
                     <h1 className="text-[20px] font-extrabold text-foreground sm:text-[24px]">{reg.eventName}</h1>
                   </div>
                 )}
@@ -264,8 +264,8 @@ export default async function TicketPage({ params, searchParams }: PageProps) {
 
                 {/* Perforated divider — the notch colour matches the page canvas */}
                 <div className="relative mx-5 border-t border-dashed border-border sm:mx-6" aria-hidden>
-                  <span className="absolute -left-8 top-1/2 size-4 -translate-y-1/2 rounded-full bg-[#f7f8fa]" />
-                  <span className="absolute -right-8 top-1/2 size-4 -translate-y-1/2 rounded-full bg-[#f7f8fa]" />
+                  <span className="absolute -left-8 top-1/2 size-4 -translate-y-1/2 rounded-full bg-muted" />
+                  <span className="absolute -right-8 top-1/2 size-4 -translate-y-1/2 rounded-full bg-muted" />
                 </div>
 
                 {/* Ticket details (semantic definition list) */}
@@ -316,7 +316,7 @@ export default async function TicketPage({ params, searchParams }: PageProps) {
                   <section aria-labelledby="ticket-cert-h" className="overflow-hidden rounded-2xl border border-border bg-white shadow-sm">
                     <div className="flex items-center gap-3 border-b border-border px-5 py-4">
                       {/* Award icon inline SVG to avoid pulling in a client component */}
-                      <svg className="size-5 shrink-0 text-primary" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" aria-hidden>
+                      <svg className="size-5 shrink-0 text-action" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" aria-hidden>
                         <path strokeLinecap="round" strokeLinejoin="round" d="M16.5 18.75h-9m9 0a3 3 0 013 3h-15a3 3 0 013-3m9 0v-3.375c0-.621-.503-1.125-1.125-1.125h-.871M7.5 18.75v-3.375c0-.621.504-1.125 1.125-1.125h.872m5.007 0H9.497m5.007 0a7.454 7.454 0 01-.982-3.172M9.497 14.25a7.454 7.454 0 00.981-3.172M5.25 4.236c-.982.143-1.954.317-2.916.52A6.003 6.003 0 007.73 9.728M5.25 4.236V4.5c0 2.108.966 3.99 2.48 5.228M5.25 4.236V2.721C7.456 2.41 9.71 2.25 12 2.25c2.291 0 4.545.16 6.75.47v1.516M7.73 9.728a6.726 6.726 0 002.748 1.35m8.272-6.842V4.5c0 2.108-.966 3.99-2.48 5.228m2.48-5.492a46.32 46.32 0 012.916.52 6.003 6.003 0 01-5.395 4.972m0 0a6.726 6.726 0 01-2.749 1.35m0 0a6.772 6.772 0 01-3.044 0" />
                       </svg>
                       <div className="min-w-0">
@@ -337,7 +337,7 @@ export default async function TicketPage({ params, searchParams }: PageProps) {
                           </p>
                           <a
                             href={`/api/certificates/download/${registrationId}`}
-                            className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-primary px-5 py-2.5 text-[13px] font-semibold text-primary-foreground transition-opacity hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                            className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-action px-5 py-2.5 text-[13px] font-semibold text-action-foreground transition-opacity hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
                           >
                             <svg className="size-4" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" aria-hidden>
                               <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3" />
@@ -361,7 +361,7 @@ export default async function TicketPage({ params, searchParams }: PageProps) {
                 <div className="text-center print:hidden">
                   <Link
                     href={`/events/${reg.eventSlug}`}
-                    className="inline-block rounded-md text-[13px] text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                    className="inline-block rounded-md text-[13px] text-action hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
                   >
                     &larr; Back to event page
                   </Link>
@@ -371,7 +371,7 @@ export default async function TicketPage({ params, searchParams }: PageProps) {
           </div>
         </div>
       </div>
-    </MarketingPageLayout>
+    </EventUtilityLayout>
   )
 }
 

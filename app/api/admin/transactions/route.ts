@@ -5,8 +5,8 @@
 //   cursor = platformTransactions document ID (for next-page)
 
 import { NextRequest, NextResponse }        from 'next/server'
+import { requireSuperAdmin } from '@/lib/admin/financialGuard'
 import { adminDb }                          from '@/lib/firebase/admin'
-import { resolveAdminUid }                  from '@/lib/admin/auth'
 import { readFinanceFromLedger }            from '@/lib/platform/pricing'
 import type { PlatformTransactionDocument } from '@/lib/fees/types'
 
@@ -41,8 +41,10 @@ function tsToISO(ts: unknown): string | null {
 }
 
 export async function GET(req: NextRequest): Promise<NextResponse> {
-  const adminUid = await resolveAdminUid(req.headers.get('authorization'))
-  if (!adminUid) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+  // RD-CLOSE — a financial read: Super Admin only (ADMIN_UIDS). A legacy `admin: true` claim
+  // alone gets 403 SUPER_ADMIN_REQUIRED (lib/admin/financialGuard.ts).
+  const superGate = await requireSuperAdmin(req)
+  if (superGate.response) return superGate.response
 
   const { searchParams } = req.nextUrl
   const limit  = Math.min(100, Math.max(1, parseInt(searchParams.get('limit') ?? '50', 10)))

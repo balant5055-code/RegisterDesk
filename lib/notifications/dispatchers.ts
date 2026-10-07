@@ -9,7 +9,14 @@
 import type { EmailProvider, EmailResult } from '@/lib/email/provider'
 import type { NotificationType, NotificationPayloadMap } from './catalog'
 import { renderReviewEmail } from './templates/review'
-import { renderLicensePurchasedEmail, renderWalletRechargedEmail } from './templates/organizer'
+import {
+  renderLicensePurchasedEmail,
+  renderOrganizerRegisteredEmail,
+  renderCapacityThresholdEmail,
+  renderWalletRechargedEmail,
+  renderServicePurchasedEmail,
+  renderServicePurchaseAdminEmail,
+} from './templates/organizer'
 
 export type EmailDispatcher<T extends NotificationType> = (
   provider: EmailProvider,
@@ -69,8 +76,15 @@ export const EMAIL_DISPATCHERS: { [T in NotificationType]: EmailDispatcher<T> } 
   // Billing lifecycle — engine-owned templates rendered to custom HTML
   LICENSE_PURCHASED:         (p, x) => p.sendCustomEmail(renderLicensePurchasedEmail(x)),
   WALLET_RECHARGED:          (p, x) => p.sendCustomEmail(renderWalletRechargedEmail(x)),
+  SERVICE_PURCHASED:         (p, x) => p.sendCustomEmail(renderServicePurchasedEmail(x)),
+  SERVICE_PURCHASE_ADMIN:    (p, x) => p.sendCustomEmail(renderServicePurchaseAdminEmail(x)),
 
   // Marketing / free-form
+  // Platform → platform. Rendered here, like the other engine-owned templates, so the
+  // route passes business facts only and never composes email content.
+  ORGANIZER_REGISTERED:      (p, x) => p.sendCustomEmail(renderOrganizerRegisteredEmail(x)),
+  CAPACITY_THRESHOLD:        (p, x) => p.sendCustomEmail(renderCapacityThresholdEmail(x)),
+
   CUSTOM_EMAIL:              (p, x) => p.sendCustomEmail(x),
   BROADCAST:                 (p, x) => p.sendCustomEmail(x),
 

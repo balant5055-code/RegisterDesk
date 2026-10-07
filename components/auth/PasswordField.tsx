@@ -3,7 +3,7 @@
 import { useState } from 'react'
 import { Eye, EyeOff, Lock } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
-import { AuthField } from './AuthField'
+import { AuthField, type AuthFieldAccent, type AuthFieldVariant, type AuthFieldRadius } from './AuthField'
 
 // ─── PasswordField ──────────────────────────────────────────────────────────
 // AuthField specialised for passwords: owns its own show/hide state and renders
@@ -18,6 +18,14 @@ export interface PasswordFieldProps {
   autoComplete?: string
   placeholder?:  string
   Icon?:         LucideIcon
+  /** Forwarded to AuthField. Defaults to the organizer accent, as it always did. */
+  accent?:       AuthFieldAccent
+  /** Forwarded to AuthField. Defaults to the bordered control, as it always did. */
+  variant?:      AuthFieldVariant
+  /** Forwarded to AuthField. Defaults to drawing the icon, as it always did. */
+  hideIcon?:     boolean
+  /** Forwarded to AuthField. Defaults to the 12px radius, as it always did. */
+  radius?:       AuthFieldRadius
 }
 
 export function PasswordField({
@@ -28,6 +36,10 @@ export function PasswordField({
   autoComplete,
   placeholder,
   Icon = Lock,
+  accent = 'primary',
+  variant = 'box',
+  hideIcon = false,
+  radius = 'lg',
 }: PasswordFieldProps) {
   const [visible, setVisible] = useState(false)
 
@@ -41,6 +53,10 @@ export function PasswordField({
       onChange={onChange}
       autoComplete={autoComplete}
       Icon={Icon}
+      accent={accent}
+      variant={variant}
+      hideIcon={hideIcon}
+      radius={radius}
       suffix={
         <button
           type="button"

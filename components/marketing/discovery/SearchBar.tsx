@@ -35,7 +35,7 @@ export function SearchBar({
         className={cn(
           'h-10 w-full rounded-xl border border-border/70 bg-muted/15 pl-10 text-[13.5px] text-foreground',
           'placeholder:text-muted-foreground/40 outline-none transition-all',
-          'focus:border-primary/40 focus:bg-white focus:ring-2 focus:ring-primary/8 focus:shadow-sm',
+          'focus:border-action/40 focus:bg-card focus:ring-2 focus:ring-action/8 focus:shadow-sm',
           value ? 'pr-8' : 'pr-4',
         )}
       />

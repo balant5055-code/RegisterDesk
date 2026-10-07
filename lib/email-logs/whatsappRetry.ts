@@ -24,14 +24,16 @@
 
 import { FieldValue } from 'firebase-admin/firestore'
 import { adminDb }     from '@/lib/firebase/admin'
-import { getWalletBalance, txnDeductWallet } from '@/lib/firebase/firestore/wallet'
+import { getWalletBalance } from '@/lib/firebase/firestore/wallet'
 import { getCommunicationConfig } from '@/lib/communications/resolveCommunicationConfig'
 import { getWalletConfig } from '@/lib/wallet/resolveWalletConfig'
 import { getMetaProvider, resolveWhatsAppTemplate } from '@/lib/whatsapp'
 import { NotificationType } from '@/lib/notifications'
 import { validatePhoneNumber } from '@/lib/communication/phone'
-import type { OrganizerWallet } from '@/types/events'
 import type { RegistrationDocument } from '@/lib/registrations/types'
+import { reserveServiceUnits, releaseServiceUnits, draftIdForEventSlug, type ReserveOutcome } from '@/lib/licensing/serviceAllowanceLedger'
+import { acceptConfirmation } from '@/lib/registrations/whatsappConfirmationAcceptance'
+import { callbackDataFor } from '@/lib/whatsapp/acceptance'
 
 /** The template this retry supports. Anything else is refused by the route. */
 export const RETRYABLE_WHATSAPP_TEMPLATE_KEY = 'registration_confirmation'
@@ -51,6 +53,7 @@ export type WhatsAppRetryResult =
         | 'not_configured' | 'channel_disabled' | 'event_disabled'
         | 'registration_missing' | 'already_sent' | 'delivery_unknown' | 'no_phone'
         | 'insufficient_balance' | 'template_unresolved' | 'send_failed'
+        | 'allowance_exhausted'   // RD-EVENT-COMMERCE-02 — prepaid allowance used up, policy 'block'
       /** Normalized, organizer-safe message. Never contains credentials. */
       error: string
       /** Meta Graph error code, when the failure came from the provider. */
@@ -71,6 +74,12 @@ export type WhatsAppRetryResult =
  */
 export interface WhatsAppRetryOptions {
   confirmUnknownDelivery?: boolean
+  /**
+   * RD-CLOSE — a per-attempt nonce (the route's claim). A retry is a NEW message, so a prepaid
+   * unit is reserved under its own key: reusing the registration's key would find the unit an
+   * earlier accepted message consumed and send this one for free.
+   */
+  attemptNonce?: string
 }
 
 export interface WhatsAppRetryArgs {
@@ -80,63 +89,10 @@ export interface WhatsAppRetryArgs {
   eventName:      string
 }
 
-/**
- * Wallet debit — byte-for-byte the same rules as the live confirmation path.
- *
- * The ledger id is deterministic PER REGISTRATION, not per attempt. That is deliberate:
- * "charge exactly once for this registration's WhatsApp confirmation" is the billing
- * contract, so a retry after a previously-billed success is a no-op rather than a second
- * charge. Returns what was actually debited so the caller can report it honestly.
- */
-async function deductWhatsAppCharge(args: WhatsAppRetryArgs, costPaise: number): Promise<number> {
-  const walletRef = adminDb.doc(`organizerWallets/${args.organizerUid}`)
-  const ledgerRef = adminDb.collection('walletTransactions').doc(`whatsapp_${args.registrationId}`)
-  const walletCfg = await getWalletConfig()
-
-  const debited = await adminDb.runTransaction(async (txn) => {
-    const ledgerSnap = await txn.get(ledgerRef)
-    if (ledgerSnap.exists) return 0   // already charged for this registration — idempotent
-
-    const walletSnap = await txn.get(walletRef)
-    const balance    = walletSnap.exists ? ((walletSnap.data() as OrganizerWallet).balancePaise ?? 0) : 0
-    const newBalance = balance - costPaise
-    // Re-check inside the txn: the caller's pre-check is a TOCTOU with concurrent charges.
-    // The message is already sent, so on insufficient funds the platform absorbs it rather
-    // than driving the wallet negative.
-    if (!walletCfg.allowNegativeBalance && balance < costPaise) return 0
-
-    txnDeductWallet(txn, args.organizerUid, costPaise)
-    txn.set(ledgerRef, {
-      organizerUid:  args.organizerUid,
-      type:          'whatsapp_charge',
-      amountPaise:   costPaise,
-      balancePaise:  newBalance,
-      status:        'completed',
-      referenceType: 'communication',
-      referenceId:   args.registrationId,
-      description:   `WhatsApp confirmation — ${args.eventName}`,
-      metadata:      { eventId: args.eventSlug, eventSlug: args.eventSlug, channel: 'whatsapp', units: 1 },
-      createdAt:     FieldValue.serverTimestamp(),
-    })
-    return costPaise
-  })
-
-  if (debited > 0) {
-    void adminDb.collection('communicationUsage').add({
-      organizerUid: args.organizerUid,
-      eventId:      args.eventSlug,
-      eventSlug:    args.eventSlug,
-      eventName:    args.eventName,
-      channel:      'whatsapp',
-      quantity:     1,
-      costPaise:    debited,
-      campaignId:   '',
-      templateKey:  RETRYABLE_WHATSAPP_TEMPLATE_KEY,
-      createdAt:    FieldValue.serverTimestamp(),
-    }).catch(() => { /* usage log is best-effort */ })
-  }
-  return debited
-}
+// RD-CLOSE — an accepted retry is recorded by the SAME acceptance transaction as the live send
+// (acceptConfirmation): charge + usage + registration status, idempotent per wamid. A retry that
+// Meta accepts is a NEW message and is billed as one (a registration's first accepted message uses
+// the legacy ledger id `whatsapp_<registrationId>`; later ones `…__<wamid>`).
 
 /** Mirrors the live path's registration-doc bookkeeping (whatsappStatus / …SentAt / …). */
 function recordStatus(
@@ -151,8 +107,14 @@ function recordStatus(
   } else if (extra?.reason) {
     patch.whatsappFailureReason = extra.reason
   }
-  adminDb.collection('registrations').doc(registrationId).update(patch)
-    .catch(err => console.error(`[whatsapp-retry] status persist failed for ${registrationId}:`, err))
+  // RD-CLOSE — never DOWNGRADE a recorded send (the status webhook may have recorded it first).
+  const ref = adminDb.collection('registrations').doc(registrationId)
+  adminDb.runTransaction(async txn => {
+    const cur = await txn.get(ref)
+    if (!cur.exists) return
+    if (status !== 'sent' && (cur.data() as { whatsappStatus?: unknown }).whatsappStatus === 'sent') return
+    txn.update(ref, patch)
+  }).catch(err => console.error(`[whatsapp-retry] status persist failed for ${registrationId}:`, err))
 }
 
 /**
@@ -180,9 +142,10 @@ export async function retryWhatsAppConfirmation(
     adminDb.collection('registrations').doc(args.registrationId).get(),
   ])
 
-  const pricing = eventSnap.exists
-    ? (eventSnap.data() as { pricing?: { whatsappEnabled?: boolean } }).pricing
-    : undefined
+  const eventData = eventSnap.exists ? eventSnap.data() as { pricing?: { whatsappEnabled?: boolean }; draftId?: unknown } : undefined
+  const pricing = eventData?.pricing
+  // RD-INTEG — owner-checked ledger key, as every other WhatsApp path now resolves it.
+  const allowanceDraftId = typeof eventData?.draftId === 'string' && eventData.draftId ? await draftIdForEventSlug(args.eventSlug) : null
   if (!pricing?.whatsappEnabled) {
     return { ok: false, reason: 'event_disabled', error: 'WhatsApp is not enabled for this event.' }
   }
@@ -232,7 +195,25 @@ export async function retryWhatsAppConfirmation(
   }
   const normalizedPhone = phoneCheck.normalizedPhone as string
 
-  const costPaise = comm.whatsapp.walletChargeAttendeeNotifications ? comm.whatsapp.pricePaise : 0
+  // RD-EVENT-COMMERCE-02 — same unit key as the live path, so a retry after a failed live
+  // attempt re-takes the unit that attempt released, and a success is consumed exactly once.
+  const unitKey = opts?.attemptNonce && /^[A-Za-z0-9_-]{1,64}$/.test(opts.attemptNonce)
+    ? `wa_reg_${args.registrationId}__r_${opts.attemptNonce}`
+    : `wa_reg_${args.registrationId}`
+  let allowance: ReserveOutcome = { mode: 'none' }
+  if (allowanceDraftId) {
+    allowance = await reserveServiceUnits({ draftId: allowanceDraftId, service: 'whatsapp', unitKey, source: 'registration_confirmation_retry' })
+    if (allowance.mode === 'exhausted' && allowance.policy === 'block') {
+      return { ok: false, reason: 'allowance_exhausted', error: 'This event’s prepaid WhatsApp allowance is used up. While the event is open, buy more with Increase limit on the event Wallet.' }
+    }
+  }
+  const fromAllowance = allowance.mode === 'allowance'
+  // RD-INTEG — release only a unit THIS attempt took.
+  const giveBack = () => fromAllowance && allowance.mode === 'allowance' && !allowance.already && allowanceDraftId
+    ? releaseServiceUnits({ draftId: allowanceDraftId, service: 'whatsapp', unitKey }).catch(err => console.error('[whatsapp-retry] allowance release failed', err))
+    : Promise.resolve()
+
+  const costPaise = fromAllowance ? 0 : (comm.whatsapp.walletChargeAttendeeNotifications ? comm.whatsapp.pricePaise : 0)
   const walletCfg = await getWalletConfig()
   const balance   = await getWalletBalance(args.organizerUid)
   if (!walletCfg.allowNegativeBalance && costPaise > 0 && balance < costPaise) {
@@ -249,12 +230,17 @@ export async function retryWhatsAppConfirmation(
     },
   )
   if (!resolved.ok) {
+    await giveBack()
     recordStatus(args.registrationId, 'failed', { reason: resolved.error })
     return { ok: false, reason: 'template_unresolved', error: resolved.error }
   }
 
-  const result = await provider.sendTemplate(resolved.message)
+  let result: Awaited<ReturnType<typeof provider.sendTemplate>>
+  // RD-CLOSE — callback data lets the status webhook recover this acceptance if persistence fails.
+  try { result = await provider.sendTemplate({ ...resolved.message, callbackData: callbackDataFor({ kind: 'registration', registrationId: args.registrationId, unitKey }) }) }
+  catch (err) { await giveBack(); throw err }
   if (!result.success) {
+    await giveBack()   // not accepted ⇒ nothing consumed
     // NOT charged. Same compact diagnostic string the live path stores, built only from
     // httpStatus / code / providerMessage — no credential ever reaches it.
     const providerResponse =
@@ -267,9 +253,22 @@ export async function retryWhatsAppConfirmation(
     }
   }
 
-  // Success → charge (idempotent) and mark the registration delivered.
-  const debited = costPaise > 0 ? await deductWhatsAppCharge(args, costPaise) : 0
-  recordStatus(args.registrationId, 'sent', { messageId: result.messageId })
+  // Accepted → the one acceptance record (charge + usage + status), retried; the route updates the
+  // log row it claimed. The message is sent: a persistence failure must not turn this into a
+  // failure the organizer would retry (a duplicate) — the status webhook recovers it instead.
+  let debited = 0
+  if (result.messageId) {
+    try {
+      debited = (await acceptConfirmation({
+        registrationId: args.registrationId, organizerUid: args.organizerUid, eventSlug: args.eventSlug, eventName: args.eventName,
+        attendeeName: reg.attendee.name, email: reg.attendee.email ?? '', phone: normalizedPhone, wamid: result.messageId,
+        fromAllowance, writeLog: false, source: 'retry',
+        unitKey, ...(fromAllowance && allowanceDraftId ? { allowanceUnit: { draftId: allowanceDraftId, unitKey } } : {}),
+      })).chargedPaise
+    } catch (err) {
+      console.error(`[whatsapp-retry] acceptance not persisted for ${args.registrationId} — the status webhook will recover it:`, err)
+    }
+  }
 
   return { ok: true, messageId: result.messageId, costPaise: debited, recipient: normalizedPhone }
 }

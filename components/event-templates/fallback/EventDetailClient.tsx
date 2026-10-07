@@ -15,7 +15,7 @@ import {
 import { cn } from '@/lib/utils/cn'
 import { EventPageShell } from '@/components/event-templates/shared/ui/EventPageShell'
 import { Container }      from '@/components/ui/Container'
-import { buttonVariants } from '@/components/ui/button'
+import { marketingButton } from '@/lib/marketing/theme'
 import type {
   SportsRunningDetails, WorkshopDetails, FundraisingDetails,
   ExhibitionDetails, CommunityDetails, CulturalDetails,
@@ -41,6 +41,7 @@ import { VenueSection }      from '@/components/event-templates/shared/venue/Ven
 import { FAQSection }        from '@/components/event-templates/shared/faq/FAQSection'
 import { EventInfoSection }  from '@/components/event-templates/shared/ui/EventInfoSection'
 import { StickyMobileCTA }         from '@/components/event-templates/shared/registration/StickyMobileCTA'
+import { formatBenefits } from '@/components/event-templates/shared/registration/benefitLabels'
 import { AddToCalendarButton }     from '@/components/event-templates/shared/ui/AddToCalendarButton'
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -102,7 +103,7 @@ function WorkshopSection({ td }: { td: WorkshopDetails }) {
         {td.prerequisites?.trim() && (
           <div>
             <div className="mb-1.5 flex items-center gap-2">
-              <ClipboardList className="size-3.5 text-primary" aria-hidden />
+              <ClipboardList className="size-3.5 text-action" aria-hidden />
               <p className="text-xs font-bold text-foreground">Prerequisites</p>
             </div>
             <p className="text-xs leading-relaxed text-muted-foreground">{td.prerequisites}</p>
@@ -111,7 +112,7 @@ function WorkshopSection({ td }: { td: WorkshopDetails }) {
         {td.materialsIncluded?.trim() && (
           <div>
             <div className="mb-1.5 flex items-center gap-2">
-              <Package className="size-3.5 text-primary" aria-hidden />
+              <Package className="size-3.5 text-action" aria-hidden />
               <p className="text-xs font-bold text-foreground">Materials Included</p>
             </div>
             <p className="text-xs leading-relaxed text-muted-foreground">{td.materialsIncluded}</p>
@@ -120,7 +121,7 @@ function WorkshopSection({ td }: { td: WorkshopDetails }) {
         {td.softwareRequired?.trim() && (
           <div>
             <div className="mb-1.5 flex items-center gap-2">
-              <Laptop className="size-3.5 text-primary" aria-hidden />
+              <Laptop className="size-3.5 text-action" aria-hidden />
               <p className="text-xs font-bold text-foreground">Software Required</p>
             </div>
             <p className="text-xs leading-relaxed text-muted-foreground">{td.softwareRequired}</p>
@@ -129,7 +130,7 @@ function WorkshopSection({ td }: { td: WorkshopDetails }) {
         {td.batchSize != null && td.batchSize > 0 && (
           <div>
             <div className="mb-1.5 flex items-center gap-2">
-              <UserCheck className="size-3.5 text-primary" aria-hidden />
+              <UserCheck className="size-3.5 text-action" aria-hidden />
               <p className="text-xs font-bold text-foreground">Batch Size</p>
             </div>
             <p className="text-xl font-extrabold text-foreground">
@@ -146,12 +147,12 @@ function WorkshopSection({ td }: { td: WorkshopDetails }) {
             && 'mt-5 border-t border-border/40 pt-5',
         )}>
           <div className="col-span-full mb-1 flex items-center gap-2">
-            <Target className="size-3.5 text-primary" aria-hidden />
+            <Target className="size-3.5 text-action" aria-hidden />
             <p className="text-xs font-bold text-foreground">What You&apos;ll Learn</p>
           </div>
           {outcomes.map((item, i) => (
             <div key={i} className="flex items-start gap-2">
-              <CheckCircle2 className="mt-0.5 size-3.5 shrink-0 text-primary" aria-hidden />
+              <CheckCircle2 className="mt-0.5 size-3.5 shrink-0 text-action" aria-hidden />
               <p className="text-xs leading-relaxed text-muted-foreground">{item}</p>
             </div>
           ))}
@@ -188,7 +189,7 @@ function SportsSection({ td }: { td: SportsRunningDetails }) {
           {infoItems.map(({ icon, label, value, sub }, i) => (
             <div key={i}>
               <div className="mb-1 flex items-center gap-1.5">
-                <span className="text-primary">{icon}</span>
+                <span className="text-action">{icon}</span>
                 <p className="text-[10.5px] font-semibold uppercase tracking-wider text-muted-foreground">
                   {label}
                 </p>
@@ -205,7 +206,7 @@ function SportsSection({ td }: { td: SportsRunningDetails }) {
             href={td.rulesUrl}
             target="_blank"
             rel="noopener noreferrer"
-            className={cn(buttonVariants({ variant: 'outline', size: 'sm' }), 'gap-1.5')}
+            className={cn(marketingButton({ variant: 'outline', size: 'sm' }), 'gap-1.5')}
           >
             <FileText className="size-3.5" aria-hidden />
             View Race Rules
@@ -287,14 +288,14 @@ function ExhibitionSection({ td }: { td: ExhibitionDetails }) {
           <div className="flex flex-wrap gap-2 pt-1">
             {td.floorPlanUrl?.trim() && (
               <a href={td.floorPlanUrl} target="_blank" rel="noopener noreferrer"
-                className={cn(buttonVariants({ variant: 'outline', size: 'sm' }), 'gap-1.5')}>
+                className={cn(marketingButton({ variant: 'outline', size: 'sm' }), 'gap-1.5')}>
                 <Layers className="size-3.5" aria-hidden />Floor Plan
                 <ExternalLink className="size-3.5" aria-hidden />
               </a>
             )}
             {td.boothInfoUrl?.trim() && (
               <a href={td.boothInfoUrl} target="_blank" rel="noopener noreferrer"
-                className={cn(buttonVariants({ variant: 'outline', size: 'sm' }), 'gap-1.5')}>
+                className={cn(marketingButton({ variant: 'outline', size: 'sm' }), 'gap-1.5')}>
                 <Tag className="size-3.5" aria-hidden />Booth Info
                 <ExternalLink className="size-3.5" aria-hidden />
               </a>
@@ -424,7 +425,9 @@ export function EventDetailClient(props: EventDetailProps) {
   // Derive highlight chips from pass benefits (unique, up to 6)
   const allBenefits: string[] = []
   passes.filter(p => p.status !== 'inactive').forEach(p => {
-    (p.benefits ?? []).forEach(b => {
+    // formatBenefits resolves curated IDs to copy; the de-duplication below is unchanged
+    // and still runs on what will actually be shown.
+    formatBenefits(p.benefits).forEach(b => {
       if (b.trim() && !allBenefits.includes(b.trim())) allBenefits.push(b.trim())
     })
   })
@@ -509,7 +512,7 @@ export function EventDetailClient(props: EventDetailProps) {
           ) : (
             <div
               className="h-full w-full"
-              style={{ backgroundImage: 'var(--primary-gradient)' }}
+              style={{ backgroundImage: 'var(--action-gradient)' }}
             />
           )}
           {/* Gradient overlays: dark left → transparent right for card legibility */}
@@ -579,15 +582,15 @@ export function EventDetailClient(props: EventDetailProps) {
                 <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1.5">
                   {dateStr && (
                     <div className="flex items-center gap-1.5 text-xs text-white/75">
-                      <Calendar className="size-3.5 shrink-0 text-primary/80" aria-hidden />
+                      <Calendar className="size-3.5 shrink-0 text-action/80" aria-hidden />
                       <span>{dateStr}{timeStr && ` · ${timeStr}`}</span>
                     </div>
                   )}
                   {venueName && (
                     <div className="flex items-center gap-1.5 text-xs text-white/75">
                       {venueType === 'online'
-                        ? <Globe  className="size-3.5 shrink-0 text-primary/80" aria-hidden />
-                        : <MapPin className="size-3.5 shrink-0 text-primary/80" aria-hidden />}
+                        ? <Globe  className="size-3.5 shrink-0 text-action/80" aria-hidden />
+                        : <MapPin className="size-3.5 shrink-0 text-action/80" aria-hidden />}
                       <span>
                         {venueName}
                         {physical?.city && `, ${physical.city}`}
@@ -596,7 +599,7 @@ export function EventDetailClient(props: EventDetailProps) {
                   )}
                   {doorsOpenTime && (
                     <div className="flex items-center gap-1.5 text-xs text-white/75">
-                      <AlarmClock className="size-3.5 shrink-0 text-primary/80" aria-hidden />
+                      <AlarmClock className="size-3.5 shrink-0 text-action/80" aria-hidden />
                       <span>Doors Open {formatTime(doorsOpenTime)}</span>
                     </div>
                   )}
@@ -607,7 +610,7 @@ export function EventDetailClient(props: EventDetailProps) {
                   {registrationOpen && passes.filter(p => p.status !== 'inactive').length > 0 && (
                     <Link
                       href="#tickets"
-                      className={cn(buttonVariants({ variant: 'primary', size: 'sm' }), 'gap-1.5')}
+                      className={cn(marketingButton({ emphasis: 'gradient', variant: 'primary', size: 'sm' }), 'gap-1.5')}
                     >
                       Register Now
                       <ArrowRight className="size-3.5" aria-hidden />
@@ -656,7 +659,7 @@ export function EventDetailClient(props: EventDetailProps) {
                     className={cn(
                       'inline-flex h-8 items-center gap-1.5 rounded-lg border px-3.5 text-xs font-medium text-white backdrop-blur-sm transition-colors',
                       saved
-                        ? 'border-primary/50 bg-primary/20'
+                        ? 'border-action/50 bg-action/20'
                         : 'border-white/25 bg-white/10 hover:bg-white/20',
                     )}
                   >

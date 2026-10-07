@@ -13,6 +13,7 @@
 import { useCallback, useState } from 'react'
 import { Loader2, Mail, ShieldCheck } from 'lucide-react'
 import { Button, Card } from '@/components/ui'
+import { marketingButtonSkin } from '@/lib/marketing/theme'
 
 type Stage = 'email' | 'code'
 
@@ -96,9 +97,9 @@ export function PhotoVerifyPanel({ eventName }: { eventName: string }) {
                 value={email}
                 onChange={e => setEmail(e.target.value)}
                 placeholder="you@example.com"
-                className="min-w-0 flex-1 rounded-lg border border-border bg-card px-3 py-2 text-[14px] text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+                className="min-w-0 flex-1 rounded-lg border border-border bg-card px-3 py-2 text-[14px] text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-action"
               />
-              <Button type="submit" size="sm" disabled={busy || email.trim() === ''}>
+              <Button type="submit" size="sm" className={marketingButtonSkin.gradient} disabled={busy || email.trim() === ''}>
                 {busy ? <Loader2 className="size-4 animate-spin" aria-hidden /> : <Mail className="size-4" aria-hidden />}
                 Send code
               </Button>
@@ -118,13 +119,13 @@ export function PhotoVerifyPanel({ eventName }: { eventName: string }) {
                 value={code}
                 onChange={e => setCode(e.target.value.replace(/\D/g, ''))}
                 placeholder="6-digit code"
-                className="min-w-0 flex-1 rounded-lg border border-border bg-card px-3 py-2 text-[14px] tabular-nums text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+                className="min-w-0 flex-1 rounded-lg border border-border bg-card px-3 py-2 text-[14px] tabular-nums text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-action"
               />
-              <Button type="submit" size="sm" disabled={busy || code.length < 4}>
+              <Button type="submit" size="sm" className={marketingButtonSkin.gradient} disabled={busy || code.length < 4}>
                 {busy && <Loader2 className="size-4 animate-spin" aria-hidden />}
                 Verify
               </Button>
-              <Button type="button" size="sm" variant="ghost" disabled={busy} onClick={() => setStage('email')}>
+              <Button type="button" size="sm" variant="ghost" className={marketingButtonSkin.ring} disabled={busy} onClick={() => setStage('email')}>
                 Change email
               </Button>
             </form>

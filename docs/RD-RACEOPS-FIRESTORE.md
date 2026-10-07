@@ -62,11 +62,43 @@ within a file by construction.
 | `chipTimeRaw` / `gunTimeRaw` | string \| null | The organizer's own text, retained for traceability. |
 | `status` | string | `'finished'` \| `'dnf'` \| `'dns'` \| `'dq'`. |
 | `statusRaw` | string \| null | |
-| `gender` / `category` / `ageGroup` | string \| null | **Stored, not ranked.** Sprint 3 Step 4 explicitly excludes gender/age/category ranking pending approved data sources. |
+| `gender` / `category` / `ageGroup` | string \| null | From the FILE only. **RD-RACEOPS-RESULTS-04:** gender and age group are now RANKED within their own group (category is not — it has no approved comparison rule). |
+| `genderKey` / `ageGroupKey` | string | RD-RACEOPS-RESULTS-04 · normalised comparison keys (`groupKey()`), written with the row so the ranking pass groups without re-deriving and the snapshot build looks up a total with the same key that counted it. `''` when the file had no value. |
+| `genderRank` / `ageGroupRank` | number \| null | RD-RACEOPS-RESULTS-04 · computed by RegisterDesk in the same walk as `overallRank`. `null` for a non-finisher, for a row with no group value, and for a dimension abandoned as not-a-group. A provider's own rank column is never imported. |
+| `distanceMeters` | number \| null | RD-RACEOPS-RESULTS-04 · the race distance in metres, parsed only from an explicit unit. What pace and speed are derived from. |
+| `distanceRaw` | string \| null | The distance cell as written. |
+| `splits` | array | RD-RACEOPS-RESULTS-04 · this participant's checkpoints (≤ `MAX_SPLITS_PER_RESULT` = 60), each `{ sequence, splitKey, name, distanceMeters, segmentMeters, cumulativeTimeMs, segmentTimeMs, timeOfDay }`. Embedded on the DRAFT row because it is written once and read once; the PUBLISHED copy is its own document (below). `timeOfDay` is a wall-clock `"HH:MM:SS"` string, never an elapsed duration. |
 | `rawRow` | map | The complete original row. |
 | `sourceProvider` | string | |
 | `overallRank` / `passRank` | number \| null | Written by the ranking pass. `null` for non-finishers, always. |
 | `sessionId` / `organizerUid` / `eventSlug` / `passId` | string | Denormalised so a future collection-group read is tenant-safe without a parent lookup. |
+
+### `raceResultSnapshots/{snapshotId}/entrySplits/v{n}__{bibKey}`
+
+**RD-RACEOPS-RESULTS-04.** One participant's PUBLISHED checkpoints, one document per
+participant per version.
+
+Why not on the entry: the public leaderboard reads entries fifty at a time and shows no
+checkpoints, so embedding 10–30 of them would multiply the payload of the most-read page in
+the module for data it never renders. Why not one document per checkpoint: 20,000 runners ×
+20 points is 400,000 documents per version, and nothing in this module ever deletes.
+
+The id carries the version exactly as `entries` does, so a rollback exposes that version's
+checkpoints by construction and an abandoned build's are unreachable. Both documents are
+written in the SAME batch as the entry, so a published version can never hold a result
+without its checkpoints — which is why `SNAPSHOT_CHUNK_SIZE` was halved to 200 (a row can
+cost two writes, and 200 × 2 is inside Firestore's 500-write batch limit).
+
+| Field | Type | Notes |
+|---|---|---|
+| `v` | number | The version. Matches the id and the entry's `v`. |
+| `bibNumber` / `bibKey` | string | |
+| `splits` | array | Course order. Pace and speed are ABSENT — both are derived at read time from the times and distances (`utils/performance.ts`). |
+
+A participant with no checkpoints has **no document**: an absent document is the honest
+"no splits", and the public projection renders no split section at all.
+
+Read by a single document GET (`fetchSplitsByBib`) on the runner result page only. **No index.**
 
 ---
 
@@ -107,6 +139,12 @@ Appended to `firestore.indexes.json`. Nothing existing is modified.
 
 Review paging (`results.orderBy('rowNumber')`) needs **no declared index**: Firestore creates
 single-field indexes automatically. Only the three composites above are added.
+
+**RD-RACEOPS-RESULTS-04 adds NO index.** Gender and age-group ranking reuses the existing
+`results (status, chipTimeMs, rowNumber)` walk — the ranks are assigned in that one pass by
+keeping a small tie state per group (`ranking/groups.ts`), rather than querying per group —
+and `entrySplits` is addressed by deterministic document id. The enriched `entries` fields are
+read, never filtered on.
 
 `results` is queried within **one** parent session, so `queryScope: COLLECTION` is correct;
 no collection-group query is issued in Sprint 3.

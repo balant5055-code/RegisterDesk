@@ -75,8 +75,8 @@ function PartnerCard({ sponsor, reduce }: { sponsor: Sponsor; reduce: boolean | 
   const surface = cn(
     'group relative flex h-24 w-full items-center justify-center overflow-hidden px-4 sm:h-28 sm:px-5',
     CARD, CARD_HOVER,
-    sponsor.featured && 'ring-1 ring-primary/25',
-    web && 'outline-none focus-visible:ring-2 focus-visible:ring-primary/50 focus-visible:ring-offset-2',
+    sponsor.featured && 'ring-1 ring-action/25',
+    web && 'outline-none focus-visible:ring-2 focus-visible:ring-action/50 focus-visible:ring-offset-2',
   )
 
   const body = (
@@ -109,7 +109,7 @@ function PartnerCard({ sponsor, reduce }: { sponsor: Sponsor; reduce: boolean | 
       )}
 
       {sponsor.featured && (
-        <Star className="absolute right-2.5 top-2.5 size-3 text-primary/70" aria-hidden />
+        <Star className="absolute right-2.5 top-2.5 size-3 text-action/70" aria-hidden />
       )}
     </>
   )

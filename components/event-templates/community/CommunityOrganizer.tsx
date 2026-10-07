@@ -43,7 +43,7 @@ export function CommunityOrganizer({ organizer, showSocial }: CommunityOrganizer
           transition={{ duration: 0.45, ease: [0.25, 0, 0, 1] }}
           className="mb-6"
         >
-          <p className="mb-1.5 text-[10px] font-bold uppercase tracking-[0.25em] text-primary">
+          <p className="mb-1.5 text-[10px] font-bold uppercase tracking-[0.25em] text-action">
             Organised By
           </p>
           <h2 className="text-[1.25rem] font-black tracking-tight text-gray-900 sm:text-[1.625rem]">

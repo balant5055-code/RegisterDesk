@@ -275,8 +275,12 @@ export interface SecurityCapabilityDef {
   description: string
   iconKey:     MarketingIconKey
   status:      SecurityStatus
-  /** Deep link into the approved IA backing this control. */
-  href:        string
+  // `href` used to sit here as "a deep link into the approved IA backing this control".
+  // Nothing ever rendered it — the /security projection drops it and CapabilityGrid has no
+  // href prop — and by the end six of its values pointed at routes that do not exist
+  // (/platform/communications, /roadmap). A destination field no renderer reads is not a
+  // link, it is a claim waiting to 404. Removed rather than repointed: there is nothing
+  // correct to aim it at yet. Add it back with the destinations, not before.
 }
 
 // ─── Final CTA (P.1.6.11 — conversion close; CTA registry only) ─────────────

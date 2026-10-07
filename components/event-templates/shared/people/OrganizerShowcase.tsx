@@ -93,7 +93,7 @@ export function OrganizerShowcase({
   const hasActions   = !!(resolvedHref || web || socials.length)
 
   const ACTION_BTN =
-    'inline-flex h-11 w-full items-center justify-center gap-2 rounded-xl border border-border bg-card px-4 text-fs-sm font-semibold text-foreground transition-colors hover:border-foreground/25 hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40'
+    'inline-flex h-11 w-full items-center justify-center gap-2 rounded-xl border border-border bg-card px-4 text-fs-sm font-semibold text-foreground transition-colors hover:border-foreground/25 hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-action/40'
 
   return (
     <SectionShell id="organizer" bg={bg}>
@@ -130,16 +130,16 @@ export function OrganizerShowcase({
               {/* Verification — the trust signal, directly under the name. */}
               <div className="mt-2 flex flex-wrap items-center gap-2">
                 {organizer.verified && (
-                  <span className="inline-flex items-center gap-1 rounded-full bg-primary/10 px-2.5 py-1 text-fs-2xs font-bold text-primary">
+                  <span className="inline-flex items-center gap-1 rounded-full bg-action/10 px-2.5 py-1 text-fs-2xs font-bold text-action">
                     <BadgeCheck className="size-3.5" aria-hidden />Verified
                   </span>
                 )}
                 <span className="inline-flex items-center gap-1 rounded-full bg-muted px-2.5 py-1 text-fs-2xs font-bold text-foreground">
-                  <ShieldCheck className="size-3.5 text-primary" aria-hidden />Official Organizer
+                  <ShieldCheck className="size-3.5 text-action" aria-hidden />Official Organizer
                 </span>
                 {organizer.foundedYear && (
                   <span className="inline-flex items-center gap-1 text-fs-2xs font-medium text-muted-foreground">
-                    <CalendarDays className="size-3.5 text-primary/70" aria-hidden />Since {organizer.foundedYear}
+                    <CalendarDays className="size-3.5 text-action/70" aria-hidden />Since {organizer.foundedYear}
                   </span>
                 )}
               </div>
@@ -164,7 +164,7 @@ export function OrganizerShowcase({
             <div className={cn('grid', GRID_GAP, stats.length > 1 ? 'grid-cols-2' : 'grid-cols-1')}>
               {stats.map(st => (
                 <div key={st.label} className={cn(CARD, CARD_PAD, 'flex flex-col justify-between')}>
-                  <st.icon className="size-[18px] text-primary" aria-hidden />
+                  <st.icon className="size-[18px] text-action" aria-hidden />
                   <p className={cn('mt-3', TYPE.statValue)}>{st.value}</p>
                   <p className={cn('mt-1', TYPE.label)}>{st.label}</p>
                 </div>
@@ -189,7 +189,7 @@ export function OrganizerShowcase({
 
                 {web && (
                   <a href={web} target="_blank" rel="noopener noreferrer" className={ACTION_BTN}>
-                    <Globe className="size-4 text-primary" aria-hidden />
+                    <Globe className="size-4 text-action" aria-hidden />
                     <span className="truncate">{domain(web)}</span>
                     <ExternalLink className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
                   </a>
@@ -198,7 +198,7 @@ export function OrganizerShowcase({
                 {/* Secondary contact channel — only when it is not already the primary. */}
                 {phone && !isTel && (
                   <a href={`tel:${phone}`} className={ACTION_BTN}>
-                    <Phone className="size-4 text-primary" aria-hidden />{phone}
+                    <Phone className="size-4 text-action" aria-hidden />{phone}
                   </a>
                 )}
               </div>
@@ -214,7 +214,7 @@ export function OrganizerShowcase({
                         target="_blank"
                         rel="noopener noreferrer"
                         aria-label={`${organizer.name} on ${soc.label}`}
-                        className="inline-flex items-center gap-1 rounded-full border border-border/70 bg-card px-3 py-1.5 text-fs-xs font-semibold text-muted-foreground transition-colors hover:border-primary/40 hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+                        className="inline-flex items-center gap-1 rounded-full border border-border/70 bg-card px-3 py-1.5 text-fs-xs font-semibold text-muted-foreground transition-colors hover:border-action/40 hover:text-action focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-action/40"
                       >
                         {soc.label}<ExternalLink className="size-3" aria-hidden />
                       </Link>

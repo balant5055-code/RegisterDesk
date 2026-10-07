@@ -15,6 +15,7 @@ import {
 import {
   listSessionsForEvent, serializeSession,
 } from '@/features/race-operations/repositories/sessionRepo'
+import { resolveRaceOpsEvent } from '@/features/race-operations/repositories/eventReadRepo'
 import type { ColumnMapping, ResultField } from '@/features/race-operations/types/results'
 import { RESULT_FIELDS } from '@/features/race-operations/types/results'
 import type { ImportSessionView } from '@/features/race-operations/types/session'
@@ -95,6 +96,11 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
 
   const eventId = new URL(req.url).searchParams.get('eventId')?.trim() ?? ''
   if (!eventId) return NextResponse.json({ error: 'eventId is required' }, { status: 400 })
+
+  // RD-RACEOPS-02B · the import log is result data: the event must be owned AND admit
+  // Race Operations before a single session is read.
+  const gate = await resolveRaceOpsEvent(authz.workspaceUid, eventId)
+  if (!gate.ok) return NextResponse.json({ error: gate.error }, { status: gate.status })
 
   const sessions = await listSessionsForEvent(authz.workspaceUid, eventId)
   const payload: ListSessionsResponse = { sessions: sessions.map(serializeSession) }

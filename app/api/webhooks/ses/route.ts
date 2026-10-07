@@ -104,6 +104,23 @@ function diagnosticFor(event: SesEvent, address: string): string | undefined {
 
 type LogData = { organizerUid?: string; recipientEmail?: string; status?: string }
 
+/**
+ * RD-INTEG — the address fallback may only reach a log that was never linked to a provider
+ * message (no providerMessageId) — a log WITH an id is provably a different message — and only
+ * the newest such log per address. It used to update EVERY log for the address (up to the query
+ * limit), so one bounce flipped an organizer's unrelated historical messages to failed.
+ */
+function newestUnlinked<T extends FirebaseFirestore.QueryDocumentSnapshot>(docs: T[]): T | null {
+  let best: T | null = null, bestMs = -1
+  for (const d of docs) {
+    const x = d.data() as { providerMessageId?: unknown; createdAt?: { toMillis?: () => number } }
+    if (typeof x.providerMessageId === 'string' && x.providerMessageId) continue
+    const ms = typeof x.createdAt?.toMillis === 'function' ? x.createdAt.toMillis() : 0
+    if (ms >= bestMs) { best = d; bestMs = ms }
+  }
+  return best
+}
+
 async function matchLogs(messageId: string, recipients: string[]): Promise<Map<string, LogData>> {
   const col = adminDb.collection('emailLogs')
   const matched = new Map<string, LogData>()
@@ -114,7 +131,8 @@ async function matchLogs(messageId: string, recipients: string[]): Promise<Map<s
   if (matched.size === 0) {
     for (const email of recipients.slice(0, 5)) {
       const snap = await col.where('recipientEmail', '==', email).limit(LOG_QUERY_LIMIT).get()
-      snap.docs.forEach(d => matched.set(d.id, d.data() as LogData))
+      const d = newestUnlinked(snap.docs.filter(x => (x.data() as { provider?: unknown }).provider !== 'resend'))
+      if (d) matched.set(d.id, d.data() as LogData)
     }
   }
   return matched
@@ -204,7 +222,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     // as well, so an organizer's own broadcast pre-filter stays correct.
     const matched = await matchLogs(messageId, recipients)
     for (const [logId, d] of matched) {
-      await updateEmailLog(logId, 'failed', { error: reason })
+      // RD-INTEG — only a PERMANENT bounce is a failed delivery. A transient bounce (mailbox
+      // full, throttled) is retried by SES, and a complaint means the mail WAS delivered: both
+      // are recorded on the log without turning it into "Failed".
+      if (isPermanent && kind === 'Bounce') await updateEmailLog(logId, 'failed', { error: reason })
+      else await adminDb.collection('emailLogs').doc(logId).update({ lastProviderEvent: kind === 'Complaint' ? 'complaint' : 'transient_bounce' }).catch(() => { /* best-effort */ })
       if (isPermanent && d.recipientEmail && d.organizerUid) {
         await addToSuppressionList(d.recipientEmail, d.organizerUid, reason).catch(() => { /* best-effort */ })
       }

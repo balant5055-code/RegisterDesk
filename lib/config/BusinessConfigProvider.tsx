@@ -88,7 +88,9 @@ async function fetchPublicConfig(): Promise<BusinessConfigData> {
       licenseCatalog:   reviveCatalog(c.licenseCatalog),
       licenseCatalogV2: reviveCatalogV2(c.licenseCatalogV2),
       communication:  c.communication ?? CODE_DEFAULTS.communication,
-      wallet:         c.wallet        ?? CODE_DEFAULTS.wallet,
+      // RD-WALLET-CFG-01 — the public feed carries only the organizer-facing wallet fields; the rest
+      // keep their code defaults on the client (nothing client-side reads them).
+      wallet:         c.wallet ? { ...CODE_DEFAULTS.wallet, ...c.wallet } : CODE_DEFAULTS.wallet,
       settlements:    c.settlements   ?? CODE_DEFAULTS.settlements,
       featureFlags:   c.featureFlags  ?? CODE_DEFAULTS.featureFlags,
       branding:       c.branding      ?? CODE_DEFAULTS.branding,

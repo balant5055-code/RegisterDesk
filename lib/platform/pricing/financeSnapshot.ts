@@ -58,7 +58,32 @@ export interface FinanceFigures {
   financialVersion?:       number
   snapshotVersion?:        number
   pricingVersion?:         number
+
+  // ═══ RD-FIN-15 · THE GATEWAY RESOLUTION ══════════════════════════════════
+  // These four are NOT part of the pricing snapshot and never can be: the snapshot is
+  // written at order time, and what the gateway actually charged is only known later,
+  // from the capture webhook. They are carried straight off the ledger document and
+  // take no part in the snapshot-equality check above.
+
+  /** What the gateway actually charged, when recorded. TAX-INCLUSIVE. null = not reconciled. */
+  gatewayFeeActualPaise:   number | null
+  /** GST CONTAINED WITHIN `gatewayFeeActualPaise` — never added to it. */
+  gatewayTaxPaise:         number | null
+  /** `actual ?? estimate`. The figure every report and surface should show. */
+  gatewayFeePaise:         number
+  /** Which of the two `gatewayFeePaise` is. Never inferred by a caller. */
+  gatewayFeeBasis:         'actual' | 'estimated'
 }
+
+/**
+ * The figures before the gateway resolution is attached.
+ *
+ * The three internal constructors below build this; `resolveFigures` decorates it once,
+ * so the resolution rule lives in exactly one place and cannot drift between the
+ * financials, snapshot and ledger paths.
+ */
+type FinanceFiguresBase = Omit<FinanceFigures,
+  'gatewayFeeActualPaise' | 'gatewayTaxPaise' | 'gatewayFeePaise' | 'gatewayFeeBasis'>
 
 /** The stored ledger fields the finance reader needs (a subset of PlatformTransactionDocument). */
 export interface FinanceLedgerDoc {
@@ -68,13 +93,16 @@ export interface FinanceLedgerDoc {
   platformFeeTotalPaise:   number
   gatewayFeeEstimatePaise: number
   netSettlementPaise:      number
+  /** Written by the capture webhook / reconciliation. Absent on unreconciled rows. */
+  gatewayFeeActualPaise?:  number
+  gatewayTaxPaise?:        number
   pricingSnapshot?:        string
   // RD-PAYMENT-02 Phase 6 — the canonical breakdown; preferred when present. Optional and
   // absent on every current/legacy ledger, so reads fall back to the flat fields above.
   financials?:             FeeBreakdownRecord
 }
 
-function fromLedger(doc: FinanceLedgerDoc): FinanceFigures {
+function fromLedger(doc: FinanceLedgerDoc): FinanceFiguresBase {
   return {
     source:                  'fallback',
     grossAmountPaise:        doc.grossAmountPaise,
@@ -91,7 +119,7 @@ function fromLedger(doc: FinanceLedgerDoc): FinanceFigures {
 // ledger fields (ticketBasePaise === gross, netSettlementPaise identical), so the core
 // figures are byte-identical; the extra fields (feeModel, charge, attendee/organizer split)
 // are additive.
-function fromFinancials(f: FeeBreakdownRecord): FinanceFigures {
+function fromFinancials(f: FeeBreakdownRecord): FinanceFiguresBase {
   return {
     source:                  'financials',
     grossAmountPaise:        f.ticketBasePaise,
@@ -126,7 +154,7 @@ function coerceFinancials(v: unknown): FeeBreakdownRecord | undefined {
 
 // Shared core: snapshot-first with ledger fallback, guaranteed byte-equal to the
 // stored ledger. Never throws, never recalculates. `ns` selects the metric counters.
-function resolveFigures(doc: FinanceLedgerDoc, ns: MetricNamespace): FinanceFigures {
+function resolveBase(doc: FinanceLedgerDoc, ns: MetricNamespace): FinanceFiguresBase {
   const ledger = fromLedger(doc)
   // RD-PAYMENT-02 Phase 6: prefer the canonical financials breakdown when present — the
   // single, highest-priority source. Absent on every current/legacy ledger, so this branch
@@ -170,6 +198,32 @@ function resolveFigures(doc: FinanceLedgerDoc, ns: MetricNamespace): FinanceFigu
   }
 }
 
+const intOrNull = (v: unknown): number | null =>
+  typeof v === 'number' && Number.isFinite(v) ? Math.trunc(v) : null
+
+/**
+ * Attach the gateway resolution. PURE.
+ *
+ * The rule is per transaction and stated once here: the reconciled figure when the row
+ * carries one, the recorded estimate otherwise, and the basis alongside so that no
+ * downstream surface has to decide — or guess — which it received. A row with no actual
+ * reports `null`, never ₹0, because zero is a claim and absence is not.
+ */
+function withGatewayResolution(doc: FinanceLedgerDoc, base: FinanceFiguresBase): FinanceFigures {
+  const actual = intOrNull(doc.gatewayFeeActualPaise)
+  return {
+    ...base,
+    gatewayFeeActualPaise: actual,
+    gatewayTaxPaise:       actual === null ? null : intOrNull(doc.gatewayTaxPaise),
+    gatewayFeePaise:       actual ?? base.gatewayFeeEstimatePaise,
+    gatewayFeeBasis:       actual === null ? 'estimated' : 'actual',
+  }
+}
+
+function resolveFigures(doc: FinanceLedgerDoc, ns: MetricNamespace): FinanceFigures {
+  return withGatewayResolution(doc, resolveBase(doc, ns))
+}
+
 /**
  * Read a ledger doc's FINANCE figures, snapshot-first with ledger fallback. Guarantees
  * the returned figures equal the stored ledger values (snapshot used only when
@@ -203,6 +257,10 @@ export function readReportFromLedgerData(d: Record<string, unknown>): FinanceFig
     platformFeeTotalPaise:   num(d.platformFeeTotalPaise),
     gatewayFeeEstimatePaise: num(d.gatewayFeeEstimatePaise),
     netSettlementPaise:      num(d.netSettlementPaise),
+    // Passed through as undefined-when-absent rather than coerced to 0 by `num`: a row
+    // that was never reconciled must read as "no actual", not as "the gateway charged 0".
+    gatewayFeeActualPaise:   typeof d.gatewayFeeActualPaise === 'number' ? d.gatewayFeeActualPaise : undefined,
+    gatewayTaxPaise:         typeof d.gatewayTaxPaise === 'number' ? d.gatewayTaxPaise : undefined,
     pricingSnapshot:         typeof d.pricingSnapshot === 'string' ? d.pricingSnapshot : undefined,
     financials:              coerceFinancials(d.financials),
   })

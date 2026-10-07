@@ -20,7 +20,7 @@ export interface TicketCalendar {
 
 // Keyboard users need a visible target; the hover-only styles left none.
 const FOCUS = ' focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2'
-const primaryAction   = 'flex items-center justify-center gap-2 rounded-xl bg-primary px-4 py-3 text-[14px] font-semibold text-primary-foreground shadow-sm transition-opacity hover:opacity-90'+FOCUS
+const primaryAction   = 'flex items-center justify-center gap-2 rounded-xl bg-action px-4 py-3 text-[14px] font-semibold text-action-foreground shadow-sm transition-opacity hover:opacity-90'+FOCUS
 const secondaryAction = 'flex items-center justify-center gap-2 rounded-xl border border-border bg-white px-3 py-2.5 text-[13px] font-semibold text-foreground transition-colors hover:bg-muted/50'+FOCUS
 
 export function TicketActions({

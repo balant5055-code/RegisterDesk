@@ -40,7 +40,7 @@ export function RecoveryBanner({ fieldCount, onResume, onDiscard }: {
             <RotateCcw className="size-4 text-primary" />
           </span>
           <div className="min-w-0">
-            <h2 id="rd-recovery-h" className={TYPE.cardTitle}>Resume your registration?</h2>
+            <h2 id="rd-recovery-h" className="font-display text-fs-lg font-normal text-hero-ink leading-snug">Resume your registration?</h2>
             <p className={cn('mt-0.5', TYPE.cardBody)}>
               We found an unfinished registration with {fieldCount} {fieldCount === 1 ? 'answer' : 'answers'} saved on this device.
             </p>

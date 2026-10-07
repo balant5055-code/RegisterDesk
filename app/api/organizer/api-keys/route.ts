@@ -4,7 +4,6 @@
 
 import { NextRequest, NextResponse } from 'next/server'
 import { verifyCaller, requireOwner } from '@/lib/team/access'
-import { requireFeature }             from '@/lib/licensing/workspaceEntitlements'
 import { createApiKey, listApiKeys }  from '@/lib/integrations/apiKeys'
 import { logIntegrationAction }       from '@/lib/integrations/audit'
 import { isApiKeyPermission, type ApiKeyPermission } from '@/lib/integrations/types'
@@ -15,10 +14,8 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   if (!caller) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   const access = requireOwner(caller.uid, caller.uid)
   if (!access.ok) return NextResponse.json({ error: access.reason }, { status: access.status })
-  // Entitlement: API access is a licensed feature (apiAccess). Enforced server-side,
-  // not just hidden in the UI, so it tracks the effective license/config override.
-  const feat = await requireFeature(caller.uid, 'apiAccess')
-  if (!feat.ok) return NextResponse.json({ error: feat.error }, { status: feat.status })
+  // RD-CAPACITY-01 · API access is no longer a licensed feature — every organizer has it.
+  // The owner check above still decides WHOSE keys these are.
 
   const keys = await listApiKeys(caller.uid)
   return NextResponse.json({ keys }, { headers: { 'Cache-Control': 'no-store' } })
@@ -29,9 +26,6 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   if (!caller) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   const access = requireOwner(caller.uid, caller.uid)
   if (!access.ok) return NextResponse.json({ error: access.reason }, { status: access.status })
-  const feat = await requireFeature(caller.uid, 'apiAccess')
-  if (!feat.ok) return NextResponse.json({ error: feat.error }, { status: feat.status })
-
   // Throttle credential creation against automation / key-spraying.
   const rl = checkPolicy(caller.uid, RATE_POLICY.apiKeyCreate)
   if (rl.limited) return NextResponse.json(

@@ -63,6 +63,14 @@ describe('deriveStoredEventCapacity — stamped vs legacy back-fill', () => {
     expect(deriveStoredEventCapacity({ pricing: { eventType: 'free' } })).toBe(100)
     expect(deriveStoredEventCapacity({ pricing: { eventType: 'paid' } })).toBeNull()
   })
+  // RD-LICENSE-E2E-03 — the atomic registration transaction reads through this function, so
+  // a stamped totalCapacity must beat the compatibility `capacityPlan` label every time.
+  it('a stamped totalCapacity always wins over a legacy capacityPlan label', () => {
+    expect(deriveStoredEventCapacity({ totalCapacity: 1206,    capacityPlan: 'pack_2500' })).toBe(1206)
+    expect(deriveStoredEventCapacity({ totalCapacity: 437,     capacityPlan: 'pack_500'  })).toBe(437)
+    expect(deriveStoredEventCapacity({ totalCapacity: 200_000, capacityPlan: 'unlimited' })).toBe(200_000)
+    expect(deriveStoredEventCapacity({ totalCapacity: 100,     capacityPlan: 'pack_200'  })).toBe(100)
+  })
 })
 
 describe('computePassAvailability — oversell prevention (remaining = min(pass, event))', () => {

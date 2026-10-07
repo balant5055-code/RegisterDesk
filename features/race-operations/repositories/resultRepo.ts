@@ -13,6 +13,8 @@ import {
   type StoredRaceResultDoc, type StoredResultView,
 } from '@/features/race-operations/types/session'
 import type { NormalizedRaceResult } from '@/features/race-operations/types/results'
+import { bibKey } from '@/features/race-operations/utils/publicKeys'
+import { groupKey } from '@/features/race-operations/ranking/groups'
 
 /** Firestore's hard limit is 500 writes per batch. */
 const MAX_BATCH_WRITES = 500
@@ -66,10 +68,26 @@ export async function persistResultChunk(
       gender:         r.gender,
       category:       r.category,
       ageGroup:       r.ageGroup,
+      // RD-RACEOPS-RESULTS-04 · the distance pace and speed are derived from, and the
+      // checkpoints, both carried to the snapshot build.
+      // `?? null` throughout: a caller that predates this sprint sends none of these
+      // fields, and Firestore rejects `undefined` outright.
+      distanceMeters: r.distanceMeters ?? null,
+      distanceRaw:    r.distanceRaw ?? null,
+      // `?? []` — a row from a caller that predates this sprint has no `splits` at all, and
+      // Firestore rejects `undefined`. An empty array is the honest "no checkpoints".
+      splits:         (r.splits ?? []).map(s => ({ ...s })),
       rawRow:         { ...r.rawRow },
       sourceProvider: r.sourceProvider,
+      bibKey:         r.bibNumber ? bibKey(r.bibNumber) : '',
       overallRank:    null,
       passRank:       null,
+      genderRank:     null,
+      ageGroupRank:   null,
+      // Written with the row so the ranking pass can group without re-deriving, and so the
+      // snapshot build can look up a group total with the same key that counted it.
+      genderKey:      groupKey(r.gender),
+      ageGroupKey:    groupKey(r.ageGroup),
       sessionId:      scope.sessionId,
       organizerUid:   scope.organizerUid,
       eventSlug:      scope.eventSlug,
@@ -85,8 +103,39 @@ export async function persistResultChunk(
 
 // ─── Ranking reads / writes ───────────────────────────────────────────────────
 
+/**
+ * RD-RACEOPS-02C · which of these bibs are ALREADY stored in the session, and on which row.
+ *
+ * Bounded by the chunk, never by the session: Firestore's `in` takes 30 values, so a
+ * 400-row chunk costs at most 14 equality queries against the single-field index every
+ * subcollection has. Returns bibKey → rowNumber of the stored row.
+ */
+export async function findStoredRowsByBib(
+  sessionId: string,
+  bibKeys:   readonly string[],
+): Promise<Map<string, number>> {
+  const out = new Map<string, number>()
+  const unique = [...new Set(bibKeys.filter(k => k !== ''))]
+  for (let i = 0; i < unique.length; i += 30) {
+    const slice = unique.slice(i, i + 30)
+    const snap = await resultsCol(sessionId).where('bibKey', 'in', slice).get()
+    for (const d of snap.docs) {
+      const r = d.data() as StoredRaceResultDoc
+      if (r.bibKey) out.set(r.bibKey, r.rowNumber)
+    }
+  }
+  return out
+}
+
 export interface RankablePage {
-  rows: Array<{ rowNumber: number; chipTimeMs: number }>
+  /**
+   * RD-RACEOPS-RESULTS-04 · the group values ride along with the time.
+   *
+   * `rankChunk` reads only (rowNumber, chipTimeMs) and `rankGroupChunk` reads the gender and
+   * age group, so one page feeds every dimension — which is what keeps group ranking free of
+   * a second query and a second index.
+   */
+  rows: Array<{ rowNumber: number; chipTimeMs: number; gender: string | null; ageGroup: string | null }>
   /** Feed back as `afterChipTimeMs`/`afterRowNumber` to continue. Null ⇒ page was the last. */
   nextCursor: { chipTimeMs: number; rowNumber: number } | null
 }
@@ -117,7 +166,12 @@ export async function fetchRankablePage(
     // Defensive: a finisher with no usable time is not rankable. Validation flags such a
     // row as an error, so it should not be here — the engine does not assume that.
     .filter(r => typeof r.chipTimeMs === 'number' && r.chipTimeMs > 0)
-    .map(r => ({ rowNumber: r.rowNumber, chipTimeMs: r.chipTimeMs as number }))
+    // RD-RACEOPS-RESULTS-04 · the group values ride along, so gender and age-group ranks
+    // are assigned in this same ascending-time walk — no second query, no new index.
+    .map(r => ({
+      rowNumber: r.rowNumber, chipTimeMs: r.chipTimeMs as number,
+      gender: r.gender ?? null, ageGroup: r.ageGroup ?? null,
+    }))
 
   const last = rows.length > 0 ? rows[rows.length - 1] : null
   return {
@@ -130,7 +184,12 @@ export async function fetchRankablePage(
 /** Writes computed ranks back. Both ranks are set together so a row is never half-ranked. */
 export async function writeRankChunk(
   sessionId:   string,
-  assignments: ReadonlyArray<{ rowNumber: number; rank: number }>,
+  assignments: ReadonlyArray<{
+    rowNumber: number; rank: number
+    /** RD-RACEOPS-RESULTS-04 · null where the row has no such group, or it was abandoned. */
+    genderRank?: number | null
+    ageGroupRank?: number | null
+  }>,
 ): Promise<void> {
   if (assignments.length === 0) return
   if (assignments.length > MAX_BATCH_WRITES) {
@@ -143,7 +202,13 @@ export async function writeRankChunk(
     // Sprint 3: a session is one (event, pass), so pass rank IS the session rank. Both are
     // written from the same sequence — see ranking/engine.ts and the note in
     // RD-RACEOPS-IMPORT-LIFECYCLE.md §Ranking.
-    batch.update(col.doc(resultDocId(a.rowNumber)), { overallRank: a.rank, passRank: a.rank })
+    batch.update(col.doc(resultDocId(a.rowNumber)), {
+      overallRank: a.rank, passRank: a.rank,
+      // RD-RACEOPS-RESULTS-04 · written in the SAME update as the overall rank, so a row is
+      // never carrying an overall rank from this pass and a group rank from the last one.
+      genderRank:   a.genderRank   ?? null,
+      ageGroupRank: a.ageGroupRank ?? null,
+    })
   }
   await batch.commit()
 }

@@ -24,12 +24,13 @@ import { cn } from '@/lib/utils/cn'
 
 // ─── Type + rhythm tokens ───────────────────────────────────────────────────────
 
-export const FIELD_LABEL = 'text-fs-sm font-semibold text-foreground'
+/** 2026-09-27 luxury pass: small caps in the eyebrow ink — the public site's label voice. */
+export const FIELD_LABEL = 'text-fs-2xs font-semibold uppercase tracking-[0.14em] text-hero-eyebrow'
 export const FIELD_HINT  = 'text-fs-xs leading-relaxed text-muted-foreground'
 export const FIELD_ERROR = 'text-fs-xs font-medium text-destructive'
 
 /** One vertical rhythm for every field: label → hint → control → message. */
-const LABEL_GAP   = 'mb-1'
+const LABEL_GAP   = 'mb-1.5'
 const HINT_GAP    = 'mb-1.5'
 const MESSAGE_GAP = 'mt-1.5'
 
@@ -48,15 +49,15 @@ const MESSAGE_GAP = 'mt-1.5'
 // the global `--select-height: 2.5rem`.
 
 const CONTROL_SHARED =
-  'w-full rounded-xl border text-fs-sm text-foreground placeholder:text-muted-foreground/50 ' +
+  'w-full rounded-[var(--radius-control)] border text-fs-sm text-foreground placeholder:text-muted-foreground/50 ' +
   'outline-none transition-[background-color,border-color,box-shadow] duration-150 ' +
   'disabled:cursor-not-allowed disabled:bg-muted/60 disabled:opacity-60 disabled:shadow-none ' +
   'read-only:bg-muted/50 read-only:text-muted-foreground read-only:shadow-none'
 
 /** Recessed at rest → lit on focus. Shared by every control branch. */
 const CONTROL_OK =
-  'border-border bg-muted/30 shadow-[inset_0_1px_2px_rgb(15_23_42_/_0.05)] ' +
-  'hover:border-border-strong hover:bg-muted/45 ' +
+  'border-border/80 bg-card ' +
+  'hover:border-border-strong ' +
   'focus:border-primary/70 focus:bg-background focus:shadow-[0_0_0_4px_rgb(var(--primary-rgb)_/_0.12)]'
 
 const CONTROL_ERR =
@@ -101,7 +102,7 @@ export function FieldLabel({ label, required, htmlFor, id, asSpan }: {
           <span className="sr-only"> (required)</span>
         </>
       ) : (
-        <span className="ml-1.5 text-fs-2xs font-medium text-muted-foreground/70">Optional</span>
+        <span className="ml-1.5 font-medium normal-case tracking-normal text-muted-foreground/70">Optional</span>
       )}
     </>
   )
@@ -169,7 +170,7 @@ export function ErrorSummary({ errors, onJump, innerRef }: {
       ref={innerRef}
       role="alert"
       tabIndex={-1}
-      className="mb-4 overflow-hidden rounded-2xl border border-destructive/25 bg-card shadow-[0_1px_2px_rgb(15_23_42_/_0.04),0_18px_36px_-28px_rgb(220_38_38_/_0.45)] outline-none focus-visible:ring-2 focus-visible:ring-destructive/40"
+      className="mb-4 overflow-hidden rounded-xl border border-destructive/25 bg-card shadow-[0_1px_2px_rgb(15_23_42_/_0.04),0_18px_36px_-28px_rgb(220_38_38_/_0.45)] outline-none focus-visible:ring-2 focus-visible:ring-destructive/40"
     >
       <p className="flex items-center gap-2.5 border-b border-destructive/15 bg-destructive/[0.05] px-4 py-3 text-fs-sm font-bold text-destructive">
         <span aria-hidden className="flex size-6 shrink-0 items-center justify-center rounded-lg bg-destructive/10">
@@ -207,7 +208,7 @@ export function ErrorSummary({ errors, onJump, innerRef }: {
 // the paint is ours. `min-h-11` gives a 44px touch target on every option.
 
 const OPTION_ROW =
-  'group relative flex min-h-11 cursor-pointer select-none items-center gap-3 rounded-xl border px-3.5 py-2.5 ' +
+  'group relative flex min-h-11 cursor-pointer select-none items-center gap-3 rounded-[var(--radius-control)] border px-3.5 py-2.5 ' +
   'text-fs-sm text-foreground transition-[background-color,border-color,box-shadow,transform] duration-150 ' +
   'has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-primary/50 has-[:focus-visible]:ring-offset-2 ' +
   'has-[:disabled]:cursor-not-allowed has-[:disabled]:opacity-60'
@@ -231,7 +232,7 @@ const RADIO_MARK =
 
 /** Checkbox mark — box fills with the brand gradient, tick fades in. */
 const CHECK_MARK =
-  'flex size-5 shrink-0 items-center justify-center rounded-[7px] border-2 border-border-strong bg-card transition-all duration-150 ' +
+  'flex size-5 shrink-0 items-center justify-center rounded-[4px] border-2 border-border-strong bg-card transition-all duration-150 ' +
   'peer-checked:border-transparent peer-checked:bg-[image:var(--primary-gradient)] ' +
   'peer-checked:shadow-[0_2px_8px_rgb(var(--primary-rgb)_/_0.40)] ' +
   'peer-checked:[&>svg]:opacity-100'
@@ -303,7 +304,7 @@ export function TogglePill({ option, checked, disabled, onToggle }: {
       aria-pressed={checked}
       onClick={onToggle}
       className={cn(
-        'inline-flex min-h-10 items-center rounded-full border px-4 text-fs-sm font-semibold outline-none',
+        'inline-flex min-h-10 items-center rounded-[var(--radius-control)] border px-4 text-fs-sm font-semibold outline-none',
         'transition-[background-color,border-color,box-shadow,color] duration-150',
         'focus-visible:ring-2 focus-visible:ring-primary/50 focus-visible:ring-offset-2',
         'disabled:cursor-not-allowed disabled:opacity-60',

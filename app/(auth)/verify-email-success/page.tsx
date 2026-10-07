@@ -17,7 +17,7 @@ import { buttonVariants } from '@/components/ui'
 import { AuthScreen } from '@/components/auth'
 import { EASE } from '@/components/auth/authMotion'
 import { ROUTES } from '@/config/navigation'
-import { auth, mapAuthError } from '@/lib/firebase/auth'
+import { auth, mapAuthError, resyncVerifiedSession } from '@/lib/firebase/auth'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -52,7 +52,10 @@ function VerifyEmailSuccessContent() {
     if (!hasActionCode || applied.current) return
     applied.current = true
     void applyActionCode(auth, oobCode as string)
-      .then(() => auth.currentUser?.reload())
+      // Same hazard as the OTP path: applyActionCode changes emailVerified server-side, so
+      // the cached ID token is stale and every organizer API would answer 401 until it
+      // happened to refresh. resyncVerifiedSession() forces the new token.
+      .then(() => resyncVerifiedSession())
       .then(() => setVerifyState('success'))
       .catch((err: unknown) => {
         setErrorMsg(mapAuthError(err))
@@ -65,11 +68,11 @@ function VerifyEmailSuccessContent() {
       {/* ── Loading ─────────────────────────────────────────── */}
       {verifyState === 'loading' && (
         <div className="flex flex-col items-center gap-5 py-4 text-center">
-          <div className="flex size-16 items-center justify-center rounded-2xl bg-muted ring-1 ring-border">
+          <div className="flex size-14 items-center justify-center rounded-[var(--radius-control)] border border-border bg-card">
             <Loader2 className="size-8 animate-spin text-muted-foreground" aria-hidden />
           </div>
           <div>
-            <h2 className="text-[1.45rem] font-bold tracking-tight text-foreground">
+            <h2 className="font-display text-fs-2xl font-light tracking-[-0.01em] text-hero-ink">
               Verifying your email
             </h2>
             <p className="mt-2 text-sm text-muted-foreground">
@@ -91,14 +94,14 @@ function VerifyEmailSuccessContent() {
               initial={{ opacity: 0, scale: 0.6 }}
               animate={{ opacity: 1, scale: 1 }}
               transition={{ duration: 0.55, ease: EASE }}
-              className="flex size-16 items-center justify-center rounded-2xl bg-primary/10 ring-1 ring-primary/20"
+              className="flex size-14 items-center justify-center rounded-[var(--radius-control)] border border-hero-accent-rule/40 bg-card"
             >
               <BadgeCheck className="size-8 text-primary" aria-hidden />
             </motion.div>
           </div>
 
           <div className="mb-8 text-center">
-            <h2 className="text-[1.45rem] font-bold tracking-tight text-foreground">
+            <h2 className="font-display text-fs-2xl font-light tracking-[-0.01em] text-hero-ink">
               Email verified successfully
             </h2>
             <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
@@ -113,7 +116,7 @@ function VerifyEmailSuccessContent() {
               className={buttonVariants({
                 variant:   'primary',
                 size:      'lg',
-                className: 'w-full cursor-pointer',
+                className: 'w-full cursor-pointer rounded-[var(--radius-control)]',
               })}
             >
               <LogIn className="size-4" aria-hidden />
@@ -141,13 +144,13 @@ function VerifyEmailSuccessContent() {
           transition={{ duration: 0.35, ease: EASE }}
         >
           <div className="mb-6 flex justify-center">
-            <div className="flex size-16 items-center justify-center rounded-2xl bg-destructive/10 ring-1 ring-destructive/20">
+            <div className="flex size-14 items-center justify-center rounded-[var(--radius-control)] border border-destructive/30 bg-card">
               <XCircle className="size-8 text-destructive" aria-hidden />
             </div>
           </div>
 
           <div className="mb-6 text-center">
-            <h2 className="text-[1.45rem] font-bold tracking-tight text-foreground">
+            <h2 className="font-display text-fs-2xl font-light tracking-[-0.01em] text-hero-ink">
               Verification failed
             </h2>
             <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
@@ -161,7 +164,7 @@ function VerifyEmailSuccessContent() {
               className={buttonVariants({
                 variant:   'primary',
                 size:      'lg',
-                className: 'w-full cursor-pointer',
+                className: 'w-full cursor-pointer rounded-[var(--radius-control)]',
               })}
             >
               <RefreshCw className="size-4" aria-hidden />

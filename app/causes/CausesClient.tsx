@@ -6,7 +6,6 @@ import Image from 'next/image'
 import { Heart, Users, Calendar, Shield } from 'lucide-react'
 import { cn } from '@/lib/utils/cn'
 import { isValidImageUrl } from '@/lib/utils/imageUrl'
-import { typography } from '@/lib/ds/typography'
 import { EmptyState } from '@/components/ui'
 import { SearchBar } from '@/components/marketing/discovery/SearchBar'
 import { FilterChip } from '@/components/marketing/discovery/FilterChip'
@@ -51,6 +50,12 @@ function progressPercent(raisedPaise: number, goalRupees: number | null): number
 }
 
 // ─── Cause Card ───────────────────────────────────────────────────────────────
+//
+// 2026-09-23 luxury pass — the same family as the landing event cards: the category (and
+// the 80G mark) sits on a line ABOVE the card, never over the campaign's cover artwork;
+// the title and the amount raised are set in the display face; progress is a hairline;
+// counts are small caps; the one action is a squared --action button. Same data, same
+// link, same ended state — only the presentation changed.
 
 function CauseCard({ campaign }: { campaign: CampaignListItem }) {
   const days     = daysRemaining(campaign.endDate)
@@ -58,145 +63,134 @@ function CauseCard({ campaign }: { campaign: CampaignListItem }) {
   const subtype  = DONATION_SUBTYPE_LABELS[campaign.eventSubtype as DonationCampaignSubtype] ?? null
   const isEnding = days <= 3 && days > 0
   const ended    = days === 0
+  const showGoal = Boolean(campaign.showGoalAmount && campaign.goalRupees)
 
   return (
-    <article className="group flex flex-col overflow-hidden rounded-2xl border border-border/60 bg-card shadow-sm transition-all duration-200 hover:shadow-md hover:border-primary/40 hover:-translate-y-0.5">
-      {/* Cover image */}
-      <div className="relative aspect-[16/9] overflow-hidden bg-gradient-to-br from-primary/5 via-primary/10 to-primary/5">
-        {isValidImageUrl(campaign.coverImageUrl) ? (
-          <Image
-            src={campaign.coverImageUrl}
-            alt={campaign.title}
-            fill
-            className="object-cover transition-transform duration-500 group-hover:scale-105"
-            sizes="(max-width: 640px) 100vw, (max-width: 1024px) 50vw, 33vw"
-          />
-        ) : (
-          <div className="flex h-full items-center justify-center">
-            <Heart className="size-10 text-primary/30" aria-hidden />
-          </div>
-        )}
-
-        {/* Badges */}
-        <div className="absolute left-3 top-3 flex flex-wrap gap-1.5">
-          {subtype && (
-            <span className="rounded-full bg-white/90 px-2.5 py-0.5 text-fs-2xs font-semibold text-primary shadow-sm backdrop-blur-sm">
-              {subtype}
-            </span>
-          )}
-          {campaign.is80G && (
-            <span className="flex items-center gap-1 rounded-full bg-emerald-600/90 px-2.5 py-0.5 text-fs-2xs font-semibold text-white shadow-sm backdrop-blur-sm">
-              <Shield className="size-3" aria-hidden />
-              80G
-            </span>
-          )}
-        </div>
-
-        {/* Urgency badge */}
-        {(isEnding || ended) && (
-          <div className={cn(
-            'absolute right-3 top-3 rounded-full px-2.5 py-0.5 text-fs-2xs font-bold shadow-sm',
-            ended
-              ? 'bg-slate-700/90 text-white'
-              : 'bg-red-600/90 text-white',
-          )}>
-            {ended ? 'Ended' : `${days}d left`}
-          </div>
+    <div className="flex h-full flex-col">
+      {/* ── Above the card: what kind of cause, and its tax status ── */}
+      <div className="mb-2.5 flex min-h-7 items-center justify-between gap-2">
+        <span className="inline-flex min-w-0 items-center gap-2">
+          <span aria-hidden className="inline-flex size-6 shrink-0 items-center justify-center rounded-[var(--radius-control)] border border-hero-accent-rule/40 bg-card text-hero-accent-rule">
+            <Heart className="size-3.5" strokeWidth={1.75} />
+          </span>
+          <span className="truncate text-fs-2xs font-semibold uppercase tracking-[0.14em] text-hero-ink">
+            {subtype ?? 'Cause'}
+          </span>
+        </span>
+        {campaign.is80G && (
+          <span className="inline-flex shrink-0 items-center gap-1.5 rounded-[var(--radius-control)] border border-border/70 bg-card px-2 py-1 text-fs-2xs font-semibold uppercase tracking-[0.12em] text-hero-ink">
+            <Shield aria-hidden className="size-3 text-success" />
+            80G
+          </span>
         )}
       </div>
 
-      {/* Content */}
-      <div className="flex flex-1 flex-col gap-3 p-4">
-        {/* Title */}
-        <div>
-          <h3 className={cn(typography.cardTitle, 'line-clamp-2 leading-snug text-foreground transition-colors group-hover:text-primary')}>
-            {campaign.title}
-          </h3>
-          {campaign.tagline && (
-            <p className="mt-0.5 line-clamp-1 text-fs-sm text-muted-foreground">
-              {campaign.tagline}
-            </p>
-          )}
-        </div>
-
-        {/* Raised + goal */}
-        <div>
-          <div className="flex items-baseline justify-between">
-            <span className="text-[17px] font-bold text-foreground">
-              {formatRupees(campaign.totalRaisedPaise)}
-            </span>
-            {campaign.showGoalAmount && campaign.goalRupees && (
-              <span className="text-fs-xs text-muted-foreground">
-                of ₹{campaign.goalRupees.toLocaleString('en-IN')} goal
-              </span>
-            )}
-          </div>
-
-          {/* Progress bar */}
-          {campaign.showGoalAmount && campaign.goalRupees && (
-            <div className="mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-muted">
-              <div
-                className={cn(
-                  'h-full rounded-full transition-all duration-700',
-                  progress >= 100
-                    ? 'bg-emerald-500'
-                    : progress >= 75
-                      ? 'bg-primary/80'
-                      : 'bg-primary',
-                )}
-                style={{ width: `${progress}%` }}
-                role="progressbar"
-                aria-valuenow={progress}
-                aria-valuemin={0}
-                aria-valuemax={100}
-                aria-label={`${progress}% funded`}
-              />
+      <article className="group flex flex-1 flex-col overflow-hidden rounded-lg border border-border/70 bg-card transition-colors duration-200 hover:border-border-strong">
+        {/* Cover image */}
+        <div className="relative aspect-video overflow-hidden border-b border-border/60 bg-surface-3/60">
+          {isValidImageUrl(campaign.coverImageUrl) ? (
+            <Image
+              src={campaign.coverImageUrl}
+              alt={campaign.title}
+              fill
+              className="object-cover transition-transform duration-500 ease-out group-hover:scale-[1.03]"
+              sizes="(max-width: 640px) 100vw, (max-width: 1024px) 50vw, 33vw"
+            />
+          ) : (
+            <div className="flex h-full items-center justify-center">
+              <Heart className="size-10 text-hero-accent-rule/50" strokeWidth={1.25} aria-hidden />
             </div>
           )}
         </div>
 
-        {/* Stats row */}
-        <div className="flex items-center gap-3 text-fs-xs text-muted-foreground">
-          <span className="flex items-center gap-1">
-            <Users className="size-3.5" aria-hidden />
-            {campaign.donorCount.toLocaleString('en-IN')} donors
-          </span>
-          <span className="size-1 rounded-full bg-border" aria-hidden />
-          <span className="flex items-center gap-1">
-            <Calendar className="size-3.5" aria-hidden />
+        {/* Content */}
+        <div className="flex flex-1 flex-col p-4 sm:p-5">
+          {/* Time left — small caps with a hairline, urgent in the destructive colour. */}
+          <p className={cn(
+            'flex items-center gap-2 text-fs-2xs font-semibold uppercase tracking-[0.16em]',
+            ended ? 'text-muted-foreground' : isEnding ? 'text-destructive' : 'text-hero-eyebrow',
+          )}>
+            <span aria-hidden className={cn('h-px w-4 shrink-0', isEnding ? 'bg-destructive' : 'bg-hero-accent-rule')} />
+            <Calendar aria-hidden className="size-3.5" />
             {ended ? 'Campaign ended' : days === 1 ? '1 day left' : `${days} days left`}
-          </span>
+          </p>
+
+          <h3 className="mt-2.5 line-clamp-2 font-display text-fs-lg font-normal tracking-[-0.01em] text-hero-ink transition-colors leading-snug group-hover:text-action">
+            {campaign.title}
+          </h3>
+          {campaign.tagline && (
+            <p className="mt-1 line-clamp-2 text-fs-sm text-hero-ink-soft">
+              {campaign.tagline}
+            </p>
+          )}
+
+          {/* Raised + goal */}
+          <div className="mt-4">
+            <div className="flex items-baseline justify-between gap-3">
+              <span className="font-display text-fs-2xl font-light tabular-nums text-hero-ink leading-none">
+                {formatRupees(campaign.totalRaisedPaise)}
+              </span>
+              {showGoal && (
+                <span className="text-fs-xs text-hero-ink-soft">
+                  of ₹{campaign.goalRupees!.toLocaleString('en-IN')} goal
+                </span>
+              )}
+            </div>
+
+            {showGoal && (
+              <div className="mt-2.5 h-1 w-full overflow-hidden rounded-[var(--radius-control)] bg-muted">
+                <div
+                  className={cn(
+                    'h-full transition-all duration-700',
+                    progress >= 100 ? 'bg-success' : 'bg-action',
+                  )}
+                  style={{ width: `${progress}%` }}
+                  role="progressbar"
+                  aria-valuenow={progress}
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-label={`${progress}% funded`}
+                />
+              </div>
+            )}
+          </div>
+
+          {/* Donors + organizer */}
+          <div className="mt-4 flex items-center gap-2 text-fs-xs text-hero-ink-soft">
+            <Users className="size-3.5 shrink-0 text-hero-accent-rule" aria-hidden />
+            <span className="font-semibold tabular-nums text-hero-ink">{campaign.donorCount.toLocaleString('en-IN')}</span>
+            <span>{campaign.donorCount === 1 ? 'donor' : 'donors'}</span>
+          </div>
+          <p className="mt-1.5 truncate text-fs-xs text-hero-ink-soft">
+            by <span className="font-medium text-hero-ink">{campaign.organizerName}</span>
+            {campaign.beneficiaryName && campaign.beneficiaryName !== campaign.organizerName && (
+              <>
+                {' '}for <span className="font-medium text-hero-ink">{campaign.beneficiaryName}</span>
+              </>
+            )}
+          </p>
+
+          {/* CTA */}
+          <div className="mt-auto pt-5">
+            <Link
+              href={`/campaign/${campaign.slug}`}
+              className={cn(
+                'flex h-10 w-full items-center justify-center gap-2 rounded-[var(--radius-control)] text-fs-sm font-semibold transition-colors duration-150',
+                'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-action focus-visible:ring-offset-2',
+                ended
+                  ? 'cursor-not-allowed border border-border bg-muted text-muted-foreground'
+                  : 'bg-action text-action-foreground hover:bg-action-hover',
+              )}
+              aria-label={`Donate to ${campaign.title}`}
+              tabIndex={ended ? -1 : undefined}
+            >
+              <Heart className="size-4" aria-hidden />
+              {ended ? 'Campaign Ended' : 'Donate Now'}
+            </Link>
+          </div>
         </div>
-
-        {/* Organizer */}
-        <p className="text-fs-xs text-muted-foreground truncate">
-          by <span className="font-medium text-foreground/80">{campaign.organizerName}</span>
-          {campaign.beneficiaryName && campaign.beneficiaryName !== campaign.organizerName && (
-            <>
-              {' '}for <span className="font-medium text-foreground/80">{campaign.beneficiaryName}</span>
-            </>
-          )}
-        </p>
-      </div>
-
-      {/* CTA */}
-      <div className="px-4 pb-4">
-        <Link
-          href={`/campaign/${campaign.slug}`}
-          className={cn(
-            'flex w-full items-center justify-center gap-2 rounded-xl py-2.5 text-fs-base font-semibold transition-all duration-150',
-            ended
-              ? 'border border-border bg-muted text-muted-foreground cursor-not-allowed'
-              : 'bg-primary text-primary-foreground hover:bg-primary/90 active:scale-[0.98]',
-          )}
-          aria-label={`Donate to ${campaign.title}`}
-          tabIndex={ended ? -1 : undefined}
-        >
-          <Heart className="size-4" aria-hidden />
-          {ended ? 'Campaign Ended' : 'Donate Now'}
-        </Link>
-      </div>
-    </article>
+      </article>
+    </div>
   )
 }
 
@@ -259,18 +253,18 @@ export function CausesClient({ campaigns }: Props) {
 
         {/* Sort */}
         <div className="flex items-center gap-2 shrink-0">
-          <span className="text-xs text-muted-foreground font-medium">Sort:</span>
-          <div className="flex rounded-xl border border-border bg-muted/40 p-0.5">
+          <span className="text-fs-2xs font-semibold uppercase tracking-[0.16em] text-hero-eyebrow">Sort</span>
+          <div className="flex rounded-[var(--radius-surface)] border border-border/70 bg-card p-0.5">
             {SORT_OPTIONS.map(opt => (
               <button
                 key={opt.key}
                 type="button"
                 onClick={() => setSort(opt.key)}
                 className={cn(
-                  'rounded-lg px-3 py-1.5 text-fs-xs font-medium transition-all',
+                  'rounded-[var(--radius-control)] px-3 py-1.5 text-fs-xs font-medium transition-colors',
                   sort === opt.key
-                    ? 'bg-background text-foreground shadow-sm'
-                    : 'text-muted-foreground hover:text-foreground',
+                    ? 'bg-surface-3 text-hero-ink'
+                    : 'text-hero-ink-soft hover:text-hero-ink',
                 )}
               >
                 {opt.label}
@@ -302,7 +296,7 @@ export function CausesClient({ campaigns }: Props) {
       </div>
 
       {/* ── Result count ─────────────────────────────────────────────────────── */}
-      <p className="mt-5 text-fs-sm text-muted-foreground">
+      <p className="mt-6 text-fs-2xs font-semibold uppercase tracking-[0.16em] text-hero-eyebrow">
         {filtered.length === 0
           ? 'No causes match your filters.'
           : filtered.length === campaigns.length

@@ -7,6 +7,7 @@
 // Reuses existing Firestore reads and getCertificate — NO new search engine.
 
 import { NextRequest, NextResponse } from 'next/server'
+import { financialViewFor } from '@/lib/admin/financialGuard'
 import { resolveAdminUid } from '@/lib/admin/auth'
 import { adminDb } from '@/lib/firebase/admin'
 import { getCertificate } from '@/lib/certificates/firestore'
@@ -80,10 +81,11 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     organizationName: String(o.organizationName ?? ''), accountStatus: String(o.accountStatus ?? 'active'),
   }))
 
-  return NextResponse.json({
+  // RD-CLOSE — mixed moderation + money view: money fields are withheld unless Super Admin (ADMIN_UIDS).
+  return NextResponse.json(await financialViewFor(req, {
     query: q,
     registrations: [...regMap.values()].slice(0, CAP),
     certificates:  certOne,
     organizers,
-  }, { headers: { 'Cache-Control': 'no-store' } })
+  }), { headers: { 'Cache-Control': 'no-store' } })
 }

@@ -1,41 +1,44 @@
 import type { Metadata } from 'next'
-import { Heart, Clock } from 'lucide-react'
-import { MarketingNavbar } from '@/components/marketing/navigation/MarketingNavbar'
-import { MarketingFooter } from '@/components/marketing/footer/MarketingFooter'
-import { Eyebrow } from '@/components/marketing/Eyebrow'
+import Link from 'next/link'
+import { Heart, Clock, ArrowRight } from 'lucide-react'
+// The public chrome comes from the shared shell, like every other public page. This file
+// used to mount MarketingNavbar and MarketingFooter itself — a second copy of a composition
+// that already had one home — so /causes drifted whenever that shell changed and had no
+// <main> landmark at all. Only the mounts were removed; the hero and the grid are untouched.
+import { MarketingPageLayout } from '@/components/marketing/layout/MarketingPageLayout'
+import { buildMetadata } from '@/lib/marketing/seo'
 import { SECTION_SPACING } from '@/lib/marketing/layout'
 import { Container }     from '@/components/ui/Container'
-import { EmptyState }    from '@/components/ui'
 import { listCampaigns } from '@/lib/firebase/firestore/campaigns'
 import type { CampaignListItem } from '@/lib/firebase/firestore/campaigns'
 import { CausesClient }  from './CausesClient'
+import { PAGE_TITLE } from '@/lib/marketing/pageTitle'
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
 export const revalidate = 60
 
-const BASE_URL = process.env.NEXT_PUBLIC_BASE_URL ?? 'https://registerdesk.in'
-
 // ─── Metadata ─────────────────────────────────────────────────────────────────
 
-export const metadata: Metadata = {
+// Built through the shared helper rather than by hand. The hand-rolled version had a
+// title, description, canonical, OG and Twitter block — everything except `images`, so
+// this page and /results were the only two public pages sharing to social with NO preview
+// image. buildMetadata supplies the site OG image (public/og-image.png), the canonical and
+// the robots directive from one place; the social-specific description this page always
+// used is layered back on top.
+const CAUSES_SOCIAL_DESCRIPTION =
+  'Find and donate to active fundraising campaigns from verified organizers.'
+
+const causesBase = buildMetadata({
   title:       'Discover Causes – RegisterDesk',
   description: 'Support fundraising campaigns, medical emergencies, NGO initiatives, disaster relief, and more. Every donation makes a difference.',
-  // RD-SEO-01 — the only public marketing page that had no canonical, so its filtered
-  // variants had nothing pointing back at the bare URL.
-  metadataBase: new URL(BASE_URL),
-  alternates:  { canonical: `${BASE_URL}/causes` },
-  openGraph: {
-    title:       'Discover Causes – RegisterDesk',
-    description: 'Find and donate to active fundraising campaigns from verified organizers.',
-    url:         `${BASE_URL}/causes`,
-    type:        'website',
-  },
-  twitter: {
-    card:        'summary_large_image',
-    title:       'Discover Causes – RegisterDesk',
-    description: 'Find and donate to active fundraising campaigns from verified organizers.',
-  },
+  path:        '/causes',
+})
+
+export const metadata: Metadata = {
+  ...causesBase,
+  openGraph: { ...causesBase.openGraph, description: CAUSES_SOCIAL_DESCRIPTION },
+  twitter:   { ...causesBase.twitter,   description: CAUSES_SOCIAL_DESCRIPTION },
 }
 
 // ─── Index-error detection ────────────────────────────────────────────────────
@@ -78,24 +81,28 @@ export default async function CausesPage() {
   const totalDonors      = campaigns.reduce((s, c) => s + c.donorCount, 0)
 
   return (
-    <div className="min-h-screen bg-background">
-      <MarketingNavbar />
-
-      {/* ── Hero ─────────────────────────────────────────────────────────────── */}
-      <div className="border-b border-border bg-gradient-to-b from-primary/5 to-background">
-        <Container className="py-10 sm:py-14">
-          <div className="flex flex-col items-start gap-2">
-            <Eyebrow>Fundraising Campaigns</Eyebrow>
-            <h1 className="text-3xl font-bold tracking-tight text-foreground sm:text-4xl lg:text-5xl">
+    <MarketingPageLayout>
+      {/* ── Hero ─────────────────────────────────────────────────────────────────
+             Editorial, like every other public page since the 2026-09-23 luxury pass: a
+             bronze-ruled small-caps label, the display face set light, one sentence, and the
+             aggregate stats as a ruled ledger rather than loose pills. */}
+      <div className="border-b border-border/60 bg-surface-3/40">
+        <Container className="py-12 sm:py-16">
+          <div className="flex max-w-3xl flex-col items-start">
+            <p className="flex items-center gap-2.5 text-fs-2xs font-semibold uppercase tracking-[0.22em] text-hero-eyebrow">
+              <span aria-hidden className="h-px w-6 shrink-0 bg-hero-accent-rule" />
+              Fundraising Campaigns
+            </p>
+            <h1 className={`mt-4 ${PAGE_TITLE}`}>
               Discover Causes
             </h1>
-            <p className="mt-1 max-w-xl text-base text-muted-foreground sm:text-lg">
+            <p className="mt-4 max-w-xl text-fs-md leading-relaxed text-hero-ink-soft">
               Support verified fundraising campaigns — from medical emergencies and disaster relief to NGO initiatives and community projects.
             </p>
 
             {/* Aggregate stats — hidden when index is building or no data */}
             {!indexBuilding && campaigns.length > 0 && (
-              <div className="mt-5 flex flex-wrap items-center gap-5">
+              <div className="mt-8 flex flex-wrap divide-x divide-border/70 border-y border-border/70">
                 <StatPill
                   value={campaigns.length.toString()}
                   label={campaigns.length === 1 ? 'active cause' : 'active causes'}
@@ -121,36 +128,66 @@ export default async function CausesPage() {
       {/* ── Campaign grid ─────────────────────────────────────────────────────── */}
       <Container className={SECTION_SPACING.default}>
         {indexBuilding ? (
-          <EmptyState
+          <QuietState
             icon={Clock}
             title="Campaign directory is updating"
             description="We're preparing the campaign listing. Please check back in a few minutes."
-            size="lg"
           />
         ) : campaigns.length === 0 ? (
-          <EmptyState
+          <QuietState
             icon={Heart}
             title="No active campaigns"
             description="There are no fundraising campaigns live right now. Check back soon — new causes are added regularly."
-            size="lg"
+            action={{ label: 'Browse upcoming events', href: '/events' }}
           />
         ) : (
           <CausesClient campaigns={campaigns} />
         )}
       </Container>
-
-      <MarketingFooter />
-    </div>
+    </MarketingPageLayout>
   )
 }
 
 // ─── Sub-components ───────────────────────────────────────────────────────────
 
+/** One cell of the hero ledger: the figure in the display face, the label in small caps. */
 function StatPill({ value, label }: { value: string; label: string }) {
   return (
-    <div className="flex items-baseline gap-1.5">
-      <span className="text-xl font-bold text-foreground">{value}</span>
-      <span className="text-sm text-muted-foreground">{label}</span>
+    <div className="flex flex-col px-5 py-3 first:pl-0">
+      <span className="font-display text-fs-2xl font-light tabular-nums text-hero-ink leading-none">{value}</span>
+      <span className="mt-1.5 text-fs-2xs font-semibold uppercase tracking-[0.16em] text-hero-eyebrow">{label}</span>
+    </div>
+  )
+}
+
+/**
+ * The empty and "updating" states, in the page's editorial voice: a bronze-outlined mark,
+ * a serif line, one sentence, and (when there is somewhere useful to go) a quiet way on.
+ * `/events` is a real route — the discovery front door — so the page is never a dead end.
+ */
+function QuietState({ icon: Icon, title, description, action }: {
+  icon: typeof Heart
+  title: string
+  description: string
+  action?: { label: string; href: string }
+}) {
+  return (
+    <div className="mx-auto flex max-w-md flex-col items-center py-10 text-center sm:py-16">
+      <span aria-hidden className="inline-flex size-14 items-center justify-center rounded-full border border-hero-accent-rule/50 text-hero-accent-rule">
+        <Icon className="size-6" strokeWidth={1.5} />
+      </span>
+      <span aria-hidden className="mt-6 h-px w-8 bg-hero-accent-rule" />
+      <h2 className="mt-6 font-display text-fs-2xl font-light text-hero-ink">{title}</h2>
+      <p className="mt-3 text-fs-base leading-relaxed text-hero-ink-soft">{description}</p>
+      {action && (
+        <Link
+          href={action.href}
+          className="group mt-6 inline-flex items-center gap-2 text-fs-xs font-semibold uppercase tracking-[0.16em] text-action underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-action focus-visible:ring-offset-2"
+        >
+          {action.label}
+          <ArrowRight aria-hidden className="size-3.5 transition-transform duration-200 group-hover:translate-x-0.5 motion-reduce:transition-none" />
+        </Link>
+      )}
     </div>
   )
 }

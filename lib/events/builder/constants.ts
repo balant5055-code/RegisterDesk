@@ -20,8 +20,10 @@ export const WIZARD_STEPS: WizardStep[] = [
   { name: 'Passes & Pricing' },
   { name: 'Form' },
   { name: 'Details' },
-  { name: 'License' },
+  // RD-EVENT-COMMERCE-05B — Review (event information only), then License & Services LAST:
+  // capacity, services, the cost summary, payment AND submission ("Pay & Submit Event").
   { name: 'Review' },
+  { name: 'License & Services' },
 ]
 
 /** Reasons shown when the organizer picks a PUBLIC event visibility. */

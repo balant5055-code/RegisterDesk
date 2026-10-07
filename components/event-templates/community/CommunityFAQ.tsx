@@ -66,7 +66,7 @@ export function CommunityFAQ({
           transition={{ duration: 0.45, ease: [0.25, 0, 0, 1] }}
           className="mb-10"
         >
-          <p className="mb-1.5 text-[10px] font-bold uppercase tracking-[0.25em] text-primary">
+          <p className="mb-1.5 text-[10px] font-bold uppercase tracking-[0.25em] text-action">
             Support
           </p>
           <h2 className="text-[1.25rem] font-black tracking-tight text-gray-900 sm:text-[1.625rem]">
@@ -129,7 +129,7 @@ export function CommunityFAQ({
               href={faqUrl}
               target="_blank"
               rel="noopener noreferrer"
-              className="inline-flex items-center gap-2 text-base font-semibold text-primary hover:underline"
+              className="inline-flex items-center gap-2 text-base font-semibold text-action hover:underline"
             >
               View Full FAQ
               <ArrowRight className="size-4" aria-hidden />
@@ -155,7 +155,7 @@ export function CommunityFAQ({
                       href={faqUrl}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="flex items-center gap-2 text-sm font-semibold text-primary hover:underline"
+                      className="flex items-center gap-2 text-sm font-semibold text-action hover:underline"
                     >
                       <ArrowRight className="size-3.5" aria-hidden />
                       Visit Help Centre
@@ -164,7 +164,7 @@ export function CommunityFAQ({
                   {supportEmail && (
                     <a
                       href={`mailto:${supportEmail}`}
-                      className="flex items-center gap-2 text-sm text-gray-600 transition-colors hover:text-primary"
+                      className="flex items-center gap-2 text-sm text-gray-600 transition-colors hover:text-action"
                     >
                       <Mail className="size-3.5 shrink-0 text-gray-400" aria-hidden />
                       {supportEmail}
@@ -173,7 +173,7 @@ export function CommunityFAQ({
                   {supportPhone && (
                     <a
                       href={`tel:${supportPhone}`}
-                      className="flex items-center gap-2 text-sm text-gray-600 transition-colors hover:text-primary"
+                      className="flex items-center gap-2 text-sm text-gray-600 transition-colors hover:text-action"
                     >
                       <Phone className="size-3.5 shrink-0 text-gray-400" aria-hidden />
                       {supportPhone}
@@ -194,7 +194,7 @@ export function CommunityFAQ({
                       href={termsUrl}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="flex items-center gap-2 text-sm text-gray-600 transition-colors hover:text-primary"
+                      className="flex items-center gap-2 text-sm text-gray-600 transition-colors hover:text-action"
                     >
                       <FileText className="size-3.5 shrink-0 text-gray-400" aria-hidden />
                       Terms &amp; Conditions
@@ -205,7 +205,7 @@ export function CommunityFAQ({
                       href={refundPolicyUrl}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="flex items-center gap-2 text-sm text-gray-600 transition-colors hover:text-primary"
+                      className="flex items-center gap-2 text-sm text-gray-600 transition-colors hover:text-action"
                     >
                       <FileText className="size-3.5 shrink-0 text-gray-400" aria-hidden />
                       Refund Policy
@@ -216,7 +216,7 @@ export function CommunityFAQ({
                       href={privacyPolicyUrl}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="flex items-center gap-2 text-sm text-gray-600 transition-colors hover:text-primary"
+                      className="flex items-center gap-2 text-sm text-gray-600 transition-colors hover:text-action"
                     >
                       <ShieldCheck className="size-3.5 shrink-0 text-gray-400" aria-hidden />
                       Privacy Policy

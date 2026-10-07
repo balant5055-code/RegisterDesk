@@ -10,6 +10,7 @@ import { AvailabilityBadge } from '@/components/event-templates/shared/registrat
 import { passDisplayPrice } from '@/components/event-templates/shared/utils/format'
 import { resolveFeaturedPassId } from '@/components/event-templates/shared/utils/featuredPass'
 import { MilestoneNotice } from '@/components/event-templates/shared/registration/MilestoneNotice'
+import { formatBenefits } from '@/components/event-templates/shared/registration/benefitLabels'
 import type { ResolvedMilestoneAlert } from '@/lib/events/milestoneAlerts'
 
 // ─── Helpers ───────────────────────────────────────────────────────────────────
@@ -102,7 +103,7 @@ export function ExhibitionPasses({
             const isFree      = isFreeEvent || pass.price === 0
             const isFeatured  = pass.id === featuredId
             const av          = availability[pass.id]
-            const benefits    = pass.benefits?.filter(b => b?.trim()) ?? []
+            const benefits    = formatBenefits(pass.benefits)
             const closedSale  = pass.salesEndDate ? new Date(pass.salesEndDate) < new Date() : false
             const noStock     = !pass.unlimited && typeof pass.quantity === 'number' && pass.quantity <= 0
             const isUnavail   = closedSale || noStock || av?.status === 'sold_out'

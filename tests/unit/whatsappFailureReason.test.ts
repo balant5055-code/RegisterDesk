@@ -183,7 +183,8 @@ describe('retry policy — recoverable, but never silently', () => {
     expect(route).toContain('l.organizerUid !== uid')
     expect(route).toContain("l.channel !== 'whatsapp'")
     expect(route).toContain('l.templateKey !== RETRYABLE_WHATSAPP_TEMPLATE_KEY')
-    expect(lib).toContain('whatsapp_${args.registrationId}')   // deterministic ledger id
+    // RD-CLOSE — the deterministic ledger id moved into the shared acceptance record.
+    expect(read('lib/registrations/whatsappConfirmationAcceptance.ts')).toContain('baseLedgerId: `whatsapp_${a.registrationId}`')
   })
 
   it('nothing retries automatically — no timer, no cron, no background caller', () => {

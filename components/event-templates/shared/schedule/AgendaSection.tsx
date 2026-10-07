@@ -49,7 +49,7 @@ export function AgendaSection({ agenda }: { agenda: AgendaSession[] }) {
                   <div className="flex flex-col items-center">
                     <div className={cn(
                       'mt-[9px] size-2.5 shrink-0 rounded-full border-2 border-background',
-                      session.isBreak ? 'bg-border' : 'bg-primary',
+                      session.isBreak ? 'bg-border' : 'bg-action',
                     )} />
                     {idx < byDate[date].length - 1 && (
                       <div className="mt-1 w-px flex-1 bg-border/50 pb-4" />
@@ -65,7 +65,7 @@ export function AgendaSection({ agenda }: { agenda: AgendaSession[] }) {
                         {session.title}
                       </p>
                       {!session.isBreak && session.type && (
-                        <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-semibold text-primary">
+                        <span className="rounded-full bg-action/10 px-2 py-0.5 text-[10px] font-semibold text-action">
                           {SESSION_TYPE_LABELS[session.type] ?? session.type}
                         </span>
                       )}

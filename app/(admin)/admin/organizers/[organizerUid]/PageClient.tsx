@@ -26,7 +26,6 @@ import { ROUTES } from '@/config/navigation'
 import type { PillTone } from '@/components/admin'
 import { useConfirm } from '@/components/ui/ConfirmDialog'
 import { HBars } from '@/components/analytics/Charts'
-import { currentLicenseTierIds, isValidTierForVersion, CURRENT_LICENSE_VERSION } from '@/lib/licensing/eventLicense'
 import type {
   Organizer360Overview, Organizer360Response, Organizer360Operations,
   Organizer360Business, Organizer360Governance, Organizer360Timeline,
@@ -50,7 +49,8 @@ async function authedGet<T>(url: string): Promise<T> {
   return await res.json() as T
 }
 
-const rupees = (p: number): string => `₹${(p / 100).toLocaleString('en-IN', { maximumFractionDigits: 0 })}`
+// RD-CLOSE — a withheld (null) amount — financial fields are Super Admin only — reads '—', never ₹0.
+const rupees = (p: number | null | undefined): string => (typeof p === 'number' ? `₹${(p / 100).toLocaleString('en-IN', { maximumFractionDigits: 0 })}` : '—')
 const num = (n: number): string => n.toLocaleString('en-IN')
 const fmtDate = (iso: string | null): string =>
   iso ? new Date(iso).toLocaleString(undefined, { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—'
@@ -308,7 +308,14 @@ function OverviewWorkspace({ o, uid, onGoto, onChanged }: {
         <Card title="Quick actions" icon={UserCog}>
           <div className="space-y-3 p-4">
             <div className="flex flex-wrap gap-2">
-              {o.account.status !== 'active'
+              {/* RD-ORGANIZER-SIGNUP-FIX-02 (D3) · this is the second entry point to
+                  organizer moderation, and its gate was `status !== 'active'`, so a
+                  PENDING signup was offered Activate — the action the service now
+                  refuses — while Suspend was hidden from it entirely. Gating on the two
+                  states a reactivation can legally return FROM fixes both halves: a
+                  pending signup can no longer be activated past its own verification,
+                  and it becomes suspendable, which is what an abusive one needs. */}
+              {o.account.status === 'suspended' || o.account.status === 'banned'
                 ? <Act icon={PlayCircle} label="Activate" tone="emerald" busy={busy === 'reactivate'} onClick={() => void moderate('reactivate')} />
                 : <Act icon={ShieldOff} label="Suspend" tone="amber" busy={busy === 'suspend'} onClick={() => void moderate('suspend')} />}
               {o.account.status !== 'banned' && <Act icon={Ban} label="Ban" tone="red" busy={busy === 'ban'} onClick={() => void moderate('ban')} />}
@@ -316,6 +323,8 @@ function OverviewWorkspace({ o, uid, onGoto, onChanged }: {
             <div className="flex flex-col gap-2">
               <button onClick={() => onGoto('operations')} className={cn(btnOutline, 'justify-between')}><span className="inline-flex items-center gap-2"><Activity className="size-3.5" /> View Operations &amp; Event 360</span></button>
               <button onClick={() => onGoto('business')} className={cn(btnOutline, 'justify-between')}><span className="inline-flex items-center gap-2"><KeyRound className="size-3.5" /> View Licenses, Coupons &amp; Payments</span></button>
+              {/* RD-CLOSE — this organizer in Wallet Management (communication balance, events, services). */}
+              <DeepLink href={`/admin/wallet-management?tab=organizers&organizer=${encodeURIComponent(uid)}`} label="Open in Wallet Management" />
               <DeepLink href="/admin/licenses" label="Open License Console" />
               <DeepLink href="/admin/finance" label="Open Finance Console" />
               <DeepLink href="/admin/communications" label="Open Communications" />
@@ -509,15 +518,14 @@ function BusinessWorkspace({ uid }: { uid: string }) {
 
 // ─── Governance workspace ──────────────────────────────────────────────────────
 
-function GovernanceWorkspace({ uid, o, onChanged }: {
+function GovernanceWorkspace({ uid, o }: {
   uid: string; o: Organizer360Overview; onChanged: () => void
 }) {
   const [gov, setGov] = useState<Organizer360Governance | null>(null)
   const [timeline, setTimeline] = useState<Organizer360TimelineEntry[] | null>(null)
   const [err, setErr] = useState<string | null>(null)
-  const [busy, setBusy] = useState<string | null>(null)
-  const [reloadKey, setReloadKey] = useState(0)
-  const { confirm, prompt } = useConfirm()
+  // RD-EVENT-COMMERCE-05 — the tier override action (and its busy / confirm state) is retired.
+  const [reloadKey] = useState(0)
 
   useEffect(() => {
     let alive = true
@@ -534,24 +542,6 @@ function GovernanceWorkspace({ uid, o, onChanged }: {
     return () => { alive = false }
   }, [uid, reloadKey])
 
-  async function setOverride() {
-    const cur = gov?.overrides.entitlementOverrideTier
-    const v = (await prompt({ title: 'Entitlement override', message: `Override tier (${currentLicenseTierIds().join(' / ')}), or "clear":`, placeholder: cur ?? 'clear' }))?.trim()
-    if (!v) return
-    const clearing = v.toLowerCase() === 'clear'
-    if (!clearing && !isValidTierForVersion(v, CURRENT_LICENSE_VERSION)) { setErr('Invalid tier'); return }
-    if (!(await confirm({ message: clearing ? 'Clear the entitlement override?' : `Set entitlement override to "${v}"? This can only raise entitlements.`, tone: clearing ? undefined : 'danger' }))) return
-    setBusy('override'); setErr(null)
-    try {
-      const token = await getToken()
-      const res = await fetch(`/api/admin/organizers/${uid}/plan`, {
-        method: 'PATCH', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
-        body: JSON.stringify({ overrideTier: clearing ? null : v }),
-      })
-      if (!res.ok) { const b = await res.json().catch(() => null) as { error?: string } | null; throw new Error(b?.error ?? `Request failed (${res.status})`) }
-      setReloadKey(k => k + 1); onChanged()
-    } catch (e) { setErr(e instanceof Error ? e.message : 'Action failed') } finally { setBusy(null) }
-  }
 
   return (
     <div className="space-y-4">
@@ -561,12 +551,13 @@ function GovernanceWorkspace({ uid, o, onChanged }: {
         <Card title="Overrides & feature flags" icon={SlidersHorizontal}>
           <div className="space-y-3 p-4">
             <div className="flex flex-wrap items-center gap-2 text-[13.5px]">
-              <span className="text-muted-foreground">Effective tier</span>
+              {/* RD-EVENT-COMMERCE-05 — tiers are retired: shown for history only, never set here. */}
+              <span className="text-muted-foreground">Legacy tier (historical)</span>
               <StatusPill tone="neutral">{gov?.overrides.effectiveTier ?? o.entitlements.effectiveTier}</StatusPill>
               <StatusPill tone="info">{gov?.overrides.source ?? o.entitlements.source}</StatusPill>
               {gov?.overrides.entitlementOverrideTier && <StatusPill tone="accent">override: {gov.overrides.entitlementOverrideTier}</StatusPill>}
             </div>
-            <Act icon={SlidersHorizontal} label="Set / clear entitlement override" busy={busy === 'override'} onClick={() => void setOverride()} />
+            <p className="text-[12px] text-muted-foreground">Tier entitlements are retired — registration capacity and prepaid services are bought per event.</p>
             <div className="flex flex-wrap gap-1.5 pt-1">
               {(gov?.features ?? []).filter(f => f.enabled).map(f => <StatusPill key={f.key} tone="success">{f.key}</StatusPill>)}
               {gov && gov.features.filter(f => f.enabled).length === 0 && <Empty>No premium features enabled.</Empty>}

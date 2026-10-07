@@ -4,7 +4,7 @@ import {
   Bookmark, Ticket, Lock, Users,
 } from 'lucide-react'
 import { cn } from '@/lib/utils/cn'
-import { buttonVariants } from '@/components/ui/button'
+import { marketingButton } from '@/lib/marketing/theme'
 import type { PassAvailability } from '@/lib/registrations/types'
 import type { PassPublic } from '@/components/event-templates/types'
 import { AvailabilityBadge } from '@/components/event-templates/shared/registration/AvailabilityBadge'
@@ -12,10 +12,10 @@ import { formatINR, formatDateShort, minPassPrice } from '@/components/event-tem
 import { TAX_INCLUSIVE_NOTE_SHORT } from '@/lib/pricing/copy'
 
 const trustSignals = [
-  { icon: <CheckCircle className="size-3 text-primary" aria-hidden />, text: 'Instant Confirmation' },
-  { icon: <ShieldCheck className="size-3 text-primary" aria-hidden />, text: 'Secure Payments' },
-  { icon: <RefreshCcw  className="size-3 text-primary" aria-hidden />, text: 'Easy Refunds' },
-  { icon: <Headphones  className="size-3 text-primary" aria-hidden />, text: '24×7 Support' },
+  { icon: <CheckCircle className="size-3 text-action" aria-hidden />, text: 'Instant Confirmation' },
+  { icon: <ShieldCheck className="size-3 text-action" aria-hidden />, text: 'Secure Payments' },
+  { icon: <RefreshCcw  className="size-3 text-action" aria-hidden />, text: 'Easy Refunds' },
+  { icon: <Headphones  className="size-3 text-action" aria-hidden />, text: '24×7 Support' },
 ]
 
 export function StickyRegistrationCard({
@@ -58,7 +58,7 @@ export function StickyRegistrationCard({
           aria-label={saved ? 'Unsave event' : 'Save event'}
           className={cn(
             'absolute right-3 top-3 rounded-full p-1 transition-colors',
-            saved ? 'text-primary' : 'text-muted-foreground hover:text-foreground hover:bg-muted',
+            saved ? 'text-action' : 'text-muted-foreground hover:text-foreground hover:bg-muted',
           )}
         >
           <Bookmark className={cn('size-3.5', saved && 'fill-current')} aria-hidden />
@@ -116,7 +116,7 @@ export function StickyRegistrationCard({
       <div className="px-3 pb-3">
         {!registrationOpen ? (
           <div className={cn(
-            buttonVariants({ variant: 'outline', size: 'sm' }),
+            marketingButton({ variant: 'outline', size: 'sm' }),
             'w-full cursor-default opacity-50',
           )}>
             <Lock className="size-3.5" aria-hidden />
@@ -124,7 +124,7 @@ export function StickyRegistrationCard({
           </div>
         ) : visiblePasses.length === 0 ? (
           <div className={cn(
-            buttonVariants({ variant: 'outline', size: 'sm' }),
+            marketingButton({ variant: 'outline', size: 'sm' }),
             'w-full cursor-default text-muted-foreground',
           )}>
             <Ticket className="size-3.5" aria-hidden />
@@ -133,7 +133,7 @@ export function StickyRegistrationCard({
         ) : (
           <Link
             href="#tickets"
-            className={cn(buttonVariants({ variant: 'primary', size: 'sm' }), 'w-full gap-1.5')}
+            className={cn(marketingButton({ emphasis: 'gradient', variant: 'primary', size: 'sm' }), 'w-full gap-1.5')}
           >
             <Ticket className="size-3.5" aria-hidden />
             View Tickets

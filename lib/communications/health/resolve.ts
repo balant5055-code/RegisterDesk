@@ -78,7 +78,8 @@ function gatherSignals(
       healthy:            true,
       funded:             fundedFor(config.sms.pricePaise),
       templatesAvailable: false,
-      event:              eventScoped ? { enabled: Boolean(opts?.event?.smsEnabled) } : undefined,
+      // RD-INTEG — no SMS transport: a legacy per-event smsEnabled flag is never "enabled".
+      event:              eventScoped ? { enabled: false } : undefined,
     },
     push: {
       configured:         false,              // no push transport exists

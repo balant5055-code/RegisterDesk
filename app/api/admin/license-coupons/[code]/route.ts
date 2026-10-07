@@ -3,7 +3,8 @@
 //      | archive. Every action requires a reason and is audited. Never deleted.
 
 import { NextRequest, NextResponse } from 'next/server'
-import { resolveAdminUid } from '@/lib/admin/auth'
+import { resolveAdminUid, resolveSuperAdminUid } from '@/lib/admin/auth'
+import { parseFinancialReason, reasonErrorResponse, requireSuperAdmin } from '@/lib/admin/financialGuard'
 import {
   getCouponUsage, updateCoupon, cloneCoupon, setCouponState,
   CouponAdminError, type CouponInput, type CouponStateAction,
@@ -13,15 +14,18 @@ import { getLicenseCoupon, deriveCouponLifecycle } from '@/lib/licensing/coupons
 type Ctx = { params: Promise<{ code: string }> }
 
 export async function GET(req: NextRequest, { params }: Ctx): Promise<NextResponse> {
-  const adminUid = await resolveAdminUid(req.headers.get('authorization'))
-  if (!adminUid) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+  // RD-CLOSE — a financial read: Super Admin only (ADMIN_UIDS). A legacy `admin: true` claim
+  // alone gets 403 SUPER_ADMIN_REQUIRED (lib/admin/financialGuard.ts).
+  const superGate = await requireSuperAdmin(req)
+  if (superGate.response) return superGate.response
   const { code } = await params
   try {
     const coupon = await getLicenseCoupon(code)
     if (!coupon) return NextResponse.json({ error: 'Coupon not found' }, { status: 404 })
     const usage = await getCouponUsage(code)
+    const canEditPricing = (await resolveSuperAdminUid(req.headers.get('authorization'))) !== null
     return NextResponse.json(
-      { coupon: { ...coupon, lifecycle: deriveCouponLifecycle(coupon, Date.now()) }, usage },
+      { coupon: { ...coupon, lifecycle: deriveCouponLifecycle(coupon, Date.now()) }, usage, permissions: { canEditPricing } },
       { headers: { 'Cache-Control': 'no-store' } },
     )
   } catch (e) {
@@ -33,15 +37,20 @@ export async function GET(req: NextRequest, { params }: Ctx): Promise<NextRespon
 const STATE_ACTIONS: CouponStateAction[] = ['pause', 'resume', 'archive']
 
 export async function POST(req: NextRequest, { params }: Ctx): Promise<NextResponse> {
-  const adminUid = await resolveAdminUid(req.headers.get('authorization'))
-  if (!adminUid) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+  // RD-PHASE4-S2 — licence coupon ISSUANCE and every other coupon mutation (edit, clone, pause, resume,
+  // archive) is a pricing decision: Super Admin only (ADMIN_UIDS), decided from the verified token.
+  if (!(await resolveAdminUid(req.headers.get('authorization')))) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+  const adminUid = await resolveSuperAdminUid(req.headers.get('authorization'))
+  if (!adminUid) return NextResponse.json({ error: 'Only a Super Admin can issue or change licence coupons.', code: 'SUPER_ADMIN_REQUIRED' }, { status: 403 })
   const { code } = await params
 
   let body: { action?: unknown; reason?: unknown; coupon?: CouponInput; newCode?: unknown }
   try { body = await req.json() } catch { return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 }) }
   const action = typeof body.action === 'string' ? body.action : ''
-  const reason = typeof body.reason === 'string' ? body.reason.trim() : ''
-  if (!reason) return NextResponse.json({ error: 'A reason is required' }, { status: 400 })
+  // RD-PHASE4-S4 · D3 — a reason of 3–500 characters.
+  const reasonCheck = parseFinancialReason(body.reason)
+  if (!reasonCheck.ok) return reasonErrorResponse(reasonCheck)
+  const reason = reasonCheck.reason
 
   try {
     if (action === 'update') {

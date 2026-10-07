@@ -21,7 +21,7 @@
 //
 // The record's CONTENT is decided by the pure `lib/payout/historyRecord.ts`.
 
-import { FieldValue, type WriteBatch } from 'firebase-admin/firestore'
+import { FieldValue, type Transaction, type WriteBatch } from 'firebase-admin/firestore'
 import { adminDb } from '@/lib/firebase/admin'
 import type { PayoutHistoryFields } from '@/lib/payout/historyRecord'
 
@@ -44,8 +44,9 @@ export interface PayoutProfileHistoryEntry extends PayoutHistoryFields {
  * convention. The server timestamp is applied here, which is what keeps `historyRecord.ts`
  * free of any SDK dependency.
  */
-export function stageHistoryRecord(batch: WriteBatch, fields: PayoutHistoryFields): void {
-  batch.create(adminDb.collection(PAYOUT_PROFILE_HISTORY).doc(), {
+export function stageHistoryRecord(batch: WriteBatch | Transaction, fields: PayoutHistoryFields): void {
+  // RD-PHASE4-S4 — also a transaction participant (the admin verify/reject, D5).
+  ;(batch as WriteBatch).create(adminDb.collection(PAYOUT_PROFILE_HISTORY).doc(), {
     ...fields,
     createdAt: FieldValue.serverTimestamp(),
   })

@@ -170,9 +170,10 @@ export async function debitRevenueWallet(
 
   if (clawbackInfo) {
     const info = clawbackInfo as { clawbackId: string; outstandingPaise: number }
-    void logClawbackEvent('system', 'clawback.created', info.clawbackId, {
+    // RD-PHASE4-S4 — awaited (never throws; a failed write is recorded for reconciliation).
+    await logClawbackEvent('system', 'clawback.created', info.clawbackId, {
       transactionId: clawback?.transactionId, outstandingPaise: info.outstandingPaise,
-    }).catch(() => {})
+    })
   }
   return result
 }

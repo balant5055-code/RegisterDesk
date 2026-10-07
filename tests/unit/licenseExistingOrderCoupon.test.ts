@@ -102,13 +102,18 @@ describe('route ordering and preserved protections', () => {
   })
 
   it('D · a captured payment is checked BEFORE superseding, and blocks it', () => {
-    const supersedeBlock = src.slice(src.indexOf("if (decision === 'supersede')"))
+    const supersedeBlock = src.slice(src.indexOf("if (decision === 'supersede'"))
     const captured = supersedeBlock.indexOf('findCapturedLicensePayment(existing.razorpayOrderId')
     const marker   = supersedeBlock.indexOf('supersededExisting = true')
     expect(captured).toBeGreaterThan(-1)
     expect(marker).toBeGreaterThan(-1)
     expect(captured).toBeLessThan(marker)          // checked first
-    expect(supersedeBlock).toMatch(/if \(captured\)/)
+    // RD-M3 — the lookup is three-state: a capture blocks, and an UNKNOWN status blocks too (before
+    // the supersede marker), instead of being read as "nothing captured".
+    expect(supersedeBlock).toMatch(/if \(captured\.state === 'captured'\)/)
+    const unknown = supersedeBlock.indexOf("if (captured.state === 'unknown') {")
+    expect(unknown).toBeGreaterThan(-1)
+    expect(unknown).toBeLessThan(marker)
     expect(supersedeBlock).toMatch(/NOT superseding/)
   })
 
@@ -123,15 +128,16 @@ describe('route ordering and preserved protections', () => {
     expect(src).toMatch(/activateLicenseOrder\(/)
   })
 
-  it('no Razorpay order is created when the remainder is zero', () => {
-    const zero = src.indexOf('if (remainderPaise <= 0)')
+  it('no Razorpay order is created when the price is zero', () => {
+    const zero = src.indexOf('if (pricePaise <= 0)')
     const mint = src.indexOf('await createLicenseRazorpayOrder(')
     expect(zero).toBeGreaterThan(-1)
     expect(mint).toBeGreaterThan(zero)             // minting is only in the >0 path
   })
 
   it('a superseded order is rewritten even with no coupon, so it cannot keep a stale order id', () => {
-    expect(src).toMatch(/if \(couponFields \|\| supersededExisting\) await persistCreatedOrder\(null\)/)
+    // RD-F2A — same rule; the persist now also reports a racing PAID order ('already_paid').
+    expect(src).toMatch(/if \(\(couponFields \|\| supersededExisting\) && \(await persistCreatedOrder\(null\)\) === 'already_paid'\)/)
   })
 
   it('the persisted order carries razorpayOrderId = null on the zero-remainder path', () => {

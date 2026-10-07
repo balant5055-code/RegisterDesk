@@ -14,6 +14,9 @@ import { IMPACTFUL_EDIT_KEYS } from './fieldClassification'
 
 const s = (v: unknown): string | null => (typeof v === 'string' && v ? v : null)
 
+/** RD-EVENT-COMMERCE-05E — the existing Fee Collection Method options (lib/events/builder/types FeeModel). */
+export const FEE_MODELS = ['organizer_absorbs', 'attendee_pays'] as const
+
 export interface EditUpdateResult {
   /** Field-path → value map for the draft doc (excludes server metadata). */
   updates:         Record<string, unknown>
@@ -108,6 +111,12 @@ export function buildEventEditUpdate(
   if (payload.metaDescription !== undefined) set('metaDescription', 'eventDetails.seo.metaDescription', payload.metaDescription.trim())
   if (payload.keywords        !== undefined) set('keywords',        'eventDetails.seo.keywords',        payload.keywords.map(k => k.trim()).filter(Boolean))
 
+  // RD-PHASE4-S3 · Q1 — the Fee Collection Method is not organizer-editable (fixed organizer-pays).
+  // Refused as a pure rule too, so no future caller of this mapper can write it.
+  if (payload.feeModel !== undefined) {
+    throw new RangeError('The fee collection method is managed by RegisterDesk and cannot be changed.')
+  }
+
   // Pass capacity — can only stay ≥ sold count (never corrupts a sold pass)
   if (payload.passCapacityUpdates && payload.passCapacityUpdates.length > 0) {
     const rawPasses = Array.isArray(pricing.passes) ? (pricing.passes as Record<string, unknown>[]) : []
@@ -145,6 +154,7 @@ export function extractEditableSnapshot(draftData: Record<string, unknown>): Eve
   const org     = (details.organizer as Record<string, unknown>) ?? {}
   const typeDet = (details.typeDetails as Record<string, unknown>) ?? {}
   const seo     = (details.seo     as Record<string, unknown>) ?? {}
+  const pricing = (draftData.pricing as Record<string, unknown>) ?? {}
 
   const str = (v: unknown): string => (typeof v === 'string' ? v : '')
   const gallery = Array.isArray(media.galleryImages)
@@ -165,6 +175,9 @@ export function extractEditableSnapshot(draftData: Record<string, unknown>): Eve
     galleryImages: gallery,
     metaTitle: str(seo.metaTitle), metaDescription: str(seo.metaDescription),
     keywords: Array.isArray(seo.keywords) ? (seo.keywords as unknown[]).map(str).filter(Boolean) : [],
+    // RD-EVENT-COMMERCE-05E — the stored value only (the "before" of a fee-method change);
+    // absent on a legacy event that never stored one — nothing is invented.
+    ...((FEE_MODELS as readonly unknown[]).includes(pricing.feeModel) ? { feeModel: pricing.feeModel as EventEditPayload['feeModel'] } : {}),
   }
 }
 

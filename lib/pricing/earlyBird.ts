@@ -1,3 +1,4 @@
+import { nowLocalInTz, windowKey } from '@/lib/registrations/salesWindow'
 // Single source of truth for early-bird price resolution.
 //
 // A pass's *effective* price is its early-bird price when ALL hold:
@@ -31,7 +32,7 @@ export interface EarlyBirdPricingFields {
  * a naive datetime-local value; it is compared via `Date.parse`, matching the
  * tolerance the rest of the app already accepts for sales-window checks.
  */
-export function isEarlyBirdActive(pass: EarlyBirdPricingFields, nowMs: number): boolean {
+export function isEarlyBirdActive(pass: EarlyBirdPricingFields, nowMs: number, tz?: string): boolean {
   if (pass.earlyBirdEnabled !== true) return false
 
   const eb = pass.earlyBirdPrice
@@ -41,6 +42,13 @@ export function isEarlyBirdActive(pass: EarlyBirdPricingFields, nowMs: number): 
   if (eb > pass.price) return false
 
   const end = pass.earlyBirdEndDate?.trim()
+  // RD-CE-FIX (early-bird timezone) — the cutoff is the organizer's naive datetime-local value, i.e. a
+  // time in the EVENT's timezone. Parsed bare it was read in the server's zone (UTC), so an IST early
+  // bird ran 5h30m late. With the event timezone it is compared as a local date-time there (a
+  // date-only cutoff ends at the START of that day, exactly as before). Without one: unchanged.
+  if (end && tz && /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2})?/.test(end)) {
+    return nowLocalInTz(tz, new Date(nowMs)) < windowKey(end, 'start')
+  }
   if (end) {
     const endMs = Date.parse(end)
     // Expired cutoff → fall back to regular price. An unparseable date is treated
@@ -55,8 +63,8 @@ export function isEarlyBirdActive(pass: EarlyBirdPricingFields, nowMs: number): 
  * The price (in rupees) that should actually be charged/displayed for `pass`
  * at `nowMs` — the early-bird price while active, otherwise the regular price.
  */
-export function resolveEffectivePriceRupees(pass: EarlyBirdPricingFields, nowMs: number): number {
-  return isEarlyBirdActive(pass, nowMs) ? (pass.earlyBirdPrice as number) : pass.price
+export function resolveEffectivePriceRupees(pass: EarlyBirdPricingFields, nowMs: number, tz?: string): number {
+  return isEarlyBirdActive(pass, nowMs, tz) ? (pass.earlyBirdPrice as number) : pass.price
 }
 
 /**
@@ -70,7 +78,7 @@ export function resolveEffectivePriceRupees(pass: EarlyBirdPricingFields, nowMs:
  * Backward-compatible: a pass without early bird resolves to `Math.round(price*100)`,
  * exactly the value these routes computed before.
  */
-export function resolveEffectivePassPricePaise(pass: Record<string, unknown>, nowMs: number): number {
+export function resolveEffectivePassPricePaise(pass: Record<string, unknown>, nowMs: number, tz?: string): number {
   const rupees = resolveEffectivePriceRupees(
     {
       price:            typeof pass.price          === 'number' ? pass.price          : 0,
@@ -79,6 +87,13 @@ export function resolveEffectivePassPricePaise(pass: Record<string, unknown>, no
       earlyBirdEndDate: typeof pass.earlyBirdEndDate === 'string' ? pass.earlyBirdEndDate : undefined,
     },
     nowMs,
+    tz,
   )
   return Math.round(rupees * 100)
+}
+
+/** RD-CE-FIX — the event's IANA timezone from a published event document (undefined when absent). */
+export function eventTimezone(event: { eventDetails?: unknown } | null | undefined): string | undefined {
+  const tz = ((event?.eventDetails as { schedule?: { timezone?: unknown } } | null | undefined)?.schedule)?.timezone
+  return typeof tz === 'string' && tz.trim() ? tz.trim() : undefined
 }

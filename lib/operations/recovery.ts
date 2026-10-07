@@ -74,7 +74,11 @@ async function dlq(label: string, key: string, retry: string, specs: DlqSpec[]):
   return { key, label, count, oldestAt: iso(oldest), retry }
 }
 
-export interface DeadLetterHealth { webhooks: DeadLetterEntry; refunds: DeadLetterEntry; reconciliations: DeadLetterEntry; settlements: DeadLetterEntry; broadcasts: DeadLetterEntry }
+export interface DeadLetterHealth {
+  webhooks: DeadLetterEntry; refunds: DeadLetterEntry; reconciliations: DeadLetterEntry; settlements: DeadLetterEntry; broadcasts: DeadLetterEntry
+  /** RD-WALLET-W2.g — held wallet top-ups: NOT auto-drained (unlike `reconciliations`), Super Admin review only. */
+  walletTopupsHeld: DeadLetterEntry
+}
 
 // ─── Deployment health ──────────────────────────────────────────────────────────
 
@@ -106,7 +110,7 @@ export interface RecoveryHealth {
 }
 
 export async function getRecoveryHealth(): Promise<RecoveryHealth> {
-  const [backup, webhooks, refunds, reconciliations, settlements, broadcasts, openIncidents] = await Promise.all([
+  const [backup, webhooks, refunds, reconciliations, settlements, broadcasts, walletTopupsHeld, openIncidents] = await Promise.all([
     getBackupHealth(),
     dlq('Failed webhook deliveries', 'webhooks', 'Auto-retries via webhooks cron; exhausted are terminal', [{ collection: 'webhookDeliveries', field: 'status', value: 'failed' }]),
     dlq('Failed refunds', 'refunds', 'Manual retry — admin failed-refunds', [{ collection: 'failedRefunds', field: 'status', value: 'open' }]),
@@ -117,12 +121,19 @@ export async function getRecoveryHealth(): Promise<RecoveryHealth> {
     ]),
     dlq('Rejected settlements', 'settlements', 'Manual — review + re-request', [{ collection: 'settlementRequests', field: 'status', value: 'rejected' }]),
     dlq('Failed broadcasts', 'broadcasts', 'Manual — organizer re-sends', [{ collection: 'broadcastCampaigns', field: 'status', value: 'failed' }]),
+    // RD-WALLET-W2.g — the held statuses, kept OUT of "Failed reconciliations" (that entry is the
+    // auto-draining 'pending' work); each record has one status, so no record is counted twice.
+    dlq('Held wallet top-ups', 'wallet_topups_held', 'Manual — Super Admin review (Admin › Wallet Top-ups)', [
+      { collection: 'walletTopupReconciliation', field: 'status', value: 'needs_review' },
+      { collection: 'walletTopupReconciliation', field: 'status', value: 'exhausted' },
+      { collection: 'walletTopupReconciliation', field: 'status', value: 'duplicate_payment' },
+    ]),
     countOpenIncidents(),
   ])
 
   return {
     backup,
-    deadLetter: { webhooks, refunds, reconciliations, settlements, broadcasts },
+    deadLetter: { webhooks, refunds, reconciliations, settlements, broadcasts, walletTopupsHeld },
     deployment: getDeploymentHealth(),
     openIncidents,
     generatedAt: new Date().toISOString(),

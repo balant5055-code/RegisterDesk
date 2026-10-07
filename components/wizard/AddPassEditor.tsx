@@ -33,11 +33,13 @@ import {
 } from 'lucide-react'
 import { buttonVariants } from '@/components/ui'
 import { cn } from '@/lib/utils/cn'
+import { lockPassCommercialFields } from '@/lib/events/editing/publishedPricingLock'
 import {
   getEventSubtypeConfig,
   type SportDetailsConfig,
 } from '@/components/wizard/passSubtypeConfig'
 import type { BenefitGroup, BenefitItem } from '@/components/wizard/passEventTypeConfig'
+import { passAgeLimits, passTeamSize } from '@/lib/passes/passRaceRules'
 
 // ─── Data model ────────────────────────────────────────────────────────────────
 
@@ -55,6 +57,8 @@ export interface RaceDetails {
   customCategory: string
   minAge:         number | null
   maxAge:         number | null
+  /** RD-CE-FIX H2 · players per team (team sports). Never an age rule — see lib/passes/passRaceRules. */
+  teamSize?:      number | null
 }
 
 export interface AdvancedSettings {
@@ -187,18 +191,30 @@ function FieldGroup({
   )
 }
 
+/** RD-PRICING-UI-LOCK-01 — the concise note shown where a published pass's pricing is locked. */
+function PricingLockedNote({ id }: { id?: string }) {
+  return (
+    <p id={id} className="flex items-start gap-1.5 text-[12.5px] text-muted-foreground">
+      <Lock className="mt-0.5 size-3.5 shrink-0" aria-hidden />
+      <span>Ticket pricing is locked after publication. Contact support if a pricing change is required.</span>
+    </p>
+  )
+}
+
 function Toggle({
   checked,
   onChange,
   label,
   desc,
   accent,
+  disabled = false,
 }: {
   checked:  boolean
   onChange: (v: boolean) => void
   label:    string
   desc?:    string
   accent?:  boolean
+  disabled?: boolean
 }) {
   return (
     <div className="flex items-center justify-between gap-4">
@@ -210,9 +226,12 @@ function Toggle({
         type="button"
         role="switch"
         aria-checked={checked}
-        onClick={() => onChange(!checked)}
+        aria-label={label}
+        onClick={() => { if (!disabled) onChange(!checked) }}
+        disabled={disabled}
         className={cn(
           'relative inline-flex h-[22px] w-10 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary',
+          'disabled:cursor-not-allowed disabled:opacity-50',
           checked
             ? accent ? 'bg-emerald-500' : 'bg-primary'
             : 'bg-muted-foreground/30',
@@ -268,12 +287,15 @@ function TabBasic({
   eventTypeId,
   eventSubtype,
   isFreeEvent,
+  pricingLocked = false,
 }: {
   pass:          EventPassFull
   onChange:      (p: Partial<EventPassFull>) => void
   eventTypeId?:  string | null
   eventSubtype?: string | null
   isFreeEvent?:  boolean
+  /** RD-PRICING-UI-LOCK-01 — published event: pass type (free/paid) is read-only. */
+  pricingLocked?: boolean
 }) {
   const subtypeCfg = getEventSubtypeConfig(eventTypeId, eventSubtype)
   return (
@@ -327,9 +349,11 @@ function TabBasic({
             </p>
           </div>
         )}
+        {pricingLocked && <div className="mb-3"><PricingLockedNote id="pass-type-locked" /></div>}
         <div
           role="radiogroup"
           aria-label="Pass type"
+          aria-describedby={pricingLocked ? 'pass-type-locked' : undefined}
           className="grid grid-cols-1 gap-2 sm:grid-cols-2"
         >
           {PASS_TYPES.filter(opt => !isFreeEvent || opt.id !== 'paid').map(opt => {
@@ -340,13 +364,17 @@ function TabBasic({
                 key={opt.id}
                 type="button"
                 aria-pressed={selected}
+                disabled={pricingLocked}
                 onClick={() => {
+                  if (pricingLocked) return
                   const next: Partial<EventPassFull> = { type: opt.id }
                   if (opt.id !== 'paid') next.price = 0
                   onChange(next)
                 }}
                 className={cn(
                   'flex items-start gap-3 rounded-xl border-[1.5px] px-3.5 py-3 text-left transition-all duration-150',
+                  'disabled:cursor-not-allowed',
+                  pricingLocked && !selected && 'opacity-50',
                   selected
                     ? 'border-primary bg-primary/[0.03] shadow-sm'
                     : 'border-border bg-card hover:border-primary/30 hover:bg-muted/[0.03]',
@@ -397,6 +425,7 @@ function TabPricing({
   showPriceErr,
   ebPriceErr,
   ebDateErr,
+  pricingLocked = false,
 }: {
   pass:          EventPassFull
   onChange:      (p: Partial<EventPassFull>) => void
@@ -404,6 +433,8 @@ function TabPricing({
   showPriceErr?: boolean
   ebPriceErr?:   boolean
   ebDateErr?:    boolean
+  /** RD-PRICING-UI-LOCK-01 — published event: price and early-bird pricing are read-only. */
+  pricingLocked?: boolean
 }) {
   const isPaid     = pass.type === 'paid'
   const isUnlimited= pass.unlimited
@@ -416,6 +447,7 @@ function TabPricing({
       {/* Pricing */}
       <SectionCard title="Pricing">
         <div className="flex flex-col gap-4">
+          {pricingLocked && <PricingLockedNote id="pass-pricing-locked" />}
           <div className="grid gap-4 sm:grid-cols-2">
             {/* Price */}
             {isFreeEvent ? (
@@ -438,13 +470,16 @@ function TabPricing({
                     min={0}
                     className={cn(
                       inputCls, 'pl-8',
-                      !isPaid && 'cursor-not-allowed bg-muted/30 text-muted-foreground',
+                      (!isPaid || pricingLocked) && 'cursor-not-allowed bg-muted/30 text-muted-foreground',
                       showPriceErr && 'border-red-400 focus:border-red-400 focus:ring-red-400/20',
                     )}
                     placeholder={isPaid ? 'e.g. 499' : '0'}
                     value={isPaid ? (pass.price === 0 ? '' : pass.price) : 0}
                     onChange={e => onChange({ price: e.target.value === '' ? 0 : Math.max(0, Number(e.target.value)) })}
-                    disabled={!isPaid}
+                    disabled={!isPaid || pricingLocked}
+                    readOnly={pricingLocked}
+                    aria-label="Price (₹)"
+                    aria-describedby={pricingLocked ? 'pass-pricing-locked' : undefined}
                   />
                 </div>
                 {showPriceErr && (
@@ -460,11 +495,12 @@ function TabPricing({
                 <label className={labelCls}>Early Bird Price (₹)</label>
                 <button
                   type="button"
-                  onClick={() => onChange({
+                  disabled={pricingLocked}
+                  onClick={() => { if (!pricingLocked) onChange({
                     earlyBirdEnabled: !pass.earlyBirdEnabled,
                     earlyBirdPrice:   !pass.earlyBirdEnabled ? (pass.earlyBirdPrice ?? 0) : null,
-                  })}
-                  className="text-[12px] font-semibold text-primary hover:underline"
+                  }) }}
+                  className="text-[12px] font-semibold text-primary hover:underline disabled:cursor-not-allowed disabled:text-muted-foreground disabled:no-underline"
                 >
                   {pass.earlyBirdEnabled ? 'Disable' : 'Enable'}
                 </button>
@@ -476,13 +512,14 @@ function TabPricing({
                   min={0}
                   className={cn(
                     inputCls, 'pl-8',
-                    (!pass.earlyBirdEnabled || !isPaid) && 'cursor-not-allowed bg-muted/30 text-muted-foreground',
+                    (!pass.earlyBirdEnabled || !isPaid || pricingLocked) && 'cursor-not-allowed bg-muted/30 text-muted-foreground',
                     ebPriceErr && 'border-red-400 focus:border-red-400 focus:ring-red-400/20',
                   )}
                   placeholder="0"
                   value={pass.earlyBirdEnabled ? (pass.earlyBirdPrice ?? '') : ''}
                   onChange={e => onChange({ earlyBirdPrice: Math.max(0, Number(e.target.value)) })}
-                  disabled={!pass.earlyBirdEnabled || !isPaid}
+                  disabled={!pass.earlyBirdEnabled || !isPaid || pricingLocked}
+                  aria-label="Early Bird Price (₹)"
                 />
               </div>
               {ebPriceErr ? (
@@ -499,7 +536,7 @@ function TabPricing({
           {isPaid && (
             <p className="flex items-center gap-1.5 text-[13px] text-muted-foreground">
               <Info className="size-3.5 shrink-0 text-muted-foreground/60" aria-hidden />
-              Taxes &amp; platform fees will be added at checkout
+              Attendees pay the ticket price shown. RegisterDesk platform fees are deducted from your payout.
             </p>
           )}
 
@@ -514,6 +551,7 @@ function TabPricing({
               })}
               label="Enable Early Bird Pricing"
               desc="Show a discounted price before a cutoff date"
+              disabled={pricingLocked}
             />
           </div>
           )}
@@ -532,10 +570,13 @@ function TabPricing({
                 type="datetime-local"
                 className={cn(
                   inputCls, 'pl-8',
+                  pricingLocked && 'cursor-not-allowed bg-muted/30 text-muted-foreground',
                   ebDateErr && 'border-red-400 focus:border-red-400 focus:ring-red-400/20',
                 )}
                 value={pass.earlyBirdEndDate}
                 onChange={e => onChange({ earlyBirdEndDate: e.target.value })}
+                disabled={pricingLocked}
+                aria-label="Early Bird Ends"
               />
             </div>
             {ebDateErr && (
@@ -816,7 +857,7 @@ function TabPeriod({
 
 // ─── Sport Details section (config-driven for any sports subtype) ─────────────
 
-const BLANK_RACE: RaceDetails = { category: '', customCategory: '', minAge: null, maxAge: null }
+const BLANK_RACE: RaceDetails = { category: '', customCategory: '', minAge: null, maxAge: null, teamSize: null }
 
 function RaceDetailsSection({
   details,
@@ -828,7 +869,12 @@ function RaceDetailsSection({
   sportCfg: SportDetailsConfig
 }) {
   const firstOption = sportCfg.categoryOptions[0] ?? ''
-  const rd          = details ?? { ...BLANK_RACE, category: firstOption }
+  const raw         = details ?? { ...BLANK_RACE, category: firstOption }
+  // RD-CE-FIX H2 · a legacy pass (no `teamSize`) of a sport whose age inputs are hidden stored its
+  // team size in `minAge`: show it as the team size, and the next edit saves it where it belongs.
+  const rd: RaceDetails = !('teamSize' in raw) && sportCfg.showTeamSize && !sportCfg.showAgeRules
+    ? { ...raw, teamSize: raw.minAge, minAge: null }
+    : raw
   const isCustom    = rd.category === 'Custom'
 
   const update = (partial: Partial<RaceDetails>) =>
@@ -908,8 +954,8 @@ function RaceDetailsSection({
               max={50}
               className={inputCls}
               placeholder="e.g. 11"
-              value={rd.minAge ?? ''}
-              onChange={e => update({ minAge: e.target.value ? Number(e.target.value) : null })}
+              value={rd.teamSize ?? ''}
+              onChange={e => update({ teamSize: e.target.value ? Number(e.target.value) : null })}
             />
           </FieldGroup>
         )}
@@ -1278,45 +1324,13 @@ function TabAdvanced({
         </p>
       </AdvAccordion>
 
-      {/* Discounts & Coupons */}
-      <AdvAccordion
-        id="coupons" icon={Tag}
-        label="Discounts & Coupons" desc="Allow discounts on this pass"
-        badge={adv.couponEligible ? 'Eligible' : 'Off'}
-        open={open === 'coupons'} onToggle={() => toggle('coupons')}
-      >
-        <div className="flex flex-col gap-3">
-          <Toggle
-            checked={adv.couponEligible}
-            onChange={v => updateAdv({ couponEligible: v })}
-            label="Coupon Eligible"
-            desc="Allow discount codes to be applied to this pass"
-          />
-          <p className="text-[12px] text-muted-foreground">
-            Bulk discounts and coupon rules can be added from event settings.
-          </p>
-        </div>
-      </AdvAccordion>
-
-      {/* Tax & Fees */}
-      <AdvAccordion
-        id="taxes" icon={IndianRupee}
-        label="Tax & Fees" desc="Manage tax and platform fees"
-        badge={adv.taxApplicable ? 'Applicable' : 'Default'}
-        open={open === 'taxes'} onToggle={() => toggle('taxes')}
-      >
-        <div className="flex flex-col gap-3">
-          <Toggle
-            checked={adv.taxApplicable}
-            onChange={v => updateAdv({ taxApplicable: v })}
-            label="Tax Applicable"
-            desc="Apply GST or applicable taxes to this pass price"
-          />
-          <p className="text-[12px] text-muted-foreground">
-            Platform fee settings and detailed tax rules can be configured from event settings after publishing.
-          </p>
-        </div>
-      </AdvAccordion>
+      {/* RD-PRICING-UI-CLEANUP-01 — the "Discounts & Coupons" (Coupon Eligible) and "Tax & Fees"
+          (Tax Applicable) panels were removed. Nothing in registration, checkout, order creation,
+          payment verification or coupon validation ever read those flags: a coupon applies to a
+          pass through the COUPON's own `applicablePassIds` (lib/coupons), and ticket-level tax is
+          not active. They promised discounts and GST that did not exist. The stored
+          `advancedSettings.couponEligible` / `taxApplicable` values are kept as-is on every pass
+          (handleChange / updateAdv merge, never drop keys) — nothing is migrated or deleted. */}
 
       {/* Badges & Branding */}
       <AdvAccordion
@@ -1520,7 +1534,8 @@ function PassPreview({
 
         {/* Sport Details — shown for any subtype that has a sportDetails config */}
         {sportCfg && pass.raceDetails && (
-          pass.raceDetails.category || pass.raceDetails.minAge !== null || pass.raceDetails.maxAge !== null
+          pass.raceDetails.category || passAgeLimits(pass as unknown as Record<string, unknown>).minAge !== null
+          || pass.raceDetails.maxAge !== null || passTeamSize(pass as unknown as Record<string, unknown>) !== null
         ) && (
           <div className="border-t border-border px-5 py-3">
             <p className="mb-1.5 flex items-center gap-1.5 text-[12px] font-semibold uppercase tracking-wider text-muted-foreground">
@@ -1537,14 +1552,25 @@ function PassPreview({
                   <span className="text-[12px] font-medium text-foreground">{display}</span>
                 ) : null
               })()}
-              {(pass.raceDetails.minAge !== null || pass.raceDetails.maxAge !== null) && (
-                <span className="text-[12px] text-muted-foreground">
-                  Age{' '}
-                  {pass.raceDetails.minAge ?? '—'}
-                  {' '}–{' '}
-                  {pass.raceDetails.maxAge ?? '—'} yrs
-                </span>
-              )}
+              {(() => {
+                const ages = passAgeLimits(pass as unknown as Record<string, unknown>)
+                const team = passTeamSize(pass as unknown as Record<string, unknown>)
+                return (
+                  <>
+                    {(ages.minAge !== null || ages.maxAge !== null) && (
+                      <span className="text-[12px] text-muted-foreground">
+                        Age{' '}
+                        {ages.minAge ?? '—'}
+                        {' '}–{' '}
+                        {ages.maxAge ?? '—'} yrs
+                      </span>
+                    )}
+                    {team !== null && (
+                      <span className="text-[12px] text-muted-foreground">{team} per team</span>
+                    )}
+                  </>
+                )
+              })()}
             </div>
           </div>
         )}
@@ -1599,6 +1625,11 @@ export interface AddPassEditorProps {
   eventTypeId?:  string | null
   eventSubtype?: string | null
   isFreeEvent?:  boolean
+  /**
+   * RD-PRICING-UI-LOCK-01 — the event is PUBLISHED: this pass's commercial fields (type, price,
+   * early bird) are read-only, and are restored from `editingPass` on save.
+   */
+  pricingLocked?: boolean
 }
 
 export function AddPassEditor({
@@ -1610,6 +1641,7 @@ export function AddPassEditor({
   eventTypeId,
   eventSubtype,
   isFreeEvent = false,
+  pricingLocked = false,
 }: AddPassEditorProps) {
   const [activeTab, setActiveTab] = useState<TabId>('basic')
   const [pass,      setPass]      = useState<EventPassFull>(
@@ -1670,7 +1702,10 @@ export function AddPassEditor({
     if (!hasName)    { setActiveTab('basic');   return }
     // Every price/early-bird blocker now lives on the Pricing tab.
     if (!canSave)    { setActiveTab('pricing'); return }
-    onSave({ ...pass, status: pass.status })
+    // Defence in depth: a published pass leaves the editor with its published commercial values,
+    // whatever the editor state holds (the server would refuse a change on Save regardless).
+    const out = pricingLocked && editingPass ? lockPassCommercialFields(editingPass, pass) : pass
+    onSave({ ...out, status: out.status })
     onClose()
   }
 
@@ -1753,8 +1788,8 @@ export function AddPassEditor({
 
               {/* Form */}
               <div className="min-w-0 flex-1 p-5 xl:pr-3">
-                {activeTab === 'basic'    && <TabBasic    pass={pass} onChange={handleChange} eventTypeId={eventTypeId} eventSubtype={pass.eventSubtype} isFreeEvent={isFreeEvent} />}
-                {activeTab === 'pricing'  && <TabPricing  pass={pass} onChange={handleChange} isFreeEvent={isFreeEvent} showPriceErr={showPriceErr} ebPriceErr={ebPriceErr} ebDateErr={ebDateErr} />}
+                {activeTab === 'basic'    && <TabBasic    pass={pass} onChange={handleChange} eventTypeId={eventTypeId} eventSubtype={pass.eventSubtype} isFreeEvent={isFreeEvent} pricingLocked={pricingLocked} />}
+                {activeTab === 'pricing'  && <TabPricing  pass={pass} onChange={handleChange} isFreeEvent={isFreeEvent} showPriceErr={showPriceErr} ebPriceErr={ebPriceErr} ebDateErr={ebDateErr} pricingLocked={pricingLocked} />}
                 {activeTab === 'period'   && <TabPeriod   pass={pass} onChange={handleChange} />}
                 {activeTab === 'benefits' && (
                   <TabBenefits pass={pass} onChange={handleChange} eventTypeId={eventTypeId} eventSubtype={pass.eventSubtype} />

@@ -23,6 +23,14 @@ export interface CapacityPlanMeta {
 export type RegistrationStatus = 'confirmed' | 'cancelled' | 'waitlisted' | 'pending' | 'rejected'
 export type PaymentStatus      = 'not_required' | 'pending' | 'paid' | 'refund_pending' | 'refunded'
 
+/**
+ * RD-FIN-02 · THE definition of a "Paid registration": the attendee was CHARGED. Whatever happened
+ * to the money afterwards (a refund keeps status 'confirmed'; a cancellation keeps paymentStatus) is
+ * answered by the Refunds figures, not by un-counting the payment. Dashboard, Finance and Analytics
+ * "Paid" all mean exactly this population.
+ */
+export const PAID_PAYMENT_STATUSES = ['paid', 'refund_pending', 'refunded'] as const satisfies readonly PaymentStatus[]
+
 // Origin of a registration (Phase C). Absent ⇒ 'online' for legacy records.
 export type RegistrationSource     = 'online' | 'walkin'
 // Walk-in payment mode collected at the gate (no Razorpay involvement).
@@ -65,8 +73,31 @@ export interface RegistrationDocument {
   // Note the asymmetric names: these are the ACTUAL persisted keys, kept verbatim
   // rather than normalised, because renaming would orphan existing documents and
   // break the admin support lookup that queries `paymentId` directly.
-  paymentId?:       string   // Razorpay payment id — "pay_…"
+  paymentId?:       string   // provider payment id — Razorpay "pay_…", Cashfree cf_payment_id
+  /**
+   * LEGACY, and now Razorpay-ONLY.
+   *
+   * It held whichever provider's order id settled the registration, so a Cashfree order id
+   * could land in a field named for Razorpay. New writes put the order id in
+   * `paymentOrderId` and only mirror it here when the provider really is Razorpay, which
+   * keeps every existing reader and export working unchanged.
+   *
+   * Read it through `resolveRegistrationOrderId()` rather than directly — that helper knows
+   * the precedence and the legacy fallback.
+   */
   razorpayOrderId?: string   // Razorpay order id   — "order_…"
+  /**
+   * The provider-neutral order id, written on every new paid registration.
+   *
+   * Absent on historical records, where `razorpayOrderId` is the value — and is genuinely a
+   * Razorpay id, because Cashfree has never been the active provider in any deployment.
+   */
+  paymentOrderId?:  string
+  /**
+   * Which gateway took the money. Absent on historical records ⇒ Razorpay, the same
+   * statement-of-fact the payment intent's `readProvider` makes.
+   */
+  paymentProvider?: import('@/lib/payments/providers/types').PaymentProvider
   // Origin of the registration. Absent on pre-Phase-C records ⇒ treat as 'online'.
   registrationSource?: RegistrationSource
   // Walk-in payment mode (gate registration). Absent for online registrations.
@@ -114,6 +145,9 @@ export interface RegistrationDocument {
    * WhatsApp. Additive value only: no existing document carries it and nothing is migrated.
    */
   whatsappStatus?:        'sent' | 'failed' | 'unknown' | 'skipped_no_phone' | 'skipped_insufficient_balance'
+                        // RD-EVENT-COMMERCE-02 — the event's PREPAID WhatsApp allowance is used up and its
+                        // exhaustion policy is 'block'. Recorded (and logged) — never a silent skip.
+                        | 'skipped_allowance_exhausted'
   whatsappSentAt?:        unknown  // Firestore Timestamp — set when successfully sent
   whatsappMessageId?:     string   // Meta wamid when sent
   whatsappFailureReason?: string   // normalized reason when failed / skipped
@@ -134,6 +168,21 @@ export interface RegistrationDocument {
   // Sports-specific fields
   bibNumber?:        string | null  // assigned bib number (e.g. "0042")
   bibCategory?:      string | null  // race category label at time of assignment
+
+  // ── Participant identity mirrors (RD-EVENT-20) ─────────────────────────────
+  //
+  // Both have been WRITTEN to the registration for some time — `identifier` since
+  // the identity engine shipped, `timingTag` since RD-EVENT-19F-B — inside the same
+  // transaction as their authoritative lock. Neither was declared here, so they were
+  // invisible to every TypeScript consumer of `RegistrationDocument` (and therefore
+  // to `SerializedRegistration`, which is `Omit`-derived from it), exactly as
+  // `paymentId`/`razorpayOrderId` were before they were declared above.
+  //
+  // Declaring them changes NO runtime behaviour and migrates NOTHING. The
+  // AUTHORITY remains the lock in each case — `identifierLocks` and
+  // `identifierTagLocks` — and these stay read-only mirrors.
+  identifier?:  import('@/lib/identifiers/types').RegistrationIdentifier | null
+  timingTag?:   import('@/lib/identifiers/timingTags').RegistrationTimingTag | null
   waiverAcceptedAt?: string | null  // ISO timestamp when participant accepted the waiver
   // Exhibition-specific fields (extracted from formResponses at submission time)
   companyName?:      string | null
@@ -220,7 +269,8 @@ export type AuditAction =
   | 'updated'
   | 'walkin_created'
 
-export type AuditActorType = 'system' | 'organizer' | 'attendee'
+// RD-PHASE4-S4 · F4 — 'super_admin': a platform Super Admin acted (e.g. a refund), never an organizer.
+export type AuditActorType = 'system' | 'organizer' | 'attendee' | 'super_admin'
 
 /**
  * registrations/{registrationId}/auditLog/{autoId}

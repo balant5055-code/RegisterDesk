@@ -36,10 +36,10 @@ export async function generateMetadata({ params }: Params): Promise<Metadata> {
   const { slug, gallerySlug } = await params
 
   const ctx = await resolvePublicEvent(slug)
-  if (!ctx) return { title: 'Photos', robots: { index: false, follow: false } }
+  if (!ctx) return { title: 'Images', robots: { index: false, follow: false } }
 
   const detail = await getPublicGallery(ctx, gallerySlug)
-  if (!detail) return { title: 'Photos', robots: { index: false, follow: false } }
+  if (!detail) return { title: 'Images', robots: { index: false, follow: false } }
 
   const title = `${detail.gallery.name} — ${ctx.eventName}`
   const description = detail.gallery.description
@@ -101,7 +101,7 @@ export default async function PublicGalleryDetailPage({ params, searchParams }: 
         eventName={ctx.eventName}
         eventSlug={slug}
         title={detail.gallery.name}
-        subtitle={`${shown.toLocaleString('en-IN')} photo${shown === 1 ? '' : 's'}${activeAlbum ? ` in ${activeAlbum.name}` : ''}`}
+        subtitle={`${shown.toLocaleString('en-IN')} image${shown === 1 ? '' : 's'}${activeAlbum ? ` in ${activeAlbum.name}` : ''}`}
         description={detail.gallery.description}
         coverUrl={detail.gallery.coverUrl}
       />
@@ -111,7 +111,7 @@ export default async function PublicGalleryDetailPage({ params, searchParams }: 
           items={[
             { label: 'Events', href: '/events' },
             { label: ctx.eventName, href: `/events/${slug}` },
-            { label: 'Photos', href: `/events/${slug}/gallery` },
+            { label: 'Images', href: `/events/${slug}/gallery` },
             { label: detail.gallery.name },
           ]}
         />
@@ -127,13 +127,13 @@ export default async function PublicGalleryDetailPage({ params, searchParams }: 
               aria-current={!albumSlug ? 'page' : undefined}
               className={cn(
                 'rounded-lg border px-3 py-1.5 text-fs-sm font-medium transition-colors',
-                'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary',
+                'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-action',
                 !albumSlug
-                  ? 'border-primary/50 bg-primary/[0.06] text-foreground'
+                  ? 'border-action/50 bg-action/[0.06] text-foreground'
                   : 'border-border text-muted-foreground hover:border-border-strong hover:text-foreground',
               )}
             >
-              All photos
+              All images
             </Link>
             {detail.albums.map(album => {
               const active = album.slug === albumSlug
@@ -144,9 +144,9 @@ export default async function PublicGalleryDetailPage({ params, searchParams }: 
                   aria-current={active ? 'page' : undefined}
                   className={cn(
                     'rounded-lg border px-3 py-1.5 text-fs-sm font-medium transition-colors',
-                    'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary',
+                    'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-action',
                     active
-                      ? 'border-primary/50 bg-primary/[0.06] text-foreground'
+                      ? 'border-action/50 bg-action/[0.06] text-foreground'
                       : 'border-border text-muted-foreground hover:border-border-strong hover:text-foreground',
                   )}
                 >

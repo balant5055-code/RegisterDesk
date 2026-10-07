@@ -2,6 +2,7 @@
 
 import { Suspense, useEffect }         from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
+import { intentFromParams, saveIntent } from '@/lib/wallet/purchaseIntent'
 
 const DRAFT_KEY = 'rd_event_draft_id'
 
@@ -19,6 +20,8 @@ function VisibilityRelayContent() {
 
   useEffect(() => {
     const draftId = searchParams.get('draftId')
+    // The Wallet's "Increase Limit": open THIS draft on License & Services, return to the Wallet after.
+    saveIntent(intentFromParams(searchParams))
     if (draftId) {
   localStorage.setItem(DRAFT_KEY, draftId)
     } else {

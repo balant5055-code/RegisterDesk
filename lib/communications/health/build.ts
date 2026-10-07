@@ -67,10 +67,10 @@ export function buildChannelHealth(channel: CommChannelId, s: ChannelSignals): C
     !cap.paid
       ? dim('credits', 'green', `${cap.label} is free`, 'No action needed')
       : s.funded === true
-        ? dim('credits', 'green', 'Wallet balance covers sending', 'No action needed')
+        ? dim('credits', 'green', 'Communication balance covers sending', 'No action needed')
         : s.funded === false
-          ? dim('credits', 'amber', 'Wallet balance is too low to send', 'Top up your communication wallet')
-          : dim('credits', 'amber', 'Wallet balance not evaluated in this scope', 'Open the wallet to review balance'),
+          ? dim('credits', 'amber', 'Communication balance is too low to send', 'Top up your communication balance (Communications → Billing)')
+          : dim('credits', 'amber', 'Communication balance not evaluated in this scope', 'Open Communications → Billing to review the balance'),
 
     // Runtime — Phase 2 exposes config-derived state; live delivery metrics are surfaced
     // in the communication logs, not fabricated here.

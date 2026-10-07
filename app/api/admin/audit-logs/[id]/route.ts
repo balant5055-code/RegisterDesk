@@ -3,7 +3,7 @@
 // Admin-only single audit-log record (for the detail drawer).
 
 import { NextRequest, NextResponse } from 'next/server'
-import { resolveAdminUid }           from '@/lib/admin/auth'
+import { requireSuperAdmin } from '@/lib/admin/financialGuard'
 import { getAuditLog }               from '@/lib/admin/auditViewerService'
 
 interface RouteContext {
@@ -11,8 +11,10 @@ interface RouteContext {
 }
 
 export async function GET(req: NextRequest, ctx: RouteContext): Promise<NextResponse> {
-  const adminUid = await resolveAdminUid(req.headers.get('authorization'))
-  if (!adminUid) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+  // RD-PHASE4-S4 · D7 — the platform audit log holds the FINANCIAL audit trail (settlements,
+  // payouts, refunds, licences, clawbacks…): Super Admin only.
+  const guard = await requireSuperAdmin(req)
+  if (guard.response) return guard.response
 
   const { id } = await ctx.params
   const log = await getAuditLog(id)

@@ -11,10 +11,11 @@ import { formatINR } from '@/lib/events/builder/format'
 import { computeFeePreview } from '@/lib/events/builder/feePreview'
 import {
   type WizardStep, type StepViewProps, type VisibilityId,
-  type FeeModel, normalizeFeeModel,
-  type FeeBreakdown, type FeeRates, type StepSummary, type ReadinessReport,
+  type FeeModel, SUPPORTED_FEE_MODEL,
+  type FeeRates, type StepSummary, type ReadinessReport,
 } from '@/lib/events/builder/types'
-import { draftKeyFor, indexOfStep, type WizardFlow } from '@/lib/events/builder/stepRegistry'
+import { draftKeyFor, indexOfStep, resumeStepFor, isSubmittedDraftStatus, type WizardFlow } from '@/lib/events/builder/stepRegistry'
+import { readIntent, clearIntent } from '@/lib/wallet/purchaseIntent'
 import { validateStep } from '@/lib/events/builder/stepValidation'
 import { EASE, WIZARD_STEPS } from '@/lib/events/builder/constants'
 import { Stepper } from '@/components/event-builder/Stepper'
@@ -24,7 +25,6 @@ import { Step3View } from '@/components/event-builder/steps/Step3View'
 import { Step4View } from '@/components/event-builder/steps/Step4View'
 import { Step5View } from '@/components/event-builder/steps/Step5View'
 import { Step6View } from '@/components/event-builder/steps/Step6View'
-import { isChannelImplemented } from '@/lib/communications/health/channels'
 import {
   type CampaignType,
   makeBlankCampaignDetailsDraft,
@@ -52,7 +52,6 @@ import {
   FileSpreadsheet,
   Globe,
   IndianRupee,
-  Info,
   Lock,
   Mail,
   MapPin,
@@ -83,19 +82,27 @@ import { cn } from '@/lib/utils/cn'
 import { auth } from '@/lib/firebase/auth'
 import { calculateCommunicationCost } from '@/lib/events/communicationCost'
 import { estimateCapacity }           from '@/lib/events/estimateCapacity'
-import { validatePublish } from '@/lib/events/publishRequirements'
+import { validatePublish, toPublishBlocker } from '@/lib/events/publishRequirements'
 import { buildEventHref } from '@/lib/events/registerHref'
 import { PublishSectionHealthGrid } from '@/components/wizard/PublishSectionHealth'
 import { PublishFindingsPanel } from '@/components/wizard/PublishFindings'
 import { ReviewSummary } from '@/components/wizard/ReviewSummary'
 import type { CommunicationCostResult, PublishApiResponse, PublishGovernanceInfo, WalletBalanceResponse, WalletTopupOrderResponse, WalletTopupVerifyResponse } from '@/types/events'
+import { classifyTopupVerifyResponse, TOPUP_OUTCOME_MESSAGES, type TopupHoldKind, type TopupVerifyOutcome } from '@/lib/wallet/topupVerifyOutcome'
 import { CURRENT_LICENSE_VERSION, isValidTierForVersion, defaultLicenseTierForVersion, type AnyEventLicenseTier } from '@/lib/licensing/eventLicense'
-import { useCurrentLicenseCatalogView } from '@/lib/licensing/licenseCatalogClient'
-import type { LicenseCatalogEntryView } from '@/lib/licensing/licenseCatalogShared'
+import { DEFAULT_COMMERCIAL_TERMS } from '@/lib/licensing/capacityCommercial'
+import { LicenseServicesStep, type LicenseServicesStepProps, type PaygServiceFlags, type FinalPayContext } from '@/components/wizard/LicenseServicesStep'
+import { PUBLISH_AGREEMENT_DOCUMENTS, type PublishAgreementInput } from '@/lib/legal/organizerAgreement'
+import { EMPTY_SELECTION, parseServiceSelection, type ServiceSelection } from '@/lib/licensing/serviceAllowances'
 import { useCommunicationConfig } from '@/lib/communications/communicationConfigClient'
 import { useFeesConfig } from '@/lib/fees/feesConfigClient'
 import type { PublicFeesConfig } from '@/lib/fees/publicFeesShared'
 import { useToast } from '@/components/ui/Toast'
+import { useConfirm } from '@/components/ui/ConfirmDialog'
+import { planTypeTransition } from '@/lib/events/builder/typeTransition'
+import { publishValueIssues } from '@/lib/events/eventValueRules'
+import { useWalletConfig } from '@/lib/wallet/walletConfigClient'
+import { useEventContext } from '@/components/dashboard/EventContextProvider'
 
 // GA-7C S2/P4: lazy-load the heavy per-step builders so the initial /dashboard/events/new
 // bundle doesn't ship them all up front. Steps are already conditionally mounted, so each
@@ -109,12 +116,6 @@ const LinkedCampaignStep = dynamic(
   () => import('@/components/wizard/LinkedCampaignStep').then(m => m.LinkedCampaignStep), { loading: builderLoading },
 )
 // TemplatePreviewPanel (Step-1-only dynamic import) → components/event-builder/steps/Step1View.tsx (RD-PRODUCT-01G Phase 5B).
-const LicenseCards = dynamic(
-  () => import('@/components/wizard/LicenseCards').then(m => m.LicenseCards), { loading: builderLoading },
-)
-const FinalCostSummary = dynamic(
-  () => import('@/components/wizard/FinalCostSummary').then(m => m.FinalCostSummary), { loading: builderLoading },
-)
 const DonationCampaignDetailsBuilder = dynamic(
   () => import('@/components/campaign/DonationCampaignDetailsBuilder').then(m => m.DonationCampaignDetailsBuilder), { loading: builderLoading },
 )
@@ -137,8 +138,9 @@ const FUNDRAISING_EVENT_WIZARD_STEPS: WizardStep[] = [
   { name: 'Form' },
   { name: 'Details' },
   { name: 'Fundraising' },
-  { name: 'License' },
+  // RD-EVENT-COMMERCE-05B — Review, then License & Services (payment + submission) last.
   { name: 'Review' },
+  { name: 'License & Services' },
 ]
 
 // Donation-only campaign has its own 4-step wizard that replaces steps 1–6
@@ -202,262 +204,38 @@ const FEE_MODEL_LABELS: Record<FeeModel, string> = {
 
 // Card used by EventTypeSelectorSection — self-contained popover for examples
 
-// --- Fee Breakdown Popover ---------------------------------------------------
 
-function FeeBreakdownPopover({
-  fees,
-  type,
-  platformPercent,
-  gstPercent,
-}: {
-  fees: FeeBreakdown
-  type: 'attendee' | 'organizer'
-  platformPercent: number
-  gstPercent:      number
-}) {
-  const [open, setOpen] = useState(false)
-  const ref             = useRef<HTMLDivElement>(null)
-
-  useEffect(() => {
-    if (!open) return
-    const close = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
-    }
-    document.addEventListener('mousedown', close)
-    return () => document.removeEventListener('mousedown', close)
-  }, [open])
-
-  const rows =
-    type === 'attendee'
-      ? [
-          { label: 'Ticket Price',                       val: formatINR(fees.ticketPrice), cls: 'text-foreground'       },
-          { label: `RegisterDesk Fee (${platformPercent}%)`, val: formatINR(fees.platformFee), cls: 'text-muted-foreground' },
-          { label: 'Gateway Fee',                        val: formatINR(fees.gatewayFee),  cls: 'text-muted-foreground' },
-          { label: `GST on Fees (${gstPercent}%)`,       val: formatINR(fees.gstOnFees),   cls: 'text-muted-foreground' },
-        ]
-      : [
-          { label: 'Ticket Price',     val:  formatINR(fees.ticketPrice), cls: 'text-foreground' },
-          { label: 'RegisterDesk Fee', val: `-${formatINR(fees.platformFee)}`, cls: 'text-rose-500' },
-          { label: 'Gateway Fee',      val: `-${formatINR(fees.gatewayFee)}`,  cls: 'text-rose-500' },
-          { label: 'GST on Fees',      val: `-${formatINR(fees.gstOnFees)}`,   cls: 'text-rose-500' },
-        ]
-
-  const totalLabel = type === 'attendee' ? 'Total Payable'       : 'Settlement Amount'
-  const totalVal   = type === 'attendee' ? formatINR(fees.attendeePays) : formatINR(fees.organizerGets)
-  const totalCls   = type === 'attendee' ? 'text-violet-700'     : 'text-emerald-700'
-
+// RD-PHASE4-S3 · Q1 — the Fee Collection Method selector is REMOVED: fee collection is fixed to
+// organizer-pays and organizers do not choose it (RegisterDesk manages pricing). What remains here is
+// the informational Cashfree Easy Split notice that used to sit under that selector.
+function EasySplitNotice() {
   return (
-    <div ref={ref} className="relative inline-flex items-center">
-      <button
-        type="button"
-        onClick={e => { e.stopPropagation(); setOpen(v => !v) }}
-        className="ml-1 flex items-center justify-center text-muted-foreground/50 transition-colors hover:text-muted-foreground"
-        aria-label="Show fee breakdown"
-      >
-        <Info className="size-3.5" aria-hidden />
-      </button>
+    <div>
+      {/* ═══ CASHFREE EASY SPLIT · INFORMATIONAL ONLY ════════════════════════
+          Placed here because this is where the organizer already reads how the
+          money they collect reaches them — the same neighbourhood as the fee
+          collection method above.
 
-      <AnimatePresence>
-        {open && (
-          <motion.div
-            key="popover"
-            initial={{ opacity: 0, y: 6, scale: 0.96 }}
-            animate={{ opacity: 1, y: 0,  scale: 1    }}
-            exit={{   opacity: 0, y: 6, scale: 0.96 }}
-            transition={{ duration: 0.15, ease: EASE }}
-            className="absolute bottom-full left-1/2 z-50 mb-2 w-56 -translate-x-1/2 overflow-hidden rounded-xl border border-border bg-card shadow-xl"
-          >
-            <div className="border-b border-border bg-muted/[0.04] px-3.5 py-2.5">
-              <p className="text-[12px] font-bold uppercase tracking-wider text-muted-foreground">
-                Sample Calculation
-              </p>
-            </div>
-            <div className="flex flex-col gap-1.5 px-3.5 py-3">
-              {rows.map(row => (
-                <div key={row.label} className="flex items-center justify-between gap-3">
-                  <span className="text-[12px] text-muted-foreground">{row.label}</span>
-                  <span className={cn('text-[12px] font-semibold tabular-nums', row.cls)}>
-                    {row.val}
-                  </span>
-                </div>
-              ))}
-              <div className="my-1 border-t border-border/60" />
-              <div className="flex items-center justify-between gap-3">
-                <span className="text-[13px] font-bold text-foreground">{totalLabel}</span>
-                <span className={cn('text-[12px] font-extrabold tabular-nums', totalCls)}>
-                  {totalVal}
-                </span>
-              </div>
-            </div>
-            <div className="border-t border-border/40 bg-muted/[0.03] px-3.5 py-2">
-              <p className="text-[12px] leading-relaxed text-muted-foreground/60">
-                Actual gateway charges may vary by payment method.
-              </p>
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-    </div>
-  )
-}
-
-// --- Step 4: Fee Collection Section — comparison cards with embedded examples ---
-
-function FeeCollectionSection({
-  feeModel,
-  onChange,
-  samplePrice = 500,
-}: {
-  feeModel:     FeeModel
-  onChange:     (m: FeeModel) => void
-  samplePrice?: number
-}) {
-  const feesCfg = useFeesConfig()
-  const rates   = feeRatesFrom(feesCfg)
-  // RD-PAYMENT-02 Phase 7: Attendee Pays becomes selectable ONLY when the pricing engine
-  // is active. While dormant (production default) it stays "Coming Soon" and any stored
-  // value normalizes to organizer_absorbs — byte-identical to before.
-  const engineEnabled = feesCfg.pricingEngineEnabled
-  const oaFees = computeFeePreview(samplePrice, 'organizer_absorbs', rates)
-  const apFees = engineEnabled ? computeFeePreview(samplePrice, 'attendee_pays', rates) : undefined
-  const effectiveModel = normalizeFeeModel(feeModel, engineEnabled)
-
-  type FeeOption = {
-    id:          FeeModel
-    label:       string
-    badge:       string | null
-    badgeCls:    string
-    desc:        string
-    supported:   boolean
-    fees?:       FeeBreakdown
-    summaryNote: string
-    summaryCls:  string
-  }
-  const OPTIONS: FeeOption[] = [
-    {
-      id:      'organizer_absorbs',
-      label:   'Organizer Absorbs Fees',
-      badge:   engineEnabled ? null : 'How it works',
-      badgeCls:'bg-emerald-100 text-emerald-700',
-      desc:    'Attendees pay only the ticket price. RegisterDesk platform fees are deducted from your payout.',
-      supported:   true,
-      fees:        oaFees,
-      summaryNote: 'Platform fees absorbed by you',
-      summaryCls:  'text-amber-700',
-    },
-    {
-      id:      'attendee_pays',
-      label:   'Attendee Pays Fees',
-      badge:   engineEnabled ? null : 'Coming Soon',
-      badgeCls: engineEnabled ? '' : 'bg-muted text-muted-foreground',
-      desc:    engineEnabled
-        ? 'Platform fees are added on top of the ticket price so attendees cover them — you receive the full ticket value.'
-        : 'Add platform fees on top of the ticket price so attendees cover them. Not available yet — every event currently uses Organizer Absorbs Fees.',
-      supported:   engineEnabled,
-      fees:        apFees,
-      summaryNote: engineEnabled ? 'Attendees cover the fees' : 'Not available yet',
-      summaryCls:  engineEnabled ? 'text-emerald-700' : 'text-muted-foreground',
-    },
-  ]
-
-  return (
-    <div className="border-t border-border/60 px-5 pt-5 sm:px-6">
-      <p className="mb-1 text-[13px] font-semibold text-foreground">Fee Collection Method</p>
-      <p className="mb-4 text-[12px] text-muted-foreground">
-        {engineEnabled
-          ? `Choose who covers RegisterDesk platform fees — shown on a ${formatINR(samplePrice)} ticket below.`
-          : `RegisterDesk platform fees are absorbed by you (the organizer). Attendees pay only the ticket price — shown on a ${formatINR(samplePrice)} ticket below.`}
-      </p>
-
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-        {OPTIONS.map(opt => {
-          const selected = opt.supported && effectiveModel === opt.id
-          return (
-            <motion.div
-              key={opt.id}
-              role="button"
-              tabIndex={opt.supported ? 0 : -1}
-              aria-disabled={!opt.supported}
-              whileTap={opt.supported ? { scale: 0.985 } : undefined}
-              onClick={() => { if (opt.supported) onChange(opt.id) }}
-              onKeyDown={(e: React.KeyboardEvent) => {
-                if (opt.supported && (e.key === 'Enter' || e.key === ' ')) {
-                  e.preventDefault()
-                  onChange(opt.id)
-                }
-              }}
-              aria-pressed={opt.supported ? selected : undefined}
-              className={cn(
-                'group relative flex flex-col rounded-xl border-[1.5px] bg-card p-4 text-left transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-1',
-                !opt.supported
-                  ? 'cursor-not-allowed border-dashed border-border/70 opacity-60'
-                  : selected
-                    ? 'cursor-pointer border-primary bg-primary/[0.02] ring-1 ring-primary/10'
-                    : 'cursor-pointer border-border hover:border-primary/30 hover:shadow-sm',
-              )}
-            >
-              {/* Selected check */}
-              <AnimatePresence>
-                {selected && (
-                  <motion.span
-                    key="chk"
-                    initial={{ scale: 0, opacity: 0 }}
-                    animate={{ scale: 1, opacity: 1 }}
-                    exit={{ scale: 0, opacity: 0 }}
-                    transition={{ duration: 0.14, ease: EASE }}
-                    className="absolute right-3 top-3 flex size-5 items-center justify-center rounded-full bg-primary text-primary-foreground"
-                    aria-hidden
-                  >
-                    <Check className="size-3" />
-                  </motion.span>
-                )}
-              </AnimatePresence>
-
-              {/* Label + badge */}
-              <div className="mb-2 flex flex-wrap items-center gap-1.5 pr-7">
-                <p className="text-[14px] font-bold text-foreground">{opt.label}</p>
-                {opt.badge && (
-                  <span className={cn('rounded-full px-1.5 py-0.5 text-[9.5px] font-semibold', opt.badgeCls)}>
-                    {opt.badge}
-                  </span>
-                )}
-              </div>
-              <p className="mb-4 text-[13px] leading-relaxed text-muted-foreground">{opt.desc}</p>
-
-              {/* Embedded example — shown only for the supported model. The Coming Soon
-                  card shows no numbers so it never implies attendee fee collection works. */}
-              {opt.supported && opt.fees ? (
-                <div className="grid grid-cols-2 gap-2 rounded-xl border border-border/60 bg-muted/[0.04] p-3">
-                  <div className="flex flex-col items-center gap-0.5 rounded-lg bg-background/80 px-2 py-2 text-center">
-                    <p className="text-[9.5px] font-semibold uppercase tracking-wider text-violet-500">Attendee Pays</p>
-                    <div className="flex items-center gap-0.5">
-                      <p className="text-[1.1rem] font-extrabold text-violet-700">{formatINR(opt.fees.attendeePays)}</p>
-                      <FeeBreakdownPopover fees={opt.fees} type="attendee" platformPercent={rates.platformPercent} gstPercent={rates.gstPercent} />
-                    </div>
-                    <p className="text-[12px] text-muted-foreground">at checkout</p>
-                  </div>
-                  <div className="flex flex-col items-center gap-0.5 rounded-lg bg-background/80 px-2 py-2 text-center">
-                    <p className="text-[9.5px] font-semibold uppercase tracking-wider text-emerald-600">You Receive</p>
-                    <div className="flex items-center gap-0.5">
-                      <p className="text-[1.1rem] font-extrabold text-emerald-700">{formatINR(opt.fees.organizerGets)}</p>
-                      <FeeBreakdownPopover fees={opt.fees} type="organizer" platformPercent={rates.platformPercent} gstPercent={rates.gstPercent} />
-                    </div>
-                    <p className="text-[12px] text-muted-foreground">per registration</p>
-                  </div>
-                </div>
-              ) : (
-                <div className="flex items-center justify-center rounded-xl border border-dashed border-border/60 bg-muted/[0.04] px-3 py-5 text-center">
-                  <p className="text-[12px] font-medium text-muted-foreground">Coming soon</p>
-                </div>
-              )}
-
-              {/* Summary note */}
-              <p className={cn('mt-2.5 text-[12px] font-medium', opt.summaryCls)}>
-                {opt.summaryNote}
-              </p>
-            </motion.div>
-          )
-        })}
+          STATIC COPY, no control of any kind. Not even a disabled one: a disabled
+          toggle is an invitation for a later change to remove `disabled`, and this
+          feature is not built. It reads no state, writes no draft field, and has
+          no counterpart in the event payload, so there is nothing to enable even
+          if the markup were bypassed. */}
+      <div className="mt-4 rounded-xl border border-dashed border-border bg-muted/30 p-4">
+        <div className="flex flex-wrap items-center gap-2">
+          <p className="text-[13px] font-semibold text-foreground">Cashfree Easy Split</p>
+          <span className="rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
+            Coming Soon
+          </span>
+        </div>
+        <p className="mt-1.5 text-[12px] leading-relaxed text-muted-foreground">
+          Automatically split registration payments between RegisterDesk and eligible event
+          organizers through Cashfree.
+        </p>
+        <p className="mt-2 text-[12px] leading-relaxed text-muted-foreground">
+          Subject to Cashfree activation, account eligibility and completion of the
+          integration. Your payouts continue through the existing settlement process.
+        </p>
       </div>
     </div>
   )
@@ -468,220 +246,6 @@ function FeeCollectionSection({
 
 // --- Step 4: RegisterDesk Services & Pricing section -------------------------
 
-
-// Section 2: Communication & Add-ons — selectable service cards
-type CommAddonValues = { whatsappEnabled: boolean; smsEnabled: boolean; certEnabled: boolean }
-
-function RegisterDeskServicesPricingSection({
-  isFreeEvent,
-  values,
-  onChange,
-  standalone = true,
-}: {
-  isFreeEvent: boolean
-  values:      CommAddonValues
-  onChange:    (field: keyof CommAddonValues, value: boolean) => void
-  standalone?: boolean
-}) {
-
-  type SvcDef = {
-    key:      string
-    Icon:     React.ElementType
-    label:    string
-    always:   boolean
-    badge:    string
-    badgeCls: string
-    desc:     string
-    rate:     string | null
-    rateNote: string | null
-    example:  string | null
-    unavailable?: boolean
-  }
-
-  // RD-COMMS-01 Phase 2B: SMS availability comes from the canonical capability SSOT — SMS
-  // has no transport, so its add-on is shown as Unavailable and cannot be toggled or priced.
-  const SMS_AVAILABLE = isChannelImplemented('sms')
-
-  // RD-EVENT-02 S1B (H2): per-message rates come from the SAME canonical pricing source the
-  // Final Cost Summary uses — the Business Configuration communication rates (seeded from
-  // lib/communications/pricing.ts). No hard-coded paise anywhere in this card.
-  const commConfig        = useCommunicationConfig()
-  const whatsappRatePaise = commConfig.whatsapp.pricePaise
-  const smsRatePaise      = commConfig.sms.pricePaise
-  // Illustrative scenario (display only): 100 attendees × 2 messages. The monetary total is
-  // derived from the canonical per-message rate so the rate and example can never diverge.
-  const rateLabel   = (paise: number) => `${formatINR(paise / 100)} per delivered message`
-  const exampleLine = (paise: number) => `100 attendees × 2 messages ≈ ${formatINR((100 * 2 * paise) / 100)}`
-
-  const SERVICES: SvcDef[] = [
-    {
-      key:      'email',
-      Icon:     Mail,
-      label:    'Email Notifications',
-      always:   true,
-      badge:    'Always Included',
-      badgeCls: 'bg-emerald-100 text-emerald-700',
-      desc:     'Registration confirmations, reminders & updates',
-      rate:     null,
-      rateNote: null,
-      example:  null,
-    },
-    {
-      key:      'whatsappEnabled',
-      Icon:     Phone,
-      label:    'WhatsApp Notifications',
-      always:   false,
-      badge:    'Optional',
-      badgeCls: 'bg-amber-100 text-amber-700',
-      desc:     isFreeEvent
-        ? 'Recharge credits before sending messages'
-        : 'Charges deducted from settlement amount',
-      rate:     rateLabel(whatsappRatePaise),
-      rateNote: isFreeEvent ? 'Pre-paid credits required' : 'Deducted at settlement',
-      example:  exampleLine(whatsappRatePaise),
-    },
-    {
-      key:      'smsEnabled',
-      Icon:     MoreHorizontal,
-      label:    'SMS Notifications',
-      always:   false,
-      badge:    SMS_AVAILABLE ? 'Optional' : 'Unavailable',
-      badgeCls: SMS_AVAILABLE ? 'bg-amber-100 text-amber-700' : 'bg-muted text-muted-foreground',
-      desc:     SMS_AVAILABLE
-        ? (isFreeEvent ? 'Recharge credits before sending messages' : 'Charges deducted from settlement amount')
-        : 'SMS delivery is not available yet — no messages are sent for this channel.',
-      rate:     SMS_AVAILABLE ? rateLabel(smsRatePaise) : null,
-      rateNote: SMS_AVAILABLE ? (isFreeEvent ? 'Pre-paid credits required' : 'Deducted at settlement') : null,
-      example:  SMS_AVAILABLE ? exampleLine(smsRatePaise) : null,
-      unavailable: !SMS_AVAILABLE,
-    },
-    {
-      key:      'certEnabled',
-      Icon:     Award,
-      label:    'Certificates',
-      always:   false,
-      badge:    'Optional',
-      badgeCls: 'bg-blue-100 text-blue-700',
-      desc:     'Auto-generate and email participation certificates',
-      rate:     null,
-      rateNote: null,
-      example:  null,
-    },
-  ]
-
-  const serviceRows = (
-    <div className="divide-y divide-border/60">
-      {SERVICES.map((svc) => {
-          const isOn   = !svc.unavailable && (svc.always || !!values[svc.key as keyof CommAddonValues])
-          const canTog = !svc.always && !svc.unavailable
-
-          return (
-            <div
-              key={svc.key}
-              className={cn(
-                'flex items-start gap-4 px-5 py-4 transition-colors sm:px-6',
-                isOn && !svc.always ? 'bg-primary/[0.015]' : '',
-              )}
-            >
-              {/* Icon */}
-              <div className={cn(
-                'mt-0.5 flex size-10 shrink-0 items-center justify-center rounded-xl transition-colors',
-                isOn
-                  ? svc.always ? 'bg-emerald-100' : 'bg-primary/10'
-                  : 'bg-muted/50',
-              )}>
-                <svc.Icon className={cn(
-                  'size-4',
-                  isOn ? (svc.always ? 'text-emerald-600' : 'text-primary') : 'text-muted-foreground/50',
-                )} aria-hidden />
-              </div>
-
-              {/* Label + desc */}
-              <div className="min-w-0 flex-1">
-                <div className="flex flex-wrap items-center gap-2">
-                  <p className="text-[13px] font-semibold text-foreground">{svc.label}</p>
-                  <span className={cn('rounded-full px-2 py-0.5 text-[12px] font-semibold', svc.badgeCls)}>
-                    {svc.badge}
-                  </span>
-                </div>
-                <p className="mt-0.5 text-[12px] text-muted-foreground">{svc.desc}</p>
-
-                {/* Rate info — shown when there's a rate */}
-                {svc.rate && (
-                  <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1">
-                    <span className="text-[13px] font-semibold text-foreground">{svc.rate}</span>
-                    {svc.rateNote && (
-                      <span className={cn(
-                        'rounded-full px-2 py-0.5 text-[12px] font-medium',
-                        isFreeEvent
-                          ? 'bg-amber-50 text-amber-700'
-                          : 'bg-emerald-50 text-emerald-700',
-                      )}>
-                        {svc.rateNote}
-                      </span>
-                    )}
-                  </div>
-                )}
-
-                {/* Example calculation — shown when enabled */}
-                {svc.example && isOn && (
-                  <motion.p
-                    initial={{ opacity: 0, y: -4 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    className="mt-1 text-[12px] text-muted-foreground/70"
-                  >
-                    e.g. {svc.example}
-                  </motion.p>
-                )}
-              </div>
-
-              {/* Toggle / always badge */}
-              {svc.always ? (
-                <div className="mt-0.5 flex shrink-0 items-center gap-1.5 rounded-full bg-emerald-50 px-2.5 py-1">
-                  <CheckCircle2 className="size-3.5 text-emerald-600" aria-hidden />
-                  <span className="text-[12px] font-semibold text-emerald-700">Active</span>
-                </div>
-              ) : (
-                <button
-                  type="button"
-                  role="switch"
-                  aria-checked={isOn}
-                  aria-label={`${isOn ? 'Disable' : 'Enable'} ${svc.label}`}
-                  onClick={() => canTog && onChange(svc.key as keyof CommAddonValues, !values[svc.key as keyof CommAddonValues])}
-                  className={cn(
-                    'relative mt-0.5 inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary',
-                    isOn ? 'bg-primary' : 'bg-muted-foreground/25',
-                  )}
-                >
-                  <span className={cn(
-                    'inline-block size-[20px] rounded-full bg-white shadow-sm transition-transform duration-200',
-                    isOn ? 'translate-x-5' : 'translate-x-0',
-                  )} />
-                </button>
-              )}
-            </div>
-          )
-        })}
-    </div>
-  )
-
-  if (!standalone) return serviceRows
-
-  return (
-    <div className="overflow-hidden rounded-2xl border border-border bg-card shadow-sm">
-      <div className="flex items-center gap-3 border-b border-border px-5 py-4 sm:px-6">
-        <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary/[0.09]">
-          <Mail className="size-4 text-primary" aria-hidden />
-        </div>
-        <div>
-          <p className="text-[15px] font-bold tracking-tight text-foreground">Communication &amp; Add-ons</p>
-          <p className="mt-0.5 text-[13px] text-muted-foreground">Optional services to improve attendee experience.</p>
-        </div>
-      </div>
-      {serviceRows}
-    </div>
-  )
-}
 
 // --- Step 4 view --------------------------------------------------------------
 
@@ -2218,8 +1782,19 @@ function buildReadinessReport(
     eventDetails:     detailsData as unknown as Record<string, unknown> | null,
     registrationForm: formData,
   })
-  const failed   = summary.requirements.filter(r => !r.passed)
-  const blockers = failed.map(r => `${r.stepName}: ${r.title}`)
+  // RD-CE-FIX H1 — the server's VALUE rules (dates in order, sane prices/quantities/limits/windows,
+  // a form for THIS event type), from the SAME function the publish gate runs, so every value blocker
+  // shows here BEFORE payment and the server can never refuse what Review passed.
+  const valueReqs = publishValueIssues({
+    eventDetails: detailsData, pricing: pricingData, registrationForm: formData, eventType: eventTypeId, eventSubtype,
+  }).map(i => ({
+    id: i.id, severity: 'critical' as const, passed: false, title: i.title, description: i.message,
+    stepName: i.stepName, stepIndex: i.stepIndex,
+  }))
+  // RD-CE-FIX (audit M2) — "Publishing blocked" lists CRITICAL findings only; warnings and
+  // suggestions keep their own lists and never read as blockers.
+  const valueBlockers = valueReqs.map(toPublishBlocker)
+  const blockers = [...summary.blockers, ...valueBlockers].map(b => `${b.step}: ${b.title}`)
   // Readiness-quality warnings (optional checks that feed the score) are a DIFFERENT axis
   // from `summary.warnings` (requirement severity). Kept separate and unchanged — merging
   // them would put score-quality hints into the publish-gating list.
@@ -2228,50 +1803,52 @@ function buildReadinessReport(
   return {
     score: Math.min(100, Math.round(earned)),
     steps,
-    requirements: summary.requirements,
+    requirements: [...summary.requirements, ...valueReqs],
     blockers,
     warnings,
-    canPublish: summary.canPublish,
+    canPublish: summary.canPublish && valueReqs.length === 0,
     // RD-EVENT-20 taxonomy, surfaced for the Review UI. Never re-categorised here.
     sections:   summary.sections,
     findings:   {
-      critical:   summary.blockers,
+      critical:   [...summary.blockers, ...valueBlockers],
       warning:    summary.warnings,
       suggestion: summary.suggestions,
     },
   }
 }
 
-// Wraps FeeCollectionSection (designed for inside a card) as a standalone card
-function FeeCollectionCard({
-  feeModel,
-  onChange,
-  samplePrice,
-}: {
-  feeModel:    FeeModel
-  onChange:    (m: FeeModel) => void
-  samplePrice?: number
-}) {
-  return (
-    <div className="overflow-hidden rounded-2xl border border-border bg-card shadow-sm">
-      <div className="flex items-center gap-3 px-5 py-4 sm:px-6">
-        <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary/[0.09]">
-          <IndianRupee className="size-4 text-primary" aria-hidden />
-        </div>
-        <div>
-          <p className="text-[15px] font-bold tracking-tight text-foreground">Fee Collection Method</p>
-          <p className="mt-0.5 text-[13px] text-muted-foreground">
-            How RegisterDesk platform fees are handled for this event.
-          </p>
-        </div>
-      </div>
-      {/* FeeCollectionSection uses border-t as header separator */}
-      <FeeCollectionSection feeModel={feeModel} onChange={onChange} samplePrice={samplePrice} />
-    </div>
-  )
-}
 
-function Step7View({ currentStep, completedValues, onNext, onBack, onSaveDraft, initialData, onGoToStep, wizardSteps }: StepViewProps) {
+
+// RD-EVENT-COMMERCE-02 · Review & Submit. It takes NO money: the activation fee is paid on
+// License & Services. Review shows the readiness report, the summary of every step, the
+// fee-collection choice, the server's activation state and the publish agreement, and submits.
+function Step7View({
+  currentStep, completedValues, onNext, onBack, initialData, onGoToStep, wizardSteps,
+  onSettle, phase = 'review', renderLicense, onServerSaved,
+}: StepViewProps & {
+  /** RD-EVENT-COMMERCE-05D — called after the SERVER confirmed Save Changes (re-align the draft baseline). */
+  onServerSaved?: () => void
+  /**
+   * RD-EVENT-COMMERCE-05B — the new-event wizard ends Review → License & Services.
+   *   review  Step 7: the event's information ONLY (readiness, summary, warnings, preview). No
+   *           payment, no order, no submission, no Fee Collection Method (05C) — its action is
+   *           "Continue" to License & Services. (An already-PUBLISHED event — opened through
+   *           "Edit event" on the same route — keeps its legitimate "Save Changes" here.)
+   *   final   Step 8, NEW drafts only: License & Services (rendered by `renderLicense`) followed
+   *           by the Fee Collection Method (05C), the publish agreement and the ONE final action —
+   *           "Pay & Publish Event" (verified payment, then publishing) or "Publish Event".
+   */
+  phase?: 'review' | 'final'
+  /** final only — renders License & Services, wired to report its payment context. */
+  renderLicense?: (onContext: (ctx: FinalPayContext) => void) => React.ReactNode
+  /**
+   * Flushes and awaits every queued draft write (useDraft.settle). The server reads the
+   * DRAFT when it prices and publishes, so submitting before a pending autosave lands would
+   * publish something other than what the organizer just reviewed. Resolves false when the
+   * writes could not be confirmed — submission is then refused, never attempted.
+   */
+  onSettle?: () => Promise<boolean>
+}) {
   // RD-EVENT-26 — which wizard this Review belongs to, read off the step list this view was
   // already given. Derived from the registry's own titles rather than a step count or a new
   // prop, so inserting a step cannot silently pick the wrong flow.
@@ -2287,12 +1864,13 @@ function Step7View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
   const pricingData  = (initialData?.pricing          as Record<string, unknown> | null) ?? null
   const formData     = (initialData?.registrationForm as Record<string, unknown> | null) ?? null
   const detailsData  = (initialData?.eventDetails     as EventDetailsDraft | null) ?? null
-  const reviewLicenseTier: AnyEventLicenseTier = isValidTierForVersion(initialData?.licenseTier, CURRENT_LICENSE_VERSION)
-    ? initialData.licenseTier
-    : defaultLicenseTierForVersion(CURRENT_LICENSE_VERSION)
 
   const isFreeEvent        = pricingData?.eventType === 'free'
   const isAlreadyPublished = draftStatus === 'published'
+  // RD-EVENT-COMMERCE-02 — 'pending_review' is SUBMITTED too (awaiting approval): it is neither a
+  // draft that may be submitted again nor a published event that may Save Changes.
+  const isSubmitted        = isSubmittedDraftStatus(draftStatus)
+  const isPendingReview    = draftStatus === 'pending_review'
 
   // Build shareable event URL once — used by both the publish success screen
   // and the "Changes saved" banner.
@@ -2355,17 +1933,23 @@ function Step7View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
   const allTermsAccepted = isAlreadyPublished || (isFreeEvent
     ? termInfo && consentFeeModel && consentTimeline
     : termInfo && termsFees && consentFeeModel && consentTimeline)
+  // RD-EVENT-COMMERCE-05F — the SAME ticks, sent to the server (the draft purchase route and the
+  // publish route both refuse without them). Only what the organizer ticked in THIS session —
+  // never a stored or default value; the fee-policy item exists for paid events only.
+  const publishAgreement = useMemo<PublishAgreementInput>(() => ({
+    accurateInformation: termInfo,
+    ...(isFreeEvent ? {} : { settlementFeePolicy: termsFees }),
+    termsOfService:      consentFeeModel,
+    privacyPolicy:       consentTimeline,
+  }), [termInfo, isFreeEvent, termsFees, consentFeeModel, consentTimeline])
 
   // ── Interactive state — initialized from draft, persisted via onSaveDraft ──
-  // RD-PAYMENT-02 Phase 7: normalize the stored fee model against the pricing-engine gate.
-  // Dormant (production default) → organizer_absorbs, identical to before; when active, an
-  // Attendee-Pays selection is honoured and persists across reloads.
-  const feeEngineEnabled = useFeesConfig().pricingEngineEnabled
-  const [localFeeModel,  setLocalFeeModel]  = useState<FeeModel>(() =>
-    normalizeFeeModel(pricingData?.feeModel, feeEngineEnabled))
-  const [localWhatsapp, setLocalWhatsapp] = useState<boolean>(!!pricingData?.whatsappEnabled)
-  const [localSms,      setLocalSms]      = useState<boolean>(!!pricingData?.smsEnabled)
-  const [localCert,     setLocalCert]     = useState<boolean>(!!pricingData?.certEnabled)
+  // RD-PHASE4-S3 · Q1 — fee collection is FIXED to organizer-pays: organizers do not choose it, so
+  // the draft always carries (and every summary shows) the supported model.
+  const localFeeModel: FeeModel = SUPPORTED_FEE_MODEL
+  // RD-EVENT-COMMERCE-02 — the service switches moved to License & Services; here they are
+  // read-only facts of the draft.
+  const localWhatsapp = !!pricingData?.whatsappEnabled
 
   // Communication cost estimate uses local interactive state. The Final Cost
   // Summary (F2.5) is the single source of truth for pricing — the standalone
@@ -2377,38 +1961,53 @@ function Step7View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
   const commCostEstimate: CommunicationCostResult = calculateCommunicationCost({
     estimatedCapacity,
     whatsappEnabled: localWhatsapp,
-    smsEnabled:      localSms,
+    // RD-CE-FIX M1 — SMS has no transport: it is never estimated (or charged).
+    smsEnabled:      false,
     whatsappRatePaise: commConfig.whatsapp.pricePaise,
     smsRatePaise:      commConfig.sms.pricePaise,
   })
-  // Per-certificate price from Business Configuration (SSOT) — no longer hardcoded.
-  const certCostAmount = localCert ? estimatedCapacity * (commConfig.certificates.pricePaise / 100) : 0
-
-  // Wallet balance check — only for draft publish flow; free events with comm channels
-  const needsWalletCheck = !isAlreadyPublished && isFreeEvent && (localWhatsapp || localSms)
+  // RD-CE-FIX M1 — the communication balance is NOT a publish requirement. It only pays for WhatsApp
+  // messages this event's PREPAID messages don't cover, as they are sent. So the estimate is the
+  // pay-as-you-go remainder after the prepaid units selected on License & Services, and a low balance
+  // is an optional prompt — never a gate. A submitted (live or awaiting-approval) event submits nothing.
+  const prepaidWhatsapp = Math.max(0, Math.floor(Number((initialData?.serviceSelection as { whatsapp?: unknown } | null | undefined)?.whatsapp) || 0))
+  const paygEstimatePaise = Math.max(0, commCostEstimate.totalPaise - prepaidWhatsapp * commConfig.whatsapp.pricePaise)
+  const needsWalletCheck = !isSubmitted && isFreeEvent && localWhatsapp && paygEstimatePaise > 0
+  const walletCfg = useWalletConfig()
 
   const [walletBalance, setWalletBalance] = useState<number | null>(null)
   const [walletLoading, setWalletLoading] = useState(false)
-  const [payState, setPayState] = useState<'idle' | 'paying'>('idle')
   const [showAddFundsModal, setShowAddFundsModal] = useState(false)
-  // Applied license coupon (validated by the wizard's cost summary; the server
-  // re-validates + is authoritative). Sent to POST /api/licensing/purchase.
-  const [appliedCouponCode, setAppliedCouponCode] = useState<string | null>(null)
 
-  // Wallet is sufficient when: not needed, or balance >= estimated cost
-  const walletReady = !needsWalletCheck ||
-    (!walletLoading && walletBalance !== null && walletBalance >= commCostEstimate.totalPaise)
-  // "Add Funds" mode: balance fetched, insufficient
-  const showAddFundsMode = needsWalletCheck && !walletLoading && walletBalance !== null && !walletReady
+  // RD-CE-FIX M1 — advisory only: the balance is below the estimated pay-as-you-go messaging cost.
+  const balanceLow = needsWalletCheck && !walletLoading && walletBalance !== null && walletBalance < paygEstimatePaise
+  // Suggested top-up: the shortfall, never below the platform's minimum top-up.
+  const suggestedTopupPaise = Math.max(walletCfg.minimumTopupPaise, paygEstimatePaise - (walletBalance ?? 0))
 
-  // Auto-save pricing changes (feeModel, comm toggles) back to the draft
-  const savePricingChanges = useCallback((patch: Record<string, unknown>) => {
-    onSaveDraft?.({ ...(pricingData ?? {}), feeModel: localFeeModel, whatsappEnabled: localWhatsapp, smsEnabled: localSms, certEnabled: localCert, ...patch })
-  }, [onSaveDraft, pricingData, localFeeModel, localWhatsapp, localSms, localCert])
+
+  // RD-EVENT-COMMERCE-02 · why the last submission failed, shown INLINE (a toast disappears).
+  const [payNotice, setPayNotice] = useState<{ kind: 'failed'; message: string } | null>(null)
+
+  // RD-EVENT-COMMERCE-05B · final step: the License & Services payment context (server quote),
+  // the payment stage, and a guard so a double click / retry cannot start two payments.
+  const [payCtx, setPayCtx]         = useState<FinalPayContext | null>(null)
+  const [finalStage, setFinalStage] = useState<'paying' | null>(null)
+  const finalInFlight = useRef(false)
+
+  // Gate every submission on the draft being fully persisted (see `onSettle`).
+  const settleDraft = useCallback(async (): Promise<boolean> => {
+    if (!onSettle) return true
+    const ok = await onSettle()
+    if (!ok) {
+      setPayNotice({ kind: 'failed', message: 'Your latest changes haven’t finished saving, so nothing was submitted. Check your connection and try again.' })
+    }
+    return ok
+  }, [onSettle])
 
   const safeDetails = detailsData ? normalizeEventDetailsDraft(detailsData) : null
 
   const { showToast } = useToast()
+
 
   // Fetch wallet balance when free event with comm channels
   useEffect(() => {
@@ -2420,20 +2019,51 @@ function Step7View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
       }))
       .then(r => r.json() as Promise<WalletBalanceResponse>)
       .then(data => setWalletBalance(data.balancePaise))
-      .catch(() => setWalletBalance(0))
+      // An unreadable balance is unknown, not ₹0 — no prompt rather than a false one.
+      .catch(() => setWalletBalance(null))
       .finally(() => setWalletLoading(false))
   }, [needsWalletCheck])
 
   // ── Publish via API ────────────────────────────────────────────────────────
   const handlePublish = useCallback(() => {
     if (!allTermsAccepted || !report.canPublish || publishState !== 'idle') return
+    // RD-EVENT-COMMERCE-05B — the final action needs a CURRENT server quote with nothing blocked.
+    if (phase === 'final' && (!payCtx?.quoteReady || !!payCtx?.blockedReason || finalStage !== null)) return
     setShowPublishConfirm(true)
-  }, [allTermsAccepted, report.canPublish, publishState])
+  }, [allTermsAccepted, report.canPublish, publishState, phase, payCtx, finalStage])
 
-  const handleConfirmPublish = useCallback(async (confirmIdentityChange = false) => {
+  const confirmPublishOnce = useCallback(async (confirmIdentityChange = false) => {
     if (publishState !== 'idle') return
+    // ═══ RD-EVENT-COMMERCE-05B/05C · Pay & Publish Event ═══════════════════════════════════
+    // Payment FIRST, and only a SERVER-VERIFIED payment continues to submission. Cancelled,
+    // failed and still-verifying payments stop here with the event untouched (nothing is
+    // submitted, nothing granted, nothing refunded). The publish route independently refuses
+    // to submit an event whose capacity / services are not covered by PAID orders, so this is
+    // never the only guard. A verified payment whose submission then fails is recoverable: the
+    // coverage-aware quote reads "covered", the button becomes "Publish Event", no second charge.
+    let paidNow = false
+    if (phase === 'final') {
+      if (finalInFlight.current) return
+      if (payCtx && !payCtx.covered) {
+        finalInFlight.current = true
+        setShowPublishConfirm(false); setPayNotice(null); setFinalStage('paying')
+        const outcome = await payCtx.pay(publishAgreement)
+        setFinalStage(null); finalInFlight.current = false
+        if (outcome !== 'paid') {
+          setPayNotice({ kind: 'failed', message:
+            outcome === 'cancelled' ? 'Payment cancelled — you were not charged and your event was not submitted. Your event and selections are saved; pay and submit whenever you’re ready.'
+            : outcome === 'pending' ? 'Your payment is still being verified, so the event has not been submitted yet. Use “Refresh status” above in a moment — you will not be charged twice.'
+            : outcome === 'busy'    ? 'A payment is already in progress.'
+            : 'The payment did not complete, so your event was not submitted. Nothing further was charged — you can try again.' })
+          payCtx.refresh()
+          return
+        }
+        paidNow = true
+      }
+    }
     setPublishState('publishing')
     setShowPublishConfirm(false)
+    if (!(await settleDraft())) { setPublishState('idle'); return }
 
     try {
       const token = await auth.currentUser?.getIdToken()
@@ -2443,23 +2073,26 @@ function Step7View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
           'Content-Type': 'application/json',
           ...(token ? { Authorization: `Bearer ${token}` } : {}),
         },
-        body: JSON.stringify({ draftId, confirmIdentityChange }),
+        body: JSON.stringify({ draftId, confirmIdentityChange, agreement: publishAgreement }),
       })
 
       const json: PublishApiResponse = await res.json()
 
       if (!res.ok || !json.canPublish) {
-        if (json.reason === 'WALLET_INSUFFICIENT') {
-          // Race condition: wallet was drained between check and publish
-          setWalletBalance(0)
+        // RD-CLOSE — the 'WALLET_INSUFFICIENT' branch was removed: publishing never requires a
+        // communication balance (the publish API has no such refusal), so it was unreachable and
+        // described the retired "fund the wallet to publish" model.
+        if (json.reason === 'AGREEMENT_REQUIRED') {
+          // RD-EVENT-COMMERCE-05F — the server did not receive the Publish Agreement.
+          setPayNotice({ kind: 'failed', message: json.error ?? 'Please accept the Publish Agreement before publishing.' })
+          document.getElementById('publish-agreement')?.scrollIntoView({ behavior: 'smooth', block: 'center' })
           setPublishState('idle')
-          showToast('Insufficient wallet balance. Please add funds and try again.', 'error')
         } else if (json.reason === 'EVENT_ALREADY_PUBLISHED') {
           setPublishState('published')
         } else if (json.reason === 'DRAFT_NOT_FOUND') {
           showToast('Draft not found. Please refresh the page and try again.', 'error')
           setPublishState('idle')
-        } else if (json.reason === 'INCOMPLETE_REQUIRED_FIELDS') {
+        } else if (json.reason === 'INCOMPLETE_REQUIRED_FIELDS' || json.reason === 'INVALID_EVENT_VALUES') {
           // Show the REAL missing field(s) the server reported (Phase 4/5) — never
           // a generic message unless the server sent no structured blockers.
           const first = json.blockers?.[0]
@@ -2489,7 +2122,13 @@ function Step7View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
           showToast(json.error ?? 'This event has changed too much to publish under the same license. Please duplicate it as a new event.', 'error')
         } else {
           showToast(json.error ?? 'Publish failed. Please try again.', 'error')
+          setPayNotice({ kind: 'failed', message: json.error ?? 'The event could not be submitted. Please try again.' })
           setPublishState('idle')
+        }
+        if (paidNow) {
+          // RD-EVENT-COMMERCE-05B — money is verified; only the submission failed. Say so plainly.
+          setPayNotice({ kind: 'failed', message: `Payment verified — but the event could not be submitted yet (${json.error ?? json.reason ?? 'see the message above'}). Resolve it and select “Publish Event” — you will not be charged again.` })
+          payCtx?.refresh()
         }
         return
       }
@@ -2505,14 +2144,40 @@ function Step7View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
     } catch {
       showToast('Network error — check your connection and try again.', 'error')
       setPublishState('idle')
+      if (paidNow) {
+        setPayNotice({ kind: 'failed', message: 'Payment verified — but the submission could not reach the server. Select “Publish Event” to try again; you will not be charged again.' })
+        payCtx?.refresh()
+      }
     }
-  }, [publishState, draftId, onNext, showToast, setIdentityConfirm])
+  }, [publishState, draftId, onNext, showToast, setIdentityConfirm, settleDraft, phase, payCtx, publishAgreement])
+
+  // RD-CE-FIX (double publish) — React state alone could not stop a double click: both clicks saw
+  // 'idle' in the same render and sent two submissions; the loser's ENTITLEMENT_ALREADY_USED then
+  // landed as an error over the success screen. A ref makes the whole publish strictly one-at-a-time.
+  const publishInFlight = useRef(false)
+  const handleConfirmPublish = useCallback(async (confirmIdentityChange = false) => {
+    if (publishInFlight.current) return
+    publishInFlight.current = true
+    try { await confirmPublishOnce(confirmIdentityChange) } finally { publishInFlight.current = false }
+  }, [confirmPublishOnce])
 
   // ── Wallet top-up via Razorpay ─────────────────────────────────────────────
   const [topupLoading, setTopupLoading] = useState(false)
+  // RD-WALLET-W1.1 — after the organizer has PAID, any outcome other than an explicit credit
+  // (authorised-not-captured, duplicate, needs review, credit deferred, unconfirmed) puts the
+  // top-up on HOLD: no new payment can be started from this page (closing and reopening the
+  // modal does not clear it), so an uncertain result can never become a second payment.
+  // The hold remembers WHICH payment it is about (order + payment id), so it can be cleared only
+  // by that payment's confirmed credit — never by an unrelated balance change. (The server also
+  // refuses a new top-up while an earlier one is unresolved, so a reload cannot bypass this.)
+  const [topupHold, setTopupHold] = useState<{ kind: TopupHoldKind; message: string; orderId: string; paymentId: string } | null>(null)
 
   const handleTopupWallet = useCallback(async (amountPaise: number) => {
     if (topupLoading) return
+    if (topupHold) {
+      showToast(topupHold.message, 'warning')
+      return
+    }
     setTopupLoading(true)
     try {
       const tok = await auth.currentUser?.getIdToken()
@@ -2524,9 +2189,14 @@ function Step7View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
         },
         body: JSON.stringify({ amountPaise }),
       })
-      const order: WalletTopupOrderResponse = await res.json()
+      const order = await res.json() as WalletTopupOrderResponse & { error?: string; code?: string }
       if (!res.ok) {
-        showToast('Could not initiate payment. Please try again.', 'error')
+        // RD-WALLET-W1.1 — an earlier top-up is unresolved (server-side guard): say why, don't invite a retry.
+        showToast(
+          order.code === 'TOPUP_UNRESOLVED' && order.error ? order.error : 'Could not initiate payment. Please try again.',
+          order.code === 'TOPUP_UNRESOLVED' ? 'warning' : 'error',
+          order.code === 'TOPUP_UNRESOLVED' ? { duration: 12_000 } : undefined,
+        )
         setTopupLoading(false)
         return
       }
@@ -2548,28 +2218,37 @@ function Step7View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
           handler: async (resp: { razorpay_order_id: string; razorpay_payment_id: string; razorpay_signature: string }) => {
             try {
               const tok2  = await auth.currentUser?.getIdToken()
-              const vRes  = await fetch('/api/organizer/wallet/topup/verify', {
-                method:  'POST',
-                headers: {
-                  'Content-Type': 'application/json',
-                  ...(tok2 ? { Authorization: `Bearer ${tok2}` } : {}),
-                },
-                body: JSON.stringify({
-                  orderId:   resp.razorpay_order_id,
-                  paymentId: resp.razorpay_payment_id,
-                  signature: resp.razorpay_signature,
-                }),
-              })
-              const vJson: WalletTopupVerifyResponse = await vRes.json()
-              if (vJson.success) {
-                setWalletBalance(vJson.newBalance ?? 0)
+              let outcome: TopupVerifyOutcome
+              try {
+                const vRes  = await fetch('/api/organizer/wallet/topup/verify', {
+                  method:  'POST',
+                  headers: {
+                    'Content-Type': 'application/json',
+                    ...(tok2 ? { Authorization: `Bearer ${tok2}` } : {}),
+                  },
+                  body: JSON.stringify({
+                    orderId:   resp.razorpay_order_id,
+                    paymentId: resp.razorpay_payment_id,
+                    signature: resp.razorpay_signature,
+                  }),
+                })
+                const vJson = (await vRes.json().catch(() => null)) as (WalletTopupVerifyResponse & { code?: string }) | null
+                outcome = classifyTopupVerifyResponse(vRes.status, vJson)
+              } catch {
+                // The organizer has paid; the verify call itself failed — never an invitation to pay again.
+                outcome = { kind: 'unconfirmed', message: TOPUP_OUTCOME_MESSAGES.unconfirmed }
+              }
+              if (outcome.kind === 'credited') {
+                setWalletBalance(outcome.newBalance)
                 setShowAddFundsModal(false)
                 showToast('Wallet funded successfully!', 'success')
+              } else if (outcome.kind === 'failed') {
+                showToast(outcome.message, 'error')
               } else {
-                showToast(vJson.error ?? 'Payment verification failed.', 'error')
+                // pending · duplicate · review · deferred · unconfirmed — not credited, not failed.
+                setTopupHold({ kind: outcome.kind, message: outcome.message, orderId: resp.razorpay_order_id, paymentId: resp.razorpay_payment_id })
+                showToast(outcome.message, outcome.kind === 'duplicate' || outcome.kind === 'review' ? 'warning' : 'info', { duration: 12_000 })
               }
-            } catch {
-              showToast('Network error during verification. Please contact support.', 'error')
             } finally {
               setTopupLoading(false)
             }
@@ -2586,113 +2265,60 @@ function Step7View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
       showToast('Network error — please try again.', 'error')
       setTopupLoading(false)
     }
-  }, [topupLoading, showToast])
+  }, [topupLoading, topupHold, showToast])
 
-  // ── License payment (F2.2) — wallet-first, then Razorpay for the remainder ──
-  // Effective (config-aware) catalog so paid-tier detection matches the server.
-  const licenseView    = useCurrentLicenseCatalogView()
-  const licenseDef: LicenseCatalogEntryView = licenseView.find(e => e.tier === reviewLicenseTier) ?? licenseView[0]
-  const isPaidLicense  = licenseDef.licensePricePaise > 0
-  // Every paid tier (Growth/Professional/Enterprise) goes through payment; Starter
-  // (free) submits directly. undefined → 'Submit Event'.
-  const submitLabel    = isPaidLicense ? 'Continue to Payment' : undefined
+  // RD-WALLET-W1.1 — while a payment is pending / deferred / unconfirmed, ask the server whether
+  // THIS payment (order + payment id) has been credited: GET /api/organizer/wallet/topup/status.
+  // READ-ONLY — it never verifies, credits or pays, so it cannot cause a duplicate; a balance rise
+  // from anything else is ignored. The hold clears ONLY on 'credited'; 'needs_review' and
+  // 'duplicate_payment' become their own holds (never polled — they do not resolve automatically).
+  // Bounded: after 12 tries the hold stays, accurately unresolved.
+  useEffect(() => {
+    if (!topupHold || topupHold.kind === 'duplicate' || topupHold.kind === 'review') return
+    const { orderId, paymentId } = topupHold
+    let tries = 0
+    let stopped = false
+    const id = setInterval(async () => {
+      tries++
+      if (tries >= 12) clearInterval(id)
+      try {
+        const tok = await auth.currentUser?.getIdToken()
+        const qs  = new URLSearchParams({ orderId, paymentId })
+        const r   = await fetch(`/api/organizer/wallet/topup/status?${qs.toString()}`, { headers: tok ? { Authorization: `Bearer ${tok}` } : {} })
+        if (stopped || !r.ok) return
+        const d = await r.json() as { state?: string; balancePaise?: number }
+        if (d.state === 'credited') {
+          clearInterval(id)
+          if (typeof d.balancePaise === 'number') setWalletBalance(d.balancePaise)
+          setTopupHold(null)
+          showToast('Wallet funded successfully!', 'success')
+        } else if (d.state === 'needs_review' || d.state === 'duplicate_payment') {
+          clearInterval(id)
+          const kind = d.state === 'needs_review' ? 'review' : 'duplicate'
+          setTopupHold({ kind, message: TOPUP_OUTCOME_MESSAGES[kind], orderId, paymentId })
+        } else if (d.state === 'not_credited') {
+          // RD-WALLET-W2.f.1 — the review is closed without a credit: final, not "under review".
+          clearInterval(id)
+          setTopupHold(null)
+          showToast(TOPUP_OUTCOME_MESSAGES.notCredited, 'info')
+        }
+      } catch { /* read-only poll — try again on the next tick */ }
+    }, 10_000)
+    return () => { stopped = true; clearInterval(id) }
+  }, [topupHold, showToast])
 
-  // Finalize the purchase (deduct wallet + persist), then auto-submit the event.
-  const confirmAndSubmit = useCallback(async (
-    walletUsePaise: number,
-    razorpay?: { razorpay_order_id: string; razorpay_payment_id: string; razorpay_signature: string },
-  ) => {
-    try {
-      const token = await auth.currentUser?.getIdToken()
-      const res   = await fetch('/api/licensing/checkout/confirm', {
-        method:  'POST',
-        headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
-        body:    JSON.stringify({ eventId: draftId, tier: reviewLicenseTier, walletUsePaise, ...(razorpay ?? {}) }),
-      })
-      const json = await res.json() as { success?: boolean; error?: string }
-      if (!res.ok || !json.success) throw new Error(json.error ?? 'Could not confirm payment')
-      setPayState('idle')
-      void handleConfirmPublish()   // automatic submission — no second click
-    } catch (e) {
-      setPayState('idle')
-      showToast(e instanceof Error ? e.message : 'Could not confirm payment. Your draft is saved — you can retry.', 'error')
-    }
-  }, [draftId, reviewLicenseTier, handleConfirmPublish, showToast])
-
-  const handlePayAndSubmit = useCallback(async () => {
-    // Starter (free) or Enterprise (contact sales) → submit directly (no payment).
-    if (!isPaidLicense) { handlePublish(); return }
-    // Phase 3 — HARD GATE: never open Razorpay while blockers remain. Stay on the
-    // Review page and scroll to Action Required. (The button is also disabled in
-    // this state; this is a defensive second gate — "no exceptions".)
-    if (!report.canPublish) {
-      document.getElementById('publish-readiness')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
-      return
-    }
-    if (payState !== 'idle' || !draftId || !allTermsAccepted) return
-    setPayState('paying')
-    console.info('[publish] payment started', { draftId, tier: reviewLicenseTier })
-    try {
-      const token = await auth.currentUser?.getIdToken()
-      const pRes  = await fetch('/api/licensing/purchase', {
-        method:  'POST',
-        headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
-        body:    JSON.stringify({ eventId: draftId, tier: reviewLicenseTier, ...(appliedCouponCode ? { couponCode: appliedCouponCode } : {}) }),
-      })
-      const purchase = await pRes.json() as {
-        ok?: boolean; alreadyPaid?: boolean; message?: string; error?: string
-        walletUsePaise?: number; remainderPaise?: number
-        checkout?: { keyId: string; razorpayOrderId: string; amountPaise: number } | null
-      }
-      if (!pRes.ok || !purchase.ok) throw new Error(purchase.message ?? purchase.error ?? 'Could not start payment')
-
-      // Phase 7 — RETRY without a second charge: a paid license already exists for
-      // this draft (payment succeeded before but publish failed). Skip Razorpay and
-      // re-run submission directly. Never charge twice.
-      if (purchase.alreadyPaid) {
-        console.info('[publish] retry — license already paid, no charge', { draftId })
-        setPayState('idle')
-        void handleConfirmPublish()
-        return
-      }
-
-      const walletUsePaise = purchase.walletUsePaise ?? 0
-      const remainderPaise = purchase.remainderPaise ?? 0
-
-      // Wallet fully covers the price → confirm directly, no Razorpay.
-      if (remainderPaise <= 0 || !purchase.checkout) { await confirmAndSubmit(walletUsePaise); return }
-
-      // Remainder → reuse the existing Razorpay checkout script.
-      const checkout = purchase.checkout
-      const script = document.createElement('script')
-      script.src = 'https://checkout.razorpay.com/v1/checkout.js'
-      script.onload = () => {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const rz = new (window as any).Razorpay({
-          key:         checkout.keyId,
-          order_id:    checkout.razorpayOrderId,
-          amount:      checkout.amountPaise,
-          currency:    'INR',
-          name:        'RegisterDesk',
-          description: `${licenseDef.name} License`,
-          handler: (resp: { razorpay_order_id: string; razorpay_payment_id: string; razorpay_signature: string }) => {
-            void confirmAndSubmit(walletUsePaise, resp)
-          },
-          modal: { ondismiss: () => { setPayState('idle'); showToast('Payment cancelled. Your draft is saved — you can retry.', 'error') } },
-        })
-        rz.open()
-      }
-      script.onerror = () => { setPayState('idle'); showToast('Could not load payment. Please retry.', 'error') }
-      document.body.appendChild(script)
-    } catch (e) {
-      setPayState('idle')
-      showToast(e instanceof Error ? e.message : 'Payment failed. Your draft is saved — you can retry.', 'error')
-    }
-  }, [isPaidLicense, payState, draftId, allTermsAccepted, report.canPublish, reviewLicenseTier, licenseDef, appliedCouponCode, handlePublish, handleConfirmPublish, confirmAndSubmit, showToast])
+  // ── Activation & services (RD-EVENT-COMMERCE-05B) ─────────────────────────────
+  // Payment and submission now happen together on the FINAL step (License & Services), so
+  // Review no longer quotes or reports activation. On the final step the gate is the embedded
+  // License & Services' live server quote (`payCtx`); the publish route re-checks coverage.
+  const reviewStepIndex = indexOfStep(reviewWizardFlow, 'review')
 
   // ── Save changes for already-published events ──────────────────────────────
+  const saveInFlight = useRef(false)
   const handleSaveChanges = useCallback(async () => {
-    if (saveChangesState !== 'idle') return
+    // RD-EVENT-COMMERCE-05D — a ref, not only state: two clicks in the same tick both read 'idle'.
+    if (saveChangesState !== 'idle' || saveInFlight.current) return
+    saveInFlight.current = true
     setSaveChangesState('saving')
     try {
       const token = await auth.currentUser?.getIdToken()
@@ -2704,19 +2330,24 @@ function Step7View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
         },
         body: JSON.stringify({}),
       })
-      const json: { success: boolean; error?: string } = await res.json()
-      if (!res.ok) {
-        showToast(json.error ?? 'Failed to save changes.', 'error')
-        setSaveChangesState('idle')
+      const json = await res.json().catch(() => ({})) as { success?: boolean; error?: string }
+      if (!res.ok || json.success !== true) {
+        // Nothing was saved; every edited value stays exactly as the organizer left it.
+        showToast(json.error ?? 'Your changes couldn’t be saved. Nothing was changed — please try again.', 'error')
         return
       }
-      showToast('Changes saved — your public event page has been updated.', 'success')
-      setSaveChangesState('idle')
+      // RD-EVENT-COMMERCE-05D — success ONLY after the server confirmed. save-changes also stamps the
+      // draft's updatedAt, so re-align the local draft baseline (as after a publish); otherwise the
+      // next autosave / reopen would read the server's newer stamp as a conflicting edit.
+      onServerSaved?.()
+      showToast('Changes saved successfully', 'success')
     } catch {
-      showToast('Network error — check your connection and try again.', 'error')
+      showToast('We couldn’t reach the server, so your changes were not saved. Check your connection and try again.', 'error')
+    } finally {
+      saveInFlight.current = false
       setSaveChangesState('idle')
     }
-  }, [saveChangesState, draftId, showToast])
+  }, [saveChangesState, draftId, showToast, onServerSaved])
 
   const scoreGrade   = report.score >= 80 ? 'great' : report.score >= 50 ? 'fair' : 'poor'
   const scoreTextCls = scoreGrade === 'great' ? 'text-emerald-600' : scoreGrade === 'fair' ? 'text-amber-500' : 'text-rose-500'
@@ -2772,6 +2403,18 @@ function Step7View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
             </button>
           </div>
         )}
+
+        {/* The Wallet's "Increase Limit" hand-off (lib/wallet/purchaseIntent): a draft's purchase is paid
+            together with its submission, so the organizer sees this confirmation first, then returns to
+            the same event's Wallet from here. (This screen only renders client-side, after a submit.) */}
+        {(() => {
+          const walletIntent = readIntent(draftId)
+          return walletIntent ? (
+            <Link href={walletIntent.returnTo} onClick={() => clearIntent()} className={cn(buttonVariants({ variant: 'primary' }), 'gap-1.5')}>
+              <ArrowLeft className="size-4" aria-hidden />Return to Wallet
+            </Link>
+          ) : null
+        })()}
 
         {/* Action grid */}
         <div className="grid w-full max-w-md grid-cols-1 gap-3 sm:grid-cols-3">
@@ -2835,7 +2478,10 @@ function Step7View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
     )
   }
 
-  // -- Main review view ------------------------------------------------------
+  // -- Review & Submit ---------------------------------------------------------
+  const stepsList   = wizardSteps ?? WIZARD_STEPS
+  const stepContext = `Step ${currentStep + 1} of ${stepsList.length} · ${stepsList[currentStep]?.name ?? ''}`
+
   return (
     <motion.div
       initial={{ opacity: 0, y: 8 }}
@@ -2843,23 +2489,28 @@ function Step7View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
       transition={{ duration: 0.35, ease: EASE }}
       className="flex min-h-full flex-col"
     >
+      {/* RD-EVENT-COMMERCE-05B — the final step is License & Services (it renders its own
+          stepper and header); the agreement and the final action follow it below. */}
+      {phase === 'final' && renderLicense?.(setPayCtx)}
+
+      {phase === 'review' && <>
       <Link href={ROUTES.DASHBOARD}
         className="mb-4 inline-flex items-center gap-1.5 text-[13px] font-medium text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary rounded">
         <ArrowLeft className="size-4" aria-hidden />Back to Dashboard
       </Link>
 
-      <Stepper currentStep={currentStep} completedValues={completedValues} steps={wizardSteps ?? WIZARD_STEPS} />
+      <Stepper currentStep={currentStep} completedValues={completedValues} steps={stepsList} />
 
       {/* Header row with Preview button */}
       <div className="mt-4 flex items-start justify-between gap-3">
         <div>
           <h1 className="text-[22px] font-bold tracking-tight text-foreground">
-            Review &amp; {isAlreadyPublished ? 'Save' : 'Submit'}
+            {isAlreadyPublished ? <>Review &amp; Save</> : 'Review'}
           </h1>
           <p className="mt-1 text-[13px] text-muted-foreground">
             {isAlreadyPublished
               ? 'Review your changes and save to update your live event.'
-              : 'Review your event and publish when ready.'}
+              : 'Check your event’s information. Capacity, optional services, payment and submission come next, on License & Services.'}
           </p>
         </div>
         <button
@@ -2980,105 +2631,62 @@ function Step7View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
           </div>
         )
       })()}
+      </>}
 
-        {/* ── REVIEW GRID: Left 70% content · Right 30% sticky Final Cost Summary (F2.5) ── */}
-        <div className="mt-4 grid grid-cols-1 gap-5 lg:grid-cols-[minmax(0,1fr)_340px] lg:items-start">
-
-          {/* ── LEFT COLUMN (70%) ──────────────────────────────────────────── */}
-          <div className="flex min-w-0 flex-col gap-5">
-
-            {/* Fee Collection Method */}
-            <FeeCollectionCard
-              feeModel={localFeeModel}
-              onChange={v => { setLocalFeeModel(v); savePricingChanges({ feeModel: v }) }}
-              samplePrice={passes.find(p => p.price && p.price > 0)?.price}
-            />
-
-            {/* Communication Services */}
-            <div className="overflow-hidden rounded-2xl border border-border bg-card shadow-sm">
-              <div className="flex items-center gap-3 border-b border-border px-5 py-4 sm:px-6">
-                <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary/[0.09]">
-                  <Zap className="size-4 text-primary" aria-hidden />
-                </div>
-                <div>
-                  <p className="text-[15px] font-bold tracking-tight text-foreground">Communication Services</p>
-                  <p className="mt-0.5 text-[13px] text-muted-foreground">Enable paid add-ons for this event</p>
-                </div>
-              </div>
-              <RegisterDeskServicesPricingSection
-                isFreeEvent={isFreeEvent}
-                values={{ whatsappEnabled: localWhatsapp, smsEnabled: localSms, certEnabled: localCert }}
-                onChange={(field, value) => {
-                  if (field === 'whatsappEnabled') { setLocalWhatsapp(value); savePricingChanges({ whatsappEnabled: value }) }
-                  if (field === 'smsEnabled')      { setLocalSms(value);      savePricingChanges({ smsEnabled:      value }) }
-                  if (field === 'certEnabled')     { setLocalCert(value);     savePricingChanges({ certEnabled:     value }) }
-                }}
-                standalone={false}
-              />
-              <div className="border-t border-border/30 bg-muted/[0.03] px-5 py-3.5 sm:px-6">
-                <p className="text-[12px] text-muted-foreground">
-                  <span className="font-semibold text-foreground">Why are these paid? </span>
-                  Email confirmations are always free. WhatsApp, SMS, and certificates require third-party
-                  integrations with per-message costs. For paid events, charges are deducted from settlement —
-                  no upfront payment needed. Free events require wallet balance before publishing.
-                </p>
-              </div>
-            </div>
-
-          </div>
-          {/* END LEFT COLUMN */}
-
-          {/* ── RIGHT COLUMN (30%) · sticky single-source Final Cost Summary (F2.5) ── */}
-          {/* order-first on mobile → summary shows above the left content; natural order on desktop */}
-          <div className="order-first lg:order-none lg:sticky lg:top-4 lg:self-start">
-            <FinalCostSummary
-              tier={reviewLicenseTier}
-              isFreeEvent={isFreeEvent}
-              walletBalancePaise={walletBalance}
-              walletLoading={walletLoading}
-              whatsappEnabled={localWhatsapp}
-              smsEnabled={localSms}
-              certEnabled={localCert}
-              whatsappCostRupees={commCostEstimate.whatsappCost}
-              smsCostRupees={commCostEstimate.smsCost}
-              certCostRupees={certCostAmount}
-              needsWalletCheck={needsWalletCheck}
-              walletReady={walletReady}
-              onAddFunds={() => setShowAddFundsModal(true)}
-              eventId={draftId ?? undefined}
-              onCouponChange={setAppliedCouponCode}
-            />
-          </div>
-          {/* END RIGHT COLUMN */}
-
+      {/* RD-EVENT-COMMERCE-05B — final step: blockers are fixed on Review, not re-listed here. */}
+      {phase === 'final' && !isSubmitted && !report.canPublish && (
+        <div role="alert" className="mt-4 flex flex-wrap items-start gap-3 rounded-xl border border-rose-200/60 bg-rose-50/60 px-4 py-3.5">
+          <XCircle className="mt-0.5 size-4 shrink-0 text-rose-500" aria-hidden />
+          <p className="min-w-0 flex-1 text-[12.5px] text-rose-700">
+            {report.requirements.filter(r => !r.passed).length} required item{report.requirements.filter(r => !r.passed).length === 1 ? '' : 's'} must be completed before this event can be submitted.
+          </p>
+          {onGoToStep && reviewStepIndex >= 0 && (
+            <button type="button" onClick={() => onGoToStep(reviewStepIndex)} className={cn(buttonVariants({ variant: 'outline' }), 'shrink-0 text-[12px]')}>
+              Go to Review
+            </button>
+          )}
         </div>
-        {/* END MAIN GRID */}
+      )}
 
-        {/* 4. PUBLISH STATUS / LIVE STATUS */}
-        {isAlreadyPublished ? (
-          <div className="flex items-center gap-3 rounded-xl border border-emerald-200/60 bg-emerald-50/60 px-4 py-3.5 shadow-sm">
-            <div className="flex size-8 shrink-0 items-center justify-center rounded-full bg-emerald-100">
-              <Globe className="size-4 text-emerald-600" aria-hidden />
+      <div className="mt-4 flex flex-col gap-4">
+        {/* RD-PHASE4-S3 · Q1 — the Fee Collection Method card is removed (fee collection is fixed to
+            organizer-pays). The informational Easy Split notice keeps its place: paid events, final step. */}
+        {phase === 'final' && !isFreeEvent && <EasySplitNotice />}
+
+        {/* Free event with paid messaging: the existing wallet gate (messages are billed from the
+            communication wallet as they are sent). */}
+        {phase === 'final' && balanceLow && (
+          <div role="status" className="flex items-start gap-3 rounded-xl border border-amber-200/70 bg-amber-50/60 px-4 py-3.5">
+            <Wallet className="mt-0.5 size-4 shrink-0 text-amber-600" aria-hidden />
+            <div className="text-[12.5px] text-amber-800">
+              <p>
+                WhatsApp messages not covered by this event’s prepaid messages are billed from your communication
+                balance as they’re sent (estimated {formatINR(paygEstimatePaise / 100)}; balance {formatINR((walletBalance ?? 0) / 100)}).
+                Publishing doesn’t require a balance.
+              </p>
+              <button type="button" onClick={() => setShowAddFundsModal(true)} className="mt-1.5 font-semibold underline underline-offset-2">
+                Top up balance
+              </button>
             </div>
-            <div className="flex-1">
-              <p className="text-[13.5px] font-bold text-emerald-800">Event is Live</p>
-              <p className="text-[12px] text-emerald-700">Changes will apply to your public event page immediately after saving.</p>
-            </div>
-            {eventUrl && (
-              <Link href={eventUrl} target="_blank" rel="noopener noreferrer"
-                className={cn(buttonVariants({ variant: 'outline' }), 'shrink-0 gap-1.5 text-[12px]')}>
-                <ExternalLink className="size-3.5" aria-hidden />View Live
-              </Link>
-            )}
           </div>
-        ) : report.canPublish ? (
+        )}
+
+        {/* PUBLISH STATUS / LIVE STATUS */}
+        {/* RD-EVENT-COMMERCE-05D — no live / pending status here: a submitted event's status (with
+            View Live and Buy capacity or services) is the ONE banner on License & Services. This
+            block is the NEW event's readiness on the final step only. */}
+        {phase === 'review' || isSubmitted ? null : report.canPublish ? (
           <div className="flex items-center gap-3 rounded-xl border border-emerald-200/60 bg-emerald-50/60 px-4 py-3.5 shadow-sm">
             <div className="flex size-8 shrink-0 items-center justify-center rounded-full bg-emerald-100">
               <CheckCircle2 className="size-4 text-emerald-600" aria-hidden />
             </div>
             <div>
-              <p className="text-[13.5px] font-bold text-emerald-800">Ready to Publish</p>
-              <p className="text-[12px] text-emerald-700">All required sections are complete. Your event goes live immediately after publishing.</p>
+              <p className="text-[13.5px] font-bold text-emerald-800">Ready to submit</p>
+              <p className="text-[12px] text-emerald-700">
+                {payCtx && !payCtx.covered
+                  ? 'Select “Pay & Publish Event”: once RegisterDesk verifies your payment, your event is published — or sent for approval first if your account requires review.'
+                  : 'When you submit, your event is published — or sent for approval first if your account requires review.'}
+              </p>
             </div>
           </div>
         ) : (
@@ -3093,15 +2701,22 @@ function Step7View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
           </div>
         )}
 
+        {payNotice && (
+          <div role="alert" className="flex items-start gap-3 rounded-xl border border-rose-200/60 bg-rose-50/60 px-4 py-3.5">
+            <XCircle className="mt-0.5 size-4 shrink-0 text-rose-500" aria-hidden />
+            <p className="text-[12.5px] text-rose-700">{payNotice.message}</p>
+          </div>
+        )}
+
         {/* 4. PUBLISH AGREEMENT — draft events only */}
-        {!isAlreadyPublished && <div className={cn(
-          'overflow-hidden rounded-xl border shadow-sm transition-colors',
+        {phase === 'final' && !isSubmitted && <div id="publish-agreement" role="group" aria-labelledby="publish-agreement-heading" className={cn(
+          'scroll-mb-[calc(var(--wizard-footer-h,0px)+1rem)] overflow-hidden rounded-xl border shadow-sm transition-colors',
           allTermsAccepted ? 'border-emerald-200/60 bg-emerald-50/10' : 'border-border bg-card',
         )}>
           <div className="flex items-center justify-between border-b border-border px-4 py-3">
             <div className="flex items-center gap-2">
               <Shield className="size-3.5 text-muted-foreground" aria-hidden />
-              <p className="text-[13px] font-semibold text-foreground">Publish Agreement</p>
+              <p id="publish-agreement-heading" className="text-[13px] font-semibold text-foreground">Publish Agreement</p>
             </div>
             <AnimatePresence>
               {allTermsAccepted && (
@@ -3117,6 +2732,12 @@ function Step7View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
             </AnimatePresence>
           </div>
 
+          {/* RD-EVENT-COMMERCE-05F — what to do while anything is unticked (the final action is disabled). */}
+          {!allTermsAccepted && (
+            <p role="status" className="border-b border-border/40 px-4 py-2.5 text-[12px] text-muted-foreground">
+              Required — tick every item below to enable “{payCtx && !payCtx.covered ? 'Pay & Publish Event' : 'Publish Event'}”.
+            </p>
+          )}
           <div className="flex flex-col divide-y divide-border/40 px-4">
             {/* 1: accurate */}
             <button type="button" onClick={() => setTermInfo(v => !v)} role="checkbox" aria-checked={termInfo}
@@ -3160,36 +2781,43 @@ function Step7View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
               </div>
             )}
 
-            {/* 3: ToS */}
-            <button type="button" onClick={() => setConsentFeeModel(v => !v)} role="checkbox" aria-checked={consentFeeModel}
-              className="flex items-center gap-3 py-3.5 text-left focus-visible:outline-none">
-              <span className={cn('flex size-[18px] shrink-0 items-center justify-center rounded border-2 transition-all',
-                consentFeeModel ? 'border-primary bg-primary' : 'border-border bg-background hover:border-primary/50')}>
+            {/* 3: ToS — RD-EVENT-COMMERCE-05F: same wording; "Terms of Service" now opens the existing
+                /terms page. A link can't sit inside the checkbox button, so the checkbox is named by
+                its visible label (aria-labelledby), exactly like item 2. */}
+            <div className="flex items-center gap-3 py-3.5">
+              <button type="button" onClick={() => setConsentFeeModel(v => !v)} role="checkbox" aria-checked={consentFeeModel}
+                aria-labelledby="terms-tos-label"
+                className={cn('flex size-[18px] shrink-0 items-center justify-center rounded border-2 transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-1',
+                  consentFeeModel ? 'border-primary bg-primary' : 'border-border bg-background hover:border-primary/50')}>
                 {consentFeeModel && <Check className="size-2.5 text-primary-foreground" aria-hidden />}
-              </span>
-              <span className={cn('text-[13px]', consentFeeModel ? 'font-medium text-foreground' : 'text-muted-foreground')}>
-                I agree to RegisterDesk <span className="text-primary underline underline-offset-2">Terms of Service</span>.
-              </span>
-            </button>
+              </button>
+              <p id="terms-tos-label" className={cn('text-[13px]', consentFeeModel ? 'font-medium text-foreground' : 'text-muted-foreground')}>
+                I agree to RegisterDesk <a href={PUBLISH_AGREEMENT_DOCUMENTS.termsOfService} target="_blank" rel="noopener noreferrer" className="text-primary underline underline-offset-2 hover:no-underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary rounded">Terms of Service</a>.
+              </p>
+            </div>
 
-            {/* 4: Privacy */}
-            <button type="button" onClick={() => setConsentTimeline(v => !v)} role="checkbox" aria-checked={consentTimeline}
-              className="flex items-center gap-3 py-3.5 text-left focus-visible:outline-none">
-              <span className={cn('flex size-[18px] shrink-0 items-center justify-center rounded border-2 transition-all',
-                consentTimeline ? 'border-primary bg-primary' : 'border-border bg-background hover:border-primary/50')}>
+            {/* 4: Privacy — same wording; "Privacy Policy" opens the existing /privacy page. */}
+            <div className="flex items-center gap-3 py-3.5">
+              <button type="button" onClick={() => setConsentTimeline(v => !v)} role="checkbox" aria-checked={consentTimeline}
+                aria-labelledby="terms-privacy-label"
+                className={cn('flex size-[18px] shrink-0 items-center justify-center rounded border-2 transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-1',
+                  consentTimeline ? 'border-primary bg-primary' : 'border-border bg-background hover:border-primary/50')}>
                 {consentTimeline && <Check className="size-2.5 text-primary-foreground" aria-hidden />}
-              </span>
-              <span className={cn('text-[13px]', consentTimeline ? 'font-medium text-foreground' : 'text-muted-foreground')}>
-                I agree to RegisterDesk <span className="text-primary underline underline-offset-2">Privacy Policy</span>.
-              </span>
-            </button>
+              </button>
+              <p id="terms-privacy-label" className={cn('text-[13px]', consentTimeline ? 'font-medium text-foreground' : 'text-muted-foreground')}>
+                I agree to RegisterDesk <a href={PUBLISH_AGREEMENT_DOCUMENTS.privacyPolicy} target="_blank" rel="noopener noreferrer" className="text-primary underline underline-offset-2 hover:no-underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary rounded">Privacy Policy</a>.
+              </p>
+            </div>
           </div>
         </div>}
+      </div>
 
-      {(publishState === 'publishing' || saveChangesState === 'saving') && (
-        <div className="flex items-center justify-center gap-2 py-3 text-[13px] text-muted-foreground">
+      {(publishState === 'publishing' || saveChangesState === 'saving' || finalStage === 'paying') && (
+        <div role="status" className="flex items-center justify-center gap-2 py-3 text-[13px] text-muted-foreground">
           <RefreshCw className="size-4 animate-spin" aria-hidden />
-          {saveChangesState === 'saving' ? 'Saving changes…' : 'Publishing your event…'}
+          {saveChangesState === 'saving' ? 'Saving changes…'
+            : finalStage === 'paying' ? 'Waiting for your payment to be verified — the event is submitted only after verification…'
+            : 'Payment verified. Submitting your event…'}
         </div>
       )}
 
@@ -3207,7 +2835,6 @@ function Step7View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
         passes={passes}
         minPassPrice={minPassPrice}
       />
-
       {/* Add Funds Modal */}
       <AnimatePresence>
         {showAddFundsModal && (
@@ -3234,8 +2861,8 @@ function Step7View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
                       <Wallet className="size-4 text-primary" aria-hidden />
                     </div>
                     <div>
-                      <p className="text-[15px] font-bold text-foreground">Add Funds to Wallet</p>
-                      <p className="text-[13px] text-muted-foreground">Top up your organizer wallet to publish this event.</p>
+                      <p className="text-[15px] font-bold text-foreground">Add to communication balance</p>
+                      <p className="text-[13px] text-muted-foreground">WhatsApp messages not covered by this event’s prepaid messages are billed from your communication balance as they’re sent. Publishing doesn’t require a balance.</p>
                     </div>
                   </div>
                   <button type="button" onClick={() => setShowAddFundsModal(false)} className="shrink-0 text-muted-foreground hover:text-foreground">
@@ -3249,29 +2876,32 @@ function Step7View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
                 {/* Balance summary */}
                 <div className="mb-4 divide-y divide-border/40 overflow-hidden rounded-xl border border-border">
                   <div className="flex items-center justify-between px-4 py-2.5 text-[13px]">
-                    <span className="text-muted-foreground">Required for publish</span>
-                    <span className="font-semibold text-foreground">{formatINR(commCostEstimate.totalCost)}</span>
+                    <span className="text-muted-foreground">Estimated messaging cost (pay-as-you-go)</span>
+                    <span className="font-semibold text-foreground">{formatINR(paygEstimatePaise / 100)}</span>
                   </div>
                   <div className="flex items-center justify-between px-4 py-2.5 text-[13px]">
-                    <span className="text-muted-foreground">Current balance</span>
+                    <span className="text-muted-foreground">Communication balance</span>
                     <span className="font-medium text-foreground">
                       {walletBalance !== null ? formatINR(walletBalance / 100) : '—'}
                     </span>
                   </div>
                   <div className="flex items-center justify-between bg-muted/[0.03] px-4 py-3 text-[13px]">
-                    <span className="font-semibold text-foreground">Amount to add</span>
-                    <span className="font-bold text-primary">
-                      {walletBalance !== null
-                        ? formatINR(Math.max(0, commCostEstimate.totalPaise - walletBalance) / 100)
-                        : formatINR(commCostEstimate.totalCost)}
-                    </span>
+                    <span className="font-semibold text-foreground">Suggested top-up</span>
+                    <span className="font-bold text-primary">{formatINR(suggestedTopupPaise / 100)}</span>
                   </div>
                 </div>
 
                 <p className="text-[12px] text-muted-foreground">
-                  Funds are charged from your wallet when WhatsApp or SMS messages are sent to attendees.
+                  Top-ups go to your communication balance (Communications › Billing), not to this event’s Wallet.
                 </p>
               </div>
+
+              {topupHold && (
+                <div role="status" className="mx-5 mb-4 flex items-start gap-2 rounded-lg border border-amber-300/60 bg-amber-50 px-3 py-2.5 text-[12.5px] text-amber-800 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-300">
+                  <AlertCircle className="mt-0.5 size-3.5 shrink-0" aria-hidden />
+                  <span>{topupHold.message}</span>
+                </div>
+              )}
 
               {/* Actions */}
               <div className="flex flex-col gap-2 border-t border-border px-5 py-4 sm:flex-row sm:justify-end">
@@ -3280,20 +2910,16 @@ function Step7View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
                   onClick={() => setShowAddFundsModal(false)}
                   className="text-[13px] font-medium text-muted-foreground hover:text-foreground"
                 >
-                  Cancel
+                  Skip for now
                 </button>
                 <button
                   type="button"
-                  onClick={() => {
-                    const shortfall = walletBalance !== null
-                      ? Math.max(0, commCostEstimate.totalPaise - walletBalance)
-                      : commCostEstimate.totalPaise
-                    handleTopupWallet(shortfall > 0 ? shortfall : commCostEstimate.totalPaise)
-                  }}
-                  className={cn(buttonVariants({ variant: 'primary' }), 'gap-1.5 text-[13px]')}
+                  onClick={() => handleTopupWallet(suggestedTopupPaise)}
+                  disabled={topupLoading || topupHold !== null}
+                  className={cn(buttonVariants({ variant: 'primary' }), 'gap-1.5 text-[13px] disabled:cursor-not-allowed disabled:opacity-50')}
                 >
                   <Wallet className="size-3.5" aria-hidden />
-                  Add Funds via Razorpay
+                  Top up balance
                 </button>
               </div>
             </motion.div>
@@ -3343,38 +2969,33 @@ function Step7View({ currentStep, completedValues, onNext, onBack, onSaveDraft, 
           />
         )}
       </AnimatePresence>
-
-      <WizardFooter
-        onBack={onBack}
-        onNext={
-          isAlreadyPublished
-            ? handleSaveChanges
-            : showAddFundsMode
-              ? () => setShowAddFundsModal(true)
-              : handlePayAndSubmit
-        }
-        isFinalStep
-        nextLabel={
-          isAlreadyPublished
-            ? 'Save Changes'
-            : showAddFundsMode
-              ? 'Add Funds'
-              : payState === 'paying'
-                ? 'Processing…'
-                : submitLabel
-        }
-        isNextDisabled={
-          isAlreadyPublished
-            ? saveChangesState === 'saving'
-            : showAddFundsMode
-              ? false
-              : !allTermsAccepted || !report.canPublish || publishState !== 'idle' || !walletReady || payState !== 'idle'
-        }
-        stepContext={(() => {
-          const steps = wizardSteps ?? WIZARD_STEPS
-          return `Step ${currentStep + 1} of ${steps.length} · ${steps[currentStep]?.name ?? ''}`
-        })()}
-      />
+      {phase === 'review' ? (
+        // RD-EVENT-COMMERCE-05B — Review collects nothing: it continues to License & Services.
+        // A LIVE event keeps "Save Changes" here (buying more is one click away, above).
+        <WizardFooter
+          onBack={onBack}
+          onNext={isAlreadyPublished ? handleSaveChanges : () => onNext('Reviewed')}
+          isFinalStep={isAlreadyPublished}
+          nextLabel={isAlreadyPublished ? (saveChangesState === 'saving' ? 'Saving…' : 'Save Changes') : 'Continue'}
+          isNextDisabled={isAlreadyPublished ? saveChangesState === 'saving' : false}
+          // RD-EVENT-COMMERCE-05D — a live event's status, View Live and purchases are on License & Services.
+          secondaryAction={isAlreadyPublished ? { label: 'License & Services', onClick: () => onNext(), disabled: saveChangesState === 'saving' } : undefined}
+          stepContext={stepContext}
+        />
+      ) : isSubmitted ? null /* RD-EVENT-COMMERCE-05E — License & Services renders the ONE footer (Unlock / Pay / Done) */ : (
+        <WizardFooter
+          onBack={onBack}
+          onNext={handlePublish}
+          isFinalStep
+          nextLabel={payCtx && !payCtx.covered ? 'Pay & Publish Event' : 'Publish Event'}
+          isNextDisabled={
+            // RD-CE-FIX M1 — the communication balance never gates publishing (it is a prompt above).
+            isPendingReview || !allTermsAccepted || !report.canPublish || publishState !== 'idle'
+              || !payCtx?.quoteReady || !!payCtx?.blockedReason || finalStage !== null
+          }
+          stepContext={stepContext}
+        />
+      )}
     </motion.div>
   )
 }
@@ -3783,87 +3404,44 @@ function DonationCampaignWizard({
 
 // --- License step (F2.1) ------------------------------------------------------
 
-function LicenseStepView({
-  currentStep, completedValues, onNext, onBack, steps, selectedTier, onSelectLicense,
-}: {
-  currentStep:     number
-  completedValues: (string | undefined)[]
-  onNext:          (label?: string, data?: unknown) => void
-  onBack:          () => void
-  steps:           WizardStep[]
-  selectedTier:    AnyEventLicenseTier
-  onSelectLicense: (t: AnyEventLicenseTier) => void
-}) {
-  const [tier, setTier] = useState<AnyEventLicenseTier>(selectedTier)
-  const [walletBalance, setWalletBalance] = useState<number | null>(null)
-  const licenseView = useCurrentLicenseCatalogView()
-
-  useEffect(() => {
-    let alive = true
-    void (async () => {
-      try {
-        const token = await auth.currentUser?.getIdToken()
-        if (!token) { if (alive) setWalletBalance(0); return }
-        const res  = await fetch('/api/organizer/wallet', { headers: { Authorization: `Bearer ${token}` } })
-        const data = await res.json() as WalletBalanceResponse
-        if (alive) setWalletBalance(typeof data.balancePaise === 'number' ? data.balancePaise : 0)
-      } catch { if (alive) setWalletBalance(0) }
-    })()
-    return () => { alive = false }
-  }, [])
-
-  const select = (t: AnyEventLicenseTier) => { setTier(t); onSelectLicense(t) }
-  const tierName = (t: AnyEventLicenseTier): string => (licenseView.find(e => e.tier === t) ?? licenseView[0]).name
-  const handleNext = () => { onSelectLicense(tier); onNext(`License: ${tierName(tier)}`, tier) }
-
-  return (
-    <motion.div
-      initial={{ opacity: 0, y: 8 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.35, ease: EASE }}
-      className="flex min-h-full flex-col"
-    >
-      <Link
-        href={ROUTES.DASHBOARD}
-        className="mb-5 inline-flex items-center gap-1.5 text-[13px] font-medium text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary rounded"
-      >
-        <ArrowLeft className="size-4" aria-hidden />
-        Back to Dashboard
-      </Link>
-
-      <Stepper currentStep={currentStep} completedValues={completedValues} steps={steps} />
-
-      <div className="mt-6">
-        <h1 className="text-[22px] font-bold tracking-tight text-foreground">Choose your Event License</h1>
-        <p className="mt-1 text-[13px] text-muted-foreground">
-          Every event runs on a license. Pick the tier for this event — you can see the price, registration
-          limit, and wallet impact below. You’ll pay after submitting.
-        </p>
-      </div>
-
-      <div className="mt-5 flex-1">
-        <LicenseCards selected={tier} onSelect={select} walletBalancePaise={walletBalance} />
-      </div>
-
-      <WizardFooter
-        onBack={onBack}
-        onNext={handleNext}
-        stepContext={`Step ${currentStep + 1} of ${steps.length} · ${steps[currentStep]?.name ?? ''}`}
-      />
-    </motion.div>
-  )
+// RD-CAPACITY-01 · the step now sells REGISTRATION CAPACITY, not a tier.
+//
+// The tier cards are gone: there are no tiers, and every feature is included for every
+// organizer. What the organizer chooses here is a number, and what they see is the server's
+// own quote for it — the component fetches its figures rather than computing them, so the
+// screen and the order it produces can never disagree about a price.
+// RD-EVENT-COMMERCE-03 · LICENSE & SERVICES — capacity, WhatsApp, email, SMS, certificates, media,
+// the itemized cost and the payment, for a draft AND for a submitted event, all on this ONE step.
+// The step itself lives in components/wizard/LicenseServicesStep.tsx.
+function LicenseStepView(props: LicenseServicesStepProps) {
+  return <LicenseServicesStep {...props} />
 }
 
 // --- Wizard -------------------------------------------------------------------
 
 export default function CreateEventWizard() {
   const {
-    draft, isLoading, createDraft, updateDraft, autosaveDraft, flushNow, markPublished, syncRenderState,
+    draft, isLoading, createDraft, updateDraft, autosaveDraft, flushNow, settle, markPublished, syncRenderState,
     saveState, lastSavedAt, hasUnsavedChanges, conflict, resolveConflict,
   } = useDraft()
 
   // RD-PRODUCT-01B: warn on tab close/reload while a save is pending or in flight.
   useUnsavedChangesWarning(hasUnsavedChanges, flushNow)
+  // RD-CE-FIX (draft recovery) — bumped on every recovery choice to remount the step views.
+  const [stepEpoch, setStepEpoch] = useState(0)
+
+  // RD-CE-FIX (header/breadcrumb) — the header selector and breadcrumb show the GLOBALLY selected
+  // event, which could be a different draft from the one open here ("Untitled Event" over a named
+  // draft). The wizard selects the draft it is editing; a brand-new draft is not in the list yet, so
+  // the list is refreshed once for it (never in a loop).
+  const eventCtx = useEventContext()
+  const refreshedForRef = useRef<string | null>(null)
+  useEffect(() => {
+    const id = draft?.id
+    if (!id || eventCtx.loading || eventCtx.selectedEventId === id) return
+    if (eventCtx.events.some(e => e.draftId === id)) { eventCtx.selectEvent(id); return }
+    if (refreshedForRef.current !== id) { refreshedForRef.current = id; eventCtx.refresh() }
+  }, [draft?.id, eventCtx])
 
   // Buffers the Step 1 (category) and Step 2 (visibility) selections BEFORE any
   // Firestore document exists. These seed the deferred createDraft and let the
@@ -3875,7 +3453,7 @@ export default function CreateEventWizard() {
   })
 
   const [currentStep,     setCurrentStep]     = useState(0)
-  // Over-provisioned to 8 — the max across all wizard types (event_plus_donation has 8 steps)
+  // Over-provisioned to 9 — the max across all wizard types (event_plus_donation has 9 steps)
   const [completedValues, setCompletedValues] = useState<(string | undefined)[]>(
     Array(9).fill(undefined),
   )
@@ -3910,6 +3488,33 @@ export default function CreateEventWizard() {
    * `step0` is the one key that is not a straight assignment: the Category step expands a
    * single Step1State into four top-level draft fields. That expansion is unchanged.
    */
+  // RD-CE-FIX H3 · an event-TYPE change on an existing draft resets exactly what the new type cannot
+  // use (lib/events/builder/typeTransition). The organizer is told what will be reset and confirms;
+  // the resets are written together with the new type keys. Returns null when they cancel.
+  const { confirm } = useConfirm()
+  const confirmTypeChange = useCallback(
+    async (step0: Step1State | null): Promise<Record<string, unknown> | null> => {
+      if (!draft?.id || !step0) return {}
+      const plan = planTypeTransition(draft as unknown as Record<string, unknown>, {
+        eventType: step0.eventType ?? null, eventSubtype: step0.subtype ?? null, campaignType: step0.campaignType ?? null,
+      })
+      if (!plan.changed) return {}
+      if (plan.resets.length > 0) {
+        const ok = await confirm({
+          title:        'Change the event type?',
+          message:      `These settings don’t apply to the new event type and will be reset: ${plan.resets.join(' · ')}. ` +
+                        'Your event name, dates, venue, organizer details, passes and prices are kept.',
+          confirmLabel: 'Change type and reset',
+          cancelLabel:  'Keep current type',
+          tone:         'danger',
+        })
+        if (!ok) return null
+      }
+      return plan.patch as Record<string, unknown>
+    },
+    [draft, confirm],
+  )
+
   const applyStepPayload = useCallback(
     (
       payload: Record<string, unknown>,
@@ -3936,7 +3541,15 @@ export default function CreateEventWizard() {
   useEffect(() => {
     if (isLoading || hydrated) return
     if (draft) {
-      setCurrentStep(draft.currentStep ?? 0)
+      // RD-EVENT-COMMERCE-02 — an out-of-range persisted index reopens on a real step (see
+      // resumeStepFor). The flow is read off the draft itself, as `wizardFlow` is.
+      const draftFlow: WizardFlow =
+        draft.eventType === 'fundraising' && draft.campaignType === 'event_plus_donation' ? 'fundraising' : 'standard'
+      // The Wallet's "Increase Limit" hand-off opens License & Services directly (lib/wallet/purchaseIntent).
+      const walletIntent = readIntent(draft.id)
+      setCurrentStep(draft.eventType === 'fundraising' && draft.campaignType === 'donation_only'
+        ? (draft.currentStep ?? 0)   // the campaign wizard keeps its own indexing, untouched
+        : walletIntent ? indexOfStep(draftFlow, 'license') : resumeStepFor(draftFlow, draft.currentStep))
       setCompletedValues(
         (draft.completedValues ?? Array(WIZARD_STEPS.length).fill(null)).map(
           v => (v as string | null | undefined) ?? undefined,
@@ -3968,6 +3581,9 @@ export default function CreateEventWizard() {
       // (and survive Back navigation) before any Firestore document exists.
       const step0      = step === eventTypeStep  ? (data as Step1State)  : pending.step0
       const visibility = step === visibilityStep ? (data as VisibilityId) : pending.visibility
+      // RD-CE-FIX H3 — confirm + collect the type-change resets BEFORE anything moves.
+      const typePatch = step === eventTypeStep ? await confirmTypeChange(step0) : {}
+      if (typePatch === null) return
       if (step === eventTypeStep || step === visibilityStep) setPending({ step0, visibility })
 
       // ── First Firestore write — happens ONLY here, on an explicit Continue ──
@@ -4006,6 +3622,7 @@ export default function CreateEventWizard() {
       // Persists steps 0–5, plus Fundraising in the fundraising flow. License and Review
       // are deliberately NOT persisted on advance — see the registry.
       applyStepPayload(payload, step, data, 'next')
+      Object.assign(payload, typePatch)
       // NOTE (LS2.2): the client must NEVER write `publishedAt` — it is a
       // server-controlled field (set only by the Admin-SDK publish route) and
       // firestore.rules blocks any client draft update whose affectedKeys include
@@ -4015,7 +3632,7 @@ export default function CreateEventWizard() {
       void updateDraft(payload)
     },
     [currentStep, completedValues, createDraft, updateDraft, markPublished, isEventPlusDonation, draft?.id, pending,
-     applyStepPayload, eventTypeStep, visibilityStep, syncRenderState],
+     applyStepPayload, eventTypeStep, visibilityStep, syncRenderState, confirmTypeChange],
   )
 
   const goBack = useCallback(
@@ -4055,16 +3672,20 @@ export default function CreateEventWizard() {
         return
       }
 
+      // RD-CE-FIX H3 — Save Draft on Step 1 applies the same confirmed type-change resets.
+      const typePatch = step === eventTypeStep ? await confirmTypeChange(step0) : {}
+      if (typePatch === null) return
       const payload: Record<string, unknown> = {}
       // Every keyed step, INCLUDING License and Review — a wider scope than goNext, which
       // is why the registry carries a flag per call site rather than one shared flag.
       applyStepPayload(payload, step, data, 'saveDraft')
+      Object.assign(payload, typePatch)
       if (Object.keys(payload).length) {
         void updateDraft(payload)
       }
     },
     [createDraft, updateDraft, draft?.id, pending,
-     applyStepPayload, eventTypeStep, visibilityStep],
+     applyStepPayload, eventTypeStep, visibilityStep, confirmTypeChange],
   )
 
   // RD-PRODUCT-01B: within-step autosave funnel — same step→payload mapping as
@@ -4081,14 +3702,50 @@ export default function CreateEventWizard() {
     [autosaveDraft, draft?.id, applyStepPayload],
   )
 
-  // Selected Event License tier (F2.1) — defaults to Starter until the organizer chooses.
+  // RD-CAPACITY-01 · the draft carries the organizer's chosen REGISTRATION CAPACITY.
+  //
+  // It defaults to the free allowance, so a draft that never reaches this step still
+  // publishes — at zero cost, with the free capacity — rather than failing a quote.
+  //
+  // This value is INTENT, not authority. The publish route re-quotes it against the
+  // effective commercial terms and refuses to store it unless a paid order covers it, so a
+  // tampered draft can only produce a payment demand, never free capacity.
+  const selectedCapacity: number = typeof draft?.registrationCapacity === 'number'
+    && Number.isInteger(draft.registrationCapacity) && draft.registrationCapacity > 0
+      ? draft.registrationCapacity
+      : DEFAULT_COMMERCIAL_TERMS.freeRegistrationCapacity
+  const onSelectCapacity = useCallback(
+    (capacity: number) => { void updateDraft({ registrationCapacity: capacity }) },
+    [updateDraft],
+  )
+  // RD-EVENT-COMMERCE-02 · the License & Services step's service switches live on `pricing`,
+  // where every sender already reads them (`pricing.whatsappEnabled` gates each WhatsApp send).
+  // Merged over the current pricing so no pass, date or fee field is touched.
+  const draftPricing = draft?.pricing
+  const onServicesChange = useCallback(
+    (values: PaygServiceFlags) => { void updateDraft({ pricing: { ...(draftPricing ?? {}), ...values } }) },
+    [updateDraft, draftPricing],
+  )
+  // RD-EVENT-COMMERCE-02 — the prepaid service QUANTITIES selected on License & Services.
+  // Intent only (publish checks it against the allowance ledger). A malformed stored value reads
+  // as nothing selected.
+  const storedSelection = (draft as { serviceSelection?: unknown } | null)?.serviceSelection
+  const initialServiceSelection = useMemo<ServiceSelection>(() => {
+    const parsed = parseServiceSelection(storedSelection)
+    return parsed.ok ? parsed.selection : { ...EMPTY_SELECTION }
+  }, [storedSelection])
+  const onServiceSelectionChange = useCallback(
+    (selection: ServiceSelection) => { void updateDraft({ serviceSelection: selection }) },
+    [updateDraft],
+  )
+  const draftStatus = typeof draft?.status === 'string' ? draft.status : null
+
+  // The legacy tier field is still read by the Review summary and by the publish route's
+  // grandfathered path. It is pinned to the version's free tier and never chosen by the
+  // organizer again — retiring the field itself is cleanup, not part of this change.
   const selectedLicense: AnyEventLicenseTier = isValidTierForVersion(draft?.licenseTier, CURRENT_LICENSE_VERSION)
     ? draft.licenseTier
     : defaultLicenseTierForVersion(CURRENT_LICENSE_VERSION)
-  const onSelectLicense = useCallback(
-    (t: AnyEventLicenseTier) => { void updateDraft({ licenseTier: t }) },
-    [updateDraft],
-  )
 
   // ─── RD-EVENT-10 · stable step props ────────────────────────────────────────
   //
@@ -4126,7 +3783,10 @@ export default function CreateEventWizard() {
 
   const pricingInitialData = useMemo(() => ({
     pricing: draft?.pricing ?? null, eventTypeId: draft?.eventType ?? null, eventSubtype: draft?.eventSubtype ?? null,
-  }), [draft?.pricing, draft?.eventType, draft?.eventSubtype])
+    // RD-PRICING-UI-LOCK-01 — Passes & Pricing locks commercial fields on a PUBLISHED event.
+    // `status` is server-written only (firestore.rules refuse client writes to it).
+    status:  draft?.status ?? null,
+  }), [draft?.pricing, draft?.eventType, draft?.eventSubtype, draft?.status])
 
   const formInitialData = useMemo(() => ({
     registrationForm: draft?.registrationForm ?? null,
@@ -4142,7 +3802,11 @@ export default function CreateEventWizard() {
     eventSubtype: draft?.eventSubtype  ?? null,
     pricing:      draft?.pricing      ?? null,
     draftId:      draft?.id           ?? null,
-  }), [draft?.eventDetails, draft?.eventType, draft?.eventSubtype, draft?.pricing, draft?.id])
+    // RD-EVENT-SLUG — the details step needs to know the event is live, so the URL slug
+    // can be shown as the frozen identity it already is server-side. Review has carried
+    // `status` all along; this is the same value, not a new one.
+    status:       draft?.status       ?? null,
+  }), [draft?.eventDetails, draft?.eventType, draft?.eventSubtype, draft?.pricing, draft?.id, draft?.status])
 
   const fundraisingInitialData = useMemo(() => ({
     linkedCampaign: draft?.linkedCampaign ?? null,
@@ -4161,8 +3825,15 @@ export default function CreateEventWizard() {
     registrationForm: draft?.registrationForm  ?? null,
     eventDetails:     draft?.eventDetails      ?? null,
     licenseTier:      selectedLicense,
+    // RD-CAPACITY-01 · the review step prices the activation, so it needs the chosen capacity.
+    // Without this it would read `undefined`, fall back to the free allowance, and offer a
+    // free submission for a capacity the organizer is supposed to pay for.
+    registrationCapacity: selectedCapacity,
+    // RD-EVENT-COMMERCE-02 — Review checks the SAME selection License & Services paid for.
+    serviceSelection:     initialServiceSelection,
   }), [draft?.id, draft?.status, draft?.eventType, draft?.eventSubtype, draft?.visibility,
-       draft?.accessControl, draft?.pricing, draft?.registrationForm, draft?.eventDetails, selectedLicense])
+       draft?.accessControl, draft?.pricing, draft?.registrationForm, draft?.eventDetails,
+       selectedLicense, selectedCapacity, initialServiceSelection])
 
   // Loading skeleton — shown while draft is being fetched from Firestore
   if (!hydrated || isLoading) {
@@ -4187,6 +3858,13 @@ export default function CreateEventWizard() {
   // Spread at each call site, so this object's own identity never reaches a step — React
   // compares the individual props. Every one of them is now stable across a re-render.
   const activeWizardSteps = isEventPlusDonation ? FUNDRAISING_EVENT_WIZARD_STEPS : WIZARD_STEPS
+  // RD-EVENT-COMMERCE-05B — Review precedes License & Services (the final step); positions from the registry.
+  const reviewStepIndex  = indexOfStep(wizardFlow, 'review')
+  const licenseStepIndex = indexOfStep(wizardFlow, 'license')
+  // RD-EVENT-COMMERCE-05D — the live event's canonical public URL for "View Live" (same builder and
+  // slug source Review used: the draft's SEO slug == events/{slug}; null when not set).
+  const liveSlug: unknown = draft?.eventDetails ? normalizeEventDetailsDraft(draft.eventDetails as unknown as EventDetailsDraft)?.seo?.urlSlug : undefined
+  const livePublicHref = typeof liveSlug === 'string' && liveSlug ? buildEventHref(liveSlug) : null
   const sharedProps = { completedValues, onNext: goNext, onBack: goBack, wizardSteps: activeWizardSteps }
 
 
@@ -4210,13 +3888,18 @@ export default function CreateEventWizard() {
       <div className="sticky top-0 z-30 -mb-1 flex justify-end px-1 pt-0.5">
         <SaveStatusIndicator state={saveState} lastSavedAt={lastSavedAt} />
       </div>
-      {conflict && <DraftRecoveryPrompt conflict={conflict} onResolve={resolveConflict} />}
+      {conflict && <DraftRecoveryPrompt conflict={conflict} onResolve={keepLocal => { resolveConflict(keepLocal); setStepEpoch(e => e + 1) }} />}
+      {/* RD-CE-FIX (draft recovery) — the steps seed their state ONCE from the draft; after a recovery
+          choice the draft changes underneath them, so they are remounted to re-seed from it (otherwise
+          the next keystroke autosaved the pre-recovery values over the recovered edits). */}
+      <Fragment key={`steps-${stepEpoch}`}>
       {currentStep === 0 && (
         <Step1View
           currentStep={0}
           {...sharedProps}
           onSaveDraft={handleSaveDraft}
           initialData={eventTypeInitialData}
+          locked={draft?.publishedAt != null}
         />
       )}
       {currentStep === 1 && (
@@ -4233,6 +3916,7 @@ export default function CreateEventWizard() {
           {...sharedProps}
           onSaveDraft={handleSaveDraft}
           initialData={(draft?.accessControl as Record<string, unknown> | null) ?? null}
+          onAutosave={handleAutosave}
         />
       )}
       {currentStep === 3 && (
@@ -4275,51 +3959,90 @@ export default function CreateEventWizard() {
           initialData={fundraisingInitialData}
         />
       )}
-      {/* Step 6 (standard) / Step 7 (event_plus_donation): License selection */}
-      {currentStep === 6 && !isEventPlusDonation && (
-        <LicenseStepView
-          currentStep={6}
-          completedValues={completedValues}
-          onNext={goNext}
-          onBack={goBack}
-          steps={WIZARD_STEPS}
-          selectedTier={selectedLicense}
-          onSelectLicense={onSelectLicense}
-        />
-      )}
-      {currentStep === 7 && isEventPlusDonation && (
-        <LicenseStepView
-          currentStep={7}
-          completedValues={completedValues}
-          onNext={goNext}
-          onBack={goBack}
-          steps={FUNDRAISING_EVENT_WIZARD_STEPS}
-          selectedTier={selectedLicense}
-          onSelectLicense={onSelectLicense}
-        />
-      )}
-      {/* Review — Step 7 (standard) / Step 8 (event_plus_donation) */}
-      {currentStep === 7 && !isEventPlusDonation && (
+      {/* RD-EVENT-COMMERCE-05B — Review, then License & Services (the final step). Mounted by
+          step ID, so the standard (7, 8) and fundraising (8, 9) positions come from the registry. */}
+      {currentStep === reviewStepIndex && (
         <Step7View
-          currentStep={7}
+          phase="review"
+          onSettle={settle}
+          onServerSaved={markPublished}
+          currentStep={reviewStepIndex}
           {...sharedProps}
           onGoToStep={goToStep}
           onSaveDraft={handleSaveDraft}
           initialData={reviewInitialData}
         />
       )}
-      {currentStep === 8 && isEventPlusDonation && (
+      {currentStep === licenseStepIndex && (isSubmittedDraftStatus(draftStatus) ? (
+        // A submitted event buys MORE here — no submission, no republish. Its status banner (Event
+        // is Live / awaiting approval, View Live) is at the top of this step. RD-EVENT-COMMERCE-05E —
+        // rendered through the SAME final view as a new event, so the Fee Collection Method card has
+        // one render site; here it saves on the server (future checkouts only), and License &
+        // Services owns the footer (Unlock to edit / Pay ₹X via Razorpay / Done).
         <Step7View
-          currentStep={8}
-          completedValues={completedValues}
-          onNext={goNext}
-          onBack={goBack}
+          phase="final"
+          onSettle={settle}
+          onServerSaved={markPublished}
+          currentStep={licenseStepIndex}
+          {...sharedProps}
           onGoToStep={goToStep}
-          onSaveDraft={handleSaveDraft}
-          wizardSteps={FUNDRAISING_EVENT_WIZARD_STEPS}
+          onSaveDraft={data => saveDraft(reviewStepIndex, data)}
           initialData={reviewInitialData}
+          renderLicense={() => (
+            <LicenseStepView
+              liveStatus={{ publicHref: livePublicHref }}
+              currentStep={licenseStepIndex}
+              completedValues={completedValues}
+              onNext={goNext}
+              onBack={goBack}
+              steps={activeWizardSteps}
+              selectedCapacity={selectedCapacity}
+              onSelectCapacity={onSelectCapacity}
+              onSettle={settle}
+              pricing={draft?.pricing ?? null}
+              onServicesChange={onServicesChange}
+              initialServiceSelection={initialServiceSelection}
+              onServiceSelectionChange={onServiceSelectionChange}
+              draftStatus={draftStatus}
+              draftId={draft?.id ?? null}
+            />
+          )}
         />
-      )}
+      ) : (
+        <Step7View
+          phase="final"
+          onSettle={settle}
+          currentStep={licenseStepIndex}
+          {...sharedProps}
+          onGoToStep={goToStep}
+          // RD-EVENT-COMMERCE-05C — the only thing this view saves is the Fee Collection Method,
+          // which belongs to `pricing`. `handleSaveDraft` would save through the CURRENT step's key
+          // (License → `licenseTier`) and put the pricing object in the wrong field, so the save is
+          // routed through the Review step's key (`pricing`) explicitly.
+          onSaveDraft={data => saveDraft(reviewStepIndex, data)}
+          initialData={reviewInitialData}
+          renderLicense={onContext => (
+            <LicenseStepView
+              currentStep={licenseStepIndex}
+              completedValues={completedValues}
+              onNext={goNext}
+              onBack={goBack}
+              steps={activeWizardSteps}
+              selectedCapacity={selectedCapacity}
+              onSelectCapacity={onSelectCapacity}
+              onSettle={settle}
+              pricing={draft?.pricing ?? null}
+              onServicesChange={onServicesChange}
+              initialServiceSelection={initialServiceSelection}
+              onServiceSelectionChange={onServiceSelectionChange}
+              draftStatus={draftStatus}
+              draftId={draft?.id ?? null}
+              embeddedFinal={{ onContext }}
+            />
+          )}
+        />
+      ))}
+      </Fragment>
     </>
   )
 }

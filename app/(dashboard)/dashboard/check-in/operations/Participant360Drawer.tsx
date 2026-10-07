@@ -28,6 +28,11 @@ import {
 import { useFocusTrap } from '@/lib/hooks/useFocusTrap'
 import { registrationStatusCls } from '@/lib/ui/statusColors'
 import ParticipantWorkspace360 from '@/app/(dashboard)/dashboard/events/[eventId]/registrations/ParticipantWorkspace360'
+import {
+  resolveIdentifierValue, resolveTimingTag,
+  IDENTIFIER_GENERIC_LABEL, TIMING_TAG_GENERIC_LABEL, allowedNumbersForPass, type EventIdentity,
+} from '@/lib/registrations/identity'
+import { identifierAssignmentBlockedBy } from '@/lib/identifiers/eligibility'
 import type { SerializedRegistration } from '@/app/api/organizer/events/[eventId]/registrations/route'
 import type { PrintTemplate } from '@/lib/printAssets/types'
 
@@ -36,10 +41,16 @@ const fmt = (iso?: string | null) => (iso ? new Date(iso).toLocaleString('en-IN'
 const initials = (name: string) => name.trim().split(/\s+/).slice(0, 2).map(w => w[0]?.toUpperCase() ?? '').join('') || '?'
 const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms))
 
-export function Participant360Drawer({ reg, eventId, token, onClose, onChanged }: {
+export function Participant360Drawer({ reg, eventId, token, identity, onClose, onChanged }: {
   reg: SerializedRegistration
   eventId: string
   token: string
+  /**
+   * RD-EVENT-21 · the event's identity vocabulary, resolved ONCE by the operations
+   * client for the selected event and passed down. Deliberately not fetched here:
+   * this drawer opens once per participant, and a gate operator opens a lot of them.
+   */
+  identity: EventIdentity | null
   onClose: () => void
   onChanged: () => void
 }) {
@@ -47,6 +58,8 @@ export function Participant360Drawer({ reg, eventId, token, onClose, onChanged }
   const headers = useMemo(() => ({ Authorization: `Bearer ${token}` }), [token])
   const jsonHeaders = useMemo(() => ({ ...headers, 'Content-Type': 'application/json' }), [headers])
   const [busy, setBusy] = useState('')
+  // The identifier this participant currently holds, canonical mirror first.
+  const [identValue, setIdentValue] = useState<string | null>(resolveIdentifierValue(reg))
 
   // GA-7D S1: this slide-over had no dialog semantics. Reuse the shared focus trap
   // (trap + restore + initial focus) and add Escape-to-close + role/aria-modal below.
@@ -119,8 +132,8 @@ export function Participant360Drawer({ reg, eventId, token, onClose, onChanged }
     const create = await fetch('/api/organizer/print-jobs', { method: 'POST', headers: jsonHeaders, body: JSON.stringify({ templateId, filters: { registrationIds: [reg.id] } }) })
     const cj = await create.json().catch(() => ({})) as { success?: boolean; jobId?: string; error?: string }
     if (!create.ok || !cj.success || !cj.jobId) { showToast(cj.error ?? 'Badge generation failed', 'error'); return }
-    // The create call drives the first chunk inline, so the single item is usually
-    // ready immediately; re-check a few times without a long poll.
+    // The create call hands the first chunk to after(), so the single item is usually
+    // ready within a beat of the response; re-check a few times without a long poll.
     for (let i = 0; i < 4; i++) {
       const items = await fetch(`/api/organizer/print-jobs/${cj.jobId}/items`, { headers, cache: 'no-store' })
       const data = await items.json().catch(() => ({})) as { success?: boolean; items?: { registrationId: string; ready: boolean }[] }
@@ -241,7 +254,22 @@ export function Participant360Drawer({ reg, eventId, token, onClose, onChanged }
           {/* Reused canonical workspace: Timeline / Certificates / Communications / Sessions / Identifier / CRM */}
           <div className="border-t border-border pt-3">
             <p className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground"><Clock className="size-3" /> Full participant history</p>
-            <ParticipantWorkspace360 reg={reg} eventId={eventId} token={token} />
+            <ParticipantWorkspace360
+              reg={reg}
+              eventId={eventId}
+              token={token}
+              identifierValue={identValue}
+              identifierLabel={identity?.identifierLabel ?? reg.identifier?.label ?? IDENTIFIER_GENERIC_LABEL}
+              tagLabel={identity?.tagLabel ?? TIMING_TAG_GENERIC_LABEL}
+              timingTag={resolveTimingTag(reg)}
+              assignmentBlockedBy={identifierAssignmentBlockedBy(reg)}
+              allowedText={allowedNumbersForPass(identity, reg.passId).text}
+              allowedRanges={allowedNumbersForPass(identity, reg.passId).ranges}
+              // The gate list is re-read rather than patched: the operator is looking
+              // at a live roster, and `onChanged` is how every other action here keeps
+              // it honest.
+              onIdentifierChange={(v) => { setIdentValue(v); onChanged() }}
+            />
           </div>
         </div>
       </div>

@@ -11,7 +11,7 @@
 import Link from 'next/link'
 import { typography } from '@/lib/ds/typography'
 import { ArrowRight } from 'lucide-react'
-import { buttonVariants } from '@/components/ui/button'
+import { marketingButton } from '@/lib/marketing/theme'
 import { getCta, type CtaKey } from '@/lib/marketing/cta'
 import { SectionLayout } from '@/components/marketing/layout/SectionLayout'
 import { FINAL_CTA } from '@/content/marketing/final-cta'
@@ -21,7 +21,7 @@ export function CTABackground() {
   return (
     <div
       aria-hidden
-      className="pointer-events-none absolute left-1/2 top-1/2 -z-10 h-72 w-full max-w-2xl -translate-x-1/2 -translate-y-1/2 rounded-full bg-[radial-gradient(closest-side,rgb(var(--primary-rgb)_/_0.08),transparent)]"
+      className="pointer-events-none absolute left-1/2 top-1/2 -z-10 h-72 w-full max-w-2xl -translate-x-1/2 -translate-y-1/2 rounded-full bg-[radial-gradient(closest-side,rgb(var(--action-rgb)_/_0.08),transparent)]"
     />
   )
 }
@@ -33,13 +33,13 @@ export function CTAActions({ primaryCta, secondaryCta }: { primaryCta: CtaKey; s
     <div className="flex flex-wrap items-center justify-center gap-3">
       <Link
         href={primary.href}
-        className={buttonVariants({ variant: primary.variant, size: 'lg' })}
-        style={primary.variant === 'gradient' ? { backgroundImage: 'var(--primary-gradient)' } : undefined}
+        className={marketingButton({ variant: primary.variant, size: 'lg' })}
+        style={primary.variant === 'gradient' ? { backgroundImage: 'var(--action-gradient)' } : undefined}
       >
         {primary.label}
         <ArrowRight className="size-4" aria-hidden />
       </Link>
-      <Link href={secondary.href} className={buttonVariants({ variant: secondary.variant, size: 'lg' })}>
+      <Link href={secondary.href} className={marketingButton({ variant: secondary.variant, size: 'lg' })}>
         {secondary.label}
       </Link>
     </div>

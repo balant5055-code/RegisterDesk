@@ -3,7 +3,7 @@
 // (Note: /api/admin/reports is the abuse-report queue — unrelated.)
 
 import { NextRequest, NextResponse } from 'next/server'
-import { resolveAdminUid } from '@/lib/admin/auth'
+import { requireSuperAdmin } from '@/lib/admin/financialGuard'
 import { buildAdminFinanceReport } from '@/lib/reports/adminBuilders'
 import { serializeTables, isExportFormat } from '@/lib/reports/export'
 import type { ReportFilters } from '@/lib/reports/types'
@@ -12,8 +12,10 @@ export const dynamic = 'force-dynamic'
 export const maxDuration = 60
 
 export async function GET(req: NextRequest): Promise<NextResponse> {
-  const adminUid = await resolveAdminUid(req.headers.get('authorization'))
-  if (!adminUid) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+  // RD-CLOSE — a financial read: Super Admin only (ADMIN_UIDS). A legacy `admin: true` claim
+  // alone gets 403 SUPER_ADMIN_REQUIRED (lib/admin/financialGuard.ts).
+  const superGate = await requireSuperAdmin(req)
+  if (superGate.response) return superGate.response
 
   const p = req.nextUrl.searchParams
   const clean = (v: string | null) => { const s = (v ?? '').trim(); return s ? s.slice(0, 120) : undefined }

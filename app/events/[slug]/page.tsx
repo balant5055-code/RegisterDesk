@@ -1,18 +1,17 @@
 import type { Metadata } from 'next'
 import { notFound } from 'next/navigation'
 import { adminDb }                  from '@/lib/firebase/admin'
-import { getEventBySlug }           from '@/lib/firebase/firestore/events'
-import { canExposePublicEvent }     from '@/lib/events/publicVisibility'
-import { isContentTakenDown }       from '@/lib/admin/moderation'
+import { findPublicEvent }          from '@/lib/events/publicEventAccess'
 import ReportButton                  from '@/components/report/ReportButton'
 import { getRegistrationCounter }   from '@/lib/firebase/firestore/registrationCounters'
 import { getCampaignBySlug, getCampaignCounter } from '@/lib/firebase/firestore/campaigns'
 import { computeEventAvailability } from '@/lib/registrations/availability'
+import { deriveStoredEventCapacity } from '@/lib/registrations/capacity'
 import { resolveMilestoneAlertsByPass, resolveMilestoneAlert } from '@/lib/events/milestoneAlerts'
 import type { MilestoneAlert } from '@/lib/events/milestoneAlerts'
 import { resolveEffectivePriceRupees } from '@/lib/pricing/earlyBird'
-import { todayISOInTz, resolvePassSaleState } from '@/lib/registrations/salesWindow'
-import type { PassAvailability, CapacityPlan } from '@/lib/registrations/types'
+import { nowLocalInTz, resolvePassSaleState } from '@/lib/registrations/salesWindow'
+import type { PassAvailability } from '@/lib/registrations/types'
 import type {
   EventDetailsDraft,
   VenueType, PhysicalVenueConfig, OnlineVenueConfig,
@@ -79,7 +78,16 @@ export async function generateMetadata({ params }: PageProps): Promise<Metadata>
   const { slug } = await params
   // Runtime-editable platform identity (this route is already dynamic/ISR).
   const { platformName, baseUrl } = await getBrandingConfig()
-  const event = await getEventBySlug(slug)
+  // layout.tsx has already 404'd anything the public may not see, so by the time this runs
+  // the event exists and is viewable. The guard stays as a type narrowing and a fallback
+  // title — it does NOT own the status. Throwing notFound() here would be misleading:
+  // measured on Next 16.2.7, generateMetadata is itself streamed, so a throw at this point
+  // cannot change a status that has already been sent. The 404 lives in the layout, above
+  // the Suspense boundary, and nowhere else.
+  //
+  // findPublicEvent wraps getEventBySlug, which is React.cache()-wrapped: the layout read,
+  // this one and the page body's collapse into ONE Firestore read per request.
+  const event = await findPublicEvent(slug)
   if (!event) return { title: `Event Not Found – ${platformName}` }
 
   const ed       = event.eventDetails as unknown as EventDetailsDraft
@@ -186,7 +194,8 @@ function buildJsonLd(
 // `price` stays the regular price; display surfaces read `effectivePrice` / `saleState`.
 function withEffectivePrices(passes: PassPublic[], tz: string): PassPublic[] {
   const now      = Date.now()
-  const todayISO = todayISOInTz(tz)
+  // RD-CE-FIX (sales window) — local date-TIME in the event timezone (shared with the gate).
+  const nowLocal = nowLocalInTz(tz)
   return passes.map(p => ({
     ...p,
     effectivePrice: resolveEffectivePriceRupees(
@@ -197,8 +206,9 @@ function withEffectivePrices(passes: PassPublic[], tz: string): PassPublic[] {
         earlyBirdEndDate: typeof p.earlyBirdEndDate === 'string' ? p.earlyBirdEndDate : undefined,
       },
       now,
+      tz,
     ),
-    saleState: resolvePassSaleState(p, todayISO),
+    saleState: resolvePassSaleState(p, nowLocal),
   }))
 }
 
@@ -208,15 +218,14 @@ export default async function EventPage({ params }: PageProps) {
   const { slug } = await params
 
   const [event, counter] = await Promise.all([
-    getEventBySlug(slug),
+    findPublicEvent(slug),
     getRegistrationCounter(slug),
   ])
+  // The public boundary — existence, the lifecycle ALLOW-LIST (so an unrecognised or
+  // future state can never leak), and admin moderation — now lives in ONE place:
+  // lib/events/publicEventAccess. generateMetadata has already thrown a real 404 for
+  // anything failing it; this keeps the rule impossible to skip if that path ever changes.
   if (!event) notFound()
-  // Public visibility is a single ALLOW-LIST (canExposePublicEvent). Any lifecycle
-  // state that is not explicitly publicly-visible — including future states — 404s.
-  if (!canExposePublicEvent(event.lifecycleStatus)) notFound()
-  // Admin moderation — a taken-down event is not publicly viewable.
-  if (isContentTakenDown(event.moderationStatus)) notFound()
 
   // Load linked donation campaign for event_plus_donation events
   const linkedCampaign = await (async () => {
@@ -385,9 +394,12 @@ export default async function EventPage({ params }: PageProps) {
   )
 
   // ── Availability ───────────────────────────────────────────────────────────
+  // RD-CAPACITY-02 · the EFFECTIVE capacity, not the legacy bucket. `capacityPlan` rounds UP
+  // (437 is stamped `pack_500`), so passing it here advertised seats that the registration gate
+  // would then refuse. `deriveStoredEventCapacity` is the derivation the gate itself uses.
   const availability = computeEventAvailability(
     passes,
-    (event.capacityPlan ?? 'free') as CapacityPlan,
+    deriveStoredEventCapacity(event as Parameters<typeof deriveStoredEventCapacity>[0]),
     counter,
   )
   const availabilityRecord: Record<string, PassAvailability> = Object.fromEntries(availability)

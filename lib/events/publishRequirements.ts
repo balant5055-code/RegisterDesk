@@ -78,6 +78,7 @@ export function evaluatePublishRequirements(input: PublishRequirementInput): Pub
   const venue     = (details?.venue     as Record<string, unknown> | null | undefined) ?? null
   const schedule  = (details?.schedule  as Record<string, unknown> | null | undefined) ?? null
   const organizer = (details?.organizer as Record<string, unknown> | null | undefined) ?? null
+  const media     = (details?.media as { coverBanner?: { value?: unknown }; logo?: { value?: unknown } } | null | undefined) ?? null
   const physical  = (venue?.physical    as Record<string, unknown> | null | undefined) ?? null
 
   const pricing   = (input.pricing ?? null) as Record<string, unknown> | null
@@ -146,7 +147,9 @@ export function evaluatePublishRequirements(input: PublishRequirementInput): Pub
       severity: 'warning', section: 'Event Information',
       title: 'Description Is Thin',
       description: 'Add at least 120 characters so attendees know what to expect',
-      passed: str(info?.description ?? details?.description).trim().length >= 120,
+      // RD-CE-FIX M6 — the wizard writes info.fullDesc / info.shortDesc (`description` is legacy).
+      passed: str(info?.fullDesc).trim().length >= 120 || str(info?.shortDesc).trim().length >= 120
+        || str(info?.description ?? details?.description).trim().length >= 120,
     },
     {
       id: 'organizer_phone', stepName: 'Event Details', stepIndex: 5, fieldHint: 'rd-organizer-name',
@@ -160,7 +163,9 @@ export function evaluatePublishRequirements(input: PublishRequirementInput): Pub
       severity: 'warning', section: 'Media',
       title: 'No Cover Image',
       description: 'Events with a cover image are significantly more likely to convert',
-      passed: nonEmpty(info?.coverImage ?? details?.coverImage) || nonEmpty(info?.bannerUrl ?? details?.bannerUrl),
+      // RD-CE-FIX M6 — the wizard writes media.coverBanner.value (coverImage/bannerUrl are legacy).
+      passed: nonEmpty(media?.coverBanner?.value)
+        || nonEmpty(info?.coverImage ?? details?.coverImage) || nonEmpty(info?.bannerUrl ?? details?.bannerUrl),
     },
 
     // ═══ SUGGESTIONS — pure polish ═════════════════════════════════════════════
@@ -169,14 +174,18 @@ export function evaluatePublishRequirements(input: PublishRequirementInput): Pub
       severity: 'suggestion', section: 'Branding',
       title: 'No Organizer Logo',
       description: 'Add a logo so your event page and emails carry your brand',
-      passed: nonEmpty(info?.logoUrl ?? details?.logoUrl),
+      // RD-CE-FIX M6 — the wizard writes media.logo.value / organizer.logoUrl (info.logoUrl is legacy).
+      passed: nonEmpty(media?.logo?.value) || nonEmpty(organizer?.logoUrl) || nonEmpty(info?.logoUrl ?? details?.logoUrl),
     },
     {
       id: 'event_social', stepName: 'Event Details', stepIndex: 5,
       severity: 'suggestion', section: 'Contact',
       title: 'No Social Links',
       description: 'Link your social profiles to help attendees share the event',
-      passed: Array.isArray(info?.socialLinks ?? details?.socialLinks) && ((info?.socialLinks ?? details?.socialLinks) as unknown[]).length > 0,
+      // RD-CE-FIX M6 — the wizard writes organizer.social.{facebook,instagram,linkedin,youtube,twitter}
+      // (socialLinks is legacy).
+      passed: ['facebook', 'instagram', 'linkedin', 'youtube', 'twitter'].some(k => nonEmpty((organizer?.social as Record<string, unknown> | undefined)?.[k]))
+        || (Array.isArray(info?.socialLinks ?? details?.socialLinks) && ((info?.socialLinks ?? details?.socialLinks) as unknown[]).length > 0),
     },
   ]
 }

@@ -12,7 +12,8 @@ import { getFeePlanForOrganizer } from '@/lib/billing/feeEngine'
 import { resolveFeeConfig, resolveEffectiveFeeModel } from '@/lib/fees/resolveFeeConfig'
 import { calculateFee }           from '@/lib/fees/engine'
 import { buildOrderPricingEvidence, resolveLedgerFinancials } from '@/lib/platform/pricing'
-import type { FeeModel, FeeBreakdownRecord } from '@/lib/fees/types'
+import { isCheckoutFeeInputs, type FeeModel, type FeeBreakdownRecord, type CheckoutFeeInputs } from '@/lib/fees/types'
+import { readProvider, type PaymentProvider } from '@/lib/payments/providers/types'
 import type { PlatformTransactionData, RevenueCreditInput } from '@/lib/firebase/firestore/platformTransactions'
 
 export interface RegistrationLedgerSource {
@@ -22,7 +23,10 @@ export interface RegistrationLedgerSource {
   attendeeName:     string
   attendeeEmail:    string
   grossAmountPaise: number   // paise — the authoritative server amount (intent.amount)
-  paymentId:        string   // Razorpay payment id
+  paymentId:        string   // provider payment id
+  /** RD-PAYMENT-PROVIDER-CONTRACT-04 — stamped onto the ledger row. Optional: absent
+   *  reads as razorpay, so nothing historical needs rewriting. */
+  provider?:        PaymentProvider
   orderId:          string   // Razorpay order id
   // RD-PAYMENT-02 Phase 2 — the event's resolved ENGINE fee model, fed to the canonical
   // resolver as the Event-level candidate (legacy path only). OPTIONAL.
@@ -31,6 +35,11 @@ export interface RegistrationLedgerSource {
   // checkout. When present, the ledger COPIES it directly (no recomputation). Absent for
   // legacy payments and whenever pricingEngineEnabled is off → legacy path (byte-identical).
   financials?:      FeeBreakdownRecord
+  // RD-PHASE4-S2 — the fee INPUTS persisted on the intent at checkout (engine OFF). When present and
+  // well-formed, the legacy path computes the fee from them instead of the LIVE configuration, so a
+  // global fee change after checkout cannot re-price the order. Absent (intents created before this)
+  // → the established behaviour: resolved from the current configuration at settlement.
+  feeInputs?:       CheckoutFeeInputs
 }
 
 export interface RegistrationLedgerBundle {
@@ -46,6 +55,15 @@ export interface RegistrationLedgerBundle {
 export async function buildRegistrationLedgerAndCredit(src: RegistrationLedgerSource): Promise<RegistrationLedgerBundle> {
   const feePlan   = await getFeePlanForOrganizer(src.organizerUid)
 
+  // ONE resolved provider for BOTH `provider` and `gateway`, on either path below.
+  //
+  // They used to be set independently — `provider` only when the caller supplied one, and
+  // `gateway` as the literal 'razorpay' always — so a Cashfree row asserted both at once.
+  // Deriving them from a single `readProvider` call makes disagreement unrepresentable, and
+  // normalizing here means a caller that omits the provider still records `razorpay`
+  // explicitly rather than leaving the field absent.
+  const ledgerProvider = readProvider(src.provider)
+
   // ── RD-PAYMENT-02 Phase 7: canonical path — COPY the persisted breakdown directly ──
   // No recomputation, no second mapper. The ledger's gross is the ticket base (NOT the
   // attendee charge), fees + net come straight from what checkout charged, and the whole
@@ -58,6 +76,7 @@ export async function buildRegistrationLedgerAndCredit(src: RegistrationLedgerSo
       type:                    'event_registration',
       category:                'ticketed',
       organizerUid:            src.organizerUid,
+      provider:                ledgerProvider,
       entityId:                src.eventSlug,
       entityType:              'event',
       sourceId:                src.registrationId,
@@ -74,7 +93,7 @@ export async function buildRegistrationLedgerAndCredit(src: RegistrationLedgerSo
       planTier:                feePlan.planTier,
       feeConfigId:             feePlan.feeConfigId,
       currency:                'INR',
-      gateway:                 'razorpay',
+      gateway:                 ledgerProvider,
       gatewayPaymentId:        src.paymentId,
       gatewayOrderId:          src.orderId,
       financials:              f,
@@ -95,8 +114,12 @@ export async function buildRegistrationLedgerAndCredit(src: RegistrationLedgerSo
     return { ledger, credit }
   }
 
-  // ── Legacy path (Phase 2) — byte-identical to today ──
-  const feeConfig = await resolveFeeConfig('event_registration', feePlan.planTier)
+  // ── Legacy path (Phase 2) ──
+  // RD-PHASE4-S2 — fee inputs frozen at checkout when the intent carries them; otherwise (older
+  // intents) resolved from the current configuration exactly as before.
+  const frozen    = isCheckoutFeeInputs(src.feeInputs) ? src.feeInputs : null
+  const planTier  = frozen ? frozen.planTier : feePlan.planTier
+  const feeConfig = frozen ? frozen.feeConfig : await resolveFeeConfig('event_registration', planTier)
   // RD-PAYMENT-02 Phase 2: resolve the fee model canonically instead of hardcoding it.
   // With no candidate populated (today's universal case) this returns organizer_pays, so
   // the calculation, the persisted ledger, and settlement are byte-identical to before.
@@ -117,7 +140,7 @@ export async function buildRegistrationLedgerAndCredit(src: RegistrationLedgerSo
   // the current commercial model (snapshot used only when its shadow matched production).
   const evidence = await buildOrderPricingEvidence({
     grossAmountPaise: src.grossAmountPaise,
-    planTier:         feePlan.planTier,
+    planTier,
     feeConfig,
     transactionType:  'event_registration',
   })
@@ -127,6 +150,7 @@ export async function buildRegistrationLedgerAndCredit(src: RegistrationLedgerSo
     type:                    'event_registration',
     category:                'ticketed',
     organizerUid:            src.organizerUid,
+    provider:                ledgerProvider,
     entityId:                src.eventSlug,
     entityType:              'event',
     sourceId:                src.registrationId,
@@ -140,10 +164,10 @@ export async function buildRegistrationLedgerAndCredit(src: RegistrationLedgerSo
     gatewayFeeEstimatePaise: fin.gatewayFeeEstimatePaise,
     netSettlementPaise:      fin.netSettlementPaise,
     feeModel,
-    planTier:                feePlan.planTier,
-    feeConfigId:             feePlan.feeConfigId,
+    planTier,
+    feeConfigId:             frozen ? frozen.feeConfigId : feePlan.feeConfigId,
     currency:                'INR',
-    gateway:                 'razorpay',
+    gateway:                 ledgerProvider,
     gatewayPaymentId:        src.paymentId,
     gatewayOrderId:          src.orderId,
     pricingSource:           fin.source,

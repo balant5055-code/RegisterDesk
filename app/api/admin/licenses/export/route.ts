@@ -3,7 +3,7 @@
 // as CSV. Capped defensively; pages through the same list service.
 
 import { NextRequest, NextResponse } from 'next/server'
-import { resolveAdminUid } from '@/lib/admin/auth'
+import { requireSuperAdmin } from '@/lib/admin/financialGuard'
 import { listLicenses } from '@/lib/admin/licenseAdminService'
 import type { LicenseRow } from '@/lib/admin/licenseAdminTypes'
 import { csvCell as csvEscape } from '@/lib/utils/csv'
@@ -14,8 +14,10 @@ const rupees = (paise: number): string => (paise / 100).toFixed(2)
 const fmtDate = (iso: string | null): string => (iso ? iso.slice(0, 10) : '')
 
 export async function GET(req: NextRequest): Promise<NextResponse> {
-  const adminUid = await resolveAdminUid(req.headers.get('authorization'))
-  if (!adminUid) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+  // RD-CLOSE — a financial read: Super Admin only (ADMIN_UIDS). A legacy `admin: true` claim
+  // alone gets 403 SUPER_ADMIN_REQUIRED (lib/admin/financialGuard.ts).
+  const superGate = await requireSuperAdmin(req)
+  if (superGate.response) return superGate.response
 
   const sp     = req.nextUrl.searchParams
   const search = sp.get('search') ?? ''

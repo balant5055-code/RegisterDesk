@@ -67,11 +67,14 @@ function legacySaveDraft(step: number, data: unknown, isEventPlusDonation: boole
   if (step === 3) payload.pricing           = data
   if (step === 4) payload.registrationForm  = data
   if (step === 5) payload.eventDetails      = data
+  // RD-EVENT-COMMERCE-05B — Review and License & Services SWAPPED positions (License is now last).
+  // Each still writes the SAME field it always did — Review → pricing, License → licenseTier — only
+  // at its new index. That field-per-step identity is what this parity test protects.
   if (step === 6 && isEventPlusDonation)  payload.linkedCampaign = data
-  if (step === 6 && !isEventPlusDonation) payload.licenseTier    = data
-  if (step === 7 && isEventPlusDonation)  payload.licenseTier    = data
-  if (step === 7 && !isEventPlusDonation) payload.pricing        = data
-  if (step === 8 && isEventPlusDonation)  payload.pricing        = data
+  if (step === 6 && !isEventPlusDonation) payload.pricing        = data
+  if (step === 7 && isEventPlusDonation)  payload.pricing        = data
+  if (step === 7 && !isEventPlusDonation) payload.licenseTier    = data
+  if (step === 8 && isEventPlusDonation)  payload.licenseTier    = data
   return payload
 }
 
@@ -113,8 +116,15 @@ describe('registry parity with the replaced positional chains', () => {
       }
     })
 
-    it(`${flow} · autosave produces the identical payload at every step`, () => {
+    it(`${flow} · autosave produces the identical payload at every step (Access Control: deliberate addition)`, () => {
+      const access = stepsFor(flow).findIndex(s => s.id === 'access')
       for (let step = 0; step <= last; step++) {
+        // RD-CE-FIX (Access Control Back) — the ONE deliberate divergence from the legacy chain.
+        if (step === access) {
+          expect(legacyAutosave(step, SAMPLE)).toEqual({})
+          expect(viaRegistry(flow, step, SAMPLE, 'autosave'), `step ${step}`).toEqual({ accessControl: SAMPLE })
+          continue
+        }
         expect(viaRegistry(flow, step, SAMPLE, 'autosave'), `step ${step}`)
           .toEqual(legacyAutosave(step, SAMPLE))
       }
@@ -122,12 +132,12 @@ describe('registry parity with the replaced positional chains', () => {
   }
 
   it('the asymmetry survives: goNext writes nothing where saveDraft writes a tier', () => {
-    // Standard License is index 6. This is the single most important parity case — it is
-    // where the three call sites genuinely disagree, and where a "tidy-up" would regress.
-    expect(viaRegistry('standard', 6, SAMPLE, 'next')).toEqual({})
-    expect(viaRegistry('standard', 6, SAMPLE, 'saveDraft')).toEqual({ licenseTier: SAMPLE })
-    expect(legacyGoNext(6, SAMPLE, false)).toEqual({})
-    expect(legacySaveDraft(6, SAMPLE, false)).toEqual({ licenseTier: SAMPLE })
+    // Standard License is index 7 (RD-EVENT-COMMERCE-05B: the final step). This is the single most
+    // important parity case — where the three call sites genuinely disagree.
+    expect(viaRegistry('standard', 7, SAMPLE, 'next')).toEqual({})
+    expect(viaRegistry('standard', 7, SAMPLE, 'saveDraft')).toEqual({ licenseTier: SAMPLE })
+    expect(legacyGoNext(7, SAMPLE, false)).toEqual({})
+    expect(legacySaveDraft(7, SAMPLE, false)).toEqual({ licenseTier: SAMPLE })
   })
 
   it('out-of-range steps write nothing, as the chains did', () => {

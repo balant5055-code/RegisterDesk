@@ -1,132 +1,50 @@
 'use client'
 
-import { useState, useEffect } from 'react'
-import Link                     from 'next/link'
-import { TextLink } from '@/components/ui'
-import { useAuth }              from '@/components/auth/AuthProvider'
-import { cn }                   from '@/lib/utils/cn'
-import { ChevronLeft, AlertCircle, Loader2, ExternalLink } from 'lucide-react'
-import CheckInClient            from './CheckInClient'
-import type { EventDetailResponse } from '@/app/api/organizer/events/[eventId]/route'
+// /dashboard/events/[eventId]/checkin — RD-CHECKIN-2.0
+//
+// A thin frame around the SHARED check-in workspace. The organizer's door and the
+// gate operator's door (/ops/checkin/[eventId]) now render the same component, so
+// the two can no longer drift: this page previously carried its own event fetch,
+// its own lifecycle warning and its own copy of the scan/lookup handlers, and the
+// copies had already diverged in what a lookup row did when clicked.
+//
+// Everything below the back link belongs to CheckinWorkspace: readiness, ownership,
+// permissions, attendance, lookup and admission. This file adds navigation and
+// nothing else — in particular it no longer re-derives whether the event accepts
+// check-ins, because that is the one authoritative resolver's job and answering it
+// twice is how the two answers came to disagree.
 
-// ─── Main ─────────────────────────────────────────────────────────────────────
+import Link from 'next/link'
+import { ChevronLeft, History } from 'lucide-react'
+import CheckinWorkspace from '@/components/checkin/workspace/CheckinWorkspace'
 
 export default function CheckInPageClient({ eventId }: { eventId: string }) {
-  const [token,   setToken]   = useState<string>('')
-  const [event,   setEvent]   = useState<EventDetailResponse | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [error,   setError]   = useState<string | null>(null)
-
-  const { user, getToken } = useAuth()
-
-  useEffect(() => {
-    if (user === undefined) return
-    let cancelled = false
-    const run = async () => {
-      if (!user) { setError('You must be signed in.'); setLoading(false); return }
-      try {
-        const tok  = await getToken()
-        if (cancelled || !tok) return
-        setToken(tok)
-        const res  = await fetch(`/api/organizer/events/${eventId}`, {
-          headers: { Authorization: `Bearer ${tok}` },
-        })
-        if (!res.ok) throw new Error(`HTTP ${res.status}`)
-        if (cancelled) return
-        setEvent(await res.json() as EventDetailResponse)
-      } catch (e) {
-        if (!cancelled) setError(e instanceof Error ? e.message : 'Failed to load event')
-      } finally {
-        if (!cancelled) setLoading(false)
-      }
-    }
-    run()
-    return () => { cancelled = true }
-  }, [user, getToken, eventId])
-
-  // ── Error ──────────────────────────────────────────────────────────────────
-  if (!loading && error) {
-    return (
-      <div className="flex min-h-screen flex-col items-center justify-center gap-4 p-6 text-center">
-        <AlertCircle className="size-10 text-destructive" />
-        <p className="text-[15px] font-semibold">{error}</p>
-        <TextLink href={`/dashboard/events/${eventId}`}>
-          ← Back to Event
-        </TextLink>
-      </div>
-    )
-  }
-
   return (
     <div className="min-h-screen bg-background">
-
-      {/* Top nav */}
       <div className="sticky top-0 z-10 border-b border-border bg-background/95 backdrop-blur">
-        <div className="mx-auto flex max-w-lg items-center gap-3 px-4 py-3">
+        <div className="mx-auto flex max-w-6xl items-center gap-3 px-4 py-3 sm:px-6">
           <Link
             href={`/dashboard/events/${eventId}`}
-            className="flex items-center gap-1 text-[13px] text-muted-foreground hover:text-foreground"
+            className="inline-flex items-center gap-1 text-fs-sm text-muted-foreground transition-colors hover:text-foreground"
           >
-            <ChevronLeft className="size-3.5" /> Back
+            <ChevronLeft className="size-4" aria-hidden /> Back to event
           </Link>
-          <div className="flex-1 text-center">
-            {event && (
-              <p className="text-[14px] font-semibold text-foreground truncate">{event.name}</p>
-            )}
-          </div>
-          {event?.slug && (
-            <Link
-              href={`/events/${event.slug}`}
-              target="_blank"
-              className="text-[13px] text-muted-foreground hover:text-foreground"
-            >
-              <ExternalLink className="size-3.5" />
-            </Link>
-          )}
+
+          {/* RD-CHECKIN-04 — the only entry point to the audit trail.
+              Shown on the ORGANIZER's check-in page only: /ops has no such link,
+              and the route behind it requires `registrations`, which no gate role
+              holds. The link is not the control — the route is. */}
+          <Link
+            href={`/dashboard/events/${eventId}/checkin/history`}
+            className="ml-auto inline-flex items-center gap-1.5 text-fs-sm text-muted-foreground transition-colors hover:text-foreground"
+          >
+            <History className="size-4" aria-hidden /> History
+          </Link>
         </div>
       </div>
 
-      <div className="mx-auto max-w-lg px-4 py-6">
-
-        {/* Page heading */}
-        <div className="mb-5">
-          <h1 className="text-[24px] font-bold text-foreground">Check-in</h1>
-          <p className="mt-0.5 text-[13px] text-muted-foreground">
-            Scan QR codes or enter ticket codes to check in attendees.
-          </p>
-        </div>
-
-        {/* Loading */}
-        {loading && (
-          <div className="flex items-center justify-center gap-3 py-20">
-            <Loader2 className="size-5 animate-spin text-primary motion-reduce:animate-none" />
-            <span className="text-[13px] text-muted-foreground">Loading event…</span>
-          </div>
-        )}
-
-        {/* Check-in UI */}
-        {!loading && event && token && (
-          <CheckInClient
-            eventId={eventId}
-            eventName={event.name}
-            token={token}
-            totalRegistrations={event.totalRegistrations}
-            checkedInCount={event.checkedInCount}
-            slug={event.slug ?? ''}
-          />
-        )}
-
-        {/* Lifecycle warning — shown for any state not accepted by the check-in API */}
-        {!loading && event && !['published', 'registration_closed', 'completed'].includes(event.lifecycleStatus) && (
-          <div className={cn(
-            'mt-4 rounded-xl border px-4 py-3 text-[13px]',
-            event.lifecycleStatus === 'cancelled'
-              ? 'border-red-200 bg-red-50 text-red-700'
-              : 'border-muted bg-muted/30 text-muted-foreground',
-          )}>
-            This event is {event.lifecycleStatus}. Check-in submissions will be rejected by the server.
-          </div>
-        )}
+      <div className="px-4 py-6 sm:px-6">
+        <CheckinWorkspace eventId={eventId} embedded />
       </div>
     </div>
   )

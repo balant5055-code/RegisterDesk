@@ -10,7 +10,8 @@
 import type { LucideIcon } from 'lucide-react'
 import { Copy, Lock, LockOpen, EyeOff, XCircle, CheckCircle, Archive, ClipboardCheck } from 'lucide-react'
 import { WORKSPACE_NAV } from '@/config/workspaceNav'
-import { EVENT_TABS, type EventTabKey } from '@/lib/events/eventTabs'
+import { EVENT_TABS, EVENT_ROOT_TAB, type EventTabKey } from '@/lib/events/eventTabs'
+import { visibleEventTabs, type EventCapabilityContext } from '@/lib/events/eventCapabilities'
 import type { TeamPermission } from '@/lib/team/types'
 import type { EventLifecycleStatus } from '@/types/events'
 
@@ -55,24 +56,33 @@ export function buildNavigationCommands(): PaletteCommand[] {
   const out: PaletteCommand[] = []
   const seen = new Set<string>()
 
+  // RD-ORG-FOUNDATION — WORKSPACE_NAV is now FLAT (section → items) instead of
+  // nested (section → group → children), matching the canonical IA where one
+  // capability has exactly one location. The palette gains the same `permission`
+  // field the sidebar reads, so both gate identically.
+  //
+  // Event-scoped items are listed with their bare href: the palette cannot know the
+  // selected event at module scope, and the destination reads the context itself.
+  // `eventTab` items are skipped — they need an event id to address at all, and the
+  // palette already offers per-event navigation through its event search.
   for (const section of WORKSPACE_NAV) {
-    for (const group of section.groups) {
-      for (const child of group.children) {
-        const dedupeKey = `${child.href}::${child.label}`
-        if (seen.has(dedupeKey)) continue
-        seen.add(dedupeKey)
-        out.push({
-          id:       `nav:${group.key}:${child.href}`,
-          title:    child.label === group.label ? child.label : `${group.label} · ${child.label}`,
-          subtitle: section.sectionLabel,
-          group:    section.sectionLabel,
-          keywords: [group.label, child.label, section.sectionLabel, group.key],
-          icon:     group.icon,
-          kind:     'navigate',
-          href:     child.href,
-          newTab:   child.newTab,
-        })
-      }
+    for (const item of section.items) {
+      if (item.eventTab) continue
+      const dedupeKey = `${item.href}::${item.label}`
+      if (seen.has(dedupeKey)) continue
+      seen.add(dedupeKey)
+      out.push({
+        id:         `nav:${item.key}`,
+        title:      item.label,
+        subtitle:   section.sectionLabel,
+        group:      section.sectionLabel,
+        keywords:   [item.label, section.sectionLabel, item.key],
+        icon:       item.icon,
+        kind:       'navigate',
+        href:       item.href,
+        newTab:     item.newTab,
+        permission: item.permission,
+      })
     }
   }
 
@@ -97,14 +107,36 @@ export function buildNavigationCommands(): PaletteCommand[] {
 
 export function buildEventTabCommands(
   eventId:   string,
-  eventType?: string | null,
+  /**
+   * RD-EVENT-16 · the event's capabilities, or `null` while the detail is still loading.
+   *
+   * This used to take just `eventType` and re-implement the three event-type flags
+   * inline — a second copy of the tab bar's filter, free to drift from it. It now calls
+   * the same resolver the bar does, so the palette can never offer a jump to a section
+   * the event does not have.
+   *
+   * `null` falls back to the unfiltered list: before the detail arrives the palette
+   * cannot know, and hiding a real tab is worse than briefly offering one that resolves
+   * to the command center anyway.
+   */
+  capabilities?: EventCapabilityContext | null,
   eventName?: string,
 ): PaletteCommand[] {
-  return EVENT_TABS
-    .filter(t =>
-      (!t.sportsOnly     || eventType === 'sports')     &&
-      (!t.exhibitionOnly || eventType === 'exhibition') &&
-      (!t.awardsOnly     || eventType === 'awards'))
+  // RD-EVENT-09 · The root leads. It is a plain `navigate` command rather than an
+  // `event-tab` one because the command center has no `?tab=` value — it IS the event
+  // route — so there is no tab key to hand to the bridge.
+  const root: PaletteCommand = {
+    id:       `event-root:${eventId}`,
+    title:    `Go to ${EVENT_ROOT_TAB.label}`,
+    subtitle: eventName ?? 'Current event',
+    group:    'This event',
+    keywords: ['command center', 'overview', 'home', 'summary', 'event', eventName ?? ''],
+    icon:     EVENT_ROOT_TAB.icon,
+    kind:     'navigate',
+    href:     `/dashboard/events/${eventId}`,
+  }
+
+  const tabs = (capabilities ? visibleEventTabs(EVENT_TABS, capabilities) : EVENT_TABS)
     .map<PaletteCommand>(t => ({
       id:       `event-tab:${eventId}:${t.key}`,
       title:    `Go to ${t.label}`,
@@ -116,6 +148,8 @@ export function buildEventTabCommands(
       tab:      t.key,
       eventId,
     }))
+
+  return [root, ...tabs]
 }
 
 // ─── Event-context: safe actions (reuse existing routes) ──────────────────────

@@ -14,6 +14,15 @@
 //   fundraising  9 steps — 'Fundraising' inserted after Details
 //   campaign     4 steps — donation-only; replaces the whole wizard
 //
+// RD-EVENT-COMMERCE-02 — 'License' became 'License & Services' (title only). Capacity, the
+// services, the cost summary and the activation payment all live on that one step.
+//
+// RD-EVENT-COMMERCE-05B — ORDER CHANGED: Review now comes BEFORE License & Services, which is the
+// FINAL step (capacity, services, payment AND submission). Standard: Review 6 → License 7;
+// fundraising: Review 7 → License 8. A draft that was saved on the old position reopens one step
+// off (old License index ⇒ Review, old Review index ⇒ License & Services) — both are the tail of
+// the wizard, nothing is lost, and every step's DATA is keyed by field, never by index.
+//
 // ═══ WHY THREE PERSISTENCE FLAGS AND NOT ONE ══════════════════════════════════
 // The three call sites do NOT persist the same set of steps, and that asymmetry is existing
 // behaviour this registry must describe rather than "correct":
@@ -74,13 +83,14 @@ const stripOrder = ({ order, ...spec }: StepDefinition): StepSpec => { void orde
 const STANDARD = define([
   { id: 'eventType',   title: 'Event Type',       draftKey: 'step0',            persistOnNext: true,  persistOnSaveDraft: true,  autosaveOnEdit: false, publishRequired: true  },
   { id: 'visibility',  title: 'Visibility',       draftKey: 'visibility',       persistOnNext: true,  persistOnSaveDraft: true,  autosaveOnEdit: false, publishRequired: true  },
-  { id: 'access',      title: 'Access Control',   draftKey: 'accessControl',    persistOnNext: true,  persistOnSaveDraft: true,  autosaveOnEdit: false, publishRequired: false },
+  { id: 'access',      title: 'Access Control',   draftKey: 'accessControl',    persistOnNext: true,  persistOnSaveDraft: true,  autosaveOnEdit: true,  publishRequired: false },
   { id: 'pricing',     title: 'Passes & Pricing', draftKey: 'pricing',          persistOnNext: true,  persistOnSaveDraft: true,  autosaveOnEdit: true,  publishRequired: true  },
   { id: 'form',        title: 'Form',             draftKey: 'registrationForm', persistOnNext: true,  persistOnSaveDraft: true,  autosaveOnEdit: true,  publishRequired: true  },
   { id: 'details',     title: 'Details',          draftKey: 'eventDetails',     persistOnNext: true,  persistOnSaveDraft: true,  autosaveOnEdit: true,  publishRequired: true  },
   // goNext does NOT persist these two today. Recorded, not corrected.
-  { id: 'license',     title: 'License',          draftKey: 'licenseTier',      persistOnNext: false, persistOnSaveDraft: true,  autosaveOnEdit: false, publishRequired: true  },
+  // RD-EVENT-COMMERCE-05B — Review, then License & Services LAST.
   { id: 'review',      title: 'Review',           draftKey: 'pricing',          persistOnNext: false, persistOnSaveDraft: true,  autosaveOnEdit: false, publishRequired: false },
+  { id: 'license',     title: 'License & Services', draftKey: 'licenseTier',    persistOnNext: false, persistOnSaveDraft: true,  autosaveOnEdit: false, publishRequired: true  },
 ])
 
 // ─── fundraising · 'Fundraising' inserted after Details ───────────────────────
@@ -88,8 +98,8 @@ const FUNDRAISING = define([
   // Reuse the first six standard steps verbatim; `define` re-derives order.
   ...STANDARD.slice(0, 6).map(stripOrder),
   { id: 'fundraising', title: 'Fundraising',      draftKey: 'linkedCampaign',   persistOnNext: true,  persistOnSaveDraft: true,  autosaveOnEdit: false, publishRequired: true  },
-  { id: 'license',     title: 'License',          draftKey: 'licenseTier',      persistOnNext: false, persistOnSaveDraft: true,  autosaveOnEdit: false, publishRequired: true  },
   { id: 'review',      title: 'Review',           draftKey: 'pricing',          persistOnNext: false, persistOnSaveDraft: true,  autosaveOnEdit: false, publishRequired: false },
+  { id: 'license',     title: 'License & Services', draftKey: 'licenseTier',    persistOnNext: false, persistOnSaveDraft: true,  autosaveOnEdit: false, publishRequired: true  },
 ])
 
 // ─── campaign · donation-only, replaces the wizard entirely ───────────────────
@@ -140,6 +150,28 @@ export function draftKeyFor(
     : site === 'saveDraft' ? step.persistOnSaveDraft
     : step.autosaveOnEdit
   return allowed ? step.draftKey : null
+}
+
+/**
+ * RD-EVENT-COMMERCE-02 · the step a draft reopens on: its persisted index, clamped into the
+ * flow. A corrupt or out-of-range value (a negative, a fraction, a string, or an index past the
+ * last step) reopens on a real step instead of rendering no step at all. Every in-range index
+ * is returned unchanged.
+ */
+export function resumeStepFor(flow: WizardFlow, persisted: unknown): number {
+  const steps = STEP_REGISTRY[flow]
+  const raw = typeof persisted === 'number' && Number.isInteger(persisted) && persisted >= 0 ? persisted : 0
+  return Math.min(raw, steps.length - 1)
+}
+
+/**
+ * RD-EVENT-COMMERCE-02 · has this draft been SUBMITTED? The publish route writes the draft's
+ * `status` (clients cannot — firestore.rules) as 'published' for auto-approved events and
+ * 'pending_review' for events awaiting approval. Both are submitted: neither may be offered the
+ * new-event activation selector or a pre-publish payment. Anything else (normally 'draft') is not.
+ */
+export function isSubmittedDraftStatus(status: unknown): boolean {
+  return status === 'published' || status === 'pending_review'
 }
 
 /** Titles in order — the shape the existing `Stepper` consumes. */

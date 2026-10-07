@@ -72,6 +72,8 @@ vi.mock('@/lib/certificates/firestore', () => ({
 }))
 
 // Side-effects that must remain untouched by this change — stubbed, not removed.
+// RD-EVENT-COMMERCE-02 — no prepaid certificate allowance for these events: the existing wallet path runs unchanged.
+vi.mock('@/lib/licensing/serviceAllowanceLedger', () => ({ draftIdForEventSlug: async () => null, reserveServiceUnits: async () => ({ mode: 'none' }), releaseServiceUnits: async () => false }))
 vi.mock('@/lib/certificates/billing',  () => ({ chargeCertificate: async () => ({ charged: false }) }))
 vi.mock('@/lib/certificates/email',    () => ({ emailCertificate: async () => ({ success: true, skipped: true }) }))
 vi.mock('@/lib/certificates/whatsapp', () => ({ sendCertificateWhatsApp: async () => {} }))

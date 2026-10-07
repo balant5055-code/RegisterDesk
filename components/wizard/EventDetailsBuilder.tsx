@@ -11,31 +11,16 @@ import {
 } from 'lucide-react'
 import { buttonVariants } from '@/components/ui'
 import { cn } from '@/lib/utils/cn'
+import { EVENT_SLUG_PATTERN } from '@/lib/events/slug'
 import { isChannelImplemented } from '@/lib/communications/health/channels'
 
 // RD-COMMS-01 Phase 2B: channel availability comes from the canonical capability SSOT. SMS
 // has no transport, so it is never offered as a selectable confirmation/reminder channel.
 const SMS_AVAILABLE = isChannelImplemented('sms')
-import {
-  type EventDetailsDraft, type EventInfo, type MediaConfig,
-  type VenueConfig, type VenueMaps, type PhysicalVenueConfig,
-  type OnlineVenueConfig, type AgendaSession, type EventSchedule,
-  type OrganizerInfo, type CommunicationConfig, type ReminderRule,
-  type SupportConfig, type SeoConfig, type PublicPageSettings,
-  type Speaker, type Sponsor, type ConferenceTrack, type ConferenceDetails,
-  type WorkshopDetails, type CulturalDetails, type AwardsDetails,
-  type ExhibitionDetails, type ExhibitorEntry, type PastWinner,
-  type Tab6Config, type CommChannel,
-  makeBlankEventDetailsDraft, makeBlankSession, makeBlankSpeaker,
-  makeBlankSponsor, makeTrackId, makeAwardCatId, getEventDays,
-  formatDayLabel, fmtTime, slugify, calcStepHealth, getTab6Config,
-  makeBlankTypeDetails, makePastWinnerId, makeExhibitorId,
-  makeHighlightId, makeZoneId, makeExhibitionCatId,
-  SESSION_TYPE_LABELS, SPONSOR_TIER_LABELS, ONLINE_PLATFORM_LABELS,
-  LANGUAGE_OPTIONS, TIMEZONE_OPTIONS,
-} from '@/components/wizard/eventDetailsConfig'
+import { type EventDetailsDraft, type EventInfo, type MediaConfig, type VenueConfig, type VenueMaps, type PhysicalVenueConfig, type OnlineVenueConfig, type AgendaSession, type EventSchedule, type OrganizerInfo, type CommunicationConfig, type ReminderRule, type SupportConfig, type SeoConfig, type PublicPageSettings, type Speaker, type Sponsor, type ConferenceTrack, type ConferenceDetails, type WorkshopDetails, type CulturalDetails, type AwardsDetails, type ExhibitionDetails, type ExhibitorEntry, type PastWinner, type Tab6Config, type CommChannel, makeBlankEventDetailsDraft, makeBlankSession, makeBlankSpeaker, makeBlankSponsor, makeTrackId, makeAwardCatId, getEventDays, formatDayLabel, fmtTime, slugify, calcStepHealth, getTab6Config, makeBlankTypeDetails, makePastWinnerId, makeExhibitorId, makeHighlightId, makeZoneId, makeExhibitionCatId, SESSION_TYPE_LABELS, SPONSOR_TIER_LABELS, ONLINE_PLATFORM_LABELS, LANGUAGE_OPTIONS, TIMEZONE_OPTIONS, TypeDetails } from '@/components/wizard/eventDetailsConfig'
 import { BrandingMediaSection } from '@/components/wizard/BrandingMediaSection'
 import { ImageAssetInput } from '@/components/wizard/ImageAssetInput'
+import { normalizeTypeDetails } from '@/lib/events/builder/typeTransition'
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -554,7 +539,11 @@ function Tab4Communication({ form, update }: { form: EventDetailsDraft; update: 
 
 // ─── Tab 5 — SEO & Discovery ──────────────────────────────────────────────────
 
-function Tab5SEO({ form, update }: { form: EventDetailsDraft; update: (p: Partial<EventDetailsDraft>) => void }) {
+function Tab5SEO({ form, update, slugLocked = false }: {
+  form: EventDetailsDraft
+  update: (p: Partial<EventDetailsDraft>) => void
+  slugLocked?: boolean
+}) {
   const us = (p: Partial<SeoConfig>) => update({ seo: { ...form.seo, ...p } })
   const [seoPreviewTab, setSeoPreviewTab] = useState<'google'|'social'>('google')
 
@@ -571,12 +560,30 @@ function Tab5SEO({ form, update }: { form: EventDetailsDraft; update: (p: Partia
             <label className={labelCls}>Event URL Slug <span className="text-red-500">*</span></label>
             <div className="flex items-center gap-0 overflow-hidden rounded-lg border border-border focus-within:border-primary/50 focus-within:ring-2 focus-within:ring-primary/20">
               <span className="shrink-0 whitespace-nowrap bg-muted/40 px-3 py-2 text-[12px] text-muted-foreground">registerdesk.co/e/</span>
-              <input className="h-9 flex-1 bg-background px-2 text-[13px] text-foreground outline-none" value={form.seo.urlSlug} onChange={e => us({ urlSlug: e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, '') })} placeholder="event-name-2026" />
-              <button type="button" onClick={() => us({ urlSlug: slugify(form.info.name) })} className="mr-1 flex items-center gap-1 rounded px-2 py-1 text-[12px] text-primary hover:bg-primary/10">
-                <RefreshCw className="size-3" aria-hidden />Auto
-              </button>
+              {/* Published: the slug is the live page's address and its Firestore id. It is
+                  displayed, never edited — `readOnly` rather than `disabled` so it stays
+                  selectable and copyable, and the coercing onChange is not attached at all. */}
+              <input
+                className={cn('h-9 flex-1 px-2 text-[13px] outline-none',
+                  slugLocked ? 'bg-muted/40 text-muted-foreground' : 'bg-background text-foreground')}
+                value={form.seo.urlSlug}
+                readOnly={slugLocked}
+                aria-readonly={slugLocked || undefined}
+                onChange={slugLocked ? undefined : e => us({ urlSlug: e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, '') })}
+                placeholder="event-name-2026"
+              />
+              {!slugLocked && (
+                <button type="button" onClick={() => us({ urlSlug: slugify(form.info.name) })} className="mr-1 flex items-center gap-1 rounded px-2 py-1 text-[12px] text-primary hover:bg-primary/10">
+                  <RefreshCw className="size-3" aria-hidden />Auto
+                </button>
+              )}
             </div>
-            {form.seo.urlSlug && !/^[a-z0-9-]+$/.test(form.seo.urlSlug) && <p className="mt-1 text-[12px] text-red-500">Only lowercase letters, numbers and hyphens allowed.</p>}
+            {slugLocked
+              // Historical slugs may contain uppercase (publish used to append the draft id
+              // verbatim). That is not an error the organizer can or should act on — the
+              // address is already live — so the lowercase rule is not applied here.
+              ? <p className="mt-1 text-[12px] text-muted-foreground">This event is live — its URL is fixed and cannot be changed.</p>
+              : form.seo.urlSlug && !EVENT_SLUG_PATTERN.test(form.seo.urlSlug) && <p className="mt-1 text-[12px] text-red-500">Only lowercase letters, numbers and hyphens allowed.</p>}
           </div>
           <div>
             <div className="flex items-center justify-between"><label className={labelCls}>Meta Title</label><span className="text-[12px] text-muted-foreground">{(form.seo.metaTitle || title).length}/60</span></div>
@@ -1171,10 +1178,11 @@ function SponsorModal({ sponsor, isNew, onSave, onCancel }: {
 
 // ─── Summary Panel ────────────────────────────────────────────────────────────
 
-function SummaryPanel({ form, eventTypeId, eventSubtype, tab6Config, onPreview, passes }: {
+function SummaryPanel({ form, eventTypeId, eventSubtype, tab6Config, onPreview, passes, slugLocked = false }: {
   form: EventDetailsDraft; eventTypeId?: string | null; eventSubtype?: string | null
   tab6Config: Tab6Config | null; onPreview: () => void
   passes: { id: string; name: string; price: number; type: 'paid'|'free' }[]
+  slugLocked?: boolean
 }) {
   const health = calcStepHealth(form)
 
@@ -1200,7 +1208,13 @@ function SummaryPanel({ form, eventTypeId, eventSubtype, tab6Config, onPreview, 
     [!!(form.schedule.startDate && form.schedule.endDate), true, 'Dates & Times'],
     [!!(form.organizer.name.trim() && form.organizer.email.trim()), true, 'Organizer Info'],
     [(form.communication.confirmation.channels?.length ?? 0) > 0, false, 'Notification Channel'],
-    [!!(form.seo.urlSlug && /^[a-z0-9-]+$/.test(form.seo.urlSlug)), true, 'URL Slug'],
+    // A LIVE event's slug is already its public address. Historical slugs can contain
+    // uppercase (publish used to append the draft id verbatim), and the organizer can
+    // neither change that nor should be asked to — so presence, not shape, is the test.
+    // Pre-publish the full rule still applies: a new slug must be canonical.
+    [slugLocked
+      ? !!form.seo.urlSlug.trim()
+      : !!(form.seo.urlSlug && EVENT_SLUG_PATTERN.test(form.seo.urlSlug)), true, 'URL Slug'],
   ]
 
   return (
@@ -1335,10 +1349,21 @@ export interface EventDetailsBuilderProps {
   pricingPasses?: { id: string; name: string; price: number; type: 'paid' | 'free' }[]
   uploadContext?: { uid: string; draftId: string }
   focusHint?:     string
+  /**
+   * RD-EVENT-SLUG — true once the event is published.
+   *
+   * `events/{urlSlug}` IS the live document's Firestore id, and the draft's copy of that
+   * slug is the only pointer to it. The server already treats the field as frozen
+   * (RESTRICTED_EDIT_KEYS); this stops the UI from contradicting that and, more to the
+   * point, from silently rewriting the pointer — which is exactly how a live event became
+   * unreachable and "Live event document not found." reached an organizer.
+   */
+  slugLocked?:    boolean
 }
 
 export function EventDetailsBuilder({
   form: rawForm, onChange, eventTypeId, eventSubtype, pricingPasses = [], uploadContext, focusHint,
+  slugLocked = false,
 }: EventDetailsBuilderProps) {
   const blank = makeBlankEventDetailsDraft()
   const raw   = rawForm ?? blank
@@ -1397,8 +1422,11 @@ export function EventDetailsBuilder({
   const update = (p: Partial<EventDetailsDraft>) => onChange({ ...form, ...p })
 
   // Ensure typeDetails is initialized when tab6Config is available
-  const effectiveForm = (tab6Config && !form.typeDetails)
-    ? { ...form, typeDetails: makeBlankTypeDetails(tab6Config.sectionType) }
+  // RD-CE-FIX H3 — always in the CURRENT type's shape: a typeDetails left over from another type
+  // (a type switch before the transition policy existed) is normalised instead of being cast, which
+  // used to crash this step. Compatible stored values are kept.
+  const effectiveForm = tab6Config
+    ? { ...form, typeDetails: (normalizeTypeDetails(eventTypeId ?? null, eventSubtype ?? null, form.typeDetails) ?? makeBlankTypeDetails(tab6Config.sectionType)) as TypeDetails }
     : form
 
   const TABS = [
@@ -1477,7 +1505,7 @@ export function EventDetailsBuilder({
             {activeTab === 'venue'     && <Tab2VenueSchedule form={effectiveForm} update={update} onAddSession={handleAddSession} onEditSession={handleEditSession} onDeleteSession={handleDeleteSession} onMoveSession={handleMoveSession} />}
             {activeTab === 'organizer' && <Tab3Organizer form={effectiveForm} update={update} />}
             {activeTab === 'comms'     && <Tab4Communication form={effectiveForm} update={update} />}
-            {activeTab === 'seo'       && <Tab5SEO        form={effectiveForm} update={update} />}
+            {activeTab === 'seo'       && <Tab5SEO        form={effectiveForm} update={update} slugLocked={slugLocked} />}
             {activeTab === 'type' && tab6Config && (
               <Tab6Dynamic form={effectiveForm} update={update} tab6Config={tab6Config}
                 onAddSpeaker={ctx => { setEditingSpeaker({ speaker: { ...makeBlankSpeaker(), order: 0 }, ctx }); setIsNewSpeaker(true) }}
@@ -1491,7 +1519,7 @@ export function EventDetailsBuilder({
       </div>
 
       <div className="lg:sticky lg:top-4">
-        <SummaryPanel form={effectiveForm} eventTypeId={eventTypeId} eventSubtype={eventSubtype} tab6Config={tab6Config} onPreview={() => setPreviewOpen(true)} passes={pricingPasses} />
+        <SummaryPanel form={effectiveForm} eventTypeId={eventTypeId} eventSubtype={eventSubtype} tab6Config={tab6Config} onPreview={() => setPreviewOpen(true)} passes={pricingPasses} slugLocked={slugLocked} />
       </div>
 
       <AnimatePresence>

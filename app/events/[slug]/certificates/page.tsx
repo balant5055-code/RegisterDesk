@@ -10,25 +10,28 @@
 
 import type { Metadata } from 'next'
 import { notFound } from 'next/navigation'
-import { adminDb } from '@/lib/firebase/admin'
-import { MarketingPageLayout } from '@/components/marketing/layout/MarketingPageLayout'
+import { EventUtilityLayout } from '@/components/marketing/layout/EventUtilityLayout'
+import { findPublicEvent } from '@/lib/events/publicEventAccess'
 import { CertificateCenterClient } from './CertificateCenterClient'
 
 type Params = { params: Promise<{ slug: string }> }
 
-/** Event name for the page header, or null when the slug is not a published event. */
+/**
+ * Event name for the page header, or null when the slug is not a PUBLIC event.
+ *
+ * This used to be an inline `adminDb.collection('events').doc(slug).get()` that returned
+ * `name || slug` for any document that existed — no lifecycle check, no moderation check.
+ * A draft, or an event an admin had taken down, therefore had its TITLE published here
+ * while its own detail page correctly 404'd. It now goes through the one public boundary
+ * (lib/events/publicEventAccess), so a non-public event yields null and this page 404s.
+ */
 async function getEventName(slug: string): Promise<string | null> {
-  try {
-    const snap = await adminDb.collection('events').doc(slug).get()
-    if (!snap.exists) return null
-    const d    = snap.data() as Record<string, unknown>
-    const ed   = (d.eventDetails as Record<string, unknown> | undefined) ?? {}
-    const info = (ed.info as Record<string, unknown> | undefined) ?? {}
-    const name = typeof info.name === 'string' ? info.name.trim() : ''
-    return name || slug
-  } catch {
-    return null
-  }
+  const event = await findPublicEvent(slug)
+  if (!event) return null
+  const ed   = (event.eventDetails as Record<string, unknown> | undefined) ?? {}
+  const info = (ed.info as Record<string, unknown> | undefined) ?? {}
+  const name = typeof info.name === 'string' ? info.name.trim() : ''
+  return name || slug
 }
 
 export async function generateMetadata({ params }: Params): Promise<Metadata> {
@@ -51,10 +54,10 @@ export default async function CertificateCenterPage({ params }: Params) {
   if (!eventName) notFound()
 
   return (
-    <MarketingPageLayout>
-      <div className="min-h-[60vh] bg-[#f7f8fa]">
+    <EventUtilityLayout>
+      <div className="min-h-[60vh] bg-muted">
         <CertificateCenterClient slug={slug} eventName={eventName} />
       </div>
-    </MarketingPageLayout>
+    </EventUtilityLayout>
   )
 }

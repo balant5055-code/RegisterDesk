@@ -38,6 +38,8 @@ import { FieldValue }   from 'firebase-admin/firestore'
 import { adminDb }      from '@/lib/firebase/admin'
 import { generateTicketCode, TicketCodeCollisionError } from '@/lib/registrations/ticketCode'
 import { buildCounterIncrement }     from '@/lib/firebase/firestore/registrationCounters'
+import { stageDailyStatsIncrement }  from '@/lib/dashboard/dailyStatsAdmin'
+import { settlementRevenueBasisPaise } from '@/lib/registrations/revenueBasis'
 import { deriveStoredEventCapacity } from '@/lib/registrations/capacity'
 import { checkRegistrationGate }     from '@/lib/registrations/gate'
 import {
@@ -49,7 +51,6 @@ import type { CouponDocument }       from '@/lib/coupons/types'
 import { validateInviteCode }        from '@/app/api/registrations/validate-invite-code/route'
 import {
   markPaymentIntentFailed,
-  updatePaymentIntentRefund,
   type PaymentIntentRecord,
 } from '@/lib/firebase/firestore/paymentIntents'
 import { sendConfirmationEmail }     from '@/lib/registrations/sendConfirmationEmail'
@@ -57,8 +58,12 @@ import { notifyPaymentReceived }     from '@/lib/notifications/inbox/notify'
 import { buildRegistrationLedgerAndCredit } from '@/lib/payments/registrationLedger'
 import { recordPlatformTransactionAndCredit } from '@/lib/firebase/firestore/platformTransactions'
 import { recordRegistrationFinancialReconciliation } from '@/lib/payments/registrationReconciliation'
-import { razorpay }                  from '@/lib/razorpay/client'
+import { buildRegistrationPaymentFields } from '@/lib/registrations/paymentIdentifiers'
+// The Razorpay client is deliberately NOT imported. This module settles captured payments
+// and can no longer refund them, so it has no business holding a gateway handle at all —
+// the absent import is part of the guarantee, not an oversight.
 import { captureFinancialError }     from '@/lib/monitoring/sentry'
+import { flagSuspiciousPayment }     from '@/lib/payments/flagSuspicious'
 
 /** Which path is settling. Only affects the unexpected-error policy and the recovery marker. */
 export type SettlementSource = 'verify' | 'webhook' | 'sweep'
@@ -76,66 +81,85 @@ export type SettlementOutcome =
   | { kind: 'settled';         registrationId: string }
   /** Someone else already settled it. */
   | { kind: 'already_settled'; registrationId: string }
-  /** Refused on an existing business rule; the payment has been refunded in full. */
-  | { kind: 'refunded';        reason: SettlementRefusal; gateBlocked?: boolean }
   /**
-   * RD-PAY-DUP-HOLD — refused as a DUPLICATE. The registration is blocked exactly as before,
-   * the intent is terminal, but the captured payment is deliberately NOT auto-refunded: it is
-   * parked as a `duplicate_hold` review record for an admin to settle by hand.
+   * RD-PAYMENT-REFUND-AUTHORITY-02 — refused, and the captured payment is PARKED.
+   *
+   * This used to be two outcomes: `held` for duplicates and `refunded` for everything else.
+   * `refunded` is gone, and so is the refund call that produced it. A captured payment is
+   * never handed back by this module for any reason; a refusal writes a durable review
+   * record and a human with refund authority decides what happens to the money.
+   *
+   * `gateBlocked` is carried so callers can tell "the event closed underneath this payment"
+   * apart from a capacity or coupon refusal when they phrase the attendee-facing message.
    */
-  | { kind: 'held';            reason: 'DUPLICATE_EMAIL' | 'DUPLICATE_MOBILE' }
-  /** Nothing written, nothing refunded — safe to retry later. */
+  | { kind: 'held';            reason: SettlementRefusal; gateBlocked?: boolean }
+  /**
+   * Nothing written, nothing refunded — safe to retry later, and something WILL retry.
+   * This is the transient-failure outcome: the recovery sweep runs every 10 minutes and
+   * settles it on a later pass.
+   */
   | { kind: 'deferred';        reason: string }
 
 /** P0-1: invite re-validation failed inside the transaction. */
+/** RD-FIN-02 · R1 — the order carries a captured-payment hold: a Super Admin decides it, not settlement. */
+class HeldForReviewError extends Error {
+  constructor(public readonly reason: string) { super(reason); this.name = 'HeldForReviewError' }
+}
+
 class InviteCodeError extends Error {
   constructor(public readonly reason: string) { super(reason); this.name = 'InviteCodeError' }
 }
 
-// ─── Refund (existing policy, unchanged) ──────────────────────────────────────
-
-async function refundInFull(
-  orderId: string, paymentId: string, amount: number, reason: string,
-  ctx: { eventSlug: string; attendeeEmail: string; registrationId?: string },
-): Promise<void> {
-  try {
-    const refund = await razorpay.payments.refund(paymentId, {
-      amount, speed: 'optimum', notes: { reason, orderId },
-      receipt: `refund_${orderId}`.slice(0, 40),
-    })
-    await updatePaymentIntentRefund(orderId, refund.id, refund.status, amount)
-  } catch (refundErr) {
-    captureFinancialError(refundErr, { scope: 'settleCaptured.refund_api_failed', detail: 'writing failedRefunds record', orderId, paymentId, amount, reason })
-    adminDb.collection('failedRefunds').add({
-      orderId, paymentId, amountPaise: amount, reason,
-      eventSlug: ctx.eventSlug, attendeeEmail: ctx.attendeeEmail,
-      registrationId: ctx.registrationId ?? null,
-      status: 'open', createdAt: FieldValue.serverTimestamp(),
-    }).catch(e => captureFinancialError(e, { scope: 'settleCaptured.failed_refund_persist_failed', detail: 'CRITICAL: could not write failedRefunds record', orderId, paymentId }))
-  }
-}
-
-// ─── Duplicate hold (RD-PAY-DUP-HOLD) ─────────────────────────────────────────
+// ═══ RD-PAYMENT-REFUND-AUTHORITY-02 · THIS MODULE CANNOT REFUND ══════════════
 //
-// A duplicate refusal is the ONE refusal that must not auto-refund. Every other reason —
-// capacity, pass unavailable, coupon exhausted, invite invalid, ticket-code exhaustion,
-// gate blocked, transaction error — keeps refunding through refuse()/refundInFull(),
-// which are deliberately left untouched.
+// `refundInFull` used to live here and was reached by seven refusal branches. It is gone,
+// not disabled — there is no longer any code path from settlement to the gateway's refund
+// API, and no flag that could switch one back on by accident.
 //
-// The captured payment is therefore parked, never silently orphaned:
+// Why removal rather than a guard: a captured payment is the attendee's money and the
+// organizer's sale. Handing it back is a financial decision with a counterparty, and the
+// three callers of this module are a browser callback, a webhook retry and a cron sweep —
+// none of which is a person who can be accountable for that decision. The worst branch was
+// `transaction_error`: a transient Firestore blip destroyed a good sale automatically.
+//
+// Refunds now have exactly one home: the Super-Admin-only routes. See lib/admin/auth
+// (`resolveSuperAdminUid`) and tests/unit/refundCallSiteBoundary.test.ts, which fails the
+// build if a new provider-refund call site appears outside that boundary.
+
+/**
+ * The two hold kinds. Both mean "captured payment, no registration, needs a human".
+ *
+ * `duplicate_hold` is kept as its own kind and its own document id so records written by
+ * RD-PAY-DUP-HOLD keep their identity and nothing has to be migrated. `settlement_hold`
+ * covers every other refusal now that none of them refunds.
+ */
+export type CapturedHoldKind = 'duplicate_hold' | 'settlement_hold' | 'duplicate_payment_hold'
+
+// ─── Captured-payment hold (RD-PAY-DUP-HOLD, generalised by RD-PAYMENT-REFUND-AUTHORITY-02)
+//
+// Originally a duplicate refusal was the ONE refusal that did not auto-refund. Every other
+// reason went through refuse() → refundInFull(). That function no longer exists, so this is
+// now the single terminus for every refusal: the payment is parked, never handed back and
+// never silently orphaned.
+//
 //   • `status: 'review'`  — the admin retry endpoint refuses anything that is not 'open',
 //                           so a hold can NEVER enter the refund path even by mistake.
-//   • `kind: 'duplicate_hold'` — distinguishes it from a genuine failed refund. Records
+//   • `kind`              — distinguishes a hold from a genuine failed refund. Records
 //                           written before this field existed have no `kind` and are read
 //                           as 'failed_refund', so nothing is migrated.
 //
-// IDEMPOTENT by deterministic id: one hold per ORDER, so a webhook replay or a sweep
-// re-run can never open a second review record for the same payment.
-async function recordDuplicateHold(
+// IDEMPOTENT by deterministic id: one hold per ORDER **per kind**, so a webhook replay or a
+// sweep re-run can never open a second review record for the same payment.
+//
+// The record deliberately stores identifiers rather than a copy of the attendee: the
+// authoritative payload already lives in paymentIntents/{orderId}, and duplicating PII into
+// a second collection would be a second thing to leak and a second thing to keep in step.
+async function recordCapturedHold(
   orderId: string, paymentId: string, amount: number, reason: string,
+  kind: CapturedHoldKind,
   ctx: { eventSlug: string; attendeeEmail: string },
 ): Promise<void> {
-  const ref = adminDb.collection('failedRefunds').doc(`duplicate_hold_${orderId}`)
+  const ref = adminDb.collection('failedRefunds').doc(`${kind}_${orderId}`)
   try {
     // `create` throws ALREADY_EXISTS rather than overwriting — that IS the idempotency,
     // and it also preserves the original createdAt on a replay.
@@ -143,7 +167,7 @@ async function recordDuplicateHold(
       orderId, paymentId, amountPaise: amount, reason,
       eventSlug: ctx.eventSlug, attendeeEmail: ctx.attendeeEmail,
       registrationId: null,
-      kind:      'duplicate_hold',
+      kind,
       status:    'review',
       createdAt: FieldValue.serverTimestamp(),
     })
@@ -152,11 +176,69 @@ async function recordDuplicateHold(
     const code = (err as { code?: number | string })?.code
     if (code === 6 || code === 'already-exists') return
     captureFinancialError(err, {
-      scope: 'settleCaptured.duplicate_hold_persist_failed',
+      scope: `settleCaptured.${kind}_persist_failed`,
       detail: 'CRITICAL: captured payment was not refunded and the review record could not be written',
       orderId, paymentId, amount, reason,
     })
   }
+}
+
+/**
+ * RD-FIN-02 · B6 — a SECOND captured payment on a registration order that is already PAID.
+ *
+ * Mirrors recordDuplicateLicensePayment / recordDuplicateTopupPayment: keyed by the PAYMENT (a third
+ * payment is its own record; a replay changes nothing), status 'review' (the registration hold
+ * workflow — a Super Admin decides), and NOTHING else: no registration, no counter / revenue / ledger
+ * write, never refunded here. `registrationId: null` is LOAD-BEARING — the retry route marks
+ * `registrationId` refunded, and this money never produced a registration; the settled one is carried
+ * separately as `settledRegistrationId`. Returns whether the record is durable. Never throws.
+ */
+export async function recordDuplicateRegistrationPayment(input: {
+  orderId: string; paymentId: string; settledPaymentId: string; settledRegistrationId: string
+  amountPaise: number; eventSlug: string; attendeeEmail: string; organizerUid: string
+  detectedBy: SettlementSource
+}): Promise<boolean> {
+  const ref = adminDb.collection('failedRefunds').doc(`duplicate_payment_hold_${input.paymentId}`)
+  let created = false
+  try {
+    created = await adminDb.runTransaction(async tx => {
+      const snap = await tx.get(ref)
+      if (snap.exists) {
+        tx.update(ref, { detectedBy: FieldValue.arrayUnion(input.detectedBy), updatedAt: FieldValue.serverTimestamp() })
+        return false
+      }
+      tx.create(ref, {
+        orderId: input.orderId, paymentId: input.paymentId, amountPaise: input.amountPaise,
+        reason: 'duplicate_payment', eventSlug: input.eventSlug, attendeeEmail: input.attendeeEmail,
+        registrationId: null,
+        settledRegistrationId: input.settledRegistrationId, settledPaymentId: input.settledPaymentId,
+        organizerUid: input.organizerUid,
+        kind: 'duplicate_payment_hold', status: 'review', detectedBy: [input.detectedBy],
+        createdAt: FieldValue.serverTimestamp(), updatedAt: FieldValue.serverTimestamp(),
+      })
+      return true
+    })
+  } catch (err) {
+    captureFinancialError(err, { scope: 'settleCaptured.duplicate_payment_persist_failed',
+      detail: 'CRITICAL: second captured payment on a paid order was not recorded', orderId: input.orderId, paymentId: input.paymentId })
+    return false
+  }
+  if (created) {
+    await flagSuspiciousPayment({ source: 'registration', reason: 'duplicate_payment', paymentId: input.paymentId,
+      orderId: input.orderId, expectedAmountPaise: input.amountPaise, actualAmountPaise: input.amountPaise,
+      expectedCurrency: 'INR', actualCurrency: 'INR' })
+  }
+  return true
+}
+
+// RD-FIN-01 · markPaymentIntentFailed refused because the intent is already PAID — another
+// path (verify / webhook / sweep) settled it. Report that settlement instead of a hold.
+async function settledElsewhere(orderId: string): Promise<SettlementOutcome> {
+  const snap = await adminDb.collection('paymentIntents').doc(orderId).get()
+  const registrationId = snap.get('registrationId') as string | undefined
+  return registrationId
+    ? { kind: 'already_settled', registrationId }
+    : { kind: 'deferred', reason: 'intent_paid_without_registration' }
 }
 
 // ─── Settlement ───────────────────────────────────────────────────────────────
@@ -200,6 +282,12 @@ export async function settleCapturedRegistration(args: {
 
   // Fast idempotency — avoids a transaction for the overwhelmingly common replay.
   if (intent.status === 'paid' && intent.registrationId) {
+    // RD-FIN-02 · B6 — the order is settled by ANOTHER payment: record this one for review.
+    if (intent.paymentId && intent.paymentId !== paymentId) {
+      await recordDuplicateRegistrationPayment({ orderId, paymentId, settledPaymentId: intent.paymentId,
+        settledRegistrationId: intent.registrationId, amountPaise: intent.amount, eventSlug: intent.eventSlug,
+        attendeeEmail: intent.attendee.email, organizerUid: intent.organizerUid, detectedBy: source })
+    }
     return { kind: 'already_settled', registrationId: intent.registrationId }
   }
   // RECOVERY BYPASS #1 — the terminal-state guard. `registration_failed` is exactly the state
@@ -219,9 +307,10 @@ export async function settleCapturedRegistration(args: {
     // date has since elapsed would punish the attendee for our own missed settlement.
     //
     // Deliberately narrow. Any OTHER refusal — cancelled, postponed, taken down, capacity or
-    // pass full, invite-code — still stops the settlement. It is reported rather than
-    // refunded, because auto-refunding an already-captured legitimate payment for a
-    // substantive reason is an operator decision, not this function's to make.
+    // pass full, invite-code — still stops the settlement. It is HELD rather than refunded:
+    // auto-refunding an already-captured legitimate payment for a substantive reason is an
+    // operator decision, not this function's to make. (RD-PAYMENT-REFUND-AUTHORITY-02 made
+    // that sentence literally true — it used to say so and then refund anyway.)
     const TIMING_ONLY = new Set([
       'REGISTRATION_NOT_OPEN', 'REGISTRATION_CLOSED', 'PASS_SALES_NOT_OPEN', 'PASS_SALES_ENDED',
     ])
@@ -231,11 +320,14 @@ export async function settleCapturedRegistration(args: {
         return { kind: 'deferred', reason: `recovery_blocked:${gate.reason ?? 'gate_blocked'}` }
       }
       captureFinancialError('gate_blocked_after_capture', { scope: `settleCaptured.${source}.gate_blocked`, orderId, paymentId, reason: gate.reason })
-      await markPaymentIntentFailed(orderId, gate.reason)
-      await refundInFull(orderId, paymentId, intent.amount, `gate_blocked:${gate.reason}`, {
-        eventSlug: intent.eventSlug, attendeeEmail: intent.attendee.email,
-      })
-      return { kind: 'refunded', reason: gate.reason ?? 'gate_blocked', gateBlocked: true }
+      const gateReason = gate.reason ?? 'gate_blocked'
+      // RD-FIN-01 · the gate read above is OUTSIDE the transaction: a concurrent path may have
+      // settled this intent meanwhile (e.g. it took the last seat — which is WHY the gate now
+      // says full). A paid intent is never marked failed and never gets a hold.
+      if (!(await markPaymentIntentFailed(orderId, gateReason))) return settledElsewhere(orderId)
+      await recordCapturedHold(orderId, paymentId, intent.amount, `gate_blocked:${gateReason}`,
+        'settlement_hold', { eventSlug: intent.eventSlug, attendeeEmail: intent.attendee.email })
+      return { kind: 'held', reason: gateReason, gateBlocked: true }
     }
   }
 
@@ -260,7 +352,6 @@ export async function settleCapturedRegistration(args: {
     : null
 
   const registrationId = regRef.id
-  const refundCtx = { eventSlug: intent.eventSlug, attendeeEmail: intent.attendee.email, registrationId }
 
   // F1: retry loop — a ticket-code collision regenerates and retries.
   for (let attempt = 0; attempt < 5; attempt++) {
@@ -269,6 +360,7 @@ export async function settleCapturedRegistration(args: {
 
     let alreadySettled = false
     let settledId      = ''
+    let settledPaymentId: string | undefined
     let capturedRawDetails: Record<string, unknown> = {}
 
     try {
@@ -282,7 +374,23 @@ export async function settleCapturedRegistration(args: {
         if (intentData.status === 'paid' && intentData.registrationId) {
           alreadySettled = true
           settledId      = intentData.registrationId
+          settledPaymentId = intentData.paymentId
           return
+        }
+
+        // RD-FIN-02 · R1 — a terminal intent may be one THIS function parked for review. Recovery
+        // exists for the payment.failed → captured trap, NOT to overrule a hold: a payment must never
+        // be both a settled registration AND an open "refund or not?" decision. Never settle an order
+        // that has a hold, whatever its state (review = undecided; open / retrying / retried = refund
+        // approved or issued; resolved = decided). Read in THIS transaction (reads before writes), and
+        // only for terminal intents, so the common path costs nothing.
+        if (intentData.status === 'registration_failed' || intentData.status === 'failed') {
+          const holdSnaps = await txn.getAll(
+            adminDb.collection('failedRefunds').doc(`settlement_hold_${orderId}`),
+            adminDb.collection('failedRefunds').doc(`duplicate_hold_${orderId}`),
+          )
+          const hold = holdSnaps.find(s => s.exists)
+          if (hold) throw new HeldForReviewError(hold.get('status') === 'review' ? 'HELD_FOR_REVIEW' : 'HOLD_DECISION_TAKEN')
         }
 
         // Phase 2: the base counter is deliberately NOT read here (GA-7C P1-4) — it is read
@@ -355,7 +463,15 @@ export async function settleCapturedRegistration(args: {
           status:          'confirmed',
           paymentStatus:   'paid',
           amount:          intent.amount,          // paise — from the intent, never a client
-          razorpayOrderId: orderId,
+          // RD-FIN-02 B5 · attendee-borne fees inside `amount`, ONLY when present, so cancel /
+          // restore / reconciliation reverse exactly the ticket base the counter added below.
+          ...(intent.amount - settlementRevenueBasisPaise(intent) > 0
+            ? { attendeeFeePaise: intent.amount - settlementRevenueBasisPaise(intent) } : {}),
+          // Provider-neutral identifiers. `razorpayOrderId` is still mirrored for Razorpay
+          // (every historical reader, export and support lookup depends on it) and is
+          // deliberately ABSENT for any other provider, so no gateway's order id is ever
+          // stored in a field named for a different one.
+          ...buildRegistrationPaymentFields(intent.provider, orderId),
           paymentId,
           ticketCode,
           // Consent audit trail — from the intent snapshot, never a client on this path.
@@ -388,9 +504,18 @@ export async function settleCapturedRegistration(args: {
         // same canonical basis the ledger, wallet and finance use — NOT the attendee charge.
         // Under organizer_pays these are identical; under attendee_pays this strips the
         // attendee-borne fees so dashboard revenue matches settlement.
+        const counterRevenuePaise = settlementRevenueBasisPaise(intent)
         txn.set(counterRef, buildCounterIncrement(intent.eventSlug, intent.passId, {
-          amountPaise: intent.financials?.ticketBasePaise ?? intent.amount,
+          amountPaise: counterRevenuePaise,
         }), { merge: true })
+        // RD-FIN-01 · the organizer daily rollup, in the SAME transaction as the counter —
+        // exactly as createRegistration does for free registrations. Online paid registrations
+        // were never written here, so the dashboard Today / month / trend / deltas and the
+        // analytics day series omitted every one of them, while cancelRegistration still
+        // reversed them on their original day (driving that day below its true value).
+        stageDailyStatsIncrement(txn, intent.organizerUid, intent.eventSlug, Date.now(), {
+          action: 'confirm', amountPaise: counterRevenuePaise,
+        })
 
         txn.update(intentRef, {
           status: 'paid', registrationId, paymentId, updatedAt: FieldValue.serverTimestamp(),
@@ -405,7 +530,15 @@ export async function settleCapturedRegistration(args: {
         }
       })
 
-      if (alreadySettled) return { kind: 'already_settled', registrationId: settledId }
+      if (alreadySettled) {
+        // RD-FIN-02 · B6 — settled meanwhile by a DIFFERENT payment (a race): record this one.
+        if (settledPaymentId && settledPaymentId !== paymentId) {
+          await recordDuplicateRegistrationPayment({ orderId, paymentId, settledPaymentId,
+            settledRegistrationId: settledId, amountPaise: intent.amount, eventSlug: intent.eventSlug,
+            attendeeEmail: intent.attendee.email, organizerUid: intent.organizerUid, detectedBy: source })
+        }
+        return { kind: 'already_settled', registrationId: settledId }
+      }
 
       // ── Post-commit. The registration is durable; nothing below may refund it. ──
       //
@@ -415,6 +548,10 @@ export async function settleCapturedRegistration(args: {
       if (intent.amount > 0) {
         const { ledger, credit } = await buildRegistrationLedgerAndCredit({
           registrationId,
+          // RD-PAYMENT-PROVIDER-CONTRACT-04 — carried from the intent, not chosen here.
+          // Settlement stays provider-INDEPENDENT: it copies a discriminator it was given
+          // and never asks who the provider is or behaves differently because of it.
+          provider:         intent.provider,
           organizerUid:     intent.organizerUid,
           eventSlug:        intent.eventSlug,
           attendeeName:     intent.attendee.name,
@@ -422,6 +559,8 @@ export async function settleCapturedRegistration(args: {
           grossAmountPaise: intent.amount,
           paymentId, orderId,
           financials:       intent.financials,
+          // RD-PHASE4-S2 — the fee inputs captured at checkout (never the live configuration).
+          feeInputs:        intent.feeInputs,
         })
         // Idempotent on ptx_<registrationId>, so whichever path settles credits once.
         try {
@@ -464,26 +603,39 @@ export async function settleCapturedRegistration(args: {
     } catch (err) {
       if (err instanceof TicketCodeCollisionError) {
         if (attempt < 4) continue
-        return refuse('ticket_code_exhausted')
+        return holdForReview('ticket_code_exhausted')
       }
-      // RD-PAY-DUP-HOLD — the ONLY reason that bypasses refundInFull(). The registration is
-      // still refused; only the automatic refund is withheld, and the payment is parked for
-      // review instead. Every other branch below is unchanged.
-      if (err instanceof DuplicateRegistrationError)  return holdForReview(err.reason)
-      if (err instanceof CapacityExceededError)       return refuse(err.reason)
-      if (err instanceof CouponExhaustedError)        return refuse('COUPON_EXHAUSTED')
-      if (err instanceof InviteCodeError)             return refuse(err.reason)
+      // ═══ RD-PAYMENT-REFUND-AUTHORITY-02 · EVERY refusal now parks the money ══
+      // These are BUSINESS refusals: retrying will not change the answer, so they are
+      // terminal and get a durable review record. What changed is only what happens to the
+      // captured payment — it stays captured. Whether the attendee is refunded, given a
+      // place anyway, or moved to another pass is a decision with a counterparty, and it is
+      // made by a Super Admin looking at the hold, not by this function.
+      // RD-FIN-02 · R1 — already held: report it, write NOTHING (never a second hold).
+      if (err instanceof HeldForReviewError)          return { kind: 'held', reason: err.reason }
+      if (err instanceof DuplicateRegistrationError)  return holdForReview(err.reason, 'duplicate_hold')
+      if (err instanceof CapacityExceededError)       return holdForReview(err.reason)
+      if (err instanceof CouponExhaustedError)        return holdForReview('COUPON_EXHAUSTED')
+      if (err instanceof InviteCodeError)             return holdForReview(err.reason)
 
-      // Unexpected. 'verify' and 'webhook' have always refunded here and that is preserved:
-      // both are one-shot (Razorpay retries a webhook indefinitely against a broken state).
-      // The SWEEP defers instead — it runs on a schedule and will simply look again, so a
-      // transient Firestore blip must never turn a good payment into a refund.
-      if (source === 'sweep') {
-        captureFinancialError(err, { scope: 'settleCaptured.sweep.deferred', detail: 'left recoverable for the next run', orderId, paymentId })
-        return { kind: 'deferred', reason: 'transaction_error' }
-      }
-      captureFinancialError(err, { scope: `settleCaptured.${source}.transaction_failed`, orderId, paymentId, eventSlug: intent.eventSlug })
-      return refuse('transaction_error')
+      // ═══ P0 · TRANSIENT FAILURE — DEFER, NEVER TERMINAL ═════════════════════
+      // This branch used to refund for 'verify' and 'webhook', on the reasoning that both
+      // are one-shot. That reasoning traded a recoverable problem for an unrecoverable one:
+      // a Firestore blip lasting seconds destroyed a completed sale, and a refund cannot be
+      // undone. The sweep's behaviour was already correct and is now used for all three
+      // sources — nothing is written, nothing is marked terminal, and
+      // recoverCapturedPaymentIntents settles it on a later pass (it runs every 10 minutes
+      // and keeps a 24h window).
+      //
+      // Deliberately NOT a hold: a hold is for refusals a human must resolve. A transient
+      // error resolves itself, and parking it would put a review record in front of someone
+      // for something that fixes itself in ten minutes.
+      captureFinancialError(err, {
+        scope:  `settleCaptured.${source}.transaction_failed`,
+        detail: 'left recoverable for the capture sweep — payment captured, NOT refunded',
+        orderId, paymentId, eventSlug: intent.eventSlug,
+      })
+      return { kind: 'deferred', reason: 'transaction_error' }
     }
 
     /**
@@ -494,27 +646,24 @@ export async function settleCapturedRegistration(args: {
      * and a conditional inside it would put every one of those refunds one edit away from
      * being switched off.
      */
-    async function holdForReview(reason: 'DUPLICATE_EMAIL' | 'DUPLICATE_MOBILE'): Promise<SettlementOutcome> {
-      captureFinancialError(`settlement_duplicate_hold:${reason}`, {
-        scope: `settleCaptured.${source}.duplicate_hold`,
-        detail: 'registration refused as a duplicate; payment captured and held for manual review (NOT refunded)',
+    async function holdForReview(
+      reason: SettlementRefusal,
+      kind: CapturedHoldKind = 'settlement_hold',
+      gateBlocked = false,
+    ): Promise<SettlementOutcome> {
+      captureFinancialError(`settlement_hold:${reason}`, {
+        scope: `settleCaptured.${source}.${kind}`,
+        detail: 'registration refused; payment captured and held for Super Admin review (NOT refunded)',
         orderId, paymentId, reason, amount: intent.amount,
       })
       // Terminal FIRST, so the entry guard short-circuits any replay before it can reach
-      // this branch again — the same ordering refuse() uses.
-      await markPaymentIntentFailed(orderId, reason)
-      await recordDuplicateHold(orderId, paymentId, intent.amount, reason, {
+      // this branch again and the hold write below stays the only side effect worth racing.
+      // RD-FIN-01 · unless another path settled it meanwhile — then there is nothing to hold.
+      if (!(await markPaymentIntentFailed(orderId, reason))) return settledElsewhere(orderId)
+      await recordCapturedHold(orderId, paymentId, intent.amount, reason, kind, {
         eventSlug: intent.eventSlug, attendeeEmail: intent.attendee.email,
       })
-      return { kind: 'held', reason }
-    }
-
-    // Mark failed + refund in full, then report the canonical reason.
-    async function refuse(reason: SettlementRefusal): Promise<SettlementOutcome> {
-      captureFinancialError(`settlement_refused:${reason}`, { scope: `settleCaptured.${source}.refused`, orderId, paymentId, reason, amount: intent.amount })
-      await markPaymentIntentFailed(orderId, reason)
-      await refundInFull(orderId, paymentId, intent.amount, reason, refundCtx)
-      return { kind: 'refunded', reason }
+      return gateBlocked ? { kind: 'held', reason, gateBlocked } : { kind: 'held', reason }
     }
   }
 

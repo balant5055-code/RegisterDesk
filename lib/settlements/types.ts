@@ -1,3 +1,5 @@
+import type { SettlementPayoutDestination } from '@/lib/payout/binding'
+
 export type SettlementStatus = 'pending' | 'approved' | 'paid' | 'rejected'
 
 export interface SettlementRequestDoc {
@@ -21,6 +23,14 @@ export interface SettlementRequestDoc {
   bankReference?: string
   paidBy?:       string
   paymentNotes?: string
+  // RD-PHASE4-S4 — maker-checker (D2) and destination binding (D5). Absent on older records.
+  /** The Super Admin who approved. A DIFFERENT Super Admin must mark it paid. */
+  approvedBy?:   string
+  /** The Super Admin who marked it paid (server-set; `paidBy` above is free-text proof). */
+  paidByAdmin?:  string
+  rejectedBy?:   string
+  /** The verified payout destination this request was made against (masked). */
+  payoutDestination?: SettlementPayoutDestination | null
 }
 
 export interface SettlementRequestSummary {

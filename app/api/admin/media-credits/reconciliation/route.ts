@@ -7,15 +7,17 @@
 // `POST /api/cron/media-credit-reconciliation` is the single place it happens.
 
 import { NextRequest, NextResponse } from 'next/server'
-import { resolveAdminUid } from '@/lib/admin/auth'
+import { requireSuperAdmin } from '@/lib/admin/financialGuard'
 import * as purchaseRepo from '@/features/media-credits/repositories/purchaseRepo'
 import * as refundRepo from '@/features/media-credits/repositories/refundRepo'
 import { detectOrphans, STUCK_REFUND_ATTEMPTS } from '@/features/media-credits/services/reconciliation'
 import { sessionMetrics } from '@/features/media-credits/services/sessionCleanupService'
 
 export async function GET(req: NextRequest): Promise<NextResponse> {
-  const adminUid = await resolveAdminUid(req.headers.get('authorization'))
-  if (!adminUid) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+  // RD-CLOSE — a financial read: Super Admin only (ADMIN_UIDS). A legacy `admin: true` claim
+  // alone gets 403 SUPER_ADMIN_REQUIRED (lib/admin/financialGuard.ts).
+  const superGate = await requireSuperAdmin(req)
+  if (superGate.response) return superGate.response
 
   const [pendingGrants, approvedRefunds, orphans, sessions] = await Promise.all([
     purchaseRepo.listPendingReconciliations(100),

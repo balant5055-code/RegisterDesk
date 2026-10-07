@@ -60,6 +60,28 @@ export function maskIfsc(value: string | null | undefined): string | null {
 }
 
 /**
+ * GSTIN → `29••••••••••1Z5`.
+ *
+ * ═══ WHY A GSTIN HAS TO BE MASKED AT ALL ═════════════════════════════════════
+ * A GSTIN is not itself a secret — it is printed on invoices. But its characters 3–12
+ * ARE the holder's PAN: `29` + `ABCDE1234F` + `1Z5`. Returning a full GSTIN to a caller
+ * we have just decided may not see the PAN hands them the PAN anyway, spelled differently.
+ *
+ * So the PAN slice is removed and the parts that carry no identity are kept: the two-digit
+ * state code, and the entity/Z/checksum tail an auditor uses to confirm they are looking at
+ * the right registration.
+ *
+ * Total, like every function here: anything that is not a well-formed 15-character GSTIN is
+ * masked entirely rather than partially revealed.
+ */
+export function maskGstin(value: string | null | undefined): string | null {
+  const v = (value ?? '').trim().toUpperCase()
+  if (v === '') return null
+  if (v.length !== 15) return BULLETS
+  return v.slice(0, 2) + DOT.repeat(10) + v.slice(12)
+}
+
+/**
  * UPI → `ba${DOT}${DOT}${DOT}${DOT}@okhdfc`.
  *
  * The handle after `@` is the provider and is not a secret; the local part identifies the

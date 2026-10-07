@@ -17,7 +17,7 @@ export function PrintResultButton() {
       type="button"
       onClick={() => window.print()}
       // Hidden from the printed page itself — a "Print" button in a printout is noise.
-      className="print:hidden inline-flex h-11 items-center gap-2 rounded-xl border border-border px-5 text-fs-base font-medium text-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+      className="print:hidden inline-flex h-11 items-center gap-2 rounded-xl border border-border px-5 text-fs-base font-medium text-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-action"
     >
       <Printer className="size-4" aria-hidden />
       Print this result

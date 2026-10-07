@@ -14,10 +14,10 @@
 // a half-copied race.
 
 
-import { getOwnedSession } from '@/features/race-operations/repositories/sessionRepo'
+import { requireEligibleSession } from '@/features/race-operations/services/eventGate'
 import { fetchStoredRowPage } from '@/features/race-operations/repositories/resultRepo'
 import {
-  advanceSnapshotProgress, beginSnapshot, resolveBuildState, writeSnapshotChunk,
+  advanceSnapshotProgress, openSnapshotBuild, writeSnapshotChunk,
 } from '@/features/race-operations/repositories/snapshotRepo'
 import { checkRegistrationGate } from '@/features/race-operations/lifecycle/transitions'
 import { resolveRace } from '@/features/race-operations/repositories/eventReadRepo'
@@ -25,8 +25,16 @@ import { passSlug } from '@/features/race-operations/utils/publicKeys'
 import { snapshotId } from '@/features/race-operations/types/snapshot'
 import type { ServiceOutcome } from './importService'
 
-/** Rows copied per build call. Under the 500-write batch limit. */
-export const SNAPSHOT_CHUNK_SIZE = 400
+/**
+ * Rows copied per build call.
+ *
+ * RD-RACEOPS-RESULTS-04 · halved from 400. A row can now cost TWO writes — its leaderboard
+ * entry and, when it has checkpoints, its splits document — and both must land in the SAME
+ * batch so a published version can never hold a result without its splits. 200 rows is
+ * therefore at most 400 writes, inside Firestore's 500-write limit with room to spare;
+ * `writeSnapshotChunk` throws rather than commit an invalid batch if the two ever drift.
+ */
+export const SNAPSHOT_CHUNK_SIZE = 200
 
 export interface SnapshotBuildProgress {
   copied:  number
@@ -49,8 +57,9 @@ export async function buildSnapshotChunk(params: {
 }): Promise<ServiceOutcome<SnapshotBuildProgress & { nextCursor: number | null }>> {
   const { sessionId, workspaceUid, afterRowNumber } = params
 
-  const session = await getOwnedSession(sessionId, workspaceUid)
-  if (!session) return { ok: false, status: 404, error: 'Import session not found' }
+  const gated = await requireEligibleSession(sessionId, workspaceUid)
+  if (!gated.ok) return gated
+  const session = gated.session
   if (session.status !== 'draft') {
     return { ok: false, status: 409, error: `Cannot build a snapshot from a ${session.status} import.` }
   }
@@ -78,39 +87,46 @@ export async function buildSnapshotChunk(params: {
   // got to all come from ONE read of the snapshot document. `afterRowNumber` from the
   // request body is deliberately ignored — it is accepted only so the existing client
   // contract keeps compiling, and a replayed chunk must not be able to rewind the build.
+  //
+  // RD-RACEOPS-02G · that read and the claim of a NEW lane are one transaction, so the
+  // version is allocated exactly once per race however many builds race for it, and never
+  // from the rolled-back live pointer. A resume writes nothing (the lane is already this
+  // session's); a fresh open resets the counts and the cursor with the claim.
   void afterRowNumber
-  const state = await resolveBuildState(session.eventSlug, session.passId, sessionId)
+  const opened = await openSnapshotBuild({
+    eventSlug:    session.eventSlug,
+    eventName:    resolved.race.eventName,
+    eventDate:    resolved.race.eventDate,
+    passId:       session.passId,
+    passSlug:     passSlug(resolved.race.passName, session.passId),
+    passName:     resolved.race.passName,
+    organizerUid: session.organizerUid,
+    eventId:      session.eventId,
+    sessionId:    session.sessionId,
+    publishedBy:  session.uploadedBy,
+  })
+  if (!opened.ok) return { ok: false, status: opened.status, error: opened.error }
+  const state = opened.state
   const version = state.version
-
-  // Opened once per build, not once per chunk: `beginSnapshot` resets the counts and the
-  // cursor, so calling it on a resume would restart the build and double-count.
-  if (!state.owns) {
-    await beginSnapshot({
-      eventSlug:    session.eventSlug,
-      eventName:    resolved.race.eventName,
-      eventDate:    resolved.race.eventDate,
-      passId:       session.passId,
-      passSlug:     passSlug(resolved.race.passName, session.passId),
-      passName:     resolved.race.passName,
-      organizerUid: session.organizerUid,
-      eventId:      session.eventId,
-      sessionId:    session.sessionId,
-      publishedBy:  session.uploadedBy,
-      version,
-    })
-  }
 
   const page = await fetchStoredRowPage(sessionId, SNAPSHOT_CHUNK_SIZE, state.cursor)
   if (page.rows.length === 0) {
     return { ok: true, value: { copied: 0, done: true, version, nextCursor: null } }
   }
 
-  const { written, finishers } = await writeSnapshotChunk(id, version, page.rows)
+  // RD-RACEOPS-RESULTS-04 · the group sizes computed by the ranking pass travel with the
+  // rows, so each entry's "4 / 56" denominator is written beside the rank it belongs to.
+  const { written, finishers } = await writeSnapshotChunk(id, version, page.rows, session.rankGroups ?? null)
 
   // The last row copied — `page.nextCursor` is null on the final page, so fall back to the
   // page's own last row number. Persisting it means a replay resumes AFTER this page.
   const copiedThrough = page.nextCursor ?? page.rows[page.rows.length - 1].rowNumber
-  await advanceSnapshotProgress(id, copiedThrough, written, finishers)
+  const credited = await advanceSnapshotProgress(id, sessionId, version, copiedThrough, written, finishers)
+  if (!credited) {
+    // Another session claimed this race's lane while this chunk was copying. The rows
+    // just written carry a version that will never be promoted; the organizer rebuilds.
+    return { ok: false, status: 409, error: 'Another import took over the public snapshot for this race. Rebuild it and try again.' }
+  }
 
   return {
     ok: true,

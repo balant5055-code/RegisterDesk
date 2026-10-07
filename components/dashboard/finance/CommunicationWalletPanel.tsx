@@ -45,7 +45,7 @@ export function CommunicationWalletPanel({ overview, transactions, usage, loadin
   ]
 
   return (
-    <section className="space-y-4" aria-label="Communication wallet">
+    <section className="space-y-4" aria-label="Communication balance">
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5" aria-busy={loading}>
         {loading
           ? Array.from({ length: 5 }).map((_, i) => <KpiCardSkeleton key={i} />)
@@ -79,10 +79,10 @@ export function CommunicationWalletPanel({ overview, transactions, usage, loadin
         {loading ? (
           <div className="space-y-2 py-2">{Array.from({ length: 3 }).map((_, i) => <div key={i} className="h-8 animate-pulse rounded bg-muted" />)}</div>
         ) : transactions.length === 0 ? (
-          <EmptyState icon={Wallet} title="No wallet transactions" description="Top-ups and communication charges will appear here." />
+          <EmptyState icon={Wallet} title="No communication-balance transactions" description="Top-ups and communication charges will appear here." />
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[560px] text-left text-[13.5px]" aria-label="Wallet transactions">
+            <table className="w-full min-w-[560px] text-left text-[13.5px]" aria-label="Communication-balance transactions">
               <thead>
                 <tr className="border-b border-border">
                   {['Date', 'Type', 'Amount', 'Status', 'Description'].map(h => (

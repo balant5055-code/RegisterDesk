@@ -14,7 +14,7 @@
 //
 //   npm run emu:start && npm run test:emu
 
-import { describe, it, expect, beforeAll, beforeEach, vi } from 'vitest'
+import { describe, it, expect, beforeAll, beforeEach, afterAll, vi } from 'vitest'
 import { Timestamp } from 'firebase-admin/firestore'
 
 const EMULATOR = process.env.FIRESTORE_EMULATOR_HOST
@@ -155,7 +155,15 @@ const regsFor = async (o: string) =>
 const counter = async () =>
   (await adminDb.collection('registrationCounters').doc(SLUG).get()).data() as { totalCount?: number; passCounts?: Record<string, number> }
 
+// RD-PREPROD · test isolation — wipe() empties whole collections, and the recovery sweep under
+// test is unscoped by design (it reads every stuck intent), so this suite cannot share a
+// project: run against the shared one it deleted other suites' (and the dev seed's) documents,
+// and their stale intents could leak into its counts. It therefore runs in its OWN emulator
+// project, set before the Admin SDK is first imported, and wipe() refuses any other project.
+const OWN_PROJECT = 'demo-registerdesk-captured-recovery'
+
 async function wipe() {
+  if (process.env.GCLOUD_PROJECT !== OWN_PROJECT) throw new Error('wipe() runs only in ' + OWN_PROJECT)
   for (const c of ['paymentIntents', 'registrations', 'registrationClaims', 'ticketCodeClaims', 'failedRefunds', 'events', 'registrationCounters']) {
     const s = await adminDb.collection(c).limit(500).get()
     await Promise.all(s.docs.map(d => d.ref.delete()))
@@ -164,6 +172,7 @@ async function wipe() {
 
 describeEmu('RD-PAY-P0-3 · orphaned capture recovery (real Firestore)', () => {
   beforeAll(async () => {
+    vi.stubEnv('GCLOUD_PROJECT', OWN_PROJECT)
     ;({ adminDb } = await import('@/lib/firebase/admin'))
     ;({ settleCapturedRegistration } = await import('@/lib/payments/settleCapturedRegistration'))
     ;({ recoverCapturedPaymentIntents } = await import('@/lib/payments/registrationReconciliation'))
@@ -175,6 +184,7 @@ describeEmu('RD-PAY-P0-3 · orphaned capture recovery (real Firestore)', () => {
     gw.refunds.length = 0; gw.emailsSent.length = 0; gw.creditCalls.length = 0
     await seedEvent()
   })
+  afterAll(() => { vi.unstubAllEnvs() })
 
   // ═══ THE CRITICAL PROOF ═════════════════════════════════════════════════════
   it('CRITICAL · captured + browser never returns → sweep creates EXACTLY ONE registration', async () => {
@@ -337,10 +347,23 @@ describeEmu('RD-PAY-P0-3 · orphaned capture recovery (real Firestore)', () => {
     expect(await regsFor(orderId)).toHaveLength(1)
   })
 
-  it('an AUTHORIZED (not yet captured) payment is also recovered — the funds are held', async () => {
+  // RD-FIN-02 · R2 — this used to assert that an AUTHORIZED payment is recovered. That settled a
+  // registration (and credited the wallet) for money that is not captured and may be released by the
+  // gateway. Authorized is not money yet (the rule licensing RD-F1 and top-ups W1.1 already apply):
+  // the sweep records it for review, never settles it, never fails it — and settles it exactly once
+  // after it is actually captured.
+  it('R2 · an AUTHORIZED (not yet captured) payment is NOT recovered — reviewed, intent untouched; captured later ⇒ settled once', async () => {
     const orderId = await seedIntent()
     gw.payments.set(orderId, [{ id: 'pay_auth', status: 'authorized', amount: 10000, currency: 'INR' }])
+    const res = await recoverCapturedPaymentIntents(50)
+    expect(res.recovered).toBe(0)
+    expect(res.uncertain).toBeGreaterThanOrEqual(1)
+    expect(await regsFor(orderId)).toHaveLength(0)
+    expect((await readIntent(orderId))?.status).toBe('created')
+    gw.payments.set(orderId, [{ id: 'pay_auth', status: 'captured', amount: 10000, currency: 'INR' }])
     expect((await recoverCapturedPaymentIntents(50)).recovered).toBe(1)
+    await recoverCapturedPaymentIntents(50)
+    expect(await regsFor(orderId)).toHaveLength(1)
   })
 
   it('a payment for a DIFFERENT amount never settles this intent', async () => {
@@ -374,7 +397,12 @@ describeEmu('RD-PAY-P0-3 · orphaned capture recovery (real Firestore)', () => {
   })
 
   // ═══ 15–16 · duplicates and capacity ════════════════════════════════════════
-  it('15 · a duplicate-email refusal creates NO registration and refunds in full', async () => {
+  // RD-PAYMENT-REFUND-AUTHORITY-02 — these two used to assert that a refusal REFUNDED the
+  // attendee automatically. Automatic refunds were deliberately removed: only a Super Admin
+  // may initiate one. A refusal now HOLDS the captured payment for review, so the sweep
+  // reports `held` and the gateway is never asked to refund anything. The money guarantee
+  // that matters is unchanged and still asserted: no registration, no capacity consumed.
+  it('15 · a duplicate-email refusal creates NO registration and HOLDS the payment', async () => {
     await wipe(); await seedEvent({ limitPerEmail: true })
     const first  = await seedIntent({ email: 'dupe@example.com' })
     capture(first)
@@ -385,14 +413,22 @@ describeEmu('RD-PAY-P0-3 · orphaned capture recovery (real Firestore)', () => {
     const pid2   = capture(second)
     const res    = await recoverCapturedPaymentIntents(50)
 
-    expect(res.refunded).toBe(1)
+    expect(res.held).toBe(1)
     expect(await regsFor(second)).toHaveLength(0)
     expect((await readIntent(second)).status).toBe('registration_failed')
-    expect(gw.refunds.map(r => r.paymentId)).toEqual([pid2])
+    // NOT refunded — and the hold is durable, so a human can see money is owed. Located by
+    // its CONTENTS rather than by `${kind}_${orderId}`, so the naming of the hold kind stays
+    // an implementation detail this test does not pin.
+    expect(gw.refunds).toHaveLength(0)
+    const holds = (await adminDb.collection('failedRefunds').get()).docs
+      .filter(d => (d.data() as { orderId?: string }).orderId === second)
+    expect(holds).toHaveLength(1)
+    expect(holds[0].data().paymentId).toBe(pid2)
+    expect(holds[0].data().status).toBe('review')
     expect((await counter()).totalCount).toBe(1)          // capacity not double-counted
   })
 
-  it('16 · recovery can NEVER exceed pass capacity — the overflow is refunded, not registered', async () => {
+  it('16 · recovery can NEVER exceed pass capacity — the overflow is HELD, not registered', async () => {
     await wipe(); await seedEvent({ passQuantity: 1 })
     const a = await seedIntent(); capture(a)
     const b = await seedIntent(); capture(b)
@@ -400,11 +436,11 @@ describeEmu('RD-PAY-P0-3 · orphaned capture recovery (real Firestore)', () => {
     const res = await recoverCapturedPaymentIntents(50)
 
     expect(res.recovered).toBe(1)
-    expect(res.refunded).toBe(1)
+    expect(res.held).toBe(1)
     expect((await counter()).passCounts?.[PASS]).toBe(1)   // never 2
     const total = (await adminDb.collection('registrations').where('eventSlug', '==', SLUG).get()).size
     expect(total).toBe(1)
-    expect(gw.refunds).toHaveLength(1)
+    expect(gw.refunds).toHaveLength(0)                     // no automatic refund, ever
   })
 
   // ═══ 17–18 · guest and authenticated ════════════════════════════════════════
@@ -487,18 +523,19 @@ describeEmu('RD-PAY-P0-3 · orphaned capture recovery (real Firestore)', () => {
     })
   }
 
-  it('COUPON CAP · an exhausted coupon is refused and refunded on EVERY path, and never over-consumed', async () => {
+  it('COUPON CAP · an exhausted coupon is refused and HELD on EVERY path, and never over-consumed', async () => {
     const c = await seedCoupon('cpn_full', { maxUses: 1, currentUses: 1 })
     for (const source of SOURCES) {
       const orderId   = await seedIntent({ coupon: c })
       const paymentId = capture(orderId)
       const out = await settleCapturedRegistration({ orderId, paymentId, intent: await readIntent(orderId) as never, source })
-      expect(out).toEqual({ kind: 'refunded', reason: 'COUPON_EXHAUSTED' })
+      // RD-PAYMENT-REFUND-AUTHORITY-02: refusal HOLDS, it does not refund.
+      expect(out).toEqual({ kind: 'held', reason: 'COUPON_EXHAUSTED' })
       expect(await regsFor(orderId)).toHaveLength(0)
       expect((await readIntent(orderId)).status).toBe('registration_failed')
     }
     expect(await couponUses('cpn_full')).toBe(1)            // never incremented past the cap
-    expect(gw.refunds).toHaveLength(3)
+    expect(gw.refunds).toHaveLength(0)                      // no automatic refund on any path
   })
 
   it('COUPON RACE · two concurrent settlements for the LAST use → one registration, one consumption', async () => {
@@ -512,12 +549,14 @@ describeEmu('RD-PAY-P0-3 · orphaned capture recovery (real Firestore)', () => {
     ])
 
     const kinds = [a.kind, b.kind].sort()
-    expect(kinds).toEqual(['refunded', 'settled'])
+    expect(kinds).toEqual(['held', 'settled'])
     expect(await couponUses('cpn_last')).toBe(1)
-    expect(gw.refunds).toHaveLength(1)                       // the loser is refunded in full
+    // The loser is HELD for Super Admin review, not auto-refunded — but the invariant that
+    // matters is still exact: one registration, one coupon consumption.
+    expect(gw.refunds).toHaveLength(0)
   }, 30_000)
 
-  it('INVITE · an invite-only event refuses + refunds on every path when the code is absent', async () => {
+  it('INVITE · an invite-only event refuses + HOLDS on every path when the code is absent', async () => {
     await adminDb.collection('events').doc(SLUG).update({
       accessControl: { type: 'invite_code', confirmationMode: 'auto', inviteCode: { code: 'VIP1', caseSensitive: false } },
     })
@@ -525,9 +564,10 @@ describeEmu('RD-PAY-P0-3 · orphaned capture recovery (real Firestore)', () => {
       const orderId   = await seedIntent()                   // intent carries NO inviteCode
       const paymentId = capture(orderId)
       const out = await settleCapturedRegistration({ orderId, paymentId, intent: await readIntent(orderId) as never, source })
-      expect(out).toEqual({ kind: 'refunded', reason: 'INVITE_CODE_INVALID' })
+      expect(out).toEqual({ kind: 'held', reason: 'INVITE_CODE_INVALID' })
       expect(await regsFor(orderId)).toHaveLength(0)
     }
+    expect(gw.refunds).toHaveLength(0)
   })
 
   it('INVITE · the trusted code stored on the intent settles on every path', async () => {
@@ -552,9 +592,14 @@ describeEmu('RD-PAY-P0-3 · orphaned capture recovery (real Firestore)', () => {
       else await settleCapturedRegistration({ orderId, paymentId, intent: await readIntent(orderId) as never, source })
       const d = (await regsFor(orderId))[0].data()
       // Drop the fields that are legitimately unique or path-specific.
-      const { id, ticketCode, razorpayOrderId, paymentId: _p, registeredAt, updatedAt,
+      // `paymentOrderId` joins `razorpayOrderId` here: each of the three paths settles its
+      // OWN order, so the order id differs by construction. `paymentProvider` is NOT
+      // stripped — it must be identical across the three, and it is what proves the
+      // provider-neutral write behaves the same on every path.
+      const { id, ticketCode, razorpayOrderId, paymentOrderId, paymentId: _p, registeredAt, updatedAt,
               recoveredByWebhook, recoveredBySweep, attendee, ...rest } = d
-      void id; void ticketCode; void razorpayOrderId; void _p; void registeredAt; void updatedAt
+      void id; void ticketCode; void razorpayOrderId; void paymentOrderId; void _p
+      void registeredAt; void updatedAt
       void recoveredByWebhook; void recoveredBySweep; void attendee
       return rest
     }

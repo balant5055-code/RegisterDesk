@@ -12,6 +12,7 @@ import { releaseEligibleFunds } from '@/lib/settlements/releaseFunds'
 import { getSettlementConfig } from '@/lib/settlements/resolveSettlementConfig'
 import { captureFinancialError, flushMonitoring } from '@/lib/monitoring/sentry'
 import { recordCronExecution } from '@/lib/monitoring/cronMetrics'
+import { logAdminActionOrRecord } from '@/lib/admin/audit'
 
 export const dynamic     = 'force-dynamic'
 export const maxDuration = 60
@@ -30,6 +31,23 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     }
     const result = await releaseEligibleFunds({ limit: 500 })
     ok = true; detail = JSON.stringify(result)
+    // RD-PHASE4-S4 · F11 — the automatic release is audited like the manual one, under a
+    // SYSTEM actor (never an admin uid). Only runs that moved money write a row, so an idle
+    // cron does not flood the log; failures are recorded for reconciliation, never thrown.
+    if (result.processed > 0 || result.failures > 0) {
+      await logAdminActionOrRecord({
+        adminUid:   'system:cron_release_funds',
+        actorRole:  'system',
+        action:     'finance.auto_release',
+        entityType: 'finance',
+        entityId:   'release-funds',
+        metadata:   {
+          releasedTransactions: result.processed,
+          releasedAmountPaise:  result.releasedAmountPaise,
+          skippedTransactions:  result.failures,
+        },
+      })
+    }
     console.log('[cron/release-funds]', detail)
     return NextResponse.json(result)
   } catch (err) {

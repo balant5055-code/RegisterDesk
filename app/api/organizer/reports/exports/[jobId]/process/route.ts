@@ -5,7 +5,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { authorizeAnyWorkspace } from '@/lib/team/workspace'
 import type { ProcessResult } from '@/lib/jobs/runner'
 import {
-  getReportExportJob, processReportExportChunk, toExportJobView, type ReportExportJobView,
+  getReportExportJob, permissionForExportJob, processReportExportChunk, toExportJobView, type ReportExportJobView,
 } from '@/lib/reports/exportJob'
 
 export type ProcessReportExportResponse =
@@ -21,6 +21,13 @@ export async function POST(
 
   const job = await getReportExportJob(jobId)
   if (!job || job.organizerUid !== authz.workspaceUid) {
+    return NextResponse.json({ success: false, error: 'Export not found' }, { status: 404 })
+  }
+  // RD-ANALYTICS-12-03 · re-check the report's permission before driving the job. Processing
+  // BUILDS the report — the most expensive thing a caller can trigger here — so the check
+  // belongs ahead of it, not merely ahead of the download.
+  const need = permissionForExportJob(job)
+  if (!need || !authz.permissions.includes(need)) {
     return NextResponse.json({ success: false, error: 'Export not found' }, { status: 404 })
   }
 

@@ -20,6 +20,8 @@ import { razorpay, RAZORPAY_KEY_ID }          from '@/lib/razorpay/client'
 import { checkRateLimit }                     from '@/lib/rateLimit'
 import { getWalletConfig }                    from '@/lib/wallet/resolveWalletConfig'
 import { getWalletBalance }                   from '@/lib/firebase/firestore/wallet'
+import { resolveActivePaymentProviderForNewOrder } from '@/lib/payments/providers'
+import { findUnresolvedTopup, UNRESOLVED_TOPUP_MESSAGES } from '@/lib/wallet/topupGuard'
 import type { WalletTopupOrderResponse }      from '@/types/events'
 
 export async function POST(req: NextRequest): Promise<NextResponse<WalletTopupOrderResponse | { error: string }>> {
@@ -88,6 +90,34 @@ export async function POST(req: NextRequest): Promise<NextResponse<WalletTopupOr
     }
   }
 
+  // ── Provider (RD-WALLET-W1 · W1.7) ─────────────────────────────────────────────
+  // Wallet top-ups are Razorpay-only: verify, the payment.captured webhook and the
+  // reconciliation cron are all Razorpay code. When an administrator has deliberately made
+  // Cashfree the active provider — or chose it and the gates refused it — this fails CLOSED,
+  // exactly like registration checkout: no Razorpay order is minted as a silent substitute.
+  const providerChoice = await resolveActivePaymentProviderForNewOrder()
+  if (!providerChoice.ok || providerChoice.provider !== 'razorpay') {
+    return NextResponse.json(
+      {
+        error: 'Wallet top-ups are temporarily unavailable. Please try again later.',
+        code:  'WALLET_TOPUP_PROVIDER_UNAVAILABLE',
+      },
+      { status: 503 },
+    )
+  }
+
+  // ── An earlier top-up still unresolved? (RD-WALLET-W1.1 follow-up) ──────────────
+  // Server-side, so a reload, a new session or another client cannot start a second payment
+  // while an earlier one is authorised, captured-but-uncredited or under review. Reads existing
+  // records (and the gateway for pending orders); fails closed when it cannot tell.
+  const unresolved = await findUnresolvedTopup(uid)
+  if (unresolved) {
+    return NextResponse.json(
+      { error: UNRESOLVED_TOPUP_MESSAGES[unresolved.reason], code: 'TOPUP_UNRESOLVED', reason: unresolved.reason },
+      { status: unresolved.reason === 'status_unknown' ? 503 : 409 },
+    )
+  }
+
   // ── Create Razorpay order ──────────────────────────────────────────────────────
   let order: { id: string; amount: number; currency: string }
   try {
@@ -108,6 +138,9 @@ export async function POST(req: NextRequest): Promise<NextResponse<WalletTopupOr
     uid,
     amountPaise,
     currency:    wallet.currency,
+    // RD-WALLET-W1 — which gateway took this order (additive; older records have no field
+    // and are, by construction, Razorpay).
+    provider:    'razorpay',
     status:      'pending',
     createdAt:   FieldValue.serverTimestamp(),
     updatedAt:   FieldValue.serverTimestamp(),

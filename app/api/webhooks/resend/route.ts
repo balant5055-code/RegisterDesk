@@ -48,6 +48,24 @@ interface ResendEvent {
   data?: { email_id?: string; to?: string[] | string }
 }
 
+
+/**
+ * RD-INTEG — the address fallback may only reach a log that was never linked to a provider
+ * message (no providerMessageId) — a log WITH an id is provably a different message — and only
+ * the newest such log per address. It used to update EVERY log for the address (up to the query
+ * limit), so one bounce flipped an organizer's unrelated historical messages to failed.
+ */
+function newestUnlinked<T extends FirebaseFirestore.QueryDocumentSnapshot>(docs: T[]): T | null {
+  let best: T | null = null, bestMs = -1
+  for (const d of docs) {
+    const x = d.data() as { providerMessageId?: unknown; createdAt?: { toMillis?: () => number } }
+    if (typeof x.providerMessageId === 'string' && x.providerMessageId) continue
+    const ms = typeof x.createdAt?.toMillis === 'function' ? x.createdAt.toMillis() : 0
+    if (ms >= bestMs) { best = d; bestMs = ms }
+  }
+  return best
+}
+
 export async function POST(req: NextRequest): Promise<NextResponse> {
   if (!RESEND_WEBHOOK_SECRET) {
     return NextResponse.json({ error: 'Webhook not configured' }, { status: 401 })
@@ -81,11 +99,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     // address can appear under either; without this filter a Resend bounce would mark an
     // unrelated SES log failed and suppress the recipient for mail that never bounced.
     // Filtered after the read (not in the query) so no new composite index is required.
+    // RD-INTEG — only the newest log never linked to a provider message (see newestUnlinked).
     for (const email of recipients.slice(0, 5)) {
       const snap = await col.where('recipientEmail', '==', email).limit(LOG_QUERY_LIMIT).get()
-      snap.docs
-        .filter(d => (d.data() as { provider?: unknown }).provider === 'resend')
-        .forEach(d => matched.set(d.id, d.data() as { organizerUid?: string; recipientEmail?: string; status?: string }))
+      const d = newestUnlinked(snap.docs.filter(x => (x.data() as { provider?: unknown }).provider === 'resend'))
+      if (d) matched.set(d.id, d.data() as { organizerUid?: string; recipientEmail?: string; status?: string })
     }
   }
 

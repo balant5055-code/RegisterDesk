@@ -16,11 +16,13 @@ import type {
   PayoutProfileSummary,
 } from '@/lib/payout/types'
 import { encryptPii, decryptPii } from '@/lib/payout/encryption'
+import { maskAccountNumber, maskGstin, maskIfsc, maskPan, maskUpi } from '@/lib/payout/mask'
 import { isValidGstin } from '@/lib/validators/gstin'
 import {
   buildHistoryRecord, snapshotFromDoc, type PayoutSnapshot,
 } from '@/lib/payout/historyRecord'
 import { stageHistoryRecord } from '@/lib/payout/history'
+import type { VendorPreparationStatus } from '@/lib/payout/vendorStatus'
 
 // ─── Validation patterns ──────────────────────────────────────────────────────
 
@@ -37,18 +39,43 @@ function tsToISO(ts: unknown): string | null {
   return null
 }
 
-function toSummary(uid: string, d: OrganizerPayoutProfileDoc): PayoutProfileSummary {
+/**
+ * @param includeSecrets  true ONLY for the profile's owner. See PayoutProfileSummary.
+ *
+ * The values are decrypted either way, because the masks are derived from plaintext —
+ * masking ciphertext would produce the tail of a base64 blob, which is meaningless. The
+ * plaintext simply never leaves this function unless the caller owns it.
+ */
+function toSummary(
+  uid: string,
+  d: OrganizerPayoutProfileDoc,
+  includeSecrets: boolean,
+): PayoutProfileSummary {
+  const account = decryptPii(d.accountNumber)
+  const ifsc    = decryptPii(d.ifscCode)
+  const pan     = decryptPii(d.panNumber)
+  const upi     = d.upiId ?? null
+
   return {
     uid,
     accountHolderName: d.accountHolderName,
     payoutMethod:      d.payoutMethod,
     bankName:          d.bankName          ?? null,
-    // Stored encrypted (P9.1) — decrypt for the owner's own view.
-    accountNumber:     decryptPii(d.accountNumber),
-    ifscCode:          decryptPii(d.ifscCode),
-    upiId:             d.upiId             ?? null,
-    panNumber:         decryptPii(d.panNumber) ?? '',
-    gstNumber:         d.gstNumber         ?? null,
+    // Stored encrypted (P9.1). Released ONLY to the owner, whose edit form needs them.
+    accountNumber:     includeSecrets ? account : null,
+    ifscCode:          includeSecrets ? ifsc    : null,
+    upiId:             upi,
+    panNumber:         includeSecrets ? (pan ?? '') : '',
+    // A GSTIN CONTAINS the PAN (chars 3-12), so it is masked for the same caller the PAN
+    // is masked for — otherwise masking the PAN field achieves nothing.
+    gstNumber:         includeSecrets ? (d.gstNumber ?? null) : maskGstin(d.gstNumber),
+
+    // Masked forms — reuse of lib/payout/mask, the same rules the audit history uses.
+    accountNumberMasked: maskAccountNumber(account),
+    ifscMasked:          maskIfsc(ifsc),
+    panMasked:           maskPan(pan),
+    upiMasked:           maskUpi(upi),
+    secretsVisible:      includeSecrets,
     isVerified:        d.isVerified        ?? false,
     verifiedAt:        tsToISO(d.verifiedAt),
     verifiedBy:        d.verifiedBy        ?? null,
@@ -71,7 +98,11 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ profile: null } satisfies PayoutProfileGetResponse)
   }
 
-  const profile = toSummary(uid, snap.data() as OrganizerPayoutProfileDoc)
+  // RD-PAYMENT-ONBOARDING-03 · the owner gets the real numbers because their edit form has
+  // to be pre-filled with them. A delegated finance member keeps the read access GA-7B gave
+  // them, but as masks — the same intent ("a finance team member cannot redirect payouts")
+  // applied to reading, not just writing.
+  const profile = toSummary(uid, snap.data() as OrganizerPayoutProfileDoc, authz.isOwner)
   return NextResponse.json({ profile } satisfies PayoutProfileGetResponse)
 }
 
@@ -95,7 +126,9 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
   if (!authz.ok) return NextResponse.json({ error: authz.error }, { status: authz.status })
   // GA-7B P2: the payout profile is the settlement DESTINATION (bank/UPI). Editing
   // it is restricted to the workspace OWNER so a finance team member cannot redirect
-  // payouts. Finance members retain read access via GET (unchanged).
+  // payouts. Finance members retain read access via GET — as of
+  // RD-PAYMENT-ONBOARDING-03 that read returns MASKED identifiers, so the same reasoning
+  // now covers reading the destination as well as changing it.
   if (!authz.isOwner) {
     return NextResponse.json({ error: 'Only the workspace owner can edit payout details.' }, { status: 403 })
   }
@@ -191,6 +224,29 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
     rejectionNote: null,
     createdAt:     existingData ? existingData.createdAt : now,
     updatedAt:     now,
+
+    // ═══ CASHFREE VENDOR METADATA · CARRIED FORWARD, NEVER ACCEPTED ═══════════
+    //
+    // This write is a `.set()` — a FULL document replace, not a merge — so any field not
+    // restated here is DELETED. The vendor fields are therefore copied from the existing
+    // document explicitly; omitting them would silently destroy an organizer's Cashfree
+    // vendor id the next time they corrected a typo in their bank name.
+    //
+    // They are copied from the STORED document, never from the request body, so an
+    // organizer cannot set their own vendor id, mark themselves locally reviewed, or claim
+    // a KYC status. That mirrors how `isVerified` is handled directly above.
+    //
+    // The local review status is the one exception to a straight copy: editing payout
+    // details invalidates the review of those details, exactly as it resets `isVerified`.
+    // A profile that was reviewed, or returned for correction, becomes freshly submitted.
+    ...(existingData?.cashfreeVendorId   !== undefined ? { cashfreeVendorId:   existingData.cashfreeVendorId   } : {}),
+    ...(existingData?.vendorKycStatus    !== undefined ? { vendorKycStatus:    existingData.vendorKycStatus    } : {}),
+    ...(existingData?.vendorCreatedAt    !== undefined ? { vendorCreatedAt:    existingData.vendorCreatedAt    } : {}),
+    ...(existingData?.vendorLastSyncedAt !== undefined ? { vendorLastSyncedAt: existingData.vendorLastSyncedAt } : {}),
+    vendorStatus:     'profile_submitted' satisfies VendorPreparationStatus,
+    vendorReviewedBy: null,
+    vendorReviewedAt: null,
+    vendorReviewNote: null,
   }
 
   // ═══ RD-FINANCE-CLOSURE-02 · the change and its audit record commit TOGETHER ═══
@@ -238,7 +294,8 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
 
   // Re-read to get server-resolved timestamps
   const saved    = await docRef.get()
-  const profile  = toSummary(uid, saved.data() as OrganizerPayoutProfileDoc)
+  // PUT is owner-only (guarded above), so the caller is by definition the owner.
+  const profile  = toSummary(uid, saved.data() as OrganizerPayoutProfileDoc, true)
 
   return NextResponse.json({ profile } satisfies PayoutProfilePutResponse)
 }

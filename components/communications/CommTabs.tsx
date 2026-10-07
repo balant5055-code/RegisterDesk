@@ -5,6 +5,7 @@
 // wallet/usage) and the shared chart/card components. No new runtime, no new
 // storage, no new communication logic.
 
+import { COMMUNICATION_BALANCE_HREF } from '@/lib/wallet/communicationBalance'
 import { useEffect, useState, type ReactNode } from 'react'
 import { auth } from '@/lib/firebase/auth'
 import { isChannelImplemented } from '@/lib/communications/health/channels'
@@ -57,11 +58,13 @@ function useLoaded<T>(loader: () => Promise<T>): { data: T | null; loading: bool
 // local assumptions — SMS has no transport, so its counters/costs are structurally zero.
 const SMS_AVAILABLE = isChannelImplemented('sms')
 
-interface WalletOverview { balancePaise: number; emailsSent: number; smsSent: number; whatsappSent: number; thisMonthSpendPaise: number }
+type WalletOverview = import('@/lib/wallet/types').WalletOverview
+/** RD-INTEG — a server-aggregated figure; "—" when it could not be measured (never 0). */
+const cnt = (v: number | null | undefined): string => (typeof v === 'number' ? v.toLocaleString('en-IN') : '—')
+const money = (v: number | null | undefined): string => (typeof v === 'number' ? rupees(v) : '—')
 interface ReminderAnalytics { scheduled: number; sent: number; failed: number; skipped: number; cancelled: number; recipients: number; costPaise: number }
 interface CommRow { id: string; createdAt: string | null; channel: string; status: string; notificationType?: string; templateKey?: string; costPaise?: number; error?: string }
 interface Broadcast { id: string; status: string; recipientCount: number; successCount: number; failCount: number; actualCostPaise?: number; estimatedCostPaise?: number }
-interface CommUsageRow { channel: string; costPaise: number; quantity: number; createdAt: string | null }
 
 function Section({ title, children, action }: { title: string; children: ReactNode; action?: ReactNode }) {
   return (
@@ -77,26 +80,22 @@ function Loading() { return <div className="flex justify-center py-16"><Loader2 
 
 export function CommOverview() {
   const { data, loading, error } = useLoaded(async () => {
-    const [wallet, reminders, broadcasts, logs] = await Promise.all([
+    const [wallet, reminders, broadcasts] = await Promise.all([
       getJSON<{ overview: WalletOverview }>('/api/organizer/wallet/overview'),
       getJSON<{ analytics: ReminderAnalytics }>('/api/organizer/reminders'),
       getJSON<{ campaigns: Broadcast[] }>('/api/organizer/broadcasts'),
-      getJSON<{ logs: { status: string; createdAt: string | null }[] }>('/api/organizer/email-logs?limit=200'),
     ])
-    return { wallet: wallet.overview, reminders: reminders.analytics, broadcasts: broadcasts.campaigns, logs: logs.logs }
+    return { wallet: wallet.overview, reminders: reminders.analytics, broadcasts: broadcasts.campaigns }
   })
 
   if (loading) return <Loading />
   if (error || !data) return <p className="text-[13px] text-destructive">{error ?? 'No data.'}</p>
 
-  const { wallet, reminders, broadcasts, logs } = data
-  const delivered = logs.filter(l => l.status === 'delivered').length
-  const sent = logs.filter(l => l.status === 'sent' || l.status === 'delivered').length
-  const failed = logs.filter(l => l.status === 'failed').length
-  const pending = logs.filter(l => l.status === 'queued').length
-  const today = new Date().toISOString().slice(0, 10)
-  const todaySends = logs.filter(l => (l.createdAt ?? '').slice(0, 10) === today).length
-  const successRate = sent + failed > 0 ? Math.round((sent / (sent + failed)) * 100) : 100
+  const { wallet, reminders, broadcasts } = data
+  // RD-INTEG — exact server counts (they were counted from the latest 200 log rows).
+  const m = wallet.messageCounts
+  const sent = m?.sent ?? null, failed = m?.failed ?? null
+  const successRate = sent === null || failed === null ? null : sent + failed > 0 ? Math.round((sent / (sent + failed)) * 100) : null
 
   return (
     <div className="space-y-4">
@@ -106,13 +105,14 @@ export function CommOverview() {
         <MetricCard label="SMS sent" value={SMS_AVAILABLE ? String(wallet.smsSent) : '—'} hint={SMS_AVAILABLE ? 'This month' : 'Unavailable'} icon={Phone} iconColor="text-sky-700" iconBg="bg-sky-50" />
         <MetricCard label="Broadcasts" value={String(broadcasts.length)} icon={Megaphone} iconColor="text-violet-700" iconBg="bg-violet-50" />
         <MetricCard label="Scheduled reminders" value={String(reminders.scheduled)} icon={Bell} iconColor="text-amber-700" iconBg="bg-amber-50" />
-        <MetricCard label="Delivered" value={String(delivered)} icon={CheckCircle2} iconColor="text-emerald-700" iconBg="bg-emerald-50" />
-        <MetricCard label="Failed" value={String(failed)} icon={XCircle} iconColor="text-rose-700" iconBg="bg-rose-50" />
-        <MetricCard label="Pending" value={String(pending)} icon={Clock} iconColor="text-amber-700" iconBg="bg-amber-50" />
+        <MetricCard label="Sent / submitted" value={cnt(sent)} hint="All time · includes delivered" icon={Mail} iconColor="text-primary" iconBg="bg-primary/10" />
+        <MetricCard label="Delivered" value={cnt(m?.delivered)} hint="Confirmed by the provider" icon={CheckCircle2} iconColor="text-emerald-700" iconBg="bg-emerald-50" />
+        <MetricCard label="Failed" value={cnt(failed)} hint={m?.unknown ? `+${m.unknown.toLocaleString('en-IN')} status unknown` : undefined} icon={XCircle} iconColor="text-rose-700" iconBg="bg-rose-50" />
+        <MetricCard label="Pending" value={cnt(m?.pending)} icon={Clock} iconColor="text-amber-700" iconBg="bg-amber-50" />
         <MetricCard label="Comm spend" value={rupees(wallet.thisMonthSpendPaise)} hint="This month" icon={Wallet} iconColor="text-slate-700" iconBg="bg-slate-100" />
-        <MetricCard label="Today's sends" value={String(todaySends)} icon={TrendingUp} iconColor="text-primary" iconBg="bg-primary/10" />
-        <MetricCard label="Wallet balance" value={rupees(wallet.balancePaise)} icon={Wallet} iconColor="text-emerald-700" iconBg="bg-emerald-50" href="/dashboard/wallet" />
-        <MetricCard label="Success rate" value={`${successRate}%`} icon={Percent} iconColor="text-emerald-700" iconBg="bg-emerald-50" />
+        <MetricCard label="Today's sends" value={cnt(m?.today)} hint="India time" icon={TrendingUp} iconColor="text-primary" iconBg="bg-primary/10" />
+        <MetricCard label="Communication balance" value={rupees(wallet.balancePaise)} icon={Wallet} iconColor="text-emerald-700" iconBg="bg-emerald-50" href={COMMUNICATION_BALANCE_HREF} />
+        <MetricCard label="Success rate" value={successRate === null ? '—' : `${successRate}%`} hint="Sent ÷ (sent + failed)" icon={Percent} iconColor="text-emerald-700" iconBg="bg-emerald-50" />
       </section>
     </div>
   )
@@ -170,7 +170,7 @@ export function CommAnalytics() {
         <Section title="Reminder & broadcast performance">
           <div className="grid grid-cols-2 gap-3 text-[13px]">
             <Kv k="Reminders sent" v={reminders.sent} /><Kv k="Reminders failed" v={reminders.failed} />
-            <Kv k="Broadcasts" v={broadcasts.length} /><Kv k="Broadcast delivered" v={broadcasts.reduce((s, b) => s + (b.successCount ?? 0), 0)} />
+            <Kv k="Broadcasts" v={broadcasts.length} /><Kv k="Broadcast messages sent" v={broadcasts.reduce((s, b) => s + (b.successCount ?? 0), 0)} />
           </div>
         </Section>
       </div>
@@ -182,36 +182,29 @@ export function CommAnalytics() {
 
 export function CommBilling() {
   const { data, loading, error } = useLoaded(async () => {
-    const [wallet, usage] = await Promise.all([
-      getJSON<{ overview: WalletOverview }>('/api/organizer/wallet/overview'),
-      getJSON<{ usage: CommUsageRow[] }>('/api/organizer/wallet/usage?limit=500'),
-    ])
-    return { wallet: wallet.overview, usage: usage.usage ?? [] }
+    const wallet = await getJSON<{ overview: WalletOverview }>('/api/organizer/wallet/overview')
+    return { wallet: wallet.overview }
   })
   if (loading) return <Loading />
   if (error || !data) return <p className="text-[13px] text-destructive">{error ?? 'No data.'}</p>
 
-  const { wallet, usage } = data
-  const byChannel = new Map<string, number>()
-  let lifetime = 0
-  const monthStart = new Date(); monthStart.setDate(1); monthStart.setHours(0, 0, 0, 0)
-  let monthly = 0
-  for (const u of usage) {
-    byChannel.set(u.channel, (byChannel.get(u.channel) ?? 0) + u.costPaise)
-    lifetime += u.costPaise
-    if (u.createdAt && new Date(u.createdAt) >= monthStart) monthly += u.costPaise
-  }
-  const seg: ChartPoint[] = [...byChannel.entries()].map(([label, value]) => ({ label, value })).sort((a, b) => b.value - a.value)
+  const { wallet } = data
+  // RD-INTEG — exact server sums (they were summed from the latest 500 usage rows, and "monthly"
+  // used the browser's month while the Overview used the server's). Net of broadcast refunds.
+  const sp = wallet.spendByChannelPaise
+  const seg: ChartPoint[] = ([['email', sp?.email], ['whatsapp', sp?.whatsapp], ...(SMS_AVAILABLE ? [['sms', sp?.sms]] : [])] as [string, number | null | undefined][])
+    .filter((e): e is [string, number] => typeof e[1] === 'number' && e[1] > 0)
+    .map(([label, value]) => ({ label, value })).sort((a, b) => b.value - a.value)
 
   return (
     <div className="grid gap-4 lg:grid-cols-2">
       <section className="grid grid-cols-2 gap-3 sm:grid-cols-3">
-        <MetricCard label="Email cost" value={rupees(byChannel.get('email') ?? 0)} icon={Mail} iconColor="text-primary" iconBg="bg-primary/10" />
-        <MetricCard label="WhatsApp cost" value={rupees(byChannel.get('whatsapp') ?? 0)} icon={MessageSquare} iconColor="text-emerald-700" iconBg="bg-emerald-50" />
-        <MetricCard label="SMS cost" value={SMS_AVAILABLE ? rupees(byChannel.get('sms') ?? 0) : '—'} hint={SMS_AVAILABLE ? undefined : 'Unavailable'} icon={Phone} iconColor="text-sky-700" iconBg="bg-sky-50" />
-        <MetricCard label="Monthly spend" value={rupees(monthly)} icon={Wallet} iconColor="text-amber-700" iconBg="bg-amber-50" />
-        <MetricCard label="Lifetime spend" value={rupees(lifetime)} icon={Wallet} iconColor="text-slate-700" iconBg="bg-slate-100" />
-        <MetricCard label="Wallet balance" value={rupees(wallet.balancePaise)} icon={Wallet} iconColor="text-emerald-700" iconBg="bg-emerald-50" href="/dashboard/wallet" />
+        <MetricCard label="Email cost" value={money(sp?.email)} icon={Mail} iconColor="text-primary" iconBg="bg-primary/10" />
+        <MetricCard label="WhatsApp cost" value={money(sp?.whatsapp)} hint="Charged per message WhatsApp accepts" icon={MessageSquare} iconColor="text-emerald-700" iconBg="bg-emerald-50" />
+        <MetricCard label="SMS cost" value={SMS_AVAILABLE ? money(sp?.sms) : '—'} hint={SMS_AVAILABLE ? undefined : 'Unavailable'} icon={Phone} iconColor="text-sky-700" iconBg="bg-sky-50" />
+        <MetricCard label="Monthly spend" value={rupees(wallet.thisMonthSpendPaise)} hint="This month (India time)" icon={Wallet} iconColor="text-amber-700" iconBg="bg-amber-50" />
+        <MetricCard label="Lifetime spend" value={money(wallet.lifetimeSpendPaise)} icon={Wallet} iconColor="text-slate-700" iconBg="bg-slate-100" />
+        <MetricCard label="Communication balance" value={rupees(wallet.balancePaise)} icon={Wallet} iconColor="text-emerald-700" iconBg="bg-emerald-50" href={COMMUNICATION_BALANCE_HREF} />
       </section>
       <Section title="Spend by channel">{seg.length ? <Donut segments={seg} /> : <p className="text-[13px] text-muted-foreground">No communication charges yet.</p>}</Section>
     </div>

@@ -17,16 +17,30 @@
 //   • the back/forward entry is replaced, not pushed — no extra history step
 // The flag is presentation-only; it gates nothing and grants nothing.
 
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { useReducedMotion } from 'framer-motion'
 import { useToast } from '@/components/ui/Toast'
+import { CornerCannons } from '@/components/auth/ConfettiBurst'
+
+/** How long the confetti layer stays mounted — the longest piece lands in ~3.5s. */
+const CELEBRATE_MS = 4200
 
 export function FreshRegistrationToast({
-  ticketCode, isPending,
+  ticketCode, isPending, celebrate = false,
 }: {
   ticketCode: string
   isPending:  boolean
+  /**
+   * 2026-10-06 (owner: "add a popper when the registration is success"). Fire the corner
+   * confetti alongside the toast — ONLY for a CONFIRMED registration (the page passes
+   * `status === 'confirmed'`), only on the same one-shot `?fresh=1` arrival, and never
+   * under prefers-reduced-motion. A refresh or bookmark never re-fires it.
+   */
+  celebrate?: boolean
 }) {
   const { showToast } = useToast()
+  const reduceMotion = useReducedMotion() ?? false
+  const [burst, setBurst] = useState(false)
   // React 18/19 mounts effects twice in dev StrictMode; without this the toast doubles.
   const fired = useRef(false)
 
@@ -37,6 +51,7 @@ export function FreshRegistrationToast({
     if (url.searchParams.get('fresh') !== '1') return
 
     fired.current = true
+    const pop = celebrate && !reduceMotion
 
     // Consume the flag before announcing, so an immediate refresh is already clean.
     url.searchParams.delete('fresh')
@@ -51,7 +66,18 @@ export function FreshRegistrationToast({
       'success',
       { title: isPending ? 'Registration received' : 'Registration successful' },
     )
-  }, [showToast, ticketCode, isPending])
+    // Next frame, not synchronously in the effect. Deliberately NOT cancelled on cleanup:
+    // StrictMode's re-run returns early on `fired`, so cancelling here would mean the
+    // confetti never fires in dev. A late setState after unmount is a no-op.
+    if (pop) requestAnimationFrame(() => setBurst(true))
+  }, [showToast, ticketCode, isPending, celebrate, reduceMotion])
 
-  return null
+  // Unmount the confetti layer once the pieces have landed.
+  useEffect(() => {
+    if (!burst) return
+    const t = setTimeout(() => setBurst(false), CELEBRATE_MS)
+    return () => clearTimeout(t)
+  }, [burst])
+
+  return burst ? <CornerCannons seed={7} /> : null
 }

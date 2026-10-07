@@ -33,8 +33,13 @@ export default async function robots(): Promise<MetadataRoute.Robots> {
         '/forgot-password',
         '/verify-email',
         '/welcome',
-        // Single-use token in the URL, no indexable content behind either.
-        '/team/accept',
+        // RD-TEAM-IMPL-01 — '/team/accept' was listed here for its single-use token.
+        // The route is gone; the entry is dropped rather than left to disallow a
+        // path that no longer exists.
+        //
+        // Staff sign-in is operational, not content: it is a credential prompt with
+        // nothing to index, and it now exists per-event as well as globally.
+        '/staff/login',
         '/unsubscribe',
       ],
     },

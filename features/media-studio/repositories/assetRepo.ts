@@ -15,6 +15,8 @@ import {
   type RenditionRecord,
 } from '@/features/media-studio/types'
 import type { ExistingAssetRef } from '@/features/media-studio/utils/duplicates'
+import { photoUsageLockRef, txnReleaseHeldPhoto } from '@/features/media-studio/repositories/photoUsageLock'
+import { PHOTO_CAPACITY_STATUSES } from '@/lib/licensing/photoCapacity'
 
 const assets    = () => adminDb.collection(MEDIA_ASSETS)
 const galleries = () => adminDb.collection(MEDIA_GALLERIES)
@@ -124,7 +126,7 @@ export async function findByChecksums(
  * It moves NO counter. A reservation is not a photo, and a gallery total must never include
  * bytes that may never arrive.
  */
-export async function reserveAsset(input: {
+export interface ReserveAssetInput {
   assetId:      string
   organizerUid: string
   eventId:      string
@@ -134,8 +136,16 @@ export async function reserveAsset(input: {
   renditions:   Partial<Record<MediaRendition, RenditionRecord>>
   visibility:   AssignableVisibility
   uploadedBy:   string
-}): Promise<void> {
-  await assets().doc(input.assetId).set({
+}
+
+/**
+ * RD-PHOTO-01 — the reservation document. Written ONLY by the photo-capacity gate
+ * (services/photoCapacityGate.ts reservePhotoUpload), inside its capacity transaction: a reservation
+ * occupies one unit of the event's paid photo capacity from this moment. (The former ungated
+ * `reserveAsset` writer was removed so nothing can reserve without that decision.)
+ */
+export function reservationData(input: ReserveAssetInput): Record<string, unknown> {
+  return {
     assetId:       input.assetId,
     schemaVersion: MEDIA_SCHEMA_VERSION,
     organizerUid:  input.organizerUid,
@@ -160,7 +170,7 @@ export async function reserveAsset(input: {
     uploadedBy: input.uploadedBy,
     uploadedAt: FieldValue.serverTimestamp(),
     updatedAt:  FieldValue.serverTimestamp(),
-  })
+  }
 }
 
 // ─── Create / finalise ────────────────────────────────────────────────────────
@@ -207,6 +217,21 @@ export interface RegisterAssetInput {
  * transaction. A hook that reads is therefore the caller's responsibility to order — which
  * is why `consumeInTx` does its reads first and is passed as the whole hook body.
  */
+/**
+ * RD-PHOTO-01 — a completion with no matching RESERVATION. Every photo must have taken a unit of
+ * its event's paid capacity at /uploads/prepare; a completion for an asset id that was never
+ * reserved (or reserved for another organizer / event, or for other object keys) would register a
+ * photo the capacity gate never authorized — e.g. re-registering one paid upload's objects under
+ * many fabricated ids.
+ */
+export class UnreservedAssetError extends Error {
+  readonly code = 'UPLOAD_NOT_RESERVED'
+  constructor(message = 'This upload was not started through Media Studio, so it cannot be completed. Please upload the photo again.') {
+    super(message)
+    this.name = 'UnreservedAssetError'
+  }
+}
+
 export interface RegisterAssetOptions {
   beforeCommit?: (tx: FirebaseFirestore.Transaction) => Promise<void>
 }
@@ -234,6 +259,15 @@ export async function registerAsset(
     }
 
     const previous = existing.exists ? (existing.data() as MediaAssetDoc) : null
+    // RD-PHOTO-01 — only a reservation THIS organizer made for THIS event (still pending, or already
+    // ready = an idempotent replay), for exactly the object keys it authorized, can be registered.
+    const reservedKeysMatch = !!previous && (Object.keys(input.renditions) as MediaRendition[])
+      .every(r => previous.renditions?.[r]?.path === input.renditions[r]?.path)
+    if (!previous || previous.organizerUid !== input.organizerUid || previous.eventId !== input.eventId
+        || previous.galleryId !== input.galleryId || (previous.albumId ?? null) !== (input.albumId ?? null)
+        || !(previous.status === 'pending' || previous.status === 'ready') || !reservedKeysMatch) {
+      throw new UnreservedAssetError()
+    }
     // Idempotency: a re-run nets out against whatever this record already contributed.
     const priorBytes  = previous?.status === 'ready' ? previous.bytesStored : 0
     const priorSource = previous?.status === 'ready' ? previous.bytesOriginalSource : 0
@@ -445,8 +479,14 @@ export async function markAssetDeleted(assetId: string): Promise<{ ok: boolean; 
     const albumRef   = doc.albumId ? albums().doc(doc.albumId) : null
     const gallerySnap = await tx.get(galleryRef)
     const albumSnap   = albumRef ? await tx.get(albumRef) : null
+    // RD-PHOTO-01 — a pending or ready photo frees its unit of the event's paid photo capacity.
+    const lockSnap    = await tx.get(photoUsageLockRef(doc.eventId))
 
     tx.update(ref, { status: 'deleted', updatedAt: FieldValue.serverTimestamp() })
+    if (doc.status === 'pending' || doc.status === 'ready') txnReleaseHeldPhoto(tx, lockSnap, doc.eventId)
+    // RD-PHOTO-01 — only a READY photo ever added to the gallery / album counters (a `pending`
+    // reservation moves none), so only a ready one takes them back down.
+    if (doc.status !== 'ready') return { ok: true, paths: Object.values(doc.renditions ?? {}).map(r => r?.path).filter((p): p is string => !!p) }
     tx.update(galleryRef, {
       assetCount:  FieldValue.increment(-1),
       bytesStored: FieldValue.increment(-doc.bytesStored),
@@ -695,8 +735,12 @@ export async function purgeReclaimedAsset(assetId: string): Promise<boolean> {
 
     const doc = snap.data() as MediaAssetDoc
     if (!(RECLAIMABLE_STATUSES as readonly string[]).includes(doc.status)) return false
+    // RD-PHOTO-01 — an abandoned PENDING reservation gives its unit of paid capacity back
+    // (a `deleted` record already gave it back when it was deleted).
+    const lockSnap = doc.status === 'pending' ? await tx.get(photoUsageLockRef(doc.eventId)) : null
 
     tx.delete(ref)
+    if (lockSnap) txnReleaseHeldPhoto(tx, lockSnap, doc.eventId)
     return true
   })
 }
@@ -848,6 +892,18 @@ export async function countEventAssets(organizerUid: string, eventId: string): P
     // infrastructure hiccup would stop an event mid-import.
     return 0
   }
+}
+
+/**
+ * RD-PHOTO-01 · the query whose count is an event's USED photo capacity: stored (`ready`) photos
+ * plus reserved in-flight uploads (`pending`). Served by the same declared
+ * (organizerUid, eventId, status) index as `countEventAssets`.
+ */
+export function photoCapacityUsageQuery(organizerUid: string, eventId: string): FirebaseFirestore.Query {
+  return assets()
+    .where('organizerUid', '==', organizerUid)
+    .where('eventId', '==', eventId)
+    .where('status', 'in', [...PHOTO_CAPACITY_STATUSES])
 }
 
 /**

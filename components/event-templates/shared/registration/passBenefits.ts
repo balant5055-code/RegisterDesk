@@ -10,9 +10,16 @@
 // Pure — no JSX, no hooks, no fabricated values.
 
 import type { PassPublic } from '@/components/event-templates/types'
+import { formatBenefit } from '@/components/event-templates/shared/registration/benefitLabels'
 
 export interface RankedBenefit {
-  /** Organiser's original label, in the casing they first used. */
+  /**
+   * The STORED entry, exactly as written: a curated benefit ID ('finisher_medal') or the
+   * organiser's free text. Kept because `label` is no longer the raw value and callers
+   * still need the original — `benefitIcon` in particular matches on it.
+   */
+  id: string
+  /** Attendee-facing copy, resolved through the canonical `formatBenefit` vocabulary. */
   label: string
   /** How many active passes include it. */
   count: number
@@ -24,9 +31,13 @@ export interface RankedBenefit {
  * Rank the benefits across a set of passes by how many passes offer each one.
  *
  * De-duplication is case- and whitespace-insensitive ("Chip Timing" and "chip timing"
- * are one benefit) but the label rendered is the organiser's first spelling — we never
- * re-case their copy. Ties keep first-appearance order, so the result is stable for a
- * given event rather than shuffling between renders.
+ * are one benefit) and runs on the STORED string; the entry kept is the first spelling,
+ * so free text is never re-cased. Ties keep first-appearance order, so the result is
+ * stable for a given event rather than shuffling between renders.
+ *
+ * `label` is then resolved through `formatBenefit`, because the stored string is often a
+ * curated ID: the hero was publishing `e_certificate` and `medical_support` to attendees
+ * verbatim. `id` carries the raw entry through for callers that key on it.
  */
 export function rankPassBenefits(passes: PassPublic[], limit = 5): RankedBenefit[] {
   const active = passes.filter(p => p.status !== 'inactive')
@@ -54,7 +65,12 @@ export function rankPassBenefits(passes: PassPublic[], limit = 5): RankedBenefit
   return [...byKey.values()]
     .sort((a, b) => (b.count - a.count) || (a.firstSeen - b.firstSeen))
     .slice(0, limit)
-    .map(({ label, count }) => ({ label, count, total: active.length }))
+    // Format LAST, at the emit boundary. Ranking, de-duplication and the limit all still
+    // run on the raw stored string, so counts, ordering and the cap are bit-for-bit what
+    // they were — only the copy that reaches a reader changes.
+    .map(({ label, count }) => ({
+      id: label, label: formatBenefit(label), count, total: active.length,
+    }))
 }
 
 /** Honest coverage line for a ranked benefit — derived, never invented. */

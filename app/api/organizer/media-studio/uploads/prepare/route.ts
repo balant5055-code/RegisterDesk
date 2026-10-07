@@ -14,16 +14,10 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { authorizeMedia } from '@/features/media-studio/services/authorize'
 import { getOwnedGallery, getOwnedAlbum } from '@/features/media-studio/repositories/galleryRepo'
-import {
-  countEventAssets, newAssetId, reserveAsset,
-} from '@/features/media-studio/repositories/assetRepo'
-import { checkCount, checkSize, resolveMediaConfig } from '@/lib/config/resolveMediaConfig'
-// MC-03 — Media Credits. Inert unless businessConfig.mediaStudio.creditsEnabled is true.
-import { getCreditPolicy, ledgerService } from '@/features/media-credits/services'
-import { openSession } from '@/features/media-credits/services/sessionService'
-import { resolveSlot } from '@/features/media-credits/utils/sessionSlots'
-import { InsufficientCreditsError, InvalidCreditOperationError } from '@/features/media-credits/errors'
-import type { CreditSessionDto } from '@/features/media-credits/types'
+import { newAssetId } from '@/features/media-studio/repositories/assetRepo'
+import { checkSize, resolveMediaConfig } from '@/lib/config/resolveMediaConfig'
+// RD-PHOTO-01 — every upload takes one unit of the event's PAID photo capacity, transactionally.
+import { reservePhotoUpload } from '@/features/media-studio/services/photoCapacityGate'
 import {
   isStorageReady, prepareUploads, type PreparedRendition, type RenditionRequest,
 } from '@/features/media-studio/services/uploadService'
@@ -34,7 +28,7 @@ import {
 export interface PrepareUploadResponse {
   assetId:    string
   renditions: PreparedRendition[]
-  /** MC-06B. Null when credits are disabled. */
+  /** RD-PHOTO-01 — always null: the organizer-level Media Credits session model is retired. Kept for older clients. */
   sessionId:  string | null
 }
 
@@ -60,10 +54,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const albumId   = typeof raw.albumId   === 'string' && raw.albumId.trim() !== ''
     ? raw.albumId.trim() : null
 
-  // MC-06B session addressing. Absent when credits are disabled; required when enabled.
-  const sessionId = typeof raw.sessionId === 'string' ? raw.sessionId.trim() : ''
-  const slotIndex = typeof raw.slotIndex === 'number' ? Math.trunc(raw.slotIndex) : null
-  const sessionSlots = typeof raw.sessionSlots === 'number' ? Math.trunc(raw.sessionSlots) : null
+  // RD-PHOTO-01 — `sessionId` / `slotIndex` (the retired Media Credits session model) are ignored.
 
   if (!galleryId) return NextResponse.json({ error: 'galleryId is required' }, { status: 400 })
 
@@ -114,19 +105,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   }
 
   // ── RD-MEDIA-08: the effective limits for THIS event ───────────────────────
-  // Event override → licence tier → global default, resolved in one place. Nothing below
-  // knows what any of the numbers are.
-  //
-  // RD-MEDIA-PERF-03: resolved alongside the event's photo count. Both are needed before any
-  // capability is minted and neither depends on the other, so they overlap.
-  const [limits, used] = await Promise.all([
-    resolveMediaConfig({
-      organizerUid: authz.workspaceUid,
-      eventId:      gallery.eventId,
-      eventSlug:    gallery.eventSlug,
-    }),
-    countEventAssets(authz.workspaceUid, gallery.eventId),
-  ])
+  // Event override → licence tier → global default — for upload SIZE and default visibility only.
+  // RD-PHOTO-01: the photo COUNT is no longer a resolved limit. `maxPhotosPerEvent` grants nothing;
+  // the event's paid photo capacity is decided by reservePhotoUpload below.
+  const limits = await resolveMediaConfig({
+    organizerUid: authz.workspaceUid,
+    eventId:      gallery.eventId,
+    eventSlug:    gallery.eventSlug,
+  })
 
   // Largest stored rendition. The platform-storage policy still applies as an absolute
   // ceiling underneath — this can tighten it, never widen it past what storage accepts.
@@ -136,100 +122,24 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: sizeVerdict.error }, { status: sizeVerdict.status })
   }
 
-  // Photos already in this event, across every gallery (resolved above, in parallel).
-  const countVerdict = checkCount(used, 1, limits.maxPhotosPerEvent, 'photos')
-  if (!countVerdict.ok) {
-    return NextResponse.json({ error: countVerdict.error }, { status: countVerdict.status })
-  }
-
-  // ── Media Credits — session-scoped (MC-06B, Spec v1.0 §11) ──────────────────
-  // Fail-safe OFF. With `creditsEnabled` false this block resolves one config section and
-  // returns — no session, no wallet read, no reservation, no behaviour change of any kind.
-  // That is the backward-compatibility guarantee, and it is why the flag is checked first.
-  const creditPolicy = await getCreditPolicy()
-
-  let creditSession: CreditSessionDto | null = null
-  let slotAssetId: string | null = null
-
-  if (creditPolicy.creditsEnabled) {
-    if (!sessionId || slotIndex === null) {
-      // Fail closed. An upload without a slot has no allocation behind it, and issuing a
-      // signed URL for one would be an unpaid upload.
-      return NextResponse.json(
-        { error: 'sessionId and slotIndex are required when media credits are enabled.' },
-        { status: 400 },
-      )
-    }
-
-    // Open-or-reuse. `openSession` is idempotent on the caller-supplied id, so the first
-    // photo of a batch opens the session and every later one collides harmlessly on
-    // `tx.create` and gets the existing allocation back. No separate open endpoint is needed.
-    try {
-      creditSession = await openSession({
-        sessionId,
-        organizerUid: authz.workspaceUid,
-        eventId:      gallery.eventId,
-        eventSlug:    gallery.eventSlug,
-        galleryId,
-        slotCount:    sessionSlots ?? 1,
-        actorUid:     authz.callerUid,
-      })
-    } catch (err) {
-      if (err instanceof InsufficientCreditsError) {
-        return NextResponse.json(
-          { error: err.message, code: err.code, required: err.required, available: err.available },
-          { status: 402 },
-        )
-      }
-      if (err instanceof InvalidCreditOperationError) {
-        return NextResponse.json({ error: err.message, code: err.code }, { status: 400 })
-      }
-      console.error('[media-studio/uploads/prepare] session open failed:', err)
-      return NextResponse.json(
-        { error: 'Could not start this upload. Please try again.' },
-        { status: 503 },
-      )
-    }
-
-    if (creditSession.status !== 'ACTIVE') {
-      return NextResponse.json(
-        { error: 'This upload session is no longer accepting photos.', code: 'SESSION_NOT_ACTIVE' },
-        { status: 409 },
-      )
-    }
-
-    // ── Stateless slot bound (Spec §11) ──
-    // Arithmetic only: no counter is read and none is written. Over-consumption is impossible
-    // because a slot outside the allocation never yields an assetId.
-    const slot = resolveSlot(sessionId, slotIndex, creditSession.slotCount)
-    if (!slot.ok) {
-      return NextResponse.json(
-        { error: `Invalid upload slot (${slot.reason}).`, code: 'INVALID_SLOT' },
-        { status: 400 },
-      )
-    }
-    slotAssetId = slot.assetId
-  }
-
   const outcome = await prepareUploads({
     eventSlug: gallery.eventSlug,
     renditions: requests,
   })
   if (!outcome.ok) return NextResponse.json({ error: outcome.error }, { status: outcome.status })
 
-  // With credits on, the assetId is DERIVED from the slot rather than random — that is what
-  // makes a retried prepare land on the same reservation document and be recognised as a
-  // replay instead of claiming a second slot.
-  const assetId = slotAssetId ?? newAssetId()
+  const assetId = newAssetId()
 
   // ── RD-MEDIA-04: record the reservation BEFORE handing out the capability ───
-  // This route used to mint signed PUT URLs and write nothing. If the browser then PUT some
-  // bytes and the tab closed, the objects sat in the bucket with NO record anywhere —
-  // invisible to the dashboard, invisible to the organizer, billable forever, and
-  // unfindable because nothing knew their keys.
-  //
   // A `pending` record makes an abandoned upload a fact the reclamation sweep can find and
-  // clean up. It moves no counter: a reservation is not a photo.
+  // clean up (it used to mint signed URLs and write nothing, orphaning objects forever).
+  //
+  // ── RD-PHOTO-01: …and that reservation IS the photo-capacity decision ─────────
+  // One transaction re-counts the event's pending + ready photos against its PAID capacity and
+  // writes this reservation only if a unit is free. No paid capacity ⇒ 402 PHOTO_CAPACITY_REQUIRED;
+  // full ⇒ 409 PHOTO_CAPACITY_FULL. Concurrent uploads (tabs, devices, parallel slots) serialise
+  // on the event's lock document, so the event can never hold more photos than it paid for.
+  // The signed URLs below are only returned once the reservation exists.
   const planned: Partial<Record<MediaRendition, RenditionRecord>> = {}
   for (const r of outcome.renditions) {
     planned[r.rendition] = {
@@ -237,8 +147,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     }
   }
 
+  let reservation
   try {
-    await reserveAsset({
+    reservation = await reservePhotoUpload({
       assetId,
       organizerUid: authz.workspaceUid,
       eventId:      gallery.eventId,
@@ -252,57 +163,20 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       uploadedBy:   authz.callerUid,
     })
   } catch (err) {
-    // FAIL-CLOSED. If the reservation cannot be written, the upload URLs must not be issued:
-    // handing out a capability whose objects nothing can ever find is exactly the hole this
-    // reservation closes.
+    // FAIL-CLOSED: no reservation (or no capacity decision) ⇒ no upload URL.
     console.error('[media-studio/uploads/prepare] reservation failed:', err)
     return NextResponse.json(
       { error: 'Could not start this upload. Please try again.' },
       { status: 503 },
     )
   }
-
-  // ── Claim the session slot (MC-06B) ─────────────────────────────────────────
-  // AFTER the asset reservation, so a slot claim can never outlive the record it belongs to.
-  //
-  // ═══ NO WALLET, NO LEDGER, NO BALANCE CHECK ══════════════════════════════════
-  // This used to hold credits per photo, which meant reading and writing one wallet document
-  // on every upload — the measured bottleneck (MC-05.6C: 3.14 photos/s across four instances,
-  // p95 15–19s). The credits are already held by the session, so all that remains is creating
-  // a document this slot alone owns. Two instances uploading for one organizer now write
-  // nothing in common.
-  //
-  // Still FAIL-CLOSED: if the slot cannot be claimed, no signed URL is issued.
-  if (creditSession) {
-    try {
-      await ledgerService.reserve({
-        organizerUid: authz.workspaceUid,
-        assetId,
-        eventId:      gallery.eventId,
-        eventSlug:    gallery.eventSlug,
-        galleryId,
-        // Recorded for audit and used by settlement's per-slot cost; it drives no wallet write.
-        credits:      creditSession.creditsPerPhotoAtOpen,
-        sessionId:    creditSession.sessionId,
-        slotIndex:    slotIndex as number,
-        actorUid:     authz.callerUid,
-      })
-    } catch (err) {
-      if (err instanceof InvalidCreditOperationError) {
-        // The slot is already spent — a retry against a consumed or released position.
-        return NextResponse.json({ error: err.message, code: err.code }, { status: 409 })
-      }
-      console.error('[media-studio/uploads/prepare] slot claim failed:', err)
-      return NextResponse.json(
-        { error: 'Could not start this upload. Please try again.' },
-        { status: 503 },
-      )
-    }
+  if (!reservation.ok) {
+    return NextResponse.json(
+      { error: reservation.error, code: reservation.code, capacity: reservation.figures },
+      { status: reservation.status, headers: { 'Cache-Control': 'no-store' } },
+    )
   }
 
-  const body: PrepareUploadResponse = {
-    assetId, renditions: outcome.renditions,
-    sessionId: creditSession?.sessionId ?? null,
-  }
+  const body: PrepareUploadResponse = { assetId, renditions: outcome.renditions, sessionId: null }
   return NextResponse.json(body, { headers: { 'Cache-Control': 'no-store' } })
 }

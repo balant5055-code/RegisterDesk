@@ -47,7 +47,8 @@ export interface AdminCommunicationOverview {
   recommendations: AdminRecommendation[]
   counts: {
     accepted:           number   // provider-accepted (SES 'sent')
-    delivered:          number   // provider-confirmed delivered (WhatsApp/Meta only — honest)
+    unknown:            number   // RD-INTEG — timed out: delivery unknown, excluded from failed
+    delivered:          number   // provider-confirmed delivered (SES/Resend delivery webhooks AND WhatsApp receipts)
     failed:             number
     pending:            number   // queued
     skipped:            number
@@ -105,7 +106,9 @@ export async function resolveAdminCommunicationOverview(): Promise<AdminCommunic
     health:          ctx.health,
     recommendations: deriveRecommendations(providers),
     counts: {
-      accepted:           analytics.messages.sent,
+      // RD-INTEG — accepted = provider-accepted, not yet confirmed delivered (one definition).
+      accepted:           analytics.messages.accepted,
+      unknown:            analytics.messages.unknown,
       delivered:          analytics.messages.delivered,
       failed:             analytics.messages.failed,
       pending:            analytics.messages.queued,

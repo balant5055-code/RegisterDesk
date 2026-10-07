@@ -22,15 +22,26 @@
 //
 // It performs NO capture and NO refund. It never mutates Razorpay.
 
-import { razorpay }                    from '@/lib/razorpay/client'
 import { adminDb }                     from '@/lib/firebase/admin'
 import { getPaymentIntent }            from '@/lib/firebase/firestore/paymentIntents'
+import { resolvePaymentProvider, LEGACY_PROVIDER, type PaymentProvider } from '@/lib/payments/providers'
 import { settleCapturedRegistration }  from './settleCapturedRegistration'
 import type { SettlementOutcome }      from './settleCapturedRegistration'
 
 /** Everything the operator must assert before anything is settled. All are required. */
 export interface OrphanedCaptureTarget {
   orderId:           string
+  /**
+   * RD-PAYMENT-PROVIDER-CONTRACT-04 — which gateway holds this order.
+   *
+   * Optional, defaulting to the legacy provider, because this manual admin tool contacts the
+   * gateway BEFORE it loads the intent, and that ordering is deliberate: the provider is the
+   * authority on whether money exists, and the stored intent is then checked against it.
+   * Reading the provider from the intent would mean reordering that validation — a larger
+   * change than this phase should make on a path where only one provider can currently
+   * exist. The Cashfree phase must pass it explicitly.
+   */
+  provider?:         PaymentProvider
   /** The captured payment on that order, as seen in the Razorpay dashboard. */
   paymentId:         string
   /** Charge amount in paise. Verified against BOTH Razorpay and the stored intent. */
@@ -71,10 +82,11 @@ export async function recoverOrphanedCapture(t: OrphanedCaptureTarget): Promise<
   // the shared server client. The secret is never read, logged or passed around here.
   let payments: Array<{ id?: string; status?: string; amount?: number; currency?: string }>
   try {
-    const res = await razorpay.orders.fetchPayments(t.orderId) as {
-      items?: Array<{ id?: string; status?: string; amount?: number; currency?: string }>
-    }
-    payments = res.items ?? []
+    const normalized = await resolvePaymentProvider(t.provider ?? LEGACY_PROVIDER)
+      .fetchOrderPayments(t.orderId)
+    payments = normalized.map(p => ({
+      id: p.providerPaymentId, status: p.status, amount: p.amountPaise, currency: p.currency,
+    }))
   } catch (err) {
     return { ok: false, reason: 'razorpay_unreachable', detail: err instanceof Error ? err.message : 'fetch failed' }
   }
@@ -102,9 +114,23 @@ export async function recoverOrphanedCapture(t: OrphanedCaptureTarget): Promise<
   }
 
   // ── 3. Nothing may already exist for this money ─────────────────────────────
+  //
+  // BOTH identifier fields are checked, and that is not belt-and-braces — it is the whole
+  // correctness of this guard. New registrations carry the order id in `paymentOrderId`
+  // (and mirror it to `razorpayOrderId` only for Razorpay); historical ones have only the
+  // legacy field. Checking one alone would miss the other kind entirely, and a MISS here
+  // does not fail safe — it concludes "no registration exists for this money" and creates
+  // a second one.
+  //
+  // Two single-field equality queries rather than one `or()`: both are covered by automatic
+  // single-field indexes, so this needs no composite index and no index deployment.
   const byOrder = await adminDb.collection('registrations')
-    .where('razorpayOrderId', '==', t.orderId).limit(1).get()
+    .where('paymentOrderId', '==', t.orderId).limit(1).get()
   if (!byOrder.empty) return { ok: false, reason: 'registration_exists', detail: byOrder.docs[0].id }
+
+  const byLegacyOrder = await adminDb.collection('registrations')
+    .where('razorpayOrderId', '==', t.orderId).limit(1).get()
+  if (!byLegacyOrder.empty) return { ok: false, reason: 'registration_exists', detail: byLegacyOrder.docs[0].id }
 
   const byPayment = await adminDb.collection('registrations')
     .where('paymentId', '==', t.paymentId).limit(1).get()

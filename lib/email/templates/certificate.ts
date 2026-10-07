@@ -43,7 +43,7 @@ export function certificateTemplate(p: CertificateEmailParams): { subject: strin
 
     <div style="text-align:center;margin-bottom:24px;">
       <a href="${p.certificateCenterUrl}"
-         style="display:inline-block;background:linear-gradient(135deg,#fb5a6a,#e5277e);color:#fff;font-size:14px;font-weight:700;padding:14px 32px;border-radius:12px;text-decoration:none;">
+         style="display:inline-block;background:#4F46E5;background-image:linear-gradient(135deg,#4F46E5,#7C3AED);color:#fff;font-size:14px;font-weight:700;padding:14px 32px;border-radius:12px;text-decoration:none;">
         Download Certificate
       </a>
     </div>
@@ -52,7 +52,7 @@ export function certificateTemplate(p: CertificateEmailParams): { subject: strin
       You can verify the authenticity of your certificate at any time:
     </p>
     <p style="text-align:center;margin:0;">
-      <a href="${p.verifyUrl}" style="font-size:12px;color:#e5277e;">${p.verifyUrl}</a>
+      <a href="${p.verifyUrl}" style="font-size:12px;color:#4F46E5;">${p.verifyUrl}</a>
     </p>
   `
 

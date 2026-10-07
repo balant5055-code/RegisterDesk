@@ -8,6 +8,41 @@ Lifecycle: [`RD-RACEOPS-IMPORT-LIFECYCLE.md`](./RD-RACEOPS-IMPORT-LIFECYCLE.md)
 
 ---
 
+## RD-RACEOPS-RESULTS-04 — Rich timing-provider results + the public runner result
+
+Closes the P1 the RESULTS-03 audit found: the pipeline collected gender, category, age group
+and the whole original row, then **dropped them at the publish boundary**, so nothing public,
+certificate, badge or export could reach them. It also could not accept a real provider
+export at all — one sheet, one row per bib, eight mappable columns.
+
+**The line this phase holds:** a timing file supplies FACTS; RegisterDesk computes the
+CONCLUSIONS. Bib, name, gender, category, age group, distance, chip/gun time, status and
+checkpoint times are imported. Positions (overall, gender, age group), their totals, pace and
+speed are RegisterDesk's own — a provider's rank describes their field, their DNF calls and
+their late corrections, and a stored pace beside a time that says otherwise is a defect
+waiting to be reported. Provider rank/pace/speed columns are recognised on import and
+reported as "calculated by RegisterDesk" rather than as unknown columns.
+
+| Area | What changed |
+|---|---|
+| Canonical model | `distanceMeters` / `distanceRaw`, and `splits[]` of `NormalizedRaceSplit` (cumulative AND segment, plus a wall-clock `timeOfDay`). `ResultField` gains `distance`; a new `SplitField` vocabulary describes the splits sheet. |
+| Distance | `import/validation/distance.ts` — a closed unit table, and a bare number is REFUSED rather than guessed (10 is 10 km to a road race and 10 m to a pool). A lap/split/checkpoint distance never feeds the overall distance. |
+| Pace & speed | `utils/performance.ts`, the only implementation. Derived, never stored. TRUNCATED, not rounded, which is what both provider samples publish. Every impossible case returns `null`, so no surface can print NaN, Infinity or a misleading zero. |
+| Time parsing | Three parsers for three questions: `parseRaceTime` (a result — `0:00` refused), `parseSplitElapsed` (a checkpoint — `0:00` is the Start), `parseTimeOfDay` (a clock reading, returned as a normalised string so it can never be read as a duration). |
+| Splits sheet | Optional second sheet keyed by bib (`import/splits/splitSheet.ts`). Keeps the Results sheet at ONE ROW PER BIB, so `DUPLICATE_BIB` stays blocking. Identity is (bib, `splitKey`); a duplicate checkpoint, an orphan bib, a timeless checkpoint and a backwards course are all blocking errors, and a last-checkpoint-vs-chip-time disagreement is a warning that overwrites neither value. |
+| Group ranking | `ranking/groups.ts` — gender and age-group positions and totals, assigned in the SAME ascending-time walk as the overall rank by keeping one tie state per group. **No new index, no second query.** A dimension with more than 64 distinct values is abandoned rather than half-ranked. |
+| Storage | `entries` carries the enriched facts and the group ranks/totals; checkpoints live in `entrySplits/v{n}__{bibKey}`, one document per participant per version, written in the SAME batch as the entry. `SNAPSHOT_CHUNK_SIZE` halved to 200 because a row can now cost two writes. |
+| Public | `PublicResultRow` gains the facts plus derived pace/speed; `PublicSplitRow` is new. The runner page shows an identity strip, Position and Pace-and-speed panels, and a split table — a compact table from `md` up inside its own scroller, one card per checkpoint below it. Every line is omitted when the value does not exist. |
+| Template | Results sheet gains `Distance`; a new **Splits** sheet ships HEADER-ONLY (a sample bib would not be on the organizer's start list, so an unedited upload would fail on it) with the worked example in "How to fill". CSV stays core-only and says so where the choice is made. |
+
+**Not changed, deliberately:** the organizer CSV export keeps its six columns; certificates and
+badges read exactly what they read before; rules and indexes are untouched.
+
+**Fixture trap for the next phase:** bibs are unique across the EVENT, so a per-pass emulator
+fixture needs disjoint bib ranges or verification reports "entered in a different race".
+
+---
+
 ## Sprint 4 — Public Results & Certificate Integration
 
 ### Phase A audit result: **PASS with 3 findings** (all reported before any code)

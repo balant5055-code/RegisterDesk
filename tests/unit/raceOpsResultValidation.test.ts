@@ -96,11 +96,16 @@ describe('validateResults — warnings', () => {
     expect(severityOf('DUPLICATE_ROW')).toBe('warning')
   })
 
-  it('UNRECOGNISED_STATUS explains the fallback', () => {
+  // RD-RACEOPS-02E · an unknown status word is a BLOCKING error now — it used to be a
+  // warning that let the row rank as a finisher. The message tells the organizer what to
+  // write instead.
+  it('UNRECOGNISED_STATUS blocks the row and names the accepted words', () => {
     const r = run([['Bib', 'Time', 'Status'], ['101', '00:45:12', 'WAVE-2']])
     const issue = r.issues.find(i => i.code === 'UNRECOGNISED_STATUS')
-    expect(issue?.message).toMatch(/treated as Finished/i)
-    expect(r.rows[0].usable).toBe(true)          // a warning never blocks
+    expect(issue?.severity).toBe('error')
+    expect(issue?.message).toMatch(/Use Finished, DNF, DNS or DQ/)
+    expect(issue?.message).not.toMatch(/treated as Finished/i)
+    expect(r.rows[0].usable).toBe(false)
   })
 
   it('UNMAPPED_COLUMN is a file-level warning with a null row number', () => {
@@ -133,11 +138,11 @@ describe('validateResults — warnings', () => {
 describe('validateResults — summary arithmetic', () => {
   it('counts valid / warning / error rows separately', () => {
     const r = run([
-      ['Bib', 'Time', 'Status'],
-      ['101', '00:45:12', 'FIN'],      // valid
-      ['102', '00:46:00', 'WAVE-2'],   // warning only
-      ['',    '00:47:00', 'FIN'],      // error
-    ])
+      ['Bib', 'Time', 'Status', 'Gun'],
+      ['101', '00:45:12', 'FIN', '00:46:00'],   // valid
+      ['102', '00:46:00', 'FIN', 'n/a'],        // warning only: gun time unreadable (02E: an unknown STATUS is an error now)
+      ['',    '00:47:00', 'FIN', ''],           // error
+    ], { ...MAP, gunTime: 'Gun' })
     expect(r.summary.rowsFound).toBe(3)
     expect(r.summary.validRows).toBe(1)
     expect(r.summary.warningRows).toBe(1)
@@ -235,5 +240,31 @@ describe('validationReportFilename', () => {
   it('falls back when the race name has no usable characters', () => {
     expect(validationReportFilename('validation-report', '///', '2026-07-26'))
       .toBe('validation-report-race-2026-07-26.csv')
+  })
+})
+
+// ─── RD-RACEOPS-02E · unknown status blocks the row ──────────────────────────
+
+describe('RD-RACEOPS-02E · an unknown status never becomes a ranked finisher', () => {
+  it.each(['LAP', 'OTL', 'SCR-X', 'DNP', 'Outside Time Limit'])('"%s" with a time → error, row unusable', raw => {
+    const r = run([['Bib', 'Time', 'Status'], ['101', '00:45:12', raw]])
+    expect(codesFor(r, 2)).toContain('UNRECOGNISED_STATUS')
+    expect(r.rows[0].usable).toBe(false)
+    expect(r.summary.errorRows).toBe(1)
+  })
+  it('SCR resolves to DNS (did not start) and needs no time', () => {
+    const r = run([['Bib', 'Time', 'Status'], ['101', '', 'SCR']])
+    expect(r.rows[0].result.status).toBe('dns')
+    expect(r.rows[0].usable).toBe(true)
+  })
+  it('Finisher, Completed, DSQ and blank keep working', () => {
+    const r = run([['Bib', 'Time', 'Status'], ['101', '00:45:12', 'Finisher'], ['102', '00:45:13', 'Completed'], ['103', '', 'DSQ'], ['104', '00:45:14', '']])
+    expect(r.rows.map(x => x.result.status)).toEqual(['finished', 'finished', 'dq', 'finished'])
+    expect(r.rows.every(x => x.usable)).toBe(true)
+    expect(r.summary.errorCount).toBe(0)
+  })
+  it('the severity table says error, so the report and the server agree', () => {
+    expect(severityOf('UNRECOGNISED_STATUS')).toBe('error')
+    expect(VALIDATION_ISSUES.find(i => i.code === 'UNRECOGNISED_STATUS')?.severity).toBe('error')
   })
 })

@@ -12,7 +12,17 @@ function check(label: string, cond: boolean): void {
   console.log(`${cond ? 'PASS' : 'FAIL'}  ${label}`)
 }
 
-const PASS = { id: 'p1', name: 'GA', description: null, price: 10000, unlimited: false, capacity: 100, sold: 0, status: 'active', salesStartDate: null, salesEndDate: null }
+// RD-EVENT-13 · `PassDetail` gained the pass configuration the organizer sets in the
+// builder (visibility, early bird, per-order limits …). Additive: every field below is
+// the neutral default, so every assertion in this script means exactly what it did.
+const PASS = {
+  id: 'p1', name: 'GA', description: null, price: 10000, unlimited: false, capacity: 100,
+  sold: 0, status: 'active', salesStartDate: null, salesEndDate: null,
+  code: null, type: 'paid', visibility: 'public', featured: false,
+  hideWhenSoldOut: false, showRemainingSeats: false,
+  minPurchase: null, maxPurchase: null,
+  earlyBirdPrice: null, earlyBirdEndDate: null, benefitsCount: 0,
+}
 
 const BASE = {
   draftId: 'd1', status: 'published', lifecycleStatus: 'published',
@@ -21,7 +31,7 @@ const BASE = {
   bannerUrl: 'https://x/b.jpg', logoUrl: 'https://x/l.png',
   eventType: 'conference', eventSubtype: 'tech_conference', campaignType: null, visibility: 'public',
   venueType: 'physical', venueName: 'Hall A', venueCity: 'Mumbai', venueAddress: '123 St', onlinePlatform: null, onlineMeetingUrl: null,
-  totalCapacity: null, totalRegistrations: 0, checkedInCount: 0, estimatedRevenue: 0, isFreeEvent: false,
+  totalCapacity: null, totalRegistrations: 0, checkedInCount: 0, confirmedRevenuePaise: 0, isFreeEvent: false,
   passes: [PASS], publishedAt: '2026-07-01T00:00:00Z', updatedAt: '2026-07-01T00:00:00Z',
   organizerName: null, organizerEmail: null, organizerPhone: null, organizerWebsite: null,
   speakers: [], sponsors: [{ id: 's1', name: 'Acme', logoUrl: 'x', website: '', tier: '', order: 0 }],

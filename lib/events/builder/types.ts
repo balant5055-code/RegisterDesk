@@ -36,6 +36,8 @@ export interface StepViewProps {
   onGoToStep?:     (step: number, fieldHint?: string) => void
   focusHint?:      string
   wizardSteps?:    WizardStep[]
+  // RD-CE-FIX H5 — the step's identity choices are frozen (the event is already published).
+  locked?:         boolean
 }
 
 export type VisibilityId = 'public' | 'private'
@@ -82,6 +84,17 @@ export function normalizeFeeModel(value: unknown, engineEnabled = false): FeeMod
 // this yet; it is the single source of truth for the mapping used from Phase 2 onward.
 export function builderFeeModelToEngine(model: FeeModel): EngineFeeModel {
   return model === 'attendee_pays' ? 'customer_pays' : 'organizer_pays'
+}
+
+// RD-PHASE4-S3 · Q1 — fee collection is FIXED to organizer-pays. Organizers do not choose it, and a
+// value that came from an organizer-controlled place (a draft, a legacy event, a duplicate) must never
+// make attendees pay platform fees. Trusted server boundaries (publish, duplicate) store the pricing
+// through this, and checkout charges by SUPPORTED_FEE_MODEL regardless of the stored value.
+export function organizerPaysPricing<T>(pricing: T): T {
+  if (pricing && typeof pricing === 'object' && !Array.isArray(pricing)) {
+    return { ...(pricing as Record<string, unknown>), feeModel: SUPPORTED_FEE_MODEL } as T
+  }
+  return pricing
 }
 
 export interface EventPricingDraft {

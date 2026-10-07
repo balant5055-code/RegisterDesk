@@ -242,7 +242,7 @@ export function CommunityTemplate(props: EventDetailProps) {
               className="grid gap-8 lg:grid-cols-[200px_minmax(0,1fr)]"
             >
               <div className="lg:pt-1">
-                <div className="mb-3 h-0.5 w-8" style={{ backgroundImage: 'var(--primary-gradient)' }} />
+                <div className="mb-3 h-0.5 w-8" style={{ backgroundImage: 'var(--action-gradient)' }} />
                 <h2 className="text-[1.125rem] font-black leading-tight text-gray-900 sm:text-[1.375rem]">
                   About This Event
                 </h2>

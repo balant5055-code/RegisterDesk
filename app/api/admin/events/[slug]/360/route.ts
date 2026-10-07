@@ -8,6 +8,7 @@
 // start `neutral` and are upgraded client-side from the (lazy) analytics endpoint.
 
 import { NextRequest, NextResponse } from 'next/server'
+import { financialViewFor } from '@/lib/admin/financialGuard'
 import { adminDb }                   from '@/lib/firebase/admin'
 import { resolveAdminUid }           from '@/lib/admin/auth'
 import { parseEmailProviderName }    from '@/lib/email/providerName'
@@ -211,7 +212,8 @@ export async function GET(req: NextRequest, ctx: RouteContext): Promise<NextResp
     health,
   }
 
-  return NextResponse.json({ overview } satisfies Event360Response, {
+  // RD-CLOSE — mixed moderation + money view: money fields are withheld unless Super Admin (ADMIN_UIDS).
+  return NextResponse.json(await financialViewFor(req, { overview } satisfies Event360Response), {
     headers: { 'Cache-Control': 'no-store' },
   })
 }

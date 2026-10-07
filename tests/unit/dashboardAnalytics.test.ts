@@ -302,8 +302,13 @@ describe('the dashboard route uses ONE canonical, archive-free event set', () =>
   it('scopes the recent-registration scan — trends and activity feed', () => {
     // organizerUid + registeredAt only: without this filter an archived event's rows flow
     // straight into both trend charts, today's figures and the activity feed.
-    expect(src).toMatch(/const recentRegs = recentRegsRaw\.filter\(/)
-    expect(src).toMatch(/dashboardSlugs\.has\(r\.eventSlug\)/)
+    // RD-DASH-03: the in-memory scope filter is gone because the scope is now pushed INTO
+    // the query — a stronger guarantee than filtering a limited read after the fact.
+    expect(src).not.toMatch(/recentRegsRaw/)
+    const feed = readFileSync(resolve(process.cwd(), 'lib/dashboard/activityFeed.ts'), 'utf8')
+    expect(feed).toMatch(/where\('eventSlug', '==', scope\.eventSlug\)/)
+    expect(feed).toMatch(/where\('eventSlug', 'in', scope\.dashboardSlugs\)/)
+    expect(src).not.toMatch(/dashboardSlugs\.has\(r\.eventSlug\)/)
   })
 
   it('scopes the settlement communication-cost figure', () => {

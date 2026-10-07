@@ -19,6 +19,26 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 
+// RD-EVENT-02 · the events-list gating rules now live in a pure module, so the assertions
+// below call them instead of pattern-matching the component that used to inline them.
+import {
+  actionAvailability, isReadOnlyLifecycle,
+  primaryActionLabel as primaryLabelFor,
+} from '@/app/(dashboard)/dashboard/events/presentation'
+import type { EventListItem } from '@/app/api/organizer/events/route'
+import type { EventLifecycleStatus } from '@/types/events'
+
+const listItem = (lifecycleStatus: EventLifecycleStatus): EventListItem => ({
+  draftId: 'd', status: 'draft', lifecycleStatus, name: 'E', slug: null, tagline: null,
+  startDate: null, endDate: null, bannerUrl: null, eventType: null, eventSubtype: null,
+  campaignType: null, isFreeEvent: false, totalCapacity: null, totalRegistrations: 0,
+  confirmedRevenuePaise: 0, passes: [], updatedAt: '', publishedAt: null,
+  reviewStatus: null, rejectionReason: null, changesComment: null, hasPaidLicense: false,
+})
+const availability = (ls: EventLifecycleStatus) =>
+  actionAvailability(listItem(ls), { canDeleteDraft: true })
+const primaryActionLabel = (ls: EventLifecycleStatus) => primaryLabelFor(listItem(ls))
+
 // ── In-memory Firestore + storage, shared by the execution tests ─────────────
 const store = new Map<string, Map<string, Record<string, unknown>>>()
 const col = (n: string) => { if (!store.has(n)) store.set(n, new Map()); return store.get(n)! }
@@ -560,27 +580,34 @@ describe('speaker photos are not deleted by key', () => {
 // fine; the integration was missing.
 
 describe('the Archived tab card menu offers permanent deletion', () => {
-  const src = readFileSync(resolve(process.cwd(), 'app/(dashboard)/dashboard/events/EventsClient.tsx'), 'utf8')
+  // RD-EVENT-02 · The landing page split its card, menu and presentation rules out of
+  // EventsClient.tsx. Every rule below is the SAME rule, re-anchored at its new home —
+  // and the gating ones are now asserted by CALLING the predicate instead of matching a
+  // string, which is a stronger check of identical behaviour.
+  const src  = readFileSync(resolve(process.cwd(), 'app/(dashboard)/dashboard/events/EventsClient.tsx'), 'utf8')
+  const card = readFileSync(resolve(process.cwd(), 'app/(dashboard)/dashboard/events/EventCard.tsx'), 'utf8')
 
   it('gates the action on ARCHIVED specifically', () => {
-    expect(src).toMatch(/const canDeleteForever = ls === 'archived'/)
-    expect(src).toMatch(/\{canDeleteForever && \(/)
+    expect(availability('archived').deleteForever).toBe(true)
+    expect(card).toMatch(/if \(avail\.deleteForever\)/)
   })
 
   it('does NOT reuse isReadOnly — completed and cancelled are read-only but not deletable', () => {
     // isReadOnly covers archived|completed|cancelled. Gating on it would offer permanent
     // deletion for two states the server refuses with 409.
-    expect(src).toMatch(/const isReadOnly\s+= ls === 'archived' \|\| ls === 'completed' \|\| ls === 'cancelled'/)
-    expect(src).not.toMatch(/isReadOnly && \([\s\S]{0,200}Delete Permanently/)
+    expect(isReadOnlyLifecycle('completed')).toBe(true)
+    expect(isReadOnlyLifecycle('cancelled')).toBe(true)
+    expect(availability('completed').deleteForever).toBe(false)
+    expect(availability('cancelled').deleteForever).toBe(false)
   })
 
   it('renders the label and a deleting state', () => {
-    expect(src).toMatch(/Delete Permanently/)
-    expect(src).toMatch(/deleting \? 'Deleting…' : 'Delete Permanently'/)
+    expect(card).toMatch(/label: 'Delete permanently'/)
+    expect(card).toMatch(/pendingLabel: 'Deleting…'/)
   })
 
   it('calls the EXISTING endpoint — no second deletion route', () => {
-    expect(src).toMatch(/fetch\(`\/api\/organizer\/events\/\$\{event\.draftId\}`, \{\s*method:\s*'DELETE'/)
+    expect(src).toMatch(/\/api\/organizer\/events\/\$\{event\.draftId\}`, \{ method: 'DELETE' \}/)
     // The draft-delete path is a different, pre-existing flow and must stay separate.
     expect(src).not.toMatch(/eventDeletion|buildDeletionManifest/)
   })
@@ -592,35 +619,41 @@ describe('the Archived tab card menu offers permanent deletion', () => {
   })
 
   it('cancelling the confirmation deletes nothing', () => {
-    // `confirm()` resolves false on Cancel; the handler must return before any fetch.
-    const fn = src.slice(src.indexOf('async function handlePermanentDelete'), src.indexOf('// Event was returned by an admin'))
+    // `confirm()` resolves false on Cancel; the handler must return before any request.
+    const fn = src.slice(src.indexOf('const onDeleteForever'), src.indexOf('const onResubmit'))
     expect(fn).toMatch(/if \(!ok\) return/)
-    expect(fn.indexOf('if (!ok) return')).toBeLessThan(fn.indexOf('fetch('))
+    expect(fn.indexOf('if (!ok) return')).toBeLessThan(fn.indexOf('authedFetch('))
   })
 
   it('derives success from the payload, not the HTTP status alone', () => {
-    expect(src).toMatch(/if \(!res\.ok \|\| !json\.success\)/)
+    // A partial deletion answers { success: false }; the status alone would call it done.
+    expect(src).toMatch(/if \(!res\.ok \|\| body\.success === false\)/)
   })
 
   it('prevents duplicate submission', () => {
-    const fn = src.slice(src.indexOf('async function handlePermanentDelete'), src.indexOf('// Event was returned by an admin'))
-    expect(fn).toMatch(/if \(deleting\) return/)
+    const fn = src.slice(src.indexOf('const runMutation'), src.indexOf('const onDuplicate'))
+    expect(fn).toMatch(/if \(pendingByEvent\[event\.draftId\]\) return/)
   })
 
   it('uses the existing destructive token, not an arbitrary colour', () => {
-    expect(src).toMatch(/text-red-600 hover:bg-red-50/)
+    const menu = readFileSync(resolve(process.cwd(), 'app/(dashboard)/dashboard/events/EventCardMenu.tsx'), 'utf8')
+    expect(menu).toMatch(/text-destructive hover:bg-destructive\/10/)
+    expect(menu).not.toMatch(/text-red-\d{3}/)
   })
 
   it('leaves Archive unavailable for an already-archived event', () => {
-    // Archive is rendered under !isReadOnly, and archived IS read-only — so it cannot show.
-    const menu = src.slice(src.indexOf('{menuOpen && ('), src.indexOf('{isDraft && onDelete && ('))
-    expect(menu).toMatch(/\{!isReadOnly && \([\s\S]*?Archive/)
+    // Archive now asks the lifecycle state machine directly: archived has no transition
+    // to archived, so the action cannot be offered.
+    expect(availability('archived').archive).toBe(false)
+    expect(availability('published').archive).toBe(true)
   })
 
   it('keeps Edit / Duplicate / Manage behaviour unchanged', () => {
-    expect(src).toMatch(/isDraft \? 'Continue Setup' : 'Edit'/)
-    expect(src).toMatch(/<Copy className="size-3\.5" \/> Duplicate/)
-    expect(src).toMatch(/isReadOnly \? 'View' : isDraft \? 'Continue Setup' : 'Manage'/)
+    expect(card).toMatch(/ls === 'draft' \? 'Continue setup' : 'Edit event'/)
+    expect(card).toMatch(/label: 'Duplicate'/)
+    expect(primaryActionLabel('archived')).toBe('View')
+    expect(primaryActionLabel('draft')).toBe('Continue setup')
+    expect(primaryActionLabel('published')).toBe('Manage')
   })
 })
 
@@ -636,10 +669,17 @@ describe('both delete surfaces share one contract', () => {
   })
 
   it('both gate on archived only', () => {
-    for (const src of [list, detail]) expect(src).toMatch(/canDeleteForever = ls === 'archived'/)
+    // The DETAIL panel still states the rule inline (it is untouched by RD-EVENT-02); the
+    // LIST now delegates to the shared predicate. Both must reach the same answer.
+    expect(detail).toMatch(/canDeleteForever = ls === 'archived'/)
+    expect(availability('archived').deleteForever).toBe(true)
+    for (const ls of ['published', 'completed', 'cancelled', 'draft'] as const) {
+      expect(availability(ls).deleteForever).toBe(false)
+    }
   })
 
   it('both target the same endpoint', () => {
-    for (const src of [list, detail]) expect(src).toMatch(/\/api\/organizer\/events\/\$\{event\.draftId\}`, \{\s*method:\s*'DELETE'/)
+    expect(detail).toMatch(/\/api\/organizer\/events\/\$\{event\.draftId\}`, \{\s*method:\s*'DELETE'/)
+    expect(list).toMatch(/\/api\/organizer\/events\/\$\{event\.draftId\}`, \{ method: 'DELETE' \}/)
   })
 })

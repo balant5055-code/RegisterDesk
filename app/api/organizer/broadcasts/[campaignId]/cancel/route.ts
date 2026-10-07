@@ -3,8 +3,15 @@
 // Cancels a broadcast:
 //   • SCHEDULED (any channel) — cancel before it starts (status-guarded txn).
 //   • SENDING WhatsApp (WA-3) — cancel the running send job; the runner stops at the
-//     next page/commit and already-sent recipients are kept (no re-send, no refund
-//     here — WA-4). The campaign is marked 'cancelled' with the counts sent so far.
+//     next page/commit and already-sent recipients are kept (no re-send). The campaign is
+//     marked 'cancelled' with the counts sent so far.
+//
+// RD-INTEG · D3 — billing: charge on accept. Every recipient WhatsApp never accepted is given
+// back (money or prepaid units) by settleBroadcastBilling — NOT here: a worker can lease the job
+// between any read this route makes and cancelJob, and would then send a page after a settlement
+// computed here. The worker settles after its last commit (syncCampaignTerminal); the
+// whatsapp-broadcasts cron sweep settles everything else once the job has been quiet for longer
+// than a page can take.
 
 import { NextRequest, NextResponse } from 'next/server'
 import { FieldValue }                from 'firebase-admin/firestore'
@@ -14,6 +21,7 @@ import { logBroadcastAction }        from '@/lib/broadcasts/audit'
 import { cancelJob, getJob }         from '@/lib/jobs/kernel'
 import type { Job }                  from '@/lib/jobs/types'
 import { campaignJobPointer }        from '@/lib/broadcasts/broadcastJobs'
+import { countAcceptedRecipients }   from '@/lib/broadcasts/whatsappJob'
 
 export async function POST(
   req: NextRequest,
@@ -37,16 +45,20 @@ export async function POST(
   if (d.status === 'sending' && ptr.jobId) {
     await cancelJob(ptr.collection, ptr.jobId)
     const job = await getJob<Job>(ptr.collection, ptr.jobId)
+    const isWhatsApp = d.channel === 'whatsapp'
+    // WhatsApp: the sent flags are the truth (the runner counter can over-count a re-run page).
+    const succeeded = isWhatsApp ? await countAcceptedRecipients(ptr.jobId) : (job?.counts.succeeded ?? 0)
+    const failed    = isWhatsApp ? Math.max(0, (job?.counts.total ?? 0) - succeeded) : (job?.counts.failed ?? 0)
     await ref.update({
       status:       'cancelled',
-      successCount: job?.counts.succeeded ?? 0,
-      failCount:    job?.counts.failed ?? 0,
+      successCount: succeeded,
+      failCount:    failed,
       sentAt:       FieldValue.serverTimestamp(),
       updatedAt:    FieldValue.serverTimestamp(),
     })
     void logBroadcastAction({
       organizerUid: uid, actorUid: callerUid, action: 'broadcast.cancelled', campaignId,
-      metadata: { successCount: job?.counts.succeeded ?? 0, failCount: job?.counts.failed ?? 0 },
+      metadata: { successCount: succeeded, failCount: failed },
     }).catch(() => {})
     return NextResponse.json({ success: true })
   }

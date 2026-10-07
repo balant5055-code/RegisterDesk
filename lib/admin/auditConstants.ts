@@ -15,6 +15,12 @@ export const AUDIT_ACTIONS = [
   'finance.release_funds',
   'payout_profile.verified',
   'payout_profile.rejected',
+  // Phase C — LOCAL Cashfree vendor preparation review. Distinct actions from the two
+  // above on purpose: `verified` is RegisterDesk's payout check, these record whether an
+  // admin considers the organizer ready to be put forward to Cashfree. Neither creates a
+  // vendor nor approves KYC.
+  'payout_profile.vendor_reviewed',
+  'payout_profile.vendor_changes_requested',
   'failed_refund.retry',
   'failed_refund.resolved',
   'failed_refund.ignored',
@@ -103,6 +109,31 @@ export const AUDIT_ACTIONS = [
   // which third party handles attendee mail for a live event, and the only record of WHY
   // is what the admin recorded here.
   'event.email_provider_changed',
+  // RD-EVENT-COMMERCE-04 — per-event capacity commercial terms (events/{slug}.commercial).
+  // Also recorded in licenseHistory; mirrored here so it appears in the admin audit log.
+  'commercial_terms.set',
+  'commercial_terms.cleared',
+  // RD-PHASE4-S4 — financial controls & audit logging.
+  'settlement.requested',                 // organizer request (destination snapshot)
+  'finance.auto_release',                 // the automatic (cron) fund release run
+  'failed_refund.review_resolved',        // a 'review' hold closed (resolved / ignored) with a reason
+  'failed_refund.review_refund_approved', // a 'review' hold approved for an explicit Super Admin refund
+  'registration.refunded',                // a Super Admin registration refund (gateway id + amount)
+  'license.refund_audit_recovered',
+  // RD-PHASE4-S4 closeout — reconciliation of a recorded audit-write failure (adminAuditFailures).
+  'audit_failure.replayed',
+  'audit_failure.resolved_present',
+  // RD-WALLET-W2.f — Super Admin review of a HELD wallet top-up (reason, evidence, refund reference).
+  'wallet_topup.review_credited',         // credited after the exact captured payment was re-verified
+  'wallet_topup.review_resolved',         // resolved without credit (a duplicate: refunded externally)
+  // RD-WALLET-REQ — Super Admin decisions on organizer refund / carry-forward requests.
+  'wallet_service_request.approved',      // units taken out of the ledger (refund) or moved (carry-forward)
+  'wallet_service_request.rejected',
+  'wallet_service_request.processed',     // refund made OUTSIDE the system; external reference recorded
+  // RD-PREPROD · D3 — Super Admin organizer deletion. `requested` is written BEFORE any data is
+  // touched (no deletion without its audit row); `result` records the outcome of each run.
+  'organizer.deletion_requested',
+  'organizer.deletion_result',
 ] as const
 
 export type AdminAuditAction = typeof AUDIT_ACTIONS[number]
@@ -129,9 +160,35 @@ export const AUDIT_ENTITY_TYPES = [
   'media_credit_refund',
   // MC-09
   'media_credit_grant',
+  // RD-PHASE4-S4 closeout
+  'audit_failure',
+  // RD-WALLET-W2.f — a walletTopupReconciliation review record
+  'wallet_topup',
+  // RD-WALLET-REQ — a walletServiceRequests record
+  'wallet_service_request',
 ] as const
 
 export type AdminAuditEntityType = typeof AUDIT_ENTITY_TYPES[number]
+
+/**
+ * RD-PHASE4-S4 · D7 — which audit rows are FINANCIAL (readable by a Super Admin only). Classified
+ * by entity type, plus the money actions recorded against a non-financial entity (an event's
+ * pricing / commercial terms, a registration refund). Pure and client-safe.
+ */
+export const FINANCIAL_AUDIT_ENTITY_TYPES: readonly AdminAuditEntityType[] = [
+  'settlement', 'finance', 'payout_profile', 'failed_refund', 'donation', 'clawback', 'billing',
+  'license', 'license_coupon', 'platform_settings', 'media_credit_refund', 'media_credit_grant',
+  'audit_failure', 'wallet_topup', 'wallet_service_request',
+]
+const FINANCIAL_ACTION_PREFIXES = ['registration.refunded', 'commercial_terms.', 'pricing_override.', 'settlement.', 'finance.', 'license.', 'license_coupon.', 'clawback.', 'donation.', 'media_credit']
+
+export function isFinancialAuditEntry(row: { entityType?: unknown; action?: unknown }): boolean {
+  if (typeof row.entityType === 'string' && (FINANCIAL_AUDIT_ENTITY_TYPES as readonly string[]).includes(row.entityType)) return true
+  return typeof row.action === 'string' && FINANCIAL_ACTION_PREFIXES.some(p => (row.action as string).startsWith(p))
+}
+
+/** RD-PHASE4-S4 — who acted, as a first-class field (never inferred from free-form metadata). */
+export type AuditActorRole = 'super_admin' | 'admin' | 'organizer' | 'system'
 
 export interface AdminAuditParams {
   adminUid:    string
@@ -139,6 +196,14 @@ export interface AdminAuditParams {
   entityType:  AdminAuditEntityType
   entityId:    string
   metadata?:   Record<string, unknown>
+  // ── RD-PHASE4-S4 — first-class, all OPTIONAL (existing callers are unchanged) ──
+  actorRole?:     AuditActorRole
+  reason?:        string
+  changedFields?: string[]
+  before?:        unknown
+  after?:         unknown
+  /** Correlation ids: orderId, paymentId, refundId, eventId, settlementId… */
+  correlation?:   Record<string, string | number | null | undefined>
 }
 
 export interface AdminAuditLog extends AdminAuditParams {

@@ -13,6 +13,28 @@ export interface BibRegistration {
   name:        string
   email:       string
   passName:    string
+  /**
+   * RD-BIB-UX-04 · ADDITIVE. The pass the registration is on, so the manual
+   * assignment panel can show which number RANGE applies to this participant
+   * instead of matching pass NAMES, which are organizer text and not a key.
+   * Read from the same document, in the same projection — zero extra reads.
+   */
+  passId:      string | null
+  /**
+   * RD-BIB-TIMING-01 · ADDITIVE. The timing device this participant carries, when
+   * one is attached. The Participants list needs it to warn BEFORE the click that
+   * removing the number will be refused. Same document, same projection — no extra
+   * read. Null when none is attached, and null for events with no timing capability.
+   */
+  timingTag:   string | null
+  /**
+   * RD-BIB-TIMING-03 · ADDITIVE. The mobile number, for the Timing Chips
+   * workspace: at a start line an organizer usually knows a participant by phone,
+   * not by number. It comes from the SAME `attendee` map the name and email are
+   * already read from, so this is a projection mapping change and costs no extra
+   * read and no new index. Empty string when the registration carries none.
+   */
+  mobile:      string
   bibNumber:   string | null
   bibCategory: string | null
 }
@@ -35,9 +57,17 @@ async function resolveSlug(uid: string, eventId: string): Promise<string | null>
 }
 
 async function getUid(req: NextRequest): Promise<string | null> {
-  // Resolves the effective workspace owner uid (caller's own, or the org they're
-  // an active member of) and enforces the 'events' permission.
-  const authz = await authorizeWorkspace(req, 'events')
+  // RD-BIB-01 · aligned to `participants`, the permission every OTHER identifier
+  // surface requires.
+  //
+  // This route both lists the roster and ASSIGNS identifiers through the engine, and
+  // it was the only door to that engine guarded by a different key (`events`).
+  //
+  // Verified before changing it: `ROLE_PERMISSIONS` grants `events` and
+  // `participants` to exactly the same roles today — owner, admin and manager — so
+  // no existing caller loses or gains anything. What it removes is the future in
+  // which a role is given `events` alone and can silently issue printed numbers.
+  const authz = await authorizeWorkspace(req, 'participants')
   return authz.ok ? authz.workspaceUid : null
 }
 
@@ -54,13 +84,27 @@ export async function GET(
   const slug = await resolveSlug(uid, eventId)
   if (!slug) return NextResponse.json({ error: 'Event not found' }, { status: 404 })
 
-  const snap = await adminDb
+  // ── RD-BIB-01 · a bound, because this read had none ────────────────────────
+  //
+  // This query returned EVERY confirmed registration, unprojected by count, and the
+  // identifier workspace called it on mount. On a 20,000-participant event that is
+  // 20,000 documents sent to a browser to render a list and a few statistics that
+  // now come from aggregates instead.
+  //
+  // The default is deliberately left UNBOUNDED so no existing caller changes
+  // behaviour; the workspace passes `?limit=`. The unbounded form is deprecated and
+  // should be removed once this route's remaining consumers are retired.
+  const rawLimit = Number(req.nextUrl.searchParams.get('limit') ?? '')
+  const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(Math.floor(rawLimit), 500) : null
+
+  let query = adminDb
     .collection('registrations')
     .where('organizerUid', '==', uid)
     .where('eventSlug',    '==', slug)
     .where('status',       '==', 'confirmed')
-    .select('attendee', 'bibNumber', 'bibCategory', 'passName')
-    .get()
+    .select('attendee', 'bibNumber', 'bibCategory', 'passName', 'passId', 'timingTag')
+  if (limit !== null) query = query.limit(limit)
+  const snap = await query.get()
 
   const registrations: BibRegistration[] = snap.docs.map(doc => {
     const data    = doc.data() as Record<string, unknown>
@@ -69,7 +113,13 @@ export async function GET(
       id:          doc.id,
       name:        String(attendee?.name  ?? ''),
       email:       String(attendee?.email ?? ''),
+      mobile:      String(attendee?.phone ?? ''),
       passName:    String(data.passName   ?? ''),
+      passId:      typeof data.passId === 'string' ? data.passId : null,
+      timingTag:   (() => {
+        const t = data.timingTag as { tag?: unknown; state?: unknown } | null | undefined
+        return t?.state === 'assigned' && typeof t.tag === 'string' ? t.tag : null
+      })(),
       bibNumber:   (data.bibNumber   as string | null) ?? null,
       bibCategory: (data.bibCategory as string | null) ?? null,
     }

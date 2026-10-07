@@ -53,7 +53,7 @@ export const TXN_FILTERS: { key: TxnFilter; label: string }[] = [
 ]
 
 // ─── Communication wallet transaction ─────────────────────────────────────────
-const WALLET_CREDIT_TYPES = new Set<WalletTxnType>(['fund_added', 'refund'])
+const WALLET_CREDIT_TYPES = new Set<WalletTxnType>(['fund_added', 'license_refund', 'refund'])
 export function isWalletCredit(type: WalletTxnType): boolean {
   return WALLET_CREDIT_TYPES.has(type)
 }

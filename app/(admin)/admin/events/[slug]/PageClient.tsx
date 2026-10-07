@@ -18,7 +18,7 @@ import {
   Loader2, ExternalLink, KeyRound, Users, IndianRupee, Ticket,
   CalendarDays, MapPin, Building2, Mail, Phone, ShieldCheck, Award, Printer,
   Send, Activity, ScrollText, RefreshCw, PlayCircle, PauseCircle, XCircle,
-  ArrowUpCircle, ArrowDownCircle, BadgeCheck, Undo2,
+  BadgeCheck, Undo2,
   Gift, CalendarPlus, CalendarMinus, CalendarX, Unlock, Fingerprint, ShieldAlert,
   Zap, RotateCcw, CheckCircle2, Ban, Clock,
 } from 'lucide-react'
@@ -29,13 +29,13 @@ import { ROUTES } from '@/config/navigation'
 import type { PillTone } from '@/components/admin'
 import { useConfirm } from '@/components/ui/ConfirmDialog'
 import { Bars, HBars, Donut, Funnel } from '@/components/analytics/Charts'
-import { currentLicenseTierIds, isValidTierForVersion, CURRENT_LICENSE_VERSION, type AnyEventLicenseTier } from '@/lib/licensing/eventLicense'
 import type {
   Event360Overview, Event360Response, Event360Analytics, Event360Governance,
   Event360Timeline, Event360TimelineEntry, HealthIndicator, HealthLevel,
 } from '@/lib/admin/event360Types'
 import type { LicenseAdminActionType, LicenseAdminActionRequest } from '@/lib/admin/licenseAdminTypes'
 import type { EventAnalytics } from '@/lib/analytics/eventAnalytics'
+import type { MaybeMoney } from '@/lib/finance/financeAnalytics'
 
 // ─── Utilities ──────────────────────────────────────────────────────────────
 
@@ -55,7 +55,8 @@ async function authedGet<T>(url: string): Promise<T> {
   return await res.json() as T
 }
 
-const rupees = (p: number): string => `₹${(p / 100).toLocaleString('en-IN', { maximumFractionDigits: 0 })}`
+// RD-CLOSE — a withheld (null) amount — financial fields are Super Admin only — reads '—', never ₹0.
+const rupees = (p: number | null | undefined): string => (typeof p === 'number' ? `₹${(p / 100).toLocaleString('en-IN', { maximumFractionDigits: 0 })}` : '—')
 const num = (n: number): string => n.toLocaleString('en-IN')
 const fmtDate = (iso: string | null): string =>
   iso ? new Date(iso).toLocaleString(undefined, { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—'
@@ -227,19 +228,34 @@ export default function Event360Page() {
 // Fold the analytics-derived signals into the permanent health strip.
 function upgradeHealth(prev: HealthIndicator[], a: EventAnalytics): HealthIndicator[] {
   const patch: Partial<Record<HealthIndicator['key'], HealthIndicator>> = {
+    // RD-ANALYTICS-01 · null means the read FAILED. "None issued" would be a claim about
+    // the event; the honest answer is that we could not tell.
     certificates: {
       key: 'certificates', label: 'Certificates',
-      level: a.certificates.issued > 0 ? 'green' : 'neutral',
-      detail: a.certificates.issued > 0 ? `${a.certificates.issued} issued · ${a.certificates.downloaded} downloaded` : 'None issued',
+      level: a.certificates == null ? 'neutral' : a.certificates.issued > 0 ? 'green' : 'neutral',
+      detail: a.certificates == null
+        ? 'Unavailable'
+        : a.certificates.issued > 0 ? `${a.certificates.issued} issued · ${a.certificates.downloaded ?? '—'} downloaded` : 'None issued',
     },
     communications: {
       key: 'communications', label: 'Communications',
-      level: a.communication.failed > 0 ? 'yellow' : a.communication.sent > 0 ? 'green' : 'neutral',
-      detail: a.communication.sent > 0 ? `${a.communication.sent} sent · ${a.communication.failed} failed` : 'None sent',
+      // RD-ANALYTICS-11 · each count is independently nullable now, because they come from
+      // separate aggregates and one can fail while the others succeed. An unmeasured count
+      // must not colour the row green or amber — that would assert a state nobody read.
+      level: a.communication?.failed == null || a.communication.sent == null ? 'neutral'
+             : a.communication.failed > 0 ? 'yellow'
+             : a.communication.sent > 0 ? 'green' : 'neutral',
+      detail: a.communication == null || a.communication.sent == null
+        ? 'Unavailable'
+        : a.communication.sent > 0
+          ? `${a.communication.sent} sent · ${a.communication.failed ?? '—'} failed`
+          : 'None sent',
     },
     analytics: {
       key: 'analytics', label: 'Analytics',
-      level: 'green', detail: `${num(a.kpis.registrations)} regs · ${rupees(a.kpis.revenuePaise)}`,
+      // RD-ANALYTICS-02 · the canonical CONFIRMED ticket revenue, not the ledger gross that
+      // used to stand in for it here.
+      level: 'green', detail: `${countOf(a.kpis.registrations)} regs · ${rupeesOf(a.financial?.confirmedRevenuePaise)}`,
     },
   }
   return prev.map(h => patch[h.key] ?? h)
@@ -354,6 +370,8 @@ function OverviewWorkspace({ o, onGoto }: { o: Event360Overview; onGoto: (t: Tab
         {/* Quick actions / deep-links */}
         <Card title="Quick actions" icon={Zap}>
           <div className="flex flex-col gap-2 p-4">
+            {/* RD-CLOSE — this event in Wallet Management: services, capacity, orders, refunds, charges. */}
+            <DeepLink href={`/admin/wallet-management?tab=events&event=${encodeURIComponent(o.slug)}`} label="Open in Wallet Management" />
             <DeepLink href={`/admin/licenses`} label="Open in License Console" />
             <DeepLink href={`/admin/event-approvals`} label="Open in Event Approvals" />
             <DeepLink href={`/admin/moderation`} label="Open in Moderation" />
@@ -379,42 +397,45 @@ function OperationsWorkspace({ a, o }: { a: EventAnalytics; o: Event360Overview 
   return (
     <div className="space-y-4">
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
-        <Kpi icon={Users} label="Registered" value={num(a.kpis.registrations)} />
-        <Kpi icon={BadgeCheck} label="Paid" value={num(a.kpis.paid)} />
-        <Kpi icon={Ticket} label="Free" value={num(a.kpis.free)} />
-        <Kpi icon={Clock} label="Pending" value={num(a.kpis.pending)} />
-        <Kpi icon={CheckCircle2} label="Checked in" value={num(a.kpis.checkedIn)} />
-        <Kpi icon={Ban} label="Cancelled" value={num(a.kpis.cancelled)} />
+        <Kpi icon={Users} label="Registered" value={countOf(a.kpis.registrations)} />
+        <Kpi icon={BadgeCheck} label="Paid" value={countOf(a.kpis.paidCharged)} />
+        <Kpi icon={Ticket} label="Free" value={countOf(a.kpis.free)} />
+        <Kpi icon={Clock} label="Pending" value={countOf(a.kpis.paymentPending)} />
+        <Kpi icon={CheckCircle2} label="Checked in" value={countOf(a.kpis.checkedIn)} />
+        <Kpi icon={Ban} label="Cancelled" value={countOf(a.kpis.cancelled)} />
       </div>
 
       <div className="grid gap-4 lg:grid-cols-2">
-        <Card title="Registrations / day" icon={Users}><div className="p-4"><Bars data={toChart(a.registrationsByDay)} /></div></Card>
-        <Card title="Check-ins / day" icon={CheckCircle2}><div className="p-4"><Bars data={toChart(a.checkInsByDay)} /></div></Card>
+        <Card title="Registrations / day" icon={Users}><div className="p-4">{a.registrationsByDay ? <Bars data={toChart(a.registrationsByDay)} /> : <Empty>{UNAVAILABLE}</Empty>}</div></Card>
+        <Card title="Check-ins / day" icon={CheckCircle2}><div className="p-4">{a.checkInsByDay ? <Bars data={toChart(a.checkInsByDay)} /> : <Empty>{UNAVAILABLE}</Empty>}</div></Card>
 
         <Card title="Participant 360" icon={Activity}>
           <dl className="space-y-2 p-4 text-[13.5px]">
-            <Row label="Total participants" value={num(a.kpis.registrations)} />
-            <Row label="Confirmed / capacity" value={o?.license?.registrationLimit != null ? `${num(a.kpis.registrations - a.kpis.cancelled)} / ${num(o.license.registrationLimit)}` : num(a.kpis.registrations - a.kpis.cancelled)} />
-            <Row label="Attendance rate" value={a.kpis.registrations > 0 ? `${Math.round((a.kpis.checkedIn / a.kpis.registrations) * 100)}%` : '—'} />
-            <Row label="Refunded" value={num(a.kpis.refunded)} />
+            <Row label="Total participants" value={countOf(a.kpis.registrations)} />
+            {/* RD-ANALYTICS-03 · `confirmed` is now counted directly rather than inferred
+                as registrations − cancelled, which treated pending, rejected and
+                waitlisted rows as confirmed. */}
+            <Row label="Confirmed / capacity" value={o?.license?.registrationLimit != null ? `${countOf(a.kpis.confirmed)} / ${num(o.license.registrationLimit)}` : countOf(a.kpis.confirmed)} />
+            <Row label="Attendance rate" value={a.kpis.checkedIn !== null && a.kpis.confirmed !== null && a.kpis.confirmed > 0 ? `${Math.round((a.kpis.checkedIn / a.kpis.confirmed) * 100)}%` : '—'} />
+            <Row label="Refunded" value={countOf(a.kpis.refunded)} />
           </dl>
         </Card>
 
         <Card title="Certificates & Print" icon={Award}>
           <dl className="space-y-2 p-4 text-[13.5px]">
-            <Row label="Certificates issued" value={num(a.certificates.issued)} icon={Award} />
-            <Row label="Certificates downloaded" value={num(a.certificates.downloaded)} />
+            <Row label="Certificates issued" value={a.certificates ? num(a.certificates.issued) : UNAVAILABLE} icon={Award} />
+            <Row label="Certificates downloaded" value={a.certificates?.downloaded != null ? num(a.certificates.downloaded) : UNAVAILABLE} />
             <Row label="Print assets" value="Managed per workspace" icon={Printer} />
           </dl>
         </Card>
 
         <Card title="Communications" icon={Send}>
           <dl className="space-y-2 p-4 text-[13.5px]">
-            <Row label="Emails sent" value={num(a.communication.sent)} icon={Mail} />
-            <Row label="Delivered" value={num(a.communication.delivered)} />
-            <Row label="Failed" value={num(a.communication.failed)} />
-            <Row label="Reminders scheduled" value={num(a.reminders.scheduled)} />
-            <Row label="Reminders sent" value={num(a.reminders.sent)} />
+            <Row label="Messages sent" value={a.communication?.sent != null ? num(a.communication.sent) : UNAVAILABLE} icon={Mail} />
+            <Row label="Delivered" value={a.communication?.delivered != null ? num(a.communication.delivered) : UNAVAILABLE} />
+            <Row label="Failed" value={a.communication?.failed != null ? num(a.communication.failed) : UNAVAILABLE} />
+            <Row label="Reminders scheduled" value={a.reminders ? num(a.reminders.scheduled) : UNAVAILABLE} />
+            <Row label="Reminders sent" value={a.reminders ? num(a.reminders.sent) : UNAVAILABLE} />
           </dl>
         </Card>
 
@@ -426,6 +447,23 @@ function OperationsWorkspace({ a, o }: { a: EventAnalytics; o: Event360Overview 
   )
 }
 
+/**
+ * RD-ANALYTICS-01 · what a figure reads as when its source could not be read.
+ *
+ * Deliberately not "0" and not "—" alone: an em dash beside five real numbers is read as
+ * "nothing happened", which is the same lie in quieter type.
+ */
+const UNAVAILABLE = 'Unavailable'
+
+/** RD-ANALYTICS-02 · MaybeMoney → a figure, or the reason there isn't one. */
+const rupeesOf = (m: MaybeMoney | undefined): string => (m && m.ok ? rupees(m.paise) : UNAVAILABLE)
+
+/**
+ * RD-ANALYTICS-03 · counts come from aggregates now and are `number | null`.
+ * A failed aggregate must not render as an event with nobody in it.
+ */
+const countOf = (v: number | null): string => (v === null ? UNAVAILABLE : num(v))
+
 // ─── Business workspace ────────────────────────────────────────────────────────
 
 function BusinessWorkspace({ a }: { a: EventAnalytics }) {
@@ -434,17 +472,26 @@ function BusinessWorkspace({ a }: { a: EventAnalytics }) {
   return (
     <div className="space-y-4">
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
-        <Kpi icon={IndianRupee} label="Gross" value={rupees(f.grossPaise)} />
-        <Kpi icon={IndianRupee} label="Platform fee" value={rupees(f.platformFeePaise)} />
-        <Kpi icon={IndianRupee} label="GST" value={rupees(f.gstPaise)} />
-        <Kpi icon={IndianRupee} label="Gateway" value={rupees(f.gatewayFeePaise)} />
-        <Kpi icon={IndianRupee} label="Net" value={rupees(f.netPaise)} />
-        <Kpi icon={IndianRupee} label="Refunds" value={rupees(f.refundsPaise)} />
+        {/* RD-ANALYTICS-02 · "Revenue" is the canonical CONFIRMED ticket revenue; "Gross"
+            is what the payment ledger collected. Two populations, two labels — the pair
+            used to be one field whose meaning depended on which read had succeeded. Each
+            is MaybeMoney, so an unread source says so rather than showing ₹0. */}
+        <Kpi icon={IndianRupee} label="Revenue (confirmed)" value={rupeesOf(f?.confirmedRevenuePaise)} />
+        <Kpi icon={IndianRupee} label="Gross collected" value={rupeesOf(f?.grossPaise)} />
+        <Kpi icon={IndianRupee} label="Platform fee" value={rupeesOf(f?.platformFeePaise)} />
+        <Kpi icon={IndianRupee} label="GST" value={rupeesOf(f?.gstPaise)} />
+        <Kpi icon={IndianRupee} label="Gateway" value={rupeesOf(f?.gatewayFeePaise)} />
+        <Kpi icon={IndianRupee} label="Net" value={rupeesOf(f?.netPaise)} />
+        {/* Completed refunds from the refund LEDGER — not registrations whose payment
+            status happens to mention a refund, and never one still in flight. */}
+        <Kpi icon={IndianRupee} label="Refunds" value={rupeesOf(f?.refundsPaise)} />
       </div>
 
       <div className="grid gap-4 lg:grid-cols-2">
-        <Card title="Revenue / day" icon={IndianRupee}><div className="p-4"><Bars data={toChart(a.revenueByDay)} format={rupees} /></div></Card>
-        <Card title="Registrations / day" icon={Users}><div className="p-4"><Bars data={toChart(a.registrationsByDay)} /></div></Card>
+        <Card title="Revenue / day" icon={IndianRupee}>
+          <div className="p-4">{a.revenueByDay ? <Bars data={toChart(a.revenueByDay)} format={rupees} /> : <Empty>{UNAVAILABLE}</Empty>}</div>
+        </Card>
+        <Card title="Registrations / day" icon={Users}><div className="p-4">{a.registrationsByDay ? <Bars data={toChart(a.registrationsByDay)} /> : <Empty>{UNAVAILABLE}</Empty>}</div></Card>
 
         <Card title="Payment status" icon={BadgeCheck}>
           <div className="p-4">{a.paymentStatus.length ? <Donut segments={toChart(a.paymentStatus)} /> : <Empty>No data.</Empty>}</div>
@@ -454,21 +501,37 @@ function BusinessWorkspace({ a }: { a: EventAnalytics }) {
         </Card>
 
         <Card title="Pass revenue" icon={Ticket}>
-          <div className="p-4">{a.passRevenue.length ? <HBars data={toChart(a.passRevenue)} format={rupees} /> : <Empty>No revenue yet.</Empty>}</div>
+          <div className="p-4">{a.passRevenue?.length ? <HBars data={toChart(a.passRevenue)} format={rupees} /> : <Empty>No revenue yet.</Empty>}</div>
         </Card>
         <Card title="Coupon usage" icon={Gift}>
           <div className="p-4">
-            {a.couponUsage.length ? <HBars data={toChart(a.couponUsage)} /> : <Empty>No coupons used.</Empty>}
-            {a.couponDiscountPaise > 0 && <p className="mt-3 text-[12.5px] text-muted-foreground">Total discount: <strong className="text-foreground">{rupees(a.couponDiscountPaise)}</strong></p>}
+            {a.couponUsage?.length ? <HBars data={toChart(a.couponUsage)} /> : <Empty>No coupons used.</Empty>}
+            {(a.couponPerformance?.totalDiscountPaise ?? 0) > 0 && <p className="mt-3 text-[12.5px] text-muted-foreground">Total discount: <strong className="text-foreground">{rupees(a.couponPerformance!.totalDiscountPaise)}</strong></p>}
           </div>
         </Card>
 
-        <Card title="Settlement" icon={IndianRupee}>
+        {/*
+          RD-ANALYTICS-01 · Available / Pending / Settled used to be read here from
+          organizerRevenueWallets/{organizerUid} — WORKSPACE-wide balances, rendered inside
+          a per-EVENT page under the heading "Settlement". Every figure was correct and
+          every figure was about the wrong subject: an organizer running six events saw one
+          payout position attributed to whichever event was open.
+
+          There is no authoritative event-level settlement figure to substitute, so the
+          rows are gone rather than approximated. The workspace position lives one card to
+          the right, on the Finance Console this page already deep-links to.
+        */}
+        <Card title="Event financials" icon={IndianRupee}>
           <dl className="space-y-2 p-4 text-[13.5px]">
-            <Row label="Available" value={rupees(f.settlement.availablePaise)} />
-            <Row label="Pending" value={rupees(f.settlement.pendingPaise)} />
-            <Row label="Settled" value={rupees(f.settlement.settledPaise)} />
-            <Row label="Profit estimate" value={rupees(f.profitEstimatePaise)} />
+            {/* Published only when net settlement, completed refunds and communication
+                spend all read — the subtraction is meaningless otherwise, and there is no
+                canonical profit definition in the codebase to fall back on. */}
+            <Row label="Est. profit (net – refunds – comms)" value={rupeesOf(f?.profitEstimatePaise)} />
+            <Row label="Communication cost" value={rupeesOf(f?.communicationCostPaise)} />
+            <p className="pt-1 text-[12px] text-muted-foreground">
+              Workspace payout position (available / pending / settled) is not event-scoped —
+              see the Finance Console.
+            </p>
           </dl>
         </Card>
         <Card title="Reports" icon={ScrollText}>
@@ -551,11 +614,6 @@ function GovernanceWorkspace({ slug, o, onChanged }: {
     await withReason(action, { expiryDays: n })
   }
 
-  async function promptTier(action: 'upgrade' | 'downgrade') {
-    const tier = (await prompt({ title: 'Select tier', message: `Target tier (${currentLicenseTierIds().join(' / ')}):`, placeholder: currentLicenseTierIds().join(' / ') }))?.trim() as AnyEventLicenseTier
-    if (!isValidTierForVersion(tier, CURRENT_LICENSE_VERSION)) { if (tier) setErr('Invalid tier'); return }
-    await withReason(action, { tier })
-  }
 
   // ── Review actions (POST …/review) ──
   async function review(action: 'approve' | 'reject' | 'request_changes') {
@@ -722,8 +780,6 @@ function GovernanceWorkspace({ slug, o, onChanged }: {
               ? <Act icon={PauseCircle} label="Suspend" tone="amber" busy={busy === 'suspend'} onClick={() => void withReason('suspend')} />
               : <Act icon={PlayCircle} label="Reactivate" tone="emerald" busy={busy === 'reactivate'} onClick={() => void withReason('reactivate', {}, 'Reactivate this license?')} />}
             <Act icon={XCircle} label="Cancel" tone="red" busy={busy === 'cancel'} onClick={() => void withReason('cancel', {}, 'Cancel this license?', 'danger')} />
-            <Act icon={ArrowUpCircle} label="Upgrade" busy={busy === 'upgrade'} onClick={() => void promptTier('upgrade')} />
-            <Act icon={ArrowDownCircle} label="Downgrade" busy={busy === 'downgrade'} onClick={() => void promptTier('downgrade')} />
             <Act icon={BadgeCheck} label="Mark paid" tone="emerald" busy={busy === 'markPaymentReceived'} onClick={() => void withReason('markPaymentReceived', {}, 'Mark payment as received?')} />
             <Act icon={Undo2} label="Refund" tone="red" busy={busy === 'refund'} onClick={() => void withReason('refund', {}, 'Refund and cancel this license?', 'danger')} />
             <Act icon={RefreshCw} label="Reissue" busy={busy === 'reissue'} onClick={() => void withReason('reissue', {}, 'Reissue this license?')} />

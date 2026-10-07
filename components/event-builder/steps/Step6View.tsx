@@ -28,7 +28,7 @@ import { EASE, WIZARD_STEPS } from '@/lib/events/builder/constants'
 import type { StepViewProps } from '@/lib/events/builder/types'
 import { useAutosaveEmit } from '@/lib/events/builder/useAutosaveEmit'
 import { auth } from '@/lib/firebase/auth'
-import { makeBlankEventDetailsDraft, normalizeEventDetailsDraft, type EventDetailsDraft } from '@/components/wizard/eventDetailsConfig'
+import { makeBlankEventDetailsDraft, normalizeEventDetailsDraft, type EventDetailsDraft, calcStepHealth } from '@/components/wizard/eventDetailsConfig'
 import type { EventPassFull } from '@/components/wizard/AddPassEditor'
 import { ROUTES } from '@/config/navigation'
 
@@ -47,6 +47,10 @@ export function Step6View({ currentStep, completedValues, onNext, onBack, onSave
   const eventSubtype = (initialData?.eventSubtype as string | null) ?? null
   const rawForm      = initialData?.eventDetails
   const draftId      = (initialData?.draftId as string | null) ?? null
+  // RD-EVENT-SLUG — a published event's URL is its public identity and is frozen
+  // server-side (RESTRICTED_EDIT_KEYS). The field is shown read-only rather than hidden,
+  // so the organizer can still see and copy the address their attendees use.
+  const slugLocked   = ((initialData?.status as string | null) ?? null) === 'published'
   const uid          = auth.currentUser?.uid ?? null
   const uploadContext = uid && draftId ? { uid, draftId } : undefined
 
@@ -84,12 +88,15 @@ export function Step6View({ currentStep, completedValues, onNext, onBack, onSave
           pricingPasses={pricingPasses}
           uploadContext={uploadContext}
           focusHint={focusHint}
+          slugLocked={slugLocked}
         />
       </div>
       <WizardFooter
         onBack={onBack}
         onSaveDraft={() => onSaveDraft?.(form)}
         onNext={() => onNext('Event Details', form)}
+        // RD-CE-FIX M7 — blockers block (warnings only warn): the step health panel names what to fix.
+        isNextDisabled={calcStepHealth(form).blockers.length > 0}
         stepContext={(() => {
           const steps = wizardSteps ?? WIZARD_STEPS
           return `Step ${currentStep + 1} of ${steps.length} · ${steps[currentStep]?.name ?? ''}`

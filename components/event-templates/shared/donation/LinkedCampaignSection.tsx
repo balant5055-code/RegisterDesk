@@ -15,7 +15,7 @@
 import Link from 'next/link'
 import { Heart, IndianRupee, ArrowRight } from 'lucide-react'
 import { cn } from '@/lib/utils/cn'
-import { buttonVariants } from '@/components/ui/button'
+import { marketingButton } from '@/lib/marketing/theme'
 import { SectionWrapper } from '@/components/event-templates/shared/ui/SectionWrapper'
 import {
   SectionShell, EventSectionHeader, TYPE, CARD, CARD_PAD_SM,
@@ -43,8 +43,8 @@ export function LinkedCampaignSection({
   const body = (
     <>
       <div className="flex items-start gap-3">
-        <div className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-pink-100">
-          <Heart className="size-5 text-pink-500" />
+        <div className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-action/10">
+          <Heart className="size-5 text-action" />
         </div>
         <div>
           <h3 className={TYPE.cardTitleLg}>Fundraising Campaign</h3>
@@ -83,7 +83,7 @@ export function LinkedCampaignSection({
         <div className="mt-4">
           <div className="h-2.5 w-full overflow-hidden rounded-full bg-muted">
             <div
-              className="h-full rounded-full bg-primary transition-all duration-700"
+              className="h-full rounded-full bg-action transition-all duration-700"
               style={{ width: `${progress}%` }}
             />
           </div>
@@ -105,10 +105,10 @@ export function LinkedCampaignSection({
         <Link
           href={`/donate/${campaign.slug}`}
           className={cn(
-            buttonVariants({ variant: 'gradient' }),
+            marketingButton({ variant: 'gradient' }),
             'inline-flex w-full justify-center gap-2 sm:w-auto',
           )}
-          style={{ backgroundImage: 'var(--primary-gradient)' }}
+          style={{ backgroundImage: 'var(--action-gradient)' }}
         >
           <Heart className="size-4" />
           Donate to this cause

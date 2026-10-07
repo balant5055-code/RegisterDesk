@@ -27,7 +27,15 @@ function tsToMillis(v: unknown): number {
 export interface FinancialHealth {
   pendingSettlements: number
   failedRefunds: number
+  /** walletTopupReconciliation 'pending' — a captured top-up whose credit the cron is retrying (auto-drains). */
   pendingWalletTopups: number
+  // RD-WALLET-W2.g (G10) — HELD top-up records: never retried, waiting for a Super Admin (Admin ›
+  // Wallet Top-ups), and each one blocks its organizer's next top-up. One status each — a record has
+  // exactly one — so these never overlap each other or `pendingWalletTopups`. Order-level holds are
+  // not counted separately: every held order carries its own per-payment records (no double count).
+  walletTopupsNeedsReview:      number   // 'needs_review'
+  walletTopupsExhausted:        number   // 'exhausted' (W2.a retry limit reached)
+  walletTopupDuplicatePayments: number   // 'duplicate_payment'
   pendingRegistrationReconciliation: number
   pendingDonationReconciliation: number
   outstandingClawbacks: number
@@ -138,6 +146,10 @@ export async function getOperationsHealth(): Promise<OperationsHealth> {
     countOf(col('registrationFinancialReconciliation').where('status', '==', 'pending')),
     countOf(col('donationFinancialReconciliation').where('status', '==', 'pending')),
     countOf(col('walletClawbacks').where('status', 'in', ['open', 'partially_recovered'])),
+    // RD-WALLET-W2.g — held top-up records, one status per count (single-field, no index).
+    countOf(col('walletTopupReconciliation').where('status', '==', 'needs_review')),
+    countOf(col('walletTopupReconciliation').where('status', '==', 'exhausted')),
+    countOf(col('walletTopupReconciliation').where('status', '==', 'duplicate_payment')),
   ])
 
   // ── Webhook ──
@@ -208,6 +220,7 @@ export async function getOperationsHealth(): Promise<OperationsHealth> {
   return {
     financial: {
       pendingSettlements: fin[0], failedRefunds: fin[1], pendingWalletTopups: fin[2],
+      walletTopupsNeedsReview: fin[6], walletTopupsExhausted: fin[7], walletTopupDuplicatePayments: fin[8],
       pendingRegistrationReconciliation: fin[3], pendingDonationReconciliation: fin[4], outstandingClawbacks: fin[5],
     },
     webhook: { pendingDeliveries: wh[0], failedDeliveries: wh[1], exhaustedRetries: wh[1], oldestPendingAt: wh[2] },
@@ -224,6 +237,11 @@ export async function getOperationsHealth(): Promise<OperationsHealth> {
 
 // ─── Alert rules (Phase G.4 requirement 4) ─────────────────────────────────────
 
+/** RD-WALLET-W2.g — held top-up records (the three disjoint statuses); a failed count (-1) adds 0. */
+export function heldWalletTopupCount(f: Pick<FinancialHealth, 'walletTopupsNeedsReview' | 'walletTopupsExhausted' | 'walletTopupDuplicatePayments'>): number {
+  return Math.max(0, f.walletTopupsNeedsReview) + Math.max(0, f.walletTopupsExhausted) + Math.max(0, f.walletTopupDuplicatePayments)
+}
+
 export type AlertSeverity = 'critical' | 'warning'
 export interface OperationalAlert { id: string; severity: AlertSeverity; message: string }
 
@@ -233,6 +251,10 @@ export function evaluateAlerts(h: OperationsHealth): OperationalAlert[] {
 
   if (h.financial.failedRefunds > 0) push('failed_refunds', 'critical', `${h.financial.failedRefunds} failed refund(s) need manual action.`)
   if (h.financial.outstandingClawbacks > 0) push('clawbacks', 'warning', `${h.financial.outstandingClawbacks} outstanding clawback(s).`)
+  // RD-WALLET-W2.g — held top-ups never resolve on their own (guard -1 = query failed). A warning:
+  // the dashboard shows it; only critical alerts page.
+  const heldTopups = heldWalletTopupCount(h.financial)
+  if (heldTopups > 0) push('wallet_topups_held', 'warning', `${heldTopups} wallet top-up(s) held for Super Admin review (Admin › Wallet Top-ups).`)
   if (h.webhook.failedDeliveries > 10) push('webhook_failures', 'warning', `${h.webhook.failedDeliveries} webhook deliveries have failed (>10).`)
   const failedCrons = h.crons.filter(c => c.failedWithin24h)
   if (failedCrons.length > 0) push('cron_failure', 'critical', `Cron failure in the last 24h: ${failedCrons.map(c => c.cronName).join(', ')}.`)

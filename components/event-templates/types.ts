@@ -93,6 +93,7 @@ export interface PassPublic {
     customCategory?: string
     minAge?:         number | null
     maxAge?:         number | null
+    teamSize?:       number | null
   } | null
 }
 

@@ -20,7 +20,6 @@ const LABELS: Record<string, string> = {
   security:        'Security',
   support:         'Support',
   contact:         'Contact',
-  resources:       'Resources',
   events:          'Events',
   causes:          'Causes',
   privacy:         'Privacy Policy',
@@ -30,9 +29,9 @@ const LABELS: Record<string, string> = {
 }
 
 // Intermediate crumbs are links only for paths that are real index pages.
-const LINKABLE = new Set(['/platform', '/pricing', '/about', '/security', '/contact', '/resources', '/events', '/causes'])
+const LINKABLE = new Set(['/pricing', '/about', '/security', '/contact', '/events', '/causes'])
 
-const LINK_CLASS = 'transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary rounded'
+const LINK_CLASS = 'transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-action rounded'
 
 function titleCase(segment: string): string {
   return segment.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase())

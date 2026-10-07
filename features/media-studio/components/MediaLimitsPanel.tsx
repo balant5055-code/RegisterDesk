@@ -33,13 +33,16 @@ function formatBytes(bytes: number): string {
  * this". It is wrong now the page is the only explanation an organizer gets: a blank cell
  * reads as missing information, not as "platform default".
  */
-function SourceChip({ source }: { source: MediaLimitSource }) {
+function SourceChip({ source }: { source: MediaLimitSource | 'purchase' }) {
+  // RD-PHOTO-01 — photo capacity is bought for the event; it has no resolver layer.
+  if (source === 'purchase') return <StatusChip tone="info">Paid capacity</StatusChip>
   if (source === 'global') {
     return <StatusChip tone="neutral">Platform default</StatusChip>
   }
   return (
     <StatusChip tone={source === 'event' ? 'info' : 'neutral'}>
-      {source === 'event' ? 'Admin override' : 'Business plan'}
+      {/* RD-CLOSE — the licence layer applies only to historical tier-priced licences. */}
+      {source === 'event' ? 'Admin override' : 'Legacy licence limit'}
     </StatusChip>
   )
 }
@@ -94,7 +97,6 @@ export function MediaLimitsPanel() {
             <h2 className="text-fs-md font-semibold text-foreground">
               Limits for {event.name}
             </h2>
-            {data?.tier && <StatusChip tone="neutral">{data.tier} plan</StatusChip>}
           </div>
 
           {loading ? (
@@ -107,10 +109,8 @@ export function MediaLimitsPanel() {
                 {[
                   {
                     label: 'Photos',
-                    value: data.limits.maxPhotosPerEvent === null
-                      ? `${data.used.photos.toLocaleString('en-IN')} used · ${UNLIMITED}`
-                      : `${data.used.photos.toLocaleString('en-IN')} of ${formatCount(data.limits.maxPhotosPerEvent)}`,
-                    source: data.source.maxPhotosPerEvent,
+                    value: `${data.photoCapacity.used.toLocaleString('en-IN')} of ${formatCount(data.photoCapacity.capacity)}`,
+                    source: 'purchase' as const,
                   },
                   {
                     label: 'Galleries',
@@ -149,8 +149,9 @@ export function MediaLimitsPanel() {
               </dl>
 
               <p className="mt-2.5 text-fs-2xs leading-relaxed text-muted-foreground">
-                Limits come from your event licence. A chip marks any value overridden for this
-                event or set by your plan; everything else is the platform default.
+                Photos use this event’s paid photo capacity, bought on License &amp; Services (up to{' '}
+                {data.photoCapacity.max.toLocaleString('en-IN')} per event). The other limits are platform
+                defaults unless a chip marks an override.
               </p>
             </>
           ) : null}

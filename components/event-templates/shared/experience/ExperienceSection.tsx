@@ -35,7 +35,7 @@ function ExperienceCard({ item, reduce, grouped }: { item: ExperienceItem; reduc
   const inner = (
     <>
       {badge && (
-        <span className="absolute right-3 top-3 z-10 rounded-full bg-primary/10 px-2.5 py-0.5 text-fs-2xs font-bold text-primary">{badge}</span>
+        <span className="absolute right-3 top-3 z-10 rounded-full bg-action/10 px-2.5 py-0.5 text-fs-2xs font-bold text-action">{badge}</span>
       )}
 
       {hasImg && (
@@ -65,7 +65,7 @@ function ExperienceCard({ item, reduce, grouped }: { item: ExperienceItem; reduc
         )}
 
         {link && (
-          <span className="mt-3 inline-flex items-center gap-1 text-fs-sm font-semibold text-primary">
+          <span className="mt-3 inline-flex items-center gap-1 text-fs-sm font-semibold text-action">
             {item.cta?.trim() || 'Learn more'}
             <ArrowRight className="size-3.5 transition-transform duration-150 group-hover:translate-x-0.5 motion-reduce:transform-none" aria-hidden />
           </span>
@@ -75,7 +75,7 @@ function ExperienceCard({ item, reduce, grouped }: { item: ExperienceItem; reduc
   )
 
   const className = cn('group relative flex flex-col overflow-hidden', CARD, CARD_HOVER,
-    link && 'outline-none focus-visible:ring-2 focus-visible:ring-primary/50 focus-visible:ring-offset-2')
+    link && 'outline-none focus-visible:ring-2 focus-visible:ring-action/50 focus-visible:ring-offset-2')
 
   return link ? (
     <motion.div whileHover={hoverLift(reduce, -4)} transition={{ duration: 0.16 }}>

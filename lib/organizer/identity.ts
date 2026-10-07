@@ -29,3 +29,41 @@ export function organizersQuery(db: Firestore): Query<DocumentData> {
 export function isOrganizer(user: { role?: unknown } | null | undefined): boolean {
   return user?.role === ORGANIZER_ROLE
 }
+
+// ═══ RD-WORKSPACE-OWNERSHIP-01 · EXPLICIT workspace ownership ═════════════════
+//
+// `users.role === 'organizer'` cannot answer "does this account own a workspace?" —
+// see the note above: every sign-in path writes that role, including an invited gate
+// operator's first sign-in, so it is true for accounts that own nothing.
+//
+// Before this field, `lib/team/workspace.ts` inferred ownership from the presence of
+// an event draft. That is evidence of a USED workspace, not of owning one, and it is
+// false for exactly one account: a brand-new or freshly re-registered organizer who has
+// not created anything yet. Such an account holding any active `teamMembers` row was
+// silently resolved into the OTHER organizer's workspace, with that membership's
+// restricted role — reported as "my new organizer account is missing features".
+//
+// This marker is the positive fact instead of the inference. It is written ONLY by the
+// three organizer profile-creation paths (createOrganizerProfile, the verify-otp
+// self-heal, ensureOrganizerProfile), never for a staff credential, and it is
+// server-owned: firestore.rules forbids a client from changing it after create.
+export const WORKSPACE_OWNER_FIELD = 'workspaceOwner' as const
+
+/**
+ * Reads the explicit ownership marker as a THREE-state answer.
+ *
+ * `true` / `false` are authoritative. `null` means the document predates the marker,
+ * and the caller must fall back to the legacy inference rather than treating a missing
+ * field as "not an owner" — every account created before this field would otherwise
+ * lose its workspace, which is the opposite of the bug being fixed.
+ *
+ * Pure, and deliberately kept here beside ORGANIZER_ROLE rather than in
+ * lib/team/workspace.ts: that module imports the Admin SDK at load, so anything
+ * defined there cannot be exercised in the repo's node-environment vitest run.
+ */
+export function readWorkspaceOwnerMarker(
+  user: { workspaceOwner?: unknown } | null | undefined,
+): boolean | null {
+  const value = user?.workspaceOwner
+  return typeof value === 'boolean' ? value : null
+}

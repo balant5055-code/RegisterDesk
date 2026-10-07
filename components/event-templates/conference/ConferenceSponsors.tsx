@@ -105,7 +105,7 @@ export function ConferenceSponsors({ sponsors }: { sponsors: Sponsor[] }) {
           transition={{ duration: 0.5, ease: [0.25, 0, 0, 1] }}
           className="mb-12 text-center"
         >
-          <p className="mb-2 text-[11px] font-bold uppercase tracking-[0.22em] text-primary">Partners</p>
+          <p className="mb-2 text-[11px] font-bold uppercase tracking-[0.22em] text-action">Partners</p>
           <h2 className="text-2xl font-black tracking-tight text-gray-950 sm:text-[2rem]">
             Our Sponsors
           </h2>

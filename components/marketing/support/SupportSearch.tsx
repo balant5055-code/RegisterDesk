@@ -52,14 +52,14 @@ export function SupportSearch({ items }: { items: FaqItem[] }) {
           placeholder="Search help topics…"
           autoComplete="off"
           aria-describedby={statusId}
-          className="h-12 w-full rounded-xl border border-border bg-white pl-11 pr-11 text-[14px] text-foreground outline-none transition-colors placeholder:text-muted-foreground/60 hover:border-border/70 focus:border-primary/60 focus:ring-2 focus:ring-primary/20"
+          className="h-12 w-full rounded-xl border border-border bg-card pl-11 pr-11 text-[14px] text-foreground outline-none transition-colors placeholder:text-muted-foreground/60 hover:border-border/70 focus:border-action/60 focus:ring-2 focus:ring-action/20"
         />
         {query && (
           <button
             type="button"
             onClick={() => setQuery('')}
             aria-label="Clear search"
-            className="absolute right-3 top-1/2 flex size-7 -translate-y-1/2 items-center justify-center rounded-lg text-muted-foreground outline-none transition-colors hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-primary/50"
+            className="absolute right-3 top-1/2 flex size-7 -translate-y-1/2 items-center justify-center rounded-lg text-muted-foreground outline-none transition-colors hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-action/50"
           >
             <X className="size-4" aria-hidden />
           </button>
@@ -77,7 +77,7 @@ export function SupportSearch({ items }: { items: FaqItem[] }) {
       </p>
 
       {searching && results.length > 0 && (
-        <ul className="mt-3 divide-y divide-border/60 overflow-hidden rounded-xl border border-border/60 bg-white text-left">
+        <ul className="mt-3 divide-y divide-border/60 overflow-hidden rounded-xl border border-border/60 bg-card text-left">
           {results.map(r => (
             <li key={r.question} className="px-5 py-4">
               <p className="text-[14px] font-semibold text-foreground">{r.question}</p>
@@ -86,8 +86,8 @@ export function SupportSearch({ items }: { items: FaqItem[] }) {
                 <Link
                   href={r.href}
                   className={cn(
-                    'mt-2 inline-block rounded text-[13px] font-semibold text-primary underline-offset-2',
-                    'outline-none hover:underline focus-visible:ring-2 focus-visible:ring-primary/50 focus-visible:ring-offset-2',
+                    'mt-2 inline-block rounded text-[13px] font-semibold text-action underline-offset-2',
+                    'outline-none hover:underline focus-visible:ring-2 focus-visible:ring-action/50 focus-visible:ring-offset-2',
                   )}
                 >
                   Read more

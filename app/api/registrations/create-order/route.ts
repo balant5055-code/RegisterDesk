@@ -19,14 +19,23 @@ import {
 } from '@/lib/firebase/firestore/paymentIntents'
 // RD-PAY-P0-2 — one registration attempt, one active order.
 import {
-  decideExistingIntent, normalizeIdempotencyKey, attemptClaimId,
+  decideExistingIntent, normalizeIdempotencyKey, attemptClaimId, openAttemptFeeModel,
 } from '@/lib/registrations/paymentAttempt'
-import { razorpay, RAZORPAY_KEY_ID } from '@/lib/razorpay/client'   // C1: throws if keys absent
+import {
+  resolveActivePaymentProviderForNewOrder, resolvePaymentProvider,
+  type PaymentProvider, type CheckoutHandoff,
+} from '@/lib/payments/providers'
+import { toCashfreeCustomerPhone } from '@/lib/payments/providers/cashfreeAdapter'
+// RD-PAYMENT-CASHFREE-CHECKOUT-06 — the direct `RAZORPAY_KEY_ID` import is gone. The key now
+// reaches the browser as the Razorpay adapter's CheckoutHandoff, so this route names no
+// provider's fields at all. That also removes a real coupling: `lib/razorpay/client` calls
+// `required()` at module scope, so importing it made create-order refuse to load without
+// Razorpay credentials — even for a deployment paying through Cashfree.
 import { getClientIp } from '@/lib/rateLimit'
 import { validateTermsConsent } from '@/lib/legal/platformTerms'
 import { checkDistributedRateLimit } from '@/lib/rateLimit/redis'
 import { validateCoupon }            from '@/lib/coupons/validate'
-import { resolveEffectivePassPricePaise } from '@/lib/pricing/earlyBird'
+import { resolveEffectivePassPricePaise, eventTimezone } from '@/lib/pricing/earlyBird'
 import { resolveAttendeeIdentity }   from '@/lib/registrations/attendeeIdentity'
 import type { IdentityField }        from '@/lib/registrations/attendeeIdentity'
 import { validateInviteCode }        from '@/app/api/registrations/validate-invite-code/route'
@@ -36,10 +45,9 @@ import type { RegistrationRules } from '@/components/wizard/registrationFormConf
 // RD-PAYMENT-02 Phase 4 — feature-gated canonical charge amount.
 import { resolvePlatformPricing }    from '@/lib/platform/pricing/resolver'
 import { resolveCheckoutCharge }     from '@/lib/fees/checkoutCharge'
-import { resolveFeeConfig }          from '@/lib/fees/resolveFeeConfig'
-import { getFeePlanForOrganizer }    from '@/lib/billing/feeEngine'
-import { builderFeeModelToEngine, normalizeFeeModel } from '@/lib/events/builder/types'
-import type { FeeConfig, FeeBreakdownRecord } from '@/lib/fees/types'
+import { builderFeeModelToEngine, SUPPORTED_FEE_MODEL } from '@/lib/events/builder/types'
+import { resolveEventFeeConfig, PRICING_UNAVAILABLE } from '@/lib/fees/resolveEventFeeConfig'
+import { isCheckoutFeeInputs, type FeeConfig, type FeeBreakdownRecord, type CheckoutFeeInputs } from '@/lib/fees/types'
 
 // ─── Request / response shapes ────────────────────────────────────────────────
 
@@ -66,7 +74,26 @@ export interface CreateOrderResponse {
   orderId:       string
   amount:        number    // paise (already reflects any coupon discount)
   currency:      string
-  keyId:         string    // Razorpay key_id for client-side checkout
+  /**
+   * RD-PAYMENT-CASHFREE-CHECKOUT-06 — which gateway this order belongs to. The SERVER decides
+   * it; the browser reads it and never infers, guesses or requests one.
+   *
+   * Absent only on the `isCouponFree` path, where no order is opened at any provider.
+   */
+  provider?:     PaymentProvider
+  /**
+   * What the browser needs to open that provider's checkout — a Razorpay publishable key or
+   * a Cashfree payment session id, discriminated on `provider`. Absent when there is nothing
+   * to pay (coupon-free) or nothing payable (already registered).
+   */
+  checkout?:     CheckoutHandoff
+  /**
+   * Razorpay's publishable key, unchanged for the existing client.
+   *
+   * OPTIONAL now, and present ONLY on a Razorpay order — a Cashfree order carrying a Razorpay
+   * key id would be a falsehood the client could act on. New code should read `checkout`.
+   */
+  keyId?:        string
   // When a coupon reduces the total to zero, no Razorpay order is created.
   // The client should call /api/registrations/submit with this couponCode instead.
   isCouponFree?: boolean
@@ -113,16 +140,17 @@ function toMillis(v: unknown): number | null {
 async function findCapturedRegistrationPayment(
   orderId: string,
   expectedAmountPaise: number,
+  provider: PaymentProvider,
 ): Promise<string | null> {
   if (expectedAmountPaise <= 0) return null
   try {
-    const res = await razorpay.orders.fetchPayments(orderId) as {
-      items?: Array<{ id?: string; status?: string; amount?: number; currency?: string }>
-    }
-    const hit = (res.items ?? []).find(p =>
+    // Through the contract: the same call, the same amount+currency+status predicate, now
+    // reading normalized payments instead of Razorpay's field names.
+    const payments = await resolvePaymentProvider(provider).fetchOrderPayments(orderId)
+    const hit = payments.find(p =>
       (p.status === 'captured' || p.status === 'authorized') &&
-      p.currency === 'INR' && p.amount === expectedAmountPaise)
-    return hit?.id ?? null
+      p.currency === 'INR' && p.amountPaise === expectedAmountPaise)
+    return hit?.providerPaymentId ?? null
   } catch (err) {
     captureFinancialError(err, { scope: 'create-order.fetch_payments_failed', detail: 'treated as CAPTURED (fail-closed)', orderId })
     return 'unknown'
@@ -219,7 +247,7 @@ export async function POST(
   // (before its cutoff), otherwise the regular price. Resolved from the stored pass only
   // via the ONE canonical resolver — the client amount is never trusted. Backward-
   // compatible: passes without early bird resolve to Math.round(price*100) unchanged.
-  const originalAmountPaise = resolveEffectivePassPricePaise(pass, Date.now())
+  const originalAmountPaise = resolveEffectivePassPricePaise(pass, Date.now(), eventTimezone(event))
   if (originalAmountPaise === 0) {
     return NextResponse.json(
       { error: 'This pass is free. Use /api/registrations/submit instead.' },
@@ -360,23 +388,65 @@ export async function POST(
   //   customer_pays charges ticket + fees. Every current event maps to organizer_pays
   //   (normalizeFeeModel keeps attendee_pays "Coming Soon"), so activating the flag does
   //   NOT change any charge today — it only starts persisting the additive breakdown.
+  //
+  // RD-EVENT-COMMERCE-05E — the organizer may change the Fee Collection Method at any time, for
+  // FUTURE checkouts only. This attempt's existing claim / intent is read HERE (it used to be
+  // read in 7.7 — same reads, moved earlier, reused there) so that a retry of a checkout that is
+  // still open keeps the fee model it started with (openAttemptFeeModel), instead of being
+  // re-priced — and its order superseded — under the new setting.
+  const claimId = idempotencyKey ? attemptClaimId(slug, idempotencyKey) : null
+  const priorClaim  = claimId ? await getAttemptClaim(claimId).catch(() => null) : null
+  const priorIntent = priorClaim?.orderId ? await getPaymentIntent(priorClaim.orderId).catch(() => null) : null
+  const pinnedFeeModel = priorIntent
+    ? openAttemptFeeModel(
+        {
+          status: priorIntent.status, registrationId: priorIntent.registrationId,
+          refundId: priorIntent.refundId, refundStatus: priorIntent.refundStatus,
+          amount: priorIntent.amount, passId: priorIntent.passId, attendeeEmail: priorIntent.attendee.email,
+          createdAtMs: toMillis(priorIntent.createdAt), feeModel: priorIntent.financials?.feeModel ?? null,
+        },
+        { passId, attendeeEmail: normEmail, nowMs: Date.now() },
+      )
+    : null
+
   const platformSettings = await resolvePlatformPricing()
-  let feeConfig: FeeConfig | undefined
-  if (platformSettings.features.pricingEngineEnabled) {
-    const feePlan = await getFeePlanForOrganizer(event.uid)
-    feeConfig = await resolveFeeConfig('event_registration', feePlan.planTier)
+  // RD-PHASE4-S3 · Q2/Q3 — the fee terms for THIS event: its own Super-Admin percentage when set,
+  // else the global one. Read server-side from events/{slug}; a failed read REFUSES the checkout
+  // (a stable, safe error the attendee can retry) instead of silently pricing from global.
+  const eventFees = await resolveEventFeeConfig(slug)
+  if (!eventFees.ok) {
+    return NextResponse.json({ error: PRICING_UNAVAILABLE.message, code: PRICING_UNAVAILABLE.code }, { status: 503 })
   }
+  const feeConfig: FeeConfig | undefined = platformSettings.features.pricingEngineEnabled ? eventFees.config : undefined
   const charge = resolveCheckoutCharge({
     pricingEngineEnabled: platformSettings.features.pricingEngineEnabled,
     finalAmountPaise,
-    eventFeeModel: builderFeeModelToEngine(
-      normalizeFeeModel(rawPricing?.feeModel, platformSettings.features.pricingEngineEnabled),
-    ),
+    // RD-PHASE4-S3 · Q1 — fee collection is fixed to organizer-pays: the event's stored fee model
+    // (organizer-controlled, possibly legacy attendee_pays) is NOT an input. An open attempt keeps the
+    // model it started with (pinnedFeeModel) — historical and in-flight checkouts are never re-priced.
+    eventFeeModel: pinnedFeeModel ?? builderFeeModelToEngine(SUPPORTED_FEE_MODEL),
     feeConfig,
     context: { organizerUid: event.uid, eventId: slug },
   })
   const amountPaise: number = charge.amountPaise
   const financials: FeeBreakdownRecord | undefined = charge.financials
+
+  // RD-PHASE4-S2 — with the engine OFF there is no `financials`, and the organizer-side platform fee
+  // used to be computed at SETTLEMENT from the live configuration — so a global fee change between
+  // checkout and a late webhook / sweep re-priced an order already created. Capture the fee inputs
+  // in force NOW (server-side, the same resolution the ledger uses) and persist them on the intent.
+  // Never changes what the attendee is charged. RD-PHASE4-S3 — these are the EVENT-resolved terms
+  // (its own percentage, or the inherited global one), with their source recorded.
+  let feeInputs: CheckoutFeeInputs | undefined
+  if (!financials) {
+    const snapshot: CheckoutFeeInputs = {
+      version: 1, planTier: eventFees.planTier, feeConfigId: eventFees.feeConfigId,
+      feeConfig: JSON.parse(JSON.stringify(eventFees.config)) as FeeConfig, capturedAt: new Date().toISOString(),
+      attendeeFeeSource: eventFees.source,
+    }
+    if (isCheckoutFeeInputs(snapshot)) feeInputs = snapshot
+    else captureFinancialError(new Error('fee inputs snapshot malformed'), { scope: 'create-order.fee_inputs_snapshot_failed', eventSlug: slug })
+  }
 
   // ── 7.7. RD-PAY-P0-2: reuse this attempt's existing order instead of minting a second ──
   //
@@ -393,15 +463,34 @@ export async function POST(
   // back, Razorpay is asked whether anything was captured against it BEFORE a replacement
   // is minted — the same guard, and the same helper shape, the license checkout has used
   // since RD-LICENSE-COUPON-FIX.
-  const claimId = idempotencyKey ? attemptClaimId(slug, idempotencyKey) : null
+  // (claimId, and this attempt's claim + intent, were read above — RD-EVENT-COMMERCE-05E.)
+  /**
+   * RD-PAYMENT-CASHFREE-CHECKOUT-06 — the provider-neutral half of every response.
+   *
+   * The browser is TOLD which gateway its order belongs to and is handed exactly what that
+   * gateway needs to open checkout. It never infers the provider from which fields are
+   * present, and it is never offered a choice.
+   *
+   * `keyId` is re-emitted for Razorpay ONLY. It is the field the existing client already
+   * reads, so the Razorpay response stays identical to before this phase; a Cashfree order
+   * must never carry a Razorpay key id, which would be a lie the client could act on.
+   */
+  function checkoutFields(handoff: CheckoutHandoff) {
+    return {
+      provider: handoff.provider,
+      checkout: handoff,
+      ...(handoff.provider === 'razorpay' ? { keyId: handoff.keyId } : {}),
+    }
+  }
+
   // True once we have decided to REPLACE an existing claim (its order is terminal, expired
   // or drifted, and Razorpay has confirmed it holds no money). Only then may the claim be
   // overwritten; a first-ever claim uses create() so a concurrent request cannot be lost.
   let supersedingClaim = false
   if (claimId) {
-    const claim = await getAttemptClaim(claimId).catch(() => null)
+    const claim = priorClaim
     if (claim?.orderId) {
-      const existing = await getPaymentIntent(claim.orderId).catch(() => null)
+      const existing = priorIntent
       if (existing) {
         const decision = decideExistingIntent(
           {
@@ -420,23 +509,44 @@ export async function POST(
         if (decision.kind === 'already_registered') {
           // The attempt is finished. Sending this attendee to Razorpay again would be the
           // double charge in its purest form.
+          // Already registered: nothing will be paid, so no checkout handoff is fetched —
+          // asking Cashfree for a session for an order nobody may pay would be a pointless
+          // network call on the duplicate path.
           return NextResponse.json({
-            orderId: claim.orderId, amount: existing.amount, currency: 'INR', keyId: RAZORPAY_KEY_ID,
+            orderId: claim.orderId, amount: existing.amount, currency: 'INR',
+            provider: existing.provider,
             alreadyRegistered: true, registrationId: decision.registrationId,
           })
         }
 
         if (decision.kind === 'reuse_order') {
+          // The SAME order is handed back, so the handoff is fetched for the provider that
+          // actually holds it — never the currently-active one. A Razorpay order created
+          // before this deployment switched providers must still open Razorpay.
+          const handoff = await resolvePaymentProvider(existing.provider)
+            .getCheckoutHandoff(claim.orderId)
           return NextResponse.json({
-            orderId: claim.orderId, amount: existing.amount, currency: 'INR', keyId: RAZORPAY_KEY_ID,
+            orderId: claim.orderId, amount: existing.amount, currency: 'INR',
+            ...checkoutFields(handoff),
             reused: true,
             ...(existing.financials ? { financials: existing.financials } : {}),
           })
         }
 
-        if (decision.kind === 'supersede') {
+        // RD-FIN-01 · a TERMINAL intent is checked too. "Terminal ⇒ already refunded" stopped
+        // being true when automatic refunds were removed: an intent marked registration_failed
+        // by payment.failed (and then captured on a retry of the same order) or by a settlement
+        // HOLD still holds the attendee's money. Minting a new order there was a double charge.
+        // A genuinely refunded payment no longer reads as captured/authorized, so it passes.
+        if (decision.kind === 'supersede' || decision.kind === 'new_order') {
           // Do NOT replace an order that may already hold the attendee's money.
-          const captured = await findCapturedRegistrationPayment(claim.orderId, existing.amount)
+          // `existing.provider`, never the active one: this asks about an order that ALREADY
+          // exists, and it must be asked of the gateway that holds it. getPaymentIntent
+          // normalizes a pre-discriminator record to 'razorpay', so historical orders resolve
+          // correctly without a backfill.
+          const captured = await findCapturedRegistrationPayment(
+            claim.orderId, existing.amount, existing.provider,
+          )
           if (captured) {
             captureFinancialError('captured_payment_blocks_new_order', {
               scope: 'create-order.captured_blocks_supersede',
@@ -452,27 +562,94 @@ export async function POST(
             )
           }
         }
-        // 'new_order' (terminal: already refunded) and a 'supersede' cleared by the
-        // captured-payment check both fall through to mint a replacement — and both must
+        // 'new_order' (terminal) and 'supersede', each cleared by the captured-payment check,
+        // both fall through to mint a replacement — and both must
         // overwrite this attempt's existing claim rather than lose to it.
         supersedingClaim = true
       }
     }
   }
 
-  // ── 8. Create Razorpay order (never trust client amount) ───────────────────
+  // ── 8. Open the provider order (never trust client amount) ─────────────────
+  //
+  // RD-PAYMENT-PROVIDER-CONTRACT-04 — this is the one place a NEW attendee payment chooses
+  // a gateway, so the choice is explicit and is carried onto the intent below.
+  //
+  // Phase B — it now resolves the ADMIN setting (Firestore, audited, 60s-cached) layered
+  // over the deployment variable, still subject to every provider gate. It is awaited here
+  // rather than read from the import-time constant so that flipping the switch takes effect
+  // without a redeploy.
+  //
+  // The value is persisted onto the payment intent immediately below, and that persisted
+  // value — never this one — is what verification, webhooks, refunds and reconciliation
+  // read later. Switching the setting therefore cannot touch a payment that already exists.
+  //
+  // FAIL-CLOSED. If an administrator explicitly selected Cashfree and its gates refuse it,
+  // this stops here. Nothing has been written yet — the gateway order (below),
+  // `createPaymentIntent` and `claimPaymentAttempt` all come AFTER this point — so a
+  // refusal leaves no order, no intent and no claim, and the attendee can retry once the
+  // configuration is corrected. A Razorpay order is deliberately NOT minted as a
+  // substitute: charging through a gateway nobody chose succeeds, and therefore hides.
+  const resolution = await resolveActivePaymentProviderForNewOrder()
+  if (!resolution.ok) {
+    return NextResponse.json(
+      {
+        error: 'Payments are temporarily unavailable for this event. Nothing was charged — please try again shortly.',
+        reason: 'GATEWAY_UNAVAILABLE',
+      },
+      { status: 503 },
+    )
+  }
+  const provider    = resolution.provider
   const receipt     = `rd_${Date.now()}`   // max 40 chars
 
+  // ── 8a. Provider-specific requirements, checked BEFORE anything is opened ──
+  //
+  // RD-PAYMENT-CASHFREE-SANDBOX-05A. Cashfree requires a 10-digit customer phone;
+  // RegisterDesk does not. The check is scoped to the Cashfree path so a Razorpay event
+  // keeps accepting attendees with no phone, exactly as it does today.
+  //
+  // It runs HERE, before `createOrder`, so a rejection leaves nothing behind: no gateway
+  // order, no payment intent, no registration, and the attendee's stored details untouched.
+  // Failing after the order existed would leave an orphaned order for an attendee who was
+  // never told to pay.
+  let customer: { id: string; phone?: string; email?: string; name?: string } | undefined
+  if (provider === 'cashfree') {
+    const phone = toCashfreeCustomerPhone(attendee.phone)
+    if (!phone.ok) {
+      return NextResponse.json(
+        { error: phone.reason, reason: 'PHONE_REQUIRED' },
+        { status: 400 },
+      )
+    }
+    customer = {
+      // A stable, non-PII customer id. Cashfree wants 3–50 alphanumerics; the receipt is
+      // already unique per attempt and carries no personal data, unlike an email.
+      id:    receipt,
+      phone: phone.phone,
+      email: attendee.email,
+      name:  attendee.name,
+    }
+  }
+
   let orderId: string
+  let checkoutHandoff: CheckoutHandoff
   try {
-    const order = await razorpay.orders.create({
-      amount:   amountPaise,
+    const order = await resolvePaymentProvider(provider).createOrder({
+      amountPaise,
       currency: 'INR',
       receipt,
+      // Razorpay's adapter ignores this; Cashfree's requires it. Passing it unconditionally
+      // keeps the call site provider-agnostic — it is `undefined` on the Razorpay path, so
+      // that path is byte-identical to before.
+      customer,
     })
-    orderId = order.id
+    orderId = order.providerOrderId
+    // Kept from the SAME call that opened the order. Cashfree mints the session with the
+    // order and RegisterDesk deliberately does not persist it.
+    checkoutHandoff = order.checkout
   } catch (err) {
-    captureFinancialError(err, { scope: 'create-order.razorpay_failed', eventSlug: slug, passId })
+    captureFinancialError(err, { scope: 'create-order.provider_order_failed', provider, eventSlug: slug, passId })
     return NextResponse.json(
       { error: 'Failed to create payment order. Please try again.' },
       { status: 502 },
@@ -486,6 +663,7 @@ export async function POST(
   try {
     await createPaymentIntent({
       orderId,
+      provider,
       eventSlug:    slug,
       passId,
       passName,
@@ -530,6 +708,8 @@ export async function POST(
       // RD-PAYMENT-02 Phase 4 — canonical fee breakdown (present only when the pricing
       // engine is enabled). Additive; `amount` above is unchanged and remains the charge.
       ...(financials ? { financials } : {}),
+      // RD-PHASE4-S2 — the fee inputs in force at checkout (engine OFF); see above.
+      ...(feeInputs ? { feeInputs } : {}),
     })
   } catch (err) {
     captureFinancialError(err, { scope: 'create-order.intent_write_failed', detail: 'orphaned Razorpay order', orderId, eventSlug: slug, passId, amount: amountPaise })
@@ -560,9 +740,11 @@ export async function POST(
     if (settled && settled.orderId !== orderId) {
       const winner = await getPaymentIntent(settled.orderId).catch(() => null)
       if (winner) {
+        const handoff = await resolvePaymentProvider(winner.provider)
+          .getCheckoutHandoff(settled.orderId)
         return NextResponse.json({
           orderId: settled.orderId, amount: winner.amount, currency: 'INR',
-          keyId: RAZORPAY_KEY_ID, reused: true,
+          ...checkoutFields(handoff), reused: true,
           ...(winner.financials ? { financials: winner.financials } : {}),
         })
       }
@@ -573,7 +755,9 @@ export async function POST(
     orderId,
     amount:   amountPaise,
     currency: 'INR',
-    keyId:    RAZORPAY_KEY_ID,
+    // The handoff the provider returned when it opened THIS order — for Cashfree that is the
+    // payment_session_id, which is the only token that can open its checkout.
+    ...checkoutFields(checkoutHandoff),
     // RD-PAYMENT-05 B1: return the canonical fee breakdown so the checkout can show the
     // attendee EXACTLY what they will pay before Razorpay opens. Present only when the
     // pricing engine ran (attendee_pays); absent under organizer_pays → response unchanged.

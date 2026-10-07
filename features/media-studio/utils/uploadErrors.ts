@@ -62,6 +62,12 @@ export type UploadFailureKind =
    * where retrying is GUARANTEED to fail and where the organizer can fix it themselves.
    */
   | 'insufficient_credits'
+  /**
+   * RD-PHOTO-01 · The event has no (or no more) PAID photo capacity — 402 PHOTO_CAPACITY_REQUIRED /
+   * 409 PHOTO_CAPACITY_FULL from /uploads/prepare. Retrying cannot help until more capacity is
+   * bought for the event on License & Services.
+   */
+  | 'photo_capacity'
   /** Anything unclassified. */
   | 'unknown'
 
@@ -131,7 +137,13 @@ const FAILURES: Readonly<Record<UploadFailureKind, Omit<UploadFailure, 'kind'>>>
   },
   insufficient_credits: {
     reason: 'Not enough Media Credits.',
-    action: 'Buy credits to continue — photos already uploaded are kept.',
+    // RD-PHOTO-01 — Media Credits are retired (no server returns this now); never offer a purchase here.
+    action: 'Photo capacity is bought for the event on License & Services — photos already uploaded are kept.',
+    retryable: false,
+  },
+  photo_capacity: {
+    reason: 'This event has no paid photo capacity left.',
+    action: 'Purchase more photo capacity for this event from License & Services — photos already uploaded are kept.',
     retryable: false,
   },
   unknown: {
@@ -153,6 +165,9 @@ export function classifyUploadError(error: unknown): UploadFailure {
   // A server code is authoritative in a way a sentence never is. Matching text for this one
   // would also be actively wrong: the 402's message contains the word "credits" and nothing
   // else distinctive, and the numbers it carries cannot be recovered from a string at all.
+  if (error instanceof UploadRequestError && (error.code === 'PHOTO_CAPACITY_REQUIRED' || error.code === 'PHOTO_CAPACITY_FULL')) {
+    return { kind: 'photo_capacity', ...FAILURES.photo_capacity }
+  }
   if (error instanceof UploadRequestError && error.code === 'INSUFFICIENT_CREDITS') {
     const required  = num(error.detail?.required)
     const available = num(error.detail?.available)

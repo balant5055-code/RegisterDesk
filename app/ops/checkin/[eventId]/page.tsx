@@ -1,6 +1,6 @@
-// /ops/checkin/[eventId] — RD-CHECKIN-STAFF-01
+// /ops/checkin/[eventId] — RD-CHECKIN-2.0
 //
-// The dedicated event-day gate surface for `checkin_staff`.
+// The dedicated event-day gate surface for staff accounts.
 //
 // This file is only a shell. It deliberately performs NO authorization of its own:
 // `middleware.ts` cannot verify a Firebase ID token on the Edge runtime (see the
@@ -9,10 +9,13 @@
 // handler with a Bearer token and shows nothing until that call succeeds.
 //
 // The authorization lives in GET /api/checkin/ops/[eventId] and in every check-in
-// route the client subsequently calls. Each one independently re-runs
+// route the workspace subsequently calls. Each one independently re-runs
 // authorizeEvent, so this page cannot leak an event by being reached directly.
+//
+// The workspace itself is shared with the organizer's own check-in page: one
+// implementation, two doors.
 
-import OpsCheckinClient from './OpsCheckinClient'
+import CheckinWorkspace from '@/components/checkin/workspace/CheckinWorkspace'
 
 export default async function OpsCheckinPage({
   params,
@@ -20,5 +23,5 @@ export default async function OpsCheckinPage({
   params: Promise<{ eventId: string }>
 }) {
   const { eventId } = await params
-  return <OpsCheckinClient eventId={eventId} />
+  return <CheckinWorkspace eventId={eventId} />
 }

@@ -12,6 +12,9 @@ import {
 } from '@/features/race-operations/components/public/ResultsChrome'
 import { getRunnerResult } from '@/features/race-operations/services/publicResults'
 import { formatRaceTime } from '@/features/race-operations/import/validation/time'
+import { formatDistance } from '@/features/race-operations/import/validation/distance'
+import { formatPaceWithUnit, formatSpeed } from '@/features/race-operations/utils/performance'
+import { SplitTable } from '@/features/race-operations/components/public/SplitTable'
 import { RACE_RESULT_STATUS_LABEL } from '@/features/race-operations/types/results'
 import { BadgeShare } from '@/features/finisher-badges/components/BadgeShare'
 // RD-RESULTS-PUBLIC-FIX-01 · the EXISTING gallery readers, through one resolver.
@@ -34,8 +37,9 @@ export async function generateMetadata({ params }: Params): Promise<Metadata> {
   const who   = result.name ?? `Bib ${result.bibNumber}`
   const title = `${who} — ${race.passName} Result`
   const time  = result.chipTimeMs !== null ? formatRaceTime(result.chipTimeMs) : null
+  const pace = formatPaceWithUnit(result.paceMsPerKm)
   const description = time
-    ? `${who} finished ${race.passName} at ${race.eventName} in ${time}.`
+    ? `${who} finished ${race.passName} at ${race.eventName} in ${time}${pace !== '' ? ` (${pace})` : ''}.`
     : `${who} — ${race.passName} result at ${race.eventName}.`
   const url = `${BASE_URL}/results/${eventSlug}/${passSlug}/${encodeURIComponent(result.bibNumber)}`
 
@@ -50,13 +54,47 @@ export async function generateMetadata({ params }: Params): Promise<Metadata> {
   }
 }
 
+/**
+ * RD-RACEOPS-RESULTS-04 · one ranking, as "4 / 60".
+ *
+ * A position means nothing without the size of the field it was taken in, so the two are
+ * rendered by one component and a missing total collapses the whole line rather than showing
+ * a bare "4". Returns null when there is no rank at all — §17: never a fake rank, never a
+ * zero, and no empty row left behind.
+ */
+function RankLine({ label, rank, total }: { label: string; rank: number | null; total: number | null }) {
+  if (rank === null) return null
+  return (
+    <div className="flex items-baseline justify-between gap-3 py-2.5">
+      <dt className="text-fs-sm text-muted-foreground">{label}</dt>
+      <dd className="text-fs-base font-semibold tabular-nums text-foreground">
+        {rank}
+        {total !== null && (
+          <span className="font-normal text-muted-foreground"> / {total.toLocaleString('en-IN')}</span>
+        )}
+      </dd>
+    </div>
+  )
+}
+
+/** One identity fact in the header strip. Rendered only when the file actually carried it. */
+function Fact({ label, value }: { label: string; value: string | null }) {
+  if (value === null || value.trim() === '') return null
+  return (
+    <div>
+      <dt className="text-fs-2xs font-semibold uppercase tracking-wide text-muted-foreground">{label}</dt>
+      <dd className="mt-0.5 text-fs-base font-semibold text-foreground">{value}</dd>
+    </div>
+  )
+}
+
 function Stat({
   icon: Icon, label, value, emphasis = false,
 }: { icon: typeof Clock; label: string; value: string; emphasis?: boolean }) {
   return (
     <div className={cn(
       'rounded-xl border p-4',
-      emphasis ? 'border-primary/30 bg-primary/[0.04]' : 'border-border bg-card',
+      emphasis ? 'border-action/30 bg-action/[0.04]' : 'border-border bg-card',
     )}>
       <div className="flex items-center gap-1.5 text-fs-2xs font-semibold uppercase tracking-wide text-muted-foreground">
         <Icon className="size-3.5" aria-hidden />
@@ -83,9 +121,17 @@ export default async function RunnerResultPage({ params }: Params) {
   const photos = found ? await resolveResultPhotos(eventSlug) : null
   if (!found) notFound()
 
-  const { race, result } = found
+  const { race, result, splits } = found
   const who      = result.name ?? `Bib ${result.bibNumber}`
   const finished = result.status === 'finished'
+  // RD-RACEOPS-RESULTS-04 · derived on the server from the published time and distance —
+  // formatted to '' when either is missing, and every consumer below hides the tile rather
+  // than printing a zero (§17).
+  const paceText  = formatPaceWithUnit(result.paceMsPerKm)
+  const speedText = formatSpeed(result.speedKmh)
+  // The distance the FILE stated, falling back to the race's own name — which is what this
+  // page showed before a distance could be imported at all.
+  const distanceText = formatDistance(result.distanceMeters) || (result.distanceRaw ?? '')
 
   return (
     <ResultsShell>
@@ -98,7 +144,7 @@ export default async function RunnerResultPage({ params }: Params) {
 
       {/* ── Hero ── */}
       <header className="mb-6 rounded-2xl border border-border bg-card p-6 sm:p-8">
-        <p className="text-fs-2xs font-semibold uppercase tracking-[0.12em] text-primary">
+        <p className="text-fs-2xs font-semibold uppercase tracking-[0.12em] text-action">
           {race.eventName} · {race.passName}
         </p>
         <h1 className="mt-2 text-fs-xl font-bold tracking-tight text-foreground sm:text-[28px]">
@@ -116,6 +162,17 @@ export default async function RunnerResultPage({ params }: Params) {
             {RACE_RESULT_STATUS_LABEL[result.status]}
           </span>
         </p>
+
+        {/* RD-RACEOPS-RESULTS-04 · the identity facts the timing file carried. Each one
+            renders only when it exists, so a file with bibs and times alone produces the
+            same header this page has always shown. */}
+        <dl className="mt-5 grid grid-cols-2 gap-x-6 gap-y-3 border-t border-border pt-5 sm:grid-cols-4">
+          <Fact label="Bib"       value={result.bibNumber} />
+          <Fact label="Distance"  value={distanceText || race.passName} />
+          <Fact label="Gender"    value={result.gender} />
+          <Fact label="Age group" value={result.ageGroup} />
+          <Fact label="Category"  value={result.category} />
+        </dl>
       </header>
 
       {/* ── Official numbers ── */}
@@ -141,6 +198,63 @@ export default async function RunnerResultPage({ params }: Params) {
           value={race.finisherCount.toLocaleString('en-IN')}
         />
       </section>
+
+      {/* ── RD-RACEOPS-RESULTS-04 · Ranking and performance ───────────────────
+          Two panels, because they answer two questions: "where did I come" and "how fast was
+          that". Every line is omitted when RegisterDesk could not compute it — a participant
+          reading this page must never be shown a rank, pace or speed that was guessed.
+
+          Gender and age-group positions are RegisterDesk's own, computed from the published
+          set in the same pass as the overall position (ranking/groups.ts). A timing
+          provider's rank columns are recognised on import and deliberately not stored. */}
+      {(result.genderRank !== null || result.ageGroupRank !== null || paceText !== '' || speedText !== '') && (
+        <section aria-label="Ranking and performance" className="mb-6 grid gap-3 sm:grid-cols-2">
+          {(result.genderRank !== null || result.ageGroupRank !== null) && (
+            <div className="rounded-xl border border-border bg-card p-5">
+              <h2 className="text-fs-2xs font-semibold uppercase tracking-wide text-muted-foreground">
+                Position
+              </h2>
+              <dl className="mt-1 divide-y divide-border/60">
+                <RankLine label="Overall"   rank={result.overallRank}  total={race.finisherCount} />
+                <RankLine label="Gender"    rank={result.genderRank}   total={result.genderTotal} />
+                <RankLine label="Age group" rank={result.ageGroupRank} total={result.ageGroupTotal} />
+              </dl>
+            </div>
+          )}
+
+          {(paceText !== '' || speedText !== '') && (
+            <div className="rounded-xl border border-border bg-card p-5">
+              <h2 className="text-fs-2xs font-semibold uppercase tracking-wide text-muted-foreground">
+                Pace and speed
+              </h2>
+              <dl className="mt-1 divide-y divide-border/60">
+                {paceText !== '' && (
+                  <div className="flex items-baseline justify-between gap-3 py-2.5">
+                    <dt className="text-fs-sm text-muted-foreground">Average pace</dt>
+                    <dd className="text-fs-base font-semibold tabular-nums text-foreground">{paceText}</dd>
+                  </div>
+                )}
+                {speedText !== '' && (
+                  <div className="flex items-baseline justify-between gap-3 py-2.5">
+                    <dt className="text-fs-sm text-muted-foreground">Average speed</dt>
+                    <dd className="text-fs-base font-semibold tabular-nums text-foreground">{speedText}</dd>
+                  </div>
+                )}
+                {distanceText !== '' && (
+                  <div className="flex items-baseline justify-between gap-3 py-2.5">
+                    <dt className="text-fs-sm text-muted-foreground">Over</dt>
+                    <dd className="text-fs-base font-semibold tabular-nums text-foreground">{distanceText}</dd>
+                  </div>
+                )}
+              </dl>
+            </div>
+          )}
+        </section>
+      )}
+
+      {/* ── RD-RACEOPS-RESULTS-04 · Split times ──
+          Renders nothing at all when the race published no checkpoints. */}
+      <SplitTable splits={splits} />
 
       {/* ── Finisher badge (RD-BADGE-01) ──
           The image endpoint generates the PNG on first request from the OFFICIAL SNAPSHOT and
@@ -176,8 +290,8 @@ export default async function RunnerResultPage({ params }: Params) {
           </div>
           <Link
             href="/attendee/certificates"
-            className="inline-flex h-11 shrink-0 items-center justify-center gap-2 rounded-xl px-5 text-fs-base font-semibold text-primary-foreground transition-opacity hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2"
-            style={{ backgroundImage: 'var(--primary-gradient)' }}
+            className="inline-flex h-11 shrink-0 items-center justify-center gap-2 rounded-xl px-5 text-fs-base font-semibold text-action-foreground transition-opacity hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-action focus-visible:ring-offset-2"
+            style={{ backgroundImage: 'var(--action-gradient)' }}
           >
             <Award className="size-4" aria-hidden />
             Get certificate
@@ -219,15 +333,15 @@ export default async function RunnerResultPage({ params }: Params) {
                     parameter, so this link reveals nothing about who ran. */}
                 <Link
                   href={photos.myPhotosHref}
-                  className="inline-flex h-11 items-center justify-center gap-2 rounded-xl px-5 text-fs-base font-semibold text-primary-foreground transition-opacity hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2"
-                  style={{ backgroundImage: 'var(--primary-gradient)' }}
+                  className="inline-flex h-11 items-center justify-center gap-2 rounded-xl px-5 text-fs-base font-semibold text-action-foreground transition-opacity hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-action focus-visible:ring-offset-2"
+                  style={{ backgroundImage: 'var(--action-gradient)' }}
                 >
                   <Camera className="size-4" aria-hidden />
                   View my photos
                 </Link>
                 <Link
                   href={photos.galleryHref}
-                  className="inline-flex h-11 items-center justify-center gap-2 rounded-xl border border-border px-5 text-fs-base font-medium text-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+                  className="inline-flex h-11 items-center justify-center gap-2 rounded-xl border border-border px-5 text-fs-base font-medium text-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-action"
                 >
                   Full gallery
                 </Link>
@@ -245,7 +359,7 @@ export default async function RunnerResultPage({ params }: Params) {
 
       <Link
         href={`/results/${eventSlug}/${passSlug}`}
-        className="inline-flex items-center gap-1.5 text-fs-base font-semibold text-primary hover:underline"
+        className="inline-flex items-center gap-1.5 text-fs-base font-semibold text-action hover:underline"
       >
         View the full {race.passName} leaderboard
       </Link>

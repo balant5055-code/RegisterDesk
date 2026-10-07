@@ -55,7 +55,7 @@ export function FAQSection({ faqUrl, supportEmail, supportPhone, termsUrl, refun
           href={faqUrl}
           target="_blank"
           rel="noopener noreferrer"
-          className="flex items-center gap-1 text-sm font-semibold text-primary hover:underline"
+          className="flex items-center gap-1 text-sm font-semibold text-action hover:underline"
         >
           View All FAQs
           <ArrowRight className="size-3.5" aria-hidden />
@@ -66,13 +66,13 @@ export function FAQSection({ faqUrl, supportEmail, supportPhone, termsUrl, refun
         <div className={cn('flex flex-wrap gap-4', faqUrl && 'mt-4 border-t border-border/40 pt-4')}>
           {supportEmail && (
             <a href={`mailto:${supportEmail}`}
-              className="flex items-center gap-1.5 text-xs text-muted-foreground transition-colors hover:text-primary">
+              className="flex items-center gap-1.5 text-xs text-muted-foreground transition-colors hover:text-action">
               <Mail className="size-3.5 shrink-0" aria-hidden />{supportEmail}
             </a>
           )}
           {supportPhone && (
             <a href={`tel:${supportPhone}`}
-              className="flex items-center gap-1.5 text-xs text-muted-foreground transition-colors hover:text-primary">
+              className="flex items-center gap-1.5 text-xs text-muted-foreground transition-colors hover:text-action">
               <Phone className="size-3.5 shrink-0" aria-hidden />{supportPhone}
             </a>
           )}
@@ -83,19 +83,19 @@ export function FAQSection({ faqUrl, supportEmail, supportPhone, termsUrl, refun
         <div className={cn('flex flex-wrap gap-2', (faqUrl || hasContact) && 'mt-4 border-t border-border/40 pt-4')}>
           {termsUrl && (
             <a href={termsUrl} target="_blank" rel="noopener noreferrer"
-              className="flex items-center gap-1 rounded-full border border-border/60 px-2.5 py-1 text-[10.5px] font-medium text-muted-foreground transition-colors hover:text-primary">
+              className="flex items-center gap-1 rounded-full border border-border/60 px-2.5 py-1 text-[10.5px] font-medium text-muted-foreground transition-colors hover:text-action">
               <FileText className="size-2.5 shrink-0" aria-hidden />Terms & Conditions
             </a>
           )}
           {refundPolicyUrl && (
             <a href={refundPolicyUrl} target="_blank" rel="noopener noreferrer"
-              className="flex items-center gap-1 rounded-full border border-border/60 px-2.5 py-1 text-[10.5px] font-medium text-muted-foreground transition-colors hover:text-primary">
+              className="flex items-center gap-1 rounded-full border border-border/60 px-2.5 py-1 text-[10.5px] font-medium text-muted-foreground transition-colors hover:text-action">
               <FileText className="size-2.5 shrink-0" aria-hidden />Refund Policy
             </a>
           )}
           {privacyPolicyUrl && (
             <a href={privacyPolicyUrl} target="_blank" rel="noopener noreferrer"
-              className="flex items-center gap-1 rounded-full border border-border/60 px-2.5 py-1 text-[10.5px] font-medium text-muted-foreground transition-colors hover:text-primary">
+              className="flex items-center gap-1 rounded-full border border-border/60 px-2.5 py-1 text-[10.5px] font-medium text-muted-foreground transition-colors hover:text-action">
               <ShieldCheck className="size-2.5 shrink-0" aria-hidden />Privacy Policy
             </a>
           )}

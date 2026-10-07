@@ -126,7 +126,7 @@ export default function EmailBrandingPage() {
           <div className="grid grid-cols-2 gap-3">
             <Field label="Organization name"><input className={input} value={form.companyName} onChange={e => set('companyName', e.target.value)} placeholder="Acme Events" /></Field>
             <Field label="Logo URL"><input className={input} value={form.logoUrl} onChange={e => set('logoUrl', e.target.value)} placeholder="https://…/logo.png" /></Field>
-            <Field label="Primary colour"><input className={input} value={form.primaryColor} onChange={e => set('primaryColor', e.target.value)} placeholder="#e5277e" /></Field>
+            <Field label="Primary colour"><input className={input} value={form.primaryColor} onChange={e => set('primaryColor', e.target.value)} placeholder="#4F46E5" /></Field>
             <Field label="Secondary colour"><input className={input} value={form.secondaryColor} onChange={e => set('secondaryColor', e.target.value)} placeholder="#6b7280" /></Field>
             <Field label="Website"><input className={input} value={form.website} onChange={e => set('website', e.target.value)} placeholder="https://acme.events" /></Field>
             <Field label="Support email"><input className={input} value={form.supportEmail} onChange={e => set('supportEmail', e.target.value)} placeholder="help@acme.events" /></Field>

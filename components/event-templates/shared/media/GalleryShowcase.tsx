@@ -100,7 +100,7 @@ function Tile({ item, index, total, span, aspect, onOpen }: {
       className={cn(
         'group relative overflow-hidden rounded-2xl bg-muted shadow-sm outline-none',
         'transition-shadow duration-300 hover:shadow-lg',
-        'focus-visible:ring-2 focus-visible:ring-primary/60 focus-visible:ring-offset-2',
+        'focus-visible:ring-2 focus-visible:ring-action/60 focus-visible:ring-offset-2',
         span, aspect,
       )}
     >

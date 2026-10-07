@@ -78,7 +78,7 @@ const MAXW_TO_MEASURE: Record<string, SectionMeasure> = {
 // generosity at exactly the width where it should feel most spacious. One `lg` step
 // closes that, and every SectionShell consumer inherits it without an edit.
 /** A full content SECTION. */
-export const SECTION_PY   = 'py-14 sm:py-16 lg:py-20'
+export const SECTION_PY   = 'py-12 sm:py-14 lg:py-16'
 /** A content BAND (waiver notice, legal strip) — not a section. */
 export const BAND_PY      = 'py-4'
 /** A notification STRIP (lifecycle status bars) — the tightest rhythm. */
@@ -96,7 +96,7 @@ export const GRID_GAP     = 'gap-4'
 // so these are drop-in replacements for the old text-[Npx] values.
 export const TYPE = {
   /** Section eyebrow — the small uppercase kicker above a section title. */
-  eyebrow:      'text-fs-xs font-bold uppercase tracking-[0.14em] text-primary',
+  eyebrow:      'text-fs-xs font-bold uppercase tracking-[0.14em] text-action',
   /** Section h2. */
   sectionTitle: 'text-fs-xl font-bold tracking-tight text-foreground sm:text-fs-2xl',
   /** Section description under the title. */
@@ -137,8 +137,8 @@ export const TYPE = {
 } as const
 
 // ─── 4 · Card language ───────────────────────────────────────────────────────────
-export const CARD       = 'rounded-2xl border border-border/50 bg-card shadow-sm'
-export const CARD_HOVER = 'transition-shadow duration-150 hover:shadow-md'
+export const CARD       = 'rounded-panel border border-border/60 bg-card'
+export const CARD_HOVER = 'transition-colors duration-150 hover:border-border-strong'
 /** Card padding scale — was eight ad-hoc values across the chain. */
 export const CARD_PAD_SM = 'p-4'
 export const CARD_PAD    = 'p-5'
@@ -159,7 +159,7 @@ export const CARD_PAD_LG = 'p-6'
  * Colour is carried here too — every call site used `bg-primary/10`. Sections that
  * tint per item (Experience) override it with an inline style, which still wins.
  */
-export const ICON_TILE = 'inline-flex size-10 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary'
+export const ICON_TILE = 'inline-flex size-10 shrink-0 items-center justify-center rounded-surface bg-action/10 text-action'
 /** The icon INSIDE an `ICON_TILE`. Was size-5 in four places and size-[18px] in two. */
 export const ICON_TILE_ICON = 'size-5'
 
@@ -171,8 +171,10 @@ export const ICON_TILE_ICON = 'size-5'
 export const GLASS_DARK  = 'border border-white/10 bg-slate-900/85 backdrop-blur-md'
 /** Frosted LIGHT panel over media (foreground text). */
 export const GLASS_LIGHT = 'border border-white/60 bg-white/70 backdrop-blur-md'
-/** The one brand gradient surface — never re-declare the gradient string. */
-export const BRAND_GRADIENT = 'bg-[image:var(--primary-gradient)]'
+/** The one brand gradient surface — never re-declare the gradient string. It is the
+    same utility the chrome and the login CTA use: .rd-brand-gradient is THE consumer of
+    --action-gradient (globals.css), so an event page's ramp cannot drift from the site's. */
+export const BRAND_GRADIENT = 'rd-brand-gradient'
 
 // ─── Section shell ───────────────────────────────────────────────────────────────
 export function SectionShell({
@@ -305,13 +307,13 @@ export function AttachmentChips({ attachments, links, className }: {
     <div className={cn('flex flex-wrap gap-2', className)}>
       {a.map((x, i) => (
         <a key={`a${i}`} href={x.url} target="_blank" rel="noopener noreferrer"
-          className="inline-flex items-center gap-1.5 rounded-lg border border-border/70 bg-card px-2.5 py-1 text-fs-xs font-medium text-foreground transition-colors hover:border-primary/40 hover:text-primary">
+          className="inline-flex items-center gap-1.5 rounded-lg border border-border/70 bg-card px-2.5 py-1 text-fs-xs font-medium text-foreground transition-colors hover:border-action/40 hover:text-action">
           <Paperclip className="size-3.5" aria-hidden />{x.label?.trim() || 'Attachment'}
         </a>
       ))}
       {l.map((x, i) => (
         <Link key={`l${i}`} href={x.url} target="_blank" rel="noopener noreferrer"
-          className="inline-flex items-center gap-1.5 rounded-lg border border-border/70 bg-card px-2.5 py-1 text-fs-xs font-medium text-foreground transition-colors hover:border-primary/40 hover:text-primary">
+          className="inline-flex items-center gap-1.5 rounded-lg border border-border/70 bg-card px-2.5 py-1 text-fs-xs font-medium text-foreground transition-colors hover:border-action/40 hover:text-action">
           {x.label?.trim() || 'Learn more'}<ExternalLink className="size-3" aria-hidden />
         </Link>
       ))}

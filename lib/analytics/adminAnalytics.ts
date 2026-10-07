@@ -108,8 +108,13 @@ export async function getAdminAnalytics(): Promise<AdminAnalytics> {
   try {
     const paid = await licenseOrders.where('status', '==', 'paid').limit(2000).get()
     for (const d of paid.docs) {
-      const o = d.data() as { tier?: string; couponCode?: string | null; campaign?: string | null }
-      byTier.set(String(o.tier ?? 'unknown'), (byTier.get(String(o.tier ?? 'unknown')) ?? 0) + 1)
+      const o = d.data() as { tier?: string; couponCode?: string | null; campaign?: string | null; commercialModel?: string }
+      // RD-CAPACITY-01 · a capacity-priced order has no tier. It carries the version's free
+      // tier purely as a compatibility stamp, so counting it here would report real
+      // activation revenue as Free-tier sales. It is bucketed as 'capacity' instead, which
+      // is what it is.
+      const bucket = o.commercialModel === 'capacity' ? 'capacity' : String(o.tier ?? 'unknown')
+      byTier.set(bucket, (byTier.get(bucket) ?? 0) + 1)
       if (o.couponCode) {
         couponRedemptions++
         byCoupon.set(o.couponCode, (byCoupon.get(o.couponCode) ?? 0) + 1)

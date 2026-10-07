@@ -14,7 +14,9 @@
 
 import { FieldValue, Timestamp } from 'firebase-admin/firestore'
 import { adminDb } from '@/lib/firebase/admin'
-import { setBaselineOverrides } from '@/lib/events/governance'
+import { baselineRef, stageBaselineOverrides } from '@/lib/events/governance'
+import { stageAdminAudit, logAdminActionOrRecord } from '@/lib/admin/audit'
+import { captureFinancialError } from '@/lib/monitoring/sentry'
 import {
   EVENT_LICENSES_COLLECTION,
   LICENSE_ORDERS_COLLECTION,
@@ -23,7 +25,6 @@ import {
   type LicenseHistoryAction,
 } from '@/lib/licensing/schema'
 import {
-  CURRENT_LICENSE_VERSION,
   isEventLicenseTier,
   isEventLicenseTierV2,
   isValidTierForVersion,
@@ -36,13 +37,23 @@ import { getLicenseCatalog, getLicenseCatalogV2, type LicenseCatalog, type Licen
 import { pickVersionedDefinition } from '@/lib/licensing/licenseCatalogShared'
 import { resolveEffectiveEventLicense, OVERRIDABLE_FEATURE_KEYS } from '@/lib/licensing/adminLicense'
 import { capacityPlanForRegistrationLimit } from '@/lib/registrations/capacity'
+import { soldFromCounter } from '@/lib/licensing/capacityChange'
 import { atomicWalletCredit } from '@/lib/firebase/firestore/wallet'
+import { organizerRedemptionCounterRef } from '@/lib/licensing/coupons'
+import { ledgerRef as serviceLedgerRef, ledgerLine, type ServiceLedgerDoc } from '@/lib/licensing/serviceAllowanceLedger'
+import { SERVICE_KINDS } from '@/lib/licensing/serviceAllowances'
+
+/** RD-M5 — the per-organizer coupon counter a licence order's redemption belongs to (null ⇒ none). */
+function couponCounterRefOf(order: Record<string, unknown>) {
+  return typeof order.couponCode === 'string' && order.couponCode && typeof order.organizerUid === 'string' && order.organizerUid
+    ? organizerRedemptionCounterRef(order.couponCode, order.organizerUid)
+    : null
+}
 // RD-ENV-ARCH-05 — Razorpay is NOT statically imported here. This service is imported by
 // admin READ paths (license list/detail, Event360, governance, timeline, export) that
 // must never initialize/validate Razorpay. The gateway client is lazy-loaded only at the
 // single payment-execution point (the 'refund' action), so read paths stay Razorpay-free.
-import { logAdminAction } from '@/lib/admin/audit'
-import type { AdminAuditAction } from '@/lib/admin/auditConstants'
+import type { AdminAuditAction, AdminAuditParams, AuditActorRole } from '@/lib/admin/auditConstants'
 import type {
   LicenseRow,
   LicenseListResponse,
@@ -153,6 +164,13 @@ function buildRow(doc: EventLicenseDoc, catalog: LicenseCatalog, catalogV2: Lice
   const maxReg  = eff.definition.limits.maxRegistrations
 
   const ev = joins.event
+  // RD-EVENT-COMMERCE-04 — a capacity licence carries the free tier only as a compatibility
+  // stamp. Its limit is the capacity it BOUGHT: the enforced events.totalCapacity (the single
+  // enforced source), else the licence's own purchased figure — never the tier's 200.
+  const isInt = (v: unknown): v is number => typeof v === 'number' && Number.isInteger(v) && v >= 0
+  const capacityLimit = isCapacityLicence(doc)
+    ? (isInt(ev?.totalCapacity) ? ev.totalCapacity : isInt((doc as { capacity?: unknown }).capacity) ? (doc as { capacity: number }).capacity : (isUnlimited(maxReg) ? null : maxReg))
+    : undefined
   const org = joins.organizer
   const hasOverrides =
     overlay.complimentary ||
@@ -170,14 +188,15 @@ function buildRow(doc: EventLicenseDoc, catalog: LicenseCatalog, catalogV2: Lice
     organizerEmail:      typeof org?.email === 'string' ? (org.email as string) : '',
     organizationName:    typeof org?.organizationName === 'string' ? (org.organizationName as string) : '',
     tier,
-    tierName:            baseDef.name,   // version-aware display name (V1 or V2)
+    // RD-EVENT-COMMERCE-05 — a tier licence is HISTORICAL (tiers are no longer sold), and says so.
+    tierName:            capacityLimit !== undefined ? 'Capacity licence' : `${baseDef.name} (legacy tier)`,   // version-aware display name (V1 or V2)
     displayStatus:       displayStatus(doc.status, overlay.lifecycle),
     lifecycle:           overlay.lifecycle,
     complimentary:       overlay.complimentary,
     source:              doc.source === 'admin' ? 'admin' : 'self_serve',
     amountPaidPaise:     doc.amountPaise ?? 0,
     effectivePricePaise: eff.effectivePricePaise,
-    registrationLimit:   isUnlimited(maxReg) ? null : maxReg,
+    registrationLimit:   capacityLimit !== undefined ? capacityLimit : isUnlimited(maxReg) ? null : maxReg,
     used:                joins.used ?? 0,
     purchaseDate:        tsToISO(doc.paidAt) ?? tsToISO(doc.createdAt),
     paymentStatus:       paymentStatus(overlay, doc.amountPaise ?? 0, joins.order),
@@ -324,6 +343,7 @@ export async function getLicenseDetail(eventId: string): Promise<LicenseDetail |
       razorpayPaymentId: typeof order.razorpayPaymentId === 'string' ? order.razorpayPaymentId : null,
     } : null,
     timeline,
+    capacityModel: isCapacityLicence(doc),
   }
 }
 
@@ -377,24 +397,41 @@ const HISTORY_ACTION: Record<LicenseAdminActionType, LicenseHistoryAction> = {
   resetLicense:               'reset',
 }
 
-/** Resolve the immutable Event ID (draftId) from a published event slug — needed to
- *  bind publish-governance overrides, which are keyed by draftId, not the slug. */
-async function resolveDraftId(slug: string): Promise<string | null> {
-  const ev = await adminDb.doc(`events/${slug}`).get()
-  const d  = ev.exists ? (ev.data() as { draftId?: unknown }) : null
-  return typeof d?.draftId === 'string' ? d.draftId : null
-}
-
-/** Write an immutable licenseHistory entry (never overwrites — always appends). */
-async function appendHistory(entry: {
+/** The licence-history entry (immutable, append-only) for one admin action. */
+interface LicenseHistoryEntryInput {
   eventId: string; organizerUid: string; action: LicenseHistoryAction
   // RD-LICENSE-01B — widened to match the widened LicenseHistoryDoc (type-only; the values
   // written are unchanged — the admin service still produces V1 tiers under version 1).
   fromTier: AnyEventLicenseTier | null; toTier: AnyEventLicenseTier
   actorUid: string; note: string; reason: string; before?: unknown; after?: unknown
   orderId?: string | null
-}): Promise<void> {
-  await adminDb.collection(LICENSE_HISTORY_COLLECTION).add({
+}
+type LicensePlatformAudit = Omit<AdminAuditParams, 'entityType' | 'entityId'> & { entityType?: AdminAuditParams['entityType'] }
+
+/**
+ * Stage the licenseHistory row AND its platform audit row (adminAuditLogs) on the caller's
+ * transaction or batch. RD-EVENT-COMMERCE-04A made them one batch; RD-PHASE4-S4 (F8) moves them
+ * INTO the action's own transaction, so the mutation, its history and its audit commit together
+ * or not at all. Both are `create`: append-only, and the platform row's id is derived from the
+ * history row's, so one logical action can never yield two platform rows.
+ */
+function stageLicenseHistory(
+  writer: FirebaseFirestore.Transaction | FirebaseFirestore.WriteBatch,
+  entry: LicenseHistoryEntryInput,
+  platform?: LicensePlatformAudit,
+): void {
+  const histRef = adminDb.collection(LICENSE_HISTORY_COLLECTION).doc()
+  if (platform) {
+    stageAdminAudit(writer, {
+      ...platform,
+      entityType: platform.entityType ?? 'license',
+      entityId:   entry.eventId,
+      reason:     platform.reason ?? (entry.reason || undefined),
+      metadata:   { ...clean(platform.metadata ?? {}), licenseHistoryId: histRef.id },
+      correlation: { eventId: entry.eventId, organizerUid: entry.organizerUid, orderId: entry.orderId ?? null, ...(platform.correlation ?? {}) },
+    }, `license_${histRef.id}`)
+  }
+  ;(writer as FirebaseFirestore.WriteBatch).create(histRef, {
     eventId:      entry.eventId,
     organizerUid: entry.organizerUid,
     action:       entry.action,
@@ -405,15 +442,16 @@ async function appendHistory(entry: {
     actorUid:     entry.actorUid,
     note:         entry.note,
     reason:       entry.reason,
-    ...(entry.before !== undefined ? { before: entry.before } : {}),
-    ...(entry.after  !== undefined ? { after:  entry.after  } : {}),
+    // JSON round-trip: Firestore rejects `undefined`.
+    ...(entry.before !== undefined ? { before: clean(entry.before) } : {}),
+    ...(entry.after  !== undefined ? { after:  clean(entry.after)  } : {}),
     createdAt:    FieldValue.serverTimestamp(),
   })
 }
 
-/** Persist a full admin overlay (merge) + bump updatedAt. */
-async function writeOverlay(eventId: string, overlay: OverlayShape, adminUid: string): Promise<void> {
-  await licenseRef(eventId).set({
+/** The merge payload of a full admin overlay + bumped updatedAt. */
+function overlayPayload(overlay: OverlayShape, adminUid: string) {
+  return {
     admin: {
       lifecycle:          overlay.lifecycle,
       complimentary:      overlay.complimentary,
@@ -425,382 +463,539 @@ async function writeOverlay(eventId: string, overlay: OverlayShape, adminUid: st
       updatedAt:          FieldValue.serverTimestamp(),
     },
     updatedAt: FieldValue.serverTimestamp(),
-  }, { merge: true })
+  }
 }
 
-/** Recompute + persist the event's enforced capacity from an effective limit.
- *  `maxRegistrations` may be Infinity (unlimited). No-op if the event doc is gone. */
-async function syncEventCapacity(eventId: string, maxRegistrations: number): Promise<void> {
-  const evRef = adminDb.doc(`events/${eventId}`)
-  if (!(await evRef.get()).exists) return
-  const plan = capacityPlanForRegistrationLimit(maxRegistrations)
-  await evRef.set({
-    capacityPlan:     plan,
+/** RD-EVENT-COMMERCE-01 · D5 — a capacity-model licence's capacity was BOUGHT; no tier-derived
+ *  limit may ever be written over it. */
+const isCapacityLicence = (d: { commercialModel?: unknown } | null | undefined): boolean =>
+  d?.commercialModel === 'capacity'
+
+/** The event-doc capacity fields for an effective limit (`Infinity` = unlimited). Every
+ *  enforcement path reads `totalCapacity` — the registration transaction, verify-payment, webhook,
+ *  restore, approve, bulk, AND the gate — so it moves in lock-step with the override. */
+function eventCapacityPatch(maxRegistrations: number) {
+  return {
+    capacityPlan:     capacityPlanForRegistrationLimit(maxRegistrations),
     capacityOverride: Number.isFinite(maxRegistrations) ? maxRegistrations : FieldValue.delete(),
-    // `totalCapacity` is the field EVERY enforcement path reads — the registration
-    // transaction, verify-payment, webhook, restore, approve, bulk, AND the gate.
-    // It must move in lock-step with the override (number, or null = unlimited) so
-    // an admin limit change applies immediately at registration time. This is the
-    // single enforced source of truth for capacity.
     totalCapacity:    Number.isFinite(maxRegistrations) ? maxRegistrations : null,
     updatedAt:        FieldValue.serverTimestamp(),
-  }, { merge: true })
+  }
 }
+
+/** Who performed a licence action — the route decides (addNote is open to any admin). */
+export interface LicenseActionActor { actorRole?: AuditActorRole }
 
 /** Apply an admin action to an event license. Validates, mutates, audits. */
 export async function applyLicenseAction(
   eventId: string,
   req: LicenseAdminActionRequest,
   adminUid: string,
+  actor: LicenseActionActor = {},
 ): Promise<LicenseAdminActionResponse> {
   const action = req.action
   const reason = (req.reason ?? '').trim()
+  const actorRole: AuditActorRole = actor.actorRole ?? 'super_admin'
 
-  const snap = await licenseRef(eventId).get()
-  const doc  = snap.exists ? { ...(snap.data() as EventLicenseDoc), eventId } : null
+  // ═══ RD-EVENT-COMMERCE-05 · TIER ACTIONS RETIRED ═══════════════════════════════
+  // RegisterDesk sells ONLY pay-as-you-go capacity + separately purchased services. Granting a
+  // tier, or moving a licence up/down a tier, no longer exists as a commercial action — for any
+  // licence, legacy or capacity. Historical tier licences stay readable (their tier, version and
+  // history are untouched); admin capacity changes go through overrideLimit (sold-floor guarded)
+  // and pricing through the capacity model. 410 so a stale client learns the action is gone.
+  if (action === 'grant' || action === 'upgrade' || action === 'downgrade') {
+    throw new LicenseActionError('Tier licences are retired. RegisterDesk sells registration capacity pay-as-you-go; use a capacity override instead of a tier grant, upgrade or downgrade.', 410)
+  }
 
-  // RD-LICENSE-GA-02: resolve BOTH catalogs; NEW writes (grant/upgrade target) resolve at
-  // CURRENT_LICENSE_VERSION, a stored license doc resolves at its own version. rankOf is the
-  // cross-version tier rank (by registration limit). At version 1 all of this is identical.
+  // RD-LICENSE-GA-02: resolve BOTH catalogs; a stored license doc resolves at its OWN version.
+  // (RD-EVENT-COMMERCE-05 retired the tier writes — grant / upgrade — that resolved at the
+  // current version, so no cross-version rank is needed any more.)
   const [catalog, catalogV2] = await Promise.all([getLicenseCatalog(), getLicenseCatalogV2()])
   const defFor = (t: string, v: number) => pickVersionedDefinition(catalog, catalogV2, t, v)
-  const rankOf = (t: string, v: number): number => {
-    const m = defFor(t, v).limits.maxRegistrations
-    return isUnlimited(m) ? Number.MAX_SAFE_INTEGER : m
-  }
   const respond = (extra?: Partial<LicenseAdminActionResponse>): LicenseAdminActionResponse =>
     ({ ok: true, eventId, action, ...extra })
 
-  // ── grant — create a comp/free license for an event that has none ──
-  if (action === 'grant') {
-    if (!isValidTierForVersion(req.tier, CURRENT_LICENSE_VERSION)) throw new LicenseActionError('A valid tier is required to grant a license')
-    if (doc && readOverlay(doc).lifecycle === 'active' && doc.status === 'active') {
-      throw new LicenseActionError('Event already has an active license — use override/upgrade instead of grant', 409)
-    }
-    const evSnap = await adminDb.doc(`events/${eventId}`).get()
-    if (!evSnap.exists) throw new LicenseActionError('Event not found', 404)
-    const ev = evSnap.data() as Record<string, unknown>
-    const organizerUid = doc?.organizerUid
-      ?? (typeof ev.organizerUid === 'string' ? ev.organizerUid : undefined)
-      ?? (typeof ev.uid === 'string' ? ev.uid : undefined)
-    if (!organizerUid) throw new LicenseActionError('Could not resolve the event organizer', 422)
+  if (action === 'refund') return refundLicense(eventId, adminUid, reason, actorRole, respond)
 
-    const complimentary = req.complimentary !== false   // default true for a grant
-    await licenseRef(eventId).set({
-      eventId,
-      organizerUid,
-      tier:         req.tier,
-      status:       'active',
-      version:      CURRENT_LICENSE_VERSION,
-      amountPaise:  0,
-      orderId:      null,
-      paidAt:       null,
-      upgradedFrom: null,
-      upgradedAt:   null,
-      source:       'admin',
-      admin: {
-        lifecycle: 'active', complimentary, pricePaiseOverride: null,
-        limitOverrides: {}, featureOverrides: {}, paymentReceived: true,
-        updatedBy: adminUid, updatedAt: FieldValue.serverTimestamp(),
-      },
-      createdAt: doc?.createdAt ?? FieldValue.serverTimestamp(),
-      updatedAt: FieldValue.serverTimestamp(),
-    }, { merge: true })
-    await syncEventCapacity(eventId, defFor(req.tier, CURRENT_LICENSE_VERSION).limits.maxRegistrations)
-    await appendHistory({
-      eventId, organizerUid, action: 'granted', fromTier: doc?.tier ?? null, toTier: req.tier,
-      actorUid: adminUid, note: complimentary ? 'Complimentary license granted' : 'License granted', reason,
-      before: doc ? { tier: doc.tier, status: doc.status } : null, after: { tier: req.tier, status: 'active', complimentary },
-    })
-    void logAdminAction({ adminUid, action: AUDIT_ACTION.grant, entityType: 'license', entityId: eventId, metadata: { tier: req.tier, complimentary, reason } }).catch(() => {})
-    return respond()
+  // ── Request validation that needs no stored state (before any transaction) ──
+  const limitKey = req.limitKey ?? 'maxRegistrations'
+  if (action === 'overridePrice' && (typeof req.pricePaise !== 'number' || !Number.isInteger(req.pricePaise) || req.pricePaise < 0)) {
+    throw new LicenseActionError('pricePaise must be a non-negative integer')
   }
+  if (action === 'overrideLimit') {
+    if (limitKey !== 'maxRegistrations' && limitKey !== 'maxTeamMembers' && limitKey !== 'maxBroadcastRecipients') {
+      throw new LicenseActionError('Invalid limit key')
+    }
+    const v = req.limitValue
+    if (v !== null && (typeof v !== 'number' || !Number.isInteger(v) || v < 0)) {
+      throw new LicenseActionError('Registration/limit value must be a non-negative integer or null (unlimited)')
+    }
+  }
+  const featurePatch: Partial<Record<string, boolean>> = {}
+  if (action === 'overrideFeatures') {
+    for (const [k, val] of Object.entries(req.features ?? {})) {
+      if (!(OVERRIDABLE_FEATURE_KEYS as string[]).includes(k)) throw new LicenseActionError(`Unknown feature: ${k}`)
+      if (typeof val !== 'boolean') throw new LicenseActionError(`Feature ${k} must be boolean`)
+      featurePatch[k] = val
+    }
+  }
+  let newExpiry: Timestamp | null = null
+  if (action === 'extendExpiry' || action === 'reduceExpiry') {
+    const days = req.expiryDays
+    if (typeof days !== 'number' || !Number.isFinite(days) || days <= 0) {
+      throw new LicenseActionError('expiryDays must be a positive number')
+    }
+    newExpiry = Timestamp.fromMillis(Date.now() + Math.round(days) * 86_400_000)
+  }
+  const note = (req.note ?? '').trim()
+  if (action === 'addNote' && !note) throw new LicenseActionError('Note text is required')
 
-  // Every other action requires an existing license.
-  if (!doc) throw new LicenseActionError('No license exists for this event', 404)
+  const GOVERNANCE_KEY = { overridePublish: 'publish', overrideIdentity: 'identity', overrideRegistrationSafety: 'registrationSafety' } as const
+  const isGovernance = action === 'overridePublish' || action === 'overrideIdentity' || action === 'overrideRegistrationSafety'
+
+  // ═══ RD-PHASE4-S4 · F8 — ONE transaction per action ═══════════════════════════════════════════
+  // The overlay is read INSIDE the transaction (it used to be read outside and written back as a
+  // full map, so two concurrent admin actions could silently undo each other), and the mutation,
+  // its licenseHistory row and its adminAuditLogs row commit together. Reads first, then writes.
+  await adminDb.runTransaction(async tx => {
+    const lRef = licenseRef(eventId)
+    const snap = await tx.get(lRef)
+    // Every action requires an existing license.
+    if (!snap.exists) throw new LicenseActionError('No license exists for this event', 404)
+    const doc = { ...(snap.data() as EventLicenseDoc), eventId }
+    const organizerUid = doc.organizerUid
+    // Stored license doc → resolve its tier against ITS stored version (V1 or V2).
+    const storedVersion = typeof doc.version === 'number' && doc.version >= 1 ? doc.version : 1
+    const tier: AnyEventLicenseTier = isValidTierForVersion(doc.tier, storedVersion) ? doc.tier : defaultLicenseTierForVersion(storedVersion)
+    const overlay = readOverlay(doc)
+    const orderRef = doc.orderId ? adminDb.collection(LICENSE_ORDERS_COLLECTION).doc(doc.orderId) : null
+
+    // ── reads (all before any write) ──
+    const evRef = adminDb.doc(`events/${eventId}`)
+    const needsEvent =
+      (action === 'overrideLimit' && limitKey === 'maxRegistrations') ||
+      (action === 'reissue' && !isCapacityLicence(doc)) ||
+      isGovernance || action === 'forceConsume' || action === 'resetLicense'
+    const evSnap = needsEvent ? await tx.get(evRef) : null
+    const draftIdRaw = evSnap?.exists ? (evSnap.data() as { draftId?: unknown }).draftId : null
+    const draftId = typeof draftIdRaw === 'string' ? draftIdRaw : null
+    const counterSnap = action === 'overrideLimit' && limitKey === 'maxRegistrations' && req.limitValue !== null
+      ? await tx.get(adminDb.doc(`registrationCounters/${eventId}`)) : null
+    const baselineSnap = (isGovernance || action === 'resetLicense') && draftId ? await tx.get(baselineRef(draftId)) : null
+
+    const history = (h: Omit<LicenseHistoryEntryInput, 'eventId' | 'organizerUid' | 'actorUid' | 'fromTier' | 'toTier'> & { fromTier?: AnyEventLicenseTier | null }, platform: Omit<LicensePlatformAudit, 'adminUid' | 'actorRole'>) =>
+      stageLicenseHistory(tx, {
+        eventId, organizerUid, actorUid: adminUid, fromTier: h.fromTier === undefined ? tier : h.fromTier, toTier: tier, ...h,
+      }, { adminUid, actorRole, ...platform })
+
+    // The shared history + audit for the overlay / override actions (unchanged content).
+    const simpleHistory = () => history({
+      action: HISTORY_ACTION[action], fromTier: null,
+      note: `${action} by admin`, reason,
+      before: { tier, lifecycle: overlay.lifecycle, priceOverride: overlay.pricePaiseOverride, limits: overlay.limitOverrides, features: overlay.featureOverrides },
+      after: clean(req),
+    }, { action: AUDIT_ACTION[action], metadata: clean({ ...req, reason }) })
+
+    switch (action) {
+      // ── Lifecycle ──
+      case 'suspend': {
+        if (overlay.lifecycle !== 'active') throw new LicenseActionError(`Cannot suspend a ${overlay.lifecycle} license`, 409)
+        tx.set(lRef, overlayPayload({ ...overlay, lifecycle: 'suspended' }, adminUid), { merge: true })
+        simpleHistory()
+        return
+      }
+      case 'reactivate': {
+        if (overlay.lifecycle === 'active') throw new LicenseActionError('License is already active', 409)
+        tx.set(lRef, overlayPayload({ ...overlay, lifecycle: 'active' }, adminUid), { merge: true })
+        simpleHistory()
+        return
+      }
+      case 'cancel': {
+        if (overlay.lifecycle === 'cancelled') throw new LicenseActionError('License is already cancelled', 409)
+        tx.set(lRef, overlayPayload({ ...overlay, lifecycle: 'cancelled' }, adminUid), { merge: true })
+        simpleHistory()
+        return
+      }
+
+      // ── Overrides ──
+      case 'overridePrice': {
+        tx.set(lRef, overlayPayload({ ...overlay, pricePaiseOverride: req.pricePaise as number }, adminUid), { merge: true })
+        simpleHistory()
+        return
+      }
+      case 'overrideLimit': {
+        const v = req.limitValue as number | null
+        // RD-EVENT-COMMERCE-04 — a capacity-model event's capacity was BOUGHT: "unlimited" would
+        // give it away for nothing. Checked before anything is written.
+        if (limitKey === 'maxRegistrations' && v === null && isCapacityLicence(doc)) {
+          throw new LicenseActionError('This event is on the capacity model: its capacity was purchased and cannot be made unlimited. Set a number instead.', 409)
+        }
+        // A finite registration limit may never go below registrations already taken — checked
+        // against the counter read in THIS transaction (the doc every registration transaction
+        // reads), so a registration landing concurrently cannot slip between check and write.
+        if (limitKey === 'maxRegistrations') {
+          if (v !== null) {
+            const sold = soldFromCounter(counterSnap?.exists ? counterSnap.data() as Record<string, unknown> : undefined)
+            if (v < sold) throw new LicenseActionError(`Capacity cannot go below the ${sold.toLocaleString('en-IN')} registrations already taken.`, 409)
+          }
+          // Registration cap enforcement is driven by the event doc — synced in the same commit.
+          if (evSnap?.exists) tx.set(evRef, eventCapacityPatch(v === null ? Number.POSITIVE_INFINITY : v), { merge: true })
+        }
+        tx.set(lRef, overlayPayload({ ...overlay, limitOverrides: { ...overlay.limitOverrides, [limitKey]: v } }, adminUid), { merge: true })
+        simpleHistory()
+        return
+      }
+      case 'overrideFeatures': {
+        tx.set(lRef, overlayPayload({ ...overlay, featureOverrides: { ...overlay.featureOverrides, ...featurePatch } }, adminUid), { merge: true })
+        simpleHistory()
+        return
+      }
+
+      // ── Payment ──
+      case 'markPaymentReceived': {
+        // RD-EVENT-COMMERCE-04 — capacity activation is settled ONLY by a verified gateway payment
+        // (confirm / webhook apply the capacity in the same transaction). Flipping its order to
+        // `paid` by hand would apply nothing, and the webhook would then skip a real capture as
+        // "already paid". Legacy tier licences keep the manual path.
+        if (isCapacityLicence(doc)) throw new LicenseActionError('This event is on the capacity model: its activation is settled only by a verified Razorpay payment. Use payment recovery for a stuck payment.', 409)
+        tx.set(lRef, {
+          ...overlayPayload({ ...overlay, paymentReceived: true }, adminUid),
+          status: 'active',
+          ...(doc.paidAt == null ? { paidAt: FieldValue.serverTimestamp() } : {}),
+        }, { merge: true })
+        if (orderRef) tx.set(orderRef, { status: 'paid', paidAt: FieldValue.serverTimestamp(), updatedAt: FieldValue.serverTimestamp() }, { merge: true })
+        simpleHistory()
+        return
+      }
+
+      // ── Reissue — re-stamp the license record (support recovery) at its current tier ──
+      case 'reissue': {
+        // RD-EVENT-COMMERCE-04 — the STORED version is kept. Re-stamping CURRENT_LICENSE_VERSION
+        // re-read a historical licence under a different catalog: a V1-only tier ('growth') became
+        // invalid and a tier present in both versions silently changed its limits — a retroactive
+        // entitlement rewrite. Reissue restores status; it never reinterprets what was sold.
+        tx.set(lRef, {
+          ...overlayPayload({ ...overlay, lifecycle: 'active' }, adminUid),
+          status: 'active', version: storedVersion,
+        }, { merge: true })
+        // RD-EVENT-COMMERCE-01 · D5 — a reissue is support recovery, not a capacity change. For a
+        // capacity licence the tier limit is the FREE stamp; re-syncing it reset a paid capacity
+        // (e.g. 1,206) to the free limit and stranded any in-flight capacity order as stale.
+        if (!isCapacityLicence(doc) && evSnap?.exists) {
+          tx.set(evRef, eventCapacityPatch(defFor(tier, storedVersion).limits.maxRegistrations), { merge: true })
+        }
+        simpleHistory()
+        return
+      }
+
+      // ── Note (any admin; the only non-financial licence action) ──
+      case 'addNote': {
+        history({ action: 'note', note, reason: '' }, { action: AUDIT_ACTION.addNote, metadata: { note } })
+        return
+      }
+
+      // ── EA-4 S1: License expiry ──
+      case 'extendExpiry':
+      case 'reduceExpiry': {
+        const days = Math.round(req.expiryDays as number)
+        const exp = newExpiry as Timestamp
+        tx.set(lRef, { expiresAt: exp, updatedAt: FieldValue.serverTimestamp() }, { merge: true })
+        if (orderRef) tx.set(orderRef, { expiresAt: exp, updatedAt: FieldValue.serverTimestamp() }, { merge: true })
+        history({ action: HISTORY_ACTION[action], note: `Expiry set to ${days} days`, reason, after: { expiresAtMs: exp.toMillis() } },
+          { action: AUDIT_ACTION[action], metadata: { days, reason } })
+        return
+      }
+      case 'disableExpiry': {
+        tx.set(lRef, { expiresAt: null, updatedAt: FieldValue.serverTimestamp() }, { merge: true })
+        if (orderRef) tx.set(orderRef, { expiresAt: null, updatedAt: FieldValue.serverTimestamp() }, { merge: true })
+        history({ action: 'expiry_disabled', note: 'Expiry disabled (perpetual)', reason }, { action: 'license.expiry_disabled', metadata: { reason } })
+        return
+      }
+
+      // ── EA-4 S1: Publish-governance overrides (written to the event's baseline) ──
+      case 'overridePublish':
+      case 'overrideIdentity':
+      case 'overrideRegistrationSafety': {
+        if (!draftId || !baselineSnap) throw new LicenseActionError('Could not resolve the event to apply a governance override', 422)
+        const enabled = req.overrideEnabled !== false
+        const key = GOVERNANCE_KEY[action]
+        stageBaselineOverrides(tx, baselineSnap, draftId, { [key]: enabled, setBy: adminUid, reason })
+        history({ action: 'governance_override', note: `${key} override ${enabled ? 'enabled' : 'cleared'}`, reason, after: { [key]: enabled } },
+          { action: 'license.governance_override', metadata: { key, enabled, reason } })
+        return
+      }
+
+      // ── EA-4 S1: Consumption controls ──
+      case 'forceConsume': {
+        const now = FieldValue.serverTimestamp()
+        tx.set(lRef, { consumed: true, consumedAt: now, updatedAt: now }, { merge: true })
+        if (orderRef && doc.orderId) {
+          tx.set(orderRef, { consumed: true, boundEventId: draftId ?? doc.orderId.replace(/^lic_/, ''), consumedAt: now, updatedAt: now }, { merge: true })
+        }
+        history({ action: 'force_consumed', note: 'License force-consumed by admin', reason }, { action: 'license.force_consumed', metadata: { reason } })
+        return
+      }
+      case 'resetLicense': {
+        const now = FieldValue.serverTimestamp()
+        tx.set(lRef, { consumed: false, consumedAt: null, updatedAt: now }, { merge: true })
+        if (orderRef) tx.set(orderRef, { consumed: false, boundEventId: null, consumedAt: null, updatedAt: now }, { merge: true })
+        if (draftId && baselineSnap) stageBaselineOverrides(tx, baselineSnap, draftId, { publish: false, identity: false, registrationSafety: false, setBy: adminUid, reason })
+        history({ action: 'reset', note: 'License governance state reset by admin', reason }, { action: 'license.reset', metadata: { reason } })
+        return
+      }
+
+      default:
+        throw new LicenseActionError(`Unknown action: ${String(action)}`)
+    }
+  })
+  return respond()
+}
+
+// ── Refund — gateway refund + wallet credit-back + cancel license ──────────────────────────────
+//
+// RD-PHASE4-S4 · F3 — once the gateway refund has SUCCEEDED, money has moved: no later step may
+// turn that into a failure response. The steps after it (order finalize, wallet credit-back, the
+// overlay cancel + history + audit transaction) are each still attempted; a failure is recorded
+// durably (adminAuditFailures, via logAdminActionOrRecord) and returned as `reconciliation`, and
+// the response reports the TRUE outcome. Before the gateway leg, failures still fail the call.
+async function refundLicense(
+  eventId: string, adminUid: string, reason: string, actorRole: AuditActorRole,
+  respond: (extra?: Partial<LicenseAdminActionResponse>) => LicenseAdminActionResponse,
+): Promise<LicenseAdminActionResponse> {
+  const snap = await licenseRef(eventId).get()
+  if (!snap.exists) throw new LicenseActionError('No license exists for this event', 404)
+  const doc = { ...(snap.data() as EventLicenseDoc), eventId }
   const organizerUid = doc.organizerUid
-  // Stored license doc → resolve its tier against ITS stored version (V1 or V2).
   const storedVersion = typeof doc.version === 'number' && doc.version >= 1 ? doc.version : 1
   const tier: AnyEventLicenseTier = isValidTierForVersion(doc.tier, storedVersion) ? doc.tier : defaultLicenseTierForVersion(storedVersion)
-  const overlay = readOverlay(doc)
 
-  switch (action) {
-    // ── Lifecycle ──
-    case 'suspend': {
-      if (overlay.lifecycle !== 'active') throw new LicenseActionError(`Cannot suspend a ${overlay.lifecycle} license`, 409)
-      await writeOverlay(eventId, { ...overlay, lifecycle: 'suspended' }, adminUid)
-      break
-    }
-    case 'reactivate': {
-      if (overlay.lifecycle === 'active') throw new LicenseActionError('License is already active', 409)
-      await writeOverlay(eventId, { ...overlay, lifecycle: 'active' }, adminUid)
-      break
-    }
-    case 'cancel': {
-      if (overlay.lifecycle === 'cancelled') throw new LicenseActionError('License is already cancelled', 409)
-      await writeOverlay(eventId, { ...overlay, lifecycle: 'cancelled' }, adminUid)
-      break
-    }
+  const refundLedgerRef = adminDb.doc(`walletTransactions/license_refund_${eventId}`)
 
-    // ── Overrides ──
-    case 'overridePrice': {
-      if (typeof req.pricePaise !== 'number' || !Number.isInteger(req.pricePaise) || req.pricePaise < 0) {
-        throw new LicenseActionError('pricePaise must be a non-negative integer')
+  // RD-INTEG — two states in which refunding the whole activation order would be wrong:
+  //   • a WhatsApp broadcast for this event is still unsettled: its reserved prepaid units count as
+  //     consumed now and are released at settlement — after this refund retired the "unused" ones,
+  //     they would become usable again on a refunded order;
+  //   • an event-service refund was already requested/approved/paid for this event's units: the
+  //     gateway refund below returns the FULL order amount, so that money would go back twice.
+  {
+    const draftKey = doc.orderId?.startsWith('lic_') ? doc.orderId.slice(4) : null
+    const [openBroadcast, serviceRefunds] = await Promise.all([
+      adminDb.collection('broadcastCampaigns').where('eventSlug', '==', eventId).where('billingSettlement', '==', 'pending').limit(1).get(),
+      draftKey
+        ? adminDb.collection('walletServiceRequests').where('sourceDraftId', '==', draftKey).where('status', 'in', ['submitted', 'approved', 'processed']).limit(10).get()
+        : Promise.resolve(null),
+    ])
+    if (!openBroadcast.empty) throw new LicenseActionError('A WhatsApp broadcast for this event has not finished settling. Refund the licence once it has ended (the cron settles it within minutes).', 409)
+    if (serviceRefunds && serviceRefunds.docs.some(d => (d.data() as { kind?: unknown }).kind === 'refund')) {
+      throw new LicenseActionError('An event-service refund for this event is open or already approved/paid. Resolve it first — a licence refund returns the full order amount, which would refund those units twice.', 409)
+    }
+  }
+  if ((await refundLedgerRef.get()).exists) throw new LicenseActionError('This license has already been refunded', 409)
+
+  let gatewayRefunded = false
+  let walletCreditedPaise = 0
+  let servicesRetired: Record<string, number> = {}
+  const reconciliation: string[] = []
+
+  if (doc.orderId) {
+    const orderRef = adminDb.doc(`${LICENSE_ORDERS_COLLECTION}/${doc.orderId}`)
+
+    // Atomically CLAIM the order (→ 'refunding') BEFORE the gateway refund so two
+    // concurrent refunds (double-click / two admins) cannot both fire
+    // razorpay.payments.refund (H-1 double gateway refund). An already
+    // refunded/refunding order aborts here; the F-1 ledger guard above blocks
+    // re-refund after completion. Only paid orders carry a paymentId, so the
+    // failure-revert to 'paid' below is always the correct prior state.
+    const claim = await adminDb.runTransaction<{ paymentId: string | null; gatewayAmount: number; wasPaid: boolean }>(async txn => {
+      const s = await txn.get(orderRef)
+      const o = s.exists ? (s.data() as Record<string, unknown>) : null
+      if (o && (o.status === 'refunded' || o.status === 'refunding')) {
+        throw new LicenseActionError('Order already refunded', 409)
       }
-      await writeOverlay(eventId, { ...overlay, pricePaiseOverride: req.pricePaise }, adminUid)
-      break
-    }
-    case 'overrideLimit': {
-      const key = req.limitKey ?? 'maxRegistrations'
-      if (key !== 'maxRegistrations' && key !== 'maxTeamMembers' && key !== 'maxBroadcastRecipients') {
-        throw new LicenseActionError('Invalid limit key')
+      // RD-M5 refund race — the claim does NOT release the organizer's coupon use: a `refunding`
+      // order still counts (counter unchanged; the seeding/pre-check query includes `refunding`)
+      // until the refund is CONFIRMED and finalized below. `wasPaid` tells finalization whether
+      // this order was a redemption at all.
+      if (o) txn.update(orderRef, { status: 'refunding', updatedAt: FieldValue.serverTimestamp() })
+      return {
+        paymentId:     typeof o?.razorpayPaymentId === 'string' ? o.razorpayPaymentId : null,
+        gatewayAmount: typeof o?.amountPaise === 'number' ? o.amountPaise : 0,
+        wasPaid:       o?.status === 'paid',
       }
-      const v = req.limitValue
-      if (v !== null && (typeof v !== 'number' || !Number.isInteger(v) || v < 0)) {
-        throw new LicenseActionError('Registration/limit value must be a non-negative integer or null (unlimited)')
-      }
-      const nextLimits = { ...overlay.limitOverrides, [key]: v }
-      await writeOverlay(eventId, { ...overlay, limitOverrides: nextLimits }, adminUid)
-      // Registration cap enforcement is driven by the event doc — sync it so the
-      // change applies immediately at registration time.
-      if (key === 'maxRegistrations') {
-        await syncEventCapacity(eventId, v === null ? Number.POSITIVE_INFINITY : v)
-      }
-      break
-    }
-    case 'overrideFeatures': {
-      const patch = req.features ?? {}
-      const clean: Partial<Record<string, boolean>> = {}
-      for (const [k, val] of Object.entries(patch)) {
-        if (!(OVERRIDABLE_FEATURE_KEYS as string[]).includes(k)) throw new LicenseActionError(`Unknown feature: ${k}`)
-        if (typeof val !== 'boolean') throw new LicenseActionError(`Feature ${k} must be boolean`)
-        clean[k] = val
-      }
-      await writeOverlay(eventId, { ...overlay, featureOverrides: { ...overlay.featureOverrides, ...clean } }, adminUid)
-      break
-    }
+    })
 
-    // ── Tier change ──
-    case 'upgrade':
-    case 'downgrade': {
-      // The upgrade/downgrade TARGET is a NEW tier → validate against CURRENT_LICENSE_VERSION.
-      if (!isValidTierForVersion(req.tier, CURRENT_LICENSE_VERSION)) throw new LicenseActionError('A valid target tier is required')
-      const target = req.tier
-      if (target === tier) throw new LicenseActionError(`License is already on the ${tier} tier`, 409)
-      // Cross-version rank by registration limit (target at current version, current at stored).
-      if (action === 'upgrade' && rankOf(target, CURRENT_LICENSE_VERSION) < rankOf(tier, storedVersion)) throw new LicenseActionError('Upgrade target must be a higher tier', 409)
-      if (action === 'downgrade' && rankOf(target, CURRENT_LICENSE_VERSION) > rankOf(tier, storedVersion)) throw new LicenseActionError('Downgrade target must be a lower tier', 409)
-      await licenseRef(eventId).set({
-        tier: target, upgradedFrom: tier, upgradedAt: FieldValue.serverTimestamp(), updatedAt: FieldValue.serverTimestamp(),
-      }, { merge: true })
-      // Effective limit for the new tier (respect an existing maxRegistrations override).
-      const overrideMax = overlay.limitOverrides.maxRegistrations
-      const effMax = overrideMax === undefined ? defFor(target, CURRENT_LICENSE_VERSION).limits.maxRegistrations
-        : overrideMax === null ? Number.POSITIVE_INFINITY : overrideMax
-      await syncEventCapacity(eventId, effMax)
-      break
-    }
-
-    // ── Payment ──
-    case 'markPaymentReceived': {
-      await writeOverlay(eventId, { ...overlay, paymentReceived: true }, adminUid)
-      const updates: Record<string, unknown> = { status: 'active', updatedAt: FieldValue.serverTimestamp() }
-      if (doc.paidAt == null) updates.paidAt = FieldValue.serverTimestamp()
-      await licenseRef(eventId).set(updates, { merge: true })
-      if (doc.orderId) {
-        await adminDb.doc(`${LICENSE_ORDERS_COLLECTION}/${doc.orderId}`)
-          .set({ status: 'paid', paidAt: FieldValue.serverTimestamp(), updatedAt: FieldValue.serverTimestamp() }, { merge: true })
-      }
-      break
-    }
-
-    // ── Reissue — re-stamp the license record (support recovery) at its current tier ──
-    case 'reissue': {
-      await licenseRef(eventId).set({
-        status: 'active', version: CURRENT_LICENSE_VERSION, updatedAt: FieldValue.serverTimestamp(),
-      }, { merge: true })
-      await writeOverlay(eventId, { ...overlay, lifecycle: 'active' }, adminUid)
-      await syncEventCapacity(eventId, defFor(tier, storedVersion).limits.maxRegistrations)
-      break
-    }
-
-    // ── Refund — gateway refund + wallet credit-back + cancel license ──
-    case 'refund': {
-      const refundLedgerRef = adminDb.doc(`walletTransactions/license_refund_${eventId}`)
-      if ((await refundLedgerRef.get()).exists) throw new LicenseActionError('This license has already been refunded', 409)
-
-      let gatewayRefunded = false
-      let walletCreditedPaise = 0
-
-      if (doc.orderId) {
-        const orderRef = adminDb.doc(`${LICENSE_ORDERS_COLLECTION}/${doc.orderId}`)
-
-        // Atomically CLAIM the order (→ 'refunding') BEFORE the gateway refund so two
-        // concurrent refunds (double-click / two admins) cannot both fire
-        // razorpay.payments.refund (H-1 double gateway refund). An already
-        // refunded/refunding order aborts here; the F-1 ledger guard (line 604) blocks
-        // re-refund after completion. Only paid orders carry a paymentId, so the
-        // failure-revert to 'paid' below is always the correct prior state.
-        const claim = await adminDb.runTransaction<{ paymentId: string | null; gatewayAmount: number }>(async txn => {
+    if (claim.paymentId && claim.gatewayAmount > 0) {
+      try {
+        // Lazy-load the Razorpay client ONLY when a real gateway refund executes, so
+        // this module never initializes/validates Razorpay on any read path.
+        const { razorpay } = await import('@/lib/razorpay/client')
+        await razorpay.payments.refund(claim.paymentId, {
+          amount: claim.gatewayAmount, speed: 'optimum',
+          notes: { kind: 'license_refund', eventId },
+          receipt: `lrfnd_${eventId}`.slice(0, 40),
+        })
+        gatewayRefunded = true
+      } catch (e) {
+        // Release the claim so a retry is possible (a crash mid-flight leaves it
+        // 'refunding' — reconciled manually, never a silent double refund).
+        // RD-M5 — only if still 'refunding' (idempotent). The coupon counter is NOT touched: the
+        // use was never released (the claim keeps it counted), so reverting restores nothing.
+        let reverted = true
+        await adminDb.runTransaction(async txn => {
           const s = await txn.get(orderRef)
           const o = s.exists ? (s.data() as Record<string, unknown>) : null
-          if (o && (o.status === 'refunded' || o.status === 'refunding')) {
-            throw new LicenseActionError('Order already refunded', 409)
-          }
-          if (o) txn.update(orderRef, { status: 'refunding', updatedAt: FieldValue.serverTimestamp() })
-          return {
-            paymentId:     typeof o?.razorpayPaymentId === 'string' ? o.razorpayPaymentId : null,
-            gatewayAmount: typeof o?.amountPaise === 'number' ? o.amountPaise : 0,
-          }
+          if (!o || o.status !== 'refunding') return
+          txn.set(orderRef, { status: 'paid', updatedAt: FieldValue.serverTimestamp() }, { merge: true })
+        }).catch(err => {
+          // The order stays 'refunding' (its use stays counted) — surfaced for manual reconciliation.
+          reverted = false
+          console.error(`[license-refund] revert to 'paid' FAILED for order ${doc.orderId} (event ${eventId}); order left 'refunding'`, err)
         })
-
-        if (claim.paymentId && claim.gatewayAmount > 0) {
-          try {
-            // Lazy-load the Razorpay client ONLY when a real gateway refund executes, so
-            // this module never initializes/validates Razorpay on any read path.
-            const { razorpay } = await import('@/lib/razorpay/client')
-            await razorpay.payments.refund(claim.paymentId, {
-              amount: claim.gatewayAmount, speed: 'optimum',
-              notes: { kind: 'license_refund', eventId },
-              receipt: `lrfnd_${eventId}`.slice(0, 40),
-            })
-            gatewayRefunded = true
-          } catch (e) {
-            // Release the claim so a retry is possible (a crash mid-flight leaves it
-            // 'refunding' — reconciled manually, never a silent double refund).
-            await orderRef.set({ status: 'paid', updatedAt: FieldValue.serverTimestamp() }, { merge: true }).catch(() => {})
-            throw new LicenseActionError(`Razorpay refund failed: ${e instanceof Error ? e.message : 'unknown error'}`, 502)
-          }
+        throw new LicenseActionError(`Razorpay refund failed: ${e instanceof Error ? e.message : 'unknown error'}${reverted ? '' : ' — the order could not be reverted and is still marked refunding; reconcile manually'}`, 502)
+      }
+    }
+    // RD-M5 — the refund is CONFIRMED (gateway succeeded, or there was no gateway leg): in ONE
+    // transaction, and only on the 'refunding' → 'refunded' transition (so exactly once), mark it
+    // refunded and release the organizer's coupon use on an EXISTING counter (never below zero;
+    // a missing counter is left missing — the next activation seeds it from order statuses).
+    // The global `currentUses` is deliberately NOT changed. A missing order doc keeps the old
+    // behaviour (the merge write), with no counter involved.
+    try {
+      // RD-INTEG · D1 — the activation order's prepaid service lines (WhatsApp/certificates/media
+      // units) were applied to the event's allowance ledger when it was paid. Refunding the order
+      // returns their money too, so their still-unused units are retired here (ledger `refunded`),
+      // in the SAME transaction that marks the order refunded — exactly once, guarded by
+      // `refundedOrders[orderId]`. Units already consumed cannot be taken back and stay counted.
+      const ledgerDraftId = doc.orderId.startsWith('lic_') ? doc.orderId.slice(4) : null
+      servicesRetired = await adminDb.runTransaction(async txn => {
+        const s = await txn.get(orderRef)
+        if (!s.exists) {
+          txn.set(orderRef, { status: 'refunded', updatedAt: FieldValue.serverTimestamp() }, { merge: true })
+          return {}
         }
-        await orderRef.set({ status: 'refunded', updatedAt: FieldValue.serverTimestamp() }, { merge: true })
-      }
-
-      // Credit back any wallet-paid portion (walletTransactions/license_<draftId>).
-      const draftId = doc.orderId?.startsWith('lic_') ? doc.orderId.slice(4) : eventId
-      const chargeSnap = await adminDb.doc(`walletTransactions/license_${draftId}`).get()
-      const walletUsed = chargeSnap.exists ? ((chargeSnap.data() as { amountPaise?: number }).amountPaise ?? 0) : 0
-
-      // Credit-back + the refund ledger entry commit as ONE idempotent transaction
-      // keyed on the deterministic license_refund_<eventId> doc (F-1): a concurrent
-      // second refund (wallet-only license, no gateway guard) or a crash-retry can
-      // never double-credit, and the balance can never drift from the ledger. When
-      // walletUsed is 0 the credit is a no-op but the audit ledger entry is still
-      // recorded. Mirrors atomicTopupCredit.
-      const { credited } = await atomicWalletCredit(organizerUid, walletUsed, refundLedgerRef, {
-        organizerUid, type: 'license_refund',
-        status: 'completed', referenceType: 'license', referenceId: eventId,
-        description: `License refund — ${eventId}`, gatewayRefunded, metadata: { reason },
+        const o = s.data() as Record<string, unknown>
+        if (o.status !== 'refunding') return {}
+        const counterRef  = claim.wasPaid ? couponCounterRefOf(o) : null
+        const counterSnap = counterRef ? await txn.get(counterRef) : null
+        const items = Array.isArray(o.serviceItems) ? o.serviceItems as Array<{ service?: unknown; quantity?: unknown }> : []
+        const lRef  = ledgerDraftId && items.length ? serviceLedgerRef(ledgerDraftId) : null
+        const lSnap = lRef ? await txn.get(lRef) : null
+        if (counterRef && counterSnap?.exists) {
+          const n = (counterSnap.data() as { count?: unknown }).count
+          const cur = typeof n === 'number' && Number.isInteger(n) && n > 0 ? n : 0
+          txn.set(counterRef, { count: Math.max(0, cur - 1), updatedAt: FieldValue.serverTimestamp() }, { merge: true })
+        }
+        const retired: Record<string, number> = {}
+        let processed = false
+        const ledger = lSnap?.exists ? lSnap.data() as ServiceLedgerDoc & { refundedOrders?: Record<string, boolean> } : undefined
+        if (lRef && ledger && ledger.appliedOrders?.[doc.orderId as string] && !ledger.refundedOrders?.[doc.orderId as string]
+          && ledger.organizerUid === organizerUid) {
+          processed = true
+          const patch: Record<string, unknown> = { refundedOrders: { [doc.orderId as string]: true }, updatedAt: FieldValue.serverTimestamp() }
+          for (const k of SERVICE_KINDS) {
+            const bought = items.filter(i => i.service === k).reduce((a, i) => a + (typeof i.quantity === 'number' && i.quantity > 0 ? Math.floor(i.quantity) : 0), 0)
+            // Never more than is still unused on the event (consumed units cannot come back), and
+            // removed from `purchased`: the money for them is returned, so they were never bought.
+            // (retainedServiceLines keeps the consumed remainder of this order as zero-value lots.)
+            const l = ledgerLine(ledger, k)
+            const ownUnused = Math.max(0, l.purchased - l.consumed - l.carriedOut - l.refunded)
+            const take = Math.min(bought, ownUnused)
+            if (take > 0) { patch[k] = { purchased: FieldValue.increment(-take) }; retired[k] = take }
+          }
+          txn.set(lRef, patch, { merge: true })
+        }
+        txn.set(orderRef, { status: 'refunded', ...(processed ? { servicesRetiredOnRefund: retired } : {}), updatedAt: FieldValue.serverTimestamp() }, { merge: true })
+        return retired
       })
-      if (credited) walletCreditedPaise = walletUsed
-
-      await writeOverlay(eventId, { ...overlay, lifecycle: 'cancelled' }, adminUid)
-
-      await appendHistory({
-        eventId, organizerUid, action: 'refunded', fromTier: tier, toTier: tier,
-        actorUid: adminUid, note: `Refunded (gateway=${gatewayRefunded}, wallet=₹${walletCreditedPaise / 100})`, reason,
-        orderId: doc.orderId, before: { lifecycle: overlay.lifecycle }, after: { lifecycle: 'cancelled', gatewayRefunded, walletCreditedPaise },
-      })
-      void logAdminAction({ adminUid, action: AUDIT_ACTION.refund, entityType: 'license', entityId: eventId, metadata: { gatewayRefunded, walletCreditedPaise, reason } }).catch(() => {})
-      return respond({ refund: { gatewayRefunded, walletCreditedPaise } })
+    } catch (err) {
+      // The order stays 'refunding' (its use stays counted) — surfaced for manual reconciliation.
+      console.error(`[license-refund] finalize to 'refunded' FAILED for order ${doc.orderId} (event ${eventId}, gateway=${gatewayRefunded}); order left 'refunding'`, err)
+      if (!gatewayRefunded) throw err   // nothing moved yet — a plain failure
+      reconciliation.push('order_finalize_failed')
     }
-
-    // ── Note ──
-    case 'addNote': {
-      const note = (req.note ?? '').trim()
-      if (!note) throw new LicenseActionError('Note text is required')
-      await appendHistory({
-        eventId, organizerUid, action: 'note', fromTier: tier, toTier: tier,
-        actorUid: adminUid, note, reason: '',
-      })
-      void logAdminAction({ adminUid, action: AUDIT_ACTION.addNote, entityType: 'license', entityId: eventId, metadata: { note } }).catch(() => {})
-      return respond()
-    }
-
-    // ── EA-4 S1: License expiry ──
-    case 'extendExpiry':
-    case 'reduceExpiry': {
-      const days = req.expiryDays
-      if (typeof days !== 'number' || !Number.isFinite(days) || days <= 0) {
-        throw new LicenseActionError('expiryDays must be a positive number')
-      }
-      const newExpiry = Timestamp.fromMillis(Date.now() + Math.round(days) * 86_400_000)
-      await licenseRef(eventId).set({ expiresAt: newExpiry, updatedAt: FieldValue.serverTimestamp() }, { merge: true })
-      if (doc.orderId) {
-        await adminDb.collection(LICENSE_ORDERS_COLLECTION).doc(doc.orderId)
-          .set({ expiresAt: newExpiry, updatedAt: FieldValue.serverTimestamp() }, { merge: true })
-      }
-      await appendHistory({
-        eventId, organizerUid, action: HISTORY_ACTION[action], fromTier: tier, toTier: tier,
-        actorUid: adminUid, note: `Expiry set to ${Math.round(days)} days`, reason, after: { expiresAtMs: newExpiry.toMillis() },
-      })
-      void logAdminAction({ adminUid, action: AUDIT_ACTION[action], entityType: 'license', entityId: eventId, metadata: { days: Math.round(days), reason } }).catch(() => {})
-      return respond()
-    }
-    case 'disableExpiry': {
-      await licenseRef(eventId).set({ expiresAt: null, updatedAt: FieldValue.serverTimestamp() }, { merge: true })
-      if (doc.orderId) {
-        await adminDb.collection(LICENSE_ORDERS_COLLECTION).doc(doc.orderId)
-          .set({ expiresAt: null, updatedAt: FieldValue.serverTimestamp() }, { merge: true })
-      }
-      await appendHistory({ eventId, organizerUid, action: 'expiry_disabled', fromTier: tier, toTier: tier, actorUid: adminUid, note: 'Expiry disabled (perpetual)', reason })
-      void logAdminAction({ adminUid, action: 'license.expiry_disabled', entityType: 'license', entityId: eventId, metadata: { reason } }).catch(() => {})
-      return respond()
-    }
-
-    // ── EA-4 S1: Publish-governance overrides (written to the event's baseline) ──
-    case 'overridePublish':
-    case 'overrideIdentity':
-    case 'overrideRegistrationSafety': {
-      const draftId = await resolveDraftId(eventId)
-      if (!draftId) throw new LicenseActionError('Could not resolve the event to apply a governance override', 422)
-      const enabled = req.overrideEnabled !== false
-      const key = action === 'overridePublish' ? 'publish' : action === 'overrideIdentity' ? 'identity' : 'registrationSafety'
-      await setBaselineOverrides(draftId, { [key]: enabled, setBy: adminUid, reason })
-      await appendHistory({ eventId, organizerUid, action: 'governance_override', fromTier: tier, toTier: tier, actorUid: adminUid, note: `${key} override ${enabled ? 'enabled' : 'cleared'}`, reason, after: { [key]: enabled } })
-      void logAdminAction({ adminUid, action: 'license.governance_override', entityType: 'license', entityId: eventId, metadata: { key, enabled, reason } }).catch(() => {})
-      return respond()
-    }
-
-    // ── EA-4 S1: Consumption controls ──
-    case 'forceConsume': {
-      const now = FieldValue.serverTimestamp()
-      const draftId = await resolveDraftId(eventId)
-      await licenseRef(eventId).set({ consumed: true, consumedAt: now, updatedAt: now }, { merge: true })
-      if (doc.orderId) {
-        await adminDb.collection(LICENSE_ORDERS_COLLECTION).doc(doc.orderId)
-          .set({ consumed: true, boundEventId: draftId ?? doc.orderId.replace(/^lic_/, ''), consumedAt: now, updatedAt: now }, { merge: true })
-      }
-      await appendHistory({ eventId, organizerUid, action: 'force_consumed', fromTier: tier, toTier: tier, actorUid: adminUid, note: 'License force-consumed by admin', reason })
-      void logAdminAction({ adminUid, action: 'license.force_consumed', entityType: 'license', entityId: eventId, metadata: { reason } }).catch(() => {})
-      return respond()
-    }
-    case 'resetLicense': {
-      const now = FieldValue.serverTimestamp()
-      await licenseRef(eventId).set({ consumed: false, consumedAt: null, updatedAt: now }, { merge: true })
-      if (doc.orderId) {
-        await adminDb.collection(LICENSE_ORDERS_COLLECTION).doc(doc.orderId)
-          .set({ consumed: false, boundEventId: null, consumedAt: null, updatedAt: now }, { merge: true })
-      }
-      const draftId = await resolveDraftId(eventId)
-      if (draftId) await setBaselineOverrides(draftId, { publish: false, identity: false, registrationSafety: false, setBy: adminUid, reason })
-      await appendHistory({ eventId, organizerUid, action: 'reset', fromTier: tier, toTier: tier, actorUid: adminUid, note: 'License governance state reset by admin', reason })
-      void logAdminAction({ adminUid, action: 'license.reset', entityType: 'license', entityId: eventId, metadata: { reason } }).catch(() => {})
-      return respond()
-    }
-
-    default:
-      throw new LicenseActionError(`Unknown action: ${String(action)}`)
   }
 
-  // Shared history + audit for the simple (non-early-returning) actions above.
-  await appendHistory({
-    eventId, organizerUid, action: HISTORY_ACTION[action],
-    fromTier: (action === 'upgrade' || action === 'downgrade') ? tier : null,
-    toTier: (action === 'upgrade' || action === 'downgrade') ? (req.tier ?? tier) : tier,
-    actorUid: adminUid, note: `${action} by admin`, reason,
-    before: { tier, lifecycle: overlay.lifecycle, priceOverride: overlay.pricePaiseOverride, limits: overlay.limitOverrides, features: overlay.featureOverrides },
-    after: clean(req),
+  // Credit back any wallet-paid portion (walletTransactions/license_<draftId>).
+  // Credit-back + the refund ledger entry commit as ONE idempotent transaction
+  // keyed on the deterministic license_refund_<eventId> doc (F-1): a concurrent
+  // second refund (wallet-only license, no gateway guard) or a crash-retry can
+  // never double-credit, and the balance can never drift from the ledger. When
+  // walletUsed is 0 the credit is a no-op but the audit ledger entry is still
+  // recorded. Mirrors atomicTopupCredit.
+  try {
+    const draftId = doc.orderId?.startsWith('lic_') ? doc.orderId.slice(4) : eventId
+    const chargeSnap = await adminDb.doc(`walletTransactions/license_${draftId}`).get()
+    const walletUsed = chargeSnap.exists ? ((chargeSnap.data() as { amountPaise?: number }).amountPaise ?? 0) : 0
+    const { credited } = await atomicWalletCredit(organizerUid, walletUsed, refundLedgerRef, {
+      organizerUid, type: 'license_refund',
+      status: 'completed', referenceType: 'license', referenceId: eventId,
+      description: `License refund — ${eventId}`, gatewayRefunded, metadata: { reason },
+    })
+    if (credited) walletCreditedPaise = walletUsed
+  } catch (err) {
+    if (!gatewayRefunded) throw err
+    console.error(`[license-refund] wallet credit-back FAILED after a gateway refund (event ${eventId})`, err)
+    reconciliation.push('wallet_credit_failed')
+  }
+
+  // RD-INTEG — other PAID orders for this event (add_/cap_), which this action does not refund.
+  const otherPaidOrders: string[] = await (async () => {
+    const draftKey = doc.orderId?.startsWith('lic_') ? doc.orderId.slice(4) : null
+    try {
+      const keys = [eventId, ...(draftKey && draftKey !== eventId ? [draftKey] : [])]
+      const snap = await adminDb.collection(LICENSE_ORDERS_COLLECTION).where('eventId', 'in', keys).where('status', '==', 'paid').limit(50).get()
+      return snap.docs.map(d => d.id).filter(id => id !== doc.orderId)
+    } catch { return [] }
+  })()
+
+  // Cancel the licence + history + audit — ONE transaction, the overlay read fresh inside it.
+  const historyEntry: LicenseHistoryEntryInput = {
+    eventId, organizerUid, action: 'refunded', fromTier: tier, toTier: tier,
+    actorUid: adminUid, note: `Refunded (gateway=${gatewayRefunded}, wallet=₹${walletCreditedPaise / 100})`, reason,
+    orderId: doc.orderId,
+  }
+  try {
+    await adminDb.runTransaction(async tx => {
+      const s = await tx.get(licenseRef(eventId))
+      const overlay = readOverlay(s.exists ? s.data() as EventLicenseDoc : {})
+      tx.set(licenseRef(eventId), overlayPayload({ ...overlay, lifecycle: 'cancelled' }, adminUid), { merge: true })
+      stageLicenseHistory(tx, {
+        ...historyEntry,
+        before: { lifecycle: overlay.lifecycle },
+        after:  { lifecycle: 'cancelled', gatewayRefunded, walletCreditedPaise },
+      }, {
+        adminUid, actorRole, action: AUDIT_ACTION.refund,
+        metadata: {
+          gatewayRefunded, walletCreditedPaise, reason, ...(reconciliation.length ? { reconciliation } : {}),
+          ...(Object.keys(servicesRetired).length ? { servicesRetired } : {}),
+          // RD-INTEG — this action refunds the ACTIVATION order only. Other paid orders on the
+          // event (add-on services, capacity increases) are separate payments and are NOT
+          // refunded here; they are listed so the admin can see what remains.
+          ...(otherPaidOrders.length ? { otherPaidOrdersNotRefunded: otherPaidOrders } : {}),
+        },
+      })
+    })
+  } catch (err) {
+    if (!gatewayRefunded && walletCreditedPaise === 0) throw err
+    console.error(`[license-refund] cancel/history/audit FAILED after money moved (event ${eventId})`, err)
+    reconciliation.push('license_cancel_audit_failed')
+  }
+
+  if (reconciliation.length) {
+    // Money moved but a later step failed: durably recorded (never thrown) for reconciliation.
+    captureFinancialError(new Error('license refund needs reconciliation'), { scope: 'license_refund.reconciliation', eventId, reconciliation: reconciliation.join(',') })
+    await logAdminActionOrRecord({
+      adminUid, actorRole, action: 'license.refund_audit_recovered', entityType: 'license', entityId: eventId,
+      reason,
+      metadata: { gatewayRefunded, walletCreditedPaise, reconciliation, orderId: doc.orderId ?? null },
+      correlation: { eventId, organizerUid, orderId: doc.orderId ?? null },
+    })
+  }
+  return respond({
+    refund: { gatewayRefunded, walletCreditedPaise, ...(Object.keys(servicesRetired).length ? { servicesRetired } : {}), ...(otherPaidOrders.length ? { otherPaidOrdersNotRefunded: otherPaidOrders } : {}) },
+    ...(reconciliation.length ? {
+      reconciliation,
+      message: 'The refund went through, but a follow-up step failed and has been recorded for reconciliation.',
+    } : {}),
   })
-  void logAdminAction({ adminUid, action: AUDIT_ACTION[action], entityType: 'license', entityId: eventId, metadata: clean({ ...req, reason }) }).catch(() => {})
-  return respond()
 }

@@ -72,7 +72,7 @@ export function ResultsSearch({
             'h-12 w-full rounded-xl border border-border bg-card pl-10 pr-24',
             'text-fs-base text-foreground placeholder:text-muted-foreground',
             'transition-colors hover:border-border-strong',
-            'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary',
+            'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-action',
           )}
         />
 
@@ -92,11 +92,11 @@ export function ResultsSearch({
           disabled={pending}
           className={cn(
             'absolute right-1.5 top-1/2 flex h-9 min-w-[76px] -translate-y-1/2 items-center justify-center gap-1.5 rounded-lg px-3',
-            'text-fs-sm font-semibold text-primary-foreground',
+            'text-fs-sm font-semibold text-action-foreground',
             'transition-opacity hover:opacity-90 disabled:opacity-60',
-            'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2',
+            'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-action focus-visible:ring-offset-2',
           )}
-          style={{ backgroundImage: 'var(--primary-gradient)' }}
+          style={{ backgroundImage: 'var(--action-gradient)' }}
         >
           {pending && <Loader2 className="size-3.5 animate-spin" aria-hidden />}
           Search

@@ -7,6 +7,7 @@
 // only when the Operations or Business workspace is opened. No new query logic.
 
 import { NextRequest, NextResponse } from 'next/server'
+import { isSuperAdminRequest } from '@/lib/admin/financialGuard'
 import { resolveAdminUid }           from '@/lib/admin/auth'
 import { getEventAnalytics }         from '@/lib/analytics/eventAnalytics'
 import type { Event360Analytics }    from '@/lib/admin/event360Types'
@@ -19,7 +20,11 @@ export async function GET(req: NextRequest, ctx: RouteContext): Promise<NextResp
 
   const { slug } = await ctx.params
   try {
-    const result = await getEventAnalytics(slug)
+    // RD-ANALYTICS-02 · platform admin is a SEPARATE authorization boundary (resolveAdminUid
+    // above), not a workspace role, so it is not subject to the organizer finance permission.
+    // RD-CLOSE — financial figures only for a Super Admin (ADMIN_UIDS); a claim-only admin gets the
+    // operational analytics with the financial rollup withheld (the analytics' own switch).
+    const result = await getEventAnalytics(slug, { includeFinancial: await isSuperAdminRequest(req) })
     if (!result) return NextResponse.json({ error: 'Event not found' }, { status: 404 })
     return NextResponse.json({ analytics: result.analytics } satisfies Event360Analytics, {
       headers: { 'Cache-Control': 'no-store' },

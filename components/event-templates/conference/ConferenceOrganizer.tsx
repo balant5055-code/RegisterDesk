@@ -35,7 +35,7 @@ export function ConferenceOrganizer({
           transition={{ duration: 0.5, ease: [0.25, 0, 0, 1] }}
           className="mb-10"
         >
-          <p className="mb-2 text-[11px] font-bold uppercase tracking-[0.22em] text-primary">Hosted by</p>
+          <p className="mb-2 text-[11px] font-bold uppercase tracking-[0.22em] text-action">Hosted by</p>
           <h2 className="text-2xl font-black tracking-tight text-gray-950 sm:text-[2rem]">Organiser</h2>
         </motion.div>
 
@@ -83,7 +83,7 @@ export function ConferenceOrganizer({
                         target="_blank"
                         rel="noopener noreferrer"
                         aria-label={label}
-                        className="flex size-8 items-center justify-center rounded-lg border border-gray-100 bg-gray-50 text-gray-400 transition-all hover:border-primary/20 hover:bg-primary/[0.06] hover:text-primary"
+                        className="flex size-8 items-center justify-center rounded-lg border border-gray-100 bg-gray-50 text-gray-400 transition-all hover:border-action/20 hover:bg-action/[0.06] hover:text-action"
                       >
                         <Icon className="size-3.5" aria-hidden />
                       </a>
@@ -103,18 +103,18 @@ export function ConferenceOrganizer({
                   {organizer.email && (
                     <a
                       href={`mailto:${organizer.email}`}
-                      className="group flex items-center gap-2 text-[0.8125rem] text-gray-600 transition-colors hover:text-primary"
+                      className="group flex items-center gap-2 text-[0.8125rem] text-gray-600 transition-colors hover:text-action"
                     >
-                      <Mail className="size-3.5 shrink-0 text-gray-400 group-hover:text-primary" aria-hidden />
+                      <Mail className="size-3.5 shrink-0 text-gray-400 group-hover:text-action" aria-hidden />
                       <span className="break-all">{organizer.email}</span>
                     </a>
                   )}
                   {organizer.phone && (
                     <a
                       href={`tel:${organizer.phone}`}
-                      className="group flex items-center gap-2 text-[0.8125rem] text-gray-600 transition-colors hover:text-primary"
+                      className="group flex items-center gap-2 text-[0.8125rem] text-gray-600 transition-colors hover:text-action"
                     >
-                      <Phone className="size-3.5 shrink-0 text-gray-400 group-hover:text-primary" aria-hidden />
+                      <Phone className="size-3.5 shrink-0 text-gray-400 group-hover:text-action" aria-hidden />
                       {organizer.phone}
                     </a>
                   )}
@@ -123,9 +123,9 @@ export function ConferenceOrganizer({
                       href={organizer.website}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="group flex items-center gap-2 text-[0.8125rem] text-gray-600 transition-colors hover:text-primary"
+                      className="group flex items-center gap-2 text-[0.8125rem] text-gray-600 transition-colors hover:text-action"
                     >
-                      <Globe className="size-3.5 shrink-0 text-gray-400 group-hover:text-primary" aria-hidden />
+                      <Globe className="size-3.5 shrink-0 text-gray-400 group-hover:text-action" aria-hidden />
                       <span className="truncate">{organizer.website.replace(/^https?:\/\//, '')}</span>
                       <ExternalLink className="size-3 shrink-0 opacity-50" aria-hidden />
                     </a>

@@ -78,7 +78,7 @@ export function HeroClampedText({
         <button
           type="button"
           onClick={() => setOpen(true)}
-          className="mt-1 inline-flex items-center gap-1 text-fs-sm font-semibold text-primary underline-offset-2 transition-colors hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 focus-visible:ring-offset-2"
+          className="mt-1 inline-flex items-center gap-1 text-fs-sm font-semibold text-action underline-offset-2 transition-colors hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-action/40 focus-visible:ring-offset-2"
         >
           {triggerLabel}
           <ArrowRight className="size-3.5" aria-hidden />

@@ -36,7 +36,9 @@ describe('classifyUploadError — insufficient credits', () => {
   it('says what happened and what to do, without mentioning support', () => {
     const f = classifyUploadError(shortfall402(100, 40))
     expect(f.reason).toContain('Not enough Media Credits')
-    expect(f.action.toLowerCase()).toContain('buy credits')
+    // RD-PHOTO-01 — Media Credits are retired: the copy points at License & Services, never a credit purchase.
+    expect(f.action).toContain('License & Services')
+    expect(f.action.toLowerCase()).not.toContain('buy credits')
     expect(f.action.toLowerCase()).not.toContain('support')
   })
 

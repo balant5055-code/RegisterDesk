@@ -67,8 +67,18 @@ export function ReportsTab({ regs, att, eventId, eventSlug }: {
   }, [att])
 
   // ── Hourly + peak (attendance API) ───────────────────────────────────────────
-  const hourly: ChartPoint[] = (att?.hourlyBuckets ?? []).map(b => ({ label: b.label, value: b.count }))
-  const peak = useMemo(() => (att?.hourlyBuckets ?? []).reduce<{ label: string; count: number } | null>((m, b) => (!m || b.count > m.count ? { label: b.label, count: b.count } : m), null), [att])
+  // RD-EVENT-11 · An hour the server could not count arrives as `null`, not 0. It is
+  // DROPPED here rather than charted as an empty hour — this chart has no way to draw
+  // "unknown", and a zero bar would assert that nobody arrived. Minimal change: this
+  // surface is owned by Check-in Operations, not by the Attendance phase.
+  const hourly: ChartPoint[] = (att?.hourlyBuckets ?? [])
+    .filter((b): b is typeof b & { count: number } => b.count !== null)
+    .map(b => ({ label: b.label, value: b.count }))
+  const peak = useMemo(
+    () => (att?.hourlyBuckets ?? []).reduce<{ label: string; count: number } | null>(
+      (m, b) => (b.count !== null && (!m || b.count > m.count) ? { label: b.label, count: b.count } : m), null),
+    [att],
+  )
 
   // ── Pass distribution (attendance API) + category (regs) ─────────────────────
   const passDist: ChartPoint[] = (att?.passStats ?? []).map(p => ({ label: p.passName, value: p.checkedIn, hint: `${p.checkedIn}/${p.registered}` }))
@@ -109,7 +119,11 @@ export function ReportsTab({ regs, att, eventId, eventSlug }: {
       <div className="flex flex-wrap items-center gap-2 rounded-2xl border border-border bg-card p-3">
         <span className="mr-auto text-[13px] font-bold text-foreground">Operations reports</span>
         <a href={exportHref} className={buttonVariants({ variant: 'primary', size: 'sm' })}><Download className="size-4" /> Download check-in report (CSV)</a>
-        <Link href="/dashboard/reports" className={buttonVariants({ variant: 'outline', size: 'sm' })}><FileBarChart className="size-4" /> Reports Center</Link>
+        {/* RD-ANALYTICS-12-13 · "Reports Center" now opens the report centre.
+            It pointed at the analytics dashboard, beside a CSV download and Print
+            Operations — a row of export affordances where the one that said "Reports"
+            was the one that produced none. */}
+        <Link href="/dashboard/finance/reports" className={buttonVariants({ variant: 'outline', size: 'sm' })}><FileBarChart className="size-4" /> Reports Center</Link>
         <Link href="/dashboard/print-assets/operations" className={buttonVariants({ variant: 'outline', size: 'sm' })}><Printer className="size-4" /> Print Operations</Link>
       </div>
 

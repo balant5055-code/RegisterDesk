@@ -14,6 +14,10 @@
 //   Pass capacity can only increase — never fall below sold count.
 //
 // Atomically updates both the draft AND events/{slug} (if published).
+//
+// RD-PHASE4-S3 · Q1 — `feeModel` (the Fee Collection Method) is NOT editable here any more: fee
+// collection is fixed to organizer-pays and organizers do not choose it. A request carrying it is
+// refused with 403 PRICING_NOT_ORGANIZER_EDITABLE (it was editable under RD-EVENT-COMMERCE-05E).
 
 import { NextRequest, NextResponse }  from 'next/server'
 import { FieldValue }                 from 'firebase-admin/firestore'
@@ -22,7 +26,11 @@ import { authorizeWorkspace }         from '@/lib/team/workspace'
 import { findForbiddenEditKeys, requiresAttendeeNotification } from '@/lib/events/editing/fieldClassification'
 import { buildEventEditUpdate, extractEditableSnapshot, pickPayload } from '@/lib/events/editing/applyEdit'
 import { writeEditHistory }           from '@/lib/events/editing/editHistory'
+import {
+  resolveLiveEventRef, draftPublicSlug, liveEventLookupMessage, liveEventLookupStatus,
+} from '@/lib/events/liveEventRef'
 import type { EventEditPayload, EventEditResponse } from '@/types/events'
+import { introducedValueIssues, applyFieldPaths } from '@/lib/events/eventValueRules'
 
 // ─── Handler ──────────────────────────────────────────────────────────────────
 
@@ -61,6 +69,15 @@ export async function PATCH(
     )
   }
 
+  // RD-PHASE4-S3 · Q1 — pricing is not organizer-editable. Named (not merely 'unknown') so the refusal
+  // is an honest 403 with a stable code, and survives any future re-classification.
+  if (Object.prototype.hasOwnProperty.call(body, 'feeModel')) {
+    return NextResponse.json(
+      { success: false, error: 'The fee collection method is managed by RegisterDesk and cannot be changed here.', code: 'PRICING_NOT_ORGANIZER_EDITABLE' },
+      { status: 403 },
+    )
+  }
+
   const forbidden = findForbiddenEditKeys(Object.keys(body))
   if (forbidden.length > 0) {
     return NextResponse.json(
@@ -79,9 +96,38 @@ export async function PATCH(
   }
 
   const d       = draftSnap.data() as Record<string, unknown>
-  const details = (d.eventDetails as Record<string, unknown>) ?? {}
-  const seo     = (details.seo    as Record<string, unknown>) ?? {}
-  const slug    = typeof seo.urlSlug === 'string' && seo.urlSlug ? seo.urlSlug : null
+  const isPublished = d.status === 'published'
+
+  // ── 3b. Locate the live document BEFORE anything is computed from the slug ──
+  //
+  // This used to read `eventDetails.seo.urlSlug` and then, at write time, do
+  // `if (eventSnap.exists) batch.update(...)` — so a stale pointer meant the live
+  // document was SILENTLY SKIPPED and the organizer was told the edit succeeded. A venue
+  // or date change would sit in the draft while attendees kept seeing the old one, with
+  // nothing anywhere reporting a problem. A missing live page for a published event is a
+  // real fault and now fails visibly.
+  //
+  // Resolving here (not at write time) also means the registration counter below is read
+  // under the SAME slug the live document actually uses.
+  let liveRef: FirebaseFirestore.DocumentReference | null = null
+  let slug: string | null = draftPublicSlug(d)
+
+  if (isPublished) {
+    const lookup = await resolveLiveEventRef(eventId, d, uid)
+    if (!lookup.ok) {
+      if (lookup.reason === 'SLUG_MISMATCH') {
+        console.error('[edit] draft/live slug mismatch', {
+          eventId, draftSlug: lookup.slug, liveSlug: lookup.canonicalSlug,
+        })
+      }
+      return NextResponse.json(
+        { success: false, error: liveEventLookupMessage(lookup) },
+        { status: liveEventLookupStatus(lookup) },
+      )
+    }
+    liveRef = lookup.ref
+    slug    = lookup.slug
+  }
 
   // ── 4. Load registration counter for pass capacity validation ─────────────
   let passCounts: Record<string, number> = {}
@@ -109,6 +155,16 @@ export async function PATCH(
     return NextResponse.json({ success: true, notificationRequired: false, impactfulFields: [], changedFields: [] })
   }
 
+  // RD-CE-FIX H1 · the edited event must still pass the server's VALUE rules (dates in order,
+  // sane prices/quantities/windows). Only issues this edit introduces are refused.
+  const introduced = introducedValueIssues(
+    { eventDetails: d.eventDetails, pricing: d.pricing },
+    (() => { const after = applyFieldPaths(d, updates as Record<string, unknown>); return { eventDetails: after.eventDetails, pricing: after.pricing } })(),
+  )
+  if (introduced.length > 0) {
+    return NextResponse.json({ success: false, error: introduced.map(i => i.message).join(' ') }, { status: 422 })
+  }
+
   // Capture the "before" snapshot of exactly the changed fields (for rollback + audit).
   const beforeSnapshot = pickPayload(extractEditableSnapshot(d), changedFields)
   const afterSnapshot  = pickPayload(payload, changedFields)
@@ -116,18 +172,15 @@ export async function PATCH(
   const meta = { updatedAt: FieldValue.serverTimestamp(), updatedBy: uid }
   const draftUpdate = { ...updates, ...meta }
   const eventUpdate = { ...updates, ...meta }
-  const isPublished = Boolean(slug && d.status === 'published')
 
   // ── 6. Atomic batch update (draft + live doc if published) ──────────────────
   try {
     const batch = adminDb.batch()
     batch.update(draftRef, draftUpdate)
 
-    if (isPublished && slug) {
-      const eventRef  = adminDb.collection('events').doc(slug)
-      const eventSnap = await eventRef.get()
-      if (eventSnap.exists) batch.update(eventRef, eventUpdate)
-    }
+    // `liveRef` is non-null for every published event — step 3b already refused the
+    // request otherwise, so there is no "exists?" branch left that can swallow the write.
+    if (liveRef) batch.update(liveRef, eventUpdate)
 
     await batch.commit()
   } catch (err) {

@@ -2,11 +2,14 @@
 //   GET  → this workspace's reminders (history) + analytics.
 //   POST → { action: 'create' | 'cancel' | 'setEventPref', ... }. Owner-scoped.
 //
+// RD-SEC-01 · Gated on the 'broadcasts' permission (owner + admin), like the rest of
+// Communications. It used to accept ANY workspace member — a gate/check-in credential could
+// schedule an email to every attendee of any workspace event.
+//
 // Reuses the reminder service; sends nothing itself (the cron dispatches).
 
 import { NextRequest, NextResponse } from 'next/server'
-import { verifyCaller }        from '@/lib/team/access'
-import { resolveWorkspaceUid } from '@/lib/team/workspace'
+import { authorizeWorkspace }  from '@/lib/team/workspace'
 import { adminDb }             from '@/lib/firebase/admin'
 import {
   listRemindersForOrganizer, createCustomReminder, cancelReminder, ReminderError,
@@ -15,9 +18,8 @@ import { setEventRemindersEnabled } from '@/lib/reminders/config'
 import type { ReminderAudience } from '@/lib/reminders/types'
 
 export async function GET(req: NextRequest): Promise<NextResponse> {
-  const caller = await verifyCaller(req)
-  if (!caller) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-  const ctx = await resolveWorkspaceUid(caller.uid)
+  const ctx = await authorizeWorkspace(req, 'broadcasts')
+  if (!ctx.ok) return NextResponse.json({ error: ctx.error }, { status: ctx.status })
   try {
     const { items, analytics } = await listRemindersForOrganizer(ctx.workspaceUid)
     return NextResponse.json({ reminders: items, analytics }, { headers: { 'Cache-Control': 'no-store' } })
@@ -28,9 +30,8 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
 }
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
-  const caller = await verifyCaller(req)
-  if (!caller) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-  const ctx = await resolveWorkspaceUid(caller.uid)
+  const ctx = await authorizeWorkspace(req, 'broadcasts')
+  if (!ctx.ok) return NextResponse.json({ error: ctx.error }, { status: ctx.status })
   const uid = ctx.workspaceUid
 
   let body: Record<string, unknown>

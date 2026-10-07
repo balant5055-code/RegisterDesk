@@ -25,6 +25,7 @@ import { getCertificate, getTemplateById, getActiveTemplate } from '@/lib/certif
 import { isValidCertificateId }      from '@/lib/certificates/id'
 import { layoutHasAttendeePhoto }    from '@/lib/certificates/attendeePhotoLayout'
 import { createCertificatePhotoGrant, GRANT_TTL_MS } from '@/lib/certificates/photoGrant'
+import { verifyCertificateDownloadCapability } from '@/lib/certificates/downloadCapability'
 import { getClientIp }               from '@/lib/rateLimit'
 import { RATE_POLICY, checkPolicy }  from '@/lib/rateLimit/policies'
 
@@ -48,12 +49,19 @@ export async function POST(req: NextRequest, { params }: Params): Promise<NextRe
   }
 
   const { slug } = await params
-  let body: { certificateId?: unknown }
+  let body: { certificateId?: unknown; capability?: unknown }
   try { body = await req.json() as typeof body }
   catch { return NextResponse.json({ error: 'Invalid request.' }, { status: 400 }) }
 
   const certificateId = typeof body.certificateId === 'string' ? body.certificateId.trim() : ''
   if (!isValidCertificateId(certificateId)) return INVALID()
+
+  // RD-SEC-01 · proof of a completed lookup. The certificate id alone is printed on the PDF, in
+  // its verify URL and QR — and a grant now authorises a PERSISTENT photo on the certificate
+  // (rendered into every later download). So the caller must also present this certificate's
+  // HMAC download capability, which only the identifier-checked lookup hands out.
+  const capability = typeof body.capability === 'string' ? body.capability : ''
+  if (!capability || !verifyCertificateDownloadCapability(certificateId, slug, capability)) return INVALID()
 
   const cert = await getCertificate(certificateId)
   if (!cert || cert.eventSlug !== slug) return INVALID()

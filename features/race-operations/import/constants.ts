@@ -15,8 +15,32 @@ export const RESULTS_MAX_ROWS = 50_000
 /** Upper bound on uploaded file size. */
 export const RESULTS_MAX_FILE_BYTES = 15 * 1024 * 1024   // 15 MB
 
-/** Extensions accepted in Sprint 2. PDF and ZIP are explicitly future-only. */
-export const RESULTS_ACCEPTED_EXTENSIONS = ['.csv', '.xlsx'] as const
+/**
+ * Extensions accepted. ZIP remains explicitly future-only.
+ *
+ * RD-RACEOPS-RESULTS-06 · `.pdf` means a TEXT pdf — one whose words can be selected in a
+ * reader. A scanned or photographed results sheet carries no text to extract and is
+ * refused with a message that says so; OCR is not supported and is not implied anywhere in
+ * the UI (see `PDF_SUPPORT_NOTE`).
+ */
+export const RESULTS_ACCEPTED_EXTENSIONS = ['.csv', '.xlsx', '.pdf'] as const
+
+/**
+ * The accepted extensions as a sentence: ".csv, .xlsx or .pdf".
+ *
+ * RD-RACEOPS-RESULTS-06 · a plain `join(' or ')` read ".csv or .xlsx or .pdf" the moment a
+ * third format arrived. Derived here so every message reads the same and adding a fourth
+ * format changes no copy.
+ */
+export function formatAcceptedExtensions(): string {
+  const list = [...RESULTS_ACCEPTED_EXTENSIONS]
+  if (list.length <= 1) return list[0] ?? ''
+  return `${list.slice(0, -1).join(', ')} or ${list[list.length - 1]}`
+}
+
+/** The single sentence every surface uses to describe PDF support. One wording, one claim. */
+export const PDF_SUPPORT_NOTE =
+  'Text-based PDFs from your timing provider are supported. Scanned or photographed results cannot be read.'
 
 /** `accept` attribute for the file input — derived, never written out by hand. */
 export const RESULTS_FILE_ACCEPT = RESULTS_ACCEPTED_EXTENSIONS.join(',')

@@ -16,6 +16,8 @@ import {
 import { sendCancellationEmail }       from '@/lib/registrations/sendCancellationEmail'
 import { enqueueWebhook }              from '@/lib/integrations/webhooks'
 import { releaseIdentifier }           from '@/lib/identifiers/engine'
+// RD-BIB-TIMING-01 · the device is surrendered with the number, and goes first.
+import { detachTimingTagByRegistration } from '@/lib/identifiers/timingTagEngine'
 
 export interface CancelRegistrationResponse {
   success: boolean
@@ -70,9 +72,19 @@ export async function POST(
 
   // ── 3b. Release any held identifier (fire-and-forget, idempotent no-op when
   //        none). Returns the number to the pool per the event's reuse policy. ──
-  void releaseIdentifier(registrationId, callerUid, 'cancelled').catch(err =>
-    console.error('[cancel] Failed to release identifier:', err),
-  )
+  // RD-BIB-TIMING-01 · a cancelled participant surrenders BOTH credentials, and the
+  // device goes first. The identifier engine now refuses to release a number while a
+  // timing device depends on it; a cancellation is the one case where the number
+  // must go anyway, so the device is detached and `allowWhileTagged` is passed
+  // explicitly rather than the guard being weakened for everybody.
+  //
+  // Either ordering is safe: if the detach fails, the release is refused and the
+  // participant keeps a valid number+device pair; if the release fails, they keep a
+  // number with no device, which is also valid.
+  void detachTimingTagByRegistration(registrationId, callerUid, 'cancelled')
+    .catch(err => console.error('[cancel] Failed to remove timing tag:', err))
+    .then(() => releaseIdentifier(registrationId, callerUid, 'cancelled', { allowWhileTagged: true }))
+    .catch(err => console.error('[cancel] Failed to release identifier:', err))
 
   // ── 4. Cancellation email (fire-and-forget) ────────────────────────────────
   sendCancellationEmail(registrationId, reason).catch(err =>

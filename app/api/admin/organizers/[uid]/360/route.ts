@@ -2,6 +2,7 @@
 // Admin-gated. Reuses getOrganizer360Overview (existing services + O(1) aggregates).
 
 import { NextRequest, NextResponse } from 'next/server'
+import { financialViewFor } from '@/lib/admin/financialGuard'
 import { resolveAdminUid }           from '@/lib/admin/auth'
 import { getOrganizer360Overview }   from '@/lib/admin/organizer360Service'
 
@@ -15,7 +16,8 @@ export async function GET(req: NextRequest, ctx: RouteContext): Promise<NextResp
   try {
     const overview = await getOrganizer360Overview(uid)
     if (!overview) return NextResponse.json({ error: 'Organizer not found' }, { status: 404 })
-    return NextResponse.json({ overview }, { headers: { 'Cache-Control': 'no-store' } })
+    // RD-CLOSE — mixed moderation + money view: money fields are withheld unless Super Admin (ADMIN_UIDS).
+    return NextResponse.json(await financialViewFor(req, { overview }), { headers: { 'Cache-Control': 'no-store' } })
   } catch (e) {
     console.error('[admin/organizers/360] failed', e)
     return NextResponse.json({ error: 'Failed to load organizer overview' }, { status: 500 })

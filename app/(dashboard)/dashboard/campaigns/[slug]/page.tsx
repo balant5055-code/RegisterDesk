@@ -469,8 +469,8 @@ function CampaignDashboardContent({ slug }: { slug: string }) {
             label="Remaining"
             value={remainingRupees !== null ? fmtINR(remainingRupees) : '—'}
             icon={Heart}
-            color="text-pink-600"
-            bg="bg-pink-50"
+            color="text-violet-600"
+            bg="bg-violet-50"
           />
           <KpiCard
             label="Progress"

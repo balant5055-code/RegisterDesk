@@ -139,7 +139,7 @@ export function CommunityHero({
     <section className="bg-white">
 
       {/* Brand accent bar */}
-      <div className="h-px w-full" style={{ backgroundImage: 'var(--primary-gradient)' }} aria-hidden />
+      <div className="h-px w-full" style={{ backgroundImage: 'var(--action-gradient)' }} aria-hidden />
 
       {/* ── Banner image ──────────────────────────────────────────────────── */}
       <div className="relative h-[190px] overflow-hidden sm:h-[230px]">
@@ -159,7 +159,7 @@ export function CommunityHero({
           <div
             aria-hidden
             className="absolute inset-0"
-            style={{ backgroundImage: 'var(--primary-gradient)' }}
+            style={{ backgroundImage: 'var(--action-gradient)' }}
           />
         )}
 
@@ -209,12 +209,12 @@ export function CommunityHero({
           className="relative mx-auto -mt-8 max-w-5xl overflow-hidden rounded-2xl bg-white px-5 py-5 shadow-[0_8px_36px_-6px_rgba(0,0,0,0.13),0_1px_6px_-2px_rgba(0,0,0,0.06)] ring-1 ring-black/[0.06] sm:px-6 sm:py-6"
         >
           {/* 1px gradient top edge on card */}
-          <div aria-hidden className="absolute inset-x-0 top-0 h-px" style={{ backgroundImage: 'var(--primary-gradient)' }} />
+          <div aria-hidden className="absolute inset-x-0 top-0 h-px" style={{ backgroundImage: 'var(--action-gradient)' }} />
 
           {/* ── Campaign label ───────────────────────────────────────────── */}
           <div className="mb-2.5">
             <span className="inline-flex items-center gap-1.5 text-[9px] font-bold uppercase tracking-[0.24em] text-slate-400">
-              <span className="size-[5px] rounded-full bg-rose-400" aria-hidden />
+              <span className="size-[5px] rounded-full bg-action" aria-hidden />
               {eventSubtype?.replace(/_/g, ' ') ?? 'Community Awareness'}
             </span>
           </div>
@@ -294,7 +294,7 @@ export function CommunityHero({
               <a
                 href="#tickets"
                 className="group inline-flex shrink-0 items-center gap-1.5 rounded-full px-4 py-1.5 text-[0.8125rem] font-bold text-white transition-all duration-200 hover:opacity-90 hover:shadow-md active:scale-[0.97]"
-                style={{ backgroundImage: 'var(--primary-gradient)' }}
+                style={{ backgroundImage: 'var(--action-gradient)' }}
               >
                 {isFreeEvent ? 'Join Free' : 'Get Your Pass'}
                 <ArrowRight className="size-3.5 transition-transform group-hover:translate-x-0.5" aria-hidden />
@@ -400,7 +400,7 @@ export function CommunityHero({
             {showAttendeeCount && totalAttendees > 0 && (
               <div className="flex items-center gap-1.5">
                 <div className="flex -space-x-0.5" aria-hidden>
-                  {['from-rose-400 to-pink-500', 'from-violet-400 to-purple-500', 'from-teal-400 to-emerald-500'].map((g, i) => (
+                  {['from-action to-action-end', 'from-violet-400 to-purple-500', 'from-teal-400 to-emerald-500'].map((g, i) => (
                     <div key={i} className={`size-4 rounded-full bg-gradient-to-br ${g} ring-[1.5px] ring-white`} style={{ opacity: 1 - i * 0.1 }} />
                   ))}
                 </div>

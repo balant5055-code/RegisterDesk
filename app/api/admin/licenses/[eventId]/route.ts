@@ -6,7 +6,8 @@
 //          note; note requires text).
 
 import { NextRequest, NextResponse } from 'next/server'
-import { resolveAdminUid } from '@/lib/admin/auth'
+import { resolveAdminUid, resolveSuperAdminUid } from '@/lib/admin/auth'
+import { parseFinancialReason, reasonErrorResponse, requireSuperAdmin } from '@/lib/admin/financialGuard'
 import {
   getLicenseDetail,
   applyLicenseAction,
@@ -28,18 +29,33 @@ const VALID_ACTIONS: LicenseAdminActionType[] = [
   'forceConsume', 'resetLicense',
 ]
 
+/**
+ * RD-EVENT-COMMERCE-04B — actions that change centrally controlled LICENCE PRICING. Super Admin
+ * only (ADMIN_UIDS), decided from the verified token. Every other action keeps its existing
+ * admin access (the confirmed rule covers pricing; other permissions are unchanged).
+ * RD-PHASE4-S1 · C3 — `refund` moves money out (gateway refund + wallet credit-back), so it joins
+ * the Super Admin set, like every other refund path (registration, donation, hold retry).
+ */
+// RD-PHASE4-S4 · D1 — every MUTATING licence action is Super Admin only (capacity overrides,
+// mark-paid, reissue, expiry, governance overrides, force-consume, reset, lifecycle, features).
+// The one exception is `addNote`, which changes nothing and stays open to any admin.
+const SUPER_ADMIN_ACTIONS: readonly LicenseAdminActionType[] = VALID_ACTIONS.filter(a => a !== 'addNote')
+
 export async function GET(
   req: NextRequest,
   { params }: { params: Promise<{ eventId: string }> },
 ): Promise<NextResponse> {
-  const adminUid = await resolveAdminUid(req.headers.get('authorization'))
-  if (!adminUid) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+  // RD-CLOSE — a financial read: Super Admin only (ADMIN_UIDS). A legacy `admin: true` claim
+  // alone gets 403 SUPER_ADMIN_REQUIRED (lib/admin/financialGuard.ts).
+  const superGate = await requireSuperAdmin(req)
+  if (superGate.response) return superGate.response
 
   const { eventId } = await params
   try {
-    const detail = await getLicenseDetail(eventId)
+    const [detail, superUid] = await Promise.all([getLicenseDetail(eventId), resolveSuperAdminUid(req.headers.get('authorization'))])
     if (!detail) return NextResponse.json({ error: 'License not found' }, { status: 404 })
-    return NextResponse.json(detail, { headers: { 'Cache-Control': 'no-store' } })
+    // Server-decided, advisory for rendering; POST re-checks.
+    return NextResponse.json({ ...detail, canEditPricing: superUid !== null }, { headers: { 'Cache-Control': 'no-store' } })
   } catch (e) {
     console.error('[admin/licenses] detail failed', e)
     return NextResponse.json({ error: 'Failed to load license detail' }, { status: 500 })
@@ -66,13 +82,24 @@ export async function POST(
   if (!action || !VALID_ACTIONS.includes(action)) {
     return NextResponse.json({ error: 'Invalid or missing action' }, { status: 400 })
   }
-  // Reason is mandatory for every mutating action (audit requirement).
-  if (LICENSE_ACTIONS_REQUIRING_REASON.includes(action) && !(body.reason ?? '').trim()) {
-    return NextResponse.json({ error: 'A reason is required for this action' }, { status: 400 })
+  const superUid = await resolveSuperAdminUid(req.headers.get('authorization'))
+  if (SUPER_ADMIN_ACTIONS.includes(action) && !superUid) {
+    return NextResponse.json({
+      error: action === 'refund' ? 'Only a Super Admin can refund a licence.'
+        : action === 'overridePrice' ? 'Only a Super Admin can change licence pricing.'
+        : 'Only a Super Admin can change a licence.',
+      code: 'SUPER_ADMIN_REQUIRED',
+    }, { status: 403 })
+  }
+  // Reason is mandatory for every mutating action (audit requirement). RD-PHASE4-S4 · D3 — 3–500 chars.
+  if (LICENSE_ACTIONS_REQUIRING_REASON.includes(action)) {
+    const r = parseFinancialReason(body.reason)
+    if (!r.ok) return reasonErrorResponse(r)
+    body = { ...body, reason: r.reason }
   }
 
   try {
-    const result = await applyLicenseAction(eventId, body, adminUid)
+    const result = await applyLicenseAction(eventId, body, adminUid, { actorRole: superUid ? 'super_admin' : 'admin' })
     return NextResponse.json(result)
   } catch (e) {
     if (e instanceof LicenseActionError) {

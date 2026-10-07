@@ -302,7 +302,7 @@ describe('the granted verbs', () => {
 
 describe('photo session — the OTP replacement', () => {
   it('mints a grant for a valid certificate, with NO code exchange', async () => {
-    const res = await PHOTO_SESSION(jsonReq({ certificateId: CHILD2 }), ctx())
+    const res = await PHOTO_SESSION(jsonReq({ certificateId: CHILD2, capability: signCertificateDownloadCapability(CHILD2, SLUG) }), ctx())
     expect(res.status).toBe(200)
     const body = await res.json() as { grant?: string }
     expect(body.grant).toBeTruthy()
@@ -317,7 +317,7 @@ describe('photo session — the OTP replacement', () => {
 
   it('the minted grant actually opens the photo endpoint', async () => {
     seedCert(CHILD2)
-    const res  = await PHOTO_SESSION(jsonReq({ certificateId: CHILD2 }), ctx())
+    const res  = await PHOTO_SESSION(jsonReq({ certificateId: CHILD2, capability: signCertificateDownloadCapability(CHILD2, SLUG) }), ctx())
     const { grant } = await res.json() as { grant: string }
     const up = await PHOTO_POST(photoReq('POST', {
       certificateId: CHILD2, grant, body: JPEG, contentType: 'image/jpeg',
@@ -325,13 +325,33 @@ describe('photo session — the OTP replacement', () => {
     expect(up.status).toBe(200)
   })
 
+  // RD-SEC-01 · the certificate id is printed on the PDF / verify URL / QR, and a grant writes a
+  // PERSISTENT photo onto the certificate — so the id alone must never mint one.
+  it('RD-SEC-01 · refuses a mint with the certificate id alone (no lookup capability)', async () => {
+    const res = await PHOTO_SESSION(jsonReq({ certificateId: CHILD2 }), ctx())
+    expect(res.status).toBe(400)
+    expect([...store.keys()].some(k => k.startsWith('certificatePhotoGrants/'))).toBe(false)
+  })
+
+  it('RD-SEC-01 · refuses another certificate’s capability, a wrong-event capability, and garbage', async () => {
+    for (const capability of [
+      signCertificateDownloadCapability(FATHER, SLUG),
+      signCertificateDownloadCapability(CHILD2, 'some-other-event'),
+      'not-a-capability',
+    ]) {
+      const res = await PHOTO_SESSION(jsonReq({ certificateId: CHILD2, capability }), ctx())
+      expect(res.status).toBe(400)
+    }
+    expect([...store.keys()].some(k => k.startsWith('certificatePhotoGrants/'))).toBe(false)
+  })
+
   it('refuses an unknown certificate', async () => {
-    const res = await PHOTO_SESSION(jsonReq({ certificateId: 'RDC-2026-ZZZZZZ' }), ctx())
+    const res = await PHOTO_SESSION(jsonReq({ certificateId: 'RDC-2026-ZZZZZZ', capability: signCertificateDownloadCapability('RDC-2026-ZZZZZZ', SLUG) }), ctx())
     expect(res.status).toBe(400)
   })
 
   it('refuses a certificate reached through the WRONG event slug', async () => {
-    const res = await PHOTO_SESSION(jsonReq({ certificateId: CHILD2 }), ctx('some-other-event'))
+    const res = await PHOTO_SESSION(jsonReq({ certificateId: CHILD2, capability: signCertificateDownloadCapability(CHILD2, 'some-other-event') }), ctx('some-other-event'))
     expect(res.status).toBe(400)
   })
 
@@ -344,7 +364,7 @@ describe('photo session — the OTP replacement', () => {
 
   it('a session grant is NOT accepted as a download capability', async () => {
     // The grant authorises a photo, never a download — the two must stay separate.
-    const res = await PHOTO_SESSION(jsonReq({ certificateId: CHILD2 }), ctx())
+    const res = await PHOTO_SESSION(jsonReq({ certificateId: CHILD2, capability: signCertificateDownloadCapability(CHILD2, SLUG) }), ctx())
     const { grant } = await res.json() as { grant: string }
     expect(grant).not.toBe(signCertificateDownloadCapability(CHILD2, SLUG))
   })

@@ -4,7 +4,7 @@
 // Admin-only.
 
 import { NextRequest, NextResponse } from 'next/server'
-import { resolveAdminUid }           from '@/lib/admin/auth'
+import { requireSuperAdmin } from '@/lib/admin/financialGuard'
 import { listClawbacks }             from '@/lib/clawbacks/clawbackService'
 import type { ClawbackStatus, ClawbackView } from '@/lib/clawbacks/types'
 
@@ -13,8 +13,10 @@ const STATUSES: ClawbackStatus[] = ['open', 'partially_recovered', 'recovered', 
 export interface ClawbacksListResponse { clawbacks: ClawbackView[] }
 
 export async function GET(req: NextRequest): Promise<NextResponse> {
-  const adminUid = await resolveAdminUid(req.headers.get('authorization'))
-  if (!adminUid) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+  // RD-CLOSE — a financial read: Super Admin only (ADMIN_UIDS). A legacy `admin: true` claim
+  // alone gets 403 SUPER_ADMIN_REQUIRED (lib/admin/financialGuard.ts).
+  const superGate = await requireSuperAdmin(req)
+  if (superGate.response) return superGate.response
 
   const sp     = req.nextUrl.searchParams
   const status = sp.get('status') ?? ''

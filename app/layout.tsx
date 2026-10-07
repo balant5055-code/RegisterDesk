@@ -1,5 +1,5 @@
 import type { Metadata, Viewport } from 'next'
-import { Geist } from 'next/font/google'
+import { Geist, Fraunces } from 'next/font/google'
 import { BASE_URL } from '@/lib/env'
 import { BUSINESS_CONFIG_DEFAULTS } from '@/lib/config/businessConfig'
 import { AuthProvider } from '@/components/auth/AuthProvider'
@@ -13,6 +13,20 @@ const geist = Geist({
   subsets:  ['latin'],
   display:  'swap',
   variable: '--font-geist',
+})
+
+// RD-HERO-03 · the landing hero's display face. Fraunces is a variable serif with an
+// optical-size axis, so the same file sets a 90px headline with fine hairlines and a 44px
+// one with sturdier strokes. Loaded here (the root layout) because next/font must be
+// declared in a module Next controls; exposed as --font-fraunces → --font-display →
+// font-display. It is used by the hero headline and nowhere else — everything that is
+// not a headline stays in Geist.
+const fraunces = Fraunces({
+  subsets:  ['latin'],
+  display:  'swap',
+  style:    ['normal', 'italic'],
+  axes:     ['opsz'],
+  variable: '--font-fraunces',
 })
 
 // LS1: metadataBase (so relative OG image URLs resolve) + default OpenGraph/Twitter
@@ -35,8 +49,9 @@ export const metadata: Metadata = {
   applicationName: NAME,
 
   icons: {
+    // /favicon.ico is emitted automatically from app/favicon.ico (the file convention), so
+    // it is not listed here — listing it again only duplicated the <link>.
     icon: [
-      { url: '/favicon.ico' },
       {
         url: '/favicon/favicon-96x96.png',
         sizes: '96x96',
@@ -79,7 +94,15 @@ export const viewport: Viewport = {
   width: 'device-width',
   initialScale: 1,
   viewportFit: 'cover',
-  themeColor: '#e5277e',
+  // The browser/OS chrome colour: Android's toolbar, the iOS PWA status bar, the tab
+  // strip on desktop Chrome. It is the LAST retired-magenta reference in the application
+  // shell — everything public now runs on the action ramp.
+  //
+  // It is a literal, and it has to be: this becomes <meta name="theme-color" content="…">,
+  // which the browser reads before any stylesheet exists, so a var(--action) here would
+  // resolve to nothing. #4F46E5 IS --action (styles/tokens.css) — if that token ever moves,
+  // this moves with it. Solid by contract: theme-color takes one colour, never a gradient.
+  themeColor: '#4F46E5',
 }
 
 export default function RootLayout({
@@ -88,7 +111,7 @@ export default function RootLayout({
   return (
     <html
       lang="en"
-      className={`${geist.variable} h-full antialiased`}
+      className={`${geist.variable} ${fraunces.variable} h-full antialiased`}
     >
       <body className="min-h-full flex flex-col">
         <AuthProvider>{children}</AuthProvider>

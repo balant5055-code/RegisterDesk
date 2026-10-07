@@ -28,6 +28,7 @@ import { serializeTables }   from '@/lib/reports/export'
 import { uploadServerFile }  from '@/lib/firebase/storage/admin'
 import { notifyExportReady } from '@/lib/notifications/inbox/notify'
 import type { ReportFilters, ExportFormat } from '@/lib/reports/types'
+import type { TeamPermission } from '@/lib/team/types'
 
 export const REPORT_EXPORT_JOBS = 'reportExportJobs'
 
@@ -39,7 +40,14 @@ const EXPORT_LEASE_MS  = 120_000
 const EXPIRY_MS        = 24 * 60 * 60 * 1000   // download link valid for 24h
 
 export interface ReportExportOutput {
-  url:         string
+  /**
+   * RD-ANALYTICS-12-04 · there is deliberately NO `url` field.
+   *
+   * It held a permanent Firebase Storage capability URL (P1-2). The download route signs
+   * `path` per request with a short-lived signature instead, so a download URL never becomes
+   * durable state. Documents written before this phase may still carry a stale `url`; nothing
+   * reads it, and it expires with the object.
+   */
   path:        string
   filename:    string
   contentType: string
@@ -60,6 +68,26 @@ export interface ReportExportJob extends Job {
 
 export function isReportFileFormat(v: unknown): v is ReportFileFormat {
   return v === 'csv' || v === 'xlsx' || v === 'pdf'
+}
+
+/**
+ * RD-ANALYTICS-12-03 · the permission a caller must STILL hold to touch this job.
+ *
+ * ═══ WHY THIS EXISTS ═════════════════════════════════════════════════════════
+ * The report's permission gated GENERATION and was then never consulted again. Poll,
+ * process, cancel and download checked only that the caller belonged to the owning
+ * workspace, so any member holding a jobId could reach a financial export they could not
+ * have created — and gate-only roles could too, because the download route bypassed the
+ * helper that excludes them. What kept that from being a live disclosure was the entropy of
+ * `rex_<uuid>`, i.e. an identifier standing in for an authorization check.
+ *
+ * The answer comes from the SAME registry the create route uses, so there is exactly one
+ * definition of "which permission does this report need". `null` means the kind is not a
+ * registered report — which the create route makes unreachable, and which callers must
+ * therefore treat as a refusal rather than as "no permission required".
+ */
+export function permissionForExportJob(job: Pick<ReportExportJob, 'kind'>): TeamPermission | null {
+  return ORGANIZER_REPORTS[job.kind]?.permission ?? null
 }
 
 // ─── Job creation ──────────────────────────────────────────────────────────────
@@ -114,10 +142,20 @@ export function reportExportStrategy(): JobStrategy<ReportExportJob, ExportCtx, 
         const out   = await serializeTables([table], job.format, job.filenameBase, { heading: job.heading, sub: 'RegisterDesk finance report' })
         const bytes = typeof out.body === 'string' ? new Uint8Array(Buffer.from(out.body, 'utf8')) : new Uint8Array(out.body)
         const path  = `reportExports/${job.organizerUid}/${job.jobId}/${out.filename}`
-        const { url } = await uploadServerFile(path, bytes, out.contentType)
+        /**
+         * RD-ANALYTICS-12-04 · the returned capability URL is DELIBERATELY DISCARDED.
+         *
+         * `uploadServerFile` still mints a `firebaseStorageDownloadTokens` URL — it is shared
+         * with the print-asset jobs, which this phase does not touch. Persisting it here was
+         * P1-2: a permanent, unauthenticated, rules-exempt link stored in Firestore for the
+         * life of the job document, long after the object it addressed had been reclaimed.
+         * The download route now signs `path` per request instead, so nothing durable needs
+         * the URL and storing it would only re-create the exposure.
+         */
+        await uploadServerFile(path, bytes, out.contentType)
 
         const output: ReportExportOutput = {
-          url, path, filename: out.filename, contentType: out.contentType,
+          path, filename: out.filename, contentType: out.contentType,
           rowCount: table.rows.length, truncated: !!table.truncated,
           expiresAt: Timestamp.fromMillis(Date.now() + EXPIRY_MS),
         }

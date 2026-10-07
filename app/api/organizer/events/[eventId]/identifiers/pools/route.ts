@@ -11,7 +11,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getPoolStatistics, upsertPool, deletePool, IdentifierConfigError } from '@/lib/identifiers/config'
 import { resolveIdentifierScope } from '@/lib/identifiers/organizerScope'
-import type { IdentifierPool } from '@/lib/identifiers/types'
+import type { IdentifierPool, IdentifierRange } from '@/lib/identifiers/types'
 
 export const dynamic = 'force-dynamic'
 
@@ -30,14 +30,35 @@ function parsePool(body: unknown): IdentifierPool | null {
   const poolId = typeof b.poolId === 'string' ? b.poolId.trim() : ''
   const label  = typeof b.label === 'string' ? b.label.trim() : ''
   if (!poolId || !label) return null
+  // ═══ RD-BIB-UX-02 · ABSENT MEANS ABSENT ═══════════════════════════════════
+  //
+  // Every one of these fields used to be written as `undefined` when the request
+  // omitted it. JSON cannot express `undefined`, so the browser never sent it:
+  // this parser created it, and Firestore then refused the whole document with
+  //
+  //   Cannot use "undefined" as a Firestore value (found in field "pools.`1`.prefix")
+  //
+  // — a 500 on a perfectly valid configuration whose only sin was an empty
+  // optional Prefix. An omitted key is now genuinely omitted.
+  //
+  // `rangeStart`/`rangeEnd`/`templateId` are NULLABLE in the schema, so an
+  // explicit null is kept: that is the legacy "unbounded" signal, and it is a
+  // different statement from "the request said nothing about this field".
   return {
     poolId, label,
-    prefix:     typeof b.prefix === 'string' ? b.prefix : undefined,
-    suffix:     typeof b.suffix === 'string' ? b.suffix : undefined,
-    padding:    typeof b.padding === 'number' ? b.padding : undefined,
-    rangeStart: typeof b.rangeStart === 'number' ? b.rangeStart : (b.rangeStart === null ? null : undefined),
-    rangeEnd:   typeof b.rangeEnd === 'number' ? b.rangeEnd : (b.rangeEnd === null ? null : undefined),
-    templateId: typeof b.templateId === 'string' ? b.templateId : (b.templateId === null ? null : undefined),
+    ...(typeof b.prefix  === 'string' ? { prefix:  b.prefix }  : {}),
+    ...(typeof b.suffix  === 'string' ? { suffix:  b.suffix }  : {}),
+    ...(typeof b.padding === 'number' ? { padding: b.padding } : {}),
+    ...(typeof b.rangeStart === 'number' || b.rangeStart === null ? { rangeStart: b.rangeStart as number | null } : {}),
+    ...(typeof b.rangeEnd   === 'number' || b.rangeEnd   === null ? { rangeEnd:   b.rangeEnd   as number | null } : {}),
+    ...(typeof b.templateId === 'string' || b.templateId === null ? { templateId: b.templateId as string | null } : {}),
+    // RD-EVENT-19A · carried through UNVALIDATED on purpose: this parser only
+    // decides what is present, and saveIdentifierConfig → validatePools is the
+    // one gate that decides what is legal (overlapping ranges, an empty
+    // passIds, a pass claimed by two pools). Dropping them here instead would
+    // make the API silently ignore a configuration the organizer sent.
+    ...(Array.isArray(b.passIds) ? { passIds: b.passIds as string[] } : {}),
+    ...(Array.isArray(b.ranges)  ? { ranges:  b.ranges as IdentifierRange[] } : {}),
   }
 }
 
@@ -52,7 +73,11 @@ async function upsert(req: NextRequest, ctx: { params: Promise<{ eventId: string
   if (!pool) return NextResponse.json({ error: 'poolId and label are required' }, { status: 400 })
 
   try {
-    const config = await upsertPool(scope.slug, pool, scope.callerUid)
+    // RD-BIB-01 · a range change that would strand issued numbers is REFUSED unless the
+    // organizer explicitly says otherwise. The flag is never a default, and the
+    // acknowledgement is written into identifierHistory by the config layer.
+    const acknowledge = (body as { acknowledgeStranding?: unknown }).acknowledgeStranding === true
+    const config = await upsertPool(scope.slug, pool, scope.callerUid, { acknowledgeStranding: acknowledge })
     return NextResponse.json({ ok: true, pools: config.pools })
   } catch (err) {
     if (err instanceof IdentifierConfigError) {

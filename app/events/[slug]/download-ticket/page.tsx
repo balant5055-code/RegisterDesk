@@ -12,7 +12,7 @@
 import type { Metadata } from 'next'
 import { notFound } from 'next/navigation'
 import { adminDb } from '@/lib/firebase/admin'
-import { MarketingPageLayout } from '@/components/marketing/layout/MarketingPageLayout'
+import { EventUtilityLayout } from '@/components/marketing/layout/EventUtilityLayout'
 import { DownloadTicketClient } from './DownloadTicketClient'
 
 type Params = { params: Promise<{ slug: string }> }
@@ -52,10 +52,10 @@ export default async function DownloadTicketPage({ params }: Params) {
   return (
     // Same shell and background as the Certificate Center, so the two attendee-facing
     // lookup pages read as one product rather than two.
-    <MarketingPageLayout>
-      <div className="min-h-[60vh] bg-[#f7f8fa]">
+    <EventUtilityLayout>
+      <div className="min-h-[60vh] bg-muted">
         <DownloadTicketClient slug={slug} eventName={eventName} />
       </div>
-    </MarketingPageLayout>
+    </EventUtilityLayout>
   )
 }

@@ -1,104 +1,132 @@
 'use client'
 
-// Phase H.4 — Event Setup Center (per-event landing/first tab).
+// RD-EVENT-04 · Event Setup Center.
 //
-// An ORCHESTRATION layer over existing features: it derives every card's state
-// from REAL signals (the already-loaded event detail + a few existing enrichment
-// endpoints). It writes nothing, adds no business logic, and creates no
-// collections. When a signal cannot be loaded, the card honestly shows
-// "Unknown" / "Not Yet Available" — never a fabricated status or percentage.
+// ═══ WHAT CHANGED, AND WHY ═══════════════════════════════════════════════════
+// The previous Setup Center derived every card's status from the draft using its own
+// rules, independently of `evaluatePublishRequirements` — the evaluator the publish
+// flow actually gates on. The two disagreed, and one publish blocker
+// (`event_organizer`) had no card at all, so an organizer could read a wall of green
+// and still be refused at publish with nothing on screen explaining why.
 //
-// Generic + metadata-driven: the UI iterates SETUP_MODULES and works for every
-// event type with no event-type-specific branches.
+// Readiness now comes from `publishChecks` — that same evaluator's roll-call, computed
+// server-side over the draft the page already loads. This file renders; it decides no
+// requirement. Everything it does decide lives in lib/eventSetup/{readiness,items}.ts
+// as pure functions, so the state model is testable without a DOM.
+//
+// It also applies the feature-flag and permission gates the rest of the organizer UI
+// applies and Setup previously did not, and it reads its five non-draft signals from
+// ONE bounded endpoint instead of three that each re-read the event draft.
 
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
-import { Loader2, ExternalLink, ArrowRight } from 'lucide-react'
-import { cn } from '@/lib/utils/cn'
-import type { EventDetailResponse } from '@/app/api/organizer/events/[eventId]/route'
-import { SETUP_MODULES } from '@/lib/eventSetup/registry'
 import {
-  SETUP_GROUP_ORDER, EMPTY_ENRICHMENT,
-  type EnrichmentSignals, type SetupState, type SetupAction, type SetupCardResult,
-} from '@/lib/eventSetup/types'
+  AlertTriangle, ArrowRight, Check, CircleDashed, ExternalLink, Info, Minus, RotateCw,
+} from 'lucide-react'
+import { cn } from '@/lib/utils/cn'
+import { accent } from '@/lib/dashboard/accents'
+import { useFeatureFlags } from '@/lib/config/featureFlagsClient'
+import { useWorkspacePermissions } from '@/lib/hooks/useWorkspacePermissions'
+import { EVENT_PARAM } from '@/lib/events/eventContext'
+import type { EventDetailResponse } from '@/app/api/organizer/events/[eventId]/route'
+import type { SetupSignalsResponse } from '@/app/api/organizer/events/[eventId]/setup-signals/route'
+import {
+  readiness, SECTION_ORDER, STATE_LABEL, STATE_RANK, STATE_TONE,
+  type ItemState, type ResolvedItem,
+} from '@/lib/eventSetup/readiness'
+import { resolveItems, UNRESOLVED_SIGNALS, type SetupSignals } from '@/lib/eventSetup/items'
 
-// ─── State styling + labels ──────────────────────────────────────────────────
+// ─── Status chip ──────────────────────────────────────────────────────────────
 
-const STATE_META: Record<SetupState, { label: string; chip: string; dot: string }> = {
-  ready:             { label: 'Ready',            chip: 'bg-emerald-50 text-emerald-700 ring-emerald-600/20', dot: 'bg-emerald-500' },
-  needs_attention:   { label: 'Needs Attention',  chip: 'bg-amber-50 text-amber-700 ring-amber-600/20',       dot: 'bg-amber-500' },
-  disabled:          { label: 'Disabled',         chip: 'bg-slate-100 text-slate-600 ring-slate-500/20',      dot: 'bg-slate-400' },
-  unknown:           { label: 'Unknown',          chip: 'bg-slate-100 text-slate-500 ring-slate-500/20',      dot: 'bg-slate-300' },
-  not_yet_available: { label: 'Not Yet Available', chip: 'bg-slate-50 text-slate-400 ring-slate-400/20',      dot: 'bg-slate-200' },
+const STATE_ICON: Record<ItemState, typeof Check> = {
+  blocked: AlertTriangle, attention: Info, ready: Check,
+  optional: CircleDashed, unavailable: RotateCw, not_applicable: Minus,
 }
 
-function timeAgo(iso: string | null | undefined): string | null {
-  if (!iso) return null
-  const t = new Date(iso).getTime()
-  if (Number.isNaN(t)) return null
-  const m = Math.floor((Date.now() - t) / 60000)
-  if (m < 1) return 'just now'
-  if (m < 60) return `${m}m ago`
-  const h = Math.floor(m / 60)
-  if (h < 24) return `${h}h ago`
-  return new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
-}
-
-// ─── Action button ───────────────────────────────────────────────────────────
-
-function ActionButton({
-  action, variant, onOpenTab,
-}: { action: SetupAction; variant: 'primary' | 'secondary'; onOpenTab: (tab: string) => void }) {
-  const cls = cn(
-    'inline-flex items-center gap-1.5 rounded-xl px-3 py-1.5 text-[13px] font-medium transition-colors',
-    variant === 'primary'
-      ? 'bg-primary text-primary-foreground hover:opacity-90'
-      : 'border border-border text-foreground hover:bg-muted',
-  )
-  if (action.tab) {
-    return <button onClick={() => onOpenTab(action.tab!)} className={cls}>{action.label}<ArrowRight className="size-3.5" aria-hidden /></button>
-  }
-  if (action.href) {
-    return (
-      <Link href={action.href} target={action.external ? '_blank' : undefined} rel={action.external ? 'noopener noreferrer' : undefined} className={cls}>
-        {action.label}{action.external ? <ExternalLink className="size-3.5" aria-hidden /> : <ArrowRight className="size-3.5" aria-hidden />}
-      </Link>
-    )
-  }
-  return null
-}
-
-// ─── Card ─────────────────────────────────────────────────────────────────────
-
-function SetupCard({
-  label, description, result, onOpenTab,
-}: { label: string; description: string; result: SetupCardResult; onOpenTab: (tab: string) => void }) {
-  const meta = STATE_META[result.state]
-  const updated = timeAgo(result.lastUpdated)
-  const muted = result.state === 'not_yet_available'
-
+function StatusChip({ state }: { state: ItemState }) {
+  const Icon = STATE_ICON[state]
   return (
-    <div className={cn('flex flex-col rounded-2xl border border-border bg-card p-4', muted && 'opacity-75')}>
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <p className="text-[15px] font-semibold text-foreground">{label}</p>
-          <p className="text-[12px] text-muted-foreground">{description}</p>
-        </div>
-        <span className={cn('inline-flex shrink-0 items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-semibold ring-1', meta.chip)}>
-          <span className={cn('size-1.5 rounded-full', meta.dot)} aria-hidden />
-          {meta.label}
-        </span>
+    <span
+      className={cn(
+        'inline-flex shrink-0 items-center gap-1.5 rounded-pill px-2 py-0.5 text-fs-2xs font-semibold',
+        accent(STATE_TONE[state]).tile,
+      )}
+    >
+      <Icon className="size-3" aria-hidden />
+      {STATE_LABEL[state]}
+    </span>
+  )
+}
+
+// ─── Item row ─────────────────────────────────────────────────────────────────
+//
+// A row, not a card. Twenty-two equal-weight boxes is how a control centre turns into
+// a wall of decoration; rows let the eye run down the status column in one pass.
+
+function ItemRow({ item }: { item: ResolvedItem }) {
+  const muted = item.state === 'not_applicable'
+  return (
+    <div
+      className={cn(
+        'flex flex-col gap-2 px-4 py-3 sm:flex-row sm:items-center sm:gap-4',
+        muted && 'opacity-60',
+      )}
+    >
+      <div className="min-w-0 flex-1">
+        <p className="text-fs-sm font-medium text-foreground">{item.label}</p>
+        <p className="mt-0.5 break-words text-fs-xs text-muted-foreground [overflow-wrap:anywhere]">
+          {item.summary}
+        </p>
       </div>
 
-      <p className="mt-2 text-[13px] text-foreground/80">{result.reason}</p>
+      <div className="flex shrink-0 items-center gap-3">
+        <StatusChip state={item.state} />
+        {item.action && (
+          <Link
+            href={item.action.href}
+            target={item.action.external ? '_blank' : undefined}
+            rel={item.action.external ? 'noopener noreferrer' : undefined}
+            aria-label={`${item.action.label} — ${item.label}`}
+            className={cn(
+              'inline-flex h-11 shrink-0 items-center gap-1 rounded-control px-2.5 text-fs-xs font-medium',
+              'text-muted-foreground transition-colors hover:bg-muted hover:text-foreground',
+              'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40',
+            )}
+          >
+            {item.action.label}
+            {item.action.external
+              ? <ExternalLink className="size-3.5" aria-hidden />
+              : <ArrowRight className="size-3.5" aria-hidden />}
+          </Link>
+        )}
+      </div>
+    </div>
+  )
+}
 
-      {(result.primary || result.secondary || updated) && (
-        <div className="mt-3 flex flex-wrap items-center gap-2">
-          {result.primary   && <ActionButton action={result.primary}   variant="primary"   onOpenTab={onOpenTab} />}
-          {result.secondary && <ActionButton action={result.secondary} variant="secondary" onOpenTab={onOpenTab} />}
-          {updated && <span className="ml-auto text-[11px] text-muted-foreground/70">Updated {updated}</span>}
+// ─── Skeleton ─────────────────────────────────────────────────────────────────
+
+function SetupSkeleton() {
+  return (
+    <div className="space-y-6" aria-busy="true" aria-live="polite">
+      <div className="h-24 animate-pulse rounded-surface bg-muted" />
+      {[0, 1, 2].map(s => (
+        <div key={s} className="space-y-2">
+          <div className="h-4 w-40 animate-pulse rounded bg-muted" />
+          <div className="overflow-hidden rounded-surface border border-border">
+            {[0, 1, 2].map(i => (
+              <div key={i} className="flex items-center gap-4 border-b border-border px-4 py-3 last:border-0">
+                <div className="min-w-0 flex-1 space-y-2">
+                  <div className="h-3.5 w-40 animate-pulse rounded bg-muted" />
+                  <div className="h-3 w-56 max-w-full animate-pulse rounded bg-muted" />
+                </div>
+                <div className="h-5 w-20 animate-pulse rounded-pill bg-muted" />
+              </div>
+            ))}
+          </div>
         </div>
-      )}
+      ))}
+      <span className="sr-only">Loading setup status…</span>
     </div>
   )
 }
@@ -106,87 +134,151 @@ function SetupCard({
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 export default function SetupCenterTab({
-  event, token, onOpenTab,
-}: { event: EventDetailResponse; token: string; onOpenTab: (tab: string) => void }) {
-  const [enrich, setEnrich] = useState<EnrichmentSignals>(EMPTY_ENRICHMENT)
-  const [loading, setLoading] = useState(true)
+  event, token,
+}: {
+  event: EventDetailResponse
+  token: string
+  /** Retained for the tab shell's existing call signature; navigation now uses real
+   *  links so an action is cmd-clickable and lands on a URL that can be shared. */
+  onOpenTab?: (tab: string) => void
+}) {
+  const flags = useFeatureFlags()
+  const perms = useWorkspacePermissions(true)
+
+  const [signals, setSignals] = useState<SetupSignals>(UNRESOLVED_SIGNALS)
+  const [signalsState, setSignalsState] = useState<'loading' | 'ok' | 'error'>('loading')
+  const [reloadKey, setReloadKey] = useState(0)
+
+  const eventId = event.draftId
 
   useEffect(() => {
     if (!token) return
     let cancelled = false
-    const eventId = event.draftId
 
     const run = async () => {
-      const headers = { Authorization: `Bearer ${token}` }
-      const safe = async <T,>(url: string, map: (json: unknown) => T): Promise<T | 'unknown'> => {
-        try {
-          const res = await fetch(url, { headers, cache: 'no-store' })
-          if (!res.ok) return 'unknown'
-          return map(await res.json())
-        } catch { return 'unknown' }
+      setSignalsState('loading')
+      try {
+        const res = await fetch(`/api/organizer/events/${encodeURIComponent(eventId)}/setup-signals`, {
+          headers: { Authorization: `Bearer ${token}` },
+          cache: 'no-store',
+        })
+        if (!res.ok) throw new Error(`HTTP ${res.status}`)
+        const j = await res.json() as SetupSignalsResponse
+        if (cancelled) return
+        // `null` from the server means that ONE signal could not be read. It becomes
+        // 'unavailable' for its card and nothing else — never a zero, never a state.
+        setSignals({
+          certificates: j.certificates ?? 'unavailable',
+          identifiers:  j.identifiers  ?? 'unavailable',
+          sessions:     j.sessions     ?? 'unavailable',
+          coupons:      j.coupons      ?? 'unavailable',
+          waitlist:     j.waitlist     ?? 'unavailable',
+        })
+        setSignalsState('ok')
+      } catch {
+        if (cancelled) return
+        setSignals(UNRESOLVED_SIGNALS)
+        setSignalsState('error')
       }
-
-      setLoading(true)
-      const [cert, identifier, sessions] = await Promise.all([
-        safe(`/api/organizer/events/${eventId}/certificates/stats`, (j) => {
-          const d = j as { generated?: number; pending?: number }
-          return { generated: d.generated ?? 0, pending: d.pending ?? 0 }
-        }),
-        safe(`/api/organizer/events/${eventId}/identifiers`, (j) => {
-          const d = j as { configured?: boolean }
-          return { configured: d.configured === true }
-        }),
-        safe(`/api/organizer/events/${eventId}/sessions`, (j) => {
-          const d = j as { sessions?: unknown[]; count?: number }
-          const count = Array.isArray(d.sessions) ? d.sessions.length
-            : Array.isArray(j) ? (j as unknown[]).length
-            : typeof d.count === 'number' ? d.count : 0
-          return { count }
-        }),
-      ])
-      if (!cancelled) { setEnrich({ cert, identifier, sessions }); setLoading(false) }
     }
 
     void run()
     return () => { cancelled = true }
-  }, [token, event.draftId])
+  }, [token, eventId, reloadKey])
 
-  const ctx = useMemo(() => ({ event, enrich }), [event, enrich])
-  const results = useMemo(() => SETUP_MODULES.map(m => ({ module: m, result: m.derive(ctx) })), [ctx])
+  const tab    = useCallback((k: string) => `/dashboard/events/${encodeURIComponent(eventId)}?tab=${k}`, [eventId])
+  const scoped = useCallback(
+    (p: string) => `${p}${p.includes('?') ? '&' : '?'}${EVENT_PARAM}=${encodeURIComponent(eventId)}`,
+    [eventId],
+  )
 
-  // Honest, DERIVED counts (not invented percentages).
-  const counts = useMemo(() => {
-    const c: Record<SetupState, number> = { ready: 0, needs_attention: 0, disabled: 0, unknown: 0, not_yet_available: 0 }
-    for (const r of results) c[r.result.state]++
-    return c
-  }, [results])
+  const items = useMemo(() => resolveItems({
+    event, signals,
+    gate: { flags, has: perms.has },
+    eventHref: `/dashboard/events/${encodeURIComponent(eventId)}`,
+    tab, scoped,
+  }), [event, signals, flags, perms, eventId, tab, scoped])
+
+  const ready = useMemo(() => readiness(event), [event])
+
+  // Loading covers the FIRST resolution only. After that a refetch leaves the page
+  // standing — a page that blanks itself on every retry is worse than a stale number.
+  if (signalsState === 'loading' && signals === UNRESOLVED_SIGNALS) return <SetupSkeleton />
 
   return (
     <div className="space-y-6">
-      {/* Header — real derived counts, never a fabricated % */}
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h2 className="text-[22px] font-bold tracking-tight text-foreground">Event Setup Center</h2>
-          <p className="text-[13px] text-muted-foreground">What&rsquo;s ready, what needs attention, and what to configure next.</p>
-        </div>
-        <div className="flex flex-wrap items-center gap-1.5 text-[12px]">
-          {counts.ready > 0           && <span className="rounded-full bg-emerald-50 px-2.5 py-1 font-semibold text-emerald-700 ring-1 ring-emerald-600/20">{counts.ready} Ready</span>}
-          {counts.needs_attention > 0 && <span className="rounded-full bg-amber-50 px-2.5 py-1 font-semibold text-amber-700 ring-1 ring-amber-600/20">{counts.needs_attention} Needs Attention</span>}
-          {loading && <Loader2 className="size-4 animate-spin text-muted-foreground" aria-hidden />}
-        </div>
-      </div>
+      {/* ── READINESS ───────────────────────────────────────────────────────── */}
+      <section
+        aria-labelledby="setup-readiness"
+        className={cn(
+          'rounded-surface border p-4 sm:p-5',
+          ready.known && ready.canPublish ? 'border-border bg-card'
+            : ready.known ? 'border-destructive/30 bg-destructive/[0.04]'
+            : 'border-border bg-muted/30',
+        )}
+      >
+        <h2 id="setup-readiness" className="text-fs-lg font-semibold text-foreground">
+          {ready.headline}
+        </h2>
+        <p className="mt-1 text-fs-sm text-muted-foreground">
+          {ready.known
+            // A literal tally from the evaluator — never a manufactured percentage.
+            ? <>{ready.criticalPassed} of {ready.criticalTotal} required checks ready
+                {ready.warningOpen > 0 && <> · {ready.warningOpen} recommended {ready.warningOpen === 1 ? 'item' : 'items'} open</>}</>
+            : 'Some setup checks could not be run, so readiness is unknown. Nothing here is claimed as ready.'}
+        </p>
 
-      {/* Groups */}
-      {SETUP_GROUP_ORDER.map(group => {
-        const items = results.filter(r => r.module.group === group.key)
-        if (items.length === 0) return null
+        {/* Blockers, listed once and only once — the rows below are not repeated here. */}
+        {ready.blockers.length > 0 && (
+          <ul className="mt-3 space-y-1.5">
+            {ready.blockers.map(b => (
+              <li key={b.id} className="flex items-start gap-2 text-fs-sm">
+                <AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-destructive" aria-hidden />
+                <span className="min-w-0">
+                  <span className="font-medium text-foreground">{b.title}</span>
+                  <span className="text-muted-foreground"> — {b.description}</span>
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+
+      {/* One quiet line, not a card, when a signal failed. */}
+      {signalsState === 'error' && (
+        <div role="alert" className="flex flex-wrap items-center gap-2 rounded-control border border-border bg-muted/30 px-3 py-2">
+          <p className="min-w-0 flex-1 text-fs-xs text-muted-foreground">
+            Some setup details couldn&apos;t be checked. The items below still show
+            everything that could be read.
+          </p>
+          <button
+            type="button"
+            onClick={() => setReloadKey(k => k + 1)}
+            className="inline-flex h-11 shrink-0 items-center gap-1.5 rounded-control px-2.5 text-fs-xs font-semibold text-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+          >
+            <RotateCw className="size-3.5" aria-hidden /> Try again
+          </button>
+        </div>
+      )}
+
+      {/* ── SECTIONS ────────────────────────────────────────────────────────── */}
+      {SECTION_ORDER.map(section => {
+        const rows = items
+          .filter(i => i.section === section.key)
+          // Most urgent first, so the eye lands on what to fix.
+          .sort((a, b) => STATE_RANK[a.state] - STATE_RANK[b.state])
+        if (rows.length === 0) return null
+
         return (
-          <section key={group.key}>
-            <h3 className="mb-2 text-[12px] font-semibold uppercase tracking-wider text-muted-foreground">{group.label}</h3>
-            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-              {items.map(({ module, result }) => (
-                <SetupCard key={module.key} label={module.label} description={module.description} result={result} onOpenTab={onOpenTab} />
-              ))}
+          <section key={section.key} aria-labelledby={`setup-${section.key}`}>
+            <div className="mb-2">
+              <h2 id={`setup-${section.key}`} className="text-fs-sm font-semibold text-foreground">
+                {section.label}
+              </h2>
+              <p className="text-fs-xs text-muted-foreground">{section.blurb}</p>
+            </div>
+            <div className="divide-y divide-border overflow-hidden rounded-surface border border-border bg-card">
+              {rows.map(item => <ItemRow key={item.key} item={item} />)}
             </div>
           </section>
         )

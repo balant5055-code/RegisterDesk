@@ -57,10 +57,12 @@ export default function AdminCommunicationsPage() {
       ) : (
         <>
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-            <Kpi icon={Mail} label="Messages sent" value={data.messages.sent.toLocaleString('en-IN')} />
-            <Kpi icon={Mail} label="Delivered" value={data.messages.delivered.toLocaleString('en-IN')} />
-            <Kpi icon={Mail} label="Failed" value={data.messages.failed.toLocaleString('en-IN')} />
-            <Kpi icon={Mail} label="WhatsApp" value={data.messages.whatsapp.toLocaleString('en-IN')} />
+            {/* RD-INTEG — "Sent / submitted" includes delivered; timeouts are not failures; an
+                aggregate that could not be read shows "—", never 0. */}
+            <Kpi icon={Mail} label="Sent / submitted" value={fig(data.messages, 'sent')} />
+            <Kpi icon={Mail} label="Delivered" value={fig(data.messages, 'delivered')} />
+            <Kpi icon={Mail} label="Failed" value={fig(data.messages, 'failed')} />
+            <Kpi icon={Mail} label="WhatsApp" value={fig(data.messages, 'whatsapp')} />
             <Kpi icon={Megaphone} label="Broadcasts" value={data.broadcasts.total.toLocaleString('en-IN')} />
             <Kpi icon={Wallet} label="Broadcast cost" value={rupees(data.broadcasts.costPaise)} />
             <Kpi icon={Bell} label="Reminders" value={data.reminders.total.toLocaleString('en-IN')} />
@@ -73,9 +75,10 @@ export default function AdminCommunicationsPage() {
             </Card>
             <Card title="Message status">
               <div className="grid grid-cols-2 gap-px overflow-hidden bg-border">
-                <Mini label="Total" value={data.messages.total.toLocaleString('en-IN')} />
-                <Mini label="Skipped" value={data.messages.skipped.toLocaleString('en-IN')} />
-                <Mini label="Queued" value={data.messages.queued.toLocaleString('en-IN')} />
+                <Mini label="Total" value={fig(data.messages, 'total')} />
+                <Mini label="Status unknown" value={fig(data.messages, 'unknown')} />
+                <Mini label="Skipped" value={fig(data.messages, 'skipped')} />
+                <Mini label="Pending" value={fig(data.messages, 'queued')} />
                 <Mini label="Reminders sent" value={data.reminders.sent.toLocaleString('en-IN')} />
               </div>
             </Card>
@@ -123,4 +126,11 @@ function Card({ title, children }: { title: string; children: React.ReactNode })
 }
 function Mini({ label, value }: { label: string; value: string }) {
   return <div className="bg-card px-4 py-3"><p className="text-[12px] text-muted-foreground">{label}</p><p className="mt-1 text-[18px] font-bold tabular-nums text-foreground">{value}</p></div>
+}
+
+/** RD-INTEG — a figure, or "—" when its aggregate could not be read (never a silent 0). */
+function fig(m: { unavailable?: string[] } & Record<string, unknown>, key: string): string {
+  if (m.unavailable?.includes(key)) return '—'
+  const v = m[key]
+  return typeof v === 'number' ? v.toLocaleString('en-IN') : '—'
 }

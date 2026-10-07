@@ -20,6 +20,7 @@ import { getBrandingConfig } from '@/lib/config/resolveBrandingConfig'
 import { getSecurityConfig } from '@/lib/config/resolveSecurityConfig'
 import { getIntegrationConfig } from '@/lib/config/resolveIntegrationConfig'
 import { getPublicFeesConfig } from '@/lib/fees/resolvePublicFeesConfig'
+import { toPublicWalletConfig } from '@/lib/config/businessConfig'
 
 export async function GET(): Promise<NextResponse> {
   // RD-LICENSE-01B Phase 3A: `licenseCatalogV2` is emitted ADDITIVELY alongside the
@@ -37,8 +38,10 @@ export async function GET(): Promise<NextResponse> {
     getPublicFeesConfig(),
   ])
   // Infinity license limits serialize to null via JSON; the client revives them.
+  // RD-WALLET-CFG-01 — the wallet entry is the organizer-facing projection only: the Super Admin-only
+  // financial controls (negative balance, freeze, refunds, balance caps, auto top-up) never leave here.
   return NextResponse.json(
-    { config: { licenseCatalog, licenseCatalogV2, communication, wallet, settlements, featureFlags, branding, security, integrations, fees } },
+    { config: { licenseCatalog, licenseCatalogV2, communication, wallet: toPublicWalletConfig(wallet), settlements, featureFlags, branding, security, integrations, fees } },
     { headers: { 'Cache-Control': 'no-store' } },
   )
 }

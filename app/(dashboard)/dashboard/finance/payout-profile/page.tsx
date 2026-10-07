@@ -6,7 +6,7 @@ import { useAuth }            from '@/components/auth/AuthProvider'
 import { cn }                 from '@/lib/utils/cn'
 import { PayoutHistoryPanel } from './PayoutHistoryPanel'
 import {
-  AlertCircle, BadgeCheck, Building2, ChevronLeft,
+  AlertCircle, BadgeCheck, Building2, ChevronLeft, Landmark,
   CreditCard, Loader2, Save, ShieldAlert, Smartphone,
 } from 'lucide-react'
 import type {
@@ -270,9 +270,14 @@ export default function PayoutProfilePage() {
         </Link>
         <div className="flex items-start justify-between gap-4">
           <div>
-            <h1 className="text-[22px] font-bold tracking-tight text-foreground">Payout Profile</h1>
+            {/* RD-PAYMENT-ONBOARDING-03 · "Payout Profile" described a form; this page is
+                about how event money is handled end to end, which is what it will keep
+                being as settlement changes. The ROUTE is deliberately unchanged — renaming
+                it would break saved links, breadcrumbs and the settlement page's Edit
+                button for no user benefit. */}
+            <h1 className="text-[22px] font-bold tracking-tight text-foreground">Payment &amp; Payouts</h1>
             <p className="mt-0.5 text-[14px] text-muted-foreground">
-              Configure where your settlements are sent.
+              Set up how your event payments are received and settled.
             </p>
           </div>
 
@@ -281,12 +286,15 @@ export default function PayoutProfilePage() {
             profile.isVerified ? (
               <div className="flex items-center gap-1.5 rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-[12.5px] font-semibold text-emerald-700 dark:border-emerald-700/30 dark:bg-emerald-900/20 dark:text-emerald-400">
                 <BadgeCheck className="size-3.5" aria-hidden />
-                Verified
+                {/* Precise on purpose: this is RegisterDesk's own review of the payout
+                    destination, NOT a payment-provider KYC. Naming it "Verified" invited
+                    exactly that confusion once provider onboarding is on the roadmap. */}
+                Payment profile verified
               </div>
             ) : (
               <div className="flex items-center gap-1.5 rounded-full border border-amber-200 bg-amber-50 px-3 py-1.5 text-[12.5px] font-semibold text-amber-700 dark:border-amber-700/30 dark:bg-amber-900/20 dark:text-amber-400">
                 <ShieldAlert className="size-3.5" aria-hidden />
-                Pending Verification
+                Payment profile verification pending
               </div>
             )
           )}
@@ -300,7 +308,45 @@ export default function PayoutProfilePage() {
         </div>
       )}
 
-      {/* ── Form card ── */}
+      {/* ── Read-only view for a delegated finance member ──────────────────────
+          The server sends this caller masks instead of the real identifiers, and PUT is
+          owner-only, so rendering the editable form would be a form that cannot be filled
+          and cannot be saved. Showing what they ARE allowed to see — and saying plainly
+          why the rest is hidden — is the honest version of the same screen. */}
+      {profile && !profile.secretsVisible && (
+        <div className="rounded-xl border border-border bg-card p-6 shadow-sm">
+          <div className="flex items-start gap-2.5">
+            <ShieldAlert className="mt-0.5 size-4 shrink-0 text-muted-foreground" aria-hidden />
+            <p className="text-[13px] text-muted-foreground">
+              Payout details are visible in full only to the workspace owner, who is also the
+              only person who can change them.
+            </p>
+          </div>
+          <dl className="mt-5 grid gap-x-8 gap-y-4 sm:grid-cols-2">
+            {[
+              ['Account holder', profile.accountHolderName || '—'],
+              ['Method',         profile.payoutMethod === 'upi' ? 'UPI' : 'Bank transfer'],
+              ...(profile.payoutMethod === 'upi'
+                ? [['UPI ID', profile.upiMasked ?? '—'] as const]
+                : [
+                    ['Bank',           profile.bankName ?? '—'] as const,
+                    ['Account number', profile.accountNumberMasked ?? '—'] as const,
+                    ['IFSC',           profile.ifscMasked ?? '—'] as const,
+                  ]),
+              ['PAN',  profile.panMasked ?? '—'],
+              ['GSTIN', profile.gstNumber ?? '—'],
+            ].map(([label, value]) => (
+              <div key={label}>
+                <dt className="text-[12px] font-medium uppercase tracking-wide text-muted-foreground">{label}</dt>
+                <dd className="mt-0.5 text-[14px] tabular-nums text-foreground">{value}</dd>
+              </div>
+            ))}
+          </dl>
+        </div>
+      )}
+
+      {/* ── Form card (owner, or first-time setup) ── */}
+      {(profile === null || profile?.secretsVisible) && (
       <form
         onSubmit={handleSubmit}
         noValidate
@@ -422,6 +468,23 @@ export default function PayoutProfilePage() {
             </p>
           </div>
 
+          {/* ── Payment provider onboarding · INFORMATIONAL ONLY ───────────────
+              Deliberately not a button. Direct provider settlement is not built, not
+              approved for this account, and has no linked-account concept behind it yet —
+              so anything clickable here would be a promise the system cannot keep. This
+              says what is coming and nothing more. */}
+          <div className="flex items-start gap-2.5 rounded-lg border border-dashed border-border bg-transparent px-4 py-3">
+            <Landmark className="mt-0.5 size-4 shrink-0 text-muted-foreground" aria-hidden />
+            <div>
+              <p className="text-[12.5px] font-medium text-foreground">Payment provider onboarding</p>
+              <p className="mt-0.5 text-[12.5px] text-muted-foreground">
+                Direct organizer settlement will require additional payment provider
+                verification when that becomes available. Your current payout details stay
+                in use until then — nothing changes today.
+              </p>
+            </div>
+          </div>
+
           {/* ── Save error ── */}
           {saveError && (
             <div className="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/[0.06] px-3 py-2.5">
@@ -463,6 +526,7 @@ export default function PayoutProfilePage() {
           </div>
         </div>
       </form>
+      )}
 
       {/* RD-FINANCE-CLOSURE-02 · read-only audit trail. A sibling of the form, not part
           of it — the form's fields, validation and save flow are untouched. `savedAt`

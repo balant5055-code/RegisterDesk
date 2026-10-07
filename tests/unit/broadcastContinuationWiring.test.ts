@@ -106,7 +106,8 @@ describe('cron metrics distinguish advanced / busy / errored', () => {
       // Previously every run wrote `status=200`, so a job failing on EVERY tick looked
       // identical to an idle scan. That is a large part of why this went unnoticed.
       expect(src, name).toContain('recordCronExecution(')
-      expect(src, name).toContain('JSON.stringify({ scanned: jobs.length, advanced, busy, errored, nonTerminal, depth, chain })')
+      // RD-INTEG — the WhatsApp cron also records its billing-settlement sweep in the detail.
+      expect(src, name).toMatch(/JSON\.stringify\(\{ scanned: jobs\.length, advanced, busy, errored, nonTerminal, depth, chain(, settlement)? \}\)/)
       expect(src, name).toContain('ok: errored === 0')
     })
   }
@@ -172,16 +173,22 @@ describe('the sent flag is awaited on both channels', () => {
   })
 
   it('WHATSAPP awaits it too — a duplicate there costs money twice', () => {
-    expect(WA_JOB).toContain("await adminDb.collection(WHATSAPP_BROADCAST_JOBS).doc(job.jobId).collection('recipients').doc(item.__id)")
+    // RD-CLOSE — the sent flag is now part of the ACCEPTANCE record (recordBroadcastAcceptance,
+    // one transaction, retried) and the attempt intent is recorded, awaited, before the send.
+    expect(WA_JOB).toContain('await withPersistRetry(() => recordBroadcastAcceptance({')
+    expect(WA_JOB).toContain('try { await recipientRef.update({ pendingAttemptAt: FieldValue.serverTimestamp() }) }')
     expect(WA_JOB).not.toContain("void adminDb.collection(WHATSAPP_BROADCAST_JOBS).doc(job.jobId).collection('recipients').doc(item.__id)")
   })
 
   it('a failed flag-write still counts the item as SENT, never re-queued', () => {
-    for (const [name, src] of [['email', EMAIL_JOB], ['whatsapp', WA_JOB]] as const) {
-      const block = src.slice(src.indexOf("if (status === 'sent') {"))
-      expect(block, name).toContain('sent-flag write failed')
-      expect(block.slice(0, block.indexOf('return { ok: true }')), name).toContain('catch (err)')
-    }
+    const emailBlock = EMAIL_JOB.slice(EMAIL_JOB.indexOf("if (status === 'sent') {"))
+    expect(emailBlock).toContain('sent-flag write failed')
+    expect(emailBlock.slice(0, emailBlock.indexOf('return { ok: true }'))).toContain('catch (err)')
+    // WhatsApp: a persistence failure leaves the pending-attempt marker (never re-sent) and the
+    // status webhook recovers the acceptance from the callback data.
+    const waBlock = WA_JOB.slice(WA_JOB.indexOf("if (status === 'sent') {"))
+    expect(waBlock.slice(0, waBlock.indexOf('return { ok: true }'))).toContain('acceptance not persisted — the status webhook will recover it')
+    expect(waBlock.slice(0, waBlock.indexOf('return { ok: true }'))).toContain('catch (err)')
   })
 
   it('the already-sent skip is still the first thing processItem does', () => {

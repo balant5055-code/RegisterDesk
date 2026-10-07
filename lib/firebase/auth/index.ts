@@ -155,6 +155,44 @@ export async function authenticateUser(
   return { user, emailVerified: auth.currentUser?.emailVerified ?? user.emailVerified }
 }
 
+// ─── resyncVerifiedSession ────────────────────────────────────────────────────
+//
+// RD-ORGANIZER-DASHBOARD-AUTH-06 · call this after the SERVER has changed this user's
+// Firebase Auth record, before routing them anywhere that authorizes on the token.
+//
+// ═══ THE BUG THIS EXISTS TO CLOSE ════════════════════════════════════════════
+// `POST /api/auth/verify-otp` flips `emailVerified` with the Admin SDK, and the email-link
+// flow does the same through `applyActionCode`. Both then called `user.reload()`, which
+// refreshes the local User OBJECT — so `user.emailVerified` became true and
+// `resolveAuthGuard` happily let the organizer through to /dashboard — but it does NOT
+// mint a new ID token. Firebase keeps the cached token for about an hour, so the very next
+// `getIdToken()` returned the token minted at SIGNUP, still carrying
+// `email_verified: false`.
+//
+// Every organizer API authorizes through `verifyCaller`, which rejects exactly that claim.
+// So a newly verified organizer reached the dashboard and every request came back
+// 401 Unauthorized — "Dashboard unavailable" — until the token happened to refresh or they
+// signed in again (a fresh sign-in mints a new token, which is why login always worked).
+//
+// The fix is to resynchronise the client instead of waiting: `reload()` for the user
+// record that client-side routing reads, and `getIdToken(true)` for the token the server
+// verifies. Both use the SDK's own primitives — no second auth system, no polling, no
+// delay, and no change to any server-side check.
+//
+// Never throws: a failed refresh must not strand a user who IS verified. The token will
+// refresh on its own schedule, and the caller's redirect still happens.
+export async function resyncVerifiedSession(): Promise<void> {
+  const user = auth.currentUser
+  if (!user) return
+  try {
+    await user.reload()
+    // `true` is the whole point — the cached token is precisely what is stale.
+    await user.getIdToken(true)
+  } catch (err) {
+    console.warn('[auth] could not resynchronise the session after verification:', err)
+  }
+}
+
 // ─── signInOrganizer ──────────────────────────────────────────────────────────
 // Organizer-facing wrapper over authenticateUser. Forwards the caller's Remember Me
 // choice to the single persistence decision above; returns emailVerified only.
@@ -219,7 +257,29 @@ export function mapAuthError(err: unknown): string {
         return 'Your browser blocked the sign-in popup. Allow popups and try again.'
       case 'auth/account-exists-with-different-credential':
         return 'An account already exists with this email. Sign in with your original method to link it.'
+
+      // ═══ FIRESTORE codes, not Auth codes ═════════════════════════════════
+      // `createOrganizerAccount` does Auth work AND a Firestore write
+      // (createOrganizerProfile), so a FirebaseError reaching here can carry a
+      // Firestore code. Those fell through to "Something went wrong", which threw away
+      // the only fact that identified the failure: a real signup outage presented
+      // identically to every other unknown error, and the profile write being REFUSED
+      // looked the same as a network blip.
+      //
+      // `permission-denied` at signup means the security rules rejected the profile
+      // document — in practice, deployed rules that are older than the client. The user
+      // cannot act on that, so the copy stays honest and non-technical rather than
+      // naming rules or Firestore; the code itself is logged below for whoever debugs it.
+      case 'permission-denied':
+        return 'We couldn’t finish setting up your account. Please try again — if this keeps happening, contact support.'
+      case 'unavailable':
+      case 'deadline-exceeded':
+        return 'We couldn’t reach our servers. Check your connection and try again.'
+
       default:
+        // Surface the code to whoever is debugging, WITHOUT putting it on screen. An
+        // unmapped code is exactly the case that used to be unattributable.
+        console.warn('[auth] unmapped Firebase error code:', err.code)
         return 'Something went wrong. Please try again.'
     }
   }

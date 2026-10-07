@@ -38,7 +38,37 @@ const browserWorkbookReader: WorkbookReader = async file => {
  * empty first sheet should not fail the whole upload.
  */
 export function selectResultsSheet(sheets: WorkbookSheet[]): WorkbookSheet | null {
-  return sheets.find(s => Array.isArray(s.data) && s.data.length >= 2) ?? null
+  const hasRows = (s: WorkbookSheet) => Array.isArray(s.data) && s.data.length >= 2
+  // RD-RACEOPS-02C · a RegisterDesk template names its data sheet "Results" and carries a
+  // "How to fill" sheet beside it. The named sheet wins when it has rows, so the
+  // instructions can never be read as results; any other workbook keeps the first sheet
+  // with data, as before.
+  const named = sheets.find(s => typeof s.sheet === 'string' && s.sheet.trim().toLowerCase() === 'results')
+  if (named && hasRows(named)) return named
+  return sheets.find(hasRows) ?? null
+}
+
+/**
+ * RD-RACEOPS-RESULTS-04 · picks the checkpoint sheet, BY NAME ONLY.
+ *
+ * Deliberately stricter than `selectResultsSheet`: results are what an organizer came to
+ * upload, so finding them is worth a fallback, but a sheet is only treated as checkpoints
+ * when it actually says "Splits". Guessing would let a "Notes" or "Prizes" tab become
+ * everybody's race data. Accepts the plural and singular, and ignores case and spacing.
+ *
+ * The sheet the results came from is excluded, so a single-sheet workbook can never be read
+ * as both.
+ */
+export function selectSplitsSheet(
+  sheets: WorkbookSheet[], resultsSheetName: string | null,
+): WorkbookSheet | null {
+  const named = sheets.find(s => {
+    if (typeof s.sheet !== 'string') return false
+    const name = s.sheet.trim().toLowerCase()
+    return (name === 'splits' || name === 'split') && s.sheet !== resultsSheetName
+  })
+  // Header-only is a template nobody filled in: not an error, simply no splits.
+  return named && Array.isArray(named.data) && named.data.length >= 2 ? named : null
 }
 
 export function createExcelParser(readWorkbook: WorkbookReader = browserWorkbookReader): ResultParser {
@@ -70,7 +100,17 @@ export function createExcelParser(readWorkbook: WorkbookReader = browserWorkbook
         return { ok: false, message: 'This workbook has no sheet containing result rows — every sheet is empty or header-only.' }
       }
 
-      return tabulate(sheet.data, { provider: EXCEL_PROVIDER_ID, sheetName: sheet.sheet })
+      const outcome = tabulate(sheet.data, { provider: EXCEL_PROVIDER_ID, sheetName: sheet.sheet })
+      if (!outcome.ok) return outcome
+
+      // RD-RACEOPS-RESULTS-04 · the checkpoint sheet, when there is one. A problem reading it
+      // never fails the upload: the core results are what the organizer is publishing, and
+      // `splitTable: null` simply means no checkpoints were found to attach.
+      const splitsSheet = selectSplitsSheet(sheets, sheet.sheet)
+      if (!splitsSheet) return outcome
+      const splits = tabulate(splitsSheet.data, { provider: EXCEL_PROVIDER_ID, sheetName: splitsSheet.sheet })
+
+      return { ...outcome, splitTable: splits.ok ? splits.table : null }
     },
   }
 }

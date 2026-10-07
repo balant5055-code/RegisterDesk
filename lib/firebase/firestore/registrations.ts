@@ -7,12 +7,17 @@ import {
   TicketCodeCollisionError,
 }                             from '@/lib/registrations/ticketCode'
 import { buildCounterIncrement, writeCheckinDelta } from '@/lib/firebase/firestore/registrationCounters'
+// RD-DASHBOARD-02 — organizer daily rollups, written in the SAME transactions as the
+// counters above so the dashboard trend can never drift from the counting SSOT.
+import { stageDailyStatsIncrement } from '@/lib/dashboard/dailyStatsAdmin'
+import { registrationRevenueBasisPaise } from '@/lib/registrations/revenueBasis'
 import { deriveStoredEventCapacity } from '@/lib/registrations/capacity'
 import { buildQrValue }          from '@/lib/tickets/generate'
 import { enqueueWebhook }        from '@/lib/integrations/webhooks'
 import { crmRecordRegistration } from '@/lib/crm/service'
 import { readSessionSnaps, applyReleaseWrites, applyRestoreWrites } from '@/lib/sessions/allocation'
 import { checkInBlockReason } from '@/lib/registrations/checkinEligibility'
+import { appendCheckinHistorySafe, toCheckinMethod, type CheckinMethod } from '@/lib/checkin/history'
 import type { RegistrationDocument, AuditEntry, AuditAction, AuditActorType } from '@/lib/registrations/types'
 import type { CouponDocument } from '@/lib/coupons/types'
 
@@ -122,6 +127,26 @@ export class IdempotencyHitError extends Error {
     super('Idempotent registration — returning existing result')
     this.name = 'IdempotencyHitError'
   }
+}
+
+/**
+ * RD-DASHBOARD-02 — the millisecond a registration was created, for daily-rollup
+ * attribution.
+ *
+ * Returns null when the field is missing or unreadable rather than falling back to
+ * "now": attributing a cancellation reversal to today would credit the wrong day and
+ * leave the original day permanently overstated. A skipped reversal is a small,
+ * bounded inaccuracy; a misattributed one is a wrong number that never self-corrects.
+ */
+function registeredAtMillis(value: unknown): number | null {
+  if (!value) return null
+  if (value instanceof Date) return value.getTime()
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  const ts = value as { toMillis?: () => number }
+  if (typeof ts.toMillis === 'function') {
+    try { const ms = ts.toMillis(); return Number.isFinite(ms) ? ms : null } catch { return null }
+  }
+  return null
 }
 
 // ─── Writes ───────────────────────────────────────────────────────────────────
@@ -306,6 +331,16 @@ export async function createRegistration(
             qrValue,
             qrGeneratedAt: FieldValue.serverTimestamp(),
           },
+          // RD-BIB-UX-02 · the field that makes "how many still need a number?"
+          // COUNTABLE. Firestore cannot count "documents missing a field", so a
+          // registration written without it matches neither `hasIdentifier == true`
+          // nor `== false` and is invisible to the identifier plan's third aggregate.
+          // Every pass therefore reconciled as 290 + 0 ≠ 600 and the plan card said
+          // "Need a BIB Number —", which is the defect this phase exists to fix.
+          // The identifier engine already maintains this field on assign and release;
+          // it simply was never initialised at birth. Written for EVERY creation path
+          // — online, walk-in, import and bulk — because they all come through here.
+          hasIdentifier: false,
           checkedIn:    !!input.checkInOnCreate,
           ...(input.checkInOnCreate ? {
             checkedInAt:           FieldValue.serverTimestamp(),
@@ -337,6 +372,17 @@ export async function createRegistration(
             amountPaise: input.amountPaise ?? 0,   // confirmed revenue (0 for free events)
             checkedIn:   !!input.checkInOnCreate,  // walk-ins are checked in at creation
           }), { merge: true })
+
+          // RD-DASHBOARD-02 — the organizer daily rollup, in the SAME transaction as
+          // the counter above. That is the consistency guarantee: the dashboard trend
+          // and registrationCounters either both move or neither does, so they cannot
+          // drift. Attributed to NOW because this registration starts today.
+          stageDailyStatsIncrement(txn, input.organizerUid, input.eventSlug, Date.now(), {
+            action: 'confirm', amountPaise: input.amountPaise ?? 0,
+          })
+          if (input.checkInOnCreate) {
+            stageDailyStatsIncrement(txn, input.organizerUid, input.eventSlug, Date.now(), { action: 'checkin' })
+          }
         } else {
           txn.set(counterRef, {
             eventSlug:    input.eventSlug,
@@ -512,11 +558,24 @@ export async function cancelRegistration(
         const currentTotal = counterData.totalCount ?? 0
         const currentPass  = (counterData.passCounts ?? {})[reg.passId] ?? 0
         const currentRev   = counterData.revenuePaise ?? 0
-        const amt          = reg.amount ?? 0
+        // RD-FIN-02 B5 · reverse the TICKET BASIS settlement added — never the gross charge.
+        const amt          = registrationRevenueBasisPaise(reg)
         if (currentTotal > 0)               updates.totalCount                   = FieldValue.increment(-1)
         if (currentPass  > 0)               updates[`passCounts.${reg.passId}`] = FieldValue.increment(-1)
         if (amt > 0 && currentRev >= amt)   updates.revenuePaise                = FieldValue.increment(-amt)
         txn.update(counterRef, updates)
+
+        // RD-DASHBOARD-02 — reverse the ORIGINAL day's confirmed count and revenue,
+        // not today's. A January registration cancelled in March must stop January
+        // claiming money it no longer has, or the trend chart would permanently
+        // disagree with registrationCounters. The cancellation event itself is
+        // recorded on today's bucket by the second call, so both "what did January
+        // earn?" and "what happened in March?" stay answerable.
+        const originalDay = registeredAtMillis(reg.registeredAt)
+        if (originalDay !== null) {
+          stageDailyStatsIncrement(txn, reg.organizerUid, reg.eventSlug, originalDay, { action: 'reverse_confirm', amountPaise: amt })
+        }
+        stageDailyStatsIncrement(txn, reg.organizerUid, reg.eventSlug, Date.now(), { action: 'record_cancel' })
       } else if (reg.status === 'pending') {
         if ((counterData.pendingCount ?? 0) > 0) updates.pendingCount = FieldValue.increment(-1)
         txn.update(counterRef, updates)
@@ -622,7 +681,17 @@ export async function restoreRegistration(
     })
 
     // Re-confirm: restore the seat + its revenue and release the cancelled slot.
-    const restoreUpdate = buildCounterIncrement(reg.eventSlug, reg.passId, { amountPaise: reg.amount ?? 0 })
+    const restoreUpdate = buildCounterIncrement(reg.eventSlug, reg.passId, { amountPaise: registrationRevenueBasisPaise(reg) })   // RD-FIN-02 B5
+
+    // Mirror of cancel: give the ORIGINAL day back its registration and revenue, and
+    // un-record the cancellation on today's bucket.
+    {
+      const originalDay = registeredAtMillis(reg.registeredAt)
+      if (originalDay !== null) {
+        stageDailyStatsIncrement(txn, reg.organizerUid, reg.eventSlug, originalDay, { action: 'restore', amountPaise: registrationRevenueBasisPaise(reg) })
+      }
+      stageDailyStatsIncrement(txn, reg.organizerUid, reg.eventSlug, Date.now(), { action: 'unrecord_cancel' })
+    }
     if (((counterData as { cancelledCount?: number } | null)?.cancelledCount ?? 0) > 0) {
       restoreUpdate.cancelledCount = FieldValue.increment(-1)
     }
@@ -656,7 +725,12 @@ export async function checkInRegistration(
 ): Promise<CheckInOutcome> {
   const regRef = adminDb.collection('registrations').doc(registrationId)
 
-  return adminDb.runTransaction<CheckInOutcome>(async txn => {
+  // RD-CHECKIN-2.0 — captured for the history entry appended after the transaction.
+  // Only set on the branch that actually admits someone, so an idempotent repeat
+  // writes no second CHECK_IN — a duplicate scan is not a new admission.
+  let admitted: { eventSlug: string; identifierValue: string | null } | null = null
+
+  const outcome = await adminDb.runTransaction<CheckInOutcome>(async txn => {
     const regSnap = await txn.get(regRef)
     if (!regSnap.exists) throw new RegistrationNotFoundError()
 
@@ -678,8 +752,33 @@ export async function checkInRegistration(
       ...(opts.source ? { checkedInSource: opts.source } : {}),
     })
     writeCheckinDelta(txn, reg.eventSlug, registrationId, reg.passId, 1)   // GA-5 S3: sharded attendance write
+    stageDailyStatsIncrement(txn, reg.organizerUid, reg.eventSlug, Date.now(), { action: 'checkin' })
+    admitted = {
+      eventSlug: reg.eventSlug,
+      identifierValue: (reg as { identifier?: { value?: string } }).identifier?.value ?? null,
+    }
     return { status: 'checked_in' }
   })
+
+  // Every admission path writes history, including this canonical helper — so a
+  // bulk or programmatic check-in is as reconstructable as a gate scan.
+  const record = admitted as { eventSlug: string; identifierValue: string | null } | null
+  if (record) {
+    // Awaited for the same reason as the undo below it: the history IS the record,
+    // and a caller must not be able to observe an admission that has none.
+    await appendCheckinHistorySafe({
+      registrationId,
+      action:       'CHECK_IN',
+      eventSlug:    record.eventSlug,
+      organizerUid,
+      operatorUid:  opts.byUid,
+      workspaceUid: opts.workspaceUid,
+      method:       toCheckinMethod(opts.source),
+      identifierValue: record.identifierValue,
+    })
+  }
+
+  return outcome
 }
 
 // ─── Un-check-in (canonical) ────────────────────────────────────────────────────
@@ -703,12 +802,25 @@ export async function uncheckInRegistration(
 ): Promise<UncheckInOutcome> {
   const regRef = adminDb.collection('registrations').doc(registrationId)
 
+  // RD-CHECKIN-2.0 — captured INSIDE the transaction, from the state that is about
+  // to be cleared. Read afterwards it would already be gone, which is precisely the
+  // evidence-loss this history exists to prevent.
+  let reverted: {
+    eventSlug: string; method: CheckinMethod; identifierValue: string | null
+  } | null = null
+
   const outcome = await adminDb.runTransaction<UncheckInOutcome>(async txn => {
     const snap = await txn.get(regRef)
     if (!snap.exists) throw new RegistrationNotFoundError()
     const reg = snap.data() as RegistrationDocument
     if (reg.organizerUid !== organizerUid) throw new UnauthorizedCancellationError()
     if (!reg.checkedIn) return { status: 'not_checked_in' }   // idempotent — nothing to undo
+
+    reverted = {
+      eventSlug: reg.eventSlug,
+      method:    toCheckinMethod((reg as { checkedInSource?: unknown }).checkedInSource),
+      identifierValue: (reg as { identifier?: { value?: string } }).identifier?.value ?? null,
+    }
 
     txn.update(regRef, {
       checkedIn:       false,
@@ -718,6 +830,7 @@ export async function uncheckInRegistration(
       updatedAt:       FieldValue.serverTimestamp(),
     })
     writeCheckinDelta(txn, reg.eventSlug, registrationId, reg.passId, -1)   // same shard as the check-in
+    stageDailyStatsIncrement(txn, reg.organizerUid, reg.eventSlug, Date.now(), { action: 'undo_checkin' })
     return { status: 'unchecked' }
   })
 
@@ -726,6 +839,40 @@ export async function uncheckInRegistration(
   if (outcome.status === 'unchecked') {
     writeAuditEntry(registrationId, 'check_in_undone', opts.byUid, 'organizer', opts.workspaceUid)
       .catch(err => console.error(`[uncheckInRegistration] audit error for ${registrationId}:`, err))
+
+    // ── RD-CHECKIN-2.0 · undo APPENDS, it does not erase ────────────────────
+    //
+    // The three current-state fields above are still cleared, and that is correct:
+    // they describe the CURRENT admission, and leaving a `checkedInAt` on a
+    // not-checked-in registration would make every reader, counter and export lie.
+    //
+    // What was missing is that clearing them used to destroy the ONLY record — the
+    // scan path wrote no audit entry at all, so an undo made a check-in
+    // unreconstructable. The evidence now lives in an append-only subcollection: a
+    // compensating CHECK_IN_UNDO is written beside the original CHECK_IN, and a
+    // check-in → undo → check-in sequence reads back as three entries in order.
+    const snapshot = reverted as {
+      eventSlug: string; method: CheckinMethod; identifierValue: string | null
+    } | null
+    //
+    // AWAITED, unlike the audit entry above. The audit log is a convenience; this
+    // is the evidence, and a caller that returns before it lands can be observed —
+    // by an operator refreshing, or by a test — in a state where the check-in is
+    // reversed and nothing records why. Found exactly that way: this passed alone
+    // and failed under a loaded suite, which is the shape of a real race, not a
+    // slow test.
+    if (snapshot) {
+      await appendCheckinHistorySafe({
+        registrationId,
+        action:       'CHECK_IN_UNDO',
+        eventSlug:    snapshot.eventSlug,
+        organizerUid,
+        operatorUid:  opts.byUid,
+        workspaceUid: opts.workspaceUid,
+        method:       snapshot.method,
+        identifierValue: snapshot.identifierValue,
+      })
+    }
   }
   return outcome
 }
@@ -869,7 +1016,11 @@ export async function approveRegistration(
 
     // Count this registration now that it's confirmed: seat + revenue in, and
     // release the pending slot it held.
-    const approveUpdate = buildCounterIncrement(reg.eventSlug, reg.passId, { amountPaise: reg.amount ?? 0 })
+    const approveUpdate = buildCounterIncrement(reg.eventSlug, reg.passId, { amountPaise: registrationRevenueBasisPaise(reg) })   // RD-FIN-02 B5
+
+    // Attributed to TODAY: a manually approved registration becomes real revenue on
+    // the day it is approved, which is the day the organizer can act on it.
+    stageDailyStatsIncrement(txn, reg.organizerUid, reg.eventSlug, Date.now(), { action: 'approve', amountPaise: registrationRevenueBasisPaise(reg) })
     if (((counterData as { pendingCount?: number } | null)?.pendingCount ?? 0) > 0) {
       approveUpdate.pendingCount = FieldValue.increment(-1)
     }

@@ -4,32 +4,33 @@
 //
 // The full flow, as it actually runs:
 //
-//   Event → Race → Upload → Parse → Map columns → Validate → Preview
+//   Event → Race → Prepare & upload → Map columns → Validate (file + start-list dry run)
 //   → Import (create session → store rows → verify against the start list → rank
 //     → build the public snapshot) → Review → Publish
 //
-// Stages 1–7 are browser-only: parsing, mapping, validation and the preview table all
-// run in memory and write nothing. The first write of any kind happens when the organizer
-// presses Import in stage 8.
+// Stages 1–5 are browser-only apart from the start-list DRY RUN, which reads and writes
+// nothing: parsing, mapping, validation and the preview run in memory. The first write of
+// any kind happens when the organizer presses Import.
 //
-// RD-RESULTS-CLOSURE-02 · this header, the banner and the stage descriptions previously
-// described Sprint 1/2 scope and stated that publishing was not built and that results
-// never reached a public page. Both had been false since Sprint 3.
+// RD-RACEOPS-02C · the organizer must never guess the file format. Stage 3 offers the
+// race's start list and the results template for download (both derived from the canonical
+// result model), states the file's contract from that same model, and still accepts any
+// timing-system export. Mapping shows what was detected against what was guessed.
 //
 // After publishing, the EXISTING certificate module is what issues certificates.
 // This flow only links to it (see components below) — it never wraps, replaces, or
 // modifies certificate code.
 
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
-import {
-  Award, CheckCircle2, Database, FileSpreadsheet, ListChecks,
-} from 'lucide-react'
+import { Award, CheckCircle2, Database, FileSpreadsheet } from 'lucide-react'
 import { Banner, Button, Card, buttonVariants } from '@/components/ui'
 import { ColumnMappingPanel } from '@/features/race-operations/components/ColumnMappingPanel'
+import { configurePdfParser } from '@/features/race-operations/import/parsers/pdf/pdfParser'
+import { useAuth } from '@/components/auth/AuthProvider'
 import { EventSelector } from '@/features/race-operations/components/EventSelector'
 import { ImportSessionHistory } from '@/features/race-operations/components/ImportSessionHistory'
-import { PlannedStage } from '@/features/race-operations/components/PlannedStage'
+import { PrepareUploadPanel } from '@/features/race-operations/components/PrepareUploadPanel'
 import { RaceSelector } from '@/features/race-operations/components/RaceSelector'
 import { ResultsFileDropzone } from '@/features/race-operations/components/ResultsFileDropzone'
 import { ResultsPreviewTable } from '@/features/race-operations/components/ResultsPreviewTable'
@@ -41,8 +42,16 @@ import { ValidationSummaryPanel } from '@/features/race-operations/components/Va
 import { useRaceOpsEvents, type RaceOpsEventRow } from '@/features/race-operations/hooks/useRaceOpsEvents'
 import { useResultImportSession } from '@/features/race-operations/hooks/useResultImportSession'
 import { useSessionCommit } from '@/features/race-operations/hooks/useSessionCommit'
+import { useStartListCheck } from '@/features/race-operations/hooks/useStartListCheck'
 import type { RaceOpsRaceSelection, RaceOpsStageKey } from '@/features/race-operations/types'
+import { EVENT_SUBTYPE_NAMES } from '@/lib/events/taxonomy'
 import { ROUTES } from '@/config/navigation'
+
+/** "10K · Running results" — the sport comes from the event's own subtype, never assumed. */
+function raceTitle(event: RaceOpsEventRow, race: RaceOpsRaceSelection): string {
+  const sport = event.eventSubtype ? EVENT_SUBTYPE_NAMES.sports?.[event.eventSubtype] : null
+  return sport && sport !== 'Other' ? `${race.name} · ${sport} results` : `${race.name} results`
+}
 
 export function PublishResultsFlow() {
   const eventsState = useRaceOpsEvents()
@@ -51,6 +60,16 @@ export function PublishResultsFlow() {
 
   const [event, setEvent] = useState<RaceOpsEventRow | null>(null)
   const [race,  setRace]  = useState<RaceOpsRaceSelection | null>(null)
+
+  // RD-RACEOPS-RESULTS-06 · a PDF is parsed on the SERVER, and the route authorizes that
+  // parse against the organizer's own event. The parser is told which event is in play the
+  // moment one is chosen; without it the route refuses, so a mis-sequenced UI fails closed.
+  //
+  // RD-RACEOPS-RESULTS-07A · …and which token source to sign the request with — the SAME
+  // `getToken` every other race-ops call in this flow uses. Without it the parser refused
+  // nothing and the server refused everything (07's P1: every PDF upload was a 401).
+  const { getToken } = useAuth()
+  useEffect(() => { configurePdfParser({ eventId: event?.eventId ?? null, getToken }) }, [event, getToken])
 
   const handleSelectEvent = useCallback((next: RaceOpsEventRow) => {
     setEvent(next)
@@ -72,6 +91,14 @@ export function PublishResultsFlow() {
   )
   const usableRowCount = usableRows.length
 
+  // RD-RACEOPS-02C · the start-list dry run — the server's own answer, before Import.
+  const startList = useStartListCheck({
+    eventId: event?.eventId ?? null,
+    passId:  race?.passId ?? null,
+    rows:    useMemo(() => usableRows.map(r => ({ rowNumber: r.rowNumber, bib: r.bibNumber ?? '' })), [usableRows]),
+  })
+  const startListBlocking = startList.phase === 'done' && startList.result.blocking
+
   const handleImport = useCallback(async () => {
     if (!event || !race || !session.table || usableRows.length === 0) return
     await commit.start({
@@ -86,13 +113,15 @@ export function PublishResultsFlow() {
     })
   }, [event, race, session, usableRows, commit])
 
-  // The furthest stage reached. Sprint 3 completes the flow, so 'publish' is now genuinely
-  // reachable — it lights up only once results are actually published.
+  // The furthest stage reached, from the commit phase downwards.
   const currentStage: RaceOpsStageKey =
-    commit.phase === 'published'   ? 'publish'
-    : session.validation?.canPreview ? 'preview'
+    commit.phase === 'published'    ? 'publish'
+    : commit.phase === 'publishing' ? 'publish'
+    : commit.phase === 'review'     ? 'review'
+    : commit.phase === 'ranking' || commit.phase === 'snapshotting' ? 'rank'
+    : commit.phase === 'verifying' || commit.phase === 'creating' || commit.phase === 'storing' ? 'verify'
     : session.validation           ? 'validate'
-    : session.table                ? 'upload'
+    : session.table                ? 'map'
     : race                         ? 'upload'
     : event                        ? 'race'
     : 'event'
@@ -104,14 +133,14 @@ export function PublishResultsFlow() {
       <Banner tone="info" title="Publishing makes these results public">
         Nothing is saved until you press Import. Imported results are checked against your
         start list, ranked, and prepared for the public results page — then published only
-        when you confirm. Once published they appear on the public results and runner pages,
-        and they supply the finish time and position on certificates and finisher badges.
+        when you confirm. Once published they appear on the public results and participant
+        pages, and they supply the finish time and position on certificates and finisher badges.
       </Banner>
 
       {/* ── Stage 1 · Event ──────────────────────────────────────────────── */}
       <StageSection
         title="1 · Select event"
-        description="Only events in your workspace are listed. Results can be recorded for live, closed and completed events."
+        description="Sports events in your workspace. Results can be recorded for live, closed and completed events."
       >
         <EventSelector
           state={eventsState}
@@ -124,7 +153,7 @@ export function PublishResultsFlow() {
       {event && (
         <StageSection
           title="2 · Select race"
-          description="Each race distance is a pass on the event, so this list mirrors the passes you already configured."
+          description="Each race is a pass on the event, so this list mirrors the passes you already configured. One results file covers one race."
         >
           <RaceSelector
             races={event.races}
@@ -134,68 +163,77 @@ export function PublishResultsFlow() {
         </StageSection>
       )}
 
-      {/* ── Stages 3–6 · declared placeholders ───────────────────────────── */}
-      {/* ── Stage 3 · Upload (Sprint 2 — live) ───────────────────────────── */}
-      {race && (
+      {/* ── Stage 3 · Prepare & upload ───────────────────────────────────── */}
+      {event && race && (
         <StageSection
-          title="3 · Upload results"
-          description={`${event?.name ?? ''} — ${race.name}. Export the file from your timing system as it comes; you will map its columns next.`}
+          title="3 · Prepare & upload"
+          description={`${event.name} — ${raceTitle(event, race)}. Download the start list or the template, or upload your timing system's export as it comes.`}
         >
-          <ResultsFileDropzone
-            onFileSelected={file => { void session.selectFile(file) }}
-            busy={session.phase === 'parsing'}
-            fileName={session.fileName}
-            fileSize={session.fileSize}
-            error={session.error}
-            onClear={session.reset}
-          />
+          <PrepareUploadPanel eventId={event.eventId} passId={race.passId} raceName={race.name}>
+            <ResultsFileDropzone
+              onFileSelected={file => { void session.selectFile(file) }}
+              busy={session.phase === 'parsing'}
+              fileName={session.fileName}
+              fileSize={session.fileSize}
+              error={session.error}
+              onClear={session.reset}
+            />
+          </PrepareUploadPanel>
           <ImportSessionHistory entries={session.history} />
         </StageSection>
       )}
 
-      {/* ── Stage 4a · Column mapping (Sprint 2 — live) ───────────────────── */}
+      {/* ── Stage 4 · Column mapping ─────────────────────────────────────── */}
       {race && session.table && (
         <StageSection
           title="4 · Map columns"
           description={
             session.table.sheetName
-              ? `Read ${session.table.rows.length.toLocaleString('en-IN')} rows from sheet "${session.table.sheetName}". Confirm which column holds each value.`
-              : `Read ${session.table.rows.length.toLocaleString('en-IN')} rows. Confirm which column holds each value.`
+              ? `Read ${session.table.rows.length.toLocaleString('en-IN')} rows from sheet "${session.table.sheetName}". Each RegisterDesk field shows the file column that feeds it — change any of them before validating.`
+              : `Read ${session.table.rows.length.toLocaleString('en-IN')} rows. Each RegisterDesk field shows the file column that feeds it — change any of them before validating.`
           }
         >
           <ColumnMappingPanel
             headers={session.table.headers}
             mapping={session.mapping}
+            source={session.mappingSource}
             missingRequired={session.missingRequired}
             onChange={session.setColumn}
           />
         </StageSection>
       )}
 
-      {/* ── Stage 4b · Validation (Sprint 2 — live) ───────────────────────── */}
+      {/* ── Stage 5 · Validation + start-list dry run ───────────────────── */}
       {race && session.validation && (
         <StageSection
-          title="5 · Validation"
-          description="Every check below runs against the uploaded file only, and nothing is saved. Your bibs are checked against the start list during Import, in the next step."
+          title="5 · Validate"
+          description="The file is checked against itself in your browser, and its bibs are checked against this race's start list on the server. Nothing is saved."
         >
-          <ValidationSummaryPanel validation={session.validation} raceName={race.name} />
+          <ValidationSummaryPanel
+            validation={session.validation}
+            raceName={race.name}
+            startList={startList}
+            // RD-RACEOPS-RESULTS-04 · checkpoints are read from a second sheet the organizer
+            // may not realise was picked up (or, worse, may believe was). Say which.
+            splits={session.splitTable ? { participants: session.splitParticipants, rows: session.splitTable.rows.length } : null}
+          />
         </StageSection>
       )}
 
-      {/* ── Stage 5 · Preview — SPRINT 2 ENDS HERE ────────────────────────── */}
+      {/* ── Preview ──────────────────────────────────────────────────────── */}
       {race && session.validation?.canPreview && (
         <StageSection
-          title="6 · Preview"
-          description="This is what your file contains after mapping and validation. Nothing has been saved yet — importing is the next step."
+          title="Preview"
+          description="What your file contains after mapping and validation. Nothing has been saved yet — importing is the next step."
         >
           <ResultsPreviewTable rows={session.validation.rows} />
         </StageSection>
       )}
 
-      {/* ── Stage 7 · Import, verify, rank, snapshot, review, publish ─────── */}
+      {/* ── Stages 6–9 · Import: verify, rank, review, publish ───────────── */}
       {race && event && session.validation?.canPreview && (
         <StageSection
-          title="7 · Import, verify, rank and publish"
+          title="6–9 · Verify, rank, review and publish"
           description="Stores the validated rows as a draft, checks every bib against your start list, ranks the finishers and prepares the public page — then lets you review everything before publishing."
         >
           {commit.phase === 'idle' ? (
@@ -209,13 +247,14 @@ export function PublishResultsFlow() {
                     {usableRowCount.toLocaleString('en-IN')} of{' '}
                     {session.validation.summary.rowsFound.toLocaleString('en-IN')} rows will be
                     stored as a draft. Nothing is published until you review and confirm.
+                    {startListBlocking && ' Fix the start-list problems shown above first — the import would be refused at verification.'}
                   </p>
                 </div>
                 <Button
                   variant="primary"
                   size="sm"
                   className="shrink-0"
-                  disabled={usableRowCount === 0}
+                  disabled={usableRowCount === 0 || startListBlocking || startList.phase === 'checking'}
                   onClick={() => void handleImport()}
                 >
                   <Database className="size-4" aria-hidden />
@@ -259,62 +298,41 @@ export function PublishResultsFlow() {
         </StageSection>
       )}
 
-      {/* ── Beyond Sprint 3 ──────────────────────────────────────────────── */}
+      {/* ── Certificates — existing module, LINK ONLY ────────────────────── */}
       {race && (
-        <StageSection
-          title="Not in this release"
-          description="Published results are live, searchable and feed certificates and badges. These rank scopes are still to come."
-        >
-          <div className="space-y-2.5">
-            <PlannedStage
-              icon={ListChecks}
-              title="Gender, age-group and category ranking"
-              sprint="A later sprint"
-              description="Additional rank scopes, once the data source is agreed."
-              capabilities={[
-                'Gender and age-group placings',
-                'Category placings',
-                'Requires an approved source — these fields are stored but not yet ranked',
-              ]}
-            />
-            </div>
-
-          {/* Existing certificate module — LINK ONLY. No certificate code is
-              touched, wrapped, or duplicated by Race Operations. */}
-          <Card>
-            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-              <div className="flex items-start gap-3.5">
-                <div
-                  className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-muted"
-                  aria-hidden
-                >
-                  <Award className="size-[18px] text-muted-foreground" />
-                </div>
-                <div className="min-w-0">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <h3 className="text-[15px] font-semibold text-foreground">Certificates</h3>
-                    <span className="inline-flex items-center gap-1 rounded-md bg-muted px-1.5 py-0.5 text-[11px] font-medium text-muted-foreground">
-                      <CheckCircle2 className="size-3" aria-hidden />
-                      Available now
-                    </span>
-                  </div>
-                  <p className="mt-1 text-[13.5px] leading-relaxed text-muted-foreground">
-                    Certificates are issued by the existing certificate module and already
-                    work independently of results. Race Operations links to it — it does not
-                    replace it.
-                  </p>
-                </div>
-              </div>
-              <Link
-                href={ROUTES.DASHBOARD_CERTIFICATES}
-                className={buttonVariants({ variant: 'outline', size: 'sm', className: 'shrink-0' })}
+        <Card>
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex items-start gap-3.5">
+              <div
+                className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-muted"
+                aria-hidden
               >
-                <FileSpreadsheet className="size-4" aria-hidden />
-                Open Certificates
-              </Link>
+                <Award className="size-[18px] text-muted-foreground" />
+              </div>
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-2">
+                  <h3 className="text-[15px] font-semibold text-foreground">Certificates</h3>
+                  <span className="inline-flex items-center gap-1 rounded-md bg-muted px-1.5 py-0.5 text-[11px] font-medium text-muted-foreground">
+                    <CheckCircle2 className="size-3" aria-hidden />
+                    Available now
+                  </span>
+                </div>
+                <p className="mt-1 text-[13.5px] leading-relaxed text-muted-foreground">
+                  Certificates are issued by the existing certificate module and take the
+                  finish time and position from the published results. Race Operations links
+                  to it — it does not replace it.
+                </p>
+              </div>
             </div>
-          </Card>
-        </StageSection>
+            <Link
+              href={ROUTES.DASHBOARD_CERTIFICATES}
+              className={buttonVariants({ variant: 'outline', size: 'sm', className: 'shrink-0' })}
+            >
+              <FileSpreadsheet className="size-4" aria-hidden />
+              Open Certificates
+            </Link>
+          </div>
+        </Card>
       )}
     </div>
   )

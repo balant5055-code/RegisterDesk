@@ -28,7 +28,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Loader2, SlidersHorizontal } from 'lucide-react'
-import { Banner, Button, Card, StatusChip, useToast } from '@/components/ui'
+import { Banner, Button, Card, useToast } from '@/components/ui'
 import { cn } from '@/lib/utils/cn'
 import { useAuth } from '@/components/auth/AuthProvider'
 import { useMediaStudio } from '@/features/media-studio/context/MediaStudioContext'
@@ -169,7 +169,6 @@ export function EventOverridesPanel() {
             <h2 className="text-fs-md font-semibold text-foreground">
               Media limits for {event.name}
             </h2>
-            {effective?.tier && <StatusChip tone="neutral">{effective.tier} plan</StatusChip>}
           </div>
           <p className="text-fs-sm leading-relaxed text-muted-foreground">
             Each setting either inherits from your licence plan or is overridden for this

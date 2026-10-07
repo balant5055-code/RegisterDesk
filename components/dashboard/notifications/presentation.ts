@@ -7,7 +7,7 @@
 
 import type { LucideIcon } from 'lucide-react'
 import {
-  BadgeCheck, CreditCard, Wallet, Ticket, Award, Megaphone, Banknote, AlertTriangle, Bell,
+  BadgeCheck, CreditCard, Wallet, Ticket, Award, Megaphone, Banknote, AlertTriangle, Bell, MessageCircle,
 } from 'lucide-react'
 import type { NotificationSeverity } from '@/lib/notifications/inbox/types'
 
@@ -20,6 +20,7 @@ const ICON_BY_KEY: Record<string, LucideIcon> = {
   megaphone:        Megaphone,
   banknote:         Banknote,
   'alert-triangle': AlertTriangle,
+  'message-circle': MessageCircle,
 }
 
 export function iconForKey(key: string): LucideIcon {

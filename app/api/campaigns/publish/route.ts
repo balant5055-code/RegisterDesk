@@ -146,7 +146,10 @@ export async function POST(req: NextRequest): Promise<NextResponse<PublishSucces
 
       if (existingCampaign.exists) {
         const existing = existingCampaign.data() as Record<string, unknown>
-        if (existing.draftId !== draftId) {
+        // RD-SEC-01 · same draft AND same owner. Draft ids are not secret (and a client could
+        // create a draft under its own path with someone else's id), so draftId equality alone let
+        // another organizer re-publish over — and take over — a live campaign.
+        if (existing.draftId !== draftId || existing.uid !== uid) {
           const conflict   = new Error('SLUG_CONFLICT')
           conflict.name    = 'SLUG_CONFLICT'
           throw conflict

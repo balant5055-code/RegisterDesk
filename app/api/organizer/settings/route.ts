@@ -1,9 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { adminAuth, adminDb }       from '@/lib/firebase/admin'
+import { adminDb }                  from '@/lib/firebase/admin'
 import { FieldValue }               from 'firebase-admin/firestore'
 import { verifyCaller }             from '@/lib/team/access'
 import { validColor, validImageUrl } from '@/lib/branding/service'
-import { RATE_POLICY, checkPolicy } from '@/lib/rateLimit/policies'
 import { validatePhoneNumber }      from '@/lib/communication/phone'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -181,21 +180,24 @@ export async function PATCH(req: NextRequest) {
   return NextResponse.json({ ok: true })
 }
 
-// ─── DELETE /api/organizer/settings ──────────────────────────────────────────
-// Permanently deletes the organizer's Firestore profile and Firebase Auth account.
-
-export async function DELETE(req: NextRequest) {
-  const uid = await requireUid(req)
-  if (!uid) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-
-  // Throttle this irreversible action to defend against abuse / repeated calls.
-  const rl = checkPolicy(uid, RATE_POLICY.accountDeletion)
-  if (rl.limited) return NextResponse.json(
-    { error: 'Too many requests. Please try again later.' },
-    { status: 429, headers: { 'Retry-After': String(rl.retryAfter) } },
-  )
-
-  await adminDb.collection('users').doc(uid).delete()
-  await adminAuth.deleteUser(uid)
-  return NextResponse.json({ ok: true })
-}
+// ─── DELETE /api/organizer/settings — REMOVED (RD-ORGANIZER-REMAINING-ALL) ───
+//
+// This route used to delete `users/{uid}` and the Firebase Auth user, and nothing else.
+//
+// An organizer uid is referenced by their events, every registration under those events, their
+// wallet, their settlements, their licences and their staff credentials. Removing the identity
+// and leaving all of that behind produced a published event whose owner could not be resolved:
+// unmoderatable, unsettleable, and impossible to explain to the attendees holding its tickets.
+// It also let an organizer with pending settlements erase themselves mid-payout.
+//
+// There is no method here now, so the route answers 405. Account deletion is an ADMIN
+// operation with server-side eligibility rules:
+//
+//   GET/DELETE /api/admin/organizers/[uid]/delete   →  lib/admin/organizerDeletion.ts
+//
+// It refuses outright unless the organizer has no events in any lifecycle state, no drafts, no
+// registrations, no campaigns and no money — and then deletes an explicit manifest of
+// organizer-owned records, in a resumable job, with Firebase Auth strictly last.
+//
+// DO NOT reintroduce a self-delete that bypasses those checks. If organizer-initiated deletion
+// is wanted, it belongs in front of the SAME eligibility gate.

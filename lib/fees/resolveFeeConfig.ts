@@ -27,16 +27,57 @@ export async function resolveFeeConfig(
   type: PlatformTransactionType,
   planTier: PlatformPlanTier = 'starter',
   context?: FeeResolutionContext,
+  /**
+   * RD-PHASE4-S3 · Q2 — the EVENT's Super-Admin-configured attendee transaction fee percentage,
+   * resolved server-side by resolveEventFeeConfig. A number replaces the effective GLOBAL attendee
+   * percentage (and only that — GST, gateway, the fixed/min fee and the global platform-fee switch
+   * are untouched); null / absent ⇒ the global precedence below applies unchanged. Ignored for
+   * donations.
+   */
+  eventTerms?: { attendeeTransactionFeePercent?: number | null },
 ): Promise<FeeConfig> {
   void context   // reserved: future organizer/event override layers hook in here
   const base = getDefaultFeeConfig(type, planTier)   // per-tier/category code default
-  const fees = await businessConfig.getSection('fees')
+  const [fees, licensing] = await Promise.all([
+    businessConfig.getSection('fees'),
+    businessConfig.getSection('licensing'),
+  ])
 
-  // Donation category uses its own platform-fee override; everything else uses the
-  // general one. `null` means "keep the per-tier matrix rate".
-  const platformOverride = getTransactionCategory(type) === 'donation'
+  const isDonation = getTransactionCategory(type) === 'donation'
+
+  // ══ RD-CAPACITY-01 · where the ATTENDEE TRANSACTION FEE comes from ═══════════════
+  //
+  // The capacity-based commercial model retires licence tiers, and with them the
+  // tier-specific transaction rate (2.0% / 1.5% / 1.0% / 0.5%). One platform rate replaces
+  // them, and `licensing.commercial.attendeeTransactionFeePercent` is its single source —
+  // Super Admin editable, like every other commercial value.
+  //
+  // Precedence, highest first:
+  //   1. `fees.platformFeeEnabled === false`   → the component is zero
+  //   2. `fees.platformFeePercent` (non-null)  → an EXPLICIT admin override still wins, so
+  //                                              an operator who already set one keeps it
+  //   3. the commercial attendee rate          → the new default for every ticketed sale
+  //   4. the per-tier matrix                   → only if the commercial value is unusable
+  //
+  // DONATIONS are untouched: they keep their own `donationPlatformFee` / matrix rate. The
+  // 2.5% figure is the fee on money an ATTENDEE pays for a ticket, and applying it to
+  // donations would silently reprice a different product.
+  const commercialAttendeeFee = typeof licensing.commercial?.attendeeTransactionFeePercent === 'number'
+    && Number.isFinite(licensing.commercial.attendeeTransactionFeePercent)
+    && licensing.commercial.attendeeTransactionFeePercent >= 0
+      ? licensing.commercial.attendeeTransactionFeePercent
+      : null
+
+  const eventAttendeeFee = !isDonation && typeof eventTerms?.attendeeTransactionFeePercent === 'number'
+    && Number.isFinite(eventTerms.attendeeTransactionFeePercent) && eventTerms.attendeeTransactionFeePercent >= 0
+      ? eventTerms.attendeeTransactionFeePercent
+      : null
+
+  const platformOverride = isDonation
     ? fees.donationPlatformFee
-    : fees.platformFeePercent
+    // RD-PHASE4-S3 — an event's own percentage wins over the effective global one; otherwise the
+    // existing global precedence (fees.platformFeePercent ?? commercial rate) is unchanged.
+    : eventAttendeeFee ?? fees.platformFeePercent ?? commercialAttendeeFee
 
   // Master enable switches (default true → no-op): disabling zeroes the component.
   // The per-tier `platformFeeType`/flat/min/max completion fields stay reserved —

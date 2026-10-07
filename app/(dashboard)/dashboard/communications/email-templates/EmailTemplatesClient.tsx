@@ -34,7 +34,7 @@ function buildPreviewHtml(subject: string, body: string): string {
   *{box-sizing:border-box;margin:0;padding:0}
   body{background:#f3f4f6;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;padding:24px 12px}
   .shell{max-width:580px;margin:0 auto;background:#ffffff;border-radius:12px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,.08)}
-  .header{background:linear-gradient(135deg,#e5277e,#c01f68);padding:24px 32px}
+  .header{background:#4F46E5;background-image:linear-gradient(135deg,#4F46E5,#7C3AED);padding:24px 32px}
   .header-logo{color:#fff;font-size:16px;font-weight:800;letter-spacing:.08em}
   .body{padding:28px 32px}
   .footer{padding:18px 32px;border-top:1px solid #f3f4f6;text-align:center}

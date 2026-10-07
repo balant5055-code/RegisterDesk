@@ -7,6 +7,10 @@
 // never wonders where it went); it is rendered disabled with this reason attached.
 
 import { RACE_OPS_ELIGIBLE_LIFECYCLE } from '@/features/race-operations/types'
+import { isRaceOperationsAvailable } from '@/lib/events/eventCapabilities'
+
+/** RD-RACEOPS-02B · the reason shown when the event's TYPE does not admit results. */
+export const RACE_OPS_TYPE_REASON = 'Race results are only available for sports events.'
 
 export interface RaceOpsEligibility {
   eligible: boolean
@@ -18,11 +22,19 @@ export interface RaceOpsEligibility {
  * `lifecycleStatus` values come from the existing EventLifecycleStatus union and
  * are produced by the existing `deriveLifecycleStatus` resolver — Race Operations
  * derives no lifecycle state of its own.
+ *
+ * RD-RACEOPS-02B · `eventType` is checked FIRST, through the platform's own event
+ * capability rule (`isRaceOperationsAvailable`): a conference is ineligible whatever its
+ * lifecycle, and a sports event of any subtype passes on to the lifecycle and pass checks.
  */
 export function resolveRaceOpsEligibility(
   lifecycleStatus: string,
   raceCount:       number,
+  eventType:       string | null,
 ): RaceOpsEligibility {
+  if (!isRaceOperationsAvailable(eventType)) {
+    return { eligible: false, reason: RACE_OPS_TYPE_REASON }
+  }
   if (!RACE_OPS_ELIGIBLE_LIFECYCLE.includes(lifecycleStatus)) {
     switch (lifecycleStatus) {
       case 'draft':

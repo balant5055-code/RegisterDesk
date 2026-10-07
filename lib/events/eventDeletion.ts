@@ -107,6 +107,24 @@ export function buildDeletionManifest(t: DeletionTarget): DeletionStep[] {
     bySlug('sponsorApplications'),
     bySlug('eventNominations'),
     bySlug('identifierHistory'),
+
+    // ── Identifier engine + timing tags (RD-EVENT-19G audit) ─────────────────
+    // These were MISSING. `identifierHistory` was deleted but the authoritative
+    // locks and counters were not, so deleting an event left `{slug}__{value}`
+    // documents behind — and because a slug can be reused by a later event, those
+    // stale locks would report every one of its numbers as already taken and block
+    // allocation outright. All five carry `eventSlug` as a first-class field.
+    //
+    // `identifierAssignmentJobs` / `timingTagImportJobs` also own an `items`
+    // subcollection; deleting the parent does not remove it, exactly as it does not
+    // for `registrationBulkJobs` above. That residue is inert (an orphan item is
+    // unreachable without its job) and removing it is a sweep, not a delete plan.
+    bySlug('identifierLocks'),
+    bySlug('identifierCounters'),
+    bySlug('identifierTagLocks'),
+    bySlug('identifierAssignmentJobs'),
+    bySlug('timingTagImportJobs'),
+    bySlug('bibLocks'),
     bySlug('broadcastCampaigns'),
     bySlug('certificatePhotoGrants'),
     bySlug('raceResultSnapshots'),

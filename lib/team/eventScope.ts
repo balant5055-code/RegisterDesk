@@ -20,6 +20,7 @@
 import { adminDb } from '@/lib/firebase/admin'
 import { isCheckinOnlyRole } from '@/lib/team/types'
 import type { WorkspaceContext } from '@/lib/team/workspace'
+import { resolveOwnedEventSlug } from '@/lib/events/liveEventRef'
 
 const SLUG_TTL_MS = 2 * 60_000
 const SLUG_MAX    = 200
@@ -44,9 +45,8 @@ export async function resolveEventSlug(workspaceUid: string, eventId: string): P
 
   const snap = await adminDb.doc(`users/${workspaceUid}/eventDrafts/${eventId}`).get()
   const draft   = snap.exists ? snap.data() as Record<string, unknown> : null
-  const details = draft?.eventDetails as Record<string, unknown> | null
-  const seo     = details?.seo as Record<string, unknown> | null
-  const slug    = typeof seo?.urlSlug === 'string' && seo.urlSlug ? seo.urlSlug : null
+  // RD-CE-FIX C1 · only a slug the live document proves is THIS workspace's event for THIS draft.
+  const slug    = draft ? await resolveOwnedEventSlug(workspaceUid, eventId, draft) : null
 
   if (_slugCache.size >= SLUG_MAX) {
     const oldest = [..._slugCache.entries()].sort((a, b) => a[1].at - b[1].at)[0]
@@ -61,17 +61,22 @@ export async function resolveEventSlug(workspaceUid: string, eventId: string): P
  *
  * Mirrors requireEventScope() (which works on ids) for the slug-only paths. The
  * rules are identical and deliberately stated in the same order:
- *   • owners and non-gate roles          → unrestricted
- *   • gate role with no assignment ([])  → unrestricted (rows predating this field)
- *   • gate role with an assignment       → the slug must belong to an assigned event
+ *   • owners and non-gate roles           → unrestricted
+ *   • STAFF CREDENTIAL with no assignment → DENIED (RD-CHECKIN-11)
+ *   • legacy gate row with no assignment  → unrestricted (rows predating this field)
+ *   • gate role with an assignment        → the slug must belong to an assigned event
  *
- * FAILS CLOSED: if an assigned id cannot be resolved to a slug, that assignment
- * simply does not match, so an unresolvable assignment denies rather than admits.
+ * FAILS CLOSED twice over: an assigned id that cannot be resolved to a slug simply
+ * does not match, and an empty assignment on a credential denies outright rather
+ * than widening. The two must not drift — isEventInScope decides the same question
+ * on ids, and a difference between them is a hole.
  */
 export async function isEventSlugInScope(ctx: WorkspaceContext, eventSlug: string): Promise<boolean> {
   if (ctx.isOwner) return true
   if (!isCheckinOnlyRole(ctx.role)) return true
-  if (ctx.eventIds.length === 0) return true
+  if (!Array.isArray(ctx.eventIds) || ctx.eventIds.length === 0) {
+    return ctx.isStaffCredential !== true
+  }
   if (!eventSlug) return false
 
   const slugs = await Promise.all(

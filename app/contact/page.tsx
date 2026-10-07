@@ -13,20 +13,28 @@
 // is surface-3 (--muted), the DS token for an inset/subtle surface, the form half is
 // white, and a hairline runs the seam. Light-first throughout — no ink, no black.
 //
+// ═══ 2026-09-23 · CENTRED EDITORIAL LAYOUT (owner) ═════════════════════════
+// The split panel was retired for a centred composition: masthead (bronze-ruled label,
+// light serif h1 with one italic bronze word) → the three email channels as one
+// hairline-divided row → the form in its own framed panel → business identity as a
+// quiet line → the FAQ under a centred heading. WhatsApp is no longer listed.
+//
+// Earlier the same day — THE LUXURY PASS (owner: "redesign luxury and nicely") ═════
+// Same structure, same data, same form, same ids. What changed is the voice: the aside
+// is the public site's editorial column — a bronze-ruled small-caps label, a LIGHT serif
+// headline with one italic bronze word, and the channels as a hairline-divided index with
+// bronze-outlined tiles instead of white shadowed cards. The panel lost its blur blobs and
+// its heavy shadow (a hairline frame now), the form half opened with its own serif title,
+// and the FAQ became an editorial heading beside a hairline list, not a card.
+//
 // Composed from the shared primitives only: SectionLayout (band + rhythm +
-// container), SectionHeader, Eyebrow, IconChip, MotionLink, Card, FAQItem.
+// container), MotionLink, FAQItem.
 
 import type { Metadata } from 'next'
-import { Mail, LifeBuoy, CreditCard, MessageCircle, ArrowUpRight } from 'lucide-react'
-import { cn } from '@/lib/utils/cn'
-import { fs, typography } from '@/lib/ds/typography'
-import { Card } from '@/components/marketing/Card'
-import { Eyebrow } from '@/components/marketing/Eyebrow'
-import { IconChip } from '@/components/marketing/IconChip'
+import { Mail, LifeBuoy, CreditCard, ArrowUpRight } from 'lucide-react'
 import { MotionLink } from '@/components/marketing/MotionLink'
 import { MarketingPageLayout } from '@/components/marketing/layout/MarketingPageLayout'
 import { SectionLayout } from '@/components/marketing/layout/SectionLayout'
-import { SectionHeader } from '@/components/marketing/layout/SectionHeader'
 import { FAQItem } from '@/components/marketing/sections/FAQSection'
 import { ContactInquiryForm } from '@/components/marketing/contact/ContactInquiryForm'
 import { BUSINESS_IDENTITY } from '@/lib/marketing/ownership'
@@ -35,127 +43,75 @@ import type { FaqItem } from '@/lib/marketing/types'
 
 export const metadata: Metadata = buildMetadata({
   title:       'Contact | RegisterDesk',
-  description: 'Talk to RegisterDesk — send an inquiry about your next event, or reach us by email or WhatsApp.',
+  description: 'Talk to RegisterDesk — send an inquiry about your next event, or reach us by email.',
   path:        '/contact',
 })
 
 // ─── The one official contact directory (real channels) ───────────────────────────
 
-const CONTACTS: { icon: typeof Mail; title: string; value: string; href: string; external?: boolean }[] = [
+// WhatsApp was listed here until 2026-09-23; the owner removed it from the page.
+const CONTACTS: { icon: typeof Mail; title: string; value: string; href: string }[] = [
   { icon: Mail,          title: 'General Enquiries', value: 'hello@registerdesk.in',   href: 'mailto:hello@registerdesk.in' },
   { icon: LifeBuoy,      title: 'Technical Support', value: 'support@registerdesk.in', href: 'mailto:support@registerdesk.in' },
   { icon: CreditCard,    title: 'Billing & Finance', value: 'finance@registerdesk.in', href: 'mailto:finance@registerdesk.in' },
-  { icon: MessageCircle, title: 'WhatsApp',          value: '+91 93639 35055',         href: 'https://wa.me/919363935055', external: true },
 ]
 
 // Typed as the shared FaqItem so these render through the SAME disclosure
 // component as the homepage FAQ, and feed faqJsonLd without a second shape.
 const FAQ: FaqItem[] = [
-  { question: 'Can I schedule a demo?',               answer: 'Yes — use Book a Demo in the inquiry form, pick a preferred date, and our team will take it from there.', category: 'contact', order: 1 },
+  { question: 'Can I schedule a demo?',               answer: 'Yes — use Book a Demo in the inquiry form, tell us when suits you in your message, and our team will take it from there.', category: 'contact', order: 1 },
   { question: 'How long does onboarding take?',       answer: 'RegisterDesk is self-serve: create a free account and publish an event right away. For larger events, our team can help you get set up.', category: 'contact', order: 2 },
   { question: 'Do you support large events?',         answer: 'Yes. The platform runs everything from small workshops to multi-thousand-attendee marathons, with QR check-in, wallets and settlements.', category: 'contact', order: 3 },
   { question: 'Can RegisterDesk be white-labelled?',  answer: 'Yes. White-labelling puts your own brand on public event pages and emails on eligible plans.', category: 'contact', order: 4 },
   { question: 'Can I migrate from another platform?', answer: 'Reach out through the form and we will help you plan a migration that fits your data and timeline.', category: 'contact', order: 5 },
 ]
 
-// ─── Aside cells ──────────────────────────────────────────────────────────────────
-//
-// The aside is a light INSET surface — surface-3 (--muted, slate-100), the token the
-// DS already defines for "inset / subtle". White form on the right, recessed neutral
-// on the left: the contrast that makes the panel read as one designed object comes
-// from depth, not from a dark fill.
-//
-// Two cells, not one, and that is the whole mobile strategy: stacked, a single aside
-// carrying headline + four channel rows + identity runs ~500px, so the form would
-// open a screen and a half down. Split, the phone gets [headline] → [form] →
-// [channels], and the form is visible immediately. At lg both cells occupy column 1
-// on adjacent rows, so they read as one continuous inset column.
+// ─── Editorial pieces ─────────────────────────────────────────────────────────────
 
-/** Decorative brand wash. Composed from --primary-rgb, so it tracks the token. */
-function BrandWash({ className, alpha }: { className: string; alpha: number }) {
+/** The public site's section label, centred: bronze rule · small caps · bronze rule. */
+function Overline({ children, as: Tag = 'p' }: { children: React.ReactNode; as?: 'p' | 'h2' }) {
   return (
-    <div
-      aria-hidden
-      className={cn('pointer-events-none absolute -z-10 rounded-full blur-3xl', className)}
-      style={{ background: `radial-gradient(circle, rgb(var(--primary-rgb) / ${alpha}), transparent 70%)` }}
-    />
+    <Tag className="flex items-center justify-center gap-3 text-fs-2xs font-semibold uppercase tracking-[0.22em] text-hero-eyebrow">
+      <span aria-hidden className="h-px w-8 shrink-0 bg-hero-accent-rule" />
+      {children}
+      <span aria-hidden className="h-px w-8 shrink-0 bg-hero-accent-rule" />
+    </Tag>
   )
 }
 
-/** Seam hairline is declared here; each cell picks the edge its breakpoint needs. */
-const ASIDE_CELL = 'relative isolate overflow-hidden border-border/60 bg-surface-3 px-6 sm:px-8 lg:px-10'
+// ─── The channels — one centred row of three, hairlines between ───────────────────
 
-function ContactHero({ className }: { className?: string }) {
+function ContactChannels() {
   return (
-    <div className={cn(ASIDE_CELL, 'border-b pb-8 pt-8 sm:pt-10 lg:border-b-0 lg:border-r lg:pt-12', className)}>
-      <BrandWash className="-left-20 -top-28 size-80" alpha={0.14} />
-
-      <Eyebrow>Contact</Eyebrow>
-
-      <h1 id="contact-heading" className="mt-5 text-fs-display-sm font-bold leading-[1.1] tracking-tight text-foreground">
-        Talk to the RegisterDesk team
-      </h1>
-      <p className={cn(typography.body, 'mt-3 max-w-md text-muted-foreground')}>
-        Tell us about your event and we will get back to you with the right person — or reach us
-        directly on any channel listed here.
-      </p>
-    </div>
-  )
-}
-
-function ContactRail({ className }: { className?: string }) {
-  return (
-    <div className={cn(ASIDE_CELL, 'border-t py-8 lg:border-r lg:border-t-0 lg:pb-12 lg:pt-0', className)}>
-      <BrandWash className="-bottom-28 -right-20 size-72" alpha={0.10} />
-
-      <h2 className={cn(typography.overline, 'text-muted-foreground')}>Direct channels</h2>
-      <ul className="mt-3 space-y-2">
+    <nav aria-label="Direct channels" className="mx-auto mt-10 max-w-4xl">
+      <h2 className="sr-only">Direct channels</h2>
+      <ul className="grid divide-y divide-border/60 border-y border-border/60 sm:grid-cols-3 sm:divide-x sm:divide-y-0">
         {CONTACTS.map(c => (
           <li key={c.title}>
-            {/* White rows lift off the inset surface — the same figure/ground the
-                form half uses, so both halves belong to one system. */}
             <MotionLink
               href={c.href}
-              {...(c.external ? { target: '_blank', rel: 'noopener noreferrer' } : {})}
               aria-label={`${c.title}: ${c.value}`}
-              className="group flex items-center gap-3 rounded-xl border border-border/60 bg-white p-2.5 shadow-sm transition-colors duration-150 hover:border-primary/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+              className="group flex h-full items-center gap-3.5 rounded-[var(--radius-control)] px-1 py-4 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-action focus-visible:ring-offset-2 sm:flex-col sm:gap-2.5 sm:px-4 sm:py-7 sm:text-center"
             >
-              <IconChip className="size-9 shrink-0">
-                <c.icon className="size-4 text-primary" aria-hidden />
-              </IconChip>
-              <span className="min-w-0">
-                <span className={cn(fs.sm, 'block font-semibold text-foreground')}>{c.title}</span>
-                <span className={cn(fs.sm, 'block truncate text-muted-foreground transition-colors group-hover:text-primary')}>
-                  {c.value}
-                </span>
+              <span aria-hidden className="inline-flex size-11 shrink-0 items-center justify-center rounded-[var(--radius-control)] border border-hero-accent-rule/40 bg-card text-hero-accent-rule transition-colors duration-200 group-hover:border-action/40 group-hover:text-action">
+                <c.icon className="size-[18px]" strokeWidth={1.5} />
               </span>
-              <ArrowUpRight
-                className="ml-auto size-4 shrink-0 text-muted-foreground/40 transition-colors duration-150 group-hover:text-primary"
-                aria-hidden
-              />
+              {/* A row on a phone (icon · text), a centred column from sm. */}
+              <span className="flex min-w-0 flex-col sm:items-center sm:gap-2.5">
+              <span className="text-fs-2xs font-semibold uppercase tracking-[0.18em] text-hero-eyebrow sm:mt-1">{c.title}</span>
+              <span className="mt-0.5 inline-flex items-center gap-1.5 sm:mt-0 text-fs-base text-hero-ink transition-colors group-hover:text-action">
+                {c.value}
+                <ArrowUpRight
+                  className="size-3.5 shrink-0 text-hero-ink-soft/50 transition-[color,translate] duration-200 group-hover:-translate-y-0.5 group-hover:translate-x-0.5 group-hover:text-action motion-reduce:transition-none"
+                  aria-hidden
+                />
+              </span>
+              </span>
             </MotionLink>
           </li>
         ))}
       </ul>
-
-      {/* RD-LAUNCH-03 — business identity. An at-a-glance directory: the product, where
-          to reach it, and where it lives. Only facts that exist in the codebase are
-          listed; registered address and GSTIN are absent because no such values exist
-          to publish. Ownership is disclosed through OWNERSHIP_SENTENCE on the about and
-          legal pages and OWNERSHIP_SHORT in the footer — it is not restated here.
-          Supporting detail at the foot of the aside column, not a card of its own. */}
-      <div className="mt-7 border-t border-border/60 pt-6">
-        <h2 className={cn(typography.overline, 'text-muted-foreground')}>Business identity</h2>
-        <dl className="mt-3 space-y-1.5">
-          {BUSINESS_IDENTITY.map(item => (
-            <div key={item.label} className="flex items-baseline justify-between gap-4">
-              <dt className={cn(fs.xs, 'shrink-0 text-muted-foreground')}>{item.label}</dt>
-              <dd className={cn(fs.sm, 'min-w-0 break-words text-right font-medium text-foreground')}>{item.value}</dd>
-            </div>
-          ))}
-        </dl>
-      </div>
-    </div>
+    </nav>
   )
 }
 
@@ -171,45 +127,69 @@ export default function ContactPage() {
   return (
     <>
       <MarketingPageLayout>
-        {/* ── The split panel. One container, no page-level header above it: the
-               panel's own <h1> is the page heading, so nothing is repeated. ── */}
         <SectionLayout id="inquiry" labelledBy="contact-heading">
-          <div className="overflow-hidden rounded-3xl border border-border/60 shadow-elevation-4">
-            {/* DOM order is hero → form → rail, which IS the mobile order, so the
-                visual order never diverges from the focus order. At lg the two ink
-                cells are placed into column 1 (rows 1 and 2) and the form spans
-                both rows of column 2 — a continuous ink column, whatever the
-                form's height. Explicit placement, not `order`, keeps that true. */}
-            <div className="grid items-stretch bg-white lg:grid-cols-[minmax(0,0.85fr)_minmax(0,1.15fr)] lg:grid-rows-[auto_1fr]">
-              {/* Placement classes go ON the ink cells, not on wrappers — a wrapper
-                  would stretch to the row while its ink child kept content height,
-                  leaving a white gap at the foot of the column. */}
-              <ContactHero className="lg:col-start-1 lg:row-start-1" />
-              <div className="px-6 py-8 sm:px-8 sm:py-10 lg:col-start-2 lg:row-span-2 lg:row-start-1 lg:px-10 lg:py-12">
-                <ContactInquiryForm />
-              </div>
-              <ContactRail className="lg:col-start-1 lg:row-start-2" />
+          {/* ── 1 · The centred masthead ── */}
+          <header className="mx-auto max-w-2xl text-center">
+            <Overline>Contact</Overline>
+            {/* ONE line on every device (owner): min(6vw, the shared PAGE_TITLE size) — the same
+                size as every other public title wherever the line fits, shrinking with the
+                viewport only on phones so it never wraps. */}
+            <h1 id="contact-heading" className="mt-5 whitespace-nowrap font-display text-[length:min(6vw,var(--fs-display-sm))] font-light tracking-[-0.015em] leading-[1.15] text-hero-ink">
+              Talk to the RegisterDesk <em className="italic text-hero-accent-rule">team.</em>
+            </h1>
+            <p className="mx-auto mt-4 max-w-xl text-fs-md leading-relaxed text-hero-ink-soft">
+              Tell us about your event and we will get back to you with the right person — or
+              write to us directly at any of the addresses below.
+            </p>
+          </header>
+
+          {/* ── 2 · The three channels ── */}
+          <ContactChannels />
+
+          {/* ── 3 · The form — its own framed panel on the centre axis ── */}
+          <div className="mx-auto mt-12 max-w-3xl rounded-xl border border-border/70 bg-card px-6 py-8 shadow-elevation-1 sm:px-10 sm:py-10">
+            <div className="mb-7 text-center">
+              <h2 className="font-display text-fs-2xl font-light text-hero-ink sm:text-fs-3xl">Send an enquiry</h2>
+              <span aria-hidden className="mx-auto mt-3 block h-px w-8 bg-hero-accent-rule" />
+              <p className="mt-3 text-fs-sm text-hero-ink-soft">
+                Fields marked <span className="text-action">*</span> are required.
+              </p>
             </div>
+            <ContactInquiryForm />
+          </div>
+
+          {/* ── 4 · Business identity — one quiet centred line. RD-LAUNCH-03: only facts
+                 that exist in the codebase; no registered address or GSTIN is published
+                 because none exists. Ownership is disclosed on the about and legal pages. ── */}
+          <div className="mx-auto mt-8 max-w-3xl text-center">
+            <h2 className="sr-only">Business identity</h2>
+            <dl className="flex flex-wrap items-baseline justify-center gap-x-6 gap-y-2">
+              {BUSINESS_IDENTITY.map(item => (
+                <div key={item.label} className="flex items-baseline gap-2">
+                  <dt className="text-fs-2xs font-semibold uppercase tracking-[0.16em] text-hero-eyebrow">{item.label}</dt>
+                  <dd className="text-fs-sm text-hero-ink">{item.value}</dd>
+                </div>
+              ))}
+            </dl>
           </div>
         </SectionLayout>
 
-        {/* ── FAQ. Heading and answers sit side by side at lg (the heading column
-               is dead space otherwise), stacking below it. Native <details> via the
+        {/* ── 5 · FAQ — a centred heading over a hairline list. Native <details> via the
                shared FAQItem — accessible, zero client JS. ── */}
         <SectionLayout id="faq" spacing="compact" labelledBy="faq-heading">
-          <div className="grid gap-6 lg:grid-cols-[minmax(0,0.6fr)_minmax(0,1fr)] lg:gap-12">
-            <SectionHeader
-              id="faq-heading"
-              align="left"
-              eyebrow="FAQ"
-              title="Common questions"
-              subtitle="A few things people often ask before getting in touch."
-              className="gap-3 lg:sticky lg:top-[calc(var(--nav-h)+2rem)] lg:self-start"
-            />
-            {/* last:border-b-0 closes the list cleanly — FAQItem draws a rule per row. */}
-            <Card className="px-5 py-1 sm:px-6 [&>details:last-child]:border-b-0">
+          <div className="mx-auto max-w-3xl">
+            <div className="text-center">
+              <Overline>FAQ</Overline>
+              <h2 id="faq-heading" className="mt-4 font-display text-fs-3xl font-light tracking-[-0.015em] text-hero-ink">
+                Common questions
+              </h2>
+              <p className="mt-2 text-fs-base leading-relaxed text-hero-ink-soft">
+                A few things people often ask before getting in touch.
+              </p>
+            </div>
+            <div className="mt-8 border-t border-border/60">
               {FAQ.map(item => <FAQItem key={item.question} item={item} />)}
-            </Card>
+            </div>
           </div>
         </SectionLayout>
       </MarketingPageLayout>

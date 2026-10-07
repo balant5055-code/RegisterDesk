@@ -14,7 +14,7 @@ import { cn } from '@/lib/utils/cn'
 import { AuthScreen } from '@/components/auth'
 import { ROUTES } from '@/config/navigation'
 import { redirectFromSearch } from '@/lib/auth/redirectTarget'
-import { auth } from '@/lib/firebase/auth'
+import { auth, resyncVerifiedSession } from '@/lib/firebase/auth'
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -86,8 +86,21 @@ function VerifyEmailContent() {
   const [resendSent, setResendSent]         = useState(false)
   const [resendError, setResendError]       = useState<string | null>(null)
   const [cooldown, setCooldown]             = useState(0)
+  // D4 · send-otp commits the code and THEN attempts delivery, so a 502 means "the code
+  // is valid but no email left the building". The sender marks that with ?delivery=failed
+  // so this screen can say so instead of claiming an email the organizer will never get.
+  // Cleared the moment a resend succeeds — at that point a code really was sent.
+  const [deliveryFailed, setDeliveryFailed] = useState(
+    () => searchParams.get('delivery') === 'failed',
+  )
 
   const inputRefs = useRef<(HTMLInputElement | null)[]>(Array(DIGITS).fill(null))
+
+  // D4 · No otpId means there is no code to submit — submitCode() returns early on it.
+  // That state used to be invisible: the boxes accepted six digits and then nothing
+  // happened, with no error and no explanation. It is now stated, and the inputs are
+  // disabled, so the only working control (Resend) is the only enabled one.
+  const awaitingCode = !currentOtpId
 
   useEffect(() => {
     const user = auth.currentUser
@@ -117,7 +130,11 @@ function VerifyEmailContent() {
         body: JSON.stringify({ otpId: currentOtpId, code }),
       })
       if (res.ok) {
-        await auth.currentUser!.reload()
+        // The server has just set emailVerified on the Auth record. A bare reload()
+        // refreshes the local user object but NOT the cached ID token, so every organizer
+        // API would still be handed email_verified:false and answer 401 — which is exactly
+        // the dashboard's "Unauthorized". This resynchronises both.
+        await resyncVerifiedSession()
         // RD-TEAM-INVITE-01 — return the user to where authentication interrupted
         // them (a team invitation), instead of always the onboarding page. Absent
         // or unsafe destinations fall through to WELCOME, so the ordinary
@@ -195,6 +212,7 @@ function VerifyEmailContent() {
       }
       if (res.ok && body.otpId) {
         setCurrentOtpId(body.otpId)
+        setDeliveryFailed(false)      // a code really did go out this time
         setResendSent(true)
         setCooldown(secondsUntil(body.resendAfter))   // server-owned cooldown
         setOtpError(null)
@@ -209,6 +227,14 @@ function VerifyEmailContent() {
           typeof body.resetInMinutes === 'number' ? body.resetInMinutes * 60 :
           secondsUntil(body.resendAfter)
         if (serverCooldown > 0) setCooldown(serverCooldown)
+        // D4 · a 502 resend still committed a NEW code. Adopt it so the form submits the
+        // live one rather than a superseded id, and keep the screen honest about the fact
+        // that nothing was delivered. (Neither code reached the organizer, so nothing is
+        // lost by moving on from the older one.)
+        if (body.otpId) {
+          setCurrentOtpId(body.otpId)
+          setDeliveryFailed(true)
+        }
         setResendError(body.error ?? 'Failed to resend code. Please try again.')
       }
     } catch {
@@ -228,7 +254,7 @@ function VerifyEmailContent() {
         <motion.div
           animate={{ scale: [1, 1.06, 1] }}
           transition={{ duration: 3, repeat: Infinity, ease: 'easeInOut' }}
-          className="flex size-16 items-center justify-center rounded-2xl bg-primary/10 ring-1 ring-primary/20"
+          className="flex size-14 items-center justify-center rounded-[var(--radius-control)] border border-hero-accent-rule/40 bg-card"
         >
           <KeyRound className="size-8 text-primary" aria-hidden />
         </motion.div>
@@ -236,16 +262,37 @@ function VerifyEmailContent() {
 
       {/* Title + email */}
       <div className="mb-2 text-center">
-        <h2 className="text-[1.45rem] font-bold tracking-tight text-foreground">
+        <h2 className="font-display text-fs-2xl font-light tracking-[-0.01em] text-hero-ink">
           Enter Verification Code
         </h2>
       </div>
       <p className="mb-6 text-center text-sm leading-relaxed text-muted-foreground">
-        We sent a 6-digit code to{' '}
-        {userEmail
-          ? <span className="font-medium text-foreground">{userEmail}</span>
-          : 'your email address'
-        }.
+        {/* Three states, three different truths. Saying "we sent a code" in any of the
+            first two would be a lie the organizer can only discover by waiting for an
+            email that is never coming. */}
+        {awaitingCode
+          // No otpId at all. Deliberately does NOT claim a send failed: there are three
+          // ways to land here — a failed send on signup, a failed send on sign-in, and
+          // the dashboard guard redirecting an unverified organizer, which never
+          // attempted a send — so a failure claim would be untrue in the third.
+          ? <>Request a verification code for{' '}
+              {userEmail
+                ? <span className="font-medium text-foreground">{userEmail}</span>
+                : 'your email address'
+              }{' '}using the button below.</>
+          : deliveryFailed
+          // A code EXISTS and is valid, but the email did not go out (send-otp 502).
+          ? <>Your code was created, but we couldn&apos;t email it to{' '}
+              {userEmail
+                ? <span className="font-medium text-foreground">{userEmail}</span>
+                : 'your email address'
+              }. Use Resend below to try again.</>
+          : <>We sent a 6-digit code to{' '}
+              {userEmail
+                ? <span className="font-medium text-foreground">{userEmail}</span>
+                : 'your email address'
+              }.</>
+        }
       </p>
 
       {/* ── OTP digit boxes ── */}
@@ -264,21 +311,21 @@ function VerifyEmailContent() {
             maxLength={1}
             value={d}
             autoFocus={idx === 0}
-            disabled={verifying}
+            disabled={verifying || awaitingCode}
             aria-label={`Digit ${idx + 1} of ${DIGITS}`}
             onChange={(e) => handleChange(idx, e.target.value)}
             onKeyDown={(e) => handleKeyDown(idx, e)}
             onPaste={(e) => handlePaste(e, idx)}
             onFocus={(e) => e.target.select()}
             className={cn(
-              'size-11 sm:size-12 rounded-xl border-2 text-center text-xl font-bold',
+              'size-11 sm:size-12 rounded-[var(--radius-control)] border-2 text-center text-xl font-bold',
               'bg-background text-foreground',
               'outline-none transition-[border-color,box-shadow] duration-150',
               'focus:border-primary focus:ring-2 focus:ring-primary/20',
               d && !otpError ? 'border-primary/60 bg-primary/5' : '',
               !d ? 'border-border' : '',
               otpError && !verifying ? 'border-destructive/60 bg-destructive/5' : '',
-              verifying ? 'cursor-not-allowed opacity-60' : '',
+              verifying || awaitingCode ? 'cursor-not-allowed opacity-60' : '',
             )}
           />
         ))}
@@ -291,7 +338,7 @@ function VerifyEmailContent() {
           role="alert"
           initial={{ opacity: 0, y: -6 }}
           animate={{ opacity: 1, y: 0 }}
-          className="mb-4 rounded-lg border border-destructive/20 bg-destructive/10 px-3.5 py-2.5 text-center text-sm text-destructive"
+          className="mb-4 rounded-[var(--radius-control)] border border-destructive/20 bg-destructive/10 px-3.5 py-2.5 text-center text-sm text-destructive"
         >
           {errorMessage(otpError)}
         </motion.p>
@@ -302,7 +349,7 @@ function VerifyEmailContent() {
         <motion.p
           initial={{ opacity: 0, y: -6 }}
           animate={{ opacity: 1, y: 0 }}
-          className="mb-4 rounded-lg border border-emerald-200 bg-emerald-50 px-3.5 py-2.5 text-center text-sm text-emerald-700 dark:border-emerald-800/40 dark:bg-emerald-950/30 dark:text-emerald-400"
+          className="mb-4 rounded-[var(--radius-control)] border border-emerald-200 bg-emerald-50 px-3.5 py-2.5 text-center text-sm text-emerald-700 dark:border-emerald-800/40 dark:bg-emerald-950/30 dark:text-emerald-400"
         >
           New code sent! Check your inbox.
         </motion.p>
@@ -314,7 +361,7 @@ function VerifyEmailContent() {
           role="alert"
           initial={{ opacity: 0, y: -6 }}
           animate={{ opacity: 1, y: 0 }}
-          className="mb-4 rounded-lg border border-destructive/20 bg-destructive/10 px-3.5 py-2.5 text-center text-sm text-destructive"
+          className="mb-4 rounded-[var(--radius-control)] border border-destructive/20 bg-destructive/10 px-3.5 py-2.5 text-center text-sm text-destructive"
         >
           {resendError}
         </motion.p>
@@ -326,9 +373,9 @@ function VerifyEmailContent() {
           type="button"
           variant="primary"
           size="lg"
-          className="w-full cursor-pointer"
+          className="w-full cursor-pointer rounded-[var(--radius-control)]"
           onClick={() => void submitCode(digits.join(''))}
-          disabled={!codeComplete || isBlocked || verifying}
+          disabled={!codeComplete || isBlocked || verifying || awaitingCode}
           isLoading={verifying}
         >
           Verify Email

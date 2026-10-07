@@ -93,6 +93,9 @@ function deviceLabel(): string {
 }
 
 function tsToMillis(v: unknown): number | null {
+  // RD-CE-FIX H6 · drafts now arrive through /api/organizer/drafts, which serialises Timestamps
+  // to epoch millis; a Timestamp object is still accepted.
+  if (typeof v === 'number' && Number.isFinite(v)) return v
   const t = v as { toMillis?: () => number } | null
   return t && typeof t.toMillis === 'function' ? t.toMillis() : null
 }
@@ -411,6 +414,29 @@ export function useDraft() {
   }, [flush])
 
   /**
+   * RD-EVENT-COMMERCE-02 · wait until EVERY queued draft edit has reached the server.
+   *
+   * Payment and publish are SERVER reads of the draft (the purchase route prices the stored
+   * capacity; publish copies the stored content). Calling them while an edit is still queued
+   * or in flight would charge for — or publish — a draft the organizer has already changed.
+   * Resolves `true` once nothing is pending and nothing is saving; `false` if that cannot be
+   * reached before the deadline (offline, repeated failure), in which case the caller must NOT
+   * proceed to money or publication.
+   */
+  const settle = useCallback(async (timeoutMs = 12_000): Promise<boolean> => {
+    if (!draftIdRef.current) return true
+    if (timerRef.current) clearTimeout(timerRef.current)
+    const deadline = Date.now() + timeoutMs
+    while (Date.now() < deadline) {
+      const pending = Object.keys(pendingRef.current).length > 0
+      if (!pending && !savingRef.current) return true
+      if (pending && !savingRef.current) { retryRef.current = 0; await flush() }
+      await new Promise(r => setTimeout(r, 120))
+    }
+    return Object.keys(pendingRef.current).length === 0 && !savingRef.current
+  }, [flush])
+
+  /**
    * M1 — post-publish baseline alignment. Publish advances the server's `updatedAt`
    * OUTSIDE the autosave path (it goes through the publish API, not `flush`). Without
    * this, a pre-publish crash-recovery snapshot keeps its stale `baseUpdatedAtMs`, and
@@ -451,7 +477,7 @@ export function useDraft() {
   }, [conflict, flushNow])
 
   return {
-    draft, isLoading, createDraft, updateDraft, autosaveDraft, flushNow, markPublished, syncRenderState,
+    draft, isLoading, createDraft, updateDraft, autosaveDraft, flushNow, settle, markPublished, syncRenderState,
     saveState, lastSavedAt, hasUnsavedChanges, conflict, resolveConflict,
   }
 }

@@ -45,13 +45,17 @@ export interface RaceOpsAccess {
 export type RaceOpsStageKey =
   | 'event'
   | 'race'
-  | 'upload'
+  | 'upload'      // RD-RACEOPS-02C · 'Prepare & upload' — start list / template / timing export
+  | 'map'
   | 'validate'
-  | 'preview'
+  | 'verify'      // start-list check (server)
+  | 'rank'
+  | 'review'
   | 'publish'
 
+/** RD-RACEOPS-02C · the organizer-facing flow, in order. */
 export const RACE_OPS_STAGE_ORDER: readonly RaceOpsStageKey[] = [
-  'event', 'race', 'upload', 'validate', 'preview', 'publish',
+  'event', 'race', 'upload', 'map', 'validate', 'verify', 'rank', 'review', 'publish',
 ]
 
 /** Which sprint delivers a stage's behaviour — surfaced in the UI so a placeholder
@@ -73,6 +77,8 @@ export interface RaceOpsEventSelection {
   name:            string
   slug:            string | null
   eventType:       string | null
+  /** RD-RACEOPS-02C · the sports subtype id ('running', 'cycling', …) for a sport-neutral title. */
+  eventSubtype:    string | null
   lifecycleStatus: string
   startDate:       string | null
   raceCount:       number

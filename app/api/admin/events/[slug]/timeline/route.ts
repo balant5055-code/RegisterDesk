@@ -10,9 +10,10 @@
 
 import { NextRequest, NextResponse } from 'next/server'
 import { adminDb }                   from '@/lib/firebase/admin'
-import { resolveAdminUid }           from '@/lib/admin/auth'
+import { resolveAdminUid, resolveSuperAdminUid } from '@/lib/admin/auth'
 import { getLicenseDetail }          from '@/lib/admin/licenseAdminService'
 import { getBaseline }               from '@/lib/events/governance/baseline'
+import { isFinancialAuditEntry }     from '@/lib/admin/auditConstants'
 import type {
   Event360Timeline, Event360TimelineEntry, TimelineSource,
 } from '@/lib/admin/event360Types'
@@ -42,6 +43,8 @@ export async function GET(req: NextRequest, ctx: RouteContext): Promise<NextResp
   const ev      = eventSnap.data() as Record<string, unknown>
   const draftId = str(ev.draftId) ?? slug
 
+  // RD-PHASE4-S4 · D7 — financial audit rows (and the licence history) only for a Super Admin.
+  const includeFinancial = (await resolveSuperAdminUid(req.headers.get('authorization'))) !== null
   const [auditSnap, license, baseline] = await Promise.all([
     adminDb.collection('adminAuditLogs').where('entityId', '==', slug).limit(200).get().catch(() => null),
     getLicenseDetail(slug).catch(() => null),
@@ -68,6 +71,7 @@ export async function GET(req: NextRequest, ctx: RouteContext): Promise<NextResp
   if (auditSnap) {
     for (const d of auditSnap.docs) {
       const x = d.data() as Record<string, unknown>
+      if (!includeFinancial && isFinancialAuditEntry(x)) continue
       const action = str(x.action) ?? 'admin.action'
       const source: TimelineSource = MODERATION_ACTIONS.has(action) ? 'moderation' : 'audit'
       const meta = x.metadata && typeof x.metadata === 'object' ? (x.metadata as Record<string, unknown>) : {}
@@ -83,7 +87,7 @@ export async function GET(req: NextRequest, ctx: RouteContext): Promise<NextResp
   }
 
   // ── License history (immutable, already mapped by the service) ──
-  if (license) {
+  if (license && includeFinancial) {
     for (const t of license.timeline) {
       entries.push({
         id:     `license:${t.id}`,

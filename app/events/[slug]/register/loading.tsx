@@ -59,7 +59,7 @@ export default function RegisterLoading() {
           <div className="flex flex-col gap-4">
             {[0, 1].map(s => (
               <div key={s} className={PANEL}>
-                <div className="flex items-center gap-3 rounded-t-2xl border-b border-border/60 px-5 py-4 sm:px-6">
+                <div className="flex items-center gap-3 rounded-t-xl border-b border-border/60 px-5 py-4 sm:px-6">
                   <div className="size-7 shrink-0 rounded-xl bg-muted" />
                   <Bar className="h-4 w-44" />
                 </div>
@@ -78,7 +78,7 @@ export default function RegisterLoading() {
           {/* Sticky summary column — desktop only, exactly as the page renders it. */}
           <div className="mt-4 hidden lg:mt-0 lg:block">
             <div className={PANEL}>
-              <div className="aspect-[21/7] rounded-t-2xl bg-muted" />
+              <div className="aspect-[21/7] rounded-t-xl bg-muted" />
               <div className="flex flex-col gap-3 px-5 pt-4 pb-5">
                 <Bar className="h-3 w-20" />
                 <Bar className="h-4 w-40" />
@@ -90,7 +90,7 @@ export default function RegisterLoading() {
                 <Bar className="h-8 w-28 self-end" />
                 <Bar className="h-11 w-full rounded-lg" />
               </div>
-              <div className="flex flex-col gap-2 rounded-b-2xl border-t border-border/60 bg-muted/40 px-5 py-4">
+              <div className="flex flex-col gap-2 rounded-b-xl border-t border-border/60 bg-muted/40 px-5 py-4">
                 {[0, 1, 2].map(i => <Bar key={i} className="h-2.5 w-40" />)}
               </div>
             </div>

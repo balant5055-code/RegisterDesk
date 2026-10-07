@@ -9,6 +9,7 @@ import { logAdminAction }        from '@/lib/admin/audit'
 import { notificationEngine, NotificationType, NotificationChannel } from '@/lib/notifications'
 import { emailShell, escHtml }   from '@/lib/email/templates/base'
 import type { AdminAuditAction } from '@/lib/admin/audit'
+import { resolveAccountStatus }  from '@/lib/admin/organizerTypes'
 import type { AccountStatus, AdminOrganizerAction } from '@/lib/admin/organizerTypes'
 
 interface ActionConfig {
@@ -30,6 +31,8 @@ export function organizerActionRequiresReason(action: AdminOrganizerAction): boo
 export interface SetOrganizerStatusResult {
   ok:            boolean
   notFound?:     boolean
+  /** The action is not a legal transition from the organizer's current status (D3). */
+  invalidTransition?: boolean
   accountStatus: AccountStatus
 }
 
@@ -47,6 +50,20 @@ export async function setOrganizerAccountStatus(
   const userRef = adminDb.doc(`users/${uid}`)
   const snap    = await userRef.get()
   if (!snap.exists) return { ok: false, notFound: true, accountStatus: 'active' }
+
+  // ── RD-ORGANIZER-SIGNUP-FIX-02 (D3) ────────────────────────────────────────
+  // 'pending' is not a moderation state — it means the signup has never verified its
+  // email. Reactivating it wrote accountStatus: 'active' while Auth emailVerified stayed
+  // false, and because NOTHING anywhere writes 'pending' back, the unverified signup
+  // became permanently indistinguishable from a verified organizer and re-entered the
+  // default admin list. The only legal way out of 'pending' is POST /api/auth/verify-otp.
+  //
+  // Suspend and ban stay available: an abusive signup must be stoppable before it
+  // verifies, and both of those ARE moderation states with a route back (this guard).
+  const current = resolveAccountStatus((snap.data() as { accountStatus?: unknown }).accountStatus)
+  if (action === 'reactivate' && current === 'pending') {
+    return { ok: false, invalidTransition: true, accountStatus: 'pending' }
+  }
 
   const userData = snap.data() as { name?: string; email?: string }
 

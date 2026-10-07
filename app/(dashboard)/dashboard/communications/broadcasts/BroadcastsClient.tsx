@@ -3,6 +3,7 @@
 import {
   Fragment, useCallback, useEffect, useRef, useState,
 } from 'react'
+import { useSearchParams } from 'next/navigation'
 import { auth } from '@/lib/firebase/auth'
 import {
   BROADCAST_AUDIENCE_LABELS,
@@ -284,7 +285,20 @@ function ComposeTab({
   eventsLoading: boolean
   onSent:        (c: BroadcastCampaign) => void
 }) {
-  const [eventSlug,       setEventSlug]       = useState('')
+  // ═══ RD-COMM-02 · the event arrives in the URL ═══════════════════════════════
+  //
+  // The event Communications surface links here as `?event=<slug>`, so an
+  // organizer who was already looking at an event does not have to find it again
+  // in this list. This is the ONLY routing change that phase made, and it is
+  // deliberately inert: with no parameter the composer starts empty exactly as
+  // before, and the value is only ever used to preselect the existing <select>.
+  //
+  // Nothing is trusted from it. The slug is a UI convenience; every send still
+  // re-resolves the audience server-side under the caller's own workspace scope,
+  // so a hand-typed slug for somebody else's event simply matches no events and
+  // selects nothing.
+  const initialEvent = useSearchParams().get('event') ?? ''
+  const [eventSlug,       setEventSlug]       = useState(initialEvent)
   const [audience,        setAudience]        = useState<BroadcastAudience>('confirmed')
   const [channel,         setChannel]         = useState<BroadcastChannelUI>('email')
   const [dedupeEmails,    setDedupeEmails]    = useState(false)
@@ -1276,8 +1290,17 @@ function HistoryTab({
                     }
                   </p>
                   <p className="whitespace-nowrap text-[11.5px] text-muted-foreground/70">
-                    {c.actualCostPaise > 0 ? `₹${(c.actualCostPaise / 100).toLocaleString('en-IN')}` : 'Free'}
+                    {c.actualCostPaise > 0 ? `₹${(c.actualCostPaise / 100).toLocaleString('en-IN')}`
+                      : c.billing?.fundedBy === 'prepaid_allowance' ? `${(c.billing.settled ? c.billing.billedUnits : c.billing.chargedUnits) ?? 0} prepaid units` : 'Free'}
                   </p>
+                  {/* RD-INTEG · D3 — what was given back for recipients WhatsApp did not accept. */}
+                  {c.billing?.settled && (c.billing.refundedUnits ?? 0) > 0 && (
+                    <p className="whitespace-nowrap text-[11.5px] text-muted-foreground/70">
+                      {c.billing.fundedBy === 'wallet'
+                        ? `₹${((c.billing.refundedPaise ?? 0) / 100).toLocaleString('en-IN')} returned`
+                        : `${c.billing.refundedUnits} units returned`} · not accepted
+                    </p>
+                  )}
                 </td>
               </tr>
               {openProgress === c.id && (
@@ -1399,12 +1422,15 @@ export function BroadcastsClient() {
         <div className="flex items-start gap-3 rounded-2xl border border-emerald-200 bg-emerald-50 px-5 py-4">
           <CheckCircle2 className="mt-0.5 size-5 shrink-0 text-emerald-600" />
           <div>
-            <p className="text-[14px] font-semibold text-emerald-900">Campaign sent!</p>
+            {/* RD-INTEG — "sent" means submitted to (accepted by) the provider, not delivered;
+                a WhatsApp campaign still running has only started. */}
+            <p className="text-[14px] font-semibold text-emerald-900">{sentBanner.status === 'sending' ? 'Campaign started' : 'Campaign sent'}</p>
             <p className="mt-0.5 text-[13px] text-emerald-700">
               <strong>{sentBanner.successCount.toLocaleString()}</strong> of{' '}
-              <strong>{sentBanner.recipientCount.toLocaleString()}</strong> emails delivered for{' '}
+              <strong>{sentBanner.recipientCount.toLocaleString()}</strong> {sentBanner.channel === 'whatsapp' ? 'WhatsApp messages' : 'emails'} sent for{' '}
               &ldquo;{sentBanner.subject}&rdquo;
               {sentBanner.failCount > 0 && ` · ${sentBanner.failCount} failed`}.
+              {sentBanner.status === 'sending' && ' Delivery continues in the background.'}
             </p>
           </div>
         </div>

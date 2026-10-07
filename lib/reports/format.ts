@@ -29,6 +29,24 @@ export function rangeBounds(from?: string, to?: string): { fromMs: number; toMs:
   }
 }
 
+/**
+ * RD-ANALYTICS-12-01 · the SAME bounds as `rangeBounds`, as Dates for a Firestore query.
+ *
+ * Derived from `rangeBounds` rather than restated, so the query boundary and any remaining
+ * in-memory boundary can never drift apart. `null` means "no bound was requested" — the
+ * caller must then omit the `where` clause entirely rather than passing a sentinel, because
+ * `new Date(Number.MAX_SAFE_INTEGER)` is not a valid Firestore timestamp.
+ *
+ * Day semantics are unchanged by this phase: inclusive UTC day start and end.
+ */
+export function dayBoundDates(from?: string, to?: string): { fromDate: Date | null; toDate: Date | null } {
+  const { fromMs, toMs } = rangeBounds(from, to)
+  return {
+    fromDate: from && fromMs > 0 ? new Date(fromMs) : null,
+    toDate:   to && toMs < Number.MAX_SAFE_INTEGER ? new Date(toMs) : null,
+  }
+}
+
 export const paiseToRupees = (paise: number): number => Math.round(paise) / 100
 
 /** Human ₹ string. ascii=true uses "Rs " (PDF: standard fonts can't encode ₹). */

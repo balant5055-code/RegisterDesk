@@ -89,8 +89,10 @@ export function classifyVerifyResponse(
     title: 'Payment could not be verified',
     message:
       body?.error
-      ?? 'We could not verify this payment. If money was debited it will be refunded '
-       + 'automatically. Please contact support if it does not reappear.',
+      // RD-EVENT-COMMERCE-04B — nothing is refunded automatically; a captured purchase is
+      // reconciled into credits (retryPendingGrants), so that is what this may promise.
+      ?? 'We could not verify this payment. If money was debited, your credits will be added '
+       + 'once the payment is confirmed. Please contact support if they do not appear.',
     tone: 'danger',
   }
 }

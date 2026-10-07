@@ -4,6 +4,7 @@
 // full collections into memory.
 
 import { NextRequest, NextResponse } from 'next/server'
+import { financialViewFor } from '@/lib/admin/financialGuard'
 import { AggregateField }            from 'firebase-admin/firestore'
 import { adminDb }                   from '@/lib/firebase/admin'
 import { resolveAdminUid }           from '@/lib/admin/auth'
@@ -56,5 +57,6 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     lifetimeGrossPaise:     revenueSnap.data().gross       ?? 0,
   }
 
-  return NextResponse.json(stats satisfies AdminStats)
+  // RD-CLOSE — mixed moderation + money view: money fields are withheld unless Super Admin (ADMIN_UIDS).
+  return NextResponse.json(await financialViewFor(req, stats satisfies AdminStats))
 }

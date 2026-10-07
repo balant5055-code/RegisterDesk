@@ -11,10 +11,9 @@
 // on mount (cheap, cached, no-store), events load on the first query and are
 // cached, attendee search is called on demand and scoped to the current event.
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useRef } from 'react'
 import { auth } from '@/lib/firebase/auth'
-import { ALL_PERMISSIONS, ROLE_PERMISSIONS, type TeamPermission, type TeamRole } from '@/lib/team/types'
-import type { WorkspaceInfoResponse }  from '@/app/api/organizer/workspace/route'
+import { useWorkspacePermissions } from '@/lib/hooks/useWorkspacePermissions'
 import type { EventListItem, EventsListResponse } from '@/app/api/organizer/events/route'
 import type { AttendeeSearchResult, AttendeeSearchResponse } from '@/app/api/organizer/events/[eventId]/checkin/search/route'
 
@@ -28,17 +27,13 @@ async function authHeaders(): Promise<Record<string, string> | null> {
   return { Authorization: `Bearer ${token}` }
 }
 
-export interface WorkspacePerms {
-  loading:     boolean
-  isOwner:     boolean
-  role:        string
-  permissions: TeamPermission[]
-  has:         (p: TeamPermission) => boolean
-}
-
-const INITIAL_PERMS: WorkspacePerms = {
-  loading: true, isOwner: false, role: '', permissions: [], has: () => false,
-}
+// RD-ORG-FOUNDATION — the permission projection moved to
+// lib/hooks/useWorkspacePermissions so the organizer sidebar and this palette gate
+// on ONE implementation over the server's ROLE_PERMISSIONS matrix. Previously only
+// the palette was permission-aware; the sidebar showed every row to every role.
+// Re-exported so existing `WorkspacePerms` importers are unaffected.
+import type { WorkspacePerms } from '@/lib/hooks/useWorkspacePermissions'
+export type { WorkspacePerms }
 
 export interface CommandData {
   perms:           WorkspacePerms
@@ -47,42 +42,13 @@ export interface CommandData {
 }
 
 export function useCommandData(enabled: boolean): CommandData {
-  const [perms, setPerms] = useState<WorkspacePerms>(INITIAL_PERMS)
-  const permsRequested = useRef(false)
+  // Shared with the organizer sidebar — one implementation, one source (the server's
+  // ROLE_PERMISSIONS matrix). Still deferred behind `enabled`, so a plain dashboard
+  // load does not pay for a palette that was never opened.
+  const perms = useWorkspacePermissions(enabled)
+
   const eventsCache    = useRef<EventListItem[] | null>(null)
   const eventsInFlight = useRef<Promise<EventListItem[]> | null>(null)
-
-  // ── Workspace role → permissions (once, on first activation) ─────────────────
-  // Deferred until the palette is actually opened so a plain dashboard load never
-  // pays for it; the ref guard keeps it to a single request thereafter.
-  useEffect(() => {
-    if (!enabled || permsRequested.current) return
-    permsRequested.current = true
-    let cancelled = false
-    void (async () => {
-      try {
-        const headers = await authHeaders()
-        if (!headers) { if (!cancelled) setPerms(p => ({ ...p, loading: false })); return }
-        const res = await fetch('/api/organizer/workspace', { headers })
-        if (!res.ok) { if (!cancelled) setPerms(p => ({ ...p, loading: false })); return }
-        const data = await res.json() as WorkspaceInfoResponse
-        const permissions = data.isOwner
-          ? [...ALL_PERMISSIONS]
-          : (ROLE_PERMISSIONS[data.role as TeamRole] ?? [])
-        if (cancelled) return
-        setPerms({
-          loading:     false,
-          isOwner:     data.isOwner,
-          role:        data.role,
-          permissions,
-          has:         (p) => data.isOwner || permissions.includes(p),
-        })
-      } catch {
-        if (!cancelled) setPerms(p => ({ ...p, loading: false }))
-      }
-    })()
-    return () => { cancelled = true }
-  }, [enabled])
 
   // ── Events (lazy, cached, paginated up to the cap) ──────────────────────────
   const loadEvents = useCallback(async (): Promise<EventListItem[]> => {

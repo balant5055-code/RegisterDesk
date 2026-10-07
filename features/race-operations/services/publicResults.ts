@@ -8,11 +8,11 @@
 // organizerUid / eventId / sessionId can leak into a server-rendered payload.
 
 import {
-  fetchByBib, fetchLeaderboardPage, getLiveSnapshot, listLiveRacesForEvent,
+  fetchByBib, fetchLeaderboardPage, fetchSplitsByBib, getLiveSnapshot, listLiveRacesForEvent,
   listRecentResultEvents, searchByNamePrefix,
 } from '@/features/race-operations/repositories/snapshotRepo'
 import { toPublicRace } from '@/features/race-operations/utils/publicProjection'
-import { isPlausibleBib } from '@/features/race-operations/utils/publicKeys'
+import { isPlausibleBib, type LeaderboardCursor } from '@/features/race-operations/utils/publicKeys'
 import type {
   PublicRaceSummary, PublicResultRow, PublicRunnerResult,
 } from '@/features/race-operations/types/snapshot'
@@ -75,20 +75,23 @@ export function groupRacesByEvent(races: readonly PublicRaceSummary[]): PublicEv
 export interface PublicLeaderboard {
   race:       PublicRaceSummary
   rows:       PublicResultRow[]
-  nextCursor: number | null
+  /** RD-RACEOPS-02C · tie-safe (rank, entry) cursors — see fetchLeaderboardPage. */
+  nextCursor: LeaderboardCursor | null
+  prevCursor: LeaderboardCursor | null
 }
 
 export async function getLeaderboard(
-  eventSlug: string, passSlugParam: string, afterRank?: number | null,
+  eventSlug: string, passSlugParam: string,
+  cursor?: LeaderboardCursor | null, direction: 'after' | 'before' = 'after',
 ): Promise<PublicLeaderboard | null> {
   const snapshot = await getLiveSnapshot(eventSlug, passSlugParam)
   if (!snapshot) return null
 
   const page = await fetchLeaderboardPage(
-    snapshot.snapshotId, snapshot.version, LEADERBOARD_PAGE_SIZE, afterRank,
+    snapshot.snapshotId, snapshot.version, LEADERBOARD_PAGE_SIZE, cursor, direction,
   )
 
-  return { race: toPublicRace(snapshot), rows: page.rows, nextCursor: page.nextCursor }
+  return { race: toPublicRace(snapshot), rows: page.rows, nextCursor: page.nextCursor, prevCursor: page.prevCursor }
 }
 
 // ─── Search ───────────────────────────────────────────────────────────────────
@@ -140,5 +143,10 @@ export async function getRunnerResult(
   const result = await fetchByBib(snapshot.snapshotId, snapshot.version, bib)
   if (!result) return null
 
-  return { race: toPublicRace(snapshot), result }
+  // RD-RACEOPS-RESULTS-04 · one extra document GET, and only on this page. The leaderboard,
+  // the name search, the export, the certificate and the badge all read exactly what they
+  // read before — checkpoints live in their own document precisely so that stays true.
+  const splits = await fetchSplitsByBib(snapshot.snapshotId, snapshot.version, bib)
+
+  return { race: toPublicRace(snapshot), result, splits }
 }

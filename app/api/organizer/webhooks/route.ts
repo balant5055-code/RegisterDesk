@@ -5,7 +5,6 @@
 
 import { NextRequest, NextResponse } from 'next/server'
 import { verifyCaller, requireOwner } from '@/lib/team/access'
-import { requireFeature }             from '@/lib/licensing/workspaceEntitlements'
 import { getWebhookConfig, setWebhookConfig, listWebhookDeliveries } from '@/lib/integrations/webhooks'
 import { logIntegrationAction }       from '@/lib/integrations/audit'
 import { validateWebhookTarget }      from '@/lib/security/ssrf'
@@ -15,10 +14,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   if (!caller) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   const access = requireOwner(caller.uid, caller.uid)
   if (!access.ok) return NextResponse.json({ error: access.reason }, { status: access.status })
-  // Entitlement: webhooks are part of the licensed API-access feature (apiAccess).
-  const feat = await requireFeature(caller.uid, 'apiAccess')
-  if (!feat.ok) return NextResponse.json({ error: feat.error }, { status: feat.status })
-
+  // RD-CAPACITY-01 · webhooks are no longer gated by a licence. Ownership stands.
   const [config, deliveries] = await Promise.all([
     getWebhookConfig(caller.uid),
     listWebhookDeliveries(caller.uid, 50),
@@ -31,9 +27,6 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
   if (!caller) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   const access = requireOwner(caller.uid, caller.uid)
   if (!access.ok) return NextResponse.json({ error: access.reason }, { status: access.status })
-  const feat = await requireFeature(caller.uid, 'apiAccess')
-  if (!feat.ok) return NextResponse.json({ error: feat.error }, { status: feat.status })
-
   let body: { webhookUrl?: unknown; rotateSecret?: unknown }
   try { body = await req.json() } catch { return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 }) }
 

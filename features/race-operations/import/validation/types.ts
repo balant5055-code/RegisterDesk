@@ -21,12 +21,27 @@ export type ValidationIssueCode =
   | 'INVALID_TIME'
   | 'MALFORMED_ROW'
   | 'TIME_OUT_OF_RANGE'
+  // ── RD-RACEOPS-RESULTS-04 · distance + splits (errors) ──
+  | 'INVALID_DISTANCE'
+  | 'SPLIT_MISSING_BIB'
+  | 'SPLIT_MISSING_NAME'
+  | 'SPLIT_NO_TIME'
+  | 'SPLIT_INVALID_TIME'
+  | 'DUPLICATE_SPLIT'
+  | 'ORPHAN_SPLIT_BIB'
+  | 'TOO_MANY_SPLITS'
+  | 'SPLIT_TIME_DECREASING'
   // ── warnings ──
   | 'DUPLICATE_ROW'
   | 'UNRECOGNISED_STATUS'
   | 'INVALID_GUN_TIME'
   | 'GUN_BEFORE_CHIP'
   | 'UNMAPPED_COLUMN'
+  // ── RD-RACEOPS-RESULTS-04 · splits (warnings) ──
+  | 'SPLIT_INVALID_TIME_OF_DAY'
+  | 'SPLIT_INVALID_DISTANCE'
+  | 'SPLIT_FINISH_MISMATCH'
+  | 'PROVIDER_CALCULATED_COLUMN'
 
 export interface ValidationIssueMeta {
   code:     ValidationIssueCode
@@ -44,10 +59,28 @@ export const VALIDATION_ISSUES: readonly ValidationIssueMeta[] = [
   { code: 'TIME_OUT_OF_RANGE',   severity: 'error',   label: 'Time out of range'          },
   { code: 'MALFORMED_ROW',       severity: 'error',   label: 'Malformed row'              },
   { code: 'DUPLICATE_ROW',       severity: 'warning', label: 'Duplicate row'              },
-  { code: 'UNRECOGNISED_STATUS', severity: 'warning', label: 'Unrecognised status'        },
+  // RD-RACEOPS-02E · blocking: an unknown status word must not be published as a finish.
+  { code: 'UNRECOGNISED_STATUS', severity: 'error',   label: 'Unrecognised status'        },
   { code: 'INVALID_GUN_TIME',    severity: 'warning', label: 'Invalid gun time'           },
   { code: 'GUN_BEFORE_CHIP',     severity: 'warning', label: 'Gun time before chip time'  },
   { code: 'UNMAPPED_COLUMN',     severity: 'warning', label: 'Unrecognised column'        },
+  // ── RD-RACEOPS-RESULTS-04 ──
+  // A distance that cannot be read is an ERROR rather than a dropped value: pace and speed
+  // are published from it, and a blank distance beside a filled-in column reads as a bug.
+  { code: 'INVALID_DISTANCE',     severity: 'error',   label: 'Distance needs a unit'      },
+  { code: 'SPLIT_MISSING_BIB',    severity: 'error',   label: 'Split without a bib'        },
+  { code: 'SPLIT_MISSING_NAME',   severity: 'error',   label: 'Split without a name'       },
+  { code: 'SPLIT_NO_TIME',        severity: 'error',   label: 'Split without a time'       },
+  { code: 'SPLIT_INVALID_TIME',   severity: 'error',   label: 'Split time unreadable'      },
+  { code: 'DUPLICATE_SPLIT',      severity: 'error',   label: 'Duplicate checkpoint'       },
+  { code: 'ORPHAN_SPLIT_BIB',     severity: 'error',   label: 'Splits for an unknown bib'  },
+  { code: 'TOO_MANY_SPLITS',      severity: 'error',   label: 'Too many checkpoints'       },
+  { code: 'SPLIT_TIME_DECREASING', severity: 'error',  label: 'Split times go backwards'   },
+  { code: 'SPLIT_INVALID_TIME_OF_DAY', severity: 'warning', label: 'Time of day unreadable' },
+  { code: 'SPLIT_INVALID_DISTANCE',    severity: 'warning', label: 'Split distance needs a unit' },
+  { code: 'SPLIT_FINISH_MISMATCH',     severity: 'warning', label: 'Last split differs from the chip time' },
+  // Not a problem at all — the honest name for a column RegisterDesk works out itself.
+  { code: 'PROVIDER_CALCULATED_COLUMN', severity: 'warning', label: 'Calculated by RegisterDesk' },
 ] as const
 
 export const ISSUE_META: Readonly<Record<ValidationIssueCode, ValidationIssueMeta>> =

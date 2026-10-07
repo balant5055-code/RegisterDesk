@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react'
 import { MapPin, Globe, Navigation, Package } from 'lucide-react'
 import { cn } from '@/lib/utils/cn'
-import { buttonVariants } from '@/components/ui/button'
+import { marketingButton } from '@/lib/marketing/theme'
 import type {
   PhysicalVenueConfig, OnlineVenueConfig, VenueMaps,
 } from '@/components/wizard/eventDetailsConfig'
@@ -82,7 +82,7 @@ export function VenueSection({ venueType, physical, online, mapsLink, venueMaps 
                     href={mapsLink}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className={cn(buttonVariants({ variant: 'primary', size: 'sm' }), 'gap-1.5')}
+                    className={cn(marketingButton({ emphasis: 'gradient', variant: 'primary', size: 'sm' }), 'gap-1.5')}
                   >
                     <MapPin className="size-3.5" aria-hidden />
                     View on Map
@@ -93,7 +93,7 @@ export function VenueSection({ venueType, physical, online, mapsLink, venueMaps 
                     href={mapsLink}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className={cn(buttonVariants({ variant: 'outline', size: 'sm' }), 'gap-1.5')}
+                    className={cn(marketingButton({ variant: 'outline', size: 'sm' }), 'gap-1.5')}
                   >
                     <Navigation className="size-3.5" aria-hidden />
                     Get Directions
@@ -105,7 +105,7 @@ export function VenueSection({ venueType, physical, online, mapsLink, venueMaps 
         )}
 
         {showPhysical && physical!.instructions?.trim() && (
-          <div className="rounded-xl border-l-2 border-primary/30 bg-muted/30 px-3 py-2.5">
+          <div className="rounded-xl border-l-2 border-action/30 bg-muted/30 px-3 py-2.5">
             <p className="mb-0.5 text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
               Getting There
             </p>
@@ -120,7 +120,7 @@ export function VenueSection({ venueType, physical, online, mapsLink, venueMaps 
                 key={i}
                 className="flex items-center gap-1.5 rounded-full border border-border bg-muted/30 px-3 py-1.5 text-xs font-medium text-foreground"
               >
-                <span className="text-primary">{icon}</span>
+                <span className="text-action">{icon}</span>
                 {text}
               </div>
             ))}
@@ -162,7 +162,7 @@ export function VenueSection({ venueType, physical, online, mapsLink, venueMaps 
 
         {showOnline && (
           <div className="flex items-start gap-3 rounded-xl bg-muted/30 px-4 py-3">
-            <Globe className="mt-0.5 size-4 shrink-0 text-primary" aria-hidden />
+            <Globe className="mt-0.5 size-4 shrink-0 text-action" aria-hidden />
             <div>
               <p className="text-sm font-semibold text-foreground">
                 {ONLINE_PLATFORM_LABELS[online!.platform] ?? online!.platform}

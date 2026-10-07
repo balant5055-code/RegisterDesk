@@ -85,7 +85,7 @@ export function ConferenceAgenda({ agenda, speakers, tracks }: ConferenceAgendaP
           transition={{ duration: 0.5, ease: [0.25, 0, 0, 1] }}
           className="mb-10"
         >
-          <p className="mb-2 text-[11px] font-bold uppercase tracking-[0.22em] text-primary">Programme</p>
+          <p className="mb-2 text-[11px] font-bold uppercase tracking-[0.22em] text-action">Programme</p>
           <h2 className="text-2xl font-black tracking-tight text-gray-950 sm:text-[2rem]">
             Event Schedule
           </h2>
@@ -121,7 +121,7 @@ export function ConferenceAgenda({ agenda, speakers, tracks }: ConferenceAgendaP
                   )}
                   <span className={cn(
                     'relative z-10 text-[10px] font-bold uppercase tracking-widest transition-colors duration-150',
-                    activeDate === date ? 'text-primary' : 'text-gray-400',
+                    activeDate === date ? 'text-action' : 'text-gray-400',
                   )}>
                     Day {dateIdx + 1}
                   </span>
@@ -256,7 +256,7 @@ export function ConferenceAgenda({ agenda, speakers, tracks }: ConferenceAgendaP
                           // track-colour branch above uses (`18` hex), so both branches match.
                           style={track?.color
                             ? { backgroundColor: `${track.color}18`, color: track.color }
-                            : { backgroundColor: 'rgb(var(--primary-rgb) / 0.09)', color: 'var(--color-primary)' }}
+                            : { backgroundColor: 'rgb(var(--action-rgb) / 0.09)', color: 'var(--color-action)' }}
                         >
                           {session.track}
                         </span>
@@ -299,7 +299,7 @@ export function ConferenceAgenda({ agenda, speakers, tracks }: ConferenceAgendaP
                               ) : (
                                 <div
                                   className="flex h-full w-full items-center justify-center text-[8px] font-bold text-white"
-                                  style={{ backgroundImage: 'var(--primary-gradient)' }}
+                                  style={{ backgroundImage: 'var(--action-gradient)' }}
                                 >
                                   {sp.name.charAt(0).toUpperCase()}
                                 </div>

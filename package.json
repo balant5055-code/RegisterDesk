@@ -3,11 +3,12 @@
   "version": "0.1.0",
   "private": true,
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=22.0.0"
   },
   "scripts": {
     "dev": "next dev",
     "build": "next build",
+    "clean:cache": "node -e \"for(const d of ['.next','.next-emulator','.next-verify','.next-prodqa','node_modules/.cache']) require('fs').rmSync(d,{recursive:true,force:true}); console.log('build caches cleared')\"",
     "start": "next start",
     "lint": "eslint",
     "test": "vitest run",
@@ -25,7 +26,8 @@
     "emu:serve": "dotenv -e .env.emulator -- next start -p 3187",
     "emu:profile": "npm run emu:seed && dotenv -e .env.emulator -- playwright test",
     "seed:demo": "npx tsx scripts/seed-demo-events.ts",
-    "deploy:firebase": "firebase deploy --only firestore:rules,firestore:indexes,storage",
+    "deploy:firebase": "node -e \"console.error('Refusing to deploy: no environment specified. Use deploy:firebase:production.'); process.exit(1)\"",
+    "deploy:firebase:production": "firebase deploy --project production --only firestore:rules,firestore:indexes,storage",
     "emu:shots": "npm run emu:seed && dotenv -e .env.emulator -- node scripts/profiling/capture-ux.mjs",
     "test:emu": "dotenv -e .env.emulator -- vitest run tests/emulator --no-file-parallelism --exclude tests/emulator/creditLoad.emu.test.ts --exclude tests/emulator/creditMixedLoad.emu.test.ts --exclude tests/emulator/multiInstance.emu.test.ts",
     "test:emu:load": "dotenv -e .env.emulator -- vitest run tests/emulator/creditLoad.emu.test.ts tests/emulator/creditMixedLoad.emu.test.ts --no-file-parallelism",
@@ -57,7 +59,8 @@
     "resend": "^6.18.1",
     "swiper": "^12.2.0",
     "tailwind-merge": "^3.6.0",
-    "undici": "^7.28.0"
+    "undici": "^7.28.0",
+    "unpdf": "^1.8.1"
   },
   "devDependencies": {
     "@playwright/test": "^1.62.0",

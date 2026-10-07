@@ -32,10 +32,10 @@ vi.mock('@/lib/firebase/admin', () => ({
   },
 }))
 
-// ── Business Configuration stub (the GLOBAL admin selection) ─────────────────
-// RD-EMAIL-PROVIDER-02 — the resolver now consults the admin's global provider when an
-// event expresses no preference, so the global has to be controllable from here. `throws`
-// proves the send path survives a configuration outage.
+// ── Business Configuration stub (the retired GLOBAL selection) ────────────────
+// RD-EMAIL-PROVIDER-03 — the resolver no longer reads `integrations.emailProvider`. The stub
+// stays so the tests below can set the global to Resend (or make it throw) and prove that
+// NOTHING about event delivery moves: an un-overridden event is SES, deterministically.
 const globalCfg = { emailProvider: 'ses' as string, throws: false }
 vi.mock('@/lib/config/resolveIntegrationConfig', () => ({
   getIntegrationConfig: async () => {
@@ -65,92 +65,79 @@ afterEach(() => {
 
 // ─── F · Resolution from the persisted event document ─────────────────────────
 
-describe('F · an EXPLICIT event choice wins; absence inherits the admin global', () => {
-  it('an event storing "resend" resolves to Resend', async () => {
+describe('F · an EXPLICIT event choice wins; absence is ALWAYS Amazon SES', () => {
+  // Every case runs with the retired global set to Resend: if the resolver still consulted
+  // it, the "no provider" cases would come back 'resend'.
+  beforeEach(() => { globalCfg.emailProvider = 'resend' })
+
+  it('explicit "resend" resolves to Resend (an admin override is preserved)', async () => {
     store.data = { emailProvider: 'resend' }
     expect(await resolveEventEmailProvider('marathon-2026')).toBe('resend')
   })
 
-  it('an event storing "ses" resolves to SES', async () => {
+  it('explicit "ses" resolves to SES', async () => {
     store.data = { emailProvider: 'ses' }
     expect(await resolveEventEmailProvider('marathon-2026')).toBe('ses')
   })
 
-  // ── THE "Lorem" CASE ────────────────────────────────────────────────────────
-  // An event that no admin ever toggled has NO emailProvider field. It used to drop
-  // straight to the hardcoded SES default, so an admin who had selected Resend globally
-  // still saw "Email rejected by SES" — the global setting existed but nothing read it.
-  it('an event with NO emailProvider follows the admin global (resend)', async () => {
-    globalCfg.emailProvider = 'resend'
-    store.data = { name: 'Lorem' }                     // no emailProvider field at all
-    expect(await resolveEventEmailProvider('lorem-hFDUUG')).toBe('resend')
+  it('a NEW event (published without a provider) resolves to SES', async () => {
+    // publish never stamps a provider (see K below), so a fresh event has no field at all.
+    store.data = { name: 'New event', status: 'published' }
+    expect(await resolveEventEmailProvider('new-event')).toBe('ses')
   })
 
-  it('an event with NO emailProvider follows the admin global (ses)', async () => {
-    globalCfg.emailProvider = 'ses'
+  it('an EXISTING event with no emailProvider field resolves to SES, not the global', async () => {
     store.data = { name: 'Lorem' }
     expect(await resolveEventEmailProvider('lorem-hFDUUG')).toBe('ses')
   })
 
-  it('an explicit "ses" event is NOT dragged to Resend by the global', async () => {
-    // The override is the point of the per-event toggle: an admin who pinned SES on one
-    // event keeps SES there after moving the platform to Resend.
-    globalCfg.emailProvider = 'resend'
-    store.data = { emailProvider: 'ses' }
-    expect(await resolveEventEmailProvider('pinned-event')).toBe('ses')
+  it('a LEGACY event (pre-provider document shape) resolves to SES', async () => {
+    store.data = { title: 'Old marathon', uid: 'org-1', createdAt: 1 }
+    expect(await resolveEventEmailProvider('legacy-2024')).toBe('ses')
   })
 
-  it('changing the admin global moves every un-overridden event', async () => {
-    store.data = { name: 'Lorem' }
-    globalCfg.emailProvider = 'ses'
-    expect(await resolveEventEmailProvider('lorem-hFDUUG')).toBe('ses')
-
-    // The admin flips the platform to Resend; the cache is what bounds the delay.
-    globalCfg.emailProvider = 'resend'
-    __clearEventProviderCache()
-    expect(await resolveEventEmailProvider('lorem-hFDUUG')).toBe('resend')
+  it('null / undefined / empty stored values resolve to SES', async () => {
+    for (const v of [null, undefined, '', '   ']) {
+      __clearEventProviderCache()
+      store.data = { emailProvider: v }
+      expect(await resolveEventEmailProvider('marathon-2026')).toBe('ses')
+    }
   })
 
-  it('a corrupt stored value falls back rather than failing the send', async () => {
-    globalCfg.emailProvider = 'resend'
-    store.data = { emailProvider: 'mailgun' }
-    // Unreadable ⇒ not an explicit choice ⇒ inherit the global, never an arbitrary string.
-    expect(await resolveEventEmailProvider('marathon-2026')).toBe('resend')
+  it('legacy / invalid spellings never select Resend — they resolve to SES', async () => {
+    // Only the exact lower-case enum is an explicit choice. A cased or vendor-style spelling
+    // is unreadable data, and unreadable data must not reach the non-default transport.
+    for (const v of ['RESEND', 'Resend', 'SES', 'amazon-ses', 'amazon_ses', 'mailgun', 1, true, {}, ['resend']]) {
+      __clearEventProviderCache()
+      store.data = { emailProvider: v }
+      expect(await resolveEventEmailProvider('marathon-2026')).toBe('ses')
+    }
   })
 
-  it('a missing event document inherits the global', async () => {
-    globalCfg.emailProvider = 'resend'
+  it('a missing event document resolves to SES', async () => {
     store.data = undefined
-    expect(await resolveEventEmailProvider('does-not-exist')).toBe('resend')
+    expect(await resolveEventEmailProvider('does-not-exist')).toBe('ses')
   })
 
-  it('an empty or absent slug never touches Firestore, and still honours the global', async () => {
-    globalCfg.emailProvider = 'resend'
-    expect(await resolveEventEmailProvider('')).toBe('resend')
-    expect(await resolveEventEmailProvider(null)).toBe('resend')
-    expect(await resolveEventEmailProvider(undefined)).toBe('resend')
-    expect(await resolveEventEmailProvider('   ')).toBe('resend')
+  it('an empty or absent slug never touches Firestore and resolves to SES', async () => {
+    expect(await resolveEventEmailProvider('')).toBe('ses')
+    expect(await resolveEventEmailProvider(null)).toBe('ses')
+    expect(await resolveEventEmailProvider(undefined)).toBe('ses')
+    expect(await resolveEventEmailProvider('   ')).toBe('ses')
     expect(getSpy).not.toHaveBeenCalled()
   })
 
-  it('a Firestore failure falls back to the global instead of throwing into the send path', async () => {
-    globalCfg.emailProvider = 'resend'
+  it('a Firestore failure resolves to SES instead of throwing into the send path', async () => {
     store.throws = true
     const err = vi.spyOn(console, 'error').mockImplementation(() => {})
-    await expect(resolveEventEmailProvider('marathon-2026')).resolves.toBe('resend')
+    await expect(resolveEventEmailProvider('marathon-2026')).resolves.toBe('ses')
     err.mockRestore()
   })
 
-  it('a configuration outage degrades to the historical default, never to a throw', async () => {
+  it('a Business Configuration outage cannot affect event resolution', async () => {
     globalCfg.throws = true
     store.data = { name: 'Lorem' }
     await expect(resolveEventEmailProvider('lorem-hFDUUG')).resolves.toBe('ses')
-  })
-
-  it('an unset global resolves to the code default', async () => {
-    globalCfg.emailProvider = ''
-    store.data = { name: 'Lorem' }
-    expect(await resolveEventEmailProvider('lorem-hFDUUG')).toBe('ses')
   })
 })
 

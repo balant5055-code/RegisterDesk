@@ -3,6 +3,7 @@
 // organizer Bearer token.
 
 import type { CertificateRecordsResponse } from '@/app/api/organizer/events/[eventId]/certificates/records/route'
+import type { CertificateStatsResponse }   from '@/app/api/organizer/events/[eventId]/certificates/stats/route'
 import type { EmailJobCreateResponse, EmailJobsListResponse } from '@/app/api/organizer/events/[eventId]/certificates/email-jobs/route'
 import type { EmailJobResponse } from '@/app/api/organizer/events/[eventId]/certificates/email-jobs/[jobId]/route'
 import type { SettingsResponse }           from '@/app/api/organizer/events/[eventId]/certificates/settings/route'
@@ -184,6 +185,19 @@ export function makeCertApi(eventId: string, token: string) {
       const suffix = q.toString() ? `?${q}` : ''
       return fetch(`${B}/records${suffix}`, { headers: auth }).then(jsonOrThrow<CertificateRecordsResponse>)
     },
+
+    /**
+     * RD-CERT-01 · the Overview's counters, computed by the SERVER.
+     *
+     * The Overview used to call `getRecords()` with no arguments and reduce the array
+     * it came back with. That array is ONE PAGE — the route's default is 200 — so an
+     * event with more certificates than that reported the page, not the event.
+     *
+     * The same endpoint already serves Reports, so both surfaces now read one set of
+     * aggregates and cannot disagree.
+     */
+    getStats: () =>
+      fetch(`${B}/stats`, { headers: auth }).then(jsonOrThrow<CertificateStatsResponse>),
 
     // ── Bulk delivery (RD-CERT-EMAIL-BULK) ──
     // "Select all matching" sends a SCOPE, never a list of ids, so the payload is the same

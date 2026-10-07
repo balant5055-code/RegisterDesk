@@ -14,6 +14,7 @@ import { cn }                   from '@/lib/utils/cn'
 import Link                      from 'next/link'
 import { RequestSettlementModal } from '@/components/dashboard/finance/RequestSettlementModal'
 import { SettlementHistoryTable } from '@/components/dashboard/finance/SettlementHistoryTable'
+import { FinanceControlCenter }   from '@/components/dashboard/finance/FinanceControlCenter'
 import { formatCompactINR, formatShortDate } from '@/lib/finance/format'
 import type { FinanceOverview } from '@/app/api/organizer/finance/route'
 import type { PayoutProfileGetResponse } from '@/lib/payout/types'
@@ -312,6 +313,27 @@ export default function FinancePage() {
         </div>
         {!loadingPage && !error && (
           <div className="flex shrink-0 items-center gap-2">
+            {/* Detail workspaces. Same border-button treatment as Reports & Exports, so the
+                header stays one visual group rather than acquiring a second style. */}
+            {/* The event-wise Wallet has no sidebar row — it is a Finance surface (workspaceNav). */}
+            <Link
+              href="/dashboard/wallet"
+              className="flex items-center gap-1.5 rounded-lg border border-border px-4 py-2 text-[13px] font-semibold text-foreground transition-colors hover:bg-muted"
+            >
+              Event Wallet
+            </Link>
+            <Link
+              href="/dashboard/finance/ledger"
+              className="flex items-center gap-1.5 rounded-lg border border-border px-4 py-2 text-[13px] font-semibold text-foreground transition-colors hover:bg-muted"
+            >
+              Ledger &amp; transactions
+            </Link>
+            <Link
+              href="/dashboard/finance/payout-profile"
+              className="flex items-center gap-1.5 rounded-lg border border-border px-4 py-2 text-[13px] font-semibold text-foreground transition-colors hover:bg-muted"
+            >
+              Payout Profile
+            </Link>
             <Link
               href="/dashboard/finance/reports"
               className="flex items-center gap-1.5 rounded-lg border border-border px-4 py-2 text-[13px] font-semibold text-foreground transition-colors hover:bg-muted"
@@ -379,6 +401,19 @@ export default function FinancePage() {
           </span>
         </div>
       )}
+
+      {/* ── Finance Control Center ────────────────────────────────────────
+          RD-FINANCE-P3. Every figure below is aggregated SERVER-SIDE by
+          lib/finance/financeAnalytics.ts and delivered through
+          /api/organizer/finance/analytics. This page passes a token and nothing
+          else — no analytics calculation is duplicated here, and the wallet KPIs
+          above keep their own source (/api/organizer/finance) untouched.
+      
+          Gated on this page's OWN signals: `error` is set whenever
+          /api/organizer/finance returns non-OK (a permission refusal included), and
+          `token` stays empty until auth resolves — the same pair the settlement and
+          ledger sections already depend on, so authorization behaviour is unchanged. */}
+      {!error && token && <FinanceControlCenter token={token} />}
 
       {/* ── Settlement History ── */}
       <DashboardCard title="Settlement Requests">
@@ -464,7 +499,10 @@ export default function FinancePage() {
                     </tr>
                   )
                   : transactions.map((tx, i) => {
-                    const totalFees = tx.platformFeeTotalPaise + tx.gatewayFeeEstimatePaise
+                    // RD-FIN-15: the fee total arrives from the server, already resolved
+                    // (actual gateway fee where reconciled, estimate elsewhere). It used to be
+                    // added up here from the ESTIMATE — a second, quietly diverging definition
+                    // of "total fees" living in a React component.
                     return (
                       <tr
                         key={tx.id}
@@ -491,7 +529,7 @@ export default function FinancePage() {
                           {formatCompactINR(tx.grossAmountPaise)}
                         </td>
                         <td className="px-4 py-3.5 tabular-nums text-muted-foreground">
-                          − {formatCompactINR(totalFees)}
+                          − {formatCompactINR(tx.totalFeesPaise)}
                         </td>
                         <td className="px-4 py-3.5 tabular-nums font-semibold text-foreground">
                           {formatCompactINR(tx.netSettlementPaise)}

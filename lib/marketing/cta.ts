@@ -23,7 +23,11 @@ export const CTAS = {
   contactSales: { label: 'Contact sales',       href: '/contact',       variant: 'outline' },
   viewPricing:  { label: 'See pricing',         href: '/pricing',       variant: 'outline' },
   exploreEvents:{ label: 'Discover events',     href: ROUTES.EVENTS,    variant: 'ghost'   },
-  readDocs:     { label: 'Read the docs',       href: '/resources',     variant: 'ghost'   },
+  // `readDocs` is gone with /resources. It pointed at that page, and by the end its only
+  // caller WAS that page's own hero — a CTA labelled "Read the docs" that took you to the
+  // page you were already on, which listed no docs because its grid read a PRIMARY_NAV
+  // group that never existed. There is no documentation to link to yet; when there is,
+  // add the key back pointing at the real destination rather than at a placeholder.
   login:        { label: 'Log in',              href: ROUTES.LOGIN,     variant: 'ghost'   },
 } as const satisfies Record<string, Cta>
 

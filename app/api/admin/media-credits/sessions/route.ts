@@ -11,7 +11,7 @@
 // credits, which the architecture forbids.
 
 import { NextRequest, NextResponse } from 'next/server'
-import { resolveAdminUid } from '@/lib/admin/auth'
+import { requireSuperAdmin } from '@/lib/admin/financialGuard'
 import * as sessionRepo from '@/features/media-credits/repositories/sessionRepo'
 import { CREDIT_SESSION_STATUSES, type CreditSessionStatus } from '@/features/media-credits/types'
 import { toDto } from '@/features/media-credits/services/sessionService'
@@ -19,8 +19,10 @@ import { toDto } from '@/features/media-credits/services/sessionService'
 export const dynamic = 'force-dynamic'
 
 export async function GET(req: NextRequest): Promise<NextResponse> {
-  const adminUid = await resolveAdminUid(req.headers.get('authorization'))
-  if (!adminUid) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+  // RD-CLOSE — a financial read: Super Admin only (ADMIN_UIDS). A legacy `admin: true` claim
+  // alone gets 403 SUPER_ADMIN_REQUIRED (lib/admin/financialGuard.ts).
+  const superGate = await requireSuperAdmin(req)
+  if (superGate.response) return superGate.response
 
   const params = req.nextUrl.searchParams
   const raw    = Number(params.get('limit') ?? '50')

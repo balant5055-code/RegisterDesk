@@ -181,8 +181,8 @@ function OverviewTab({ data }: { data: AdminCommunicationOverview }) {
     <div className="space-y-5">
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
         <Tile label="Accepted"   value={c.accepted.toLocaleString('en-IN')}  sub="Provider-accepted" />
-        <Tile label="Delivered"  value={c.delivered.toLocaleString('en-IN')} sub="Confirmed (WhatsApp only)" />
-        <Tile label="Failed"     value={c.failed.toLocaleString('en-IN')}    sub="Send-stage failures" />
+        <Tile label="Delivered"  value={c.delivered.toLocaleString('en-IN')} sub="Confirmed by the provider (email + WhatsApp)" />
+        <Tile label="Failed"     value={c.failed.toLocaleString('en-IN')}    sub="Rejected or bounced — timeouts excluded" />
         <Tile label="Pending"    value={c.pending.toLocaleString('en-IN')}   sub="Queued" />
         <Tile label="WhatsApp"   value={c.whatsapp.toLocaleString('en-IN')}  sub="Sent" />
         <Tile label="Campaigns"  value={c.campaigns.toLocaleString('en-IN')} sub={`${c.campaignsScheduled} scheduled`} />
@@ -247,8 +247,16 @@ function ProvidersTab({ providers }: { providers: AdminProviderView[] }) {
               <Row label="Connection" value={!p.implemented ? 'No transport' : p.configured ? 'Connected' : 'Not connected'} />
               <Row label="Health"     value={p.implemented ? STATUS[p.status].label : 'Unavailable'} />
               <Row label="Authentication" value={!p.implemented ? '—' : p.configured ? 'Credentials present · live probe pending' : 'Not configured'} />
-              <Row label="Credits"    value={!p.implemented ? '—' : p.paid ? `₹${(p.pricePaise / 100).toFixed(2)} / message · organizer wallet` : 'Free (platform-absorbed)'} />
-              <Row label="Delivery tracking" value={p.deliveryReceipts ? 'Delivered + read receipts' : p.implemented ? 'Accepted only (no receipts)' : '—'} />
+              <Row label="Credits"    value={!p.implemented ? '—' : p.paid ? `₹${(p.pricePaise / 100).toFixed(2)} / message · communication balance` : 'Free (platform-absorbed)'} />
+              {/* RD-COMM-03 · email now reports delivery receipts too, so this line can
+                  no longer say "Delivered + read receipts" for every channel that does:
+                  only WhatsApp reports READS. Saying otherwise would trade the old
+                  false statement ("no receipts") for a new one. */}
+              <Row label="Delivery tracking" value={
+                !p.deliveryReceipts ? (p.implemented ? 'Accepted only (no receipts)' : '—')
+                  : p.id === 'whatsapp' ? 'Delivered + read receipts'
+                  : 'Delivery receipts'
+              } />
               <Row label="Latency / Quota" value="Not measured yet" />
               <Row label="State" value={<span className="font-mono text-[12px]">{p.state}</span>} />
             </div>
@@ -1314,7 +1322,7 @@ function AnalyticsTab() {
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
         <Tile label="Volume"       value={a.overall.volume.toLocaleString('en-IN')} />
         <Tile label="Accepted"     value={a.overall.accepted.toLocaleString('en-IN')} />
-        <Tile label="Delivered"    value={a.overall.delivered.toLocaleString('en-IN')} sub="WhatsApp only" />
+        <Tile label="Delivered"    value={a.overall.delivered.toLocaleString('en-IN')} sub="Confirmed by the provider" />
         <Tile label="Failed"       value={a.overall.failed.toLocaleString('en-IN')} />
         <Tile label="Success rate" value={pct(a.overall.successRate)} />
         <Tile label="Failure rate" value={pct(a.overall.failureRate)} />

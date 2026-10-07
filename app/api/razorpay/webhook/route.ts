@@ -41,7 +41,8 @@ import {
   failDonation,
 } from '@/lib/donations/donationService'
 import { ensureRefundRecord, applyDonationRefundAccounting } from '@/lib/donations/refundService'
-import { logAdminAction }              from '@/lib/admin/audit'
+import { extractActualGatewayFee, recordActualGatewayFee } from '@/lib/payments/actualGatewayFee'
+import { logAdminActionOrRecord }      from '@/lib/admin/audit'
 import { RazorpayDonationGateway }     from '@/lib/razorpay/donationGateway'
 import { flagSuspiciousPayment }      from '@/lib/payments/flagSuspicious'
 import { RAZORPAY_WEBHOOK_SECRET, RAZORPAY_KEY_SECRET } from '@/lib/env'
@@ -185,6 +186,21 @@ async function handlePaymentCaptured(
   const donation = await getDonation(donationId)
   if (!donation) {
     return { result: 'failed', detail: `donation_not_found:${donationId}` }
+  }
+
+  // ── The gateway fee, recorded BEFORE the idempotency return below ──────────
+  // Deliberately above it. In the common case the browser verify path has already
+  // completed the donation, so this handler returns "already_successful" at the next
+  // block — which is exactly how the registration ledger ended up with zero actual fees
+  // in production. The fee is independent of completion state, so it is captured here
+  // regardless of whether this delivery completes anything.
+  //
+  // Same write-once primitive and the same deterministic `ptx_<id>` key the donation
+  // ledger writes, so this only ever fills a gap and never creates a row. Awaited: work
+  // left pending when a serverless response returns can be dropped.
+  const donationFee = extractActualGatewayFee(payment as { fee?: unknown; tax?: unknown })
+  if (donationFee) {
+    await recordActualGatewayFee(`ptx_${donationId}`, donationFee, { paymentId: payment.id })
   }
 
   // Layer-2 idempotency: browser verify may have beaten us here
@@ -334,13 +350,21 @@ async function handleRefundProcessed(
 
   const result = await applyDonationRefundAccounting(refund.id)
 
-  void logAdminAction({
-    adminUid:   donation.organizerUid,
-    action:     'donation.refund_processed',
-    entityType: 'donation',
-    entityId:   donationId,
-    metadata:   { refundId: refund.id, amountPaise: refund.amount, fullRefund: result.fullRefund, applied: result.applied },
-  }).catch(() => {})
+  // RD-PHASE4-S4 · F10 — the actor is the SYSTEM (the gateway webhook), never the organizer: the
+  // organizer did not act, and an organizer uid in the admin audit log misattributes a money
+  // movement. Written only when THIS delivery applied the accounting, so a redelivery (or the
+  // organizer-side path having applied it first) never adds a second row. Awaited; never throws.
+  if (result.applied) {
+    await logAdminActionOrRecord({
+      adminUid:   'system:razorpay_webhook',
+      actorRole:  'system',
+      action:     'donation.refund_processed',
+      entityType: 'donation',
+      entityId:   donationId,
+      metadata:   { refundId: refund.id, amountPaise: refund.amount, fullRefund: result.fullRefund, applied: result.applied, organizerUid: donation.organizerUid },
+      correlation: { donationId, refundId: refund.id, paymentId: refund.payment_id, organizerUid: donation.organizerUid },
+    })
+  }
 
   console.log(`[webhook] refund.processed: donation ${donationId}, refundId=${refund.id}, applied=${result.applied}, full=${result.fullRefund}`)
   return { result: 'processed', detail: `refunded:${refund.id}:applied=${result.applied}` }

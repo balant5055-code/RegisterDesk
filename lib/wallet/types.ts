@@ -11,6 +11,10 @@ export type WalletTxnType =
   | 'broadcast_whatsapp'   // wallet debit for a WhatsApp broadcast campaign
   | 'license_charge'       // wallet debit toward an Event License purchase (F2.2)
   | 'certificate_charge'   // wallet debit for a generated certificate (GA-4 S2)
+  // RD-WALLET-W1 · W1.5 — a CREDIT written by the admin licence refund (lib/admin/
+  // licenseAdminService.ts → atomicWalletCredit) for the wallet-paid part of a legacy
+  // licence. It was written but never declared, so it rendered as a debit with no label.
+  | 'license_refund'
   | 'refund'
   | 'adjustment'
 
@@ -22,6 +26,7 @@ export type WalletTxnReferenceType =
   | 'adjustment'
   | 'refund'
   | 'communication'
+  | 'license'              // RD-WALLET-W1 — license_refund entries reference the event
 
 export const WALLET_TXN_TYPE_LABELS: Record<WalletTxnType, string> = {
   fund_added:         'Funds Added',
@@ -32,6 +37,7 @@ export const WALLET_TXN_TYPE_LABELS: Record<WalletTxnType, string> = {
   broadcast_whatsapp: 'WhatsApp Broadcast',
   license_charge:     'Event License Payment',
   certificate_charge: 'Certificate Charge',
+  license_refund:     'Event License Refund',
   refund:             'Refund',
   adjustment:         'Adjustment',
 }
@@ -122,4 +128,14 @@ export interface WalletOverview {
   smsSent:            number
   whatsappSent:       number
   thisMonthSpendPaise: number
+  /**
+   * RD-INTEG — exact server aggregates (count()/sum(), no row cap). Each is null when its
+   * aggregate could not be read — shown as "—", never as 0. Months/days are India time.
+   */
+  lifetimeSpendPaise?:  number | null
+  spendByChannelPaise?: { email: number | null; whatsapp: number | null; sms: number | null }
+  messageCounts?: {
+    pending: number | null; sent: number | null; delivered: number | null
+    failed: number | null; unknown: number | null; today: number | null
+  }
 }

@@ -12,7 +12,9 @@ import type { AdminStats } from '@/app/api/admin/stats/route'
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function paise(n: number) {
+// RD-CLOSE — a withheld (null) amount (Super Admin only) reads '—', never ₹0.
+function paise(n: number | null | undefined) {
+  if (typeof n !== 'number') return '—'
   const r = n / 100
   if (r >= 10_00_000) return `₹${(r / 10_00_000).toFixed(2)}L`
   if (r >= 1_000)     return `₹${(r / 1_000).toFixed(2)}K`
@@ -142,7 +144,7 @@ export default function AdminDashboardPage() {
           value:  fmt(stats.campaignCount),
           sub:    'Donation campaigns',
           icon:   Heart,
-          accent: 'bg-pink-100 text-pink-700 dark:bg-pink-900/30 dark:text-pink-300',
+          accent: 'bg-violet-100 text-violet-700 dark:bg-violet-900/30 dark:text-violet-300',
           href:   undefined,
         },
         {

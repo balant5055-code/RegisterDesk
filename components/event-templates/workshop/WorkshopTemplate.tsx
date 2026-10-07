@@ -115,7 +115,7 @@ export function WorkshopTemplate(props: EventDetailProps) {
           <div className="mx-auto flex max-w-7xl flex-wrap items-center gap-x-6 gap-y-1.5">
             {doorsOpenTime && (
               <span className="flex items-center gap-1.5 text-[0.8125rem] font-medium text-gray-500">
-                <AlarmClock className="size-3.5 shrink-0 text-primary/70" aria-hidden />
+                <AlarmClock className="size-3.5 shrink-0 text-action/70" aria-hidden />
                 Doors open {doorsOpenTime}
               </span>
             )}

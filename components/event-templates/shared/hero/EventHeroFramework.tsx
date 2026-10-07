@@ -170,7 +170,7 @@ export function EventHeroFramework({
 
   // One shared shape for every secondary control so the group aligns perfectly.
   const SECONDARY_BTN =
-    'inline-flex h-9 items-center gap-2 rounded-full border border-border/80 bg-card px-4 text-fs-sm font-semibold text-foreground transition-colors hover:border-foreground/30 hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40'
+    'inline-flex h-9 items-center gap-2 rounded-control border border-border/80 bg-card px-4 text-fs-sm font-semibold text-foreground transition-colors hover:border-foreground/30 hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-action/40'
   const MENU_ITEM =
     'flex w-full items-center gap-2.5 px-3.5 py-2.5 text-left text-fs-sm font-medium text-foreground transition-colors hover:bg-muted/60 focus-visible:bg-muted/60 focus-visible:outline-none'
 
@@ -195,16 +195,16 @@ export function EventHeroFramework({
               <span className={cn(
                 'inline-flex items-center gap-2 rounded-full px-3 py-1 text-fs-2xs font-bold',
                 status.tone === 'open'
-                  ? 'bg-primary/10 text-primary ring-1 ring-primary/20'
+                  ? 'bg-action/10 text-action ring-1 ring-action/20'
                   : 'bg-muted text-muted-foreground ring-1 ring-border',
               )}>
-                <span className={cn('size-1.5 rounded-full', status.tone === 'open' ? 'bg-primary' : 'bg-muted-foreground/60')} aria-hidden />
+                <span className={cn('size-1.5 rounded-full', status.tone === 'open' ? 'bg-action' : 'bg-muted-foreground/60')} aria-hidden />
                 {status.label}
               </span>
             )}
             {kicker && (
               <span className="inline-flex items-center gap-1.5 rounded-full border border-border/70 bg-card px-3 py-1 text-fs-2xs font-bold uppercase tracking-[0.14em] text-muted-foreground">
-                {icon && createElement(icon, { className: 'size-3.5 text-primary', 'aria-hidden': true })}
+                {icon && createElement(icon, { className: 'size-3.5 text-action', 'aria-hidden': true })}
                 {kicker}
               </span>
             )}
@@ -232,7 +232,7 @@ export function EventHeroFramework({
           {/* ═══ THE REGISTRATION PANEL — DOM-first, visually right on lg ═══════ */}
           {hasPanel && (
             <motion.div {...rise(0.15)} className="lg:col-span-5 lg:col-start-8 lg:row-start-1">
-              <div className={cn(CARD, 'flex flex-col overflow-hidden shadow-lg shadow-black/[0.05]')}>
+              <div className={cn(CARD, 'flex flex-col overflow-hidden')}>
 
                 {/* Decision block */}
                 <div className="order-1 flex flex-col gap-4 p-5 lg:order-2">
@@ -265,7 +265,7 @@ export function EventHeroFramework({
                         </div>
                       ) : (
                         <span className="inline-flex items-center gap-2 text-fs-sm font-semibold text-muted-foreground">
-                          {phase === 'live' && !reduce && <span className="size-2 rounded-full bg-primary motion-safe:animate-pulse" aria-hidden />}
+                          {phase === 'live' && !reduce && <span className="size-2 rounded-full bg-action motion-safe:animate-pulse" aria-hidden />}
                           {statusWord}
                         </span>
                       )}
@@ -275,7 +275,7 @@ export function EventHeroFramework({
                   {/* Seats remaining — only when the caller can state it honestly */}
                   {seatsLabel && (
                     <p className="inline-flex items-center gap-2 text-fs-sm font-medium text-muted-foreground">
-                      <Users className="size-4 shrink-0 text-primary/70" aria-hidden />{seatsLabel}
+                      <Users className="size-4 shrink-0 text-action/70" aria-hidden />{seatsLabel}
                     </p>
                   )}
 
@@ -283,8 +283,8 @@ export function EventHeroFramework({
                   {primary && (
                     <Link
                       href={primary.href}
-                      className="group inline-flex h-12 w-full items-center justify-center gap-2 rounded-xl text-fs-md font-bold text-white shadow-sm transition-transform duration-200 hover:-translate-y-0.5 active:translate-y-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 focus-visible:ring-offset-2 motion-reduce:transform-none"
-                      style={{ backgroundImage: 'var(--primary-gradient)' }}
+                      className="group inline-flex h-12 w-full items-center justify-center gap-2 rounded-xl text-fs-md font-bold text-white shadow-sm transition-transform duration-200 hover:-translate-y-0.5 active:translate-y-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-action/50 focus-visible:ring-offset-2 motion-reduce:transform-none"
+                      style={{ backgroundImage: 'var(--action-gradient)' }}
                     >
                       {primary.label}
                       <ArrowRight className="size-4 transition-transform group-hover:translate-x-1 motion-reduce:transform-none" aria-hidden />
@@ -297,8 +297,8 @@ export function EventHeroFramework({
                       {trust.map(t => (
                         <li key={t.label} className="inline-flex items-center gap-1.5 text-fs-2xs font-medium text-muted-foreground">
                           {t.icon
-                            ? createElement(t.icon, { className: 'size-3.5 shrink-0 text-primary/70', 'aria-hidden': true })
-                            : <Check className="size-3.5 shrink-0 text-primary/70" aria-hidden />}
+                            ? createElement(t.icon, { className: 'size-3.5 shrink-0 text-action/70', 'aria-hidden': true })
+                            : <Check className="size-3.5 shrink-0 text-action/70" aria-hidden />}
                           {t.label}
                         </li>
                       ))}
@@ -315,7 +315,7 @@ export function EventHeroFramework({
                       type="button"
                       onClick={() => setPosterOpen(true)}
                       aria-label={`View ${title} poster full screen`}
-                      className="group block w-full overflow-hidden rounded-xl bg-muted/30 outline-none focus-visible:ring-2 focus-visible:ring-primary/50 focus-visible:ring-offset-2"
+                      className="group block w-full overflow-hidden rounded-xl bg-muted/30 outline-none focus-visible:ring-2 focus-visible:ring-action/50 focus-visible:ring-offset-2"
                     >
                       {/* eslint-disable-next-line @next/next/no-img-element */}
                       <img
@@ -327,7 +327,7 @@ export function EventHeroFramework({
                       />
                     </button>
                   ) : (
-                    <div className="aspect-[16/9] w-full rounded-xl" style={{ backgroundImage: 'var(--primary-gradient)' }} aria-hidden />
+                    <div className="aspect-[16/9] w-full rounded-xl" style={{ backgroundImage: 'var(--action-gradient)' }} aria-hidden />
                   )}
                 </div>
               </div>
@@ -347,7 +347,7 @@ export function EventHeroFramework({
                     {essentials.map((e, i) => (
                       <div key={i} className="flex items-start gap-3">
                         {e.icon && (
-                          <span className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+                          <span className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg bg-action/10 text-action">
                             <e.icon className="size-4" aria-hidden />
                           </span>
                         )}
@@ -363,7 +363,7 @@ export function EventHeroFramework({
                     {essentials.map((e, i) => (
                       <li key={i} className="flex items-start gap-3">
                         {e.icon && (
-                          <span className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+                          <span className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg bg-action/10 text-action">
                             <e.icon className="size-4" aria-hidden />
                           </span>
                         )}
@@ -401,7 +401,7 @@ export function EventHeroFramework({
                     </button>
                     <div className="border-t border-border" />
                     <button type="button" role="menuitem" onClick={onCopy} className={MENU_ITEM}>
-                      {copied ? <Check className="size-4 shrink-0 text-primary" aria-hidden /> : <Copy className="size-4 shrink-0 text-muted-foreground" aria-hidden />}
+                      {copied ? <Check className="size-4 shrink-0 text-action" aria-hidden /> : <Copy className="size-4 shrink-0 text-muted-foreground" aria-hidden />}
                       {copied ? 'Link copied' : 'Copy Link'}
                     </button>
                     {hasPoster && (
@@ -430,7 +430,7 @@ export function EventHeroFramework({
               <motion.div {...rise(0.28)} className="flex items-center gap-2 border-t border-border/60 pt-5 text-fs-sm text-muted-foreground">
                 <span>Hosted by <span className="font-semibold text-foreground">{organizer.name}</span></span>
                 {organizer.verified && (
-                  <span className="inline-flex items-center gap-1 rounded-full bg-primary/10 px-2 py-0.5 text-fs-2xs font-bold text-primary">
+                  <span className="inline-flex items-center gap-1 rounded-full bg-action/10 px-2 py-0.5 text-fs-2xs font-bold text-action">
                     <BadgeCheck className="size-3.5" aria-hidden />Verified
                   </span>
                 )}

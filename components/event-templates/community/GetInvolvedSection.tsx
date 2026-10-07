@@ -33,7 +33,7 @@ export function GetInvolvedSection({
   // Attend — always first if registration is live
   if (registrationOpen && activePasses.length > 0) {
     cards.push({
-      icon:  <Calendar className="size-4 text-primary" aria-hidden />,
+      icon:  <Calendar className="size-4 text-action" aria-hidden />,
       title: isFreeEvent ? 'Attend for Free' : 'Get Your Ticket',
       body:  'Join us at the event and be part of this community initiative.',
       href:  '#tickets',
@@ -44,7 +44,7 @@ export function GetInvolvedSection({
   // Volunteer — if instructions exist
   if (td?.volunteerInstructions?.trim()) {
     cards.push({
-      icon:  <Heart className="size-4 text-primary" aria-hidden />,
+      icon:  <Heart className="size-4 text-action" aria-hidden />,
       title: 'Volunteer',
       body:  clip(td.volunteerInstructions.trim()),
       href:  contactHref,
@@ -56,7 +56,7 @@ export function GetInvolvedSection({
   if (td?.impactGoal?.trim() || td?.causeInfo?.trim()) {
     const text = (td.impactGoal?.trim() || td.causeInfo?.trim()) ?? ''
     cards.push({
-      icon:  <Target className="size-4 text-primary" aria-hidden />,
+      icon:  <Target className="size-4 text-action" aria-hidden />,
       title: 'Support the Cause',
       body:  clip(text),
       href:  contactHref,
@@ -67,7 +67,7 @@ export function GetInvolvedSection({
   // Become a Sponsor — if organiser contact exists
   if (organizer?.email || organizer?.website) {
     cards.push({
-      icon:  <Building2 className="size-4 text-primary" aria-hidden />,
+      icon:  <Building2 className="size-4 text-action" aria-hidden />,
       title: 'Become a Sponsor',
       body:  'Support this community initiative as a sponsor or organisational partner.',
       href:  organizer?.email
@@ -86,7 +86,7 @@ export function GetInvolvedSection({
 
   return (
     <section className="py-10 sm:py-12" aria-label="Get Involved">
-      <p className="mb-1 text-[10px] font-semibold uppercase tracking-widest text-primary">
+      <p className="mb-1 text-[10px] font-semibold uppercase tracking-widest text-action">
         Get Involved
       </p>
       <h2 className="mb-6 text-[1.0625rem] font-bold text-foreground">
@@ -99,7 +99,7 @@ export function GetInvolvedSection({
             key={i}
             className="rounded-xl border border-border/60 bg-card p-4 transition-shadow hover:shadow-sm"
           >
-            <div className="mb-3 flex size-8 items-center justify-center rounded-lg bg-primary/10">
+            <div className="mb-3 flex size-8 items-center justify-center rounded-lg bg-action/10">
               {card.icon}
             </div>
             <p className="text-[0.875rem] font-semibold text-foreground">
@@ -111,7 +111,7 @@ export function GetInvolvedSection({
             {card.href && (
               <a
                 href={card.href}
-                className="mt-3 inline-flex items-center gap-1 text-[0.75rem] font-semibold text-primary hover:underline"
+                className="mt-3 inline-flex items-center gap-1 text-[0.75rem] font-semibold text-action hover:underline"
               >
                 {card.cta}
                 <ArrowRight className="size-3" aria-hidden />

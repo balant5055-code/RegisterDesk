@@ -1,15 +1,14 @@
 import Link from 'next/link'
 import { HeartCrack } from 'lucide-react'
-import { MarketingNavbar } from '@/components/marketing/navigation/MarketingNavbar'
+import { HomeShell }      from '@/components/discovery/home/HomeShell'
 import { Container }      from '@/components/ui/Container'
-import { buttonVariants } from '@/components/ui/button'
+import { marketingButton } from '@/lib/marketing/theme'
 import { ROUTES }         from '@/config/navigation'
 
 export default function CampaignNotFound() {
   return (
-    <div className="flex min-h-screen flex-col bg-background">
-      <MarketingNavbar />
-      <Container className="flex flex-1 flex-col items-center justify-center py-20 text-center">
+    <HomeShell>
+      <Container className="flex min-h-[60vh] flex-col items-center justify-center py-20 text-center">
         <div className="flex size-20 items-center justify-center rounded-full bg-muted">
           <HeartCrack className="size-9 text-muted-foreground" aria-hidden />
         </div>
@@ -20,11 +19,11 @@ export default function CampaignNotFound() {
           This campaign may have ended, been removed, or the link might be incorrect.
         </p>
         <div className="mt-8 flex flex-wrap items-center justify-center gap-3">
-          <Link href={ROUTES.HOME} className={buttonVariants({ variant: 'primary' })}>
+          <Link href={ROUTES.HOME} className={marketingButton({ variant: 'primary' })}>
             Go Home
           </Link>
         </div>
       </Container>
-    </div>
+    </HomeShell>
   )
 }

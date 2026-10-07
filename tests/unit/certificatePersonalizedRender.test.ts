@@ -74,6 +74,8 @@ vi.mock('@/lib/certificates/firestore', () => ({
   getSettings:          async () => null,
   recordTemplateUsage:  async () => { recordWrites.push('recordTemplateUsage') },
 }))
+// RD-EVENT-COMMERCE-02 — no prepaid certificate allowance for these events: the existing wallet path runs unchanged.
+vi.mock('@/lib/licensing/serviceAllowanceLedger', () => ({ draftIdForEventSlug: async () => null, reserveServiceUnits: async () => ({ mode: 'none' }), releaseServiceUnits: async () => false }))
 vi.mock('@/lib/certificates/billing',  () => ({ chargeCertificate: async () => ({ charged: false }) }))
 vi.mock('@/lib/certificates/email',    () => ({ emailCertificate: async () => ({ success: true, skipped: true }) }))
 vi.mock('@/lib/certificates/whatsapp', () => ({ sendCertificateWhatsApp: async () => {} }))

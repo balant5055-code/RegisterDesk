@@ -12,7 +12,12 @@
 import { describe, it, expect, beforeAll, beforeEach, afterAll, vi } from 'vitest'
 
 const EMULATOR = process.env.FIRESTORE_EMULATOR_HOST
-const describeEmu = EMULATOR ? describe : describe.skip
+// RD-PHOTO-01 (2026-10-06) — Media Credits are RETIRED: getCreditPolicy() reports credits OFF no matter
+// what is stored, so the credit purchase / session / spend / refund engine this suite drives can no longer
+// be switched on. Photos are a paid EVENT service (tests/emulator/photoCapacity.emu.test.ts and the
+// RD-PHOTO-01 block in serviceAllowances.emu.test.ts). Kept, not deleted, as the record of that engine.
+void EMULATOR
+const describeEmu = describe.skip
 
 const SECRET = 'test_key_secret'
 const CONTENTION_TIMEOUT_MS = 30_000
@@ -389,21 +394,25 @@ describeEmu('MC-05 · refunds and reconciliation against the Firestore emulator'
     expect(gw.refundCreateCalls).toBe(before)      // nothing paid a second time
   })
 
-  it('runReconciliation drains grants and refunds together and is replay-safe', async () => {
+  it('RD-EVENT-COMMERCE-04B · runReconciliation NEVER pays a refund — it reports it for a manual payout', async () => {
     const purchaseId = await buy(100)
     const r = await request(purchaseId)
     gw.failRefund = true
     await refunds.approveRefund({ refundId: r.refundId, adminUid: ADMIN }).catch(() => {})
     gw.failRefund = false
+    const callsBefore = gw.refundCreateCalls
+    const balance = (await walletService.getBalance(UID)).balance
 
     const report = await recon.runReconciliation({ limit: 50 })
-    expect(report.refunds.resolved).toBeGreaterThanOrEqual(1)
-    expect((await refundRepo.read(r.refundId))!.status).toBe('settled')
-
-    // Running it again changes nothing.
-    const balance = (await walletService.getBalance(UID)).balance
-    await recon.runReconciliation({ limit: 50 })
+    expect(report.refunds.resolved).toBe(0)
+    expect(report.refundsAwaitingManualPayout).toBeGreaterThanOrEqual(1)
+    expect(gw.refundCreateCalls).toBe(callsBefore)                        // no gateway call from the job
+    expect((await refundRepo.read(r.refundId))!.status).not.toBe('settled')
     expect((await walletService.getBalance(UID)).balance).toBe(balance)
+
+    // The explicit, admin-initiated payout retry is what settles it.
+    await recon.retryPendingRefunds({ limit: 50 })
+    expect((await refundRepo.read(r.refundId))!.status).toBe('settled')
   }, CONTENTION_TIMEOUT_MS)
 
   it('detectOrphans flags a stuck refund after repeated payout failures', async () => {

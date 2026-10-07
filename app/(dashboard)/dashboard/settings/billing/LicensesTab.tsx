@@ -64,10 +64,10 @@ export default function LicensesTab() {
   // version (V1 today, V2 after cutover), so a historical 'growth' license never crashes.
   const resolve  = useLicenseEntryResolver()
   const tierName = (r: LicenseRow): string => resolve(r.tier, r.version).name
-  const upgradeCta = (r: LicenseRow): { label: string; href?: string } | null => {
-    const nextName = resolve(r.tier, r.version).nextTierName
-    return nextName ? { label: `Upgrade to ${nextName}` } : null
-  }
+  // RD-CAPACITY-02 · the per-row "Upgrade to <tier>" call to action is gone. It resolved from
+  // the licence's TIER, and a capacity licence carries the version's free tier as a
+  // compatibility stamp — so every capacity-model event was being offered "Upgrade to Starter",
+  // a product that no longer exists. Capacity is changed from the event's own settings.
   // Filter options derived from the licenses actually present (no hardcoded tier list).
   const tierOptions = Array.from(new Map(rows.map(r => [r.tier, tierName(r)] as const)))
 
@@ -115,7 +115,7 @@ export default function LicensesTab() {
         <div className="rounded-2xl border border-dashed border-border py-12 text-center">
           <p className="text-[14px] font-semibold text-foreground">No licenses yet</p>
           <p className="mt-1 text-[13px] text-muted-foreground">Publish an event to get your first Event License.</p>
-          <Link href="/dashboard/events/new" className="mt-3 inline-flex items-center gap-1.5 rounded-lg px-4 py-2 text-[13px] font-semibold text-primary-foreground shadow-sm" style={{ backgroundImage: 'var(--primary-gradient)' }}>
+          <Link href="/dashboard/events/new/visibility" className="mt-3 inline-flex items-center gap-1.5 rounded-lg px-4 py-2 text-[13px] font-semibold text-primary-foreground shadow-sm" style={{ backgroundImage: 'var(--primary-gradient)' }}>
             Create your first event <ArrowRight className="size-3.5" />
           </Link>
         </div>
@@ -159,7 +159,6 @@ export default function LicensesTab() {
               </thead>
               <tbody className="divide-y divide-border">
                 {filtered.map(r => {
-                  const cta = upgradeCta(r)
                   return (
                     <tr key={r.slug} className="cursor-pointer hover:bg-muted/20" onClick={() => router.push(licenseHref(r.slug))}>
                       <td className="px-3 py-2.5">
@@ -172,7 +171,7 @@ export default function LicensesTab() {
                       <td className="px-3 py-2.5 text-muted-foreground">{fmtDate(r.purchaseDate)}</td>
                       <td className="px-3 py-2.5 text-right font-semibold text-foreground">{r.amountPaidPaise > 0 ? rupees(r.amountPaidPaise) : 'Free'}</td>
                       <td className="px-3 py-2.5 text-right" onClick={e => e.stopPropagation()}>
-                        <Link href={licenseHref(r.slug)} className="text-[12px] font-semibold text-primary">{cta ? cta.label : 'Manage'}</Link>
+                        <Link href={licenseHref(r.slug)} className="text-[12px] font-semibold text-primary">Manage</Link>
                       </td>
                     </tr>
                   )
@@ -184,7 +183,6 @@ export default function LicensesTab() {
           {/* Mobile cards */}
           <div className="space-y-2.5 sm:hidden">
             {filtered.map(r => {
-              const cta = upgradeCta(r)
               return (
                 <Link key={r.slug} href={licenseHref(r.slug)} className="block w-full rounded-xl border border-border bg-card p-3 text-left">
                   <div className="flex items-center justify-between gap-2">
@@ -196,7 +194,6 @@ export default function LicensesTab() {
                     <span>{r.used.toLocaleString('en-IN')} / {regLabel(r.maxRegistrations)}</span>
                     <span className="ml-auto font-semibold text-foreground">{r.amountPaidPaise > 0 ? rupees(r.amountPaidPaise) : 'Free'}</span>
                   </div>
-                  {cta && <div className="mt-1.5 text-[12px] font-semibold text-primary">{cta.label}</div>}
                 </Link>
               )
             })}

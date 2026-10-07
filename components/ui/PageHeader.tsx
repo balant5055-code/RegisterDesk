@@ -41,10 +41,10 @@ export interface PageHeaderProps {
 
 const TONE: Record<StatusTone, string> = {
   neutral: 'bg-muted text-muted-foreground ring-border',
-  success: 'bg-emerald-50 text-emerald-700 ring-emerald-600/20',
-  warning: 'bg-amber-50 text-amber-700 ring-amber-600/20',
-  danger:  'bg-rose-50 text-rose-700 ring-rose-600/20',
-  info:    'bg-sky-50 text-sky-700 ring-sky-600/20',
+  success: 'bg-accent-money-bg text-accent-money-fg ring-accent-money-fg/20',
+  warning: 'bg-accent-pending-bg text-accent-pending-fg ring-accent-pending-fg/20',
+  danger:  'bg-accent-critical-bg text-accent-critical-fg ring-accent-critical-fg/20',
+  info:    'bg-accent-people-bg text-accent-people-fg ring-accent-people-fg/20',
 }
 
 // ─── Component ───────────────────────────────────────────────────────────────

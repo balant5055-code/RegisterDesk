@@ -3,8 +3,13 @@
 // Bank-account summary card for the Settlement Center (Phase H.5.1).
 //
 // Reads the existing payout profile (GET /api/organizer/payout-profile →
-// PayoutProfileSummary). Account number is masked client-side (last 4). No new
-// endpoint — links to the existing payout-profile page to edit.
+// PayoutProfileSummary). No new endpoint — links to the existing payout-profile page.
+//
+// RD-PAYMENT-ONBOARDING-03 · this card now renders the SERVER's masks. It used to slice
+// the last four characters off the plaintext account number in the browser, which meant
+// the full number had to be sent to render a summary that only ever showed four digits.
+// The masks arrive pre-computed for every caller, so nothing sensitive reaches the client
+// just to be hidden again. `maskTail` is kept purely as a fallback.
 
 import Link from 'next/link'
 import { BadgeCheck, Clock3, Landmark, Pencil, Smartphone } from 'lucide-react'
@@ -59,10 +64,10 @@ export function BankSummaryCard({ profile }: { profile: PayoutProfileSummary | n
             <div className="min-w-0">
               <p className="text-[14px] font-semibold text-foreground">{profile.accountHolderName || '—'}</p>
               {profile.payoutMethod === 'upi' ? (
-                <p className="mt-0.5 text-[13px] text-muted-foreground">UPI · {profile.upiId || '—'}</p>
+                <p className="mt-0.5 text-[13px] text-muted-foreground">UPI · {profile.upiMasked ?? profile.upiId ?? '—'}</p>
               ) : (
                 <p className="mt-0.5 text-[13px] text-muted-foreground">
-                  {profile.bankName || 'Bank'} · A/C {maskTail(profile.accountNumber)} · IFSC {profile.ifscCode || '—'}
+                  {profile.bankName || 'Bank'} · A/C {profile.accountNumberMasked ?? maskTail(profile.accountNumber)} · IFSC {profile.ifscMasked ?? profile.ifscCode ?? '—'}
                 </p>
               )}
             </div>

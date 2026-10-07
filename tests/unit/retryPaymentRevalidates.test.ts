@@ -110,7 +110,7 @@ describe('2 · the duplicate gates the retry now reaches', () => {
     // Unchanged server behaviour — asserted so the retry fix cannot be mistaken for having
     // moved duplicate enforcement into the client.
     const dup   = ORDER.indexOf("reason: 'DUPLICATE_EMAIL'")
-    const mint  = ORDER.indexOf('razorpay.orders.create')
+    const mint  = ORDER.indexOf('.createOrder')
     expect(dup).toBeGreaterThan(-1)
     expect(mint).toBeGreaterThan(-1)
     expect(dup).toBeLessThan(mint)
@@ -121,9 +121,15 @@ describe('3 · double-charge protection is preserved BY THE SERVER', () => {
   it('an unchanged attempt reuses the same order — no second gateway order', () => {
     expect(ATTEMPT).toMatch(/kind: 'reuse_order'/)
     expect(ORDER).toMatch(/if \(decision\.kind === 'reuse_order'\)/)
+    // Window widened from 300 to 800 chars: RD-PAYMENT-CASHFREE-CHECKOUT-06 added the
+    // provider-neutral checkout handoff (fetched for the provider that actually HOLDS this
+    // order) ahead of the response. The guarantee asserted is unchanged — the SAME order id
+    // is handed back and flagged as reused, so no second gateway order is minted.
     const reuse = ORDER.slice(ORDER.indexOf("decision.kind === 'reuse_order'"))
-    expect(reuse.slice(0, 300)).toMatch(/orderId: claim\.orderId/)   // the SAME order id
-    expect(reuse.slice(0, 300)).toMatch(/reused: true/)
+    expect(reuse.slice(0, 800)).toMatch(/orderId: claim\.orderId/)   // the SAME order id
+    expect(reuse.slice(0, 800)).toMatch(/reused: true/)
+    // The handoff must follow the ORDER's provider, never the currently-active one.
+    expect(reuse.slice(0, 800)).toMatch(/resolvePaymentProvider\(existing\.provider\)/)
   })
 
   it('a changed attendee is a first-class supersede reason, not a silent reuse', () => {
@@ -133,7 +139,9 @@ describe('3 · double-charge protection is preserved BY THE SERVER', () => {
 
   it('supersede NEVER replaces an order that may already hold money', () => {
     const sup = ORDER.slice(ORDER.indexOf("decision.kind === 'supersede'"))
-    expect(sup).toMatch(/findCapturedRegistrationPayment\(claim\.orderId/)
+    // The call is now multi-line and passes the EXISTING intent's provider, so the order is
+    // queried at the gateway that actually holds it. Matched loosely across lines.
+    expect(sup).toMatch(/findCapturedRegistrationPayment\(\s*[\s\S]{0,120}?claim\.orderId/)
     expect(sup).toMatch(/PAYMENT_IN_PROGRESS/)
   })
 

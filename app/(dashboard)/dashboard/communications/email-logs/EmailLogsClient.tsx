@@ -1,6 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useState } from 'react'
+import { usePathname, useRouter, useSearchParams } from 'next/navigation'
 import { auth } from '@/lib/firebase/auth'
 import {
   RefreshCw,
@@ -188,6 +189,62 @@ export function EmailLogsClient() {
   const [dateFrom,    setDateFrom]    = useState('')
   const [dateTo,      setDateTo]      = useState('')
 
+  // ═══ RD-COMM-04 · the event filter ═════════════════════════════════════════
+  //
+  // RD-COMM-02 already routes here as `?event=<slug>`; that parameter reached the
+  // page and narrowed nothing. It now seeds this state and is sent to the server,
+  // which applies it to the Firestore query.
+  //
+  // The option list comes from the organizer's OWN events endpoint — never from
+  // slugs seen in the logs — so the dropdown cannot advertise another workspace's
+  // events. A slug typed into the URL is not trusted either: the server query is
+  // anchored on the authenticated organizer, so a foreign slug simply matches
+  // nothing.
+  const router       = useRouter()
+  const pathname     = usePathname()
+  const searchParams = useSearchParams()
+  const [eventSlug, setEventSlug] = useState(searchParams.get('event') ?? '')
+  const [events,    setEvents]    = useState<{ slug: string; name: string }[]>([])
+  const [eventsLoaded, setEventsLoaded] = useState(false)
+
+  /** Keep the address bar honest, so the view is shareable and survives a reload. */
+  const selectEvent = useCallback((slug: string) => {
+    setEventSlug(slug)
+    const next = new URLSearchParams(searchParams.toString())
+    if (slug) next.set('event', slug); else next.delete('event')
+    const qs = next.toString()
+    router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false })
+  }, [router, pathname, searchParams])
+
+  // One request, on mount. Reuses the existing organizer events endpoint exactly
+  // as the WhatsApp logs page does.
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      try {
+        const token = await auth.currentUser?.getIdToken()
+        if (!token) return
+        const res  = await fetch('/api/organizer/events', { headers: { Authorization: `Bearer ${token}` } })
+        const data = await res.json() as { events?: { slug: string | null; name: string }[] }
+        if (cancelled) return
+        setEvents((data.events ?? [])
+          .filter((e): e is { slug: string; name: string } => Boolean(e.slug))
+          .map(e => ({ slug: e.slug, name: e.name })))
+      } finally { if (!cancelled) setEventsLoaded(true) }
+    })()
+    return () => { cancelled = true }
+  }, [])
+
+  /**
+   * The event named in the URL, once the trusted list has loaded.
+   *
+   * `null` means the organizer has no such event — which is NOT the same as "all
+   * events". The list stays empty and says so, rather than silently widening to
+   * everything or implying the event exists.
+   */
+  const selectedEvent = eventSlug ? events.find(e => e.slug === eventSlug) ?? null : null
+  const unknownEvent  = Boolean(eventSlug) && eventsLoaded && selectedEvent === null
+
   // ── Fetch ───────────────────────────────────────────────────────────────────
   const fetchLogs = useCallback(async () => {
     setLoading(true)
@@ -201,6 +258,7 @@ export function EmailLogsClient() {
       if (templateKey) params.set('templateKey', templateKey)
       if (dateFrom)    params.set('dateFrom',    dateFrom)
       if (dateTo)      params.set('dateTo',      dateTo)
+      if (eventSlug)   params.set('eventSlug',   eventSlug)
 
       const res  = await fetch(`/api/organizer/email-logs?${params}`, {
         headers: { Authorization: `Bearer ${token}` },
@@ -213,7 +271,7 @@ export function EmailLogsClient() {
     } finally {
       setLoading(false)
     }
-  }, [status, templateKey, dateFrom, dateTo])
+  }, [status, templateKey, dateFrom, dateTo, eventSlug])
 
   useEffect(() => { void fetchLogs() }, [fetchLogs])
 
@@ -291,6 +349,21 @@ export function EmailLogsClient() {
             className="w-full rounded-xl border border-border bg-background py-2 pl-8 pr-3.5 text-[13.5px] text-foreground placeholder:text-muted-foreground/50 focus:border-primary/50 focus:outline-none focus:ring-2 focus:ring-primary/20"
           />
         </div>
+
+        {/* RD-COMM-04 · Event. Organizer-facing wording only — never a slug or an
+            internal id. Listed first because it is the widest scope on this page. */}
+        <select
+          value={eventSlug}
+          onChange={e => selectEvent(e.target.value)}
+          aria-label="Filter by event"
+          className="rounded-xl border border-border bg-background px-3 py-2 text-[13.5px] text-foreground focus:border-primary/50 focus:outline-none focus:ring-2 focus:ring-primary/20"
+        >
+          <option value="">All events</option>
+          {events.map(e => <option key={e.slug} value={e.slug}>{e.name}</option>)}
+          {/* Keep an unknown slug visible rather than snapping the control back to
+              "All events", which would silently widen what the organizer is seeing. */}
+          {unknownEvent && <option value={eventSlug}>Unavailable event</option>}
+        </select>
 
         {/* Status */}
         <select
@@ -378,13 +451,27 @@ export function EmailLogsClient() {
           </div>
         )}
 
+        {/* RD-COMM-04 · §9 · an empty list says WHY, and never drops the event
+            context. "No email logs found" under an event filter reads as "this
+            product has no history", when the truth is "this event has none". */}
         {!loading && !error && filtered.length === 0 && (
           <EmptyState
             icon={Mail}
-            title="No email logs found"
-            description={logs.length > 0
-              ? 'No results match your filters.'
-              : 'Email logs will appear here once emails are sent.'
+            title={
+              unknownEvent            ? 'Event not available'
+              : selectedEvent         ? `No email history for ${selectedEvent.name}`
+              : 'No email logs found'
+            }
+            description={
+              unknownEvent
+                ? 'That event is not available in your workspace.'
+              : selectedEvent
+                ? (logs.length > 0
+                    ? 'No results match your filters for this event.'
+                    : 'No email communication has been sent for this event yet.')
+              : logs.length > 0
+                ? 'No results match your filters.'
+                : 'Email logs will appear here once emails are sent.'
             }
             className="py-16"
           />

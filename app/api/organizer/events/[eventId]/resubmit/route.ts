@@ -13,6 +13,7 @@ import { applyLifecycleTransition, deriveLifecycleStatus } from '@/lib/events/li
 import { validateEventPublish } from '@/lib/events/validatePublish'
 import { sendEventReviewEmail } from '@/lib/events/reviewNotifications'
 import { governPublish, recordPublish, extractIdentity } from '@/lib/events/governance'
+import { liveEventBelongsTo } from '@/lib/events/liveEventRef'
 
 type Ctx = { params: Promise<{ eventId: string }> }
 
@@ -45,7 +46,10 @@ export async function POST(req: NextRequest, { params }: Ctx): Promise<NextRespo
   const slug = typeof seo?.urlSlug === 'string' && seo.urlSlug ? seo.urlSlug : null
   if (!slug) return NextResponse.json({ error: 'Event has not been submitted before' }, { status: 400 })
   const eventSnap = await adminDb.collection('events').doc(slug).get()
-  if (!eventSnap.exists) return NextResponse.json({ error: 'Event has not been submitted before' }, { status: 400 })
+  // RD-CE-FIX C1 · the slug came from the client-writable draft: the live doc must be THIS draft's.
+  if (!eventSnap.exists || !liveEventBelongsTo(eventSnap.data(), uid, eventId)) {
+    return NextResponse.json({ error: 'Event has not been submitted before' }, { status: 400 })
+  }
 
   // ── Reuse the SHARED publish validation engine (no duplicated rules) — identical to
   //    republish, so resubmit and republish run ONE publish-validation pipeline (RD-EVENTS-01
@@ -56,6 +60,8 @@ export async function POST(req: NextRequest, { params }: Ctx): Promise<NextRespo
     eventDetails:         d.eventDetails         as Record<string, unknown> | null,
     communicationBilling: d.communicationBilling as Record<string, unknown> | null | undefined,
     registrationForm:     d.registrationForm     as Record<string, unknown> | null | undefined,
+    eventType:            typeof d.eventType    === 'string' ? d.eventType    : null,
+    eventSubtype:         typeof d.eventSubtype === 'string' ? d.eventSubtype : null,
   })
   if (!validation.canPublish) {
     return NextResponse.json(

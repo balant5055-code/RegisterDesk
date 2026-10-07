@@ -15,6 +15,8 @@ export interface WhatsAppStatusEvent {
   timestampMs:       number
   error?:            string   // human summary (failed events)
   providerResponse?: string   // compact diagnostics (failed events)
+  /** RD-CLOSE — Meta's echo of the send's biz_opaque_callback_data (acceptance recovery). */
+  callbackData?:     string
 }
 
 const VALID: Record<string, WhatsAppDeliveryStatus> = {
@@ -34,7 +36,7 @@ export function parseWhatsAppStatusEvents(payload: unknown): WhatsAppStatusEvent
     for (const change of asArray((entry as { changes?: unknown }).changes)) {
       const value = (change as { value?: unknown }).value as { statuses?: unknown } | undefined
       for (const s of asArray(value?.statuses)) {
-        const st = s as { id?: unknown; status?: unknown; timestamp?: unknown; errors?: unknown }
+        const st = s as { id?: unknown; status?: unknown; timestamp?: unknown; errors?: unknown; biz_opaque_callback_data?: unknown }
         const wamid = typeof st.id === 'string' ? st.id : ''
         const mapped = typeof st.status === 'string' ? VALID[st.status] : undefined
         if (!wamid || !mapped) continue
@@ -57,7 +59,8 @@ export function parseWhatsAppStatusEvents(payload: unknown): WhatsAppStatusEvent
           }
         }
 
-        events.push({ wamid, status: mapped, timestampMs, error, providerResponse })
+        const callbackData = typeof st.biz_opaque_callback_data === 'string' && st.biz_opaque_callback_data ? st.biz_opaque_callback_data : undefined
+        events.push({ wamid, status: mapped, timestampMs, error, providerResponse, ...(callbackData ? { callbackData } : {}) })
       }
     }
   }

@@ -163,3 +163,174 @@ describe('applyMapping — building NormalizedRaceResult', () => {
     expect(rows.every(r => r.sourceProvider === 'excel')).toBe(true)
   })
 })
+
+// ─── RD-RACEOPS-02C · timing precedence, order independence, confidence ──────
+
+describe('RD-RACEOPS-02C · chip / finish / gun precedence', () => {
+  const perms = <T,>(xs: T[]): T[][] =>
+    xs.length <= 1 ? [xs] : xs.flatMap((x, i) => perms([...xs.slice(0, i), ...xs.slice(i + 1)]).map(p => [x, ...p]))
+
+  it('Chip Time + Finish Time → chip ← Chip Time, gun ← Finish Time, in EVERY column order', () => {
+    for (const headers of perms(['Bib No', 'Finish Time', 'Chip Time', 'Position', 'Status'])) {
+      const r = autoMapColumns(headers)
+      expect(r.mapping, headers.join('|')).toMatchObject({ bibNumber: 'Bib No', chipTime: 'Chip Time', gunTime: 'Finish Time', status: 'Status' })
+      // RD-RACEOPS-RESULTS-04 · "Position" is a rank RegisterDesk computes itself, so it is
+      // now reported as CALCULATED rather than as an unrecognised column. It is still never
+      // mapped — the change is what the organizer is told about it.
+      expect(r.unmappedHeaders, headers.join('|')).toEqual([])
+      expect(r.calculatedHeaders, headers.join('|')).toEqual(['Position'])
+      expect(r.confidence.chipTime).toBe('exact')
+      expect(r.confidence.gunTime).toBe('review')      // a generic heading was re-read as gun time
+    }
+  })
+
+  it('Net Time + Gross Time → chip ← Net Time, gun ← Gross Time', () => {
+    const r = autoMapColumns(['Gross Time', 'Net Time', 'Bib'])
+    expect(r.mapping).toMatchObject({ chipTime: 'Net Time', gunTime: 'Gross Time', bibNumber: 'Bib' })
+    expect(r.confidence).toMatchObject({ chipTime: 'exact', gunTime: 'exact', bibNumber: 'exact' })
+  })
+
+  it('Net Time + Finish Time → chip ← Net Time, gun ← Finish Time (review)', () => {
+    const r = autoMapColumns(['Finish Time', 'Net Time'])
+    expect(r.mapping).toMatchObject({ chipTime: 'Net Time', gunTime: 'Finish Time' })
+    expect(r.confidence.gunTime).toBe('review')
+  })
+
+  it('Finish Time only → chip ← Finish Time, flagged for review, no gun time invented', () => {
+    const r = autoMapColumns(['Bib', 'Finish Time'])
+    expect(r.mapping).toMatchObject({ chipTime: 'Finish Time' })
+    expect(r.mapping.gunTime).toBeUndefined()
+    expect(r.confidence.chipTime).toBe('review')
+  })
+
+  it('Chip Time only / Net Time only → exact', () => {
+    expect(autoMapColumns(['Bib', 'Chip Time']).confidence.chipTime).toBe('exact')
+    expect(autoMapColumns(['Bib', 'Net Time']).confidence.chipTime).toBe('exact')
+  })
+
+  it('Time only → chip ← Time, review', () => {
+    const r = autoMapColumns(['Bib', 'Time'])
+    expect(r.mapping.chipTime).toBe('Time')
+    expect(r.confidence.chipTime).toBe('review')
+    expect(r.mapping.gunTime).toBeUndefined()
+  })
+
+  it('two exact chip columns (Chip Time + Net Time) → a deterministic pick, flagged for review', () => {
+    const a = autoMapColumns(['Net Time', 'Chip Time'])
+    const b = autoMapColumns(['Chip Time', 'Net Time'])
+    expect(a.mapping.chipTime).toBe(b.mapping.chipTime)   // alias preference, not column order
+    expect(a.mapping.chipTime).toBe('Chip Time')
+    expect(a.confidence.chipTime).toBe('review')
+    expect(a.unmappedHeaders).toEqual(['Net Time'])
+  })
+
+  it('Gun Time + Finish Time (no chip column) → gun ← Gun Time, chip ← Finish Time (review)', () => {
+    const r = autoMapColumns(['Gun Time', 'Finish Time'])
+    expect(r.mapping).toMatchObject({ gunTime: 'Gun Time', chipTime: 'Finish Time' })
+    expect(r.confidence.chipTime).toBe('review')
+    expect(r.confidence.gunTime).toBe('exact')
+  })
+
+  it('a substring guess ("Net Time (final)") maps but is review-level; the listed "Net Time (hh:mm:ss)" spelling stays exact', () => {
+    const r = autoMapColumns(['Bib', 'Net Time (final)'])
+    expect(r.mapping.chipTime).toBe('Net Time (final)')
+    expect(r.confidence.chipTime).toBe('review')
+    expect(autoMapColumns(['Bib', 'Net Time (hh:mm:ss)']).confidence.chipTime).toBe('exact')
+  })
+
+  it('an exact alias of another field is never taken as a substring guess for this one', () => {
+    // "Gun Time" contains no chip alias; "Chip Time" is exact for chip and must not become gun.
+    const r = autoMapColumns(['Chip Time', 'Bib'])
+    expect(r.mapping.gunTime).toBeUndefined()
+  })
+
+  it('the canonical template headers map exactly, every one', () => {
+    const r = autoMapColumns(['Bib Number', 'Participant Name', 'Chip Time', 'Gun Time', 'Status', 'Gender', 'Category', 'Age Group'])
+    expect(r.mapping).toEqual({
+      bibNumber: 'Bib Number', participantName: 'Participant Name', chipTime: 'Chip Time', gunTime: 'Gun Time',
+      status: 'Status', gender: 'Gender', category: 'Category', ageGroup: 'Age Group',
+    })
+    expect(Object.values(r.confidence).every(c => c === 'exact')).toBe(true)
+    expect(r.unmappedHeaders).toEqual([])
+  })
+})
+
+// ─── RD-RACEOPS-02E · clock-time headings are never guessed as a result time ──
+
+describe('RD-RACEOPS-02E · time-of-day headings never pre-select chipTime', () => {
+  const noTiming = (h: string) => {
+    const r = autoMapColumns(['Bib', h])
+    expect(r.mapping.chipTime, h).toBeUndefined()
+    expect(r.mapping.gunTime, h).toBeUndefined()
+    expect(r.unmappedHeaders, h).toContain(h)
+  }
+  it.each(['Start Time', 'Start', 'Start Time of Day', 'Finish Time of Day', 'Race Start Time', 'Lap 1', 'Split 2', 'Checkpoint 3 Time'])(
+    '"%s" is left unmapped', h => noTiming(h))
+
+  it('"Clock Time" stays the gun-time alias it always was — never chip time', () => {
+    const r = autoMapColumns(['Bib', 'Clock Time'])
+    expect(r.mapping.gunTime).toBe('Clock Time')
+    expect(r.mapping.chipTime).toBeUndefined()
+  })
+
+  it('a Start Time beside a real result column never wins it', () => {
+    for (const headers of [['Bib', 'Start Time', 'Elapsed Time'], ['Elapsed Time', 'Start Time', 'Bib'], ['Bib', 'Start Time', 'Time']]) {
+      const r = autoMapColumns(headers)
+      expect(r.mapping.chipTime, headers.join('|')).toBe(headers.includes('Elapsed Time') ? 'Elapsed Time' : 'Time')
+      expect(r.confidence.chipTime).toBe('review')
+      expect(r.unmappedHeaders).toContain('Start Time')
+    }
+  })
+
+  it('legitimate mappings are unchanged', () => {
+    expect(autoMapColumns(['Bib', 'Chip Time']).mapping.chipTime).toBe('Chip Time')
+    expect(autoMapColumns(['Bib', 'Net Time']).mapping.chipTime).toBe('Net Time')
+    expect(autoMapColumns(['Bib', 'Gun Time']).mapping.gunTime).toBe('Gun Time')
+    expect(autoMapColumns(['Bib', 'Chip Time']).confidence.chipTime).toBe('exact')
+    expect(autoMapColumns(['Bib', 'Net Time']).confidence.chipTime).toBe('exact')
+    expect(autoMapColumns(['Bib', 'Gun Time']).confidence.gunTime).toBe('exact')
+    for (const h of ['Official Time', 'Elapsed Time', 'Time', 'Elapsed']) {
+      const r = autoMapColumns(['Bib', h])
+      expect(r.mapping.chipTime, h).toBe(h)
+      expect(r.confidence.chipTime, h).toBe('review')
+    }
+  })
+
+  it('substring guesses come only from exact aliases of five or more characters', () => {
+    expect(autoMapColumns(['Bib', 'Net Time (final)']).mapping.chipTime).toBe('Net Time (final)')   // 'nettime' (exact, 7)
+    expect(autoMapColumns(['Bib', 'Sometime']).mapping.chipTime).toBeUndefined()                    // 'time' is generic and short
+    expect(autoMapColumns(['Bib', 'Timestamp']).mapping.chipTime).toBeUndefined()
+  })
+})
+
+describe('RD-RACEOPS-02E · sport vocabulary', () => {
+  it('Rider and Athlete → participantName, exactly', () => {
+    expect(autoMapColumns(['Bib', 'Rider']).mapping.participantName).toBe('Rider')
+    expect(autoMapColumns(['Bib', 'Rider']).confidence.participantName).toBe('exact')
+    expect(autoMapColumns(['Bib', 'Athlete']).mapping.participantName).toBe('Athlete')
+  })
+
+  it('Total alone → chipTime at review level; beside Chip Time or Net Time it never wins', () => {
+    const alone = autoMapColumns(['Bib', 'Total'])
+    expect(alone.mapping.chipTime).toBe('Total')
+    expect(alone.confidence.chipTime).toBe('review')
+    for (const headers of [['Bib', 'Total', 'Chip Time'], ['Chip Time', 'Total', 'Bib'], ['Bib', 'Total', 'Net Time']]) {
+      const r = autoMapColumns(headers)
+      expect(r.mapping.chipTime, headers.join('|')).toBe(headers.includes('Chip Time') ? 'Chip Time' : 'Net Time')
+      expect(r.confidence.chipTime, headers.join('|')).toBe('exact')
+      expect(r.unmappedHeaders, headers.join('|')).toContain('Total')
+    }
+  })
+})
+
+describe('RD-RACEOPS-02E · status words', () => {
+  it('the four outcomes and their accepted spellings still resolve', () => {
+    for (const [raw, want] of [['Finished', 'finished'], ['FIN', 'finished'], ['Finisher', 'finished'], ['Completed', 'finished'], ['DNF', 'dnf'], ['DNS', 'dns'], ['DQ', 'dq'], ['DSQ', 'dq'], ['Disqualified', 'dq'], [' dnf ', 'dnf'], ['SCR', 'dns'], ['Scratched', 'dns']] as const) {
+      expect(resolveStatus(raw), raw).toBe(want)
+      expect(isUnrecognisedStatus(raw), raw).toBe(false)
+    }
+  })
+  it.each(['LAP', 'OTL', 'DNP', 'Outside Time Limit', 'WAVE-2', 'DNF (injury)'])('"%s" is unrecognised — never a silent Finished', raw => {
+    expect(isUnrecognisedStatus(raw)).toBe(true)
+  })
+})

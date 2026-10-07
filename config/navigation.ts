@@ -1,11 +1,12 @@
 import type { LucideIcon } from 'lucide-react'
 import {
   Coins,
-  Home, CalendarDays, Users, CreditCard,
+  WalletCards,
+  CalendarDays,
   LayoutDashboard, Activity, Building2, Wallet, BarChart3,
   AlertTriangle, ClipboardCheck, ShieldAlert, PlusCircle, Undo2,
   Globe, SlidersHorizontal, ArrowRightLeft, ScrollText, KeyRound, Bell, Radio,
-  Gauge, LifeBuoy, Search, Boxes, FileText, Receipt,
+  Gauge, LifeBuoy, Search, Boxes, FileText, Receipt, Inbox,
 } from 'lucide-react'
 
 // ─── Route constants ─────────────────────────────────────────────────────────
@@ -18,7 +19,6 @@ export const ROUTES = {
   EVENTS:         '/events',
   CAUSES:         '/causes',
   CAMPAIGN:       '/campaign',
-  FOR_ORGANIZERS: '/platform',        // LS1: /for-organizers did not exist
   PRICING:        '/pricing',
 
   // Auth
@@ -40,11 +40,13 @@ export const ROUTES = {
   ADMIN_MODERATION:            '/admin/moderation',
   ADMIN_EVENT_APPROVALS:       '/admin/event-approvals',
   ADMIN_WALLET_TOPUPS:         '/admin/wallet-topups',
+  ADMIN_WALLET_MANAGEMENT:     '/admin/wallet-management',
   ADMIN_CLAWBACKS:             '/admin/clawbacks',
   ADMIN_LICENSES:              '/admin/licenses',
   ADMIN_REMINDERS:             '/admin/reminders',
   ADMIN_ANALYTICS:             '/admin/analytics',
   ADMIN_COMMUNICATIONS:        '/admin/communications',
+  ADMIN_WHATSAPP_INBOX:        '/admin/whatsapp-inbox',
   ADMIN_DOMAINS:               '/admin/domains',
   ADMIN_BUSINESS_CONFIG:       '/admin/business-configuration',
   /** MC-08.1 — Media Credits operations console. */
@@ -100,21 +102,11 @@ export const ROUTES = {
 
 export type AppRoute = (typeof ROUTES)[keyof typeof ROUTES]
 
-// ─── Nav items ────────────────────────────────────────────────────────────────
-// Add, remove, or reorder items here — the Navbar reads this array directly.
-
-export interface NavItem {
-  label: string
-  href:  string
-  icon:  LucideIcon
-}
-
-export const NAV_ITEMS: NavItem[] = [
-  { label: 'Home',           href: ROUTES.HOME,           icon: Home         },
-  { label: 'Events',         href: ROUTES.EVENTS,         icon: CalendarDays },
-  { label: 'For Organizers', href: ROUTES.FOR_ORGANIZERS, icon: Users        },
-  { label: 'Pricing',        href: ROUTES.PRICING,        icon: CreditCard   },
-]
+// NAV_ITEMS and its NavItem type lived here and were imported by nothing — the public header reads PRIMARY_NAV
+// from content/marketing/navigation.ts. It is removed with ROUTES.FOR_ORGANIZERS, the
+// '/platform' constant it was the sole consumer of, so no route table still names a
+// deleted page. The public "For Organizers" entry is unaffected: HomeNavbar resolves it
+// through getCta('login') → ROUTES.LOGIN.
 
 // ─── Platform Admin navigation registry ────────────────────────────────────────
 // Single source of truth for the admin shell's top bar. The `(admin)` layout
@@ -214,6 +206,10 @@ export const ADMIN_SIDEBAR_NAV: AdminNavGroup[] = [
         description: "Financial reporting and exports", keywords: "report export gst tax statement" },
       { label: 'Top-ups',         href: ROUTES.ADMIN_WALLET_TOPUPS,   icon: PlusCircle,
         description: "Organizer wallet top-ups", keywords: "wallet topup credit balance" },
+      // RD-WALLET-W2.e · Super Admin only (the page's API enforces requireSuperAdmin). Read-only
+      // except refund / carry-forward request decisions.
+      { label: 'Wallet Management', href: ROUTES.ADMIN_WALLET_MANAGEMENT, icon: WalletCards,
+        description: "Event services, refund and carry-forward requests, reconciliation", keywords: "wallet balance allowance credits refund reconciliation organizer event ledger" },
       { label: 'Clawbacks',       href: ROUTES.ADMIN_CLAWBACKS,       icon: Undo2,
         description: "Recover funds already released", keywords: "clawback recover reverse chargeback" },
       // MC-08.1 · Media Credits sits in Finance rather than Commerce: its primary figures
@@ -259,6 +255,11 @@ export const ADMIN_SIDEBAR_NAV: AdminNavGroup[] = [
         description: "Channel health and providers", keywords: "provider health email whatsapp sms push status" },
       { label: 'Comms Usage',          href: ROUTES.ADMIN_COMMUNICATIONS,       icon: Radio,
         description: "Usage, failures, costs and broadcasts", keywords: "email whatsapp broadcast usage cost failure" },
+      // WhatsApp Inbox (Phase 1c). Super Admin ONLY — every API behind it uses
+      // resolveSuperAdminUid, so a claim-only admin who opens it gets the page's access-denied
+      // state and no data. The admin nav has no per-item Super Admin gate to hide the row.
+      { label: 'WhatsApp Inbox',       href: ROUTES.ADMIN_WHATSAPP_INBOX,       icon: Inbox,
+        description: "Attendee WhatsApp replies across organizers, and unmatched messages", keywords: "whatsapp inbox replies messages conversations unmatched unrouted attendee" },
       { label: 'Reminders',            href: ROUTES.ADMIN_REMINDERS,            icon: Bell,
         description: "Scheduled reminder campaigns", keywords: "reminder schedule campaign" },
       { label: 'Domains',              href: ROUTES.ADMIN_DOMAINS,              icon: Globe,

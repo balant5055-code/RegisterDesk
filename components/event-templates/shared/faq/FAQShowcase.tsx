@@ -43,7 +43,7 @@ function FaqRow({
           aria-expanded={open}
           aria-controls={panelId}
           onClick={onToggle}
-          className="flex w-full items-center gap-3 py-4 text-left outline-none focus-visible:ring-2 focus-visible:ring-primary/40 focus-visible:ring-offset-2"
+          className="flex w-full items-center gap-3 py-4 text-left outline-none focus-visible:ring-2 focus-visible:ring-action/40 focus-visible:ring-offset-2"
         >
           <span className="flex-1 text-fs-md font-semibold leading-snug text-foreground">
             {item.question}
@@ -79,7 +79,7 @@ function FaqRow({
                   <span className="text-fs-2xs font-semibold uppercase tracking-wide text-muted-foreground/70">Related</span>
                   {item.relatedFaqs.filter(Boolean).map(rid => (
                     <button key={rid} type="button" onClick={() => onRelated(rid)}
-                      className="inline-flex items-center gap-1 rounded-full bg-primary/10 px-2.5 py-0.5 text-fs-xs font-semibold text-primary hover:bg-primary/15">
+                      className="inline-flex items-center gap-1 rounded-full bg-action/10 px-2.5 py-0.5 text-fs-xs font-semibold text-action hover:bg-action/15">
                       {rid}<ArrowRight className="size-3" aria-hidden />
                     </button>
                   ))}
@@ -250,7 +250,7 @@ export function FAQShowcase({
               onChange={e => setQuery(e.target.value)}
               placeholder="Search questions…"
               aria-label="Search questions"
-              className="h-11 w-full rounded-xl border border-border/70 bg-muted/15 pl-10 pr-9 text-fs-base text-foreground outline-none transition-all placeholder:text-muted-foreground/50 focus:border-primary/40 focus:bg-white focus:ring-2 focus:ring-primary/10"
+              className="h-11 w-full rounded-xl border border-border/70 bg-muted/15 pl-10 pr-9 text-fs-base text-foreground outline-none transition-all placeholder:text-muted-foreground/50 focus:border-action/40 focus:bg-white focus:ring-2 focus:ring-action/10"
             />
             {query && (
               <button type="button" onClick={() => setQuery('')} aria-label="Clear search"
@@ -266,7 +266,7 @@ export function FAQShowcase({
         {contactHref?.trim() && (
           <div className="mt-8 flex flex-wrap items-center justify-center gap-3 text-center">
             <span className="text-fs-base text-muted-foreground">Still have questions?</span>
-            <Link href={contactHref} className="inline-flex items-center gap-1.5 text-fs-base font-semibold text-primary hover:underline">
+            <Link href={contactHref} className="inline-flex items-center gap-1.5 text-fs-base font-semibold text-action hover:underline">
               {contactLabel}<ArrowRight className="size-4" aria-hidden />
             </Link>
           </div>

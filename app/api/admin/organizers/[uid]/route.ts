@@ -6,10 +6,12 @@
 // (fire-and-forget — the admin action never fails if email fails).
 
 import { NextRequest, NextResponse } from 'next/server'
+import { financialViewFor } from '@/lib/admin/financialGuard'
 import { adminDb }                   from '@/lib/firebase/admin'
 import { resolveAdminUid }           from '@/lib/admin/auth'
 import { setOrganizerAccountStatus, organizerActionRequiresReason } from '@/lib/admin/organizerService'
 import { ORGANIZER_ROLE }             from '@/lib/organizer/identity'
+import { resolveAccountStatus } from '@/lib/admin/organizerTypes'
 import type {
   AccountStatus,
   AdminOrganizerDetail,
@@ -27,9 +29,13 @@ function tsToISO(ts: unknown): string | null {
   return null
 }
 
-function effectiveStatus(s: AccountStatus | undefined): AccountStatus {
-  return s === 'suspended' || s === 'banned' ? s : 'active'
-}
+// RD-ORGANIZER-SIGNUP-FIX-02 (D1) · this route used to carry its own copy of the rule,
+// spelled `s === 'suspended' || s === 'banned' ? s : 'active'`. That shape is correct for
+// three values and silently wrong for a fourth: it coerced 'pending' to 'active', so the
+// detail modal showed a green Active badge for the same unverified signup the list row
+// beside it showed as Pending. It now delegates to the ONE resolver that lives beside the
+// type, exactly as app/api/admin/organizers/route.ts does.
+const effectiveStatus = resolveAccountStatus
 
 // ─── GET ──────────────────────────────────────────────────────────────────────
 
@@ -99,7 +105,8 @@ export async function GET(req: NextRequest, ctx: RouteContext): Promise<NextResp
     campaignCount: campaignsCount.data().count,
   }
 
-  return NextResponse.json(detail)
+  // RD-CLOSE — mixed moderation + money view: money fields are withheld unless Super Admin (ADMIN_UIDS).
+  return NextResponse.json(await financialViewFor(req, detail))
 }
 
 // ─── PATCH ────────────────────────────────────────────────────────────────────
@@ -130,6 +137,14 @@ export async function PATCH(req: NextRequest, ctx: RouteContext): Promise<NextRe
   }
 
   const result = await setOrganizerAccountStatus(uid, action, adminUid, reason)
+  // D3 · a refused transition is a CONFLICT with the account's current state, not a
+  // missing account — collapsing it into 404 would read as "this organizer is gone".
+  if (result.invalidTransition) {
+    return NextResponse.json(
+      { error: 'An unverified signup cannot be reactivated. It becomes active when the organizer verifies their email.' },
+      { status: 409 },
+    )
+  }
   if (!result.ok) return NextResponse.json({ error: 'Organizer not found' }, { status: 404 })
 
   return NextResponse.json({

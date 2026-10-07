@@ -21,15 +21,30 @@ export interface ChannelCapability {
   paid:          boolean
   /** Short billing label for honest UI ('Free', 'Per message', 'Unavailable'). */
   billingLabel:  string
-  /** The provider reports post-send delivery status (delivered/read). Email (SES) does NOT
-   *  today — no SES/SNS bounce webhook is wired — so its delivery stops at "accepted".
-   *  WhatsApp (Meta) DOES. Drives honest Accepted-vs-Delivered semantics + the "connect
-   *  delivery tracking" health recommendation. */
+  /**
+   * The provider reports post-send delivery status back to us.
+   *
+   * RD-COMM-03 · email was declared `false` here with a note saying no SES/SNS
+   * webhook was wired. That became stale: `app/api/webhooks/ses/route.ts`
+   * advances a log to `delivered` on an SES Delivery notification and to
+   * `failed` on a permanent bounce or complaint (signature-verified, fail-closed),
+   * and `app/api/webhooks/resend/route.ts` does the same for the Resend
+   * transport. Both reconcile through the existing `updateEmailLog`.
+   *
+   * The flag therefore made the platform under-report a capability it has, which
+   * surfaced as a standing "connect delivery tracking" recommendation for a
+   * channel that already tracks delivery.
+   *
+   * NOTE what this does NOT mean: `true` says the provider confirms DELIVERY, not
+   * that it reports reads. Only WhatsApp reports reads. Accepted-vs-Delivered
+   * semantics are unchanged — a message is 'delivered' only when a webhook says
+   * so, never because it was sent.
+   */
   deliveryReceipts: boolean
 }
 
 export const CHANNEL_CAPABILITIES: Record<CommChannelId, ChannelCapability> = {
-  email:    { id: 'email',    label: 'Email',    implemented: true,  paid: false, billingLabel: 'Free',        deliveryReceipts: false },
+  email:    { id: 'email',    label: 'Email',    implemented: true,  paid: false, billingLabel: 'Free',        deliveryReceipts: true  },
   whatsapp: { id: 'whatsapp', label: 'WhatsApp', implemented: true,  paid: true,  billingLabel: 'Per message', deliveryReceipts: true  },
   sms:      { id: 'sms',      label: 'SMS',      implemented: false, paid: true,  billingLabel: 'Unavailable', deliveryReceipts: false },
   push:     { id: 'push',     label: 'Push',     implemented: false, paid: false, billingLabel: 'Unavailable', deliveryReceipts: false },

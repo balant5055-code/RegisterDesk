@@ -193,9 +193,9 @@ export function ChallengeSelectionSection({
                 tabIndex={isSel ? 0 : -1}
                 onClick={() => setSelectedId(c.id)}
                 className={cn(
-                  'shrink-0 rounded-full border px-5 py-2.5 text-fs-md font-bold outline-none',
+                  'shrink-0 rounded-control border px-5 py-2.5 text-fs-md font-bold outline-none',
                   'transition-[background-color,border-color,color,box-shadow] duration-200',
-                  'focus-visible:ring-2 focus-visible:ring-primary/50 focus-visible:ring-offset-2',
+                  'focus-visible:ring-2 focus-visible:ring-action/50 focus-visible:ring-offset-2',
                   isSel
                     ? cn(BRAND_GRADIENT, 'border-transparent text-white shadow-md')
                     : 'border-border bg-card text-foreground hover:border-foreground/25 hover:bg-muted/40',
@@ -229,10 +229,10 @@ export function ChallengeSelectionSection({
                   <span className={cn(
                     'inline-flex items-center gap-2 rounded-full px-3 py-1 text-fs-2xs font-bold',
                     canRegister
-                      ? 'bg-primary/10 text-primary ring-1 ring-primary/20'
+                      ? 'bg-action/10 text-action ring-1 ring-action/20'
                       : 'bg-muted text-muted-foreground ring-1 ring-border',
                   )}>
-                    <span className={cn('size-1.5 rounded-full', canRegister ? 'bg-primary' : 'bg-muted-foreground/60')} aria-hidden />
+                    <span className={cn('size-1.5 rounded-full', canRegister ? 'bg-action' : 'bg-muted-foreground/60')} aria-hidden />
                     Registration {registrationLabel(selected, registrationOpen)}
                   </span>
 
@@ -261,10 +261,10 @@ export function ChallengeSelectionSection({
                 {overview.length > 0 && (
                   <div className={cn(SECTION_PAD, 'border-t border-border/40 bg-muted/30')}>
                     <h4 className={TYPE.cardTitle}>Overview</h4>
-                    <dl className="mt-4 grid grid-cols-2 gap-x-6 gap-y-5 sm:grid-cols-3 lg:grid-cols-5">
+                    <dl className="mt-4 grid grid-cols-1 gap-x-4 gap-y-5 min-[360px]:grid-cols-2 sm:grid-cols-3 lg:grid-cols-5">
                       {overview.map(o => (
                         <div key={o.label} className="flex min-w-0 items-start gap-2.5">
-                          <o.icon className="mt-0.5 size-[18px] shrink-0 text-primary" aria-hidden />
+                          <o.icon className="mt-0.5 size-[18px] shrink-0 text-action" aria-hidden />
                           <div className="min-w-0">
                             <dt className={TYPE.label}>{o.label}</dt>
                             <dd className="mt-1 truncate text-fs-md font-semibold text-foreground">{o.value}</dd>
@@ -279,7 +279,7 @@ export function ChallengeSelectionSection({
                 {selected.benefits.length > 0 && (
                   <div className={cn(SECTION_PAD, 'border-t border-border/40')}>
                     <h4 className={TYPE.cardTitle}>What&apos;s Included</h4>
-                    <ul className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+                    <ul className="mt-4 grid grid-cols-1 gap-3 min-[360px]:grid-cols-2 sm:grid-cols-3 lg:grid-cols-4">
                       {selected.benefits.map(b => {
                         const Icon = benefitIcon(b)
                         return (
@@ -287,7 +287,7 @@ export function ChallengeSelectionSection({
                             key={b}
                             className="flex min-h-14 items-center gap-3 rounded-xl bg-muted/50 px-3.5 py-3"
                           >
-                            <Icon className="size-[18px] shrink-0 text-primary" aria-hidden />
+                            <Icon className="size-[18px] shrink-0 text-action" aria-hidden />
                             <span className="min-w-0 text-fs-sm font-semibold leading-snug text-foreground">{b}</span>
                           </li>
                         )
@@ -299,7 +299,7 @@ export function ChallengeSelectionSection({
                       <ul className="mt-5 flex flex-wrap items-center gap-x-5 gap-y-2">
                         {selected.notes.map(n => (
                           <li key={n} className="inline-flex items-center gap-1.5 text-fs-sm text-muted-foreground">
-                            <Info className="size-3.5 shrink-0 text-primary/60" aria-hidden />{n}
+                            <Info className="size-3.5 shrink-0 text-action/60" aria-hidden />{n}
                           </li>
                         ))}
                       </ul>
@@ -315,7 +315,7 @@ export function ChallengeSelectionSection({
                       className={cn(
                         'group flex h-14 w-full items-center justify-center gap-2 rounded-xl text-fs-lg font-bold text-white shadow-md',
                         'transition-transform duration-200 hover:-translate-y-0.5 active:translate-y-0 motion-reduce:transform-none',
-                        'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 focus-visible:ring-offset-2',
+                        'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-action/50 focus-visible:ring-offset-2',
                         BRAND_GRADIENT,
                       )}
                     >
@@ -362,8 +362,8 @@ export function ChallengeSelectionSection({
                   <span className="shrink-0 text-fs-lg font-extrabold tracking-tight text-foreground">
                     {selected.isFree ? 'Free' : formatINR(selected.price)}
                   </span>
-                  <span className="hidden shrink-0 items-center gap-1.5 text-fs-2xs font-semibold text-primary sm:inline-flex">
-                    <span className="size-1.5 rounded-full bg-primary" aria-hidden />
+                  <span className="hidden shrink-0 items-center gap-1.5 text-fs-2xs font-semibold text-action sm:inline-flex">
+                    <span className="size-1.5 rounded-full bg-action" aria-hidden />
                     Registration Open
                   </span>
                 </div>
@@ -374,7 +374,7 @@ export function ChallengeSelectionSection({
                 className={cn(
                   'group inline-flex h-11 shrink-0 items-center justify-center gap-2 rounded-xl px-5 text-fs-md font-bold text-white shadow-sm sm:px-7',
                   'transition-transform duration-200 hover:-translate-y-0.5 active:translate-y-0 motion-reduce:transform-none',
-                  'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 focus-visible:ring-offset-2',
+                  'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-action/50 focus-visible:ring-offset-2',
                   BRAND_GRADIENT,
                 )}
               >

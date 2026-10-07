@@ -16,6 +16,25 @@
 //   2. Gate check-ins increment `registrationCounters/{slug}/attendanceShards/{k}`, never
 //      the base document — so a client reading the base gets a number that never moves,
 //      even if the rule were opened.
+//
+// ═══ RE-ANCHORED BY RD-CHECKIN-2.0 ═══════════════════════════════════════════
+// The invariant is UNCHANGED and still worth pinning; what changed is where the
+// check-in screen lives. `CheckInClient.tsx` and its four siblings were replaced by
+// ONE shared workspace under components/checkin/workspace/, rendered by both the
+// organizer page and the gate console. The assertions therefore moved to that
+// directory, and two of them were restated against the new names for the same
+// facts:
+//
+//   • the attendance endpoint is now /api/checkin/ops/[eventId] — a gate-shaped
+//     response (four numbers) rather than the organizer attendance endpoint, which
+//     also returns per-pass breakdowns a gate operator should not receive;
+//   • the degraded state is `statsUnavailable` (server-sent) rather than
+//     `countsStale` (client-inferred). Same requirement — never present an
+//     unreadable aggregate as a real number — enforced one layer earlier.
+//
+// The "does not zero the counters" assertion is kept verbatim in spirit and made
+// stronger: the workspace renders an em dash for null, so a `?? 0` anywhere in the
+// header would be the regression.
 
 import { describe, it, expect } from 'vitest'
 import { readFileSync, readdirSync, statSync } from 'node:fs'
@@ -23,8 +42,9 @@ import { resolve, join } from 'node:path'
 
 const read = (p: string) => readFileSync(resolve(process.cwd(), p), 'utf8')
 
-const CHECKIN_DIR = 'app/(dashboard)/dashboard/events/[eventId]/checkin'
-const CLIENT      = `${CHECKIN_DIR}/CheckInClient.tsx`
+const WORKSPACE_DIR = 'components/checkin/workspace'
+const CLIENT        = `${WORKSPACE_DIR}/CheckinWorkspace.tsx`
+const HEADER        = `${WORKSPACE_DIR}/AttendanceHeader.tsx`
 
 /** Strips line and block comments so the explanatory comments here are not false positives. */
 function code(src: string): string {
@@ -33,7 +53,7 @@ function code(src: string): string {
     .replace(/^\s*\/\/.*$/gm, '')
 }
 
-describe('CheckInClient reads attendance from the authorized API, not Firestore', () => {
+describe('the check-in workspace reads attendance from the authorized API, not Firestore', () => {
   const src = code(read(CLIENT))
 
   it('does not import the Firebase client SDK', () => {
@@ -48,56 +68,54 @@ describe('CheckInClient reads attendance from the authorized API, not Firestore'
     expect(src).not.toMatch(/onSnapshot/)
   })
 
-  it('calls the existing authorized attendance endpoint', () => {
-    expect(src).toMatch(/\/api\/organizer\/events\/\$\{eventId\}\/attendance/)
+  it('calls the authorized gate endpoint', () => {
+    expect(src).toMatch(/\/api\/checkin\/ops\/\$\{encodeURIComponent\(eventId\)\}/)
   })
 
   it('sends the bearer token with that request', () => {
-    expect(src).toMatch(/Authorization:\s*`Bearer \$\{token\}`/)
+    expect(src).toMatch(/Authorization:\s*`Bearer \$\{t\}`/)
   })
 
-  it('reads confirmedRegistrations, matching the counter base the UI has always shown', () => {
-    // `totalRegistrations` would silently change what the denominator means and make the
-    // figure jump on the first refresh.
-    expect(src).toMatch(/data\.confirmedRegistrations/)
-    expect(src).toMatch(/data\.checkedInCount/)
-  })
-
-  it('refreshes after a successful check-in rather than trusting the optimistic bump', () => {
-    expect(src).toMatch(/refreshAttendance/)
-    // The optimistic increment is retained (established pattern) but must be followed by a
-    // server read — so more than one call site exists.
-    expect(src.match(/refreshAttendance\(\)/g)?.length ?? 0).toBeGreaterThanOrEqual(4)
+  it('refreshes from the server after a successful check-in rather than bumping a local number', () => {
+    // The previous implementation incremented a client-held count and reconciled
+    // later. The counters are the authority, so the workspace re-reads instead —
+    // and it must do so from more than one place (admit, undo, walk-in, sync).
+    expect(src).toMatch(/load\(\{ quiet: true \}\)/)
+    expect(src.match(/load\(\{ quiet: true \}\)/g)?.length ?? 0).toBeGreaterThanOrEqual(4)
+    expect(src).not.toMatch(/setCtx\(c => \(c \? \{ \.\.\.c, checkedIn: c\.checkedIn \+ 1 \}/)
   })
 
   it('surfaces a degraded state instead of presenting stale numbers as current', () => {
-    expect(src).toMatch(/countsStale/)
-    expect(read(CLIENT)).toMatch(/Attendance count unavailable/)
+    expect(src).toMatch(/statsUnavailable/)
+    expect(read(HEADER)).toMatch(/Attendance counts are unavailable/)
   })
 
-  it('does not zero the counters when the refresh fails', () => {
-    // A `setLiveCheckedIn(0)` / `setLiveTotal(0)` in the failure path would show 0 as
-    // though it were a real count — the exact dishonesty this sprint removes.
-    expect(src).not.toMatch(/setLive(CheckedIn|Total)\(0\)/)
+  it('renders an unreadable aggregate as a dash, never as zero', () => {
+    const header = code(read(HEADER))
+    // The formatter is the single place a number becomes text, and it must not be
+    // able to turn "unknown" into "0".
+    expect(header).toMatch(/typeof n === 'number' \? n\.toLocaleString\('en-IN'\) : '—'/)
+    expect(header).not.toMatch(/checkedIn \?\? 0/)
+    expect(header).not.toMatch(/totalExpected \?\? 0/)
   })
 })
 
-describe('no sibling check-in component reintroduces a counter read', () => {
-  const files = readdirSync(resolve(process.cwd(), CHECKIN_DIR))
+describe('no sibling workspace component reintroduces a counter read', () => {
+  const files = readdirSync(resolve(process.cwd(), WORKSPACE_DIR))
     .filter(f => f.endsWith('.tsx'))
-    .map(f => join(CHECKIN_DIR, f).replace(/\\/g, '/'))
+    .map(f => join(WORKSPACE_DIR, f).replace(/\\/g, '/'))
 
-  it('covers every component in the check-in directory', () => {
+  it('covers every component in the workspace directory', () => {
     expect(files.length).toBeGreaterThanOrEqual(5)
-    expect(files.some(f => f.endsWith('CheckInClient.tsx'))).toBe(true)
+    expect(files.some(f => f.endsWith('CheckinWorkspace.tsx'))).toBe(true)
   })
 
   it.each(
-    readdirSync(resolve(process.cwd(), CHECKIN_DIR))
+    readdirSync(resolve(process.cwd(), WORKSPACE_DIR))
       .filter(f => f.endsWith('.tsx'))
-      .filter(f => statSync(resolve(process.cwd(), CHECKIN_DIR, f)).isFile()),
+      .filter(f => statSync(resolve(process.cwd(), WORKSPACE_DIR, f)).isFile()),
   )('%s does not read registrationCounters from the client', file => {
-    const src = code(read(`${CHECKIN_DIR}/${file}`))
+    const src = code(read(`${WORKSPACE_DIR}/${file}`))
     expect(src).not.toMatch(/registrationCounters/)
     expect(src).not.toMatch(/onSnapshot/)
   })

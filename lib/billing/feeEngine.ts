@@ -9,10 +9,16 @@
 //   • Only NEW transactions call this. Historical platformTransactions, refunds,
 //     settlements, reports and wallets keep their STORED fee values.
 //   • Refund reversals reverse the original STORED net — never re-resolve a license.
-//   • The fee is always derived server-side from the stored licenses; the client can
-//     never select a tier or influence the fee.
+//   • The fee is always derived server-side; the client can never select a rate or
+//     influence the fee.
+//
+// RD-CAPACITY-01 — the rate no longer comes from a licence tier. The capacity-based
+// commercial model has one platform rate, held in
+// `licensing.commercial.attendeeTransactionFeePercent` and applied by resolveFeeConfig.
+// `licenseTierToFeeTier` below is RETAINED, unchanged, because reporting and historical
+// reconciliation still map a STORED licence tier to the fee row it was charged under — it
+// is simply no longer consulted when pricing a new transaction.
 
-import { getWorkspaceEntitlements } from '@/lib/licensing/workspaceEntitlements'
 import { resolveFeeConfig } from '@/lib/fees/resolveFeeConfig'
 import type { PlatformPlanTier } from '@/lib/fees/types'
 import { LICENSE_VERSION_V2, type AnyEventLicenseTier, type LicenseVersion } from '@/lib/licensing/eventLicense'
@@ -53,12 +59,36 @@ export function licenseTierToFeeTier(tier: AnyEventLicenseTier, version: License
 }
 
 /**
- * Resolves the organizer's active fee plan. Always reads the stored licenses
- * server-side — there is no client-supplied path to a lower fee.
+ * The single fee row every NEW transaction resolves against.
+ *
+ * RD-CAPACITY-01 · the capacity-based commercial model has no tiers, so there is no longer a
+ * tier to look up and no per-organizer rate to resolve. `starter` is the canonical row:
+ * uncapped, with the same fixed and minimum components the great majority of organizers were
+ * already on. The PERCENTAGE it carries is overridden by
+ * `licensing.commercial.attendeeTransactionFeePercent` inside resolveFeeConfig, so the rate
+ * is configuration, not a table entry.
+ */
+const CANONICAL_FEE_TIER: PlatformPlanTier = 'starter'
+
+/**
+ * Resolves the fee plan for a NEW transaction.
+ *
+ * RD-CAPACITY-01 · this no longer reads the organizer's licences. Under one flat platform
+ * rate there is nothing organizer-specific left to resolve, and continuing to read a tier
+ * would leave the retired tier vocabulary quietly deciding money.
+ *
+ * Every financial-integrity rule above still holds, and the two that matter most are
+ * unchanged by this: historical transactions keep their STORED fee values, and refund
+ * reversals reverse the stored net rather than re-resolving anything. So this changes the
+ * rate for FUTURE transactions only — which is what a platform rate change means.
+ *
+ * `organizerUid` is retained in the signature: every caller passes it, the argument is what
+ * makes a future per-organizer negotiated rate a one-line change here, and removing it would
+ * churn four call sites on the payment path for no behavioural gain.
  */
 export async function getFeePlanForOrganizer(organizerUid: string): Promise<OrganizerFeePlan> {
-  const { effectiveTier, effectiveVersion } = await getWorkspaceEntitlements(organizerUid)
-  const planTier = licenseTierToFeeTier(effectiveTier, effectiveVersion)
+  void organizerUid   // reserved: a future per-organizer negotiated rate resolves here
+  const planTier = CANONICAL_FEE_TIER
   const headline = await resolveFeeConfig('event_registration', planTier)
   return {
     planTier,

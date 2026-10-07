@@ -184,7 +184,7 @@ export function ConferenceTemplate(props: EventDetailProps) {
               viewport={{ once: true, amount: 0.1 }}
               transition={{ duration: 0.5, ease: [0.25, 0, 0, 1] }}
             >
-              <p className="mb-2 text-[11px] font-bold uppercase tracking-[0.22em] text-primary">About</p>
+              <p className="mb-2 text-[11px] font-bold uppercase tracking-[0.22em] text-action">About</p>
               <h2 className="mb-6 text-2xl font-black tracking-tight text-gray-950 sm:text-[2rem]">
                 About This Conference
               </h2>

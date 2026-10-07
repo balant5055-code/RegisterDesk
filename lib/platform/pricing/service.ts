@@ -4,7 +4,8 @@
 // FULL merged result before persisting and stamps metadata (version bump +
 // updatedAt/updatedBy). Backs the admin API. NOTHING migrates existing data.
 
-import { resolvePlatformPricing, platformSettingsRef } from './resolver'
+import { FieldValue } from 'firebase-admin/firestore'
+import { resolvePlatformPricing, resolveStoredPlatformSettings, platformSettingsRef } from './resolver'
 import { validatePlatformSettings } from './validation'
 import {
   PRICING_TIER_IDS,
@@ -61,33 +62,72 @@ function applyPatch(cur: PlatformSettings, patch: PlatformSettingsPatch): Platfo
 }
 
 export type UpdateResult =
-  | { ok: true;  settings: PlatformSettings }
+  | { ok: true;  settings: PlatformSettings; changed: string[] }
   | { ok: false; errors: string[] }
+
+/** RD-PHASE4-S2 — the leaf paths whose values differ (metadata excluded). Pure. */
+export function changedSettingPaths(a: unknown, b: unknown, prefix = ''): string[] {
+  const isMap = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v)
+  if (isMap(a) && isMap(b)) {
+    const keys = [...new Set([...Object.keys(a), ...Object.keys(b)])].filter(k => !(prefix === '' && k === 'metadata')).sort()
+    return keys.flatMap(k => changedSettingPaths(a[k], b[k], prefix ? `${prefix}.${k}` : k))
+  }
+  return JSON.stringify(a) === JSON.stringify(b) ? [] : [prefix]
+}
+const valueAt = (obj: unknown, path: string): unknown =>
+  path.split('.').reduce<unknown>((o, k) => (o !== null && typeof o === 'object' ? (o as Record<string, unknown>)[k] : undefined), obj)
 
 /**
  * Validate + persist a patch. Returns the new effective settings, or the validation
  * errors (nothing is written on failure). Stamps a fresh metadata block (revision
  * bump + updatedAt/updatedBy). `nowIso` is injected so the caller controls the
  * timestamp source.
+ *
+ * RD-PHASE4-S2 — ONE TRANSACTION: the document is re-read inside it and the patch is applied to that
+ * FRESH state (only the requested fields change), so concurrent updates to different keys both
+ * survive and a concurrent update to the same key is serialized (the loser re-runs). The audit row —
+ * actor, changed setting paths, their previous and new values, the reason, a server timestamp — is
+ * written in the SAME transaction under the new revision's id: no change without its audit, and a
+ * failed audit write leaves the settings untouched. A patch that changes nothing writes nothing.
  */
 export async function updatePlatformSettings(
   patch:    PlatformSettingsPatch,
   adminUid: string,
   nowIso:   string,
+  audit: { collection: string; reason: string; data?: Record<string, unknown> },
 ): Promise<UpdateResult> {
-  const current = await resolvePlatformPricing()
-  const next    = applyPatch(current, patch)
+  const ref = platformSettingsRef()
+  return ref.firestore.runTransaction<UpdateResult>(async txn => {
+    const snap    = await txn.get(ref)
+    const current = resolveStoredPlatformSettings(snap.exists ? (snap.data() ?? {}) as Record<string, unknown> : null)
+    const next    = applyPatch(current, patch)
 
-  const check = validatePlatformSettings(next)
-  if (!check.ok) return { ok: false, errors: check.errors }
+    const check = validatePlatformSettings(next)
+    if (!check.ok) return { ok: false, errors: check.errors }
 
-  next.metadata = {
-    version:   (current.metadata.version ?? 0) + 1,   // monotonic revision counter
-    updatedAt: nowIso,
-    updatedBy: adminUid,
-  }
+    const changed = changedSettingPaths(current, next)
+    if (changed.length === 0) return { ok: true, settings: current, changed }
 
-  // Full overwrite — `next` is a complete, validated object.
-  await platformSettingsRef().set(next)
-  return { ok: true, settings: next }
+    next.metadata = {
+      version:   (current.metadata.version ?? 0) + 1,   // monotonic revision counter
+      updatedAt: nowIso,
+      updatedBy: adminUid,
+    }
+
+    // Full overwrite of a document DERIVED FROM THE FRESH READ in this transaction (not a stale copy).
+    txn.set(ref, next)
+    txn.set(ref.firestore.collection(audit.collection).doc(`platform_settings_v${next.metadata.version}`), {
+      ...(audit.data ?? {}),
+      adminUid, action: 'platform_settings.updated', entityType: 'platform_settings', entityId: 'default',
+      metadata: {
+        version: next.metadata.version,
+        reason:  audit.reason,
+        fields:  changed,
+        before:  Object.fromEntries(changed.map(p => [p, valueAt(current, p) ?? null])),
+        after:   Object.fromEntries(changed.map(p => [p, valueAt(next, p) ?? null])),
+      },
+      createdAt: FieldValue.serverTimestamp(),
+    })
+    return { ok: true, settings: next, changed }
+  })
 }

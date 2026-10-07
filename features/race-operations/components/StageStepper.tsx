@@ -2,7 +2,7 @@
 
 // RD-RACEOPS-01 · Race Operations — Publish Results stage indicator.
 //
-// Shows the six stages of the flow and where the organizer currently is. Purely
+// Shows the nine stages of the flow and where the organizer currently is. Purely
 // presentational; it holds no state and triggers no work. Uses the existing token
 // layer (bg-primary, border-border, text-muted-foreground) and `cn` — no new colours.
 
@@ -13,9 +13,12 @@ import { RACE_OPS_STAGE_ORDER, type RaceOpsStageKey } from '@/features/race-oper
 const STAGE_LABEL: Record<RaceOpsStageKey, string> = {
   event:    'Event',
   race:     'Race',
-  upload:   'Upload',
+  upload:   'Prepare & upload',
+  map:      'Map columns',
   validate: 'Validate',
-  preview:  'Preview',
+  verify:   'Verify',
+  rank:     'Rank',
+  review:   'Review',
   publish:  'Publish',
 }
 

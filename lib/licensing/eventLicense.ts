@@ -53,11 +53,24 @@ export type EventLicenseFeature =
   | 'advancedReports'
   | 'prioritySupport'
 
+/** Every feature key, in a stable order. RD-CAPACITY-01 added this so a consumer that has
+ *  to enumerate the features (the entitlements endpoint, an admin display) does so from ONE
+ *  list rather than a hand-written literal that silently drifts from the type. */
+export const EVENT_LICENSE_FEATURES: EventLicenseFeature[] = [
+  'offlineCheckin', 'teamAccess', 'apiAccess', 'whiteLabel',
+  'customDomain', 'advancedReports', 'prioritySupport',
+]
+
 // Numeric limits, resolved from an event's license tier.
 export type EventLicenseLimitKey =
   | 'maxRegistrations'
   | 'maxTeamMembers'
   | 'maxBroadcastRecipients'
+
+/** Every numeric limit key, in a stable order. */
+export const EVENT_LICENSE_LIMIT_KEYS: EventLicenseLimitKey[] = [
+  'maxRegistrations', 'maxTeamMembers', 'maxBroadcastRecipients',
+]
 
 // Sentinel for "no limit". A real JS number so comparisons (usage >= limit) just
 // work; the UI renders it as "Unlimited".
@@ -126,7 +139,7 @@ const V1_DEFINITIONS: Record<EventLicenseTier, EventLicenseDefinition> = {
     },
     featureList: [
       'Unlimited email', 'QR tickets', 'Certificates', 'Coupons', 'Early bird pricing',
-      'Multiple passes', 'Waitlist', 'Basic analytics', '1 team member',
+      'Multiple passes', 'Basic analytics', '1 team member',
     ],
   },
   growth: {
@@ -243,7 +256,24 @@ export interface EventLicenseDefinitionV2 extends Omit<EventLicenseDefinition, '
 
 // V2 definitions (FROZEN — the approved catalog). Non-price fields (team/broadcast limits,
 // feature flags, transaction fees, feature bullets) are foundation defaults aligned by role
-// with V1's progression; admin config may later override them. NONE of this is consumed yet.
+// with V1's progression; admin config may later override them.
+//
+// ═══ featureList IS PUBLIC COPY ══════════════════════════════════════════════
+// The trailing "NONE of this is consumed yet" that used to close the paragraph above is no
+// longer true and was worth correcting, because it is exactly why a false claim survived
+// here. `featureList` is spread straight into the /pricing tier cards by
+// buildPricingTiers(), and the entitlement flags below are enforced for real — apiAccess by
+// the api-keys route, offlineCheckin by /api/checkin/cache, whiteLabel by branding/service,
+// customDomain by domains/service, advancedReports by the entitlements route.
+//
+// 'Waitlist' was listed on V2 Free and V1 Starter while WAITLIST_ENABLED is false
+// platform-wide (lib/registrations/gate.ts) — so /pricing advertised, as a headline Free
+// feature, something no organizer on any tier can use. It is removed from the bullets only.
+// The waitlist implementation, its kill switch and its join route are untouched: this is a
+// display-truth correction, not a product change. Re-add the bullet when the switch flips.
+//
+// A bullet here is a PROMISE ON A PRICING PAGE. Before adding one, check the capability is
+// reachable at that tier — the flags in `features` are the honest place to look.
 const V2_DEFINITIONS: Record<EventLicenseTierV2, EventLicenseDefinitionV2> = {
   free: {
     tier: 'free', name: 'Free',
@@ -256,7 +286,7 @@ const V2_DEFINITIONS: Record<EventLicenseTierV2, EventLicenseDefinitionV2> = {
     },
     featureList: [
       'Unlimited email', 'QR tickets', 'Certificates', 'Coupons', 'Early bird pricing',
-      'Multiple passes', 'Waitlist', 'Basic analytics', '1 team member',
+      'Multiple passes', 'Basic analytics', '1 team member',
     ],
   },
   starter: {

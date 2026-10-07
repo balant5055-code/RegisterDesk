@@ -249,8 +249,11 @@ describe('the change is confined to the retry success write', () => {
     expect(failure).not.toContain('deliveryUnknown')
   })
 
-  it('broadcasts never carried the flag, so they are out of scope', () => {
-    expect(read('lib/broadcasts/whatsappJob.ts')).not.toContain('deliveryUnknown')
+  it('RD-CLOSE — a broadcast transport timeout is flagged UNKNOWN (no verdict from Meta), not failed', () => {
+    // The status webhook resolves it (acceptance recovery). The retry path is not involved.
+    const src = read('lib/broadcasts/whatsappJob.ts')
+    expect(src).toContain("failureReason === 'NETWORK_TIMEOUT'")
+    expect(src).toContain('deliveryUnknown: true')
   })
 
   it('the send path that SETS the flag is untouched', () => {

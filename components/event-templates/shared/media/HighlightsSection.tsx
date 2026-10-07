@@ -38,7 +38,7 @@ export function HighlightsSection({ promoVideoUrl, gallery, perks }: {
                 key={label}
                 className="flex flex-col items-center gap-1.5 rounded-lg border border-border/60 bg-background p-2.5 text-center"
               >
-                <span className="text-primary">{icon}</span>
+                <span className="text-action">{icon}</span>
                 <div>
                   <p className="text-xs font-semibold text-foreground">{label}</p>
                   {sub && <p className="text-[10px] text-muted-foreground">{sub}</p>}

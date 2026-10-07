@@ -40,7 +40,8 @@ export interface PayoutSnapshot {
 export interface PayoutHistoryFields {
   organizerUid:  string
   actorUid:      string
-  action:        'created' | 'updated'
+  /** RD-PHASE4-S4 — admin_verified / admin_rejected: a Super Admin review (D5), no field change. */
+  action:        'created' | 'updated' | 'admin_verified' | 'admin_rejected'
   changedFields: AuditedField[]
   /** Null on the first save — there was no previous destination. */
   previous:      MaskedDestination | null
@@ -53,7 +54,9 @@ export interface PayoutHistoryFields {
   verificationReset: boolean
   /** Whether the profile was verified immediately BEFORE this change. */
   wasVerified:   boolean
-  source:        'organizer_portal'
+  source:        'organizer_portal' | 'admin_review'
+  /** RD-PHASE4-S4 — the reviewer's reason (admin_review only). */
+  reason?:       string | null
   requestIp:     string | null
   userAgent:     string | null
 }
@@ -117,5 +120,40 @@ export function buildHistoryRecord(params: {
     source:    'organizer_portal',
     requestIp,
     userAgent,
+  }
+}
+
+/**
+ * RD-PHASE4-S4 · D5 — the record of a Super Admin verify / reject. Nothing about the destination
+ * changed, so previous and next are the SAME masked destination and changedFields is empty; what
+ * the row records is WHO reviewed WHICH destination, and why.
+ */
+export function buildAdminReviewHistoryRecord(params: {
+  organizerUid: string
+  actorUid:     string
+  snapshot:     PayoutSnapshot
+  action:       'admin_verified' | 'admin_rejected'
+  wasVerified:  boolean
+  reason:       string
+}): PayoutHistoryFields {
+  const { organizerUid, actorUid, snapshot, action, wasVerified, reason } = params
+  const masked = maskDestination(snapshot)
+  return {
+    organizerUid,
+    actorUid,
+    action,
+    changedFields: [],
+    previous:      masked,
+    next:          masked,
+    previousPanMasked:  maskPan(snapshot.panNumber),
+    nextPanMasked:      maskPan(snapshot.panNumber),
+    previousHolderName: snapshot.accountHolderName,
+    nextHolderName:     snapshot.accountHolderName,
+    verificationReset:  action === 'admin_rejected' && wasVerified,
+    wasVerified,
+    source:    'admin_review',
+    reason,
+    requestIp: null,
+    userAgent: null,
   }
 }

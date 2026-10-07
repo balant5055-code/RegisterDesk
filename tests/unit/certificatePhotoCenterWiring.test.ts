@@ -111,7 +111,9 @@ describe('the Certificate Center mounts AttendeePhotoCard', () => {
 
   it('creates the photo session against the documented endpoint and body', () => {
     expect(src).toMatch(/\/api\/events\/\$\{encodeURIComponent\(slug\)\}\/certificates\/photo\/session/)
-    expect(src).toMatch(/JSON\.stringify\(\{ certificateId \}\)/)
+    // RD-SEC-01 · the lookup's download capability travels with the mint request.
+    expect(src).toMatch(/JSON\.stringify\(\{ certificateId, capability \}\)/)
+    expect(src).toMatch(/open\(r\.certificateId, r\.downloadCapability\)/)
   })
 })
 

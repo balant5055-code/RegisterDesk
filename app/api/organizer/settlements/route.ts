@@ -20,6 +20,11 @@ import type {
   CreateSettlementResponse,
 } from '@/lib/settlements/types'
 import { getSettlementConfig } from '@/lib/settlements/resolveSettlementConfig'
+import { payoutBindingVersion, type SettlementPayoutDestination } from '@/lib/payout/binding'
+import { snapshotFromDoc } from '@/lib/payout/historyRecord'
+import { maskDestination } from '@/lib/payout/mask'
+import type { OrganizerPayoutProfileDoc } from '@/lib/payout/types'
+import { stageAdminAudit } from '@/lib/admin/audit'
 
 // ─── Timestamp helpers ────────────────────────────────────────────────────────
 
@@ -154,6 +159,23 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         .where('status', '==', 'pending')
         .limit(1),
     )
+    // RD-PHASE4-S4 · D5 — snapshot the VERIFIED destination this request is made against, read
+    // in the same transaction. Mark-paid later requires the profile to still be verified at this
+    // exact version (lib/payout/binding.ts). Masked label only — never a payout identifier.
+    const profileSnap = await tx.get(adminDb.doc(`organizerPayoutProfiles/${uid}`))
+    const profile     = profileSnap.exists ? profileSnap.data() as OrganizerPayoutProfileDoc : null
+    const bindVersion = payoutBindingVersion(profile)
+    if (bindVersion === null || !profile) {
+      return { ok: false, status: 422, error: PAYOUT_PROFILE_UNVERIFIED_MESSAGE }
+    }
+    let label: string | null = null
+    try { label = maskDestination(snapshotFromDoc(profile)).label } catch { label = null }
+    const payoutDestination: SettlementPayoutDestination = {
+      verifiedVersion: bindVersion,
+      verifiedBy:      profile.verifiedBy ?? null,
+      method:          profile.payoutMethod,
+      label,
+    }
 
     // ── validations ──
     if (!pendingSnap.empty) {
@@ -178,8 +200,19 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       paidAt:       null,
       adminNote:    '',
       reserved:     true,
+      payoutDestination,
     }
     tx.set(newRef, doc)
+    stageAdminAudit(tx, {
+      adminUid:    callerUid,
+      actorRole:   'organizer',
+      action:      'settlement.requested',
+      entityType:  'settlement',
+      entityId:    newRef.id,
+      after:       { status: 'pending', amountPaise, reserved: true },
+      metadata:    { organizerUid: uid, amountPaise, destination: label, destinationVersion: bindVersion },
+      correlation: { settlementId: newRef.id, organizerUid: uid },
+    })
     return { ok: true }
   })
 

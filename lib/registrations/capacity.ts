@@ -51,6 +51,78 @@ export function deriveStoredEventCapacity(eventData: {
   return isPaid ? null : 100
 }
 
+// ─── RD-FIN-02 · THE capacity summary every organizer / admin surface shows ─────────────────
+//
+// Four surfaces used to answer "what is this event's capacity?" four ways — the dashboard from
+// the LICENCE, the events list / Command Center from the client-writable DRAFT pass sums,
+// analytics from `totalCapacity` only when numeric, enforcement from deriveStoredEventCapacity.
+// They disagree after an admin override, for legacy tier licences, and whenever a draft is
+// edited. One definition now:
+//   total     = the ENFORCED capacity of the live event (deriveStoredEventCapacity — the gate's
+//               and the settlement transaction's own derivation). An uncapped event whose every
+//               LIVE pass is capped is bounded by Σ live pass quantities (source 'passes').
+//               Never the licence, never draft pricing. No live doc ⇒ the draft's intent.
+//   used      = registrationCounters.totalCount — exactly what the gate compares: confirmed
+//               registrations. A cancellation releases a seat; a REFUND does not (the
+//               registration stays confirmed until cancelled).
+//   remaining = max(0, total − used); overBy flags an oversell. Uncapped ⇒ null.
+
+export type EventCapacitySource = 'event' | 'passes' | 'unlimited' | 'draft' | 'unknown'
+
+export interface EventCapacitySummary {
+  total:     number | null
+  used:      number | null
+  remaining: number | null
+  overBy:    number
+  /** UNCLAMPED (an oversell reads > 100) — views clamp. */
+  fillPct:   number | null
+  source:    EventCapacitySource
+}
+
+function sumLivePassCaps(pricing: unknown): number | null {
+  const passes = (pricing as { passes?: unknown } | null | undefined)?.passes
+  if (!Array.isArray(passes) || passes.length === 0) return null
+  let sum = 0
+  for (const p of passes as Array<{ unlimited?: unknown; quantity?: unknown }>) {
+    if (p?.unlimited === true || typeof p?.quantity !== 'number' || !Number.isFinite(p.quantity)) return null
+    sum += p.quantity
+  }
+  return sum
+}
+
+export function resolveEventCapacitySummary(input: {
+  /** The LIVE events/{slug} data, or null when the event was never published. */
+  eventDoc:            Parameters<typeof deriveStoredEventCapacity>[0]
+  /** registrationCounters/{slug} data; null / absent doc ⇒ 0 used. */
+  counter:             { totalCount?: unknown } | null | undefined
+  /** The counter READ failed ⇒ used is unknown (never shown as 0). */
+  counterUnavailable?: boolean
+  /** The draft's intended capacity — consulted ONLY when there is no live doc. */
+  draftIntent?:        unknown
+}): EventCapacitySummary {
+  let total: number | null
+  let source: EventCapacitySource
+  if (input.eventDoc) {
+    const enforced = deriveStoredEventCapacity(input.eventDoc)
+    if (enforced !== null) { total = enforced; source = 'event' }
+    else { total = sumLivePassCaps(input.eventDoc.pricing); source = total === null ? 'unlimited' : 'passes' }
+  } else {
+    const i = input.draftIntent
+    total = typeof i === 'number' && Number.isInteger(i) && i > 0 ? i : null
+    source = total === null ? 'unknown' : 'draft'
+  }
+  const n = input.counter?.totalCount
+  const used = input.counterUnavailable ? null
+    : typeof n === 'number' && Number.isFinite(n) && n > 0 ? Math.trunc(n) : 0
+  if (total === null || used === null) return { total, used, remaining: null, overBy: 0, fillPct: null, source }
+  return {
+    total, used, source,
+    remaining: Math.max(0, total - used),
+    overBy:    Math.max(0, used - total),
+    fillPct:   total > 0 ? Math.round((used / total) * 100) : 0,
+  }
+}
+
 /**
  * Maps an Event License registration limit (from the license tier's
  * `limits.maxRegistrations`) to the capacity bucket that enforces it, so an event's

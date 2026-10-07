@@ -116,7 +116,7 @@ describe('CSV export', () => {
   it('contains the canonical financial headers that were previously absent', async () => {
     const header = (await (await GET(url(), ctx())).text()).split('\r\n')[0]
     for (const h of [
-      'Payment ID', 'Razorpay Order ID', 'Amount', 'Original Amount',
+      'Payment ID', 'Payment Order ID', 'Amount', 'Original Amount',
       'Discount Amount', 'Coupon Code', 'Refund Status', 'Refund Amount', 'Refund ID',
     ]) expect(header, `missing header: ${h}`).toContain(h)
   })
@@ -188,7 +188,7 @@ describe('XLSX export', () => {
 
   it('carries the same canonical columns as the CSV', async () => {
     const xml = Buffer.from(await (await GET(url('?format=xlsx'), ctx())).arrayBuffer()).toString('utf8')
-    for (const h of ['Payment ID', 'Razorpay Order ID', 'Dietary Preference', 'Refund ID']) {
+    for (const h of ['Payment ID', 'Payment Order ID', 'Dietary Preference', 'Refund ID']) {
       expect(xml, `missing column: ${h}`).toContain(h)
     }
   })

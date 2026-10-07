@@ -1,52 +1,45 @@
 'use client'
 
-import { useEffect, useState } from 'react'
-import { useAuth } from '@/components/auth/AuthProvider'
-import { Building2, UserCircle } from 'lucide-react'
+// Workspace chip — which workspace am I operating in?
+//
+// Owners see nothing (their own workspace is the default and needs no announcement).
+// Team members see the organization name plus their role, because operating inside
+// someone else's workspace is exactly the context you must never lose track of.
+//
+// RD-ORG-FOUNDATION: this used to make its own GET /api/organizer/workspace call. It
+// now reads the SAME result the sidebar's permission gate already fetched, removing
+// one of three identical requests a dashboard load was making. No behaviour change.
+
+import { Building2 } from 'lucide-react'
 import { cn } from '@/lib/utils/cn'
-import type { WorkspaceInfoResponse } from '@/app/api/organizer/workspace/route'
+import { useWorkspacePermissions } from '@/lib/hooks/useWorkspacePermissions'
 
 const ROLE_LABEL: Record<string, string> = {
   owner: 'Owner', admin: 'Admin', manager: 'Manager', checkin_staff: 'Check-in Staff', finance: 'Finance',
 }
 
-// Top-bar chip showing which workspace the user is operating in. Owners see
-// "Personal Workspace"; team members see the organization name + a role badge.
-export function WorkspaceBanner() {
-  const { user, getToken } = useAuth()
-  const [info, setInfo] = useState<WorkspaceInfoResponse | null>(null)
+export function WorkspaceBanner({ className }: { className?: string }) {
+  const { info } = useWorkspacePermissions(true)
 
-  // RD-AUTH-01 Phase 1 (M-A): reacts to the shared auth state instead of a private
-  // onAuthStateChanged listener; same fetch, same non-critical behaviour.
-  useEffect(() => {
-    if (user === undefined) return                 // auth still resolving
-    let cancelled = false
-    const run = async () => {
-      if (!user) { setInfo(null); return }
-      try {
-        const token = await getToken()
-        if (!token) return
-        const res = await fetch('/api/organizer/workspace', { headers: { Authorization: `Bearer ${token}` }, cache: 'no-store' })
-        if (!cancelled && res.ok) setInfo(await res.json() as WorkspaceInfoResponse)
-      } catch { /* banner is non-critical */ }
-    }
-    run()
-    return () => { cancelled = true }
-  }, [user, getToken])
-
-  if (!info) return null
+  // Owners get no chip. Showing "Personal Workspace" to the only person who could
+  // possibly be there is noise on every page, and this bar is scarce space.
+  if (!info || info.isOwner) return null
 
   return (
-    <div className="hidden items-center gap-2 rounded-lg border border-border bg-muted/40 px-2.5 py-1 md:inline-flex" aria-label="Current workspace">
-      {info.isOwner
-        ? <UserCircle className="size-4 text-muted-foreground" aria-hidden />
-        : <Building2 className="size-4 text-primary" aria-hidden />}
-      <span className="max-w-[180px] truncate text-[13px] font-medium text-foreground">{info.organizationName}</span>
-      {!info.isOwner && (
-        <span className={cn('rounded-full px-1.5 py-0.5 text-[10.5px] font-semibold capitalize ring-1', 'bg-primary/[0.08] text-primary ring-primary/20')}>
-          {ROLE_LABEL[info.role] ?? info.role}
-        </span>
+    <div
+      aria-label="Current workspace"
+      className={cn(
+        'hidden items-center gap-1.5 rounded-control border border-border bg-muted/50 px-2 py-0.5 md:inline-flex',
+        className,
       )}
+    >
+      <Building2 className="size-3.5 shrink-0 text-primary" aria-hidden />
+      <span className="max-w-[180px] truncate text-fs-xs font-medium text-foreground">
+        {info.organizationName}
+      </span>
+      <span className="rounded-control bg-primary/10 px-1 py-0.5 text-fs-2xs font-semibold capitalize text-primary">
+        {ROLE_LABEL[info.role] ?? info.role}
+      </span>
     </div>
   )
 }

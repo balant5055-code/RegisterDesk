@@ -17,7 +17,7 @@ import { FileSpreadsheet, Loader2, Upload, X } from 'lucide-react'
 import { Banner, Card } from '@/components/ui'
 import { cn } from '@/lib/utils/cn'
 import {
-  RESULTS_ACCEPTED_EXTENSIONS, RESULTS_FILE_ACCEPT, formatMaxFileSize,
+  PDF_SUPPORT_NOTE, RESULTS_FILE_ACCEPT, formatAcceptedExtensions, formatMaxFileSize,
 } from '@/features/race-operations/import'
 
 export interface ResultsFileDropzoneProps {
@@ -72,7 +72,7 @@ export function ResultsFileDropzone({
             id={inputId}
             type="file"
             accept={RESULTS_FILE_ACCEPT}
-            className="sr-only"
+            className="peer sr-only"
             disabled={busy}
             aria-describedby={hintId}
             onChange={e => { take(e.target.files); e.target.value = '' }}
@@ -92,9 +92,16 @@ export function ResultsFileDropzone({
           </p>
 
           <p id={hintId} className="mx-auto mt-1 max-w-sm text-fs-sm leading-relaxed text-muted-foreground">
-            Drag a file here, or choose one below. {RESULTS_ACCEPTED_EXTENSIONS.join(' and ')} up
+            Drag a file here, or choose one below. {formatAcceptedExtensions()} up
             to {formatMaxFileSize()}. Export it from your timing system exactly as it comes —
             you will map the columns in the next step.
+          </p>
+
+          {/* RD-RACEOPS-RESULTS-06 · the PDF caveat belongs where the file is chosen, not in
+              a help page read afterwards. One sentence, one claim, and no suggestion that a
+              photographed results sheet will work. */}
+          <p className="mx-auto mt-1.5 max-w-sm text-fs-2xs leading-relaxed text-muted-foreground">
+            {PDF_SUPPORT_NOTE}
           </p>
 
           <label
@@ -102,7 +109,10 @@ export function ResultsFileDropzone({
             className={cn(
               'mt-4 inline-flex cursor-pointer items-center gap-2 rounded-lg border border-border px-4 py-2',
               'text-fs-sm font-medium text-foreground transition-colors hover:bg-muted',
-              'focus-within:ring-2 focus-within:ring-primary',
+              // RD-RACEOPS-02C · the input is a SIBLING (sr-only), so `focus-within` on the
+              // label never fired and keyboard focus was invisible. `peer-focus-visible` reads
+              // the input's own focus and rings the label the organizer can see.
+              'peer-focus-visible:ring-2 peer-focus-visible:ring-primary peer-focus-visible:ring-offset-2',
               busy && 'pointer-events-none opacity-60',
             )}
           >

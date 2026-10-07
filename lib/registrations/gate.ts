@@ -5,7 +5,8 @@ import { getEventBySlug }          from '@/lib/firebase/firestore/events'
 import { getRegistrationCounter }  from '@/lib/firebase/firestore/registrationCounters'
 import { isContentTakenDown }      from '@/lib/admin/moderation'
 import { computePassAvailability, resolveTotalCapacity } from './capacity'
-import { todayISOInTz } from './salesWindow'
+import { resolveWaitlistSettings, type WaitlistSettingSource } from '@/lib/waitlist/waitlistSettings'
+import { todayISOInTz, nowLocalInTz, windowKey } from './salesWindow'
 import type {
   RegistrationGateResult, RegistrationBlockReason, CapacityPlan,
 } from './types'
@@ -141,10 +142,13 @@ export async function checkRegistrationGate(
   const pricing         = event.pricing as Record<string, unknown> | null
   const regOpenDate     = (pricing?.registrationOpenDate  as string | undefined) || ''
   const regEndDate      = (pricing?.registrationEndDate   as string | undefined) || ''
-  if (regOpenDate && today < regOpenDate) {
+  // RD-CE-FIX (sales window) — compared as local date-times in the event timezone, so a datetime
+  // bound opens/closes at its time (not a day late / at midnight). Date-only bounds are inclusive days.
+  const nowLocal = nowLocalInTz(tz)
+  if (regOpenDate && nowLocal < windowKey(regOpenDate, 'start')) {
     return { allowed: false, reason: 'REGISTRATION_NOT_OPEN' }
   }
-  if (regEndDate && today > regEndDate) {
+  if (regEndDate && nowLocal > windowKey(regEndDate, 'end')) {
     return { allowed: false, reason: 'REGISTRATION_CLOSED' }
   }
 
@@ -158,10 +162,10 @@ export async function checkRegistrationGate(
   if (pass.status === 'inactive') return { allowed: false, reason: 'PASS_INACTIVE' }
 
   // Per-pass sales window (date-only; event timezone for consistency)
-  if (pass.salesStartDate && today < pass.salesStartDate) {
+  if (pass.salesStartDate && nowLocal < windowKey(pass.salesStartDate, 'start')) {
     return { allowed: false, reason: 'PASS_SALES_NOT_OPEN' }
   }
-  if (pass.salesEndDate && today > pass.salesEndDate) {
+  if (pass.salesEndDate && nowLocal > windowKey(pass.salesEndDate, 'end')) {
     return { allowed: false, reason: 'PASS_SALES_ENDED' }
   }
 
@@ -185,8 +189,14 @@ export async function checkRegistrationGate(
   // join-only waitlist would strand attendees. Full events fall through to the
   // plain *_CAPACITY_FULL reasons. Flip WAITLIST_ENABLED to re-enable once
   // promotion is complete (see app/api/waitlist/join/route.ts).
+  //
+  // RD-EVENT-15A · the event's own switch is resolved by ONE function, shared with the
+  // join route and the organizer workspace. It used to read a top-level
+  // `events/{slug}.waitlistEnabled` that only the Waitlist tab's PATCH ever wrote, while
+  // the event BUILDER wrote `registrationForm.registrationRules.waitlistEnabled` — which
+  // nothing read. The builder's toggle therefore changed nothing here.
   const waitlistEnabled = WAITLIST_ENABLED &&
-    (event as unknown as Record<string, unknown>).waitlistEnabled === true
+    resolveWaitlistSettings(event as unknown as WaitlistSettingSource).enabled
 
   if (eventCapacity !== null && eventCount >= eventCapacity) {
     return waitlistEnabled

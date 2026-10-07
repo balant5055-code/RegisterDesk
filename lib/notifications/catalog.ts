@@ -62,6 +62,87 @@ export interface WalletRechargedEmailParams {
   newBalancePaise: number
 }
 
+/**
+ * RD-ORGANIZER-NOTIFY-03 · the platform's own notice that a signup completed.
+ *
+ * This is the first notification in the catalog addressed to the PLATFORM rather than
+ * to an organizer or an attendee: `to` is the configured support inbox, never a value
+ * a signup can influence. Everything else on it is organizer-supplied text, so the
+ * renderer escapes all of it. There is deliberately no OTP, no token, no password and
+ * no trust score here — an operational notice needs to say who registered, not how
+ * they proved it.
+ */
+/**
+ * RD-CAPACITY-01 · "your event is N% full".
+ *
+ * `capacity` and `registrations` are the numbers the threshold was computed FROM, carried
+ * so the message states them rather than only the percentage — an organizer deciding whether
+ * to buy more capacity needs the counts, not a ratio.
+ */
+export interface CapacityThresholdEmailParams {
+  to:            string
+  organizerName: string
+  eventName:     string
+  eventSlug:     string
+  threshold:     number   // 50 | 70 | 85 | 95 | 100
+  capacity:      number
+  registrations: number
+}
+
+/** One line of a verified event-service purchase (capacity or a prepaid service). */
+export interface ServicePurchaseLine {
+  label:      string
+  quantity:   number
+  basePaise:  number | null
+  gstPaise:   number | null
+  totalPaise: number
+}
+/** A balance after the purchase was applied (null when not measurable). */
+export interface ServicePurchaseBalance { label: string; purchased: number | null; used: number | null; remaining: number | null }
+
+/** Wallet-02 — a verified, applied purchase of event service quantities (organizer copy). */
+export interface ServicePurchasedEmailParams {
+  to:             string
+  organizerName:  string
+  eventName:      string
+  lines:          ServicePurchaseLine[]
+  /** What was actually collected for the whole order (incl. GST). */
+  amountPaise:    number
+  gstPaise:       number | null
+  discountPaise:  number | null
+  orderId:        string
+  paymentId:      string | null
+  purchasedAt:    string
+  balances:       ServicePurchaseBalance[]
+  walletUrl:      string
+}
+
+/** Wallet-02 — the same purchase, for the platform support inbox (branding.supportEmail). */
+export interface ServicePurchaseAdminEmailParams {
+  to:             string
+  organizerName:  string
+  organizerEmail: string
+  organizerUid:   string
+  eventName:      string
+  lines:          ServicePurchaseLine[]
+  amountPaise:    number
+  orderId:        string
+  paymentId:      string | null
+  purchasedAt:    string
+}
+
+export interface OrganizerRegisteredEmailParams {
+  /** The platform support inbox (branding.supportEmail). Server-resolved. */
+  to:               string
+  organizerName:    string
+  organizationName: string
+  organizerEmail:   string
+  /** The organizer's uid — the key an admin searches by. */
+  uid:              string
+  /** ISO 8601, taken from the request clock at activation. */
+  registeredAt:     string
+}
+
 // ─── Catalog ──────────────────────────────────────────────────────────────────
 
 export const NotificationType = {
@@ -119,6 +200,18 @@ export const NotificationType = {
   // Billing lifecycle (platform → organizer)
   LICENSE_PURCHASED:        'LICENSE_PURCHASED',
   WALLET_RECHARGED:         'WALLET_RECHARGED',
+  // Wallet-02 — every verified purchase of event service quantities (capacity, WhatsApp,
+  // certificates, photos): the organizer's copy, and the platform support inbox's copy.
+  SERVICE_PURCHASED:        'SERVICE_PURCHASED',
+  SERVICE_PURCHASE_ADMIN:   'SERVICE_PURCHASE_ADMIN',
+
+  // Platform operations (platform → platform). Addressed to the support inbox, not
+  // to a user — the only notification in this catalog the platform sends to itself.
+  ORGANIZER_REGISTERED:     'ORGANIZER_REGISTERED',
+
+  // Capacity utilisation (platform → organizer). RD-CAPACITY-01: the organizer is told as
+  // their event fills, and told at 100% that registrations are being refused.
+  CAPACITY_THRESHOLD:       'CAPACITY_THRESHOLD',
 
   // Marketing / free-form (organizer → attendee)
   CUSTOM_EMAIL:             'CUSTOM_EMAIL',
@@ -198,6 +291,11 @@ export type NotificationPayloadMap = {
 
   LICENSE_PURCHASED:         LicensePurchasedEmailParams
   WALLET_RECHARGED:          WalletRechargedEmailParams
+  SERVICE_PURCHASED:         ServicePurchasedEmailParams
+  SERVICE_PURCHASE_ADMIN:    ServicePurchaseAdminEmailParams
+
+  ORGANIZER_REGISTERED:      OrganizerRegisteredEmailParams
+  CAPACITY_THRESHOLD:        CapacityThresholdEmailParams
 
   CUSTOM_EMAIL:              CustomEmailParams
   BROADCAST:                 CustomEmailParams
@@ -250,6 +348,10 @@ export const NOTIFICATION_META: Record<NotificationType, NotificationMeta> = {
   PAYOUT_PROFILE_REJECTED:   PLATFORM(),
   LICENSE_PURCHASED:         PLATFORM(),
   WALLET_RECHARGED:          PLATFORM(),
+  SERVICE_PURCHASED:         PLATFORM(),
+  SERVICE_PURCHASE_ADMIN:    PLATFORM(),
+  ORGANIZER_REGISTERED:      PLATFORM(),
+  CAPACITY_THRESHOLD:        PLATFORM(),
   CUSTOM_EMAIL:              MARKETING(),
   BROADCAST:                 MARKETING(),
 }

@@ -11,6 +11,8 @@ import {
   buildNavigationCommands, buildEventTabCommands, buildEventActionCommands,
   availableEventActions, commandStrings,
 } from '@/lib/commandPalette/registry'
+import type { EventCapabilityContext } from '@/lib/events/eventCapabilities'
+import { FEATURE_FLAG_KEYS, type FeatureFlagsConfig } from '@/lib/config/businessConfig'
 import { EVENT_TABS } from '@/lib/events/eventTabs'
 
 let failures = 0
@@ -65,12 +67,40 @@ check('nav builder is cached (stable ref)', buildNavigationCommands() === nav)
 // ─── Event tab commands (deep-link into ManageEventClient) ────────────────────
 
 console.log('── registry: event-tab commands ──')
-const genericTabs = buildEventTabCommands('evt_1', 'conference', 'My Conf')
-// 18 total tabs minus the two gated ones (exhibition, nominations) = 16
-check('generic event hides gated tabs',   genericTabs.length === EVENT_TABS.length - 2)
-check('every tab command targets event',  genericTabs.every(c => c.kind === 'event-tab' && c.eventId === 'evt_1' && !!c.tab && !c.href))
-check('exhibition tab only for exhibition', buildEventTabCommands('e', 'exhibition').some(c => c.tab === 'exhibition'))
-check('awards event shows nominations',     buildEventTabCommands('e', 'awards').some(c => c.tab === 'nominations'))
+// RD-EVENT-16 · the builder now takes the event's CAPABILITIES rather than just its
+// type, and resolves visibility through the same function the tab bar uses. `ctx`
+// switches everything on except the per-event configuration under test.
+const ALL_FLAGS = Object.fromEntries(FEATURE_FLAG_KEYS.map(k => [k, true])) as unknown as FeatureFlagsConfig
+const ctx = (o: Partial<EventCapabilityContext> = {}): EventCapabilityContext => ({
+  eventType: 'conference', registrationRules: null, applications: null,
+  gate: { flags: ALL_FLAGS, has: () => true },
+  ...o,
+})
+const genericTabs = buildEventTabCommands('evt_1', ctx(), 'My Conf')
+// RD-EVENT-09 · The list now leads with the ROOT (the Event Command Center), which is a
+// plain `navigate` command because it has no `?tab=` value. Then the 16 tabs, minus the
+// two gated ones (exhibition, nominations).
+const rootCmd = genericTabs[0]
+const tabCmds = genericTabs.slice(1)
+check('the command center leads the list',  rootCmd.kind === 'navigate' && rootCmd.href === '/dashboard/events/evt_1' && !rootCmd.tab)
+check('the root is reachable by its old names', ['overview', 'home'].every(k => rootCmd.keywords.includes(k)))
+check('no retired tab command survives',    !genericTabs.some(c => c.tab === ('home' as never) || c.tab === ('overview' as never)))
+// Hidden for a conference with no applications and no waitlist: exhibition and
+// nominations (event type), waitlist (switch off), speakers and sponsors (forms closed).
+check('generic event hides gated tabs',     tabCmds.length === EVENT_TABS.length - 5)
+check('every tab command targets event',    tabCmds.every(c => c.kind === 'event-tab' && c.eventId === 'evt_1' && !!c.tab && !c.href))
+check('exhibition tab only for exhibition', buildEventTabCommands('e', ctx({ eventType: 'exhibition' })).some(c => c.tab === 'exhibition'))
+check('awards event shows nominations',     buildEventTabCommands('e', ctx({ eventType: 'awards' })).some(c => c.tab === 'nominations'))
+
+// ─── RD-EVENT-16 · capability gating ─────────────────────────────────────────
+const withWaitlist = ctx({ registrationRules: { waitlistEnabled: true } })
+const withSpeakers = ctx({ applications: { speaker: { enabled: true }, sponsor: { enabled: false } } })
+check('waitlist hidden when not enabled',   !genericTabs.some(c => c.tab === 'waitlist'))
+check('waitlist shown when enabled',        buildEventTabCommands('e', withWaitlist).some(c => c.tab === 'waitlist'))
+check('speakers hidden when apps closed',   !genericTabs.some(c => c.tab === 'speaker-applications'))
+check('speakers shown when apps open',      buildEventTabCommands('e', withSpeakers).some(c => c.tab === 'speaker-applications'))
+check('sponsors stay hidden independently', !buildEventTabCommands('e', withSpeakers).some(c => c.tab === 'sponsor-applications'))
+check('no capabilities yet → full list',    buildEventTabCommands('e', null).length === EVENT_TABS.length + 1)
 check('conference hides nominations',       !genericTabs.some(c => c.tab === 'nominations'))
 check('identifiers tab present (sports key)', genericTabs.some(c => c.tab === 'sports' && c.title.includes('Identifiers')))
 

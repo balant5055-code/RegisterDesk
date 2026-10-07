@@ -4,9 +4,10 @@ import { useCallback, useEffect, useState } from 'react'
 import Link                                 from 'next/link'
 import { auth }                             from '@/lib/firebase/auth'
 import { cn }                               from '@/lib/utils/cn'
-import { Loader2, X, ShieldOff, ShieldCheck, Ban, Eye, LayoutGrid } from 'lucide-react'
+import { Loader2, X, ShieldOff, ShieldCheck, Ban, Eye, LayoutGrid, Trash2 } from 'lucide-react'
 import { IconButton } from '@/components/ui'
 import { useConfirm } from '@/components/ui/ConfirmDialog'
+import { DeleteOrganizerDialog } from '@/components/admin/DeleteOrganizerDialog'
 import {
   AdminToolbar, StatusPill, TableFrame, THead, Th, TBody, Tr, Td, TableStateRow,
   SearchInput, FilterTabs, LoadMoreButton, ErrorBanner,
@@ -19,9 +20,14 @@ import type {
   AdminOrganizerDetail,
 } from '@/lib/admin/organizerTypes'
 
+// RD-ORGANIZER-SIGNUP-02 · "All" is every ORGANIZER — it does not include signups that
+// have not verified their email, because those are not organizers yet (the route excludes
+// them from the unfiltered list). "Pending" is how an admin asks to see them, and it is
+// the only way to reach them here.
 const STATUS_FILTERS: { value: '' | AccountStatus; label: string }[] = [
   { value: '',          label: 'All' },
   { value: 'active',    label: 'Active' },
+  { value: 'pending',   label: 'Pending' },
   { value: 'suspended', label: 'Suspended' },
   { value: 'banned',    label: 'Banned' },
 ]
@@ -39,6 +45,9 @@ function fmtDate(iso: string | null): string {
 
 const STATUS_TONE: Record<AccountStatus, PillTone> = {
   active:    'success',
+  // Neutral, not a warning: an unverified signup is an ordinary state on the way in,
+  // not something an admin has to act on.
+  pending:   'neutral',
   suspended: 'warning',
   banned:    'danger',
 }
@@ -59,6 +68,9 @@ export default function AdminOrganizersPage() {
 
   const [busyUid, setBusyUid] = useState<string | null>(null)
   const [detailUid, setDetailUid] = useState<string | null>(null)
+  // The row being considered for deletion. Held as the whole row, not just the uid, so the
+  // dialog can name the organizer immediately instead of flashing placeholders while it loads.
+  const [deleteTarget, setDeleteTarget] = useState<AdminOrganizerSummary | null>(null)
   const { confirm, prompt } = useConfirm()
 
   const load = useCallback(async (opts: { cursor?: string | null } = {}) => {
@@ -184,7 +196,10 @@ export default function AdminOrganizersPage() {
                     <Link href={`/admin/organizers/${o.uid}`} title="Open Organizer 360 console" className={btnGhost}>
                       <LayoutGrid className="size-3.5" />
                     </Link>
-                    {o.accountStatus !== 'active' && (
+                    {/* D3 · 'pending' is not a moderation state, so it has no Reactivate.
+                        Gated on the two states a reactivation can legally return FROM,
+                        rather than on "anything that is not active". */}
+                    {(o.accountStatus === 'suspended' || o.accountStatus === 'banned') && (
                       <button onClick={() => moderate(o.uid, 'reactivate')} disabled={busy} title="Reactivate" className={cn(btnGhost, 'text-emerald-600 hover:bg-emerald-50')}>
                         <ShieldCheck className="size-3.5" />
                       </button>
@@ -199,6 +214,18 @@ export default function AdminOrganizersPage() {
                         {busy ? <Loader2 className="size-3.5 animate-spin" /> : <Ban className="size-3.5" />}
                       </button>
                     )}
+                    {/* Delete — irreversible, so it is last in the cluster and the only action
+                        that opens a dialog. The dialog asks the SERVER whether this organizer is
+                        deletable; nothing here predicts that, because a prediction shown as an
+                        enabled-looking button is a promise the server may refuse. */}
+                    <button
+                      onClick={() => setDeleteTarget(o)}
+                      disabled={busy}
+                      title="Delete organizer"
+                      className={cn(btnGhost, 'text-red-700 hover:bg-red-50')}
+                    >
+                      <Trash2 className="size-3.5" />
+                    </button>
                   </div>
                 </Td>
               </Tr>
@@ -212,6 +239,22 @@ export default function AdminOrganizersPage() {
       )}
 
       {detailUid && <OrganizerDetailModal uid={detailUid} onClose={() => setDetailUid(null)} />}
+
+      {deleteTarget && (
+        <DeleteOrganizerDialog
+          uid={deleteTarget.uid}
+          fallback={{
+            name:             deleteTarget.name ?? '',
+            email:            deleteTarget.email ?? '',
+            organizationName: deleteTarget.organizationName ?? '',
+          }}
+          getToken={getToken}
+          onClose={() => setDeleteTarget(null)}
+          // Drop the row locally rather than refetching: the account is gone, and a refetch
+          // would briefly show it again on a stale read.
+          onDeleted={uid => setItems(prev => prev.filter(i => i.uid !== uid))}
+        />
+      )}
     </div>
   )
 }

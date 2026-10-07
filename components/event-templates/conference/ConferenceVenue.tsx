@@ -57,7 +57,7 @@ export function ConferenceVenue({ venueType, venueName, physical, online, mapsLi
           transition={{ duration: 0.5, ease: [0.25, 0, 0, 1] }}
           className="mb-10"
         >
-          <p className="mb-2 text-[11px] font-bold uppercase tracking-[0.22em] text-primary">Location</p>
+          <p className="mb-2 text-[11px] font-bold uppercase tracking-[0.22em] text-action">Location</p>
           <h2 className="text-2xl font-black tracking-tight text-gray-950 sm:text-[2rem]">Venue</h2>
         </motion.div>
 
@@ -73,7 +73,7 @@ export function ConferenceVenue({ venueType, venueName, physical, online, mapsLi
               className="rounded-2xl border border-gray-100 bg-gray-50 p-6"
             >
               <div className="mb-4 flex size-10 items-center justify-center rounded-xl bg-white ring-1 ring-gray-100">
-                <MapPin className="size-5 text-primary" aria-hidden />
+                <MapPin className="size-5 text-action" aria-hidden />
               </div>
               <h3 className="mb-1 text-[1.0625rem] font-bold text-gray-950">{venueName}</h3>
               {addressParts.length > 0 && (
@@ -86,7 +86,7 @@ export function ConferenceVenue({ venueType, venueName, physical, online, mapsLi
                   href={directionsHref}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-semibold text-gray-700 transition-all hover:border-primary/30 hover:text-primary"
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-semibold text-gray-700 transition-all hover:border-action/30 hover:text-action"
                 >
                   <Navigation className="size-3.5" aria-hidden />
                   Get Directions
@@ -106,7 +106,7 @@ export function ConferenceVenue({ venueType, venueName, physical, online, mapsLi
               className="rounded-2xl border border-gray-100 bg-gray-50 p-6"
             >
               <div className="mb-4 flex size-10 items-center justify-center rounded-xl bg-white ring-1 ring-gray-100">
-                <MonitorPlay className="size-5 text-primary" aria-hidden />
+                <MonitorPlay className="size-5 text-action" aria-hidden />
               </div>
               <h3 className="mb-1 text-[1.0625rem] font-bold text-gray-950">Online</h3>
               <p className="mb-4 text-sm text-gray-500">
@@ -117,7 +117,7 @@ export function ConferenceVenue({ venueType, venueName, physical, online, mapsLi
                   href={online.meetingUrl}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-semibold text-gray-700 transition-all hover:border-primary/30 hover:text-primary"
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-semibold text-gray-700 transition-all hover:border-action/30 hover:text-action"
                 >
                   <Globe className="size-3.5" aria-hidden />
                   Join Link
@@ -141,7 +141,7 @@ export function ConferenceVenue({ venueType, venueName, physical, online, mapsLi
               className="rounded-2xl border border-gray-100 bg-gray-50 p-6 lg:col-span-2"
             >
               <div className="mb-4 flex size-10 items-center justify-center rounded-xl bg-white ring-1 ring-gray-100">
-                <Info className="size-5 text-primary" aria-hidden />
+                <Info className="size-5 text-action" aria-hidden />
               </div>
               <h3 className="mb-2 text-[1.0625rem] font-bold text-gray-950">Getting Here</h3>
               <p className="whitespace-pre-line text-[0.875rem] leading-relaxed text-gray-500">

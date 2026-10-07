@@ -67,10 +67,15 @@ describe('the flag carries no authority', () => {
   })
 })
 
-describe('the page uses the canonical public shell', () => {
-  it('mounts MarketingPageLayout rather than a hand-rolled header', () => {
-    expect(src).toContain("import { MarketingPageLayout }")
-    expect(src).toContain('<MarketingPageLayout>')
+describe('the page uses a shared shell', () => {
+  it('mounts EventUtilityLayout rather than a hand-rolled header', () => {
+    // It used to mount MarketingPageLayout, which carried this exact composition. That
+    // layout now delegates to HomeShell for the marketing site; a registration-success
+    // page belongs to the EVENT experience, so the composition it always rendered moved
+    // to EventUtilityLayout and this page follows it. Same chrome, different seam.
+    expect(src).toContain("import { EventUtilityLayout }")
+    expect(src).toContain('<EventUtilityLayout>')
+    expect(src).not.toContain('MarketingPageLayout')
   })
 
   it('no longer renders the old inline brand strip', () => {

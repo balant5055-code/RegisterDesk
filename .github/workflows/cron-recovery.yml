@@ -85,6 +85,17 @@ jobs:
             -H "Authorization: Bearer $CRON_SECRET" \
             --retry 2 --retry-delay 5 --max-time 65 --fail-with-body
 
+      # RD-CAPACITY-01 — organizer capacity-threshold notifications (50/70/85/95/100%).
+      # Idempotent: each threshold is claimed in a Firestore transaction that re-decides from
+      # the stored state, so an overlapping run sends nothing. continue-on-error like every
+      # sibling here: a missed notification must not fail the whole recovery workflow.
+      - name: capacity-alerts
+        continue-on-error: true
+        run: |
+          curl -sS -X POST "$CRON_BASE_URL/api/cron/capacity-alerts" \
+            -H "Authorization: Bearer $CRON_SECRET" \
+            --retry 2 --retry-delay 5 --max-time 65 --fail-with-body
+
       - name: ops-alerts
         continue-on-error: true
         run: |

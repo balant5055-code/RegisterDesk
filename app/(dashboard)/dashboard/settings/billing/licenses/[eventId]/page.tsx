@@ -11,10 +11,9 @@ import { useParams } from 'next/navigation'
 import { auth } from '@/lib/firebase/auth'
 import { cn } from '@/lib/utils/cn'
 import {
-  Loader2, ArrowLeft, ArrowRight, Check, Minus, ShieldCheck, Gift, Sparkles,
+  Loader2, ArrowLeft, Check, Minus, ShieldCheck, Gift, Sparkles,
   Ticket, Clock, CreditCard, TrendingUp, AlertTriangle,
 } from 'lucide-react'
-import { useBranding } from '@/lib/config/brandingClient'
 import type {
   LicenseCenterDetail, LicenseCenterStatus, LicenseCenterPayment,
 } from '@/lib/organizer/licenseCenterTypes'
@@ -46,7 +45,6 @@ function Pill({ meta }: { meta: { label: string; cls: string } }) {
 export default function LicenseCenterPage() {
   const params  = useParams<{ eventId: string }>()
   const eventId = params?.eventId ?? ''
-  const branding = useBranding()
 
   const [detail, setDetail]   = useState<LicenseCenterDetail | null>(null)
   const [loading, setLoading] = useState(true)
@@ -149,14 +147,16 @@ export default function LicenseCenterPage() {
           <div className={cn('mt-3 flex items-center gap-2 rounded-lg px-3 py-2 text-[12.5px] font-medium',
             pct >= 100 ? 'bg-rose-50 text-rose-700' : pct >= 90 ? 'bg-orange-50 text-orange-700' : 'bg-amber-50 text-amber-700')}>
             <AlertTriangle className="size-4 shrink-0" />
-            {pct >= 100 ? 'Registration limit reached — upgrade to accept more registrations.'
-              : pct >= 90 ? 'Over 90% of your registration limit is used.'
-              : 'Over 80% of your registration limit is used.'}
+            {/* RD-CAPACITY-02 · "upgrade" named an action that no longer exists. The organizer
+                increases CAPACITY, from the event's settings. */}
+            {pct >= 100 ? 'Registration capacity reached — increase your capacity to accept more registrations.'
+              : pct >= 90 ? 'Over 90% of your registration capacity is used.'
+              : 'Over 80% of your registration capacity is used.'}
           </div>
         )}
         {d.limitOverridden && (
           <p className="mt-2 text-[12px] text-muted-foreground">
-            Registration limit adjusted by admin — tier default: <span className="font-medium text-foreground">{regLabel(d.baseRegistrationLimit)}</span>,
+            Registration capacity adjusted by admin — previous default: <span className="font-medium text-foreground">{regLabel(d.baseRegistrationLimit)}</span>,
             now: <span className="font-medium text-foreground">{regLabel(d.registrationLimit)}</span>.
           </p>
         )}
@@ -220,46 +220,8 @@ export default function LicenseCenterPage() {
         </Card>
       </div>
 
-      {/* ── Upgrade ── */}
-      {d.upgrade && d.status !== 'cancelled' && (
-        <Card title="Upgrade this event" icon={<TrendingUp className="size-4" />} subtitle={`Move from ${d.tierName} to ${d.upgrade.nextTierName} for more capacity and features.`}>
-          <div className="flex flex-wrap items-center gap-3">
-            <div className="rounded-xl border border-border bg-muted/20 px-4 py-3">
-              <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Current</p>
-              <p className="text-[15px] font-bold text-foreground">{d.tierName}</p>
-            </div>
-            <ArrowRight className="size-4 text-muted-foreground" />
-            <div className="rounded-xl border border-primary/30 bg-primary/[0.04] px-4 py-3">
-              <p className="text-[11px] font-semibold uppercase tracking-wide text-primary">Upgrade to</p>
-              <p className="text-[15px] font-bold text-foreground">{d.upgrade.nextTierName}</p>
-            </div>
-            <div className="ml-auto text-right">
-              <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Price difference</p>
-              <p className="text-[18px] font-bold text-foreground">{d.upgrade.priceDifferencePaise > 0 ? rupees(d.upgrade.priceDifferencePaise) : 'Free'}</p>
-            </div>
-          </div>
-
-          <div className="mt-4">
-            <p className="mb-2 text-[12px] font-semibold uppercase tracking-wide text-muted-foreground">What you get</p>
-            <ul className="grid grid-cols-1 gap-1.5 sm:grid-cols-2">
-              {d.upgrade.benefits.map(b => (
-                <li key={b} className="flex items-center gap-2 text-[13px] text-foreground">
-                  <Check className="size-3.5 shrink-0 text-emerald-500" /> {b}
-                </li>
-              ))}
-            </ul>
-          </div>
-
-          <a
-            href={`mailto:${branding.supportEmail}?subject=${encodeURIComponent(`Upgrade request: ${d.eventName} → ${d.upgrade.nextTierName}`)}&body=${encodeURIComponent(`I'd like to upgrade the license for event ${d.eventId} from ${d.tierName} to ${d.upgrade.nextTierName}.`)}`}
-            className="mt-4 inline-flex items-center gap-1.5 rounded-lg px-4 py-2 text-[13px] font-semibold text-primary-foreground shadow-sm"
-            style={{ backgroundImage: 'var(--primary-gradient)' }}
-          >
-            Request upgrade <ArrowRight className="size-3.5" />
-          </a>
-          <p className="mt-2 text-[11.5px] text-muted-foreground">Upgrades for a published event are processed by our team.</p>
-        </Card>
-      )}
+      {/* RD-CLOSE — the "Upgrade this event" (tier) card was removed: licence tiers are retired and the
+          API always returns upgrade: null. Capacity and services are bought from the event Wallet. */}
     </div>
   )
 }

@@ -3,6 +3,9 @@
 // readiness builders. No server imports (env-free), so these run in the pure vitest env.
 
 import { describe, it, expect } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
+
 import {
   CHANNEL_CAPABILITIES,
   isChannelImplemented,
@@ -18,6 +21,11 @@ const configured = (over: Partial<ChannelSignals> = {}): ChannelSignals => ({
   templatesAvailable: true, ...over,
 })
 
+const read = (p: string) => readFileSync(resolve(process.cwd(), p), 'utf8')
+/** Comments are intent, not behaviour — strip them before asserting on source. */
+const code = (src: string) =>
+  src.replace(/\/\*[\s\S]*?\*\//g, '').split('\n').filter(l => !l.trim().startsWith('//')).join('\n')
+
 describe('channel capability SSOT', () => {
   it('marks only email and whatsapp as implemented', () => {
     expect(isChannelImplemented('email')).toBe(true)
@@ -30,6 +38,96 @@ describe('channel capability SSOT', () => {
     expect(CHANNEL_CAPABILITIES.whatsapp.paid).toBe(true)
     expect(CHANNEL_CAPABILITIES.sms.billingLabel).toBe('Unavailable')
     expect(CHANNEL_CAPABILITIES.push.billingLabel).toBe('Unavailable')
+  })
+
+  // ═══ RD-COMM-03 · the capability caught up with the implementation ══════════
+  //
+  // Email was declared `deliveryReceipts: false` on the grounds that no SES/SNS
+  // webhook was wired. Both `app/api/webhooks/ses/route.ts` and
+  // `app/api/webhooks/resend/route.ts` advance a log to `delivered`, and to
+  // `failed` on a permanent bounce or complaint — so the flag was under-reporting
+  // a capability the platform has, and produced a standing "connect delivery
+  // tracking" recommendation for a channel that already tracks delivery.
+  it('email and whatsapp report delivery receipts; sms/push cannot', () => {
+    expect(CHANNEL_CAPABILITIES.email.deliveryReceipts).toBe(true)
+    expect(CHANNEL_CAPABILITIES.whatsapp.deliveryReceipts).toBe(true)
+    // A channel with no transport can never report anything back.
+    expect(CHANNEL_CAPABILITIES.sms.deliveryReceipts).toBe(false)
+    expect(CHANNEL_CAPABILITIES.push.deliveryReceipts).toBe(false)
+  })
+
+  it('a channel cannot report receipts without a transport', () => {
+    for (const cap of Object.values(CHANNEL_CAPABILITIES)) {
+      if (cap.deliveryReceipts) expect(cap.implemented, cap.id).toBe(true)
+    }
+  })
+})
+
+// ════════════════════════════════════════════════════════════════════════════
+// RD-COMM-03 — the recommendation the stale flag was producing
+// ════════════════════════════════════════════════════════════════════════════
+//
+// `deriveRecommendations` is private behind an async server resolver, so its rule
+// is pinned from SOURCE. That is enough to prove the correction: the branch is
+// gated on `!p.deliveryReceipts`, and email is now `true`, so the "delivery
+// tracking not connected" recommendation can no longer be produced for email —
+// while every other rule is asserted to still be there.
+
+describe('RD-COMM-03 · the delivery-tracking recommendation', () => {
+  const OVERVIEW = code(read('lib/communications/health/adminOverview.ts'))
+
+  it('is driven ONLY by the capability flag, which email now satisfies', () => {
+    expect(OVERVIEW).toContain('if (!p.deliveryReceipts) {')
+    expect(OVERVIEW).toContain('delivery tracking not connected')
+    // The flag is read straight from the SSOT — no second source of truth.
+    expect(OVERVIEW).toContain('deliveryReceipts: cap.deliveryReceipts')
+    // …and email satisfies it, so the branch cannot fire for email.
+    expect(CHANNEL_CAPABILITIES.email.deliveryReceipts).toBe(true)
+  })
+
+  it('leaves every unrelated health rule exactly as it was', () => {
+    for (const rule of [
+      'is not available yet',                       // no transport
+      'provider not connected',                     // missing credentials
+      'disabled in Business Configuration',         // switched off
+    ]) {
+      expect(OVERVIEW, rule).toContain(rule)
+    }
+  })
+
+  it('no NEW recommendation was invented for this correction', () => {
+    // Exactly four `out.push({` recommendation sites, the same four as before.
+    expect((OVERVIEW.match(/out\.push\(\{/g) ?? []).length).toBe(4)
+  })
+})
+
+// ════════════════════════════════════════════════════════════════════════════
+// RD-COMM-03 — delivery semantics are UNTOUCHED
+// ════════════════════════════════════════════════════════════════════════════
+
+describe('RD-COMM-03 · sent, delivered and failed still mean what they meant', () => {
+  const SES    = code(read('app/api/webhooks/ses/route.ts'))
+  const RESEND = code(read('app/api/webhooks/resend/route.ts'))
+
+  it('delivered is written ONLY by a provider webhook, never by sending', () => {
+    for (const [name, src] of [['ses', SES], ['resend', RESEND]] as const) {
+      expect(src, name).toContain("updateEmailLog(logId, 'delivered')")
+      // A bounce already recorded must never be overwritten by a late delivery.
+      expect(src, name).toContain("d.status !== 'failed'")
+    }
+  })
+
+  it('a permanent failure is recorded as failed, with its reason', () => {
+    for (const [name, src] of [['ses', SES], ['resend', RESEND]] as const) {
+      expect(src, name).toContain("updateEmailLog(logId, 'failed'")
+    }
+  })
+
+  it('nothing equates sent with delivered', () => {
+    for (const src of [SES, RESEND]) {
+      expect(src).not.toMatch(/sent\s*===?\s*delivered/)
+      expect(src).not.toMatch(/status:\s*'delivered'\s*\}\s*\)\s*\/\/\s*sent/)
+    }
   })
 })
 

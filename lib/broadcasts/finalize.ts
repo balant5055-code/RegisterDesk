@@ -10,6 +10,7 @@ import { enqueueWebhook }          from '@/lib/integrations/webhooks'
 import { crmRecordBroadcastBatch } from '@/lib/crm/service'
 import { notifyBroadcastComplete } from '@/lib/notifications/inbox/notify'
 import type { BroadcastChannel }   from '@/lib/broadcasts/types'
+import { settleBroadcastBilling }  from '@/lib/communications/billing'
 
 // Only the campaign fields finalize needs (send.ts CampaignData is a superset).
 export interface FinalizeCampaign {
@@ -40,14 +41,26 @@ export async function finalizeBroadcast(
 
   await ref.update({ status: finalStatus, successCount, failCount, sentAt: FieldValue.serverTimestamp() })
 
+  // RD-INTEG · D3 — charge on accept: return the money/prepaid units of every recipient WhatsApp
+  // did not accept. `successCount` here IS the accepted count (the WhatsApp caller passes the
+  // recipients marked sent). Email broadcasts are free and carry no charge to settle.
+  let costPaise = c.actualCostPaise ?? 0
+  if (c.channel === 'whatsapp') {
+    try { costPaise = (await settleBroadcastBilling(campaignId, successCount)).netCostPaise }
+    catch (err) { console.error('[broadcast] billing settlement failed — the sweep retries it:', { campaignId, err: err instanceof Error ? err.message : err }) }
+  }
+
   // H.4.3: record broadcast completion in the organizer Notification Center inbox.
   void notifyBroadcastComplete({ workspaceUid: uid, broadcastId: campaignId, status: finalStatus, sent: successCount, failed: failCount })
 
   // ── Usage tracking — reconciles with the ledger (costPaise = charged amount) ──
-  if (successCount > 0) {
-    void adminDb.collection('communicationUsage').add({
+  // RD-CLOSE — a WhatsApp campaign's usage record is written by its billing settlement, atomically
+  // with the money (settleBroadcastBilling). Only free email broadcasts are recorded here.
+  if (successCount > 0 && c.channel !== 'whatsapp') {
+    // Deterministic id (bc_<campaignId>): one row per campaign, and settlement can correct it.
+    void adminDb.collection('communicationUsage').doc(`bc_${campaignId}`).set({
       organizerUid: uid, eventId: c.eventId, eventSlug: c.eventSlug, eventName: c.eventName,
-      channel: c.channel, quantity: successCount, costPaise: c.actualCostPaise ?? 0,
+      channel: c.channel, quantity: successCount, costPaise,
       campaignId, templateKey: 'broadcast', createdAt: FieldValue.serverTimestamp(),
     }).catch(() => {})
   }

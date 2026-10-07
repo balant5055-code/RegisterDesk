@@ -13,7 +13,10 @@ import {
 } from '@/features/race-operations/components/public/ResultsChrome'
 import { ResultsSearch } from '@/features/race-operations/components/public/ResultsSearch'
 import {
-  LEADERBOARD_PAGE_SIZE, getLeaderboard, searchRace,
+  decodeLeaderboardCursor, encodeLeaderboardCursor,
+} from '@/features/race-operations/utils/publicKeys'
+import {
+  getLeaderboard, searchRace,
 } from '@/features/race-operations/services/publicResults'
 
 const BASE_URL = process.env.NEXT_PUBLIC_BASE_URL ?? 'https://registerdesk.in'
@@ -22,7 +25,7 @@ export const revalidate = 300
 
 type Params = {
   params:       Promise<{ eventSlug: string; passSlug: string }>
-  searchParams: Promise<{ q?: string; after?: string }>
+  searchParams: Promise<{ q?: string; after?: string; before?: string }>
 }
 
 export async function generateMetadata({ params }: Params): Promise<Metadata> {
@@ -35,7 +38,7 @@ export async function generateMetadata({ params }: Params): Promise<Metadata> {
   const description =
     `Official ${race.passName} results for ${race.eventName}: `
     + `${race.finisherCount.toLocaleString('en-IN')} finishers. `
-    + 'Search by bib number or runner name.'
+    + 'Search by bib number or participant name.'
   const url = `${BASE_URL}/results/${eventSlug}/${passSlug}`
 
   return {
@@ -51,14 +54,18 @@ export async function generateMetadata({ params }: Params): Promise<Metadata> {
 
 export default async function RaceLeaderboardPage({ params, searchParams }: Params) {
   const { eventSlug, passSlug } = await params
-  const { q, after } = await searchParams
+  const { q, after, before } = await searchParams
 
   const query = (q ?? '').trim()
-  const afterRank = after !== undefined && Number.isFinite(Number(after)) ? Number(after) : null
+  // RD-RACEOPS-02C · opaque (rank, entry) cursors; anything malformed lands on page one.
+  const afterCursor  = decodeLeaderboardCursor(after)
+  const beforeCursor = afterCursor ? null : decodeLeaderboardCursor(before)
+  const cursor    = afterCursor ?? beforeCursor
+  const direction = beforeCursor ? 'before' : 'after'
 
   // Search mode and leaderboard mode are separate reads — a search never pages the board.
   const searching = query !== ''
-  const board = searching ? null : await getLeaderboard(eventSlug, passSlug, afterRank).catch(() => null)
+  const board = searching ? null : await getLeaderboard(eventSlug, passSlug, cursor, direction).catch(() => null)
   const found  = searching ? await searchRace(eventSlug, passSlug, query).catch(() => null) : null
 
   const race = board?.race ?? found?.race
@@ -67,13 +74,11 @@ export default async function RaceLeaderboardPage({ params, searchParams }: Para
   const rows = searching ? (found?.rows ?? []) : (board?.rows ?? [])
   const baseHref = `/results/${eventSlug}/${passSlug}`
 
-  // RD-RESULTS-PUBLIC-FIX-01 · paging arithmetic, derived from the page we are on.
-  // `LEADERBOARD_PAGE_SIZE` is the server's own constant, so this cannot drift from the
-  // page size the query actually uses.
-  const prevStart = afterRank === null ? null : afterRank - LEADERBOARD_PAGE_SIZE
-  const prevHref  = prevStart !== null && prevStart > 0
-    ? `${baseHref}?after=${prevStart}`
-    : baseHref
+  // RD-RACEOPS-02C · both links carry a real cursor from the page we are on. The rank
+  // arithmetic that used to derive "Previous" assumed ranks are contiguous, which ties
+  // break — the backward query is the exact previous page.
+  const prevHref = board?.prevCursor ? `${baseHref}?before=${encodeLeaderboardCursor(board.prevCursor)}` : null
+  const nextHref = board?.nextCursor ? `${baseHref}?after=${encodeLeaderboardCursor(board.nextCursor)}` : null
   const ranked = rows.filter(r => r.overallRank !== null)
   const firstRankShown = ranked[0]?.overallRank ?? 0
   const lastRankShown  = ranked[ranked.length - 1]?.overallRank ?? 0
@@ -118,7 +123,7 @@ export default async function RaceLeaderboardPage({ params, searchParams }: Para
       <ResultsSearch
         action={baseHref}
         initialQuery={query}
-        hint="Enter a full bib number, or the start of a runner's name."
+        hint="Enter a full bib number, or the start of a participant's name."
       />
 
       {searching ? (
@@ -129,7 +134,7 @@ export default async function RaceLeaderboardPage({ params, searchParams }: Para
                 ? 'No matches'
                 : `${rows.length} ${rows.length === 1 ? 'match' : 'matches'}`}
             </h2>
-            <Link href={baseHref} className="text-fs-sm font-medium text-primary hover:underline">
+            <Link href={baseHref} className="text-fs-sm font-medium text-action hover:underline">
               Back to full leaderboard
             </Link>
           </div>
@@ -160,19 +165,17 @@ export default async function RaceLeaderboardPage({ params, searchParams }: Para
               This was forward-only: a spectator on page 6 of a 10,000-runner race could
               only restart from the top.
 
-              PREVIOUS is derived, not stored. The leaderboard is cursor-paginated on
-              `overallRank` and pages are a fixed size, so the previous page begins one
-              page-length back — arithmetic on the rank we arrived at, with no second
-              query and no change to the backend. Below the first page it clamps to the
-              top, which is exactly where "previous" should land. */}
-          {(board?.nextCursor != null || afterRank !== null) && (
+              RD-RACEOPS-02C · both directions are real cursors on (overallRank, entry) —
+              tied finishers at a page boundary are never skipped, and "Previous" is the
+              exact previous page rather than rank arithmetic. */}
+          {(nextHref !== null || prevHref !== null) && (
             <nav aria-label="Leaderboard pages" className="mt-4 flex items-center justify-between gap-3">
               <div className="flex-1">
-                {afterRank !== null && (
+                {prevHref !== null && (
                   <Link
                     href={prevHref}
                     rel="prev"
-                    className="inline-flex h-11 items-center gap-2 rounded-xl border border-border px-5 text-fs-base font-medium text-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+                    className="inline-flex h-11 items-center gap-2 rounded-xl border border-border px-5 text-fs-base font-medium text-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-action"
                   >
                     <ArrowLeft className="size-4" aria-hidden />
                     Previous
@@ -191,11 +194,11 @@ export default async function RaceLeaderboardPage({ params, searchParams }: Para
               )}
 
               <div className="flex flex-1 justify-end">
-                {board?.nextCursor != null && (
+                {nextHref !== null && (
                   <Link
-                    href={`${baseHref}?after=${board.nextCursor}`}
+                    href={nextHref}
                     rel="next"
-                    className="inline-flex h-11 items-center gap-2 rounded-xl border border-border px-5 text-fs-base font-medium text-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+                    className="inline-flex h-11 items-center gap-2 rounded-xl border border-border px-5 text-fs-base font-medium text-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-action"
                   >
                     Next
                     <ArrowRight className="size-4" aria-hidden />

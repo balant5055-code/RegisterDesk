@@ -4,17 +4,33 @@
 
 :root {
   /* ── Brand: Primary ──────────────────────────────────────── */
-  --primary:          #e5277e;   /* magenta-pink — CTAs, active states, links  */
-  --primary-hover:    #bf1868;   /* deeper pink  — hover on primary elements   */
+  /* ═══ 2026-09-29 · PRODUCT THEME → THE LOGO'S INDIGO → VIOLET (owner decision) ══════
+     "Our global theme is not pink." The logo was replaced on 2026-09-22 with an indigo →
+     violet mark; the magenta ramp (#e5277e / coral #fb5a6a) described the RETIRED logo.
+     The organizer + admin product now runs on the same hues as the public --action ramp,
+     so there is one brand again. Values are typed here rather than aliased to --action
+     because .dark re-points --action to a light lavender with DARK text, while --primary
+     keeps a white foreground in both themes.
+       white on #4F46E5  6.29:1  (magenta was 4.27:1 — under AA; this closes that ceiling)
+       #4338CA on white  7.9:1   (--primary-text)                                        */
+  --primary:          #4F46E5;   /* indigo-600 — CTAs, active states, links    */
+  --primary-hover:    #4338CA;   /* indigo-700 — hover on primary elements     */
+  /* RD-DASH-15 · brand pink for TEXT on a light surface.
+     `--primary` is the brand FILL. As body-size text on white it measures 4.28:1 —
+     below the 4.5 AA target — and it is used for every "View all" / "Set up" link.
+     Darkening `--primary` itself would change every CTA, gradient, ring and shadow in
+     the product, so text gets its own value: the SAME brand pink one step deeper, the
+     colour the hover state already uses. Measured 5.85:1 on white. */
+  --primary-text:     #4338CA;
   --primary-foreground: #FFFFFF; /* text rendered on primary backgrounds       */
 
   /* Gradient endpoints — use with from-primary-from / to-primary-to */
-  --primary-from:     #fb5a6a;   /* coral-pink  — gradient start               */
-  --primary-to:       #e5277e;   /* deep magenta — gradient end                */
+  --primary-from:     #4F46E5;   /* indigo — gradient start                    */
+  --primary-to:       #7C3AED;   /* violet — gradient end                      */
 
   /* Full gradient strings — used via CSS overrides, not Tailwind utilities  */
-  --primary-gradient:       linear-gradient(90deg, #fb5a6a 0%, #e5277e 100%);
-  --primary-gradient-hover: linear-gradient(90deg, #ea4858 0%, #bf1868 100%);
+  --primary-gradient:       linear-gradient(90deg, #4F46E5 0%, #7C3AED 100%);
+  --primary-gradient-hover: linear-gradient(90deg, #4338CA 0%, #6D28D9 100%);
   
 
   /* ── Brand: Secondary ───────────────────────────────────── */
@@ -32,14 +48,18 @@
 
   /* ── Muted ───────────────────────────────────────────────── */
   --muted:            #F1F5F9;     /* slate-100 — muted/subtle backgrounds    */
-  --muted-foreground: #64748B;     /* slate-500 — placeholder & helper text   */
+  /* RD-DASH-15 · slate-500 → slate-600. On white slate-500 passes (4.77:1), but this
+     token is read on TINTED card grounds too, where RD-DASH-14 measured it as low as
+     3.44:1. One step deeper clears AA on every ground the dashboard uses without
+     changing the type hierarchy — secondary text stays secondary. */
+  --muted-foreground: #475569;     /* slate-600 — placeholder & helper text   */
 
   /* ── Borders ─────────────────────────────────────────────── */
   --border:        #E2E8F0;        /* slate-200 — default dividers/outlines   */
   --border-strong: #CBD5E1;        /* slate-300 — emphasized borders          */
 
   /* ── Accent ─────────────────────────────────────────────── */
-  --accent:            #fb5a6a;    /* coral-pink — badges, tags, highlights   */
+  --accent:            #7C3AED;    /* violet — badges, tags, highlights (was coral) */
   --accent-foreground: #FFFFFF;
 
   /* ── Feedback: Success ───────────────────────────────────── */
@@ -55,7 +75,7 @@
   --destructive-foreground: #FFFFFF;
 
   /* ── Feedback: Info ─────────────────────────────────────── */
-  --info:            #e879a0;      /* rose-pink — informational states        */
+  --info:            #0369A1;      /* sky-700 — informational states (was rose-pink); white 5.9:1 */
   --info-foreground: #FFFFFF;
 
   /* ── Typography ─────────────────────────────────────────── */
@@ -99,6 +119,437 @@
   --radius-2xl:  1.5rem;           /* 24px — modals, elevated surfaces        */
   --radius-full: 9999px;           /* pills                                   */
 
+  /* ── RD-ORG-FOUNDATION · Restrained radius scale ───────────────────────────
+     The organizer shell was built on rounded-lg/xl/full, which reads bubbly
+     rather than structured. These four tokens are the ONLY radii the organizer
+     foundation (shell, header, event selector, sidebar, breadcrumbs, overview)
+     is allowed to use. Deliberately ADDITIVE — no legacy --radius-* value is
+     changed, so every existing page renders byte-identically until it is
+     migrated in its own module phase.
+
+     Rule of thumb:
+       control  → buttons, inputs, selects, menu rows, nav items
+       surface  → cards, panels, table frames, popovers
+       panel    → modals, drawers, large elevated surfaces
+       pill     → ONLY avatars, status dots, and true badge semantics       */
+  --radius-control: 0.375rem;      /* 6px  — interactive controls             */
+  --radius-surface: 0.5rem;        /* 8px  — cards / panels / popovers        */
+  --radius-panel:   0.625rem;      /* 10px — modals / drawers                 */
+  --radius-pill:    9999px;        /* avatars + true badges ONLY              */
+
+  /* ── RD-DASHBOARD-03 · Semantic metric accents ─────────────────────────────
+     A CLOSED set of six accents, each with a subtle surface and a legible
+     foreground. Every coloured icon tile, progress bar and status dot on the
+     dashboard draws from here.
+
+     Why tokens and not Tailwind palette classes: the previous dashboard wrote
+     `bg-emerald-50 text-emerald-700` inline at ~20 sites. That is unreadable in dark
+     mode (a 50-weight surface under a dark canvas), impossible to retune centrally,
+     and it let "green" mean three different things on one screen. These pairs are
+     defined once, overridden once for dark, and addressed by MEANING.
+
+     The mapping is semantic, not decorative:
+       people   → registrations, participants, attendees
+       money    → revenue, wallet, settlement
+       event    → events, schedule, capacity
+       verify   → check-in, delivered, completed
+       pending  → awaiting review, warnings, deadlines
+       critical → blocked, failed, at-capacity                                */
+  --accent-people-bg:    #EFF6FF;  --accent-people-fg:    #1D4ED8;  /* blue    */
+  --accent-money-bg:     #ECFDF5;  --accent-money-fg:     #047857;  /* emerald */
+  --accent-event-bg:     #F5F3FF;  --accent-event-fg:     #6D28D9;  /* violet  */
+  --accent-verify-bg:    #F0FDFA;  --accent-verify-fg:    #0F766E;  /* teal    */
+  --accent-pending-bg:   #FFFBEB;  --accent-pending-fg:   #B45309;  /* amber   */
+  --accent-critical-bg:  #FEF2F2;  --accent-critical-fg:  #B91C1C;  /* red     */
+  /* Neutral, for metrics that carry no semantic charge. */
+  --accent-neutral-bg:   #F1F5F9;  --accent-neutral-fg:   #475569;
+
+  /* ── Bright solids — RULES, METERS AND BARS ONLY ───────────────────────────
+     The `-fg` values above are 700-level because they carry TEXT on the 50-level
+     tints and must clear AA. That same darkness made every accent rule and progress
+     bar look muddy on a white card, which is what read as "dull".
+
+     These are the same hues one or two steps brighter. They are used ONLY for
+     non-text fills — the KPI top rules and the capacity meter — where contrast
+     ratios do not apply, so the page gets its brightness without dropping a single
+     label below AA. Never use a `-solid` for text. */
+  --accent-people-solid:   #3B82F6;   /* blue-500    */
+  --accent-money-solid:    #10B981;   /* emerald-500 */
+  --accent-event-solid:    #8E32E9;   /* product violet */
+  --accent-verify-solid:   #14B8A6;   /* teal-500    */
+  --accent-pending-solid:  #F59E0B;   /* amber-500   */
+  --accent-critical-solid: #FF4D6B;   /* product rose   */
+  --accent-neutral-solid:  #94A3B8;   /* slate-400   */
+
+  /* ═══ RD-DASH-05 · DISTRIBUTION BAR FILLS ═══════════════════════════════════
+     Saturated two-stop gradients for the share bars on Registration Status and Pass
+     Distribution. A flat --accent-*-solid reads as a muted rule at 6px tall; a gradient
+     of the SAME hue family reads as data.
+
+     Deliberately separate from --kpi-*-fill: those clothe a whole card and are frozen at
+     four. These are thin fills on a white card, so they can be brighter without the card
+     itself becoming a gradient — which is the rule that keeps the surface premium.
+
+     Semantic, never rotating: confirmed always reads as arrival, cancelled always as loss.
+     A palette that assigned colour by index made "Cancelled" green whenever it landed on
+     the right slot. */
+  --dist-confirmed-fill:  linear-gradient(90deg, #2563EB 0%, #7C3AED 100%);
+  --dist-pending-fill:    linear-gradient(90deg, #F59E0B 0%, #F97316 100%);
+  --dist-waitlisted-fill: linear-gradient(90deg, #06B6D4 0%, #6366F1 100%);
+  --dist-cancelled-fill:  linear-gradient(90deg, #F43F5E 0%, #EF4444 100%);
+  --dist-rejected-fill:   linear-gradient(90deg, #E11D48 0%, #C026D3 100%);
+  /* Pass rows carry no status meaning, so they share the primary data gradient. */
+  --dist-pass-fill:       linear-gradient(90deg, #2563EB 0%, #7C3AED 100%);
+  /* The unfilled track. Light enough that a 1% sliver of fill still registers against it. */
+  --dist-track:           #EEF1F6;
+
+  /* ═══ RD-DASH-05B · RING STOPS, SHARE TINTS, RANK BADGES ════════════════════
+
+     ── Ring stops ──
+     The SAME two endpoints as each --dist-*-fill above, addressable one at a time.
+     An SVG <stop stop-color> takes a COLOUR, not a gradient, so the status ring cannot
+     read the fill token — it needs the ends. They are duplicated deliberately and pinned
+     to their gradient by test: a comment saying "keep these in step" would not have
+     caught the day somebody retuned one and not the other.                        */
+  --dist-confirmed-a:  #2563EB;  --dist-confirmed-b:  #7C3AED;
+  --dist-pending-a:    #F59E0B;  --dist-pending-b:    #F97316;
+  --dist-waitlisted-a: #06B6D4;  --dist-waitlisted-b: #6366F1;
+  --dist-cancelled-a:  #F43F5E;  --dist-cancelled-b:  #EF4444;
+  --dist-rejected-a:   #E11D48;  --dist-rejected-b:   #C026D3;
+  --dist-pass-a:       #2563EB;  --dist-pass-b:       #7C3AED;
+
+  /* ── Share pills ──
+     The ground a status share is printed on, and the ink printed on it. The ground is
+     the hue at ~10-14% over white — enough that two statuses are told apart instantly,
+     light enough that the card is still a white card. The ink is a 700/800-level of the
+     same family, chosen so every percentage clears AA ON ITS OWN TINT rather than on the
+     card: a pill's contrast is measured where the text actually sits.
+     Amber carries more alpha on purpose — at 10% it is indistinguishable from white. */
+  --dist-confirmed-tint:  rgb( 37  99 235 / 0.10);  --dist-confirmed-ink:  #1D4ED8;
+  --dist-pending-tint:    rgb(245 158  11 / 0.14);  --dist-pending-ink:    #92400E;
+  --dist-waitlisted-tint: rgb(  6 182 212 / 0.12);  --dist-waitlisted-ink: #155E75;
+  --dist-cancelled-tint:  rgb(244  63  94 / 0.10);  --dist-cancelled-ink:  #BE123C;
+  --dist-rejected-tint:   rgb(192  38 211 / 0.10);  --dist-rejected-ink:   #A21CAF;
+  --dist-pass-tint:       rgb( 37  99 235 / 0.10);  --dist-pass-ink:       #1D4ED8;
+
+  /* ═══ RD-DASH-05B · EVENT PERFORMANCE RANK BADGES ═══════════════════════════
+     The BRAND axis — logo violet (#6204e3) through logo pink (#f61e7d) — stepped down in
+     intensity by position, so the leading event is unmistakable without three events
+     wearing three unrelated hues. From fourth place the badge goes neutral: past the
+     podium the position stops being the point, and that is what keeps a workspace with
+     six events from rendering as a rainbow.
+
+     Each gradient carries a MID stop and runs its bright end past 100%, so the brightest
+     colour lands outside the badge and the two digits sit on the dark half. A two-stop
+     violet→pink ramp puts pink under the type, where white loses AA.                  */
+  /* 2026-09-29: the leader now runs deep indigo → violet (the logo), not violet → pink. */
+  --perf-rank1-fill: linear-gradient(135deg, #312E81 0%, #4338CA 55%, #7C3AED 130%);
+  --perf-rank2-fill: linear-gradient(135deg, #4338CA 0%, #4F46E5 52%, #6366F1 122%);
+  --perf-rank3-fill: linear-gradient(135deg, #7E22CE 0%, #9333EA 52%, #D946EF 122%);
+  --perf-rank-ink:   #FFFFFF;
+  --perf-rest-tint:  rgb( 15  23  42 / 0.06);
+  --perf-rest-ink:   #475569;
+  /* The leader's tile. A brand WASH at the same ~0.045 alpha the page ground uses — any
+     heavier and the card stops being a white card and starts being a coloured panel. */
+  --perf-lead-surface: rgb( 98   4 227 / 0.045);
+  --perf-lead-border:  rgb( 98   4 227 / 0.16);
+
+  /* ═══ RD-DASH-06 · COMMUNICATION CHANNELS + DELIVERY OUTCOMES ═══════════════
+     Channel colour is SEMANTIC and conventional — WhatsApp is green everywhere in the
+     world, so recolouring it violet to match the brand would cost recognition and buy
+     nothing. The brand gradient is spent on exactly ONE thing here: campaigns.
+
+     Outcomes are a SEPARATE axis from channels on purpose. "Delivered" is teal rather
+     than a second green, because a reader must never have to work out whether the green
+     on a row means WhatsApp or means delivered.
+
+     The accepted tone is deliberately NEUTRAL. A message a provider took but never
+     confirmed is not a success and not a failure, and painting it either way is a claim
+     the data does not support.                                                        */
+  --comm-whatsapp-fill:  linear-gradient(90deg, #059669 0%, #10B981 100%);
+  --comm-email-fill:     linear-gradient(90deg, #2563EB 0%, #6366F1 100%);
+  --comm-sms-fill:       linear-gradient(90deg, #F59E0B 0%, #F97316 100%);
+  --comm-campaign-fill:  linear-gradient(90deg, #7C3AED 0%, #A855F7 100%);   /* brand violet (was violet → pink) */
+  --comm-delivered-fill: linear-gradient(90deg, #0D9488 0%, #14B8A6 100%);
+  --comm-accepted-fill:  linear-gradient(90deg, #64748B 0%, #94A3B8 100%);
+  --comm-failed-fill:    linear-gradient(90deg, #E11D48 0%, #F43F5E 100%);
+
+  /* Ground + ink for a chip. Same rule as the status share pills: the ink clears AA
+     measured ON ITS OWN TINT, not on the card behind it. Amber carries more alpha —
+     at 10% it is indistinguishable from white. */
+  --comm-whatsapp-tint:  rgb(  5 150 105 / 0.10);  --comm-whatsapp-ink:  #047857;
+  --comm-email-tint:     rgb( 37  99 235 / 0.10);  --comm-email-ink:     #1D4ED8;
+  --comm-sms-tint:       rgb(245 158  11 / 0.14);  --comm-sms-ink:       #92400E;
+  --comm-campaign-tint:  rgb(139  31 203 / 0.10);  --comm-campaign-ink:  #A21CAF;
+  --comm-delivered-tint: rgb( 13 148 136 / 0.10);  --comm-delivered-ink: #0F766E;
+  --comm-accepted-tint:  rgb(100 116 139 / 0.10);  --comm-accepted-ink:  #475569;
+  --comm-failed-tint:    rgb(225  29  72 / 0.10);  --comm-failed-ink:    #BE123C;
+
+  /* ═══ RD-DASH-07 · COUPON USAGE LEVELS ══════════════════════════════════════
+     A coupon meter is a FUEL GAUGE, not a share: the reader is asking "how much is left",
+     so the colour has to change as the headroom disappears. One colour for every row
+     (which is what the old card did, in pink) throws away the only signal on the card.
+
+     Four levels plus two neutral end states. The steps are wide on purpose — a gauge that
+     changes colour every 10% is a rainbow, and a rainbow carries no meaning.
+
+     over is a DEEPER red than exhausted, because they are different facts: exhausted means
+     the cap was reached, over means redemptions got past it (a cap lowered after the fact).  */
+  --coupon-normal-fill:    linear-gradient(90deg, #2563EB 0%, #7C3AED 100%);
+  --coupon-high-fill:      linear-gradient(90deg, #F59E0B 0%, #F97316 100%);
+  --coupon-exhausted-fill: linear-gradient(90deg, #EA580C 0%, #F43F5E 100%);
+  --coupon-over-fill:      linear-gradient(90deg, #BE123C 0%, #E11D48 100%);
+  --coupon-idle-fill:      linear-gradient(90deg, #94A3B8 0%, #CBD5E1 100%);
+
+  --coupon-normal-tint:    rgb( 37  99 235 / 0.10);  --coupon-normal-ink:    #1D4ED8;
+  --coupon-high-tint:      rgb(245 158  11 / 0.14);  --coupon-high-ink:      #92400E;
+  --coupon-exhausted-tint: rgb(234  88  12 / 0.12);  --coupon-exhausted-ink: #9A3412;
+  --coupon-over-tint:      rgb(190  18  60 / 0.10);  --coupon-over-ink:      #9F1239;
+  --coupon-idle-tint:      rgb(100 116 139 / 0.10);  --coupon-idle-ink:      #475569;
+
+  /* ═══ RD-DASH-08 · WORKSPACE HEALTH STATES ══════════════════════════════════
+     FOUR states, and the fourth is the point: `unknown` is not a shade of bad, it is the
+     absence of an answer, and it must never be able to render as the healthy one.
+
+     Healthy is TEAL rather than the brand violet on purpose. Violet is the product's
+     "this is data" colour across every other card on this dashboard; a health verdict is
+     not data, and it has to be separable at a glance from the meters beside it.
+
+     Only the healthy state carries a gradient — it is the card's one hero element. The
+     other three are flat, because a warning that shimmers reads as decoration.
+
+     The ramp is DARK where the type sits. Measured in the browser: an earlier
+     #0D9488 → #14B8A6 → #5EEAD4 put teal-500 under the verdict and white on it scored
+     2.49 — nowhere near AA. Same rule as the KPI cards and the rank badges: carry a mid
+     stop, and run the bright end past 100% so it lands outside the box.                   */
+  --health-healthy-fill: linear-gradient(135deg, #115E59 0%, #0F766E 55%, #2DD4BF 140%);
+  --health-healthy-tint: rgb( 13 148 136 / 0.10);  --health-healthy-ink: #0F766E;
+  --health-attention-tint: rgb(245 158  11 / 0.14);  --health-attention-ink: #92400E;
+  --health-action-tint:    rgb(225  29  72 / 0.10);  --health-action-ink:    #BE123C;
+  --health-unknown-tint:   rgb(100 116 139 / 0.10);  --health-unknown-ink:   #475569;
+  /* The check list: done vs outstanding. Deliberately quiet — a six-item checklist is
+     supporting detail, not a second set of alarms. */
+  --health-done-dot:       #14B8A6;
+  --health-todo-dot:       rgb(100 116 139 / 0.32);
+
+  /* ═══ RD-DASH-09 · BROADCAST STATUS ═════════════════════════════════════════
+     CHANNEL colour is not defined here — a broadcast row reuses --comm-whatsapp/email/sms
+     from RD-DASH-06, so one channel is one colour on both communication cards.
+
+     What IS new is the campaign OUTCOME, and it is a separate axis on purpose: a WhatsApp
+     campaign that failed must not read as green because WhatsApp is green. Four tones for
+     seven statuses — sent, partial, failed, and one neutral covering every state that has
+     not finished (draft, scheduled, sending, cancelled), because "not an outcome yet" is
+     one fact however it is reached.                                                     */
+  --bcast-sent-tint:    rgb( 13 148 136 / 0.10);  --bcast-sent-ink:    #0F766E;
+  --bcast-partial-tint: rgb(245 158  11 / 0.14);  --bcast-partial-ink: #92400E;
+  --bcast-failed-tint:  rgb(225  29  72 / 0.10);  --bcast-failed-ink:  #BE123C;
+  --bcast-idle-tint:    rgb(100 116 139 / 0.10);  --bcast-idle-ink:    #475569;
+
+  /* ═══ RD-DASH-11A · CHECK-IN PROGRESS ═══════════════════════════════════════
+     A PROGRESS gradient, not a status one. It runs emerald → teal → cyan so the bar reads
+     as movement along a track rather than as a state that happens to be green — the
+     distinction that keeps it from being mistaken for the delivery and health tones that
+     already live in the teal family.
+
+     The bright end sits past 100% so a nearly-complete bar still darkens toward its own
+     end rather than washing out. Same rule the KPI cards and the rank badges follow.
+
+     `alert` is for ONE condition: more check-ins than confirmed registrations. That is a
+     real data state (a participant cancelled after being checked in) and it is flagged
+     rather than clamped away — see lib/dashboard/checkInStatus.                        */
+  --checkin-fill:        linear-gradient(90deg, #059669 0%, #0D9488 45%, #22D3EE 130%);
+  --checkin-tint:        rgb(  5 150 105 / 0.10);  --checkin-ink:        #047857;
+  --checkin-alert-tint:  rgb(245 158  11 / 0.14);  --checkin-alert-ink:  #92400E;
+
+  /* ── Card SURFACES ─────────────────────────────────────────────────────────
+     A KPI card's ground. The 50-weight -bg tints are sized for a small icon
+     container; across a whole card they read as a coloured panel. These are the
+     same hues at ~21-24% over white — enough that four cards side by side are
+     visibly different at a glance, light enough that the value on top keeps full
+     contrast. Gold carries a higher alpha (0.34) on purpose: #FFDE73 is a pale,
+     low-chroma hue, so at 12% it is indistinguishable from white.
+
+     Deliberately NOT the -bg values and NOT a gradient: one flat tint per card is
+     what separates "premium SaaS" from "colourful marketing tile".               */
+  --accent-people-surface:   rgb(59 130 246 / 0.24);
+  --accent-money-surface:    rgb(16 185 129 / 0.24);
+  --accent-event-surface:    rgb(142 50 233 / 0.21);
+  --accent-verify-surface:   rgb(20 184 166 / 0.24);
+  --accent-pending-surface:  rgb(255 222 115 / 0.42);
+  --accent-critical-surface: rgb(255 77 107 / 0.20);
+  --accent-neutral-surface:  rgb(148 163 184 / 0.22);
+
+  /* ── Icon CHIP ─────────────────────────────────────────────────────────────
+     The 28px container behind a KPI glyph.
+
+     It cannot be the -bg (50-weight) value any more: those sit at ~4% over white,
+     which is now LIGHTER than the card ground itself, so the chip would read as a
+     hole punched in the card rather than an element on top of it. A solid accent at
+     28px is the brief's "clear accent colour" — bright, unmistakable, and far too
+     small to be the "huge saturated fill" the brief rules out.
+
+     Each chip carries its OWN foreground because the palette is not uniform in
+     luminance: white clears the violet, blue, emerald, teal and rose, but disappears
+     on gold, which takes a dark brown instead.                                     */
+  --accent-people-chip:   #3B82F6;  --accent-people-chip-fg:   #FFFFFF;
+  --accent-money-chip:    #10B981;  --accent-money-chip-fg:    #FFFFFF;
+  --accent-event-chip:    #8E32E9;  --accent-event-chip-fg:    #FFFFFF;
+  --accent-verify-chip:   #14B8A6;  --accent-verify-chip-fg:   #FFFFFF;
+  --accent-pending-chip:  #FFDE73;  --accent-pending-chip-fg:  #6B4E00;
+  --accent-critical-chip: #FF4D6B;  --accent-critical-chip-fg: #FFFFFF;
+  --accent-neutral-chip:  #94A3B8;  --accent-neutral-chip-fg:  #FFFFFF;
+
+  /* ── RD-DASHBOARD-12 · Product accent colours ──────────────────────────────
+     The four accents the Dashboard KPI system uses. Named --accent-* on purpose:
+     --brand-violet is already the LOGO violet (#6204e3) and redefining it would
+     retint the marketing surfaces. These live alongside the semantic set above.
+
+       violet → licence / entitlement / upgrade emphasis
+       gold   → finance secondary, pending
+       rose   → critical, cancellation
+       coral  → warning, financial deduction
+
+     Used as ACCENTS only: icon containers, rules, meters, small labels, decorative
+     motifs. Never a card background — a saturated block is the look the brief rules
+     out, and text on it cannot hold contrast across both themes.                  */
+  --accent-violet: #8E32E9;
+  --accent-gold:   #FFDE73;
+  --accent-rose:   #FF4D6B;
+  --accent-coral:  #F96868;
+  /* Low-alpha tints keep the card surface light behind an icon. */
+  --accent-violet-bg2: rgb(142 50 233 / 0.10);
+  --accent-gold-bg2:   rgb(255 222 115 / 0.24);
+  --accent-rose-bg2:   rgb(255 77 107 / 0.10);
+  --accent-coral-bg2:  rgb(249 104 104 / 0.10);
+  /* Readable glyph/text colours ON those tints. Gold cannot carry text at AA, so its
+     foreground borrows a dark amber that means the same thing. */
+  --accent-violet-fg2: #6D28D9;
+  --accent-gold-fg2:   #A16207;
+  --accent-rose-fg2:   #C81E4A;
+  --accent-coral-fg2:  #C23A3A;
+
+  /* ── Filled hero surfaces ──────────────────────────────────────────────────
+     Saturated fills for the THREE primary KPI cards only. Everything else on the
+     dashboard uses the tinted pairs above.
+
+     Why so few: a filled card is the loudest thing on a page. Three of them read as
+     "these are the headline numbers"; ten would read as wallpaper and the hierarchy
+     would collapse back to flat — which is exactly what this pass exists to fix.
+
+     A two-stop gradient rather than a flat fill, kept deliberately shallow (a single
+     hue stepping one shade darker). It gives the card depth without becoming the
+     decorative gradient wash the design rules forbid. */
+  /* ── RD-DASHBOARD-13 · The four primary KPI fills ──────────────────────────
+     One gradient per primary card, built from the approved product palette. Each
+     runs 135° from the named hue into a deeper step of the SAME hue — depth, not a
+     second colour, so a card never reads as two.
+
+     Ordered to keep meaning intact: revenue is teal, never rose, because a red card
+     for money reads as loss. Rose/coral therefore go to entitlement, where pressure
+     is the point.                                                                  */
+  /* ── WHERE THE BRIGHT STOP LANDS IS THE WHOLE TRICK ───────────────────────
+     The brief names bright endpoints (#FFB07C, #22C7B8, #FFDE73) and asks for white
+     type. Those two cannot both be true across a whole card: white needs a backdrop
+     under ~0.30 relative luminance to clear 3:1, and #FFB07C measures 0.54 — white on
+     it is 1.79:1, effectively invisible.
+
+     Deepening the endpoints was the previous attempt and it read as heavy and dull.
+     So instead the bright stop is POSITIONED rather than diluted. Each fill holds its
+     named hue flat across the top-left — where every glyph, value and footer line
+     actually sits — and only opens into the bright endpoint past ~55%, in the
+     bottom-right corner that carries nothing but the motif.
+
+     The card therefore reads as the bright gradient the reference shows, and the type
+     sits on a hue that carries it. Stops run past 100% so the corner is a real glow
+     rather than a hard arrival.                                                      */
+  --kpi-capacity-fill: linear-gradient(135deg, #E11D48 0%, #E11D48 52%, #FFB07C 128%);
+  --kpi-people-fill:   linear-gradient(135deg, #8E32E9 0%, #7C3BEE 46%, #6366F1 108%);
+  --kpi-money-fill:    linear-gradient(135deg, #0F766E 0%, #0F766E 50%, #22C7B8 122%);
+  --kpi-fees-fill:     linear-gradient(135deg, #F59E0B 0%, #F7B02F 46%, #FFDE73 118%);
+
+  /* ── The floor under every fill ────────────────────────────────────────────
+     Each card's flat type-zone hue, painted as a solid BACKGROUND-COLOR beneath the
+     gradient.
+
+     It is not decoration — it is the failure mode. A filled card draws no `bg-*` class
+     and no border, so `background-image` was its only background: if the fill token ever
+     failed to resolve (a corrupted Turbopack CSS cache — which has hit this repo four
+     times — a stale chunk, tokens arriving late) the card painted NOTHING and rendered as
+     a transparent box carrying white text on a white canvas. Washed-out, almost-white,
+     unfinished. With a base colour the worst case is a flat saturated card instead. */
+  --kpi-capacity-base: #E11D48;
+  --kpi-people-base:   #8E32E9;
+  --kpi-money-base:    #0F766E;
+  --kpi-fees-base:     #F59E0B;
+
+  /* Ink for the licence card's upgrade button.
+     That button paints its OWN white surface, so it is the one element inside a filled
+     card that cannot inherit the card's white ink — it needs a named colour. It had been
+     borrowing a gradient ENDPOINT token, which is why it went invisible the moment the
+     fills moved to whole-gradient tokens and that endpoint stopped existing. */
+  --kpi-capacity-cta:  #D01543;
+
+  /* ── Ink printed ON each fill ──────────────────────────────────────────────
+     Per-card rather than one global white, because gold is not like the others.
+
+     White needs ~0.18 relative luminance behind it to clear 4.5:1, and every gold
+     worth calling gold sits above 0.45 — #FFDE73 is 0.75. Deepening it far enough
+     for white would turn it brown and cost the palette its gold. So the finance card
+     keeps its gold and takes a deep-brown ink instead, which clears 9:1 on the light
+     stop and 6:1 on the dark one. It is the readable answer, not the uniform one.   */
+  --kpi-capacity-ink: #FFFFFF;  --kpi-capacity-ink-muted: #FFFFFF;
+  --kpi-capacity-ink-tile: rgb(255 255 255 / 0.22);  --kpi-capacity-ink-rule: rgb(255 255 255 / 0.26);
+  --kpi-people-ink: #FFFFFF;    --kpi-people-ink-muted: #FFFFFF;
+  --kpi-people-ink-tile: rgb(255 255 255 / 0.22);    --kpi-people-ink-rule: rgb(255 255 255 / 0.26);
+  --kpi-money-ink: #FFFFFF;     --kpi-money-ink-muted: #FFFFFF;
+  --kpi-money-ink-tile: rgb(255 255 255 / 0.22);     --kpi-money-ink-rule: rgb(255 255 255 / 0.26);
+  --kpi-fees-ink: #4A3200;      --kpi-fees-ink-muted: rgb(74 50 0 / 0.90);
+  --kpi-fees-ink-tile: rgb(255 255 255 / 0.46);      --kpi-fees-ink-rule: rgb(74 50 0 / 0.20);
+
+  /* Defaults for the legacy `event` fill. Per-card values above override these. */
+  --kpi-on-fill:        #FFFFFF;
+  --kpi-on-fill-muted:  rgb(255 255 255 / 0.86);
+  --kpi-on-fill-tile:   rgb(255 255 255 / 0.22);
+  --kpi-on-fill-rule:   rgb(255 255 255 / 0.26);
+  /* RD-DASH-16 · the plan chip's ground on a filled card.
+     Every other on-fill surface above LIGHTENS the gradient, which is right for an icon
+     tile but wrong under TEXT: the chip carries white type, so a white wash moves the
+     ground toward the ink and takes contrast down rather than up. Measured from rendered
+     pixels on the licence card, `bg-white/20` gave 4.32:1 in light and 3.83:1 in dark.
+     This one DEEPENS instead, using the slate-900 the token file already uses for
+     translucent tints (--perf-rest-tint, --bg-overlay). Same brand hue underneath, same
+     white type, contrast the right side of AA. */
+  --kpi-on-fill-chip:   rgb( 15  23  42 / 0.30);
+
+  /* ── RD-DASHBOARD-03 · Dashboard entrance motion ───────────────────────────
+     A single short rise-and-fade, applied to top-level dashboard sections so the
+     page assembles rather than snapping in. 260ms and 4px: enough to read as
+     intentional, too small to delay anything. Sections stagger via inline delay.
+
+     Wrapped in prefers-reduced-motion so it disappears entirely for anyone who has
+     asked for that — an entrance animation is exactly the kind of motion that
+     setting exists to suppress. */
+  --motion-rise-duration: 260ms;
+  --motion-ease:          cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@keyframes rd-rise {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: none; }
+}
+
+.rd-rise {
+  animation: rd-rise var(--motion-rise-duration) var(--motion-ease) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rd-rise { animation: none; }
+}
+
+:root {
+  /* closes the block re-opened above */
+
   /* ── Shadows — neutral ───────────────────────────────────── */
   --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
   --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.08), 0 2px 4px -2px rgb(0 0 0 / 0.06);
@@ -129,23 +580,29 @@
   --brand-gradient-hover: var(--primary-gradient-hover);
 
   /* ── Logo palette ──────────────────────────────────────────────────────────
-     SAMPLED from public/logo/logo-registerdesk.png (decoded pixel values, not an
+     SAMPLED from the PREVIOUS RegisterDesk logo (decoded pixel values, not an
      eyeballed approximation):
        #021246  the "REGISTER" wordmark navy
        #6204e3  the gradient START — R monogram and the left edge of "DESK"
        #f61e7d  the gradient END   — the right edge of "DESK"
-     The logo's gradient runs VIOLET → PINK.
+     That logo's gradient ran VIOLET → PINK.
 
-     Note this disagrees with --primary-from (#fb5a6a, coral): coral appears
-     nowhere in the logo. These tokens exist so surfaces that must match the
-     wordmark can do so exactly; reconciling the app-wide brand gradient with the
-     logo is a separate, deliberate decision because it restyles every CTA. */
+     The logo has since been replaced by an icon-only mark, so these are a record of
+     artwork that is no longer on the site. Two of them still have consumers and stay:
+     --brand-navy tints the hero canvas, --brand-violet the size-chart surfaces.
+
+     --brand-pink / --brand-pink-rgb were REMOVED. The footer wordmark and backdrop were
+     their last consumers and both went to the action ramp; a repository-wide check then
+     found zero remaining references, in any file type, outside historical comments. The
+     hex is left documented above because it is a fact about the old artwork, not a token.
+
+     Note the palette disagrees with --primary-from (#fb5a6a, coral): coral appears
+     nowhere in that logo. These tokens exist so surfaces that must match the wordmark
+     can do so exactly. */
   --brand-navy:       #021246;
   --brand-violet:     #6204e3;
-  --brand-pink:       #f61e7d;
   --brand-navy-rgb:     2 18  70;
   --brand-violet-rgb:  98  4 227;
-  --brand-pink-rgb:   246 30 125;
 
   /* Marketing footer canvas.
      The band is a COOL NEAR-WHITE, not a colour field. Brand appears only as a
@@ -159,8 +616,8 @@
      alpha covers thousands of square pixels, and washes read far heavier than the
      number suggests. Raise these with care. */
   --footer-gradient:
-    linear-gradient(160deg, rgb(var(--brand-violet-rgb) / 0.045) 0%, transparent 34%),
-    linear-gradient(320deg, rgb(var(--brand-pink-rgb)   / 0.040) 0%, transparent 38%),
+    linear-gradient(160deg, rgb(var(--action-rgb)     / 0.045) 0%, transparent 34%),
+    linear-gradient(320deg, rgb(var(--action-end-rgb) / 0.040) 0%, transparent 38%),
     linear-gradient(180deg, #FFFFFF 0%, #FBFCFE 46%, rgb(var(--brand-navy-rgb) / 0.055) 100%);
 
   /* ── Text ── */
@@ -183,6 +640,121 @@
   --surface-2: var(--card);                               /* raised panel / card */
   --surface-3: var(--muted);                              /* inset / subtle */
 
+  /* ═══ RD-HERO-02 · LANDING HERO PALETTE ════════════════════════════════════
+     The landing hero deliberately does NOT draw on --primary. The brand fill is
+     magenta (#e5277e); a magenta hero reads as consumer ticketing, and the brief
+     for this one surface is navy / cobalt / violet.
+
+     It is still on-brand, because every value here is anchored to the LOGO palette
+     defined above — --brand-navy (#021246) and --brand-violet (#6204e3) are sampled
+     pixel values from the wordmark. The cobalt between them is the one new hue: it
+     is what makes navy → violet read as a single deliberate ramp instead of two
+     unrelated ends.
+
+     Contrast, measured on #FFFFFF:
+       --hero-ink       18.1:1    --hero-ink-soft  7.7:1
+       --hero-eyebrow    5.6:1    --hero-cobalt    7.2:1
+     The gradient's lightest stop (#8B3AE8) measures 5.4:1, so even the brightest
+     part of the headline clears AA for body text, never mind display type.        */
+  --hero-ink:       #0B1533;   /* headline solid — a navy black. Never #000. */
+  --hero-ink-soft:  #47536B;   /* description / supporting copy               */
+  --hero-eyebrow:   #5A6880;   /* eyebrow, labels, highlight captions          */
+  /* ═══ RD-NAV-01 · THE ACTION COLOUR ════════════════════════════════════════
+     The primary call to action on public chrome — today the landing header's
+     "Sign Up".
+
+     It is NOT --primary. The brand fill is magenta (#e5277e) and a magenta button in
+     the header would put the loudest colour on the page in its calmest surface. It is
+     also NOT --foreground: a near-black button is what the header used to carry, and
+     "the text colour, used as a fill" is not a call to action, it is a default.
+
+     ═══ RD-LANDING-01 · INDIGO → VIOLET ══════════════════════════════════════
+     The public brand direction is indigo → violet. The previous magenta/coral ramp
+     (--primary, #e5277e) is RETIRED from landing and marketing surfaces. It stays
+     defined because the ORGANIZER and ADMIN products still run on it; retiring it
+     there is a separate decision with a far larger blast radius than this pass.
+
+     So there are deliberately two accents in the codebase, and this is the public one.
+     --hero-cobalt aliases it, so the hero, the header and the landing CTA cannot drift
+     apart — one definition, one rendered colour.
+
+     Measured on #FFFFFF:
+       --action     #4F46E5   6.29:1
+       --action-end #7C3AED   5.70:1
+     Both clear AA for normal text at either end of the ramp, which the magenta it
+     replaces did not: white on #e5277e is 4.27:1, under the 4.5 floor. The change is
+     an accessibility improvement as well as a brand one.
+
+     --action-gradient is the ONE definition of the brand gradient. Nothing else in the
+     codebase may re-type the two hex values; the .rd-brand-gradient utility in
+     globals.css is the only consumer, and components reference that. */
+  --action:            #4F46E5;
+  --action-end:        #7C3AED;
+  --action-hover:      #4338CA;
+  --action-foreground: #FFFFFF;
+  --action-gradient:   linear-gradient(135deg, var(--action) 0%, var(--action-end) 100%);
+  /* The same two stops as RGB triplets, for the `rgb(... / alpha)` form. Washes and
+     hairlines need the ramp at a fraction of its opacity, which a hex cannot express —
+     and re-typing the colour beside the token is how the two drift apart. */
+  --action-rgb:      79  70 229;
+  --action-end-rgb: 124  58 237;
+
+  --hero-cobalt:    var(--action);
+  --hero-violet:    var(--action-end);
+  /* The single-colour accent, for anything that cannot carry a gradient. */
+  --hero-accent:    var(--hero-cobalt);
+
+  /* RD-HERO-03 removed four values from this group, and they are listed here so the
+     next person does not reinstate them by reflex:
+
+       --hero-headline-gradient   the headline is ONE solid ink colour now. Gradient
+                                  text is the single most dated thing a hero can do.
+       --hero-progress-fill       the progress line is a flat --hero-accent hairline.
+       --hero-wash-cobalt/violet  two 50rem radial washes behind the copy. At ~5% they
+                                  still read as a blue haze on a large display, and the
+                                  left column is meant to be white paper.
+       --hero-canvas (#FBFCFE)    an off-white that was never quite white. The section
+                                  uses --background directly.
+
+     What survives is structural, not decorative. */
+  --hero-rule:  rgb( 36  71 214 / 0.35);   /* hairlines: rules, control borders */
+  --hero-track: rgb( 11  21  51 / 0.10);   /* the unfilled progress line        */
+
+  /* The hero's WARM accent — the Sports panel rule and the "Create Impact" chip. It is
+     the one hero value that is neither ink nor brand, which is why those two elements use
+     it rather than borrowing the cobalt.
+     It was previously named for a brand signature that sat beside the collage. The
+     signature was removed and this accent outlived it, so the old name described
+     something that no longer existed. Same value, honest name. */
+  --hero-accent-rule: #B08D57;
+
+  /* Autoplay dwell. Lives here so the JS timer and the CSS progress animation are
+     driven by ONE number — two copies drift, and the bar then finishes before or
+     after the slide actually changes. */
+  --hero-autoplay: 7600ms;
+
+  /* ── Inverse surface ───────────────────────────────────────────────────────
+     The deliberate dark contrast band on marketing pages. It is NOT a dark THEME —
+     it is a section that is dark in both themes, which is why it carries its own
+     foreground rather than borrowing --foreground (that one flips, and the band
+     would lose its type in dark mode). Value is the #0e0e13 that lib/marketing/theme
+     used to hardcode. */
+  --surface-inverse:            #0E0E13;
+  --surface-inverse-foreground: #FFFFFF;
+
+  /* ── Ink on MEDIA ──────────────────────────────────────────────────────────
+     Type and chips that sit on a photograph or a video still, not on a surface.
+
+     This is a genuinely different role from --primary-foreground ("on the brand
+     fill") and from --foreground ("on the page"), and it is the one colour in the
+     system that must NOT flip with the theme: the photograph underneath is the same
+     photograph in dark mode, so ink that followed the theme would vanish. Every
+     bare text-white over an image in discovery, the hero collage and the event
+     templates is this role — see the migration ledger in docs/RD-THEME-01-audit.md. */
+  --ink-on-media:       #FFFFFF;
+  --ink-on-media-muted: rgb(255 255 255 / 0.78);
+  --ink-on-media-scrim: rgb(255 255 255 / 0.95);   /* the small white chip on a photo */
+
   /* ── Borders (--border-strong already defined above as a primitive) ── */
   --border-default: var(--border);
   --border-subtle:  var(--border);                        /* alias today; own value later */
@@ -196,7 +768,7 @@
 
   /* ── Focus ── */
   --focus-ring:   var(--primary);
-  --focus-shadow: 0 0 0 3px rgb(229 39 126 / 0.35);
+  --focus-shadow: 0 0 0 3px rgb(79 70 229 / 0.35);
 
   /* ── Elevation (semantic → neutral shadow primitives) ── */
   --elevation-0: none;
@@ -294,9 +866,9 @@
      Space-separated RGB channels for the brand hexes above, so translucent
      surfaces can be composed as rgb(var(--primary-rgb) / <alpha>) instead of
      re-typing the hex. Values mirror --primary / --primary-from / --info. */
-  --primary-rgb:      229 39 126;   /* #e5277e */
-  --primary-from-rgb: 251 90 106;   /* #fb5a6a */
-  --info-rgb:         232 121 160;  /* #e879a0 */
+  --primary-rgb:      79 70 229;    /* #4F46E5 */
+  --primary-from-rgb: 79 70 229;    /* #4F46E5 */
+  --info-rgb:         3 105 161;    /* #0369A1 */
 
   /* ── Scrollbar (tokenised; was hardcoded in globals.css) ── */
   --scrollbar-thumb: #D1D5DB;
@@ -380,7 +952,12 @@
   --card-foreground: #F1F5F9;
 
   --muted:            #1E293B;     /* slate-800 — subtle backgrounds           */
-  --muted-foreground: #94A3B8;     /* slate-400 — placeholder & helper text    */
+  /* RD-DASH-15 · slate-400 → slate-300, the dark-mode mirror of the change above.
+     Dark muted text measured 3.65:1 on tinted grounds. */
+  --muted-foreground: #CBD5E1;     /* slate-300 — placeholder & helper text    */
+  /* Brand indigo for TEXT on a dark surface — #4338CA would go the wrong way here, so the
+     dark variant lightens to indigo-300 (~9:1 on slate-900). */
+  --primary-text:     #A5B4FC;
 
   --border:        #334155;        /* slate-700 — default dividers             */
   --border-strong: #475569;        /* slate-600 — emphasized borders           */
@@ -398,4 +975,205 @@
   --text-tertiary: #64748B;   /* slate-500 */
   --text-disabled: #475569;   /* slate-600 */
   --bg-overlay:    rgb(0 0 0 / 0.6);
+
+  /* RD-HERO-02 — the landing hero under the dark theme. The organizer header's
+     theme toggle sets `.dark` on <html> globally and nothing clears it, so this
+     surface has to hold up there too (see docs/RD-THEME-01-audit.md). Ink and paper
+     invert; the cobalt→violet ramp only brightens, because the same ramp on a dark
+     ground would otherwise fall below AA at its dark end. */
+  --hero-ink:       #EEF2F9;
+  --hero-ink-soft:  #A9B4C7;
+  --hero-eyebrow:   #93A0B5;
+  /* The dark theme lightens the action colour, so its ink has to flip with it —
+     white on #7CA0FF measures 2.3:1 and would be unreadable. */
+  /* Dark theme: the same ramp lifted off the dark ground. The light values are far too
+     dark to carry text on a dark surface, so both stops move together — the gradient
+     keeps its indigo → violet direction rather than collapsing to one hue. */
+  --action:            #8B84F5;
+  --action-end:        #B18AF7;
+  --action-hover:      #A9A3F8;
+  --action-foreground: #0B1533;
+  --action-gradient:   linear-gradient(135deg, var(--action) 0%, var(--action-end) 100%);
+  --action-rgb:     139 132 245;
+  --action-end-rgb: 177 138 247;
+
+  --hero-cobalt:    var(--action);
+  --hero-rule:  rgb(124 160 255 / 0.40);
+  --hero-track: rgb(238 242 249 / 0.16);
+  --hero-accent-rule: #B08D57;
+
+  /* RD-DASHBOARD-03 — dark accents.
+     The surface becomes a low-alpha tint of the hue rather than a light wash (a
+     50-weight surface glows against a dark canvas), and the foreground moves to a
+     300/400 weight so it clears contrast on that tint. Same six meanings, so every
+     component that reads them switches automatically with no per-component logic. */
+  --accent-people-bg:   rgb(59 130 246 / 0.14);  --accent-people-fg:   #93C5FD;
+  --accent-money-bg:    rgb(16 185 129 / 0.14);  --accent-money-fg:    #6EE7B7;
+  --accent-event-bg:    rgb(139 92 246 / 0.14);  --accent-event-fg:    #C4B5FD;
+  --accent-verify-bg:   rgb(20 184 166 / 0.14);  --accent-verify-fg:   #5EEAD4;
+  --accent-pending-bg:  rgb(245 158 11 / 0.14);  --accent-pending-fg:  #FCD34D;
+  --accent-critical-bg: rgb(239 68 68 / 0.14);   --accent-critical-fg: #FCA5A5;
+  --accent-neutral-bg:  rgb(148 163 184 / 0.14); --accent-neutral-fg:  #CBD5E1;
+  /* Bright non-text fills, dark theme. The light-theme 500s already read well on a dark
+     ground, so the same hues carry over — only neutral is lifted so a rule stays visible. */
+  --accent-people-solid:   #60A5FA;
+  --accent-money-solid:    #34D399;
+  --accent-event-solid:    #A78BFA;
+  --accent-verify-solid:   #2DD4BF;
+  --accent-pending-solid:  #FBBF24;
+  --accent-critical-solid: #F87171;
+  --accent-neutral-solid:  #64748B;
+
+  /* Distribution fills, dark theme. The same hues, lifted one step so a thin bar keeps its
+     saturation against a dark ground rather than sinking into it. */
+  --dist-confirmed-fill:  linear-gradient(90deg, #3B82F6 0%, #A78BFA 100%);
+  --dist-pending-fill:    linear-gradient(90deg, #FBBF24 0%, #FB923C 100%);
+  --dist-waitlisted-fill: linear-gradient(90deg, #22D3EE 0%, #818CF8 100%);
+  --dist-cancelled-fill:  linear-gradient(90deg, #FB7185 0%, #F87171 100%);
+  --dist-rejected-fill:   linear-gradient(90deg, #FB7185 0%, #E879F9 100%);
+  --dist-pass-fill:       linear-gradient(90deg, #3B82F6 0%, #A78BFA 100%);
+  --dist-track:           rgb(255 255 255 / 0.10);
+
+  /* RD-DASH-05B, dark theme. Ring stops mirror the lifted fills directly above; the share
+     pills need more alpha to register on a dark ground and a LIGHT ink, because the tint is
+     now darker than the text rather than lighter. */
+  --dist-confirmed-a:  #3B82F6;  --dist-confirmed-b:  #A78BFA;
+  --dist-pending-a:    #FBBF24;  --dist-pending-b:    #FB923C;
+  --dist-waitlisted-a: #22D3EE;  --dist-waitlisted-b: #818CF8;
+  --dist-cancelled-a:  #FB7185;  --dist-cancelled-b:  #F87171;
+  --dist-rejected-a:   #FB7185;  --dist-rejected-b:   #E879F9;
+  --dist-pass-a:       #3B82F6;  --dist-pass-b:       #A78BFA;
+
+  --dist-confirmed-tint:  rgb( 59 130 246 / 0.20);  --dist-confirmed-ink:  #BFDBFE;
+  --dist-pending-tint:    rgb(251 191  36 / 0.20);  --dist-pending-ink:    #FDE68A;
+  --dist-waitlisted-tint: rgb( 34 211 238 / 0.20);  --dist-waitlisted-ink: #A5F3FC;
+  --dist-cancelled-tint:  rgb(251 113 133 / 0.20);  --dist-cancelled-ink:  #FECDD3;
+  --dist-rejected-tint:   rgb(232 121 249 / 0.20);  --dist-rejected-ink:   #F5D0FE;
+  --dist-pass-tint:       rgb( 59 130 246 / 0.20);  --dist-pass-ink:       #BFDBFE;
+
+  --perf-rank1-fill: linear-gradient(135deg, #7C22D6 0%, #A21FC0 55%, #F43F8E 130%);
+  --perf-rank2-fill: linear-gradient(135deg, #7C3AED 0%, #8B5CF6 52%, #C084FC 122%);
+  --perf-rank3-fill: linear-gradient(135deg, #7E22CE 0%, #9333EA 52%, #D946EF 122%);
+  --perf-rank-ink:   #FFFFFF;
+  --perf-rest-tint:  rgb(255 255 255 / 0.08);
+  --perf-rest-ink:   #94A3B8;
+  --perf-lead-surface: rgb(139  92 246 / 0.10);
+  --perf-lead-border:  rgb(139  92 246 / 0.24);
+
+  /* RD-DASH-06, dark theme. Same hues lifted a step; the chip tints need more alpha to
+     register on a dark ground and a LIGHT ink, since the tint is now darker than the
+     text rather than lighter. */
+  --comm-whatsapp-fill:  linear-gradient(90deg, #10B981 0%, #34D399 100%);
+  --comm-email-fill:     linear-gradient(90deg, #3B82F6 0%, #818CF8 100%);
+  --comm-sms-fill:       linear-gradient(90deg, #FBBF24 0%, #FB923C 100%);
+  --comm-campaign-fill:  linear-gradient(90deg, #A855F7 0%, #F43F8E 100%);
+  --comm-delivered-fill: linear-gradient(90deg, #14B8A6 0%, #2DD4BF 100%);
+  --comm-accepted-fill:  linear-gradient(90deg, #64748B 0%, #94A3B8 100%);
+  --comm-failed-fill:    linear-gradient(90deg, #FB7185 0%, #F87171 100%);
+
+  --comm-whatsapp-tint:  rgb( 16 185 129 / 0.20);  --comm-whatsapp-ink:  #6EE7B7;
+  --comm-email-tint:     rgb( 59 130 246 / 0.20);  --comm-email-ink:     #BFDBFE;
+  --comm-sms-tint:       rgb(251 191  36 / 0.20);  --comm-sms-ink:       #FDE68A;
+  --comm-campaign-tint:  rgb(168  85 247 / 0.20);  --comm-campaign-ink:  #F5D0FE;
+  --comm-delivered-tint: rgb( 20 184 166 / 0.20);  --comm-delivered-ink: #99F6E4;
+  --comm-accepted-tint:  rgb(148 163 184 / 0.18);  --comm-accepted-ink:  #CBD5E1;
+  --comm-failed-tint:    rgb(251 113 133 / 0.20);  --comm-failed-ink:    #FECDD3;
+
+  /* RD-DASH-07, dark theme. Same four levels lifted a step; the chip tints need more alpha
+     to register on a dark ground and a LIGHT ink. */
+  --coupon-normal-fill:    linear-gradient(90deg, #3B82F6 0%, #A78BFA 100%);
+  --coupon-high-fill:      linear-gradient(90deg, #FBBF24 0%, #FB923C 100%);
+  --coupon-exhausted-fill: linear-gradient(90deg, #FB923C 0%, #FB7185 100%);
+  --coupon-over-fill:      linear-gradient(90deg, #F43F5E 0%, #FB7185 100%);
+  --coupon-idle-fill:      linear-gradient(90deg, #64748B 0%, #94A3B8 100%);
+
+  --coupon-normal-tint:    rgb( 59 130 246 / 0.20);  --coupon-normal-ink:    #BFDBFE;
+  --coupon-high-tint:      rgb(251 191  36 / 0.20);  --coupon-high-ink:      #FDE68A;
+  --coupon-exhausted-tint: rgb(251 146  60 / 0.20);  --coupon-exhausted-ink: #FED7AA;
+  --coupon-over-tint:      rgb(251 113 133 / 0.20);  --coupon-over-ink:      #FECDD3;
+  --coupon-idle-tint:      rgb(148 163 184 / 0.18);  --coupon-idle-ink:      #CBD5E1;
+
+  /* RD-DASH-08, dark theme. Same four states lifted a step; tints need more alpha on a
+     dark ground and a LIGHT ink. */
+  --health-healthy-fill: linear-gradient(135deg, #134E4A 0%, #0F766E 55%, #2DD4BF 140%);
+  --health-healthy-tint: rgb( 20 184 166 / 0.20);  --health-healthy-ink: #99F6E4;
+  --health-attention-tint: rgb(251 191  36 / 0.20);  --health-attention-ink: #FDE68A;
+  --health-action-tint:    rgb(251 113 133 / 0.20);  --health-action-ink:    #FECDD3;
+  --health-unknown-tint:   rgb(148 163 184 / 0.18);  --health-unknown-ink:   #CBD5E1;
+  --health-done-dot:       #2DD4BF;
+  --health-todo-dot:       rgb(148 163 184 / 0.38);
+
+  /* RD-DASH-09, dark theme. Same four outcomes lifted a step. */
+  --bcast-sent-tint:    rgb( 20 184 166 / 0.20);  --bcast-sent-ink:    #99F6E4;
+  --bcast-partial-tint: rgb(251 191  36 / 0.20);  --bcast-partial-ink: #FDE68A;
+  --bcast-failed-tint:  rgb(251 113 133 / 0.20);  --bcast-failed-ink:  #FECDD3;
+  --bcast-idle-tint:    rgb(148 163 184 / 0.18);  --bcast-idle-ink:    #CBD5E1;
+
+  /* RD-DASH-11A, dark theme. The same progression lifted a step. */
+  --checkin-fill:        linear-gradient(90deg, #10B981 0%, #14B8A6 45%, #67E8F9 130%);
+  --checkin-tint:        rgb( 16 185 129 / 0.20);  --checkin-ink:        #6EE7B7;
+  --checkin-alert-tint:  rgb(251 191  36 / 0.20);  --checkin-alert-ink:  #FDE68A;
+  /* Card surfaces, dark theme — a tint needs more alpha to register on a dark ground. */
+  --accent-people-surface:   rgb(59 130 246 / 0.10);
+  --accent-money-surface:    rgb(16 185 129 / 0.10);
+  --accent-event-surface:    rgb(142 50 233 / 0.12);
+  --accent-verify-surface:   rgb(20 184 166 / 0.10);
+  --accent-pending-surface:  rgb(255 222 115 / 0.10);
+  /* Chips keep their solid hue in dark mode — a bright 28px accent is exactly as
+     legible on a dark canvas, and dimming it would undo the signal it exists for. */
+  --accent-people-chip:   #3B82F6;  --accent-people-chip-fg:   #06121F;
+  --accent-money-chip:    #10B981;  --accent-money-chip-fg:    #04211A;
+  --accent-event-chip:    #A970F0;  --accent-event-chip-fg:    #150726;
+  --accent-verify-chip:   #14B8A6;  --accent-verify-chip-fg:   #04211E;
+  --accent-pending-chip:  #FFDE73;  --accent-pending-chip-fg:  #4A3600;
+  --accent-critical-chip: #FF4D6B;  --accent-critical-chip-fg: #2A0710;
+  --accent-neutral-chip:  #94A3B8;  --accent-neutral-chip-fg:  #0B1220;
+  --accent-critical-surface: rgb(255 77 107 / 0.10);
+  --accent-neutral-surface:  rgb(148 163 184 / 0.08);
+  /* Product accents, dark theme: same hues, tints lifted off the dark ground and
+     foregrounds inverted to light so they stay legible. */
+  --accent-violet-bg2: rgb(142 50 233 / 0.20);  --accent-violet-fg2: #C4B5FD;
+  --accent-gold-bg2:   rgb(255 222 115 / 0.18); --accent-gold-fg2:   #FCD34D;
+  --accent-rose-bg2:   rgb(255 77 107 / 0.20);  --accent-rose-fg2:   #FDA4AF;
+  --accent-coral-bg2:  rgb(249 104 104 / 0.20); --accent-coral-fg2:  #FCA5A5;
+
+  /* Filled hero KPIs in dark: the same hues one step deeper so they read as surfaces
+     against a dark canvas rather than glowing panels. The on-fill values are
+     unchanged — white still clears contrast on all three. */
+  /* One step deeper at the type end only; the corner glow keeps its brightness, so the
+     cards still read as saturated rather than dimmed. Gold is left alone entirely — a
+     dimmed gold is just brown, and the deep-brown ink it carries needs a light ground
+     in either theme. */
+  --kpi-capacity-fill: linear-gradient(135deg, #E8324F 0%, #E8324F 52%, #FF9E6C 128%);
+  --kpi-people-fill:   linear-gradient(135deg, #7C22D6 0%, #6B2FDC 46%, #5457E8 108%);
+  --kpi-money-fill:    linear-gradient(135deg, #0B7F76 0%, #0B7F76 50%, #1FB8AA 122%);
+  /* RD-DASH-16 · the dark gradients above sit a step lighter at the type end, so the plan
+     chip needs a touch more depth to clear AA on the same white type. */
+  --kpi-on-fill-chip:  rgb( 15  23  42 / 0.38);
+  --kpi-capacity-cta:  #B81038;
+  --kpi-capacity-base: #E8324F;
+  --kpi-people-base:   #7C22D6;
+  --kpi-money-base:    #0B7F76;
+}
+
+/* ── RD-DASHBOARD-03 · Dashboard entrance motion ─────────────────────────────
+   ONE short rise-and-fade, applied to top-level dashboard sections so the page
+   assembles rather than snapping in. 260ms and 4px: enough to read as intentional,
+   far too small to delay anything the organizer wants to do. Sections stagger by
+   setting animation-delay inline.
+
+   Suppressed entirely under prefers-reduced-motion — an entrance animation is
+   precisely what that setting exists to remove, and the dashboard is fully usable
+   without it. */
+@keyframes rd-rise {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: none; }
+}
+
+.rd-rise {
+  animation: rd-rise var(--motion-rise-duration) var(--motion-ease) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rd-rise { animation: none; }
 }

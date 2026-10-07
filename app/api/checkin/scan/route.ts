@@ -15,9 +15,11 @@ import { NextRequest, NextResponse }   from 'next/server'
 import { FieldValue }                   from 'firebase-admin/firestore'
 import { adminDb }                      from '@/lib/firebase/admin'
 import { writeCheckinDelta }            from '@/lib/firebase/firestore/registrationCounters'
+import { stageDailyStatsIncrement }     from '@/lib/dashboard/dailyStatsAdmin'
 import { authorizeWorkspace }           from '@/lib/team/workspace'
 import { isEventSlugInScope }           from '@/lib/team/eventScope'
-import { getEventCheckInStatus }        from '@/lib/checkin/eventStatus'
+import { isEventOpenForCheckin }        from '@/lib/checkin/readiness'
+import { appendCheckinHistorySafe, toCheckinMethod } from '@/lib/checkin/history'
 import { checkRateLimit }               from '@/lib/rateLimit'
 import { enqueueWebhook }                from '@/lib/integrations/webhooks'
 import { crmRecordCheckIn }              from '@/lib/crm/service'
@@ -186,8 +188,10 @@ export async function POST(req: NextRequest): Promise<NextResponse<CheckInResult
   // ── Event lifecycle check ─────────────────────────────────────────────────
   // Must be published, registration_closed, or completed. All other states
   // (draft, unpublished, cancelled, archived, or doc missing) reject here.
-  const eventStatus = await getEventCheckInStatus(reg.eventSlug)
-  if (eventStatus !== 'ok') {
+  // RD-CHECKIN-2.0 — the ONE event-readiness rule, shared with every other
+  // check-in surface (lib/checkin/readiness.ts). The scan path knows only the slug,
+  // so it uses the slug variant; both call the same lifecycle + moderation check.
+  if (!await isEventOpenForCheckin(reg.eventSlug)) {
     return NextResponse.json({ success: false, error: 'EVENT_NOT_ACCEPTING_CHECKINS' }, { status: 422 })
   }
 
@@ -238,6 +242,10 @@ export async function POST(req: NextRequest): Promise<NextResponse<CheckInResult
           actor:          callerUid,      // attribution: the operator at the gate
           source:         'manual',       // an operator typed it
           explicitValue:  identifierValue,
+          // RD-EVENT-19A · from the registration already resolved from the ticket
+          // code — no extra read, and never from the request. It only decides
+          // which pool records the value the operator typed.
+          passId:         reg.passId ?? null,
         })
         assignedIdentifier = allocated.value
       } catch (err) {
@@ -261,11 +269,24 @@ export async function POST(req: NextRequest): Promise<NextResponse<CheckInResult
   // ── Perform check-in atomically ───────────────────────────────────────────
   const now = FieldValue.serverTimestamp()
 
-  await adminDb.runTransaction(async txn => {
+  // ═══ THE TRANSACTION'S VERDICT IS THE ANSWER (RD-CHECKIN-2.0) ═════════════
+  //
+  // This used to be a bare `await runTransaction(...)` whose result was discarded,
+  // and the response below always said `alreadyCheckedIn: false`. The DATA was
+  // never at risk — the re-read inside the transaction has always meant exactly one
+  // admission and exactly one counter increment — but under a genuine race the
+  // ROUTE lied: three devices scanning the same person at the same instant all
+  // received "Check-in successful", and every one of them would have appended a
+  // CHECK_IN to the history.
+  //
+  // Found by the concurrency test rather than by reading, because the losing
+  // branches are invisible until two callers actually collide. The transaction now
+  // reports whether it admitted anyone, and everything after it follows that.
+  const admitted = await adminDb.runTransaction<boolean>(async txn => {
     // Re-read inside transaction to prevent double check-in under concurrent load
     const freshSnap = await txn.get(regRef)
     const fresh     = freshSnap.data() as RegistrationDocument
-    if (fresh.checkedIn) return  // already done — idempotent
+    if (fresh.checkedIn) return false  // already done — idempotent
 
     txn.update(regRef, {
       checkedIn:             true,
@@ -279,9 +300,57 @@ export async function POST(req: NextRequest): Promise<NextResponse<CheckInResult
     // Increment attendance counters (event-level + per-pass) atomically — GA-5 S3:
     // routed to the registration's shard so mass gate scanning spreads the writes.
     writeCheckinDelta(txn, reg.eventSlug, regRef.id, reg.passId, 1)
+    // RD-DASHBOARD-02 — same transaction as the attendance shard, so the dashboard's
+    // "checked in today" can never disagree with the counter it is drawn from.
+    // `uid` is the workspace, which is what the dashboard aggregates by.
+    stageDailyStatsIncrement(txn, uid, reg.eventSlug, Date.now(), { action: 'checkin' })
+    return true
   })
 
+  // ── Lost the race ─────────────────────────────────────────────────────────
+  // Somebody else admitted this attendee between the pre-check above and the
+  // transaction. That is the ALREADY CHECKED IN state, and it must be reported as
+  // one — with the ORIGINAL timestamp, re-read from the document the winner wrote.
+  // No history entry is appended here: there was one admission, so there is one
+  // record of it.
+  if (!admitted) {
+    const after = await regRef.get()
+    const ts = (after.data() as RegistrationDocument | undefined)?.checkedInAt as
+      { toDate?: () => Date } | undefined
+    return NextResponse.json({
+      success:          true,
+      alreadyCheckedIn: true,
+      attendee:         { name: reg.attendee.name, passName: reg.passName },
+      eventName:        reg.eventName,
+      checkedInAt:      ts?.toDate ? ts.toDate().toISOString() : undefined,
+    })
+  }
+
   const checkedInAt = new Date().toISOString()
+
+  // ── Immutable history (RD-CHECKIN-2.0) ────────────────────────────────────
+  //
+  // ═══ THE GAP THIS CLOSES ══════════════════════════════════════════════════
+  // This route — the one that admits almost everybody — wrote NO audit record at
+  // all. Walk-in wrote one and undo wrote one, so the two rarest operations were
+  // recorded and the common one was not. "Who admitted this person" was answerable
+  // only from three fields on the registration, which the undo path then deleted.
+  //
+  // Awaited rather than fired and forgotten: this IS the evidence. It cannot fail
+  // the check-in, which has already committed and must not be rolled back for a
+  // logging error, so a failure is logged loudly instead of dropped silently.
+  await appendCheckinHistorySafe({
+    registrationId: regDoc.id,
+    action:         'CHECK_IN',
+    eventSlug:      reg.eventSlug,
+    organizerUid:   uid,
+    operatorUid:    callerUid,     // the human at the gate
+    workspaceUid:   uid,           // the workspace the action belongs to
+    method:         toCheckinMethod(source),
+    identifierValue: assignedIdentifier
+      ?? (reg as { identifier?: { value?: string } }).identifier?.value
+      ?? null,
+  })
 
   void enqueueWebhook(uid, 'registration.checked_in', {
     registrationId: regDoc.id, ticketCode: reg.ticketCode, eventSlug: reg.eventSlug,

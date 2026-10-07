@@ -1,61 +1,55 @@
-import type { Metadata }       from 'next'
-import { listPublishedEvents } from '@/lib/firebase/firestore/publicEvents'
-import { DiscoveryClient }     from './DiscoveryClient'
+// ─── /events — compatibility redirect to the canonical landing ───────────────
+//
+// `/` is the RegisterDesk event-discovery experience. This route used to render a second,
+// separate marketplace UI; that page and everything built only for it have been removed.
+//
+// The URL is NOT retired. It stays a live public contract: the header's "Discover Events"
+// deliberately points here rather than at `/`, so any link, bookmark or index entry that
+// already says /events keeps working and lands in the same place. That indirection is the
+// point of this file.
+//
+// ═══ WHY THE PAGE FILE AND NOT next.config ═══════════════════════════════════
+// A redirect declared in next.config.ts is matched by the proxy before routing, and the
+// patterns that catch `/events` are one careless character away from also catching
+// `/events/:slug` — which would take down every event detail page, its registration flow
+// and its success and sponsor routes. Declaring it HERE means the App Router has already
+// resolved the segment: this file serves exactly `/events`, and `/events/[slug]/**` is a
+// different route that never reaches it. The blast radius is one path by construction.
+//
+// ═══ 307 AND NOT 308 ═════════════════════════════════════════════════════════
+// `redirect()` answers 307 (temporary). `permanentRedirect()` would answer 308 and let
+// search engines fold /events' ranking signals into `/` — better SEO consolidation, and
+// the right call once this structure is settled. It is deliberately not used yet: a 308 is
+// cached hard by browsers and intermediaries, so if /events is ever given its own page
+// again, every visitor who saw the 308 would keep skipping it. Swap `redirect` for
+// `permanentRedirect` (same import, same call) when the shape of the product is fixed.
+//
+// No metadata, no JSON-LD, no data fetch: nothing here renders, so nothing here needs to
+// describe itself. The discovery metadata that used to live in this file belonged to the
+// deleted page and went with it — app/page.tsx carries the canonical set.
 
-const BASE_URL = process.env.NEXT_PUBLIC_BASE_URL ?? 'https://registerdesk.in'
+// ═══ THE QUERY STRING TRAVELS WITH THE REDIRECT ══════════════════════════════
+// The discovery page's filters live in its query string (lib/discovery/urlState.ts), and
+// that module keeps a read-only `type` alias precisely so the event-page breadcrumb
+// (`/events?type=sports`, built by lib/events/breadcrumbs.ts) "keeps working". It did not:
+// this file answered `redirect('/')` and dropped the query, so "Sports" in a breadcrumb
+// landed on the unfiltered homepage. Measured in the link crawl — /events?type=sports → /.
+//
+// The redirect now carries the query through. A bare /events is still exactly `/`, which
+// is the contract every other consumer relies on; only a /events?… request changes, and it
+// changes to the URL the discovery page already understands.
 
-export const revalidate = 60
+import { redirect } from 'next/navigation'
 
-export const metadata: Metadata = {
-  title:       'Discover Events — RegisterDesk',
-  description: 'Find conferences, workshops, marathons, startup meetups, and more across India. Register instantly with secure payments.',
-  metadataBase: new URL(BASE_URL),
-  alternates:  { canonical: `${BASE_URL}/events` },
-  keywords:    ['events', 'conferences', 'workshops', 'marathon', 'startup events', 'India events', 'RegisterDesk'],
-  openGraph: {
-    type:        'website',
-    url:         `${BASE_URL}/events`,
-    title:       'Discover Events — RegisterDesk',
-    description: 'Find conferences, workshops, marathons, and more. Register instantly.',
-    siteName:    'RegisterDesk',
-  },
-  twitter: {
-    card:        'summary_large_image',
-    title:       'Discover Events — RegisterDesk',
-    description: 'Find conferences, workshops, marathons, and more. Register instantly.',
-  },
-}
-
-export default async function EventsDiscoveryPage() {
-  // First page (48) — keeps the initial render + hero stats identical to before; discovery is
-  // now cursor-paginated so events beyond the first page are reachable (RD-DISCOVERY-01 / D-C1).
-  //
-  // A FAILED QUERY MUST NOT RENDER AS "no events". This page is ISR (`revalidate = 60`), so a
-  // render that SUCCEEDS is written to the page cache and served to everyone until the next
-  // revalidation. Swallowing the rejection here therefore did not degrade one request — it baked
-  // an empty discovery page into the cache for the whole window, which is exactly the
-  // intermittent "shell renders, cards missing, even on hard refresh" report.
-  //
-  // Letting it throw is what makes the page self-healing: Next.js does not cache a render that
-  // threw, so the last good page keeps being served and the next request retries. The root
-  // `app/error.tsx` boundary surfaces a branded, recoverable screen; in production Next.js
-  // replaces the message with a generic one and exposes only a `digest`, so nothing sensitive
-  // reaches the browser. The real cause is logged here, server-side, before rethrowing.
-  // Only the await is guarded — the JSX is constructed outside the try, so a render error is
-  // left to the error boundary rather than being caught here (react-hooks/error-boundaries).
-  let data: Awaited<ReturnType<typeof listPublishedEvents>>
-  try {
-    data = await listPublishedEvents({ limit: 48 })
-  } catch (err) {
-    console.error('[events/page] discovery query failed:', err)
-    throw err
+export default async function EventsRedirect({ searchParams }: {
+  searchParams: Promise<Record<string, string | string[] | undefined>>
+}): Promise<never> {
+  const params = await searchParams
+  const qs = new URLSearchParams()
+  for (const [k, v] of Object.entries(params)) {
+    if (typeof v === 'string') qs.set(k, v)
+    else if (Array.isArray(v)) for (const x of v) qs.append(k, x)
   }
-
-  return (
-    <DiscoveryClient
-      initialEvents={data.events}
-      initialStats={data.stats}
-      initialNextCursor={data.nextCursor}
-    />
-  )
+  const query = qs.toString()
+  redirect(query ? `/?${query}` : '/')
 }

@@ -110,7 +110,7 @@ function ReportModal({ targetType, targetId, onClose }: {
               <select
                 value={reason}
                 onChange={e => setReason(e.target.value)}
-                className="w-full rounded-lg border border-border bg-card px-3 py-2 text-[13.5px] outline-none focus:border-primary"
+                className="w-full rounded-lg border border-border bg-card px-3 py-2 text-[13.5px] outline-none focus:border-action"
               >
                 {REASONS.map(r => <option key={r} value={r}>{r}</option>)}
               </select>
@@ -123,7 +123,7 @@ function ReportModal({ targetType, targetId, onClose }: {
                 rows={3}
                 maxLength={5000}
                 placeholder="Add any context that will help us review this report…"
-                className="w-full resize-none rounded-lg border border-border bg-card px-3 py-2 text-[13.5px] outline-none focus:border-primary"
+                className="w-full resize-none rounded-lg border border-border bg-card px-3 py-2 text-[13.5px] outline-none focus:border-action"
               />
             </div>
             <div>
@@ -133,7 +133,7 @@ function ReportModal({ targetType, targetId, onClose }: {
                 value={email}
                 onChange={e => setEmail(e.target.value)}
                 placeholder="you@example.com"
-                className="w-full rounded-lg border border-border bg-card px-3 py-2 text-[13.5px] outline-none focus:border-primary"
+                className="w-full rounded-lg border border-border bg-card px-3 py-2 text-[13.5px] outline-none focus:border-action"
               />
             </div>
 
@@ -144,7 +144,7 @@ function ReportModal({ targetType, targetId, onClose }: {
               <button
                 onClick={submit}
                 disabled={busy || !reason}
-                className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-[13.5px] font-semibold text-primary-foreground hover:opacity-90 disabled:opacity-60"
+                className="inline-flex items-center gap-2 rounded-lg bg-action px-4 py-2 text-[13.5px] font-semibold text-action-foreground hover:opacity-90 disabled:opacity-60"
               >
                 {busy && <Loader2 className="size-4 animate-spin" />} Submit report
               </button>

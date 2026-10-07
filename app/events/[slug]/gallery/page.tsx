@@ -18,8 +18,8 @@
 import type { Metadata } from 'next'
 import Link from 'next/link'
 import { notFound } from 'next/navigation'
-import { Camera, ImageIcon } from 'lucide-react'
-import { Card, EmptyState } from '@/components/ui'
+import { Camera, ImageIcon, ArrowRight } from 'lucide-react'
+import { Card } from '@/components/ui'
 import { Breadcrumbs } from '@/components/ui/Breadcrumbs'
 import { cn } from '@/lib/utils/cn'
 import { EventPageShell } from '@/components/event-templates/shared/ui/EventPageShell'
@@ -41,13 +41,13 @@ export const revalidate = 60
 export async function generateMetadata({ params }: Params): Promise<Metadata> {
   const { slug } = await params
   const ctx = await resolvePublicEvent(slug)
-  if (!ctx) return { title: 'Photos', robots: { index: false, follow: false } }
+  if (!ctx) return { title: 'Images', robots: { index: false, follow: false } }
 
   const index = await getPublicGalleryIndex(ctx)
-  const title = `Photos — ${ctx.eventName}`
+  const title = `Images — ${ctx.eventName}`
   const description = index.totalPhotos > 0
-    ? `Browse ${index.totalPhotos.toLocaleString('en-IN')} photos from ${ctx.eventName}.`
-    : `Photos from ${ctx.eventName}.`
+    ? `Browse ${index.totalPhotos.toLocaleString('en-IN')} images from ${ctx.eventName}.`
+    : `Images from ${ctx.eventName}.`
   const url = `${BASE_URL}/events/${slug}/gallery`
   const cover = index.galleries.find(g => g.coverUrl)?.coverUrl
 
@@ -84,13 +84,13 @@ export default async function PublicGalleryPage({ params }: Params) {
   const cover = index.galleries.find(g => g.coverUrl)?.coverUrl ?? null
 
   return (
-    <EventPageShell variant="marketing" title={`Photos — ${ctx.eventName}`}>
+    <EventPageShell variant="marketing" title={`Images — ${ctx.eventName}`}>
       <GalleryHero
         eventName={ctx.eventName}
         eventSlug={slug}
-        title="Event photos"
+        title="Event images"
         subtitle={index.totalPhotos > 0
-          ? `${index.totalPhotos.toLocaleString('en-IN')} photo${index.totalPhotos === 1 ? '' : 's'} across ${index.galleries.length} ${index.galleries.length === 1 ? 'gallery' : 'galleries'}`
+          ? `${index.totalPhotos.toLocaleString('en-IN')} image${index.totalPhotos === 1 ? '' : 's'} across ${index.galleries.length} ${index.galleries.length === 1 ? 'gallery' : 'galleries'}`
           : undefined}
         coverUrl={cover}
       />
@@ -101,25 +101,37 @@ export default async function PublicGalleryPage({ params }: Params) {
           items={[
             { label: 'Events', href: '/events' },
             { label: ctx.eventName, href: `/events/${slug}` },
-            { label: 'Photos' },
+            { label: 'Images' },
           ]}
         />
       </div>
 
-      <SectionShell border={false}>
+      <SectionShell border={false} className="py-6 sm:py-8 lg:py-8">
         {index.galleries.length === 0 ? (
-          <EmptyState
-            icon={Camera}
-            title="No photos have been published yet"
-            description={`${ctx.eventName} has no public photo galleries at the moment. Check back after the event.`}
-          />
+          <div className="mx-auto flex max-w-md flex-col items-center py-2 text-center sm:py-4">
+            <span aria-hidden className="inline-flex size-11 items-center justify-center rounded-full border border-hero-accent-rule/50 text-hero-accent-rule">
+              <Camera className="size-5" strokeWidth={1.5} />
+            </span>
+            <span aria-hidden className="mt-4 h-px w-8 bg-hero-accent-rule" />
+            <h2 className="mt-4 font-display text-fs-xl font-light text-hero-ink">No images have been published yet</h2>
+            <p className="mt-2 text-fs-sm leading-relaxed text-hero-ink-soft">
+              {ctx.eventName} has no public image galleries at the moment. Check back after the event.
+            </p>
+            <Link
+              href={`/events/${slug}`}
+              className="group mt-5 inline-flex items-center gap-2 text-fs-xs font-semibold uppercase tracking-[0.16em] text-action underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-action focus-visible:ring-offset-2"
+            >
+              Back to the event
+              <ArrowRight aria-hidden className="size-3.5 transition-transform duration-200 group-hover:translate-x-0.5 motion-reduce:transition-none" />
+            </Link>
+          </div>
         ) : (
           <ul className={cn('grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3', GRID_GAP)}>
             {index.galleries.map(gallery => (
               <li key={gallery.slug}>
                 <Link
                   href={`/events/${slug}/gallery/${gallery.slug}`}
-                  className="group block h-full rounded-2xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2"
+                  className="group block h-full rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-action focus-visible:ring-offset-2"
                 >
                   <Card padded={false} className={cn(CARD, 'h-full overflow-hidden')}>
                     <div className="aspect-[4/3] w-full bg-muted">
@@ -139,9 +151,9 @@ export default async function PublicGalleryPage({ params }: Params) {
                       )}
                     </div>
                     <div className="p-4">
-                      <h2 className={TYPE.cardTitle}>{gallery.name}</h2>
-                      <p className={cn(TYPE.metaSm, 'mt-0.5')}>
-                        {gallery.photoCount.toLocaleString('en-IN')} photo
+                      <h2 className="font-display text-fs-lg text-hero-ink leading-snug transition-colors group-hover:text-action">{gallery.name}</h2>
+                      <p className="mt-1 text-fs-2xs font-semibold uppercase tracking-[0.16em] text-hero-eyebrow">
+                        {gallery.photoCount.toLocaleString('en-IN')} image
                         {gallery.photoCount === 1 ? '' : 's'}
                       </p>
                       {gallery.description && (

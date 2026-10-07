@@ -54,13 +54,19 @@ export function EventSelector({ state, selectedEventId, onSelect }: EventSelecto
   }
 
   if (events.length === 0) {
+    // RD-RACEOPS-02B · the list holds only sports events now (useRaceOpsEvents), so an
+    // empty list means "no sports event", not "no event". A page of fifty non-sports events
+    // can leave it empty while more pages exist, so the load-more control stays reachable.
     return (
-      <EmptyState
-        icon={CalendarDays}
-        title="No events yet"
-        description="Create and publish an event before recording race results."
-        action={{ label: 'Create event', href: '/dashboard/events/new/visibility' }}
-      />
+      <div className="space-y-3">
+        <EmptyState
+          icon={CalendarDays}
+          title="No sports events yet"
+          description="Race results can be published for sports events only. Create and publish a sports event before recording race results."
+          action={{ label: 'Create event', href: '/dashboard/events/new/visibility' }}
+        />
+        {hasMore && <LoadMoreButton onClick={loadMore} loading={loadingMore} label="Load more events" />}
+      </div>
     )
   }
 
@@ -68,7 +74,7 @@ export function EventSelector({ state, selectedEventId, onSelect }: EventSelecto
     <div className="space-y-3">
       <ul className="space-y-2.5">
         {events.map(event => {
-          const { eligible, reason } = resolveRaceOpsEligibility(event.lifecycleStatus, event.raceCount)
+          const { eligible, reason } = resolveRaceOpsEligibility(event.lifecycleStatus, event.raceCount, event.eventType)
           const selected = event.eventId === selectedEventId
           const meta     = eventLifecycleMeta[event.lifecycleStatus]
             ?? { label: event.lifecycleStatus, cls: 'bg-muted text-muted-foreground' }

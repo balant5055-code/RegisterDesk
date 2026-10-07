@@ -5,14 +5,16 @@
 import type { ReactNode } from 'react'
 import { cn } from '@/lib/utils/cn'
 
-// The RegisterDesk brand gradient utility (#fb5a6a → #e5277e — matches --primary-gradient).
-export const BRAND_GRADIENT = 'bg-[linear-gradient(90deg,var(--primary-from),var(--primary))]'
+// The canonical brand gradient, named — never re-typed. One definition, in globals.css
+// (.rd-brand-gradient → --action-gradient). It used to hand-roll the retired coral→magenta
+// ramp inline, which is how a second opinion about the brand colour gets into the CSS.
+export const BRAND_GRADIENT = 'rd-brand-gradient'
 
 export function Eyebrow({ children, className }: { children: ReactNode; className?: string }) {
   return (
     <span
       className={cn(
-        'inline-flex h-9 items-center gap-2 rounded-full border border-border/60 bg-white px-4 text-fs-xs font-bold uppercase tracking-[0.18em] text-primary shadow-sm',
+        'inline-flex h-9 items-center gap-2 rounded-full border border-border/60 bg-card px-4 text-fs-xs font-bold uppercase tracking-[0.18em] text-action shadow-sm',
         className,
       )}
     >

@@ -100,7 +100,11 @@ describe('canonical columns', () => {
 
   it('carries the payment identifiers that were previously exported nowhere', () => {
     expect(m.paymentId?.label).toBe('Payment ID')
-    expect(m.razorpayOrderId?.label).toBe('Razorpay Order ID')
+    // The column KEY stays `razorpayOrderId` — it is the heading in every export already
+    // downloaded or scripted against — but the LABEL is provider-neutral, because the value
+    // is whichever gateway's order id settled the registration.
+    expect(m.razorpayOrderId?.label).toBe('Payment Order ID')
+    expect(m.razorpayOrderId?.label).not.toMatch(/razorpay/i)
   })
 
   it('carries the money block the server export had NO column for', () => {

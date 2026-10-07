@@ -1,12 +1,4 @@
-import {
-  collection,
-  doc,
-  getDoc,
-  setDoc,
-  updateDoc,
-  serverTimestamp,
-} from 'firebase/firestore'
-import { db } from '@/lib/firebase/firestore'
+import { auth } from '@/lib/firebase/auth'
 import type { CommunicationBilling } from '@/types/events'
 import type { LinkedCampaignDraft }  from '@/lib/campaigns/linkedCampaignConfig'
 
@@ -32,6 +24,15 @@ export interface EventDraftDocument {
   // Organizer's chosen Event License tier (F2.1). Persisted for the License step;
   // does not itself create or pay for a license.
   licenseTier?:     string | null
+  // RD-CAPACITY-01 — the registration capacity the organizer selected. The publish step
+  // re-quotes it server-side and requires a paid order to cover it, so this is the
+  // organizer INTENT, never an authority on price. Absent on pre-migration drafts, which
+  // keep publishing through the legacy tier-derived capacity path.
+  registrationCapacity?: number | null
+  // RD-EVENT-COMMERCE-02 — the prepaid service QUANTITIES the organizer selected on License &
+  // Services. INTENT only: the allowance ledger (written by verified payments) is what an event
+  // actually has, and publish refuses a selection the ledger does not cover.
+  serviceSelection?: { whatsapp: number; certificates: number } | null
   // Server-controlled fields — never written by the client directly
   communicationBilling: CommunicationBilling | null
   publishedAt:          unknown   // Firestore Timestamp | null
@@ -41,14 +42,29 @@ export interface EventDraftDocument {
 
 export type DraftPayload = Partial<Omit<EventDraftDocument, 'id' | 'createdAt'>>
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
 
-// Max steps across all event types (9 for event_plus_donation with the License
-// step, 8 for others). Over-provisioning the array is safe — extra slots are ignored.
-const MAX_STEPS = 9
+// ─── Transport ────────────────────────────────────────────────────────────────
+//
+// RD-CE-FIX M2/H6 · drafts are no longer written with the client SDK. Every read and write goes
+// through /api/organizer/drafts (Admin SDK): the server resolves the WORKSPACE the caller acts for
+// (so a team member edits the workspace's draft, the one publish and licensing read), checks the
+// `events` permission, and applies the wizard-field allow-list in lib/events/draftWrite.ts — a
+// lifecycle/review/publish/commerce field, or any unknown key, can no longer reach a draft.
+// The function signatures are unchanged; `uid` is kept for callers but the server decides the path.
 
-function col(uid: string) {
-  return collection(db, 'users', uid, 'eventDrafts')
+async function draftApi(path: string, init: RequestInit = {}): Promise<Response> {
+  const token = await auth.currentUser?.getIdToken()
+  if (!token) throw new Error('Not signed in')
+  return fetch(`/api/organizer/drafts${path}`, {
+    ...init,
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, ...(init.headers ?? {}) },
+    cache: 'no-store',
+  })
+}
+
+async function failure(res: Response, what: string): Promise<Error> {
+  const body = await res.json().catch(() => ({})) as { error?: unknown }
+  return new Error(typeof body.error === 'string' && body.error ? body.error : `${what} failed (${res.status})`)
 }
 
 // ─── CRUD ─────────────────────────────────────────────────────────────────────
@@ -62,64 +78,46 @@ function col(uid: string) {
  * their Step 1/2 selections (event category + visibility).
  *
  * Server-controlled / identity fields (`id`, `status`, `communicationBilling`,
- * `publishedAt`, timestamps) are fixed here and can never be overridden by the
- * seed — mirroring the constraints enforced by firestore.rules.
+ * `publishedAt`, timestamps) are fixed by the server and can never be set by the seed.
  */
 export async function createEventDraft(
-  uid:   string,
+  _uid:  string,
   seed?: DraftPayload,
 ): Promise<string> {
-  const ref = doc(col(uid))
-
-  const safeSeed: DraftPayload = { ...(seed ?? {}) }
-  delete safeSeed.status
-  delete safeSeed.communicationBilling
-  delete safeSeed.publishedAt
-  delete safeSeed.updatedAt
-
-  await setDoc(ref, {
-    id:               ref.id,
-    status:           'draft',
-    currentStep:      0,
-    completedValues:  Array(MAX_STEPS).fill(null),
-    eventType:          null,
-    eventSubtype:       null,
-    customEventSubtype: null,
-    campaignType:       null,
-    linkedCampaign:     null,
-    visibility:         null,
-    accessControl:    null,
-    pricing:          null,
-    registrationForm: null,
-    eventDetails:     {},
-    communicationBilling: null,
-    publishedAt:          null,
-    // Wizard selections (eventType, visibility, currentStep, …) override blanks.
-    ...safeSeed,
-    createdAt:        serverTimestamp(),
-    updatedAt:        serverTimestamp(),
-  })
-  return ref.id
+  // RD-CE-FIX (orphan drafts) — one request id per creation attempt, kept in this tab's
+  // sessionStorage until the server acknowledges it: a refresh mid-create (or a retried submit)
+  // resolves to the SAME draft instead of orphaning one and creating another.
+  const KEY = 'rd_draft_create_request'
+  let requestId: string | null = null
+  try {
+    requestId = sessionStorage.getItem(KEY)
+    if (!requestId) { requestId = crypto.randomUUID(); sessionStorage.setItem(KEY, requestId) }
+  } catch { requestId = null }
+  const res = await draftApi('', { method: 'POST', body: JSON.stringify({ seed: seed ?? {}, ...(requestId ? { requestId } : {}) }) })
+  if (!res.ok) throw await failure(res, 'Creating the draft')
+  const { id } = await res.json() as { id: string }
+  try { sessionStorage.removeItem(KEY) } catch { /* storage unavailable — nothing to clear */ }
+  return id
 }
 
-/** Loads a draft by id. Returns null if it does not exist. */
+/** Loads a draft by id. Returns null if it does not exist. Timestamps arrive as epoch millis. */
 export async function loadEventDraft(
-  uid:     string,
+  _uid:    string,
   draftId: string,
 ): Promise<EventDraftDocument | null> {
-  const snap = await getDoc(doc(col(uid), draftId))
-  if (!snap.exists()) return null
-  return { id: snap.id, ...snap.data() } as EventDraftDocument
+  const res = await draftApi(`/${encodeURIComponent(draftId)}`)
+  if (res.status === 404) return null
+  if (!res.ok) throw await failure(res, 'Loading the draft')
+  const { draft } = await res.json() as { draft: EventDraftDocument }
+  return draft
 }
 
-/** Merges partial data into the draft and bumps updatedAt. */
+/** Merges partial data into the draft; the server bumps updatedAt. */
 export async function saveEventDraft(
-  uid:     string,
+  _uid:    string,
   draftId: string,
   data:    DraftPayload,
 ): Promise<void> {
-  await updateDoc(doc(col(uid), draftId), {
-    ...data,
-    updatedAt: serverTimestamp(),
-  })
+  const res = await draftApi(`/${encodeURIComponent(draftId)}`, { method: 'PATCH', body: JSON.stringify(data) })
+  if (!res.ok) throw await failure(res, 'Saving the draft')
 }

@@ -18,7 +18,7 @@
 // listed as a certification finding rather than left to be rediscovered.
 
 import { NextRequest, NextResponse } from 'next/server'
-import { resolveAdminUid } from '@/lib/admin/auth'
+import { requireSuperAdmin } from '@/lib/admin/financialGuard'
 import * as ledgerRepo from '@/features/media-credits/repositories/ledgerRepo'
 import { CREDIT_LEDGER_REASONS, type CreditLedgerReason } from '@/features/media-credits/types'
 
@@ -28,8 +28,10 @@ const toMs = (v: unknown): number =>
   v && typeof v === 'object' && 'toMillis' in v ? (v as { toMillis(): number }).toMillis() : 0
 
 export async function GET(req: NextRequest): Promise<NextResponse> {
-  const adminUid = await resolveAdminUid(req.headers.get('authorization'))
-  if (!adminUid) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+  // RD-CLOSE — a financial read: Super Admin only (ADMIN_UIDS). A legacy `admin: true` claim
+  // alone gets 403 SUPER_ADMIN_REQUIRED (lib/admin/financialGuard.ts).
+  const superGate = await requireSuperAdmin(req)
+  if (superGate.response) return superGate.response
 
   const params = req.nextUrl.searchParams
   const raw    = Number(params.get('limit') ?? '50')

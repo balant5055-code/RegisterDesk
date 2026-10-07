@@ -7,6 +7,7 @@ import { Button } from '@/components/ui'
 import { AuthField } from './AuthField'
 import { PasswordField } from './PasswordField'
 import { SocialLoginRow } from './SocialLoginRow'
+import { cn } from '@/lib/utils/cn'
 import type { SocialProviderKey } from '@/lib/firebase/auth/social'
 
 // ─── LoginForm ──────────────────────────────────────────────────────────────
@@ -37,6 +38,14 @@ export interface LoginFormProps {
   /** Social handlers — forwarded to SocialLoginRow when showSocial is true. */
   onSocialSelect?:     (key: SocialProviderKey) => void
   socialLoadingKey?:   SocialProviderKey | null
+  /**
+   * 'default' — the original product dress (organizer magenta), byte-identical to what
+   * shipped. 'editorial' — the public theme the sign-in screens now share: the --action
+   * accent, icon-free 6px fields, a small-caps link, and the flat brand-ramp button with NO
+   * shadow and NO hover lift (Button's gradient variant carries a magenta glow). Opt-in, so
+   * nothing else changes.
+   */
+  tone?:               'default' | 'editorial'
 }
 
 export function LoginForm({
@@ -57,7 +66,12 @@ export function LoginForm({
   showSocial = false,
   onSocialSelect,
   socialLoadingKey = null,
+  tone = 'default',
 }: LoginFormProps) {
+  const editorial = tone === 'editorial'
+  const fieldProps = editorial
+    ? { accent: 'action' as const, hideIcon: true, radius: 'control' as const }
+    : {}
   return (
     <form onSubmit={onSubmit} noValidate>
       {/* Field group — 16px field-to-field */}
@@ -71,6 +85,7 @@ export function LoginForm({
           value={email}
           onChange={onEmailChange}
           Icon={Mail}
+          {...fieldProps}
         />
 
         <PasswordField
@@ -80,6 +95,7 @@ export function LoginForm({
           placeholder="Enter your password"
           value={password}
           onChange={onPasswordChange}
+          {...fieldProps}
         />
       </div>
 
@@ -91,7 +107,7 @@ export function LoginForm({
                 type="checkbox"
                 checked={remember}
                 onChange={(e) => onRememberChange?.(e.target.checked)}
-                className="size-4 cursor-pointer rounded border-border accent-primary"
+                className={cn('size-4 cursor-pointer rounded border-border', editorial ? 'accent-action' : 'accent-primary')}
               />
               <span className="text-sm text-muted-foreground">Remember me</span>
             </label>
@@ -101,7 +117,9 @@ export function LoginForm({
           {forgotPasswordHref && (
             <Link
               href={forgotPasswordHref}
-              className="text-sm font-medium text-primary transition-opacity duration-150 hover:opacity-75"
+              className={editorial
+                ? 'text-fs-xs font-semibold uppercase tracking-[0.12em] text-action underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-action focus-visible:ring-offset-2'
+                : 'text-sm font-medium text-primary transition-opacity duration-150 hover:opacity-75'}
             >
               Forgot password?
             </Link>
@@ -112,7 +130,9 @@ export function LoginForm({
       {error && (
         <p
           role="alert"
-          className="mt-4 rounded-lg border border-destructive/20 bg-destructive/10 px-3.5 py-2.5 text-sm text-destructive"
+          className={editorial
+            ? 'mt-4 border-l-2 border-destructive py-1 pl-3 text-left text-fs-sm text-destructive'
+            : 'mt-4 rounded-lg border border-destructive/20 bg-destructive/10 px-3.5 py-2.5 text-sm text-destructive'}
         >
           {error}
         </p>
@@ -120,10 +140,16 @@ export function LoginForm({
 
       <Button
         type="submit"
-        variant="gradient"
+        variant={editorial ? 'secondary' : 'gradient'}
         size="lg"
         isLoading={loading}
-        className="mt-5 h-12 w-full cursor-pointer shadow-md transition-all duration-200 hover:-translate-y-0.5 hover:shadow-lg"
+        className={editorial
+          ? cn(
+              'rd-brand-gradient mt-6 h-12 w-full cursor-pointer rounded-[var(--radius-control)] border-0 bg-transparent',
+              'text-white text-fs-base font-semibold ring-1 ring-inset ring-white/15',
+              'transition-opacity duration-200 hover:opacity-90 focus-visible:ring-action focus-visible:ring-offset-2',
+            )
+          : 'mt-5 h-12 w-full cursor-pointer shadow-md transition-all duration-200 hover:-translate-y-0.5 hover:shadow-lg'}
       >
         {submitLabel}
       </Button>

@@ -10,6 +10,7 @@
 
 import { useCallback, useState } from 'react'
 import { Camera, Check, Copy, Download, Loader2, Share2 } from 'lucide-react'
+import { marketingButtonSkin } from '@/lib/marketing/theme'
 import { Button, Card, EmptyState } from '@/components/ui'
 import type { RunnerPhotoPage, RunnerPhotoView } from '@/features/runner-photos/types'
 import type { AttendeePhotosResponse } from '@/app/api/attendee/photos/route'
@@ -108,11 +109,11 @@ export function RunnerPhotoGallery({
         </p>
         <div className="flex flex-wrap gap-2">
           {canNativeShare && (
-            <Button size="sm" variant="outline" onClick={() => void nativeShare()}>
+            <Button size="sm" variant="outline" className={marketingButtonSkin.ring} onClick={() => void nativeShare()}>
               <Share2 className="size-4" aria-hidden /> Share
             </Button>
           )}
-          <Button size="sm" variant="outline" onClick={() => void copyLink()}>
+          <Button size="sm" variant="outline" className={marketingButtonSkin.ring} onClick={() => void copyLink()}>
             {copied ? <Check className="size-4" aria-hidden /> : <Copy className="size-4" aria-hidden />}
             {copied ? 'Link copied' : 'Copy link'}
           </Button>
@@ -153,7 +154,7 @@ export function RunnerPhotoGallery({
                   </div>
                   <a
                     href={photo.downloadUrl}
-                    className="shrink-0 rounded-lg p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+                    className="shrink-0 rounded-lg p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-action"
                     aria-label={`Download photo from ${photo.galleryName}`}
                   >
                     <Download className="size-4" aria-hidden />
@@ -169,7 +170,7 @@ export function RunnerPhotoGallery({
 
       {cursor && (
         <div className="flex justify-center">
-          <Button variant="outline" size="sm" disabled={busy} onClick={() => void loadMore()}>
+          <Button variant="outline" size="sm" className={marketingButtonSkin.ring} disabled={busy} onClick={() => void loadMore()}>
             {busy && <Loader2 className="size-4 animate-spin" aria-hidden />}
             {busy ? 'Loading…' : 'Load more photos'}
           </Button>

@@ -9,7 +9,8 @@
 
 import { NextRequest, NextResponse } from 'next/server'
 import { authorizeMedia, resolveOwnedEvent } from '@/features/media-studio/services/authorize'
-import { countEventAssets } from '@/features/media-studio/repositories/assetRepo'
+import { readEventPhotoCapacity } from '@/features/media-studio/services/photoCapacityGate'
+import { increaseLimitHref } from '@/lib/wallet/purchaseIntent'
 import { listGalleries } from '@/features/media-studio/repositories/galleryRepo'
 import {
   resolveMediaConfig, type MediaLimitProvenance,
@@ -21,7 +22,11 @@ export interface MediaLimitsResponse {
   tier: EventLicenseTierV2 | null
 
   limits: {
-    maxPhotosPerEvent:      number | null
+    /**
+     * RD-PHOTO-01 — the event's PAID photo capacity (0 until photo capacity is bought on License &
+     * Services; at most MAX_EVENT_PHOTO_CAPACITY). Never null: there is no unlimited/free photo tier.
+     */
+    maxPhotosPerEvent:      number
     maxUploadBatchSize:     number
     maxUploadFileSizeBytes: number
     maxGalleriesPerEvent:   number
@@ -40,8 +45,22 @@ export interface MediaLimitsResponse {
 
   /** What the event has used, so the UI can show headroom rather than only a ceiling. */
   used: {
+    /** Photos occupying paid capacity: stored + in-flight uploads (the number the upload gate counts). */
     photos:    number
     galleries: number
+  }
+
+  /** RD-PHOTO-01 — the event's paid photo capacity, exactly as the upload gate enforces it. */
+  photoCapacity: {
+    capacity:      number
+    used:          number
+    stored:        number
+    inFlight:      number
+    remaining:     number
+    max:           number
+    maxAdditional: number
+    /** The ONE place photo capacity is bought: this event's License & Services step. */
+    purchaseHref:  string
   }
 
   /** Which layer each value came from — 'event' | 'plan' | 'global'. */
@@ -58,20 +77,20 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   const event = await resolveOwnedEvent(authz.workspaceUid, eventId)
   if (!event.ok) return NextResponse.json({ error: event.error }, { status: event.status })
 
-  const [config, photos, galleries] = await Promise.all([
+  const [config, photo, galleries] = await Promise.all([
     resolveMediaConfig({
       organizerUid: authz.workspaceUid,
       eventId:      event.event.eventId,
       eventSlug:    event.event.eventSlug,
     }),
-    countEventAssets(authz.workspaceUid, event.event.eventId),
+    readEventPhotoCapacity(authz.workspaceUid, event.event.eventId),
     listGalleries(authz.workspaceUid, event.event.eventId),
   ])
 
   const body: MediaLimitsResponse = {
     tier: config.tier,
     limits: {
-      maxPhotosPerEvent:      config.maxPhotosPerEvent,
+      maxPhotosPerEvent:      photo.capacity,
       maxUploadBatchSize:     config.maxUploadBatchSize,
       maxUploadFileSizeBytes: config.maxUploadFileSizeBytes,
       maxGalleriesPerEvent:   config.maxGalleriesPerEvent,
@@ -86,7 +105,8 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       signedUrlExpirySeconds: config.signedUrlExpirySeconds,
       publicGalleryEnabled:   config.publicGalleryEnabled,
     },
-    used: { photos, galleries: galleries.length },
+    used: { photos: photo.used, galleries: galleries.length },
+    photoCapacity: { ...photo, purchaseHref: increaseLimitHref(event.event.eventId, 'media') },
     source: config.source,
   }
 

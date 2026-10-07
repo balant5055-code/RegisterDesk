@@ -1,5 +1,6 @@
 'use client'
 
+import { COMMUNICATION_BALANCE_HREF } from '@/lib/wallet/communicationBalance'
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { type User } from 'firebase/auth'
 import { useAuth } from '@/components/auth/AuthProvider'
@@ -20,12 +21,12 @@ type Tab = 'overview' | 'wallet' | 'licenses' | 'usage'
 
 const TABS: { key: Tab; label: string }[] = [
   { key: 'overview', label: 'Overview' },
-  { key: 'wallet',   label: 'Wallet' },
+  { key: 'wallet',   label: 'Communication balance' },
   { key: 'licenses', label: 'Licenses' },
   { key: 'usage',    label: 'Usage' },
 ]
 
-const CREDIT_TYPES = new Set<WalletTxnType>(['fund_added', 'refund'])
+const CREDIT_TYPES = new Set<WalletTxnType>(['fund_added', 'license_refund', 'refund'])
 const rupees  = (p: number) => `₹${(p / 100).toLocaleString('en-IN')}`
 const fmtDate = (iso: string | null) => iso ? new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) : '—'
 
@@ -79,7 +80,7 @@ export default function BillingPage() {
         <div className="flex size-9 items-center justify-center rounded-xl bg-primary/[0.09] text-primary"><CreditCard className="size-5" aria-hidden /></div>
         <div>
           <h1 className="text-[20px] font-bold tracking-tight text-foreground">Billing Center</h1>
-          <p className="text-[13.5px] text-muted-foreground">Your wallet, event licenses, and usage.</p>
+          <p className="text-[13.5px] text-muted-foreground">Your communication balance, event licences and usage.</p>
         </div>
       </div>
 
@@ -104,7 +105,7 @@ export default function BillingPage() {
       {tab === 'overview' && (
         <div className="space-y-5">
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
-            <Kpi icon={<Wallet className="size-4" />}  label="Wallet balance"          value={overview ? rupees(overview.balancePaise) : '—'} />
+            <Kpi icon={<Wallet className="size-4" />}  label="Communication balance"          value={overview ? rupees(overview.balancePaise) : '—'} />
             <Kpi icon={<Ticket className="size-4" />}  label="Active event licenses"   value={activeLicenses} />
             <Kpi icon={<Activity className="size-4" />} label="Pending approval"        value={pendingLicenses} />
             <Kpi icon={<CreditCard className="size-4" />} label="License purchases"     value={purchases} />
@@ -114,8 +115,8 @@ export default function BillingPage() {
           <div>
             <h2 className="mb-2.5 text-[13px] font-semibold uppercase tracking-wider text-muted-foreground">Quick actions</h2>
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-              <QuickAction href="/dashboard/wallet"      icon={<Plus className="size-4" />}   title="Top up wallet"  subtitle="Add funds for paid services" />
-              <QuickAction href="/dashboard/events/new"  icon={<Ticket className="size-4" />} title="Create event"   subtitle="Start a new event + license" />
+              <QuickAction href={COMMUNICATION_BALANCE_HREF} icon={<Plus className="size-4" />} title="Top up communication balance" subtitle="For broadcasts and pay-as-you-go messages" />
+              <QuickAction href="/dashboard/events/new/visibility"  icon={<Ticket className="size-4" />} title="Create event"   subtitle="Start a new event + license" />
               <QuickAction onClick={() => setTab('licenses')} icon={<CreditCard className="size-4" />} title="View licenses" subtitle="See every event's license" />
             </div>
           </div>
@@ -130,7 +131,7 @@ export default function BillingPage() {
               <p className="text-[12px] font-semibold uppercase tracking-wider text-muted-foreground">Current balance</p>
               <p className="mt-0.5 text-[26px] font-bold text-foreground">{overview ? rupees(overview.balancePaise) : '—'}</p>
             </div>
-            <Link href="/dashboard/wallet" className="inline-flex items-center gap-1.5 rounded-lg px-4 py-2 text-[13px] font-semibold text-primary-foreground shadow-sm" style={{ backgroundImage: 'var(--primary-gradient)' }}>
+            <Link href={COMMUNICATION_BALANCE_HREF} className="inline-flex items-center gap-1.5 rounded-lg px-4 py-2 text-[13px] font-semibold text-primary-foreground shadow-sm" style={{ backgroundImage: 'var(--primary-gradient)' }}>
               <Plus className="size-4" /> Top up
             </Link>
           </section>
@@ -167,7 +168,7 @@ export default function BillingPage() {
             )}
           </section>
 
-          <p className="text-[12.5px] text-muted-foreground">Manage top-ups, usage, and full history on the <Link href="/dashboard/wallet" className="font-semibold text-primary">Wallet page</Link>.</p>
+          <p className="text-[12.5px] text-muted-foreground">Top up and see usage under <Link href={COMMUNICATION_BALANCE_HREF} className="font-semibold text-primary">Communications › Billing</Link>. Each event&apos;s purchases, usage and refunds are in its <Link href="/dashboard/wallet" className="font-semibold text-primary">Event Wallet</Link>.</p>
         </div>
       )}
 

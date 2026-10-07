@@ -39,6 +39,14 @@ function when(iso: string | null): string {
     : d.toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' })
 }
 
+// RD-PHASE4-S4 — admin review rows (verify / reject) appear in the same history.
+const ACTION_LABEL: Record<string, string> = {
+  created:        'Payout profile created',
+  updated:        'Payout details changed',
+  admin_verified: 'Verified by RegisterDesk',
+  admin_rejected: 'Verification rejected by RegisterDesk',
+}
+
 export function PayoutHistoryPanel({ reloadKey }: PayoutHistoryPanelProps) {
   const { user, getToken } = useAuth()
   const [entries, setEntries] = useState<PayoutProfileHistoryEntry[] | null>(null)
@@ -121,7 +129,7 @@ export function PayoutHistoryPanel({ reloadKey }: PayoutHistoryPanelProps) {
             <li key={e.id} className="rounded-lg border border-border bg-background px-4 py-3">
               <div className="flex flex-wrap items-baseline justify-between gap-2">
                 <p className="text-[13px] font-semibold text-foreground">
-                  {e.action === 'created' ? 'Payout profile created' : 'Payout details changed'}
+                  {ACTION_LABEL[e.action] ?? 'Payout details changed'}
                 </p>
                 <p className="text-[12px] tabular-nums text-muted-foreground">{when(e.createdAt)}</p>
               </div>

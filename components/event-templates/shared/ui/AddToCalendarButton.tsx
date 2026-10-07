@@ -21,6 +21,10 @@ export interface AddToCalendarButtonProps {
   /** Extra classes merged onto the trigger (tailwind-merge wins) — lets callers align it
    *  with a surrounding button group. Default appearance is unchanged. */
   className?:  string
+  /** Which edge of the trigger the menu aligns to. Default 'right' (unchanged); a
+   *  trigger at the LEFT of its row (the sports cover) passes 'left' so the menu opens
+   *  inward rather than off the left edge of a phone. */
+  menuAlign?:  'left' | 'right'
   /** Trigger label (default 'Add to Calendar'). */
   label?:      string
 }
@@ -28,7 +32,7 @@ export interface AddToCalendarButtonProps {
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export function AddToCalendarButton({
-  title, startDate, endDate, startTime, endTime, location, description, slug, variant = 'light', className, label = 'Add to Calendar',
+  title, startDate, endDate, startTime, endTime, location, description, slug, variant = 'light', className, menuAlign = 'right', label = 'Add to Calendar',
 }: AddToCalendarButtonProps) {
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
@@ -51,12 +55,13 @@ export function AddToCalendarButton({
     'inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-fs-xs font-semibold transition-colors select-none',
     isDark
       ? 'border-zinc-700 bg-zinc-800 text-zinc-300 hover:border-zinc-600 hover:text-zinc-100'
-      : 'border-border bg-background text-muted-foreground hover:border-primary/30 hover:text-foreground',
+      : 'border-border bg-background text-muted-foreground hover:border-action/30 hover:text-foreground',
     className,
   )
 
   const dropdownCls = cn(
-    'absolute right-0 z-50 mt-1 min-w-[180px] overflow-hidden rounded-xl border shadow-lg',
+    'absolute z-50 mt-1 min-w-[180px] overflow-hidden rounded-xl border shadow-lg',
+    menuAlign === 'left' ? 'left-0' : 'right-0',
     isDark
       ? 'border-zinc-700 bg-zinc-800'
       : 'border-border bg-card',

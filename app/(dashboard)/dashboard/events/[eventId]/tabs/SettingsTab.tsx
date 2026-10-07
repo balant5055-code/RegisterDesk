@@ -7,6 +7,7 @@ import {
 } from 'lucide-react'
 import type { EventDetailResponse, SpeakerDetail, SponsorDetail } from '@/app/api/organizer/events/[eventId]/route'
 import type { EventEditPayload } from '@/types/events'
+import { EventCapacityManager } from '@/components/dashboard/EventCapacityManager'
 
 // ─── Shared display components ────────────────────────────────────────────────
 
@@ -702,6 +703,26 @@ export default function SettingsTab({ event, eventId, token, onSuccess }: Settin
           </div>
         </Section>
       )}
+
+      {/* ── RD-CAPACITY-01 · Registration capacity ──────────────────────────────
+          Placed ABOVE "Passes & Pricing" because event capacity is the outer bound on every
+          pass — `computePassAvailability` takes min(passRemaining, eventRemaining) — so it
+          reads in the order it actually binds.
+
+          Deliberately NOT inside a <Section>: this is a self-contained flow that takes a
+          payment, with its own quote, its own errors and its own success state. Wrapping it in
+          the surrounding edit/save chrome would imply it is part of the tab's Save button,
+          which it is not — it commits on its own. */}
+      <EventCapacityManager
+        eventId={eventId}
+        // RD-EVENT-COMMERCE-01 · D2 — the ENFORCED capacity from the live event, never the
+        // draft-derived `totalCapacity` estimate (which the server does not price against).
+        currentCapacity={event.enforcedCapacity}
+        registrations={event.totalRegistrations}
+        token={token}
+        editable={isEditable}
+        onChanged={onSuccess}
+      />
 
       {/* ── Passes & Pricing ── */}
       <Section title="Passes & Pricing" locked={hasRegistrations} lockedMsg="Pass pricing locked">

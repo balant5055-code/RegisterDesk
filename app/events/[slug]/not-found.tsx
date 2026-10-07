@@ -1,15 +1,14 @@
 import Link from 'next/link'
 import { CalendarX } from 'lucide-react'
-import { MarketingNavbar } from '@/components/marketing/navigation/MarketingNavbar'
+import { HomeShell }      from '@/components/discovery/home/HomeShell'
 import { Container }      from '@/components/ui/Container'
-import { buttonVariants } from '@/components/ui/button'
+import { marketingButton } from '@/lib/marketing/theme'
 import { ROUTES }         from '@/config/navigation'
 
 export default function EventNotFound() {
   return (
-    <div className="flex min-h-screen flex-col bg-background">
-      <MarketingNavbar />
-      <Container className="flex flex-1 flex-col items-center justify-center py-20 text-center">
+    <HomeShell>
+      <Container className="flex min-h-[60vh] flex-col items-center justify-center py-20 text-center">
         <div className="flex size-20 items-center justify-center rounded-full bg-muted">
           <CalendarX className="size-9 text-muted-foreground" aria-hidden />
         </div>
@@ -20,14 +19,14 @@ export default function EventNotFound() {
           This event may have been removed, made private, or the link might be incorrect.
         </p>
         <div className="mt-8 flex flex-wrap items-center justify-center gap-3">
-          <Link href={ROUTES.EVENTS} className={buttonVariants({ variant: 'primary' })}>
+          <Link href={ROUTES.EVENTS} className={marketingButton({ variant: 'primary' })}>
             Browse Events
           </Link>
-          <Link href={ROUTES.HOME} className={buttonVariants({ variant: 'outline' })}>
+          <Link href={ROUTES.HOME} className={marketingButton({ variant: 'outline' })}>
             Go Home
           </Link>
         </div>
       </Container>
-    </div>
+    </HomeShell>
   )
 }

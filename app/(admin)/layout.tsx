@@ -14,9 +14,10 @@ import { cn }                             from '@/lib/utils/cn'
 import { ToastProvider }                  from '@/components/ui/Toast'
 import { ConfirmProvider }                from '@/components/ui/ConfirmDialog'
 import { CommandPaletteRoot }             from '@/components/admin/commandPalette'
+import { AdminNotificationsBell }         from '@/components/admin/AdminNotificationsBell'
 import {
   ChevronDown, LayoutDashboard, LogOut, Menu, ShieldAlert, ShieldCheck, X,
-  Bell, Zap, PanelLeft, PanelLeftClose, ClipboardCheck, PlusCircle, Search, Building2,
+  Zap, PanelLeft, PanelLeftClose, ClipboardCheck, PlusCircle, Search, Building2,
 } from 'lucide-react'
 
 // ─── Auth state ───────────────────────────────────────────────────────────────
@@ -453,7 +454,8 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
             <span className="text-[9px] font-extrabold tracking-[0.1em]">RD</span>
           </div>
           <div className="flex items-center gap-1.5">
-            <span className="text-[14px] font-bold tracking-tight text-foreground">RegisterDesk</span>
+            {/* Phones: the RD mark + Admin badge identify the console; the wordmark would push the account menu off-screen at 390px. */}
+            <span className="hidden text-[14px] font-bold tracking-tight text-foreground sm:inline">RegisterDesk</span>
             <span className="inline-flex items-center gap-1 rounded-full bg-primary/10 px-2 py-0.5 text-[11px] font-semibold text-primary" aria-label="Admin console">
               <ShieldCheck className="size-3" aria-hidden />
               Admin
@@ -466,15 +468,8 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
           {/* Global search / command palette (⌘K) */}
           <CommandPaletteRoot />
 
-          {/* Notifications → platform incidents & alerts (existing surface) */}
-          <Link
-            href={ROUTES.ADMIN_INCIDENTS}
-            aria-label="Incidents & alerts"
-            title="Incidents & alerts"
-            className="rounded-md p-2 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
-          >
-            <Bell className="size-[18px]" aria-hidden />
-          </Link>
+          {/* Notifications — Wallet-02: Super Admin purchase feed + the existing incidents & alerts link */}
+          <AdminNotificationsBell />
 
           <QuickActionsMenu />
           <ProfileMenu displayName={displayName} email={email} initial={initial} onSignOut={handleSignOut} />

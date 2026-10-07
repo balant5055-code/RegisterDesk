@@ -11,6 +11,7 @@ import { getEventBySlug }              from '@/lib/firebase/firestore/events'
 import { checkRegistrationGate, WAITLIST_ENABLED } from '@/lib/registrations/gate'
 import { checkRateLimit, getClientIp } from '@/lib/rateLimit'
 import { sendWaitlistJoinedEmail }     from '@/lib/waitlist/sendWaitlistJoinedEmail'
+import { resolveWaitlistSettings, type WaitlistSettingSource } from '@/lib/waitlist/waitlistSettings'
 import type { WaitlistDocument }       from '@/lib/waitlist/types'
 import { getEmailAppUrl } from '@/lib/email/appUrl'
 
@@ -100,10 +101,14 @@ export async function POST(
     return NextResponse.json({ success: false, error: 'Event not found' }, { status: 404 })
   }
 
-  // Check waitlistLimit if set
-  const wlLimit = typeof (event as unknown as Record<string, unknown>).waitlistLimit === 'number'
-    ? (event as unknown as Record<string, unknown>).waitlistLimit as number
-    : null
+  // The queue cap, from the SAME resolver the gate and the organizer workspace use.
+  //
+  // RD-EVENT-15A · this used to read a top-level `waitlistLimit` that only the Waitlist
+  // tab wrote, while the builder's cap lived at
+  // `registrationForm.registrationRules.waitlistCapacity` and was never enforced. It also
+  // accepted any `number`, so a stored `0` or `-5` became a cap nobody could pass, and a
+  // stored `"20"` became no cap at all. `resolveWaitlistSettings` refuses all three.
+  const { limit: wlLimit } = resolveWaitlistSettings(event as unknown as WaitlistSettingSource)
   if (wlLimit !== null) {
     const countSnap = await adminDb
       .collection('waitlists')

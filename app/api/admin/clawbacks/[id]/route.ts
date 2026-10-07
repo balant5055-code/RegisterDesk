@@ -1,11 +1,13 @@
 // GET   /api/admin/clawbacks/[id]  — clawback detail + audit history
-// PATCH /api/admin/clawbacks/[id]  — { action: 'waive' | 'mark_recovered', note? }
+// PATCH /api/admin/clawbacks/[id]  — { action: 'waive' | 'mark_recovered', reason }
 //
-// Admin-only. Every mutating action is audited (logClawbackEvent inside the
-// service writes clawback.waived / clawback.recovered).
+// GET is admin. PATCH is Super Admin only (RD-PHASE4-S4 · D1) with a 3–500 character reason
+// (D3, `reason` or the legacy `note`); the service stages the audit row in the SAME
+// transaction as the resolution (D6).
 
 import { NextRequest, NextResponse } from 'next/server'
-import { resolveAdminUid }           from '@/lib/admin/auth'
+import { resolveSuperAdminUid } from '@/lib/admin/auth'
+import { requireSuperAdmin, parseFinancialReason, reasonErrorResponse } from '@/lib/admin/financialGuard'
 import { adminDb }                   from '@/lib/firebase/admin'
 import {
   getClawback, waiveClawback, markClawbackRecovered,
@@ -21,15 +23,19 @@ function tsToISO(ts: unknown): string | null {
 }
 
 export async function GET(req: NextRequest, { params }: Ctx): Promise<NextResponse> {
-  const adminUid = await resolveAdminUid(req.headers.get('authorization'))
-  if (!adminUid) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+  // RD-CLOSE — a financial read: Super Admin only (ADMIN_UIDS). A legacy `admin: true` claim
+  // alone gets 403 SUPER_ADMIN_REQUIRED (lib/admin/financialGuard.ts).
+  const superGate = await requireSuperAdmin(req)
+  if (superGate.response) return superGate.response
 
   const { id } = await params
   const clawback = await getClawback(id)
   if (!clawback) return NextResponse.json({ error: 'Clawback not found' }, { status: 404 })
 
-  // History — audit-log events for this clawback entity, newest first.
-  const histSnap = await adminDb.collection('adminAuditLogs')
+  // History — audit-log events for this clawback entity, newest first. RD-PHASE4-S4 · D7 — the
+  // financial audit trail is returned to a Super Admin only (an empty history otherwise).
+  const isSuper = (await resolveSuperAdminUid(req.headers.get('authorization'))) !== null
+  const histSnap = !isSuper ? { docs: [] as FirebaseFirestore.QueryDocumentSnapshot[] } : await adminDb.collection('adminAuditLogs')
     .where('entityType', '==', 'clawback')
     .where('entityId', '==', id)
     .limit(50)
@@ -45,19 +51,22 @@ export async function GET(req: NextRequest, { params }: Ctx): Promise<NextRespon
 }
 
 export async function PATCH(req: NextRequest, { params }: Ctx): Promise<NextResponse> {
-  const adminUid = await resolveAdminUid(req.headers.get('authorization'))
-  if (!adminUid) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+  const guard = await requireSuperAdmin(req)
+  if (guard.response) return guard.response
+  const adminUid = guard.uid
 
   const { id } = await params
-  let body: { action?: unknown; note?: unknown }
+  let body: { action?: unknown; note?: unknown; reason?: unknown }
   try { body = await req.json() } catch { return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 }) }
-  const note = typeof body.note === 'string' ? body.note : undefined
+  if (body.action !== 'waive' && body.action !== 'mark_recovered') {
+    return NextResponse.json({ error: 'Unknown action.' }, { status: 400 })
+  }
+  const r = parseFinancialReason(body.reason, body.note)
+  if (!r.ok) return reasonErrorResponse(r)
 
   const result = body.action === 'waive'
-    ? await waiveClawback(id, adminUid, note)
-    : body.action === 'mark_recovered'
-      ? await markClawbackRecovered(id, adminUid, note)
-      : { ok: false as const, status: 400, error: 'Unknown action.' }
+    ? await waiveClawback(id, adminUid, r.reason)
+    : await markClawbackRecovered(id, adminUid, r.reason)
 
   if (!result.ok) return NextResponse.json({ error: result.error }, { status: result.status })
   return NextResponse.json({ clawback: result.view })

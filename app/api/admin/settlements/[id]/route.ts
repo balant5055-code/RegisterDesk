@@ -1,17 +1,25 @@
 // PATCH /api/admin/settlements/[id]
-// Body: { action: 'approve' | 'reject' | 'paid', adminNote?: string }
+// Body: { action: 'approve' | 'reject' | 'paid', reason?: string, adminNote?: string, … }
 //
 // State machine:
 //   pending  → approve → approved
 //   pending  → reject  → rejected
 //   approved → paid    → paid       (atomic wallet debit)
 //   approved → reject  → rejected
+//
+// RD-PHASE4-S4 — financial controls:
+//   • D1 Super Admin only (ADMIN_UIDS). A legacy `admin: true` claim alone → 403 SUPER_ADMIN_REQUIRED.
+//   • D3 every action needs a 3–500 character reason (`reason`, falling back to `adminNote`).
+//   • D2 maker-checker: the Super Admin who APPROVED cannot mark the same settlement PAID
+//     (409 MAKER_CHECKER_REQUIRED) — enforced inside the paid transaction, never bypassed.
+//   • D5 approve and paid re-check the payout destination INSIDE the transaction against the
+//     destination snapshotted when the organizer requested (409 DESTINATION_CHANGED).
+//   • D6/F1 the audit row is staged in the SAME transaction as the change (stageAdminAudit):
+//     the change and its audit commit together or not at all.
 
 import { NextRequest, NextResponse } from 'next/server'
-import { captureFinancialError }      from '@/lib/monitoring/sentry'
 import { FieldValue }                from 'firebase-admin/firestore'
 import { adminDb }                   from '@/lib/firebase/admin'
-import { resolveAdminUid }           from '@/lib/admin/auth'
 import type { OrganizerRevenueWallet } from '@/lib/fees/types'
 import type {
   SettlementRequestDoc,
@@ -25,9 +33,13 @@ import {
 import { NotificationType } from '@/lib/notifications'
 import { sendOrganizerWhatsApp } from '@/lib/notifications/organizerWhatsApp'
 import { notifySettlement } from '@/lib/notifications/inbox/notify'
-import { logAdminAction } from '@/lib/admin/audit'
+import { stageAdminAudit } from '@/lib/admin/audit'
+import {
+  requireSuperAdmin, parseFinancialReason, reasonErrorResponse, configuredSuperAdminCount,
+} from '@/lib/admin/financialGuard'
 import { enqueueWebhook } from '@/lib/integrations/webhooks'
-import { isPayoutProfileVerified, PAYOUT_PROFILE_UNVERIFIED_MESSAGE } from '@/lib/payout/verification'
+import { PAYOUT_PROFILE_UNVERIFIED_MESSAGE } from '@/lib/payout/verification'
+import { checkSettlementBinding, DESTINATION_CHANGED_MESSAGE } from '@/lib/payout/binding'
 import type { OrganizerPayoutProfileDoc } from '@/lib/payout/types'
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -57,6 +69,13 @@ async function fetchOrganizerProfile(
   }
 }
 
+/** D2 — actionable, and explicit that the control is never bypassed. */
+function makerCheckerMessage(): string {
+  return configuredSuperAdminCount() < 2
+    ? 'You approved this settlement, so a different Super Admin must mark it paid. Only one Super Admin is configured: add a second Super Admin to ADMIN_UIDS before this payout can be recorded. This control cannot be bypassed.'
+    : 'You approved this settlement, so a different Super Admin must mark it paid. Ask another Super Admin to record the payout.'
+}
+
 export interface AdminSettlementPatchResponse {
   id:     string
   status: SettlementStatus
@@ -65,8 +84,9 @@ export interface AdminSettlementPatchResponse {
 type Ctx = { params: Promise<{ id: string }> }
 
 export async function PATCH(req: NextRequest, { params }: Ctx): Promise<NextResponse> {
-  const adminUid = await resolveAdminUid(req.headers.get('authorization'))
-  if (!adminUid) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+  const guard = await requireSuperAdmin(req)
+  if (guard.response) return guard.response
+  const adminUid = guard.uid
 
   const { id } = await params
 
@@ -88,39 +108,75 @@ export async function PATCH(req: NextRequest, { params }: Ctx): Promise<NextResp
     )
   }
 
+  // D3 — a reason for every settlement decision.
+  const reasonResult = parseFinancialReason(body.reason, body.adminNote)
+  if (!reasonResult.ok) return reasonErrorResponse(reasonResult)
+  const reason = reasonResult.reason
+
   const settlementRef = adminDb.doc(`settlementRequests/${id}`)
 
   // ── approve ───────────────────────────────────────────────────────────────────
 
   if (action === 'approve') {
-    const snap = await settlementRef.get()
-    if (!snap.exists) return NextResponse.json({ error: 'Settlement not found' }, { status: 404 })
-    const d = snap.data() as SettlementRequestDoc
-    if (d.status !== 'pending') {
-      return NextResponse.json(
-        { error: `Cannot approve a '${d.status}' settlement.` }, { status: 409 },
-      )
-    }
-    // P9.1: never approve a payout without a verified payout profile.
-    if (!(await isPayoutProfileVerified(d.organizerUid))) {
-      return NextResponse.json({ error: PAYOUT_PROFILE_UNVERIFIED_MESSAGE }, { status: 422 })
-    }
     // Flip pending → approved inside a transaction that RE-READS status, so a
     // concurrent reject (which atomically releases the payout hold) is never
     // silently clobbered back to 'approved' (M-1). Mirrors the reject/paid txns.
-    const flipped = await adminDb.runTransaction(async tx => {
-      const fresh = await tx.get(settlementRef)
-      if (!fresh.exists || (fresh.data() as SettlementRequestDoc).status !== 'pending') return false
-      tx.update(settlementRef, {
-        status:     'approved',
-        approvedAt: FieldValue.serverTimestamp(),
-        updatedAt:  FieldValue.serverTimestamp(),
-        ...(adminNote ? { adminNote } : {}),
+    // RD-PHASE4-S4: the payout destination is checked in the SAME transaction (D5), the
+    // approver is recorded for maker-checker (D2) and the audit row is staged (D6).
+    let d: SettlementRequestDoc
+    try {
+      d = await adminDb.runTransaction(async tx => {
+        const fresh = await tx.get(settlementRef)
+        if (!fresh.exists) throw new Error('NOT_FOUND')
+        const s = fresh.data() as SettlementRequestDoc
+        if (s.status !== 'pending') throw new Error(`WRONG_STATE:${s.status}`)
+        // P9.1: never approve a payout without a verified payout profile.
+        const profileSnap = await tx.get(adminDb.doc(`organizerPayoutProfiles/${s.organizerUid}`))
+        const binding = checkSettlementBinding(
+          s.payoutDestination,
+          profileSnap.exists ? profileSnap.data() as OrganizerPayoutProfileDoc : null,
+        )
+        if (!binding.ok) throw new Error(binding.code)
+        tx.update(settlementRef, {
+          status:     'approved',
+          approvedAt: FieldValue.serverTimestamp(),
+          approvedBy: adminUid,
+          updatedAt:  FieldValue.serverTimestamp(),
+          ...(adminNote ? { adminNote } : {}),
+        })
+        stageAdminAudit(tx, {
+          adminUid,
+          actorRole:     'super_admin',
+          action:        'settlement.approved',
+          entityType:    'settlement',
+          entityId:      id,
+          reason,
+          changedFields: ['status', 'approvedAt', 'approvedBy'],
+          before:        { status: 'pending' },
+          after:         { status: 'approved', approvedBy: adminUid },
+          metadata:      {
+            organizerUid:       s.organizerUid,
+            amountPaise:        s.amountPaise,
+            adminNote:          adminNote || null,
+            destinationBinding: binding.mode,
+            destination:        s.payoutDestination?.label ?? null,
+          },
+          correlation:   { settlementId: id, organizerUid: s.organizerUid },
+        })
+        return s
       })
-      return true
-    })
-    if (!flipped) {
-      return NextResponse.json({ error: 'This settlement was just updated by another action. Refresh and try again.' }, { status: 409 })
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'UNKNOWN'
+      if (msg === 'NOT_FOUND') return NextResponse.json({ error: 'Settlement not found' }, { status: 404 })
+      if (msg.startsWith('WRONG_STATE:')) {
+        return NextResponse.json({ error: `Cannot approve a '${msg.split(':')[1]}' settlement.` }, { status: 409 })
+      }
+      if (msg === 'UNVERIFIED_PROFILE') return NextResponse.json({ error: PAYOUT_PROFILE_UNVERIFIED_MESSAGE }, { status: 422 })
+      if (msg === 'DESTINATION_CHANGED') {
+        return NextResponse.json({ error: DESTINATION_CHANGED_MESSAGE, code: 'DESTINATION_CHANGED' }, { status: 409 })
+      }
+      console.error('[settlement] approve failed:', { id, msg })
+      return NextResponse.json({ error: 'The approval could not be saved. Nothing was changed.' }, { status: 500 })
     }
 
     void (async () => {
@@ -148,14 +204,6 @@ export async function PATCH(req: NextRequest, { params }: Ctx): Promise<NextResp
     // H.4.3: organizer Notification Center inbox (best-effort).
     void notifySettlement({ workspaceUid: d.organizerUid, settlementId: id, kind: 'approved', amountPaise: d.amountPaise })
 
-    void logAdminAction({
-      adminUid,
-      action:     'settlement.approved',
-      entityType: 'settlement',
-      entityId:   id,
-      metadata:   { organizerUid: d.organizerUid, amountPaise: d.amountPaise, adminNote: adminNote || undefined },
-    }).catch(err => captureFinancialError(err, { scope: 'settlement.approved_audit_failed', id }))
-
     return NextResponse.json({ id, status: 'approved' } satisfies AdminSettlementPatchResponse)
   }
 
@@ -179,19 +227,41 @@ export async function PATCH(req: NextRequest, { params }: Ctx): Promise<NextResp
         const walletSnap = d.reserved === true ? await tx.get(walletRef) : null
 
         tx.update(settlementRef, {
-          status:    'rejected',
-          updatedAt: FieldValue.serverTimestamp(),
-          adminNote: adminNote || d.adminNote,
+          status:     'rejected',
+          rejectedBy: adminUid,
+          updatedAt:  FieldValue.serverTimestamp(),
+          adminNote:  adminNote || d.adminNote,
         })
 
+        let releasedHoldPaise = 0
         if (d.reserved === true && walletSnap?.exists) {
           const wallet  = walletSnap.data() as OrganizerRevenueWallet
           const release = Math.min(wallet.inTransitPaise ?? 0, d.amountPaise)
+          releasedHoldPaise = release
           tx.update(walletRef, {
             inTransitPaise: (wallet.inTransitPaise ?? 0) - release,
             updatedAt:      FieldValue.serverTimestamp(),
           })
         }
+
+        stageAdminAudit(tx, {
+          adminUid,
+          actorRole:     'super_admin',
+          action:        'settlement.rejected',
+          entityType:    'settlement',
+          entityId:      id,
+          reason,
+          changedFields: ['status', 'rejectedBy', 'adminNote'],
+          before:        { status: d.status },
+          after:         { status: 'rejected' },
+          metadata:      {
+            organizerUid:      d.organizerUid,
+            amountPaise:       d.amountPaise,
+            adminNote:         (adminNote || d.adminNote) || null,
+            releasedHoldPaise,
+          },
+          correlation:   { settlementId: id, organizerUid: d.organizerUid },
+        })
 
         return { organizerUid: d.organizerUid, amountPaise: d.amountPaise, adminNote: adminNote || d.adminNote }
       })
@@ -201,7 +271,8 @@ export async function PATCH(req: NextRequest, { params }: Ctx): Promise<NextResp
       if (msg.startsWith('WRONG_STATE:')) {
         return NextResponse.json({ error: `Cannot reject a '${msg.split(':')[1]}' settlement.` }, { status: 409 })
       }
-      return NextResponse.json({ error: msg }, { status: 422 })
+      console.error('[settlement] reject failed:', { id, msg })
+      return NextResponse.json({ error: 'The rejection could not be saved. Nothing was changed.' }, { status: 500 })
     }
 
     void (async () => {
@@ -222,14 +293,6 @@ export async function PATCH(req: NextRequest, { params }: Ctx): Promise<NextResp
 
     // H.4.3: organizer Notification Center inbox (best-effort).
     void notifySettlement({ workspaceUid: captured.organizerUid, settlementId: id, kind: 'rejected', amountPaise: captured.amountPaise, reason: captured.adminNote || undefined })
-
-    void logAdminAction({
-      adminUid,
-      action:     'settlement.rejected',
-      entityType: 'settlement',
-      entityId:   id,
-      metadata:   { organizerUid: captured.organizerUid, amountPaise: captured.amountPaise, adminNote: captured.adminNote || undefined },
-    }).catch(err => captureFinancialError(err, { scope: 'settlement.rejected_audit_failed', id }))
 
     return NextResponse.json({ id, status: 'rejected' } satisfies AdminSettlementPatchResponse)
   }
@@ -260,12 +323,20 @@ export async function PATCH(req: NextRequest, { params }: Ctx): Promise<NextResp
         throw new Error(`WRONG_STATE:${settlement.status}`)
       }
 
-      // P9.1: re-verify the payout profile INSIDE the transaction before any
-      // money moves — a payout must never reach an unverified bank profile.
-      const profileSnap = await tx.get(adminDb.doc(`organizerPayoutProfiles/${settlement.organizerUid}`))
-      if (!profileSnap.exists || (profileSnap.data() as OrganizerPayoutProfileDoc).isVerified !== true) {
-        throw new Error('UNVERIFIED_PROFILE')
+      // D2 — maker-checker. Approvals recorded before `approvedBy` existed carry no approver;
+      // they are allowed and flagged in the audit row (`makerChecker: 'legacy_no_approver'`).
+      if (settlement.approvedBy && settlement.approvedBy === adminUid) {
+        throw new Error('MAKER_CHECKER')
       }
+
+      // P9.1 + D5: re-verify the payout destination INSIDE the transaction before any money
+      // moves — verified, and (when the request snapshotted one) the SAME verified destination.
+      const profileSnap = await tx.get(adminDb.doc(`organizerPayoutProfiles/${settlement.organizerUid}`))
+      const binding = checkSettlementBinding(
+        settlement.payoutDestination,
+        profileSnap.exists ? profileSnap.data() as OrganizerPayoutProfileDoc : null,
+      )
+      if (!binding.ok) throw new Error(binding.code)
 
       capturedOrganizerUid = settlement.organizerUid
       capturedAmountPaise  = settlement.amountPaise
@@ -294,14 +365,44 @@ export async function PATCH(req: NextRequest, { params }: Ctx): Promise<NextResp
       })
 
       tx.update(settlementRef, {
-        status:    'paid',
-        paidAt:    FieldValue.serverTimestamp(),
-        updatedAt: FieldValue.serverTimestamp(),
-        adminNote: adminNote || settlement.adminNote,
+        status:      'paid',
+        paidAt:      FieldValue.serverTimestamp(),
+        paidByAdmin: adminUid,
+        updatedAt:   FieldValue.serverTimestamp(),
+        adminNote:   adminNote || settlement.adminNote,
         utrNumber,
         ...(bankReference ? { bankReference } : {}),
         ...(paidBy        ? { paidBy }        : {}),
         ...(paymentNotes  ? { paymentNotes }  : {}),
+      })
+
+      stageAdminAudit(tx, {
+        adminUid,
+        actorRole:     'super_admin',
+        action:        'settlement.paid',
+        entityType:    'settlement',
+        entityId:      id,
+        reason,
+        changedFields: ['status', 'paidAt', 'paidByAdmin', 'utrNumber'],
+        before:        { status: 'approved', availablePaise: wallet.availablePaise, settledPaise: wallet.settledPaise },
+        after:         {
+          status:         'paid',
+          availablePaise: wallet.availablePaise - settlement.amountPaise,
+          settledPaise:   wallet.settledPaise   + settlement.amountPaise,
+        },
+        metadata:      {
+          organizerUid:       settlement.organizerUid,
+          amountPaise:        settlement.amountPaise,
+          utrNumber,
+          bankReference:      bankReference || null,
+          paidBy:             paidBy || null,
+          approvedBy:         settlement.approvedBy ?? null,
+          makerChecker:       settlement.approvedBy ? 'distinct_approver' : 'legacy_no_approver',
+          destinationBinding: binding.mode,
+          destination:        settlement.payoutDestination?.label ?? null,
+          releasedHoldPaise:  releaseHold,
+        },
+        correlation:   { settlementId: id, organizerUid: settlement.organizerUid, utrNumber },
       })
 
       return 'paid' as SettlementStatus
@@ -328,20 +429,6 @@ export async function PATCH(req: NextRequest, { params }: Ctx): Promise<NextResp
     // H.4.3: organizer Notification Center inbox (best-effort).
     void notifySettlement({ workspaceUid: capturedOrganizerUid, settlementId: id, kind: 'paid', amountPaise: capturedAmountPaise })
 
-    void logAdminAction({
-      adminUid,
-      action:     'settlement.paid',
-      entityType: 'settlement',
-      entityId:   id,
-      metadata:   {
-        organizerUid:  capturedOrganizerUid,
-        amountPaise:   capturedAmountPaise,
-        utrNumber,
-        ...(bankReference ? { bankReference } : {}),
-        ...(paidBy        ? { paidBy }        : {}),
-      },
-    }).catch(err => captureFinancialError(err, { scope: 'settlement.paid_audit_failed', id }))
-
     // Organizer webhook (fire-and-forget; no-op when no webhook configured).
     void enqueueWebhook(capturedOrganizerUid, 'settlement.paid', {
       settlementId: id, amountPaise: capturedAmountPaise, utrNumber,
@@ -354,6 +441,12 @@ export async function PATCH(req: NextRequest, { params }: Ctx): Promise<NextResp
     if (msg === 'NOT_FOUND')  return NextResponse.json({ error: 'Settlement not found' }, { status: 404 })
     if (msg === 'NO_WALLET')  return NextResponse.json({ error: 'Organizer revenue wallet not found.' }, { status: 400 })
     if (msg === 'UNVERIFIED_PROFILE') return NextResponse.json({ error: PAYOUT_PROFILE_UNVERIFIED_MESSAGE }, { status: 422 })
+    if (msg === 'DESTINATION_CHANGED') {
+      return NextResponse.json({ error: DESTINATION_CHANGED_MESSAGE, code: 'DESTINATION_CHANGED' }, { status: 409 })
+    }
+    if (msg === 'MAKER_CHECKER') {
+      return NextResponse.json({ error: makerCheckerMessage(), code: 'MAKER_CHECKER_REQUIRED' }, { status: 409 })
+    }
     if (msg.startsWith('WRONG_STATE:')) {
       const state = msg.split(':')[1]
       return NextResponse.json(
@@ -368,6 +461,7 @@ export async function PATCH(req: NextRequest, { params }: Ctx): Promise<NextResp
         { status: 422 },
       )
     }
-    return NextResponse.json({ error: msg }, { status: 422 })
+    console.error('[settlement] mark-paid failed:', { id, msg })
+    return NextResponse.json({ error: 'The payout could not be recorded. Nothing was changed.' }, { status: 500 })
   }
 }

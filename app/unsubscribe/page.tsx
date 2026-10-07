@@ -11,7 +11,14 @@ import type { Metadata } from 'next'
 import { verifyUnsubscribeToken } from '@/lib/email/unsubscribeToken'
 import { addToSuppressionList }   from '@/lib/firebase/firestore/emailSuppressionList'
 
-export const metadata: Metadata = { title: 'Unsubscribe — RegisterDesk' }
+// noindex: a one-off transactional page reached from a signed link in an email. It was
+// indexable and, having no description of its own, inherited the root layout's — so it
+// shared a meta description with two unrelated routes. robots.txt already disallows the
+// path; this closes the other door, where a crawler follows a shared link directly.
+export const metadata: Metadata = {
+  title:  'Unsubscribe — RegisterDesk',
+  robots: { index: false, follow: false },
+}
 
 // ─── Shared UI primitives ─────────────────────────────────────────────────────
 
@@ -22,7 +29,7 @@ function Shell({ children }: { children: React.ReactNode }) {
       <body style={{ margin: 0, fontFamily: '-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif', background: '#f4f4f5' }}>
         <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '24px 16px' }}>
           <div style={{ width: '100%', maxWidth: 440, background: '#fff', borderRadius: 16, border: '1px solid #e5e7eb', padding: '40px 36px', boxShadow: '0 1px 4px rgba(0,0,0,0.06)' }}>
-            <div style={{ marginBottom: 8, fontSize: 11, fontWeight: 700, color: '#e5277e', letterSpacing: '0.14em', textTransform: 'uppercase' }}>
+            <div style={{ marginBottom: 8, fontSize: 11, fontWeight: 700, color: 'var(--action)', letterSpacing: '0.14em', textTransform: 'uppercase' }}>
               RegisterDesk
             </div>
             {children}

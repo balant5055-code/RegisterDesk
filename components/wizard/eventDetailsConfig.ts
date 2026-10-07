@@ -899,27 +899,32 @@ export function calcStepHealth(input: EventDetailsDraft): StepHealth {
   let score = 0
 
   // ── Blockers (required) ──
-  if (d.info.name.trim().length >= 3) {
+  // RD-CE-FIX M7 — a blocker here BLOCKS the step's Continue, so the list is exactly what the server
+  // refuses at publish (publishRequirements criticals + lib/events/eventValueRules); everything the
+  // server accepts is a warning. The UI can then never reject what the server accepts, or the reverse.
+  if (d.info.name.trim().length > 0) {
     score += 10
   } else {
-    blockers.push('Event name is required (min 3 characters)')
+    blockers.push('Event name is required')
   }
 
-  if (d.schedule.startDate && d.schedule.startTime) {
+  if (d.schedule.startDate) {
     score += 8
+    if (!d.schedule.startTime) warnings.push('Add a start time so attendees know when to arrive')
   } else {
-    blockers.push('Event start date and time are required')
+    blockers.push('Event start date is required')
   }
 
-  if (d.schedule.endDate && d.schedule.endTime) {
+  if (d.schedule.endDate) {
     score += 4
-    if (d.schedule.startDate && d.schedule.endDate) {
+    if (d.schedule.startDate) {
       const start = new Date(`${d.schedule.startDate}T${d.schedule.startTime || '00:00'}`)
-      const end   = new Date(`${d.schedule.endDate}T${d.schedule.endTime || '00:00'}`)
-      if (end <= start) blockers.push('Event end must be after event start')
+      const end   = new Date(`${d.schedule.endDate}T${d.schedule.endTime || '23:59'}`)
+      if (end < start) blockers.push('Event end must be after event start')
     }
+    if (!d.schedule.endTime) warnings.push('Add an end time')
   } else {
-    blockers.push('Event end date and time are required')
+    warnings.push('Add an end date and time')
   }
 
   const vt = d.venue.type
@@ -928,7 +933,9 @@ export function calcStepHealth(input: EventDetailsDraft): StepHealth {
     if (!d.venue.physical.name.trim()) { blockers.push('Venue name is required for physical events'); venueOk = false }
   }
   if (vt === 'online' || vt === 'hybrid') {
-    if (!d.venue.online.meetingUrl.trim()) { blockers.push('Meeting URL is required for online events'); venueOk = false }
+    const url = d.venue.online.meetingUrl.trim()
+    if (!url) { warnings.push('Add the meeting link before the event starts'); venueOk = false }
+    else if (!/^https?:\/\/\S+$/i.test(url)) { blockers.push('The meeting link must start with http:// or https://'); venueOk = false }
   }
   if (venueOk) score += 12
 
@@ -938,10 +945,11 @@ export function calcStepHealth(input: EventDetailsDraft): StepHealth {
   if (d.organizer.email.trim()) score += 6
   else blockers.push('Organizer email is required')
 
+  // The public URL is generated (and normalised) at publish, so a missing or unusual slug is a warning.
   if (d.seo.urlSlug.trim() && /^[a-z0-9-]+$/.test(d.seo.urlSlug.trim())) {
     score += 8
   } else {
-    blockers.push('A valid URL slug is required (lowercase letters, numbers, hyphens)')
+    warnings.push('Set a URL slug (lowercase letters, numbers, hyphens) — otherwise one is generated')
   }
 
   // ── Warnings (recommended) ──

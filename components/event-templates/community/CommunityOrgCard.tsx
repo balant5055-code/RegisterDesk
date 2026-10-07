@@ -49,9 +49,9 @@ export function CommunityOrgCard({
 
           <div className="min-w-0 flex-1">
             {/* Trust badge */}
-            <div className="mb-2 inline-flex items-center gap-1.5 rounded-full border border-primary/20 bg-primary/5 px-2.5 py-0.5">
-              <ShieldCheck className="size-3 text-primary" aria-hidden />
-              <span className="text-[10px] font-bold uppercase tracking-widest text-primary">
+            <div className="mb-2 inline-flex items-center gap-1.5 rounded-full border border-action/20 bg-action/5 px-2.5 py-0.5">
+              <ShieldCheck className="size-3 text-action" aria-hidden />
+              <span className="text-[10px] font-bold uppercase tracking-widest text-action">
                 Verified Organiser
               </span>
             </div>
@@ -98,7 +98,7 @@ export function CommunityOrgCard({
                     href={href}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-gray-50 px-3 py-1 text-[0.75rem] font-semibold text-gray-600 transition-all hover:border-primary/30 hover:bg-primary/5 hover:text-primary"
+                    className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-gray-50 px-3 py-1 text-[0.75rem] font-semibold text-gray-600 transition-all hover:border-action/30 hover:bg-action/5 hover:text-action"
                   >
                     {label}
                     <ExternalLink className="size-3" aria-hidden />

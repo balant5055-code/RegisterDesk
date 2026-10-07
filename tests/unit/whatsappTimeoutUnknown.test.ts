@@ -42,7 +42,7 @@ vi.mock('@/lib/firebase/admin', () => ({
     doc: (path: string) => ({ path, id: path.split('/').pop() }),
     collection: (name: string) => ({
       doc: (id?: string) => ({
-        id: id ?? 'auto',
+        id: id ?? 'auto', path: `${name}/${id ?? 'auto'}`,
         get: async () => {
           if (name === 'registrations') return { exists: !!registration, data: () => registration }
           if (name === 'events')        return { exists: !!eventDoc,     data: () => eventDoc }
@@ -56,12 +56,17 @@ vi.mock('@/lib/firebase/admin', () => ({
     // The charge txn reads TWO refs and treats them differently: the ledger doc
     // `whatsapp_{registrationId}` (its existence is the exactly-once guard) and the wallet
     // (whose balance is re-checked inside the txn). They must not be conflated.
+    // RD-CLOSE — the unknown/failed status (and the unknown outcome's deterministic log row) are
+    // written in a transaction that never downgrades a recorded send; registrations and emailLogs
+    // written there land in the same capture arrays as before.
     runTransaction: async (fn: (tx: unknown) => Promise<unknown>) => fn({
       get: async (ref: { path?: string }) =>
-        ref.path?.startsWith('organizerWallets/')
-          ? { exists: true,        data: () => ({ balancePaise: walletBalance }) }
-          : { exists: ledgerExists, data: () => ({}) },
-      set: () => { ledgerWrites++ }, update: () => {}, delete: () => {},
+        ref.path?.startsWith('organizerWallets/') ? { exists: true, data: () => ({ balancePaise: walletBalance }) }
+        : ref.path?.startsWith('registrations/') ? { exists: !!registration, data: () => registration }
+        : { exists: ledgerExists, data: () => ({}) },
+      set: (ref: { path?: string }, data: Doc) => { if (ref.path?.startsWith('emailLogs/')) emailLogs.push(data); else ledgerWrites++ },
+      update: (ref: { path?: string }, patch: Doc) => { if (ref.path?.startsWith('registrations/')) registrationUpdates.push(patch) },
+      delete: () => {},
     }),
   },
 }))
@@ -106,6 +111,27 @@ vi.mock('@/lib/whatsapp', () => ({
   }),
 }))
 
+// RD-CLOSE — an accepted message is now persisted by ONE acceptance transaction
+// (lib/whatsapp/acceptance.ts → recordMessageAcceptance): charge + usage + log + status, idempotent
+// per wamid. Its real atomicity/idempotency is proven on the emulator
+// (tests/emulator/closureAcceptance.emu.test.ts). Here it is a faithful stand-in that feeds this
+// file's capture arrays: one charge per wamid; a legacy base row (from an earlier message) puts a
+// NEW wamid on `<base>__<wamid>`; the in-transaction balance re-check never drives it negative.
+const acceptedWamids = new Set<string>()
+vi.mock('@/lib/whatsapp/acceptance', async orig => ({
+  ...(await orig<typeof import('@/lib/whatsapp/acceptance')>()),
+  withPersistRetry: <T,>(fn: () => Promise<T>) => fn(),
+  recordMessageAcceptance: async (i: { wamid: string; costPaise: number; log: Doc | null; registrationPatch?: { patch: Doc } }) => {
+    if (acceptedWamids.has(i.wamid)) return { already: true, chargedPaise: 0, chargeSkipped: false }
+    acceptedWamids.add(i.wamid)
+    let chargedPaise = 0
+    if (i.costPaise > 0 && walletBalance >= i.costPaise) { deductions.push(i.costPaise); ledgerWrites++; chargedPaise = i.costPaise }
+    if (i.log) emailLogs.push({ ...i.log, status: 'sent', providerMessageId: i.wamid, costPaise: chargedPaise })
+    if (i.registrationPatch) registrationUpdates.push(i.registrationPatch.patch)
+    return { already: false, chargedPaise, chargeSkipped: false }
+  },
+}))
+
 const { sendWhatsAppConfirmation }  = await import('@/lib/registrations/sendWhatsAppConfirmation')
 const { retryWhatsAppConfirmation } = await import('@/lib/email-logs/whatsappRetry')
 
@@ -122,7 +148,7 @@ beforeEach(() => {
   walletBalance = 10_000; sendOutcome = 'ok'; ledgerExists = false; ledgerWrites = 0
   registration = { attendee: { name: 'Balaganapathy NT', phone: '+919080452223', email: 'a@b.c' }, ticketCode: 'TK-1' }
   eventDoc = { pricing: { whatsappEnabled: true } }
-  registrationUpdates.length = 0; emailLogs.length = 0; deductions.length = 0
+  registrationUpdates.length = 0; emailLogs.length = 0; deductions.length = 0; acceptedWamids.clear()
 })
 
 // ─── 1. The classification itself ─────────────────────────────────────────────
@@ -238,13 +264,13 @@ describe('idempotency', () => {
     expect(registrationUpdates).toEqual([])
   })
 
-  it('the wallet is charged EXACTLY once — the ledger doc is the guard, not the status', async () => {
+  it('the wallet is charged EXACTLY once — the per-message acceptance record is the guard, not the status', async () => {
     await sendWhatsAppConfirmation(ARGS)
     expect(deductions).toEqual([35])
     expect(ledgerWrites).toBe(1)
 
-    // Second attempt with the ledger already present: the txn must no-op even though every
-    // other precondition still passes.
+    // Second attempt reporting the SAME accepted message (same wamid): the acceptance record
+    // already exists, so nothing is charged again even though every other precondition passes.
     ledgerExists = true
     await sendWhatsAppConfirmation(ARGS)
     expect(deductions).toEqual([35])

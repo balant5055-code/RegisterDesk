@@ -22,6 +22,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { useAuth } from '@/components/auth/AuthProvider'
 import type { EventsListResponse, EventListItem } from '@/app/api/organizer/events/route'
 import type { RaceOpsEventSelection, RaceOpsRaceSelection } from '@/features/race-operations/types'
+import { isRaceOperationsAvailable } from '@/lib/events/eventCapabilities'
 
 const PAGE_SIZE = 50
 
@@ -49,6 +50,7 @@ function projectEvent(e: EventListItem): RaceOpsEventRow {
     name:            e.name,
     slug:            e.slug,
     eventType:       e.eventType,
+    eventSubtype:    e.eventSubtype,
     lifecycleStatus: e.lifecycleStatus,
     startDate:       e.startDate,
     raceCount:       races.length,
@@ -97,7 +99,11 @@ export function useRaceOpsEvents(): RaceOpsEventsState {
         const data = await res.json() as EventsListResponse
         if (cancelled) return
 
-        const page = data.events.map(projectEvent)
+        // RD-RACEOPS-02B · only events whose TYPE admits Race Operations are races at all.
+        // A conference's passes are tickets, not distances; listing them — even disabled —
+        // would offer a race-results operation to an event that has none. Lifecycle and
+        // pass-count eligibility still apply to what remains (EventSelector).
+        const page = data.events.filter(e => isRaceOperationsAvailable(e.eventType)).map(projectEvent)
         setEvents(prev => (isFirstPage ? page : [...prev, ...page]))
         setCursor(data.nextCursor)
         setHasMore(data.nextCursor !== null)

@@ -15,6 +15,7 @@ import { authorizeWorkspace } from '@/lib/team/workspace'
 import type { RegistrationDocument, RegistrationCounter } from '@/lib/registrations/types'
 import { getEventStats } from '@/lib/firebase/firestore/registrationCounters'
 import type { SerializedRegistration } from '@/app/api/organizer/events/[eventId]/registrations/route'
+import { resolveOwnedEventSlugs, resolveOwnedEventSlug } from '@/lib/events/liveEventRef'
 
 export interface AllRegistrationsResponse {
   registrations: SerializedRegistration[]
@@ -59,16 +60,30 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       return NextResponse.json(EMPTY_RESPONSE satisfies AllRegistrationsResponse)
     }
     const draft      = draftSnap.data() as Record<string, unknown>
-    const rawDetails = draft.eventDetails as Record<string, unknown> | null
-    const rawSeo     = rawDetails?.seo   as Record<string, unknown> | null
-    const slug       = typeof rawSeo?.urlSlug === 'string' ? rawSeo.urlSlug : null
+    // RD-CE-FIX C1 · only a slug the live document proves is THIS workspace's event for THIS draft.
+    const slug       = await resolveOwnedEventSlug(uid, eventId, draft)
     // Draft events with no published slug have no registrations yet
     if (!slug) return NextResponse.json(EMPTY_RESPONSE satisfies AllRegistrationsResponse)
     slugFilter = slug
   }
 
   // ── Build Firestore query ──────────────────────────────────────────────────
-  // Fetch all registrations for this organizer (max 300, newest-first)
+  //
+  // RD-REPORT-02 · this endpoint is a PARTICIPANT LIST, and now only that.
+  //
+  // It had no `orderBy` at all, so `.limit(300)` returned the first 300 documents by
+  // document id — an arbitrary slice — which the route then sorted by date in memory. The
+  // comment claimed "newest-first"; it was not. That was tolerable for a list and fatal
+  // for the Reports hub, which charted those 300 rows as a time series and derived
+  // week-over-week velocity from them. The hub now reads server-computed aggregates
+  // (/api/organizer/dashboard) and no longer consumes this endpoint at all.
+  //
+  // The 300-row ceiling REMAINS, because a list is what this is. What changes is that the
+  // window is now the genuinely most recent 300 rather than an arbitrary 300, so the
+  // ceiling is a predictable "recent activity" window instead of a lottery.
+  //
+  // Ordering is served by existing composites — (organizerUid, registeredAt DESC) and
+  // (organizerUid, eventSlug, registeredAt DESC). No new index.
   let baseQuery = adminDb
     .collection('registrations')
     .where('organizerUid', '==', uid)
@@ -77,7 +92,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     baseQuery = baseQuery.where('eventSlug', '==', slugFilter)
   }
 
-  const snap = await baseQuery.limit(300).get()
+  const snap = await baseQuery.orderBy('registeredAt', 'desc').limit(300).get()
 
   const registrations: SerializedRegistration[] = snap.docs
     .map(doc => {
@@ -114,11 +129,9 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     // Global: sum the organizer's per-event counters. Slugs come from the organizer's own
     // published events (bounded to the account's events, mirroring the dashboard route).
     const draftsSnap = await adminDb.collection(`users/${uid}/eventDrafts`).limit(500).get()
-    const slugs = Array.from(new Set(
-      draftsSnap.docs
-        .map(d => ((d.data().eventDetails as Record<string, unknown> | undefined)?.seo as Record<string, unknown> | undefined)?.urlSlug)
-        .filter((s): s is string => typeof s === 'string' && s.length > 0),
-    ))
+    // RD-CE-FIX C1 · only slugs the live documents prove belong to THIS workspace's drafts.
+    const owned = await resolveOwnedEventSlugs(uid, draftsSnap.docs.map(d => ({ id: d.id, data: d.data() as Record<string, unknown> })))
+    const slugs = Array.from(new Set(owned.values()))
     if (slugs.length > 0) {
       const counterSnaps = await adminDb.getAll(
         ...slugs.map(s => adminDb.collection('registrationCounters').doc(s)),

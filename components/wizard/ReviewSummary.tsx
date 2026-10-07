@@ -14,6 +14,7 @@
 import { Pencil } from 'lucide-react'
 import { indexOfStep, type WizardFlow } from '@/lib/events/builder/stepRegistry'
 import { formatINR } from '@/lib/events/builder/format'
+import { isChannelImplemented } from '@/lib/communications/health/channels'
 import type { ReadinessReport } from '@/lib/events/builder/types'
 
 /** How an absent value reads. ONE component, so "not set" never drifts across the panel. */
@@ -109,6 +110,14 @@ export function ReviewSummary({ data, report, flow, onGoToStep }: ReviewSummaryP
     : anyUnlimited ? 'Unlimited'
     : passes.reduce((n, p) => n + (Number(p.quantity) || 0), 0).toLocaleString('en-IN')
 
+  // RD-EVENT-COMMERCE-02 — the prepaid quantities selected on License & Services (intent; the
+  // payment state is shown by Review's activation panel from server records).
+  const selection = rec(data?.serviceSelection)
+  const prepaid = (k: 'whatsapp' | 'certificates', units: string): string => {
+    const n = selection?.[k]
+    return typeof n === 'number' && Number.isInteger(n) && n > 0 ? `${n.toLocaleString('en-IN')} ${units}` : 'None'
+  }
+
   const card = (title: string, stepId: string | undefined, children: React.ReactNode) => (
     <Card title={title} stepId={stepId} flow={flow} onGoToStep={onGoToStep}>{children}</Card>
   )
@@ -159,7 +168,22 @@ export function ReviewSummary({ data, report, flow, onGoToStep }: ReviewSummaryP
         <Row label="Email">{str(organizer?.email)}</Row>
         <Row label="Phone">{str(organizer?.phone)}</Row>
         <Row label="Website">{str(organizer?.website)}</Row>
-        <Row label="License">{str(data?.licenseTier as string)}</Row>
+      </>)}
+
+      {/* RD-EVENT-COMMERCE-02 — the License & Services step's choices, with Edit resolving to
+          that step through the registry like every other card.
+          RD-LICENSE-E2E-03 — the licence IS the registration capacity. The legacy
+          `licenseTier` is a compatibility stamp ('free' for every capacity event), so
+          printing it labelled a 1,206-registration event "free". */}
+      {card('License & Services', 'license', <>
+        <Row label="License" missing="Not selected">{typeof data?.registrationCapacity === 'number'
+          ? `${data.registrationCapacity.toLocaleString('en-IN')} registrations`
+          : ''}</Row>
+        <Row label="Email">Included</Row>
+        <Row label="WhatsApp">{pricing?.whatsappEnabled === true ? 'On' : 'Off'}</Row>
+        <Row label="Prepaid WhatsApp">{prepaid('whatsapp', 'messages')}</Row>
+        <Row label="SMS">{isChannelImplemented('sms') ? (pricing?.smsEnabled === true ? 'On · billed per message' : 'Off') : 'Unavailable'}</Row>
+        <Row label="Prepaid certificates">{prepaid('certificates', 'certificates')}</Row>
       </>)}
 
       {/* Publish reads the SHARED report — never a second readiness calculation. */}

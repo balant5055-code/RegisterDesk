@@ -1,6 +1,10 @@
 import type { ReactNode } from 'react'
 import { Loader2 } from 'lucide-react'
+import { cn } from '@/lib/utils/cn'
 import type { SocialProviderKey } from '@/lib/firebase/auth/social'
+import type { AuthFieldAccent } from './AuthField'
+
+export type SocialLoginRowVariant = 'boxes' | 'group' | 'plain'
 
 // ─── SocialLoginRow ───────────────────────────────────────────────────────────
 // Social sign-in row: a divider + three equal outline buttons (Google / Microsoft /
@@ -37,10 +41,61 @@ export interface SocialLoginRowProps {
   onSelect?:   (key: SocialProviderKey) => void
   /** The provider whose popup is currently in flight (shows a spinner). */
   loadingKey?: SocialProviderKey | null
+  /**
+   * Focus/hover accent, matched to the fields above the row. Defaults to the
+   * organizer magenta, which is what /admin/login has always rendered; the public
+   * /login passes 'action' so the whole column stays on one ramp.
+   */
+  accent?:     AuthFieldAccent
+  /**
+   * The word set between the two divider rules. Defaults to 'or' — unchanged for
+   * every existing caller. The public sign-in screen says what the row actually
+   * does ('or continue with'), which is worth the extra two words on the one
+   * surface where a first-time visitor is deciding how to create an account.
+   */
+  label?:      string
+  /**
+   * 'boxes' (default) draws three separate outlined buttons — what every existing
+   * caller has always rendered. 'group' draws ONE outlined row divided into three
+   * cells by hairlines.
+   *
+   * 'plain' is 'group' with the outer border removed — for use INSIDE a container
+   * that already has one, where a bordered row would draw a box inside a box.
+   *
+   * Three adjacent identical rectangles read as three decisions; one divided row
+   * reads as one decision with three answers, which is what this actually is.
+   */
+  variant?:    SocialLoginRowVariant
+}
+
+/** Focus/hover per accent. Same geometry either way — only the colour moves. */
+const ACCENT_CLASSES: Record<AuthFieldAccent, string> = {
+  primary: 'hover:bg-muted focus-visible:ring-primary',
+  action:  'hover:border-border-strong hover:bg-muted focus-visible:ring-action',
+}
+
+/** The row that holds the three cells. */
+const ROW_CLASSES: Record<SocialLoginRowVariant, string> = {
+  boxes: 'grid grid-cols-3 gap-3',
+  group: 'grid grid-cols-3 overflow-hidden rounded-control border border-border divide-x divide-border',
+  plain: 'grid grid-cols-3 divide-x divide-border',
+}
+
+/** And the cell itself. Only 'boxes' carries a border of its own. */
+const CELL_CLASSES: Record<SocialLoginRowVariant, string> = {
+  boxes: 'h-11 rounded-lg border border-border bg-background text-sm font-medium text-foreground',
+  group: 'h-12 border-0 bg-transparent text-fs-sm font-medium text-muted-foreground hover:text-foreground',
+  plain: 'h-11 border-0 bg-transparent text-fs-sm font-medium text-muted-foreground hover:text-foreground',
 }
 
 // No outer margin — the parent form's vertical rhythm owns the gap above/below.
-export function SocialLoginRow({ onSelect, loadingKey = null }: SocialLoginRowProps) {
+export function SocialLoginRow({
+  onSelect,
+  loadingKey = null,
+  accent = 'primary',
+  label = 'or',
+  variant = 'boxes',
+}: SocialLoginRowProps) {
   const anyLoading = loadingKey != null
 
   return (
@@ -48,12 +103,12 @@ export function SocialLoginRow({ onSelect, loadingKey = null }: SocialLoginRowPr
       {/* Divider — OR */}
       <div className="flex items-center gap-3" aria-hidden="true">
         <span className="h-px flex-1 bg-border" />
-        <span className="text-[11px] font-semibold uppercase tracking-widest text-muted-foreground">or</span>
+        <span className="whitespace-nowrap text-[11px] font-semibold uppercase tracking-widest text-muted-foreground">{label}</span>
         <span className="h-px flex-1 bg-border" />
       </div>
 
-      {/* Three equal outline buttons — icons left */}
-      <div className="grid grid-cols-3 gap-3">
+      {/* Three equal cells — icons left */}
+      <div className={ROW_CLASSES[variant]}>
         {PROVIDERS.map(({ key, name, icon }) => {
           const isLoading = loadingKey === key
           const disabled  = !onSelect || anyLoading
@@ -65,7 +120,17 @@ export function SocialLoginRow({ onSelect, loadingKey = null }: SocialLoginRowPr
               onClick={() => onSelect?.(key)}
               title={`Continue with ${name}`}
               aria-label={`Continue with ${name}`}
-              className="inline-flex h-11 items-center justify-center gap-2 rounded-lg border border-border bg-background text-sm font-medium text-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary disabled:cursor-not-allowed disabled:opacity-60"
+              className={cn(
+                'inline-flex cursor-pointer items-center justify-center gap-2 transition-colors',
+                'focus-visible:outline-none focus-visible:ring-2 focus-visible:-outline-offset-1',
+                'disabled:cursor-not-allowed disabled:opacity-60',
+                CELL_CLASSES[variant],
+                // The group variant already has one border; giving each cell a hover
+                // border as well would draw the three boxes it exists to remove.
+                variant === 'boxes'
+                  ? ACCENT_CLASSES[accent]
+                  : 'hover:bg-muted focus-visible:ring-inset focus-visible:ring-action',
+              )}
             >
               {isLoading ? <Loader2 className="size-4 animate-spin" aria-hidden /> : icon}
               <span className="hidden sm:inline">{name}</span>

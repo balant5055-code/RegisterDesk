@@ -14,8 +14,9 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { authorizeRaceOps } from '@/features/race-operations/services/authorize'
 import { resolveRace } from '@/features/race-operations/repositories/eventReadRepo'
+import { revalidatePublicResults } from '@/features/race-operations/services/publicRevalidate'
 import {
-  listSnapshotVersions, rollbackSnapshot,
+  getLiveSnapshotByPass, listSnapshotVersions, rollbackSnapshot,
 } from '@/features/race-operations/repositories/snapshotRepo'
 import type { SnapshotVersionRecord } from '@/features/race-operations/types/snapshot'
 
@@ -73,6 +74,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     actorUid:     authz.callerUid,
   })
   if (!outcome.ok) return NextResponse.json({ error: outcome.error }, { status: outcome.status })
+
+  // RD-RACEOPS-02C · the restored version is live: purge this race's public pages.
+  const live = await getLiveSnapshotByPass(resolved.race.eventSlug, passId).catch(() => null)
+  if (live) revalidatePublicResults(live.eventSlug, live.passSlug)
 
   const body: RaceRollbackResponse = {
     version: outcome.version, previousVersion: outcome.previousVersion,

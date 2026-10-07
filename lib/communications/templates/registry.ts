@@ -61,7 +61,9 @@ export const PLATFORM_TEMPLATE_VARS: Partial<Record<NotificationType, string[]>>
   PAYOUT_PROFILE_VERIFIED: ['OrganizerName', 'AccountHolderName', 'DashboardUrl'],
   PAYOUT_PROFILE_REJECTED: ['OrganizerName', 'AccountHolderName', 'ReviewNote', 'SupportEmail'],
   LICENSE_PURCHASED:       ['OrganizerName', 'LicenseName', 'Amount', 'InvoiceNumber', 'DashboardUrl'],
+  CAPACITY_THRESHOLD:      ['OrganizerName', 'EventName', 'CapacityUsedPercent', 'RegistrationCapacity', 'DashboardUrl'],
   WALLET_RECHARGED:        ['OrganizerName', 'Amount', 'DashboardUrl'],
+  SERVICE_PURCHASED:       ['OrganizerName', 'EventName', 'Amount', 'DashboardUrl'],
   CUSTOM_EMAIL:            ['RecipientName', 'OrganizationName', 'SupportEmail'],
 }
 

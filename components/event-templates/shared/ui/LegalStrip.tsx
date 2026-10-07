@@ -66,7 +66,7 @@ function PolicyCard({ policy }: { policy: Policy }) {
         CARD, CARD_PAD,
         'group flex h-full flex-col outline-none transition duration-150',
         'hover:-translate-y-[3px] hover:shadow-md motion-reduce:transform-none',
-        'focus-visible:ring-2 focus-visible:ring-primary/50 focus-visible:ring-offset-2',
+        'focus-visible:ring-2 focus-visible:ring-action/50 focus-visible:ring-offset-2',
       )}
     >
       <span className={ICON_TILE} aria-hidden>
@@ -76,7 +76,7 @@ function PolicyCard({ policy }: { policy: Policy }) {
       <h3 className={cn('mt-3.5', TYPE.cardTitle)}>{policy.title}</h3>
       <p className={cn('mt-1.5', TYPE.cardBody)}>{policy.desc}</p>
 
-      <span className="mt-auto inline-flex items-center gap-1 pt-4 text-fs-sm font-semibold text-primary">
+      <span className="mt-auto inline-flex items-center gap-1 pt-4 text-fs-sm font-semibold text-action">
         View Policy
         <ArrowRight
           className="size-3.5 transition-transform duration-150 group-hover:translate-x-0.5 motion-reduce:transform-none"
@@ -127,7 +127,7 @@ export function LegalStrip({
           <Link
             href={contact}
             {...(isExternal(contact) ? { target: '_blank', rel: 'noopener noreferrer' } : {})}
-            className="inline-flex items-center gap-1.5 rounded text-fs-sm font-semibold text-primary outline-none hover:underline focus-visible:ring-2 focus-visible:ring-primary/50 focus-visible:ring-offset-2"
+            className="inline-flex items-center gap-1.5 rounded text-fs-sm font-semibold text-action outline-none hover:underline focus-visible:ring-2 focus-visible:ring-action/50 focus-visible:ring-offset-2"
           >
             {contactLabel}
             <ArrowRight className="size-3.5" aria-hidden />

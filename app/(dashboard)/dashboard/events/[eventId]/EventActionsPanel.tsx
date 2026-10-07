@@ -542,31 +542,45 @@ export default function EventActionsPanel({ event, token, onSuccess, mode = 'fla
 
           {dropdownItems.length > 0 && (
             <div className="relative" ref={dropdownRef}>
+              {/* RD-EVENT-09 · Browser QA measured this trigger at 34px on every phone
+                  width — the one control in the finalised shell below the 44px target.
+                  Sized to match the sibling actions (44 on touch, 36 from sm up), given
+                  the ARIA menu semantics it already behaved as, and moved onto the
+                  design tokens: it was the last raw palette hue and legacy radius left
+                  on this surface. */}
               <button
                 type="button"
                 onClick={() => setDropdownOpen(o => !o)}
-                className="flex items-center gap-1.5 rounded-lg border border-border bg-card px-3 py-1.5 text-[13px] font-medium text-foreground transition-colors hover:bg-muted/60"
+                aria-haspopup="menu"
+                aria-expanded={dropdownOpen}
+                className="inline-flex h-11 items-center gap-1.5 rounded-control border border-border bg-card px-3 text-fs-sm font-medium text-foreground transition-colors hover:bg-muted/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 sm:h-9"
               >
                 Actions
-                <ChevronDown className={cn('size-3.5 transition-transform duration-150', dropdownOpen && 'rotate-180')} />
+                <ChevronDown className={cn('size-3.5 transition-transform duration-150', dropdownOpen && 'rotate-180')} aria-hidden />
               </button>
 
               {dropdownOpen && (
-                <div className="absolute right-0 top-full z-30 mt-1.5 w-52 overflow-hidden rounded-xl border border-border bg-card shadow-xl">
+                <div
+                  role="menu"
+                  aria-label="Event actions"
+                  className="absolute right-0 top-full z-30 mt-1.5 w-52 overflow-hidden rounded-surface border border-border bg-card shadow-lg"
+                >
                   {dropdownItems.map((item, i) => (
                     <button
                       key={item.label}
                       type="button"
+                      role="menuitem"
                       onClick={item.onClick}
                       className={cn(
-                        'flex w-full items-center gap-2.5 px-4 py-2.5 text-left text-[13px] font-medium transition-colors',
+                        'flex min-h-11 w-full items-center gap-2.5 px-4 py-2.5 text-left text-fs-sm font-medium transition-colors',
+                        'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary/40',
                         item.variant === 'danger'
-                          ? 'text-red-600 hover:bg-red-50'
+                          ? 'text-destructive hover:bg-destructive/[0.08]'
                           : 'text-foreground hover:bg-muted/60',
                         i > 0 && 'border-t border-border/40',
                       )}
                     >
-                      <item.icon className="size-3.5 shrink-0" />
+                      <item.icon className="size-3.5 shrink-0" aria-hidden />
                       {item.label}
                     </button>
                   ))}

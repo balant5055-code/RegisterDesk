@@ -12,6 +12,7 @@ import {
 import { AUDIT_ACTIONS, AUDIT_ENTITY_TYPES } from '@/lib/admin/auditConstants'
 import type { AdminAuditAction }            from '@/lib/admin/auditConstants'
 import type { AuditLogItem, AuditLogResponse } from '@/lib/admin/auditViewerTypes'
+import { AuditFailuresPanel }                from './AuditFailuresPanel'
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -229,6 +230,9 @@ export default function AdminAuditPage() {
       {nextCursor && !loading && (
         <LoadMoreButton onClick={() => load(applied, { cursor: nextCursor })} loading={loadingMore} />
       )}
+
+      {/* RD-PHASE4-S4 closeout — audit writes that failed after money moved (Super Admin). */}
+      <AuditFailuresPanel />
 
       {selected && <AuditDetailDrawer item={selected} onClose={() => setSelected(null)} />}
     </div>

@@ -176,13 +176,24 @@ export async function payoutStatementPdf(stmt: PayoutStatement): Promise<Uint8Ar
     ctx.y -= 18
   }
 
-  // Amount breakdown
+  // Amount breakdown.
+  //
+  // These are listed, NOT subtracted into the total below. Under an attendee-pays model
+  // the attendee bore the fees and the organizer receives the full gross; under
+  // organizer-pays the stored settlement already has them deducted. Either way the payable
+  // is the recorded figure, so presenting this as a running subtraction produced a number
+  // that was simply wrong. The RegisterDesk fee and the Razorpay fee stay on separate
+  // lines because two different companies charged them.
+  const basisLabel = stmt.gatewayFeeBasis === 'actual' ? 'Actual'
+    : stmt.gatewayFeeBasis === 'mixed' ? 'Part Actual' : 'Estimated'
   const lines: [string, number, boolean][] = [
-    ['Gross Revenue',     stmt.grossRevenuePaise, false],
-    ['Platform Fees',     -stmt.platformFeesPaise, false],
-    ['GST on Fees',       -stmt.gstPaise, false],
-    ['Refunds',           -stmt.refundsPaise, false],
-    ['Net Settlement',    stmt.netSettlementPaise, true],
+    ['Gross Revenue',                       stmt.grossRevenuePaise, false],
+    ['Platform Fee',                        stmt.platformFeeBasePaise, false],
+    ['Platform GST',                        stmt.platformFeeGstPaise, false],
+    [`Razorpay Fee (${basisLabel})`,        stmt.gatewayFeePaise, false],
+    ['Total Fees',                          stmt.totalFeesPaise, false],
+    ['Refunds',                             stmt.refundsPaise, false],
+    ['Net Settlement (payable)',            stmt.netSettlementPaise, true],
   ]
   ctx.page.drawLine({ start: { x: M, y: ctx.y }, end: { x: A4[0] - M, y: ctx.y }, thickness: 0.5, color: C_LINE })
   ctx.y -= 6
@@ -202,7 +213,12 @@ export async function payoutStatementPdf(stmt: PayoutStatement): Promise<Uint8Ar
   }
 
   ctx.y -= 20
-  ctx.page.drawText('This statement is generated from RegisterDesk ledger records. Fees and GST are as charged at transaction time.',
+  const taxNote = stmt.gatewayTaxPaise === null ? ''
+    : ` Razorpay tax of ${money(stmt.gatewayTaxPaise)} is a component INSIDE the Razorpay fee, not an additional charge.`
+  ctx.page.drawText(pdfSafe('This statement is generated from RegisterDesk ledger records. Fees and GST are as charged at transaction time.'),
+    { x: M, y: ctx.y, size: 7.5, font: ctx.font, color: C_MUTED })
+  ctx.y -= 11
+  ctx.page.drawText(pdfSafe('Net Settlement is the recorded payable, not gross minus the fees above: under an attendee-pays model the attendee bore them.' + taxNote),
     { x: M, y: ctx.y, size: 7.5, font: ctx.font, color: C_MUTED })
 
   return doc.save()

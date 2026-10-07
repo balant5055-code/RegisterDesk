@@ -60,11 +60,21 @@ export const getEventBySlug = cache(async (slug: string): Promise<PublishedEvent
   data.accessControl = data.accessControl ?? null
   // Back-fill for events published before planType/capacityPlan fields existed.
   // Derive from pricing.eventType so paid events aren't incorrectly capped at 100.
+  //
+  // RD-EVENT-COMMERCE-01 · D4 — a STORED `totalCapacity` (a number, or an explicit `null` for
+  // unlimited) is never overwritten. A capacity change deliberately writes `totalCapacity`
+  // without `capacityPlan`, so a legacy event that bought capacity has the first but not the
+  // second; this backfill used to reset it to 100/unlimited in memory, and the registration gate
+  // and public page then enforced the OLD number while the registration transaction (which reads
+  // the raw doc through `deriveStoredEventCapacity`) allowed the new one. Now both agree.
   if (!data.capacityPlan) {
     const isPaid       = (data.pricing as Record<string, unknown> | null)?.eventType !== 'free'
     data.planType      = isPaid ? 'paid_event'  : 'free_event'
     data.capacityPlan  = isPaid ? 'unlimited'   : 'free'
-    data.totalCapacity = isPaid ? null           : 100
+    const stored = (raw as { totalCapacity?: unknown }).totalCapacity
+    if (typeof stored !== 'number' && stored !== null) {
+      data.totalCapacity = isPaid ? null : 100
+    }
   }
   // Back-fill lifecycleStatus for events published before this field was added.
   data.lifecycleStatus = deriveLifecycleStatus(raw)

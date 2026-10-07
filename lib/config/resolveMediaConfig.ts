@@ -56,6 +56,12 @@ export async function resolveEventTier(eventSlug: string): Promise<EventLicenseT
   try {
     const snap = await adminDb.collection(EVENT_LICENSES_COLLECTION).doc(eventSlug).get()
     if (!snap.exists) return null
+    // RD-EVENT-COMMERCE-01 · M1 — a CAPACITY licence has no tier: it carries the version's free
+    // tier purely as a compatibility stamp. Resolving that stamp capped EVERY capacity event —
+    // including a paid 5,000-registration one — at the free tier's photo limit (50), below the
+    // global default an event with no licence gets. There are no plan-based feature limits
+    // under the capacity model, so these events resolve to the GLOBAL layer.
+    if (snap.get('commercialModel') === 'capacity') return null
     const tier = snap.get('tier') as unknown
     // A V1 tier ('growth') is not a V2 key. Historical licences therefore fall back to
     // global rather than being mapped by a guess about which V2 tier they resemble.

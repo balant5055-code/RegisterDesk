@@ -57,6 +57,8 @@ vi.mock('@/lib/whatsapp', () => ({
 // The snapshot writer is NOT under test — it must stay untouched — but what it RECEIVES is
 // exactly what this file is here to verify.
 vi.mock('@/lib/broadcasts/whatsappJob', () => ({
+  // RD-INTEG — send.ts now looks up an orphan job (crash between creating and linking it).
+  WHATSAPP_BROADCAST_JOBS: 'whatsappBroadcastJobs',
   createWhatsAppBroadcastJob: async (_id: string, _c: Doc, recipients: Array<{ id: string; data: Doc }>) => {
     createJobCalls++
     snapshotRecipients = recipients

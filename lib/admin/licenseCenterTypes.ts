@@ -97,11 +97,14 @@ export interface CouponView {
   stackable:         boolean
 }
 
-export interface CouponListResponse { coupons: CouponView[] }
+/** RD-PHASE4-S2 — server-decided (verified token): may this caller issue / change coupons? */
+export interface CouponPermissions { canEditPricing: boolean }
+
+export interface CouponListResponse { coupons: CouponView[]; permissions?: CouponPermissions }
 
 export interface CouponUsageView { currentUses: number; paidRedemptions: number; discountGivenPaise: number }
 
-export interface CouponDetailResponse { coupon: CouponView; usage: CouponUsageView }
+export interface CouponDetailResponse { coupon: CouponView; usage: CouponUsageView; permissions?: CouponPermissions }
 
 // ─── Timeline ─────────────────────────────────────────────────────────────────
 

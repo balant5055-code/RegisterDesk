@@ -12,6 +12,7 @@ import type {
   SpeakerApplicationsApiResponse,
   ApplicationStatus,
 } from '@/lib/applications/types'
+import { resolveOwnedEventSlug } from '@/lib/events/liveEventRef'
 
 const BASE_URL = process.env.NEXT_PUBLIC_BASE_URL ?? 'https://registerdesk.in'
 
@@ -27,8 +28,8 @@ async function resolveSlugAndName(uid: string, eventId: string): Promise<{ slug:
   if (!snap.exists) return null
   const d   = snap.data() as Record<string, unknown>
   const ed  = d.eventDetails as Record<string, unknown> | null
-  const seo = ed?.seo as Record<string, unknown> | null
-  const slug = typeof seo?.urlSlug === 'string' ? seo.urlSlug : null
+  // RD-CE-FIX C1 · only a slug proven to be THIS workspace's live event (the pointer is client-writable).
+  const slug = await resolveOwnedEventSlug(uid, eventId, d)
   if (!slug) return null
   const name = typeof (ed?.info as Record<string, unknown> | null)?.name === 'string'
     ? (ed!.info as Record<string, unknown>).name as string

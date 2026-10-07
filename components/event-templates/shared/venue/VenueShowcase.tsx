@@ -122,14 +122,14 @@ export function VenueShowcase({
   }
 
   const ACTION_BTN =
-    'inline-flex h-11 items-center justify-center gap-2 rounded-xl border border-border bg-card px-4 text-fs-sm font-semibold text-foreground transition-colors hover:border-foreground/25 hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40'
+    'inline-flex h-11 items-center justify-center gap-2 rounded-xl border border-border bg-card px-4 text-fs-sm font-semibold text-foreground transition-colors hover:border-foreground/25 hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-action/40'
 
   return (
     <SectionShell id="venue" className="relative isolate overflow-hidden">
       {/* Very light brand field — continues the ST5 language, no photography. */}
       <span
         aria-hidden
-        className="absolute -top-40 right-[-10%] -z-10 size-[560px] rounded-full bg-[radial-gradient(closest-side,rgb(var(--primary-rgb)/0.05),transparent)]"
+        className="absolute -top-40 right-[-10%] -z-10 size-[560px] rounded-full bg-[radial-gradient(closest-side,rgb(var(--action-rgb)/0.05),transparent)]"
       />
 
       <EventSectionHeader eyebrow={eyebrow} title={resolvedTitle} description={subtitle} />
@@ -155,7 +155,7 @@ export function VenueShowcase({
                   <p className="text-fs-sm text-muted-foreground">Map preview unavailable for this address.</p>
                   {directions && (
                     <Link href={directions} target="_blank" rel="noopener noreferrer"
-                      className="inline-flex items-center gap-1.5 text-fs-sm font-semibold text-primary hover:underline">
+                      className="inline-flex items-center gap-1.5 text-fs-sm font-semibold text-action hover:underline">
                       Open in Maps <ExternalLink className="size-3.5" aria-hidden />
                     </Link>
                   )}
@@ -172,7 +172,7 @@ export function VenueShowcase({
                       <img src={m.url} alt={`${m.label} map`} loading="lazy" decoding="async" className="size-full object-cover" />
                     </div>
                     <figcaption className="flex items-center gap-1.5 px-4 py-2.5 text-fs-xs font-semibold text-foreground">
-                      <m.icon className="size-3.5 text-primary" aria-hidden />{m.label}
+                      <m.icon className="size-3.5 text-action" aria-hidden />{m.label}
                     </figcaption>
                   </figure>
                 ))}
@@ -180,16 +180,21 @@ export function VenueShowcase({
             )}
           </div>
 
-          {/* ── RIGHT · identity · actions · getting there ── */}
-          <div className="flex flex-col gap-4 lg:col-span-5">
+          {/* ── RIGHT · identity · actions · getting there ──
+              min-w-0: a grid item defaults to min-width:auto, so a venue name with no
+              break opportunity ("Mangalam(Near…", real data) set the column's minimum
+              at its own width and pushed the card 70px past a 375px viewport, clipped
+              by the section's overflow-hidden. The column may now shrink to the track;
+              break-words on the name and address lets the long token wrap instead. */}
+          <div className="flex min-w-0 flex-col gap-4 lg:col-span-5">
 
             <div className={cn(CARD, CARD_PAD_LG)}>
-              {name && <h3 className={TYPE.cardTitleLg}>{name}</h3>}
+              {name && <h3 className={cn(TYPE.cardTitleLg, 'break-words')}>{name}</h3>}
 
               {(lines.length > 0 || cityLine || country) && (
-                <address className={cn('flex items-start gap-2.5 not-italic text-fs-sm leading-relaxed text-muted-foreground', name && 'mt-2')}>
-                  <MapPin className="mt-0.5 size-4 shrink-0 text-primary" aria-hidden />
-                  <span>
+                <address className={cn('flex min-w-0 items-start gap-2.5 not-italic text-fs-sm leading-relaxed text-muted-foreground', name && 'mt-2')}>
+                  <MapPin className="mt-0.5 size-4 shrink-0 text-action" aria-hidden />
+                  <span className="min-w-0 break-words">
                     {lines.map((l, i) => <span key={i} className="block">{l}</span>)}
                     {cityLine && <span className="block">{cityLine}</span>}
                     {country && <span className="block">{country}</span>}
@@ -202,14 +207,14 @@ export function VenueShowcase({
                 {directions && (
                   <Link
                     href={directions} target="_blank" rel="noopener noreferrer"
-                    className={cn(ACTION_BTN, 'border-transparent bg-[image:var(--primary-gradient)] text-white shadow-sm hover:bg-[image:var(--primary-gradient)] hover:brightness-105')}
+                    className={cn(ACTION_BTN, 'border-transparent rd-brand-gradient text-white shadow-sm hover:brightness-105')}
                   >
                     <Navigation className="size-4" aria-hidden />Get Directions
                   </Link>
                 )}
                 <div className="grid grid-cols-2 gap-2.5">
                   <button type="button" onClick={onCopy} disabled={!fullAddress} className={cn(ACTION_BTN, !fullAddress && 'opacity-50')}>
-                    {copied ? <Check className="size-4 text-primary" aria-hidden /> : <Copy className="size-4" aria-hidden />}
+                    {copied ? <Check className="size-4 text-action" aria-hidden /> : <Copy className="size-4" aria-hidden />}
                     {copied ? 'Copied' : 'Copy Address'}
                   </button>
                   <button type="button" onClick={onShare} className={ACTION_BTN}>
@@ -222,7 +227,7 @@ export function VenueShowcase({
             {addr?.instructions?.trim() && (
               <div className={cn(CARD, CARD_PAD)}>
                 <p className={cn('flex items-center gap-1.5', TYPE.label)}>
-                  <Navigation className="size-3.5 text-primary" aria-hidden />Getting there
+                  <Navigation className="size-3.5 text-action" aria-hidden />Getting there
                 </p>
                 <p className="mt-1.5 whitespace-pre-line text-fs-sm leading-relaxed text-muted-foreground">
                   {addr.instructions}
@@ -233,7 +238,7 @@ export function VenueShowcase({
             {note?.trim() && (
               <div className={cn(CARD, CARD_PAD)}>
                 <p className={cn('flex items-center gap-1.5', TYPE.label)}>
-                  <Info className="size-3.5 text-primary" aria-hidden />{noteLabel}
+                  <Info className="size-3.5 text-action" aria-hidden />{noteLabel}
                 </p>
                 <p className="mt-1.5 whitespace-pre-line text-fs-sm leading-relaxed text-foreground/80">{note}</p>
               </div>
