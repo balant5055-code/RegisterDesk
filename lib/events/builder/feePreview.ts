@@ -16,8 +16,8 @@ import type { FeeConfig } from '@/lib/fees/types'
 import { builderFeeModelToEngine, type FeeModel, type FeeBreakdown, type FeeRates } from './types'
 
 // Build an engine FeeConfig from the wizard's representative display rates. Fixed/min/max
-// are 0 (the preview shows the representative percentage rate; the authoritative per-tier
-// caps are applied server-side at charge time).
+// are 0 — exactly the active ticket fee (RD-FEE-01: percentage + GST on the fee, no fixed part,
+// no minimum), so the preview equals what checkout/settlement deduct.
 function engineConfigFromRates(rates: FeeRates): FeeConfig {
   return {
     platformFeePercentBps: Math.round(rates.platformPercent * 100),

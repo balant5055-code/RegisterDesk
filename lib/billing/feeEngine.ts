@@ -63,8 +63,9 @@ export function licenseTierToFeeTier(tier: AnyEventLicenseTier, version: License
  *
  * RD-CAPACITY-01 · the capacity-based commercial model has no tiers, so there is no longer a
  * tier to look up and no per-organizer rate to resolve. `starter` is the canonical row:
- * uncapped, with the same fixed and minimum components the great majority of organizers were
- * already on. The PERCENTAGE it carries is overridden by
+ * uncapped. Its fixed and minimum components are NOT applied to ticket sales any more
+ * (RD-FEE-01: zeroed in resolveFeeConfig — the active fee is the percentage + GST only).
+ * The PERCENTAGE it carries is overridden by
  * `licensing.commercial.attendeeTransactionFeePercent` inside resolveFeeConfig, so the rate
  * is configuration, not a table entry.
  */

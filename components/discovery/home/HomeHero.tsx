@@ -81,9 +81,14 @@ export function HomeHero({ cityCounts, stateCounts }: HomeHeroProps) {
         <div className="rounded-xl shadow-[0_24px_60px_-20px_rgb(11_21_51/0.45)]">
           <Suspense fallback={<SearchFallback />}>
             <HomeSearch cityCounts={cityCounts} stateCounts={stateCounts} />
-            <ActiveFilterChips />
           </Suspense>
         </div>
+        {/* 2026-10-07: the active filters sit OUTSIDE the bar's shadow — inside it, the
+            drop shadow wrapped the chips too and they read as a stray block hanging off
+            the bar. Own boundary: it reads the URL (useSearchParams) like the bar does. */}
+        <Suspense fallback={null}>
+          <ActiveFilterChips />
+        </Suspense>
 
         <div className="mt-6 pb-8 lg:mt-7 lg:pb-10">
           <BrowseShortcuts />

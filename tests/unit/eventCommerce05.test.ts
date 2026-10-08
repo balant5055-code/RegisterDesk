@@ -29,8 +29,8 @@ describe('every not-for-sale reason is distinct', () => {
   it('stored corruption is "invalid" (never sold, never the defaults); absent ⇒ the approved defaults; a stored null ⇒ "not_configured"', () => {
     const r = resolveServiceCatalogFromStored({ whatsapp: WA, certificates: { ...WA, unitPricePaise: 'x' } })
     expect(r.state).toEqual({ whatsapp: 'available', certificates: 'invalid', media: 'available' })
-    expect(r.config.certificates.unitPricePaise).toBeNull()                    // NOT the ₹1.90 default
-    expect(r.config.media.unitPricePaise).toBe(190)                            // absent ⇒ approved default
+    expect(r.config.certificates.unitPricePaise).toBeNull()                    // NOT the ₹1.50 default
+    expect(r.config.media.unitPricePaise).toBe(160)                            // absent ⇒ approved default
     const garbage = resolveServiceCatalogFromStored('garbage')
     expect(garbage.state).toEqual({ whatsapp: 'invalid', certificates: 'invalid', media: 'invalid' })
     expect(garbage.config.whatsapp.unitPricePaise).toBeNull()

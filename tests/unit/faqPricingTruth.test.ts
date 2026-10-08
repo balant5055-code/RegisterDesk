@@ -30,14 +30,25 @@ import { resolve as resolvePath } from 'node:path'
 import { FAQ_ITEMS } from '@/content/marketing/faq'
 import { SOLUTION_PAGES } from '@/content/marketing/solution-pages'
 import { DEFAULT_COMMERCIAL_TERMS } from '@/lib/licensing/capacityCommercial'
-import { buildPricingPlans } from '@/content/marketing/pricing'
+import { buildPricingPlans, PLATFORM_FEE_PREFIX } from '@/content/marketing/pricing'
+import { type PublicTicketFee } from '@/lib/licensing/publicPricing'
+import { getDefaultFeeConfig } from '@/lib/fees/config'
 
 const ROOT = process.cwd()
 const read = (p: string) => readFileSync(resolvePath(ROOT, p), 'utf8')
 
 /** THE canonical commercial model. Every FAQ money claim is checked against this. */
 const T = DEFAULT_COMMERCIAL_TERMS
-const plans = buildPricingPlans(T)
+
+/** The ticket fee a new sale resolves to under the code defaults: the commercial percentage + the canonical row's GST and cap,
+ *  with NO fixed part and NO minimum (RD-FEE-01 — resolveFeeConfig zeroes them for ticket sales). */
+const FEE_ROW = getDefaultFeeConfig('event_registration', 'starter')
+const FEE: PublicTicketFee = {
+  percent: T.attendeeTransactionFeePercent, fixedPaise: 0,
+  minPaise: 0, maxPaise: FEE_ROW.platformFeeMaxPaise, gstRatePercent: FEE_ROW.gstRatePercent,
+}
+
+const plans = buildPricingPlans(T, FEE)
 const plan = (id: string) => {
   const t = plans.find(x => x.id === id)
   if (!t) throw new Error('no such plan: ' + id)
@@ -50,6 +61,11 @@ const faq = (id: string) => {
   const item = FAQ_ITEMS.find(i => i.id === id)
   if (!item) throw new Error('no such FAQ item: ' + id)
   return item.answer
+}
+const faqItem = (id: string) => {
+  const item = FAQ_ITEMS.find(i => i.id === id)
+  if (!item) throw new Error('no such FAQ item: ' + id)
+  return item
 }
 
 /** Every FAQ answer, as one blob — for "no page says X anywhere" assertions. */
@@ -64,10 +80,12 @@ describe('the canonical commercial model says what the FAQ must agree with', () 
     expect(plan('payg').period).toBe('/registration')
   })
 
-  it('carries ONE flat attendee transaction fee, not a ladder', () => {
-    expect(T.attendeeTransactionFeePercent).toBe(2.5)
+  it('carries ONE RegisterDesk platform fee, not a ladder', () => {
+    // RD-FEE-02 — the approved default RegisterDesk platform fee is 0.5% (was 2.5%), Super Admin editable.
+    expect(T.attendeeTransactionFeePercent).toBe(0.5)
     // Both cards quote the same fee — there is no tier that pays less.
-    const fees = plans.map(p => p.features.find(f => /transaction fee/i.test(f)))
+    const fees = plans.map(p => p.features.find(f => f.startsWith(PLATFORM_FEE_PREFIX)))
+    expect(fees.every(Boolean)).toBe(true)
     expect(new Set(fees).size).toBe(1)
   })
 })
@@ -75,8 +93,25 @@ describe('the canonical commercial model says what the FAQ must agree with', () 
 describe('the FAQ fee answer matches the commercial model', () => {
   const answer = faq('transaction-fees')
 
-  it('states the ONE configured rate', () => {
-    expect(answer).toContain(`${T.attendeeTransactionFeePercent}%`)
+  // RD-PRICING-CALC fee audit — the answer used to state "2.5%", but checkout charges the fee the
+  // fee resolver produces (percentage + a fixed part, GST on the fee — see transactionFeePath.test.ts),
+  // and every part of it is configuration or code that can change. The FAQ is static content, so it
+  // now states the structure only and defers the figures to the LIVE pricing page; it can no longer
+  // contradict checkout.
+  it('states no fee figure of its own — it defers to the live pricing page', () => {
+    expect(answer).not.toMatch(/\d/)          // no percentage, amount or count
+    expect(answer).not.toMatch(/₹|%/)
+    expect(faqItem('transaction-fees').href).toBe('/pricing')
+    expect(answer).toMatch(/pricing page/i)
+  })
+
+  it('describes the fee structure checkout actually applies', () => {
+    // RD-FEE-02 — RegisterDesk's platform fee and the payment provider's gateway charge are SEPARATE.
+    expect(answer).toMatch(/paid ticket sales carry a RegisterDesk platform fee/i)
+    expect(answer).toMatch(/GST charged on that fee/i)
+    expect(answer).toMatch(/gateway charges are separate/i)
+    expect(answer).toMatch(/charged by the payment provider, not RegisterDesk/i)
+    expect(answer).not.toMatch(/transaction fee/i)
   })
 
   it('does not describe a per-plan fee ladder any more', () => {

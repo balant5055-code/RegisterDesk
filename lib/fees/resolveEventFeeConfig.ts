@@ -3,8 +3,9 @@
 // The single place an event's own commercial terms reach the attendee fee:
 //   • `events/{slug}.commercial.attendeeTransactionFeePercent`, when a Super Admin set it, replaces
 //     the EFFECTIVE GLOBAL attendee transaction fee percentage for that event — and only that.
-//     GST, the gateway percentage, the ₹5 fixed/minimum fee and the global platform-fee switch keep
-//     their global sources (resolveFeeConfig), and the global precedence itself is unchanged.
+//     GST, the gateway percentage and the global platform-fee switch keep their global sources
+//     (resolveFeeConfig), and the global precedence itself is unchanged. (RD-FEE-01: ticket sales
+//     carry no fixed/minimum part — resolveFeeConfig zeroes it.)
 //   • no (or a cleared) event value ⇒ the global percentage is INHERITED.
 //   • the event record could not be read ⇒ the checkout is REFUSED (never a silent fall-back to global).
 //

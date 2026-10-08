@@ -25,7 +25,11 @@ export interface CommercialTerms {
   activationRatePaise:           number
   /** GST on the activation fee, as a percent (18 = 18%). */
   gstRatePercent:                number
-  /** Platform fee on money the organizer collects from attendees, as a percent. */
+  /**
+   * The REGISTERDESK PLATFORM FEE on paid ticket sales, as a percent of the ticket price (GST is
+   * added on the fee). Payment-gateway charges are separate and NOT part of it. (The field keeps
+   * its historical name — it is stored on events, orders and snapshots.)
+   */
   attendeeTransactionFeePercent: number
   /** Charge for removing capacity, as a percent of the removed capacity's value. */
   capacityDecreaseFeePercent:    number
@@ -39,13 +43,14 @@ export interface CommercialTerms {
  * values are the approved commercial model:
  *
  *   first 100 registrations free · ₹1.50 per additional registration · 18% GST
- *   2.5% attendee transaction fee · 1% charge to remove capacity · 200,000 ceiling
+ *   0.5% RegisterDesk platform fee on paid ticket sales (RD-FEE-02, was 2.5%) · 1% charge to remove
+ *   capacity · 200,000 ceiling
  */
 export const DEFAULT_COMMERCIAL_TERMS: CommercialTerms = {
   freeRegistrationCapacity:      100,
   activationRatePaise:           150,
   gstRatePercent:                18,
-  attendeeTransactionFeePercent: 2.5,
+  attendeeTransactionFeePercent: 0.5,
   capacityDecreaseFeePercent:    1,
   maximumEventCapacity:          200_000,
 }

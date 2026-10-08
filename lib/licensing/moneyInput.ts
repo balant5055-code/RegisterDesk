@@ -21,7 +21,7 @@ export function parseRupeesToPaise(raw: string): RupeeParse {
   if (!m) {
     return /^\d+\.\d{3,}$/.test(s)
       ? { ok: false, error: 'Use at most 2 decimal places (paise).' }
-      : { ok: false, error: 'Enter an amount in rupees, e.g. 0.20 or 1.90.' }
+      : { ok: false, error: 'Enter an amount in rupees, e.g. 0.20 or 1.50.' }
   }
   const paise = Number(m[1]) * 100 + Number((m[2] ?? '').padEnd(2, '0'))
   if (!Number.isSafeInteger(paise)) return { ok: false, error: 'That amount is too large.' }

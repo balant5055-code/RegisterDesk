@@ -297,23 +297,33 @@ export function ActiveFilterChips() {
   if (!chips.length) return null
 
   return (
-    <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
+    // 2026-10-07 (owner: "fix the alignment"): one quiet line under the bar — a small-caps
+    // label, the chips, a hairline, then Clear all — every item 32px tall on one centre
+    // line, starting on the same left edge as the "Browse by category" rule below.
+    <div className="mt-3 flex flex-wrap items-center gap-x-2.5 gap-y-2">
+      <span className="mr-0.5 inline-flex items-center gap-2 text-fs-2xs font-semibold uppercase tracking-[0.16em] text-hero-eyebrow">
+        <span aria-hidden className="h-px w-4 bg-hero-accent-rule" />
+        Filtered by
+      </span>
       {chips.map(c => (
         <button
           key={c.key}
           type="button"
           onClick={() => router.push(discoveryHref(nextUrlState(state, c.patch)))}
-          className="inline-flex cursor-pointer items-center gap-1 rounded-md border border-action/25 bg-action/[0.06] py-1 pl-2.5 pr-1.5 text-fs-sm font-medium text-action transition-colors hover:bg-action/[0.1] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-action focus-visible:ring-offset-2"
+          className="group inline-flex h-8 cursor-pointer items-center gap-1.5 rounded-control border border-action/25 bg-action/[0.06] pl-3 pr-2 text-fs-sm font-medium text-action transition-colors hover:border-action/40 hover:bg-action/[0.1] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-action focus-visible:ring-offset-2"
         >
           {c.label}
-          <X className="size-3.5" aria-hidden />
+          <span aria-hidden className="flex size-4 items-center justify-center rounded-sm transition-colors group-hover:bg-action/15">
+            <X className="size-3" strokeWidth={2.5} />
+          </span>
           <span className="sr-only">Remove filter</span>
         </button>
       ))}
+      <span aria-hidden className="h-4 w-px bg-border" />
       <button
         type="button"
         onClick={() => router.push('/')}
-        className="ml-0.5 cursor-pointer rounded-md px-2 py-1 text-fs-sm font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-action focus-visible:ring-offset-2"
+        className="inline-flex h-8 cursor-pointer items-center rounded-control px-1.5 text-fs-sm font-medium text-muted-foreground underline-offset-4 transition-colors hover:text-foreground hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-action focus-visible:ring-offset-2"
       >
         Clear all
       </button>

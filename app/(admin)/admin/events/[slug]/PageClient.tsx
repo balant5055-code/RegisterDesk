@@ -36,6 +36,7 @@ import type {
 import type { LicenseAdminActionType, LicenseAdminActionRequest } from '@/lib/admin/licenseAdminTypes'
 import type { EventAnalytics } from '@/lib/analytics/eventAnalytics'
 import type { MaybeMoney } from '@/lib/finance/financeAnalytics'
+import { GatewayVarianceCard } from '@/components/admin/GatewayVarianceCard'
 
 // ─── Utilities ──────────────────────────────────────────────────────────────
 
@@ -215,7 +216,7 @@ export default function Event360Page() {
       )}
       {tab === 'business' && (
         <AnalyticsGate loading={analyticsLoading} error={analyticsErr} data={analytics} onRetry={retryAnalytics}>
-          {a => <BusinessWorkspace a={a} />}
+          {a => <BusinessWorkspace a={a} slug={slug} />}
         </AnalyticsGate>
       )}
       {tab === 'governance' && overview && (
@@ -466,7 +467,7 @@ const countOf = (v: number | null): string => (v === null ? UNAVAILABLE : num(v)
 
 // ─── Business workspace ────────────────────────────────────────────────────────
 
-function BusinessWorkspace({ a }: { a: EventAnalytics }) {
+function BusinessWorkspace({ a, slug }: { a: EventAnalytics; slug: string }) {
   const toChart = (pts: { label: string; value: number }[]) => pts.map(p => ({ label: p.label, value: p.value }))
   const f = a.financial
   return (
@@ -486,6 +487,9 @@ function BusinessWorkspace({ a }: { a: EventAnalytics }) {
             status happens to mention a refund, and never one still in flight. */}
         <Kpi icon={IndianRupee} label="Refunds" value={rupeesOf(f?.refundsPaise)} />
       </div>
+
+      {/* RD-FEE-04 — this event's gateway cost reconciliation (Super Admin API, reporting only). */}
+      <GatewayVarianceCard getToken={getToken} eventSlug={slug} scopeLabel="This event · lifetime" />
 
       <div className="grid gap-4 lg:grid-cols-2">
         <Card title="Revenue / day" icon={IndianRupee}>

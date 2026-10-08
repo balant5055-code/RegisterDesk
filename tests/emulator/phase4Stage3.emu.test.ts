@@ -5,7 +5,7 @@
 //
 // Stubbed: identity at the token boundary (admin resolvers, verifyCaller), the pricing-engine switch,
 // the rate limiter, the registration gate and the payment gateway adapter. The fee RESOLUTION is real
-// (resolveFeeConfig + Business Configuration code defaults: 2.5% attendee fee, ₹5 fixed/min, 18% GST).
+// (resolveFeeConfig + Business Configuration code defaults: 0.5% RegisterDesk platform fee (RD-FEE-02), no fixed/min (RD-FEE-01), 18% GST).
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest'
 import { NextRequest } from 'next/server'
@@ -182,19 +182,20 @@ describeEmu('RD-PHASE4-S3 · event-specific pricing & inheritance', () => {
   }, T)
 
   // ═══ Step 4/5 · the event percentage reaches the checkout snapshot ═══════════════════════
-  it('no override → global 2.5% (source global); an event 1.5% → new checkouts 1.5% (source event); the charge is the ticket', async () => {
+  it('no override → global 0.5% (source global); an event 1.5% → new checkouts 1.5% (source event); the charge is the ticket', async () => {
     expect((await createOrder(orderReq('p4s3KeyAAAAAAAAAA1'))).status).toBe(200)
     const g = await intentOf(h.orders[0].id)
     expect(g.amount).toBe(50_000)
     expect(g.feeInputs).toMatchObject({ attendeeFeeSource: 'global' })
-    expect(g.feeInputs.feeConfig).toMatchObject({ platformFeePercentBps: 250, platformFeeFixedPaise: 500, platformFeeMinPaise: 500, gstRatePercent: 18 })
+    // RD-FEE-01 — the active ticket fee is the percentage + GST only: no fixed part, no minimum.
+    expect(g.feeInputs.feeConfig).toMatchObject({ platformFeePercentBps: 50, platformFeeFixedPaise: 0, platformFeeMinPaise: 0, gstRatePercent: 18 })
     h.admin = SUPER
     expect((await commercial({ terms: { attendeeTransactionFeePercent: 1.5 }, reason: 'event rate' })).status).toBe(200)
     expect((await createOrder(orderReq('p4s3KeyAAAAAAAAAA2', 'b@example.test'))).status).toBe(200)
     const e = await intentOf(h.orders[1].id)
     expect(e.amount).toBe(50_000)
     expect(e.feeInputs).toMatchObject({ attendeeFeeSource: 'event' })
-    expect(e.feeInputs.feeConfig).toMatchObject({ platformFeePercentBps: 150, platformFeeFixedPaise: 500, gstRatePercent: 18, gatewayFeePercentBps: g.feeInputs.feeConfig.gatewayFeePercentBps })
+    expect(e.feeInputs.feeConfig).toMatchObject({ platformFeePercentBps: 150, platformFeeFixedPaise: 0, platformFeeMinPaise: 0, gstRatePercent: 18, gatewayFeePercentBps: g.feeInputs.feeConfig.gatewayFeePercentBps })
     // the earlier checkout keeps ITS terms: retry reuses it untouched; settlement uses the snapshot
     expect((await createOrder(orderReq('p4s3KeyAAAAAAAAAA1'))).status).toBe(200)
     expect(h.orders).toHaveLength(2)
@@ -202,7 +203,7 @@ describeEmu('RD-PHASE4-S3 · event-specific pricing & inheritance', () => {
     const { buildRegistrationLedgerAndCredit } = await import('@/lib/payments/registrationLedger')
     const led = await buildRegistrationLedgerAndCredit({ registrationId: 'r1', organizerUid: OWNER, eventSlug: SLUG, attendeeName: 'A', attendeeEmail: 'a@example.test',
       grossAmountPaise: g.amount, paymentId: 'p', orderId: g.orderId, feeInputs: g.feeInputs })
-    expect(led.ledger.platformFeeBasePaise).toBe(1_750)                     // 2.5% of ₹500 + ₹5 — the checkout terms, not 1.5%
+    expect(led.ledger.platformFeeBasePaise).toBe(250)                       // 0.5% of ₹500 — the checkout terms, not 1.5% (no ₹5 fixed part)
   }, T)
 
   it('engine ON: fee-preview and create-order resolve the SAME event terms; a legacy stored attendee_pays is NOT charged', async () => {
@@ -286,6 +287,6 @@ describeEmu('RD-PHASE4-S3 · event-specific pricing & inheritance', () => {
     expect((await createOrder(orderReq('p4s3KeyAAAAAAAAAA5'))).status).toBe(200)
     const i = await intentOf(h.orders[0].id)
     expect(i.amount).toBe(50_000)
-    expect(i.feeInputs.feeConfig.platformFeePercentBps).toBe(250)
+    expect(i.feeInputs.feeConfig.platformFeePercentBps).toBe(50)            // the global default 0.5% (RD-FEE-02)
   }, T)
 })

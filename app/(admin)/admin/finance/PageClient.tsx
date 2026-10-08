@@ -16,6 +16,7 @@ import type { AdminTransaction, AdminTransactionsResponse }
   from '@/app/api/admin/transactions/route'
 import type { ReleasePreviewResponse } from '@/app/api/admin/finance/release-preview/route'
 import type { ReleaseFundsResponse }   from '@/app/api/admin/finance/release-funds/route'
+import { GatewayVarianceCard } from '@/components/admin/GatewayVarianceCard'
 import type {
   AdminPayoutProfileSummary,
   AdminPayoutProfilesResponse,
@@ -1168,15 +1169,16 @@ export default function AdminFinancePage() {
         </button>
       </div>
 
-      {/* Tabs */}
+      {/* Tabs — the STRIP scrolls sideways on a narrow screen (tabs keep their size, never wrap), so
+          the page itself never overflows. Desktop is unchanged: the tabs fit and nothing scrolls. */}
       <div className="border-b border-border">
-        <nav className="-mb-px flex gap-1" aria-label="Finance tabs">
+        <nav className="-mb-px flex gap-1 overflow-x-auto" aria-label="Finance tabs">
           {TABS.map(t => (
             <button
               key={t.id}
               onClick={() => setActiveTab(t.id)}
               className={cn(
-                'px-4 py-2.5 text-[13.5px] font-medium transition-colors border-b-2',
+                'shrink-0 whitespace-nowrap px-4 py-2.5 text-[13.5px] font-medium transition-colors border-b-2',
                 activeTab === t.id
                   ? 'border-primary text-primary'
                   : 'border-transparent text-muted-foreground hover:text-foreground',
@@ -1316,6 +1318,10 @@ export default function AdminFinancePage() {
               )}
             </>
           ) : null}
+
+          {/* RD-FEE-04 — gateway cost reconciliation (reporting only; Super Admin API). Independent
+              of the settlement stats above, so it renders even if they fail. */}
+          <GatewayVarianceCard getToken={getToken} scopeLabel="All organizers · lifetime" />
         </div>
       )}
 

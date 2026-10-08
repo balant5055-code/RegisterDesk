@@ -9,7 +9,8 @@
 //
 // ═══ APPROVED DEFAULTS (RD-EVENT-COMMERCE-05A) ═══════════════════════════════
 // The business approved default prices (GST-exclusive, 18% GST) — WhatsApp ₹0.20 / message,
-// certificate ₹1.90, additional photo ₹1.90 — with sales ENABLED, exhaustion = block, minimum 1
+// certificate ₹1.50, photo ₹1.60 (RD-PRICE-01, 2026-10-07; were ₹1.90 / ₹1.90) — with sales ENABLED,
+// exhaustion = block, minimum 1
 // and NO RegisterDesk maximum (confirmed: an unset maximum means "no cap"; Razorpay's own
 // per-order limit still applies). They are DEFAULTS, not constants: a Super Admin edits them in
 // Business Configuration (`licensing.serviceAllowances`), and any STORED field — including an
@@ -79,8 +80,8 @@ export const NOT_FOR_SALE: Readonly<PrepaidServiceConfig> = Object.freeze({ ...U
 /** RD-EVENT-COMMERCE-05A — the approved default prices, GST, and sale settings (editable). */
 export const DEFAULT_SERVICE_ALLOWANCES: ServiceAllowancesConfig = {
   whatsapp:     { enabled: true, unitPricePaise: 20,  gstRatePercent: 18, minQuantity: 1, maxQuantity: null, presets: [], onExhausted: 'block' },
-  certificates: { enabled: true, unitPricePaise: 190, gstRatePercent: 18, minQuantity: 1, maxQuantity: null, presets: [], onExhausted: 'block' },
-  media:        { enabled: true, unitPricePaise: 190, gstRatePercent: 18, minQuantity: 1, maxQuantity: null, presets: [], onExhausted: 'block' },
+  certificates: { enabled: true, unitPricePaise: 150, gstRatePercent: 18, minQuantity: 1, maxQuantity: null, presets: [], onExhausted: 'block' },
+  media:        { enabled: true, unitPricePaise: 160, gstRatePercent: 18, minQuantity: 1, maxQuantity: null, presets: [], onExhausted: 'block' },
 }
 
 export const SERVICE_LABELS: Record<ServiceKind, { title: string; unit: string; units: string }> = {

@@ -1212,26 +1212,39 @@ function CommercialAgreementModal({
             )}
           </div>
 
-          {/* RegisterDesk fee */}
+          {/* RD-FEE-02 — RegisterDesk's platform fee and the payment gateway's charge are SEPARATE
+              charges: the gateway fee is the payment provider's, never RegisterDesk's. Both rates
+              come from the live fee configuration (useFeesConfig → resolveFeeConfig), the same
+              resolver checkout and settlement use. */}
           <div className="mb-5 rounded-xl border border-border bg-card p-4">
-            <p className="mb-3 text-[12px] font-semibold text-foreground">RegisterDesk Charges</p>
+            <p className="mb-3 text-[12px] font-semibold text-foreground">RegisterDesk platform fee</p>
             <div className="flex flex-col gap-2 text-[13px]">
               <div className="flex justify-between">
-                <span className="text-muted-foreground">Platform Fee</span>
-                <span className="font-semibold text-foreground">{feesCfg.platformFeePercent}% of ticket revenue</span>
+                <span className="text-muted-foreground">Paid ticket sales</span>
+                <span className="font-semibold text-foreground">
+                  {feesCfg.platformFeePercent > 0
+                    ? `${feesCfg.platformFeePercent}%${feesCfg.gstEnabled ? ' + GST' : ''}`
+                    : 'No RegisterDesk platform fee'}
+                </span>
               </div>
-              <div className="flex justify-between">
-                <span className="text-muted-foreground">Payment Gateway</span>
-                <span className="font-semibold text-foreground">{feesCfg.gatewayFeeEnabled ? `${feesCfg.gatewayFeePercent}% per ticket` : 'Waived'}</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-muted-foreground">GST on fees</span>
-                <span className="font-semibold text-foreground">{feesCfg.gstEnabled ? `${feesCfg.gstPercent}%` : 'Not applicable'}</span>
-              </div>
+              {feesCfg.platformFeePercent > 0 && (
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">GST on the platform fee</span>
+                  <span className="font-semibold text-foreground">{feesCfg.gstEnabled ? `${feesCfg.gstPercent}%` : 'Not applicable'}</span>
+                </div>
+              )}
               <div className="flex justify-between border-t border-border pt-2">
                 <span className="text-muted-foreground">Free events</span>
                 <span className="font-semibold text-emerald-600">Always free</span>
               </div>
+            </div>
+          </div>
+          <div className="mb-5 rounded-xl border border-border bg-card p-4">
+            <p className="mb-1 text-[12px] font-semibold text-foreground">Payment gateway charges</p>
+            <p className="mb-3 text-[12px] text-muted-foreground">Charged separately by the payment provider — not by RegisterDesk.</p>
+            <div className="flex justify-between text-[13px]">
+              <span className="text-muted-foreground">Estimated per paid ticket</span>
+              <span className="font-semibold text-foreground">{feesCfg.gatewayFeeEnabled ? `${feesCfg.gatewayFeePercent}%` : 'Not estimated'}</span>
             </div>
           </div>
 

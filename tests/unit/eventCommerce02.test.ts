@@ -46,10 +46,10 @@ const CONFIGURED: PrepaidServiceConfig = {
 // ─── 1 · pure pricing / validation ────────────────────────────────────────────
 
 describe('prepaid catalog defaults (RD-EVENT-COMMERCE-05A: the APPROVED prices, editable)', () => {
-  it('ships the approved defaults: ₹0.20 / ₹1.90 / ₹1.90 excl. 18% GST, on sale, block, no maximum', () => {
+  it('ships the approved defaults: ₹0.20 / ₹1.50 / ₹1.60 excl. 18% GST, on sale, block, no maximum', () => {
     expect(DEFAULT_SERVICE_ALLOWANCES.whatsapp).toMatchObject({ enabled: true, unitPricePaise: 20, gstRatePercent: 18, minQuantity: 1, maxQuantity: null, onExhausted: 'block' })
-    expect(DEFAULT_SERVICE_ALLOWANCES.certificates).toMatchObject({ enabled: true, unitPricePaise: 190, gstRatePercent: 18, maxQuantity: null, onExhausted: 'block' })
-    expect(DEFAULT_SERVICE_ALLOWANCES.media).toMatchObject({ enabled: true, unitPricePaise: 190, gstRatePercent: 18, maxQuantity: null, onExhausted: 'block' })
+    expect(DEFAULT_SERVICE_ALLOWANCES.certificates).toMatchObject({ enabled: true, unitPricePaise: 150, gstRatePercent: 18, maxQuantity: null, onExhausted: 'block' })
+    expect(DEFAULT_SERVICE_ALLOWANCES.media).toMatchObject({ enabled: true, unitPricePaise: 160, gstRatePercent: 18, maxQuantity: null, onExhausted: 'block' })
     for (const k of ['whatsapp', 'certificates', 'media'] as const) expect(serviceAvailability(DEFAULT_SERVICE_ALLOWANCES[k]).purchasable).toBe(true)
   })
   it('availability names exactly what is missing (a blank maximum is NOT missing — it means no cap)', () => {
@@ -63,7 +63,7 @@ describe('prepaid catalog defaults (RD-EVENT-COMMERCE-05A: the APPROVED prices, 
     expect(normalizeServiceAllowances(undefined).whatsapp.unitPricePaise).toBe(20)
     expect(normalizeServiceAllowances({ whatsapp: { unitPricePaise: 45 } }).whatsapp).toMatchObject({ unitPricePaise: 45, enabled: true, gstRatePercent: 18 })
     expect(normalizeServiceAllowances({ whatsapp: { unitPricePaise: null } }).whatsapp.unitPricePaise).toBeNull()
-    expect(normalizeServiceAllowances({ certificates: { enabled: false } }).certificates).toMatchObject({ enabled: false, unitPricePaise: 190 })
+    expect(normalizeServiceAllowances({ certificates: { enabled: false } }).certificates).toMatchObject({ enabled: false, unitPricePaise: 150 })
   })
   it('Business Configuration validation refuses bad values', () => {
     expect(validateServiceAllowances(normalizeServiceAllowances(undefined))).toEqual([])

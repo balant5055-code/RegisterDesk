@@ -6,7 +6,7 @@
 // cannot disturb its siblings.
 // RD-EVENT-COMMERCE-05  — each service also carries WHY it is or is not for sale.
 // RD-EVENT-COMMERCE-05A — an ABSENT service / field takes the APPROVED default (₹0.20 WhatsApp,
-// ₹1.90 certificate, ₹1.90 photo, 18% GST, on sale); a STORED value always wins (never
+// ₹1.50 certificate, ₹1.60 photo — RD-PRICE-01; 18% GST, on sale); a STORED value always wins (never
 // overwritten). But a stored configuration that is UNUSABLE — or a config that cannot be READ —
 // resolves to NOT_FOR_SALE, never to the defaults: a broken setting fails closed. Read-only.
 

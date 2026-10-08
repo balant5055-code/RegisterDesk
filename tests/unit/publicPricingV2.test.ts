@@ -15,9 +15,9 @@
 import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { buildPricingPlans, buildPricingExample } from '@/content/marketing/pricing'
+import { buildPricingPlans, PLATFORM_FEE_PREFIX } from '@/content/marketing/pricing'
 import { DEFAULT_COMMERCIAL_TERMS, type CommercialTerms } from '@/lib/licensing/capacityCommercial'
-import { calculateActivationQuote, formatPaise } from '@/lib/licensing/capacityPricing'
+import { formatPaise } from '@/lib/licensing/capacityPricing'
 
 const read = (p: string) => readFileSync(resolve(process.cwd(), p), 'utf8')
 const PAGE = read('app/pricing/page.tsx')
@@ -28,8 +28,19 @@ const PAGE_CODE = PAGE
   .filter(line => !line.trim().startsWith('//') && !line.trim().startsWith('*'))
   .join('\n')
 
+import { formatTicketFee, type PublicTicketFee } from '@/lib/licensing/publicPricing'
+import { getDefaultFeeConfig } from '@/lib/fees/config'
+
+/** The ticket fee a new sale resolves to under the code defaults: the commercial percentage + the canonical row's GST and cap,
+ *  with NO fixed part and NO minimum (RD-FEE-01 — resolveFeeConfig zeroes them for ticket sales). */
+const FEE_ROW = getDefaultFeeConfig('event_registration', 'starter')
+const FEE: PublicTicketFee = {
+  percent: DEFAULT_COMMERCIAL_TERMS.attendeeTransactionFeePercent, fixedPaise: 0,
+  minPaise: 0, maxPaise: FEE_ROW.platformFeeMaxPaise, gstRatePercent: FEE_ROW.gstRatePercent,
+}
+
 const T = DEFAULT_COMMERCIAL_TERMS
-const plans = buildPricingPlans(T)
+const plans = buildPricingPlans(T, FEE)
 const byId = new Map(plans.map(p => [p.id, p]))
 const RETIRED = ['Starter', 'Professional', 'Business', 'Enterprise']
 
@@ -82,10 +93,16 @@ describe('every figure comes from the commercial terms', () => {
     )
   })
 
-  it('both cards quote the same attendee transaction fee', () => {
-    const fees = plans.map(p => p.features.find(f => /transaction fee/i.test(f)))
+  it('both cards quote the same RegisterDesk platform fee', () => {
+    const fees = plans.map(p => p.features.find(f => f.startsWith(PLATFORM_FEE_PREFIX)))
+    expect(fees.every(Boolean)).toBe(true)
     expect(new Set(fees).size).toBe(1)
     expect(fees[0]).toContain(`${T.attendeeTransactionFeePercent}%`)
+    // RD-PRICING-CALC — the line is the ticket fee the checkout resolves (percent + fixed + GST),
+    // not the bare commercial percentage.
+    expect(fees[0]).toBe(PLATFORM_FEE_PREFIX + formatTicketFee(FEE))
+    // RD-FEE-02 — never called a "transaction fee"; the gateway charge is not part of it.
+    for (const p of plans) expect(p.features.join(' ')).not.toMatch(/transaction fee/i)
   })
 
   it('the paid card states the CONFIGURED GST rate', () => {
@@ -95,20 +112,23 @@ describe('every figure comes from the commercial terms', () => {
   it('moves with configuration — a changed rate changes the card', () => {
     // The property that makes this page safe: it cannot drift from the checkout.
     const cheaper: CommercialTerms = { ...T, activationRatePaise: 50, freeRegistrationCapacity: 250, gstRatePercent: 12, attendeeTransactionFeePercent: 3 }
-    const p = buildPricingPlans(cheaper)
+    const p = buildPricingPlans(cheaper, { percent: 3, fixedPaise: 0, minPaise: 0, maxPaise: 0, gstRatePercent: 0 })
     expect(p[0].features[0]).toContain('250')
     expect(p[1].priceLabel).toBe('₹0.50')
     expect(p[1].features.join(' ')).toContain('GST 12%')
-    expect(p[1].features.join(' ')).toContain('3% transaction fee')
+    expect(p[1].features.join(' ')).toContain('RegisterDesk platform fee: 3% on paid ticket sales')
   })
 
-  it('the page resolves the EFFECTIVE terms, not code defaults', () => {
-    // Business Configuration is layered over the code defaults, so an admin rate change reaches
-    // the public page without a deploy. RD-EVENT-COMMERCE-04A: the page uses the DISPLAY resolver
-    // (same configured values; the approved model if the stored group is corrupt — charging
-    // paths refuse in that case, the public page does not show a sentinel).
-    expect(PAGE).toContain('await getDisplayCommercialTerms()')
-    expect(PAGE).toContain('buildPricingPlans(terms)')
+  it('the page resolves the EFFECTIVE pricing, live, and never the code defaults', () => {
+    // RD-PRICING-CALC — one snapshot (getPublicPricing) feeds the facts, the cards, the metadata and
+    // the calculator, and the page regenerates about once a minute, so an admin change reaches it
+    // without a deploy. The DISPLAY resolver (which fell back to the code defaults on a corrupt
+    // config) is no longer used: an unresolvable config now shows "unavailable".
+    expect(PAGE).toContain('const pricing = await getPublicPricing()')
+    expect(PAGE).toContain('buildPricingPlans(pricing.terms, pricing.ticketFee)')
+    expect(PAGE).toContain('initialPricing={pricing}')
+    expect(PAGE).toMatch(/export const revalidate = 60\b/)
+    expect(PAGE_CODE).not.toContain('getDisplayCommercialTerms')
     expect(PAGE).not.toContain('getLicenseCatalogV2')
   })
 })
@@ -145,61 +165,44 @@ describe('features are no longer a differentiator', () => {
   })
 })
 
-// ═══ 4 · the worked example is priced by the REAL engine ═════════════════════
+// ═══ 4 · the static worked example is replaced by the calculator (RD-PRICING-CALC) ═══
+//
+// The page used to print one example ('An event accepting 500 registrations'). It now mounts the
+// interactive calculator, whose arithmetic is pinned in publicPricingCalculator.test.ts against the
+// License & Services quote route. Here: the page carries no figure of its own.
 
-describe('the worked example', () => {
-  it('matches what the activation quote would actually charge', () => {
-    const ex = buildPricingExample(T, 500)
-    expect(ex).not.toBeNull()
-    const q = calculateActivationQuote({ capacity: 500, terms: T })
-    if (!q.ok) throw new Error('quote rejected')
-    // Not recomputed here — compared against the engine, which is the point.
-    expect(ex!.base).toBe(formatPaise(q.quote.basePaise))
-    expect(ex!.gst).toBe(formatPaise(q.quote.gstPaise))
-    expect(ex!.total).toBe(formatPaise(q.quote.totalPaise))
-    expect(ex!.chargeable).toBe(q.quote.chargeableCapacity.toLocaleString('en-IN'))
+describe('the pricing calculator replaces the static example', () => {
+  it('mounts the calculator and no longer renders the static example', () => {
+    expect(PAGE_CODE).toContain('<PricingCalculator ')
+    expect(PAGE_CODE).not.toMatch(/An event accepting|buildPricingExample|ExampleRow/)
   })
 
-  it('is the ₹708 figure the business stated', () => {
-    expect(buildPricingExample(T, 500)!.total).toBe('₹708')
-  })
-
-  it('returns null rather than inventing a figure it cannot price', () => {
-    // A maximum below the example capacity must omit the block, not clamp or fabricate it.
-    expect(buildPricingExample({ ...T, maximumEventCapacity: 300 }, 500)).toBeNull()
-  })
-
-  it('the page omits the block when there is nothing to show', () => {
-    expect(PAGE).toContain('{example && (')
-    // …and never falls back to a hardcoded amount.
-    expect(PAGE).not.toMatch(/₹7?0?8|₹1,?50/)
-  })
-
-  it('the page asks for an example within the configured maximum', () => {
-    expect(PAGE).toContain('Math.min(500, terms.maximumEventCapacity)')
+  it('the page never writes an amount or a rate into the markup', () => {
+    expect(PAGE_CODE).not.toMatch(/₹\s?\d/)
+    expect(PAGE_CODE).not.toMatch(/\b18%|\b1\.50\b/)
   })
 })
 
 // ═══ 5 · the two places that CANNOT derive, guarded against drift ════════════
 //
-// `export const metadata` is evaluated at module load, so it cannot await the config resolver
-// the way the page body does. The numbers in it are therefore static — which is exactly the
-// drift that produced the original /pricing-vs-FAQ contradiction. The same guard the FAQ uses
-// applies here: the sentence is checked against the canonical constant, so changing the free
-// capacity without updating the description fails.
+// RD-PRICING-CALC — the metadata used to be a static `export const metadata` with the free capacity
+// typed into it (pinned here to the constant to catch drift). It is now `generateMetadata`, built
+// from the same live pricing as the page, so there is no static number left to drift. Its rendered
+// output is checked in publicPricingPage.test.ts; here, the source shape.
 
-describe('static copy that cannot derive is pinned to the constants', () => {
-  const description = (PAGE.match(/description:\s*'([^']+)'/) ?? [])[1] ?? ''
+describe('the metadata description is derived, not pinned', () => {
+  const gen = PAGE.slice(PAGE.indexOf('export async function generateMetadata')).split(/\r?\n\}\r?\n/)[0]
 
-  it('the page metadata names the configured free capacity', () => {
-    expect(description, 'no metadata description found').not.toBe('')
-    expect(description).toContain(String(T.freeRegistrationCapacity))
+  it('the page metadata names the CONFIGURED free capacity', () => {
+    expect(PAGE).not.toMatch(/export const metadata/)
+    expect(gen).toContain('pricing.terms.freeRegistrationCapacity')
+    expect(gen).not.toMatch(/up to \d/)
   })
 
   it('the page metadata describes the capacity model, not a tier ladder', () => {
-    expect(description).toMatch(/pay once per event|capacity/i)
-    expect(description).not.toMatch(/tier|one license per event|transaction fees on every/i)
-    for (const name of RETIRED) expect(description, name).not.toContain(name)
+    expect(gen).toMatch(/pay once per event|capacity/i)
+    expect(gen).not.toMatch(/tier|one license per event|transaction fees on every/i)
+    for (const name of RETIRED) expect(gen, name).not.toContain(name)
   })
 
   it('"per event" survives, because activation genuinely is once per event', () => {

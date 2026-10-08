@@ -43,13 +43,13 @@ describe('approved default prices and 18% GST', () => {
     const q = calculateActivationQuote({ capacity: 437, terms: DEFAULT_COMMERCIAL_TERMS })
     expect(q.ok && q.quote).toMatchObject({ basePaise: 50_550, gstPaise: 9_099, totalPaise: 59_649 })
   })
-  it('WhatsApp ₹0.20, certificate ₹1.90, photo ₹1.90 — GST-exclusive at 18%', () => {
+  it('WhatsApp ₹0.20, certificate ₹1.50, photo ₹1.60 — GST-exclusive at 18%', () => {
     const wa = priceServiceItem('whatsapp', 1_000, DEFAULT_SERVICE_ALLOWANCES.whatsapp)
     expect(wa).toMatchObject({ unitPricePaise: 20, basePaise: 20_000, gstPaise: 3_600, totalPaise: 23_600 })     // ₹200 + ₹36 = ₹236
     const ce = priceServiceItem('certificates', 100, DEFAULT_SERVICE_ALLOWANCES.certificates)
-    expect(ce).toMatchObject({ unitPricePaise: 190, basePaise: 19_000, gstPaise: 3_420, totalPaise: 22_420 })    // ₹190 + ₹34.20
+    expect(ce).toMatchObject({ unitPricePaise: 150, basePaise: 15_000, gstPaise: 2_700, totalPaise: 17_700 })    // ₹150 + ₹27
     const me = priceServiceItem('media', 7, DEFAULT_SERVICE_ALLOWANCES.media)
-    expect(me).toMatchObject({ basePaise: 1_330, gstPaise: 239, totalPaise: 1_569 })                           // 239.4 → 239 (half-up)
+    expect(me).toMatchObject({ unitPricePaise: 160, basePaise: 1_120, gstPaise: 202, totalPaise: 1_322 })     // 201.6 → 202 (half-up)
   })
   it('no maximum: any whole quantity ≥ 1 is valid; 0 is "none"', () => {
     expect(validateServiceQuantity('whatsapp', 250_000, DEFAULT_SERVICE_ALLOWANCES.whatsapp)).toEqual({ ok: true, quantity: 250_000 })
@@ -61,13 +61,13 @@ describe('approved default prices and 18% GST', () => {
 describe('defaults apply ONLY where nothing is stored', () => {
   it('unconfigured ⇒ approved defaults, on sale', () => {
     const r = resolveServiceCatalogFromStored(undefined)
-    expect(r.config.whatsapp.unitPricePaise).toBe(20); expect(r.config.certificates.unitPricePaise).toBe(190); expect(r.config.media.unitPricePaise).toBe(190)
+    expect(r.config.whatsapp.unitPricePaise).toBe(20); expect(r.config.certificates.unitPricePaise).toBe(150); expect(r.config.media.unitPricePaise).toBe(160)
     expect(r.state).toEqual({ whatsapp: 'available', certificates: 'available', media: 'available' })
   })
   it('a Super Admin’s SAVED price is preserved (never overwritten by a default)', () => {
     const r = resolveServiceCatalogFromStored({ whatsapp: { ...DEFAULT_SERVICE_ALLOWANCES.whatsapp, unitPricePaise: 35, maxQuantity: 10_000 } })
     expect(r.config.whatsapp).toMatchObject({ unitPricePaise: 35, maxQuantity: 10_000 })
-    expect(r.config.certificates.unitPricePaise).toBe(190)
+    expect(r.config.certificates.unitPricePaise).toBe(150)
   })
   it('saved "not for sale" and saved-cleared values are preserved too', () => {
     const r = resolveServiceCatalogFromStored({ media: { enabled: false }, certificates: { unitPricePaise: null } })

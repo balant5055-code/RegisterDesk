@@ -52,12 +52,12 @@ function ok(r: ReturnType<typeof activation>) {
 // ═══ 1 · the commercial terms are configuration, never constants ══════════════
 
 describe('commercial terms', () => {
-  it('ship the approved defaults — 100 free · ₹1.50 · 18% · 2.5% · 1% · 200,000', () => {
+  it('ship the approved defaults — 100 free · ₹1.50 · 18% · 0.5% platform fee (RD-FEE-02, was 2.5%) · 1% · 200,000', () => {
     expect(DEFAULT_COMMERCIAL_TERMS).toEqual({
       freeRegistrationCapacity:      100,
       activationRatePaise:           150,
       gstRatePercent:                18,
-      attendeeTransactionFeePercent: 2.5,
+      attendeeTransactionFeePercent: 0.5,
       capacityDecreaseFeePercent:    1,
       maximumEventCapacity:          200_000,
     })

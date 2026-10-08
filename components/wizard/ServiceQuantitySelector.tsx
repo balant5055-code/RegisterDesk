@@ -83,7 +83,8 @@ export interface ServiceQuantitySelectorProps {
   maxReachedMessage?: string
 }
 
-const DEFAULT_PRESETS = [100, 500, 1_000, 2_500, 5_000, 10_000]
+/** Quick-select quantities when the catalog sets none (presentation only — never a price). Shared with the public calculator. */
+export const DEFAULT_PRESETS = [100, 500, 1_000, 2_500, 5_000, 10_000]
 
 export function ServiceQuantitySelector({
   title, unit, units, usageRule, quantity, onChange, catalog, item, error,

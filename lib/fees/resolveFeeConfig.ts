@@ -82,13 +82,32 @@ export async function resolveFeeConfig(
   // Master enable switches (default true → no-op): disabling zeroes the component.
   // The per-tier `platformFeeType`/flat/min/max completion fields stay reserved —
   // the pure calculation is intentionally unchanged this sprint.
-  const platformBps = fees.platformFeeEnabled === false
+  const platformOff = fees.platformFeeEnabled === false
+  const platformBps = platformOff
     ? 0
     : platformOverride != null ? Math.round(platformOverride * 100) : base.platformFeePercentBps
+
+  // ══ RD-FEE-01 · the active ticket fee is the PERCENTAGE only (+ GST on it) ═══════════
+  // Business rule (owner, 2026-10-07): a paid ticket carries the platform percentage plus
+  // applicable GST on that fee; gateway charges are separate. The ₹5 fixed part and ₹5 minimum
+  // that the per-tier matrix row still carries are NOT part of the active model, so they are
+  // zeroed here for every TICKETED transaction — the matrix table itself is left untouched,
+  // because historical reconciliation still maps a stored tier to the row it was charged under.
+  //
+  // Platform fee OFF ⇒ the WHOLE platform fee is zero (percentage, fixed and minimum), for every
+  // transaction type — so the GST on it is zero too. Before RD-FEE-01 only the percentage was
+  // zeroed and a paid ticket still paid the ₹5 fixed part, contradicting the switch.
+  //
+  // Donations keep their own matrix row (fixed/minimum included) unless the switch is off: their
+  // rate is a separate product decision (see `donationPlatformFee` above).
+  const ticketed = getTransactionCategory(type) === 'ticketed'
+  const noFixedOrMinimum = platformOff || ticketed
 
   return {
     ...base,
     platformFeePercentBps: platformBps,
+    platformFeeFixedPaise: noFixedOrMinimum ? 0 : base.platformFeeFixedPaise,
+    platformFeeMinPaise:   noFixedOrMinimum ? 0 : base.platformFeeMinPaise,
     gstRatePercent:        fees.gstEnabled === false ? 0 : fees.gstPercent,
     gatewayFeePercentBps:  fees.gatewayFeeEnabled ? Math.round(fees.gatewayFeePercent * 100) : 0,
   }

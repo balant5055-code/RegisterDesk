@@ -32,8 +32,8 @@ import { PAID_PAYMENT_STATUSES } from '@/lib/registrations/types'
 import { registrationRevenueBasisPaise } from '@/lib/registrations/revenueBasis'
 import { isInPlaceReversal, IN_PLACE_REVERSAL_STATUSES } from '@/lib/finance/ledgerReversal'
 import {
-  money, gone, resolveGatewayFee,
-  type MaybeMoney, type GatewayResolution,
+  money, gone, resolveGatewayFee, resolveGatewayVariance,
+  type MaybeMoney, type GatewayResolution, type GatewayVariance, type CoveredGatewayRows,
 } from './gatewayFee'
 import {
   listOrganizerRefunds, ORGANIZER_REFUND_READ_CAP, type OrganizerRefundRead,
@@ -57,9 +57,9 @@ export interface FinanceScope {
  * re-exported here because every existing consumer imports them from this path.
  */
 export {
-  money, gone, resolveGatewayFee,
+  money, gone, resolveGatewayFee, resolveGatewayVariance,
   type Unavailable, type Money, type MaybeMoney,
-  type GatewayFeeBasis, type GatewayResolution, type CoveredGatewayRows,
+  type GatewayFeeBasis, type GatewayResolution, type CoveredGatewayRows, type GatewayVariance,
 } from './gatewayFee'
 
 // ─── Firestore helpers — aggregates only ─────────────────────────────────────
@@ -212,6 +212,67 @@ export async function getLedgerTotals(scope: FinanceScope): Promise<LedgerTotals
     totalFees: platformFeeTotal.ok && gateway.fee.ok
       ? money(platformFeeTotal.paise + gateway.fee.paise)
       : gone('query_failed'),
+  }
+}
+
+// ═══ RD-FEE-04 · Razorpay gateway variance (Super Admin reporting) — READ-ONLY ═══════════════
+// Estimated (frozen, used for the organizer's net) vs actual (Razorpay's captured-payment fee),
+// compared over reconciled rows only — see resolveGatewayVariance in ./gatewayFee. Lifetime, like
+// every other ledger total here (the ledger aggregates carry no date filter). Writes nothing.
+
+/** The one scope vocabulary of this module: all organizers, or FinanceScope's organizer (+ event). */
+export type GatewayVarianceScope =
+  | { kind: 'platform' }
+  | { kind: 'organizer'; organizerUid: string; eventSlug: string | null }
+
+/**
+ * Platform-wide has no (filter, gatewayFeeActualPaise, …) composite index to aggregate against, so
+ * it is a bounded, field-masked read of the three gateway fields — and says so (out_of_budget)
+ * rather than reporting a partial sum if the ledger ever outgrows the cap.
+ */
+export const GATEWAY_VARIANCE_SCAN_CAP = 25_000
+const GATEWAY_VARIANCE_PAGE = 1_000
+
+export async function getGatewayVariance(scope: GatewayVarianceScope): Promise<GatewayVariance> {
+  if (scope.kind === 'organizer') {
+    // The same indexed aggregates as getLedgerTotals (organizerUid[, entityId] ⇒ deployed indexes).
+    const q = ledgerQuery({ organizerUid: scope.organizerUid, eventSlug: scope.eventSlug, from: null, to: null })
+    const [n, s, covered] = await Promise.all([
+      countOf(q),
+      sumsOf(q, LEDGER_5),
+      countAndSumsOf(q.orderBy('gatewayFeeActualPaise'), GATEWAY_ACTUAL_AGG),
+    ])
+    return resolveGatewayVariance({ total: n, estimateAll: s ? s.gatewayFeeEstimatePaise : null, covered })
+  }
+  try {
+    let total = 0, estimateAll = 0
+    const covered: CoveredGatewayRows = { count: 0, sums: { gatewayFeeActualPaise: 0, gatewayTaxPaise: 0, gatewayFeeEstimatePaise: 0 } }
+    let last: FirebaseFirestore.QueryDocumentSnapshot | null = null
+    for (;;) {
+      let q = ptx().select('gatewayFeeEstimatePaise', 'gatewayFeeActualPaise', 'gatewayTaxPaise').orderBy('__name__').limit(GATEWAY_VARIANCE_PAGE)
+      if (last) q = q.startAfter(last)
+      const snap = await q.get()
+      for (const d of snap.docs) {
+        const x = d.data() as Record<string, unknown>
+        const est = int(x.gatewayFeeEstimatePaise)
+        total += 1; estimateAll += est
+        // Only a stored integer actual counts as reconciled — absent is never ₹0.
+        if (typeof x.gatewayFeeActualPaise === 'number' && Number.isInteger(x.gatewayFeeActualPaise)) {
+          covered.count += 1
+          covered.sums.gatewayFeeActualPaise   += x.gatewayFeeActualPaise
+          covered.sums.gatewayTaxPaise         += int(x.gatewayTaxPaise)
+          covered.sums.gatewayFeeEstimatePaise += est
+        }
+      }
+      if (total > GATEWAY_VARIANCE_SCAN_CAP) {
+        return resolveGatewayVariance({ total: null, estimateAll: null, covered: null, coveredUnavailable: 'out_of_budget' })
+      }
+      if (snap.size < GATEWAY_VARIANCE_PAGE) break
+      last = snap.docs[snap.docs.length - 1]
+    }
+    return resolveGatewayVariance({ total, estimateAll, covered })
+  } catch {
+    return resolveGatewayVariance({ total: null, estimateAll: null, covered: null, coveredUnavailable: 'query_failed' })
   }
 }
 

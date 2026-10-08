@@ -50,8 +50,8 @@ export const FAQ_ITEMS: FaqItem[] = [
     answer: 'Refunds are handled by the RegisterDesk Super Admin team according to the RegisterDesk refund policy. Organizers do not issue refunds from their dashboard.' },
   { category: 'payments', order: 3, id: 'settlements', question: 'How are settlements handled?',
     answer: 'After an event collects revenue, funds are held briefly and then released to your available balance. You can request a settlement and receive payouts to your bank account or UPI.' },
-  { category: 'payments', order: 4, id: 'transaction-fees', question: 'What are the transaction fees?',
-    answer: 'Paid registrations carry a transaction fee. The standard rate is 2.5% of the ticket price — see the pricing page for current terms.',
+  { category: 'payments', order: 4, id: 'transaction-fees', question: 'What fees apply to paid tickets?',
+    answer: 'Paid ticket sales carry a RegisterDesk platform fee, with GST charged on that fee. Payment gateway charges are separate — they are charged by the payment provider, not RegisterDesk. See the pricing page for the current platform fee.',
     href: '/pricing' },
 
   // ── Team & security ──

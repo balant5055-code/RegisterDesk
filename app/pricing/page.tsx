@@ -1,4 +1,4 @@
-// /pricing — Server Component (zero client JS).
+// /pricing — Server Component, with ONE client island: the pricing calculator (RD-PRICING-CALC).
 //
 // RD-CAPACITY-02 · rebuilt for the capacity-based commercial model. There are TWO commercial
 // states — Free up to the configured free capacity, and Pay as you go above it — and every
@@ -12,8 +12,16 @@
 //
 // 2026-09-25 LUXURY PASS (owner): a centred editorial masthead with the three facts as a
 // ledger; the two plans as a hairline card beside ONE dark card on the hero ink (the
-// highlighted plan); the worked example set as an invoice with dotted leaders; a quiet
-// closing band. Every figure still comes from the effective terms and the real engine.
+// highlighted plan); a quiet closing band. Every figure still comes from the effective terms and
+// the real engine.
+//
+// RD-PRICING-CALC: the static "An event accepting 500 registrations" example is replaced by an
+// interactive calculator, and EVERY figure on the page — the facts ribbon, both plan cards, the
+// metadata description and the calculator — now comes from ONE call, getPublicPricing()
+// (lib/licensing/publicPricingServer), over the same resolvers License & Services and the ticket
+// checkout charge with. The page regenerates about once a minute (`revalidate`), so a Super Admin
+// price change appears without a deploy. If pricing cannot be resolved the page shows an
+// "unavailable" state — never the code defaults or an older figure.
 
 import type { Metadata } from 'next'
 import Link from 'next/link'
@@ -23,37 +31,60 @@ import { marketingButton } from '@/lib/marketing/theme'
 import { getCta } from '@/lib/marketing/cta'
 import { MarketingPageLayout } from '@/components/marketing/layout/MarketingPageLayout'
 import { EditorialOverline } from '@/components/marketing/EditorialOverline'
-import { buildPricingPlans, buildPricingExample } from '@/content/marketing/pricing'
-import { getDisplayCommercialTerms } from '@/lib/licensing/resolveCommercialTerms'
+import { buildPricingPlans, PLATFORM_FEE_PREFIX } from '@/content/marketing/pricing'
+import { PricingCalculator, PRICING_UNAVAILABLE_MESSAGE } from '@/components/marketing/pricing/PricingCalculator'
+import { getPublicPricing } from '@/lib/licensing/publicPricingServer'
+import type { PublicPricingConfig } from '@/lib/licensing/publicPricing'
 import { formatPaise } from '@/lib/licensing/capacityPricing'
 import { MARKETING_CONTAINER } from '@/lib/marketing/layout'
 import type { PricingTier } from '@/lib/marketing/types'
 import { buildMetadata, organizationJsonLd, softwareAppJsonLd, breadcrumbJsonLd } from '@/lib/marketing/seo'
 import { PAGE_TITLE } from '@/lib/marketing/pageTitle'
 
-export const metadata: Metadata = buildMetadata({
-  title:       'Pricing | RegisterDesk',
-  description: 'Start free up to 100 registrations. Above that, pay once per event for the capacity you need — no feature plans, no subscriptions.',
-  path:        '/pricing',
-})
+/**
+ * Regenerate the page about once a minute — the same freshness as the public pricing endpoint's
+ * shared cache — so a configuration change reaches the plan cards and facts without a deploy,
+ * while visitors are still served a static page (no Firestore read per view).
+ */
+export const revalidate = 60
+
+/** The description names the CONFIGURED free allowance — or no number at all if pricing is unavailable. */
+export async function generateMetadata(): Promise<Metadata> {
+  const pricing = await getPublicPricing()
+  const lead = pricing
+    ? `Start free up to ${pricing.terms.freeRegistrationCapacity.toLocaleString('en-IN')} registrations. Above that, pay once per event`
+    : 'Pay once per event'
+  return buildMetadata({
+    title:       'Pricing | RegisterDesk',
+    description: `${lead} for the capacity you need — no feature plans, no subscriptions.`,
+    path:        '/pricing',
+  })
+}
 
 /** Squared, a touch taller than the default lg — the editorial action size. */
 const ACTION = 'h-12 rounded-[var(--radius-control)] px-6'
 const OUTLINED = 'border-hero-ink/25 bg-transparent text-hero-ink shadow-none hover:border-action hover:bg-transparent hover:text-action'
 
-function heroFacts(freeCapacity: string, rate: string): { icon: LucideIcon; label: string; value: string }[] {
+/**
+ * The ribbon under the title. The first two are fixed product statements (no figure); the third
+ * is configuration and is built from the live pricing, or says it is unavailable — never a default.
+ */
+function heroFacts(pricing: PublicPricingConfig | null): { icon: LucideIcon; label: string; value: string }[] {
+  const t = pricing?.terms
   return [
     { icon: Layers3,     label: 'Model',    value: 'Pay once per event, for capacity' },
     { icon: ShieldCheck, label: 'Included', value: 'Same features on every event' },
-    { icon: ReceiptText, label: 'Free',     value: `First ${freeCapacity} registrations, then ${rate} each` },
+    { icon: ReceiptText, label: 'Free',     value: t
+        ? `First ${t.freeRegistrationCapacity.toLocaleString('en-IN')} registrations, then ${formatPaise(t.activationRatePaise)} each`
+        : 'Current pricing is temporarily unavailable' },
   ]
 }
 
 function splitTierFeatures(features: string[]) {
   const registrationFeature = features[0]
-  const transactionFeature = features.find(feature => /transaction fee/i.test(feature)) ?? features[features.length - 1]
-  const capabilityFeatures = features.filter(feature => feature !== registrationFeature && feature !== transactionFeature)
-  return { registrationFeature, transactionFeature, capabilityFeatures }
+  const platformFeeFeature = features.find(feature => feature.startsWith(PLATFORM_FEE_PREFIX)) ?? features[features.length - 1]
+  const capabilityFeatures = features.filter(feature => feature !== registrationFeature && feature !== platformFeeFeature)
+  return { registrationFeature, platformFeeFeature, capabilityFeatures }
 }
 
 /**
@@ -63,7 +94,7 @@ function splitTierFeatures(features: string[]) {
  */
 function PricingCard({ tier, index }: { tier: PricingTier; index: number }) {
   const cta = getCta(tier.ctaKey)
-  const { registrationFeature, transactionFeature, capabilityFeatures } = splitTierFeatures(tier.features)
+  const { registrationFeature, platformFeeFeature, capabilityFeatures } = splitTierFeatures(tier.features)
   const dark = !!tier.highlighted
 
   const ink      = dark ? 'text-ink-on-media' : 'text-hero-ink'
@@ -118,8 +149,10 @@ function PricingCard({ tier, index }: { tier: PricingTier; index: number }) {
             <dd className={cn('mt-1 text-fs-sm font-semibold leading-snug', ink)}>{registrationFeature}</dd>
           </div>
           <div className="py-3 pl-3">
-            <dt className={label}>Transaction fee</dt>
-            <dd className={cn('mt-1 text-fs-sm font-semibold leading-snug', ink)}>{transactionFeature}</dd>
+            {/* RD-FEE-02 — RegisterDesk's fee only; the payment gateway charges separately. */}
+            <dt className={label}>RegisterDesk platform fee</dt>
+            <dd className={cn('mt-1 text-fs-sm font-semibold leading-snug', ink)}>{platformFeeFeature.replace(PLATFORM_FEE_PREFIX, '')}</dd>
+            <dd className={cn('mt-1 text-fs-2xs leading-snug', soft)}>Payment gateway charges are separate.</dd>
           </div>
         </dl>
 
@@ -153,34 +186,18 @@ function PricingCard({ tier, index }: { tier: PricingTier; index: number }) {
   )
 }
 
-/** One line of the worked example, set as an invoice line with a dotted leader. */
-function ExampleRow({ label, value, strong }: { label: string; value: string; strong?: boolean }) {
-  return (
-    <div className="flex items-baseline gap-3 py-2.5">
-      <dt className={cn('shrink-0', strong ? 'text-fs-md font-semibold text-hero-ink' : 'text-fs-sm text-hero-ink-soft')}>{label}</dt>
-      <span aria-hidden className="mb-1 min-w-4 flex-1 border-b border-dotted border-border-strong" />
-      <dd className={cn('shrink-0 tabular-nums', strong ? 'text-fs-xl font-semibold text-hero-ink' : 'text-fs-md font-semibold text-hero-ink')}>{value}</dd>
-    </div>
-  )
-}
-
 export default async function PricingPage() {
   const jsonLd = [
     organizationJsonLd(),
     softwareAppJsonLd(),
     breadcrumbJsonLd([{ name: 'Home', path: '/' }, { name: 'Pricing', path: '/pricing' }]),
   ]
-  // The EFFECTIVE terms — global defaults overlaid with any admin configuration. The same
-  // resolver the activation quote uses, so the page and the checkout cannot disagree.
-  // RD-EVENT-COMMERCE-04A — display only; charging paths fail closed on a corrupt config.
-  const terms = await getDisplayCommercialTerms()
-  const PRICING_TIERS = buildPricingPlans(terms)
-  // Priced by the real engine. `null` if the configured maximum ever fell below it, in which
-  // case the example is simply omitted rather than invented.
-  const example = buildPricingExample(terms, Math.min(500, terms.maximumEventCapacity))
-  const freeCapacityLabel = terms.freeRegistrationCapacity.toLocaleString('en-IN')
-  const rateLabel = formatPaise(terms.activationRatePaise)
-  const HERO_FACTS = heroFacts(freeCapacityLabel, rateLabel)
+  // RD-PRICING-CALC · ONE snapshot of the public pricing for the whole render — facts, cards and
+  // calculator all read it, so they cannot disagree. Null ⇒ the configuration could not be
+  // resolved: every figure is withheld (fail closed), never replaced by a default.
+  const pricing = await getPublicPricing()
+  const PRICING_TIERS = pricing ? buildPricingPlans(pricing.terms, pricing.ticketFee) : []
+  const HERO_FACTS = heroFacts(pricing)
   const startFree = getCta('startFree')
   const bookDemo = getCta('bookDemo')
 
@@ -218,35 +235,33 @@ export default async function PricingPage() {
               ))}
             </dl>
 
-            <ul className="mx-auto mt-8 grid max-w-5xl gap-5 md:grid-cols-2">
-              {PRICING_TIERS.map((tier, index) => (
-                <PricingCard key={tier.id} tier={tier} index={index} />
-              ))}
-            </ul>
-
-            {/* A worked example, priced by the real engine. A per-unit rate is harder to picture
-                than a tier price, and any arithmetic this page invented could disagree with the
-                invoice — so the figures below are the ones the organizer would actually pay.
-                Set as an invoice: dotted leaders, the total ruled off. */}
-            {example && (
-              <div className="mx-auto mt-12 max-w-2xl rounded-[var(--radius-panel)] border border-border/70 bg-card p-6 sm:p-8">
-                <div className="text-center">
-                  <EditorialOverline>For example</EditorialOverline>
-                  <p className="mt-3 font-display text-fs-xl font-light text-hero-ink sm:text-fs-2xl">
-                    An event accepting {example.capacity} registrations
-                  </p>
-                </div>
-                <dl className="mt-6">
-                  <ExampleRow label="Free capacity" value={freeCapacityLabel} />
-                  <ExampleRow label="Chargeable capacity" value={example.chargeable} />
-                  <ExampleRow label="Activation fee" value={example.base} />
-                  <ExampleRow label={example.gstLabel} value={example.gst} />
-                  <div className="mt-2 border-t-2 border-hero-ink pt-2">
-                    <ExampleRow label="Total, one-time" value={example.total} strong />
-                  </div>
-                </dl>
+            {pricing ? (
+              <ul className="mx-auto mt-8 grid max-w-5xl gap-5 md:grid-cols-2">
+                {PRICING_TIERS.map((tier, index) => (
+                  <PricingCard key={tier.id} tier={tier} index={index} />
+                ))}
+              </ul>
+            ) : (
+              <div role="status" className="mx-auto mt-8 max-w-5xl rounded-[var(--radius-panel)] border border-border/70 bg-card px-6 py-10 text-center text-fs-sm text-hero-ink">
+                {PRICING_UNAVAILABLE_MESSAGE}
               </div>
             )}
+
+            {/* RD-PRICING-CALC · the interactive estimate. Every figure is computed in the browser
+                from the server's pricing configuration by the License & Services pricing
+                functions; this page passes only the call to action. */}
+            <section aria-labelledby="pricing-calculator-heading" className="mx-auto mt-12 max-w-2xl rounded-[var(--radius-panel)] border border-border/70 bg-card p-6 sm:p-8">
+              <div className="text-center">
+                <EditorialOverline>Plan your event</EditorialOverline>
+                <h2 id="pricing-calculator-heading" className="mt-3 font-display text-fs-xl font-light text-hero-ink sm:text-fs-2xl">
+                  Estimate what your event will cost
+                </h2>
+                <p className="mt-2 text-fs-sm text-hero-ink-soft">Adjust the services you expect to use.</p>
+              </div>
+              <div className="mt-4">
+                <PricingCalculator ctaHref={startFree.href} ctaLabel="Start your event" initialPricing={pricing} />
+              </div>
+            </section>
           </div>
         </section>
 

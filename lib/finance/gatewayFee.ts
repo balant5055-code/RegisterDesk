@@ -111,3 +111,74 @@ export function resolveGatewayFee(input: {
     coverage: { withActual: covered.count, total },
   }
 }
+
+// ═══ RD-FEE-04 · GATEWAY VARIANCE — a reconciliation METRIC, never money movement ════════════
+//
+// Variance = Σ estimate − Σ actual, over ONLY the rows Razorpay has reported a fee for.
+//
+//   estimate  the FROZEN gatewayFeeEstimatePaise written onto the ledger row at settlement — the
+//             figure the organizer's net was computed with (2% all-in by business rule).
+//   actual    gatewayFeeActualPaise from the verified payment.captured webhook (tax-INCLUSIVE).
+//
+// Positive ⇒ the estimate exceeded the actual gateway cost; negative ⇒ it fell short. It is NOT
+// organizer profit, NOT RegisterDesk platform revenue, and it changes NO payable, net, wallet or
+// payout — nothing here writes anything.
+//
+// A row without an actual fee is NEVER read as an actual of ₹0: it is excluded from the
+// comparison and its estimate is reported separately as "awaiting Razorpay's fee", so an
+// unreconciled payment cannot manufacture a variance.
+
+export interface GatewayVariance {
+  /** Ledger rows in scope. */
+  transactions:        number | null
+  /** Rows carrying a Razorpay actual fee — the ONLY population compared. */
+  reconciled:          number | null
+  /** Σ frozen estimate over the reconciled rows. */
+  estimatedReconciled: MaybeMoney
+  /** Σ Razorpay actual fee over the reconciled rows (tax-inclusive). */
+  actual:              MaybeMoney
+  /** GST contained WITHIN `actual` — a component, never added to it. */
+  actualTax:           MaybeMoney
+  /** estimatedReconciled − actual. */
+  variance:            MaybeMoney
+  /** Σ frozen estimate over rows still awaiting Razorpay's fee (excluded from the variance). */
+  estimatedAwaiting:   MaybeMoney
+  /** Σ frozen estimate over every row in scope. */
+  estimatedAll:        MaybeMoney
+  basis:               GatewayFeeBasis
+}
+
+/** Pure: the variance from the same two aggregates the gateway resolver uses. */
+export function resolveGatewayVariance(input: {
+  total:       number | null
+  estimateAll: number | null
+  covered:     CoveredGatewayRows | null
+  /** Why an unavailable covered read is unavailable (index missing, or a bounded scan stopped). */
+  coveredUnavailable?: Unavailable
+}): GatewayVariance {
+  const { total, estimateAll, covered } = input
+  const estimatedAll = estimateAll === null ? gone('query_failed') : money(estimateAll)
+  if (!covered) {
+    const why = input.coveredUnavailable ?? 'requires_index'
+    return { transactions: total, reconciled: null, estimatedReconciled: gone(why), actual: gone(why), actualTax: gone(why),
+             variance: gone(why), estimatedAwaiting: gone(why), estimatedAll, basis: 'estimated' }
+  }
+  if (covered.count === 0) {
+    return { transactions: total, reconciled: 0, estimatedReconciled: gone('no_authoritative_field'),
+             actual: gone('no_authoritative_field'), actualTax: gone('no_authoritative_field'),
+             variance: gone('no_authoritative_field'), estimatedAwaiting: estimatedAll, estimatedAll, basis: 'estimated' }
+  }
+  const est = covered.sums.gatewayFeeEstimatePaise
+  const act = covered.sums.gatewayFeeActualPaise
+  return {
+    transactions:        total,
+    reconciled:          covered.count,
+    estimatedReconciled: money(est),
+    actual:              money(act),
+    actualTax:           money(covered.sums.gatewayTaxPaise),
+    variance:            money(est - act),
+    estimatedAwaiting:   estimateAll === null ? gone('query_failed') : money(estimateAll - est),
+    estimatedAll,
+    basis:               total !== null && covered.count >= total ? 'actual' : 'mixed',
+  }
+}

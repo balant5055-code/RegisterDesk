@@ -137,10 +137,10 @@ describeEmu('RD-EVENT-COMMERCE-05 · pay-as-you-go licensing & services end to e
     const q = await quote(437, { whatsapp: 1_000, certificates: 100 })
     const cat = q.body.catalog as Record<string, { purchasable: boolean; state: string; unitPricePaise: number; gstRatePercent: number; maxQuantity: number | null }>
     expect(cat.whatsapp).toMatchObject({ purchasable: true, state: 'available', unitPricePaise: 20, gstRatePercent: 18, maxQuantity: null })
-    expect(cat.certificates).toMatchObject({ purchasable: true, state: 'available', unitPricePaise: 190, gstRatePercent: 18 })
-    // Capacity 437 ₹596.49 + 1,000 × ₹0.20 (₹200 + ₹36) + 100 × ₹1.90 (₹190 + ₹34.20) = ₹1,052.69.
+    expect(cat.certificates).toMatchObject({ purchasable: true, state: 'available', unitPricePaise: 150, gstRatePercent: 18 })
+    // Capacity 437 ₹596.49 + 1,000 × ₹0.20 (₹200 + ₹36) + 100 × ₹1.50 (₹150 + ₹27) = ₹1,009.49.
     const total = (q.body.totals as { totalPaise: number }).totalPaise
-    expect(total).toBe(59_649 + 23_600 + 22_420)
+    expect(total).toBe(59_649 + 23_600 + 17_700)
 
     const purchase = withPublishAgreement((await import('@/app/api/licensing/purchase/route')).POST)
     const p = await json(await purchase(req('POST', { eventId: DRAFT, capacity: 437, services: { whatsapp: 1_000, certificates: 100 }, expectedTotalPaise: total })))

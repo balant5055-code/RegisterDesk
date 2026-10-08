@@ -11,14 +11,18 @@
 // "Professional · ₹1,499 · 2,500 registrations · API access" and then met a capacity slider.
 //
 // ═══ EVERY FIGURE IS DERIVED ═════════════════════════════════════════════════
-// Nothing here is hardcoded. The free allowance, the per-registration rate, the GST rate, the
-// attendee transaction fee and the maximum all come from the effective commercial terms the
-// server resolves, so the page cannot drift from what the checkout actually charges. The only
-// things this file adds are taglines and which card is highlighted.
+// Nothing here is hardcoded. The free allowance, the per-registration rate, the GST rate and the
+// maximum come from the effective commercial terms; the RegisterDesk platform fee is the one the ticket
+// checkout resolves (RD-PRICING-CALC: percent + fixed part + GST on the fee, via resolveFeeConfig —
+// not the bare commercial percentage, which omitted the fixed part). Both arrive in the public
+// pricing the server assembles (lib/licensing/publicPricingServer), so the page cannot drift from
+// what the checkout actually charges. The only things this file adds are taglines and which card
+// is highlighted.
 
 import type { PricingTier } from '@/lib/marketing/types'
 import type { CommercialTerms } from '@/lib/licensing/capacityCommercial'
-import { calculateActivationQuote, formatPaise } from '@/lib/licensing/capacityPricing'
+import { formatPaise } from '@/lib/licensing/capacityPricing'
+import { formatTicketFee, type PublicTicketFee } from '@/lib/licensing/publicPricing'
 
 const count = (n: number): string => n.toLocaleString('en-IN')
 
@@ -26,16 +30,23 @@ const count = (n: number): string => n.toLocaleString('en-IN')
 const pct = (n: number): string => String(Number(n.toFixed(2)))
 
 /**
- * The two commercial states, built from the EFFECTIVE terms.
+ * The platform-fee line's prefix — the card layout finds the line by it, and shows the text after it.
+ * RD-FEE-02: "RegisterDesk platform fee", never "transaction fee" — the payment gateway's charge is a
+ * separate charge by the payment provider and is not part of it.
+ */
+export const PLATFORM_FEE_PREFIX = 'RegisterDesk platform fee: '
+
+/**
+ * The two commercial states, built from the EFFECTIVE terms and the resolved ticket fee.
  *
- * `features[0]` is always the capacity line and one entry always matches /transaction fee/ —
+ * `features[0]` is always the capacity line and one entry always starts with PLATFORM_FEE_PREFIX —
  * the page's card layout pulls those two out into their own blocks, so the ordering is part of
  * the contract rather than incidental.
  */
-export function buildPricingPlans(terms: CommercialTerms): PricingTier[] {
+export function buildPricingPlans(terms: CommercialTerms, ticketFee: PublicTicketFee): PricingTier[] {
   const free = terms.freeRegistrationCapacity
   const rate = formatPaise(terms.activationRatePaise)
-  const fee  = `${pct(terms.attendeeTransactionFeePercent)}% transaction fee`
+  const fee  = `${PLATFORM_FEE_PREFIX}${formatTicketFee(ticketFee)}`
 
   return [
     {
@@ -72,35 +83,4 @@ export function buildPricingPlans(terms: CommercialTerms): PricingTier[] {
       ],
     },
   ]
-}
-
-/**
- * A worked example, computed by the REAL pricing engine from the REAL terms.
- *
- * Included because a per-unit rate is genuinely harder to picture than a tier price: "₹1.50 per
- * registration" leaves a prospect doing arithmetic, and any arithmetic a marketing page invents
- * is arithmetic that can disagree with the invoice. Running the actual engine means this example
- * is the amount the organizer would really be charged, or it is nothing at all.
- */
-export interface PricingExample {
-  capacity:   string
-  chargeable: string
-  base:       string
-  gstLabel:   string
-  gst:        string
-  total:      string
-}
-
-export function buildPricingExample(terms: CommercialTerms, capacity: number): PricingExample | null {
-  const r = calculateActivationQuote({ capacity, terms })
-  if (!r.ok) return null
-  const q = r.quote
-  return {
-    capacity:   count(q.capacity),
-    chargeable: count(q.chargeableCapacity),
-    base:       formatPaise(q.basePaise),
-    gstLabel:   `GST ${pct(q.gstRatePercent)}%`,
-    gst:        formatPaise(q.gstPaise),
-    total:      formatPaise(q.totalPaise),
-  }
 }

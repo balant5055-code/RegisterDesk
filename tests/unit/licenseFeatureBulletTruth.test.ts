@@ -30,6 +30,7 @@ import {
 } from '@/lib/licensing/eventLicense'
 import { DEFAULT_COMMERCIAL_TERMS } from '@/lib/licensing/capacityCommercial'
 import { buildPricingPlans } from '@/content/marketing/pricing'
+import { getDefaultFeeConfig } from '@/lib/fees/config'
 
 const ROOT = process.cwd()
 const read = (p: string) => readFileSync(resolvePath(ROOT, p), 'utf8')
@@ -76,7 +77,11 @@ describe('no tier advertises the waitlist while it is switched off', () => {
     // RD-CAPACITY-02 · /pricing now builds two capacity-based cards from the commercial
     // terms rather than five tier cards from the catalog. The invariant is unchanged: a
     // bullet is a promise, so none may name a capability the kill switch disables.
-    for (const t of buildPricingPlans(DEFAULT_COMMERCIAL_TERMS)) {
+    // RD-PRICING-CALC — the cards also take the resolved ticket fee (code defaults; RD-FEE-01: no fixed part, no minimum).
+    const row = getDefaultFeeConfig('event_registration', 'starter')
+    const fee = { percent: DEFAULT_COMMERCIAL_TERMS.attendeeTransactionFeePercent, fixedPaise: 0,
+      minPaise: 0, maxPaise: row.platformFeeMaxPaise, gstRatePercent: row.gstRatePercent }
+    for (const t of buildPricingPlans(DEFAULT_COMMERCIAL_TERMS, fee)) {
       expect(t.features.join(' '), `${t.name} card`).not.toMatch(/wait-?list/i)
     }
   })
