@@ -20,8 +20,9 @@ import { NextRequest } from 'next/server'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import {
-  WHATSAPP_WALLET_SKIP_REASON, isWalletSkippedWhatsAppLog,
+  WHATSAPP_WALLET_SKIP_REASON, WHATSAPP_CAPACITY_SKIP_REASON, isWalletSkippedWhatsAppLog,
 } from '@/lib/email-logs/types'
+import { WHATSAPP_CAPACITY_REQUIRED } from '@/lib/communications/capacity'
 
 type Doc = Record<string, unknown>
 const UID = 'organizer-1'
@@ -67,11 +68,15 @@ describe('isWalletSkippedWhatsAppLog — historical reason only', () => {
 // ─── The literal is still what the live sender writes ─────────────────────────
 
 describe('the constant tracks its only writer', () => {
-  it('sendWhatsAppConfirmation still stores exactly this string', () => {
-    // emailLogs has no reason CODE, so this string IS the schema. If the sender's literal is
-    // ever reworded, eligibility silently stops matching — this is what catches that.
+  // RD-COMMS-P1 — the live sender now records the CAPACITY reason (a skipped message the event's
+  // capacity — and no legacy balance — covered). Rows written earlier keep the wallet reason; both
+  // stay re-sendable once capacity is purchased.
+  it('sendWhatsAppConfirmation stores the capacity reason, and the matcher accepts it AND the legacy wallet reason', () => {
     const src = read('lib/registrations/sendWhatsAppConfirmation.ts')
-    expect(src).toContain(`'skipped', { error: '${WHATSAPP_WALLET_SKIP_REASON}' }`)
+    expect(src).toContain("'skipped', { error: WHATSAPP_CAPACITY_REQUIRED }")
+    expect(WHATSAPP_CAPACITY_SKIP_REASON).toBe(WHATSAPP_CAPACITY_REQUIRED)
+    expect(isWalletSkippedWhatsAppLog({ status: 'skipped', error: WHATSAPP_CAPACITY_REQUIRED })).toBe(true)
+    expect(isWalletSkippedWhatsAppLog({ status: 'skipped', error: WHATSAPP_WALLET_SKIP_REASON })).toBe(true)
   })
 
   it('the live send path was NOT modified by this fix', () => {
@@ -266,16 +271,22 @@ describe('the retry route enforces the same rule independently of the UI', () =>
 describe('8 · a zero fee must not be mistaken for a broken one', () => {
   const src = read('lib/email-logs/whatsappRetry.ts')
 
-  it('the balance gate only applies when there is something to charge', () => {
-    expect(src).toContain("if (!walletCfg.allowNegativeBalance && costPaise > 0 && balance < costPaise) {")
+  // RD-COMMS-P1 — the gate applies only when the event's capacity does NOT cover the message, and
+  // then only a legacy balance covering the whole legacy price may fund it (a zero price funds
+  // nothing — there is no free send without capacity).
+  // RD-COMMS-P2-A — the gate is the atomic funding hold: event capacity first, then only a legacy
+  // balance that covers the whole price (a zero price funds nothing).
+  it('the legacy-balance gate applies only to sends the event capacity does not cover', () => {
+    const funding = read('lib/whatsapp/funding.ts')
+    expect(funding.indexOf("outcome.mode === 'allowance' && req.draftId")).toBeLessThan(funding.indexOf('if (!legacyBalanceCanFund(balance, req.legacyPricePaise)) {'))
+    expect(src).toContain('reserveWhatsAppFunding({')
   })
 
   it('no debit is attempted at zero cost', () => {
-    // RD-INTEG — the debit is guarded by costPaise > 0 and a billing error after the send no
-    // longer turns an accepted message into a failure.
-    // RD-CLOSE — the charge is decided inside the acceptance record: a zero cost writes no ledger row.
-    expect(read('lib/whatsapp/acceptance.ts')).toContain('if (input.costPaise > 0) {')
-    expect(src).toContain('fromAllowance, writeLog: false, source: \'retry\',')
+    // legacyBalanceCanFund refuses a zero/negative price, so no ₹0 ledger row is ever written; the
+    // retry's acceptance settles against its hold.
+    expect(read('lib/communications/capacity.ts')).toContain('costPaise > 0')
+    expect(src).toContain("draftId: allowanceDraftId, writeLog: false, source: 'retry', unitKey,")
   })
 
   it('no truthiness check treats a zero fee as unset', () => {

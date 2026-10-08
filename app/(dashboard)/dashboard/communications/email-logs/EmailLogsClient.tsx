@@ -15,11 +15,13 @@ import {
   Mail,
   ChevronDown,
   ChevronUp,
+  HelpCircle,
 } from 'lucide-react'
 import { cn } from '@/lib/utils/cn'
 import { EMAIL_LOG_STATUS_LABELS } from '@/lib/email-logs/types'
 import type { EmailLog, EmailLogStatus } from '@/lib/email-logs/types'
 import { emailLogStatusCls } from '@/lib/ui/statusColors'
+import { commStatusOf, canOfferRetry, COMM_STATUS_LABELS, DELIVERY_UNKNOWN_HELP } from '@/lib/communications/messageStatus'
 import { EmptyState, PageHeader } from '@/components/ui'
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -51,7 +53,16 @@ const TEMPLATE_OPTIONS: { value: string; label: string }[] = [
 
 // ─── Status badge ─────────────────────────────────────────────────────────────
 
-function StatusBadge({ status }: { status: EmailLogStatus }) {
+function StatusBadge({ status, deliveryUnknown }: { status: EmailLogStatus; deliveryUnknown?: boolean }) {
+  // RD-COMMS-P2-F — an unconfirmed outcome is its own state: not "Failed", not "Sent".
+  if (commStatusOf({ status, deliveryUnknown }) === 'unknown') {
+    return (
+      <span title={DELIVERY_UNKNOWN_HELP} className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-full bg-amber-100 px-2.5 py-1 text-[12px] font-semibold text-amber-800 ring-1 ring-amber-600/30">
+        <HelpCircle className="size-3" />
+        {COMM_STATUS_LABELS.unknown}
+      </span>
+    )
+  }
   const ICONS: Record<EmailLogStatus, React.ElementType> = {
     queued:    Clock,
     sent:      CheckCircle2,
@@ -114,7 +125,7 @@ function LogRow({
 
         {/* Status */}
         <td className="py-3 px-3">
-          <StatusBadge status={log.status} />
+          <StatusBadge status={log.status} deliveryUnknown={log.deliveryUnknown} />
         </td>
 
         {/* Sent At */}
@@ -125,7 +136,9 @@ function LogRow({
         {/* Actions */}
         <td className="py-3 pl-3 pr-4">
           <div className="flex items-center gap-2">
-            {log.status === 'failed' && (
+            {/* RD-COMMS-P2-F — a DEFINITE failure only: an unknown outcome may already have been
+                delivered, so it is never offered a resend (the retry route refuses it too). */}
+            {canOfferRetry(log) && (
               <button
                 type="button"
                 onClick={() => onRetry(log.id)}
@@ -165,6 +178,7 @@ function LogRow({
       {expanded && log.error && (
         <tr className="border-b border-border bg-rose-50/50">
           <td colSpan={6} className="py-2 pl-4 pr-4">
+            {log.deliveryUnknown && <p className="mb-1 text-[12px] text-amber-800">{DELIVERY_UNKNOWN_HELP}</p>}
             <p className="font-mono text-[12px] text-rose-700">{log.error}</p>
           </td>
         </tr>
@@ -295,6 +309,9 @@ export function EmailLogsClient() {
         ))
       } else {
         setRetryMsg({ id: logId, ok: false, msg: data.error ?? 'Retry failed.' })
+        // The retry itself may have ended with an unconfirmed outcome — re-read so the row says so
+        // (and stops offering another retry) instead of still showing a plain "Failed".
+        void fetchLogs()
       }
     } catch {
       setRetryMsg({ id: logId, ok: false, msg: 'Network error.' })
@@ -336,8 +353,9 @@ export function EmailLogsClient() {
         }
       />
 
-      {/* ── Filters ── */}
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+      {/* ── Filters ── RD-COMMS-P2-F: an explicit minmax(0,1fr) track + min-w-0 children, so a long
+          event name in the <select> can no longer widen the column past a phone's viewport. */}
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-5 [&>*]:min-w-0">
         {/* Search */}
         <div className="relative sm:col-span-2 lg:col-span-1">
           <Search className="absolute left-3 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />

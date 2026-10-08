@@ -209,7 +209,9 @@ describe('RD-ANALYTICS-12-28 · WhatsApp signals', () => {
 
   it('17 · wallet-held rows are matched by the ONE declared reason constant, on skipped rows only', () => {
     expect(SOURCES).toContain("where('status', '==', 'skipped').where('error', '==', WHATSAPP_WALLET_SKIP_REASON)")
-    expect(SOURCES).toContain("import { BROADCAST_TEMPLATE_KEY, WHATSAPP_WALLET_SKIP_REASON } from '@/lib/email-logs/types'")
+    // RD-COMMS-P1 — the capacity-skip reason is the second declared constant, counted the same way.
+    expect(SOURCES).toContain("where('status', '==', 'skipped').where('error', '==', WHATSAPP_CAPACITY_SKIP_REASON)")
+    expect(SOURCES).toContain("import { BROADCAST_TEMPLATE_KEY, WHATSAPP_WALLET_SKIP_REASON, WHATSAPP_CAPACITY_SKIP_REASON } from '@/lib/email-logs/types'")
   })
 
   it('18 · the screen defines wallet-held as "not a failure" and read as "not an email open"', () => {

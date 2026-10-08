@@ -39,10 +39,20 @@ export interface RecipientCountMeta {
  * `error` is "we do not know" and must never render as a number — least of all the
  * previous one. Keeping these distinct is the whole point of the type.
  */
+/** RD-COMMS-CAPACITY-UX — the server's WhatsApp funding quote for the counted audience. */
+export interface RecipientCapacity {
+  required:   number
+  available:  number
+  shortfall:  number
+  sufficient: boolean
+  fundedBy:   'event_capacity' | 'legacy_balance' | null
+}
+
 export type RecipientCountState =
   | { status: 'idle' }
   | { status: 'loading' }
-  | { status: 'ready'; count: number; meta: RecipientCountMeta | null }
+  // `capacity` is present only when the server sent one (WhatsApp); never invented here.
+  | { status: 'ready'; count: number; meta: RecipientCountMeta | null; capacity?: RecipientCapacity }
   | { status: 'error'; message: string }
 
 export interface CountApiResponse {
@@ -52,6 +62,16 @@ export interface CountApiResponse {
   timezone?:     string
   dateLabel?:    string
   undatedCount?: number
+  capacity?:     unknown
+}
+
+function asCapacity(v: unknown): RecipientCapacity | null {
+  const c = v as Partial<RecipientCapacity> | null | undefined
+  if (!c || typeof c !== 'object') return null
+  const nums = [c.required, c.available, c.shortfall].every(n => typeof n === 'number' && Number.isFinite(n))
+  return nums && typeof c.sufficient === 'boolean'
+    ? { required: c.required!, available: c.available!, shortfall: c.shortfall!, sufficient: c.sufficient, fundedBy: c.fundedBy === 'event_capacity' || c.fundedBy === 'legacy_balance' ? c.fundedBy : null }
+    : null
 }
 
 export const COUNT_FAILED_MESSAGE = 'Could not calculate the recipient count. Check the filters and try again.'
@@ -76,6 +96,7 @@ export function toRecipientCountState(ok: boolean, body: CountApiResponse | null
       // the same thing to a reader: we do not know.
       ? { timezone: body.timezone, dateLabel: body.dateLabel, undatedCount: body.undatedCount ?? null }
       : null,
+    ...(asCapacity(body.capacity) ? { capacity: asCapacity(body.capacity)! } : {}),
   }
 }
 

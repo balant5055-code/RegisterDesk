@@ -114,12 +114,16 @@ describe('structural safety', () => {
     expect(page).toContain('/api/organizer/wallet/events/${encodeURIComponent(eventId)}')
     expect(page).toContain('/api/organizer/wallet/service-requests?event=${encodeURIComponent(eventId)}')
   })
-  it('no general Add Funds on the Wallet: Increase Limit uses the existing purchase flow; the top-up moved unchanged to the communication balance card', () => {
+  // RD-COMMS-P1 — no Add Funds anywhere: capacity is bought per event (Increase Limit → License &
+  // Services); the old balance card is a read-only legacy notice, and Communications shows Usage.
+  it('no Add Funds on the Wallet or the legacy balance card: Increase Limit uses the existing purchase flow', () => {
     expect(page).not.toMatch(/\/api\/organizer\/wallet\/topup|AddFundsModal|Add Funds/)
     expect(page).toContain('increaseLimitHref(')
-    expect(balance).toContain("fetch('/api/organizer/wallet/topup'")
-    expect(balance).toContain("fetch('/api/organizer/wallet/topup/verify'")
-    expect(code('app/(dashboard)/dashboard/communications/page.tsx')).toContain('<CommunicationBalanceCard />')
+    expect(balance).not.toMatch(/\/api\/organizer\/wallet\/topup|AddFundsModal|Add funds|Add Funds|razorpay/i)
+    expect(balance).toContain('if (balancePaise === null || balancePaise <= 0) return null')
+    const comms = code('app/(dashboard)/dashboard/communications/page.tsx')
+    expect(comms).not.toContain('<CommunicationBalanceCard />')
+    expect(comms).toContain("{tab === 'usage'      && <CommUsage />}")
   })
   it('no SMS allowance; the other balances are separate links, never summed into the event', () => {
     expect(page).toContain('{SMS_NOTE}')

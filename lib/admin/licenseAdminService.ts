@@ -750,6 +750,10 @@ export async function applyLicenseAction(
 // overlay cancel + history + audit transaction) are each still attempted; a failure is recorded
 // durably (adminAuditFailures, via logAdminActionOrRecord) and returned as `reconciliation`, and
 // the response reports the TRUE outcome. Before the gateway leg, failures still fail the call.
+/** RD-COMMS-P1 — set (once) when a licence refund is recorded; the non-wallet "already refunded" marker. */
+const refundedMarkerOf = (d: unknown): boolean =>
+  !!d && typeof d === 'object' && (d as { refundedAt?: unknown }).refundedAt != null
+
 async function refundLicense(
   eventId: string, adminUid: string, reason: string, actorRole: AuditActorRole,
   respond: (extra?: Partial<LicenseAdminActionResponse>) => LicenseAdminActionResponse,
@@ -782,7 +786,11 @@ async function refundLicense(
       throw new LicenseActionError('An event-service refund for this event is open or already approved/paid. Resolve it first — a licence refund returns the full order amount, which would refund those units twice.', 409)
     }
   }
-  if ((await refundLedgerRef.get()).exists) throw new LicenseActionError('This license has already been refunded', 409)
+  // Already refunded: the licence's own refund marker (RD-COMMS-P1, below), or — for refunds made
+  // before that marker existed — the deterministic refund ledger row (F-1).
+  if (refundedMarkerOf(snap.data()) || (await refundLedgerRef.get()).exists) {
+    throw new LicenseActionError('This license has already been refunded', 409)
+  }
 
   let gatewayRefunded = false
   let walletCreditedPaise = 0
@@ -907,23 +915,28 @@ async function refundLicense(
     }
   }
 
-  // Credit back any wallet-paid portion (walletTransactions/license_<draftId>).
+  // Credit back any wallet-paid portion (walletTransactions/license_<draftId>) — HISTORICAL only.
+  // That `license_charge` row was written by the retired wallet-first licence activation; current
+  // licences are paid through Razorpay in full and have none, so they get NO communication-wallet
+  // operation at all (RD-COMMS-P1: no ₹0 ledger row, no wallet document created).
   // Credit-back + the refund ledger entry commit as ONE idempotent transaction
   // keyed on the deterministic license_refund_<eventId> doc (F-1): a concurrent
   // second refund (wallet-only license, no gateway guard) or a crash-retry can
-  // never double-credit, and the balance can never drift from the ledger. When
-  // walletUsed is 0 the credit is a no-op but the audit ledger entry is still
-  // recorded. Mirrors atomicTopupCredit.
+  // never double-credit, and the balance can never drift from the ledger.
+  // Mirrors atomicTopupCredit.
   try {
     const draftId = doc.orderId?.startsWith('lic_') ? doc.orderId.slice(4) : eventId
     const chargeSnap = await adminDb.doc(`walletTransactions/license_${draftId}`).get()
-    const walletUsed = chargeSnap.exists ? ((chargeSnap.data() as { amountPaise?: number }).amountPaise ?? 0) : 0
-    const { credited } = await atomicWalletCredit(organizerUid, walletUsed, refundLedgerRef, {
-      organizerUid, type: 'license_refund',
-      status: 'completed', referenceType: 'license', referenceId: eventId,
-      description: `License refund — ${eventId}`, gatewayRefunded, metadata: { reason },
-    })
-    if (credited) walletCreditedPaise = walletUsed
+    const charged = chargeSnap.exists ? (chargeSnap.data() as { amountPaise?: unknown }).amountPaise : 0
+    const walletUsed = typeof charged === 'number' && Number.isFinite(charged) && charged > 0 ? charged : 0
+    if (walletUsed > 0) {
+      const { credited } = await atomicWalletCredit(organizerUid, walletUsed, refundLedgerRef, {
+        organizerUid, type: 'license_refund',
+        status: 'completed', referenceType: 'license', referenceId: eventId,
+        description: `License refund — ${eventId}`, gatewayRefunded, metadata: { reason },
+      })
+      if (credited) walletCreditedPaise = walletUsed
+    }
   } catch (err) {
     if (!gatewayRefunded) throw err
     console.error(`[license-refund] wallet credit-back FAILED after a gateway refund (event ${eventId})`, err)
@@ -949,8 +962,14 @@ async function refundLicense(
   try {
     await adminDb.runTransaction(async tx => {
       const s = await tx.get(licenseRef(eventId))
+      // RD-COMMS-P1 — the licence's refund marker, claimed in THIS transaction: a refund with no
+      // order (so no order claim) racing another one is refused here instead of recording twice.
+      if (refundedMarkerOf(s.data())) throw new LicenseActionError('This license has already been refunded', 409)
       const overlay = readOverlay(s.exists ? s.data() as EventLicenseDoc : {})
-      tx.set(licenseRef(eventId), overlayPayload({ ...overlay, lifecycle: 'cancelled' }, adminUid), { merge: true })
+      tx.set(licenseRef(eventId), {
+        ...overlayPayload({ ...overlay, lifecycle: 'cancelled' }, adminUid),
+        refundedAt: FieldValue.serverTimestamp(), refundedBy: adminUid,
+      }, { merge: true })
       stageLicenseHistory(tx, {
         ...historyEntry,
         before: { lifecycle: overlay.lifecycle },

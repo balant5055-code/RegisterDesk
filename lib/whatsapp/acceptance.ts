@@ -28,8 +28,9 @@
 
 import { FieldValue } from 'firebase-admin/firestore'
 import { adminDb } from '@/lib/firebase/admin'
-import { getWalletConfig } from '@/lib/wallet/resolveWalletConfig'
 import type { OrganizerWallet } from '@/types/events'
+import { legacyBalanceCanFund } from '@/lib/communications/capacity'
+import { WHATSAPP_HOLDS } from './funding'
 import type { WriteEmailLogInput } from '@/lib/email-logs/types'
 import {
   ledgerRef as serviceLedgerRef, ledgerLine, availableUnits, ALLOWANCE_USAGE_SUBCOLLECTION, draftIdForEventSlug, type ServiceLedgerDoc,
@@ -93,10 +94,16 @@ export interface MessageAcceptanceInput {
   eventName:    string
   wamid:        string
   templateKey:  'registration_confirmation' | 'certificate_ready'
-  /** Wallet price for THIS message; 0 when a prepaid unit (or a free policy) covers it. */
-  costPaise:    number
-  /** The FIRST message's deterministic ledger id (legacy-compatible); later messages get `<base>__<wamid>`. */
-  baseLedgerId: string
+  /**
+   * RD-COMMS-P2-A — the send attempt's FUNDING HOLD (lib/whatsapp/funding.ts): the prepaid unit
+   * `usage/{unitKey}` on the event's ledger (`draftId`), or the legacy debit `holdLedgerId`. The
+   * acceptance settles against it in THIS transaction — it is marked accepted (a sender or the
+   * sweep can then never give it back) and costs nothing more. Only when the attempt has no usable
+   * hold (a message sent before holds existed, or a hold the sweep already returned) is the message
+   * funded here, by the same rules: a free unit, else the legacy balance if it covers the legacy
+   * price — never below zero — else it is recorded as unbilled (`chargeSkipped: 'no_capacity'`).
+   */
+  funding: { draftId: string | null; unitKey: string; holdLedgerId: string; legacyPricePaise: number }
   ledgerReferenceId: string
   ledgerDescription: string
   ledgerMetadata:    Record<string, unknown>
@@ -104,12 +111,6 @@ export interface MessageAcceptanceInput {
   log: WriteEmailLogInput | null
   /** Registration status to record (merged), when the message is a registration's confirmation. */
   registrationPatch?: { registrationId: string; patch: Record<string, unknown> }
-  /**
-   * The prepaid unit that covers this message (fromAllowance). Marked `acceptedWamid` in the same
-   * transaction, so a sender whose request timed out can never release a unit Meta's webhook has
-   * already proven accepted (releaseServiceUnits refuses a marked unit).
-   */
-  allowanceUnit?: { draftId: string; unitKey: string }
   /**
    * The row the sender wrote when Meta gave no verdict (timeout): it is UPGRADED to this accepted
    * message instead of a second row being created — one log row per message.
@@ -129,64 +130,79 @@ export interface MessageAcceptanceResult { already: boolean; chargedPaise: numbe
  * written by an earlier attempt (or by the webhook), and nothing is written again.
  */
 export async function recordMessageAcceptance(input: MessageAcceptanceInput): Promise<MessageAcceptanceResult> {
-  const walletCfg = input.costPaise > 0 ? await getWalletConfig() : null
+  const f = input.funding
+  const wk        = wamidKey(input.wamid)
   const usageRef  = adminDb.collection('communicationUsage').doc(messageUsageId(input.wamid))
   const logRef    = adminDb.collection('emailLogs').doc(messageLogId(input.wamid))
-  const baseRef   = adminDb.collection('walletTransactions').doc(input.baseLedgerId)
-  const altRef    = adminDb.collection('walletTransactions').doc(`${input.baseLedgerId}__${wamidKey(input.wamid)}`)
+  const holdRef   = adminDb.collection('walletTransactions').doc(f.holdLedgerId)
+  // A SECOND message on an attempt whose hold already paid for another one (a duplicate send) is
+  // funded on its own, under ids derived from its wamid.
+  const altRowRef = adminDb.collection('walletTransactions').doc(`${f.holdLedgerId}__${wk}`)
+  const idxRef    = adminDb.collection(WHATSAPP_HOLDS).doc(f.unitKey)
   const walletRef = adminDb.doc(`organizerWallets/${input.organizerUid}`)
   const regRef    = input.registrationPatch ? adminDb.collection('registrations').doc(input.registrationPatch.registrationId) : null
-  const unitRef   = input.allowanceUnit ? serviceLedgerRef(input.allowanceUnit.draftId).collection(ALLOWANCE_USAGE_SUBCOLLECTION).doc(input.allowanceUnit.unitKey) : null
+  const unitRef   = f.draftId ? serviceLedgerRef(f.draftId).collection(ALLOWANCE_USAGE_SUBCOLLECTION).doc(f.unitKey) : null
+  const altUnitRef = f.draftId ? serviceLedgerRef(f.draftId).collection(ALLOWANCE_USAGE_SUBCOLLECTION).doc(`${f.unitKey}__m_${wk}`.slice(0, 1400)) : null
   const pendingRef = input.pendingLogId ? adminDb.collection('emailLogs').doc(input.pendingLogId) : null
 
   return adminDb.runTransaction<MessageAcceptanceResult>(async txn => {
-    const [usageSnap, logSnap, baseSnap, altSnap, walletSnap, regSnap, unitSnap, pendingSnap] = await Promise.all([
-      txn.get(usageRef), txn.get(logRef), txn.get(baseRef), txn.get(altRef),
-      input.costPaise > 0 ? txn.get(walletRef) : Promise.resolve(null),
+    const [usageSnap, logSnap, holdSnap, altRowSnap, idxSnap, walletSnap, regSnap, unitSnap, altUnitSnap, ledgerSnap, pendingSnap] = await Promise.all([
+      txn.get(usageRef), txn.get(logRef), txn.get(holdRef), txn.get(altRowRef), txn.get(idxRef), txn.get(walletRef),
       regRef ? txn.get(regRef) : Promise.resolve(null),
       unitRef ? txn.get(unitRef) : Promise.resolve(null),
+      altUnitRef ? txn.get(altUnitRef) : Promise.resolve(null),
+      f.draftId ? txn.get(serviceLedgerRef(f.draftId)) : Promise.resolve(null),
       pendingRef ? txn.get(pendingRef) : Promise.resolve(null),
     ])
     if (usageSnap.exists) return { already: true, chargedPaise: Number((usageSnap.data() as { costPaise?: number }).costPaise ?? 0), chargeSkipped: false }
 
-    // ── charge (exactly once per wamid) ──
+    // ── funding (exactly once per wamid) — settled against the attempt's hold ──
     let chargedPaise = 0, chargeSkipped = false
-    if (input.costPaise > 0) {
-      const base = baseSnap.exists ? baseSnap.data() as { metadata?: { messageId?: unknown } } : null
-      // The base row covers the FIRST accepted message. A legacy base row (written before rows
-      // recorded the wamid) is treated as covering an earlier message, never this one.
-      const coveredByBase = !!base && base.metadata?.messageId === input.wamid
-      const target = !base ? baseRef : coveredByBase ? null : altSnap.exists ? null : altRef
-      if (target) {
-        const balance = walletSnap?.exists ? ((walletSnap.data() as OrganizerWallet).balancePaise ?? 0) : 0
-        if (!walletCfg!.allowNegativeBalance && balance < input.costPaise) {
-          // RD-PAY-GA-01B (unchanged rule): never drive the wallet negative. Recorded, not hidden.
-          chargeSkipped = true
-        } else {
-          txn.set(walletRef, { balancePaise: FieldValue.increment(-input.costPaise), currency: 'INR', updatedAt: FieldValue.serverTimestamp() }, { merge: true })
-          txn.set(target, {
-            organizerUid: input.organizerUid, type: 'whatsapp_charge', amountPaise: input.costPaise,
-            balancePaise: balance - input.costPaise, status: 'completed', referenceType: 'communication',
-            referenceId: input.ledgerReferenceId, description: input.ledgerDescription,
-            metadata: { ...input.ledgerMetadata, eventSlug: input.eventSlug, channel: 'whatsapp', units: 1, messageId: input.wamid },
-            createdAt: FieldValue.serverTimestamp(),
-          })
-          chargedPaise = input.costPaise
-        }
+    const unit = unitSnap?.exists ? unitSnap.data() as { acceptedWamid?: unknown } : null
+    const hold = holdSnap.exists ? holdSnap.data() as { holdState?: unknown; amountPaise?: number; metadata?: { messageId?: unknown } } : null
+    if (unitRef && unit && (!unit.acceptedWamid || unit.acceptedWamid === input.wamid)) {
+      // The prepaid unit held for this attempt: consumed by this message — it can no longer be released.
+      txn.set(unitRef, { acceptedWamid: input.wamid }, { merge: true })
+    } else if (hold && (hold.holdState === 'held' || (hold.holdState === 'accepted' && hold.metadata?.messageId === input.wamid))) {
+      // The legacy money held for this attempt IS the charge.
+      chargedPaise = Math.max(0, Math.round(hold.amountPaise ?? 0))
+      txn.set(holdRef, { holdState: 'accepted', metadata: { messageId: input.wamid }, acceptedAt: FieldValue.serverTimestamp() }, { merge: true })
+    } else {
+      // No usable hold: fund it now, atomically, by the same rules as a send.
+      const available = f.draftId && ledgerSnap?.exists ? availableUnits(ledgerLine(ledgerSnap.data() as ServiceLedgerDoc, 'whatsapp')) : 0
+      const balance = walletSnap.exists ? ((walletSnap.data() as OrganizerWallet).balancePaise ?? 0) : 0
+      const takeUnitRef = unitRef && !unitSnap?.exists ? unitRef : altUnitRef && !altUnitSnap?.exists ? altUnitRef : null
+      const chargeRef = !holdSnap.exists ? holdRef : !altRowSnap.exists ? altRowRef : null
+      if (f.draftId && takeUnitRef && available >= 1) {
+        txn.set(serviceLedgerRef(f.draftId), { whatsapp: { consumed: FieldValue.increment(1) }, updatedAt: FieldValue.serverTimestamp() }, { merge: true })
+        txn.set(takeUnitRef, { service: 'whatsapp', quantity: 1, source: `${input.templateKey}_${input.source}`, acceptedWamid: input.wamid, createdAt: FieldValue.serverTimestamp() })
+      } else if (chargeRef && legacyBalanceCanFund(balance, f.legacyPricePaise)) {
+        // Never below zero: legacyBalanceCanFund requires the WHOLE price, whatever allowNegativeBalance says.
+        txn.set(walletRef, { balancePaise: balance - f.legacyPricePaise, currency: 'INR', updatedAt: FieldValue.serverTimestamp() }, { merge: true })
+        txn.set(chargeRef, {
+          organizerUid: input.organizerUid, type: 'whatsapp_charge', amountPaise: f.legacyPricePaise,
+          balancePaise: balance - f.legacyPricePaise, status: 'completed', referenceType: 'communication',
+          referenceId: input.ledgerReferenceId, description: input.ledgerDescription,
+          metadata: { ...input.ledgerMetadata, eventSlug: input.eventSlug, channel: 'whatsapp', units: 1, messageId: input.wamid, unitKey: f.unitKey },
+          holdState: 'accepted', createdAt: FieldValue.serverTimestamp(),
+        })
+        chargedPaise = f.legacyPricePaise
+      } else {
+        // Meta accepted a message nothing can pay for (only possible once its hold was returned).
+        // It cannot be unsent: recorded — visibly — as unbilled, never as a silent free message.
+        chargeSkipped = true
       }
     }
+    if (idxSnap.exists) txn.delete(idxRef)
 
     // ── usage (the guard) ──
     txn.set(usageRef, clean({
       organizerUid: input.organizerUid, eventId: input.eventSlug, eventSlug: input.eventSlug, eventName: input.eventName,
       channel: 'whatsapp', quantity: 1, costPaise: chargedPaise, campaignId: '', templateKey: input.templateKey,
       providerMessageId: input.wamid, acceptedVia: input.source,
-      ...(chargeSkipped ? { chargeSkipped: 'insufficient_balance' } : {}),
+      ...(chargeSkipped ? { chargeSkipped: 'no_capacity' } : {}),
       createdAt: FieldValue.serverTimestamp(),
     }))
-
-    // ── prepaid unit: this message consumed it — it can no longer be released ──
-    if (unitRef && unitSnap?.exists) txn.set(unitRef, { acceptedWamid: input.wamid }, { merge: true })
 
     // ── log row: ONE per message. A "delivery unknown" row the sender wrote for this attempt is
     //    upgraded; otherwise the wa_<wamid> row is created if the original write was lost ──
@@ -209,11 +225,11 @@ export async function recordMessageAcceptance(input: MessageAcceptanceInput): Pr
 
 // ═══ Broadcast recipients ═══════════════════════════════════════════════════════
 
-export type BroadcastAcceptanceOutcome = 'recorded' | 'already' | 'late_charged' | 'late_unbilled' | 'missing'
+export type BroadcastAcceptanceOutcome = 'recorded' | 'already' | 'late_held' | 'late_charged' | 'late_unbilled' | 'missing'
 
 interface CampaignBillingDoc {
   organizerUid?: string; billingSettledAt?: unknown; eventSlug?: string; eventId?: string; eventName?: string; channel?: string
-  chargedUnits?: number; unitPricePaise?: number; billedUnits?: number; lateUnbilledUnits?: number
+  chargedUnits?: number; unitPricePaise?: number; billedUnits?: number; lateUnbilledUnits?: number; unknownHeldUnits?: number
   fundedBy?: unknown; allowanceDraftId?: unknown; whatsappJobId?: unknown
 }
 
@@ -248,7 +264,7 @@ async function txnReadChargeBack(txn: FirebaseFirestore.Transaction, campaignId:
 function txnWriteChargeBack(
   txn: FirebaseFirestore.Transaction, campaignId: string, campaignRef: FirebaseFirestore.DocumentReference, c: CampaignBillingDoc,
   allowanceDraftId: string | null, reads: Awaited<ReturnType<typeof txnReadChargeBack>>, units: number,
-  ledgerRef: FirebaseFirestore.DocumentReference, allowNegative: boolean, why: string, meta: Record<string, unknown>,
+  ledgerRef: FirebaseFirestore.DocumentReference, why: string, meta: Record<string, unknown>,
 ): boolean {
   const { chargeSnap, walletSnap, allowanceSnap, aUsageSnap, usageSnap, usageRef, walletRef, aUsageRef } = reads
   let charged = false, amount = 0
@@ -258,7 +274,8 @@ function txnWriteChargeBack(
     const unitPaise = typeof c.unitPricePaise === 'number' && c.unitPricePaise > 0 ? c.unitPricePaise : Math.round((ch.amountPaise ?? 0) / chargedUnits)
     amount = unitPaise * units
     const balance = walletSnap?.exists ? ((walletSnap.data() as OrganizerWallet).balancePaise ?? 0) : 0
-    if (amount > 0 && (allowNegative || balance >= amount)) {
+    // RD-COMMS-P2-A — the LEGACY balance is drained, never extended: allowNegativeBalance does not apply.
+    if (legacyBalanceCanFund(balance, amount)) {
       txn.set(walletRef, { balancePaise: balance - amount, currency: 'INR', updatedAt: FieldValue.serverTimestamp() }, { merge: true })
       txn.set(ledgerRef, {
         organizerUid: c.organizerUid, type: 'broadcast_whatsapp', amountPaise: amount, balancePaise: balance - amount,
@@ -302,11 +319,37 @@ function txnWriteChargeBack(
 }
 
 /**
+ * RD-COMMS-P2-A — `n` late-accepted recipients that settlement had HELD (their outcome was unknown,
+ * so their units/money were kept rather than returned — settleBroadcastBilling): the held units
+ * become billed ones. Nothing is charged again and nothing is free. Needs `usageSnap` from
+ * txnReadChargeBack (reads first).
+ */
+function txnAbsorbHeld(
+  txn: FirebaseFirestore.Transaction, campaignId: string, campaignRef: FirebaseFirestore.DocumentReference, c: CampaignBillingDoc,
+  usage: { usageSnap: FirebaseFirestore.DocumentSnapshot; usageRef: FirebaseFirestore.DocumentReference }, n: number,
+): void {
+  txn.update(campaignRef, {
+    unknownHeldUnits: FieldValue.increment(-n), billedUnits: FieldValue.increment(n), lateAcceptedUnits: FieldValue.increment(n),
+    successCount: FieldValue.increment(n), failCount: FieldValue.increment(-n),
+  })
+  txn.set(usage.usageRef, {
+    quantity: FieldValue.increment(n), updatedAt: FieldValue.serverTimestamp(),
+    ...(usage.usageSnap.exists ? {} : {
+      organizerUid: c.organizerUid ?? '', eventSlug: c.eventSlug ?? '', eventId: c.eventSlug ?? '', eventName: c.eventName ?? '',
+      channel: c.channel ?? 'whatsapp', campaignId, templateKey: 'broadcast', costPaise: 0, createdAt: FieldValue.serverTimestamp(),
+    }),
+  }, { merge: true })
+}
+
+const heldOf = (c: CampaignBillingDoc) => Math.max(0, Math.floor(c.unknownHeldUnits ?? 0))
+
+/**
  * Marks one broadcast recipient ACCEPTED (sent flag + wamid). Before the campaign is settled this
  * is all — settlement counts the flags, and reconcileBroadcastBilledUnits catches an acceptance that
  * lands between that count and the settlement commit. AFTER settlement (the acceptance was recovered
- * late: a lost write, a crash, or a timed-out send Meta had in fact accepted) the recipient was
- * already refunded, so it is charged back here, in the same transaction, exactly once.
+ * late: a lost write, a crash, or a timed-out send Meta had in fact accepted) a recipient whose
+ * outcome was unknown at settlement consumes one of the units settlement HELD for exactly that case
+ * (RD-COMMS-P2-A); only beyond those is it charged back here, in the same transaction, exactly once.
  */
 export async function recordBroadcastAcceptance(args: {
   jobId: string; recipientId: string; wamid: string; source: 'send' | 'webhook'
@@ -320,13 +363,13 @@ export async function recordBroadcastAcceptance(args: {
   const pre = await campaignRef.get()
   if (!pre.exists) return 'missing'
   const allowanceDraftId = await campaignAllowanceDraftId(pre.data() as CampaignBillingDoc)
-  const walletCfg = await getWalletConfig()
   const lateRef = adminDb.collection('walletTransactions').doc(`broadcast_late_${campaignId}_${args.recipientId}`)
 
   return adminDb.runTransaction<BroadcastAcceptanceOutcome>(async txn => {
     const [rSnap, cSnap] = await Promise.all([txn.get(recipientRef), txn.get(campaignRef)])
     if (!rSnap.exists || !cSnap.exists) return 'missing'
-    if ((rSnap.data() as { sent?: boolean }).sent === true) return 'already'
+    const r = rSnap.data() as { sent?: boolean; indeterminate?: unknown; pendingAttemptAt?: unknown }
+    if (r.sent === true) return 'already'
     const c = cSnap.data() as CampaignBillingDoc
     const accepted = { sent: true, wamid: args.wamid, acceptedVia: args.source, acceptedAt: FieldValue.serverTimestamp(), pendingAttemptAt: FieldValue.delete(), indeterminate: FieldValue.delete() }
     if (!c.billingSettledAt) {
@@ -335,7 +378,13 @@ export async function recordBroadcastAcceptance(args: {
     }
     const reads = await txnReadChargeBack(txn, campaignId, c, allowanceDraftId, lateRef)
     if (reads.ledgerDocSnap.exists) { txn.update(recipientRef, accepted); return 'already' }
-    const charged = txnWriteChargeBack(txn, campaignId, campaignRef, c, allowanceDraftId, reads, 1, lateRef, walletCfg.allowNegativeBalance,
+    // Its outcome was unknown when the campaign settled ⇒ settlement held its unit: use it.
+    if ((r.indeterminate === true || r.pendingAttemptAt != null) && heldOf(c) > 0) {
+      txnAbsorbHeld(txn, campaignId, campaignRef, c, reads, 1)
+      txn.update(recipientRef, accepted)
+      return 'late_held'
+    }
+    const charged = txnWriteChargeBack(txn, campaignId, campaignRef, c, allowanceDraftId, reads, 1, lateRef,
       'accepted by WhatsApp after the campaign was settled', { recipientId: args.recipientId })
     txn.update(recipientRef, accepted)
     return charged ? 'late_charged' : 'late_unbilled'
@@ -365,18 +414,22 @@ export async function reconcileBroadcastBilledUnits(campaignId: string): Promise
     const from = counted(c0)
     if (sent <= from) { await campaignRef.update({ billingCatchUp: 'done' }).catch(() => undefined); return 0 }
     const allowanceDraftId = await campaignAllowanceDraftId(c0)
-    const walletCfg = await getWalletConfig()
     const ledgerRef = adminDb.collection('walletTransactions').doc(`broadcast_catchup_${campaignId}_${from}`)
-    const done = await adminDb.runTransaction<number | null>(async txn => {
+    const done = await adminDb.runTransaction<number | 'absorbed' | null>(async txn => {
       const cSnap = await txn.get(campaignRef)
       const c = cSnap.data() as CampaignBillingDoc
       if (counted(c) !== from) return null                       // moved meanwhile — recount
       const reads = await txnReadChargeBack(txn, campaignId, c, allowanceDraftId, ledgerRef)
       if (reads.ledgerDocSnap.exists) return 0
-      txnWriteChargeBack(txn, campaignId, campaignRef, c, allowanceDraftId, reads, sent - from, ledgerRef, walletCfg.allowNegativeBalance,
+      // RD-COMMS-P2-A — a recipient accepted in that window had an unknown outcome when it was
+      // counted, so its unit was HELD by settlement: absorb from the held units first (no charge).
+      const absorb = Math.min(sent - from, heldOf(c))
+      if (absorb > 0) { txnAbsorbHeld(txn, campaignId, campaignRef, c, reads, absorb); return 'absorbed' }
+      txnWriteChargeBack(txn, campaignId, campaignRef, c, allowanceDraftId, reads, sent - from, ledgerRef,
         'accepted by WhatsApp while the campaign was being settled', { catchUpFrom: from })
       return sent - from
     })
+    if (done === 'absorbed') continue                              // recount: any remainder is charged next pass
     if (done !== null) { await campaignRef.update({ billingCatchUp: 'done' }).catch(() => undefined); return done }
   }
   return 0

@@ -111,9 +111,10 @@ describe('isLeaseLive', () => {
 describe('Wallet and communication-ledger breadcrumbs', () => {
   const crumbs = (pathname: string) => buildBreadcrumbs({ pathname, tab: null, selectedEventId: null, eventName: null }).map(c => c.label)
   it('the event Wallet names itself', () => expect(crumbs('/dashboard/wallet')).toEqual(['Overview', 'Event Wallet']))
-  it('the ledger pages sit under the communication balance, as their headers say', () => {
-    expect(crumbs('/dashboard/wallet/transactions')).toEqual(['Overview', 'Communications', 'Communication balance', 'Transaction History'])
-    expect(crumbs('/dashboard/wallet/usage')).toEqual(['Overview', 'Communications', 'Communication balance', 'Communication Usage'])
+  // RD-COMMS-P1 — the ledgers are the LEGACY balance's history.
+  it('the ledger pages sit under the legacy balance, as their headers say', () => {
+    expect(crumbs('/dashboard/wallet/transactions')).toEqual(['Overview', 'Communications', 'Legacy balance', 'Transaction History'])
+    expect(crumbs('/dashboard/wallet/usage')).toEqual(['Overview', 'Communications', 'Legacy balance', 'Communication Usage'])
   })
 })
 
@@ -121,7 +122,9 @@ describe('Wallet and communication-ledger breadcrumbs', () => {
 describe('wiring', () => {
   it('Communications reads its tab from the URL on every navigation (not once on mount)', () => {
     const src = code('app/(dashboard)/dashboard/communications/page.tsx')
-    expect(src).toContain("const requested = searchParams.get('tab')")
+    // RD-COMMS-P1 — read from the URL every render; the retired ?tab=billing is an alias for Usage.
+    expect(src).toContain("const rawTab = searchParams.get('tab')")
+    expect(src).toContain("const requested = rawTab === 'billing' ? 'usage' : rawTab")
     expect(src).toContain('router.replace(')
     expect(src).not.toContain('window.location.search')
   })

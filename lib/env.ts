@@ -142,6 +142,12 @@ export const SES_FROM_NAME         = optional('SES_FROM_NAME', 'RegisterDesk')
 // lib/email/index.ts (RD-ENV-ARCH-03) — the email subsystem boundary — so a
 // half-configured SES pair fails only when the email module loads.
 
+// RD-COMMS-P2-C — the SNS topic(s) the SES delivery webhook (/api/webhooks/ses) accepts, as a
+// comma-separated list of TopicArns (e.g. arn:aws:sns:ap-south-1:123456789012:ses-notifications).
+// A valid AWS signature only proves a message came from SOME SNS topic — any AWS account can
+// create one — so only these topics are trusted. Blank ⇒ the webhook fails closed (503).
+export const SES_SNS_TOPIC_ARNS = optional('SES_SNS_TOPIC_ARNS')
+
 // Svix-style signing secret for the inbound email delivery webhook.
 // Optional: when blank, the webhook route fails closed (rejects all calls).
 export const RESEND_WEBHOOK_SECRET = optional('RESEND_WEBHOOK_SECRET')

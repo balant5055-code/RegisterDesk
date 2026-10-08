@@ -128,9 +128,11 @@ describe('retry can never cause a duplicate successful send', () => {
     expect(EB).toContain('if (cursor) q = q.startAfter(cursor)')
   })
 
-  it('email never retries a THROW — the one indeterminate email case', () => {
+  it('email never retries an indeterminate outcome — a THROW, or one the provider REPORTS as unknown', () => {
     expect(EB).toContain('indeterminate = true')
-    expect(EB).toContain('if (indeterminate) break')
+    // RD-COMMS-P2-D — providers do not throw; a timeout / no answer / 5xx comes back as deliveryUnknown.
+    expect(EB).toContain('indeterminate = r.deliveryUnknown === true')
+    expect(EB).toContain('if (indeterminate) { deliveryUnknown = true; break }')
   })
 
   it('the shared notificationEngine is untouched: BROADCAST stays non-retrying there', () => {

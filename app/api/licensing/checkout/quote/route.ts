@@ -30,6 +30,8 @@ import {
 } from '@/lib/licensing/serviceAllowances'
 import { getServiceCatalog } from '@/lib/licensing/serviceAllowanceConfig'
 import { readDraftCoverage, quoteAddon } from '@/lib/licensing/draftCoverage'
+import { communicationCapacityFigures, type CapacityActivity } from '@/lib/communications/capacityFigures'
+import { readWhatsAppCapacityActivity } from '@/lib/communications/capacityActivity'
 import { isSubmittedDraftStatus } from '@/lib/events/builder/stepRegistry'
 import { resolveCapacityEventSlug, loadCapacityChangeContext, readSoldCount, isPurchaseEligibleLifecycle } from '@/lib/licensing/capacityChange'
 import { photoCapacityUsageQuery } from '@/features/media-studio/repositories/assetRepo'
@@ -165,6 +167,17 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const c = await readDraftCoverage(eventId, uid)
     if (!c.activation || c.activation.organizerUid === uid) coverage = c
   }
+  // RD-COMMS-L2 — the communication figures in the ONE organizer definition shared with
+  // Communications › Usage. An event that never had WhatsApp capacity holds nothing (no read);
+  // an unreadable activity leaves Used / In progress unknown ("—"), never guessed.
+  let whatsappActivity: CapacityActivity | null = { inProgress: 0, returned: 0 }
+  if (coverage && uid && coverage.purchased.whatsapp + coverage.carriedIn.whatsapp > 0) {
+    whatsappActivity = await readWhatsAppCapacityActivity(uid, eventId).catch(() => null)
+  }
+  const commLine = (c: NonNullable<typeof coverage>, k: 'whatsapp' | 'certificates') => ({
+    purchased: c.purchased[k], consumed: c.consumed[k], carriedIn: c.carriedIn[k],
+    carriedOut: c.carriedOut[k], refunded: c.refunded[k], remaining: c.remaining[k],
+  })
 
   type Payable = { kind: 'activation' | 'addon' | 'covered' | 'capacity_change'; capacityCharge: unknown; serviceItems: ServiceChargeItem[]; totalPaise: number }
   let payable: Payable | null = null
@@ -191,6 +204,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     coverage: coverage ? {
       activationPaid: coverage.activationPaid, paidCapacity: coverage.paidCapacity,
       purchased: coverage.purchased, consumed: coverage.consumed, remaining: coverage.remaining,
+      communication: {
+        whatsapp:     communicationCapacityFigures(commLine(coverage, 'whatsapp'), whatsappActivity),
+        certificates: communicationCapacityFigures(commLine(coverage, 'certificates'), { inProgress: 0, returned: null }),
+      },
     } : null,
     published: published ? { currentCapacity: published.currentCapacity, sold: published.sold, eligible: published.eligible } : null,
     media,

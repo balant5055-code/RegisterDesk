@@ -124,7 +124,11 @@ export function EventSelector({ className }: { className?: string }) {
           'group flex h-9 min-w-0 items-center gap-2 rounded-control border border-border bg-background px-2.5',
           'text-left transition-colors hover:bg-muted/50 disabled:opacity-60',
           'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40',
-          'w-[min(15rem,45vw)] sm:w-64',
+          // RD-COMMS-P2-F mobile QA — below sm the top bar's other controls (menu, search, theme,
+          // bell, profile) need ~15.75rem; a fixed 45vw pushed the bell and the profile menu off a
+          // 320–412px screen. The selector now takes what is left (it still truncates the name and
+          // opens the full list). Unchanged from sm up.
+          'w-[min(15rem,calc(100vw-15.75rem))] sm:w-64',
         )}
       >
         {/* The glyph distinguishes the two kinds of scope at a glance: a workspace icon

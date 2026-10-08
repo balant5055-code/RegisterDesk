@@ -378,9 +378,12 @@ export function LicensingEditor({
 }
 
 // ─── RD-EVENT-COMMERCE-02 · Prepaid service allowances ─────────────────────────
+// RD-COMMS-P1 — 'wallet_payg' is RETIRED as a current rule: an exhausted allowance never starts a
+// new pay-as-you-go charge (only an existing legacy balance may drain — lib/communications/capacity).
+// It is offered only so a value already stored stays visible; it behaves as Block.
 const EXHAUSTION_LABEL: Record<string, string> = {
   block:       'Block further sends / issuance (recorded + logged)',
-  wallet_payg: 'Fall back to the communication wallet (pay-as-you-go)',
+  wallet_payg: 'Retired: wallet fallback (now behaves as Block)',
 }
 
 /** RD-EVENT-COMMERCE-05 — what organizers see RIGHT NOW for each service (from the stored doc). */
@@ -445,7 +448,7 @@ function ServiceAllowancesBlock({ value, onChange, liveStates }: { value: unknow
                 <label className="col-span-2 flex flex-col gap-1"><span className="text-[11px] text-muted-foreground">When the allowance is used up</span>
                   <select value={c.onExhausted ?? ''} onChange={e => set(k, { onExhausted: e.target.value === '' ? null : e.target.value as PrepaidServiceConfig['onExhausted'] })} className={inputCls}>
                     <option value="">Not set</option>
-                    {EXHAUSTION_POLICIES.map(p => <option key={p} value={p}>{EXHAUSTION_LABEL[p]}</option>)}
+                    {EXHAUSTION_POLICIES.filter(p => p !== 'wallet_payg' || c.onExhausted === 'wallet_payg').map(p => <option key={p} value={p}>{EXHAUSTION_LABEL[p]}</option>)}
                   </select></label>
               </div>
               <p className="mt-2 text-[10.5px] text-muted-foreground tabular-nums">

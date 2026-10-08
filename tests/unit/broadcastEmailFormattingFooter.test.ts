@@ -118,14 +118,17 @@ describe('transactional email still carries both lines', () => {
 describe('one-click unsubscribe survives', () => {
   const job = read('lib/broadcasts/emailJob.ts')
 
+  // RD-COMMS-P2-G — the headers are now built by one shared helper (also used by reminders).
   it('still sends List-Unsubscribe and one-click POST headers', () => {
-    expect(job).toContain("'List-Unsubscribe':")
-    expect(job).toContain("'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click'")
-    expect(job).toContain('unsubHeaders')
+    const token = read('lib/email/unsubscribeToken.ts')
+    expect(token).toContain("'List-Unsubscribe':")
+    expect(token).toContain("'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click'")
+    expect(job).toContain('const unsubHeaders    = unsubscribeHeaders(item.email, job.organizerUid, unsubCtx)')
+    expect(job).toContain('headers: unsubHeaders')
   })
 
   it('still builds a signed per-recipient unsubscribe URL for the body link', () => {
-    expect(job).toContain('buildUnsubscribeUrl(item.email, job.organizerUid)')
+    expect(job).toContain('buildUnsubscribeUrl(item.email, job.organizerUid, unsubCtx)')
   })
 
   it('the unsubscribe backend was not touched', () => {

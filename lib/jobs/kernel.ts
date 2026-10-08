@@ -31,7 +31,13 @@ export async function createJob<T extends Job = Job>(
   total:      number,
 ): Promise<T> {
   const ref = jobsCol(collection).doc(jobId)
-  await ref.set({
+  await ref.set(jobScaffold(jobId, seed, total))
+  return (await ref.get()).data() as T
+}
+
+/** The generic job document every job type starts from (`pending`, empty progress, no lease). */
+function jobScaffold(jobId: string, seed: Record<string, unknown>, total: number): Record<string, unknown> {
+  return {
     ...seed,
     jobId,
     status:        'pending',
@@ -43,8 +49,18 @@ export async function createJob<T extends Job = Job>(
     updatedAt:     FieldValue.serverTimestamp(),
     completedAt:   null,
     lockedUntil:   null,
-  })
-  return (await ref.get()).data() as T
+  }
+}
+
+/**
+ * RD-COMMS-P2-B — the same job document, CREATED inside the caller's transaction (fails if it
+ * already exists). For callers that must make a job leasable only after its work items exist and
+ * only while a precondition still holds, as one atomic step.
+ */
+export function txnCreateJob(
+  tx: FirebaseFirestore.Transaction, collection: string, jobId: string, seed: Record<string, unknown>, total: number,
+): void {
+  tx.create(jobsCol(collection).doc(jobId), jobScaffold(jobId, seed, total))
 }
 
 export async function getJob<T extends Job = Job>(collection: string, jobId: string): Promise<T | null> {
@@ -71,10 +87,23 @@ export async function listActiveJobs<T extends Job = Job>(collection: string, li
  * worker holds an unexpired lease. Prevents concurrent processors.
  */
 export async function leaseJob<T extends Job = Job>(
+  collection: string, jobId: string, leaseMs: number,
+): Promise<{ proceed: true; job: T; leaseTag: number } | { proceed: false; reason: LeaseReason }>
+/**
+ * RD-COMMS-P2-B — OPT-IN: with `failedIsTerminal`, a `failed` job is terminal and is never leased
+ * again (a re-lease would flip it back to `processing`); it is refused with reason 'failed'.
+ * Broadcast jobs set it: a failed broadcast has been settled and must not silently resume. Without
+ * the option every other job type keeps its behaviour — and its narrower reason type.
+ */
+export async function leaseJob<T extends Job = Job>(
+  collection: string, jobId: string, leaseMs: number, opts: { failedIsTerminal?: boolean },
+): Promise<{ proceed: true; job: T; leaseTag: number } | { proceed: false; reason: LeaseReason | 'failed' }>
+export async function leaseJob<T extends Job = Job>(
   collection: string,
   jobId:      string,
   leaseMs:    number,
-): Promise<{ proceed: true; job: T; leaseTag: number } | { proceed: false; reason: LeaseReason }> {
+  opts: { failedIsTerminal?: boolean } = {},
+): Promise<{ proceed: true; job: T; leaseTag: number } | { proceed: false; reason: LeaseReason | 'failed' }> {
   const ref = jobsCol(collection).doc(jobId)
   return adminDb.runTransaction(async tx => {
     const snap = await tx.get(ref)
@@ -83,6 +112,7 @@ export async function leaseJob<T extends Job = Job>(
 
     if (job.status === 'completed') return { proceed: false as const, reason: 'completed' as const }
     if (job.status === 'cancelled') return { proceed: false as const, reason: 'cancelled' as const }
+    if (opts.failedIsTerminal && job.status === 'failed') return { proceed: false as const, reason: 'failed' as const }
 
     const now    = Date.now()
     const locked = job.lockedUntil instanceof Timestamp ? job.lockedUntil.toMillis() : 0

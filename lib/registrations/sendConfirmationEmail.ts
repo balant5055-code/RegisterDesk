@@ -120,6 +120,9 @@ export async function sendConfirmationEmail(args: ConfirmationEmailArgs): Promis
 
   let emailStatus: 'sent' | 'failed' = 'failed'
   let emailFailureReason: string | undefined
+  // RD-COMMS-P2-D — the provider gave no definite answer: it may have been delivered. Recorded on the
+  // log, which the manual retry then refuses to resend blindly.
+  let emailDeliveryUnknown = false
 
   try {
     const result = await notificationEngine.send(NotificationType.REGISTRATION_CONFIRMATION, {
@@ -143,6 +146,7 @@ export async function sendConfirmationEmail(args: ConfirmationEmailArgs): Promis
     emailStatus = result.success ? 'sent' : 'failed'
     if (!result.success) {
       emailFailureReason = result.error
+      emailDeliveryUnknown = result.deliveryUnknown === true
       console.error(`[email] Registration email failed for ${registrationId}:`, result.error)
     }
   } catch (err) {
@@ -174,6 +178,7 @@ export async function sendConfirmationEmail(args: ConfirmationEmailArgs): Promis
     provider:       emailProviderName,
     error:          emailFailureReason,
     registrationId,
+    ...(emailDeliveryUnknown ? { deliveryUnknown: true } : {}),
   })
 
   // Attendee WhatsApp confirmation (Phase G3.4) — paid channel, applied AFTER the

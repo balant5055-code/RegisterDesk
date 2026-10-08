@@ -72,7 +72,10 @@ vi.mock('@/lib/certificates/firestore', () => ({
 }))
 
 // RD-EVENT-COMMERCE-02 — no prepaid certificate allowance for these events: the existing wallet path runs unchanged.
-vi.mock('@/lib/licensing/serviceAllowanceLedger', () => ({ draftIdForEventSlug: async () => null, reserveServiceUnits: async () => ({ mode: 'none' }), releaseServiceUnits: async () => false }))
+// RD-COMMS-P1 — certificates REQUIRE certificate capacity: these suites test rendering/storage, so the
+// event holds capacity (one unit reserved per certificate). The capacity rule itself is pinned in
+// tests/unit/communicationCapacityP1.test.ts.
+vi.mock('@/lib/licensing/serviceAllowanceLedger', () => ({ draftIdForEventSlug: async () => 'draft-1', reserveServiceUnits: async () => ({ mode: 'allowance', already: false }), releaseServiceUnits: async () => true }))
 vi.mock('@/lib/certificates/billing',  () => ({ chargeCertificate: async () => { events.push('charge'); return { charged: false } } }))
 vi.mock('@/lib/certificates/email',    () => ({ emailCertificate: async () => ({ success: true, skipped: true }) }))
 vi.mock('@/lib/certificates/whatsapp', () => ({ sendCertificateWhatsApp: async () => {} }))
@@ -126,10 +129,12 @@ describe('A · the artifact exists before the record', () => {
     expect(upload).toBeLessThan(create)
   })
 
-  it('renders, then uploads, then records, then bills', async () => {
+  // RD-COMMS-P1 — certificate capacity is reserved BEFORE rendering; issuance never charges the
+  // communication balance (the pay-as-you-go certificate charge is retired).
+  it('renders, then uploads, then records — and never charges the communication balance', async () => {
     await run()
     expect(events.filter(e => ['render', 'upload', 'create', 'charge'].includes(e)))
-      .toEqual(['render', 'upload', 'create', 'charge'])
+      .toEqual(['render', 'upload', 'create'])
   })
 
   it('persists fileKey + fileSize on the record, and leaves legacy fileUrl null', async () => {

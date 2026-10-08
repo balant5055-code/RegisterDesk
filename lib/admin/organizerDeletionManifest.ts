@@ -44,7 +44,7 @@ export const ORGANIZER_RETAINED_COLLECTIONS = [
  * and protects nothing.
  */
 export const SHARED_COLLECTIONS = [
-  'globalCertificateTemplates', 'platformSettings', 'emailSuppressionList',
+  'globalCertificateTemplates', 'platformSettings', 'emailSuppressionList', 'emailSuppressionAudit',
   'platformCampaigns', 'changeLog',
 ] as const
 

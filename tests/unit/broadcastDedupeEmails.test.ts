@@ -170,7 +170,7 @@ describe('C+F · recipientCount and the job snapshot', () => {
 
   it('dedupe happens BEFORE createEmailBroadcastJob — one snapshot row per address', () => {
     const dedupeAt = send.indexOf('dedupeRecipientsByEmail(suppressed)')
-    const jobAt    = send.indexOf('createEmailBroadcastJob(campaignId, c, recipients)')
+    const jobAt    = send.indexOf('createEmailBroadcastJob(campaignId, c, recipients, { jobId: claim.jobId, campaignRef: ref })')
     expect(dedupeAt).toBeGreaterThan(-1)
     expect(jobAt).toBeGreaterThan(dedupeAt)
   })
@@ -215,7 +215,10 @@ describe('G · retries cannot re-send a collapsed duplicate', () => {
   const emailJob = strip(read('lib/broadcasts/emailJob.ts'))
 
   it('an existing job is resumed, never re-resolved', () => {
-    expect(send).toMatch(/if \(c\.emailJobId\) \{ await processEmailBroadcastChunk\(c\.emailJobId\); return \}/)
+    // RD-COMMS-P2-B — an existing job (pointer + job document) is driven; otherwise the one-job build
+    // claim adopts an existing job before anything is re-resolved.
+    expect(send).toMatch(/if \(c\.emailJobId && await jobExists\(EMAIL_BROADCAST_JOBS, c\.emailJobId\)\) \{ await processEmailBroadcastChunk\(c\.emailJobId\); return \}/)
+    expect(send).toMatch(/if \(claim\.kind === 'adopt'\) \{ await processEmailBroadcastChunk\(claim\.jobId\); return \}/)
   })
 
   it('a recipient already sent is skipped', () => {
@@ -223,7 +226,8 @@ describe('G · retries cannot re-send a collapsed duplicate', () => {
   })
 
   it('the job runner and its idempotency were not modified', () => {
-    expect(emailJob).toMatch(/\.update\(\{ sent: true \}\)/)
+    // RD-COMMS-P2-D — the sent flag (now also clearing the attempt marker) is still the per-recipient guard.
+    expect(emailJob).toMatch(/\.update\(\{ sent: true, pendingAttemptAt: FieldValue\.delete\(\) \}\)/)
   })
 })
 
@@ -297,7 +301,8 @@ describe('preview count endpoint stays bounded', () => {
   const count = strip(read('app/api/organizer/broadcasts/count/route.ts'))
 
   it('reuses the existing projected, capped read — never the whole collection', () => {
-    expect(count).toMatch(/\.select\('attendee'\)\.limit\(maxRecipients \+ 1\)\.get\(\)/)
+    // RD-COMMS-CAPACITY-UX (L3) also projects paymentStatus (refunded exclusion) — still projected and capped.
+    expect(count).toMatch(/\.select\('attendee'(, '[a-zA-Z]+')*\)\.limit\(maxRecipients \+ 1\)\.get\(\)/)
   })
 
   it('falls back to the untouched count() aggregate when the flag is off', () => {

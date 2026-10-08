@@ -292,10 +292,14 @@ export class SESProvider implements EmailProvider {
         httpStatusCode: fields.httpStatusCode,
         recipient:      to,
       })
+      // RD-COMMS-P2-D — SES ANSWERED (an HTTP status below 500) ⇒ a definite rejection, nothing was
+      // queued. No status (timeout / abort / network) or a 5xx ⇒ it may have been accepted: unknown.
+      const definite = typeof fields.httpStatusCode === 'number' && fields.httpStatusCode < 500
       return {
         success:     false,
         error:       normalizeSesError(err),
         errorDetail: formatSesErrorDetail(fields),
+        ...(definite ? {} : { deliveryUnknown: true }),
       }
     }
   }

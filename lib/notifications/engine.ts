@@ -109,15 +109,16 @@ class NotificationEngine {
 
     const dispatch = EMAIL_DISPATCHERS[type] as EmailDispatcher<T>
 
-    // RD-ORGANIZER-04 P1-3: bounded retry/backoff for TRANSACTIONAL email only. A send
-    // either succeeds, returns { success:false } (SES rejected — not sent), or throws (not
-    // sent), so retrying never duplicates a delivered email. Bulk types keep their
-    // single-attempt-by-design behaviour. Hooks fire once, on the final outcome.
+    // RD-ORGANIZER-04 P1-3: bounded retry/backoff for TRANSACTIONAL email only. Bulk types keep
+    // their single-attempt-by-design behaviour. Hooks fire once, on the final outcome.
+    // RD-COMMS-P2-D — ONLY a DEFINITE rejection is retried. A result with `deliveryUnknown` (timeout,
+    // dropped connection, 5xx — the provider may already have accepted it) is final: resending it is
+    // how a recipient got the same email two or three times. A suppressed recipient is final too.
     const retryable = channel === NotificationChannel.EMAIL && !NON_RETRY_TYPES.has(type)
     for (let attempt = 1; ; attempt++) {
       try {
         const result = await dispatch(provider, payload)
-        if (result.success || !retryable || attempt >= MAX_SEND_ATTEMPTS) {
+        if (result.success || !retryable || result.deliveryUnknown || result.suppressed || attempt >= MAX_SEND_ATTEMPTS) {
           await runHook('afterSend', h => h.afterSend?.(ctx, result))
           return result
         }

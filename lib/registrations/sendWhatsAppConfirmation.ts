@@ -15,23 +15,26 @@
 //   • Wallet is deducted ONLY after a successful send (idempotent ledger id).
 //
 // RD-EVENT-COMMERCE-02 — an event with a PREPAID WhatsApp allowance is billed from that
-// allowance instead of the wallet: one unit is reserved before the send (so concurrent sends
-// can never exceed it) and released again if the provider does not accept the message, so a
-// unit is consumed exactly when PAYG would have charged. Exhausted ⇒ the allowance's policy:
-// 'block' skips with a recorded status + log, 'wallet_payg' falls back to the wallet path
-// below, unchanged. Events without an allowance take the wallet path exactly as before.
+// allowance: one unit is reserved before the send (so concurrent sends can never exceed it) and
+// released again if the provider does not accept the message.
+//
+// RD-COMMS-P1 — a message the event's capacity does not cover (none bought, or used up — the
+// stored exhaustion policy no longer matters) may be funded ONLY by the organizer's LEGACY
+// communication balance, at the configured legacy per-message price, and only while that balance
+// covers it (lib/communications/capacity). Otherwise it is skipped with a recorded status and the
+// capacity message — there is no free send and no new pay-as-you-go path.
 
 import { FieldValue } from 'firebase-admin/firestore'
 import { adminDb }     from '@/lib/firebase/admin'
-import { getWalletBalance } from '@/lib/firebase/firestore/wallet'
 import { getCommunicationConfig } from '@/lib/communications/resolveCommunicationConfig'
-import { getWalletConfig } from '@/lib/wallet/resolveWalletConfig'
+import { WHATSAPP_CAPACITY_REQUIRED } from '@/lib/communications/capacity'
 import { getMetaProvider, resolveWhatsAppTemplate } from '@/lib/whatsapp'
 import { NotificationType } from '@/lib/notifications'
 import { writeEmailLog } from '@/lib/email-logs/write'
 import { validatePhoneNumber } from '@/lib/communication/phone'
 import type { RegistrationDocument } from './types'
-import { reserveServiceUnits, releaseServiceUnits, draftIdForEventSlug, type ReserveOutcome } from '@/lib/licensing/serviceAllowanceLedger'
+import { draftIdForEventSlug } from '@/lib/licensing/serviceAllowanceLedger'
+import { reserveWhatsAppFunding, releaseWhatsAppFunding, confirmationHoldLedgerId } from '@/lib/whatsapp/funding'
 import { acceptConfirmation } from './whatsappConfirmationAcceptance'
 import { callbackDataFor, unknownLogId } from '@/lib/whatsapp/acceptance'
 
@@ -161,38 +164,27 @@ export async function sendWhatsAppConfirmation(args: WhatsAppConfirmationArgs): 
     }
     const normalizedPhone = phoneCheck.normalizedPhone as string
 
-    // 2b. RD-EVENT-COMMERCE-02 — prepaid allowance first, when the event has one.
+    // 2b/3. RD-COMMS-P2-A — FUND the message before it is sent, atomically, from exactly one source:
+    // the event's WhatsApp capacity, else the LEGACY balance while it covers the whole legacy price
+    // (lib/whatsapp/funding.ts). Otherwise it is skipped — never sent free, never below zero.
     const unitKey = `wa_reg_${args.registrationId}`
-    let allowance: ReserveOutcome = { mode: 'none' }
-    if (allowanceDraftId) {
-      allowance = await reserveServiceUnits({ draftId: allowanceDraftId, service: 'whatsapp', unitKey, source: 'registration_confirmation' })
-      if (allowance.mode === 'exhausted' && allowance.policy === 'block') {
-        recordStatus(args.registrationId, 'skipped_allowance_exhausted', { reason: 'Prepaid WhatsApp allowance used up' })
-        logComm(args, email, normalizedPhone, 'skipped', { error: 'Prepaid WhatsApp allowance used up — while the event is open, buy more on the event Wallet' })
-        return
-      }
-    }
-    const fromAllowance = allowance.mode === 'allowance'
-    // RD-INTEG — only a unit THIS call took is ever given back: when the reservation already
-    // existed (a concurrent duplicate of this confirmation holds it), releasing on our failure
-    // would free the unit the other send consumed.
-    const giveBack = () => fromAllowance && allowance.mode === 'allowance' && !allowance.already && allowanceDraftId
-      ? releaseServiceUnits({ draftId: allowanceDraftId, service: 'whatsapp', unitKey }).catch(err => console.error('[whatsapp] allowance release failed', err))
-      : Promise.resolve()
-    releaseOnError = giveBack
-
-    // 3. Communication policy: attendee WhatsApp is paid (unless disabled) — the
-    // price and the wallet-charge toggle come from Business Configuration. A send covered by
-    // the prepaid allowance costs the wallet nothing.
-    const costPaise = fromAllowance ? 0 : (comm.whatsapp.walletChargeAttendeeNotifications ? comm.whatsapp.pricePaise : 0)
-    const wallet    = await getWalletConfig()
-    const balance   = await getWalletBalance(args.organizerUid)
-    if (!wallet.allowNegativeBalance && costPaise > 0 && balance < costPaise) {
-      // Wallet empty → email already sent, WhatsApp skipped, dashboard warning.
-      recordStatus(args.registrationId, 'skipped_insufficient_balance', { reason: 'Insufficient wallet balance' })
-      logComm(args, email, phone, 'skipped', { error: 'Insufficient wallet balance' })
+    const fundingKey = { organizerUid: args.organizerUid, draftId: allowanceDraftId, unitKey, holdLedgerId: confirmationHoldLedgerId(args.registrationId, unitKey) }
+    const funding = await reserveWhatsAppFunding({
+      ...fundingKey, legacyPricePaise: comm.whatsapp.pricePaise, source: 'registration_confirmation',
+      ledger: { referenceId: args.registrationId, description: `WhatsApp confirmation — ${args.eventName}`, eventSlug: args.eventSlug, metadata: { eventId: args.eventSlug, registrationId: args.registrationId } },
+    })
+    if (!funding.ok) {
+      // A concurrent duplicate of this confirmation already holds (or used) this attempt: it sends.
+      if (funding.reason === 'already_held') return
+      // Email already sent; WhatsApp skipped and LOGGED (dashboard warning surface).
+      recordStatus(args.registrationId, 'skipped_allowance_exhausted', { reason: 'WhatsApp capacity required' })
+      logComm(args, email, normalizedPhone, 'skipped', { error: WHATSAPP_CAPACITY_REQUIRED })
       return
     }
+    const fromAllowance = funding.mode === 'allowance'
+    // Only ever called by THIS attempt, which took the hold. A hold Meta accepted is never released.
+    const giveBack = () => releaseWhatsAppFunding(fundingKey).catch(err => console.error('[whatsapp] funding release failed', err))
+    releaseOnError = giveBack
 
     // 4. Resolve the approved template via the registry (normalized recipient).
     const resolved = resolveWhatsAppTemplate(
@@ -213,9 +205,13 @@ export async function sendWhatsAppConfirmation(args: WhatsAppConfirmationArgs): 
       ` · Template=${resolved.message.templateName} · Original=${phone} · Normalized=${normalizedPhone}`,
     )
     const startedAt = Date.now()
+    // From the provider call on, the outcome may be "accepted": nothing may hand the hold back
+    // except a DEFINITE refusal below (an unknown outcome keeps it for the webhook to settle).
+    releaseOnError = async () => undefined
     // RD-CLOSE — the callback data lets Meta's status webhook recover this acceptance (and its
     // charge) if anything after the provider call fails, including a transport timeout.
-    const result    = await provider.sendTemplate({ ...resolved.message, callbackData: callbackDataFor({ kind: 'registration', registrationId: args.registrationId, unitKey }) })
+    const result = await provider.sendTemplate({ ...resolved.message, callbackData: callbackDataFor({ kind: 'registration', registrationId: args.registrationId, unitKey }) })
+      .catch((err: unknown) => ({ success: false as const, error: err instanceof Error ? err.message : 'transport failure', httpStatus: undefined, code: undefined, providerMessage: undefined, messageId: undefined }))
     const durationMs = Date.now() - startedAt
     // ═══ OBSERVABILITY ═════════════════════════════════════════════════════════
     // One structured line per attempt so a timeout is diagnosable after the fact: how long we
@@ -253,9 +249,10 @@ export async function sendWhatsAppConfirmation(args: WhatsAppConfirmationArgs): 
         ? `Delivery status unknown — no response from Meta (${result.error ?? 'transport failure'})`
         : (result.error ?? 'WhatsApp send failed')
 
-      // Not accepted (or unknown) ⇒ nothing consumed — exactly as PAYG charges nothing here.
-      // (A unit Meta's webhook has already proven accepted is never released — releaseServiceUnits.)
-      await giveBack()
+      // RD-COMMS-P2-A — DEFINITELY refused ⇒ the hold is given back. UNKNOWN ⇒ it is KEPT: Meta may
+      // have accepted it, and its status webhook settles that acceptance against this same hold
+      // (no second reservation, no free message). An unresolved hold is returned by the sweep later.
+      if (!deliveryUnknown) await giveBack()
       // The log row keeps status 'failed' so every existing consumer stays byte-identical;
       // deliveryUnknown is the additive flag the WhatsApp surfaces read.
       if (deliveryUnknown) {
@@ -296,8 +293,8 @@ export async function sendWhatsAppConfirmation(args: WhatsAppConfirmationArgs): 
       try {
         await acceptConfirmation({
           registrationId: args.registrationId, organizerUid: args.organizerUid, eventSlug: args.eventSlug, eventName: args.eventName,
-          attendeeName: args.attendeeName, email, phone, wamid: result.messageId, fromAllowance, writeLog: true, source: 'send',
-          unitKey, ...(fromAllowance && allowanceDraftId ? { allowanceUnit: { draftId: allowanceDraftId, unitKey } } : {}),
+          attendeeName: args.attendeeName, email, phone, wamid: result.messageId, draftId: allowanceDraftId, writeLog: true, source: 'send',
+          unitKey,
         })
       } catch (err) {
         console.error(`[whatsapp] acceptance not persisted for ${args.registrationId} — the status webhook will recover it:`, err)

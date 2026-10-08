@@ -20,7 +20,6 @@ import {
   assertRegistrationEligibleForCertificate,
 } from './firestore'
 
-import { chargeCertificate } from './billing'
 import { reserveServiceUnits, releaseServiceUnits, draftIdForEventSlug } from '@/lib/licensing/serviceAllowanceLedger'
 import { sendCertificateWhatsApp } from './whatsapp'
 import { uploadCertificateArtifact, deleteCertificateArtifact } from './artifact'
@@ -30,7 +29,8 @@ import { layoutHasAttendeePhoto }   from './attendeePhotoLayout'
 import { getEmailAppUrl } from '@/lib/email/appUrl'
 import { enqueueWebhook }           from '@/lib/integrations/webhooks'
 import { crmRecordCertificate }     from '@/lib/crm/service'
-import { captureError, captureFinancialError } from '@/lib/monitoring/sentry'
+import { captureError } from '@/lib/monitoring/sentry'
+import { CERTIFICATE_CAPACITY_REQUIRED } from '@/lib/communications/capacity'
 import type { PlaceholderContext, PlaceholderKey } from './placeholders'
 import type {
   Certificate,
@@ -209,12 +209,13 @@ export class CertificateInProgressError extends Error {
 }
 
 /**
- * RD-EVENT-COMMERCE-02 — raised when the event's PREPAID certificate allowance is used up and
- * its exhaustion policy is 'block'. Nothing is rendered, stored, recorded or charged.
+ * RD-EVENT-COMMERCE-02 / RD-COMMS-P1 — raised when the event has no certificate capacity left to
+ * cover a NEW certificate (none bought, or used up). Certificates require purchased certificate
+ * capacity; there is no wallet or free fallback. Nothing is rendered, stored, recorded or charged.
  */
 export class CertificateAllowanceExhaustedError extends Error {
   constructor() {
-    super('This event’s prepaid certificate allowance is used up. While the event is open, buy more with Increase limit on the event Wallet.')
+    super(CERTIFICATE_CAPACITY_REQUIRED)
     this.name = 'CertificateAllowanceExhaustedError'
   }
 }
@@ -327,19 +328,20 @@ export async function generateCertificate(
   // 2b. RD-EVENT-COMMERCE-02 — the event's prepaid certificate allowance. One unit is
   //     reserved for this certificateId BEFORE anything is rendered (so concurrent issuance can
   //     never exceed it) and released if issuance fails. The unit key is the certificateId, so a
-  //     retry of the same tuple never takes a second unit. No allowance ⇒ the wallet path below,
-  //     unchanged. Exhausted ⇒ the allowance's policy: 'block' refuses issuance, 'wallet_payg'
-  //     falls back to the wallet charge.
+  //     retry of the same tuple never takes a second unit.
+  //     RD-COMMS-P1 — a certificate REQUIRES certificate capacity: no allowance, an exhausted one
+  //     (whatever its stored policy) or no resolvable ledger ⇒ issuance is refused. The wallet
+  //     (pay-as-you-go) certificate charge is retired for new issuance.
   const allowanceDraftId = await draftIdForEventSlug(input.eventSlug)
   const certUnitKey = `cert_${certificateId}`
   let fromAllowance = false
   if (allowanceDraftId) {
     const outcome = await reserveServiceUnits({ draftId: allowanceDraftId, service: 'certificates', unitKey: certUnitKey, source: source })
-    if (outcome.mode === 'exhausted' && outcome.policy === 'block') {
-      await releaseCertificateClaim(eventId, registrationId, certificateType)
-      throw new CertificateAllowanceExhaustedError()
-    }
     fromAllowance = outcome.mode === 'allowance'
+  }
+  if (!fromAllowance) {
+    await releaseCertificateClaim(eventId, registrationId, certificateType)
+    throw new CertificateAllowanceExhaustedError()
   }
 
   // 3. We own generation. Any failure releases the claim so a retry can recover.
@@ -430,20 +432,11 @@ export async function generateCertificate(
     }
 
 
-    // Wallet billing (GA-4 S2). Idempotent + config-driven; runs on the create path
-    // only, so a re-issued/duplicate tuple (which returns early above) never charges
-    // twice. Best-effort: an insufficient balance skips the charge but never fails an
-    // already-issued certificate (the result carries the outcome for surfacing).
-    // A certificate covered by the prepaid allowance costs the wallet nothing.
-    const billing = fromAllowance ? null : await chargeCertificate({
-      organizerUid: input.organizerUid, certificateId, eventId, eventName: input.eventName,
-    }).catch(err => {
-      // A billing infra error must not fail an already-issued certificate, but a
-      // silent money-path failure must raise an alert (same as payment/webhook paths).
-      captureFinancialError(err, { scope: 'certificate_billing', area: 'financial', certificateId, eventId, organizerUid: input.organizerUid })
-      return null
-    })
-    const charged = billing?.charged === true
+    // RD-COMMS-P1 — every NEW certificate is covered by the event's certificate capacity (issuance
+    // is refused above otherwise), so issuance never charges the communication balance. The
+    // retired pay-as-you-go charge (chargeCertificate, lib/certificates/billing) is kept only for
+    // its historical ledger contract; `charged` stays in the result shape for existing callers.
+    const charged = false
 
     // RD-CERT-EMAIL-BULK — GENERATION NO LONGER SENDS EMAIL.
     //

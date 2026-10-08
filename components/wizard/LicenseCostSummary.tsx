@@ -16,6 +16,7 @@ import { auth } from '@/lib/firebase/auth'
 import { formatPaise, type CapacityQuote } from '@/lib/licensing/capacityPricing'
 import { SERVICE_KINDS, SERVICE_LABELS, type ServiceChargeItem, type ServiceKind, type ServiceSelection } from '@/lib/licensing/serviceAllowances'
 import { SALE_STATE_BADGE } from './ServiceQuantitySelector'
+import type { CommunicationCapacityFigures } from '@/lib/communications/capacityFigures'
 
 export interface CatalogEntryDto { purchasable: boolean; missing: string[]; state?: 'available' | 'not_configured' | 'disabled' | 'invalid' | 'unavailable' | 'no_photo_limit'; stateMessage?: string; minQuantity: number; maxQuantity: number | null; presets: number[]; unitPricePaise: number | null; gstRatePercent: number | null; onExhausted: 'block' | 'wallet_payg' | null }
 
@@ -26,7 +27,11 @@ export interface CheckoutQuoteResponse {
   services: Record<ServiceKind, { ok: true; item: ServiceChargeItem | null } | { ok: false; code: string; error: string }>
   totals:   { activationPaise: number; servicesPaise: number; basePaise: number; gstPaise: number; totalPaise: number }
   payable:  { kind: 'activation' | 'addon' | 'covered' | 'capacity_change'; capacityCharge: CapacityQuote | null; serviceItems: ServiceChargeItem[]; totalPaise: number } | null
-  coverage: { activationPaid: boolean; paidCapacity: number | null; purchased: ServiceSelection; consumed: ServiceSelection; remaining: ServiceSelection } | null
+  coverage: {
+    activationPaid: boolean; paidCapacity: number | null; purchased: ServiceSelection; consumed: ServiceSelection; remaining: ServiceSelection
+    /** RD-COMMS-L2 — the ONE organizer definition (lib/communications/capacityFigures), as on Usage. */
+    communication?: { whatsapp: CommunicationCapacityFigures; certificates: CommunicationCapacityFigures }
+  } | null
   published: { currentCapacity: number; sold: number; eligible: boolean } | null
   /**
    * RD-PHOTO-01 — the event's PAID photo capacity (server). baseCap is always 0 (no free photos);
@@ -60,7 +65,7 @@ const Tagline = ({ tone, children }: { tone: 'ok' | 'muted' | 'warn'; children: 
 )
 
 export function LicenseCostSummary({
-  quote, quoting, draftId, capacity, onCouponChange, onPayableAmount, paygWhatsappPaise, paygCertificatePaise,
+  quote, quoting, draftId, capacity, onCouponChange, onPayableAmount,
 }: {
   quote:    CheckoutQuoteResponse | null
   quoting:  boolean
@@ -69,8 +74,6 @@ export function LicenseCostSummary({
   onCouponChange: (code: string | null) => void
   /** Reports the amount payable now (coupon applied), or null when payment is not possible. */
   onPayableAmount: (paise: number | null) => void
-  paygWhatsappPaise:    number | null
-  paygCertificatePaise: number | null
 }) {
   const published = quote?.mode === 'published'
   const cap = quote?.capacity.ok ? quote.capacity.quote : null
@@ -246,11 +249,8 @@ export function LicenseCostSummary({
 
       <div className="border-t border-border/40 px-5 py-3">
         <p className="text-[11px] leading-relaxed text-muted-foreground">
-          Pay-as-you-go (not part of this payment): usage not covered by a prepaid allowance — or past
-          one whose policy allows it — is billed from your communication balance
-          {paygWhatsappPaise ? <> · WhatsApp {formatPaise(paygWhatsappPaise)} per message sent</> : null}
-          {paygCertificatePaise ? <> · certificates {formatPaise(paygCertificatePaise)} each</> : null}.
-          Unused prepaid units are tracked per event; after the event closes you can request a refund or
+          WhatsApp messages and certificates are sent only from the capacity you buy here; buy more here at any
+          time while the event is open. Unused prepaid units are tracked per event; after the event closes you can request a refund or
           carry them to another event from the Wallet. Every request is reviewed — nothing is refunded automatically.
         </p>
       </div>

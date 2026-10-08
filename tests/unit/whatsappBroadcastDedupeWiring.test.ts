@@ -68,13 +68,27 @@ vi.mock('@/lib/broadcasts/whatsappJob', () => ({
 }))
 
 vi.mock('@/lib/broadcasts/emailJob', () => ({
+  EMAIL_BROADCAST_JOBS: 'emailBroadcastJobs',
   createEmailBroadcastJob: async () => ({ jobId: 'ejob-1' }),
   processEmailBroadcastChunk: async () => ({ status: 'running', processed: 0 }),
 }))
+// RD-COMMS-P2-B — the one-job build claim, the guarded status write and the execution gate are
+// proven on the emulator (tests/emulator/broadcastLifecycleP2B.emu.test.ts); here they let the
+// delivery reach the snapshot this file inspects.
+vi.mock('@/lib/broadcasts/jobPreparation', () => ({
+  claimBroadcastJob: async () => ({ kind: 'prepare', jobId: 'job-1' }),
+  transitionCampaign: async () => true,
+}))
+vi.mock('@/lib/broadcasts/executionGuard', () => ({ broadcastExecutionBlock: async () => null }))
 vi.mock('@/lib/broadcasts/limits', () => ({ resolveMaxRecipientsPerBroadcast: async () => 5000 }))
 vi.mock('@/lib/broadcasts/audit', () => ({ logBroadcastAction: async () => {} }))
 vi.mock('@/lib/communications/billing', () => ({ chargeAndStartCampaign: async () => ({ ok: true }) }))
 vi.mock('@/lib/firebase/firestore/emailSuppressionList', () => ({ getOrganiserSuppressionSet: async () => new Set() }))
+// RD-COMMS-WA-CONSENT — this suite isolates DEDUPE; the consent filter is a pass-through here,
+// exactly like the email suppression set above. Consent is covered by whatsappConsent* suites.
+vi.mock('@/lib/whatsapp/broadcastConsent', () => ({
+  filterWhatsAppBroadcastRecipients: async <T,>(r: T[]) => ({ eligible: r, noConsent: 0, optedOut: 0 }),
+}))
 vi.mock('@/lib/email/resolveEventProvider', () => ({ resolveEventEmailProvider: async () => 'ses' }))
 vi.mock('@/lib/notifications', () => ({
   notificationEngine: { send: async () => ({ success: true }), isAvailable: () => true },
@@ -89,8 +103,10 @@ const reg = (phone: string, name: string) => ({
 
 const waCampaign = (over: Doc = {}): Doc => ({
   organizerUid: 'org-1', eventId: 'evt-1', eventSlug: 'evt-1', eventName: 'Marathon',
-  channel: 'whatsapp', audience: 'all', status: 'sending', templateType: 'EVENT_REMINDER',
-  subject: '', html: '', recipientCount: 0, actualCostPaise: 0, ...over,
+  channel: 'whatsapp', audience: 'all', status: 'sending', templateType: 'EVENT_UPDATED',
+  // RD-COMMS-P2-A — a started WhatsApp campaign always records the units it paid for; one with no
+  // recorded charge reaches no one. These fixtures paid for more than their audience.
+  subject: '', html: '', recipientCount: 0, actualCostPaise: 0, chargedUnits: 100, ...over,
 })
 
 beforeEach(() => {

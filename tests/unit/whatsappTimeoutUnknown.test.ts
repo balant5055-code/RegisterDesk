@@ -117,15 +117,39 @@ vi.mock('@/lib/whatsapp', () => ({
 // (tests/emulator/closureAcceptance.emu.test.ts). Here it is a faithful stand-in that feeds this
 // file's capture arrays: one charge per wamid; a legacy base row (from an earlier message) puts a
 // NEW wamid on `<base>__<wamid>`; the in-transaction balance re-check never drives it negative.
+// RD-COMMS-P2-A — the attempt's FUNDING HOLD (lib/whatsapp/funding.ts), taken before the send. A
+// faithful stand-in (its real atomicity is proven on the emulator): one hold per attempt key, legacy
+// funded only while the balance covers the whole price, given back only from the `held` state.
+const holds = new Map<string, { amount: number; state: 'held' | 'released' | 'accepted' }>()
+const released: number[] = []
+vi.mock('@/lib/whatsapp/funding', async orig => ({
+  ...(await orig<typeof import('@/lib/whatsapp/funding')>()),
+  reserveWhatsAppFunding: async (r: { unitKey: string; legacyPricePaise: number }) => {
+    if (holds.has(r.unitKey)) return { ok: false, reason: 'already_held' }
+    if (!(r.legacyPricePaise > 0 && walletBalance >= r.legacyPricePaise)) return { ok: false, reason: 'allowance_required' }
+    walletBalance -= r.legacyPricePaise; deductions.push(r.legacyPricePaise); ledgerWrites++
+    holds.set(r.unitKey, { amount: r.legacyPricePaise, state: 'held' })
+    return { ok: true, mode: 'legacy', costPaise: r.legacyPricePaise }
+  },
+  releaseWhatsAppFunding: async (k: { unitKey: string }) => {
+    const h = holds.get(k.unitKey)
+    if (!h || h.state !== 'held') return false
+    h.state = 'released'; walletBalance += h.amount; released.push(h.amount)
+    return true
+  },
+}))
+
 const acceptedWamids = new Set<string>()
 vi.mock('@/lib/whatsapp/acceptance', async orig => ({
   ...(await orig<typeof import('@/lib/whatsapp/acceptance')>()),
   withPersistRetry: <T,>(fn: () => Promise<T>) => fn(),
-  recordMessageAcceptance: async (i: { wamid: string; costPaise: number; log: Doc | null; registrationPatch?: { patch: Doc } }) => {
+  recordMessageAcceptance: async (i: { wamid: string; funding: { unitKey: string }; log: Doc | null; registrationPatch?: { patch: Doc } }) => {
     if (acceptedWamids.has(i.wamid)) return { already: true, chargedPaise: 0, chargeSkipped: false }
     acceptedWamids.add(i.wamid)
+    // Settled against the attempt's hold: the hold IS the charge — nothing is debited again.
+    const h = holds.get(i.funding.unitKey)
     let chargedPaise = 0
-    if (i.costPaise > 0 && walletBalance >= i.costPaise) { deductions.push(i.costPaise); ledgerWrites++; chargedPaise = i.costPaise }
+    if (h && h.state === 'held') { h.state = 'accepted'; chargedPaise = h.amount }
     if (i.log) emailLogs.push({ ...i.log, status: 'sent', providerMessageId: i.wamid, costPaise: chargedPaise })
     if (i.registrationPatch) registrationUpdates.push(i.registrationPatch.patch)
     return { already: false, chargedPaise, chargeSkipped: false }
@@ -149,7 +173,9 @@ beforeEach(() => {
   registration = { attendee: { name: 'Balaganapathy NT', phone: '+919080452223', email: 'a@b.c' }, ticketCode: 'TK-1' }
   eventDoc = { pricing: { whatsappEnabled: true } }
   registrationUpdates.length = 0; emailLogs.length = 0; deductions.length = 0; acceptedWamids.clear()
+  holds.clear(); released.length = 0
 })
+const netCharged = () => deductions.reduce((n, d) => n + d, 0) - released.reduce((n, r) => n + r, 0)
 
 // ─── 1. The classification itself ─────────────────────────────────────────────
 
@@ -161,11 +187,12 @@ describe('send outcome to recorded status', () => {
     expect(deductions).toEqual([35])
   })
 
-  it('Meta REJECTED it (httpStatus present) ⇒ failed, and nothing is charged', async () => {
+  it('Meta REJECTED it (httpStatus present) ⇒ failed, and nothing is charged (the hold is given back)', async () => {
     sendOutcome = 'rejected'
     await sendWhatsAppConfirmation(ARGS)
     expect(status()).toBe('failed')
-    expect(deductions).toEqual([])
+    expect(released).toEqual([35])
+    expect(netCharged()).toBe(0)
   })
 
   it('TIMEOUT ⇒ unknown, not failed', async () => {
@@ -180,10 +207,15 @@ describe('send outcome to recorded status', () => {
     expect(status()).toBe('unknown')
   })
 
-  it('an unknown send is never charged — we cannot bill for a message we cannot confirm', async () => {
+  // RD-COMMS-P2-A — an unknown send is neither confirmed-charged nor released: its funding is HELD.
+  // Meta's status webhook settles an acceptance against that same hold (never a second charge, never
+  // a free message); a hold no acceptance ever claims is returned by the sweep after the webhook window.
+  it('an unknown send keeps its hold — not released, not charged a second time', async () => {
     sendOutcome = 'timeout'
     await sendWhatsAppConfirmation(ARGS)
-    expect(deductions).toEqual([])
+    expect(deductions).toEqual([35])
+    expect(released).toEqual([])
+    expect(holds.get('wa_reg_reg-1')?.state).toBe('held')
   })
 
   it('the recorded reason says "unknown", so the dashboard cannot claim non-delivery', async () => {
@@ -264,24 +296,23 @@ describe('idempotency', () => {
     expect(registrationUpdates).toEqual([])
   })
 
-  it('the wallet is charged EXACTLY once — the per-message acceptance record is the guard, not the status', async () => {
+  it('the wallet is charged EXACTLY once — the attempt\'s funding hold is the guard, not the status', async () => {
     await sendWhatsAppConfirmation(ARGS)
     expect(deductions).toEqual([35])
     expect(ledgerWrites).toBe(1)
 
-    // Second attempt reporting the SAME accepted message (same wamid): the acceptance record
-    // already exists, so nothing is charged again even though every other precondition passes.
-    ledgerExists = true
+    // A second run of the SAME confirmation (every other precondition passes): its attempt is
+    // already funded, so it is refused before Meta is called — nothing is charged or sent again.
     await sendWhatsAppConfirmation(ARGS)
     expect(deductions).toEqual([35])
     expect(ledgerWrites).toBe(1)
   })
 
-  it('two concurrent timeouts leave the doc unknown — never a stray sent/failed', async () => {
+  it('two concurrent timeouts leave the doc unknown — never a stray sent/failed, and ONE hold', async () => {
     sendOutcome = 'timeout'
     await Promise.all([sendWhatsAppConfirmation(ARGS), sendWhatsAppConfirmation(ARGS)])
     expect(registrationUpdates.every(u => u.whatsappStatus === 'unknown')).toBe(true)
-    expect(deductions).toEqual([])
+    expect(deductions).toEqual([35])                       // the duplicate was refused, never sent
   })
 })
 

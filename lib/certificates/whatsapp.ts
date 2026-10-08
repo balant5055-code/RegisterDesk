@@ -13,11 +13,11 @@
 
 import { adminDb }     from '@/lib/firebase/admin'
 import { FieldValue } from 'firebase-admin/firestore'
-import { getWalletBalance } from '@/lib/firebase/firestore/wallet'
-import { reserveServiceUnits, releaseServiceUnits, draftIdForEventSlug, type ReserveOutcome } from '@/lib/licensing/serviceAllowanceLedger'
+import { draftIdForEventSlug } from '@/lib/licensing/serviceAllowanceLedger'
 import { callbackDataFor, recordMessageAcceptance, withPersistRetry, unknownLogId } from '@/lib/whatsapp/acceptance'
+import { reserveWhatsAppFunding, releaseWhatsAppFunding, certificateHoldLedgerId } from '@/lib/whatsapp/funding'
 import { getCommunicationConfig } from '@/lib/communications/resolveCommunicationConfig'
-import { getWalletConfig } from '@/lib/wallet/resolveWalletConfig'
+import { WHATSAPP_CAPACITY_REQUIRED } from '@/lib/communications/capacity'
 import { getMetaProvider, resolveWhatsAppTemplate } from '@/lib/whatsapp'
 import { NotificationType } from '@/lib/notifications'
 import { writeEmailLog } from '@/lib/email-logs/write'
@@ -42,16 +42,19 @@ export interface CertificateWhatsAppArgs {
  */
 export async function acceptCertificateMessage(a: {
   certificateId: string; registrationId: string; organizerUid: string; eventSlug: string; eventName: string
-  attendeeName: string; email: string; phone: string; wamid: string; fromAllowance: boolean; source: 'send' | 'webhook'
-  allowanceDraftId?: string | null
+  attendeeName: string; email: string; phone: string; wamid: string; source: 'send' | 'webhook'
+  /** The event's prepaid ledger (owner-checked), or null when it has none. */
+  draftId: string | null
 }) {
   const unitKey = `wa_cert_${a.certificateId}`
   const comm = await getCommunicationConfig()
-  const costPaise = a.fromAllowance ? 0 : (comm.whatsapp.walletChargeAttendeeNotifications ? comm.whatsapp.pricePaise : 0)
+  // RD-COMMS-P2-A — settled against the send's FUNDING HOLD (lib/whatsapp/funding.ts); the legacy
+  // price applies only to a message that reaches acceptance with no usable hold.
   return withPersistRetry(() => recordMessageAcceptance({
     organizerUid: a.organizerUid, eventSlug: a.eventSlug, eventName: a.eventName, wamid: a.wamid,
-    templateKey: 'certificate_ready', costPaise,
-    baseLedgerId: `cert_whatsapp_${a.certificateId}`, ledgerReferenceId: a.certificateId,
+    templateKey: 'certificate_ready',
+    funding: { draftId: a.draftId, unitKey, holdLedgerId: certificateHoldLedgerId(a.certificateId), legacyPricePaise: comm.whatsapp.pricePaise },
+    ledgerReferenceId: a.certificateId,
     ledgerDescription: `Certificate WhatsApp — ${a.eventName}`,
     ledgerMetadata: { certificateId: a.certificateId, registrationId: a.registrationId },
     log: {
@@ -60,7 +63,6 @@ export async function acceptCertificateMessage(a: {
       subject: `WhatsApp: Certificate ready — ${a.eventName}`, status: 'sent', provider: 'meta', channel: 'whatsapp',
       recipientPhone: a.phone, registrationId: a.registrationId,
     },
-    ...(a.fromAllowance && a.allowanceDraftId ? { allowanceUnit: { draftId: a.allowanceDraftId, unitKey } } : {}),
     pendingLogId: unknownLogId(unitKey),
     source: a.source,
   }))
@@ -110,34 +112,23 @@ export async function sendCertificateWhatsApp(args: CertificateWhatsAppArgs): Pr
     // RD-EVENT-COMMERCE-02 — the event's prepaid WhatsApp allowance first (see
     // lib/registrations/sendWhatsAppConfirmation.ts for the rule): reserve before the send,
     // release if the provider does not accept it.
+    // RD-COMMS-P2-A — funded BEFORE the send, atomically (lib/whatsapp/funding.ts): the event's
+    // capacity, else the legacy balance while it covers the whole legacy price. Otherwise the
+    // delivery is skipped and LOGGED (the certificate itself is already issued).
     const unitKey = `wa_cert_${args.certificateId}`
-    let allowance: ReserveOutcome = { mode: 'none' }
-    if (allowanceDraftId) {
-      allowance = await reserveServiceUnits({ draftId: allowanceDraftId, service: 'whatsapp', unitKey, source: 'certificate_ready' })
-      if (allowance.mode === 'exhausted' && allowance.policy === 'block') {
-        logSkip(email, normalizedPhone, 'Prepaid WhatsApp allowance used up — while the event is open, buy more on the event Wallet')
-        return
-      }
+    const fundingKey = { organizerUid: args.organizerUid, draftId: allowanceDraftId, unitKey, holdLedgerId: certificateHoldLedgerId(args.certificateId) }
+    const funding = await reserveWhatsAppFunding({
+      ...fundingKey, legacyPricePaise: comm.whatsapp.pricePaise, source: 'certificate_ready',
+      ledger: { referenceId: args.certificateId, description: `Certificate WhatsApp — ${args.eventName}`, eventSlug: args.eventSlug, metadata: { certificateId: args.certificateId, registrationId: args.registrationId } },
+    })
+    if (!funding.ok) {
+      if (funding.reason === 'already_held') return   // already sent (or being sent) for this certificate
+      logSkip(email, normalizedPhone, WHATSAPP_CAPACITY_REQUIRED)
+      return
     }
-    const fromAllowance = allowance.mode === 'allowance'
-    // RD-INTEG — release only a unit THIS call took (a concurrent duplicate may hold it).
-    const giveBack = () => fromAllowance && allowance.mode === 'allowance' && !allowance.already && allowanceDraftId
-      ? releaseServiceUnits({ draftId: allowanceDraftId, service: 'whatsapp', unitKey }).catch(err => console.error('[certificate] allowance release failed', err))
-      : Promise.resolve()
+    // Only THIS call took the hold; an accepted hold is never released.
+    const giveBack = () => releaseWhatsAppFunding(fundingKey).catch(err => console.error('[certificate] funding release failed', err))
     releaseOnError = giveBack
-
-    // Wallet policy — same as attendee confirmation: charge only if configured, and
-    // never spend below zero when negative balances are disallowed.
-    const costPaise = fromAllowance ? 0 : (comm.whatsapp.walletChargeAttendeeNotifications ? comm.whatsapp.pricePaise : 0)
-    const wallet    = await getWalletConfig()
-    if (costPaise > 0 && !wallet.allowNegativeBalance) {
-      const balance = await getWalletBalance(args.organizerUid)
-      if (balance < costPaise) {
-        // Insufficient wallet — the certificate is already issued; the delivery is skipped and LOGGED.
-        logSkip(email, normalizedPhone, 'Insufficient communication wallet balance')
-        return
-      }
-    }
 
     // RD-WA-BROADCAST-02 — the template now carries the attendee's route to their
     // certificate. Built from the SAME helper and shape the broadcast job uses, so a
@@ -151,11 +142,15 @@ export async function sendCertificateWhatsApp(args: CertificateWhatsAppArgs): Pr
     )
     if (!resolved.ok) { await giveBack(); return }
 
+    // From the provider call on, only a DEFINITE refusal hands the hold back.
+    releaseOnError = async () => undefined
     const result = await provider.sendTemplate({ ...resolved.message, callbackData: callbackDataFor({ kind: 'certificate', certificateId: args.certificateId, registrationId: args.registrationId }) })
+      .catch((err: unknown) => ({ success: false as const, error: err instanceof Error ? err.message : 'transport failure', httpStatus: undefined, code: undefined, providerMessage: undefined, messageId: undefined }))
     if (!result.success) {
-      await giveBack()   // not accepted ⇒ nothing consumed (an accepted-marked unit is never released)
       // RD-CLOSE — an UNKNOWN outcome (no HTTP status) gets the deterministic row the acceptance
       // record upgrades if Meta's webhook proves the message accepted; a definite refusal keeps its own.
+      // RD-COMMS-P2-A — and an unknown outcome KEEPS its hold (the webhook settles against it).
+      if (result.httpStatus !== undefined) await giveBack()
       if (result.httpStatus === undefined) {
         void adminDb.collection('emailLogs').doc(unknownLogId(unitKey)).set({
           organizerUid: args.organizerUid, eventId: args.eventSlug, eventSlug: args.eventSlug, eventName: args.eventName,
@@ -187,7 +182,7 @@ export async function sendCertificateWhatsApp(args: CertificateWhatsAppArgs): Pr
         await acceptCertificateMessage({
           certificateId: args.certificateId, registrationId: args.registrationId, organizerUid: args.organizerUid,
           eventSlug: args.eventSlug, eventName: args.eventName, attendeeName: args.attendeeName, email,
-          phone: normalizedPhone, wamid: result.messageId, fromAllowance, source: 'send', allowanceDraftId,
+          phone: normalizedPhone, wamid: result.messageId, source: 'send', draftId: allowanceDraftId,
         })
       } catch (err) {
         console.error(`[certificate] acceptance not persisted for ${args.certificateId} — the status webhook will recover it:`, err)

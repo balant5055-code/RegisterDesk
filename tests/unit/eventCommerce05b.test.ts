@@ -42,8 +42,9 @@ describe('Review shows the event information only', () => {
     expect(STEP7).toContain("onNext={isAlreadyPublished ? handleSaveChanges : () => onNext('Reviewed')}")
     // The agreement, the wallet gate and the final action exist ONLY in the final phase.
     expect(STEP7).toContain("{phase === 'final' && !isSubmitted && <div id=\"publish-agreement\"")   // 05F: anchored for scroll-into-view
-    // RD-CE-FIX M1 — an optional communication-balance prompt, never a gate.
-    expect(STEP7).toContain("{phase === 'final' && balanceLow && (")
+    // RD-COMMS-P1 — an advisory WhatsApp-capacity hint (no communication-balance top-up), never a gate.
+    expect(STEP7).toContain("{phase === 'final' && needsWhatsappCapacity && (")
+    expect(STEP7).not.toContain('/api/organizer/wallet/topup')
     // No purchase / confirm route, no payment panel, no second License & Services interface.
     for (const banned of ['/api/licensing/purchase', '/api/licensing/checkout/confirm', '<ActivationPaymentPanel', '<LicenseServicesStep']) {
       expect(STEP7, banned).not.toContain(banned)

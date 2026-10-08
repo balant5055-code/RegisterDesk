@@ -20,6 +20,7 @@ import { AlertCircle, Clock, PackagePlus } from 'lucide-react'
 import { cn } from '@/lib/utils/cn'
 import { formatPaise } from '@/lib/licensing/capacityPricing'
 import type { ServiceChargeItem } from '@/lib/licensing/serviceAllowances'
+import type { CommunicationCapacityFigures } from '@/lib/communications/capacityFigures'
 
 /** RD-EVENT-COMMERCE-05 — a specific badge per reason, never one blanket "awaiting configuration". */
 export const SALE_STATE_BADGE: Record<NonNullable<ServiceCatalogEntry['state']>, string> = {
@@ -62,6 +63,12 @@ export interface ServiceQuantitySelectorProps {
   /** Already purchased / consumed for this event. `consumed` null ⇒ not tracked as a counter. */
   purchased?:  number
   consumed?:   number | null
+  /**
+   * RD-COMMS-L2 — WhatsApp / certificates: the ONE organizer definition (capacityFigures), as on
+   * Communications › Usage. When given it replaces purchased/consumed for the balance line, and
+   * Available is the ledger's own figure (never Purchased − Used).
+   */
+  capacity?:   CommunicationCapacityFigures | null
   disabled?:   boolean
   /** Extra line under the balance (e.g. the media photo cap). */
   note?:       React.ReactNode
@@ -80,7 +87,7 @@ const DEFAULT_PRESETS = [100, 500, 1_000, 2_500, 5_000, 10_000]
 
 export function ServiceQuantitySelector({
   title, unit, units, usageRule, quantity, onChange, catalog, item, error,
-  mode = 'total', purchased = 0, consumed = 0, disabled, note, unavailable = false,
+  mode = 'total', purchased = 0, consumed = 0, capacity = null, disabled, note, unavailable = false,
   ceiling = null, maxReachedMessage,
 }: ServiceQuantitySelectorProps) {
   const id = useId()
@@ -111,7 +118,10 @@ export function ServiceQuantitySelector({
   const shownError = localError ?? error
   const tracked = consumed !== null
   const remaining = tracked ? Math.max(0, purchased - (consumed ?? 0)) : null
-  const exhausted = purchased > 0 && tracked && remaining === 0
+  const hasCapacity = capacity !== null && capacity.purchased + capacity.carriedIn > 0
+  const exhausted = capacity !== null ? hasCapacity && capacity.available === 0 : purchased > 0 && tracked && remaining === 0
+  const showBalance = capacity !== null ? hasCapacity : purchased > 0
+  const q = (v: number | null) => (v === null ? '—' : v.toLocaleString('en-IN'))
   const label = mode === 'additional' ? `Additional ${units} to buy` : `${units[0].toUpperCase()}${units.slice(1)} to buy`
 
   return (
@@ -131,15 +141,24 @@ export function ServiceQuantitySelector({
       </div>
       <p className="mt-1 text-[12px] text-muted-foreground">{usageRule}</p>
 
-      {(purchased > 0 || note) && (
+      {(showBalance || note) && (
         <div className={cn('mt-3 rounded-lg px-3 py-2 text-[12px] tabular-nums', exhausted ? 'bg-amber-50 text-amber-800' : 'bg-muted/40 text-foreground')}>
-          {purchased > 0 && (
+          {capacity !== null && hasCapacity && (
+            <p>
+              Purchased {q(capacity.purchased)}
+              {capacity.carriedIn > 0 && <> · carried in {q(capacity.carriedIn)}</>}
+              {' '}· used {q(capacity.used)}
+              {(capacity.inProgress ?? 0) > 0 && <> · in progress {q(capacity.inProgress)}</>}
+              {' '}· <span className="font-semibold">{exhausted ? 'Used up' : `${q(capacity.available)} available`}</span>
+            </p>
+          )}
+          {capacity === null && purchased > 0 && (
             <p>
               Purchased {purchased.toLocaleString('en-IN')}
               {tracked && <> · used {(consumed ?? 0).toLocaleString('en-IN')} · <span className="font-semibold">{exhausted ? 'Used up' : `${(remaining ?? 0).toLocaleString('en-IN')} remaining`}</span></>}
             </p>
           )}
-          {note && <p className={purchased > 0 ? 'mt-0.5' : ''}>{note}</p>}
+          {note && <p className={showBalance ? 'mt-0.5' : ''}>{note}</p>}
           {exhausted && purchasable && quantity === 0 && (
             <button type="button" onClick={() => onChange(Math.max(min, presets[0] ?? min))}
               className="mt-1.5 inline-flex items-center gap-1.5 rounded-md bg-amber-100 px-2 py-1 text-[12px] font-semibold text-amber-900 hover:bg-amber-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary">

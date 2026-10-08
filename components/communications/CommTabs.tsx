@@ -5,13 +5,12 @@
 // wallet/usage) and the shared chart/card components. No new runtime, no new
 // storage, no new communication logic.
 
-import { COMMUNICATION_BALANCE_HREF } from '@/lib/wallet/communicationBalance'
 import { useEffect, useState, type ReactNode } from 'react'
 import { auth } from '@/lib/firebase/auth'
 import { isChannelImplemented } from '@/lib/communications/health/channels'
 import {
   Loader2, Mail, MessageSquare, Phone, Megaphone, Bell, CheckCircle2, XCircle,
-  Clock, Wallet, TrendingUp, Percent,
+  Clock, Wallet, TrendingUp, Percent, Hash,
 } from 'lucide-react'
 import { MetricCard } from '@/components/dashboard/MetricCard'
 import { useFocusTrap } from '@/lib/hooks/useFocusTrap'
@@ -61,7 +60,6 @@ const SMS_AVAILABLE = isChannelImplemented('sms')
 type WalletOverview = import('@/lib/wallet/types').WalletOverview
 /** RD-INTEG — a server-aggregated figure; "—" when it could not be measured (never 0). */
 const cnt = (v: number | null | undefined): string => (typeof v === 'number' ? v.toLocaleString('en-IN') : '—')
-const money = (v: number | null | undefined): string => (typeof v === 'number' ? rupees(v) : '—')
 interface ReminderAnalytics { scheduled: number; sent: number; failed: number; skipped: number; cancelled: number; recipients: number; costPaise: number }
 interface CommRow { id: string; createdAt: string | null; channel: string; status: string; notificationType?: string; templateKey?: string; costPaise?: number; error?: string }
 interface Broadcast { id: string; status: string; recipientCount: number; successCount: number; failCount: number; actualCostPaise?: number; estimatedCostPaise?: number }
@@ -99,19 +97,26 @@ export function CommOverview() {
 
   return (
     <div className="space-y-4">
+      {/* RD-COMMS-P2-F — these are workspace totals; per-event capacity lives on Usage. */}
+      <p className="text-[12.5px] text-muted-foreground">Across all your events. For one event’s WhatsApp and certificate capacity, open <span className="font-semibold text-foreground">Usage</span>.</p>
       <section className="grid grid-cols-2 gap-3 sm:grid-cols-4 xl:grid-cols-6">
         <MetricCard label="Emails sent" value={String(wallet.emailsSent)} hint="This month" icon={Mail} iconColor="text-primary" iconBg="bg-primary/10" />
         <MetricCard label="WhatsApp sent" value={String(wallet.whatsappSent)} hint="This month" icon={MessageSquare} iconColor="text-emerald-700" iconBg="bg-emerald-50" />
-        <MetricCard label="SMS sent" value={SMS_AVAILABLE ? String(wallet.smsSent) : '—'} hint={SMS_AVAILABLE ? 'This month' : 'Unavailable'} icon={Phone} iconColor="text-sky-700" iconBg="bg-sky-50" />
+        {/* RD-COMMS-P2-F — SMS has no transport: no card at all until it does. */}
+        {SMS_AVAILABLE && <MetricCard label="SMS sent" value={String(wallet.smsSent)} hint="This month" icon={Phone} iconColor="text-sky-700" iconBg="bg-sky-50" />}
         <MetricCard label="Broadcasts" value={String(broadcasts.length)} icon={Megaphone} iconColor="text-violet-700" iconBg="bg-violet-50" />
         <MetricCard label="Scheduled reminders" value={String(reminders.scheduled)} icon={Bell} iconColor="text-amber-700" iconBg="bg-amber-50" />
         <MetricCard label="Sent / submitted" value={cnt(sent)} hint="All time · includes delivered" icon={Mail} iconColor="text-primary" iconBg="bg-primary/10" />
         <MetricCard label="Delivered" value={cnt(m?.delivered)} hint="Confirmed by the provider" icon={CheckCircle2} iconColor="text-emerald-700" iconBg="bg-emerald-50" />
         <MetricCard label="Failed" value={cnt(failed)} hint={m?.unknown ? `+${m.unknown.toLocaleString('en-IN')} status unknown` : undefined} icon={XCircle} iconColor="text-rose-700" iconBg="bg-rose-50" />
         <MetricCard label="Pending" value={cnt(m?.pending)} icon={Clock} iconColor="text-amber-700" iconBg="bg-amber-50" />
-        <MetricCard label="Comm spend" value={rupees(wallet.thisMonthSpendPaise)} hint="This month" icon={Wallet} iconColor="text-slate-700" iconBg="bg-slate-100" />
+        {/* RD-COMMS-P1 — what the LEGACY balance paid this month (usage records). Not a purchase surface. */}
+        {(wallet.thisMonthSpendPaise ?? 0) > 0 && (
+          <MetricCard label="Legacy balance spend" value={rupees(wallet.thisMonthSpendPaise)} hint="This month" icon={Wallet} iconColor="text-slate-700" iconBg="bg-slate-100" />
+        )}
         <MetricCard label="Today's sends" value={cnt(m?.today)} hint="India time" icon={TrendingUp} iconColor="text-primary" iconBg="bg-primary/10" />
-        <MetricCard label="Communication balance" value={rupees(wallet.balancePaise)} icon={Wallet} iconColor="text-emerald-700" iconBg="bg-emerald-50" href={COMMUNICATION_BALANCE_HREF} />
+        {/* RD-COMMS-P1 — no "Communication balance" KPI: capacity is per event (Usage tab). A legacy
+            balance is shown read-only on Usage, and only while it is above zero. */}
         <MetricCard label="Success rate" value={successRate === null ? '—' : `${successRate}%`} hint="Sent ÷ (sent + failed)" icon={Percent} iconColor="text-emerald-700" iconBg="bg-emerald-50" />
       </section>
     </div>
@@ -141,20 +146,20 @@ export function CommAnalytics() {
   const dailyMap = new Map<string, number>(days.map(d => [d.key, 0]))
   const channelMap = new Map<string, number>()
   const templateMap = new Map<string, number>()
-  let sent = 0, failed = 0, cost = 0
+  let sent = 0, failed = 0
   for (const r of rows) {
     const k = (r.createdAt ?? '').slice(0, 10); if (dailyMap.has(k)) dailyMap.set(k, (dailyMap.get(k) ?? 0) + 1)
     channelMap.set(r.channel || 'email', (channelMap.get(r.channel || 'email') ?? 0) + 1)
     const t = r.notificationType || r.templateKey || 'other'; templateMap.set(t, (templateMap.get(t) ?? 0) + 1)
     if (r.status === 'sent' || r.status === 'delivered') sent++; else if (r.status === 'failed') failed++
-    cost += r.costPaise ?? 0
   }
   const total = sent + failed
   const successPct = total ? Math.round((sent / total) * 100) : 100
-  const avgCost = rows.length ? Math.round(cost / rows.length) : 0
   const toPoints = (m: Map<string, number>): ChartPoint[] => [...m.entries()].map(([label, value]) => ({ label, value })).sort((a, b) => b.value - a.value)
 
   return (
+    <div className="space-y-4">
+    <p className="text-[12.5px] text-muted-foreground">Across all your events · last 30 days.</p>
     <div className="grid gap-4 lg:grid-cols-2">
       <Section title="Daily sends (14d)"><Bars label="Daily sends over the last 14 days" data={days.map(d => ({ label: d.label, value: dailyMap.get(d.key) ?? 0 }))} /></Section>
       <Section title="Channel split"><Donut label="Sends by channel" segments={toPoints(channelMap)} /></Section>
@@ -164,7 +169,7 @@ export function CommAnalytics() {
           <div className="grid grid-cols-3 gap-3 text-center">
             <div><p className="text-[22px] font-bold text-emerald-600">{successPct}%</p><p className="text-[12px] text-muted-foreground">Success</p></div>
             <div><p className="text-[22px] font-bold text-rose-600">{total ? 100 - successPct : 0}%</p><p className="text-[12px] text-muted-foreground">Failure</p></div>
-            <div><p className="text-[22px] font-bold text-foreground">{rupees(avgCost)}</p><p className="text-[12px] text-muted-foreground">Avg cost</p></div>
+            <div><p className="flex items-center justify-center gap-1 text-[22px] font-bold text-foreground"><Hash className="size-4 text-muted-foreground" aria-hidden />{rows.length.toLocaleString('en-IN')}</p><p className="text-[12px] text-muted-foreground">Messages</p></div>
           </div>
         </Section>
         <Section title="Reminder & broadcast performance">
@@ -175,41 +180,13 @@ export function CommAnalytics() {
         </Section>
       </div>
     </div>
-  )
-}
-
-// ─── Billing tab ────────────────────────────────────────────────────────────────
-
-export function CommBilling() {
-  const { data, loading, error } = useLoaded(async () => {
-    const wallet = await getJSON<{ overview: WalletOverview }>('/api/organizer/wallet/overview')
-    return { wallet: wallet.overview }
-  })
-  if (loading) return <Loading />
-  if (error || !data) return <p className="text-[13px] text-destructive">{error ?? 'No data.'}</p>
-
-  const { wallet } = data
-  // RD-INTEG — exact server sums (they were summed from the latest 500 usage rows, and "monthly"
-  // used the browser's month while the Overview used the server's). Net of broadcast refunds.
-  const sp = wallet.spendByChannelPaise
-  const seg: ChartPoint[] = ([['email', sp?.email], ['whatsapp', sp?.whatsapp], ...(SMS_AVAILABLE ? [['sms', sp?.sms]] : [])] as [string, number | null | undefined][])
-    .filter((e): e is [string, number] => typeof e[1] === 'number' && e[1] > 0)
-    .map(([label, value]) => ({ label, value })).sort((a, b) => b.value - a.value)
-
-  return (
-    <div className="grid gap-4 lg:grid-cols-2">
-      <section className="grid grid-cols-2 gap-3 sm:grid-cols-3">
-        <MetricCard label="Email cost" value={money(sp?.email)} icon={Mail} iconColor="text-primary" iconBg="bg-primary/10" />
-        <MetricCard label="WhatsApp cost" value={money(sp?.whatsapp)} hint="Charged per message WhatsApp accepts" icon={MessageSquare} iconColor="text-emerald-700" iconBg="bg-emerald-50" />
-        <MetricCard label="SMS cost" value={SMS_AVAILABLE ? money(sp?.sms) : '—'} hint={SMS_AVAILABLE ? undefined : 'Unavailable'} icon={Phone} iconColor="text-sky-700" iconBg="bg-sky-50" />
-        <MetricCard label="Monthly spend" value={rupees(wallet.thisMonthSpendPaise)} hint="This month (India time)" icon={Wallet} iconColor="text-amber-700" iconBg="bg-amber-50" />
-        <MetricCard label="Lifetime spend" value={money(wallet.lifetimeSpendPaise)} icon={Wallet} iconColor="text-slate-700" iconBg="bg-slate-100" />
-        <MetricCard label="Communication balance" value={rupees(wallet.balancePaise)} icon={Wallet} iconColor="text-emerald-700" iconBg="bg-emerald-50" href={COMMUNICATION_BALANCE_HREF} />
-      </section>
-      <Section title="Spend by channel">{seg.length ? <Donut segments={seg} /> : <p className="text-[13px] text-muted-foreground">No communication charges yet.</p>}</Section>
     </div>
   )
 }
+
+// ─── Usage tab ─────────────────────────────────────────────────────────────────
+// RD-COMMS-P1 — the old Billing view (wallet spend + "Communication balance") is retired; the
+// read-only, event-scoped Usage view lives in ./CommUsage.
 
 // ─── Templates tab (read-only registries) ──────────────────────────────────────
 
@@ -221,18 +198,20 @@ export function TemplateCenter() {
   // templates remain in the registry but are hidden here (future Admin surfaces them).
   const emailTypes = Object.values(NotificationType).filter(t => NOTIFICATION_META[t]?.channel === 'email' && isOrganizerNotification(t))
   const whatsappEntries = Object.entries(WHATSAPP_TEMPLATE_REGISTRY).filter(([type]) => isOrganizerNotification(type as NotificationType))
+  // RD-COMMS-P2-F — the low-balance ("top up") reminder is retired (RD-COMMS-P1): never previewed.
+  const reminderKinds = REMINDER_KINDS.filter(k => k !== 'low_wallet')
 
   return (
     <div className="space-y-4">
-      <Section title={`Reminder templates (${REMINDER_KINDS.length})`}>
+      <Section title={`Reminder templates (${reminderKinds.length})`}>
         <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-          {REMINDER_KINDS.map(kind => (
+          {reminderKinds.map(kind => (
             <div key={kind} className="flex items-center justify-between rounded-lg border border-border px-3 py-2">
               <div>
                 <p className="text-[13px] font-medium text-foreground">{REMINDER_KIND_LABELS[kind]}</p>
                 <p className="text-[11px] text-muted-foreground capitalize">Email · {kind === 'custom' ? 'organizer' : KIND_AUDIENCE[kind]}</p>
               </div>
-              <button onClick={() => { const c = buildReminderContent({ kind, eventName: 'Sample Event', recipientName: 'Alex', eventDateLabel: 'Sat, 12 Jul', eventUrl: '#', balanceLabel: '₹0' }); setPreview({ subject: c.subject, body: c.html }) }}
+              <button onClick={() => { const c = buildReminderContent({ kind, eventName: 'Sample Event', recipientName: 'Alex', eventDateLabel: 'Sat, 12 Jul', eventUrl: '#' }); setPreview({ subject: c.subject, body: c.html }) }}
                 className="text-[12px] font-semibold text-primary hover:underline">Preview</button>
             </div>
           ))}

@@ -56,9 +56,13 @@ const REASON_STATUS: Record<string, number> = {
   insufficient_balance: 402,
   template_unresolved:  422,
   send_failed:          502,
+  // RD-COMMS-P2-A — Meta never answered this attempt: not a failure, an unknown outcome.
+  send_unknown:         504,
   // RD-INTEG — the event's prepaid allowance is used up under the 'block' policy: a payment
   // problem the organizer resolves, not a server error.
   allowance_exhausted:  402,
+  // RD-COMMS-P1 — the event has no WhatsApp capacity (and no legacy balance covers it).
+  allowance_required:   402,
 }
 
 export async function POST(
@@ -140,6 +144,9 @@ export async function POST(
       status:    'failed',
       error:     result.error,
       ...(providerResponse ? { providerResponse } : {}),
+      // RD-COMMS-P2-A — an unanswered attempt reads as Unknown (and the next retry needs the explicit
+      // confirmUnknownDelivery, gated on the registration's 'unknown' status).
+      ...(result.reason === 'send_unknown' ? { deliveryUnknown: true } : {}),
       updatedAt: FieldValue.serverTimestamp(),
     }).catch(err => console.error('[whatsapp-retry] claim release failed:', err))
 

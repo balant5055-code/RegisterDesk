@@ -70,6 +70,8 @@ export interface RunnerConfig {
    * unchanged, because their work is driven by the scheduled tick, not by a chained call.
    */
   releaseLeaseOnHandoff?: boolean
+  /** RD-COMMS-P2-B — a `failed` job is terminal: never leased again (see leaseJob). Broadcasts only. */
+  failedIsTerminal?: boolean
 }
 
 export interface ProcessResult {
@@ -84,8 +86,11 @@ export async function runJobChunk<J extends Job, Ctx, Item>(
   strategy: JobStrategy<J, Ctx, Item>,
   config:   RunnerConfig,
 ): Promise<ProcessResult> {
-  const lease = await leaseJob<J>(config.collection, jobId, config.leaseMs)
+  const lease = await leaseJob<J>(config.collection, jobId, config.leaseMs, { failedIsTerminal: config.failedIsTerminal === true })
   if (!lease.proceed) {
+    // RD-COMMS-P2-B — a terminal FAILED job (opt-in): done, never resumed. Reported as status
+    // 'failed' with no lease reason, so ProcessResult keeps its existing shape for every caller.
+    if (lease.reason === 'failed') return { done: true, status: 'failed', processed: 0 }
     return {
       done:   lease.reason === 'completed' || lease.reason === 'cancelled' || lease.reason === 'not_found',
       status: lease.reason === 'busy' ? 'processing' : (lease.reason === 'not_found' ? 'failed' : lease.reason),

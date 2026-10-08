@@ -40,7 +40,6 @@ import {
 import { isSubmittedDraftStatus } from '@/lib/events/builder/stepRegistry'
 import { EASE } from '@/lib/events/builder/constants'
 import type { WizardStep } from '@/lib/events/builder/types'
-import { useCommunicationConfig } from '@/lib/communications/communicationConfigClient'
 import { ROUTES } from '@/config/navigation'
 import { Stepper } from '@/components/event-builder/Stepper'
 import { WizardFooter } from '@/components/wizard/WizardFooter'
@@ -51,6 +50,7 @@ import { ServiceQuantitySelector, SALE_STATE_BADGE } from '@/components/wizard/S
 import { LicenseCostSummary, type CheckoutQuoteResponse } from '@/components/wizard/LicenseCostSummary'
 import { ActivationPaymentPanel, type PayOutcome } from '@/components/wizard/ActivationPaymentPanel'
 import type { PublishAgreementInput } from '@/lib/legal/organizerAgreement'
+import { CAPACITY_FIGURE_LABELS, capacityBreakdown } from '@/lib/communications/capacityFigures'
 
 export interface PaygServiceFlags { whatsappEnabled: boolean; smsEnabled: boolean; certEnabled: boolean }
 
@@ -150,10 +150,10 @@ const Badge = ({ tone, children }: { tone: 'ok' | 'muted' | 'warn' | 'opt'; chil
     tone === 'ok' ? 'bg-emerald-100 text-emerald-700' : tone === 'warn' ? 'bg-muted text-muted-foreground' : tone === 'opt' ? 'bg-amber-100 text-amber-700' : 'bg-muted text-muted-foreground')}>{children}</span>
 )
 
-const EXHAUSTION_TEXT: Record<string, string> = {
-  block:       'When it is used up, further messages are not sent (each is recorded in the communication log) until you buy more.',
-  wallet_payg: 'When it is used up, usage continues pay-as-you-go from your communication balance.',
-}
+// RD-COMMS-P1 — one rule for every allowance: when it is used up, nothing more is sent until more
+// capacity is bought here. (A stored 'wallet_payg' no longer creates a pay-as-you-go charge.)
+const EXHAUSTED_TEXT = 'When it is used up, nothing more is sent (each is recorded in the communication log) until you buy more here.'
+const EXHAUSTION_TEXT: Record<string, string> = { block: EXHAUSTED_TEXT, wallet_payg: EXHAUSTED_TEXT }
 
 export function LicenseServicesStep({
   currentStep, completedValues, onNext, onBack, steps, selectedCapacity, onSelectCapacity,
@@ -329,10 +329,6 @@ export function LicenseServicesStep({
     router.push(returnAfterPurchase)
   }, [returnAfterPurchase, router])
 
-  const commConfig = useCommunicationConfig()
-  const certCfg = commConfig.certificates
-  const paygCertPaise = certCfg.billingMode === 'wallet' && certCfg.walletBilling && certCfg.pricePaise > 0 ? certCfg.pricePaise : null
-  const paygWaPaise = commConfig.whatsapp.walletChargeAttendeeNotifications && commConfig.whatsapp.pricePaise > 0 ? commConfig.whatsapp.pricePaise : null
 
   const selectCapacity = (n: number) => {
     if (isSubmitted) { setTarget(n); return }
@@ -481,18 +477,18 @@ export function LicenseServicesStep({
             <h2 id="license-whatsapp-heading" className={sectionHeading}>WhatsApp messages</h2>
             <ServiceCard anchor="license-service-whatsapp" icon={MessageSquare} title="WhatsApp notifications" open={payg.whatsappEnabled && !locked}
               badge={<Badge tone="opt">Optional</Badge>}
-              description={<>Registration confirmations and updates on WhatsApp. Messages not covered by a prepaid allowance are billed from your communication balance{paygWaPaise ? <> at {formatPaise(paygWaPaise)} per message sent</> : null}.</>}
+              description={<>Registration confirmations and updates on WhatsApp, sent from the WhatsApp messages you buy here. Without WhatsApp capacity, attendees receive email only.</>}
               control={<Switch checked={payg.whatsappEnabled} onChange={v => setFlag('whatsappEnabled', v)} label={`${payg.whatsappEnabled ? 'Disable' : 'Enable'} WhatsApp notifications`} />}>
               <ServiceQuantitySelector
                 title="Prepaid WhatsApp messages" unit="message" units="messages" mode={qtyMode}
                 usageRule={`One message is used when WhatsApp accepts a message to an attendee — a registration confirmation, a certificate-ready notice, a retry of a failed confirmation, or one per recipient when a broadcast starts. A message WhatsApp rejects is not counted.${policy('whatsapp')}`}
                 quantity={selection.whatsapp} onChange={n => setQty('whatsapp', n)}
                 catalog={quote?.catalog.whatsapp ?? null} item={item('whatsapp')} error={error('whatsapp')} unavailable={!quote && !!networkError}
-                purchased={coverage?.purchased.whatsapp ?? 0} consumed={coverage?.consumed.whatsapp ?? 0}
+                purchased={coverage?.purchased.whatsapp ?? 0} consumed={coverage?.consumed.whatsapp ?? 0} capacity={coverage?.communication?.whatsapp ?? null}
               />
             </ServiceCard>
             {!payg.whatsappEnabled && (coverage?.purchased.whatsapp ?? 0) > 0 && (
-              <p className="mt-2 flex items-start gap-1.5 text-[12px] text-muted-foreground"><Info className="mt-0.5 size-3.5 shrink-0" aria-hidden />WhatsApp is off. Your purchased allowance is kept: {(coverage?.remaining.whatsapp ?? 0).toLocaleString('en-IN')} messages remaining.</p>
+              <p className="mt-2 flex items-start gap-1.5 text-[12px] text-muted-foreground"><Info className="mt-0.5 size-3.5 shrink-0" aria-hidden />WhatsApp is off. Your purchased allowance is kept: {(coverage?.remaining.whatsapp ?? 0).toLocaleString('en-IN')} messages available.</p>
             )}
           </section>
 
@@ -517,14 +513,14 @@ export function LicenseServicesStep({
             <h2 id="license-certs-heading" className={sectionHeading}>Certificates</h2>
             <ServiceCard anchor="license-service-certificates" icon={Award} title="Participation certificates" open={payg.certEnabled && !locked}
               badge={<Badge tone="opt">Optional</Badge>}
-              description={<>Issue certificates from the event’s Certificates tab. Certificates not covered by a prepaid allowance are {paygCertPaise !== null ? <>charged {formatPaise(paygCertPaise)} each from your communication balance</> : 'not charged'} when issued.</>}
+              description={<>Issue certificates from the event’s Certificates tab. Each certificate uses one unit of the certificate capacity you buy here — certificates cannot be issued without it.</>}
               control={<Switch checked={payg.certEnabled} onChange={v => setFlag('certEnabled', v)} label={`${payg.certEnabled ? 'Disable' : 'Enable'} participation certificates`} />}>
               <ServiceQuantitySelector
                 title="Prepaid certificates" unit="certificate" units="certificates" mode={qtyMode}
                 usageRule={`One is used when a certificate is issued to a participant. Re-downloading, emailing or re-issuing the same certificate uses nothing.${policy('certificates')}`}
                 quantity={selection.certificates} onChange={n => setQty('certificates', n)}
                 catalog={quote?.catalog.certificates ?? null} item={item('certificates')} error={error('certificates')} unavailable={!quote && !!networkError}
-                purchased={coverage?.purchased.certificates ?? 0} consumed={coverage?.consumed.certificates ?? 0}
+                purchased={coverage?.purchased.certificates ?? 0} consumed={coverage?.consumed.certificates ?? 0} capacity={coverage?.communication?.certificates ?? null}
               />
             </ServiceCard>
           </section>
@@ -558,8 +554,6 @@ export function LicenseServicesStep({
             capacity={isSubmitted ? (target ?? 0) : capacity}
             onCouponChange={setCouponCode}
             onPayableAmount={setPayNowPaise}
-            paygWhatsappPaise={paygWaPaise}
-            paygCertificatePaise={paygCertPaise}
           />
           <ActivationPaymentPanel
             mode={mode}
@@ -654,11 +648,22 @@ export function PurchasedPanel({ editing, capacity, coverage, media, unavailable
     return t ?? <span className="text-muted-foreground" aria-label="unavailable">—</span>
   }
   const limit = media.base !== null && media.purchased !== null ? media.base + media.purchased : null
+  // RD-COMMS-L2 — WhatsApp / certificates use the ONE organizer definition (capacityFigures), as
+  // on Communications › Usage: Used = settled use (held units are In progress), Available = the
+  // ledger's own figure, and the breakdown (In progress · Returned · Refunded · Carried in / out)
+  // under the label. Without those figures the cells are "—", never a guessed number.
+  const comm = (k: 'whatsapp' | 'certificates') => {
+    const f = coverage?.communication?.[k] ?? null
+    return {
+      purchased: f?.purchased ?? null, used: f?.used ?? null, remaining: f?.available ?? null,
+      note: f ? capacityBreakdown(f).map(({ key, value }) => `${CAPACITY_FIGURE_LABELS[key]} ${value === null ? '—' : value.toLocaleString('en-IN')}`).join(' · ') : undefined,
+    }
+  }
   const rows: { label: string; purchased: number | null; used: number | null; remaining: number | null; note?: string }[] = [
     { label: 'Registration capacity', purchased: capacity?.total ?? null, used: capacity?.used ?? null,
       remaining: capacity ? Math.max(0, capacity.total - capacity.used) : null },
-    { label: 'WhatsApp messages', purchased: coverage?.purchased.whatsapp ?? null, used: coverage?.consumed.whatsapp ?? null, remaining: coverage?.remaining.whatsapp ?? null },
-    { label: 'Certificates', purchased: coverage?.purchased.certificates ?? null, used: coverage?.consumed.certificates ?? null, remaining: coverage?.remaining.certificates ?? null },
+    { label: 'WhatsApp messages', ...comm('whatsapp') },
+    { label: 'Certificates', ...comm('certificates') },
     { label: 'Photo capacity', purchased: media.purchased, used: media.used,
       remaining: limit !== null && media.used !== null ? Math.max(0, limit - media.used) : null,
       note: 'Paid photos only · used = photos stored · maximum 3,000 per event' },
@@ -677,13 +682,13 @@ export function PurchasedPanel({ editing, capacity, coverage, media, unavailable
         <p className="px-4 pt-3 text-[12px] text-muted-foreground">These figures couldn’t be loaded right now. Nothing has changed — use Refresh status in the payment panel to try again.</p>
       )}
       <table className="w-full text-[12.5px]">
-        <caption className="sr-only">Actual purchased, used and remaining quantities for this event</caption>
+        <caption className="sr-only">Actual purchased, used and available quantities for this event</caption>
         <thead>
           <tr className="text-left text-[11.5px] text-muted-foreground">
             <th scope="col" className="px-4 pb-1 pt-3 font-medium">Item</th>
             <th scope="col" className="px-2 pb-1 pt-3 text-right font-medium">Purchased</th>
             <th scope="col" className="px-2 pb-1 pt-3 text-right font-medium">Used</th>
-            <th scope="col" className="px-4 pb-1 pt-3 text-right font-medium">Remaining</th>
+            <th scope="col" className="px-4 pb-1 pt-3 text-right font-medium">Available</th>
           </tr>
         </thead>
         <tbody>

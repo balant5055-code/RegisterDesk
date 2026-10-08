@@ -24,6 +24,9 @@ export interface DraftCoverage {
   purchased:      ServicePurchased
   consumed:       ServicePurchased
   remaining:      ServicePurchased
+  carriedIn:      ServicePurchased
+  carriedOut:     ServicePurchased
+  refunded:       ServicePurchased
   /** The single payable add-on order, when one is outstanding. */
   pendingAddon:   LicenseOrderDoc | null
 }

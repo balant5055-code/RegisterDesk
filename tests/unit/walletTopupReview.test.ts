@@ -118,11 +118,11 @@ describe('W2.f.1 · organizer status after a review', () => {
     expect(m).not.toMatch(/review|reviewed|super admin|refund reference|rfnd_|reason/i)
     expect(m).toMatch(/contact support/i)
   })
-  it('the event wizard treats not_credited as final (clears the hold, says so) instead of leaving a review hold', () => {
+  // RD-COMMS-P1 — the wizard no longer starts top-ups, so it holds no top-up state to resolve.
+  it('the event wizard no longer starts (or tracks) a communication-balance top-up', () => {
     const wizard = code('app/(dashboard)/dashboard/events/new/page.tsx')
-    const branch = wizard.slice(wizard.indexOf("d.state === 'not_credited'"))
-    expect(branch).toContain('setTopupHold(null)')
-    expect(branch).toContain('TOPUP_OUTCOME_MESSAGES.notCredited')
+    expect(wizard).not.toContain('setTopupHold')
+    expect(wizard).not.toContain('/api/organizer/wallet/topup')
   })
 })
 

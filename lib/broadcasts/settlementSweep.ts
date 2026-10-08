@@ -15,8 +15,10 @@
 import { adminDb } from '@/lib/firebase/admin'
 import { getJob } from '@/lib/jobs/kernel'
 import type { Job } from '@/lib/jobs/types'
-import { settleBroadcastBilling } from '@/lib/communications/billing'
+import { settleBroadcastBilling, releaseHeldBroadcastUnits } from '@/lib/communications/billing'
 import { reconcileBroadcastBilledUnits } from '@/lib/whatsapp/acceptance'
+import { releaseExpiredWhatsAppHolds } from '@/lib/whatsapp/funding'
+import { EMAIL_BROADCAST_JOBS, finalizeEmailCampaign, syncEmailCampaignTerminal, type EmailBroadcastJob } from './emailJob'
 import {
   WHATSAPP_BROADCAST_JOBS, countAcceptedRecipients, finalizeWhatsAppCampaign, syncCampaignTerminal,
 } from './whatsappJob'
@@ -44,10 +46,28 @@ export function isLeaseLive(lockedUntil: unknown, now: number = Date.now()): boo
 const millisOf = (v: unknown): number | null =>
   v && typeof (v as { toMillis?: unknown }).toMillis === 'function' ? (v as { toMillis: () => number }).toMillis() : null
 
-export interface SweepOutcome { scanned: number; settled: number; finalized: number; redelivered: number; skipped: number; errored: number }
+export interface SweepOutcome {
+  scanned: number; settled: number; finalized: number; redelivered: number; skipped: number; errored: number
+  /** RD-COMMS-P2-A — expired transactional funding holds / held broadcast units given back. */
+  holdsReleased: number; heldUnitsReleased: number
+  /** RD-COMMS-P2-B — email campaigns brought out of a stuck `sending` (finalized / synced / redelivered). */
+  emailRecovered: number
+}
 
 export async function sweepBroadcastSettlements(now: number = Date.now()): Promise<SweepOutcome> {
-  const out: SweepOutcome = { scanned: 0, settled: 0, finalized: 0, redelivered: 0, skipped: 0, errored: 0 }
+  const out: SweepOutcome = { scanned: 0, settled: 0, finalized: 0, redelivered: 0, skipped: 0, errored: 0, holdsReleased: 0, heldUnitsReleased: 0, emailRecovered: 0 }
+
+  // RD-COMMS-P2-A — unresolved WhatsApp funding past the webhook window (lib/whatsapp/funding.ts):
+  // transactional holds never accepted, and broadcast units held for recipients with no verdict.
+  try { out.holdsReleased = (await releaseExpiredWhatsAppHolds(now)).released } catch (err) {
+    out.errored++
+    console.error('[broadcast-settlement-sweep] hold release failed:', err instanceof Error ? err.message : err)
+  }
+  const withHeld = await adminDb.collection('broadcastCampaigns').where('unknownHeldUnits', '>', 0).limit(SWEEP_BATCH).get()
+  for (const d of withHeld.docs) {
+    try { out.heldUnitsReleased += await releaseHeldBroadcastUnits(d.id, now) } catch { out.errored++ }
+  }
+
   const pending = () => adminDb.collection('broadcastCampaigns').where('billingSettlement', '==', 'pending')
   const [ended, sending] = await Promise.all([
     pending().where('status', 'in', [...TERMINAL]).limit(SWEEP_BATCH).get(),
@@ -88,8 +108,10 @@ export async function sweepBroadcastSettlements(now: number = Date.now()): Promi
           out.finalized++
           continue
         }
+        // No job: never built, or (RD-COMMS-P2-B) its preparer died after claiming it — the claim
+        // refreshes updatedAt, so this also waits out a live preparation before re-claiming.
         const updated = millisOf(c.updatedAt)
-        if (!jobId && updated !== null && now - updated > STUCK_NO_JOB_MS) {
+        if ((!jobId || !job) && updated !== null && now - updated > STUCK_NO_JOB_MS) {
           const { deliverBroadcastCampaign } = await import('./send')
           await deliverBroadcastCampaign(doc.id)
           out.redelivered++
@@ -102,5 +124,52 @@ export async function sweepBroadcastSettlements(now: number = Date.now()): Promi
       console.error('[broadcast-settlement-sweep] campaign error:', { campaignId: doc.id, err: err instanceof Error ? err.message : err })
     }
   }
+  // RD-COMMS-P2-B — email campaigns stuck in `sending` (email never enters billing settlement).
+  try { out.emailRecovered = await recoverStuckEmailCampaigns(now) } catch (err) {
+    out.errored++
+    console.error('[broadcast-settlement-sweep] email recovery failed:', err instanceof Error ? err.message : err)
+  }
   return out
+}
+
+/**
+ * RD-COMMS-P2-B — an EMAIL campaign must never sit in `sending` forever. Email carries no billing
+ * settlement, so the pass above never sees it. For each `sending` email campaign:
+ *   • its job COMPLETED but the completion hook never ran       → finalize it (counts from the job);
+ *   • its job FAILED / was CANCELLED but the campaign was not synced (e.g. the reaper failed it)
+ *                                                               → sync it to the same terminal state;
+ *   • no job long after it started (a crash before / while building it) → deliver again (the build
+ *     claim adopts or rebuilds the ONE job — never a second one).
+ * A job that is pending, leased or recently active is left to its drivers. Already-delivered emails
+ * are never re-sent (the per-recipient `sent` flags), and unreached recipients are never counted sent.
+ */
+export async function recoverStuckEmailCampaigns(now: number = Date.now()): Promise<number> {
+  const snap = await adminDb.collection('broadcastCampaigns')
+    .where('status', '==', 'sending').where('channel', '==', 'email').limit(SWEEP_BATCH).get()
+  let recovered = 0
+  for (const doc of snap.docs) {
+    const c = doc.data() as { emailJobId?: unknown; updatedAt?: unknown }
+    try {
+      const jobId = typeof c.emailJobId === 'string' && c.emailJobId ? c.emailJobId : null
+      const job = jobId ? await getJob<EmailBroadcastJob>(EMAIL_BROADCAST_JOBS, jobId) : null
+      if (job && jobId) {
+        const jobUpdated = millisOf((job as { updatedAt?: unknown }).updatedAt)
+        const active = job.status === 'pending' || job.status === 'processing' || isLeaseLive(job.lockedUntil, now)
+          || (jobUpdated !== null && now - jobUpdated < SETTLE_GRACE_MS)
+        if (active) continue
+        if (job.status === 'completed') { await finalizeEmailCampaign(job); recovered++; continue }
+        if (job.status === 'failed' || job.status === 'cancelled') { await syncEmailCampaignTerminal(jobId, job.status); recovered++; continue }
+        continue
+      }
+      const updated = millisOf(c.updatedAt)
+      if (updated !== null && now - updated > STUCK_NO_JOB_MS) {
+        const { deliverBroadcastCampaign } = await import('./send')
+        await deliverBroadcastCampaign(doc.id)
+        recovered++
+      }
+    } catch (err) {
+      console.error('[broadcast-settlement-sweep] email campaign error:', { campaignId: doc.id, err: err instanceof Error ? err.message : err })
+    }
+  }
+  return recovered
 }

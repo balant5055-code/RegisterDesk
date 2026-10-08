@@ -54,6 +54,7 @@ import {
   IndianRupee,
   Lock,
   Mail,
+  MessageSquare,
   MapPin,
   MoreHorizontal,
   Phone,
@@ -66,7 +67,6 @@ import {
   Upload,
   UserCheck,
   Users,
-  Wallet,
   X,
   XCircle,
   Zap,
@@ -80,28 +80,23 @@ import { calcStepHealth, normalizeEventDetailsDraft, type EventDetailsDraft, typ
 import { ROUTES } from '@/config/navigation'
 import { cn } from '@/lib/utils/cn'
 import { auth } from '@/lib/firebase/auth'
-import { calculateCommunicationCost } from '@/lib/events/communicationCost'
-import { estimateCapacity }           from '@/lib/events/estimateCapacity'
 import { validatePublish, toPublishBlocker } from '@/lib/events/publishRequirements'
 import { buildEventHref } from '@/lib/events/registerHref'
 import { PublishSectionHealthGrid } from '@/components/wizard/PublishSectionHealth'
 import { PublishFindingsPanel } from '@/components/wizard/PublishFindings'
 import { ReviewSummary } from '@/components/wizard/ReviewSummary'
-import type { CommunicationCostResult, PublishApiResponse, PublishGovernanceInfo, WalletBalanceResponse, WalletTopupOrderResponse, WalletTopupVerifyResponse } from '@/types/events'
-import { classifyTopupVerifyResponse, TOPUP_OUTCOME_MESSAGES, type TopupHoldKind, type TopupVerifyOutcome } from '@/lib/wallet/topupVerifyOutcome'
+import type { PublishApiResponse, PublishGovernanceInfo } from '@/types/events'
 import { CURRENT_LICENSE_VERSION, isValidTierForVersion, defaultLicenseTierForVersion, type AnyEventLicenseTier } from '@/lib/licensing/eventLicense'
 import { DEFAULT_COMMERCIAL_TERMS } from '@/lib/licensing/capacityCommercial'
 import { LicenseServicesStep, type LicenseServicesStepProps, type PaygServiceFlags, type FinalPayContext } from '@/components/wizard/LicenseServicesStep'
 import { PUBLISH_AGREEMENT_DOCUMENTS, type PublishAgreementInput } from '@/lib/legal/organizerAgreement'
 import { EMPTY_SELECTION, parseServiceSelection, type ServiceSelection } from '@/lib/licensing/serviceAllowances'
-import { useCommunicationConfig } from '@/lib/communications/communicationConfigClient'
 import { useFeesConfig } from '@/lib/fees/feesConfigClient'
 import type { PublicFeesConfig } from '@/lib/fees/publicFeesShared'
 import { useToast } from '@/components/ui/Toast'
 import { useConfirm } from '@/components/ui/ConfirmDialog'
 import { planTypeTransition } from '@/lib/events/builder/typeTransition'
 import { publishValueIssues } from '@/lib/events/eventValueRules'
-import { useWalletConfig } from '@/lib/wallet/walletConfigClient'
 import { useEventContext } from '@/components/dashboard/EventContextProvider'
 
 // GA-7C S2/P4: lazy-load the heavy per-step builders so the initial /dashboard/events/new
@@ -1951,39 +1946,11 @@ function Step7View({
   // read-only facts of the draft.
   const localWhatsapp = !!pricingData?.whatsappEnabled
 
-  // Communication cost estimate uses local interactive state. The Final Cost
-  // Summary (F2.5) is the single source of truth for pricing — the standalone
-  // Registration-Plan slider and Billing-Summary panels were removed, so their
-  // derived totals (plan upgrade, platform-fee roll-up, GST) live there now.
-  // Config-resolved per-message rates so the estimate matches the actual charge.
-  const commConfig = useCommunicationConfig()
-  const estimatedCapacity = estimateCapacity(pricingData)
-  const commCostEstimate: CommunicationCostResult = calculateCommunicationCost({
-    estimatedCapacity,
-    whatsappEnabled: localWhatsapp,
-    // RD-CE-FIX M1 — SMS has no transport: it is never estimated (or charged).
-    smsEnabled:      false,
-    whatsappRatePaise: commConfig.whatsapp.pricePaise,
-    smsRatePaise:      commConfig.sms.pricePaise,
-  })
-  // RD-CE-FIX M1 — the communication balance is NOT a publish requirement. It only pays for WhatsApp
-  // messages this event's PREPAID messages don't cover, as they are sent. So the estimate is the
-  // pay-as-you-go remainder after the prepaid units selected on License & Services, and a low balance
-  // is an optional prompt — never a gate. A submitted (live or awaiting-approval) event submits nothing.
+  // RD-COMMS-P1 — WhatsApp is sent only from WhatsApp capacity bought on License & Services (this
+  // final step). There is no communication-balance top-up here any more: when WhatsApp is on but no
+  // WhatsApp capacity is selected, the step simply says so (an advisory hint — never a payment).
   const prepaidWhatsapp = Math.max(0, Math.floor(Number((initialData?.serviceSelection as { whatsapp?: unknown } | null | undefined)?.whatsapp) || 0))
-  const paygEstimatePaise = Math.max(0, commCostEstimate.totalPaise - prepaidWhatsapp * commConfig.whatsapp.pricePaise)
-  const needsWalletCheck = !isSubmitted && isFreeEvent && localWhatsapp && paygEstimatePaise > 0
-  const walletCfg = useWalletConfig()
-
-  const [walletBalance, setWalletBalance] = useState<number | null>(null)
-  const [walletLoading, setWalletLoading] = useState(false)
-  const [showAddFundsModal, setShowAddFundsModal] = useState(false)
-
-  // RD-CE-FIX M1 — advisory only: the balance is below the estimated pay-as-you-go messaging cost.
-  const balanceLow = needsWalletCheck && !walletLoading && walletBalance !== null && walletBalance < paygEstimatePaise
-  // Suggested top-up: the shortfall, never below the platform's minimum top-up.
-  const suggestedTopupPaise = Math.max(walletCfg.minimumTopupPaise, paygEstimatePaise - (walletBalance ?? 0))
-
+  const needsWhatsappCapacity = !isSubmitted && localWhatsapp && prepaidWhatsapp === 0
 
   // RD-EVENT-COMMERCE-02 · why the last submission failed, shown INLINE (a toast disappears).
   const [payNotice, setPayNotice] = useState<{ kind: 'failed'; message: string } | null>(null)
@@ -2008,21 +1975,6 @@ function Step7View({
 
   const { showToast } = useToast()
 
-
-  // Fetch wallet balance when free event with comm channels
-  useEffect(() => {
-    if (!needsWalletCheck) return
-    setWalletLoading(true)
-    auth.currentUser?.getIdToken()
-      .then(tok => fetch('/api/organizer/wallet', {
-        headers: { Authorization: `Bearer ${tok}` },
-      }))
-      .then(r => r.json() as Promise<WalletBalanceResponse>)
-      .then(data => setWalletBalance(data.balancePaise))
-      // An unreadable balance is unknown, not ₹0 — no prompt rather than a false one.
-      .catch(() => setWalletBalance(null))
-      .finally(() => setWalletLoading(false))
-  }, [needsWalletCheck])
 
   // ── Publish via API ────────────────────────────────────────────────────────
   const handlePublish = useCallback(() => {
@@ -2160,152 +2112,6 @@ function Step7View({
     publishInFlight.current = true
     try { await confirmPublishOnce(confirmIdentityChange) } finally { publishInFlight.current = false }
   }, [confirmPublishOnce])
-
-  // ── Wallet top-up via Razorpay ─────────────────────────────────────────────
-  const [topupLoading, setTopupLoading] = useState(false)
-  // RD-WALLET-W1.1 — after the organizer has PAID, any outcome other than an explicit credit
-  // (authorised-not-captured, duplicate, needs review, credit deferred, unconfirmed) puts the
-  // top-up on HOLD: no new payment can be started from this page (closing and reopening the
-  // modal does not clear it), so an uncertain result can never become a second payment.
-  // The hold remembers WHICH payment it is about (order + payment id), so it can be cleared only
-  // by that payment's confirmed credit — never by an unrelated balance change. (The server also
-  // refuses a new top-up while an earlier one is unresolved, so a reload cannot bypass this.)
-  const [topupHold, setTopupHold] = useState<{ kind: TopupHoldKind; message: string; orderId: string; paymentId: string } | null>(null)
-
-  const handleTopupWallet = useCallback(async (amountPaise: number) => {
-    if (topupLoading) return
-    if (topupHold) {
-      showToast(topupHold.message, 'warning')
-      return
-    }
-    setTopupLoading(true)
-    try {
-      const tok = await auth.currentUser?.getIdToken()
-      const res = await fetch('/api/organizer/wallet/topup', {
-        method:  'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(tok ? { Authorization: `Bearer ${tok}` } : {}),
-        },
-        body: JSON.stringify({ amountPaise }),
-      })
-      const order = await res.json() as WalletTopupOrderResponse & { error?: string; code?: string }
-      if (!res.ok) {
-        // RD-WALLET-W1.1 — an earlier top-up is unresolved (server-side guard): say why, don't invite a retry.
-        showToast(
-          order.code === 'TOPUP_UNRESOLVED' && order.error ? order.error : 'Could not initiate payment. Please try again.',
-          order.code === 'TOPUP_UNRESOLVED' ? 'warning' : 'error',
-          order.code === 'TOPUP_UNRESOLVED' ? { duration: 12_000 } : undefined,
-        )
-        setTopupLoading(false)
-        return
-      }
-
-      // Open Razorpay checkout
-      const rzKey = process.env.NEXT_PUBLIC_RAZORPAY_KEY_ID ?? ''
-      const script = document.createElement('script')
-      script.src = 'https://checkout.razorpay.com/v1/checkout.js'
-      document.head.appendChild(script)
-      script.onload = () => {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const rz = new (window as any).Razorpay({
-          key:         rzKey,
-          order_id:    order.orderId,
-          amount:      order.amount,
-          currency:    order.currency,
-          name:        'RegisterDesk',
-          description: 'Wallet top-up',
-          handler: async (resp: { razorpay_order_id: string; razorpay_payment_id: string; razorpay_signature: string }) => {
-            try {
-              const tok2  = await auth.currentUser?.getIdToken()
-              let outcome: TopupVerifyOutcome
-              try {
-                const vRes  = await fetch('/api/organizer/wallet/topup/verify', {
-                  method:  'POST',
-                  headers: {
-                    'Content-Type': 'application/json',
-                    ...(tok2 ? { Authorization: `Bearer ${tok2}` } : {}),
-                  },
-                  body: JSON.stringify({
-                    orderId:   resp.razorpay_order_id,
-                    paymentId: resp.razorpay_payment_id,
-                    signature: resp.razorpay_signature,
-                  }),
-                })
-                const vJson = (await vRes.json().catch(() => null)) as (WalletTopupVerifyResponse & { code?: string }) | null
-                outcome = classifyTopupVerifyResponse(vRes.status, vJson)
-              } catch {
-                // The organizer has paid; the verify call itself failed — never an invitation to pay again.
-                outcome = { kind: 'unconfirmed', message: TOPUP_OUTCOME_MESSAGES.unconfirmed }
-              }
-              if (outcome.kind === 'credited') {
-                setWalletBalance(outcome.newBalance)
-                setShowAddFundsModal(false)
-                showToast('Wallet funded successfully!', 'success')
-              } else if (outcome.kind === 'failed') {
-                showToast(outcome.message, 'error')
-              } else {
-                // pending · duplicate · review · deferred · unconfirmed — not credited, not failed.
-                setTopupHold({ kind: outcome.kind, message: outcome.message, orderId: resp.razorpay_order_id, paymentId: resp.razorpay_payment_id })
-                showToast(outcome.message, outcome.kind === 'duplicate' || outcome.kind === 'review' ? 'warning' : 'info', { duration: 12_000 })
-              }
-            } finally {
-              setTopupLoading(false)
-            }
-          },
-          modal: { ondismiss: () => setTopupLoading(false) },
-        })
-        rz.open()
-      }
-      script.onerror = () => {
-        showToast('Could not load payment SDK. Check your connection.', 'error')
-        setTopupLoading(false)
-      }
-    } catch {
-      showToast('Network error — please try again.', 'error')
-      setTopupLoading(false)
-    }
-  }, [topupLoading, topupHold, showToast])
-
-  // RD-WALLET-W1.1 — while a payment is pending / deferred / unconfirmed, ask the server whether
-  // THIS payment (order + payment id) has been credited: GET /api/organizer/wallet/topup/status.
-  // READ-ONLY — it never verifies, credits or pays, so it cannot cause a duplicate; a balance rise
-  // from anything else is ignored. The hold clears ONLY on 'credited'; 'needs_review' and
-  // 'duplicate_payment' become their own holds (never polled — they do not resolve automatically).
-  // Bounded: after 12 tries the hold stays, accurately unresolved.
-  useEffect(() => {
-    if (!topupHold || topupHold.kind === 'duplicate' || topupHold.kind === 'review') return
-    const { orderId, paymentId } = topupHold
-    let tries = 0
-    let stopped = false
-    const id = setInterval(async () => {
-      tries++
-      if (tries >= 12) clearInterval(id)
-      try {
-        const tok = await auth.currentUser?.getIdToken()
-        const qs  = new URLSearchParams({ orderId, paymentId })
-        const r   = await fetch(`/api/organizer/wallet/topup/status?${qs.toString()}`, { headers: tok ? { Authorization: `Bearer ${tok}` } : {} })
-        if (stopped || !r.ok) return
-        const d = await r.json() as { state?: string; balancePaise?: number }
-        if (d.state === 'credited') {
-          clearInterval(id)
-          if (typeof d.balancePaise === 'number') setWalletBalance(d.balancePaise)
-          setTopupHold(null)
-          showToast('Wallet funded successfully!', 'success')
-        } else if (d.state === 'needs_review' || d.state === 'duplicate_payment') {
-          clearInterval(id)
-          const kind = d.state === 'needs_review' ? 'review' : 'duplicate'
-          setTopupHold({ kind, message: TOPUP_OUTCOME_MESSAGES[kind], orderId, paymentId })
-        } else if (d.state === 'not_credited') {
-          // RD-WALLET-W2.f.1 — the review is closed without a credit: final, not "under review".
-          clearInterval(id)
-          setTopupHold(null)
-          showToast(TOPUP_OUTCOME_MESSAGES.notCredited, 'info')
-        }
-      } catch { /* read-only poll — try again on the next tick */ }
-    }, 10_000)
-    return () => { stopped = true; clearInterval(id) }
-  }, [topupHold, showToast])
 
   // ── Activation & services (RD-EVENT-COMMERCE-05B) ─────────────────────────────
   // Payment and submission now happen together on the FINAL step (License & Services), so
@@ -2653,21 +2459,14 @@ function Step7View({
             organizer-pays). The informational Easy Split notice keeps its place: paid events, final step. */}
         {phase === 'final' && !isFreeEvent && <EasySplitNotice />}
 
-        {/* Free event with paid messaging: the existing wallet gate (messages are billed from the
-            communication wallet as they are sent). */}
-        {phase === 'final' && balanceLow && (
+        {/* RD-COMMS-P1 — WhatsApp needs WhatsApp capacity from this step (no wallet top-up). */}
+        {phase === 'final' && needsWhatsappCapacity && (
           <div role="status" className="flex items-start gap-3 rounded-xl border border-amber-200/70 bg-amber-50/60 px-4 py-3.5">
-            <Wallet className="mt-0.5 size-4 shrink-0 text-amber-600" aria-hidden />
-            <div className="text-[12.5px] text-amber-800">
-              <p>
-                WhatsApp messages not covered by this event’s prepaid messages are billed from your communication
-                balance as they’re sent (estimated {formatINR(paygEstimatePaise / 100)}; balance {formatINR((walletBalance ?? 0) / 100)}).
-                Publishing doesn’t require a balance.
-              </p>
-              <button type="button" onClick={() => setShowAddFundsModal(true)} className="mt-1.5 font-semibold underline underline-offset-2">
-                Top up balance
-              </button>
-            </div>
+            <MessageSquare className="mt-0.5 size-4 shrink-0 text-amber-600" aria-hidden />
+            <p className="text-[12.5px] text-amber-800">
+              WhatsApp messages are sent only from WhatsApp capacity. Add WhatsApp messages in License &amp; Services
+              above — without capacity, attendees receive email only.
+            </p>
           </div>
         )}
 
@@ -2835,98 +2634,6 @@ function Step7View({
         passes={passes}
         minPassPrice={minPassPrice}
       />
-      {/* Add Funds Modal */}
-      <AnimatePresence>
-        {showAddFundsModal && (
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm"
-            onClick={() => setShowAddFundsModal(false)}
-          >
-            <motion.div
-              initial={{ opacity: 0, scale: 0.95, y: 8 }}
-              animate={{ opacity: 1, scale: 1,    y: 0 }}
-              exit={{ opacity:   0, scale: 0.95, y: 8 }}
-              transition={{ duration: 0.25, ease: EASE }}
-              onClick={e => e.stopPropagation()}
-              className="w-full max-w-md overflow-hidden rounded-2xl border border-border bg-card shadow-2xl"
-            >
-              {/* Header */}
-              <div className="border-b border-border px-5 py-4">
-                <div className="flex items-center justify-between gap-2.5">
-                  <div className="flex items-center gap-2.5">
-                    <div className="flex size-8 shrink-0 items-center justify-center rounded-full bg-primary/10">
-                      <Wallet className="size-4 text-primary" aria-hidden />
-                    </div>
-                    <div>
-                      <p className="text-[15px] font-bold text-foreground">Add to communication balance</p>
-                      <p className="text-[13px] text-muted-foreground">WhatsApp messages not covered by this event’s prepaid messages are billed from your communication balance as they’re sent. Publishing doesn’t require a balance.</p>
-                    </div>
-                  </div>
-                  <button type="button" onClick={() => setShowAddFundsModal(false)} className="shrink-0 text-muted-foreground hover:text-foreground">
-                    <X className="size-4" aria-hidden />
-                  </button>
-                </div>
-              </div>
-
-              {/* Body */}
-              <div className="px-5 py-4">
-                {/* Balance summary */}
-                <div className="mb-4 divide-y divide-border/40 overflow-hidden rounded-xl border border-border">
-                  <div className="flex items-center justify-between px-4 py-2.5 text-[13px]">
-                    <span className="text-muted-foreground">Estimated messaging cost (pay-as-you-go)</span>
-                    <span className="font-semibold text-foreground">{formatINR(paygEstimatePaise / 100)}</span>
-                  </div>
-                  <div className="flex items-center justify-between px-4 py-2.5 text-[13px]">
-                    <span className="text-muted-foreground">Communication balance</span>
-                    <span className="font-medium text-foreground">
-                      {walletBalance !== null ? formatINR(walletBalance / 100) : '—'}
-                    </span>
-                  </div>
-                  <div className="flex items-center justify-between bg-muted/[0.03] px-4 py-3 text-[13px]">
-                    <span className="font-semibold text-foreground">Suggested top-up</span>
-                    <span className="font-bold text-primary">{formatINR(suggestedTopupPaise / 100)}</span>
-                  </div>
-                </div>
-
-                <p className="text-[12px] text-muted-foreground">
-                  Top-ups go to your communication balance (Communications › Billing), not to this event’s Wallet.
-                </p>
-              </div>
-
-              {topupHold && (
-                <div role="status" className="mx-5 mb-4 flex items-start gap-2 rounded-lg border border-amber-300/60 bg-amber-50 px-3 py-2.5 text-[12.5px] text-amber-800 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-300">
-                  <AlertCircle className="mt-0.5 size-3.5 shrink-0" aria-hidden />
-                  <span>{topupHold.message}</span>
-                </div>
-              )}
-
-              {/* Actions */}
-              <div className="flex flex-col gap-2 border-t border-border px-5 py-4 sm:flex-row sm:justify-end">
-                <button
-                  type="button"
-                  onClick={() => setShowAddFundsModal(false)}
-                  className="text-[13px] font-medium text-muted-foreground hover:text-foreground"
-                >
-                  Skip for now
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleTopupWallet(suggestedTopupPaise)}
-                  disabled={topupLoading || topupHold !== null}
-                  className={cn(buttonVariants({ variant: 'primary' }), 'gap-1.5 text-[13px] disabled:cursor-not-allowed disabled:opacity-50')}
-                >
-                  <Wallet className="size-3.5" aria-hidden />
-                  Top up balance
-                </button>
-              </div>
-            </motion.div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
       <AnimatePresence>
         {showCommercialModal && (
           <CommercialAgreementModal

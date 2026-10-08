@@ -51,6 +51,9 @@ interface SubmitBody {
   // Mandatory Terms & Conditions consent — validated server-side below.
   termsAccepted?: boolean
   termsVersion?:  string
+  // RD-COMMS-WA-CONSENT — OPTIONAL, explicit opt-in to organizer WhatsApp broadcasts. Only a
+  // real boolean `true` records consent (lib/whatsapp/broadcastConsent); anything else, nothing.
+  whatsappBroadcastOptIn?: unknown
 }
 
 export interface SubmitResponse {
@@ -389,6 +392,7 @@ export async function POST(
       // Server-validated consent — stamped onto the registration for auditability.
       termsAccepted: true,
       termsVersion:  termsCheck.version!,
+      whatsappBroadcastOptIn: body.whatsappBroadcastOptIn === true,
     })
 
     // ── 8b. Optional conference session selection (G.3) ───────────────────────

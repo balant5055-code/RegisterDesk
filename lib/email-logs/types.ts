@@ -1,6 +1,8 @@
 // Shared types for the emailLogs Firestore collection.
 // Safe to import from client and server.
 
+import { WHATSAPP_CAPACITY_REQUIRED } from '@/lib/communications/capacity'
+
 export type EmailLogStatus = 'queued' | 'sent' | 'delivered' | 'failed' | 'skipped'
 
 export const EMAIL_LOG_STATUS_LABELS: Record<EmailLogStatus, string> = {
@@ -101,6 +103,14 @@ export interface WriteEmailLogInput {
 export const WHATSAPP_WALLET_SKIP_REASON = 'Insufficient wallet balance'
 
 /**
+ * RD-COMMS-P1 — the `error` string the confirmation path stores since communication capacity is
+ * bought per event: the message was skipped because neither the event's WhatsApp capacity nor a
+ * legacy balance covered it. Same meaning for re-sending as the wallet skip above: nothing was ever
+ * sent, so once capacity is purchased the confirmation may be sent again.
+ */
+export const WHATSAPP_CAPACITY_SKIP_REASON = WHATSAPP_CAPACITY_REQUIRED
+
+/**
  * Was this row skipped because the wallet could not pay for it?
  *
  * HISTORICAL STATE ONLY, and that separation is the whole point. Why a row was skipped is a
@@ -115,8 +125,9 @@ export const WHATSAPP_WALLET_SKIP_REASON = 'Insufficient wallet balance'
 export function isWalletSkippedWhatsAppLog(
   log: { status?: string | null; error?: string | null },
 ): boolean {
-  return log.status === 'skipped'
-    && (log.error ?? '').trim().toLowerCase() === WHATSAPP_WALLET_SKIP_REASON.toLowerCase()
+  if (log.status !== 'skipped') return false
+  const e = (log.error ?? '').trim().toLowerCase()
+  return e === WHATSAPP_WALLET_SKIP_REASON.toLowerCase() || e === WHATSAPP_CAPACITY_SKIP_REASON.toLowerCase()
 }
 
 // ─── WhatsApp message type (RD-WA-LOGS-03) ───────────────────────────────────

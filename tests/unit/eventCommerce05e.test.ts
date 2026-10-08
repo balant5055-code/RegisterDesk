@@ -205,6 +205,11 @@ describe('rendered: the locked panel shows ACTUAL figures, unknown as unavailabl
     purchased: { whatsapp: 500, certificates: 200, media: 50 },
     consumed:  { whatsapp: 120, certificates: 0, media: 0 },
     remaining: { whatsapp: 380, certificates: 200, media: 50 },
+    // RD-COMMS-L2 — the shared organizer figures: 120 consumed = 100 used + 20 in progress.
+    communication: {
+      whatsapp:     { purchased: 500, used: 100, inProgress: 20, returned: 7, refunded: 0, carriedIn: 0, carriedOut: 0, available: 380 },
+      certificates: { purchased: 200, used: 0, inProgress: 0, returned: null, refunded: 0, carriedIn: 0, carriedOut: 0, available: 200 },
+    },
   }
   it('locked: lock + "Locked", purchased / used / remaining from the server records', () => {
     const html = renderToStaticMarkup(createElement(PurchasedPanel, {
@@ -213,7 +218,9 @@ describe('rendered: the locked panel shows ACTUAL figures, unknown as unavailabl
     expect(html).toContain('Locked')
     expect(html).not.toContain('Editing additional capacity and services')
     // RD-PHOTO-01 — photos: paid capacity 50, used 20 ⇒ 30 remaining (no free base).
-    for (const v of ['1,000', '430', '570', '120', '380', '200', '50', '20', '30']) expect(html).toContain(`>${v}<`)
+    for (const v of ['1,000', '430', '570', '100', '380', '200', '50', '20', '30']) expect(html).toContain(`>${v}<`)
+    expect(html).toContain('In progress 20 · Returned 7 · Refunded 0')
+    expect(html).toContain('>Available<')
     expect(html).toContain('Photo capacity')
     expect(html).toContain('maximum 3,000 per event')
     expect(html).not.toContain('Photo limit')

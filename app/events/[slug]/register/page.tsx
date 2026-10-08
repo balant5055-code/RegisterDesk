@@ -495,6 +495,8 @@ export default async function RegisterPage({
         requiresInviteCode={requiresInviteCode}
         termsUrl={termsUrl}
         refundPolicyUrl={refundPolicyUrl}
+        // RD-COMMS-WA-CONSENT — offer the WhatsApp-updates opt-in only where WhatsApp is on.
+        whatsappUpdatesAvailable={rawPricing?.whatsappEnabled === true}
       />
     </ToastProvider>
   )

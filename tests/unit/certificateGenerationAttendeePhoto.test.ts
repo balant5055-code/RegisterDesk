@@ -77,7 +77,10 @@ vi.mock('@/lib/certificates/firestore', () => ({
 }))
 
 // RD-EVENT-COMMERCE-02 — no prepaid certificate allowance for these events: the existing wallet path runs unchanged.
-vi.mock('@/lib/licensing/serviceAllowanceLedger', () => ({ draftIdForEventSlug: async () => null, reserveServiceUnits: async () => ({ mode: 'none' }), releaseServiceUnits: async () => false }))
+// RD-COMMS-P1 — certificates REQUIRE certificate capacity: these suites test rendering/storage, so the
+// event holds capacity (one unit reserved per certificate). The capacity rule itself is pinned in
+// tests/unit/communicationCapacityP1.test.ts.
+vi.mock('@/lib/licensing/serviceAllowanceLedger', () => ({ draftIdForEventSlug: async () => 'draft-1', reserveServiceUnits: async () => ({ mode: 'allowance', already: false }), releaseServiceUnits: async () => true }))
 vi.mock('@/lib/certificates/billing',  () => ({ chargeCertificate: async () => ({ charged: false }) }))
 vi.mock('@/lib/certificates/email',    () => ({ emailCertificate: async () => ({ success: true, skipped: true }) }))
 vi.mock('@/lib/certificates/whatsapp', () => ({ sendCertificateWhatsApp: async () => {} }))

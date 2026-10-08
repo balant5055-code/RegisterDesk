@@ -46,6 +46,9 @@ export interface PaymentIntentRecord {
   // stamp the registration from the SERVER snapshot rather than trusting a later client.
   termsAccepted?:  boolean
   termsVersion?:   string
+  // RD-COMMS-WA-CONSENT — explicit WhatsApp broadcast opt-in, validated at create-order and
+  // stamped onto the registration at settlement (never re-read from a client).
+  whatsappBroadcastOptIn?: boolean
   status:         PaymentIntentStatus
   registrationId?: string        // set atomically when registration is created
   paymentId?:      string        // Razorpay payment ID, set after verification

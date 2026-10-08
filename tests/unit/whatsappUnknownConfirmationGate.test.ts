@@ -130,19 +130,39 @@ vi.mock('@/lib/whatsapp', () => ({
 // (tests/emulator/closureAcceptance.emu.test.ts). Here it is a faithful stand-in that feeds this
 // file's capture arrays: one charge per wamid; a legacy base row (from an earlier message) puts a
 // NEW wamid on `<base>__<wamid>`; the in-transaction balance re-check never drives it negative.
+// RD-COMMS-P2-A — the attempt's FUNDING HOLD (lib/whatsapp/funding.ts): a faithful stand-in (real
+// atomicity is proven on the emulator) — one hold per attempt key, legacy-funded only while the
+// balance covers the whole price. The hold IS the charge; the acceptance settles against it.
+const holds = new Map<string, { amount: number; state: 'held' | 'released' | 'accepted' }>()
+vi.mock('@/lib/whatsapp/funding', async orig => ({
+  ...(await orig<typeof import('@/lib/whatsapp/funding')>()),
+  reserveWhatsAppFunding: async (r: { unitKey: string; holdLedgerId: string; legacyPricePaise: number }) => {
+    if (holds.has(r.unitKey)) return { ok: false, reason: 'already_held' }
+    if (!(r.legacyPricePaise > 0 && walletBalance >= r.legacyPricePaise)) return { ok: false, reason: 'allowance_required' }
+    walletBalance -= r.legacyPricePaise
+    walletDebits.push(r.legacyPricePaise)
+    ledgerWrites.push({ id: r.holdLedgerId, amountPaise: r.legacyPricePaise })
+    holds.set(r.unitKey, { amount: r.legacyPricePaise, state: 'held' })
+    return { ok: true, mode: 'legacy', costPaise: r.legacyPricePaise }
+  },
+  releaseWhatsAppFunding: async (k: { unitKey: string }) => {
+    const h = holds.get(k.unitKey)
+    if (!h || h.state !== 'held') return false
+    h.state = 'released'; walletBalance += h.amount
+    return true
+  },
+}))
+
 const acceptedWamids = new Set<string>()
 vi.mock('@/lib/whatsapp/acceptance', async orig => ({
   ...(await orig<typeof import('@/lib/whatsapp/acceptance')>()),
   withPersistRetry: <T,>(fn: () => Promise<T>) => fn(),
-  recordMessageAcceptance: async (i: { wamid: string; costPaise: number; baseLedgerId: string; registrationPatch?: { patch: Doc } }) => {
+  recordMessageAcceptance: async (i: { wamid: string; funding: { unitKey: string }; registrationPatch?: { patch: Doc } }) => {
     if (acceptedWamids.has(i.wamid)) return { already: true, chargedPaise: 0, chargeSkipped: false }
     acceptedWamids.add(i.wamid)
+    const h = holds.get(i.funding.unitKey)
     let chargedPaise = 0
-    if (i.costPaise > 0 && walletBalance >= i.costPaise) {
-      walletDebits.push(i.costPaise)
-      ledgerWrites.push({ id: ledgerExists ? `${i.baseLedgerId}__${i.wamid}` : i.baseLedgerId, amountPaise: i.costPaise })
-      chargedPaise = i.costPaise
-    }
+    if (h && h.state === 'held') { h.state = 'accepted'; chargedPaise = h.amount }
     if (i.registrationPatch) regUpdates.push(i.registrationPatch.patch)
     return { already: false, chargedPaise, chargeSkipped: false }
   },
@@ -184,7 +204,7 @@ beforeEach(() => {
     ticketCode: 'TK-1', whatsappStatus: 'unknown',
   }
   eventDoc = { pricing: { whatsappEnabled: true } }
-  providerSends.length = 0; walletDebits.length = 0; ledgerWrites.length = 0; regUpdates.length = 0; acceptedWamids.clear()
+  providerSends.length = 0; walletDebits.length = 0; ledgerWrites.length = 0; regUpdates.length = 0; acceptedWamids.clear(); holds.clear()
 })
 
 // ─── 1. The security matrix, through the REAL route ───────────────────────────
@@ -336,13 +356,15 @@ describe('no duplicate billing is introduced', () => {
     // Approved rule (D3): Meta accepted ⇒ billable exactly once PER MESSAGE. The original
     // (timed-out) message, if Meta did accept it, is billed by its own acceptance record when its
     // status webhook arrives; this retry is a second accepted message and is billed separately.
-    ledgerExists = true
-    const r = await retryWhatsAppConfirmation(ARGS, { confirmUnknownDelivery: true })
+    // RD-COMMS-P2-A — the original attempt still holds ITS funding; the retry (its own nonce, as the
+    // route passes) is funded and charged under its own attempt id.
+    holds.set('wa_reg_reg-1', { amount: 35, state: 'held' })
+    const r = await retryWhatsAppConfirmation(ARGS, { confirmUnknownDelivery: true, attemptNonce: 'n1' })
 
     expect(r.ok).toBe(true)
     expect(providerSends).toHaveLength(1)
     expect(walletDebits).toEqual([35])
-    expect(ledgerWrites).toHaveLength(1)
+    expect(ledgerWrites).toEqual([{ id: 'whatsapp_reg-1__r_n1', amountPaise: 35 }])
   })
 
   it('confirmation cannot be used to bypass the already-sent guard', async () => {

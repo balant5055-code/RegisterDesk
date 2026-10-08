@@ -64,6 +64,7 @@ import { buildRegistrationPaymentFields } from '@/lib/registrations/paymentIdent
 // the absent import is part of the guarantee, not an oversight.
 import { captureFinancialError }     from '@/lib/monitoring/sentry'
 import { flagSuspiciousPayment }     from '@/lib/payments/flagSuspicious'
+import { whatsappConsentFields }     from '@/lib/whatsapp/broadcastConsent'
 
 /** Which path is settling. Only affects the unexpected-error policy and the recovery marker. */
 export type SettlementSource = 'verify' | 'webhook' | 'sweep'
@@ -480,6 +481,8 @@ export async function settleCapturedRegistration(args: {
             termsAcceptedAt: FieldValue.serverTimestamp(),
             ...(intent.termsVersion ? { termsVersion: intent.termsVersion } : {}),
           } : {}),
+          // RD-COMMS-WA-CONSENT — explicit WhatsApp broadcast opt-in, from the same snapshot.
+          ...whatsappConsentFields(intent.whatsappBroadcastOptIn, intent.attendee?.phone),
           registeredAt:    FieldValue.serverTimestamp(),
           updatedAt:       FieldValue.serverTimestamp(),
           ...(uidOverride ?? intent.uid ? { uid: uidOverride ?? intent.uid } : {}),

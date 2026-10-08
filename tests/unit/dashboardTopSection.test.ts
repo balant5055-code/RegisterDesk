@@ -276,7 +276,8 @@ describe('4 · the trend never turns a rollup gap into a claim about the busines
 describe('5 · the grid is composed, not accidental', () => {
   it('cards in a row stretch to equal height with no fixed heights', () => {
     expect(PAGE).toMatch(/aria-label="Key metrics" className="rd-rise grid items-stretch/)
-    expect(PAGE).toMatch(/aria-label="Today" className="rd-rise grid items-stretch/)
+    // RD-COMMS-P1 — the Today row drops to 4 columns when there is no legacy balance tile.
+    expect(PAGE).toMatch(/aria-label="Today" className=\{cn\('rd-rise grid items-stretch/)
     expect(KPI).toMatch(/'relative flex h-full min-w-0 flex-col overflow-hidden rounded-surface/)
     expect(TILE).toMatch(/flex h-full flex-col overflow-hidden rounded-surface/)
     // A fixed pixel height on the CARD would break on a wrapped label — the failure this

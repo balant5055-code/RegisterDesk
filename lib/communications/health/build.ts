@@ -66,11 +66,9 @@ export function buildChannelHealth(channel: CommChannelId, s: ChannelSignals): C
     // Credits
     !cap.paid
       ? dim('credits', 'green', `${cap.label} is free`, 'No action needed')
-      : s.funded === true
-        ? dim('credits', 'green', 'Communication balance covers sending', 'No action needed')
-        : s.funded === false
-          ? dim('credits', 'amber', 'Communication balance is too low to send', 'Top up your communication balance (Communications → Billing)')
-          : dim('credits', 'amber', 'Communication balance not evaluated in this scope', 'Open Communications → Billing to review the balance'),
+      // RD-COMMS-P1 — paid channels are sent from each EVENT's purchased capacity (License & Services);
+      // the legacy communication balance only drains. There is no balance to top up.
+      : dim('credits', 'amber', `${cap.label} is sent from each event’s purchased capacity`, 'Purchase capacity per event in License & Services (see Communications → Usage)'),
 
     // Runtime — Phase 2 exposes config-derived state; live delivery metrics are surfaced
     // in the communication logs, not fabricated here.
@@ -106,7 +104,8 @@ function channelReadiness(
   }
   if (!s.configured)      blockers.push(`${cap.label} provider is not connected`)
   if (!s.platformEnabled) blockers.push(`${cap.label} is disabled in Business Configuration`)
-  if (cap.paid && s.funded === false) warnings.push(`Wallet balance is low — ${cap.label} messages will be skipped until you top up`)
+  // RD-COMMS-P1 — no top-up exists: paid channels need each event's purchased capacity.
+  if (cap.paid && s.funded === false) warnings.push(`${cap.label} messages are sent only from an event’s purchased capacity — buy it in License & Services`)
   if (!s.templatesAvailable && s.configured) warnings.push(`No approved ${cap.label} template — sends may fall back or be skipped`)
 
   const eventOff = s.event ? !s.event.enabled : false

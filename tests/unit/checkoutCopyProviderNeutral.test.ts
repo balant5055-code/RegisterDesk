@@ -102,8 +102,10 @@ describe('RD-PAYMENT-CHECKOUT-COPY-06.1 · Razorpay-only surfaces are LEFT ALONE
   // by a frozen decision). Naming it there is accurate, and a well-meaning sweep that
   // neutralised them would delete true information.
   it.each([
-    ['components/wallet/CommunicationBalanceCard.tsx', 'Secure payment via Razorpay'],
+    // RD-COMMS-P1 — the communication-balance top-up dialog (CommunicationBalanceCard) was removed with
+    // the retired top-up path; that card is now a read-only legacy-balance notice with no payment.
     // RD-PHOTO-01 — BuyCreditsDialog was removed with the retired Media Credits purchase path.
+    ['components/wizard/ActivationPaymentPanel.tsx', 'Razorpay'],
   ])('%s still says "%s"', (file, phrase) => {
     expect(read(file)).toContain(phrase)
   })

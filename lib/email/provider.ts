@@ -128,6 +128,11 @@ export interface EmailResult {
   // deliberate non-send from a delivery FAILURE, so callers and the Communication Log
   // can tell "we chose not to send" from "SES rejected it".
   suppressed?: boolean
+  // RD-COMMS-P2-D — true when the provider gave NO definite answer (timeout, dropped connection,
+  // a 5xx): it may already have ACCEPTED the message. Never resend such a result automatically —
+  // a "failed" retry of it is how one recipient gets the same email twice. Absent ⇒ the outcome
+  // is definite (success, or a rejection that queued nothing).
+  deliveryUnknown?: boolean
 }
 
 // ─── Registration lifecycle email params ──────────────────────────────────────

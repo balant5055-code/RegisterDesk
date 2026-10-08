@@ -24,14 +24,14 @@
 
 import { FieldValue } from 'firebase-admin/firestore'
 import { adminDb }     from '@/lib/firebase/admin'
-import { getWalletBalance } from '@/lib/firebase/firestore/wallet'
 import { getCommunicationConfig } from '@/lib/communications/resolveCommunicationConfig'
-import { getWalletConfig } from '@/lib/wallet/resolveWalletConfig'
+import { WHATSAPP_CAPACITY_REQUIRED } from '@/lib/communications/capacity'
 import { getMetaProvider, resolveWhatsAppTemplate } from '@/lib/whatsapp'
 import { NotificationType } from '@/lib/notifications'
 import { validatePhoneNumber } from '@/lib/communication/phone'
 import type { RegistrationDocument } from '@/lib/registrations/types'
-import { reserveServiceUnits, releaseServiceUnits, draftIdForEventSlug, type ReserveOutcome } from '@/lib/licensing/serviceAllowanceLedger'
+import { draftIdForEventSlug } from '@/lib/licensing/serviceAllowanceLedger'
+import { reserveWhatsAppFunding, releaseWhatsAppFunding, confirmationHoldLedgerId } from '@/lib/whatsapp/funding'
 import { acceptConfirmation } from '@/lib/registrations/whatsappConfirmationAcceptance'
 import { callbackDataFor } from '@/lib/whatsapp/acceptance'
 
@@ -53,7 +53,9 @@ export type WhatsAppRetryResult =
         | 'not_configured' | 'channel_disabled' | 'event_disabled'
         | 'registration_missing' | 'already_sent' | 'delivery_unknown' | 'no_phone'
         | 'insufficient_balance' | 'template_unresolved' | 'send_failed'
-        | 'allowance_exhausted'   // RD-EVENT-COMMERCE-02 — prepaid allowance used up, policy 'block'
+        | 'send_unknown'          // RD-COMMS-P2-A — Meta never answered THIS attempt: delivery unknown
+        | 'allowance_exhausted'   // RD-EVENT-COMMERCE-02 — prepaid allowance used up (no legacy balance covers it)
+        | 'allowance_required'    // RD-COMMS-P1 — no WhatsApp capacity (and no legacy balance covers it)
       /** Normalized, organizer-safe message. Never contains credentials. */
       error: string
       /** Meta Graph error code, when the failure came from the provider. */
@@ -195,30 +197,23 @@ export async function retryWhatsAppConfirmation(
   }
   const normalizedPhone = phoneCheck.normalizedPhone as string
 
-  // RD-EVENT-COMMERCE-02 — same unit key as the live path, so a retry after a failed live
-  // attempt re-takes the unit that attempt released, and a success is consumed exactly once.
+  // A retry is a NEW message: its own unit key (per-attempt nonce from the route's claim).
   const unitKey = opts?.attemptNonce && /^[A-Za-z0-9_-]{1,64}$/.test(opts.attemptNonce)
     ? `wa_reg_${args.registrationId}__r_${opts.attemptNonce}`
     : `wa_reg_${args.registrationId}`
-  let allowance: ReserveOutcome = { mode: 'none' }
-  if (allowanceDraftId) {
-    allowance = await reserveServiceUnits({ draftId: allowanceDraftId, service: 'whatsapp', unitKey, source: 'registration_confirmation_retry' })
-    if (allowance.mode === 'exhausted' && allowance.policy === 'block') {
-      return { ok: false, reason: 'allowance_exhausted', error: 'This event’s prepaid WhatsApp allowance is used up. While the event is open, buy more with Increase limit on the event Wallet.' }
-    }
+  // RD-COMMS-P2-A — funded BEFORE the send, atomically (lib/whatsapp/funding.ts): the event's capacity,
+  // else the legacy balance while it covers the whole legacy price. Otherwise refused, nothing sent.
+  const fundingKey = { organizerUid: args.organizerUid, draftId: allowanceDraftId, unitKey, holdLedgerId: confirmationHoldLedgerId(args.registrationId, unitKey) }
+  const funding = await reserveWhatsAppFunding({
+    ...fundingKey, legacyPricePaise: comm.whatsapp.pricePaise, source: 'registration_confirmation_retry',
+    ledger: { referenceId: args.registrationId, description: `WhatsApp confirmation — ${args.eventName}`, eventSlug: args.eventSlug, metadata: { eventId: args.eventSlug, registrationId: args.registrationId } },
+  })
+  if (!funding.ok) {
+    if (funding.reason === 'already_held') return { ok: false, reason: 'already_sent', error: 'This WhatsApp confirmation is already being sent.' }
+    return { ok: false, reason: funding.reason, error: WHATSAPP_CAPACITY_REQUIRED }
   }
-  const fromAllowance = allowance.mode === 'allowance'
-  // RD-INTEG — release only a unit THIS attempt took.
-  const giveBack = () => fromAllowance && allowance.mode === 'allowance' && !allowance.already && allowanceDraftId
-    ? releaseServiceUnits({ draftId: allowanceDraftId, service: 'whatsapp', unitKey }).catch(err => console.error('[whatsapp-retry] allowance release failed', err))
-    : Promise.resolve()
-
-  const costPaise = fromAllowance ? 0 : (comm.whatsapp.walletChargeAttendeeNotifications ? comm.whatsapp.pricePaise : 0)
-  const walletCfg = await getWalletConfig()
-  const balance   = await getWalletBalance(args.organizerUid)
-  if (!walletCfg.allowNegativeBalance && costPaise > 0 && balance < costPaise) {
-    return { ok: false, reason: 'insufficient_balance', error: 'Insufficient wallet balance to send this message.' }
-  }
+  // Only THIS attempt took the hold; an accepted hold is never released.
+  const giveBack = () => releaseWhatsAppFunding(fundingKey).catch(err => console.error('[whatsapp-retry] funding release failed', err))
 
   const resolved = resolveWhatsAppTemplate(
     NotificationType.REGISTRATION_CONFIRMATION,
@@ -235,16 +230,24 @@ export async function retryWhatsAppConfirmation(
     return { ok: false, reason: 'template_unresolved', error: resolved.error }
   }
 
-  let result: Awaited<ReturnType<typeof provider.sendTemplate>>
   // RD-CLOSE — callback data lets the status webhook recover this acceptance if persistence fails.
-  try { result = await provider.sendTemplate({ ...resolved.message, callbackData: callbackDataFor({ kind: 'registration', registrationId: args.registrationId, unitKey }) }) }
-  catch (err) { await giveBack(); throw err }
+  // A throw is a transport failure like any other: the outcome is unknown, never "failed".
+  const result = await provider.sendTemplate({ ...resolved.message, callbackData: callbackDataFor({ kind: 'registration', registrationId: args.registrationId, unitKey }) })
+    .catch((err: unknown) => ({ success: false as const, error: err instanceof Error ? err.message : 'transport failure', httpStatus: undefined, code: undefined, providerMessage: undefined, messageId: undefined }))
   if (!result.success) {
-    await giveBack()   // not accepted ⇒ nothing consumed
-    // NOT charged. Same compact diagnostic string the live path stores, built only from
-    // httpStatus / code / providerMessage — no credential ever reaches it.
+    // Same compact diagnostic string the live path stores, built only from httpStatus / code /
+    // providerMessage — no credential ever reaches it.
     const providerResponse =
       `HTTP ${result.httpStatus ?? '-'} · code ${result.code ?? '-'} · ${result.providerMessage ?? result.error ?? 'unknown'}`
+    // RD-COMMS-P2-A · A6 — no HTTP status ⇒ Meta never answered: delivery is UNKNOWN, exactly as the
+    // live path records it. Not "failed" — that is what let the next retry go out with no
+    // confirmation and double-message the attendee. The hold is KEPT for Meta's webhook to settle.
+    if (result.httpStatus === undefined) {
+      const error = `Delivery status unknown — no response from Meta (${result.error ?? 'transport failure'})`
+      recordStatus(args.registrationId, 'unknown', { reason: error })
+      return { ok: false, reason: 'send_unknown', error, providerResponse }
+    }
+    await giveBack()   // definitely refused ⇒ nothing consumed
     const error = result.error ?? 'WhatsApp send failed'
     recordStatus(args.registrationId, 'failed', { reason: error })
     return {
@@ -262,8 +265,7 @@ export async function retryWhatsAppConfirmation(
       debited = (await acceptConfirmation({
         registrationId: args.registrationId, organizerUid: args.organizerUid, eventSlug: args.eventSlug, eventName: args.eventName,
         attendeeName: reg.attendee.name, email: reg.attendee.email ?? '', phone: normalizedPhone, wamid: result.messageId,
-        fromAllowance, writeLog: false, source: 'retry',
-        unitKey, ...(fromAllowance && allowanceDraftId ? { allowanceUnit: { draftId: allowanceDraftId, unitKey } } : {}),
+        draftId: allowanceDraftId, writeLog: false, source: 'retry', unitKey,
       })).chargedPaise
     } catch (err) {
       console.error(`[whatsapp-retry] acceptance not persisted for ${args.registrationId} — the status webhook will recover it:`, err)

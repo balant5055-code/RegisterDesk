@@ -90,6 +90,25 @@ function startOfDayUtc(dateISO: string, timezone: string): Date {
 }
 
 /**
+ * RD-COMMS-P2-E — the instant a local wall-clock time `hh:mm` on `dateISO` occurs in `timezone`
+ * (e.g. an event's start). Same two-pass offset correction as startOfDayUtc, so a DST zone lands
+ * on the right side of a transition. Returns null for a malformed date, time or zone — a bad
+ * value is never coerced into a valid-looking instant.
+ */
+export function zonedWallTimeUtc(dateISO: string, hhmm: string, timezone: string): Date | null {
+  if (!isValidISODate(dateISO) || !isValidTimezone(timezone)) return null
+  const t = /^(\d{1,2}):(\d{2})$/.exec(hhmm)
+  if (!t) return null
+  const h = Number(t[1]), min = Number(t[2])
+  if (h > 23 || min > 59) return null
+  const [y, m, d] = dateISO.split('-').map(Number)
+  const wallClockAsUtc = Date.UTC(y, m - 1, d, h, min, 0, 0)
+  let instant = wallClockAsUtc - offsetMsAt(new Date(wallClockAsUtc), timezone)
+  instant = wallClockAsUtc - offsetMsAt(new Date(instant), timezone)
+  return new Date(instant)
+}
+
+/**
  * Half-open UTC window covering whole calendar days in `timezone`.
  *
  * @param startDateISO first day, inclusive ('YYYY-MM-DD')

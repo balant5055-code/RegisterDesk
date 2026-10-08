@@ -28,8 +28,8 @@ import type { Job }                  from '@/lib/jobs/types'
 import { isAuthorizedCron, cronUnauthorized } from '@/lib/cron/auth'
 import { recordCronExecution }       from '@/lib/monitoring/cronMetrics'
 import { captureError, flushMonitoring } from '@/lib/monitoring/sentry'
-import { EMAIL_BROADCAST_JOBS, processEmailBroadcastChunk }       from '@/lib/broadcasts/emailJob'
-import { WHATSAPP_BROADCAST_JOBS, processWhatsAppBroadcastChunk } from '@/lib/broadcasts/whatsappJob'
+import { EMAIL_BROADCAST_JOBS, processEmailBroadcastChunk, syncEmailCampaignTerminal } from '@/lib/broadcasts/emailJob'
+import { WHATSAPP_BROADCAST_JOBS, processWhatsAppBroadcastChunk, syncCampaignTerminal } from '@/lib/broadcasts/whatsappJob'
 
 export const dynamic     = 'force-dynamic'
 export const maxDuration = 60
@@ -53,9 +53,11 @@ export const HARD_STALE_AFTER_MS = 30 * 60_000
 const CRON_BUDGET_MS = 50_000
 const JOB_BATCH      = 25
 
+// RD-COMMS-P2-B — `syncFailed` brings the job's CAMPAIGN out of `sending` once the job is failed
+// (status-guarded; WhatsApp also settles: accepted units stay billed, unknown ones held).
 const CHANNELS = [
-  { collection: EMAIL_BROADCAST_JOBS,    drive: processEmailBroadcastChunk,    label: 'email'    },
-  { collection: WHATSAPP_BROADCAST_JOBS, drive: processWhatsAppBroadcastChunk, label: 'whatsapp' },
+  { collection: EMAIL_BROADCAST_JOBS,    drive: processEmailBroadcastChunk,    syncFailed: (id: string) => syncEmailCampaignTerminal(id, 'failed'), label: 'email'    },
+  { collection: WHATSAPP_BROADCAST_JOBS, drive: processWhatsAppBroadcastChunk, syncFailed: (id: string) => syncCampaignTerminal(id, 'failed'),     label: 'whatsapp' },
 ] as const
 
 const millis = (v: unknown): number =>
@@ -104,6 +106,9 @@ async function handle(req: NextRequest): Promise<NextResponse> {
             `No progress for ${Math.round(idleMs / 60_000)} minutes; continuation, the scheduled ` +
             `cron and a reaper retry all failed to advance it.`,
           )
+          // The job is final now; its campaign must not stay `sending` forever (the settlement
+          // sweep is the backstop if this throws).
+          await channel.syncFailed(job.jobId).catch(err => console.error('[cron/job-reaper] campaign sync failed:', { jobId: job.jobId, err }))
           failed++
           outcomes.push({ collection: channel.collection, jobId: job.jobId, action: 'failed', idleMs })
         } else {

@@ -387,11 +387,11 @@ const RULES: Rule[] = [
     if (w === null || w <= 0) return null
     return {
       rule: 'comm_wallet_held', severity: 'warning', module: 'communications',
-      title: `${nf(w)} WhatsApp messages were held for wallet balance`,
-      summary: 'Never sent because the wallet could not cover them — not a delivery failure.',
+      title: `${nf(w)} WhatsApp messages so far were not sent for lack of capacity`,
+      summary: 'Never sent because neither the event’s WhatsApp capacity nor a legacy balance covered them — not a delivery failure.',
       evidence: c.base('communications.intelligence.whatsapp.walletSkipped', 'lifetime', 'count', w, { min: 1 },
         { basis: c.r.communications.intelligence.whatsapp.basis }),
-      action: { label: 'Check the communication balance', href: COMMUNICATION_BALANCE_HREF },
+      action: { label: 'Review communication usage', href: COMMUNICATION_BALANCE_HREF },
     }
   },
 

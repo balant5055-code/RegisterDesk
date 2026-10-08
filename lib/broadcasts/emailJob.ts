@@ -11,10 +11,11 @@
 // Email is free (no wallet charge), so there is no billing to double-charge; a
 // per-recipient `sent` flag makes a resumed/re-run chunk never re-send.
 
-import crypto            from 'crypto'
 import { FieldPath, FieldValue } from 'firebase-admin/firestore'
 import { adminDb }       from '@/lib/firebase/admin'
-import { createJob as kernelCreateJob, getJob } from '@/lib/jobs/kernel'
+import { getJob } from '@/lib/jobs/kernel'
+import { buildBroadcastJob, broadcastJobIdFor, transitionCampaign } from './jobPreparation'
+import { broadcastExecutionBlock, blockedJobError, blockReasonOf } from './executionGuard'
 import { runJobChunk }   from '@/lib/jobs/runner'
 import type { JobStrategy, ProcessResult } from '@/lib/jobs/runner'
 import type { Job }      from '@/lib/jobs/types'
@@ -25,7 +26,9 @@ import { emailShell }              from '@/lib/email/templates/base'
 import { substituteVariables }     from '@/lib/email-templates/types'
 import { renderBroadcastBody }     from '@/lib/broadcasts/renderBody'
 import { writeEmailLog }           from '@/lib/email-logs/write'
-import { buildUnsubscribeUrl, buildUnsubscribeApiUrl } from '@/lib/email/unsubscribeToken'
+import { buildUnsubscribeUrl, unsubscribeHeaders } from '@/lib/email/unsubscribeToken'
+import { suppressionStatus } from '@/lib/firebase/firestore/emailSuppressionList'
+import { SKIP_UNSUBSCRIBED, SKIP_UNDELIVERABLE } from '@/lib/communications/consent'
 import { resolvePublicBranding }   from '@/lib/branding/service'
 import { logBroadcastAction }      from '@/lib/broadcasts/audit'
 import { finalizeBroadcast }       from './finalize'
@@ -83,6 +86,15 @@ interface EmailRecipientRow {
   attempts?:      number
   /** Normalized message of the last failure. Observable final state. */
   lastError?:     string
+  /** RD-COMMS-P2-D — written just BEFORE a send; cleared by its definite outcome. Found set ⇒ the
+   *  attempt was interrupted (crash / lost lease) and the provider may have accepted it. */
+  pendingAttemptAt?: unknown
+  /** RD-COMMS-P2-D — the send's outcome is unknown (no definite provider answer): never re-sent. */
+  indeterminate?: boolean
+  /** RD-COMMS-P2-G — not sent: the recipient opted out of this organizer, or the address is
+   *  suppressed platform-wide. Final for this broadcast; `skipReason` says which. */
+  skipped?:       boolean
+  skipReason?:    string
 }
 
 // send.ts CampaignData is a superset; typed locally to avoid a circular import.
@@ -100,17 +112,25 @@ interface EmailCampaignInput {
 type Recipient = { id: string; data: RegistrationDocument }
 
 // ─── Job creation (snapshot recipients) ───────────────────────────────────────
+// RD-COMMS-P2-B — deterministic job id per campaign, built recipients-FIRST, job-document-LAST
+// (lib/broadcasts/jobPreparation.ts). With `campaignRef`, created only while that campaign is still
+// sending and still points at it; null ⇒ it stopped meanwhile and no job was created.
 export async function createEmailBroadcastJob(
   campaignId: string,
   campaign: EmailCampaignInput,
   recipients: Recipient[],
-): Promise<EmailBroadcastJob> {
-  const jobId = `eb_${crypto.randomUUID()}`
-
-  const job = await kernelCreateJob<EmailBroadcastJob>(
-    EMAIL_BROADCAST_JOBS,
-    jobId,
-    {
+  opts: { jobId?: string; campaignRef?: FirebaseFirestore.DocumentReference } = {},
+): Promise<EmailBroadcastJob | null> {
+  const rows: EmailRecipientRow[] = recipients.map(r => ({
+    registrationId: r.id,
+    email:          r.data.attendee.email,
+    name:           r.data.attendee.name,
+    ticketCode:     r.data.ticketCode ?? '',
+  }))
+  return buildBroadcastJob<EmailBroadcastJob>({
+    jobsCollection: EMAIL_BROADCAST_JOBS,
+    jobId: opts.jobId ?? broadcastJobIdFor('email', campaignId),
+    seed: {
       organizerUid:    campaign.organizerUid,
       createdBy:       campaign.createdBy ?? campaign.organizerUid,
       campaignId,
@@ -121,26 +141,9 @@ export async function createEmailBroadcastJob(
       html:            campaign.html,
       actualCostPaise: campaign.actualCostPaise ?? 0,
     },
-    recipients.length,
-  )
-
-  const col = adminDb.collection(EMAIL_BROADCAST_JOBS).doc(jobId).collection('recipients')
-  for (let i = 0; i < recipients.length; i += 400) {
-    const batch = adminDb.batch()
-    for (let j = i; j < Math.min(i + 400, recipients.length); j++) {
-      const r = recipients[j]
-      const row: EmailRecipientRow = {
-        registrationId: r.id,
-        email:          r.data.attendee.email,
-        name:           r.data.attendee.name,
-        ticketCode:     r.data.ticketCode ?? '',
-      }
-      batch.set(col.doc(`r${String(j).padStart(7, '0')}`), row)
-    }
-    await batch.commit()
-  }
-
-  return job
+    rows: rows as unknown as Record<string, unknown>[],
+    ...(opts.campaignRef ? { campaign: { ref: opts.campaignRef, kind: 'email' as const } } : {}),
+  })
 }
 
 // ─── Strategy ──────────────────────────────────────────────────────────────────
@@ -159,6 +162,10 @@ export function emailBroadcastStrategy(): JobStrategy<EmailBroadcastJob, EmailJo
   return {
     // Load once: this event's transport + its availability + white-label branding + per-msg cost.
     async loadContext(job) {
+      // RD-COMMS-P2-B — every chunk re-checks the authoritative organizer / event / feature state;
+      // a blocked broadcast fails (terminal, with its reason) instead of sending on.
+      const block = await broadcastExecutionBlock({ organizerUid: job.organizerUid, eventSlug: job.eventSlug, channel: 'email' })
+      if (block) return { ok: false, error: blockedJobError(block) }
       // RD-EMAIL-PROVIDER — a broadcast belongs to ONE event, so its provider is resolved
       // once per job from that event, never globally. A broadcast for an SES event still
       // uses SES even while another event is on Resend. Resolved BEFORE the gate so the
@@ -199,6 +206,44 @@ export function emailBroadcastStrategy(): JobStrategy<EmailBroadcastJob, EmailJo
     // `sent` (a prior interrupted chunk) is skipped — no duplicate email.
     async processItem(item, job, ctx) {
       if (item.sent) return { ok: true }
+      if (item.skipped) return { ok: true, skipped: true }   // RD-COMMS-P2-G — opted out on an earlier pass
+
+      // RD-COMMS-P2-D — the ONLY safe answer to "did an earlier attempt reach the provider?" when we
+      // cannot know is "assume it may have": an interrupted attempt (marker still set — the worker
+      // died, or lost its lease, between the send and its outcome write) or an earlier unknown
+      // outcome is NEVER sent again. It stays failed + delivery-unknown; nothing re-sends it.
+      const recipientRef = adminDb.collection(EMAIL_BROADCAST_JOBS).doc(job.jobId).collection('recipients').doc(item.__id)
+      if (item.indeterminate) return { ok: false, error: 'Delivery status unknown — not re-sent' }
+      if (item.pendingAttemptAt) {
+        await recipientRef.update({ indeterminate: true, pendingAttemptAt: FieldValue.delete(), lastError: 'Send was interrupted — delivery status unknown' }).catch(() => undefined)
+        void writeEmailLog({
+          organizerUid: job.organizerUid, eventId: job.eventId, eventSlug: job.eventSlug, eventName: job.eventName,
+          templateKey: 'broadcast', provider: ctx.emailProviderName, campaignId: job.campaignId,
+          recipientEmail: item.email, recipientName: item.name, subject: job.subject, status: 'failed',
+          registrationId: item.registrationId, error: 'Send was interrupted — delivery status unknown', deliveryUnknown: true, costPaise: 0,
+        })
+        return { ok: false, error: 'Delivery status unknown (interrupted send)' }
+      }
+
+      // RD-COMMS-P2-G — CONSENT, re-read at the send boundary for every recipient: the audience was
+      // filtered when the broadcast was created, but a recipient may opt out (or start bouncing)
+      // afterwards — before the job starts, between its pages, before a retry. An opted-out or
+      // platform-suppressed address is skipped with its reason and never reaches SES or Resend.
+      // If the state cannot be read, the recipient is NOT sent (consent fails closed).
+      let consent: { platform: boolean; organizer: boolean }
+      try { consent = await suppressionStatus(item.email, job.organizerUid) }
+      catch { return { ok: false, error: 'Opt-out status could not be checked; not sent' } }
+      if (consent.platform || consent.organizer) {
+        const skipReason = consent.platform ? SKIP_UNDELIVERABLE : SKIP_UNSUBSCRIBED
+        await recipientRef.update({ skipped: true, skipReason }).catch(() => undefined)
+        void writeEmailLog({
+          organizerUid: job.organizerUid, eventId: job.eventId, eventSlug: job.eventSlug, eventName: job.eventName,
+          templateKey: 'broadcast', provider: ctx.emailProviderName, campaignId: job.campaignId,
+          recipientEmail: item.email, recipientName: item.name, subject: job.subject, status: 'skipped',
+          registrationId: item.registrationId, error: skipReason, costPaise: 0,
+        })
+        return { ok: true, skipped: true }
+      }
 
       const vars: Record<string, string> = {
         attendeeName: item.name, eventName: job.eventName, ticketCode: item.ticketCode,
@@ -212,15 +257,15 @@ export function emailBroadcastStrategy(): JobStrategy<EmailBroadcastJob, EmailJo
       // hideOwnershipLine: a broadcast is the organizer's voice to their own audience, so
       // the operating-entity line comes off. "Powered by RegisterDesk" and the visible
       // unsubscribe link both stay — the latter is what makes this mail honest.
-      const fullHtml        = emailShell(renderedSubject, renderedBody, buildUnsubscribeUrl(item.email, job.organizerUid), ctx.emailBranding, { hideOwnershipLine: true })
-      const unsubHeaders: Record<string, string> = {
-        'List-Unsubscribe':      `<${buildUnsubscribeApiUrl(item.email, job.organizerUid)}>`,
-        'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
-      }
+      const unsubCtx        = { eventSlug: job.eventSlug, kind: 'broadcast' as const }
+      const fullHtml        = emailShell(renderedSubject, renderedBody, buildUnsubscribeUrl(item.email, job.organizerUid, unsubCtx), ctx.emailBranding, { hideOwnershipLine: true })
+      // One-click unsubscribe (RFC 8058): 'List-Unsubscribe' + 'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click'.
+      const unsubHeaders    = unsubscribeHeaders(item.email, job.organizerUid, unsubCtx)
 
       let status: 'sent' | 'failed' = 'failed'
       let errorMsg: string | undefined
       let messageId: string | undefined
+      let deliveryUnknown = false
 
       // RD-BROADCAST-RETRY-01 — bounded retry of DEFINITELY-REJECTED sends only.
       //
@@ -230,30 +275,65 @@ export function emailBroadcastStrategy(): JobStrategy<EmailBroadcastJob, EmailJo
       // fresh allowance on every resume.
       const priorAttempts = typeof item.attempts === 'number' ? item.attempts : 0
       let   attemptsUsed  = 0
+      let   consentStop: string | null = null    // RD-COMMS-P2-G — opted out between two attempts
 
       if (priorAttempts >= EB_MAX_ATTEMPTS) {
         errorMsg = `Send abandoned after ${priorAttempts} attempts`
       } else {
+        // RD-COMMS-P2-D — record the INTENT to send before the provider is called (awaited). If this
+        // cannot be recorded, the recipient is not sent this pass (a later pass may retry it).
+        try { await recipientRef.update({ pendingAttemptAt: FieldValue.serverTimestamp() }) }
+        catch (err) {
+          console.error('[email-broadcast] attempt intent not recorded — not sending:', { jobId: job.jobId, recipient: item.__id, err: err instanceof Error ? err.message : err })
+          return { ok: false, error: 'Could not record the send attempt; not sent' }
+        }
         const remaining = EB_MAX_ATTEMPTS - priorAttempts
         for (let attempt = 1; attempt <= remaining; attempt++) {
+          // RD-COMMS-P2-G — a retry is a NEW send: consent is re-read before it. Unreadable ⇒ no retry.
+          if (attempt > 1) {
+            try {
+              const again = await suppressionStatus(item.email, job.organizerUid)
+              if (again.platform || again.organizer) { consentStop = again.platform ? SKIP_UNDELIVERABLE : SKIP_UNSUBSCRIBED; break }
+            } catch { break }
+          }
           attemptsUsed = attempt
           let indeterminate = false
+          let suppressed = false
           try {
             const r = await notificationEngine.send(NotificationType.BROADCAST, { to: item.email, subject: renderedSubject, html: fullHtml, fromName: ctx.fromName, headers: unsubHeaders }, ctx.emailProviderName)
             status    = r.success ? 'sent' : 'failed'
             messageId = r.messageId
             if (r.success) { errorMsg = undefined; break }
-            errorMsg = r.error          // provider ANSWERED and rejected — nothing was queued
+            errorMsg = r.error
+            // RD-COMMS-P2-D — providers do not throw; they REPORT an unknown outcome (timeout, no
+            // answer, 5xx) with `deliveryUnknown`. Only a definite rejection queued nothing.
+            indeterminate = r.deliveryUnknown === true
+            suppressed    = r.suppressed === true
           } catch (err) {
             errorMsg = err instanceof Error ? err.message : 'Unknown error'
-            indeterminate = true        // no answer — SES may already hold it
+            indeterminate = true        // no answer — the provider may already hold it
           }
 
-          // A throw is never retried: resending it is how one attendee gets the same broadcast
-          // twice. Only an explicit rejection earns another attempt.
-          if (indeterminate) break
+          // An unknown outcome is never retried: resending it is how one attendee gets the same
+          // broadcast twice. A suppressed recipient is final. Only an explicit rejection earns
+          // another attempt.
+          if (indeterminate) { deliveryUnknown = true; break }
+          if (suppressed) break
           if (attempt < remaining) await ebSleep(EB_RETRY_BACKOFF_MS[attempt - 1] ?? 400)
         }
+      }
+
+      if (consentStop) {
+        // Every attempt so far was a DEFINITE rejection (nothing was delivered); the recipient then
+        // opted out, so no further attempt is made. Recorded as a consent skip, not a failure.
+        await recipientRef.update({ skipped: true, skipReason: consentStop, pendingAttemptAt: FieldValue.delete(), attempts: priorAttempts + attemptsUsed }).catch(() => undefined)
+        void writeEmailLog({
+          organizerUid: job.organizerUid, eventId: job.eventId, eventSlug: job.eventSlug, eventName: job.eventName,
+          templateKey: 'broadcast', provider: ctx.emailProviderName, campaignId: job.campaignId,
+          recipientEmail: item.email, recipientName: item.name, subject: renderedSubject, status: 'skipped',
+          registrationId: item.registrationId, error: consentStop, costPaise: 0,
+        })
+        return { ok: true, skipped: true }
       }
 
       void writeEmailLog({
@@ -263,6 +343,7 @@ export function emailBroadcastStrategy(): JobStrategy<EmailBroadcastJob, EmailJo
         subject: renderedSubject, status, registrationId: item.registrationId,
         error: errorMsg, providerMessageId: messageId,
         costPaise: status === 'sent' ? ctx.perMsgCostPaise : 0,
+        ...(deliveryUnknown ? { deliveryUnknown: true } : {}),
       })
 
       if (status === 'sent') {
@@ -279,8 +360,7 @@ export function emailBroadcastStrategy(): JobStrategy<EmailBroadcastJob, EmailJo
         // the attendee has the email. Counting it failed would be a lie and would queue
         // a retry — the exact duplicate this guards against.
         try {
-          await adminDb.collection(EMAIL_BROADCAST_JOBS).doc(job.jobId).collection('recipients').doc(item.__id)
-            .update({ sent: true })
+          await recipientRef.update({ sent: true, pendingAttemptAt: FieldValue.delete() })
         } catch (err) {
           console.error('[email-broadcast] sent-flag write failed — resume may re-send:', {
             jobId: job.jobId, recipient: item.__id, err: err instanceof Error ? err.message : err,
@@ -295,9 +375,12 @@ export function emailBroadcastStrategy(): JobStrategy<EmailBroadcastJob, EmailJo
       // bounded attempt on a later resume.
       if (attemptsUsed > 0) {
         try {
-          await adminDb.collection(EMAIL_BROADCAST_JOBS).doc(job.jobId).collection('recipients').doc(item.__id)
-            .update({
+          // The attempt has a recorded outcome now: the marker is cleared. An UNKNOWN one is kept as
+          // `indeterminate` so that no later pass ever sends it again.
+          await recipientRef.update({
               attempts: priorAttempts + attemptsUsed,
+              pendingAttemptAt: FieldValue.delete(),
+              ...(deliveryUnknown ? { indeterminate: true } : {}),
               ...(errorMsg ? { lastError: errorMsg.slice(0, 300) } : {}),
             })
         } catch (err) {
@@ -311,20 +394,27 @@ export function emailBroadcastStrategy(): JobStrategy<EmailBroadcastJob, EmailJo
 
     // Terminal (completed) → the SAME finalizeBroadcast the WhatsApp path uses.
     async onComplete(job) {
-      const campaignRef = adminDb.collection('broadcastCampaigns').doc(job.campaignId)
-      const campSnap = await campaignRef.get()
-      if (!campSnap.exists) return
-      const c = campSnap.data() as FinalizeCampaign
-
-      const recSnap = await adminDb.collection(EMAIL_BROADCAST_JOBS).doc(job.jobId).collection('recipients').get()
-      const recipients: FinalizeRecipient[] = recSnap.docs.map(d => {
-        const r = d.data() as EmailRecipientRow
-        return { id: r.registrationId, data: { attendee: { email: r.email, name: r.name } } }
-      })
-
-      await finalizeBroadcast(campaignRef, job.campaignId, c, job.counts.succeeded, job.counts.failed, recipients)
+      await finalizeEmailCampaign(job)
     },
   }
+}
+
+/** Completion of an email campaign from its COMPLETED job (onComplete, and the stuck-campaign sweep). */
+export async function finalizeEmailCampaign(job: EmailBroadcastJob): Promise<void> {
+  const campaignRef = adminDb.collection('broadcastCampaigns').doc(job.campaignId)
+  const campSnap = await campaignRef.get()
+  if (!campSnap.exists) return
+  const c = campSnap.data() as FinalizeCampaign
+
+  const recSnap = await adminDb.collection(EMAIL_BROADCAST_JOBS).doc(job.jobId).collection('recipients').get()
+  const recipients: FinalizeRecipient[] = recSnap.docs.map(d => {
+    const r = d.data() as EmailRecipientRow
+    return { id: r.registrationId, data: { attendee: { email: r.email, name: r.name } } }
+  })
+
+  // RD-COMMS-P2-G — opted-out / suppressed recipients were deliberately not sent: not a failure.
+  const skipped = recSnap.docs.filter(d => (d.data() as EmailRecipientRow).skipped === true).length
+  await finalizeBroadcast(campaignRef, job.campaignId, c, job.counts.succeeded, job.counts.failed, recipients, skipped)
 }
 
 // ─── Public entry point ─────────────────────────────────────────────────────────
@@ -341,27 +431,34 @@ export async function processEmailBroadcastChunk(jobId: string): Promise<Process
     // worker hands the lease over instead of holding it for another full leaseMs. Without
     // this the successor always lost the race and the chain died at depth 1.
     releaseLeaseOnHandoff: true,
+    // RD-COMMS-P2-B — a failed broadcast job is final: never leased (resumed) again.
+    failedIsTerminal: true,
   })
   if (result.status === 'cancelled' || result.status === 'failed') {
-    await syncCampaignTerminal(jobId, result.status).catch(() => { /* best-effort */ })
+    await syncEmailCampaignTerminal(jobId, result.status).catch(() => { /* best-effort */ })
   }
   return result
 }
 
-async function syncCampaignTerminal(jobId: string, status: 'cancelled' | 'failed'): Promise<void> {
+/**
+ * A cancelled/failed email job's campaign leaves `sending` — status-GUARDED (only a `sending`
+ * campaign moves), so it never overwrites a terminal state another path wrote. Counts are the
+ * job's: emails actually sent stay counted; recipients never reached are not counted as sent.
+ * Called by the runner hook, the job reaper and the stuck-campaign sweep (RD-COMMS-P2-B).
+ */
+export async function syncEmailCampaignTerminal(jobId: string, status: 'cancelled' | 'failed'): Promise<void> {
   const job = await getJob<EmailBroadcastJob>(EMAIL_BROADCAST_JOBS, jobId)
   if (!job) return
   const campaignRef = adminDb.collection('broadcastCampaigns').doc(job.campaignId)
-  const snap = await campaignRef.get()
-  if (!snap.exists || (snap.data() as { status?: string }).status !== 'sending') return
-
-  await campaignRef.update({
+  const failReason = blockReasonOf(job.error) ?? ((typeof job.error === 'string' && job.error) ? job.error : 'provider_unavailable')
+  const moved = await transitionCampaign(campaignRef, ['sending'], {
     status:       status === 'cancelled' ? 'cancelled' : 'failed',
     successCount: job.counts.succeeded,
     failCount:    job.counts.failed,
     sentAt:       FieldValue.serverTimestamp(),
-    ...(status === 'failed' ? { failReason: (typeof job.error === 'string' && job.error) ? job.error : 'provider_unavailable' } : {}),
+    ...(status === 'failed' ? { failReason } : {}),
   })
+  if (!moved) return
   void logBroadcastAction({
     organizerUid: job.organizerUid, actorUid: job.createdBy ?? job.organizerUid, campaignId: job.campaignId,
     action: status === 'cancelled' ? 'broadcast.cancelled' : 'broadcast.failed',

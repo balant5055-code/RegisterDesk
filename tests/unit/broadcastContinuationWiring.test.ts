@@ -168,8 +168,10 @@ describe('the sent flag is awaited on both channels', () => {
     // `void … .catch(() => {})` meant an invocation that died between the send and the
     // write left the recipient unmarked — and resumed chunks mailed them again. Automatic
     // continuation makes resumes routine, so this had to close first.
-    expect(EMAIL_JOB).toContain("await adminDb.collection(EMAIL_BROADCAST_JOBS).doc(job.jobId).collection('recipients').doc(item.__id)")
-    expect(EMAIL_JOB).not.toContain("void adminDb.collection(EMAIL_BROADCAST_JOBS).doc(job.jobId).collection('recipients').doc(item.__id)")
+    // RD-COMMS-P2-D — the same awaited write, through the recipient ref (it also clears the attempt marker).
+    expect(EMAIL_JOB).toContain("const recipientRef = adminDb.collection(EMAIL_BROADCAST_JOBS).doc(job.jobId).collection('recipients').doc(item.__id)")
+    expect(EMAIL_JOB).toContain('await recipientRef.update({ sent: true, pendingAttemptAt: FieldValue.delete() })')
+    expect(EMAIL_JOB).not.toMatch(/void (recipientRef|adminDb\.collection\(EMAIL_BROADCAST_JOBS\))/)
   })
 
   it('WHATSAPP awaits it too — a duplicate there costs money twice', () => {

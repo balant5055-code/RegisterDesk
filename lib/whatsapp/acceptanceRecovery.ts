@@ -13,7 +13,7 @@
 
 import { FieldValue } from 'firebase-admin/firestore'
 import { adminDb } from '@/lib/firebase/admin'
-import { draftIdForEventSlug, reserveServiceUnits, releaseServiceUnits } from '@/lib/licensing/serviceAllowanceLedger'
+import { draftIdForEventSlug } from '@/lib/licensing/serviceAllowanceLedger'
 import type { WhatsAppStatusEvent } from './webhookStatus'
 import {
   parseCallbackData, recordBroadcastAcceptance, messageLogId, messageUsageId, WHATSAPP_BROADCAST_JOBS_COLLECTION,
@@ -34,18 +34,11 @@ async function hasLogFor(wamid: string): Promise<boolean> {
   return !snap.empty
 }
 
-/** Prepaid unit for a recovered message, decided exactly as the send decided it. */
-async function recoveredFromAllowance(eventSlug: string, unitKey: string, source: string): Promise<{ fromAllowance: boolean; fresh: boolean; draftId: string | null }> {
-  const draftId = await draftIdForEventSlug(eventSlug)
-  if (!draftId) return { fromAllowance: false, fresh: false, draftId: null }
-  const r = await reserveServiceUnits({ draftId, service: 'whatsapp', unitKey, source })
-  return { fromAllowance: r.mode === 'allowance', fresh: r.mode === 'allowance' && !r.already, draftId }
-}
-
-/** A unit THIS recovery reserved for an acceptance that turned out to be recorded already: hand it back. */
-async function releaseIfUnused(u: { fresh: boolean; draftId: string | null }, unitKey: string, already: boolean) {
-  if (already && u.fresh && u.draftId) await releaseServiceUnits({ draftId: u.draftId, service: 'whatsapp', unitKey }).catch(() => undefined)
-}
+// RD-COMMS-P2-A — recovery never RESERVES. The send took the message's funding hold before it
+// called Meta (lib/whatsapp/funding.ts) and keeps it while the outcome is unknown, so the acceptance
+// transaction settles against that same hold — atomically, with the hold read inside it. The old
+// reserve-here-then-release-if-unused sequence raced the sender's own release and could record an
+// accepted message at cost 0, or charge a legacy price the send never checked.
 
 export type RecoveryOutcome = 'no_ref' | 'already' | 'recovered' | 'missing' | string
 
@@ -98,26 +91,25 @@ export async function reconcileWhatsAppAcceptance(event: WhatsAppStatusEvent): P
   const attendeeName = str(reg.attendee?.name), email = str(reg.attendee?.email), phone = str(reg.attendee?.phone)
 
   if (ref.kind === 'registration') {
-    const unitKey = ref.unitKey && /^[A-Za-z0-9_.-]{1,160}$/.test(ref.unitKey) ? ref.unitKey : `wa_reg_${registrationId}`
-    const unit = await recoveredFromAllowance(eventSlug, unitKey, 'registration_confirmation_recovery')
+    // Only this registration's own attempt keys are honoured (the callback is HMAC-verified, but the
+    // key must still name THIS registration's hold).
+    const own = `wa_reg_${registrationId}`
+    const unitKey = ref.unitKey && /^[A-Za-z0-9_.-]{1,160}$/.test(ref.unitKey) && ref.unitKey.startsWith(own) ? ref.unitKey : own
+    const draftId = await draftIdForEventSlug(eventSlug)
     const { acceptConfirmation } = await import('@/lib/registrations/whatsappConfirmationAcceptance')
     const r = await acceptConfirmation({
       registrationId, organizerUid, eventSlug, eventName, attendeeName, email, phone, wamid: event.wamid,
-      fromAllowance: unit.fromAllowance, writeLog: !(await hasLogFor(event.wamid)), source: 'webhook',
-      unitKey, ...(unit.fromAllowance && unit.draftId ? { allowanceUnit: { draftId: unit.draftId, unitKey } } : {}),
+      draftId, writeLog: !(await hasLogFor(event.wamid)), source: 'webhook', unitKey,
     })
-    await releaseIfUnused(unit, unitKey, r.already)
     return r.already ? 'already' : 'recovered'
   }
 
   // certificate
-  const certUnitKey = `wa_cert_${ref.certificateId}`
-  const unit = await recoveredFromAllowance(eventSlug, certUnitKey, 'certificate_ready_recovery')
+  const draftId = await draftIdForEventSlug(eventSlug)
   const { acceptCertificateMessage } = await import('@/lib/certificates/whatsapp')
   const r = await acceptCertificateMessage({
     certificateId: ref.certificateId, registrationId, organizerUid, eventSlug, eventName, attendeeName, email, phone,
-    wamid: event.wamid, fromAllowance: unit.fromAllowance, source: 'webhook', allowanceDraftId: unit.draftId,
+    wamid: event.wamid, source: 'webhook', draftId,
   })
-  await releaseIfUnused(unit, certUnitKey, r.already)
   return r.already ? 'already' : 'recovered'
 }

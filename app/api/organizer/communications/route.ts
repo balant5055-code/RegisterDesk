@@ -42,6 +42,9 @@ export interface CommRow {
   subject:           string
   error:             string
   registrationId:    string
+  /** RD-COMMS-P2-D/F — the provider gave no definite answer (or the send was interrupted): it may
+   *  have been delivered. Shown as "Delivery unknown", never as sent or failed, and never resendable. */
+  deliveryUnknown:   boolean
 }
 
 export interface CommKpis {
@@ -98,9 +101,18 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   const rawLimit         = parseInt(sp.get('limit') ?? '500', 10)
   const limit            = Math.min(isNaN(rawLimit) ? 500 : rawLimit, 1000)
 
-  let query = adminDb.collection('emailLogs')
-    .where('organizerUid', '==', uid)
-    .orderBy('createdAt', 'desc') as FirebaseFirestore.Query
+  // RD-COMMS-P2-F — one event's messages are read FROM that event (served by the existing
+  // organizerUid + eventSlug + status + createdAt index; every log row carries a status), not
+  // filtered out of the workspace's most recent rows, where a busy workspace would hide them.
+  // The organizerUid equality keeps it tenant-safe: another workspace's slug matches nothing.
+  let query = (fEvent
+    ? adminDb.collection('emailLogs')
+        .where('organizerUid', '==', uid)
+        .where('eventSlug', '==', fEvent)
+        .where('status', 'in', ['queued', 'sent', 'delivered', 'failed', 'skipped'])
+    : adminDb.collection('emailLogs')
+        .where('organizerUid', '==', uid)
+  ).orderBy('createdAt', 'desc') as FirebaseFirestore.Query
 
   if (dateFrom) { const f = new Date(dateFrom); f.setHours(0, 0, 0, 0);    query = query.where('createdAt', '>=', f) }
   if (dateTo)   { const t = new Date(dateTo);   t.setHours(23, 59, 59, 999); query = query.where('createdAt', '<=', t) }
@@ -133,6 +145,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       subject:           typeof d.subject === 'string' ? d.subject : '',
       error:             typeof d.error === 'string' ? d.error : '',
       registrationId:    typeof d.registrationId === 'string' ? d.registrationId : '',
+      deliveryUnknown:   d.deliveryUnknown === true,
     }
 
     // ── In-memory filters (single composite index kept for the query above) ────

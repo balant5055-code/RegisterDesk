@@ -6,7 +6,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { resolveAdminUid } from '@/lib/admin/auth'
 import { listRemindersForAdmin, cancelReminder, ReminderError } from '@/lib/reminders/service'
-import { getReminderSettings, updateReminderSettings, type ReminderSettings } from '@/lib/reminders/config'
+import { getReminderSettings, updateReminderSettings, ReminderSettingsError, type ReminderSettings } from '@/lib/reminders/config'
 
 export async function GET(req: NextRequest): Promise<NextResponse> {
   const adminUid = await resolveAdminUid(req.headers.get('authorization'))
@@ -38,6 +38,9 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
     const settings = await updateReminderSettings(patch, adminUid)
     return NextResponse.json({ ok: true, settings })
   } catch (e) {
+    // RD-COMMS-P2-E — a malformed value (NaN/Infinity/negative offset, a non-boolean switch) is
+    // refused outright; it used to be stored and then crash the reminder cron.
+    if (e instanceof ReminderSettingsError) return NextResponse.json({ error: e.message }, { status: 400 })
     console.error('[admin/reminders] settings update failed', e)
     return NextResponse.json({ error: 'Update failed' }, { status: 500 })
   }

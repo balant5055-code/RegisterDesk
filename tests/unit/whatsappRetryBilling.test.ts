@@ -1,14 +1,18 @@
 // RD-WA-LOGS-01 · the money rules of a manual WhatsApp retry.
 //
 // The retry route is what refuses ineligible rows; THIS module is what spends money, so the
-// billing invariants are asserted against `retryWhatsAppConfirmation` directly:
+// billing invariants are asserted against `retryWhatsAppConfirmation` directly.
 //
-//   • A failed Meta send writes ZERO wallet transactions. The debit is strictly after success.
-//   • A successful send writes EXACTLY ONE ledger entry, at the deterministic id
-//     `whatsapp_{registrationId}` — so retrying a registration that was already billed is a
-//     no-op, not a second charge.
-//   • The wallet is never driven negative: the balance is re-checked INSIDE the transaction,
-//     because the caller's pre-check races concurrent charges.
+// RD-COMMS-P2-A — a message is FUNDED before it is sent, atomically (lib/whatsapp/funding.ts): the
+// event's capacity, else the LEGACY balance while it covers the whole price. So:
+//   • A definitely-refused Meta send leaves nothing charged: its hold is taken and given back.
+//   • An accepted send is charged EXACTLY once — by its hold, under the attempt's deterministic id
+//     (`whatsapp_<registrationId>` for the registration's own key, `…__r_<nonce>` for a retry).
+//   • Concurrent sends on a balance worth ONE message: one is funded and sent, the others are
+//     refused BEFORE Meta is called. Nothing is sent free; the balance never goes negative.
+//     (This file used to assert the opposite — "the platform absorbs it" — which was the bug.)
+//   • No answer from Meta ⇒ UNKNOWN, and the hold is KEPT for the status webhook to settle.
+// The funding hold's real atomicity is proven on the emulator (tests/emulator/whatsappFundingP2A.emu.test.ts).
 //
 // Also pinned: no registration and no payment document is ever created.
 
@@ -16,17 +20,16 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 type Doc = Record<string, unknown>
 
-let ledgerExists = false
 let walletBalance = 10_000
-let txnWalletBalance: number | null = null
-let sendOutcome: 'ok' | 'fail' = 'ok'
+let sendOutcome: 'ok' | 'fail' | 'timeout' = 'ok'
 let registration: Doc | null = null
 let eventDoc: Doc | null = null
 
-const ledgerWrites:   Array<{ id: string; data: Doc }> = []
-const deductions:     number[] = []
+const debits:   Array<{ id: string; amountPaise: number }> = []
+const releases: number[] = []
 const collectionsWritten: string[] = []
 const registrationUpdates: Doc[] = []
+const providerSends: number[] = []
 
 vi.mock('firebase-admin/firestore', () => ({
   FieldValue: { serverTimestamp: () => 'TS', delete: () => 'DELETE' },
@@ -38,7 +41,7 @@ vi.mock('@/lib/firebase/admin', () => ({
     doc: (path: string) => ({ path, id: path.split('/').pop() }),
     collection: (name: string) => ({
       doc: (id?: string) => ({
-        id: id ?? 'auto',
+        id: id ?? 'auto', path: `${name}/${id ?? 'auto'}`,
         get: async () => {
           if (name === 'registrations') return { exists: !!registration, data: () => registration }
           if (name === 'events')        return { exists: !!eventDoc,     data: () => eventDoc }
@@ -52,33 +55,21 @@ vi.mock('@/lib/firebase/admin', () => ({
       add: async () => { collectionsWritten.push(name); return { id: 'usage-1' } },
     }),
     runTransaction: async (fn: (tx: unknown) => Promise<unknown>) => fn({
-      get: async (ref: { path?: string; get?: () => Promise<unknown> }) => {
-        if (ref.path?.startsWith('organizerWallets/')) {
-          return { exists: true, data: () => ({ balancePaise: txnWalletBalance ?? walletBalance }) }
-        }
-        return { exists: ledgerExists, data: () => ({}) }
+      get: async (ref: { path?: string }) => ref.path?.startsWith('registrations/')
+        ? { exists: !!registration, data: () => registration }
+        : { exists: false, data: () => ({}) },
+      set: () => {},
+      update: (ref: { path?: string }, patch: Doc) => {
+        collectionsWritten.push(String(ref.path).split('/')[0])
+        if (ref.path?.startsWith('registrations/')) registrationUpdates.push(patch)
       },
-      set: (ref: { id?: string }, data: Doc) => {
-        collectionsWritten.push('walletTransactions')
-        ledgerWrites.push({ id: ref.id ?? '', data })
-      },
-      update: () => {}, delete: () => {},
+      delete: () => {},
     }),
   },
 }))
 
-vi.mock('@/lib/firebase/firestore/wallet', () => ({
-  getWalletBalance: async () => walletBalance,
-  txnDeductWallet: (_tx: unknown, _uid: string, paise: number) => { deductions.push(paise) },
-}))
-
 vi.mock('@/lib/communications/resolveCommunicationConfig', () => ({
-  getCommunicationConfig: async () => ({
-    whatsapp: { enabled: true, pricePaise: 35, walletChargeAttendeeNotifications: true },
-  }),
-}))
-vi.mock('@/lib/wallet/resolveWalletConfig', () => ({
-  getWalletConfig: async () => ({ allowNegativeBalance: false }),
+  getCommunicationConfig: async () => ({ whatsapp: { enabled: true, pricePaise: 35 } }),
 }))
 vi.mock('@/lib/communication/phone', () => ({
   validatePhoneNumber: (p: string) => ({ valid: true, normalizedPhone: p }),
@@ -86,65 +77,84 @@ vi.mock('@/lib/communication/phone', () => ({
 
 vi.mock('@/lib/whatsapp', () => ({
   getMetaProvider: async () => ({
-    sendTemplate: async () => sendOutcome === 'ok'
-      ? { success: true, messageId: 'wamid.OK' }
-      : {
-          success: false, error: 'WhatsApp template is missing or not approved',
-          code: 132001, httpStatus: 404,
-          providerMessage: '(#132001) Template name does not exist in the translation',
-        },
+    sendTemplate: async () => {
+      providerSends.push(1)
+      if (sendOutcome === 'ok') return { success: true, messageId: `wamid.${providerSends.length}` }
+      if (sendOutcome === 'timeout') return { success: false, error: 'Meta API request timed out', retriable: true }
+      return {
+        success: false, error: 'WhatsApp template is missing or not approved',
+        code: 132001, httpStatus: 404,
+        providerMessage: '(#132001) Template name does not exist in the translation',
+      }
+    },
   }),
   resolveWhatsAppTemplate: () => ({
     ok: true, message: { to: '+919080452223', templateName: 'registration_confirmation', languageCode: 'en', bodyParameters: [] },
   }),
 }))
 
-// RD-CLOSE — an accepted message is now persisted by ONE acceptance transaction
-// (lib/whatsapp/acceptance.ts → recordMessageAcceptance): charge + usage + log + status, idempotent
-// per wamid. Its real atomicity/idempotency is proven on the emulator
-// (tests/emulator/closureAcceptance.emu.test.ts). Here it is a faithful stand-in that feeds this
-// file's capture arrays: one charge per wamid; a legacy base row (from an earlier message) puts a
-// NEW wamid on `<base>__<wamid>`; the in-transaction balance re-check never drives it negative.
+// The funding hold — a faithful stand-in: one hold per attempt key; legacy-funded only while the
+// balance covers the WHOLE price (decided and taken in one step, as the real transaction does);
+// given back only by a release of a still-held hold.
+const holds = new Map<string, { amount: number; state: 'held' | 'released' | 'accepted' }>()
+vi.mock('@/lib/whatsapp/funding', async orig => ({
+  ...(await orig<typeof import('@/lib/whatsapp/funding')>()),
+  reserveWhatsAppFunding: async (r: { unitKey: string; holdLedgerId: string; legacyPricePaise: number }) => {
+    if (holds.has(r.unitKey)) return { ok: false, reason: 'already_held' }
+    if (!(r.legacyPricePaise > 0 && walletBalance >= r.legacyPricePaise)) return { ok: false, reason: 'allowance_required' }
+    walletBalance -= r.legacyPricePaise
+    debits.push({ id: r.holdLedgerId, amountPaise: r.legacyPricePaise })
+    collectionsWritten.push('walletTransactions')
+    holds.set(r.unitKey, { amount: r.legacyPricePaise, state: 'held' })
+    return { ok: true, mode: 'legacy', costPaise: r.legacyPricePaise }
+  },
+  releaseWhatsAppFunding: async (k: { unitKey: string }) => {
+    const h = holds.get(k.unitKey)
+    if (!h || h.state !== 'held') return false
+    h.state = 'released'; walletBalance += h.amount; releases.push(h.amount)
+    return true
+  },
+}))
+
+// The acceptance record settles against the attempt's hold (lib/whatsapp/acceptance.ts).
 const acceptedWamids = new Set<string>()
 vi.mock('@/lib/whatsapp/acceptance', async orig => ({
   ...(await orig<typeof import('@/lib/whatsapp/acceptance')>()),
   withPersistRetry: <T,>(fn: () => Promise<T>) => fn(),
-  recordMessageAcceptance: async (i: { wamid: string; costPaise: number; baseLedgerId: string; ledgerReferenceId: string; registrationPatch?: { patch: Doc } }) => {
+  recordMessageAcceptance: async (i: { wamid: string; funding: { unitKey: string }; registrationPatch?: { patch: Doc } }) => {
     if (acceptedWamids.has(i.wamid)) return { already: true, chargedPaise: 0, chargeSkipped: false }
     acceptedWamids.add(i.wamid)
+    const h = holds.get(i.funding.unitKey)
     let chargedPaise = 0
-    const balance = txnWalletBalance ?? walletBalance
-    if (i.costPaise > 0 && balance >= i.costPaise) {
-      deductions.push(i.costPaise)
-      ledgerWrites.push({ id: ledgerExists ? `${i.baseLedgerId}__${i.wamid}` : i.baseLedgerId, data: { type: 'whatsapp_charge', amountPaise: i.costPaise, referenceId: i.ledgerReferenceId } })
-      chargedPaise = i.costPaise
-    }
+    if (h && h.state === 'held') { h.state = 'accepted'; chargedPaise = h.amount }
     if (i.registrationPatch) registrationUpdates.push(i.registrationPatch.patch)
-    return { already: false, chargedPaise, chargeSkipped: i.costPaise > 0 && chargedPaise === 0 }
+    return { already: false, chargedPaise, chargeSkipped: !h }
   },
 }))
 
 const { retryWhatsAppConfirmation } = await import('@/lib/email-logs/whatsappRetry')
 
 const ARGS = { registrationId: 'reg-1', organizerUid: 'org-1', eventSlug: 'evt-1', eventName: 'Marathon' }
+const netCharged = () => debits.reduce((n, d) => n + d.amountPaise, 0) - releases.reduce((n, r) => n + r, 0)
 
 beforeEach(() => {
-  ledgerExists = false; walletBalance = 10_000; txnWalletBalance = null; sendOutcome = 'ok'
+  walletBalance = 10_000; sendOutcome = 'ok'
   registration = { attendee: { name: 'Balaganapathy NT', phone: '+919080452223', email: 'a@b.c' }, ticketCode: 'TK-1' }
   eventDoc = { pricing: { whatsappEnabled: true } }
-  ledgerWrites.length = 0; deductions.length = 0; acceptedWamids.clear()
-  collectionsWritten.length = 0; registrationUpdates.length = 0
+  debits.length = 0; releases.length = 0; acceptedWamids.clear(); holds.clear()
+  collectionsWritten.length = 0; registrationUpdates.length = 0; providerSends.length = 0
 })
 
-describe('failed send ⇒ ZERO wallet charge', () => {
-  it('writes no ledger entry and deducts nothing', async () => {
+describe('failed send ⇒ nothing charged', () => {
+  it('the hold taken before the send is given back in full', async () => {
     sendOutcome = 'fail'
     const r = await retryWhatsAppConfirmation(ARGS)
 
     expect(r.ok).toBe(false)
-    expect(ledgerWrites).toEqual([])
-    expect(deductions).toEqual([])
-    expect(collectionsWritten).not.toContain('walletTransactions')
+    expect(debits).toEqual([{ id: 'whatsapp_reg-1', amountPaise: 35 }])
+    expect(releases).toEqual([35])
+    expect(netCharged()).toBe(0)
+    expect(walletBalance).toBe(10_000)
   })
 
   it('returns the exact Meta code, status and normalized reason', async () => {
@@ -159,32 +169,37 @@ describe('failed send ⇒ ZERO wallet charge', () => {
   })
 })
 
-describe('successful send ⇒ EXACTLY ONE ledger entry', () => {
-  it('debits once at the deterministic per-registration id', async () => {
+describe('successful send ⇒ EXACTLY ONE charge', () => {
+  it('charged once, by its hold, at the deterministic per-registration id', async () => {
     const r = await retryWhatsAppConfirmation(ARGS)
 
     expect(r.ok).toBe(true)
-    expect(deductions).toEqual([35])
-    expect(ledgerWrites).toHaveLength(1)
-    expect(ledgerWrites[0].id).toBe('whatsapp_reg-1')
-    expect(ledgerWrites[0].data).toMatchObject({ type: 'whatsapp_charge', amountPaise: 35, referenceId: 'reg-1' })
+    expect(debits).toEqual([{ id: 'whatsapp_reg-1', amountPaise: 35 }])
+    expect(releases).toEqual([])
+    expect((r as { costPaise: number }).costPaise).toBe(35)
   })
 
-  it('RD-CLOSE — a retry Meta accepts is a NEW message: billed once under its own wamid', async () => {
-    // Approved rule (D3): billable when Meta accepts; a retry that Meta accepts is a separate
-    // message. The registration's first message keeps `whatsapp_<reg>`; this one is `…__<wamid>`.
-    ledgerExists = true                       // an earlier, different message was already charged
-    const r = await retryWhatsAppConfirmation(ARGS)
+  it('a retry is a NEW message: funded under its own attempt id, never on an earlier attempt\'s hold', async () => {
+    await retryWhatsAppConfirmation(ARGS)                                         // the registration's own key
+    const r = await retryWhatsAppConfirmation(ARGS, { attemptNonce: 'n1' })       // a retry Meta also accepts
 
     expect(r.ok).toBe(true)
-    expect(deductions).toEqual([35])
-    expect(ledgerWrites.map(w => w.id)).toEqual(['whatsapp_reg-1__wamid.OK'])
+    expect(debits.map(d => d.id)).toEqual(['whatsapp_reg-1', 'whatsapp_reg-1__r_n1'])
     expect((r as { costPaise: number }).costPaise).toBe(35)
+  })
+
+  it('the same attempt can never be funded twice (a duplicate is refused before Meta is called)', async () => {
+    await retryWhatsAppConfirmation(ARGS, { attemptNonce: 'n1' })
+    const again = await retryWhatsAppConfirmation(ARGS, { attemptNonce: 'n1' })
+
+    expect(again).toMatchObject({ ok: false, reason: 'already_sent' })
+    expect(providerSends).toHaveLength(1)
+    expect(debits).toHaveLength(1)
   })
 
   it('marks the registration sent with the new wamid', async () => {
     await retryWhatsAppConfirmation(ARGS)
-    expect(registrationUpdates[0]).toMatchObject({ whatsappStatus: 'sent', whatsappMessageId: 'wamid.OK' })
+    expect(registrationUpdates.at(-1)).toMatchObject({ whatsappStatus: 'sent', whatsappMessageId: 'wamid.1' })
   })
 })
 
@@ -194,7 +209,7 @@ describe('guards before the provider is called', () => {
     const r = await retryWhatsAppConfirmation(ARGS)
 
     expect(r).toMatchObject({ ok: false, reason: 'already_sent' })
-    expect(ledgerWrites).toEqual([])
+    expect(debits).toEqual([])
   })
 
   it('refuses when the event has WhatsApp disabled', async () => {
@@ -207,26 +222,46 @@ describe('guards before the provider is called', () => {
     expect(await retryWhatsAppConfirmation(ARGS)).toMatchObject({ ok: false, reason: 'registration_missing' })
   })
 
-  it('refuses when the wallet cannot cover the message — and never sends', async () => {
+  it('refuses when neither capacity nor the legacy balance can cover the message — and never sends', async () => {
     walletBalance = 10
     const r = await retryWhatsAppConfirmation(ARGS)
 
-    expect(r).toMatchObject({ ok: false, reason: 'insufficient_balance' })
-    expect(deductions).toEqual([])
+    expect(r).toMatchObject({ ok: false, reason: 'allowance_required' })
+    expect((r as { error?: string }).error).toMatch(/License & Services/)
+    expect(providerSends).toEqual([])
+    expect(debits).toEqual([])
   })
 
-  it('does not drive the wallet negative when the balance drops between pre-check and txn', async () => {
-    // The genuine TOCTOU: the pre-check sees funds, then a concurrent charge empties the
-    // wallet before the transaction reads it. The message is already sent at that point, so
-    // the correct outcome is "skip the charge" (platform absorbs), never a negative balance.
-    walletBalance   = 10_000   // what getWalletBalance (the pre-check) sees
-    txnWalletBalance = 5       // what the transaction actually reads
+  it('RD-COMMS-P2-A — concurrent sends on a balance worth ONE message: one sent and charged, the rest refused, none free', async () => {
+    walletBalance = 35
+    const rs = await Promise.all(['a', 'b', 'c'].map(n => retryWhatsAppConfirmation(ARGS, { attemptNonce: n })))
 
-    const r = await retryWhatsAppConfirmation(ARGS)
+    expect(rs.filter(r => r.ok)).toHaveLength(1)
+    expect(rs.filter(r => !r.ok).every(r => (r as { reason: string }).reason === 'allowance_required')).toBe(true)
+    expect(providerSends).toHaveLength(1)                 // only the funded one reached Meta
+    expect(debits).toHaveLength(1)
+    expect(walletBalance).toBe(0)                          // drained exactly, never negative
+  })
+})
 
-    expect(r.ok).toBe(true)              // the send stands
-    expect(deductions).toEqual([])       // ...but nothing was debited
-    expect(ledgerWrites).toEqual([])
+describe('no answer from Meta ⇒ UNKNOWN (A6)', () => {
+  it('a retry that times out is recorded UNKNOWN, not failed, and keeps its hold for the webhook', async () => {
+    sendOutcome = 'timeout'
+    const r = await retryWhatsAppConfirmation(ARGS, { attemptNonce: 'n1' })
+
+    expect(r).toMatchObject({ ok: false, reason: 'send_unknown' })
+    expect((r as { error: string }).error).toMatch(/unknown/i)
+    expect(registrationUpdates.at(-1)).toMatchObject({ whatsappStatus: 'unknown' })
+    expect(releases).toEqual([])                           // not given back: Meta may have accepted it
+    expect(holds.get('wa_reg_reg-1__r_n1')?.state).toBe('held')
+  })
+
+  it('the next retry is then blocked until the explicit confirmUnknownDelivery', async () => {
+    registration = { ...registration, whatsappStatus: 'unknown' }
+    expect(await retryWhatsAppConfirmation(ARGS, { attemptNonce: 'n2' })).toMatchObject({ ok: false, reason: 'delivery_unknown' })
+    expect(providerSends).toEqual([])
+    const confirmed = await retryWhatsAppConfirmation(ARGS, { attemptNonce: 'n3', confirmUnknownDelivery: true })
+    expect(confirmed.ok).toBe(true)
   })
 })
 

@@ -103,7 +103,9 @@ describe('client enforcement: nothing starts without consent', () => {
     expect(STEP7).toContain("if (json.reason === 'AGREEMENT_REQUIRED') {")
   })
   it('the ticks survive a cancelled / failed payment and a failed submission (same component state; no reset)', () => {
-    const handler = STEP7.slice(STEP7.indexOf('const confirmPublishOnce'), STEP7.indexOf('// ── Wallet top-up via Razorpay'))
+    // RD-COMMS-P1 — the wizard's top-up block is gone; the handler now ends at the activation section.
+    const handler = STEP7.slice(STEP7.indexOf('const confirmPublishOnce'), STEP7.indexOf('// ── Activation & services (RD-EVENT-COMMERCE-05B)'))
+    expect(handler.length).toBeGreaterThan(0)
     expect(handler).not.toMatch(/setTermInfo|setConsentFeeModel|setConsentTimeline|setFeesAcceptedAt/)
   })
   it('License & Services and the payment panel pass it through; only a DRAFT purchase sends it', () => {

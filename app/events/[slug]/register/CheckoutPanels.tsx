@@ -41,6 +41,8 @@ export interface ConsentState {
   info:   boolean
   terms:  boolean
   refund: boolean
+  /** RD-COMMS-WA-CONSENT — OPTIONAL opt-in to WhatsApp updates. Not part of the gate. */
+  whatsapp?: boolean
 }
 
 /**
@@ -112,7 +114,7 @@ function CheckoutSection({ id, icon, title, description, emphasis, children }: {
 // ─── 1 · Terms & Consent ────────────────────────────────────────────────────────
 
 export function ConsentPanel({
-  consent, onConsent, termsUrl, refundPolicyUrl, submitting, needsConsent = false,
+  consent, onConsent, termsUrl, refundPolicyUrl, submitting, needsConsent = false, whatsappUpdatesFrom,
 }: {
   consent:          ConsentState
   onConsent:        (key: keyof ConsentState, value: boolean) => void
@@ -121,6 +123,8 @@ export function ConsentPanel({
   submitting:       boolean
   /** Set by the caller when Pay was pressed with consent missing. */
   needsConsent?:    boolean
+  /** RD-COMMS-WA-CONSENT — the event name, when the event sends WhatsApp; offers the opt-in. */
+  whatsappUpdatesFrom?: string
 }) {
   const [termsOpen, setTermsOpen] = useState(false)
   const terms  = termsUrl?.trim()
@@ -174,6 +178,14 @@ export function ConsentPanel({
             <Link href={refund} target="_blank" rel="noopener noreferrer" className="font-semibold text-primary underline underline-offset-2">
               Refund Policy
             </Link>
+          </CheckOption>
+        )}
+
+        {/* RD-COMMS-WA-CONSENT — OPTIONAL, unticked by default and outside the required gate:
+            the explicit consent organizer WhatsApp broadcasts need. Registration works without it. */}
+        {whatsappUpdatesFrom && (
+          <CheckOption checked={consent.whatsapp === true} disabled={submitting} onToggle={v => onConsent('whatsapp', v)}>
+            Yes, I would like to receive WhatsApp updates about this event from the organiser. I can reply STOP at any time to opt out.
           </CheckOption>
         )}
       </div>

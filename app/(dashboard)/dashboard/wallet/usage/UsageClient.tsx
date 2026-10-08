@@ -129,7 +129,7 @@ export function UsageClient() {
         title="Communication Usage"
         subtitle="Email broadcasts and WhatsApp messages per event and campaign, with what each cost."
         breadcrumb={[
-          { label: 'Communication balance', href: COMMUNICATION_BALANCE_HREF },
+          { label: 'Legacy balance', href: COMMUNICATION_BALANCE_HREF },
           { label: 'Communication Usage' },
         ]}
         action={

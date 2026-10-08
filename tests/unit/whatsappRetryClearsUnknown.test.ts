@@ -246,13 +246,17 @@ describe('the change is confined to the retry success write', () => {
     const success = route.slice(route.indexOf("status:    'sent'"))
     const failure = route.slice(route.indexOf("status:    'failed'"), route.indexOf("status:    'sent'"))
     expect(success).toContain('deliveryUnknown: FieldValue.delete()')
-    expect(failure).not.toContain('deliveryUnknown')
+    // RD-COMMS-P2-A — the failure branch never CLEARS it; it SETS it only when this attempt itself got
+    // no verdict from Meta (send_unknown), so the next retry needs the explicit confirmation.
+    expect(failure).not.toContain('deliveryUnknown: FieldValue.delete()')
+    expect(failure).toContain("...(result.reason === 'send_unknown' ? { deliveryUnknown: true } : {}),")
   })
 
   it('RD-CLOSE — a broadcast transport timeout is flagged UNKNOWN (no verdict from Meta), not failed', () => {
     // The status webhook resolves it (acceptance recovery). The retry path is not involved.
     const src = read('lib/broadcasts/whatsappJob.ts')
-    expect(src).toContain("failureReason === 'NETWORK_TIMEOUT'")
+    // RD-COMMS-P2-A — structural: no HTTP status from Meta ⇒ unknown (an unmapped code is still a verdict).
+    expect(src).toContain('const transport = attemptsUsed > 0 && lastHttpStatus === undefined')
     expect(src).toContain('deliveryUnknown: true')
   })
 

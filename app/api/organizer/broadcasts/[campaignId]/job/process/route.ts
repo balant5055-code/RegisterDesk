@@ -26,7 +26,7 @@ export async function POST(
   if (!authz.ok) return NextResponse.json({ success: false, error: authz.error }, { status: authz.status })
 
   const snap = await adminDb.collection('broadcastCampaigns').doc(campaignId).get()
-  const d = snap.data() as { organizerUid?: string; channel?: string; whatsappJobId?: string; emailJobId?: string } | undefined
+  const d = snap.data() as { organizerUid?: string; status?: string; channel?: string; whatsappJobId?: string; emailJobId?: string } | undefined
   if (!snap.exists || d?.organizerUid !== authz.workspaceUid) {
     return NextResponse.json({ success: false, error: 'Campaign not found' }, { status: 404 })
   }
@@ -34,6 +34,14 @@ export async function POST(
   const ptr = campaignJobPointer(d)
   if (!ptr.jobId || !ptr.channel) {
     return NextResponse.json({ success: false, error: 'This campaign has no send job.' }, { status: 400 })
+  }
+
+  // RD-COMMS-P2-B — only a campaign that is still sending, with a job that is not finished, may be
+  // driven. A completed / failed / cancelled job is terminal: resuming a failed broadcast (already
+  // settled) would send — and bill — after its end. Refused with no state change.
+  const current = await getJob<Job>(ptr.collection, ptr.jobId)
+  if (d.status !== 'sending' || !current || current.status === 'completed' || current.status === 'failed' || current.status === 'cancelled') {
+    return NextResponse.json({ success: false, error: 'This broadcast has finished and cannot be resumed.' }, { status: 409 })
   }
 
   const result = await processCampaignJobChunk(ptr.channel, ptr.jobId)

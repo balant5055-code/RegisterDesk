@@ -15,9 +15,11 @@
 
 import { NextRequest, NextResponse } from 'next/server'
 import crypto from 'crypto'
+import { Timestamp } from 'firebase-admin/firestore'
 import { adminDb }              from '@/lib/firebase/admin'
 import { updateEmailLog }       from '@/lib/email-logs/write'
 import { addToSuppressionList, suppressEmailPlatformWide } from '@/lib/firebase/firestore/emailSuppressionList'
+import { snsUrl, isValidSigningCertUrl, allowedSesTopics, snsSignatureAlgorithm } from '@/lib/email/snsSecurity'
 
 export const dynamic     = 'force-dynamic'
 export const maxDuration = 30
@@ -33,19 +35,21 @@ const SIGNABLE_KEYS: Record<string, string[]> = {
   UnsubscribeConfirmation:  ['Message', 'MessageId', 'SubscribeURL', 'Timestamp', 'Token', 'TopicArn', 'Type'],
 }
 
+// RD-COMMS-P2-C — bounded (a varying query string can no longer grow it forever) and only ever
+// holding certificates fetched from a validated AWS SNS certificate URL.
 const certCache = new Map<string, string>()
-
+const CERT_CACHE_MAX = 16
 async function fetchSigningCert(url: string): Promise<string | null> {
-  // SSRF guard — the cert host MUST be an AWS SNS domain.
-  let host: string
-  try { host = new URL(url).host } catch { return null }
-  if (!/^sns\.[a-z0-9-]+\.amazonaws\.com$/.test(host)) return null
+  // SSRF guard — https, an AWS SNS host and the SNS certificate path only.
+  if (!isValidSigningCertUrl(url)) return null
   const cached = certCache.get(url)
   if (cached) return cached
   try {
-    const res = await fetch(url)
+    const res = await fetch(url, { redirect: 'error', signal: AbortSignal.timeout(5_000) })
     if (!res.ok) return null
     const pem = await res.text()
+    if (!pem.includes('BEGIN CERTIFICATE') || pem.length > 16_384) return null
+    if (certCache.size >= CERT_CACHE_MAX) certCache.clear()
     certCache.set(url, pem)
     return pem
   } catch { return null }
@@ -58,6 +62,10 @@ async function verifySnsSignature(msg: Record<string, unknown>): Promise<boolean
   const certUrl = String(msg.SigningCertURL ?? '')
   const signature = String(msg.Signature ?? '')
   if (!certUrl || !signature) return false
+  // RD-COMMS-P2-C — the two AWS signature versions, EXACTLY. A missing or unknown version is
+  // rejected instead of defaulting to SHA1.
+  const algo = snsSignatureAlgorithm(msg.SignatureVersion)
+  if (!algo) return false
 
   let canonical = ''
   for (const key of keys) {
@@ -69,7 +77,6 @@ async function verifySnsSignature(msg: Record<string, unknown>): Promise<boolean
   const cert = await fetchSigningCert(certUrl)
   if (!cert) return false
 
-  const algo = String(msg.SignatureVersion ?? '1') === '2' ? 'RSA-SHA256' : 'RSA-SHA1'
   try {
     return crypto.createVerify(algo).update(canonical, 'utf8').verify(cert, signature, 'base64')
   } catch { return false }
@@ -143,6 +150,20 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   let sns: Record<string, unknown>
   try { sns = JSON.parse(raw) as Record<string, unknown> } catch { return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 }) }
 
+  // RD-COMMS-P2-C — ONLY the configured SES topic(s). Any AWS account can create an SNS topic, point
+  // it here and publish validly-signed messages, so a good signature alone proves nothing about who
+  // sent it; without this check a forged "Complaint" suppressed any address platform-wide (OTP mail
+  // included). Checked BEFORE the certificate is fetched. Not configured ⇒ fail closed (503: SNS
+  // keeps retrying while it is being configured, instead of anything being accepted).
+  const topics = allowedSesTopics()
+  if (topics.size === 0) {
+    console.error('[ses-webhook] SES_SNS_TOPIC_ARNS is not configured — rejecting (fail closed)')
+    return NextResponse.json({ error: 'Webhook not configured' }, { status: 503 })
+  }
+  if (!topics.has(String(sns.TopicArn ?? ''))) {
+    return NextResponse.json({ error: 'Unexpected topic' }, { status: 403 })
+  }
+
   // Fail-closed signature verification for EVERY SNS message.
   if (!(await verifySnsSignature(sns))) {
     return NextResponse.json({ error: 'Invalid signature' }, { status: 401 })
@@ -150,16 +171,50 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
   const type = String(sns.Type ?? '')
 
-  // First-time subscription — confirm it (signature already verified above).
+  // First-time subscription — confirm it (signature AND topic verified above). The confirmation
+  // URL must itself be an AWS SNS https URL; it is fetched with a timeout and no redirects.
   if (type === 'SubscriptionConfirmation') {
     const subscribeUrl = String(sns.SubscribeURL ?? '')
-    try { if (subscribeUrl) await fetch(subscribeUrl) } catch { /* AWS retries */ }
+    if (!snsUrl(subscribeUrl)) return NextResponse.json({ error: 'Invalid SubscribeURL' }, { status: 400 })
+    try { await fetch(subscribeUrl, { redirect: 'error', signal: AbortSignal.timeout(5_000) }) } catch { /* AWS retries */ }
     return NextResponse.json({ ok: true, confirmed: true })
   }
 
   if (type !== 'Notification') {
     return NextResponse.json({ ok: true, ignored: type })
   }
+
+  // RD-COMMS-P2-C — REPLAY / DUPLICATE protection, keyed by the SNS MessageId (stable across SNS
+  // retries and on any captured-and-replayed message). A MessageId already processed — or being
+  // processed right now — changes nothing again (a replayed bounce can no longer re-suppress an
+  // address an admin cleared). A claim whose processing died goes stale and may be retried.
+  const snsMessageId = String(sns.MessageId ?? '')
+  if (!/^[A-Za-z0-9-]{1,128}$/.test(snsMessageId)) return NextResponse.json({ error: 'Invalid MessageId' }, { status: 400 })
+  const claimRef = adminDb.collection(SES_WEBHOOK_MESSAGES).doc(snsMessageId)
+  const claimed = await adminDb.runTransaction<boolean>(async txn => {
+    const s = await txn.get(claimRef)
+    if (s.exists) {
+      const c = s.data() as { status?: unknown; claimedAt?: { toMillis?: () => number } }
+      const at = typeof c.claimedAt?.toMillis === 'function' ? c.claimedAt.toMillis() : 0
+      if (c.status === 'done' || Date.now() - at < CLAIM_STALE_MS) return false
+    }
+    txn.set(claimRef, {
+      status: 'processing', topicArn: String(sns.TopicArn), claimedAt: Timestamp.now(),
+      expireAt: Timestamp.fromMillis(Date.now() + 30 * 24 * 60 * 60_000),
+    })
+    return true
+  })
+  if (!claimed) return NextResponse.json({ ok: true, duplicate: true })
+  const response = await handleNotification(sns)
+  await claimRef.update({ status: 'done', doneAt: Timestamp.now() }).catch(() => { /* a stale claim is retried */ })
+  return response
+}
+
+/** RD-COMMS-P2-C — Firestore record of processed SNS message ids (server-only; rules deny clients). */
+const SES_WEBHOOK_MESSAGES = 'sesWebhookMessages'
+const CLAIM_STALE_MS = 5 * 60_000
+
+async function handleNotification(sns: Record<string, unknown>): Promise<NextResponse> {
 
   let event: SesEvent
   try { event = JSON.parse(String(sns.Message ?? '{}')) as SesEvent } catch { return NextResponse.json({ error: 'Invalid message' }, { status: 400 }) }

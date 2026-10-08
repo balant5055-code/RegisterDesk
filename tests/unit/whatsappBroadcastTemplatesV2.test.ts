@@ -292,8 +292,10 @@ describe('certificateUrl is SERVER-derived, never organizer-typed', () => {
   })
 
   it('the create route treats it as server-supplied, not a missing static', () => {
-    const src = read('app/api/organizer/broadcasts/route.ts')
-    expect(src).toContain("new Set(['attendeeName', 'eventName', 'ticketCode', 'certificateUrl'])")
+    // RD-COMMS-P2-C — the set now lives once, in the registry (BROADCAST_SERVER_VARIABLES), and the
+    // route validates organizer variables through it (validateBroadcastVariables).
+    expect(read('lib/whatsapp/registry.ts')).toContain("new Set(['attendeeName', 'eventName', 'ticketCode', 'certificateUrl'])")
+    expect(read('app/api/organizer/broadcasts/route.ts')).toContain('validateBroadcastVariables(templateType, variables)')
   })
 
   it('the transactional certificate sender uses the SAME shape', () => {

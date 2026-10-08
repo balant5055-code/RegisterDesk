@@ -2,19 +2,20 @@
 
 import { useCallback, useEffect, useState } from 'react'
 import Link from 'next/link'
-import { Mail, MessageCircle, Phone, Info, Wallet, ArrowUpRight, Send, History } from 'lucide-react'
+import { Mail, MessageCircle, Phone, Info, ArrowUpRight, Send, History } from 'lucide-react'
 
 import { cn } from '@/lib/utils/cn'
 import { accent, type AccentTone } from '@/lib/dashboard/accents'
-import { calculateCommunicationCost } from '@/lib/events/communicationCost'
-import { useCommunicationConfig } from '@/lib/communications/communicationConfigClient'
 import { isChannelImplemented } from '@/lib/communications/health/channels'
 import {
   toEventActivityState, isSilent, commCenterHref, commComposeHref, commHistoryHref,
   type EventActivityState, type EventActivityCounts,
 } from '@/lib/communications/eventActivity'
 import type { EventDetailResponse } from '@/app/api/organizer/events/[eventId]/route'
-import { COMMUNICATION_BALANCE_HREF } from '@/lib/wallet/communicationBalance'
+import { COMMUNICATION_USAGE_HREF } from '@/lib/wallet/communicationBalance'
+import { withEventParam } from '@/lib/events/eventContext'
+import { increaseLimitHref } from '@/lib/wallet/purchaseIntent'
+import { LICENSE_SERVICES_CTA } from '@/lib/communications/capacity'
 
 // RD-COMMS-01 Phase 2B: SMS availability comes from the canonical capability SSOT. SMS has
 // no transport, so it can never be "Active" — it renders as Unavailable and is never priced.
@@ -32,12 +33,6 @@ const GHOST_BTN =
   'text-fs-sm font-semibold text-muted-foreground transition-colors hover:bg-muted hover:text-foreground ' +
   'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40'
 
-function formatINR(rupees: number): string {
-  return `₹${rupees.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
-}
-function ratePerMsg(pricePaise: number): string {
-  return `₹${(pricePaise / 100).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} / msg`
-}
 const n = (v: number): string => v.toLocaleString('en-IN')
 
 // ─── Channel row ─────────────────────────────────────────────────────────────
@@ -151,63 +146,19 @@ function BillingNote() {
     <div className={cn(CARD, 'flex items-start gap-2.5 bg-muted/[0.04] px-4 py-3')}>
       <Info className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" aria-hidden />
       <p className="text-fs-sm leading-relaxed text-muted-foreground">
-        {/* RD-INTEG — the actual billing path for every event (free or paid): prepaid units first,
-            else the communication balance, charged only for messages WhatsApp accepts. The old
-            copy promised paid events a deduction "from settlement", which nothing implements. */}
-        WhatsApp messages use this event&apos;s prepaid WhatsApp units first, if you bought any; otherwise each
-        message WhatsApp accepts is charged to your communication balance. Messages WhatsApp does not accept are
-        not charged. SMS is not available.
+        {/* RD-COMMS-P1 — WhatsApp is sent only from this event's WhatsApp capacity (License & Services);
+            one unit per message WhatsApp accepts. No pay-as-you-go / communication-balance path. */}
+        WhatsApp messages are sent from this event&apos;s WhatsApp capacity, purchased in License &amp; Services —
+        one unit per message WhatsApp accepts. Messages WhatsApp does not accept use nothing. Email is free.
+        SMS is not available.
       </p>
     </div>
   )
 }
 
 /** One line of the cost table. Module scope: defining it in render remounts it. */
-function CostRow({ label, value, strong }: { label: string; value: string; strong?: boolean }) {
-  return (
-    <div className={cn('flex items-center justify-between px-4 py-2.5 text-fs-sm', strong && 'bg-muted/[0.04]')}>
-      <span className={strong ? 'font-semibold text-foreground' : 'text-muted-foreground'}>{label}</span>
-      <span className={strong ? 'font-bold text-[color:var(--primary-text)]' : 'font-medium text-foreground'}>{value}</span>
-    </div>
-  )
-}
-
-function CostEstimate({
-  estimatedCapacity, whatsappEnabled, smsEnabled, whatsappRatePaise, smsRatePaise,
-}: {
-  estimatedCapacity: number; whatsappEnabled: boolean; smsEnabled: boolean
-  whatsappRatePaise: number; smsRatePaise: number
-}) {
-  const smsBillable = SMS_AVAILABLE && smsEnabled   // SMS has no transport → never estimated
-  if (!whatsappEnabled && !smsBillable) return null
-
-  const cost = calculateCommunicationCost({
-    estimatedCapacity, whatsappEnabled, smsEnabled: smsBillable, whatsappRatePaise, smsRatePaise,
-  })
-
-
-  return (
-    <section className={cn(CARD, 'overflow-hidden')} aria-labelledby="comm-cost-h">
-      <div className="border-b border-border px-4 py-2.5">
-        <h3 id="comm-cost-h" className="text-fs-2xs font-semibold uppercase tracking-wider text-muted-foreground">
-          Estimated communication cost
-        </h3>
-      </div>
-      <div className="divide-y divide-border/40">
-        <CostRow label="Estimated registrations" value={n(estimatedCapacity)} />
-        <CostRow label="Messages per attendee" value="2 (confirmation + reminder)" />
-        {whatsappEnabled && <CostRow label={`WhatsApp (${ratePerMsg(whatsappRatePaise)})`} value={formatINR(cost.whatsappCost)} />}
-        {smsBillable && <CostRow label={`SMS (${ratePerMsg(smsRatePaise)})`} value={formatINR(cost.smsCost)} />}
-        <CostRow label="Total estimated" value={formatINR(cost.totalCost)} strong />
-      </div>
-      <div className="border-t border-border/40 px-4 py-2.5">
-        <p className="text-fs-2xs leading-relaxed text-muted-foreground">
-          Charged per message WhatsApp accepts (prepaid units first, then your communication balance). Actual cost depends on final registrations.
-        </p>
-      </div>
-    </section>
-  )
-}
+// RD-COMMS-P1 — the "Estimated communication cost" panel (a money estimate at the retired
+// pay-as-you-go per-message price) is gone: capacity is bought per event in License & Services.
 
 // ─── Main ────────────────────────────────────────────────────────────────────
 
@@ -217,15 +168,11 @@ interface Props {
 }
 
 export default function CommunicationsTab({ event, token }: Props) {
-  const commConfig        = useCommunicationConfig()
-  const whatsappRatePaise = commConfig.whatsapp.pricePaise
-  const smsRatePaise      = commConfig.sms.pricePaise
 
   const pricing         = event.pricing as Record<string, unknown> | null
   const whatsappEnabled = !!(pricing?.whatsappEnabled as boolean | undefined)
   const smsEnabled      = !!(pricing?.smsEnabled      as boolean | undefined)
   const hasCommChannels = whatsappEnabled || (SMS_AVAILABLE && smsEnabled)
-  const estimatedCapacity = (event.totalCapacity ?? event.totalRegistrations) || 100
 
   const eventSlug = event.slug ?? ''
 
@@ -301,7 +248,7 @@ export default function CommunicationsTab({ event, token }: Props) {
             desc="Confirmation and reminder messages sent to attendees' WhatsApp numbers."
             badge="Active"
             tone="verify"
-            meta={`${ratePerMsg(whatsappRatePaise).replace('/ msg', '/ message')} · Prepaid units first, then communication balance`}
+            meta="Sent from this event’s WhatsApp capacity"
             action={
               <Link href={commComposeHref(eventSlug)} className={GHOST_BTN}>
                 Open WhatsApp <ArrowUpRight className="size-4" aria-hidden />
@@ -325,46 +272,43 @@ export default function CommunicationsTab({ event, token }: Props) {
           />
         )}
 
-        {/* §12 · SMS has no transport. No send control, no implication of one. */}
-        <ChannelRow
-          icon={Phone}
-          label="SMS"
-          desc={SMS_AVAILABLE
-            ? 'Not enabled for this event. Configure in event settings to activate.'
-            : 'SMS delivery is not available yet — no messages are sent for this channel.'}
-          badge={SMS_AVAILABLE ? 'Not enabled' : 'Unavailable'}
-          tone="neutral"
-          enabled={false}
-        />
+        {/* §12 · SMS has no transport. RD-COMMS-P2-F — no row at all until it does: an inert
+            "Unavailable" channel only suggests a product that does not exist. */}
+        {SMS_AVAILABLE && (
+          <ChannelRow
+            icon={Phone}
+            label="SMS"
+            desc="Not enabled for this event. Configure in event settings to activate."
+            badge="Not enabled"
+            tone="neutral"
+            enabled={false}
+          />
+        )}
       </section>
-
-      {hasCommChannels && (
-        <CostEstimate
-          estimatedCapacity={estimatedCapacity}
-          whatsappEnabled={whatsappEnabled}
-          smsEnabled={smsEnabled}
-          whatsappRatePaise={whatsappRatePaise}
-          smsRatePaise={smsRatePaise}
-        />
-      )}
 
       {hasCommChannels && <BillingNote />}
 
       {hasCommChannels && (
         <section className={cn(CARD, 'flex flex-wrap items-start gap-3 px-4 py-3.5')}>
           <span className={cn('flex size-8 shrink-0 items-center justify-center rounded-control', accent('event').tile)} aria-hidden>
-            <Wallet className="size-4" />
+            <MessageCircle className="size-4" />
           </span>
           <div className="min-w-0 flex-1">
-            <p className="text-fs-sm font-semibold text-foreground">Communication balance</p>
+            <p className="text-fs-sm font-semibold text-foreground">WhatsApp capacity</p>
             <p className="mt-0.5 text-fs-sm leading-relaxed text-muted-foreground">
-              Messages not covered by this event&apos;s prepaid units are charged to your communication balance.
-              Keep it above the estimate so messages are not held back.
+              Purchase WhatsApp capacity for this event in License &amp; Services. See what is used and what remains
+              under Communications › Usage.
             </p>
           </div>
-          <Link href={COMMUNICATION_BALANCE_HREF} className={GHOST_BTN}>
-            Communication balance <ArrowUpRight className="size-4" aria-hidden />
-          </Link>
+          <div className="flex flex-wrap gap-2">
+            <Link href={increaseLimitHref(event.draftId, 'whatsapp')} className={GHOST_BTN}>
+              {LICENSE_SERVICES_CTA} <ArrowUpRight className="size-4" aria-hidden />
+            </Link>
+            {/* RD-COMMS-P2-F — opens Usage on THIS event (the selector reads ?eventId=). */}
+            <Link href={withEventParam(COMMUNICATION_USAGE_HREF, event.draftId)} className={GHOST_BTN}>
+              Usage <ArrowUpRight className="size-4" aria-hidden />
+            </Link>
+          </div>
         </section>
       )}
 

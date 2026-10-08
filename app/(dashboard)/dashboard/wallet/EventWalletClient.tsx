@@ -6,8 +6,8 @@
 // requests. Every figure is the server's (GET /api/organizer/wallet/events/[draftId] and
 // GET /api/organizer/wallet/service-requests?event=…, both ownership-checked); nothing here
 // computes money. Buying more goes through the EXISTING purchase flow (Increase Limit →
-// License & Services, lib/wallet/purchaseIntent) — there is no general "Add Funds" here: the
-// communication balance and its top-up live on Communications › Billing.
+// License & Services, lib/wallet/purchaseIntent) — there is no "Add Funds" anywhere (RD-COMMS-P1:
+// the legacy communication balance is read-only, in controlled drain).
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
@@ -104,6 +104,11 @@ function ServiceCard({ svc, detail, closed, canSubmit, onRefund, onCarry }: {
   // Usable total: what was bought here plus what was carried in (capacity: the event's capacity).
   const total = s.service === 'registrations' ? (s.facts.capacity ?? null) : s.purchased + s.carriedIn
   const used = s.used
+  // RD-COMMS-L2 — the Wallet's WhatsApp "used" is the ledger's consumed figure, which still includes
+  // units held by running broadcasts. Communications › Usage and License & Services split those
+  // out as In progress, so here the label says so instead of contradicting them.
+  const usedLabel = s.service === 'whatsapp' ? 'Used or in progress' : 'Used'
+  const usedPhrase = s.service === 'whatsapp' ? 'used or in progress' : 'used'
   const donation = detail.event.registrations.state === 'not_applicable' && detail.event.registrations.reason === 'donation_campaign'
   // RD-INTEG — once the event's dates have passed, more REGISTRATIONS cannot be used; extra
   // certificate/photo/WhatsApp units still can (they are sent and uploaded after the event).
@@ -121,7 +126,7 @@ function ServiceCard({ svc, detail, closed, canSubmit, onRefund, onCarry }: {
             <h3 className="truncate text-[14px] font-semibold text-foreground">{SERVICE_LABEL[s.service]}</h3>
             <p className="text-[12px] text-muted-foreground">
               {s.applicable || s.service === 'registrations'
-                ? (used === null || total === null ? 'Usage not measurable' : `${qty(used)} of ${qty(total)} ${unit} used`)
+                ? (used === null || total === null ? 'Usage not measurable' : `${qty(used)} of ${qty(total)} ${unit} ${usedPhrase}`)
                 : 'Not purchased'}
             </p>
           </div>
@@ -141,8 +146,8 @@ function ServiceCard({ svc, detail, closed, canSubmit, onRefund, onCarry }: {
       {(s.applicable || s.service === 'registrations') && !s.notApplicableReason ? (
         <dl className="grid grid-cols-3 gap-x-3 gap-y-2 border-t border-border pt-3">
           <Figure label={s.service === 'registrations' ? 'Paid capacity' : 'Purchased'} value={qty(s.purchased)} />
-          <Figure label="Used" value={used === null ? '—' : qty(used)} />
-          <Figure label="Remaining" value={s.remaining === null ? '—' : qty(s.remaining)} />
+          <Figure label={usedLabel} value={used === null ? '—' : qty(used)} />
+          <Figure label={s.service === 'registrations' ? 'Remaining' : 'Available'} value={s.remaining === null ? '—' : qty(s.remaining)} />
           {s.service !== 'registrations' && <Figure label="Carried in" value={qty(s.carriedIn)} muted={s.carriedIn === 0} />}
           {s.service !== 'registrations' && <Figure label="Carried out" value={qty(s.carriedOut)} muted={s.carriedOut === 0} />}
           <Figure label="Refunded" value={qty(s.refunded)} muted={s.refunded === 0} />
@@ -423,21 +428,24 @@ export function EventWalletClient() {
             </Card>
           </section>
 
+          {/* RD-COMMS-P1 — history of LEGACY balance charges; hidden for an event that never had one. */}
+          {!(current.detail.communication.walletChargeCount.ok && current.detail.communication.walletChargeCount.value === 0) && (
           <Card variant="elevated" padded={false} className="p-4 sm:p-5">
             <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
               <h2 className="flex items-center gap-1 text-[14px] font-semibold text-foreground">
-                Pay-as-you-go for this event
-                <InfoTip label="About pay-as-you-go charges">Messages beyond a prepaid allowance are charged to your communication balance, only for messages WhatsApp accepts; anything charged for a broadcast recipient WhatsApp did not accept is returned when the broadcast ends. Only entries that record this event are counted.</InfoTip>
+                Legacy balance charges for this event
+                <InfoTip label="About legacy balance charges">Charges to the legacy communication balance (added before capacity-based billing) that record this event. New funds cannot be added to that balance — WhatsApp and certificate capacity is bought per event in License &amp; Services. Only messages WhatsApp accepts are charged; anything charged for a broadcast recipient WhatsApp did not accept is returned when the broadcast ends.</InfoTip>
               </h2>
               <Link href={`/dashboard/wallet/transactions?event=${encodeURIComponent(ev.draftId)}`} className="text-[12.5px] font-semibold text-primary hover:underline">View charges</Link>
             </div>
             <dl className="grid grid-cols-2 gap-3 sm:grid-cols-4">
               <Figure label="Broadcast emails" value={measuredText(current.detail.communication.emailMessages, qty, 'None')} />
               <Figure label="WhatsApp accepted" value={measuredText(current.detail.communication.whatsappMessages, qty, 'None')} />
-              <Figure label="Net charged to balance" value={measuredText(current.detail.communication.walletChargesPaise, rupees)} />
+              <Figure label="Net charged to legacy balance" value={measuredText(current.detail.communication.walletChargesPaise, rupees)} />
               <Figure label="Charge entries" value={measuredText(current.detail.communication.walletChargeCount, qty)} />
             </dl>
           </Card>
+          )}
 
           <Card variant="elevated" padded={false} className="overflow-hidden">
             <h2 className="border-b border-border px-4 py-3 text-[14px] font-semibold text-foreground">Refund and carry-forward requests</h2>
@@ -482,7 +490,7 @@ function OtherBalances() {
     <section aria-label="Other balances" className="grid gap-3 sm:grid-cols-2">
       <Link href={COMMUNICATION_BALANCE_HREF} className="flex items-center gap-3 rounded-2xl border border-border bg-card p-4 hover:bg-muted/40">
         <WalletIcon className="size-5 text-primary" aria-hidden />
-        <span className="min-w-0 flex-1"><span className="block text-[13.5px] font-semibold text-foreground">Communication balance</span><span className="block text-[12px] text-muted-foreground">Pay-as-you-go messages and broadcasts — managed in Communications.</span></span>
+        <span className="min-w-0 flex-1"><span className="block text-[13.5px] font-semibold text-foreground">Communication usage</span><span className="block text-[12px] text-muted-foreground">Each event&apos;s WhatsApp and certificate capacity and usage — in Communications.</span></span>
         <ChevronRight className="size-4 text-muted-foreground" aria-hidden />
       </Link>
     </section>

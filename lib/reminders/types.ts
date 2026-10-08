@@ -102,6 +102,55 @@ export interface ReminderRow {
   costPaise:    number
   createdAt:    string | null
   dispatchedAt: string | null
+  /** RD-COMMS-P2-F — why it was skipped / failed / resumed, in plain words (never an internal code
+   *  or exception text). Null when there is nothing to explain. */
+  reasonLabel:  string | null
+  /** Paused part-way (time budget) and still to finish — 'scheduled' with recipients already done. */
+  continuing:   boolean
+  /** Resumed after an interrupted send (no one already reached was emailed again). */
+  resumed:      boolean
+}
+
+export const REMINDER_STATUS_LABELS: Record<ReminderStatus, string> = {
+  scheduled: 'Scheduled',
+  sending:   'Sending',
+  sent:      'Sent',
+  partial:   'Partly sent',
+  failed:    'Failed',
+  cancelled: 'Cancelled',
+  skipped:   'Not sent',
+}
+
+// RD-COMMS-P2-F — the reasons the reminder engine records (RD-COMMS-P2-E executionGuard + dispatch),
+// in the organizer's words. Anything not listed is shown generically: an unexpected error message is
+// never echoed to the page.
+const REMINDER_REASON_LABELS: Record<string, string> = {
+  organizer_suspended:     'Your account is suspended, so reminders are paused.',
+  event_unavailable:       'The event is no longer available (removed, taken down, or not yours).',
+  event_cancelled:         'The event was cancelled.',
+  event_not_live:          'The event is not live (draft, under review, changes requested, unpublished or archived).',
+  event_rescheduled:       'The event’s date or time changed after this reminder was scheduled — a new one is scheduled for the new time.',
+  event_reminders_off:     'Automatic reminders are turned off for this event.',
+  reminders_disabled:      'Reminders are switched off on the platform.',
+  kind_disabled:           'This type of reminder is switched off on the platform.',
+  email_disabled:          'Email sending is switched off on the platform.',
+  channel_not_live:        'This channel is not available for reminders.',
+  invalid_reminder:        'The reminder was incomplete and could not be sent.',
+  retired:                 'This reminder type has been retired.',
+  no_recipients:           'No one was eligible to receive it.',
+  no_eligible_recipients:  'Everyone eligible had already received it, had unsubscribed, or is no longer an attendee.',
+  stale_sending_reclaimed: 'Sending was interrupted and could not be safely resumed. No one was emailed twice.',
+  guard_unavailable:       'The event’s status could not be checked, so it was not sent.',
+  resumed_after_interruption: 'Sending was interrupted and is resuming — no one already reached will be emailed again.',
+}
+
+/** The plain-language reason for a reminder's state, or null when there is nothing to explain. */
+export function reminderReasonLabel(status: string, error: unknown): string | null {
+  const code = typeof error === 'string' ? error : ''
+  if (code && REMINDER_REASON_LABELS[code]) return REMINDER_REASON_LABELS[code]
+  if (status === 'failed')  return 'It could not be sent.'
+  if (status === 'skipped') return 'It was not sent.'
+  return null
 }
 
 export interface ReminderAnalytics {

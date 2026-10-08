@@ -22,6 +22,7 @@ import { cancelJob, getJob }         from '@/lib/jobs/kernel'
 import type { Job }                  from '@/lib/jobs/types'
 import { campaignJobPointer }        from '@/lib/broadcasts/broadcastJobs'
 import { countAcceptedRecipients }   from '@/lib/broadcasts/whatsappJob'
+import { transitionCampaign }        from '@/lib/broadcasts/jobPreparation'
 
 export async function POST(
   req: NextRequest,
@@ -43,19 +44,28 @@ export async function POST(
   // ── Running campaign (email or WhatsApp) — cancel the job, keep what was sent ─
   const ptr = campaignJobPointer(d)
   if (d.status === 'sending' && ptr.jobId) {
-    await cancelJob(ptr.collection, ptr.jobId)
+    // RD-COMMS-P2-B — a job that already FINISHED cannot be cancelled: its completion (finalize)
+    // owns the campaign's final state. cancelJob reports that instead of cancelling it.
+    const jobStatus = await cancelJob(ptr.collection, ptr.jobId)
+    if (jobStatus === 'completed') {
+      return NextResponse.json({ success: false, error: 'This broadcast has already finished sending.' }, { status: 409 })
+    }
     const job = await getJob<Job>(ptr.collection, ptr.jobId)
     const isWhatsApp = d.channel === 'whatsapp'
     // WhatsApp: the sent flags are the truth (the runner counter can over-count a re-run page).
     const succeeded = isWhatsApp ? await countAcceptedRecipients(ptr.jobId) : (job?.counts.succeeded ?? 0)
     const failed    = isWhatsApp ? Math.max(0, (job?.counts.total ?? 0) - succeeded) : (job?.counts.failed ?? 0)
-    await ref.update({
+    // Status-GUARDED: only a campaign still `sending` becomes cancelled — never one a concurrent
+    // finalize / fail has already ended (sent → cancelled cannot happen).
+    const moved = await transitionCampaign(ref, ['sending'], {
       status:       'cancelled',
       successCount: succeeded,
       failCount:    failed,
       sentAt:       FieldValue.serverTimestamp(),
-      updatedAt:    FieldValue.serverTimestamp(),
     })
+    if (!moved) {
+      return NextResponse.json({ success: false, error: 'This broadcast has already finished.' }, { status: 409 })
+    }
     void logBroadcastAction({
       organizerUid: uid, actorUid: callerUid, action: 'broadcast.cancelled', campaignId,
       metadata: { successCount: succeeded, failCount: failed },

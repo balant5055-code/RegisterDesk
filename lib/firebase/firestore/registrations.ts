@@ -14,6 +14,7 @@ import { registrationRevenueBasisPaise } from '@/lib/registrations/revenueBasis'
 import { deriveStoredEventCapacity } from '@/lib/registrations/capacity'
 import { buildQrValue }          from '@/lib/tickets/generate'
 import { enqueueWebhook }        from '@/lib/integrations/webhooks'
+import { whatsappConsentFields } from '@/lib/whatsapp/broadcastConsent'
 import { crmRecordRegistration } from '@/lib/crm/service'
 import { readSessionSnaps, applyReleaseWrites, applyRestoreWrites } from '@/lib/sessions/allocation'
 import { checkInBlockReason } from '@/lib/registrations/checkinEligibility'
@@ -65,6 +66,10 @@ export interface CreateRegistrationInput {
   // onto the registration for auditability.
   termsAccepted?: boolean
   termsVersion?:  string
+  // RD-COMMS-WA-CONSENT — the attendee's EXPLICIT opt-in to organizer WhatsApp broadcasts (the
+  // unchecked-by-default box), validated server-side by the calling route. Only `true` records
+  // consent; absent/false records nothing (= not eligible). Never inferred from anything else.
+  whatsappBroadcastOptIn?: boolean
   registrationSource?:   'online' | 'walkin'
   paymentMethod?:        'cash' | 'upi' | 'complimentary'
   referenceNumber?:      string
@@ -325,6 +330,7 @@ export async function createRegistration(
             termsAcceptedAt: FieldValue.serverTimestamp(),
             ...(input.termsVersion ? { termsVersion: input.termsVersion } : {}),
           } : {}),
+          ...whatsappConsentFields(input.whatsappBroadcastOptIn, input.attendee.phone),
           ticketCode,
           ticket: {
             ticketId:      registrationId,

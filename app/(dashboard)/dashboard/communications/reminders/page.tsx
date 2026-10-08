@@ -2,20 +2,26 @@
 
 // Organizer Reminder Center (RD-REM-01) — history, analytics, and a "new custom
 // reminder" composer with preview. Auto reminders (event tomorrow/today/starting
-// soon, registration closing, early bird, low wallet) are scheduled by the engine;
-// this page also lets organizers author + schedule custom reminders and cancel
-// pending ones. Reuses the communications design tokens.
+// soon, registration closing, early bird) are scheduled by the engine; this page
+// also lets organizers author + schedule custom reminders and cancel pending ones.
+// Reuses the communications design tokens.
+//
+// RD-COMMS-P2-F — scoped to the event chosen in the dashboard's event selector (every event when
+// "All events" is chosen; the list is re-read when the selection changes, and a late answer for a
+// previous selection is dropped). Each row says, in plain words, why a reminder was not sent, and
+// whether it is continuing or was resumed — the server maps the engine's reasons (rows never carry
+// an internal code or error text). Reminders are email and included at no charge.
 
 import { useEffect, useState, type ReactNode } from 'react'
 import Link from 'next/link'
 import { auth } from '@/lib/firebase/auth'
 import { cn } from '@/lib/utils/cn'
 import { useConfirm } from '@/components/ui/ConfirmDialog'
+import { useEventContext } from '@/components/dashboard/EventContextProvider'
 import { Loader2, ArrowLeft, Bell, Plus, X, CalendarClock } from 'lucide-react'
 import { IconButton } from '@/components/ui'
-import type { ReminderRow, ReminderAnalytics } from '@/lib/reminders/types'
+import { REMINDER_STATUS_LABELS, type ReminderRow, type ReminderAnalytics, type ReminderStatus } from '@/lib/reminders/types'
 
-const rupees = (p: number) => `₹${(p / 100).toLocaleString('en-IN')}`
 const fmtDateTime = (iso: string | null) => iso ? new Date(iso).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—'
 
 const STATUS_CLS: Record<string, string> = {
@@ -28,6 +34,12 @@ const STATUS_CLS: Record<string, string> = {
   cancelled: 'bg-slate-100 text-slate-600 ring-slate-500/20',
 }
 
+/** The status text an organizer sees: "Continuing" for a send paused part-way. */
+function statusText(r: ReminderRow): string {
+  if (r.continuing) return 'Continuing'
+  return REMINDER_STATUS_LABELS[r.status as ReminderStatus] ?? 'Scheduled'
+}
+
 async function getToken(): Promise<string> {
   const u = auth.currentUser
   if (!u) throw new Error('Not authenticated')
@@ -36,39 +48,58 @@ async function getToken(): Promise<string> {
 
 interface EventOpt { slug: string; name: string }
 
+type ListState =
+  | { kind: 'loading' }
+  | { kind: 'error'; scope: string; message: string }
+  | { kind: 'ready'; scope: string; rows: ReminderRow[]; analytics: ReminderAnalytics }
+
 export default function RemindersPage() {
   const { confirm } = useConfirm()
-  const [rows, setRows]           = useState<ReminderRow[]>([])
-  const [analytics, setAnalytics] = useState<ReminderAnalytics | null>(null)
+  const { selectedEvent, isAllEvents, loading: eventsLoading } = useEventContext()
+  // '*' = every event; a slug = that event; '' = an event with no public page yet (no reminders).
+  const scope: string | null = eventsLoading ? null
+    : selectedEvent ? (selectedEvent.slug ?? '') : isAllEvents ? '*' : ''
+  const [list, setList]           = useState<ListState>({ kind: 'loading' })
   const [events, setEvents]       = useState<EventOpt[]>([])
-  const [loading, setLoading]     = useState(true)
   const [error, setError]         = useState<string | null>(null)
   const [showForm, setShowForm]   = useState(false)
+  const [reloadKey, setReloadKey] = useState(0)
+  const reload = () => setReloadKey(k => k + 1)
 
-  async function reload() {
-    const token = await getToken()
-    const res = await fetch('/api/organizer/reminders', { headers: { Authorization: `Bearer ${token}` }, cache: 'no-store' })
-    if (!res.ok) throw new Error('Could not load reminders.')
-    const data = await res.json() as { reminders: ReminderRow[]; analytics: ReminderAnalytics }
-    setRows(data.reminders); setAnalytics(data.analytics)
-  }
+  useEffect(() => {
+    if (scope === null) return
+    let alive = true
+    void (async () => {
+      try {
+        if (scope === '') {
+          if (alive) setList({ kind: 'ready', scope, rows: [], analytics: { scheduled: 0, sent: 0, failed: 0, skipped: 0, cancelled: 0, recipients: 0, costPaise: 0 } })
+          return
+        }
+        const token = await getToken()
+        const qs = scope === '*' ? '' : `?event=${encodeURIComponent(scope)}`
+        const res = await fetch(`/api/organizer/reminders${qs}`, { headers: { Authorization: `Bearer ${token}` }, cache: 'no-store' })
+        if (!res.ok) throw new Error('Could not load reminders.')
+        const data = await res.json() as { reminders: ReminderRow[]; analytics: ReminderAnalytics }
+        if (alive) setList({ kind: 'ready', scope, rows: data.reminders, analytics: data.analytics })
+      } catch (e) {
+        if (alive) setList({ kind: 'error', scope, message: e instanceof Error ? e.message : 'Failed to load' })
+      }
+    })()
+    return () => { alive = false }
+  }, [scope, reloadKey])
 
+  // Events for the custom-reminder form (published events only — they have a public slug).
   useEffect(() => {
     let alive = true
     void (async () => {
       try {
-        await reload()
         const token = await getToken()
         const lic = await fetch('/api/organizer/licenses', { headers: { Authorization: `Bearer ${token}` }, cache: 'no-store' })
         if (lic.ok && alive) {
           const d = await lic.json() as { licenses: { slug: string; eventName: string }[] }
           setEvents(d.licenses.map(l => ({ slug: l.slug, name: l.eventName })))
         }
-      } catch (e) {
-        if (alive) setError(e instanceof Error ? e.message : 'Failed to load')
-      } finally {
-        if (alive) setLoading(false)
-      }
+      } catch { /* the form simply offers no events */ }
     })()
     return () => { alive = false }
   }, [])
@@ -82,11 +113,14 @@ export default function RemindersPage() {
         body: JSON.stringify({ action: 'cancel', id }),
       })
       if (!res.ok) { const b = await res.json().catch(() => null) as { error?: string } | null; throw new Error(b?.error ?? 'Failed') }
-      await reload()
+      reload()
     } catch (e) { setError(e instanceof Error ? e.message : 'Cancel failed') }
   }
 
-  if (loading) return <div className="flex justify-center py-20"><Loader2 className="size-6 animate-spin text-muted-foreground motion-reduce:animate-none" /></div>
+  // Only ever show the list for the scope selected NOW.
+  const current = list.kind !== 'loading' && list.scope === scope ? list : null
+  const rows = current?.kind === 'ready' ? current.rows : []
+  const analytics = current?.kind === 'ready' ? current.analytics : null
 
   return (
     <div className="space-y-6 p-5 sm:p-6">
@@ -95,11 +129,11 @@ export default function RemindersPage() {
       </Link>
 
       <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="flex items-center gap-3">
-          <div className="flex size-9 items-center justify-center rounded-xl bg-primary/[0.09] text-primary"><Bell className="size-5" /></div>
-          <div>
+        <div className="flex min-w-0 items-center gap-3">
+          <div className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-primary/[0.09] text-primary"><Bell className="size-5" /></div>
+          <div className="min-w-0">
             <h1 className="text-[20px] font-bold tracking-tight text-foreground">Reminders</h1>
-            <p className="text-[13.5px] text-muted-foreground">Automatic event reminders + custom scheduled messages to your attendees.</p>
+            <p className="text-[13.5px] text-muted-foreground">Automatic event reminders + custom scheduled messages to your attendees. Reminders are email, included at no charge.</p>
           </div>
         </div>
         <button onClick={() => setShowForm(v => !v)} className="inline-flex items-center gap-1.5 rounded-lg px-4 py-2 text-[13px] font-semibold text-primary-foreground shadow-sm" style={{ backgroundImage: 'var(--primary-gradient)' }}>
@@ -107,58 +141,73 @@ export default function RemindersPage() {
         </button>
       </div>
 
-      {error && <div className="rounded-xl border border-destructive/30 bg-destructive/5 px-4 py-3 text-[13.5px] text-destructive">{error}</div>}
+      <p className="text-[12.5px] text-muted-foreground">
+        {selectedEvent ? <>Showing reminders for <span className="font-semibold text-foreground">{selectedEvent.name}</span>.</>
+          : isAllEvents ? 'Showing reminders for all your events.' : 'Choose an event in the selector at the top of the page.'}
+      </p>
+
+      {(error || current?.kind === 'error') && (
+        <div role="alert" className="rounded-xl border border-destructive/30 bg-destructive/5 px-4 py-3 text-[13.5px] text-destructive">{error ?? (current?.kind === 'error' ? current.message : '')}</div>
+      )}
 
       {analytics && (
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-6">
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
           <Kpi label="Scheduled" value={analytics.scheduled} />
           <Kpi label="Sent" value={analytics.sent} />
           <Kpi label="Failed" value={analytics.failed} />
-          <Kpi label="Skipped" value={analytics.skipped} />
+          <Kpi label="Not sent" value={analytics.skipped} />
           <Kpi label="Recipients" value={analytics.recipients} />
-          <Kpi label="Cost" value={rupees(analytics.costPaise)} />
         </div>
       )}
 
-      {showForm && <NewReminderForm events={events} onClose={() => setShowForm(false)} onCreated={() => { setShowForm(false); void reload() }} />}
+      {showForm && <NewReminderForm events={events} defaultEventSlug={selectedEvent?.slug ?? ''} onClose={() => setShowForm(false)} onCreated={() => { setShowForm(false); reload() }} />}
 
-      <div className="overflow-x-auto rounded-xl border border-border">
-        <table className="w-full min-w-[820px] text-[13px]">
-          <thead>
-            <tr className="border-b border-border bg-muted/40 text-left text-[12px] font-semibold text-muted-foreground">
-              <th scope="col" className="px-3 py-2.5">Reminder</th>
-              <th scope="col" className="px-3 py-2.5">Event</th>
-              <th scope="col" className="px-3 py-2.5">Audience</th>
-              <th scope="col" className="px-3 py-2.5">Send at</th>
-              <th scope="col" className="px-3 py-2.5">Status</th>
-              <th scope="col" className="px-3 py-2.5">Sent</th>
-              <th scope="col" className="px-3 py-2.5 text-right">Actions</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-border">
-            {rows.length === 0 ? (
-              <tr><td colSpan={7} className="px-3 py-10 text-center text-muted-foreground">No reminders yet.</td></tr>
-            ) : rows.map(r => (
-              <tr key={r.id} className="hover:bg-muted/20">
-                <td className="px-3 py-2.5">
-                  <div className="font-medium text-foreground">{r.kindLabel}</div>
-                  <div className="text-[11.5px] text-muted-foreground">{r.source === 'auto' ? 'Automatic' : 'Custom'}{r.subject ? ` · ${r.subject}` : ''}</div>
-                </td>
-                <td className="px-3 py-2.5 text-muted-foreground">{r.eventName}</td>
-                <td className="px-3 py-2.5 text-muted-foreground capitalize">{r.audience}</td>
-                <td className="px-3 py-2.5 text-muted-foreground">{fmtDateTime(r.sendAt)}</td>
-                <td className="px-3 py-2.5"><span className={cn('inline-flex rounded-full px-2 py-0.5 text-[11px] font-semibold capitalize ring-1', STATUS_CLS[r.status] ?? STATUS_CLS.scheduled)}>{r.status}</span></td>
-                <td className="px-3 py-2.5 text-muted-foreground">{r.counts.sent}/{r.counts.recipients || '—'}</td>
-                <td className="px-3 py-2.5 text-right">
-                  {r.status === 'scheduled'
-                    ? <button onClick={() => cancel(r.id)} className="text-[12px] font-semibold text-rose-600 hover:underline">Cancel</button>
-                    : <span className="text-[12px] text-muted-foreground/50">—</span>}
-                </td>
+      {!current ? (
+        <div className="flex justify-center py-12"><Loader2 className="size-6 animate-spin text-muted-foreground motion-reduce:animate-none" aria-label="Loading reminders" /></div>
+      ) : (
+        <div className="overflow-x-auto rounded-xl border border-border">
+          <table className="w-full min-w-[820px] text-[13px]">
+            <thead>
+              <tr className="border-b border-border bg-muted/40 text-left text-[12px] font-semibold text-muted-foreground">
+                <th scope="col" className="px-3 py-2.5">Reminder</th>
+                <th scope="col" className="px-3 py-2.5">Event</th>
+                <th scope="col" className="px-3 py-2.5">Audience</th>
+                <th scope="col" className="px-3 py-2.5">Send at</th>
+                <th scope="col" className="px-3 py-2.5">Status</th>
+                <th scope="col" className="px-3 py-2.5">Sent</th>
+                <th scope="col" className="px-3 py-2.5 text-right">Actions</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+            </thead>
+            <tbody className="divide-y divide-border">
+              {rows.length === 0 ? (
+                <tr><td colSpan={7} className="px-3 py-10 text-center text-muted-foreground">No reminders yet.</td></tr>
+              ) : rows.map(r => (
+                <tr key={r.id} className="align-top hover:bg-muted/20">
+                  <td className="px-3 py-2.5">
+                    <div className="font-medium text-foreground">{r.kindLabel}</div>
+                    <div className="text-[11.5px] text-muted-foreground">{r.source === 'auto' ? 'Automatic' : 'Custom'}{r.subject ? ` · ${r.subject}` : ''}</div>
+                  </td>
+                  <td className="px-3 py-2.5 text-muted-foreground">{r.eventName}</td>
+                  <td className="px-3 py-2.5 text-muted-foreground capitalize">{r.audience}</td>
+                  <td className="px-3 py-2.5 text-muted-foreground">{fmtDateTime(r.sendAt)}</td>
+                  <td className="max-w-[280px] px-3 py-2.5">
+                    <span className={cn('inline-flex rounded-full px-2 py-0.5 text-[11px] font-semibold ring-1', STATUS_CLS[r.status] ?? STATUS_CLS.scheduled)}>{statusText(r)}</span>
+                    {r.reasonLabel && <p className="mt-1 text-[11.5px] leading-snug text-muted-foreground">{r.reasonLabel}</p>}
+                    {r.continuing && !r.reasonLabel && <p className="mt-1 text-[11.5px] leading-snug text-muted-foreground">Part-way through — the rest goes out on the next run. No one is emailed twice.</p>}
+                    {r.resumed && r.status !== 'scheduled' && <p className="mt-1 text-[11.5px] leading-snug text-muted-foreground">Resumed after an interruption.</p>}
+                  </td>
+                  <td className="px-3 py-2.5 text-muted-foreground">{r.counts.sent}/{r.counts.recipients || '—'}</td>
+                  <td className="px-3 py-2.5 text-right">
+                    {r.status === 'scheduled'
+                      ? <button onClick={() => cancel(r.id)} className="text-[12px] font-semibold text-rose-600 hover:underline">Cancel</button>
+                      : <span className="text-[12px] text-muted-foreground/50">—</span>}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   )
 }
@@ -172,9 +221,9 @@ function Kpi({ label, value }: { label: string; value: ReactNode }) {
   )
 }
 
-function NewReminderForm({ events, onClose, onCreated }: { events: EventOpt[]; onClose: () => void; onCreated: () => void }) {
+function NewReminderForm({ events, defaultEventSlug, onClose, onCreated }: { events: EventOpt[]; defaultEventSlug: string; onClose: () => void; onCreated: () => void }) {
   const [audience, setAudience] = useState<'attendees' | 'organizer'>('attendees')
-  const [eventId, setEventId]   = useState('')
+  const [eventId, setEventId]   = useState(defaultEventSlug)
   const [subject, setSubject]   = useState('')
   const [message, setMessage]   = useState('')
   const [when, setWhen]         = useState('')

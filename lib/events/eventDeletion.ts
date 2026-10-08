@@ -58,7 +58,7 @@ export const RETAINED_COLLECTIONS = [
   // Not event-scoped despite the name — see the header.
   'paymentEvents',
   // Shared / global.
-  'globalCertificateTemplates', 'emailSuppressionList', 'platformSettings', 'users',
+  'globalCertificateTemplates', 'emailSuppressionList', 'emailSuppressionAudit', 'platformSettings', 'users',
 ] as const
 
 /** One unit of deletion work. Ordered; executed front to back. */
@@ -166,6 +166,8 @@ export function buildDeletionManifest(t: DeletionTarget): DeletionStep[] {
     // is misleading and its own type says so. Querying it with the draft id would silently
     // delete nothing and leave every reminder behind.
     { kind: 'query', label: 'scheduledReminders', collection: 'scheduledReminders', field: 'eventId', value: slug },
+    // RD-COMMS-P2-E — the reminder delivery ledger, keyed the same way (slug).
+    { kind: 'query', label: 'reminderDeliveries', collection: 'reminderDeliveries', field: 'eventId', value: slug },
 
     // ── Per-event singleton documents ────────────────────────────────────────
     { kind: 'doc', label: 'registrationCounters', path: `registrationCounters/${slug}` },

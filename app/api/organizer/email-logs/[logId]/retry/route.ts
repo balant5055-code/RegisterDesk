@@ -60,6 +60,11 @@ export async function POST(
     if (!retryableKeys.has(l.templateKey)) {
       return { ok: false as const, status: 422, error: `Retry not supported for template "${l.templateKey}"` }
     }
+    // RD-COMMS-P2-D — the earlier attempt got NO definite answer from the provider: it may already
+    // have been delivered, so it is not resent automatically (a duplicate to the attendee).
+    if ((l as { deliveryUnknown?: unknown }).deliveryUnknown === true) {
+      return { ok: false as const, status: 409, error: 'Delivery status unknown — this email may already have been delivered, so it is not resent automatically.' }
+    }
     tx.update(logRef, { status: 'queued', updatedAt: FieldValue.serverTimestamp() })
     return { ok: true as const, log: l }
   })
@@ -69,6 +74,18 @@ export async function POST(
   }
   const log = claim.log
 
+  // RD-COMMS-P2-D — the claim moved the row to 'queued'. ANY unexpected error from here on releases
+  // it back to 'failed' (still retryable) — it used to stay 'queued' forever, never retryable again.
+  try {
+    return await resend(logId, log)
+  } catch (err) {
+    console.error('[email-logs/retry] unexpected error — claim released:', err)
+    await updateEmailLog(logId, 'failed', { error: 'Retry could not be completed' })
+    return NextResponse.json({ success: false, error: 'Retry could not be completed' }, { status: 500 })
+  }
+}
+
+async function resend(logId: string, log: EmailLog): Promise<NextResponse<RetryEmailLogResponse>> {
   // ── 6. Load registration + event ───────────────────────────────────────────
   const regSnap = await adminDb.collection('registrations').doc(log.registrationId).get()
   if (!regSnap.exists) {
@@ -105,6 +122,7 @@ export async function POST(
   // ── 7. Re-send (templateKey already validated during the claim) ────────────
   let emailStatus: 'sent' | 'failed' = 'failed'
   let errorMsg: string | undefined
+  let deliveryUnknown = false
   let providerMessageId: string | undefined
 
   try {
@@ -124,7 +142,7 @@ export async function POST(
     }, emailProviderName)
     emailStatus         = result.success ? 'sent' : 'failed'
     providerMessageId   = result.messageId
-    if (!result.success) errorMsg = result.error
+    if (!result.success) { errorMsg = result.error; deliveryUnknown = result.deliveryUnknown === true }
   } catch (err) {
     errorMsg = err instanceof Error ? err.message : 'Unknown error'
     console.error('[email-logs/retry] send error:', err)
@@ -134,6 +152,8 @@ export async function POST(
   await updateEmailLog(logId, emailStatus === 'sent' ? 'sent' : 'failed', {
     providerMessageId,
     error: errorMsg,
+    // RD-COMMS-P2-D — an unknown outcome is flagged, so a later retry does not resend it blindly.
+    ...(deliveryUnknown ? { deliveryUnknown: true } : {}),
   })
 
   // ── 9. Update registration emailStatus ────────────────────────────────────

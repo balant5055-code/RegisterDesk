@@ -20,8 +20,12 @@ import type { ReminderAudience } from '@/lib/reminders/types'
 export async function GET(req: NextRequest): Promise<NextResponse> {
   const ctx = await authorizeWorkspace(req, 'broadcasts')
   if (!ctx.ok) return NextResponse.json({ error: ctx.error }, { status: ctx.status })
+  // RD-COMMS-P2-F — `?event=<slug>` scopes the list to the event chosen in the event selector.
+  // Always within this workspace (the service filters by its uid first).
+  const event = req.nextUrl.searchParams.get('event') ?? ''
+  if (event && !/^[A-Za-z0-9_-]{1,200}$/.test(event)) return NextResponse.json({ error: 'Invalid event' }, { status: 400 })
   try {
-    const { items, analytics } = await listRemindersForOrganizer(ctx.workspaceUid)
+    const { items, analytics } = await listRemindersForOrganizer(ctx.workspaceUid, event ? { eventSlug: event } : {})
     return NextResponse.json({ reminders: items, analytics }, { headers: { 'Cache-Control': 'no-store' } })
   } catch (e) {
     console.error('[organizer/reminders] list failed', e)

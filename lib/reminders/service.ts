@@ -2,10 +2,11 @@
 // reminder APIs (list history, create custom, cancel, analytics). Writes go to the
 // same `scheduledReminders` collection the cron dispatches from.
 
+import { createHash } from 'node:crypto'
 import { FieldValue, Timestamp } from 'firebase-admin/firestore'
 import { adminDb } from '@/lib/firebase/admin'
 import {
-  REMINDER_KIND_LABELS,
+  REMINDER_KIND_LABELS, reminderReasonLabel,
   type ReminderDocData, type ReminderRow, type ReminderAnalytics,
   type ReminderAudience,
 } from './types'
@@ -42,6 +43,11 @@ function toRow(id: string, d: Record<string, unknown>): ReminderRow {
     costPaise:    typeof d.costPaise === 'number' ? d.costPaise : 0,
     createdAt:    tsToISO(d.createdAt),
     dispatchedAt: tsToISO(d.dispatchedAt),
+    // RD-COMMS-P2-F — explained in plain words; the raw `error` (a code, or an exception message)
+    // never leaves the server.
+    reasonLabel:  reminderReasonLabel(data.status, d.error),
+    continuing:   data.status === 'scheduled' && (counts.recipients ?? 0) > 0,
+    resumed:      typeof d.resumes === 'number' && d.resumes > 0,
   }
 }
 
@@ -59,9 +65,13 @@ function analyticsFrom(rows: ReminderRow[]): ReminderAnalytics {
   return a
 }
 
-/** Recent reminders for one workspace (no composite index needed — sorted in-memory). */
-export async function listRemindersForOrganizer(organizerUid: string): Promise<{ items: ReminderRow[]; analytics: ReminderAnalytics }> {
-  const snap = await REMINDERS.where('organizerUid', '==', organizerUid).limit(300).get()
+/** Recent reminders for one workspace (no composite index needed — sorted in-memory).
+ *  RD-COMMS-P2-F — `eventSlug` narrows it to ONE event (two equality filters, still index-free);
+ *  the organizerUid filter keeps another workspace's event matching nothing. */
+export async function listRemindersForOrganizer(organizerUid: string, opts: { eventSlug?: string } = {}): Promise<{ items: ReminderRow[]; analytics: ReminderAnalytics }> {
+  let q = REMINDERS.where('organizerUid', '==', organizerUid)
+  if (opts.eventSlug) q = q.where('eventId', '==', opts.eventSlug)
+  const snap = await q.limit(300).get()
   const items = snap.docs.map(d => toRow(d.id, d.data())).sort((a, b) => (b.createdAt ?? '').localeCompare(a.createdAt ?? ''))
   return { items, analytics: analyticsFrom(items) }
 }
@@ -110,7 +120,11 @@ export async function createCustomReminder(input: {
   }
 
   const sendAtMs = Math.max(input.sendAtMs, Date.now())
-  const ref = REMINDERS.doc()
+  // RD-COMMS-P2-E — a DETERMINISTIC id: the same organizer submitting the same reminder for the
+  // same minute (a double click, a retried request) gets the one job, not two. Anything that
+  // differs — subject, message, audience, event or time — is a separate reminder.
+  const fingerprint = [input.organizerUid, input.audience, input.eventId ?? '', subject, message, Math.floor(input.sendAtMs / 60_000)].join('|')
+  const ref = REMINDERS.doc(`crem_${createHash('sha256').update(fingerprint).digest('hex').slice(0, 40)}`)
   const data: ReminderDocData & { sendAt: Timestamp } = {
     eventId:      input.audience === 'attendees' ? input.eventId : null,
     eventName,
@@ -128,7 +142,17 @@ export async function createCustomReminder(input: {
     error:        null,
     sendAt:       Timestamp.fromMillis(sendAtMs),
   }
-  await ref.set({ ...data, createdAt: FieldValue.serverTimestamp(), updatedAt: FieldValue.serverTimestamp() })
+  try {
+    await ref.create({ ...data, createdAt: FieldValue.serverTimestamp(), updatedAt: FieldValue.serverTimestamp() })
+  } catch (err) {
+    const code = (err as { code?: unknown }).code
+    if (code !== 6 && !/already exists/i.test(String((err as Error)?.message))) throw err
+    // Already created by an identical request — idempotent success, unless that one was cancelled.
+    const existing = (await ref.get()).data() as { status?: unknown } | undefined
+    if (existing?.status === 'cancelled') {
+      throw new ReminderError('An identical reminder for this time was cancelled. Change the time or the message to schedule it again.', 409)
+    }
+  }
   return ref.id
 }
 

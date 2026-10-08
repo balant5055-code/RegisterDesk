@@ -83,8 +83,8 @@ export async function GET(req: NextRequest): Promise<NextResponse<GetResponse>> 
   //
   // ⚠ COMPOSITE INDEXES REQUIRED IN PRODUCTION. This filter combines with
   // `orderBy('createdAt','desc')`, so Firestore cannot serve it by merging
-  // single-field indexes. `organizerUid, eventSlug, status, createdAt DESC` already
-  // exists; these three do NOT and must be deployed:
+  // single-field indexes. `organizerUid, eventSlug, status, createdAt DESC` and these
+  // three are defined in firestore.indexes.json (RD-COMMS-FINAL) and must be DEPLOYED:
   //
   //   organizerUid, eventSlug,                      createdAt DESC
   //   organizerUid, eventSlug, templateKey,         createdAt DESC
@@ -146,6 +146,8 @@ export async function GET(req: NextRequest): Promise<NextResponse<GetResponse>> 
       providerMessageId: typeof d.providerMessageId  === 'string' ? d.providerMessageId  : undefined,
       error:             typeof d.error              === 'string' ? d.error              : undefined,
       registrationId:    typeof d.registrationId     === 'string' ? d.registrationId     : '',
+      // RD-COMMS-P2-F — the outcome was never confirmed (RD-COMMS-P2-D); the page shows it as such.
+      ...(d.deliveryUnknown === true ? { deliveryUnknown: true } : {}),
       createdAt:         tsToIso(d.createdAt),
       updatedAt:         tsToIso(d.updatedAt),
     } as EmailLog

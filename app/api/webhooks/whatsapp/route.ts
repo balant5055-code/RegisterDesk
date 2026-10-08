@@ -22,6 +22,7 @@ import { parseWhatsAppInboundMessages } from '@/lib/whatsapp/webhookInbound'
 import { applyWhatsAppDeliveryStatus } from '@/lib/email-logs/whatsappStatus'
 import { reconcileWhatsAppAcceptance } from '@/lib/whatsapp/acceptanceRecovery'
 import { recordInboundMessages, routeInboundBatch } from '@/lib/whatsapp-inbox/persist'
+import { applyInboundOptCommands } from '@/lib/whatsapp/broadcastConsent'
 import { META_APP_SECRET } from '@/lib/env'
 
 export const dynamic     = 'force-dynamic'
@@ -88,6 +89,18 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     inboundFailed = rec.failed
     if (rec.created.length) after(() => routeInboundBatch(rec.created))
     console.info(`[webhooks/whatsapp] inbound · received=${inbound.length} created=${rec.created.length} duplicates=${rec.duplicates} failed=${rec.failed}`)
+
+    // RD-COMMS-WA-CONSENT — a message that IS a STOP/START command changes the number's ORGANIZER
+    // BROADCAST opt-out (lib/whatsapp/broadcastConsent). Applied synchronously, for redeliveries
+    // too (idempotent per wamid), and a failure asks Meta to redeliver — an opt-out must not be
+    // lost. Any other message changes nothing; routing above is untouched; no auto-reply is sent.
+    try {
+      const opt = await applyInboundOptCommands(inbound)
+      if (opt.applied || opt.superseded) console.info(`[webhooks/whatsapp] opt commands · applied=${opt.applied} superseded=${opt.superseded} duplicates=${opt.duplicates}`)
+    } catch (err) {
+      inboundFailed++
+      console.error('[webhooks/whatsapp] opt command not recorded — asking Meta to redeliver:', err instanceof Error ? err.message : err)
+    }
   }
 
   // Valid delivery — process status events. Parsing + updates are best-effort and

@@ -146,8 +146,9 @@ describe('4 — no composer, no sender, no second history', () => {
     }
   })
 
-  it('SMS is offered no send control', () => {
-    expect(TAB).toContain('SMS delivery is not available yet')
+  it('SMS is offered no send control — and no row at all while it has no transport (RD-COMMS-P2-F)', () => {
+    expect(TAB).toMatch(/\{SMS_AVAILABLE && \(\s*<ChannelRow\s+icon=\{Phone\}\s+label="SMS"/)
+    expect(TAB).not.toContain('SMS delivery is not available yet')
     expect(TAB).not.toMatch(/Send SMS|sendSms/i)
   })
 })

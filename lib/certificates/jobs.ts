@@ -7,7 +7,7 @@
 import { FieldPath } from 'firebase-admin/firestore'
 import { adminDb }   from '@/lib/firebase/admin'
 import { getTemplateById, recordTemplateUsage } from './firestore'
-import { generateCertificate, loadRenderAssets, CertificateInProgressError } from './generate'
+import { generateCertificate, loadRenderAssets, CertificateInProgressError, CertificateAllowanceExhaustedError } from './generate'
 import type { RenderAssets } from './generate'
 import { notifyCertificateJobComplete } from '@/lib/notifications/inbox/notify'
 import { runJobChunk } from '@/lib/jobs/runner'
@@ -221,6 +221,10 @@ async function generateForReg(
     if (err instanceof CertificateInProgressError) {
       // Transient concurrency race (a later chunk retries it) — not an anomaly, don't alert.
       return { ok: false, error: `Registration ${reg.id} generation in progress` }
+    }
+    if (err instanceof CertificateAllowanceExhaustedError) {
+      // RD-COMMS-P1 — no certificate capacity left: an organizer action (License & Services), not a fault.
+      return { ok: false, error: err.message }
     }
     // Genuine per-item generation failure — alert, but never fail the whole job.
     captureError(err, { scope: 'certificate_bulk_item', area: 'certificate', jobId: job.jobId, registrationId: reg.id })

@@ -8,7 +8,7 @@ import { cn } from '@/lib/utils/cn'
 import { isChannelImplemented } from '@/lib/communications/health/channels'
 import Link from 'next/link'
 import {
-  Loader2, CreditCard, Wallet, Ticket, Plus, ArrowRight, Activity,
+  Loader2, CreditCard, Wallet, Ticket, ArrowRight, Activity,
   Mail, MessageSquare, Phone,
 } from 'lucide-react'
 import LicensesTab from './LicensesTab'
@@ -21,7 +21,8 @@ type Tab = 'overview' | 'wallet' | 'licenses' | 'usage'
 
 const TABS: { key: Tab; label: string }[] = [
   { key: 'overview', label: 'Overview' },
-  { key: 'wallet',   label: 'Communication balance' },
+  // RD-COMMS-P1 — the legacy communication balance: history + read-only balance (no top-up).
+  { key: 'wallet',   label: 'Legacy balance' },
   { key: 'licenses', label: 'Licenses' },
   { key: 'usage',    label: 'Usage' },
 ]
@@ -80,7 +81,7 @@ export default function BillingPage() {
         <div className="flex size-9 items-center justify-center rounded-xl bg-primary/[0.09] text-primary"><CreditCard className="size-5" aria-hidden /></div>
         <div>
           <h1 className="text-[20px] font-bold tracking-tight text-foreground">Billing Center</h1>
-          <p className="text-[13.5px] text-muted-foreground">Your communication balance, event licences and usage.</p>
+          <p className="text-[13.5px] text-muted-foreground">Event licences, payments and communication usage.</p>
         </div>
       </div>
 
@@ -105,7 +106,10 @@ export default function BillingPage() {
       {tab === 'overview' && (
         <div className="space-y-5">
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
-            <Kpi icon={<Wallet className="size-4" />}  label="Communication balance"          value={overview ? rupees(overview.balancePaise) : '—'} />
+            {/* RD-COMMS-P1 — a legacy balance is shown only while it is above zero. */}
+            {(overview?.balancePaise ?? 0) > 0 && (
+              <Kpi icon={<Wallet className="size-4" />}  label="Legacy communication balance" value={rupees(overview!.balancePaise)} />
+            )}
             <Kpi icon={<Ticket className="size-4" />}  label="Active event licenses"   value={activeLicenses} />
             <Kpi icon={<Activity className="size-4" />} label="Pending approval"        value={pendingLicenses} />
             <Kpi icon={<CreditCard className="size-4" />} label="License purchases"     value={purchases} />
@@ -115,7 +119,7 @@ export default function BillingPage() {
           <div>
             <h2 className="mb-2.5 text-[13px] font-semibold uppercase tracking-wider text-muted-foreground">Quick actions</h2>
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-              <QuickAction href={COMMUNICATION_BALANCE_HREF} icon={<Plus className="size-4" />} title="Top up communication balance" subtitle="For broadcasts and pay-as-you-go messages" />
+              <QuickAction href={COMMUNICATION_BALANCE_HREF} icon={<Mail className="size-4" />} title="Communication usage" subtitle="Each event's capacity and usage" />
               <QuickAction href="/dashboard/events/new/visibility"  icon={<Ticket className="size-4" />} title="Create event"   subtitle="Start a new event + license" />
               <QuickAction onClick={() => setTab('licenses')} icon={<CreditCard className="size-4" />} title="View licenses" subtitle="See every event's license" />
             </div>
@@ -128,12 +132,13 @@ export default function BillingPage() {
         <div className="space-y-5">
           <section className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-border bg-card p-5">
             <div>
-              <p className="text-[12px] font-semibold uppercase tracking-wider text-muted-foreground">Current balance</p>
+              <p className="text-[12px] font-semibold uppercase tracking-wider text-muted-foreground">Legacy communication balance</p>
               <p className="mt-0.5 text-[26px] font-bold text-foreground">{overview ? rupees(overview.balancePaise) : '—'}</p>
+              <p className="mt-1 max-w-md text-[12.5px] text-muted-foreground">
+                Existing balance added before capacity-based billing. New funds cannot be added. It is used only for
+                WhatsApp messages an event&apos;s capacity does not cover, until it reaches ₹0.
+              </p>
             </div>
-            <Link href={COMMUNICATION_BALANCE_HREF} className="inline-flex items-center gap-1.5 rounded-lg px-4 py-2 text-[13px] font-semibold text-primary-foreground shadow-sm" style={{ backgroundImage: 'var(--primary-gradient)' }}>
-              <Plus className="size-4" /> Top up
-            </Link>
           </section>
 
           <section>
@@ -168,7 +173,7 @@ export default function BillingPage() {
             )}
           </section>
 
-          <p className="text-[12.5px] text-muted-foreground">Top up and see usage under <Link href={COMMUNICATION_BALANCE_HREF} className="font-semibold text-primary">Communications › Billing</Link>. Each event&apos;s purchases, usage and refunds are in its <Link href="/dashboard/wallet" className="font-semibold text-primary">Event Wallet</Link>.</p>
+          <p className="text-[12.5px] text-muted-foreground">Communication capacity is purchased per event in License &amp; Services. See each event&apos;s usage under <Link href={COMMUNICATION_BALANCE_HREF} className="font-semibold text-primary">Communications › Usage</Link>, and its purchases and refunds in its <Link href="/dashboard/wallet" className="font-semibold text-primary">Event Wallet</Link>.</p>
         </div>
       )}
 

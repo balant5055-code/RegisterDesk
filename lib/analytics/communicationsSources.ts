@@ -215,7 +215,7 @@ export async function readCommunicationSpend(eventId: string): Promise<MaybeMone
 // createdAt)` and a query without the prefix cannot use them, and because a read that names
 // its workspace cannot be pointed at another one by a later caller.
 
-import { BROADCAST_TEMPLATE_KEY, WHATSAPP_WALLET_SKIP_REASON } from '@/lib/email-logs/types'
+import { BROADCAST_TEMPLATE_KEY, WHATSAPP_WALLET_SKIP_REASON, WHATSAPP_CAPACITY_SKIP_REASON } from '@/lib/email-logs/types'
 
 const campaigns = () => adminDb.collection('broadcastCampaigns')
 
@@ -306,13 +306,16 @@ export async function readCommunicationSignals(
 ): Promise<CommunicationSignals> {
   const base = logs().where('organizerUid', '==', organizerUid).where('eventId', '==', eventId)
   const wa   = base.where('channel', '==', 'whatsapp')
-  const [broadcast, bounces, complaints, read, walletSkipped] = await Promise.all([
+  const [broadcast, bounces, complaints, read, walletSkippedLegacy, capacitySkipped] = await Promise.all([
     countOf(base.where('templateKey', '==', BROADCAST_TEMPLATE_KEY)),
     countOf(base.where('error', '==', 'bounce')),
     countOf(base.where('error', '==', 'complaint')),
     countOf(wa.where('waStatus', '==', 'read')),
     countOf(wa.where('status', '==', 'skipped').where('error', '==', WHATSAPP_WALLET_SKIP_REASON)),
+    // RD-COMMS-P1 — skipped for lack of WhatsApp capacity (the same "never attempted" signal).
+    countOf(wa.where('status', '==', 'skipped').where('error', '==', WHATSAPP_CAPACITY_SKIP_REASON)),
   ])
+  const walletSkipped: Count = walletSkippedLegacy === null || capacitySkipped === null ? null : walletSkippedLegacy + capacitySkipped
   return {
     broadcast,
     automatic: total === null || broadcast === null ? null : Math.max(0, total - broadcast),

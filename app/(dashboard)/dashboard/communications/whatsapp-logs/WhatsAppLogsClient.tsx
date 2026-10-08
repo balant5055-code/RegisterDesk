@@ -139,7 +139,8 @@ function DetailsDrawer({ log, onClose }: { log: WhatsAppLog; onClose: () => void
                               ? `${log.templateName}${log.templateLanguage ? ` (${log.templateLanguage})` : ''}`
                               : log.templateKey || '—'],
     ['Time',                fmtTime(log.createdAt)],
-    ['Wallet charged',      fmtRupees(log.costPaise)],
+    // RD-COMMS-P2-F — only the LEGACY balance ever charged per message; capacity-funded sends show "—".
+    ['Legacy balance charge', log.costPaise > 0 ? fmtRupees(log.costPaise) : '—'],
     ['Retry available',     log.retryAvailable ? 'Yes' : 'No'],
   ]
   if (log.providerMessageId) rows.push(['Meta message ID', log.providerMessageId])

@@ -118,6 +118,8 @@ export interface BroadcastCampaign {
     refundedPaise: number | null
   } | null
   failReason:     string | null   // e.g. 'insufficient_balance'
+  /** RD-COMMS-CAPACITY-UX — the event's draft id (opens its License & Services step). */
+  eventDraftId?:  string | null
   createdAt:      string       // ISO
   sentAt:         string | null
 }

@@ -18,6 +18,9 @@ import { getWalletConfig } from '@/lib/wallet/resolveWalletConfig'
 import type { OrganizerWallet } from '@/types/events'
 import type { WalletTxnType }   from '@/lib/wallet/types'
 import { decideReserve, txnReadForReserve, txnTakeUnits, draftIdForEventSlug, txnReadUsage, txnTrimUnits } from '@/lib/licensing/serviceAllowanceLedger'
+import { legacyBalanceCanFund } from './capacity'
+import { WHATSAPP_BROADCAST_JOBS_COLLECTION } from '@/lib/whatsapp/acceptance'
+import { HOLD_RELEASE_AFTER_MS } from '@/lib/whatsapp/funding'
 
 const LEDGER_TYPE: Record<string, WalletTxnType> = {
   sms:      'broadcast_sms',
@@ -28,8 +31,13 @@ export type StartResult =
   | { ok: true;  costPaise: number }
   | { ok: false; reason: 'insufficient_balance' }
   // RD-EVENT-COMMERCE-02 — the event's prepaid WhatsApp allowance cannot cover the campaign
-  // and its exhaustion policy is 'block'. Nothing is sent and nothing is charged.
+  // (and the legacy balance cannot either — RD-COMMS-P1). Nothing is sent and nothing is charged.
   | { ok: false; reason: 'allowance_exhausted' }
+  // RD-COMMS-P1 — the event has NO WhatsApp capacity and no legacy balance can cover it.
+  | { ok: false; reason: 'allowance_required' }
+  // RD-COMMS-P2-A — a WhatsApp campaign with NO billable recipient: refused, never started. (Started,
+  // it carried no unit cap and the job re-resolved the whole audience at send time — free messages.)
+  | { ok: false; reason: 'no_recipients' }
   | { ok: false; reason: 'bad_state' }   // already started / missing — skip silently
 
 /**
@@ -79,8 +87,22 @@ export async function chargeAndStartCampaign(args: {
     // (sending/sent/failed/cancelled) is a replay → no-op.
     if (status !== 'scheduled' && status !== 'draft') return { ok: false, reason: 'bad_state' }
 
+    // RD-COMMS-P2-A — zero billable units is not an uncapped campaign: nothing is sent.
+    if (args.channel === 'whatsapp' && units === 0) {
+      txn.update(campaignRef, {
+        status: 'failed', failReason: 'no_recipients', actualCostPaise: 0, chargedUnits: 0,
+        sentAt: FieldValue.serverTimestamp(), updatedAt: FieldValue.serverTimestamp(),
+      })
+      return { ok: false, reason: 'no_recipients' }
+    }
+
+    // RD-COMMS-P1 — WhatsApp is funded by the event's capacity; only what that capacity does not
+    // cover may drain the LEGACY balance (lib/communications/capacity). `outcome` is 'none' when
+    // the event has no ledger at all.
+    const outcome = args.channel === 'whatsapp' && units > 0 && allowanceDraftId && allowanceRead
+      ? decideReserve(allowanceRead.ledger, allowanceRead.usageExists, 'whatsapp', units)
+      : { mode: 'none' as const }
     if (allowanceDraftId && allowanceRead) {
-      const outcome = decideReserve(allowanceRead.ledger, allowanceRead.usageExists, 'whatsapp', units)
       if (outcome.mode === 'allowance') {
         if (!outcome.already) txnTakeUnits(txn, allowanceDraftId, 'whatsapp', unitKey, units, 'broadcast')
         txn.update(campaignRef, {
@@ -91,17 +113,21 @@ export async function chargeAndStartCampaign(args: {
         })
         return { ok: true, costPaise: 0 }
       }
-      if (outcome.mode === 'exhausted' && outcome.policy === 'block') {
-        txn.update(campaignRef, {
-          status: 'failed', failReason: 'allowance_exhausted', actualCostPaise: 0,
-          sentAt: FieldValue.serverTimestamp(), updatedAt: FieldValue.serverTimestamp(),
-        })
-        return { ok: false, reason: 'allowance_exhausted' }
-      }
-      // 'none', or exhausted with 'wallet_payg' ⇒ the existing wallet path below, unchanged.
     }
 
     const balance = walletSnap.exists ? ((walletSnap.data() as OrganizerWallet).balancePaise ?? 0) : 0
+
+    // RD-COMMS-P1 — not covered by the event's capacity (none bought, used up — whatever the
+    // stored exhaustion policy says): the LEGACY balance may fund it only if it covers the WHOLE
+    // cost; otherwise nothing is sent and nothing is charged. There is no new pay-as-you-go path.
+    if (args.channel === 'whatsapp' && units > 0 && !legacyBalanceCanFund(balance, cost)) {
+      const reason = outcome.mode === 'exhausted' ? 'allowance_exhausted' as const : 'allowance_required' as const
+      txn.update(campaignRef, {
+        status: 'failed', failReason: reason, actualCostPaise: 0,
+        sentAt: FieldValue.serverTimestamp(), updatedAt: FieldValue.serverTimestamp(),
+      })
+      return { ok: false, reason }
+    }
 
     if (paid) {
       if (!walletCfg.allowNegativeBalance && balance < cost) {
@@ -179,7 +205,12 @@ export async function settleBroadcastBilling(campaignId: string, acceptedUnits: 
   const campaignRef = adminDb.collection('broadcastCampaigns').doc(campaignId)
   const pre = await campaignRef.get()
   if (!pre.exists) return NOT_SETTLED
-  const p = pre.data() as { fundedBy?: unknown; allowanceDraftId?: unknown; eventSlug?: unknown }
+  const p = pre.data() as { fundedBy?: unknown; allowanceDraftId?: unknown; eventSlug?: unknown; whatsappJobId?: unknown }
+  // RD-COMMS-P2-A — recipients whose send had no verdict (Meta never answered, or the worker died
+  // mid-attempt). Meta may have accepted them, and a late acceptance must not go out free: their
+  // units/money are HELD by this settlement rather than returned. A late acceptance consumes them
+  // (lib/whatsapp/acceptance.ts); releaseHeldBroadcastUnits returns the rest after the webhook window.
+  const held = typeof p.whatsappJobId === 'string' && p.whatsappJobId ? await countUnresolvedRecipients(p.whatsappJobId) : 0
   // The prepaid ledger key: stamped at charge time; older campaigns resolve it the way the charge did.
   const allowanceDraftId = p.fundedBy === 'prepaid_allowance'
     ? (typeof p.allowanceDraftId === 'string' && p.allowanceDraftId ? p.allowanceDraftId
@@ -217,7 +248,7 @@ export async function settleBroadcastBilling(campaignId: string, acceptedUnits: 
       ...(typeof chargeMeta.eventId === 'string' && chargeMeta.eventId ? { eventId: chargeMeta.eventId } : {}),
     }
 
-    let billed = 0, refundedUnits = 0, refundedPaise = 0, net = 0
+    let billed = 0, heldUnits = 0, refundedUnits = 0, refundedPaise = 0, net = 0
 
     // Wallet-funded: credit back the unaccepted share of the one upfront charge.
     if (chargeSnap.exists) {
@@ -225,10 +256,12 @@ export async function settleBroadcastBilling(campaignId: string, acceptedUnits: 
       const charged = Math.max(0, Math.round(ch.amountPaise ?? 0))
       const units   = Math.max(0, Math.floor(ch.metadata?.units ?? 0))
       billed = Math.min(accepted, units)
+      heldUnits = Math.min(held, units - billed)
+      const keep = billed + heldUnits
       // Proportional, so a legacy charge whose stored unit price is unknown still settles exactly.
-      const keepPaise = units > 0 ? Math.round((charged * billed) / units) : charged
+      const keepPaise = units > 0 ? Math.round((charged * keep) / units) : charged
       refundedPaise = Math.max(0, charged - keepPaise)
-      refundedUnits = units - billed
+      refundedUnits = units - keep
       net = charged - refundedPaise
       if (refundedPaise > 0 && walletRef && walletSnap && !refundSnap.exists) {
         const balance    = walletSnap.exists ? ((walletSnap.data() as OrganizerWallet).balancePaise ?? 0) : 0
@@ -250,7 +283,8 @@ export async function settleBroadcastBilling(campaignId: string, acceptedUnits: 
     } else if (allowanceDraftId && usage && usage.exists) {
       // Prepaid-funded: keep one unit per accepted message, give the rest back to the event.
       billed = Math.min(accepted, usage.quantity)
-      refundedUnits = txnTrimUnits(txn, allowanceDraftId, 'whatsapp', unitKey, usage, billed)
+      heldUnits = Math.min(held, usage.quantity - billed)
+      refundedUnits = txnTrimUnits(txn, allowanceDraftId, 'whatsapp', unitKey, usage, billed + heldUnits)
     } else {
       billed = 0
     }
@@ -273,6 +307,7 @@ export async function settleBroadcastBilling(campaignId: string, acceptedUnits: 
       billingSettledAt:  FieldValue.serverTimestamp(),
       billingCatchUp:    'pending',   // RD-CLOSE — cleared by reconcileBroadcastBilledUnits (sweep retries)
       billedUnits:       billed,
+      ...(heldUnits > 0 ? { unknownHeldUnits: heldUnits } : {}),
       refundedUnits,
       refundedPaise,
       ...(chargeSnap.exists ? { actualCostPaise: net } : {}),
@@ -286,4 +321,79 @@ export async function settleBroadcastBilling(campaignId: string, acceptedUnits: 
     await reconcileBroadcastBilledUnits(campaignId).catch(err => console.error('[broadcast] billed-unit reconciliation failed — the sweep retries it:', { campaignId, err: err instanceof Error ? err.message : err }))
   }
   return result
+}
+
+// ─── RD-COMMS-P2-A — recipients with no verdict, and the units held for them ──────────────────
+
+/** Recipients of a WhatsApp job whose send had NO verdict (never `sent`): indeterminate, or mid-attempt. */
+export async function countUnresolvedRecipients(jobId: string): Promise<number> {
+  const recipients = adminDb.collection(WHATSAPP_BROADCAST_JOBS_COLLECTION).doc(jobId).collection('recipients')
+  const [indeterminate, attempting] = await Promise.all([
+    recipients.where('indeterminate', '==', true).count().get(),
+    recipients.where('pendingAttemptAt', '!=', null).count().get(),
+  ])
+  return indeterminate.data().count + attempting.data().count
+}
+
+/**
+ * Returns the units/money settlement HELD for unresolved recipients once the webhook window has
+ * passed with no acceptance for them (an acceptance converts a held unit into a billed one first).
+ * Idempotent: the transaction re-reads `unknownHeldUnits`; the wallet credit lands under the
+ * deterministic id `broadcast_refund_held_<campaignId>`.
+ */
+export async function releaseHeldBroadcastUnits(campaignId: string, now: number = Date.now()): Promise<number> {
+  const campaignRef = adminDb.collection('broadcastCampaigns').doc(campaignId)
+  const pre = await campaignRef.get()
+  if (!pre.exists) return 0
+  const p = pre.data() as { fundedBy?: unknown; allowanceDraftId?: unknown; eventSlug?: unknown }
+  const allowanceDraftId = p.fundedBy === 'prepaid_allowance'
+    ? (typeof p.allowanceDraftId === 'string' && p.allowanceDraftId ? p.allowanceDraftId
+      : typeof p.eventSlug === 'string' && p.eventSlug ? await draftIdForEventSlug(p.eventSlug) : null)
+    : null
+  const chargeRef  = adminDb.collection('walletTransactions').doc(`broadcast_${campaignId}`)
+  const releaseRef = adminDb.collection('walletTransactions').doc(`broadcast_refund_held_${campaignId}`)
+  const usageRowRef = adminDb.collection('communicationUsage').doc(`bc_${campaignId}`)
+  return adminDb.runTransaction<number>(async txn => {
+    const cSnap = await txn.get(campaignRef)
+    const c = (cSnap.data() ?? {}) as { organizerUid?: string; unknownHeldUnits?: number; billingSettledAt?: { toMillis?: () => number }; unitPricePaise?: number; actualCostPaise?: number; channel?: string }
+    const held = Math.max(0, Math.floor(c.unknownHeldUnits ?? 0))
+    const settledMs = typeof c.billingSettledAt?.toMillis === 'function' ? c.billingSettledAt.toMillis() : null
+    if (held === 0 || settledMs === null || now - settledMs < HOLD_RELEASE_AFTER_MS) return 0
+    const [chargeSnap, releaseSnap, usageRowSnap] = await Promise.all([txn.get(chargeRef), txn.get(releaseRef), txn.get(usageRowRef)])
+    const usage = allowanceDraftId ? await txnReadUsage(txn, allowanceDraftId, `bc_${campaignId}`) : null
+    const walletRef = c.organizerUid ? adminDb.doc(`organizerWallets/${c.organizerUid}`) : null
+    const walletSnap = walletRef && chargeSnap.exists && !releaseSnap.exists ? await txn.get(walletRef) : null
+
+    let amount = 0
+    if (chargeSnap.exists && walletRef && walletSnap && !releaseSnap.exists) {
+      const ch = chargeSnap.data() as { amountPaise?: number; metadata?: { units?: number; eventSlug?: unknown; eventId?: unknown } }
+      const units = Math.max(1, Math.floor(ch.metadata?.units ?? 1))
+      const unitPaise = typeof c.unitPricePaise === 'number' && c.unitPricePaise > 0 ? c.unitPricePaise : Math.round((ch.amountPaise ?? 0) / units)
+      amount = Math.max(0, Math.min(unitPaise * held, Math.round(c.actualCostPaise ?? 0)))
+      if (amount > 0) {
+        const balance = walletSnap.exists ? ((walletSnap.data() as OrganizerWallet).balancePaise ?? 0) : 0
+        txn.set(walletRef, { balancePaise: balance + amount, currency: 'INR', updatedAt: FieldValue.serverTimestamp() }, { merge: true })
+        txn.set(releaseRef, {
+          organizerUid: c.organizerUid, type: 'refund' satisfies WalletTxnType, amountPaise: amount, balancePaise: balance + amount,
+          status: 'completed', referenceType: 'communication', referenceId: campaignId,
+          description: `${String(c.channel ?? 'whatsapp').toUpperCase()} broadcast — ${held} message${held === 1 ? '' : 's'} with no WhatsApp verdict, returned`,
+          metadata: {
+            campaignId, units: held, channel: c.channel ?? 'whatsapp', heldRelease: true,
+            ...(typeof ch.metadata?.eventSlug === 'string' && ch.metadata.eventSlug ? { eventSlug: ch.metadata.eventSlug } : {}),
+            ...(typeof ch.metadata?.eventId === 'string' && ch.metadata.eventId ? { eventId: ch.metadata.eventId } : {}),
+          },
+          createdAt: FieldValue.serverTimestamp(),
+        })
+      }
+    } else if (allowanceDraftId && usage?.exists) {
+      txnTrimUnits(txn, allowanceDraftId, 'whatsapp', `bc_${campaignId}`, usage, Math.max(0, usage.quantity - held))
+    }
+    if (amount > 0 && usageRowSnap.exists) txn.set(usageRowRef, { costPaise: FieldValue.increment(-amount), updatedAt: FieldValue.serverTimestamp() }, { merge: true })
+    txn.update(campaignRef, {
+      unknownHeldUnits: 0, heldReleasedUnits: held, heldReleasedAt: FieldValue.serverTimestamp(),
+      refundedUnits: FieldValue.increment(held),
+      ...(amount > 0 ? { refundedPaise: FieldValue.increment(amount), actualCostPaise: FieldValue.increment(-amount) } : {}),
+    })
+    return held
+  })
 }

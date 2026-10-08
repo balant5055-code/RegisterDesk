@@ -1,6 +1,9 @@
 // GET  /api/organizer/broadcasts          — campaign history list
 // POST /api/organizer/broadcasts          — create + send a broadcast campaign
 
+import { quoteWhatsAppBroadcastCapacity, type WhatsAppCapacityQuote } from '@/lib/communications/capacityQuote'
+import { applyAudienceRefundRule } from '@/lib/broadcasts/audienceRefunds'
+import { filterWhatsAppBroadcastRecipients } from '@/lib/whatsapp/broadcastConsent'
 import { NextRequest, NextResponse }  from 'next/server'
 import { FieldValue, Timestamp }       from 'firebase-admin/firestore'
 import { adminDb }                     from '@/lib/firebase/admin'
@@ -16,7 +19,8 @@ import { startBroadcastCampaign }      from '@/lib/broadcasts/send'
 import { logBroadcastAction }          from '@/lib/broadcasts/audit'
 import { getFeatureFlags }             from '@/lib/config/resolveFeatureFlags'
 import { hasWhatsAppTemplate, getWhatsAppTemplate } from '@/lib/whatsapp'
-import { isSendableMetaStatus } from '@/lib/whatsapp/registry'
+import { isSendableMetaStatus, isOrganizerBroadcastTemplate, validateBroadcastVariables } from '@/lib/whatsapp/registry'
+import { authoritativeEventName } from '@/lib/broadcasts/eventName'
 import { getCommunicationConfig }      from '@/lib/communications/resolveCommunicationConfig'
 import {
   parseRegistrationDateFilter, resolveRegistrationDateWindow, applyRegistrationDateRange, toFilterRecord,
@@ -25,6 +29,7 @@ import {
 import { resolveBroadcastTimezone }    from '@/lib/broadcasts/resolveBroadcastTimezone'
 import { countUndatedRegistrations }   from '@/lib/broadcasts/undatedRegistrations'
 import { todayISOInTz }                from '@/lib/registrations/salesWindow'
+import { WHATSAPP_BROADCAST_CAPACITY_REQUIRED } from '@/lib/communications/capacity'
 
 const AUDIENCES: BroadcastAudience[] = ['all', 'confirmed', 'pending', 'rejected', 'cancelled']
 
@@ -71,6 +76,7 @@ function docToCampaign(id: string, d: Record<string, unknown>): BroadcastCampaig
       refundedPaise: typeof d.refundedPaise === 'number' ? d.refundedPaise : null,
     } : null,
     failReason:     typeof d.failReason      === 'string' ? d.failReason      : null,
+    eventDraftId:   typeof d.eventDraftId    === 'string' ? d.eventDraftId    : null,
     createdAt:      tsToIso(d.createdAt) ?? new Date().toISOString(),
     sentAt:         tsToIso(d.sentAt),
   }
@@ -114,6 +120,8 @@ export type PostBroadcastResponse =
       limit?:   number | string
       /** ISO instant at which a daily quota rolls over. */
       resetAt?: string
+      /** RD-COMMS-CAPACITY-UX — WHATSAPP_CAPACITY_REQUIRED: required vs available for this audience. */
+      capacity?: WhatsAppCapacityQuote
     }
 
 export async function POST(req: NextRequest): Promise<NextResponse<PostBroadcastResponse>> {
@@ -135,7 +143,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<PostBroadcast
   try { body = await req.json() }
   catch { return NextResponse.json({ success: false, error: 'Invalid JSON' }, { status: 400 }) }
 
-  const { eventSlug, eventName, audience, subject, html, channel, templateType, languageCode, variables, scheduledFor } =
+  const { eventSlug, audience, subject, html, channel, templateType, languageCode, variables, scheduledFor } =
     body as Record<string, unknown>
 
   // "Ignore duplicate email IDs". Strict `=== true` so any other value — absent, null, a
@@ -151,7 +159,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<PostBroadcast
   // allowance a WhatsApp campaign is billed from and which event's Wallet/analytics it counts
   // toward, so it is verified here rather than trusted from the body.
   const liveEvent = await adminDb.collection('events').doc(eventSlug).get().catch(() => null)
-  const liveData  = liveEvent?.exists ? liveEvent.data() as { uid?: unknown; draftId?: unknown } : null
+  const liveData  = liveEvent?.exists ? liveEvent.data() as { uid?: unknown; draftId?: unknown } & Record<string, unknown> : null
   if (!liveData || liveData.uid !== uid) {
     return NextResponse.json({ success: false, error: 'Event not found' }, { status: 404 })
   }
@@ -201,6 +209,13 @@ export async function POST(req: NextRequest): Promise<NextResponse<PostBroadcast
     if (typeof templateType !== 'string' || !hasWhatsAppTemplate(templateType)) {
       return NextResponse.json({ success: false, error: 'Select an approved WhatsApp template.' }, { status: 400 })
     }
+    // RD-COMMS-P2-C — only the organizer-broadcastable templates. Transactional (refund, cancellation,
+    // confirmation…) and RegisterDesk platform templates (wallet, settlement, licence…) are sent by
+    // the platform with server-derived values only; a broadcast could otherwise impersonate them.
+    // Enforced HERE (and again by the broadcast job), whatever the client sends.
+    if (!isOrganizerBroadcastTemplate(templateType)) {
+      return NextResponse.json({ success: false, error: 'TEMPLATE_NOT_ALLOWED', message: 'This WhatsApp template cannot be used for a broadcast.' }, { status: 403 })
+    }
     const def = getWhatsAppTemplate(templateType)
     // Refuse a template Meta cannot deliver HERE, before chargeAndStartCampaign runs.
     // The resolver would refuse it later anyway, but by then the campaign is created and
@@ -220,28 +235,18 @@ export async function POST(req: NextRequest): Promise<NextResponse<PostBroadcast
       }
       waLanguageCode = languageCode
     }
-    if (variables && typeof variables === 'object') {
-      for (const [k, v] of Object.entries(variables as Record<string, unknown>)) {
-        if (typeof v === 'string') waVariables[k] = v
-      }
+    // Every required template variable must be satisfiable — either filled by the server per
+    // recipient (attendeeName / eventName / ticketCode / certificateUrl) or typed by the organizer.
+    // Otherwise the resolver fails EVERY recipient at send time while the campaign is still charged
+    // upfront (M4). Reject at create instead.
+    // RD-COMMS-P2-C — and ONLY those organizer-typed variables are stored, validated (single line,
+    // bounded, links https://). A typed value for a server-filled variable (e.g. eventName) or for
+    // any key the template does not use is never kept, so it cannot reach the message.
+    const checked = validateBroadcastVariables(templateType, variables)
+    if (!checked.ok) {
+      return NextResponse.json({ success: false, error: checked.error }, { status: 400 })
     }
-    // Every required template variable must be satisfiable — either auto-supplied
-    // per recipient (attendeeName/eventName/ticketCode) or provided as a non-blank
-    // static variable. Otherwise the resolver fails EVERY recipient at send time while
-    // the campaign is still charged upfront (M4). Reject at create instead.
-    // Variables the SERVER fills at send time, so the organizer is never asked for them.
-    // `certificateUrl` is derived per campaign from the event slug (see whatsappJob.ts);
-    // listing it here is what stops this gate demanding a static value for a variable the
-    // composer deliberately does not offer an input for.
-    const PER_RECIPIENT_VARS = new Set(['attendeeName', 'eventName', 'ticketCode', 'certificateUrl'])
-    const unsatisfiable = def.requiredVariables.filter(k =>
-      !PER_RECIPIENT_VARS.has(k) && !(typeof waVariables[k] === 'string' && waVariables[k].trim() !== ''))
-    if (unsatisfiable.length) {
-      return NextResponse.json(
-        { success: false, error: `This template needs variable(s) the broadcast can't fill: ${unsatisfiable.join(', ')}. Provide them, or pick a template that uses attendee name, event name, or ticket code.` },
-        { status: 400 },
-      )
-    }
+    Object.assign(waVariables, checked.variables)
     waTemplateType = templateType
     storedSubject  = `WhatsApp · ${def.templateName}`
   }
@@ -300,14 +305,16 @@ export async function POST(req: NextRequest): Promise<NextResponse<PostBroadcast
   }
 
   const regsSnap = await regsQuery.limit(maxRecipients + 1).get()
-  const allRecipients = regsSnap.docs.map(d => ({
+  // RD-COMMS-CAPACITY-UX (L3) — a 'confirmed' audience never includes a completed refund.
+  const allRecipients = applyAudienceRefundRule(String(audience), regsSnap.docs.map(d => ({
     id:   d.id,
     data: d.data() as RegistrationDocument,
-  }))
+  })))
 
   // Recipient filtering per channel: email removes suppressed addresses; WhatsApp
   // requires a phone number (email suppression is an email-channel concept).
   let recipients: typeof allRecipients
+  let waExcluded: { noConsent: number; optedOut: number } | null = null
   if (chosenChannel === 'whatsapp') {
     const withPhone = allRecipients.filter(({ data: reg }) => typeof reg.attendee.phone === 'string' && reg.attendee.phone.trim().length > 0)
     // 'Ignore duplicate WhatsApp numbers' — WHATSAPP ONLY, applied after the presence filter
@@ -319,7 +326,12 @@ export async function POST(req: NextRequest): Promise<NextResponse<PostBroadcast
     // (limit(cap+1)), exactly as it does for email. Evaluating it after dedupe would admit a
     // larger audience on the promise of fewer uniques, changing what the cap protects.
     // Existing cap semantics are unchanged.
-    recipients = dedupePhones ? dedupeRecipientsByPhone(withPhone) : withPhone
+    // RD-COMMS-WA-CONSENT — only attendees who EXPLICITLY opted in to WhatsApp updates and have
+    // not replied STOP (server-side, from stored data; lib/whatsapp/broadcastConsent). Before
+    // dedupe and before billing, so the paid count is the consenting count.
+    const consent = await filterWhatsAppBroadcastRecipients(withPhone)
+    waExcluded = { noConsent: consent.noConsent, optedOut: consent.optedOut }
+    recipients = dedupePhones ? dedupeRecipientsByPhone(consent.eligible) : consent.eligible
   } else {
     const suppressionSet = await getOrganiserSuppressionSet(uid)
     const suppressed = allRecipients.filter(({ data: reg }) => !suppressionSet.has(reg.attendee.email.toLowerCase().trim()))
@@ -336,6 +348,32 @@ export async function POST(req: NextRequest): Promise<NextResponse<PostBroadcast
   }
 
   const recipientCount = recipients.length
+
+  // RD-COMMS-P2-A — a WhatsApp broadcast is paid per recipient at start; with no recipient there is
+  // nothing to pay for and nothing to send (later registrants are never added to a campaign's charge).
+  if (chosenChannel === 'whatsapp' && recipientCount === 0) {
+    return NextResponse.json(
+      { success: false, error: 'NO_RECIPIENTS', message: waExcluded && (waExcluded.noConsent || waExcluded.optedOut)
+          ? 'No one in this audience can receive WhatsApp updates: attendees must opt in to WhatsApp updates when they register, and anyone who replied STOP is excluded.'
+          : 'No one in this audience has a WhatsApp number to send to.', ...(waExcluded ? { excluded: waExcluded } : {}) },
+      { status: 422 },
+    )
+  }
+
+  // RD-COMMS-CAPACITY-UX (M1/M2) — can the event fund this WhatsApp broadcast? Checked HERE, before
+  // any campaign document exists, for send-now AND scheduled campaigns, with the same decision the
+  // funding transaction makes (lib/communications/capacityQuote). Not enough ⇒ nothing is created,
+  // charged, queued or sent, and the organizer is told required vs available. The funding
+  // transaction at start still decides (capacity can change before a scheduled send).
+  if (chosenChannel === 'whatsapp') {
+    const capacity = await quoteWhatsAppBroadcastCapacity({ organizerUid: uid, eventSlug, recipientCount })
+    if (!capacity.sufficient) {
+      return NextResponse.json(
+        { success: false, error: 'WHATSAPP_CAPACITY_REQUIRED', message: WHATSAPP_BROADCAST_CAPACITY_REQUIRED, capacity },
+        { status: 402 },
+      )
+    }
+  }
 
   // RD-CAPACITY-01 · the per-plan recipient cap is gone with the tiers. The operational
   // guard below — checkBroadcastLimits, the free email quota and the rate limits — is what
@@ -384,7 +422,9 @@ export async function POST(req: NextRequest): Promise<NextResponse<PostBroadcast
     eventId:        eventSlug,
     ...(liveDraftId ? { eventDraftId: liveDraftId } : {}),
     eventSlug,
-    eventName:      typeof eventName === 'string' ? eventName : '',
+    // RD-COMMS-P2-C — the event's own name (the event document), never the client's: it is what the
+    // message calls the event, and a typed name could pass one event off as another.
+    eventName:      authoritativeEventName(liveData, eventSlug),
     channel:        chosenChannel,
     audience,
     subject:        storedSubject,
@@ -439,16 +479,21 @@ export async function POST(req: NextRequest): Promise<NextResponse<PostBroadcast
       campaignId: campaignRef.id, organizerUid: uid, actorUid: callerUid,
       channel: chosenChannel, recipientCount,
     })
-    if (!result.ok && result.reason === 'insufficient_balance') {
+    // RD-COMMS-P1 — every "not enough capacity" outcome points to License & Services, the ONE place
+    // communication capacity is bought (lib/communications/capacity). The machine code (`error`) lets
+    // the UI offer the License & Services CTA; `message` is the sentence shown.
+    if (!result.ok && (result.reason === 'insufficient_balance' || result.reason === 'allowance_exhausted' || result.reason === 'allowance_required')) {
       return NextResponse.json(
-        { success: false, error: 'Insufficient wallet balance for this broadcast.' },
+        { success: false, error: 'WHATSAPP_CAPACITY_REQUIRED', message: WHATSAPP_BROADCAST_CAPACITY_REQUIRED },
         { status: 402 },
       )
     }
-    if (!result.ok && result.reason === 'allowance_exhausted') {
+    // RD-COMMS-P2-B — the execution gate refused it (event no longer live, WhatsApp off, …): the
+    // campaign is recorded failed with that reason; nothing was charged.
+    if (!result.ok && result.reason === 'blocked') {
       return NextResponse.json(
-        { success: false, error: 'This event’s prepaid WhatsApp allowance cannot cover this broadcast. While the event is open, buy more with Increase limit on the event Wallet.' },
-        { status: 402 },
+        { success: false, error: 'BROADCAST_BLOCKED', message: `This broadcast cannot be sent: ${result.block.replace(/_/g, ' ')}.` },
+        { status: 422 },
       )
     }
   }

@@ -147,10 +147,15 @@ export class ResendProvider implements EmailProvider {
       // The SDK reports API-level failures in `error` rather than throwing.
       if (res.error) {
         console.error('[resend] send failed', { name: res.error.name, message: res.error.message, recipient: to })
+        // RD-COMMS-P2-D — an API answer below 500 is a definite rejection; a 5xx or no status
+        // code may have been accepted by Resend: unknown, never auto-resent.
+        const status = (res.error as { statusCode?: unknown }).statusCode
+        const definite = typeof status === 'number' && status < 500
         return {
           success:     false,
           error:       normalizeResendError(new Error(res.error.message)),
           errorDetail: `${res.error.name} · ${res.error.message}`,
+          ...(definite ? {} : { deliveryUnknown: true }),
         }
       }
       return { success: true, messageId: res.data?.id }
@@ -158,10 +163,13 @@ export class ResendProvider implements EmailProvider {
       console.error('[resend] send threw', {
         detail: formatResendErrorDetail(err), recipient: to,
       })
+      // RD-COMMS-P2-D — a throw (including the local timeout, which does NOT cancel the HTTP request
+      // already in flight) means no answer: Resend may have accepted it.
       return {
         success:     false,
         error:       normalizeResendError(err),
         errorDetail: formatResendErrorDetail(err),
+        deliveryUnknown: true,
       }
     }
   }

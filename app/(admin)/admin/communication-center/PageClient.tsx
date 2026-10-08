@@ -13,6 +13,7 @@ import {
   CheckCircle2, AlertTriangle, XCircle, Wrench,
 } from 'lucide-react'
 import { ErrorBanner } from '@/components/admin'
+import { SuppressionLookupTab } from '@/components/admin/communications/SuppressionLookupTab'
 import type { AdminCommunicationOverview, AdminProviderView } from '@/lib/communications/health/adminOverview'
 import type { HealthStatus } from '@/lib/communications/health/types'
 import type { ResolvedRegistryEntry } from '@/lib/communications/registry/resolve'
@@ -63,6 +64,7 @@ const TABS = [
   { id: 'composer',  label: 'Composer',    live: true },
   { id: 'approval',  label: 'Approval',    live: true },
   { id: 'planner',   label: 'Execution Planner', live: true },
+  { id: 'suppression', label: 'Suppression', live: true },   // RD-COMMS-P2-G — read-only lookup
   { id: 'settings',  label: 'Settings',    live: false },
 ] as const
 
@@ -73,7 +75,7 @@ export default function CommunicationCenterPage() {
   const [templates, setTemplates] = useState<TemplateCenterView | null>(null)
   const [loading, setLoading]   = useState(true)
   const [error, setError]       = useState<string | null>(null)
-  const [tab, setTab]           = useState<'overview' | 'providers' | 'health' | 'notifications' | 'policies' | 'templates' | 'timeline' | 'analytics' | 'insights' | 'playground' | 'campaigns' | 'audiences' | 'composer' | 'approval' | 'planner'>('overview')
+  const [tab, setTab]           = useState<'overview' | 'providers' | 'health' | 'notifications' | 'policies' | 'templates' | 'timeline' | 'analytics' | 'insights' | 'playground' | 'campaigns' | 'audiences' | 'composer' | 'approval' | 'planner' | 'suppression'>('overview')
 
   useEffect(() => {
     let alive = true
@@ -157,6 +159,7 @@ export default function CommunicationCenterPage() {
           {tab === 'composer' && registry && <ComposerTab notifications={registry} />}
           {tab === 'approval' && <ApprovalTab />}
           {tab === 'planner' && <PlannerTab />}
+          {tab === 'suppression' && <SuppressionLookupTab />}
         </>
       )}
     </div>

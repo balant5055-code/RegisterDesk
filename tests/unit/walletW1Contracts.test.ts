@@ -77,14 +77,15 @@ describe('W1.1 / W1.2 · the credit rules are in the code paths', () => {
 })
 
 describe('W1.7 · provider safety', () => {
-  it('the order route resolves the active provider BEFORE minting a Razorpay order, and fails closed', () => {
+  // RD-COMMS-P1 — the top-up ORDER route is retired: it mints no order with ANY provider (410), so
+  // there is no provider choice left to make. verify / webhook / reconciliation still settle the
+  // orders created before retirement.
+  it('the order route is retired: auth, then 410 — it never mints a payment order', () => {
     const src = code('app/api/organizer/wallet/topup/route.ts')
-    const resolveAt = src.indexOf('resolveActivePaymentProviderForNewOrder()')
-    const createAt  = src.indexOf('razorpay.orders.create(')
-    expect(resolveAt).toBeGreaterThan(-1)
-    expect(resolveAt).toBeLessThan(createAt)
-    expect(src).toContain("providerChoice.provider !== 'razorpay'")
-    expect(src).toContain('WALLET_TOPUP_PROVIDER_UNAVAILABLE')
+    expect(src).toContain("authorizeWorkspace(req, 'wallet')")
+    expect(src).toContain("code: 'COMMUNICATION_TOPUP_RETIRED'")
+    expect(src).toContain('status: 410')
+    expect(src).not.toMatch(/razorpay|orders\.create|walletTopups|adminDb/i)
   })
 })
 

@@ -6,6 +6,7 @@
 // Querying suppressed emails for a single organizer:
 //   .where('organizerUid', '==', uid)  — requires no composite index (single-field)
 
+import { createHash } from 'node:crypto'
 import { FieldValue } from 'firebase-admin/firestore'
 import { adminDb }    from '@/lib/firebase/admin'
 
@@ -105,6 +106,10 @@ export async function suppressEmailPlatformWide(
   const normalised = normaliseEmail(email)
   const ref  = col().doc(docId(PLATFORM_SCOPE, normalised))
   const snap = await ref.get()
+  // RD-COMMS-P2-C — the SES webhook always passes BOTH the bounce and the complaint fields, so one
+  // set is always undefined; Firestore rejects an undefined value (ignoreUndefinedProperties is
+  // deliberately off), and the write failed for every real bounce/complaint. Absent fields are dropped.
+  const definedMeta = Object.fromEntries(Object.entries(meta).filter(([, v]) => v !== undefined))
 
   await ref.set(
     {
@@ -112,7 +117,7 @@ export async function suppressEmailPlatformWide(
       organizerUid: PLATFORM_SCOPE,
       scope:        'platform',
       reason,
-      ...meta,
+      ...definedMeta,
       // Only stamp on first write — a re-delivered notification must not reset it.
       ...(snap.exists ? {} : { createdAt: FieldValue.serverTimestamp() }),
     },
@@ -163,4 +168,168 @@ export async function getOrganiserSuppressionSet(
   return new Set(
     [...own.docs, ...platform.docs].map(d => (d.data() as EmailSuppressionDoc).email),
   )
+}
+
+// ═══ RD-COMMS-P2-G · a recipient's opt-out from ONE organizer ═══════════════════════════════
+//
+// Scope: (organizer, address) — the same record the broadcast audience filter has always read.
+// It covers that organizer's NON-transactional mail (broadcasts and reminders); it never touches
+// another organizer, and it never touches the platform scope (hard bounces / complaints), which
+// nobody can lift from here.
+//
+// Every real state change is recorded once in `emailSuppressionAudit` (append-only): the action,
+// the scope, the organizer, a SHA-256 of the address (not the address), the source and the event
+// context. A repeated click finds the state already set and writes nothing — no audit noise.
+
+const AUDIT = 'emailSuppressionAudit'
+
+export type OptOutSource = 'unsubscribe_link' | 'unsubscribe_oneclick'
+
+/** One-way identity for audit rows: enough to correlate, not enough to read. */
+export function suppressionEmailHash(email: string): string {
+  return createHash('sha256').update(normaliseEmail(email)).digest('hex')
+}
+
+/** Reasons a RECIPIENT may lift themselves (their own opt-out). Bounces/complaints are not. */
+const SELF_REVERSIBLE = /^unsubscribe/
+
+function assertOrganizerScope(organizerUid: string): void {
+  if (!organizerUid || organizerUid === PLATFORM_SCOPE) throw new Error('An organizer scope is required')
+}
+
+/** Opt this address out of one organizer's broadcast/reminder email. Idempotent. */
+export async function optOutOfOrganizer(
+  email: string, organizerUid: string,
+  opts: { source: OptOutSource; eventSlug?: string | null; kind?: 'broadcast' | 'reminder' | null },
+): Promise<'opted_out' | 'already'> {
+  assertOrganizerScope(organizerUid)
+  const normalised = normaliseEmail(email)
+  const ref = col().doc(docId(organizerUid, normalised))
+  return adminDb.runTransaction(async txn => {
+    if ((await txn.get(ref)).exists) return 'already' as const
+    txn.set(ref, {
+      email: normalised, organizerUid, scope: 'organizer', reason: opts.source,
+      ...(opts.eventSlug ? { eventSlug: opts.eventSlug } : {}),
+      createdAt: FieldValue.serverTimestamp(),
+    })
+    txn.set(adminDb.collection(AUDIT).doc(), {
+      action: 'opt_out', scope: 'organizer', organizerUid, emailHash: suppressionEmailHash(normalised),
+      source: opts.source, eventSlug: opts.eventSlug ?? null, kind: opts.kind ?? null,
+      at: FieldValue.serverTimestamp(),
+    })
+    return 'opted_out' as const
+  })
+}
+
+/**
+ * The recipient changed their mind: lift THEIR OWN opt-out from this organizer. Idempotent.
+ * A bounce or complaint recorded against the organizer is not the recipient's to lift
+ * ('not_allowed'), and the platform scope is never read or written here.
+ */
+export async function resubscribeToOrganizer(
+  email: string, organizerUid: string, opts: { eventSlug?: string | null } = {},
+): Promise<'resubscribed' | 'not_opted_out' | 'not_allowed'> {
+  assertOrganizerScope(organizerUid)
+  const normalised = normaliseEmail(email)
+  const ref = col().doc(docId(organizerUid, normalised))
+  return adminDb.runTransaction(async txn => {
+    const snap = await txn.get(ref)
+    if (!snap.exists) return 'not_opted_out' as const
+    const reason = String((snap.data() as { reason?: unknown }).reason ?? '')
+    if (!SELF_REVERSIBLE.test(reason)) return 'not_allowed' as const
+    txn.delete(ref)
+    txn.set(adminDb.collection(AUDIT).doc(), {
+      action: 'opt_in', scope: 'organizer', organizerUid, emailHash: suppressionEmailHash(normalised),
+      source: 'resubscribe_link', eventSlug: opts.eventSlug ?? null, at: FieldValue.serverTimestamp(),
+    })
+    return 'resubscribed' as const
+  })
+}
+
+export interface SuppressionStatus {
+  /** Hard platform suppression (bounce / complaint) — blocks every sender, can't be overridden. */
+  platform:  boolean
+  /** This organizer may not email this address (the recipient opted out, or it bounced for them). */
+  organizer: boolean
+}
+
+/** Both scopes in one batched read. Throws on a read failure — callers decide fail-open/closed. */
+export async function suppressionStatus(email: string, organizerUid: string): Promise<SuppressionStatus> {
+  const normalised = normaliseEmail(email)
+  if (!normalised) return { platform: false, organizer: false }
+  const refs = [col().doc(docId(PLATFORM_SCOPE, normalised))]
+  if (organizerUid && organizerUid !== PLATFORM_SCOPE) refs.push(col().doc(docId(organizerUid, normalised)))
+  const [p, o] = await adminDb.getAll(...refs)
+  return { platform: p.exists, organizer: !!o?.exists }
+}
+
+export interface OrganizerOptOutRow {
+  email:     string
+  /** 'unsubscribed' (the recipient's choice) or 'undeliverable' (bounce/complaint for this organizer). */
+  kind:      'unsubscribed' | 'undeliverable'
+  eventSlug: string | null
+  createdAt: string | null
+}
+
+/** One organizer's OWN opt-out records (never the platform scope, never another organizer's). */
+export async function listOrganizerOptOuts(organizerUid: string, limit = 500): Promise<{ rows: OrganizerOptOutRow[]; truncated: boolean }> {
+  assertOrganizerScope(organizerUid)
+  const snap = await col().where('organizerUid', '==', organizerUid).limit(limit + 1).get()
+  const rows = snap.docs.slice(0, limit).map(d => {
+    const x = d.data() as Record<string, unknown>
+    const ts = x.createdAt as { toDate?: () => Date } | undefined
+    return {
+      email:     String(x.email ?? ''),
+      kind:      SELF_REVERSIBLE.test(String(x.reason ?? '')) ? 'unsubscribed' as const : 'undeliverable' as const,
+      eventSlug: typeof x.eventSlug === 'string' ? x.eventSlug : null,
+      createdAt: typeof ts?.toDate === 'function' ? ts.toDate().toISOString() : null,
+    }
+  }).sort((a, b) => (b.createdAt ?? '').localeCompare(a.createdAt ?? ''))
+  return { rows, truncated: snap.size > limit }
+}
+
+export interface SuppressionInvestigation {
+  email:      string
+  platform:   { reason: string; bounceType: string | null; complaintType: string | null; createdAt: string | null } | null
+  organizers: { organizerUid: string; reason: string; kind: 'unsubscribed' | 'undeliverable'; eventSlug: string | null; createdAt: string | null }[]
+  audit:      { action: string; scope: string; organizerUid: string | null; source: string | null; eventSlug: string | null; at: string | null }[]
+}
+
+const isoOf = (v: unknown): string | null =>
+  v && typeof (v as { toDate?: () => Date }).toDate === 'function' ? (v as { toDate: () => Date }).toDate().toISOString() : null
+
+/** Super Admin ONLY (the caller enforces ADMIN_UIDS): every scope that blocks one address, and
+ *  its opt-out history. Read-only — there is deliberately no override here. */
+export async function investigateSuppression(email: string): Promise<SuppressionInvestigation> {
+  const normalised = normaliseEmail(email)
+  const [platformSnap, orgSnap, auditSnap] = await Promise.all([
+    col().doc(docId(PLATFORM_SCOPE, normalised)).get(),
+    col().where('email', '==', normalised).limit(200).get(),
+    adminDb.collection(AUDIT).where('emailHash', '==', suppressionEmailHash(normalised)).limit(200).get(),
+  ])
+  const p = platformSnap.exists ? platformSnap.data() as Record<string, unknown> : null
+  return {
+    email: normalised,
+    platform: p ? {
+      reason: String(p.reason ?? ''), bounceType: typeof p.bounceType === 'string' ? p.bounceType : null,
+      complaintType: typeof p.complaintType === 'string' ? p.complaintType : null, createdAt: isoOf(p.createdAt),
+    } : null,
+    organizers: orgSnap.docs
+      .map(d => d.data() as Record<string, unknown>)
+      .filter(x => x.organizerUid !== PLATFORM_SCOPE)
+      .map(x => ({
+        organizerUid: String(x.organizerUid ?? ''), reason: String(x.reason ?? ''),
+        kind: SELF_REVERSIBLE.test(String(x.reason ?? '')) ? 'unsubscribed' as const : 'undeliverable' as const,
+        eventSlug: typeof x.eventSlug === 'string' ? x.eventSlug : null, createdAt: isoOf(x.createdAt),
+      })),
+    audit: auditSnap.docs
+      .map(d => d.data() as Record<string, unknown>)
+      .map(x => ({
+        action: String(x.action ?? ''), scope: String(x.scope ?? ''),
+        organizerUid: typeof x.organizerUid === 'string' ? x.organizerUid : null,
+        source: typeof x.source === 'string' ? x.source : null,
+        eventSlug: typeof x.eventSlug === 'string' ? x.eventSlug : null, at: isoOf(x.at),
+      }))
+      .sort((a, b) => (b.at ?? '').localeCompare(a.at ?? '')),
+  }
 }

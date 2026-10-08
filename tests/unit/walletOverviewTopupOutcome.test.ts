@@ -77,31 +77,18 @@ describe('every verify outcome, as the Wallet page shows it', () => {
   })
 })
 
-describe('Communication balance Add Funds modal — moved verbatim from the Wallet page, 2026-10-02 (source contract)', () => {
+// RD-COMMS-P1 — the communication-balance Add Funds modal is RETIRED (no new funds can be added;
+// capacity is bought per event on License & Services). The classifier above stays: it still reads
+// the verify answers for top-up orders created before retirement. The card is now read-only.
+describe('Communication balance Add Funds modal — RETIRED (RD-COMMS-P1)', () => {
   const src = readFileSync('components/wallet/CommunicationBalanceCard.tsx', 'utf8')
-  const submit = src.slice(src.indexOf('async function handleSubmit()'), src.indexOf('return (', src.indexOf('async function handleSubmit()')))
 
-  it('reads verify through the shared classifier + describeTopupHold — not success / pending flags', () => {
-    expect(submit).toContain('classifyTopupVerifyResponse(verifyRes.status, body)')
-    expect(submit).toContain('describeTopupHold(outcome)')
-    expect(submit).not.toMatch(/verify\.pending|verify\.success/)
+  it('the card starts no payment: no top-up / verify call, no modal, no Add Funds', () => {
+    expect(src).not.toMatch(/\/api\/organizer\/wallet\/topup|AddFundsModal|handleSubmit|Razorpay|Add funds|Add Funds/)
   })
-  it('an unreadable body or a network failure during verify is "unconfirmed", never a retryable error', () => {
-    expect(submit).toContain('await verifyRes.json().catch(() => null)')
-    expect(submit).toContain("outcome = { kind: 'unconfirmed', message: TOPUP_OUTCOME_MESSAGES.unconfirmed }")
-  })
-  it('only "credited" is success; only "failed" returns to the error state (where paying again is possible)', () => {
-    expect(submit).toContain("if (outcome.kind === 'credited') {")
-    expect(submit).toContain("if (outcome.kind === 'failed') throw new Error(outcome.message)")
-    expect(submit.indexOf("setPhase('pending')")).toBeGreaterThan(submit.indexOf('describeTopupHold(outcome)'))
-  })
-  it('the hold panel shows the truthful message and the payment reference, and offers Close only', () => {
-    expect(src).not.toContain('Your wallet will be credited shortly')
-    const panel = src.slice(src.indexOf("phase === 'pending' && hold ?"), src.indexOf(') : (', src.indexOf("phase === 'pending' && hold ?")))
-    expect(panel).toContain('{hold.message}')
-    expect(panel).toContain('Payment reference:')
-    expect(panel).toContain('{hold.paymentId}')
-    expect(panel).not.toContain('handleSubmit')                               // no second payment from a hold
-    expect(panel).toContain('onClick={onClose}')
+  it('it shows a positive legacy balance read-only, and nothing at ₹0', () => {
+    expect(src).toContain('Legacy communication balance')
+    expect(src).toContain('New funds cannot be added')
+    expect(src).toContain('if (balancePaise === null || balancePaise <= 0) return null')
   })
 })

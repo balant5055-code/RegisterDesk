@@ -11,14 +11,18 @@
 // chunk never double-bills; a per-recipient `sent` flag makes re-processing after an
 // interruption never re-send (WhatsApp has no provider-side idempotency).
 
-import crypto            from 'crypto'
+import { whatsappBroadcastSendBlock, WHATSAPP_SKIP_REASONS, type WhatsAppBroadcastBlock } from '@/lib/whatsapp/broadcastConsent'
 import { FieldPath, FieldValue } from 'firebase-admin/firestore'
 import { adminDb }       from '@/lib/firebase/admin'
-import { createJob as kernelCreateJob, getJob } from '@/lib/jobs/kernel'
+import { getJob } from '@/lib/jobs/kernel'
+import { buildBroadcastJob, broadcastJobIdFor, transitionCampaign } from './jobPreparation'
+import { broadcastExecutionBlock, blockedJobError, blockReasonOf } from './executionGuard'
 import { runJobChunk }   from '@/lib/jobs/runner'
 import type { JobStrategy, ProcessResult } from '@/lib/jobs/runner'
 import type { Job }      from '@/lib/jobs/types'
 import { getMetaProvider, resolveWhatsAppTemplateByType, hasWhatsAppTemplate } from '@/lib/whatsapp'
+import { isOrganizerBroadcastTemplate, validateBroadcastVariables } from '@/lib/whatsapp/registry'
+import { authoritativeEventName } from './eventName'
 import type { WhatsAppProvider, WhatsAppTemplateType } from '@/lib/whatsapp'
 import { validatePhoneNumber } from '@/lib/communication/phone'
 // RD-BROADCAST-RETRY-01 — the EXISTING failure taxonomy. No new classifier was created; the
@@ -113,6 +117,10 @@ interface WhatsAppRecipientRow {
   pendingAttemptAt?: unknown
   /** RD-CLOSE — set when an interrupted attempt was found: indeterminate, never auto-resent. */
   indeterminate?: boolean
+  /** RD-COMMS-WA-CONSENT — not sent: no explicit opt-in, or the number replied STOP, as read at
+   *  the send boundary. Never reached Meta; final for this broadcast. */
+  skipped?:       boolean
+  skipReason?:    string
 }
 
 /** RD-CLOSE — one log row per recipient outcome (deterministic id ⇒ a re-run page never duplicates it). */
@@ -141,17 +149,27 @@ interface WhatsAppCampaignInput {
 type Recipient = { id: string; data: RegistrationDocument }
 
 // ─── Job creation (snapshot recipients) ───────────────────────────────────────
+// RD-COMMS-P2-B — the job id is deterministic per campaign (one campaign ⇒ one job), and the job is
+// built recipients-FIRST, job-document-LAST (lib/broadcasts/jobPreparation.ts): a cron can never
+// lease a half-written snapshot. With `campaignRef`, the job is created only while that campaign
+// is still sending and still points at it; null ⇒ it stopped meanwhile and no job was created.
 export async function createWhatsAppBroadcastJob(
   campaignId: string,
   campaign: WhatsAppCampaignInput,
   recipients: Recipient[],
-): Promise<WhatsAppBroadcastJob> {
-  const jobId = `wab_${crypto.randomUUID()}`
-
-  const job = await kernelCreateJob<WhatsAppBroadcastJob>(
-    WHATSAPP_BROADCAST_JOBS,
-    jobId,
-    {
+  opts: { jobId?: string; campaignRef?: FirebaseFirestore.DocumentReference } = {},
+): Promise<WhatsAppBroadcastJob | null> {
+  const rows: WhatsAppRecipientRow[] = recipients.map(r => ({
+    registrationId: r.id,
+    phone:          (r.data.attendee.phone ?? '').trim(),
+    name:           r.data.attendee.name,
+    email:          r.data.attendee.email,
+    ticketCode:     r.data.ticketCode ?? '',
+  }))
+  return buildBroadcastJob<WhatsAppBroadcastJob>({
+    jobsCollection: WHATSAPP_BROADCAST_JOBS,
+    jobId: opts.jobId ?? broadcastJobIdFor('whatsapp', campaignId),
+    seed: {
       organizerUid:    campaign.organizerUid,
       createdBy:       campaign.createdBy ?? campaign.organizerUid,
       campaignId,
@@ -164,27 +182,9 @@ export async function createWhatsAppBroadcastJob(
       variables:       campaign.variables ?? {},
       actualCostPaise: campaign.actualCostPaise ?? 0,
     },
-    recipients.length,
-  )
-
-  const col = adminDb.collection(WHATSAPP_BROADCAST_JOBS).doc(jobId).collection('recipients')
-  for (let i = 0; i < recipients.length; i += 400) {
-    const batch = adminDb.batch()
-    for (let j = i; j < Math.min(i + 400, recipients.length); j++) {
-      const r = recipients[j]
-      const row: WhatsAppRecipientRow = {
-        registrationId: r.id,
-        phone:          (r.data.attendee.phone ?? '').trim(),
-        name:           r.data.attendee.name,
-        email:          r.data.attendee.email,
-        ticketCode:     r.data.ticketCode ?? '',
-      }
-      batch.set(col.doc(`r${String(j).padStart(7, '0')}`), row)
-    }
-    await batch.commit()
-  }
-
-  return job
+    rows: rows as unknown as Record<string, unknown>[],
+    ...(opts.campaignRef ? { campaign: { ref: opts.campaignRef, kind: 'whatsapp' as const } } : {}),
+  })
 }
 
 // ─── Strategy ──────────────────────────────────────────────────────────────────
@@ -206,9 +206,23 @@ export function whatsAppBroadcastStrategy(): JobStrategy<WhatsAppBroadcastJob, W
   return {
     // Load once: provider + template + language + static variables + per-msg cost.
     async loadContext(job) {
+      // RD-COMMS-P2-B — every chunk re-checks the authoritative organizer / event / feature /
+      // WhatsApp state; a blocked broadcast fails (terminal, with its reason) instead of sending on.
+      // Its settlement then keeps accepted units billed and unknown ones held (Batch A rules).
+      const block = await broadcastExecutionBlock({ organizerUid: job.organizerUid, eventSlug: job.eventSlug, channel: 'whatsapp' })
+      if (block) return { ok: false, error: blockedJobError(block) }
       const provider = await getMetaProvider()
       if (!provider) return { ok: false, error: 'WhatsApp provider is not configured' }
       if (!hasWhatsAppTemplate(job.templateType)) return { ok: false, error: 'WhatsApp template is no longer available' }
+      // RD-COMMS-P2-C — the send boundary re-applies the organizer-broadcast template allowlist (a
+      // campaign stored before it, or written around the route, still cannot send a protected one),
+      // keeps only the template's validated organizer variables, and names the event from the event
+      // document — never from the stored campaign/client value.
+      if (!isOrganizerBroadcastTemplate(job.templateType)) return { ok: false, error: 'template_not_allowed' }
+      const checkedVars = validateBroadcastVariables(job.templateType, job.variables ?? {})
+      if (!checkedVars.ok) return { ok: false, error: `invalid_template_variables: ${checkedVars.error}` }
+      const eventSnap = await adminDb.collection('events').doc(job.eventSlug).get()
+      const eventName = authoritativeEventName(eventSnap.exists ? eventSnap.data() as Record<string, unknown> : null, job.eventSlug)
       const total = job.counts.total || 1
       return {
         ok: true,
@@ -216,8 +230,8 @@ export function whatsAppBroadcastStrategy(): JobStrategy<WhatsAppBroadcastJob, W
           provider,
           templateType:    job.templateType,   // narrowed by hasWhatsAppTemplate
           languageCode:    job.languageCode,
-          staticVars:      job.variables ?? {},
-          eventName:       job.eventName,
+          staticVars:      checkedVars.variables,
+          eventName,
           certificateUrl:  `${getEmailAppUrl()}/events/${job.eventSlug}/certificates`,
           perMsgCostPaise: Math.round((job.actualCostPaise ?? 0) / total),
         },
@@ -243,6 +257,7 @@ export function whatsAppBroadcastStrategy(): JobStrategy<WhatsAppBroadcastJob, W
     // this is what makes resume/re-run never send twice.
     async processItem(item, job, ctx) {
       if (item.sent) return { ok: true }
+      if (item.skipped) return { ok: true, skipped: true }   // RD-COMMS-WA-CONSENT — final on an earlier pass
       const recipientRef = adminDb.collection(WHATSAPP_BROADCAST_JOBS).doc(job.jobId).collection('recipients').doc(item.__id)
       const baseLog = {
         organizerUid: job.organizerUid, eventId: job.eventId, eventSlug: job.eventSlug, eventName: job.eventName,
@@ -272,6 +287,21 @@ export function whatsAppBroadcastStrategy(): JobStrategy<WhatsAppBroadcastJob, W
       }
       const normalizedPhone = phoneCheck.normalizedPhone as string
 
+      // RD-COMMS-WA-CONSENT — the SEND BOUNDARY. The audience was consent-filtered when it was
+      // selected, but a recipient can reply STOP after that (before the job starts, between pages,
+      // while it is running). Read the registration's opt-in and the number's STOP state NOW,
+      // immediately before Meta. Blocked ⇒ skipped with its reason: Meta is never called, so the
+      // recipient is never accepted, and settlement returns their unit (charge on Meta accept,
+      // Batch A — unchanged). Cannot read ⇒ not sent.
+      let consentBlock: WhatsAppBroadcastBlock | null
+      try { consentBlock = await whatsappBroadcastSendBlock(item.registrationId, item.phone) }
+      catch { return { ok: false, error: 'WhatsApp consent could not be checked; not sent' } }
+      if (consentBlock) {
+        await recipientRef.update({ skipped: true, skipReason: consentBlock }).catch(() => undefined)
+        await writeBroadcastLog(`bcskip_${job.jobId}_${item.__id}`, { ...baseLog, status: 'skipped', error: WHATSAPP_SKIP_REASONS[consentBlock], costPaise: 0 })
+        return { ok: true, skipped: true }
+      }
+
       const vars: Record<string, string> = {
         ...ctx.staticVars,
         attendeeName: item.name,
@@ -289,6 +319,8 @@ export function whatsAppBroadcastStrategy(): JobStrategy<WhatsAppBroadcastJob, W
       let errorMsg: string | undefined
       let messageId: string | undefined
       let providerResponse: string | undefined
+      // RD-COMMS-P2-A — the HTTP status of the LAST attempt Meta answered; undefined ⇒ no verdict.
+      let lastHttpStatus: number | undefined
 
       // RD-BROADCAST-RETRY-01 — bounded retry of DEFINITELY-REFUSED sends only.
       //
@@ -334,6 +366,7 @@ export function whatsAppBroadcastStrategy(): JobStrategy<WhatsAppBroadcastJob, W
             providerResponse = r.providerMessage ? `code ${r.code ?? '?'} · ${r.providerMessage}` : undefined
             code             = r.code
             httpStatus       = r.httpStatus
+            lastHttpStatus   = r.httpStatus
           } catch (err) {
             errorMsg = err instanceof Error ? err.message : 'Unknown error'
             // A throw means no response arrived, so httpStatus stays undefined and the
@@ -357,7 +390,9 @@ export function whatsAppBroadcastStrategy(): JobStrategy<WhatsAppBroadcastJob, W
         ...baseLog, status, error: errorMsg, providerMessageId: messageId, providerResponse,
         costPaise: status === 'sent' ? ctx.perMsgCostPaise : 0,
         // No verdict from Meta (transport) ⇒ delivery UNKNOWN, not failed; the webhook resolves it.
-        ...(status === 'failed' && (failureReason === 'NETWORK_TIMEOUT' || failureReason === 'NETWORK_ERROR' || failureReason === 'UNKNOWN_ERROR') ? { deliveryUnknown: true } : {}),
+        // RD-COMMS-P2-A — structural, like the transactional paths: an attempt Meta returned no HTTP
+        // status for. A definite answer with an unmapped code (UNKNOWN_ERROR + httpStatus) is a refusal.
+        ...(status === 'failed' && attemptsUsed > 0 && lastHttpStatus === undefined ? { deliveryUnknown: true } : {}),
       })
 
       if (status === 'sent') {
@@ -405,7 +440,10 @@ export function whatsAppBroadcastStrategy(): JobStrategy<WhatsAppBroadcastJob, W
           // RD-CLOSE — a TRANSPORT outcome (no verdict from Meta) may have been accepted: the
           // recipient is indeterminate and is never re-sent, even if this page re-runs; Meta's
           // status webhook records it if it was accepted.
-          const transport = failureReason === 'NETWORK_TIMEOUT' || failureReason === 'NETWORK_ERROR' || failureReason === 'UNKNOWN_ERROR'
+          // RD-COMMS-P2-A — keyed off the ABSENT httpStatus (no verdict), not the reason label: an
+          // unmapped Meta error code classifies as UNKNOWN_ERROR yet is a definite refusal, and an
+          // indeterminate recipient now keeps its unit at settlement.
+          const transport = attemptsUsed > 0 && lastHttpStatus === undefined
           await recipientRef
             .update({
               pendingAttemptAt: FieldValue.delete(),
@@ -449,7 +487,10 @@ export async function finalizeWhatsAppCampaign(jobId: string, campaignId: string
   // as a success again, inflating job.counts.succeeded. The sent flags are the truth, and
   // they are what billing is settled on.
   const accepted = recSnap.docs.filter(d => (d.data() as WhatsAppRecipientRow).sent === true).length
-  await finalizeBroadcast(campaignRef, campaignId, c, accepted, recipients.length - accepted, recipients)
+  // RD-COMMS-WA-CONSENT — consent skips are neither accepted nor failed. Billing still settles on
+  // `accepted` alone (unchanged), so every skipped recipient's unit is returned.
+  const skipped = recSnap.docs.filter(d => (d.data() as WhatsAppRecipientRow).skipped === true).length
+  await finalizeBroadcast(campaignRef, campaignId, c, accepted, recipients.length - accepted - skipped, recipients, skipped)
 }
 
 // ─── Public entry point ─────────────────────────────────────────────────────────
@@ -467,6 +508,8 @@ export async function processWhatsAppBroadcastChunk(jobId: string): Promise<Proc
     // this the successor always lost the race and the chain died at depth 1.
     releaseLeaseOnHandoff: true,
     concurrency: WAB_CONCURRENCY,
+    // RD-COMMS-P2-B — a failed broadcast job is final (its campaign was settled): never resumed.
+    failedIsTerminal: true,
   })
   if (result.status === 'cancelled' || result.status === 'failed') {
     await syncCampaignTerminal(jobId, result.status).catch(() => { /* best-effort */ })
@@ -486,22 +529,26 @@ export async function syncCampaignTerminal(jobId: string, status: 'cancelled' | 
   // the accepted count is final. (The cancel route may already have marked the campaign
   // cancelled while this worker was mid-page — settlement still has to happen, here.)
   const accepted = await countAcceptedRecipients(jobId)
-  if ((snap.data() as { status?: string }).status === 'sending') {
-    await campaignRef.update({
-      status:       status === 'cancelled' ? 'cancelled' : 'failed',
-      successCount: accepted,
-      failCount:    Math.max(0, job.counts.total - accepted),
-      sentAt:       FieldValue.serverTimestamp(),
-      ...(status === 'failed' ? { failReason: (typeof job.error === 'string' && job.error) ? job.error : 'delivery_failed' } : {}),
-    })
+  // RD-COMMS-P2-B — status-GUARDED: only a `sending` campaign moves to this terminal state, so a
+  // concurrent cancel / finalize can never be overwritten. A blocked job carries its reason.
+  const failReason = blockReasonOf(job.error) ?? ((typeof job.error === 'string' && job.error) ? job.error : 'delivery_failed')
+  const moved = await transitionCampaign(campaignRef, ['sending'], {
+    status:       status === 'cancelled' ? 'cancelled' : 'failed',
+    successCount: accepted,
+    failCount:    Math.max(0, job.counts.total - accepted),
+    sentAt:       FieldValue.serverTimestamp(),
+    ...(status === 'failed' ? { failReason } : {}),
+  })
+  if (moved) {
     void logBroadcastAction({
       organizerUid: job.organizerUid, actorUid: job.createdBy ?? job.organizerUid, campaignId: job.campaignId,
       action: status === 'cancelled' ? 'broadcast.cancelled' : 'broadcast.failed',
       metadata: { successCount: accepted, failCount: Math.max(0, job.counts.total - accepted) },
     }).catch(() => {})
   } else {
-    // Already marked terminal (the cancel route) — bring its counts to the final truth.
-    await campaignRef.update({ successCount: accepted, failCount: Math.max(0, job.counts.total - accepted) })
+    // Already terminal. Only a campaign the cancel route ended (counts taken mid-page) has its
+    // counts brought to the final truth; a finished (sent/partial) one is never rewritten.
+    await transitionCampaign(campaignRef, ['cancelled', 'failed'], { successCount: accepted, failCount: Math.max(0, job.counts.total - accepted) })
   }
   // RD-INTEG · D3 — charge on accept: give back everything WhatsApp did not accept.
   await settleBroadcastBilling(job.campaignId, accepted)

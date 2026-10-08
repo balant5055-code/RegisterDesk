@@ -125,7 +125,14 @@ export default function AdminRemindersPage() {
             </div>
           </div>
           <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
-            {AUTO_KINDS.map(k => (
+            {AUTO_KINDS.map(k => k === 'low_wallet' ? (
+              // RD-COMMS-P2-F — retired with pay-as-you-go funding (RD-COMMS-P1): never scheduled or
+              // sent whatever this switch says, so it is shown as retired, not as a live control.
+              <div key={k} className="flex items-center justify-between gap-2 rounded-lg border border-dashed border-border px-3 py-2 text-[12.5px] text-muted-foreground">
+                <span>{REMINDER_KIND_LABELS[k]}</span>
+                <span className="rounded-full bg-muted px-2 py-0.5 text-[11px] font-semibold">Retired</span>
+              </div>
+            ) : (
               <label key={k} className="flex items-center justify-between gap-2 rounded-lg border border-border px-3 py-2 text-[12.5px]">
                 <span className="text-foreground">{REMINDER_KIND_LABELS[k]}</span>
                 <input type="checkbox" checked={settings.kinds[k] !== false} disabled={!settings.enabled} onChange={e => saveSettings({ kinds: { ...settings.kinds, [k]: e.target.checked } })} className="size-4 accent-primary" />
@@ -133,7 +140,7 @@ export default function AdminRemindersPage() {
             ))}
           </div>
           <div className="mt-3 flex items-center gap-2 text-[12.5px]">
-            <span className="text-muted-foreground">Retry policy (advisory):</span>
+            <span className="text-muted-foreground">Resume an interrupted send (times):</span>
             <input type="number" min={0} max={5} value={settings.retryCount} onChange={e => saveSettings({ retryCount: Math.max(0, Number(e.target.value) || 0) })} className="w-16 rounded-lg border border-border bg-background px-2 py-1" />
           </div>
         </div>
@@ -168,7 +175,10 @@ export default function AdminRemindersPage() {
               <Td className="text-muted-foreground">{r.eventName}</Td>
               <Td className="text-muted-foreground capitalize">{r.audience}</Td>
               <Td className="text-muted-foreground">{fmtDateTime(r.sendAt)}</Td>
-              <Td><StatusPill tone={STATUS_TONE[r.status] ?? 'neutral'}>{r.status}</StatusPill></Td>
+              <Td>
+                <StatusPill tone={STATUS_TONE[r.status] ?? 'neutral'}>{r.status}</StatusPill>
+                {r.reasonLabel && <p className="mt-1 max-w-[260px] text-[11.5px] leading-snug text-muted-foreground">{r.reasonLabel}</p>}
+              </Td>
               <Td align="right" className="tabular-nums">{r.counts.sent}/{r.counts.recipients || '—'}</Td>
               <Td align="right">
                 {r.status === 'scheduled'

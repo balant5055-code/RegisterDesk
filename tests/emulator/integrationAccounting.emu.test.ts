@@ -14,6 +14,7 @@
 // The Meta provider is an in-memory stub. No request leaves the process; no real money moves.
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest'
+import { withWaOptIn, seedConsentingRegistrations } from '../helpers/whatsappConsentFixture'
 
 const EMULATOR = process.env.FIRESTORE_EMULATOR_HOST
 const describeEmu = EMULATOR ? describe : describe.skip
@@ -72,6 +73,8 @@ describeEmu('RD-INTEG · communication accounting on real Firestore', () => {
   let sweep: typeof import('@/lib/broadcasts/settlementSweep')
   let waJob: typeof import('@/lib/broadcasts/whatsappJob')
   const docs = new Set<string>(), trees = new Set<string>()
+  // RD-COMMS-WA-CONSENT — synthetic recipients get real, opted-in registration docs (see helper).
+  const consenting = async <R extends { id: string; data: { attendee: { phone?: string } } }>(rs: R[]): Promise<R[]> => { await seedConsentingRegistrations(adminDb, rs, docs); return rs }
   let n = 0
 
   const walletRef = () => adminDb.doc(`organizerWallets/${UID}`)
@@ -97,10 +100,10 @@ describeEmu('RD-INTEG · communication accounting on real Firestore', () => {
     for (const [i, ph] of phones.entries()) {
       const id = `integ-r-${slug}-${i}`
       docs.add(`registrations/${id}`)
-      await adminDb.doc(`registrations/${id}`).set({
+      await adminDb.doc(`registrations/${id}`).set(withWaOptIn({
         organizerUid: UID, eventSlug: slug, status: 'confirmed', ticketCode: `T${i}`,
         attendee: { name: `A${i}`, email: `a${i}@example.test`, phone: ph },
-      })
+      }))
     }
   }
 
@@ -109,7 +112,7 @@ describeEmu('RD-INTEG · communication accounting on real Firestore', () => {
     docs.add(`broadcastCampaigns/${id}`)
     await adminDb.doc(`broadcastCampaigns/${id}`).set({
       organizerUid: UID, createdBy: UID, eventId: slug, eventSlug: slug, eventName: 'Integ', channel: 'whatsapp',
-      audience: 'all', subject: '', html: '', templateType: 'EVENT_REMINDER', variables: {},
+      audience: 'all', subject: '', html: '', templateType: 'EVENT_UPDATED', variables: {},
       recipientCount, successCount: 0, failCount: 0, status: 'draft', actualCostPaise: 0, ...extra,
     })
     return id
@@ -158,7 +161,9 @@ describeEmu('RD-INTEG · communication accounting on real Firestore', () => {
     const c = await camp(id)
     expect(c.status).toBe('partial')
     expect(c.successCount).toBe(3)
-    expect(c.failCount).toBe(2)
+    // RD-COMMS-WA-CONSENT (phone binding) — 'abc' can hold no consent (an opt-in is bound to a valid
+    // number), so it is no longer selected: 4 recipients, 1 refused. Every money figure is unchanged.
+    expect(c.failCount).toBe(1)
     expect(c.billingSettlement).toBe('settled')
     expect(c.billedUnits).toBe(3)
     expect(c.refundedUnits).toBe(2)
@@ -211,7 +216,9 @@ describeEmu('RD-INTEG · communication accounting on real Firestore', () => {
   }, T)
 
   // ═══ 2 · prepaid-funded broadcast ═══════════════════════════════════════════
-  it('prepaid: 4 units reserved, 2 accepted (1 timeout, 1 invalid) ⇒ 2 units back to the event; wallet untouched', async () => {
+  // RD-COMMS-P2-A — the timed-out recipient has no verdict: its unit is HELD (a late acceptance uses
+  // it; the sweep returns it after the webhook window). Only the invalid one goes back now.
+  it('prepaid: 4 units reserved, 2 accepted (1 timeout HELD, 1 invalid) ⇒ 1 unit back to the event; wallet untouched', async () => {
     const { d, slug } = await event({ prepaid: 10 })
     await walletRef().set({ balancePaise: 7_000, currency: 'INR' })
     await regs(slug, [phone(21), phone(22), phone(23), 'not-a-phone'])
@@ -222,12 +229,13 @@ describeEmu('RD-INTEG · communication accounting on real Firestore', () => {
     expect(r).toEqual({ ok: true, costPaise: 0 })
     await settleWait()
 
-    expect((await ledger(d))!.whatsapp!.consumed).toBe(2)
+    expect((await ledger(d))!.whatsapp!.consumed).toBe(3)
     const u = (await adminDb.doc(`eventServiceAllowances/${d}/usage/bc_${id}`).get()).data()!
-    expect(u.quantity).toBe(2)
+    expect(u.quantity).toBe(3)
     const c = await camp(id)
     expect(c.billedUnits).toBe(2)
-    expect(c.refundedUnits).toBe(2)
+    expect(c.unknownHeldUnits).toBe(1)
+    expect(c.refundedUnits).toBe(1)
     expect(c.fundedBy).toBe('prepaid_allowance')
     expect(await balance()).toBe(7_000)
     const usage = await usageFor(id)
@@ -274,9 +282,9 @@ describeEmu('RD-INTEG · communication accounting on real Firestore', () => {
     const started = await billing.chargeAndStartCampaign({ campaignId: id, organizerUid: UID, channel: 'whatsapp', recipientCount: 3 })
     expect(started.ok).toBe(true)
     const c0 = await camp(id)
-    const job = await waJob.createWhatsAppBroadcastJob(id, c0 as never, [0, 1, 2].map(i => ({
+    const job = await waJob.createWhatsAppBroadcastJob(id, c0 as never, await consenting([0, 1, 2].map(i => ({
       id: `r${i}`, data: { attendee: { name: `A${i}`, email: `a${i}@x.test`, phone: phone(50 + i) }, ticketCode: '' },
-    })) as never)
+    }))) as never)
     await adminDb.doc(`${waJob.WHATSAPP_BROADCAST_JOBS}/${job.jobId}/recipients/r0000000`).update({ sent: true })
     const { Timestamp: Ts } = await import('firebase-admin/firestore')
     // Quiet for longer than a worker's page could take (the sweep's grace window).
@@ -296,9 +304,9 @@ describeEmu('RD-INTEG · communication accounting on real Firestore', () => {
     await walletRef().set({ balancePaise: 5_000, currency: 'INR' })
     const id = await campaign(slug, 2)
     await billing.chargeAndStartCampaign({ campaignId: id, organizerUid: UID, channel: 'whatsapp', recipientCount: 2 })
-    const job = await waJob.createWhatsAppBroadcastJob(id, (await camp(id)) as never, [0, 1].map(i => ({
+    const job = await waJob.createWhatsAppBroadcastJob(id, (await camp(id)) as never, await consenting([0, 1].map(i => ({
       id: `r${i}`, data: { attendee: { name: `A${i}`, email: `a${i}@x.test`, phone: phone(60 + i) }, ticketCode: '' },
-    })) as never)
+    }))) as never)
     const { Timestamp } = await import('firebase-admin/firestore')
     await adminDb.doc(`${waJob.WHATSAPP_BROADCAST_JOBS}/${job.jobId}`).update({ status: 'processing', lockedUntil: Timestamp.fromMillis(Date.now() + 60_000) })
     await adminDb.doc(`broadcastCampaigns/${id}`).update({ whatsappJobId: job.jobId, status: 'cancelled' })

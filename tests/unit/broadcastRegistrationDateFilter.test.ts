@@ -257,7 +257,9 @@ describe('the range reaches Firestore BEFORE the limit, everywhere', () => {
   })
 
   it('SEND still short-circuits on an existing job id — resume never re-resolves', () => {
-    expect(send).toContain('if (c.emailJobId) { await processEmailBroadcastChunk(c.emailJobId); return }')
+    // RD-COMMS-P2-B — an existing job is driven (or adopted by the one-job build claim), never re-resolved.
+    expect(send).toContain('if (c.emailJobId && await jobExists(EMAIL_BROADCAST_JOBS, c.emailJobId)) { await processEmailBroadcastChunk(c.emailJobId); return }')
+    expect(send).toContain("if (claim.kind === 'adopt') { await processEmailBroadcastChunk(claim.jobId); return }")
     expect(send).toContain('if (!jobId) {')
   })
 

@@ -7,6 +7,8 @@
 //                                in 'sending' (idempotent guard), then writes the
 //                                final status, usage and audit.
 
+import { applyAudienceRefundRule } from '@/lib/broadcasts/audienceRefunds'
+import { filterWhatsAppBroadcastRecipients } from '@/lib/whatsapp/broadcastConsent'
 import { FieldValue }              from 'firebase-admin/firestore'
 import { adminDb }                 from '@/lib/firebase/admin'
 import { notificationEngine, NotificationChannel } from '@/lib/notifications'
@@ -17,11 +19,13 @@ import { chargeAndStartCampaign, settleBroadcastBilling, type StartResult } from
 import { logBroadcastAction }      from '@/lib/broadcasts/audit'
 import { getMetaProvider, hasWhatsAppTemplate } from '@/lib/whatsapp'
 import { createWhatsAppBroadcastJob, processWhatsAppBroadcastChunk, WHATSAPP_BROADCAST_JOBS } from './whatsappJob'
-import { createEmailBroadcastJob, processEmailBroadcastChunk } from './emailJob'
+import { createEmailBroadcastJob, processEmailBroadcastChunk, EMAIL_BROADCAST_JOBS } from './emailJob'
 import { dedupeRecipientsByEmail, dedupeRecipientsByPhone } from './dedupeRecipients'
 import { applyRegistrationDateRange, persistedDateBounds } from '@/lib/broadcasts/registrationDateFilter'
 import type { BroadcastChannel }   from '@/lib/broadcasts/types'
 import type { RegistrationDocument } from '@/lib/registrations/types'
+import { broadcastExecutionBlock, type BroadcastBlockReason } from './executionGuard'
+import { claimBroadcastJob, transitionCampaign } from './jobPreparation'
 
 type Recipient = { id: string; data: RegistrationDocument }
 
@@ -72,13 +76,41 @@ interface CampaignData {
 
 // ─── Bill + start (the only entry point for kicking off a campaign) ───────────
 
+/** RD-COMMS-P2-B — start outcomes: the billing results, plus a campaign the execution gate refused. */
+export type StartBroadcastResult = StartResult | { ok: false; reason: 'blocked'; block: BroadcastBlockReason }
+
 export async function startBroadcastCampaign(args: {
   campaignId:   string
   organizerUid: string
   actorUid:     string
   channel:      BroadcastChannel
   recipientCount: number
-}): Promise<StartResult> {
+}): Promise<StartBroadcastResult> {
+  // RD-COMMS-P2-B — re-check the authoritative state at the moment the campaign actually starts
+  // (a scheduled one may start long after it was created), BEFORE anything is charged. A blocked
+  // campaign is terminal — failed with its reason — and nothing was charged, so nothing to return.
+  const ref = adminDb.collection('broadcastCampaigns').doc(args.campaignId)
+  const pre = await ref.get()
+  if (!pre.exists) return { ok: false, reason: 'bad_state' }
+  const block = await broadcastExecutionBlock({
+    organizerUid: args.organizerUid, eventSlug: String((pre.data() as { eventSlug?: unknown }).eventSlug ?? ''), channel: args.channel,
+  })
+  if (block) {
+    const failed = await adminDb.runTransaction(async txn => {
+      const s = await txn.get(ref)
+      const st = (s.data() as { status?: unknown } | undefined)?.status
+      if (st !== 'scheduled' && st !== 'draft') return false     // started / ended meanwhile — not ours to touch
+      txn.update(ref, { status: 'failed', failReason: block, actualCostPaise: 0, sentAt: FieldValue.serverTimestamp(), updatedAt: FieldValue.serverTimestamp() })
+      return true
+    })
+    if (!failed) return { ok: false, reason: 'bad_state' }
+    void logBroadcastAction({
+      organizerUid: args.organizerUid, actorUid: args.actorUid,
+      action: 'broadcast.failed', campaignId: args.campaignId, metadata: { reason: block },
+    }).catch(() => { /* best-effort */ })
+    return { ok: false, reason: 'blocked', block }
+  }
+
   const result = await chargeAndStartCampaign({
     campaignId:     args.campaignId,
     organizerUid:   args.organizerUid,
@@ -87,7 +119,7 @@ export async function startBroadcastCampaign(args: {
   })
 
   if (!result.ok) {
-    if (result.reason === 'insufficient_balance' || result.reason === 'allowance_exhausted') {
+    if (result.reason === 'insufficient_balance' || result.reason === 'allowance_exhausted' || result.reason === 'allowance_required' || result.reason === 'no_recipients') {
       void logBroadcastAction({
         organizerUid: args.organizerUid, actorUid: args.actorUid,
         action: 'broadcast.failed', campaignId: args.campaignId, metadata: { reason: result.reason },
@@ -130,7 +162,12 @@ async function deliverEmailCampaign(
   uid: string,
   actorUid: string,
 ): Promise<void> {
-  if (c.emailJobId) { await processEmailBroadcastChunk(c.emailJobId); return }
+  // RD-COMMS-P2-B — one job per campaign: an existing job is driven; otherwise the right to BUILD it
+  // is claimed atomically (lib/broadcasts/jobPreparation.ts) so two drivers never build two.
+  if (c.emailJobId && await jobExists(EMAIL_BROADCAST_JOBS, c.emailJobId)) { await processEmailBroadcastChunk(c.emailJobId); return }
+  const claim = await claimBroadcastJob(ref, 'email', EMAIL_BROADCAST_JOBS)
+  if (claim.kind === 'busy' || claim.kind === 'not_sending') return
+  if (claim.kind === 'adopt') { await processEmailBroadcastChunk(claim.jobId); return }
 
   // Same audience query as before; drop addresses on the organizer's suppression list.
   // RD-ORGANIZER-04 P1-1: the campaign already passed the create-time cap gate, so bound
@@ -147,8 +184,9 @@ async function deliverEmailCampaign(
   const maxRecipients = await resolveMaxRecipientsPerBroadcast(uid)
   const regsSnap    = await regsQuery.limit(maxRecipients + 1).get()
   const suppression = await getOrganiserSuppressionSet(uid)
-  const suppressed: Recipient[] = regsSnap.docs
-    .map(d => ({ id: d.id, data: d.data() as RegistrationDocument }))
+  // RD-COMMS-CAPACITY-UX (L3) — a 'confirmed' audience never includes a completed refund.
+  const suppressed: Recipient[] = applyAudienceRefundRule(c.audience, regsSnap.docs
+    .map(d => ({ id: d.id, data: d.data() as RegistrationDocument })))
     .filter(({ data }) => !suppression.has(data.attendee.email.toLowerCase().trim()))
 
   // "Ignore duplicate email IDs" — applied HERE, before createEmailBroadcastJob, so the
@@ -172,11 +210,13 @@ async function deliverEmailCampaign(
   // No provider / no recipients — resolve immediately (no job).
   if (!emailAvailable || recipients.length === 0) {
     const finalStatus = recipients.length === 0 ? 'sent' : 'failed'
-    await ref.update({
+    // RD-COMMS-P2-B — status-guarded: a campaign cancelled meanwhile stays cancelled.
+    const moved = await transitionCampaign(ref, ['sending'], {
       status: finalStatus, successCount: 0, failCount: recipients.length,
       sentAt: FieldValue.serverTimestamp(), ...(emailAvailable ? {} : { failReason: 'provider_unavailable' }),
+      emailJobId: FieldValue.delete(), jobPreparingAt: FieldValue.delete(),
     })
-    void logBroadcastAction({
+    if (moved) void logBroadcastAction({
       organizerUid: uid, actorUid, campaignId,
       action: finalStatus === 'sent' ? 'broadcast.sent' : 'broadcast.failed',
       metadata: { recipientCount: recipients.length, reason: emailAvailable ? undefined : 'provider_unavailable' },
@@ -184,10 +224,13 @@ async function deliverEmailCampaign(
     return
   }
 
-  const job = await createEmailBroadcastJob(campaignId, c, recipients)
-  await ref.update({ emailJobId: job.jobId })
+  // Recipients first, job document last, only while the campaign is still sending.
+  const job = await createEmailBroadcastJob(campaignId, c, recipients, { jobId: claim.jobId, campaignRef: ref })
+  if (!job) return                                   // cancelled while it was being built
   await processEmailBroadcastChunk(job.jobId)
 }
+
+const jobExists = async (collection: string, jobId: string) => (await adminDb.collection(collection).doc(jobId).get()).exists
 
 // ─── WhatsApp delivery (WA-3) — executed on the generic job runner ────────────
 // The per-recipient send loop lives in the WhatsAppBroadcastStrategy (whatsappJob).
@@ -215,7 +258,19 @@ async function deliverWhatsAppCampaign(
     }
   }
 
+  // RD-COMMS-P2-B — one job per campaign: a pointer to an existing job is driven; otherwise the
+  // right to BUILD it is claimed atomically, so two drivers (a send, the sweep, two cron runners)
+  // can never build two jobs — every recipient messaged twice.
+  if (jobId && !(await jobExists(WHATSAPP_BROADCAST_JOBS, jobId))) jobId = undefined
+  let buildJobId: string | null = null
   if (!jobId) {
+    const claim = await claimBroadcastJob(ref, 'whatsapp', WHATSAPP_BROADCAST_JOBS)
+    if (claim.kind === 'busy' || claim.kind === 'not_sending') return
+    if (claim.kind === 'adopt') jobId = claim.jobId
+    else buildJobId = claim.jobId
+  }
+
+  if (!jobId && buildJobId) {
     // Recipients: same audience query; require a phone. Email suppression is an
     // email-channel concept and does not apply to WhatsApp (opt-out is WA-2/WA-5).
     let regsQuery = adminDb.collection('registrations')
@@ -229,8 +284,9 @@ async function deliverWhatsAppCampaign(
     // RD-ORGANIZER-04 P1-1: bound the snapshot load to cap+1 (never the whole collection).
     const maxRecipients = await resolveMaxRecipientsPerBroadcast(uid)
     const regsSnap = await regsQuery.limit(maxRecipients + 1).get()
-    const withPhone: Recipient[] = regsSnap.docs
-      .map(d => ({ id: d.id, data: d.data() as RegistrationDocument }))
+    // RD-COMMS-CAPACITY-UX (L3) — a 'confirmed' audience never includes a completed refund.
+    const withPhone: Recipient[] = applyAudienceRefundRule(c.audience, regsSnap.docs
+      .map(d => ({ id: d.id, data: d.data() as RegistrationDocument })))
       .filter(({ data }) => typeof data.attendee.phone === 'string' && data.attendee.phone.trim().length > 0)
 
     // 'Ignore duplicate WhatsApp numbers' — applied HERE, before the job snapshot, because
@@ -241,14 +297,20 @@ async function deliverWhatsAppCampaign(
     //
     // Reads the flag off the persisted campaign, so an immediate send and a scheduled one
     // resolved by the cron behave identically.
+    // RD-COMMS-WA-CONSENT — re-applied when the audience is resolved for sending (a scheduled
+    // campaign is resolved long after creation): explicit opt-in, no STOP. The send boundary
+    // re-checks each recipient again immediately before Meta.
+    const { eligible: consenting } = await filterWhatsAppBroadcastRecipients(withPhone)
     const audience: Recipient[] = c.dedupePhones
-      ? dedupeRecipientsByPhone(withPhone)
-      : withPhone
+      ? dedupeRecipientsByPhone(consenting)
+      : consenting
     // RD-INTEG — never message more people than were paid for. A SCHEDULED campaign is charged
     // for the count previewed at creation, and the audience is resolved again now; anyone who
     // registered in between is beyond the charge. (Fewer is fine: settlement returns the rest.)
-    const paidFor = typeof c.chargedUnits === 'number' && c.chargedUnits >= 0 ? c.chargedUnits : null
-    const recipients: Recipient[] = paidFor !== null && audience.length > paidFor ? audience.slice(0, paidFor) : audience
+    // RD-COMMS-P2-A — no recorded charge is NEVER "no cap": every WhatsApp campaign that starts now
+    // records the units it paid for (capacity or legacy balance); one that did not paid for none.
+    const paidFor = typeof c.chargedUnits === 'number' && c.chargedUnits >= 0 ? Math.floor(c.chargedUnits) : 0
+    const recipients: Recipient[] = audience.length > paidFor ? audience.slice(0, paidFor) : audience
     if (recipients.length < audience.length) {
       await ref.update({ unbilledRecipientsSkipped: audience.length - recipients.length })
     }
@@ -260,11 +322,13 @@ async function deliverWhatsAppCampaign(
     if (!provider || !validTemplate || recipients.length === 0) {
       const finalStatus = recipients.length === 0 ? 'sent' : 'failed'
       const failReason  = !provider ? 'provider_unavailable' : !validTemplate ? 'invalid_template' : undefined
-      await ref.update({
+      // RD-COMMS-P2-B — status-guarded: a campaign cancelled meanwhile stays cancelled.
+      const moved = await transitionCampaign(ref, ['sending'], {
         status: finalStatus, successCount: 0, failCount: recipients.length,
         sentAt: FieldValue.serverTimestamp(), ...(failReason ? { failReason } : {}),
+        whatsappJobId: FieldValue.delete(), jobPreparingAt: FieldValue.delete(),
       })
-      void logBroadcastAction({
+      if (moved) void logBroadcastAction({
         organizerUid: uid, actorUid, campaignId,
         action: finalStatus === 'sent' ? 'broadcast.sent' : 'broadcast.failed',
         metadata: { recipientCount: recipients.length, reason: failReason },
@@ -275,10 +339,12 @@ async function deliverWhatsAppCampaign(
       return
     }
 
-    const job = await createWhatsAppBroadcastJob(campaignId, c, recipients)
+    // Recipients first, job document last, only while the campaign is still sending.
+    const job = await createWhatsAppBroadcastJob(campaignId, c, recipients, { jobId: buildJobId, campaignRef: ref })
+    if (!job) return                                 // cancelled while it was being built (the sweep settles it)
     jobId = job.jobId
-    await ref.update({ whatsappJobId: jobId })
   }
+  if (!jobId) return
 
   // Drive the first chunk now; the cron completes the rest (resumable/cancellable).
   await processWhatsAppBroadcastChunk(jobId)

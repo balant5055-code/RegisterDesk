@@ -18,6 +18,7 @@
 //   +  retry that Meta accepts as a NEW message                       → billed separately
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest'
+import { withWaOptIn, seedConsentingRegistrations } from '../helpers/whatsappConsentFixture'
 
 const EMULATOR = process.env.FIRESTORE_EMULATOR_HOST
 const describeEmu = EMULATOR ? describe : describe.skip
@@ -97,6 +98,8 @@ describeEmu('RD-CLOSE · WhatsApp acceptance is billable exactly once', () => {
   let confirm: typeof import('@/lib/registrations/sendWhatsAppConfirmation')
   let waJob: typeof import('@/lib/broadcasts/whatsappJob')
   const docs = new Set<string>(), trees = new Set<string>()
+  // RD-COMMS-WA-CONSENT — synthetic recipients get real, opted-in registration docs (see helper).
+  const consenting = async <R extends { id: string; data: { attendee: { phone?: string } } }>(rs: R[]): Promise<R[]> => { await seedConsentingRegistrations(adminDb, rs, docs); return rs }
   let n = 0
   const walletRef = () => adminDb.doc(`organizerWallets/${UID}`)
   const balance = async () => ((await walletRef().get()).data()?.balancePaise as number | undefined) ?? 0
@@ -117,7 +120,7 @@ describeEmu('RD-CLOSE · WhatsApp acceptance is billable exactly once', () => {
   async function reg(slug: string, i: number, ph: string) {
     const id = `close-r-${slug}-${i}`
     docs.add(`registrations/${id}`)
-    await adminDb.doc(`registrations/${id}`).set({ organizerUid: UID, eventSlug: slug, status: 'confirmed', ticketCode: `T${i}`, attendee: { name: `A${i}`, email: `a${i}@example.test`, phone: ph } })
+    await adminDb.doc(`registrations/${id}`).set(withWaOptIn({ organizerUid: UID, eventSlug: slug, status: 'confirmed', ticketCode: `T${i}`, attendee: { name: `A${i}`, email: `a${i}@example.test`, phone: ph } }))
     return id
   }
   async function campaign(slug: string, recipientCount: number) {
@@ -125,7 +128,7 @@ describeEmu('RD-CLOSE · WhatsApp acceptance is billable exactly once', () => {
     docs.add(`broadcastCampaigns/${id}`)
     await adminDb.doc(`broadcastCampaigns/${id}`).set({
       organizerUid: UID, createdBy: UID, eventId: slug, eventSlug: slug, eventName: 'Close', channel: 'whatsapp', audience: 'all',
-      subject: '', html: '', templateType: 'EVENT_REMINDER', variables: {}, recipientCount, successCount: 0, failCount: 0, status: 'draft', actualCostPaise: 0,
+      subject: '', html: '', templateType: 'EVENT_UPDATED', variables: {}, recipientCount, successCount: 0, failCount: 0, status: 'draft', actualCostPaise: 0,
     })
     return id
   }
@@ -173,7 +176,9 @@ describeEmu('RD-CLOSE · WhatsApp acceptance is billable exactly once', () => {
   }, T)
 
   // ── 2 ──
-  it('2 · broadcast sent-marker write fails → refunded at settlement, then the webhook recovers it and charges it back ONCE', async () => {
+  // RD-COMMS-P2-A — the recipient whose marker write failed has no verdict (attempt marker only), so
+  // settlement HOLDS its unit instead of refunding it; the webhook then settles against that held unit.
+  it('2 · broadcast sent-marker write fails → HELD at settlement, then the webhook recovers it against the held unit ONCE', async () => {
     const { d, slug } = await event()
     await walletRef().set({ balancePaise: 10_000 })
     for (let i = 0; i < 3; i++) await reg(slug, i, phone(20 + i))
@@ -184,7 +189,8 @@ describeEmu('RD-CLOSE · WhatsApp acceptance is billable exactly once', () => {
     let c = await camp(id)
     expect(c.billingSettlement).toBe('settled')
     expect(c.billedUnits).toBe(2)
-    expect(await balance()).toBe(10_000 - 2 * PRICE)
+    expect(c.unknownHeldUnits).toBe(1)
+    expect(await balance()).toBe(10_000 - 3 * PRICE)                // the unknown one is held, not refunded
     const lost = h.sends.find(s => s.callbackData?.endsWith(':r0000001'))!
     const jobId = String(c.whatsappJobId)
     expect((await adminDb.doc(`whatsappBroadcastJobs/${jobId}/recipients/r0000001`).get()).data()!.sent).toBeUndefined()
@@ -192,9 +198,10 @@ describeEmu('RD-CLOSE · WhatsApp acceptance is billable exactly once', () => {
 
     // Meta's status webhook for that message (a "sent" status — the acceptance proof).
     h.failBroadcastFor.clear()
-    expect(await webhook(lost.wamid!, lost.callbackData)).toBe('late_charged')
+    expect(await webhook(lost.wamid!, lost.callbackData)).toBe('late_held')
     c = await camp(id)
     expect(c.billedUnits).toBe(3)
+    expect(c.unknownHeldUnits).toBe(0)
     expect(c.refundedUnits).toBe(0)
     expect(c.actualCostPaise).toBe(3 * PRICE)
     expect(await balance()).toBe(10_000 - 3 * PRICE)
@@ -208,6 +215,9 @@ describeEmu('RD-CLOSE · WhatsApp acceptance is billable exactly once', () => {
   }, T)
 
   // ── 3 / 5 ──
+  // RD-COMMS-P2-A — the message was FUNDED before the send (its legacy hold is the one debit); only the
+  // acceptance record (usage, log, status) failed — none of it is half-written, and the webhook
+  // settles it against that same hold: no second charge.
   it('3 · confirmation: every acceptance write fails → NOTHING half-written; the webhook persists it whole, once', async () => {
     const { slug } = await event()
     await walletRef().set({ balancePaise: 1_000 })
@@ -215,9 +225,9 @@ describeEmu('RD-CLOSE · WhatsApp acceptance is billable exactly once', () => {
     h.failMessage = 99
     await confirm.sendWhatsAppConfirmation(args(r, slug))
     const s = h.sends[0]
-    expect(await balance()).toBe(1_000)
+    expect(await balance()).toBe(1_000 - PRICE)                       // the hold
     expect(await usageCount()).toHaveLength(0)
-    expect(await charges()).toHaveLength(0)
+    expect((await charges()).map(c => c.data().holdState)).toEqual(['held'])
     h.failMessage = 0
     expect(await webhook(s.wamid!, s.callbackData)).toBe('recovered')
     expect(await balance()).toBe(1_000 - PRICE)
@@ -261,9 +271,9 @@ describeEmu('RD-CLOSE · WhatsApp acceptance is billable exactly once', () => {
     const id = await campaign(slug, 2)
     const billing = await import('@/lib/communications/billing')
     await billing.chargeAndStartCampaign({ campaignId: id, organizerUid: UID, channel: 'whatsapp', recipientCount: 2 })
-    const job = await waJob.createWhatsAppBroadcastJob(id, (await camp(id)) as never, [0, 1].map(i => ({
+    const job = await waJob.createWhatsAppBroadcastJob(id, (await camp(id)) as never, await consenting([0, 1].map(i => ({
       id: `rr${i}`, data: { attendee: { name: `A${i}`, email: `a${i}@x.test`, phone: phone(90 + i) }, ticketCode: '' },
-    })) as never)
+    }))) as never)
     await adminDb.doc(`broadcastCampaigns/${id}`).update({ whatsappJobId: job.jobId })
     // The previous worker handed r0000000 to Meta (accepted as wamid X) and died before recording it.
     const { FieldValue } = await import('firebase-admin/firestore')
@@ -274,9 +284,9 @@ describeEmu('RD-CLOSE · WhatsApp acceptance is billable exactly once', () => {
     expect((await adminDb.doc(`whatsappBroadcastJobs/${job.jobId}/recipients/r0000000`).get()).data()).toMatchObject({ indeterminate: true })
     let c = await camp(id)
     expect(c.billedUnits).toBe(1)
-    expect(await balance()).toBe(5_000 - PRICE)
-    // Meta's webhook for the message the dead worker sent.
-    expect(await webhook(`wamid.crashed.${P}`, `rd1:bc:${job.jobId}:r0000000`)).toBe('late_charged')
+    expect(await balance()).toBe(5_000 - 2 * PRICE)                   // RD-COMMS-P2-A — the unknown one is HELD
+    // Meta's webhook for the message the dead worker sent: settled against the held unit.
+    expect(await webhook(`wamid.crashed.${P}`, `rd1:bc:${job.jobId}:r0000000`)).toBe('late_held')
     c = await camp(id)
     expect(c.billedUnits).toBe(2)
     expect(await balance()).toBe(5_000 - 2 * PRICE)
@@ -285,7 +295,9 @@ describeEmu('RD-CLOSE · WhatsApp acceptance is billable exactly once', () => {
     expect((await adminDb.doc(`emailLogs/wa_wamid.crashed.${P}`).get()).exists).toBe(false)
   }, T)
 
-  it('+ a transport TIMEOUT that Meta did accept is billed when the webhook proves it (prepaid unit re-taken)', async () => {
+  // RD-COMMS-P2-A — the unit is no longer released on a timeout and re-taken later (that race could
+  // record the message free): it stays HELD, and the webhook settles the acceptance against it.
+  it('+ a transport TIMEOUT that Meta did accept is billed when the webhook proves it (its held unit)', async () => {
     const { d, slug } = await event({ prepaid: 5 })
     await walletRef().set({ balancePaise: 1_000 })
     const r = await reg(slug, 11, phone(110))
@@ -293,7 +305,7 @@ describeEmu('RD-CLOSE · WhatsApp acceptance is billable exactly once', () => {
     await confirm.sendWhatsAppConfirmation(args(r, slug))
     await wait()   // the unknown status is a fire-and-forget write
     expect((await adminDb.doc(`registrations/${r}`).get()).data()!.whatsappStatus).toBe('unknown')
-    expect(((await adminDb.doc(`eventServiceAllowances/${d}`).get()).data() as { whatsapp: { consumed: number } }).whatsapp.consumed).toBe(0)
+    expect(((await adminDb.doc(`eventServiceAllowances/${d}`).get()).data() as { whatsapp: { consumed: number } }).whatsapp.consumed).toBe(1)   // held
     const s = h.sends[0]
     expect(await webhook(s.wamid!, s.callbackData)).toBe('recovered')
     expect(((await adminDb.doc(`eventServiceAllowances/${d}`).get()).data() as { whatsapp: { consumed: number } }).whatsapp.consumed).toBe(1)
@@ -343,9 +355,9 @@ describeEmu('RD-CLOSE · WhatsApp acceptance is billable exactly once', () => {
     const id = await campaign(slug, 2)
     const billing = await import('@/lib/communications/billing')
     await billing.chargeAndStartCampaign({ campaignId: id, organizerUid: UID, channel: 'whatsapp', recipientCount: 2 })
-    const job = await waJob.createWhatsAppBroadcastJob(id, (await camp(id)) as never, [0, 1].map(i => ({
+    const job = await waJob.createWhatsAppBroadcastJob(id, (await camp(id)) as never, await consenting([0, 1].map(i => ({
       id: `rq${i}`, data: { attendee: { name: `A${i}`, email: `a${i}@x.test`, phone: phone(230 + i) }, ticketCode: '' },
-    })) as never)
+    }))) as never)
     await adminDb.doc(`broadcastCampaigns/${id}`).update({ whatsappJobId: job.jobId, status: 'partial' })
     // r0 accepted ("recorded" — not yet settled); settlement then commits with a STALE count of 0.
     const { recordBroadcastAcceptance } = await import('@/lib/whatsapp/acceptance')
@@ -394,9 +406,11 @@ describeEmu('RD-CLOSE · WhatsApp acceptance is billable exactly once', () => {
     const r = await reg(slug, 13, phone(130))
     await confirm.sendWhatsAppConfirmation(args(r, slug))
     const { acceptConfirmation } = await import('@/lib/registrations/whatsappConfirmationAcceptance')
-    await acceptConfirmation({ registrationId: r, organizerUid: UID, eventSlug: slug, eventName: 'E', attendeeName: 'A', email: 'a@x.test', phone: phone(130), wamid: `wamid.retry.${P}`, fromAllowance: false, writeLog: false, source: 'retry' })
+    // RD-COMMS-P2-A — the retry's own attempt key (as the route's nonce gives it); with no hold of its
+    // own the acceptance funds it atomically from the legacy balance, under that attempt's id.
+    await acceptConfirmation({ registrationId: r, organizerUid: UID, eventSlug: slug, eventName: 'E', attendeeName: 'A', email: 'a@x.test', phone: phone(130), wamid: `wamid.retry.${P}`, draftId: null, unitKey: `wa_reg_${r}__r_n1`, writeLog: false, source: 'retry' })
     expect(await balance()).toBe(1_000 - 2 * PRICE)
-    expect((await adminDb.doc(`walletTransactions/whatsapp_${r}__wamid.retry.${P}`).get()).exists).toBe(true)
+    expect((await adminDb.doc(`walletTransactions/whatsapp_${r}__r_n1`).get()).exists).toBe(true)
     expect(await usageCount()).toHaveLength(2)
   }, T)
 

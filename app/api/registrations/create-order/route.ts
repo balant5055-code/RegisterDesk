@@ -68,6 +68,9 @@ interface CreateOrderBody {
   // Mandatory Terms & Conditions consent — validated server-side below.
   termsAccepted?: boolean
   termsVersion?:  string
+  // RD-COMMS-WA-CONSENT — OPTIONAL, explicit opt-in to organizer WhatsApp broadcasts. Only a
+  // real boolean `true` records consent (lib/whatsapp/broadcastConsent); anything else, nothing.
+  whatsappBroadcastOptIn?: unknown
 }
 
 export interface CreateOrderResponse {
@@ -693,6 +696,7 @@ export async function POST(
       // Server-validated consent, carried to settlement.
       termsAccepted: true,
       termsVersion:  termsCheck.version!,
+      ...(body.whatsappBroadcastOptIn === true ? { whatsappBroadcastOptIn: true } : {}),
       ...(inviteCode?.trim() ? { inviteCode: inviteCode.trim() } : {}),
       ...(appliedCouponCode ? {
         couponCode:     appliedCouponCode,

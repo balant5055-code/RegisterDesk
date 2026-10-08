@@ -412,35 +412,40 @@ describeEmu('RD-WALLET-W1 · wallet top-up payment safety on real Firestore', ()
   }, T)
 
   // ═══ W1.7 ═══════════════════════════════════════════════════════════════════════════════
-  it('W1.7 · Cashfree active (or chosen and refused) → wallet top-up fails CLOSED; Razorpay still works', async () => {
+  // RD-COMMS-P1 — the order route is RETIRED: whatever the provider choice, it mints nothing.
+  it('W1.7 · the top-up order route is retired for EVERY provider choice → 410, no order, no top-up record', async () => {
     const { POST } = await import('@/app/api/organizer/wallet/topup/route')
-    for (const choice of [{ ok: true, provider: 'cashfree' }, { ok: false, reason: 'cashfree_not_ready' }] as const) {
+    for (const choice of [{ ok: true, provider: 'cashfree' }, { ok: false, reason: 'cashfree_not_ready' }, { ok: true, provider: 'razorpay' }] as const) {
       const uid = await organizer()
       h.providerChoice = choice as typeof h.providerChoice
       h.who = uid
       const before = h.ordersCreated
       const r = await json(await POST(post({ amountPaise: 50_000 })))
-      expect(r.status, JSON.stringify(choice)).toBe(503)
-      expect(r.body.code).toBe('WALLET_TOPUP_PROVIDER_UNAVAILABLE')
-      expect(h.ordersCreated).toBe(before)                       // no Razorpay order minted
+      expect(r.status, JSON.stringify(choice)).toBe(410)
+      expect(r.body.code).toBe('COMMUNICATION_TOPUP_RETIRED')
+      expect(h.ordersCreated).toBe(before)
       expect((await adminDb.collection('walletTopups').where('uid', '==', uid).get()).size).toBe(0)
     }
-    const uid = await organizer()
-    h.providerChoice = { ok: true, provider: 'razorpay' }; h.who = uid
-    const ok = await json(await POST(post({ amountPaise: 50_000 })))
-    expect(ok.status).toBe(200)
-    const orderId = ok.body.orderId as string
-    cleanup.add(`walletTopups/${orderId}`)
-    expect(await topupDoc(orderId)).toMatchObject({ status: 'pending', provider: 'razorpay', uid, amountPaise: 50_000 })
   }, T)
 
   // ═══ W1.1 follow-up · Issue 1 — server-side guard against a second top-up ════════════════════
+  // RD-COMMS-P1 — the order route no longer creates top-ups at all (410 for everyone, proven on
+  // every call here). The unresolved-top-up GUARD it used to apply is still the reconciliation
+  // state detector, so its verdict is asserted directly, in the route's former response shape.
   const createTopup = async (uid: string) => {
     const { POST } = await import('@/app/api/organizer/wallet/topup/route')
+    const { findUnresolvedTopup, UNRESOLVED_TOPUP_MESSAGES } = await import('@/lib/wallet/topupGuard')
     h.who = uid
-    const r = await json(await POST(post({ amountPaise: 50_000 })))
-    if (r.status === 200) { cleanup.add(`walletTopups/${r.body.orderId as string}`); cleanup.add(`walletTopupReconciliation/${r.body.orderId as string}`) }
-    return r
+    const before = h.ordersCreated
+    const retired = await json(await POST(post({ amountPaise: 50_000 })))
+    expect(retired.status).toBe(410)
+    expect(h.ordersCreated).toBe(before)
+    const unresolved = await findUnresolvedTopup(uid)
+    if (!unresolved) return { status: 200, body: {} as Record<string, unknown> }
+    return {
+      status: unresolved.reason === 'status_unknown' ? 503 : 409,
+      body: { error: UNRESOLVED_TOPUP_MESSAGES[unresolved.reason], code: 'TOPUP_UNRESOLVED', reason: unresolved.reason } as Record<string, unknown>,
+    }
   }
 
   it('GUARD · a paid-but-uncredited (authorised) earlier top-up blocks a new one from ANY session — until it is credited', async () => {

@@ -37,15 +37,16 @@ interface Props {
 
 export function CommunicationWalletPanel({ overview, transactions, usage, loading, onExport, exporting }: Props) {
   const kpis = [
-    { label: 'Comms balance',   value: formatCompactINR(overview?.balancePaise ?? 0),        sub: 'Prepaid credits',   icon: Wallet },
-    { label: 'This-month spend', value: formatCompactINR(overview?.thisMonthSpendPaise ?? 0), sub: 'Current cycle',      icon: TrendingDown },
+    // RD-COMMS-P1 — the LEGACY communication balance (read-only, no new funds), and what it paid.
+    { label: 'Legacy balance',  value: formatCompactINR(overview?.balancePaise ?? 0),        sub: 'No new funds',      icon: Wallet },
+    { label: 'This-month spend', value: formatCompactINR(overview?.thisMonthSpendPaise ?? 0), sub: 'From legacy balance', icon: TrendingDown },
     { label: 'Emails',          value: String(overview?.emailsSent ?? 0),                     sub: 'Sent this month',   icon: Mail },
     { label: 'SMS',             value: SMS_AVAILABLE ? String(overview?.smsSent ?? 0) : '—',   sub: SMS_AVAILABLE ? 'Sent this month' : 'Unavailable', icon: MessageSquare },
     { label: 'WhatsApp',        value: String(overview?.whatsappSent ?? 0),                   sub: 'Sent this month',   icon: MessagesSquare },
   ]
 
   return (
-    <section className="space-y-4" aria-label="Communication balance">
+    <section className="space-y-4" aria-label="Legacy communication balance">
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5" aria-busy={loading}>
         {loading
           ? Array.from({ length: 5 }).map((_, i) => <KpiCardSkeleton key={i} />)
@@ -64,7 +65,7 @@ export function CommunicationWalletPanel({ overview, transactions, usage, loadin
 
       {/* Recharge / debit history */}
       <DashboardCard
-        title="Recharge & usage charges"
+        title="Legacy balance history"
         action={onExport && (
           <button
             onClick={onExport}
@@ -79,7 +80,7 @@ export function CommunicationWalletPanel({ overview, transactions, usage, loadin
         {loading ? (
           <div className="space-y-2 py-2">{Array.from({ length: 3 }).map((_, i) => <div key={i} className="h-8 animate-pulse rounded bg-muted" />)}</div>
         ) : transactions.length === 0 ? (
-          <EmptyState icon={Wallet} title="No communication-balance transactions" description="Top-ups and communication charges will appear here." />
+          <EmptyState icon={Wallet} title="No legacy balance activity" description="Historical top-ups and charges to the legacy communication balance appear here." />
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full min-w-[560px] text-left text-[13.5px]" aria-label="Communication-balance transactions">

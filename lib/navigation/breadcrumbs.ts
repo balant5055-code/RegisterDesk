@@ -99,7 +99,8 @@ export function buildBreadcrumbs(input: BreadcrumbInput): Crumb[] {
     return [
       ...crumbs,
       { label: 'Communications', href: '/dashboard/communications' },
-      { label: 'Communication balance', href: '/dashboard/communications?tab=billing' },
+      // RD-COMMS-P1 — these are the LEGACY communication-balance ledgers (read-only history).
+      { label: 'Legacy balance', href: '/dashboard/communications?tab=usage' },
       { label: pathname.endsWith('/usage') ? 'Communication Usage' : 'Transaction History', href: null },
     ]
   }

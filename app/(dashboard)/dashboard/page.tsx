@@ -497,9 +497,12 @@ export default function DashboardPage() {
   })()
   // Workspace-level, and labelled as such in event mode — the same wallet the tile below
   // shows, and equally not divisible by event.
-  const walletFooter = data.walletBalancePaise !== undefined
-    ? { icon: Wallet, text: `${rupees(data.walletBalancePaise)} communication balance${workspaceOnly.has('wallet') ? ' (all events)' : ''}` }
+  // RD-COMMS-P1 — the communication balance is LEGACY (no new funds): mentioned only while above zero.
+  const walletFooter = data.walletBalancePaise !== undefined && data.walletBalancePaise > 0
+    ? { icon: Wallet, text: `${rupees(data.walletBalancePaise)} legacy communication balance${workspaceOnly.has('wallet') ? ' (all events)' : ''}` }
     : undefined
+  // The legacy balance tile shows only while there is a positive balance (and to finance holders).
+  const showLegacyBalance = finance.allowed && (data.walletBalancePaise ?? 0) > 0
 
 
 
@@ -682,7 +685,7 @@ export default function DashboardPage() {
 
       {/* ── Secondary strip ── supporting facts, lighter but still contextual ── */}
       {visible.today && (
-      <section aria-label="Today" className="rd-rise grid items-stretch grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5" style={{ animationDelay: '80ms' }}>
+      <section aria-label="Today" className={cn('rd-rise grid items-stretch grid-cols-2 gap-3 sm:grid-cols-3', showLegacyBalance ? 'lg:grid-cols-5' : 'lg:grid-cols-4')} style={{ animationDelay: '80ms' }}>
         <KpiTile
           icon={Ticket} tone="people" motif="people"
           label="Registrations today"
@@ -711,18 +714,18 @@ export default function DashboardPage() {
           unavailableReason="Count unavailable"
           context={checkinContext}
         />
-        <KpiTile
-          icon={Wallet} tone="event" motif="wallet"
-          label="Communication balance"
-          value={finance.allowed ? rupees(data.walletBalancePaise ?? 0) : null}
-          restricted={!finance.allowed}
-          // ONE wallet per organizer — not divisible by event. In event mode the context
-          // line says which scope this belongs to rather than letting it read as the
-          // selected event's balance.
-          context={finance.allowed ? (wsContext('wallet') ?? 'Communication credit') : undefined}
-          // The communication balance is managed on Communications › Billing (lib/wallet/communicationBalance).
-          href={finance.allowed ? COMMUNICATION_BALANCE_HREF : undefined}
-        />
+        {/* RD-COMMS-P1 — LEGACY communication balance (no new funds can be added): shown read-only,
+            only while it is above zero. Communication capacity is bought per event on License & Services. */}
+        {showLegacyBalance && (
+          <KpiTile
+            icon={Wallet} tone="event" motif="wallet"
+            label="Legacy balance"
+            value={rupees(data.walletBalancePaise ?? 0)}
+            // ONE balance per organizer — not divisible by event.
+            context={wsContext('wallet') ?? 'Added before capacity billing · no new funds'}
+            href={COMMUNICATION_BALANCE_HREF}
+          />
+        )}
         <KpiTile
           icon={Clock} tone="critical" motif="time"
           label="Pending review"

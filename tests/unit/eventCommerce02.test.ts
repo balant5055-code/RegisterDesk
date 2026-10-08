@@ -260,6 +260,7 @@ vi.mock('@/lib/licensing/resolveCommercialTerms', () => ({
 const emptyCoverage = (over: Record<string, unknown> = {}) => ({
   activation: null, activationPaid: false, paidCapacity: null,
   purchased: { whatsapp: 0, certificates: 0, media: 0 }, consumed: { whatsapp: 0, certificates: 0, media: 0 }, remaining: { whatsapp: 0, certificates: 0, media: 0 },
+  carriedIn: { whatsapp: 0, certificates: 0, media: 0 }, carriedOut: { whatsapp: 0, certificates: 0, media: 0 }, refunded: { whatsapp: 0, certificates: 0, media: 0 },
   pendingAddon: null, ...over,
 })
 
@@ -571,34 +572,43 @@ describe('server contracts', () => {
     expect(p).toContain('paidAddonCapacity >= quoted.quote.capacity')
   })
   it.each([
-    ['lib/registrations/sendWhatsAppConfirmation.ts', "service: 'whatsapp', unitKey, source: 'registration_confirmation'"],
-    ['lib/certificates/whatsapp.ts',                  "service: 'whatsapp', unitKey, source: 'certificate_ready'"],
-    ['lib/email-logs/whatsappRetry.ts',               "service: 'whatsapp', unitKey, source: 'registration_confirmation_retry'"],
+    ['lib/registrations/sendWhatsAppConfirmation.ts', "legacyPricePaise: comm.whatsapp.pricePaise, source: 'registration_confirmation'"],
+    ['lib/certificates/whatsapp.ts',                  "legacyPricePaise: comm.whatsapp.pricePaise, source: 'certificate_ready'"],
+    ['lib/email-logs/whatsappRetry.ts',               "legacyPricePaise: comm.whatsapp.pricePaise, source: 'registration_confirmation_retry'"],
   ])('%s reserves before the send and releases when not accepted', (file, reserve) => {
     const s = code(file)
     expect(s).toContain(reserve)
-    expect(s.indexOf('reserveServiceUnits(')).toBeLessThan(s.indexOf('sendTemplate('))
+    // RD-COMMS-P2-A — ONE atomic funding hold (event capacity, else a legacy balance that covers the
+    // whole legacy price — lib/whatsapp/funding.ts) is taken before the send and given back only on
+    // a definite refusal. No balance pre-check outside a transaction, no stored-policy branch.
+    expect(s.indexOf('reserveWhatsAppFunding(')).toBeGreaterThan(-1)
+    expect(s.indexOf('reserveWhatsAppFunding(')).toBeLessThan(s.indexOf('sendTemplate('))
     expect(s).toMatch(/giveBack\(\)/)
-    expect(s).toContain("allowance.mode === 'exhausted' && allowance.policy === 'block'")
-    expect(s).toContain('fromAllowance ? 0')
+    expect(s).not.toContain('getWalletBalance(')
+    expect(s).not.toContain("allowance.policy === 'block'")
+    expect(s).not.toContain('walletChargeAttendeeNotifications')
   })
   it('the certificate-ready WhatsApp never skips silently', () => {
     const s = code('lib/certificates/whatsapp.ts')
-    expect(s).toContain("logSkip(email, normalizedPhone, 'Insufficient communication wallet balance')")
+    expect(s).toContain('logSkip(email, normalizedPhone, WHATSAPP_CAPACITY_REQUIRED)')
     expect(s).not.toMatch(/if \(balance < costPaise\) return\b/)
   })
   it('broadcasts consume the allowance in the billing transaction', () => {
     const s = code('lib/communications/billing.ts')
     expect(s).toContain("decideReserve(allowanceRead.ledger, allowanceRead.usageExists, 'whatsapp', units)")
     expect(s).toContain("txnTakeUnits(txn, allowanceDraftId, 'whatsapp', unitKey, units, 'broadcast')")
-    expect(s).toContain("return { ok: false, reason: 'allowance_exhausted' }")
+    // RD-COMMS-P1 — anything the capacity does not cover drains a covering legacy balance or fails.
+    expect(s).toContain('!legacyBalanceCanFund(balance, cost)')
+    expect(s).toContain("const reason = outcome.mode === 'exhausted' ? 'allowance_exhausted' as const : 'allowance_required' as const")
   })
   it('certificate issuance reserves before rendering and releases on failure', () => {
     const s = code('lib/certificates/generate.ts')
     expect(s.indexOf("service: 'certificates', unitKey: certUnitKey")).toBeLessThan(s.indexOf('renderCertificatePdf({'))
     expect(s).toContain('throw new CertificateAllowanceExhaustedError()')
     expect(s).toContain("releaseServiceUnits({ draftId: allowanceDraftId, service: 'certificates', unitKey: certUnitKey })")
-    expect(s).toContain('const billing = fromAllowance ? null : await chargeCertificate({')
+    // RD-COMMS-P1 — no capacity ⇒ refused (no wallet charge, no free certificate).
+    expect(s).toContain('if (!fromAllowance) {')
+    expect(s).not.toContain('chargeCertificate(')
   })
   it('licensing failed refunds are visible to the admin queue', () => {
     expect(code('app/api/admin/failed-refunds/route.ts')).toContain("status: d.status === 'pending' ? 'open' : d.status")

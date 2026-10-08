@@ -5,6 +5,9 @@
 //
 // Body: { eventSlug: string; audience: BroadcastAudience; registrationDate?: RegistrationDateFilterInput }
 
+import { quoteWhatsAppBroadcastCapacity } from '@/lib/communications/capacityQuote'
+import { applyAudienceRefundRule, audienceExcludesRefunded } from '@/lib/broadcasts/audienceRefunds'
+import { filterWhatsAppBroadcastRecipients } from '@/lib/whatsapp/broadcastConsent'
 import { NextRequest, NextResponse } from 'next/server'
 import { adminDb }                   from '@/lib/firebase/admin'
 import type { BroadcastAudience }    from '@/lib/broadcasts/types'
@@ -49,6 +52,15 @@ export async function POST(req: NextRequest): Promise<NextResponse<CountResponse
   const dedupePhones = dedupePhonesRaw === true
   if (typeof eventSlug !== 'string' || !eventSlug) {
     return NextResponse.json({ success: false, error: 'eventSlug is required' }, { status: 400 })
+  }
+  // RD-COMMS-FINAL — the event must be THIS workspace's live event, exactly as the create route
+  // checks it (broadcasts/route.ts). The registration queries below are already scoped by
+  // organizerUid, but the WhatsApp capacity quote is keyed by the slug alone — without this an
+  // organizer could read ANOTHER organizer's event capacity by posting its public slug.
+  const liveEvent = await adminDb.collection('events').doc(eventSlug).get().catch(() => null)
+  const liveData  = liveEvent?.exists ? liveEvent.data() as { uid?: unknown } : null
+  if (!liveData || liveData.uid !== uid) {
+    return NextResponse.json({ success: false, error: 'Event not found' }, { status: 404 })
   }
 
   const AUDIENCES: BroadcastAudience[] = ['all', 'confirmed', 'pending', 'rejected', 'cancelled']
@@ -112,21 +124,28 @@ export async function POST(req: NextRequest): Promise<NextResponse<CountResponse
   const maxRecipients = await resolveMaxRecipientsPerBroadcast(uid)
 
   if (channel === 'whatsapp') {
-    const snap = await query.select('attendee').limit(maxRecipients + 1).get()
-    const phones: (string | undefined)[] = []
-    for (const d of snap.docs) {
-      const phone = (d.data() as { attendee?: { phone?: string } }).attendee?.phone
-      // Presence filter FIRST, exactly as before: a registration with no number is not a
-      // WhatsApp recipient at all, whether or not dedupe is on.
-      if (typeof phone === 'string' && phone.trim().length > 0) phones.push(phone)
-    }
+    const snap = await query.select('attendee', 'whatsappBroadcastConsent', 'paymentStatus').limit(maxRecipients + 1).get()
+    // Presence filter FIRST, exactly as before: a registration with no number is not a
+    // WhatsApp recipient at all, whether or not dedupe is on. RD-COMMS-WA-CONSENT — then the
+    // same consent filter the send uses, so the preview never promises a recipient the send skips.
+    const withPhone = applyAudienceRefundRule(audience as BroadcastAudience, snap.docs
+      .map(d => ({ data: d.data() as { attendee?: { phone?: string } } })))
+      .filter(r => typeof r.data.attendee?.phone === 'string' && r.data.attendee.phone.trim().length > 0)
+    const { eligible, noConsent, optedOut } = await filterWhatsAppBroadcastRecipients(withPhone)
+    const phones: (string | undefined)[] = eligible.map(r => r.data.attendee?.phone)
     // 'Ignore duplicate WhatsApp numbers': count CANONICAL numbers, not registrations.
     // Counted by the same helper the send path collapses with, so the number previewed, the
     // number billed and the number of rows snapshotted cannot disagree. Off ⇒ the previous
     // count, unchanged.
+    const count = dedupePhones ? countUniquePhones(phones) : phones.length
+    // RD-COMMS-CAPACITY-UX (M1) — what funding this audience needs vs what the event has, by the
+    // same decision the funding transaction makes. Advisory: the send itself re-checks.
+    const capacity = await quoteWhatsAppBroadcastCapacity({ organizerUid: uid, eventSlug, recipientCount: count })
     return NextResponse.json({
       success: true,
-      count: dedupePhones ? countUniquePhones(phones) : phones.length,
+      count,
+      whatsappExcluded: { noConsent, optedOut },
+      capacity,
       ...windowMeta,
     })
   }
@@ -137,12 +156,19 @@ export async function POST(req: NextRequest): Promise<NextResponse<CountResponse
   // the read cost is one already-established pattern rather than a new one, and the whole
   // collection is never loaded — here or in the browser.
   if (dedupeEmails) {
-    const snap = await query.select('attendee').limit(maxRecipients + 1).get()
-    const emails = snap.docs.map(d => (d.data() as { attendee?: { email?: string } }).attendee?.email)
+    const snap = await query.select('attendee', 'paymentStatus').limit(maxRecipients + 1).get()
+    const emails = applyAudienceRefundRule(audience as BroadcastAudience, snap.docs.map(d => ({ data: d.data() as { attendee?: { email?: string } } })))
+      .map(r => r.data.attendee?.email)
     return NextResponse.json({ success: true, count: countUniqueRecipients(emails), ...windowMeta })
   }
 
   // Email: exact count via an indexed aggregate — no documents transferred.
   const agg = await query.count().get()
-  return NextResponse.json({ success: true, count: agg.data().count, ...windowMeta })
+  // RD-COMMS-CAPACITY-UX (L3) — 'confirmed' leaves completed refunds out: subtract them with a
+  // second index-only aggregate (registrations: organizerUid, eventSlug, status, paymentStatus,
+  // [registeredAt]) instead of loading documents.
+  const refunded = audienceExcludesRefunded(audience as BroadcastAudience)
+    ? (await query.where('paymentStatus', '==', 'refunded').count().get()).data().count
+    : 0
+  return NextResponse.json({ success: true, count: Math.max(0, agg.data().count - refunded), ...windowMeta })
 }

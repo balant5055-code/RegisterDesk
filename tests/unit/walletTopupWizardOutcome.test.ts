@@ -64,53 +64,19 @@ describe('classifyTopupVerifyResponse — every verify outcome', () => {
   })
 })
 
-describe('the event wizard uses it and cannot start a second payment on an uncertain outcome', () => {
+// RD-COMMS-P1 — the event wizard no longer offers a communication-balance top-up at all (capacity is
+// bought on its own License & Services step), so there is no second payment path to guard. The
+// classifier above keeps reading verify answers for top-up orders created before retirement.
+describe('the event wizard starts no communication-balance top-up (RD-COMMS-P1)', () => {
   const src = readFileSync('app/(dashboard)/dashboard/events/new/page.tsx', 'utf8')
-  const handler = src.slice(src.indexOf('const handleTopupWallet = useCallback('), src.indexOf('}, [topupLoading, topupHold, showToast])'))
-
-  it('classifies the verify response instead of trusting `success` alone', () => {
-    expect(handler).toContain('classifyTopupVerifyResponse(vRes.status, vJson)')
-    expect(handler).not.toContain("showToast(vJson.error ?? 'Payment verification failed.', 'error')")
+  it('no top-up / verify / status call, no hold state and no Add Funds modal', () => {
+    for (const banned of ['/api/organizer/wallet/topup', 'handleTopupWallet', 'setTopupHold', 'showAddFundsModal', 'Add to communication balance', 'Top up balance']) {
+      expect(src, banned).not.toContain(banned)
+    }
   })
-  it('a hold blocks a NEW payment before any order is created', () => {
-    const guard = handler.indexOf('if (topupHold) {')
-    expect(guard).toBeGreaterThan(-1)
-    expect(guard).toBeLessThan(handler.indexOf("fetch('/api/organizer/wallet/topup'"))
-  })
-  it('pending / duplicate / review / deferred / unconfirmed set the hold — never the success path', () => {
-    expect(handler).toContain("if (outcome.kind === 'credited') {")
-    expect(handler).toContain("} else if (outcome.kind === 'failed') {")
-    // the hold is tied to THIS payment (order + payment id), not to a balance snapshot
-    expect(handler).toContain('setTopupHold({ kind: outcome.kind, message: outcome.message, orderId: resp.razorpay_order_id, paymentId: resp.razorpay_payment_id })')
-    expect(handler).not.toContain('balanceAtHold')
-    // only the credited branch closes the modal / reports success
-    expect((handler.match(/Wallet funded successfully!/g) ?? []).length).toBe(1)
-  })
-  it('a network failure during verify is "unconfirmed", not a prompt to retry by paying', () => {
-    expect(handler).toContain("outcome = { kind: 'unconfirmed', message: TOPUP_OUTCOME_MESSAGES.unconfirmed }")
-    expect(handler).not.toContain('Network error during verification. Please contact support.')
-  })
-  it('the pay button is disabled while loading or on hold, and the hold is shown in the modal', () => {
-    expect(src).toContain('disabled={topupLoading || topupHold !== null}')
-    expect(src).toMatch(/\{topupHold && \([\s\S]{0,400}topupHold\.message/)
-  })
-  it('the pending poll asks about THIS payment, is READ-ONLY, and never trusts a balance rise', () => {
-    const poll = src.slice(src.indexOf('while a payment is pending / deferred / unconfirmed'), src.indexOf('}, [topupHold, showToast])'))
-    expect(poll).toContain('/api/organizer/wallet/topup/status?')
-    expect(poll).toContain('new URLSearchParams({ orderId, paymentId })')
-    // read-only: no POST, no verify, no order creation
-    expect(poll).not.toMatch(/method:\s*'POST'/)
-    expect(poll).not.toContain('/topup/verify')
-    expect(poll).not.toContain("fetch('/api/organizer/wallet/topup'")
-    // success only on the server's 'credited' for this payment; no balance comparison
-    expect(poll).toContain("if (d.state === 'credited') {")
-    expect(poll).not.toMatch(/balancePaise\s*>/)
-    // review / duplicate become their own holds; they are never polled
-    expect(poll).toContain("d.state === 'needs_review' || d.state === 'duplicate_payment'")
-    expect(poll).toContain("topupHold.kind === 'duplicate' || topupHold.kind === 'review'")
-  })
-  it('a server refusal (earlier top-up unresolved) is explained, not reported as a generic failure', () => {
-    expect(handler).toContain("order.code === 'TOPUP_UNRESOLVED' && order.error ? order.error")
+  it('a missing WhatsApp capacity is an advisory hint pointing to License & Services, never a payment', () => {
+    expect(src).toContain('needsWhatsappCapacity')
+    expect(src).toContain('WhatsApp messages are sent only from WhatsApp capacity')
   })
 })
 

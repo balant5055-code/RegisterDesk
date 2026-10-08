@@ -476,3 +476,64 @@ export function resolveWhatsAppTemplateByType(
     },
   }
 }
+
+// ─── RD-COMMS-P2-C · what an ORGANIZER may broadcast ─────────────────────────────
+//
+// The registry above holds EVERY template RegisterDesk sends — attendee transactional messages
+// (confirmation, refund, cancellation, waitlist…) and RegisterDesk→organizer platform messages
+// (wallet, settlement, licence, event review…). Those are sent by server code with server-derived
+// values only. An organizer BROADCAST is different: the organizer picks the template and types some
+// of its values, so it may only use templates whose content is an announcement the organizer is
+// entitled to make. Anything else — e.g. REFUND_SUCCESS with a typed amount, EVENT_CANCELLED for a
+// live event, WALLET_RECHARGED — would let an organizer impersonate RegisterDesk or a transaction.
+// This list is the server-side boundary (broadcast create route + broadcast job); the composer's
+// picker shows the same list. System senders never pass through it and keep every template.
+export const ORGANIZER_BROADCAST_TEMPLATES = ['EVENT_UPDATED', 'KIT_COLLECTION', 'EVENT_LOCATION', 'CERTIFICATE_READY'] as const satisfies readonly WhatsAppTemplateType[]
+const ORGANIZER_BROADCASTABLE: ReadonlySet<string> = new Set(ORGANIZER_BROADCAST_TEMPLATES)
+
+/** True only for a registry template an organizer may use in a broadcast. */
+export function isOrganizerBroadcastTemplate(type: unknown): type is WhatsAppTemplateType {
+  return typeof type === 'string' && ORGANIZER_BROADCASTABLE.has(type) && hasWhatsAppTemplate(type)
+}
+
+/**
+ * Variables the broadcast fills SERVER-side for every recipient (lib/broadcasts/whatsappJob.ts) —
+ * never organizer input: a typed value for any of these is ignored.
+ */
+export const BROADCAST_SERVER_VARIABLES: ReadonlySet<string> = new Set(['attendeeName', 'eventName', 'ticketCode', 'certificateUrl'])
+
+const MAX_VARIABLE_LENGTH = 200
+const MAX_URL_LENGTH      = 500
+/** Variables that are links; an organizer-typed link must be an absolute https:// URL. */
+const URL_VARIABLES: ReadonlySet<string> = new Set(['mapsUrl'])
+
+export type BroadcastVariablesResult =
+  | { ok: true; variables: Record<string, string> }
+  | { ok: false; error: string; variable?: string }
+
+/**
+ * The organizer-typed values of a broadcast template, validated: ONLY the template's own required
+ * variables that the server does not fill are kept (anything else is dropped); each must be present,
+ * single-line (Meta refuses new lines, tabs and runs of 4+ spaces in a parameter), and bounded; a
+ * link must be an absolute https:// URL. Values are kept as typed otherwise (they are template
+ * PARAMETERS, plain text — never markup).
+ */
+export function validateBroadcastVariables(type: WhatsAppTemplateType, raw: unknown): BroadcastVariablesResult {
+  const input = raw && typeof raw === 'object' ? raw as Record<string, unknown> : {}
+  const variables: Record<string, string> = {}
+  for (const k of getWhatsAppTemplate(type).requiredVariables) {
+    if (BROADCAST_SERVER_VARIABLES.has(k)) continue
+    const v = typeof input[k] === 'string' ? (input[k] as string).trim() : ''
+    if (!v) return { ok: false, variable: k, error: `This template needs a value for "${k}".` }
+    if (/[\r\n\t]| {4,}/.test(v)) return { ok: false, variable: k, error: `"${k}" must be a single line (no line breaks, tabs or long runs of spaces).` }
+    if (URL_VARIABLES.has(k)) {
+      let url: URL | null = null
+      try { url = new URL(v) } catch { url = null }
+      if (!url || url.protocol !== 'https:' || v.length > MAX_URL_LENGTH) return { ok: false, variable: k, error: `"${k}" must be a full https:// link.` }
+    } else if (v.length > MAX_VARIABLE_LENGTH) {
+      return { ok: false, variable: k, error: `"${k}" is too long (max ${MAX_VARIABLE_LENGTH} characters).` }
+    }
+    variables[k] = v
+  }
+  return { ok: true, variables }
+}

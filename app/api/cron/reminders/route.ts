@@ -23,7 +23,10 @@ async function handle(req: NextRequest): Promise<NextResponse> {
   let ok = false, detail = ''
   const startedAt = Date.now()
   try {
-    const materialized = await materializeReminders()
+    // RD-COMMS-P2-E — a materialize failure must not stop already-due reminders from going out.
+    let materialized: Awaited<ReturnType<typeof materializeReminders>> | { materializeError: true }
+    try { materialized = await materializeReminders() }
+    catch (err) { captureError(err, { scope: 'cron.reminders.materialize' }); materialized = { materializeError: true } }
     // Give dispatch whatever remains of a ~55s working window (maxDuration 60) after
     // materialize, floored at 5s, so a slow materialize can't push us past the limit.
     const budgetMs = Math.max(5_000, 55_000 - (Date.now() - startedAt))

@@ -17,6 +17,8 @@ export interface ReminderTemplateInput {
   customSubject?: string
   customMessage?: string
   balanceLabel?:  string
+  /** RD-COMMS-P2-G — attendee reminders carry the recipient's signed unsubscribe link. */
+  unsubscribeUrl?: string
 }
 
 const p = (s: string) => `<p style="margin:0 0 14px;font-size:14px;line-height:1.6;color:#374151;">${s}</p>`
@@ -38,34 +40,37 @@ export function buildReminderContent(input: ReminderTemplateInput): ReminderCont
 
   switch (input.kind) {
     case 'custom': {
-      const subject = input.customSubject?.trim() || `Reminder: ${input.eventName}`
+      // RD-COMMS-P2-C — the organizer's subject is DATA: one line (no CR/LF for the header path)
+      // and HTML-escaped wherever it enters the body. It used to reach `heading()` raw, which let
+      // a subject inject links, forms or images into every attendee's email.
+      const subject = (input.customSubject?.replace(/[\r\n]+/g, ' ').trim()) || `Reminder: ${input.eventName}`
       const body = (input.customMessage ?? '')
         .split(/\n{2,}/).map(par => p(escHtml(par).replace(/\n/g, '<br>'))).join('')
-      return { subject, html: emailShell(subject, `${heading(subject)}${body}${cta}`) }
+      return { subject, html: emailShell(subject, `${heading(escHtml(subject))}${body}${cta}`, input.unsubscribeUrl) }
     }
     case 'event_tomorrow': {
       const subject = `Tomorrow: ${input.eventName}`
-      return { subject, html: emailShell(subject, `${heading(`See you tomorrow at ${ev}`)}${p(`Hi ${name}, this is a friendly reminder that <strong>${ev}</strong> is tomorrow.`)}${eventMeta(input)}${cta}`) }
+      return { subject, html: emailShell(subject, `${heading(`See you tomorrow at ${ev}`)}${p(`Hi ${name}, this is a friendly reminder that <strong>${ev}</strong> is tomorrow.`)}${eventMeta(input)}${cta}`, input.unsubscribeUrl) }
     }
     case 'event_today': {
       const subject = `Today: ${input.eventName}`
-      return { subject, html: emailShell(subject, `${heading(`${ev} is today`)}${p(`Hi ${name}, <strong>${ev}</strong> is happening today. We look forward to seeing you!`)}${eventMeta(input)}${cta}`) }
+      return { subject, html: emailShell(subject, `${heading(`${ev} is today`)}${p(`Hi ${name}, <strong>${ev}</strong> is happening today. We look forward to seeing you!`)}${eventMeta(input)}${cta}`, input.unsubscribeUrl) }
     }
     case 'event_starting_soon': {
       const subject = `Starting soon: ${input.eventName}`
-      return { subject, html: emailShell(subject, `${heading(`${ev} starts soon`)}${p(`Hi ${name}, <strong>${ev}</strong> is starting soon. Get ready!`)}${eventMeta(input)}${cta}`) }
+      return { subject, html: emailShell(subject, `${heading(`${ev} starts soon`)}${p(`Hi ${name}, <strong>${ev}</strong> is starting soon. Get ready!`)}${eventMeta(input)}${cta}`, input.unsubscribeUrl) }
     }
     case 'registration_closing': {
       const subject = `Registration closing soon: ${input.eventName}`
-      return { subject, html: emailShell(subject, `${heading('Registration is closing soon')}${p(`Registration for <strong>${ev}</strong> closes soon. Consider a final promotion push to fill remaining seats.`)}${cta}`) }
+      return { subject, html: emailShell(subject, `${heading('Registration is closing soon')}${p(`Registration for <strong>${ev}</strong> closes soon. Consider a final promotion push to fill remaining seats.`)}${cta}`, input.unsubscribeUrl) }
     }
     case 'early_bird_ending': {
       const subject = `Early bird ending: ${input.eventName}`
-      return { subject, html: emailShell(subject, `${heading('Early bird pricing is ending')}${p(`Early bird pricing for <strong>${ev}</strong> is ending soon. This is a good moment to remind prospective attendees.`)}${cta}`) }
+      return { subject, html: emailShell(subject, `${heading('Early bird pricing is ending')}${p(`Early bird pricing for <strong>${ev}</strong> is ending soon. This is a good moment to remind prospective attendees.`)}${cta}`, input.unsubscribeUrl) }
     }
     case 'low_wallet': {
       const subject = 'Low communication balance'
-      return { subject, html: emailShell(subject, `${heading('Your communication balance is low')}${p(`Your communication balance is ${escHtml(input.balanceLabel ?? 'low')}. Top up to keep pay-as-you-go WhatsApp messages running for your events.`)}${input.eventUrl ? btn('Top up communication balance', input.eventUrl) : ''}`) }
+      return { subject, html: emailShell(subject, `${heading('Your communication balance is low')}${p(`Your communication balance is ${escHtml(input.balanceLabel ?? 'low')}. Top up to keep pay-as-you-go WhatsApp messages running for your events.`)}${input.eventUrl ? btn('Top up communication balance', input.eventUrl) : ''}`, input.unsubscribeUrl) }
     }
   }
 }

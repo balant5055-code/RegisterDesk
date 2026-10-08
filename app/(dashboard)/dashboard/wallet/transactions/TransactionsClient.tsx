@@ -137,10 +137,10 @@ export function TransactionsClient() {
       {/* ── Header ── */}
       <PageHeader
         title="Transaction History"
-        subtitle="Communication balance credits and charges (top-ups, pay-as-you-go messages, broadcasts)."
+        subtitle="Legacy communication balance history (top-ups, pay-as-you-go messages, broadcasts). New funds cannot be added."
         // This is the COMMUNICATION BALANCE ledger, not the event-wise Wallet.
         breadcrumb={[
-          { label: 'Communication balance', href: COMMUNICATION_BALANCE_HREF },
+          { label: 'Legacy balance', href: COMMUNICATION_BALANCE_HREF },
           { label: 'Transaction History' },
         ]}
         action={
@@ -203,7 +203,7 @@ export function TransactionsClient() {
                     <EmptyState
                       icon={ArrowUpDown}
                       title={eventId || filters.kind || filters.from || filters.to ? 'No matching transactions' : 'No transactions yet'}
-                      description={eventId || filters.kind || filters.from || filters.to ? 'Try a different filter.' : 'Add funds under Communications › Billing.'}
+                      description={eventId || filters.kind || filters.from || filters.to ? 'Try a different filter.' : 'No legacy balance activity.'}
                     />
                   </td>
                 </tr>

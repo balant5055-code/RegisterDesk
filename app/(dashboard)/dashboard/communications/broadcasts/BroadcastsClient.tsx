@@ -11,15 +11,15 @@ import {
 } from '@/lib/broadcasts/types'
 import type { BroadcastAudience, BroadcastCampaign, BroadcastStatus } from '@/lib/broadcasts/types'
 import type { RegistrationDateFilterInput, RegistrationDateFilterType } from '@/lib/broadcasts/registrationDateFilter'
-import { createRecipientCountController, type RecipientCountState, type RecipientCountMeta } from '@/lib/broadcasts/recipientCount'
+import { createRecipientCountController, type RecipientCountState, type RecipientCountMeta, type RecipientCapacity } from '@/lib/broadcasts/recipientCount'
+import { campaignFailureLabel, isCapacityFailure } from '@/lib/broadcasts/campaignFailure'
 import { TEMPLATE_VARIABLES, SAMPLE_VARS, substituteVariables } from '@/lib/email-templates/types'
 // Both are pure and client-safe. emailShell is already used this way by the email-branding
 // settings preview, so this reuses a proven boundary rather than opening a new one.
 import { renderBroadcastBody } from '@/lib/broadcasts/renderBody'
 import { emailShell } from '@/lib/email/templates/base'
-import { WHATSAPP_TEMPLATE_REGISTRY, isSendableMetaStatus } from '@/lib/whatsapp/registry'
+import { WHATSAPP_TEMPLATE_REGISTRY, isSendableMetaStatus, isOrganizerBroadcastTemplate } from '@/lib/whatsapp/registry'
 import type { WhatsAppTemplateType } from '@/lib/whatsapp/registry'
-import { isOrganizerNotification } from '@/lib/notifications/catalog'
 import type { EventListItem } from '@/app/api/organizer/events/route'
 import type { PostBroadcastResponse, GetBroadcastsResponse } from '@/app/api/organizer/broadcasts/route'
 import type { GetBroadcastStatsResponse, BroadcastWhatsAppStats } from '@/app/api/organizer/broadcasts/[campaignId]/stats/route'
@@ -29,9 +29,12 @@ import {
   Bold, Italic, Underline, Link2, List,
   ChevronDown, Loader2, Send, Mail, AlertCircle,
   CheckCircle2, Users, Eye, History, Plus, RefreshCw,
-  FlaskConical, XCircle, CheckCheck, Clock, MessageCircle,
+  FlaskConical, XCircle, CheckCheck, Clock, MessageCircle, AlertTriangle,
 } from 'lucide-react'
 import { cn } from '@/lib/utils/cn'
+import { increaseLimitHref } from '@/lib/wallet/purchaseIntent'
+import { LICENSE_SERVICES_CTA } from '@/lib/communications/capacity'
+import { broadcastCapacityWarning, broadcastCapacityWarningText } from '@/lib/broadcasts/capacityWarning'
 import { broadcastStatusCls } from '@/lib/ui/statusColors'
 import { useFocusTrap } from '@/lib/hooks/useFocusTrap'
 import { EmptyState, PageHeader, buttonVariants } from '@/components/ui'
@@ -68,7 +71,8 @@ const WA_SAMPLE: Record<string, string> = {
 // This is presentation only — the server refuses it too (broadcasts/route.ts), and the
 // resolver refuses it a third time. The picker just avoids showing a dead end.
 const WA_TEMPLATE_TYPES = (Object.keys(WHATSAPP_TEMPLATE_REGISTRY) as WhatsAppTemplateType[])
-  .filter(t => isOrganizerNotification(t))
+  // RD-COMMS-P2-C — the SAME organizer-broadcast allowlist the server enforces (registry.ts).
+  .filter(t => isOrganizerBroadcastTemplate(t))
   .filter(t => isSendableMetaStatus(WHATSAPP_TEMPLATE_REGISTRY[t].metaStatus))
 // One sentence, correct for 1 and for many. Kept out of the JSX so the warning reads as
 // prose in the source too — this is the line that stops a date filter from lying by omission.
@@ -329,6 +333,11 @@ function ComposeTab({
   const [testMsg,         setTestMsg]         = useState<{ ok: boolean; msg: string } | null>(null)
   const [sendLoading,     setSendLoading]     = useState(false)
   const [sendError,       setSendError]       = useState<string | null>(null)
+  // RD-COMMS-P1 — set when the server says the event needs WhatsApp capacity: the ONE place to buy it.
+  const [capacityHref,    setCapacityHref]    = useState<string | null>(null)
+  // RD-COMMS-CAPACITY-UX (M1) — the SERVER's funding quote for the counted WhatsApp audience.
+  // Display + Send gating only; the funding transaction remains the authority.
+  const [capacity,        setCapacity]        = useState<RecipientCapacity | null>(null)
   const [showConfirm,     setShowConfirm]     = useState(false)
   const [scheduleFor,     setScheduleFor]     = useState('')   // datetime-local; empty = send now
 
@@ -369,14 +378,17 @@ function ComposeTab({
     if (next.status === 'ready') {
       setRecipientCount(next.count)
       setDateMeta(next.meta)
+      setCapacity(next.capacity ?? null)
       setCountError(null)
     } else if (next.status === 'error') {
+      setCapacity(null)
       // Cleared, not retained. `recipientCount === null` also disables Send, so an
       // unknown audience cannot be broadcast to by accident.
       setRecipientCount(null)
       setDateMeta(null)
       setCountError(next.message)
     } else if (next.status === 'idle') {
+      setCapacity(null)
       setRecipientCount(null)
       setDateMeta(null)
       setCountError(null)
@@ -480,6 +492,8 @@ function ComposeTab({
           ? ` Resets ${new Date(data.resetAt).toLocaleString()}.`
           : ''
         setSendError((data.message ?? data.error ?? 'Send failed.') + resetNote)
+        setCapacityHref(data.error === 'WHATSAPP_CAPACITY_REQUIRED' && selectedEvent?.draftId ? increaseLimitHref(selectedEvent.draftId, 'whatsapp') : null)
+        if (data.error === 'WHATSAPP_CAPACITY_REQUIRED' && data.capacity) setCapacity(data.capacity)
         setSendLoading(false)
         setShowConfirm(false)
         return
@@ -506,7 +520,11 @@ function ComposeTab({
   const emailReady   = !!subject.trim() && !!body.trim()
   const waReady      = !!waTemplate && waManualVars.every(v => (waVars[v] ?? '').trim().length > 0)
   const contentReady = channel === 'whatsapp' ? waReady : emailReady
-  const canSend = !!eventSlug && contentReady && recipientCount !== null && recipientCount > 0
+  const capacityShort = channel === 'whatsapp' && capacity !== null && !capacity.sufficient
+  const canSend = !!eventSlug && contentReady && recipientCount !== null && recipientCount > 0 && !capacityShort
+  const capacityPurchaseHref = selectedEvent?.draftId ? increaseLimitHref(selectedEvent.draftId, 'whatsapp') : null
+  // RD-COMMS-M3 — transparency only: an allowed broadcast taking a large share of the shared pool.
+  const capacityWarning = channel === 'whatsapp' ? broadcastCapacityWarning(capacity) : null
 
   // ── Preview ─────────────────────────────────────────────────────────────
   const previewSubject = substituteVariables(subject, SAMPLE_VARS)
@@ -683,6 +701,13 @@ function ComposeTab({
                       className="flex-1 rounded-lg border border-border bg-background px-2.5 py-1.5 text-[13px] text-foreground focus:border-primary/50 focus:outline-none focus:ring-2 focus:ring-primary/20"
                     />
                   </div>
+                )}
+
+                {/* RD-COMMS-WA-CONSENT — why a WhatsApp audience is smaller than the event. */}
+                {channel === 'whatsapp' && (
+                  <p className="text-[12px] text-muted-foreground">
+                    WhatsApp broadcasts reach only attendees who opted in to WhatsApp updates when they registered and haven’t replied STOP.
+                  </p>
                 )}
 
                 {/* Stated in the timezone the SERVER resolved, never the browser’s — two
@@ -910,12 +935,41 @@ function ComposeTab({
               Estimated cost: <strong className="text-foreground">
                 {recipientCount
                   ? channel === 'whatsapp'
-                    ? `${recipientCount.toLocaleString()} WhatsApp message${recipientCount !== 1 ? 's' : ''} (wallet)`
+                    ? `${recipientCount.toLocaleString()} WhatsApp message${recipientCount !== 1 ? 's' : ''} (event capacity)`
                     : 'Free (email)'
                   : '—'}
               </strong>
             </span>
           </div>
+
+          {/* RD-COMMS-CAPACITY-UX (M1) — capacity BEFORE Send, from the server's quote. */}
+          {channel === 'whatsapp' && capacity && recipientCount !== null && recipientCount > 0 && (
+            <div className={cn('mx-5 mb-3 rounded-xl border px-4 py-3 text-[12.5px]', capacityShort ? 'border-amber-300 bg-amber-50 text-amber-900' : 'border-border bg-muted/20 text-muted-foreground')}
+              role={capacityShort ? 'alert' : undefined} aria-label="WhatsApp capacity">
+              <dl className="grid grid-cols-2 gap-x-4 gap-y-1 sm:grid-cols-4">
+                <div><dt>Eligible recipients</dt><dd className="font-semibold tabular-nums text-foreground">{recipientCount.toLocaleString()}</dd></div>
+                <div><dt>Available messages</dt><dd className="font-semibold tabular-nums text-foreground">{capacity.available.toLocaleString()}</dd></div>
+                <div><dt>Required</dt><dd className="font-semibold tabular-nums text-foreground">{capacity.required.toLocaleString()}</dd></div>
+                {capacityShort && <div><dt>Additional capacity needed</dt><dd className="font-semibold tabular-nums text-foreground">{capacity.shortfall.toLocaleString()}</dd></div>}
+              </dl>
+              {capacityShort ? (
+                <p className="mt-2">
+                  This event doesn’t have enough WhatsApp capacity for this broadcast, so it can’t be sent or scheduled.{' '}
+                  {capacityPurchaseHref && <a href={capacityPurchaseHref} className="font-semibold text-primary underline underline-offset-2">{LICENSE_SERVICES_CTA}</a>}
+                </p>
+              ) : capacity.fundedBy === 'legacy_balance' ? (
+                <p className="mt-2">The event’s capacity doesn’t cover this broadcast; it will be paid from your legacy communication balance.</p>
+              ) : capacityWarning ? (
+                <p className="mt-2 flex items-start gap-1.5 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-amber-900" role="status" data-testid="broadcast-capacity-warning">
+                  <AlertTriangle className="mt-0.5 size-3.5 shrink-0" aria-hidden />
+                  <span>
+                    {broadcastCapacityWarningText(capacityWarning)}{' '}
+                    {capacityPurchaseHref && <a href={capacityPurchaseHref} className="font-semibold text-primary underline underline-offset-2">{LICENSE_SERVICES_CTA}</a>}
+                  </span>
+                </p>
+              ) : null}
+            </div>
+          )}
 
           {/* Action bar */}
           <div className="flex flex-wrap items-center justify-between gap-3 rounded-b-2xl border-t border-border bg-muted/20 px-5 py-3">
@@ -931,8 +985,11 @@ function ComposeTab({
                 </span>
               )}
               {sendError && (
-                <span className="flex items-center gap-1.5 text-[13px] font-medium text-destructive">
+                <span className="flex flex-wrap items-center gap-1.5 text-[13px] font-medium text-destructive">
                   <AlertCircle className="size-4" /> {sendError}
+                  {capacityHref && (
+                    <a href={capacityHref} className="font-semibold text-primary underline underline-offset-2">{LICENSE_SERVICES_CTA}</a>
+                  )}
                 </span>
               )}
             </div>
@@ -1261,6 +1318,15 @@ function HistoryTab({
                 </td>
                 <td className="py-3 px-3">
                   <CampaignStatusBadge status={c.status} />
+                  {/* RD-COMMS-CAPACITY-UX (M2) — never a bare "Failed": say why, and offer the fix. */}
+                  {c.status === 'failed' && campaignFailureLabel(c.failReason) && (
+                    <p className="mt-1 max-w-[220px] text-[11.5px] font-medium leading-snug text-rose-700">
+                      {campaignFailureLabel(c.failReason)}
+                      {isCapacityFailure(c.failReason) && c.eventDraftId && (
+                        <> · <a href={increaseLimitHref(c.eventDraftId, 'whatsapp')} className="font-semibold text-primary underline underline-offset-2">{LICENSE_SERVICES_CTA}</a></>
+                      )}
+                    </p>
+                  )}
                   {c.status === 'sending' ? (
                     <button
                       type="button" onClick={() => setOpenProgress(openProgress === c.id ? null : c.id)}
@@ -1290,8 +1356,10 @@ function HistoryTab({
                     }
                   </p>
                   <p className="whitespace-nowrap text-[11.5px] text-muted-foreground/70">
-                    {c.actualCostPaise > 0 ? `₹${(c.actualCostPaise / 100).toLocaleString('en-IN')}`
-                      : c.billing?.fundedBy === 'prepaid_allowance' ? `${(c.billing.settled ? c.billing.billedUnits : c.billing.chargedUnits) ?? 0} prepaid units` : 'Free'}
+                    {/* RD-COMMS-P2-F — email is included; WhatsApp is never labelled "Free". */}
+                    {c.actualCostPaise > 0 ? `₹${(c.actualCostPaise / 100).toLocaleString('en-IN')} · legacy balance`
+                      : c.billing?.fundedBy === 'prepaid_allowance' ? `${(c.billing.settled ? c.billing.billedUnits : c.billing.chargedUnits) ?? 0} units · event capacity`
+                      : c.channel === 'email' ? 'Included (email)' : '—'}
                   </p>
                   {/* RD-INTEG · D3 — what was given back for recipients WhatsApp did not accept. */}
                   {c.billing?.settled && (c.billing.refundedUnits ?? 0) > 0 && (

@@ -144,6 +144,8 @@ export interface RegisterClientProps {
   /** RD-RT3.0: policy URLs for the review consent rows. Empty string = not published. */
   termsUrl?:          string
   refundPolicyUrl?:   string
+  /** RD-COMMS-WA-CONSENT — the event sends WhatsApp, so the optional opt-in box is offered. */
+  whatsappUpdatesAvailable?: boolean
 }
 
 type FieldState = { visible: boolean; required: boolean; disabled: boolean }
@@ -635,6 +637,7 @@ export function RegisterClient({
   requiresInviteCode,
   termsUrl,
   refundPolicyUrl,
+  whatsappUpdatesAvailable = false,
 }: RegisterClientProps) {
   const router = useRouter()
 
@@ -720,7 +723,7 @@ export function RegisterClient({
   // and the total are all on screen at once, and Pay goes straight to Razorpay.
   // Consent lives here — not inside the panel — so the sticky-summary CTA, the mobile
   // checkout bar and the submit handler are gated by exactly ONE condition. Never persisted.
-  const [consent, setConsent] = useState<ConsentState>({ info: false, terms: false, refund: false })
+  const [consent, setConsent] = useState<ConsentState>({ info: false, terms: false, refund: false, whatsapp: false })
 
   // RD-REGISTRATION-UX — the payment CTA used to be `disabled` while consent was missing,
   // so clicking it fired NO event at all: no scroll, no message, nothing. That is what
@@ -1650,6 +1653,9 @@ export function RegisterClient({
       // gate above is UX, this is the value the server actually checks and stores.
       termsAccepted: consent.terms,
       termsVersion:  PLATFORM_TERMS_VERSION,
+      // RD-COMMS-WA-CONSENT — OPTIONAL and unticked by default; never required to register.
+      // The server records it only as a strict `true` with a usable phone number.
+      ...(whatsappUpdatesAvailable && consent.whatsapp ? { whatsappBroadcastOptIn: true } : {}),
     }
 
     try {
@@ -2139,6 +2145,7 @@ export function RegisterClient({
               refundPolicyUrl={refundPolicyUrl}
               submitting={submitting}
               needsConsent={needsConsent && !consentReady}
+              whatsappUpdatesFrom={whatsappUpdatesAvailable ? eventName : undefined}
             />
 
             {/* Coupon — RD-RT4.0 gives it the same panel language as a form section, so

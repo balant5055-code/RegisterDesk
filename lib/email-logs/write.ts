@@ -39,7 +39,7 @@ export async function writeEmailLog(input: WriteEmailLogInput): Promise<string> 
 export async function updateEmailLog(
   logId:    string,
   status:   EmailLogStatus,
-  opts?: { providerMessageId?: string; error?: string },
+  opts?: { providerMessageId?: string; error?: string; deliveryUnknown?: boolean },
 ): Promise<void> {
   if (!logId) return
   try {
@@ -47,6 +47,8 @@ export async function updateEmailLog(
       status,
       ...(opts?.providerMessageId ? { providerMessageId: opts.providerMessageId } : {}),
       ...(opts?.error             ? { error:             opts.error             } : {}),
+      // RD-COMMS-P2-D — set only when the provider gave no definite answer (never cleared here).
+      ...(opts?.deliveryUnknown   ? { deliveryUnknown:   true                   } : {}),
       updatedAt: FieldValue.serverTimestamp(),
     })
   } catch (err) {

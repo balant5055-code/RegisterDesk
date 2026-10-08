@@ -3,13 +3,23 @@
 // Communication Center (Phase G3.6) — READ-ONLY organizer dashboard over the
 // unified communication log (email + WhatsApp). View-only: message delivery is
 // driven by the notification/broadcast/reminder engines, not from this log.
+//
+// RD-COMMS-P2-F — scoped to the event chosen in the dashboard's event selector (all events when
+// "All events" is chosen); the server reads that event's rows directly. A message whose outcome
+// the provider never confirmed is "Delivery unknown" — neither sent nor failed — and has no
+// resend. Email is included; WhatsApp is drawn from the event's capacity (see Usage), so the
+// only money shown is what the LEGACY balance paid.
 
 import { useEffect, useMemo, useState } from 'react'
+import Link from 'next/link'
 import {
   Mail, MessageCircle, XCircle, MinusCircle, Gauge, Wallet, ShieldCheck,
-  UserCog, Download, Filter, X, RefreshCw, Search,
+  UserCog, Download, Filter, X, RefreshCw, Search, HelpCircle,
 } from 'lucide-react'
 import { auth } from '@/lib/firebase/auth'
+import { useEventContext } from '@/components/dashboard/EventContextProvider'
+import { COMMUNICATION_USAGE_HREF } from '@/lib/wallet/communicationBalance'
+import { commStatusOf, COMM_STATUS_LABELS, DELIVERY_UNKNOWN_HELP, chargeLabel, type CommDisplayStatus } from '@/lib/communications/messageStatus'
 import { PageHeader, Card, Badge } from '@/components/ui'
 import { useFocusTrap } from '@/lib/hooks/useFocusTrap'
 import { cn } from '@/lib/utils/cn'
@@ -20,35 +30,31 @@ const fmtDateTime = (iso: string) =>
   new Date(iso).toLocaleString('en-IN', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })
 
 interface Stats {
-  emailsSent: number; whatsappSent: number; failed: number; skipped: number
-  successRate: number; whatsappChargesPaise: number; platformFree: number; organizerFree: number
-  emailsFree: number; whatsappPaid: number; thisMonthPaise: number; attendeePaidPaise: number
+  emailsSent: number; whatsappSent: number; failed: number; unknown: number; skipped: number
+  successRate: number; legacyChargesPaise: number; platformNotices: number; organizerNotices: number
 }
 
 function computeStats(rows: CommRow[]): Stats {
   const s: Stats = {
-    emailsSent: 0, whatsappSent: 0, failed: 0, skipped: 0, successRate: 0,
-    whatsappChargesPaise: 0, platformFree: 0, organizerFree: 0,
-    emailsFree: 0, whatsappPaid: 0, thisMonthPaise: 0, attendeePaidPaise: 0,
+    emailsSent: 0, whatsappSent: 0, failed: 0, unknown: 0, skipped: 0, successRate: 0,
+    legacyChargesPaise: 0, platformNotices: 0, organizerNotices: 0,
   }
-  const now = new Date()
-  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).getTime()
   let sent = 0, failed = 0
   for (const r of rows) {
-    const ok = r.status === 'sent' || r.status === 'delivered'
-    if (r.status === 'failed') { s.failed++; failed++ }
-    if (r.status === 'skipped') s.skipped++
-    if (ok) {
+    const st = commStatusOf(r)
+    if (st === 'failed') { s.failed++; failed++ }
+    if (st === 'unknown') s.unknown++
+    if (st === 'skipped') s.skipped++
+    if (st === 'sent' || st === 'delivered') {
       sent++
-      if (r.channel === 'email')    { s.emailsSent++;   s.emailsFree++ }
-      if (r.channel === 'whatsapp') { s.whatsappSent++; if (r.costPaise > 0) s.whatsappPaid++ }
+      if (r.channel === 'email')    s.emailsSent++
+      if (r.channel === 'whatsapp') s.whatsappSent++
     }
-    s.whatsappChargesPaise += r.costPaise
-    if (r.costPaise > 0) s.attendeePaidPaise += r.costPaise
-    if (new Date(r.createdAt).getTime() >= monthStart) s.thisMonthPaise += r.costPaise
-    if (r.audience === 'platform')  s.platformFree++
-    if (r.audience === 'organizer') s.organizerFree++
+    s.legacyChargesPaise += r.costPaise
+    if (r.audience === 'platform')  s.platformNotices++
+    if (r.audience === 'organizer') s.organizerNotices++
   }
+  // An unknown outcome is neither a success nor a failure, so it stays outside the rate.
   s.successRate = sent + failed > 0 ? Math.round((sent / (sent + failed)) * 100) : 0
   return s
 }
@@ -73,32 +79,40 @@ function Kpi({ icon: Icon, label, value, tone }: {
 
 // ─── Status badge ─────────────────────────────────────────────────────────────
 
-function StatusBadge({ status }: { status: CommRow['status'] }) {
-  const map: Record<string, { v: 'success' | 'danger' | 'warning' | 'neutral'; label: string }> = {
-    sent:      { v: 'success', label: 'Sent' },
-    delivered: { v: 'success', label: 'Delivered' },
-    failed:    { v: 'danger',  label: 'Failed' },
-    skipped:   { v: 'warning', label: 'Skipped' },
-    queued:    { v: 'neutral', label: 'Queued' },
-  }
-  const m = map[status] ?? { v: 'neutral' as const, label: status }
-  const cls = m.v === 'success' ? 'bg-emerald-100 text-emerald-700'
-    : m.v === 'danger' ? 'bg-rose-100 text-rose-700'
-    : m.v === 'warning' ? 'bg-amber-100 text-amber-700' : 'bg-border/50 text-muted-foreground'
-  return <span className={cn('rounded-full px-2 py-0.5 text-[11px] font-semibold', cls)}>{m.label}</span>
+const STATUS_TONE: Record<CommDisplayStatus, string> = {
+  sent:      'bg-emerald-100 text-emerald-700',
+  delivered: 'bg-emerald-100 text-emerald-700',
+  failed:    'bg-rose-100 text-rose-700',
+  unknown:   'bg-amber-100 text-amber-800 ring-1 ring-amber-600/30',
+  skipped:   'bg-amber-100 text-amber-700',
+  queued:    'bg-border/50 text-muted-foreground',
+}
+
+function StatusBadge({ row }: { row: CommRow }) {
+  const st = commStatusOf(row)
+  return (
+    <span className={cn('inline-flex items-center gap-1 whitespace-nowrap rounded-full px-2 py-0.5 text-[11px] font-semibold', STATUS_TONE[st])}
+      title={st === 'unknown' ? DELIVERY_UNKNOWN_HELP : undefined}>
+      {st === 'unknown' && <HelpCircle className="size-3" aria-hidden />}
+      {COMM_STATUS_LABELS[st]}
+    </span>
+  )
 }
 
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function CommunicationCenterPage() {
+  // The event selector decides the scope: one event (by its public slug), or every event.
+  // null = the selector is still loading; '' = nothing to show (a draft has no messages yet).
+  const { selectedEvent, isAllEvents, loading: eventsLoading } = useEventContext()
+  const scope: string | null = eventsLoading ? null
+    : selectedEvent ? (selectedEvent.slug ?? '') : isAllEvents ? '*' : ''
   const [rows, setRows]       = useState<CommRow[]>([])
-  const [events, setEvents]   = useState<Array<{ slug: string; name: string }>>([])
   const [loading, setLoading] = useState(true)
   const [error, setError]     = useState<string | null>(null)
   const [selected, setSelected] = useState<CommRow | null>(null)
 
   // Filters
-  const [fEvent, setFEvent]         = useState('')
   const [fChannel, setFChannel]     = useState('')
   const [fStatus, setFStatus]       = useState('')
   const [fType, setFType]           = useState('')
@@ -114,21 +128,22 @@ export default function CommunicationCenterPage() {
     void (async () => {
       // Await before any setState so the effect never setStates synchronously.
       const token = await auth.currentUser?.getIdToken()
-      if (cancelled) return
+      if (cancelled || scope === null) return
       setLoading(true); setError(null)
+      if (scope === '') { setRows([]); setLoading(false); return }
       try {
         const qs = new URLSearchParams()
+        if (scope !== '*') qs.set('event', scope)
         if (dateFrom) qs.set('dateFrom', dateFrom)
         if (dateTo)   qs.set('dateTo', dateTo)
         const res = await fetch(`/api/organizer/communications?${qs.toString()}`, {
           headers: token ? { Authorization: `Bearer ${token}` } : {},
           cache: 'no-store',
         })
-        const json = await res.json() as { success?: boolean; rows?: CommRow[]; events?: Array<{ slug: string; name: string }>; error?: string }
+        const json = await res.json() as { success?: boolean; rows?: CommRow[]; error?: string }
         if (!res.ok || !json.success) throw new Error(json.error ?? 'Failed to load communications')
         if (cancelled) return
         setRows(json.rows ?? [])
-        setEvents(json.events ?? [])
       } catch (e) {
         if (!cancelled) setError(e instanceof Error ? e.message : 'Failed to load communications')
       } finally {
@@ -136,33 +151,32 @@ export default function CommunicationCenterPage() {
       }
     })()
     return () => { cancelled = true }
-  }, [dateFrom, dateTo, reloadKey])
+  }, [scope, dateFrom, dateTo, reloadKey])
 
-  // Client-side filters (date range is applied server-side).
+  // Client-side filters (event scope and date range are applied server-side).
   const filtered = useMemo(() => rows.filter((r) => {
-    if (fEvent   && r.eventSlug !== fEvent)        return false
     if (fChannel && r.channel !== fChannel)        return false
-    if (fStatus  && r.status !== fStatus)          return false
+    if (fStatus  && commStatusOf(r) !== fStatus)   return false
     if (fType    && r.notificationType !== fType)  return false
     if (fRecipient) {
       const hay = `${r.recipientEmail} ${r.recipientPhone} ${r.recipientName}`.toLowerCase()
       if (!hay.includes(fRecipient.toLowerCase().trim())) return false
     }
     return true
-  }), [rows, fEvent, fChannel, fStatus, fType, fRecipient])
+  }), [rows, fChannel, fStatus, fType, fRecipient])
 
   const stats = useMemo(() => computeStats(filtered), [filtered])
   const types = useMemo(() => [...new Set(rows.map(r => r.notificationType).filter(Boolean))].sort(), [rows])
 
-  const hasFilters = fEvent || fChannel || fStatus || fType || fRecipient || dateFrom || dateTo
-  const clearFilters = () => { setFEvent(''); setFChannel(''); setFStatus(''); setFType(''); setFRecipient(''); setDateFrom(''); setDateTo('') }
+  const hasFilters = fChannel || fStatus || fType || fRecipient || dateFrom || dateTo
+  const clearFilters = () => { setFChannel(''); setFStatus(''); setFType(''); setFRecipient(''); setDateFrom(''); setDateTo('') }
 
   const exportCsv = () => {
-    const headers = ['Date', 'Event', 'Recipient', 'Email', 'Phone', 'Type', 'Channel', 'Status', 'Provider', 'Message ID', 'Cost (₹)']
+    const headers = ['Date', 'Event', 'Recipient', 'Email', 'Phone', 'Type', 'Channel', 'Status', 'Provider', 'Message ID', 'Legacy balance charge (₹)']
     const esc = (v: string) => `"${(v ?? '').replace(/"/g, '""')}"`
     const lines = filtered.map(r => [
       fmtDateTime(r.createdAt), r.eventName, r.recipientName, r.recipientEmail, r.recipientPhone,
-      r.notificationType, r.channel, r.status, r.provider, r.providerMessageId,
+      r.notificationType, r.channel, COMM_STATUS_LABELS[commStatusOf(r)], r.provider, r.providerMessageId,
       r.costPaise > 0 ? (r.costPaise / 100).toFixed(2) : '0',
     ].map(v => esc(String(v))).join(','))
     const csv = [headers.join(','), ...lines].join('\r\n')
@@ -179,28 +193,34 @@ export default function CommunicationCenterPage() {
     <div className="flex flex-col gap-5">
       <PageHeader
         title="Communication Center"
-        subtitle="Every email and WhatsApp notification for your events — read-only history, delivery status, and charges."
+        subtitle="Every email and WhatsApp notification — read-only history and delivery status."
       />
+      <p className="-mt-3 text-[12.5px] text-muted-foreground">
+        {selectedEvent ? <>Showing messages for <span className="font-semibold text-foreground">{selectedEvent.name}</span>. Change the event in the selector at the top of the page.</>
+          : isAllEvents ? 'Showing messages for all your events.' : 'Choose an event in the selector at the top of the page.'}
+      </p>
 
       {/* ── SECTION 1 — KPIs ────────────────────────────────────────────────── */}
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
         <Kpi icon={Mail}          label="Emails Sent"           value={stats.emailsSent.toLocaleString('en-IN')} />
         <Kpi icon={MessageCircle} label="WhatsApp Sent"         value={stats.whatsappSent.toLocaleString('en-IN')} />
         <Kpi icon={XCircle}       label="Failed"                value={stats.failed.toLocaleString('en-IN')} tone={stats.failed ? 'rose' : 'default'} />
+        <Kpi icon={HelpCircle}    label="Delivery unknown"      value={stats.unknown.toLocaleString('en-IN')} tone={stats.unknown ? 'amber' : 'default'} />
         <Kpi icon={MinusCircle}   label="Skipped"               value={stats.skipped.toLocaleString('en-IN')} tone={stats.skipped ? 'amber' : 'default'} />
         <Kpi icon={Gauge}         label="Delivery Success"      value={`${stats.successRate}%`} tone="emerald" />
-        <Kpi icon={Wallet}        label="WhatsApp Charges"      value={inr(stats.whatsappChargesPaise)} />
-        <Kpi icon={ShieldCheck}   label="Platform (Free)"       value={stats.platformFree.toLocaleString('en-IN')} />
-        <Kpi icon={UserCog}       label="Organizer (Free)"      value={stats.organizerFree.toLocaleString('en-IN')} />
+        {/* Only the LEGACY balance ever charged per message; capacity-funded WhatsApp is on Usage. */}
+        {stats.legacyChargesPaise > 0 && <Kpi icon={Wallet} label="Legacy balance charges" value={inr(stats.legacyChargesPaise)} />}
+        <Kpi icon={ShieldCheck}   label="Platform notices"      value={stats.platformNotices.toLocaleString('en-IN')} />
+        <Kpi icon={UserCog}       label="Organizer notices"     value={stats.organizerNotices.toLocaleString('en-IN')} />
       </div>
 
       {/* ── SECTION 3 — Filters ─────────────────────────────────────────────── */}
       <Card className="flex flex-col gap-3 p-4">
-        <div className="flex items-center justify-between gap-2">
+        <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-2 text-[13px] font-semibold text-foreground">
             <Filter className="size-4 text-muted-foreground" aria-hidden />Filters
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             {hasFilters && (
               <button type="button" onClick={clearFilters} className="flex items-center gap-1 text-[12px] font-medium text-muted-foreground hover:text-foreground">
                 <X className="size-3.5" aria-hidden />Clear
@@ -216,10 +236,6 @@ export default function CommunicationCenterPage() {
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <select value={fEvent} onChange={e => setFEvent(e.target.value)} className={selectCls}>
-            <option value="">All events</option>
-            {events.map(ev => <option key={ev.slug} value={ev.slug}>{ev.name}</option>)}
-          </select>
           <select value={fChannel} onChange={e => setFChannel(e.target.value)} className={selectCls}>
             <option value="">All channels</option>
             <option value="email">Email</option>
@@ -230,6 +246,7 @@ export default function CommunicationCenterPage() {
             <option value="sent">Sent</option>
             <option value="delivered">Delivered</option>
             <option value="failed">Failed</option>
+            <option value="unknown">Delivery unknown</option>
             <option value="skipped">Skipped</option>
             <option value="queued">Queued</option>
           </select>
@@ -272,7 +289,7 @@ export default function CommunicationCenterPage() {
                   <th scope="col" className="px-4 py-2.5">Type</th>
                   <th scope="col" className="px-4 py-2.5">Channel</th>
                   <th scope="col" className="px-4 py-2.5">Status</th>
-                  <th scope="col" className="px-4 py-2.5">Cost</th>
+                  <th scope="col" className="px-4 py-2.5">Charge</th>
                   <th scope="col" className="px-4 py-2.5"></th>
                 </tr>
               </thead>
@@ -286,8 +303,8 @@ export default function CommunicationCenterPage() {
                     <td className="px-4 py-2.5">
                       <Badge variant={r.channel === 'whatsapp' ? 'success' : 'secondary'}>{r.channel === 'whatsapp' ? 'WhatsApp' : 'Email'}</Badge>
                     </td>
-                    <td className="px-4 py-2.5"><StatusBadge status={r.status} /></td>
-                    <td className="whitespace-nowrap px-4 py-2.5 font-medium text-foreground">{r.costPaise > 0 ? inr(r.costPaise) : <span className="text-emerald-600">Free</span>}</td>
+                    <td className="px-4 py-2.5"><StatusBadge row={r} /></td>
+                    <td className="whitespace-nowrap px-4 py-2.5 text-muted-foreground">{chargeLabel(r, inr)}</td>
                     <td className="px-4 py-2.5 text-right">
                       <button type="button" onClick={() => setSelected(r)} className="text-[12px] font-semibold text-primary hover:underline">Details</button>
                     </td>
@@ -299,36 +316,14 @@ export default function CommunicationCenterPage() {
         )}
       </Card>
 
-      {/* ── SECTION 5 — Communication usage ─────────────────────────────────── */}
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-        <UsageCard title="Emails" tag="Free" tagTone="emerald" primary={`${stats.emailsFree.toLocaleString('en-IN')} sent`} sub="Always free — SES" />
-        <UsageCard title="WhatsApp" tag="Paid" tagTone="amber" primary={`${stats.whatsappPaid.toLocaleString('en-IN')} charged`} sub={`${inr(stats.whatsappChargesPaise)} total`} />
-        <UsageCard title="Wallet Deduction" tag="This Month" tagTone="neutral" primary={inr(stats.thisMonthPaise)} sub="Attendee WhatsApp charges" />
-        <UsageCard title="Platform Notifications" tag="Free" tagTone="emerald" primary={`${stats.platformFree.toLocaleString('en-IN')}`} sub="Platform → user" />
-        <UsageCard title="Organizer Notifications" tag="Free" tagTone="emerald" primary={`${stats.organizerFree.toLocaleString('en-IN')}`} sub="Platform → organizer" />
-        <UsageCard title="Attendee Notifications" tag="Paid" tagTone="amber" primary={inr(stats.attendeePaidPaise)} sub="Wallet-charged WhatsApp" />
+      {/* ── SECTION 5 — what these messages cost (RD-COMMS-P2-F: the wallet-era cards are gone) ── */}
+      <div className="rounded-2xl border border-border bg-card p-4 text-[12.5px] text-muted-foreground">
+        <span className="font-semibold text-foreground">Email</span> is included at no charge.{' '}
+        <span className="font-semibold text-foreground">WhatsApp</span> uses each event’s purchased capacity — see{' '}
+        <Link href={COMMUNICATION_USAGE_HREF} className="font-semibold text-primary hover:underline">Usage</Link> for what is used and what remains.
       </div>
 
       {selected && <DetailsDrawer row={selected} onClose={() => setSelected(null)} />}
-    </div>
-  )
-}
-
-// ─── Usage card ───────────────────────────────────────────────────────────────
-
-function UsageCard({ title, tag, tagTone, primary, sub }: {
-  title: string; tag: string; tagTone: 'emerald' | 'amber' | 'neutral'; primary: string; sub: string
-}) {
-  const tagCls = tagTone === 'emerald' ? 'bg-emerald-100 text-emerald-700'
-    : tagTone === 'amber' ? 'bg-amber-100 text-amber-700' : 'bg-border/50 text-muted-foreground'
-  return (
-    <div className="rounded-2xl border border-border bg-card p-4 shadow-sm">
-      <div className="flex items-center justify-between">
-        <p className="text-[13px] font-semibold text-foreground">{title}</p>
-        <span className={cn('rounded-full px-2 py-0.5 text-[10px] font-bold', tagCls)}>{tag}</span>
-      </div>
-      <p className="mt-2 text-[18px] font-bold text-foreground">{primary}</p>
-      <p className="mt-0.5 text-[12px] text-muted-foreground">{sub}</p>
     </div>
   )
 }
@@ -368,8 +363,9 @@ function DetailsDrawer({ row, onClose }: { row: CommRow; onClose: () => void }) 
             {rowItem('Template Used', row.notificationType)}
             {rowItem('Meta Message ID', row.channel === 'whatsapp' ? row.providerMessageId : '—')}
             {rowItem('Email Provider Message ID', row.channel === 'email' ? row.providerMessageId : '—')}
-            {rowItem('Wallet Charge', row.costPaise > 0 ? inr(row.costPaise) : 'Free')}
-            {rowItem('Status', <StatusBadge status={row.status} />)}
+            {rowItem('Charge', chargeLabel(row, inr))}
+            {rowItem('Status', <StatusBadge row={row} />)}
+            {commStatusOf(row) === 'unknown' && rowItem('What this means', DELIVERY_UNKNOWN_HELP)}
             {rowItem('Failure Reason', row.error)}
             {rowItem('Created Time', fmtDateTime(row.createdAt))}
           </dl>

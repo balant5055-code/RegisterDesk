@@ -184,7 +184,9 @@ describe('retry policy — recoverable, but never silently', () => {
     expect(route).toContain("l.channel !== 'whatsapp'")
     expect(route).toContain('l.templateKey !== RETRYABLE_WHATSAPP_TEMPLATE_KEY')
     // RD-CLOSE — the deterministic ledger id moved into the shared acceptance record.
-    expect(read('lib/registrations/whatsappConfirmationAcceptance.ts')).toContain('baseLedgerId: `whatsapp_${a.registrationId}`')
+    // RD-COMMS-P2-A — that id is now the attempt's funding hold (`whatsapp_<registrationId>[__r_<nonce>]`).
+    expect(read('lib/registrations/whatsappConfirmationAcceptance.ts')).toContain('holdLedgerId: confirmationHoldLedgerId(a.registrationId, a.unitKey)')
+    expect(read('lib/whatsapp/funding.ts')).toContain('`whatsapp_${registrationId}${unitKey.slice(base.length)}`')
   })
 
   it('nothing retries automatically — no timer, no cron, no background caller', () => {
