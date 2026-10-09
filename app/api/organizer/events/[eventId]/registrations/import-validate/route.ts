@@ -6,7 +6,7 @@
 // are centralized in buildImportContext (shared with the import EXECUTION route);
 // this route only runs the pure engine over the resulting context.
 //
-// Body:  { rows: Record<string,string>[], headers: string[], metadata }
+// Body:  { rows: Record<string,string>[], headers: string[], metadata, rowNumbers? }
 // Reply: { eventStopped? , validatedRows, statistics }
 
 import { NextRequest, NextResponse } from 'next/server'
@@ -25,7 +25,7 @@ export async function POST(
 
   const { eventId } = await context.params
 
-  let body: { rows?: unknown; headers?: unknown }
+  let body: { rows?: unknown; headers?: unknown; rowNumbers?: unknown }
   try { body = await req.json() } catch { return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 }) }
   const rows    = Array.isArray(body.rows)    ? (body.rows    as Record<string, string>[]) : null
   const headers = Array.isArray(body.headers) ? (body.headers as string[])                 : null
@@ -45,6 +45,6 @@ export async function POST(
     })
   }
 
-  const result = validateImportRows(rows, headers, built.ctx)
+  const result = validateImportRows(rows, headers, built.ctx, body.rowNumbers)
   return NextResponse.json(result, { headers: { 'Cache-Control': 'no-store' } })
 }

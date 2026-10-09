@@ -18,6 +18,10 @@
 //
 // The LABEL always comes from configuration ("Bib Number", "Member ID", …) and is
 // never hardcoded.
+//
+// RD-CHECKIN-ID-OPT-02 — identifiers are OPTIONAL at check-in. When `onSkip` is given
+// the prompt offers "Check in without …", which retries the scan with
+// `skipIdentifier: true`; the server then admits the attendee and assigns nothing.
 
 import { useEffect, useRef, useState } from 'react'
 import { Loader2, X } from 'lucide-react'
@@ -32,10 +36,12 @@ interface Props {
   busy:       boolean
   onSubmit:   (value: string) => void
   onCancel:   () => void
+  /** Check the attendee in WITHOUT an identifier. Omitted ⇒ no skip button (corrections). */
+  onSkip?:    () => void
 }
 
 export default function IdentifierPrompt({
-  label, attendeeName, error, busy, onSubmit, onCancel,
+  label, attendeeName, error, busy, onSubmit, onCancel, onSkip,
 }: Props) {
   const [value, setValue] = useState('')
   const inputRef = useRef<HTMLInputElement>(null)
@@ -132,6 +138,18 @@ export default function IdentifierPrompt({
               Confirm
             </button>
           </div>
+
+          {onSkip && (
+            <button
+              type="button"
+              onClick={onSkip}
+              disabled={busy}
+              data-testid="identifier-prompt-skip"
+              className="mt-2 w-full rounded-xl px-4 py-2.5 text-fs-sm font-semibold text-primary underline-offset-2 hover:underline disabled:opacity-50"
+            >
+              Check in without {label}
+            </button>
+          )}
         </form>
       </div>
     </div>

@@ -36,6 +36,13 @@ export interface ReportTable {
   summary?:  ReportSummaryItem[]     // totals shown below the table
   truncated?: boolean                // true when the row cap was hit
   note?:     string
+  /**
+   * XLSX only, opt-in: format every column as Text (Excel numFmt 49), so values an
+   * organizer TYPES into the sheet are kept exactly — "+919876543210", "0012",
+   * "1990-05-15" — instead of Excel turning them into numbers or date serials.
+   * For fill-in templates; exports leave it unset.
+   */
+  textColumns?: boolean
 }
 
 export interface ReportFilters {

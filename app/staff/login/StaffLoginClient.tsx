@@ -21,7 +21,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { AlertCircle, Loader2, LockKeyhole, ScanLine } from 'lucide-react'
-import { authenticateUser } from '@/lib/firebase/auth'
+import { signOut } from 'firebase/auth'
+import { auth as firebaseAuth, authenticateUser } from '@/lib/firebase/auth'
 import { staffEmailForUsername, isValidUsername, PASSWORD_MIN } from '@/lib/staff/types'
 import type { StaffMeResponse } from '@/app/api/staff/me/route'
 
@@ -122,6 +123,9 @@ export default function StaffLoginClient({ event }: { event?: StaffLoginEvent } 
       const res = await fetch('/api/staff/me', { headers: auth, cache: 'no-store' })
       if (!res.ok) {
         const body = await res.json().catch(() => null) as { error?: string } | null
+        // RD-STAFF-SEC-01 — a refused credential must not stay signed in: the session would
+        // otherwise carry it into /dashboard, which is not where a gate login belongs.
+        await signOut(firebaseAuth).catch(() => null)
         setError(body?.error ?? 'This account cannot open check-in. Ask your organizer.')
         return
       }

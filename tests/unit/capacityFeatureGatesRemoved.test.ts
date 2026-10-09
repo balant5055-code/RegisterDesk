@@ -34,32 +34,32 @@ const SURFACES: { file: string; licence: string[]; authz: { call: string; count:
   {
     file: 'app/api/organizer/api-keys/route.ts',
     licence: ["requireFeature(caller.uid, 'apiAccess')"],
-    authz: [{ call: 'verifyCaller(req)', count: 2 }, { call: 'requireOwner(caller.uid, caller.uid)', count: 2 }],
+    authz: [{ call: 'verifyCaller(req)', count: 2 }, { call: 'await requireWorkspaceOwner(caller)', count: 2 }],
   },
   {
     file: 'app/api/organizer/branding/route.ts',
     licence: ["requireFeature(caller.uid, 'whiteLabel')"],
-    authz: [{ call: 'verifyCaller(req)', count: 1 }, { call: 'requireOwner(caller.uid, caller.uid)', count: 1 }],
+    authz: [{ call: 'verifyCaller(req)', count: 1 }, { call: 'await requireWorkspaceOwner(caller)', count: 1 }],
   },
   {
     file: 'app/api/organizer/domain/route.ts',
     licence: ["requireFeature(caller.uid, 'customDomain')"],
-    authz: [{ call: 'verifyCaller(req)', count: 1 }, { call: 'requireOwner(caller.uid, caller.uid)', count: 1 }],
+    authz: [{ call: 'verifyCaller(req)', count: 1 }, { call: 'await requireWorkspaceOwner(caller)', count: 1 }],
   },
   {
     file: 'app/api/organizer/domain/verify/route.ts',
     licence: ["requireFeature(caller.uid, 'customDomain')"],
-    authz: [{ call: 'verifyCaller(req)', count: 1 }, { call: 'requireOwner(caller.uid, caller.uid)', count: 1 }],
+    authz: [{ call: 'verifyCaller(req)', count: 1 }, { call: 'await requireWorkspaceOwner(caller)', count: 1 }],
   },
   {
     file: 'app/api/organizer/webhooks/route.ts',
     licence: ["requireFeature(caller.uid, 'apiAccess')"],
-    authz: [{ call: 'verifyCaller(req)', count: 2 }, { call: 'requireOwner(caller.uid, caller.uid)', count: 2 }],
+    authz: [{ call: 'verifyCaller(req)', count: 2 }, { call: 'await requireWorkspaceOwner(caller)', count: 2 }],
   },
   {
     file: 'app/api/organizer/webhooks/test/route.ts',
     licence: ["requireFeature(caller.uid, 'apiAccess')"],
-    authz: [{ call: 'verifyCaller(req)', count: 1 }, { call: 'requireOwner(caller.uid, caller.uid)', count: 1 }],
+    authz: [{ call: 'verifyCaller(req)', count: 1 }, { call: 'await requireWorkspaceOwner(caller)', count: 1 }],
   },
   {
     file: 'app/api/organizer/staff/route.ts',
@@ -167,10 +167,10 @@ describe('the authorization checks survive intact', () => {
     // With the payment gate gone, these calls are the only thing standing between a caller
     // and the resource — so their POSITION matters more than it did before, not less.
     const cases: [string, string, string][] = [
-      ['app/api/organizer/api-keys/route.ts',   'requireOwner',       'listApiKeys'],
+      ['app/api/organizer/api-keys/route.ts',   'await requireWorkspaceOwner(caller)', 'await listApiKeys('],
       ['app/api/organizer/staff/route.ts',      'requireStaffManager', 'createStaffAccount'],
-      ['app/api/organizer/webhooks/route.ts',   'requireOwner',       'getWebhookConfig'],
-      ['app/api/organizer/domain/verify/route.ts', 'requireOwner',    'verifyDomain'],
+      ['app/api/organizer/webhooks/route.ts',   'await requireWorkspaceOwner(caller)', 'getWebhookConfig(caller.uid)'],
+      ['app/api/organizer/domain/verify/route.ts', 'await requireWorkspaceOwner(caller)', 'await verifyDomain('],
       ['app/api/checkin/cache/route.ts',        'authorizeWorkspace', 'MAX_CACHE'],
     ]
     for (const [file, guard, work] of cases) {
@@ -203,7 +203,7 @@ describe('the entitlements endpoint', () => {
   it('still authenticates, and still resolves the workspace', () => {
     // "Every organizer has every feature" is not "everyone may read this workspace".
     expect(src).toContain('verifyCaller(req)')
-    expect(src).toContain('resolveWorkspaceUid(caller.uid)')
+    expect(src).toContain('resolveWorkspaceUid(caller.uid, caller.email)')
     expect(src).toMatch(/401|Unauthorized/)
   })
 

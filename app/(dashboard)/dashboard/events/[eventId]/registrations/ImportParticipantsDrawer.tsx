@@ -14,7 +14,7 @@ import {
 import {
   IMPORT_TEMPLATE_VERSION, IMPORT_SHEET_PARTICIPANTS, IMPORT_SHEET_META,
   IMPORT_META_KEYS, IMPORT_REQUIRED_HEADERS, IMPORT_MAX_ROWS, IMPORT_MAX_FILE_BYTES,
-  type ImportTemplateMetadata,
+  importCellText, numberImportRows, type ImportTemplateMetadata,
 } from '@/lib/registrations/importTemplate'
 import type {
   ValidatedImportRow, ImportValidationStatistics, ImportRowStatus,
@@ -31,6 +31,8 @@ interface ParsedImport {
   fileName:        string
   headers:         string[]
   rows:            Record<string, string>[]
+  /** RD-IMPORT-ROWNUM-01 — each row's real spreadsheet row (header = row 1, blank rows counted). */
+  rowNumbers:      number[]
   metadata:        ImportTemplateMetadata
   rowsDetected:    number
   columnsDetected: number
@@ -146,10 +148,12 @@ async function parseTemplateFile(file: File, eventId: string, eventSlug: string)
     return { ok: false, error: 'This workbook format is invalid — no sheets were found. Re-download the template and try again.' }
   }
 
-  const cell = (v: unknown) => String(v ?? '').trim()
+  // RD-IMPORT-RT-01 — Excel date/time cells arrive as JS Dates; importCellText turns them into the
+  // YYYY-MM-DD / HH:MM the online form stores (String(date) stored a locale timestamp, a day off west of UTC).
+  const cell = importCellText
 
   const metaSheet = sheets.find(s => s.sheet === IMPORT_SHEET_META)
-  if (!metaSheet) return { ok: false, error: 'This file is missing its template metadata. Download a fresh template and try again.' }
+  if (!metaSheet) return { ok: false, error: 'This file is missing its template metadata. A Registrations export can’t be imported — download the template, copy your rows into it, and upload that.' }
   const metaMap: Record<string, string> = {}
   for (const row of metaSheet.data.slice(1)) {
     const k = cell(row[0])
@@ -186,18 +190,17 @@ async function parseTemplateFile(file: File, eventId: string, eventSlug: string)
     return { ok: false, error: `The template is missing required columns: ${missing.join(', ')}. Do not rename or delete columns.` }
   }
 
-  const dataRows = partSheet.data.slice(1)
-    .map(r => headers.map((_, i) => cell(r[i])))
-    .filter(cells => cells.some(c => c !== ''))
+  // RD-IMPORT-ROWNUM-01 — blank rows are skipped, but each kept row keeps its REAL
+  // spreadsheet row number (header = row 1), so every message names the row in Excel.
+  const { rows, rowNumbers } = numberImportRows(partSheet.data, headers)
 
-  if (dataRows.length > IMPORT_MAX_ROWS) {
-    return { ok: false, error: `Too many rows (${dataRows.length}). Maximum is ${IMPORT_MAX_ROWS} per import — split the file.` }
+  if (rows.length > IMPORT_MAX_ROWS) {
+    return { ok: false, error: `Too many rows (${rows.length}). Maximum is ${IMPORT_MAX_ROWS} per import — split the file.` }
   }
 
-  const rows = dataRows.map(cells => Object.fromEntries(headers.map((h, i) => [h, cells[i] ?? ''])))
   return {
     ok: true,
-    data: { fileName: file.name, headers, rows, metadata, rowsDetected: rows.length, columnsDetected: headers.length },
+    data: { fileName: file.name, headers, rows, rowNumbers, metadata, rowsDetected: rows.length, columnsDetected: headers.length },
   }
 }
 
@@ -278,7 +281,7 @@ export function ImportParticipantsDrawer({
       const res = await fetch(`/api/organizer/events/${eventId}/registrations/import-validate`, {
         method:  'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body:    JSON.stringify({ rows: data.rows, headers: data.headers, metadata: data.metadata }),
+        body:    JSON.stringify({ rows: data.rows, headers: data.headers, metadata: data.metadata, rowNumbers: data.rowNumbers }),
       })
       const json = await res.json().catch(() => ({})) as ValidationResponse & { error?: string }
       if (!res.ok) throw new Error(json.error ?? 'Validation failed. Please try again.')
@@ -329,7 +332,7 @@ export function ImportParticipantsDrawer({
       const res  = await fetch(`${apiBase}/import`, {
         method:  'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body:    JSON.stringify({ rows: parsed.rows, headers: parsed.headers, fileName: parsed.fileName }),
+        body:    JSON.stringify({ rows: parsed.rows, headers: parsed.headers, fileName: parsed.fileName, rowNumbers: parsed.rowNumbers }),
       })
       const json = await res.json().catch(() => ({})) as { jobId?: string; job?: ImportJobView; error?: string }
       if (!res.ok || !json.jobId || !json.job) throw new Error(json.error ?? 'Could not start the import.')
@@ -441,7 +444,7 @@ export function ImportParticipantsDrawer({
 
   // Merge validated rows with the parsed participant fields for display.
   const rowsView = (validation?.validatedRows ?? []).map(vr => {
-    const src = parsed?.rows[vr.rowNumber - 2] ?? {}
+    const src = parsed?.rows[vr.index] ?? {}
     return { ...vr, name: src[H_NAME] ?? '', email: src[H_EMAIL] ?? '', pass: src[H_PASS] ?? '' }
   })
 
@@ -546,6 +549,12 @@ export function ImportParticipantsDrawer({
                 {downloading ? 'Preparing…' : 'Download Template'}
               </button>
               {downloadError && <p className="text-[12px] text-red-600">{downloadError}</p>}
+              {/* RD-IMPORT-RT-01 — the supported workflow, said once, where the organizer starts. */}
+              <p className="text-[12px] text-muted-foreground" data-testid="import-supported-files">
+                Import accepts this template, or the failed-rows file from an earlier import. A Registrations export is a
+                report and can’t be imported back — copy its rows into the template instead. Keep the column headers and
+                the Meta sheet as they are. Imported participants are not emailed automatically.
+              </p>
             </div>
           )}
 
@@ -735,7 +744,14 @@ export function ImportParticipantsDrawer({
               <div className="border-t border-border pt-4">
                 {!job ? (
                   <div className="flex items-center justify-between gap-3">
-                    <p className="text-[12px] text-muted-foreground">{stats.readyCount} of {stats.total} rows are ready to import.</p>
+                    <div className="text-[12px] text-muted-foreground" data-testid="import-ready-summary">
+                      <p>
+                        {stats.readyCount} of {stats.total} rows are ready to import
+                        {stats.warningCount > 0 && <> — plus {stats.warningCount} with warnings, which are imported too</>}.
+                      </p>
+                      {/* RD-IMPORT-EMAIL-01 — approved: imports never send confirmation emails. */}
+                      <p>No confirmation emails are sent to imported participants.</p>
+                    </div>
                     <div className="flex flex-col items-end gap-1">
                       <button
                         type="button"

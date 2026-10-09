@@ -57,15 +57,21 @@ export interface RegistrationImportRow {
 
 // A row that could not be imported (validation-rejected or createRegistration-failed),
 // carrying its original template cells + the reason — for the failed-rows download.
-export interface FailedImportRow { cells: Record<string, string>; error: string }
+export interface FailedImportRow { cells: Record<string, string>; error: string; rowNumber: number | null }
 
-// Stored row doc = the input row + a stable, content-derived fingerprint used for
-// the idempotency key (NEVER the row number, so re-runs after a resume are safe).
+// Stored row doc = the input row + a stable fingerprint used for the idempotency key.
+// It is computed ONCE, when the job is created, and STORED on the row doc — a resume
+// re-reads the stored value, so re-runs stay safe.
+//
+// RD-IMPORT-RT-01 — it now includes the row's position in the file. Built from
+// email|pass|phone alone, two different participants sharing those (a parent's email
+// for two children, no phone, duplicates allowed) collided: the second hit the first's
+// idempotency key, was counted as "imported", and was never created.
 type StoredImportRow = RegistrationImportRow & { fingerprint: string }
 
 function rowFingerprint(row: RegistrationImportRow): string {
   return crypto.createHash('sha256')
-    .update(`${row.attendee.email}|${row.passId}|${row.attendee.phone ?? ''}`)
+    .update(`${row.rowNumber ?? ''}|${row.attendee.email}|${row.passId}|${row.attendee.phone ?? ''}|${row.attendee.name}`)
     .digest('hex')
     .slice(0, 32)
 }
@@ -177,12 +183,12 @@ export function registrationImportStrategy(): JobStrategy<RegistrationImportJob,
     },
 
     // Reuse ONLY createRegistration(). Stable idempotencyKey = importId + fingerprint
-    // (never the row number) so a resumed/re-run chunk never double-creates.
+    // (stored on the row doc at creation, so a resume reuses it) — a re-run chunk never double-creates.
     async processItem(row, job, ctx) {
       const pass = ctx.passById.get(row.passId)
       if (!pass) {
         const message = `Pass ${row.passId} is no longer available`
-        await recordFailedImportRow(job.jobId, `x_${row.fingerprint}`, row.cells ?? {}, message)
+        await recordFailedImportRow(job.jobId, `x_${row.fingerprint}`, row.cells ?? {}, message, row.rowNumber)
         return { ok: false, error: message }
       }
       try {
@@ -208,7 +214,7 @@ export function registrationImportStrategy(): JobStrategy<RegistrationImportJob,
       } catch (err) {
         if (err instanceof IdempotencyHitError) return { ok: true }   // already created (resume-safe)
         const message = err instanceof Error ? err.message : 'registration failed'
-        await recordFailedImportRow(job.jobId, `x_${row.fingerprint}`, row.cells ?? {}, message)
+        await recordFailedImportRow(job.jobId, `x_${row.fingerprint}`, row.cells ?? {}, message, row.rowNumber)
         return { ok: false, error: message }
       }
     },
@@ -252,21 +258,25 @@ const failedRowsCol = (jobId: string) =>
 
 /** Records ONE failed row (used per-item at execution time). Best-effort. */
 export async function recordFailedImportRow(
-  jobId: string, key: string, cells: Record<string, string>, error: string,
+  jobId: string, key: string, cells: Record<string, string>, error: string, rowNumber?: number,
 ): Promise<void> {
-  await failedRowsCol(jobId).doc(key).set({ cells, error: error.slice(0, 300) }).catch(() => { /* best-effort */ })
+  await failedRowsCol(jobId).doc(key).set({ cells, error: error.slice(0, 300), ...rowNumberField(rowNumber) }).catch(() => { /* best-effort */ })
 }
+
+// RD-IMPORT-ROWNUM-01 — the row's real spreadsheet row, stored so the failed-rows file
+// can name it and list rows in file order (document ids are not in file order).
+const rowNumberField = (n: number | undefined) => (typeof n === 'number' && Number.isInteger(n) ? { rowNumber: n } : {})
 
 /** Records MANY failed rows in batches (used for validation-rejected rows at create). */
 export async function writeFailedImportRows(
-  jobId: string, entries: Array<{ key: string; cells: Record<string, string>; error: string }>,
+  jobId: string, entries: Array<{ key: string; cells: Record<string, string>; error: string; rowNumber?: number }>,
 ): Promise<void> {
   const col = failedRowsCol(jobId)
   for (let i = 0; i < entries.length; i += 400) {
     const batch = adminDb.batch()
     for (let j = i; j < Math.min(i + 400, entries.length); j++) {
       const e = entries[j]
-      batch.set(col.doc(e.key), { cells: e.cells, error: e.error.slice(0, 300) })
+      batch.set(col.doc(e.key), { cells: e.cells, error: e.error.slice(0, 300), ...rowNumberField(e.rowNumber) })
     }
     await batch.commit()
   }
@@ -276,9 +286,15 @@ export async function writeFailedImportRows(
 export async function listFailedImportRows(jobId: string): Promise<FailedImportRow[]> {
   const snap = await failedRowsCol(jobId).get()
   return snap.docs.map(d => {
-    const x = d.data() as { cells?: Record<string, string>; error?: string }
-    return { cells: x.cells ?? {}, error: typeof x.error === 'string' ? x.error : '' }
+    const x = d.data() as { cells?: Record<string, string>; error?: string; rowNumber?: unknown }
+    return {
+      cells:     x.cells ?? {},
+      error:     typeof x.error === 'string' ? x.error : '',
+      rowNumber: typeof x.rowNumber === 'number' ? x.rowNumber : null,
+    }
   })
+    // File order; rows from jobs created before row numbers were stored keep their old order, last.
+    .sort((a, b) => (a.rowNumber ?? Infinity) - (b.rowNumber ?? Infinity))
 }
 
 /** The most recent import jobs for an event (newest first), for the Recent Imports list. */

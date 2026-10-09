@@ -29,7 +29,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   const caller = await verifyCaller(req)
   if (!caller) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
-  const ctx = await resolveWorkspaceUid(caller.uid)
+  const ctx = await resolveWorkspaceUid(caller.uid, caller.email)
 
   const features = Object.fromEntries(EVENT_LICENSE_FEATURES.map(f => [f, true]))
   // `Infinity` does not survive JSON, so an unlimited numeric limit is reported as `null` —

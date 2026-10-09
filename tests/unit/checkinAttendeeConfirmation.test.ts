@@ -378,10 +378,13 @@ describe('11 — offline is preserved and honestly labelled', () => {
     expect(WORK).toContain('The attendee was NOT checked in.')
   })
 
-  it('the offline identifier guard still fails closed', () => {
+  // RD-CHECKIN-ID-OPT-02 — identifiers are optional: offline admits WITHOUT one and never
+  // mints a value; the replay asks the server to skip, so nothing is assigned at sync.
+  it('offline never assigns an identifier, and replays with skipIdentifier', () => {
     const off = code(read('lib/checkin/useOfflineCheckin.ts'))
-    expect(off).toContain('identifierRequiredRef.current && !att.hasIdentifier')
-    expect(off).toContain('IDENTIFIER_REQUIRES_ONLINE')
+    expect(off).not.toContain('IDENTIFIER_REQUIRES_ONLINE')
+    expect(off).not.toContain('identifierValue')
+    expect(off).toContain("source: 'offline-sync', eventSlug: item.eventSlug, skipIdentifier: true")
   })
 })
 

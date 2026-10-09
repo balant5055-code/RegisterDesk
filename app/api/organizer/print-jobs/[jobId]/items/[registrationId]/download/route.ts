@@ -7,8 +7,7 @@
 // only — no ZIP, no combined package.
 
 import { NextRequest, NextResponse } from 'next/server'
-import { verifyCaller }        from '@/lib/team/access'
-import { resolveWorkspaceUid } from '@/lib/team/workspace'
+import { authorizeAnyWorkspace } from '@/lib/team/workspace'
 import { getPrintGenerationJob, getPrintJobItem } from '@/lib/printAssets/generationJob'
 
 export async function GET(
@@ -20,9 +19,11 @@ export async function GET(
   const authReq = qToken
     ? new Request(req.url, { headers: { Authorization: `Bearer ${qToken}` } })
     : req
-  const caller = await verifyCaller(authReq)
-  if (!caller) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-  const ctx = await resolveWorkspaceUid(caller.uid)
+  // RD-STAFF-SEC-02 — same gate as every sibling print route (authorizeAnyWorkspace): a
+  // gate-only staff credential is refused. This route resolved the workspace by hand and
+  // skipped that, so check-in staff could download any printed credential in the workspace.
+  const ctx = await authorizeAnyWorkspace(authReq)
+  if (!ctx.ok) return NextResponse.json({ error: ctx.error }, { status: ctx.status })
 
   const job = await getPrintGenerationJob(jobId)
   if (!job || job.organizerUid !== ctx.workspaceUid) {

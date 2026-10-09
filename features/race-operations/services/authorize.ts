@@ -22,7 +22,7 @@ export async function authorizeRaceOps(req: Request): Promise<RaceOpsAuthz> {
   const caller = await verifyCaller(req)
   if (!caller) return { ok: false, status: 401, error: 'Unauthorized' }
 
-  const ctx = await resolveWorkspaceUid(caller.uid)
+  const ctx = await resolveWorkspaceUid(caller.uid, caller.email)
 
   // Owner or admin only — the Phase 0 decision, enforced through the existing matrix with
   // no new permission introduced.

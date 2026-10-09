@@ -43,10 +43,14 @@ export interface CheckInResult {
   error?:       string
   /**
    * RD-CHECKIN-BIB-01 — set when this event issues identifiers and THIS attendee
-   * has none. The caller must collect one and retry with `identifierValue`; the
-   * attendee is NOT checked in until it is supplied and accepted.
+   * has none. The caller may collect one and retry with `identifierValue`, or retry
+   * with `skipIdentifier: true` to check the attendee in without one
+   * (RD-CHECKIN-ID-OPT-02: identifiers are optional at check-in). Nothing is written
+   * until one of those retries.
    */
   requiresIdentifier?: boolean
+  /** RD-CHECKIN-ID-OPT-02 — always true with `requiresIdentifier`: the prompt may be skipped. */
+  identifierOptional?: boolean
   /** The organizer's configured label ("Bib Number", "Member ID", …). Never hardcoded. */
   identifierLabel?:    string
   /** The value that was assigned as part of this check-in, when one was. */
@@ -85,9 +89,10 @@ export async function POST(req: NextRequest): Promise<NextResponse<CheckInResult
   let source: string | undefined
   let expectedEventSlug: string | undefined
   let identifierValue: string | undefined
+  let skipIdentifier = false
   try {
     const body = await req.json() as {
-      ticketCode?: unknown; source?: unknown; eventSlug?: unknown; identifierValue?: unknown
+      ticketCode?: unknown; source?: unknown; eventSlug?: unknown; identifierValue?: unknown; skipIdentifier?: unknown
     }
     if (typeof body.ticketCode !== 'string' || !body.ticketCode.trim()) {
       return NextResponse.json({ success: false, error: 'MISSING_TICKET_CODE' }, { status: 400 })
@@ -100,6 +105,9 @@ export async function POST(req: NextRequest): Promise<NextResponse<CheckInResult
     identifierValue = typeof body.identifierValue === 'string' && body.identifierValue.trim()
       ? body.identifierValue.trim().slice(0, 64)
       : undefined
+    // RD-CHECKIN-ID-OPT-02 — the operator chose "check in without one". Strictly `true`;
+    // a typed value still wins (it is validated by the engine exactly as before).
+    skipIdentifier = body.skipIdentifier === true
     // Optional (backward-compatible): the gate the operator is running. When
     // present, the scanned ticket must belong to THIS event — otherwise a ticket
     // for another of the same organizer's events would open this gate.
@@ -198,9 +206,10 @@ export async function POST(req: NextRequest): Promise<NextResponse<CheckInResult
   // ── Identifier gate (RD-CHECKIN-BIB-01) ───────────────────────────────────
   //
   // Runs AFTER every eligibility check and BEFORE the check-in transaction, which
-  // is what makes the ordering requirement true: an attendee who cannot be
-  // identified is never marked present, and an ineligible attendee is rejected
-  // before we would have asked for an identifier at all.
+  // is what makes the ordering requirement true: a typed identifier is assigned (or
+  // refused) before the attendee is marked present, and an ineligible attendee is
+  // rejected before we would have offered an identifier at all. Skipping the prompt
+  // (`skipIdentifier`) admits without one — RD-CHECKIN-ID-OPT-02.
   //
   // ORDER IS THE ATOMICITY STORY. `allocateIdentifier` runs its own Firestore
   // transaction (lock read + write + registration mirror). Assigning FIRST means:
@@ -216,19 +225,31 @@ export async function POST(req: NextRequest): Promise<NextResponse<CheckInResult
   // document, so an operator can name a value, never a victim.
   let assignedIdentifier: string | undefined
 
-  const { config: idConfig } = await resolveIdentifierConfig(reg.eventSlug)
-  if (idConfig.enabled) {
+  // RD-CHECKIN-ID-OPT-01 — the gate applies only to an event whose organizer SET UP
+  // identifiers (a stored, enabled config). An event that never configured them used to
+  // resolve to the behaviour-compatible default (`enabled: true`) and so blocked EVERY
+  // check-in behind "Enter Identifier" — conferences included. Same guard as
+  // autoAssignIfEnabled (lib/identifiers/engine.ts): `isStored && enabled`.
+  const { config: idConfig, isStored: idConfigured } = await resolveIdentifierConfig(reg.eventSlug)
+  if (idConfigured && idConfig.enabled) {
     const existing = (reg as { identifier?: { value?: string } }).identifier
     const hasIdentifier = typeof existing?.value === 'string' && existing.value.length > 0
 
-    if (!hasIdentifier) {
-      // Nothing typed yet → tell the caller what to ask for, and stop. This is the
-      // "show the popup" signal; no write of any kind has happened.
+    // RD-CHECKIN-ID-OPT-02 — identifiers are OPTIONAL at check-in (approved product
+    // decision): the operator is offered the prompt, and may skip it. Skipping assigns
+    // nothing and leaves the attendee's identifier empty; existing identifiers, the
+    // engine's duplicate/range/blocked validation of a TYPED value, and every
+    // authorization and eligibility check above are unchanged.
+    if (!hasIdentifier && !(skipIdentifier && !identifierValue)) {
+      // Nothing typed yet → offer the prompt, and stop. This is the "show the popup"
+      // signal; no write of any kind has happened. The error code is kept for every
+      // existing client; `identifierOptional` tells it the prompt may be skipped.
       if (!identifierValue) {
         return NextResponse.json({
           success: false,
           error:   'IDENTIFIER_REQUIRED',
           requiresIdentifier: true,
+          identifierOptional: true,
           identifierLabel:    idConfig.label,
           attendee:  { name: reg.attendee.name, passName: reg.passName },
           eventName: reg.eventName,
@@ -260,6 +281,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<CheckInResult
           success: false,
           error:   code,
           requiresIdentifier: true,
+          identifierOptional: true,
           identifierLabel:    idConfig.label,
         }, { status: 422 })
       }

@@ -5,7 +5,7 @@
 // service functions re-verify the target row belongs to that workspace.
 
 import { NextRequest, NextResponse } from 'next/server'
-import { verifyCaller, requireOwner } from '@/lib/team/access'
+import { verifyCaller, requireWorkspaceOwner } from '@/lib/team/access'
 import { changeRole, setMemberStatus, removeMember } from '@/lib/team/service'
 
 export async function PATCH(
@@ -15,7 +15,7 @@ export async function PATCH(
   const caller = await verifyCaller(req)
   if (!caller) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
-  const access = requireOwner(caller.uid, caller.uid)
+  const access = await requireWorkspaceOwner(caller)
   if (!access.ok) return NextResponse.json({ error: access.reason }, { status: access.status })
 
   const { memberId } = await params
@@ -43,7 +43,7 @@ export async function DELETE(
   const caller = await verifyCaller(req)
   if (!caller) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
-  const access = requireOwner(caller.uid, caller.uid)
+  const access = await requireWorkspaceOwner(caller)
   if (!access.ok) return NextResponse.json({ error: access.reason }, { status: access.status })
 
   const { memberId } = await params

@@ -1,7 +1,7 @@
 // DELETE /api/organizer/api-keys/[keyId]  — revoke a key (owner-only).
 
 import { NextRequest, NextResponse } from 'next/server'
-import { verifyCaller, requireOwner } from '@/lib/team/access'
+import { verifyCaller, requireWorkspaceOwner } from '@/lib/team/access'
 import { revokeApiKey }               from '@/lib/integrations/apiKeys'
 import { logIntegrationAction }       from '@/lib/integrations/audit'
 
@@ -10,7 +10,7 @@ export async function DELETE(
 ): Promise<NextResponse> {
   const caller = await verifyCaller(req)
   if (!caller) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-  const access = requireOwner(caller.uid, caller.uid)
+  const access = await requireWorkspaceOwner(caller)
   if (!access.ok) return NextResponse.json({ error: access.reason }, { status: access.status })
 
   const { keyId } = await params

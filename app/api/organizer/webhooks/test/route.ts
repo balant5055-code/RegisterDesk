@@ -4,7 +4,7 @@
 // organizer gets an immediate delivery result. Owner-only.
 
 import { NextRequest, NextResponse } from 'next/server'
-import { verifyCaller, requireOwner } from '@/lib/team/access'
+import { verifyCaller, requireWorkspaceOwner } from '@/lib/team/access'
 import { getWebhookConfig, enqueueWebhook, processWebhookDelivery } from '@/lib/integrations/webhooks'
 import { logIntegrationAction }       from '@/lib/integrations/audit'
 import { checkDistributedRateLimit }  from '@/lib/rateLimit/redis'
@@ -12,7 +12,7 @@ import { checkDistributedRateLimit }  from '@/lib/rateLimit/redis'
 export async function POST(req: NextRequest): Promise<NextResponse> {
   const caller = await verifyCaller(req)
   if (!caller) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-  const access = requireOwner(caller.uid, caller.uid)
+  const access = await requireWorkspaceOwner(caller)
   if (!access.ok) return NextResponse.json({ error: access.reason }, { status: access.status })
   // RD-CAPACITY-01 · webhooks are no longer gated by a licence. Ownership stands.
 

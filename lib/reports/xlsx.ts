@@ -44,14 +44,18 @@ function sheetXml(table: ReportTable): string {
   ).join('')
   rows.push(`<row r="${r}">${headerCells}</row>`)
 
+  // Text columns: a PRE-FILLED cell (e.g. a failed-rows file) keeps its own style when the
+  // organizer edits it — the <col> style only reaches cells that do not exist yet — so data
+  // cells carry the Text style themselves (s="1"), or an edited "+9198…" becomes a number.
+  const textStyle = table.textColumns ? ' s="1"' : ''
   for (const row of table.rows) {
     r++
     const cells = table.columns.map((col, ci) => {
       const { v, numeric } = cellToXlsx(row[col.key] ?? null, col.type)
       const ref = `${colRef(ci)}${r}`
       return numeric
-        ? `<c r="${ref}"><v>${v}</v></c>`
-        : `<c r="${ref}" t="inlineStr"><is><t xml:space="preserve">${xmlEscape(String(v))}</t></is></c>`
+        ? `<c r="${ref}"${textStyle}><v>${v}</v></c>`
+        : `<c r="${ref}"${textStyle} t="inlineStr"><is><t xml:space="preserve">${xmlEscape(String(v))}</t></is></c>`
     }).join('')
     rows.push(`<row r="${r}">${cells}</row>`)
   }
@@ -76,8 +80,14 @@ function sheetXml(table: ReportTable): string {
     rows.push(`<row r="${r}"><c r="A${r}" t="inlineStr"><is><t xml:space="preserve">${xmlEscape(note)}</t></is></c></row>`)
   }
 
+  // Opt-in Text columns (cellXfs index 1 = numFmt 49 "@"): Excel applies a column's style
+  // to cells typed into it later, so a template's phone/code/date entries stay as typed.
+  const cols = table.textColumns && table.columns.length > 0
+    ? `<cols><col min="1" max="${table.columns.length}" width="22" style="1" customWidth="1"/></cols>`
+    : ''
+
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>`
-    + `<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>${rows.join('')}</sheetData></worksheet>`
+    + `<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">${cols}<sheetData>${rows.join('')}</sheetData></worksheet>`
 }
 
 // ─── Public ───────────────────────────────────────────────────────────────────
@@ -87,7 +97,10 @@ const STYLES_XML = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>`
   + `<fills count="1"><fill><patternFill patternType="none"/></fill></fills>`
   + `<borders count="1"><border/></borders>`
   + `<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>`
-  + `<cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs>`
+  // Index 0 = General (every existing cell). Index 1 = Text ("@", built-in numFmt 49),
+  // referenced only by opt-in `textColumns` tables (<col> + data cells) — unused by plain exports.
+  + `<cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>`
+  + `<xf numFmtId="49" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/></cellXfs>`
   + `</styleSheet>`
 
 /** Build a multi-sheet .xlsx workbook (one sheet per table). */

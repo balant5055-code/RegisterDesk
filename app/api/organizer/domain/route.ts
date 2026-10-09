@@ -6,14 +6,14 @@
 // plan/tier gate and no 402.)
 
 import { NextRequest, NextResponse } from 'next/server'
-import { verifyCaller, requireOwner } from '@/lib/team/access'
+import { verifyCaller, requireWorkspaceOwner } from '@/lib/team/access'
 import { getDomainConfig, setDomain, removeDomain } from '@/lib/domains/service'
 import { logDomainAction }            from '@/lib/domains/audit'
 
 async function gate(req: NextRequest): Promise<{ uid: string } | NextResponse> {
   const caller = await verifyCaller(req)
   if (!caller) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-  const access = requireOwner(caller.uid, caller.uid)
+  const access = await requireWorkspaceOwner(caller)
   if (!access.ok) return NextResponse.json({ error: access.reason }, { status: access.status })
   // RD-CAPACITY-01 · a custom domain is no longer a licensed feature. Ownership stands.
   return { uid: caller.uid }

@@ -298,34 +298,38 @@ export default function AttendanceTab({ eventId, token, event }: {
     if (busyRows[reg.id]) return
     setBusyRows(b => ({ ...b, [reg.id]: true }))
     try {
-      const res = action === 'in'
-        ? await fetch('/api/checkin/scan', {
-            method: 'POST',
-            headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-            // `eventSlug` is sent deliberately: ticket codes are globally unique, and
-            // without it a code belonging to another of this organizer's events would
-            // open this gate. The server re-checks it — this is not the guard, it is
-            // the caller declaring which gate it is running.
-            body: JSON.stringify({
-              ticketCode: reg.ticketCode,
-              eventSlug:  event.slug ?? undefined,
-              source:     'attendance_tab',
-            }),
-          })
+      const scanIn = (skipIdentifier: boolean) => fetch('/api/checkin/scan', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        // `eventSlug` is sent deliberately: ticket codes are globally unique, and
+        // without it a code belonging to another of this organizer's events would
+        // open this gate. The server re-checks it — this is not the guard, it is
+        // the caller declaring which gate it is running.
+        body: JSON.stringify({
+          ticketCode: reg.ticketCode,
+          eventSlug:  event.slug ?? undefined,
+          source:     'attendance_tab',
+          ...(skipIdentifier ? { skipIdentifier: true } : {}),
+        }),
+      })
+      type ScanBody = { success?: boolean; error?: string; requiresIdentifier?: boolean; identifierLabel?: string }
+
+      let res = action === 'in'
+        ? await scanIn(false)
         : await fetch(`/api/organizer/registrations/${encodeURIComponent(reg.id)}/undo-checkin`, {
             method: 'POST', headers: { Authorization: `Bearer ${token}` },
           })
+      let body = await res.json().catch(() => ({})) as ScanBody
 
-      const body = await res.json().catch(() => ({})) as {
-        success?: boolean; error?: string; requiresIdentifier?: boolean; identifierLabel?: string
-      }
-
+      // RD-CHECKIN-ID-OPT-02 — identifiers are OPTIONAL at check-in. The event issues
+      // them and this person has none; this table has no identifier input (assigning
+      // one is the scanner's job — it owns the pool, format and uniqueness rules), so
+      // the attendee is admitted WITHOUT one and the toast says so.
+      let withoutLabel: string | null = null
       if (action === 'in' && body.requiresIdentifier) {
-        // The event issues identifiers and this person has none. Assigning one is the
-        // scanner's job — it owns the pool, the format and the uniqueness rules — so
-        // this sends the operator there rather than growing a second assignment UI.
-        showToast(`${body.identifierLabel ?? 'An identifier'} is required — use the check-in screen to assign one.`, 'info')
-        return
+        withoutLabel = body.identifierLabel ?? 'identifier'
+        res  = await scanIn(true)
+        body = await res.json().catch(() => ({})) as ScanBody
       }
       if (!res.ok || body.success === false) {
         showToast(action === 'in' ? "Check-in couldn't be completed." : "Undo couldn't be completed.", 'error')
@@ -336,7 +340,11 @@ export default function AttendanceTab({ eventId, token, event }: {
       setRows(prev => prev.map(r => r.id === reg.id
         ? { ...r, checkedIn: action === 'in', checkedInAt: action === 'in' ? new Date().toISOString() : null }
         : r))
-      showToast(action === 'in' ? `${reg.name || 'Attendee'} checked in.` : 'Check-in undone.', 'success')
+      showToast(action === 'in'
+        ? (withoutLabel
+            ? `${reg.name || 'Attendee'} checked in without a ${withoutLabel}. Assign one from the check-in screen if needed.`
+            : `${reg.name || 'Attendee'} checked in.`)
+        : 'Check-in undone.', 'success')
       setAttempt(a => a + 1)
     } catch {
       showToast('That could not be completed. Check your connection and try again.', 'error')

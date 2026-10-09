@@ -40,6 +40,17 @@ import type { StaffAccountView } from '@/lib/staff/types'
 
 interface EventOption { id: string; name: string; slug: string | null }
 
+// RD-STAFF-EVENTS-01 — the picker used to read ONE page (`limit=100&tab=published`), so a
+// workspace's 101st event could never be assigned, and `published` left out events whose
+// registration had closed — exactly the events a gate works on event day. It now walks the
+// existing cursor (`nextCursor`) over the existing `active` listing tab (published +
+// registration closed + pending review), through the same organizer events endpoint and its
+// authorization. The server still decides what an assignment may hold (sanitizeEventIds,
+// MAX_ASSIGNED_EVENTS) and every check-in route still checks the event itself.
+const EVENT_PAGE_SIZE        = 100
+const EVENT_PICKER_MAX_PAGES = 20      // 2,000 events — a safety stop, not a product limit
+const EVENT_FILTER_FROM      = 8         // show the name filter once the list is long enough to need it
+
 const ROLE_LABEL: Record<string, string> = {
   checkin_staff: 'Check-in Staff',
   checkin_lead:  'Check-in Lead',
@@ -72,6 +83,7 @@ export default function StaffManagementPage() {
   const [busyId,  setBusyId]  = useState<string | null>(null)
 
   const [query,  setQuery]  = useState('')
+  const [eventFilter, setEventFilter] = useState('')
   const [filter, setFilter] = useState<'all' | 'active' | 'suspended'>('all')
 
   const [showCreate, setShowCreate] = useState(false)
@@ -98,14 +110,35 @@ export default function StaffManagementPage() {
     })
   }, [getToken])
 
+  /** Every assignable event, page by page (RD-STAFF-EVENTS-01). null = the first page failed. */
+  const fetchAssignableEvents = useCallback(async (): Promise<EventOption[] | null> => {
+    const out: EventOption[] = []
+    let cursor: string | null = null
+    for (let page = 0; page < EVENT_PICKER_MAX_PAGES; page++) {
+      const res = await authedFetch(
+        `/api/organizer/events?limit=${EVENT_PAGE_SIZE}&tab=active${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`,
+      )
+      if (!res.ok) return page === 0 ? null : out
+      const data = await res.json() as {
+        events?: Array<{ draftId?: string; name?: string; slug?: string | null }>; nextCursor?: string | null
+      }
+      for (const e of data.events ?? []) {
+        if (e.draftId) out.push({ id: e.draftId, name: e.name || 'Untitled event', slug: e.slug ?? null })
+      }
+      cursor = data.nextCursor ?? null
+      if (!cursor) break
+    }
+    return out
+  }, [authedFetch])
+
   const load = useCallback(async () => {
     setLoading(true); setError(null)
     try {
       // Three independent reads; a failure in the legacy list or the event picker
       // must not stop the staff roster from rendering.
-      const [staffRes, eventsRes, teamRes] = await Promise.all([
+      const [staffRes, assignable, teamRes] = await Promise.all([
         authedFetch('/api/organizer/staff'),
-        authedFetch('/api/organizer/events?limit=100&tab=published'),
+        fetchAssignableEvents().catch(() => null),
         authedFetch('/api/organizer/team'),
       ])
       if (!staffRes.ok) {
@@ -114,12 +147,7 @@ export default function StaffManagementPage() {
       }
       setStaff(((await staffRes.json()) as { staff: StaffAccountView[] }).staff)
 
-      if (eventsRes.ok) {
-        const data = await eventsRes.json() as { events?: Array<{ draftId?: string; name?: string; slug?: string | null }> }
-        setEvents((data.events ?? [])
-          .filter((e): e is { draftId: string; name: string; slug: string | null } => Boolean(e.draftId))
-          .map(e => ({ id: e.draftId, name: e.name || 'Untitled event', slug: e.slug ?? null })))
-      }
+      if (assignable) setEvents(assignable)
       if (teamRes.ok) {
         setLegacy(((await teamRes.json()) as { members?: TeamMemberView[] }).members ?? [])
       }
@@ -128,7 +156,7 @@ export default function StaffManagementPage() {
     } finally {
       setLoading(false)
     }
-  }, [authedFetch])
+  }, [authedFetch, fetchAssignableEvents])
 
   // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { if (user) void load() }, [user, load])
@@ -136,6 +164,24 @@ export default function StaffManagementPage() {
   const eventName = useCallback(
     (id: string) => events.find(e => e.id === id)?.name ?? id,
     [events],
+  )
+
+  const shownEvents = useMemo(() => {
+    const f = eventFilter.trim().toLowerCase()
+    return f ? events.filter(e => e.name.toLowerCase().includes(f)) : events
+  }, [events, eventFilter])
+
+  const eventFilterInput = events.length >= EVENT_FILTER_FROM && (
+    <div className="relative mb-2">
+      <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" aria-hidden />
+      <input type="search" value={eventFilter} onChange={e => setEventFilter(e.target.value)}
+        placeholder={`Filter ${events.length} events by name`} aria-label="Filter events by name"
+        data-testid="staff-event-filter"
+        className="w-full rounded-lg border border-border bg-background py-1.5 pl-8 pr-2 text-fs-2xs text-foreground outline-none focus:border-primary" />
+    </div>
+  )
+  const noEventMatch = eventFilter.trim() && shownEvents.length === 0 && (
+    <p className="text-fs-2xs text-muted-foreground">No events match “{eventFilter.trim()}”.</p>
   )
 
   const visible = useMemo(() => {
@@ -409,8 +455,10 @@ export default function StaffManagementPage() {
                 </p>
               ) : (
                 <>
+                  {eventFilterInput}
+                  {noEventMatch}
                   <div className="flex max-h-44 flex-col gap-1.5 overflow-y-auto">
-                    {events.map(ev => (
+                    {shownEvents.map(ev => (
                       <label key={ev.id} className="flex items-center gap-2 text-fs-sm text-foreground">
                         <input type="checkbox" checked={eventIds.includes(ev.id)}
                           onChange={e => setEventIds(prev => e.target.checked ? [...prev, ev.id] : prev.filter(i => i !== ev.id))}
@@ -504,8 +552,10 @@ export default function StaffManagementPage() {
                     <td className="px-4 py-3">
                       {open ? (
                         <div className="flex flex-col gap-2">
+                          {eventFilterInput}
+                          {noEventMatch}
                           <div className="flex max-h-36 flex-col gap-1 overflow-y-auto">
-                            {events.map(ev => (
+                            {shownEvents.map(ev => (
                               <label key={ev.id} className="flex items-center gap-2 text-fs-2xs text-foreground">
                                 <input type="checkbox" checked={editing.eventIds.includes(ev.id)}
                                   onChange={e => setEditing(cur => cur && ({

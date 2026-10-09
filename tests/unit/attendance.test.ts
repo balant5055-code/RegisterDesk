@@ -466,9 +466,13 @@ describe('Attendance can actually admit someone', () => {
     expect(TAB).toContain("showToast(action === 'in' ? \"Check-in couldn't be completed.\" : \"Undo couldn't be completed.\", 'error')")
   })
 
-  it('an identifier requirement is handed to the surface that owns assignment', () => {
+  // RD-CHECKIN-ID-OPT-02 — identifiers are optional: this table has no identifier input,
+  // so it admits WITHOUT one (assigning stays the scanner's job) and the toast says so.
+  it('an identifier prompt is skipped here, and the operator is told no identifier was assigned', () => {
     expect(TAB).toContain('body.requiresIdentifier')
-    expect(TAB).toContain('use the check-in screen to assign one')
+    expect(TAB).toContain('res  = await scanIn(true)')
+    expect(TAB).toContain('...(skipIdentifier ? { skipIdentifier: true } : {})')
+    expect(TAB).toContain('checked in without a ${withoutLabel}. Assign one from the check-in screen if needed.')
   })
 })
 

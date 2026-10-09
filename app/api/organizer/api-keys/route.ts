@@ -3,7 +3,7 @@
 // Owner-only.
 
 import { NextRequest, NextResponse } from 'next/server'
-import { verifyCaller, requireOwner } from '@/lib/team/access'
+import { verifyCaller, requireWorkspaceOwner } from '@/lib/team/access'
 import { createApiKey, listApiKeys }  from '@/lib/integrations/apiKeys'
 import { logIntegrationAction }       from '@/lib/integrations/audit'
 import { isApiKeyPermission, type ApiKeyPermission } from '@/lib/integrations/types'
@@ -12,7 +12,7 @@ import { RATE_POLICY, checkPolicy }   from '@/lib/rateLimit/policies'
 export async function GET(req: NextRequest): Promise<NextResponse> {
   const caller = await verifyCaller(req)
   if (!caller) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-  const access = requireOwner(caller.uid, caller.uid)
+  const access = await requireWorkspaceOwner(caller)
   if (!access.ok) return NextResponse.json({ error: access.reason }, { status: access.status })
   // RD-CAPACITY-01 · API access is no longer a licensed feature — every organizer has it.
   // The owner check above still decides WHOSE keys these are.
@@ -24,7 +24,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
 export async function POST(req: NextRequest): Promise<NextResponse> {
   const caller = await verifyCaller(req)
   if (!caller) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-  const access = requireOwner(caller.uid, caller.uid)
+  const access = await requireWorkspaceOwner(caller)
   if (!access.ok) return NextResponse.json({ error: access.reason }, { status: access.status })
   // Throttle credential creation against automation / key-spraying.
   const rl = checkPolicy(caller.uid, RATE_POLICY.apiKeyCreate)

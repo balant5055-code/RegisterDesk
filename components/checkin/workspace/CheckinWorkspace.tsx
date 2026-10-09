@@ -37,6 +37,7 @@ import { useOfflineCheckin } from '@/lib/checkin/useOfflineCheckin'
 import { cn } from '@/lib/utils/cn'
 import QrScanner from '@/components/checkin/QrScanner'
 import IdentifierPrompt from '@/components/checkin/IdentifierPrompt'
+import IdentifierCheckinChoice from '@/components/checkin/IdentifierCheckinChoice'
 import AttendeeConfirmation from '@/components/checkin/AttendeeConfirmation'
 import AttendanceHeader from './AttendanceHeader'
 import OutcomeCard, { type Outcome } from './OutcomeCard'
@@ -248,7 +249,8 @@ export default function CheckinWorkspace({ eventId, embedded = false }: CheckinW
   }, [ctx, eventId, getToken])
 
   // ── Step 2: ADMIT — the existing, unchanged transaction ───────────────────
-  const submitCode = useCallback(async (rawCode: string, identifierValue?: string) => {
+  // RD-CHECKIN-ID-OPT-02 — `skipIdentifier` = the operator chose "Check in without …".
+  const submitCode = useCallback(async (rawCode: string, identifierValue?: string, skipIdentifier = false) => {
     const ticketCode = ticketCodeFromQr(rawCode)
     if (!ticketCode || !ctx) return
 
@@ -308,13 +310,14 @@ export default function CheckinWorkspace({ eventId, embedded = false }: CheckinW
         body:    JSON.stringify({
           ticketCode, source: mode === 'walkin' ? 'manual' : mode, eventSlug: ctx.eventSlug,
           ...(identifierValue ? { identifierValue } : {}),
+          ...(skipIdentifier ? { skipIdentifier: true } : {}),
         }),
       })
       const data = await res.json() as CheckInResult
 
       // The attendee has no identifier yet. Nothing has been written: the server
-      // stops before the check-in transaction. Hold the code so Confirm retries the
-      // SAME attendee.
+      // stops before the check-in transaction. Hold the code so Confirm (or "Check in
+      // without") retries the SAME attendee — identifiers are optional (RD-CHECKIN-ID-OPT-02).
       if (data.requiresIdentifier) {
         setPrompt({
           ticketCode,
@@ -504,6 +507,9 @@ export default function CheckinWorkspace({ eventId, embedded = false }: CheckinW
         refreshing={refreshing}
       />
 
+      {/* RD-CHECKIN-ID-OPT-01 — asks once per unconfigured event; otherwise states the choice. */}
+      <IdentifierCheckinChoice eventId={eventId} getToken={getToken} onChanged={() => void load()} />
+
       {/* Offline banner — truthful about what is and is not possible. */}
       {!online && (
         <p role="status" className="flex items-start gap-2 rounded-xl border border-warning/40 bg-warning/10 px-4 py-3 text-fs-sm text-foreground">
@@ -608,6 +614,7 @@ export default function CheckinWorkspace({ eventId, embedded = false }: CheckinW
                 }
                 void submitCode(prompt.ticketCode, value)
               }}
+              onSkip={prompt.correcting ? undefined : () => void submitCode(prompt.ticketCode, undefined, true)}
               onCancel={() => {
                 setPrompt(null)
                 if (!prompt.correcting) {
@@ -620,7 +627,7 @@ export default function CheckinWorkspace({ eventId, embedded = false }: CheckinW
                   // The operator was left with no statement that the attendee had
                   // NOT been admitted, one tap away from looping.
                   setConfirm(null)
-                  setOutcome({ kind: 'error', title: `${prompt.label} required`, detail: 'The attendee was not checked in.' })
+                  setOutcome({ kind: 'error', title: 'Check-in cancelled', detail: 'The attendee was not checked in.' })
                 }
               }}
             />

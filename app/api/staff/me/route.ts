@@ -50,14 +50,15 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   const caller = await verifyCaller(req)
   if (!caller) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
-  const ctx = await resolveWorkspaceUid(caller.uid)
+  const ctx = await resolveWorkspaceUid(caller.uid, caller.email)
   const staff = await getStaffAccount(caller.uid)
 
-  // A staff credential whose grant was revoked resolves to its OWN workspace
-  // (isOwner true, no memberships). Reporting that as a working staff session would
-  // send the operator to a gate they cannot open, so it is refused here with the
-  // same wording a suspension gives.
-  if (staff && ctx.isOwner) {
+  // A staff credential whose grant was revoked (suspended, removed, or a ghost left by a
+  // failed delete) has no membership and resolves to its OWN workspace — since
+  // RD-STAFF-SEC-01 with NO permissions and isOwner false, before that as owner. Either
+  // way, reporting it as a working staff session would send the operator to a gate they
+  // cannot open (and keep them signed in), so it is refused with the suspension wording.
+  if (staff && (ctx.isOwner || ctx.workspaceUid === caller.uid)) {
     return NextResponse.json(
       { error: 'This account is not active. Ask your organizer to re-enable it.' },
       { status: 403 },

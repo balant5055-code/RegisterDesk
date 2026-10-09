@@ -335,9 +335,20 @@ export async function updateStaffAccount(input: UpdateStaffInput): Promise<Staff
   // Suspension must take effect NOW, not when the current ID token expires.
   // verifyCaller calls verifyIdToken(token, checkRevoked = true), so revoking here
   // closes an in-progress session on the operator's next request.
+  //
+  // RD-STAFF-SEC-01 — revoking sessions alone left the credential USABLE: the operator
+  // could simply sign in again with the same password. Suspension now also DISABLES the
+  // Auth user (Firebase refuses the sign-in; the login screen already explains
+  // auth/user-disabled), and reactivation re-enables it. resolveWorkspaceUid refuses a
+  // membership-less staff credential as well, so a failed disable here cannot escalate.
   if (input.status === 'suspended') {
+    await adminAuth.updateUser(input.staffId, { disabled: true }).catch(err =>
+      console.error('[staff] disable on suspend failed:', err))
     await adminAuth.revokeRefreshTokens(input.staffId).catch(err =>
       console.error('[staff] revokeRefreshTokens failed:', err))
+  } else if (input.status === 'active') {
+    await adminAuth.updateUser(input.staffId, { disabled: false }).catch(err =>
+      console.error('[staff] enable on reactivate failed:', err))
   }
 
   // One row per meaningful change, so an assignment edit and a suspension read as
@@ -421,8 +432,20 @@ export async function deleteStaffAccount(args: {
   // that still holds a workspace grant.
   const memberId = staffMemberId(args.organizerUid, args.staffId)
   await adminDb.collection(TEAM_COLLECTION).doc(memberId).delete().catch(() => {})
-  await adminAuth.deleteUser(args.staffId).catch(err =>
-    console.error('[staff] deleteUser failed:', err))
+  // RD-STAFF-SEC-01 — a failed Auth delete used to be logged and then IGNORED: the profile
+  // and username lock were deleted anyway, leaving a live credential nobody could see or
+  // retry. Now the sign-in is disabled as a fallback and the profile is KEPT, so the
+  // organizer sees the account and can retry the removal. Already gone = nothing to do.
+  try {
+    await adminAuth.deleteUser(args.staffId)
+  } catch (err) {
+    if ((err as { code?: string }).code !== 'auth/user-not-found') {
+      console.error('[staff] deleteUser failed:', err)
+      await adminAuth.updateUser(args.staffId, { disabled: true }).catch(e =>
+        console.error('[staff] disable after failed delete failed:', e))
+      return fail(500, 'The staff sign-in could not be removed. Their access is already revoked — please try removing them again.')
+    }
+  }
   await adminDb.collection(STAFF_USERNAME_COLLECTION).doc(doc.username).delete().catch(() => {})
   await ref.delete()
 

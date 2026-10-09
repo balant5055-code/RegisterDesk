@@ -15,6 +15,7 @@ import { adminDb } from '@/lib/firebase/admin'
 import { permissionsForRole, isCheckinOnlyRole, isEventInScope, type TeamRole, type TeamPermission } from '@/lib/team/types'
 import { isModerated, MODERATION_DENIAL_MESSAGE } from '@/lib/admin/organizerStatus'
 import { readWorkspaceOwnerMarker } from '@/lib/organizer/identity'
+import { isStaffEmail, STAFF_COLLECTION } from '@/lib/staff/types'
 
 export interface WorkspaceContext {
   callerUid:    string
@@ -148,9 +149,20 @@ async function ownsWorkspace(
  * The single-active-workspace model is otherwise unchanged; no permission, role or matrix
  * behaviour is touched.
  */
-export async function resolveWorkspaceUid(callerUid: string): Promise<WorkspaceContext> {
+export async function resolveWorkspaceUid(callerUid: string, callerEmail?: string | null): Promise<WorkspaceContext> {
   const memberships = await activeMemberships(callerUid)
   if (memberships.length === 0) {
+    // RD-STAFF-SEC-01 — a staff credential with NO active membership (suspended, removed,
+    // or a ghost Auth user left behind by a failed delete) is NOT the owner of its own
+    // workspace. Falling through to the owner branch below handed a revoked gate login
+    // every organizer permission over an empty namespace. Identified from the reserved
+    // .invalid address the server minted — no extra read on the hot path.
+    if (isStaffEmail(callerEmail)) {
+      return {
+        callerUid, workspaceUid: callerUid, role: 'checkin_staff',
+        permissions: [], isOwner: false, eventIds: [], isStaffCredential: true,
+      }
+    }
     return {
       callerUid, workspaceUid: callerUid, role: 'owner',
       permissions: permissionsForRole('owner'), isOwner: true, eventIds: [], isStaffCredential: false,
@@ -264,14 +276,31 @@ export async function authorizeWorkspace(req: Request, permission: TeamPermissio
   // the one worth paying for. Route handlers must never pass this.
   const caller = await verifyCaller(req, { skipModeration: true })
   if (!caller) return denied(401, 'Unauthorized')
-  const ctx = await resolveWorkspaceUid(caller.uid)
+  const ctx = await resolveWorkspaceUid(caller.uid, caller.email)
   if (await moderationBlocked(ctx)) {
     return { ...ctx, ok: false, status: 403, error: MODERATION_ERROR }
+  }
+  // RD-STAFF-PW-01 — the organizer-issued temporary password is a HANDOVER, not a credential
+  // (lib/staff/service): it must be changed before the operator reaches a gate. That was
+  // enforced only by the /staff/login screen, so calling /api/checkin/* directly skipped it.
+  // Every gate route enters here (authorizeEvent and the download variant delegate), while
+  // the routes the change itself needs — /api/staff/me and /api/staff/password — verify the
+  // caller directly and stay reachable. One read, for staff credentials only.
+  if (ctx.isStaffCredential && !ctx.isOwner && await staffMustChangePassword(caller.uid)) {
+    return { ...ctx, ok: false, status: 403, error: PASSWORD_CHANGE_REQUIRED_ERROR }
   }
   if (!ctx.permissions.includes(permission)) {
     return { ...ctx, ok: false, status: 403, error: `Missing required permission: ${permission}.` }
   }
   return { ...ctx, ok: true, status: 200, error: '' }
+}
+
+export const PASSWORD_CHANGE_REQUIRED_ERROR =
+  'Change your temporary password before using check-in. Sign in again at /staff/login to set a new one.'
+
+async function staffMustChangePassword(staffUid: string): Promise<boolean> {
+  const snap = await adminDb.collection(STAFF_COLLECTION).doc(staffUid).get()
+  return snap.exists && (snap.data() as { mustChangePassword?: unknown }).mustChangePassword === true
 }
 
 /**
@@ -290,7 +319,7 @@ export async function authorizeAnyWorkspace(req: Request): Promise<WorkspaceAuth
   // the one worth paying for. Route handlers must never pass this.
   const caller = await verifyCaller(req, { skipModeration: true })
   if (!caller) return denied(401, 'Unauthorized')
-  const ctx = await resolveWorkspaceUid(caller.uid)
+  const ctx = await resolveWorkspaceUid(caller.uid, caller.email)
   if (await moderationBlocked(ctx)) {
     return { ...ctx, ok: false, status: 403, error: MODERATION_ERROR }
   }

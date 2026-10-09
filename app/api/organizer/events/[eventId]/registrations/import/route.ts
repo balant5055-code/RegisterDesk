@@ -6,7 +6,9 @@
 // createRegistration expects, and enqueues the job. NO registration is created
 // here — the background runner (cron / process endpoint) does the writes.
 //
-// Body:  { rows: Record<string,string>[], headers: string[], fileName? }
+// Body:  { rows: Record<string,string>[], headers: string[], fileName?, rowNumbers? }
+//        rowNumbers (RD-IMPORT-ROWNUM-01) = each row's real spreadsheet row, so errors and the
+//        failed-rows file name the row the organizer sees in Excel (blank rows counted).
 // Reply: { success, jobId, job }
 
 import { NextRequest, NextResponse } from 'next/server'
@@ -52,7 +54,7 @@ export async function POST(
 
   const { eventId } = await context.params
 
-  let body: { rows?: unknown; headers?: unknown; fileName?: unknown }
+  let body: { rows?: unknown; headers?: unknown; fileName?: unknown; rowNumbers?: unknown }
   try { body = await req.json() } catch { return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 }) }
   const rows     = Array.isArray(body.rows)    ? (body.rows    as Record<string, string>[]) : null
   const headers  = Array.isArray(body.headers) ? (body.headers as string[])                 : null
@@ -70,7 +72,7 @@ export async function POST(
     return NextResponse.json({ error: `Import unavailable — ${built.stopped.message}` }, { status: 422 })
   }
 
-  const { validatedRows } = validateImportRows(rows, headers, built.ctx)
+  const { validatedRows } = validateImportRows(rows, headers, built.ctx, body.rowNumbers)
   const resolveField = buildColumnResolver(built.ctx.form)
 
   // ── Validation breakdown of the WHOLE file (for the summary) ────────────────
@@ -86,7 +88,7 @@ export async function POST(
   const importRows: RegistrationImportRow[] = []
   for (const vr of validatedRows) {
     if (vr.status !== 'READY' && vr.status !== 'WARNING') continue
-    const row = rows[vr.rowNumber - 2]
+    const row = rows[vr.index]
     if (!row) continue
 
     const passId = built.passIdByName.get((row[H_PASS] ?? '').trim().toLowerCase())
@@ -130,7 +132,7 @@ export async function POST(
   // fixed and re-imported — alongside execution failures recorded during processing.
   const rejected = validatedRows
     .filter(vr => vr.status === 'ERROR' || vr.status === 'DUPLICATE')
-    .map(vr => ({ key: `v_${vr.rowNumber}`, cells: rows[vr.rowNumber - 2] ?? {}, error: vr.reasons.join('; ') }))
+    .map(vr => ({ key: `v_${vr.rowNumber}`, cells: rows[vr.index] ?? {}, error: vr.reasons.join('; '), rowNumber: vr.rowNumber }))
   if (rejected.length) await writeFailedImportRows(job.jobId, rejected)
 
   return NextResponse.json(

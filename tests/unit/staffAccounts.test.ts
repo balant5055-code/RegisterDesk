@@ -276,12 +276,12 @@ describe('6 — the management routes are owner-scoped and self-scoped', () => {
 
   it('/api/staff/me resolves identity, status, events and permissions server-side', () => {
     expect(ME).toContain('verifyCaller(req)')
-    expect(ME).toContain('resolveWorkspaceUid(caller.uid)')
+    expect(ME).toContain('resolveWorkspaceUid(caller.uid, caller.email)')
     expect(ME).toContain('eventIds:    ctx.eventIds')
     expect(ME).toContain('permissions: ctx.permissions')
     // A revoked staff grant resolves to its own workspace; that is refused here
     // rather than reported as a working session.
-    expect(ME).toContain('if (staff && ctx.isOwner)')
+    expect(ME).toContain('if (staff && (ctx.isOwner || ctx.workspaceUid === caller.uid))')
   })
 
   it('the login form derives the address locally — no username oracle exists', () => {

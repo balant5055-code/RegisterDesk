@@ -22,8 +22,7 @@ import { adminDb }            from '@/lib/firebase/admin'
 import { authorizeWorkspace } from '@/lib/team/workspace'
 import { tablesToXlsx }       from '@/lib/reports/xlsx'
 import {
-  IMPORT_TEMPLATE_VERSION, IMPORT_SHEET_PARTICIPANTS, IMPORT_SHEET_FIELD_OPTIONS,
-  IMPORT_SHEET_INSTRUCTIONS, IMPORT_SHEET_META, IMPORT_META_KEYS,
+  IMPORT_SHEET_PARTICIPANTS, IMPORT_SHEET_FIELD_OPTIONS, IMPORT_SHEET_INSTRUCTIONS, importMetaTable,
 } from '@/lib/registrations/importTemplate'
 import { FIELD_TYPES } from '@/components/wizard/registrationFormConfig'
 import type { FieldType } from '@/components/wizard/registrationFormConfig'
@@ -171,14 +170,26 @@ export async function GET(
       type:  'text',
     })),
   ]
-  const participants: ReportTable = { id: IMPORT_SHEET_PARTICIPANTS, title: IMPORT_SHEET_PARTICIPANTS, columns, rows: [] }
+  // RD-IMPORT-RT-01 — Text columns: Excel keeps "+919876543210", "0012" and "1990-05-15"
+  // exactly as typed instead of turning them into numbers / date serials.
+  const participants: ReportTable = { id: IMPORT_SHEET_PARTICIPANTS, title: IMPORT_SHEET_PARTICIPANTS, columns, rows: [], textColumns: true }
+
+  // RD-IMPORT-RT-01 — the standard Phone column maps to the form's FIRST mobile field
+  // (importValidation.buildColumnResolver). When that field is required, every row needs a
+  // phone; the template used to call it optional, so a file that followed it failed on every
+  // row. The header stays "Phone" (the importer reads it by that name) — the guidance changes.
+  let firstMobile: RawField | null = null
+  for (const s of rawSections) for (const f of s?.fields ?? []) if (!firstMobile && f?.type === 'mobile') firstMobile = f
+  const phoneRequired = firstMobile?.required === true
 
   // ── Sheet 2 — Field Options (the fill-it-right reference) ────────────────────
   const passAllowed = passNames.length ? passNames.join(', ') : 'Enter the exact pass name configured for this event'
   const standardRows: ReportRow[] = [
     { field: 'Full Name', type: 'Text',   required: 'Yes', allowed: 'Any text',                                          help: "Participant's full name.",           placeholder: '', conditional: '—', pass: 'All passes' },
     { field: 'Email',     type: 'Email',  required: 'Yes', allowed: 'A valid email address (e.g. name@example.com)',     help: 'Used to identify the participant.',  placeholder: '', conditional: '—', pass: 'All passes' },
-    { field: 'Phone',     type: 'Mobile', required: 'No',  allowed: 'Phone with country code (e.g. +919876543210)',      help: 'Optional contact number.',           placeholder: '', conditional: '—', pass: 'All passes' },
+    { field: 'Phone',     type: 'Mobile', required: phoneRequired ? 'Yes' : 'No', allowed: 'Phone with country code (e.g. +919876543210)',
+      help: phoneRequired ? 'Required — this event\'s registration form asks every participant for a mobile number.' : 'Optional contact number.',
+      placeholder: '', conditional: '—', pass: 'All passes' },
     { field: 'Pass',      type: 'Text',   required: 'Yes', allowed: passAllowed,                                         help: 'Must exactly match a configured pass name.', placeholder: '', conditional: '—', pass: 'All passes' },
   ]
   const dynamicRows: ReportRow[] = dynamicFields.map<ReportRow>(f => ({
@@ -208,12 +219,16 @@ export async function GET(
   }
 
   // ── Sheet 3 — Instructions ──────────────────────────────────────────────────
-  const requiredList = columns.filter(c => c.label.endsWith(' *')).map(c => c.label.replace(/ \*$/, '')).join(', ')
+  const requiredNames = columns.filter(c => c.label.endsWith(' *')).map(c => c.label.replace(/ \*$/, ''))
+  if (phoneRequired) requiredNames.splice(2, 0, 'Phone')        // after Full Name, Email — as in the sheet
+  const requiredList = requiredNames.join(', ')
   const instructionsRows: ReportRow[] = [
     { topic: 'Event',                 details: eventName },
     { topic: 'Purpose',               details: 'Fill one participant per row in the "Participants" sheet, then upload this file in the Import Participants panel.' },
     { topic: 'Passes',                details: passNames.length ? `Allowed pass names: ${passNames.join(', ')}.` : 'Configure at least one pass for this event before importing.' },
-    { topic: 'Required columns',      details: `Columns marked with * are required: ${requiredList}.` },
+    { topic: 'Required columns',      details: phoneRequired
+      ? `Required: ${requiredList}. Columns marked with * are required, and Phone is required for this event too.`
+      : `Columns marked with * are required: ${requiredList}.` },
     { topic: 'Email format',          details: 'A valid email address, e.g. name@example.com.' },
     { topic: 'Phone format',          details: 'Include the country code, e.g. +919876543210.' },
     { topic: 'Date format',           details: 'Use YYYY-MM-DD, e.g. 2026-07-15.' },
@@ -233,20 +248,7 @@ export async function GET(
   }
 
   // ── Sheet 4 — Meta (machine-read on upload; do not edit) ─────────────────────
-  const meta: ReportTable = {
-    id:      IMPORT_SHEET_META,
-    title:   IMPORT_SHEET_META,
-    columns: [
-      { key: 'key',   label: 'Key',   type: 'text' },
-      { key: 'value', label: 'Value', type: 'text' },
-    ],
-    rows: [
-      { key: IMPORT_META_KEYS.version,     value: IMPORT_TEMPLATE_VERSION },
-      { key: IMPORT_META_KEYS.eventId,     value: eventId },
-      { key: IMPORT_META_KEYS.eventSlug,   value: slug },
-      { key: IMPORT_META_KEYS.generatedAt, value: new Date().toISOString() },
-    ],
-  }
+  const meta: ReportTable = importMetaTable(eventId, slug)
 
   const body = new Uint8Array(tablesToXlsx([participants, fieldOptions, instructions, meta]))
 

@@ -12,12 +12,14 @@
 
 import { validateFormResponses } from './validateFormResponses'
 import { isValidEmail, isValidPhone, normalizeEmail, normalizePhone } from './editValidation'
+import { ageOn, ageRangeLabel, resolveDobField, type AgeLimits } from './ageEligibility'
 import type { RegistrationFormDraft } from '@/components/wizard/registrationFormConfig'
 
 export type ImportRowStatus = 'READY' | 'WARNING' | 'DUPLICATE' | 'ERROR'
 
 export interface ValidatedImportRow {
   rowNumber:    number                              // 1-based spreadsheet row (header = row 1)
+  index:        number                              // position in the submitted rows[] array
   status:       ImportRowStatus
   reasons:      string[]
   resultStatus: 'confirmed' | 'pending' | null      // approval-mode outcome for importable rows
@@ -49,6 +51,37 @@ export interface ImportValidationContext {
   approvalMode:        'auto' | 'manual'
   existingEmailClaims: Set<string>                  // normalized emails already registered
   existingPhoneClaims: Set<string>                  // normalized phones already registered
+  /**
+   * RD-IMPORT-DUP-02 — the event's "one registration per mobile number" rule
+   * (registrationRules.limitPerMobile — the same flag online registration and walk-in
+   * enforce). OFF ⇒ several registrations may share a mobile, so a shared phone is
+   * never, on its own, a duplicate. Absent ⇒ treated as OFF (the setting's default).
+   */
+  limitPerMobile?:     boolean
+  /**
+   * RD-IMPORT-AGE-01 — online age eligibility, for an INFORMATIONAL warning only. A
+   * manual import is the organizer's override of the online age window; nothing in
+   * the event model marks an age window as mandatory, so an out-of-window row is
+   * imported, with a warning that says so. Absent ⇒ no age check (previous behaviour).
+   */
+  eventDate?:          string | null
+  passAgeLimits?:      Map<string, AgeLimits>       // passId → the pass's age window
+}
+
+/**
+ * RD-IMPORT-ROWNUM-01 — the real spreadsheet row numbers the client read the rows from
+ * (header = row 1, blank rows counted). Accepted only when it is one strictly
+ * increasing integer ≥ 2 per row; anything else is ignored and positions fall back to
+ * `index + 2` (an older client, or a hand-built request).
+ */
+export function sanitizeRowNumbers(raw: unknown, rowCount: number): number[] | null {
+  if (!Array.isArray(raw) || raw.length !== rowCount) return null
+  let prev = 1
+  for (const n of raw) {
+    if (typeof n !== 'number' || !Number.isInteger(n) || n <= prev || n > 1_048_576) return null
+    prev = n
+  }
+  return raw as number[]
 }
 
 // Standard template headers (must match the RM-2.1 generator).
@@ -86,11 +119,14 @@ export function buildColumnResolver(form: RegistrationFormDraft | null): (header
 }
 
 export function validateImportRows(
-  rows:    Record<string, string>[],
-  headers: string[],
-  ctx:     ImportValidationContext,
+  rows:        Record<string, string>[],
+  headers:     string[],
+  ctx:         ImportValidationContext,
+  rowNumbers?: unknown,                              // RD-IMPORT-ROWNUM-01 — see sanitizeRowNumbers
 ): ImportValidationResult {
   const resolveField = buildColumnResolver(ctx.form)
+  const positions    = sanitizeRowNumbers(rowNumbers, rows.length)
+  const dobField     = ctx.passAgeLimits ? resolveDobField(ctx.form?.sections.flatMap(s => s.fields) ?? []) : null
 
   const seenEmails = new Set<string>()
   const seenPhones = new Set<string>()
@@ -136,14 +172,27 @@ export function validateImportRows(
       }
       const err = validateFormResponses(ctx.form, passId, responses)
       if (err) errors.push(`${err.label}: ${err.message}`)
+
+      // ── Age window — organizer override, surfaced as a warning ─────────────
+      const limits = passId ? ctx.passAgeLimits?.get(passId) : undefined
+      const ageWindow = limits ? ageRangeLabel(limits) : null
+      if (dobField && limits && ageWindow && ctx.eventDate) {
+        const age = ageOn(String(responses[dobField.id] ?? ''), ctx.eventDate)
+        if (age !== null && age >= 0 && ((limits.minAge != null && age < limits.minAge) || (limits.maxAge != null && age > limits.maxAge))) {
+          warnings.push(`Age ${age} on the event date is outside this pass's age limit (${ageWindow}). Online registration would refuse it; importing it is your override.`)
+        }
+      }
     }
 
     // ── Duplicate detection (within-file + existing claims, per policy) ──────
     const normEmail = email ? normalizeEmail(email) : ''
     const normPhone = phone ? normalizePhone(phone) : ''
+    // RD-IMPORT-DUP-02 — the phone counts only when the event limits one registration per
+    // mobile. With that limit off, families and teams legitimately share one number.
+    const phoneLimited = ctx.limitPerMobile === true
     const isDup =
       (normEmail && (seenEmails.has(normEmail) || ctx.existingEmailClaims.has(normEmail))) ||
-      (normPhone && (seenPhones.has(normPhone) || ctx.existingPhoneClaims.has(normPhone)))
+      (phoneLimited && normPhone && (seenPhones.has(normPhone) || ctx.existingPhoneClaims.has(normPhone)))
     if (isDup && ctx.duplicatePolicy !== 'allow') {
       if (ctx.duplicatePolicy === 'block') dupReasons.push('Duplicate — a registration already exists (duplicate policy: block)')
       else                                 warnings.push('Possible duplicate (duplicate policy: warn)')
@@ -159,7 +208,8 @@ export function validateImportRows(
     else                        status = 'READY'
 
     return {
-      rowNumber: i + 2,
+      rowNumber: positions ? positions[i] : i + 2,
+      index:     i,
       status,
       reasons: [...errors, ...dupReasons, ...warnings],
       resultStatus: null,
@@ -169,7 +219,7 @@ export function validateImportRows(
   // ── Aggregate capacity — rows that would import consume seats in row order ─
   for (const vr of validated) {
     if (vr.status !== 'READY' && vr.status !== 'WARNING') continue
-    const row = rows[vr.rowNumber - 2]
+    const row = rows[vr.index]
     const passId = ctx.passIdByName.get((row[H_PASS] ?? '').trim().toLowerCase()) ?? ''
     const passLeft = remainingPass.get(passId) ?? Infinity
     if (remainingEvent <= 0 || passLeft <= 0) {

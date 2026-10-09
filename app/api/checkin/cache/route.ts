@@ -132,7 +132,9 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     .filter(a => a.ticketCode)
 
   // One config read per cache build (not per attendee) — the answer is per EVENT.
-  const { config: idConfig } = await resolveIdentifierConfig(slug)
+  // RD-CHECKIN-ID-OPT-01 — mirrors /api/checkin/scan: required only when the organizer
+  // set up identifiers (stored + enabled), so an unconfigured event checks in offline too.
+  const { config: idConfig, isStored: idConfigured } = await resolveIdentifierConfig(slug)
 
   const body: CacheResponse = {
     eventSlug: slug,
@@ -140,7 +142,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     count:     attendees.length,
     truncated,
     fetchedAt: new Date().toISOString(),
-    identifierRequired: idConfig.enabled,
+    identifierRequired: idConfigured && idConfig.enabled,
   }
   return NextResponse.json(body, { headers: { 'Cache-Control': 'no-store' } })
 }

@@ -229,6 +229,7 @@ describe('7 — registration, payment and ticketing are untouched', () => {
   it('offline behaviour is unchanged — corrections are online-only by construction', () => {
     const off = code(read('lib/checkin/useOfflineCheckin.ts'))
     expect(off).not.toContain('/api/checkin/correct')
-    expect(off).toContain('IDENTIFIER_REQUIRES_ONLINE')
+    // RD-CHECKIN-ID-OPT-02 — offline admits without an identifier and never assigns one.
+    expect(off).not.toContain('identifierValue')
   })
 })

@@ -39,7 +39,7 @@ export async function authorizeCrm(req: Request): Promise<CrmAuthz> {
   const caller = await verifyCaller(req)
   if (!caller) return deny(401, 'Unauthorized')
 
-  const ctx = await resolveWorkspaceUid(caller.uid)
+  const ctx = await resolveWorkspaceUid(caller.uid, caller.email)
   // An OWNER is never gate-only, so the isOwner short-circuit is not needed here —
   // ctx.role is 'owner' for them and ROLE_PERMISSIONS.owner is the full set.
   if (isCheckinOnlyRole(ctx.role)) return deny(403, 'CRM is not available for your role.')

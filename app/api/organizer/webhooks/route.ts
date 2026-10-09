@@ -4,7 +4,7 @@
 // to the owner (needed to verify X-RegisterDesk-Signature), never exposed elsewhere.
 
 import { NextRequest, NextResponse } from 'next/server'
-import { verifyCaller, requireOwner } from '@/lib/team/access'
+import { verifyCaller, requireWorkspaceOwner } from '@/lib/team/access'
 import { getWebhookConfig, setWebhookConfig, listWebhookDeliveries } from '@/lib/integrations/webhooks'
 import { logIntegrationAction }       from '@/lib/integrations/audit'
 import { validateWebhookTarget }      from '@/lib/security/ssrf'
@@ -12,7 +12,7 @@ import { validateWebhookTarget }      from '@/lib/security/ssrf'
 export async function GET(req: NextRequest): Promise<NextResponse> {
   const caller = await verifyCaller(req)
   if (!caller) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-  const access = requireOwner(caller.uid, caller.uid)
+  const access = await requireWorkspaceOwner(caller)
   if (!access.ok) return NextResponse.json({ error: access.reason }, { status: access.status })
   // RD-CAPACITY-01 · webhooks are no longer gated by a licence. Ownership stands.
   const [config, deliveries] = await Promise.all([
@@ -25,7 +25,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
 export async function PUT(req: NextRequest): Promise<NextResponse> {
   const caller = await verifyCaller(req)
   if (!caller) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-  const access = requireOwner(caller.uid, caller.uid)
+  const access = await requireWorkspaceOwner(caller)
   if (!access.ok) return NextResponse.json({ error: access.reason }, { status: access.status })
   let body: { webhookUrl?: unknown; rotateSecret?: unknown }
   try { body = await req.json() } catch { return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 }) }

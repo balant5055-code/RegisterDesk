@@ -94,16 +94,18 @@ describe('1 — an identifier is assigned BEFORE the attendee is marked present'
 describe('2 — an attendee who already holds an identifier is never prompted', () => {
   it('presence of a non-empty value short-circuits the whole gate', () => {
     expect(SCAN).toContain('const hasIdentifier =')
-    expect(SCAN).toContain('if (!hasIdentifier)')
+    expect(SCAN).toContain('if (!hasIdentifier && !(skipIdentifier && !identifierValue)) {')
   })
 
   it('the value is read from the REGISTRATION, not the request', () => {
     expect(SCAN).toMatch(/reg as \{ identifier\?: \{ value\?: string \} \}/)
   })
 
-  it('an event with identifiers disabled is untouched by any of this', () => {
-    // Events that do not issue identifiers must behave exactly as before.
-    expect(SCAN).toContain('if (idConfig.enabled)')
+  it('an event with identifiers disabled — or never configured — is untouched by any of this', () => {
+    // Events that do not issue identifiers must behave exactly as before. RD-CHECKIN-ID-OPT-01: an
+    // event that never SET UP identifiers resolves to the default config (enabled: true), so the
+    // gate must also require a STORED config — otherwise every check-in asked for one.
+    expect(SCAN).toContain('if (idConfigured && idConfig.enabled)')
   })
 })
 
@@ -174,7 +176,7 @@ describe('5 — QR, manual and lookup share one implementation', () => {
     // ATTENDEE INFORMATION and writes nothing); confirming still funnels into the
     // one unchanged `submitCode`. The property under test — a single shared
     // implementation for QR, manual and lookup — is unchanged.
-    expect(OPS).toContain('const submitCode = useCallback(async (rawCode: string, identifierValue?: string)')
+    expect(OPS).toContain('const submitCode = useCallback(async (rawCode: string, identifierValue?: string, skipIdentifier = false)')
     expect(OPS).toContain('onCode={resolveAttendee}')            // QR
     expect(OPS).toContain('void resolveAttendee(manualCode)')     // manual
     expect(OPS).toContain('onSelect={row => void resolveAttendee(row.ticketCode)}')   // lookup
@@ -216,7 +218,7 @@ describe('6 — cancelling the prompt does not admit anyone', () => {
       const closeAt = src.indexOf('/>', promptAt)
       expect(closeAt, name).toBeGreaterThan(promptAt)
       const seg = src.slice(promptAt, closeAt)
-      expect(seg, name).toMatch(/IDENTIFIER_REQUIRED|required/)
+      expect(seg, name).toContain("title: 'Check-in cancelled', detail: 'The attendee was not checked in.'")
     }
   })
 
@@ -229,28 +231,23 @@ describe('6 — cancelling the prompt does not admit anyone', () => {
   })
 })
 
-// ─── 7. Offline must refuse rather than mint a value ────────────────────────
+// ─── 7. Offline never mints a value (RD-CHECKIN-ID-OPT-02: optional) ─────────
 
 describe('7 — offline cannot assign an identifier', () => {
-  it('an attendee WITHOUT one is refused offline', () => {
-    expect(OFFLINE).toContain('IDENTIFIER_REQUIRES_ONLINE')
-    expect(OFFLINE).toContain('!att.hasIdentifier')
+  it('an attendee WITHOUT one is admitted offline WITHOUT one (identifiers are optional)', () => {
+    expect(OFFLINE).not.toContain('IDENTIFIER_REQUIRES_ONLINE')
+    expect(OFFLINE).not.toContain('identifierRequiredRef')
   })
 
-  it('an attendee WITH one still checks in offline exactly as before', () => {
-    // The refusal is gated on BOTH conditions; a holder is unaffected.
-    expect(OFFLINE).toContain('identifierRequiredRef.current && !att.hasIdentifier')
-  })
-
-  it('the refusal happens BEFORE anything is queued or marked locally', () => {
-    const refuse = OFFLINE.indexOf('IDENTIFIER_REQUIRES_ONLINE')
-    expect(refuse).toBeLessThan(OFFLINE.indexOf('markLocalCheckedIn(code'))
-    expect(refuse).toBeLessThan(OFFLINE.indexOf('enqueue({'))
+  it('no value is ever sent or minted offline; the replay skips the prompt', () => {
+    expect(OFFLINE).not.toContain('identifierValue')
+    expect(OFFLINE).not.toContain('allocateIdentifier')
+    expect(OFFLINE).toContain('skipIdentifier: true')
   })
 
   it('the cache carries presence, and the event-level requirement, to decide it', () => {
     expect(CACHE).toContain('hasIdentifier:')
-    expect(CACHE).toContain('identifierRequired: idConfig.enabled')
+    expect(CACHE).toContain('identifierRequired: idConfigured && idConfig.enabled')
   })
 
   it('the cache stores only the BOOLEAN, never the value', () => {
