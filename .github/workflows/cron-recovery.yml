@@ -108,7 +108,12 @@ jobs:
       # Idempotent: each threshold is claimed in a Firestore transaction that re-decides from
       # the stored state, so an overlapping run sends nothing. continue-on-error like every
       # sibling here: a missed notification must not fail the whole recovery workflow.
+      # HELD BACK for the initial release (2026-10-13, owner): the first sweep may notify
+      # existing organizers. Skipped on scheduled AND manual runs until the repository
+      # variable CAPACITY_ALERTS_ENABLED is set to 'true' (Settings → Secrets and variables
+      # → Actions → Variables). Unset or any other value = skipped. Nothing else changes.
       - name: capacity-alerts
+        if: ${{ vars.CAPACITY_ALERTS_ENABLED == 'true' }}
         continue-on-error: true
         run: |
           curl -sS -X POST "$CRON_BASE_URL/api/cron/capacity-alerts" \

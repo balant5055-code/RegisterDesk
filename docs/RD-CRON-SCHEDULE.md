@@ -58,6 +58,10 @@ treat every cadence as "at most this often".
   on time left over in `print-generation`, whose inline sweep stays as a fast path. A round of a job
   that is still running is never settled, however old; such rounds are counted as `staleActive`.
   A round that fails to settle is retried first on the next run. It never charges or refunds.
+- **`capacity-alerts`** — listed in Group B, but **held back since 2026-10-13**: its step runs only
+  when the repository Actions variable `CAPACITY_ALERTS_ENABLED` is exactly `true`. Unset or any
+  other value skips it on both scheduled and manual runs, so no capacity-threshold notification is
+  sent until an owner sets that variable (Settings → Secrets and variables → Actions → Variables).
 
 ## Differences from the earlier (unshipped) plan
 
