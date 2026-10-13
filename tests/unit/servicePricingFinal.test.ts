@@ -46,7 +46,7 @@ describe('Business Configuration — the approved values', () => {
     expect([S.whatsapp.unitPricePaise, S.certificates.unitPricePaise, S.media.unitPricePaise]).toEqual([20, 150, 160])
     expect([S.whatsapp.gstRatePercent, S.certificates.gstRatePercent, S.media.gstRatePercent]).toEqual([18, 18, 18])
     const r = resolveServiceCatalogFromStored(undefined)
-    expect(r.state).toEqual({ whatsapp: 'available', certificates: 'available', media: 'available' })
+    expect(r.state).toEqual({ whatsapp: 'available', certificates: 'available', media: 'available', print_badges: 'not_released' })   // RD-PRINT-BILL-P1: print_badges is catalog-only and not for sale
     expect([r.config.whatsapp.unitPricePaise, r.config.certificates.unitPricePaise, r.config.media.unitPricePaise]).toEqual([20, 150, 160])
   })
   it('a price a Super Admin SAVED still wins over the code default (production needs its stored value edited)', () => {

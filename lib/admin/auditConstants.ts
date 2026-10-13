@@ -84,6 +84,15 @@ export const AUDIT_ACTIONS = [
   'license_coupon.paused',
   'license_coupon.resumed',
   'license_coupon.archived',
+  // RD-PRINT-BILL-P3 — ID badge purchase coupons (badgeCoupons/*), Super Admin only, reason required.
+  'badge_coupon.created',
+  'badge_coupon.updated',
+  'badge_coupon.cloned',
+  'badge_coupon.paused',
+  'badge_coupon.resumed',
+  'badge_coupon.archived',
+  // RD-PRINT-BILL-P4 — a FULL refund of a badge purchase releases the organizer's count once.
+  'badge_coupon.organizer_usage_released',
   // GA-2 S4 — Operations Center (NOC): cancel reuses the kernel cancelJob()
   'job.cancelled',
   // GA-7E S1 — admin support workspace (resend on an attendee's behalf)
@@ -113,6 +122,18 @@ export const AUDIT_ACTIONS = [
   // Also recorded in licenseHistory; mirrored here so it appears in the admin audit log.
   'commercial_terms.set',
   'commercial_terms.cleared',
+  // RD-PRINT-BILL-P2 — per-event print badge billing (events/{slug}.printBadgeCommercial; also in
+  // licenseHistory) and the GLOBAL badge settings (Business Configuration), audited with a reason.
+  'print_badge_commercial.set',
+  'print_badge_commercial.cleared',
+  'print_badge_settings.updated',
+  // RD-PRINT-BILL-P4 — the RECORDED accountant approval of the badge GST rate + tax treatment.
+  'print_badge_tax.approval_recorded',
+  'print_badge_tax.approval_revoked',
+  // RD-PRINT-BILL-P7 — Super Admin READS of badge billing evidence (order detail, one event's billing).
+  // Lists are not audited; these two detail views are, with only the ids that were viewed.
+  'print_badge_billing.order_viewed',
+  'print_badge_billing.event_billing_viewed',
   // RD-PHASE4-S4 — financial controls & audit logging.
   'settlement.requested',                 // organizer request (destination snapshot)
   'finance.auto_release',                 // the automatic (cron) fund release run
@@ -152,6 +173,7 @@ export const AUDIT_ENTITY_TYPES = [
   'billing',
   'license',
   'license_coupon',
+  'badge_coupon',
   'job',
   'registration',
   'certificate',
@@ -177,10 +199,10 @@ export type AdminAuditEntityType = typeof AUDIT_ENTITY_TYPES[number]
  */
 export const FINANCIAL_AUDIT_ENTITY_TYPES: readonly AdminAuditEntityType[] = [
   'settlement', 'finance', 'payout_profile', 'failed_refund', 'donation', 'clawback', 'billing',
-  'license', 'license_coupon', 'platform_settings', 'media_credit_refund', 'media_credit_grant',
+  'license', 'license_coupon', 'badge_coupon', 'platform_settings', 'media_credit_refund', 'media_credit_grant',
   'audit_failure', 'wallet_topup', 'wallet_service_request',
 ]
-const FINANCIAL_ACTION_PREFIXES = ['registration.refunded', 'commercial_terms.', 'pricing_override.', 'settlement.', 'finance.', 'license.', 'license_coupon.', 'clawback.', 'donation.', 'media_credit']
+const FINANCIAL_ACTION_PREFIXES = ['registration.refunded', 'commercial_terms.', 'pricing_override.', 'settlement.', 'finance.', 'license.', 'license_coupon.', 'badge_coupon.', 'print_badge_', 'clawback.', 'donation.', 'media_credit']
 
 export function isFinancialAuditEntry(row: { entityType?: unknown; action?: unknown }): boolean {
   if (typeof row.entityType === 'string' && (FINANCIAL_AUDIT_ENTITY_TYPES as readonly string[]).includes(row.entityType)) return true

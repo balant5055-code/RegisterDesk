@@ -41,9 +41,12 @@ import { checkPhotoPurchase, paidPhotoCapacity } from '@/lib/licensing/photoCapa
 import { draftFacts, type DraftFacts } from './eventWalletService'
 import { effectiveLifecycleStatus } from '@/lib/events/listingTabs'
 import { liveEventBelongsTo } from '@/lib/events/liveEventRef'
+import { isConsistentBadgeSnapshot, type BadgePurchaseSnapshot } from '@/lib/licensing/printBadgePurchase/pricing'
+import { badgeOrderRef, badgeOrderRefundsRef, BADGE_COUPON_RELEASES_SUBCOLLECTION } from '@/lib/licensing/printBadgePurchase/orderDoc'
+import { badgeCouponRef, badgeCouponOrganizerCounterRef } from '@/lib/licensing/badgeCoupons/store'
 import {
   SERVICE_REQUESTS_COLLECTION, REQUESTABLE_SERVICES, isLedgerService,
-  requestEligibility, valueUnits, destinationProblem, decisionTransition, targetStatus,
+  requestEligibility, valuationFor, destinationProblem, decisionTransition, targetStatus,
   isClosedLifecycle, eventClosedAtMs, refundDeadlineMs, withinRefundWindow, refundWindowSnapshot, refundedAmountProblem,
   type RefundWindowSnapshot, type CapacityRefundRecord,
   type RequestableService, type LedgerService, type ServiceRequestKind, type ServiceRequestStatus, type ServiceRequestAction,
@@ -94,6 +97,10 @@ interface RequestDoc {
   refundedAmountPaise?: number | null
   /** S4 — registration-capacity refunds, written once in the approval transaction. */
   capacity?: CapacityRefundRecord
+  /** RD-PRINT-BILL-P4 — badge refunds only, written once at approval: the exact per-order parts the
+   *  approved amount was capped by, and that cap. Processing attributes the refunded money to them. */
+  badgeAllocation?: ValuationPart[]
+  badgeCapPaise?: number
   createdAt?: unknown; updatedAt?: unknown
 }
 
@@ -145,9 +152,9 @@ const requestsForEventQuery = (draftId: string) => col().where('sourceDraftId', 
 
 /** Aggregates are read once before the transaction (the transaction re-checks the rest; a photo
  *  refund also re-counts stored photos inside it — see approve). */
-interface Aggregates { usage: Record<'whatsapp' | 'certificates', number | null>; storedPhotos: number | null }
+interface Aggregates { usage: Record<'whatsapp' | 'certificates' | 'print_badges', number | null>; storedPhotos: number | null }
 
-async function usageConsumed(draftId: string, service: 'whatsapp' | 'certificates'): Promise<number | null> {
+async function usageConsumed(draftId: string, service: 'whatsapp' | 'certificates' | 'print_badges'): Promise<number | null> {
   try {
     const snap = await ledgerRef(draftId).collection(ALLOWANCE_USAGE_SUBCOLLECTION)
       .where('service', '==', service).aggregate({ q: AggregateField.sum('quantity') }).get()
@@ -158,11 +165,11 @@ async function usageConsumed(draftId: string, service: 'whatsapp' | 'certificate
 // in-flight uploads). The same query the gate re-counts inside its transaction.
 const storedPhotosQuery = (uid: string, draftId: string) => photoCapacityUsageQuery(uid, draftId).count()
 async function readAggregates(uid: string, draftId: string): Promise<Aggregates> {
-  const [wa, cert, stored] = await Promise.all([
-    usageConsumed(draftId, 'whatsapp'), usageConsumed(draftId, 'certificates'),
+  const [wa, cert, badges, stored] = await Promise.all([
+    usageConsumed(draftId, 'whatsapp'), usageConsumed(draftId, 'certificates'), usageConsumed(draftId, 'print_badges'),
     storedPhotosQuery(uid, draftId).get().then(s => s.data().count).catch(() => null),
   ])
-  return { usage: { whatsapp: wa, certificates: cert }, storedPhotos: stored }
+  return { usage: { whatsapp: wa, certificates: cert, print_badges: badges }, storedPhotos: stored }
 }
 
 interface EventRecords {
@@ -377,9 +384,39 @@ function capacityState(rec: EventRecords): ServiceState {
   return s
 }
 
+// ═══ RD-PRINT-BILL-P4 · ID badges ═══════════════════════════════════════════════════════════════
+// Lots come ONLY from PAID badge purchase orders (purpose 'print_badges'), each valued at the NET
+// amount actually paid after its coupon — never the gross. They are kept apart from lineLots (badge
+// orders carry no serviceItems), and valued with valueUnitsExact (valuationFor), so other services'
+// valuation is unchanged. Usage must agree between the ledger and the usage records, as for messaging.
+const badgeOrdersOf = (rec: EventRecords) => rec.orders.filter(o => o.status === 'paid' && o.purpose === 'print_badges')
+function badgeState(rec: EventRecords): ServiceState {
+  const l = ledgerLine(rec.ledger, 'print_badges')
+  const orders = badgeOrdersOf(rec)
+  const lots: PurchaseLot[] = orders.filter(o => isConsistentBadgeSnapshot(o.badgePurchase)).map(o => {
+    const bp = o.badgePurchase as BadgePurchaseSnapshot
+    return { orderId: o.orderId, at: orderAt(o), quantity: bp.quantity, totalPaise: bp.netPaise }
+  })
+  const s = base('print_badges')
+  s.lots = lots; s.paidPaise = lots.reduce((n, x) => n + x.totalPaise, 0)
+  s.purchased = l.purchased; s.carriedIn = l.carriedIn; s.carriedOut = l.carriedOut; s.refunded = l.refunded
+  s.used = l.consumed; s.remaining = availableUnits(l)
+  s.applicable = l.purchased > 0 || l.carriedIn > 0 || orders.length > 0
+  if (!s.applicable) { s.notApplicableReason = 'No ID badges were bought for this event.'; return s }
+  s.ownUnused = Math.max(0, Math.trunc(l.purchased - l.consumed - l.carriedOut - l.refunded))
+  s.usedFront = Math.min(l.consumed, l.purchased); s.removedBack = l.carriedOut + l.refunded
+  const usage = rec.agg.usage.print_badges
+  if (rec.ledgerOwnerProblem) s.problem = OWNER_PROBLEM
+  else if (lots.length !== orders.length || lots.reduce((n, x) => n + x.quantity, 0) !== l.purchased) s.problem = { code: 'LEDGER_UNRECONCILED', reason: 'The purchased badges do not match the paid badge orders — requires Super Admin review.' }
+  else if (usage === null) s.problem = { code: 'USAGE_UNVERIFIABLE', reason: 'Usage could not be verified right now. Try again later.' }
+  else if (usage !== l.consumed) s.problem = { code: 'LEDGER_UNRECONCILED', reason: 'The used badges do not match the usage records — requires Super Admin review.' }
+  return s
+}
+
 function stateOf(rec: EventRecords, service: RequestableService): ServiceState {
   if (service === 'registrations') return capacityState(rec)
   if (service === 'media') return photoState(rec)
+  if (service === 'print_badges') return badgeState(rec)
   return messagingState(rec, service)
 }
 
@@ -404,7 +441,9 @@ export async function getEventRequests(uid: string, draftId: string, nowMs: numb
       refund: eligibilityOf(rec, 'refund', state, { windowAt: nowMs }),
       carryForward: eligibilityOf(rec, 'carry_forward', state, {}),
     }
-  })
+  // RD-PRINT-BILL-P4 — ID badges appear only on an event that actually has badge units (no empty
+  // row on every event while badge purchases are unreleased; the organizer UI is Phase 6).
+  }).filter(v => v.state.service !== 'print_badges' || v.state.applicable)
   // Destinations: the workspace's own events that can still use units (bounded: newest 200 drafts).
   let destinations: { draftId: string; name: string }[] = []
   if (closed) {
@@ -595,7 +634,7 @@ export async function listAdminRequests(opts: AdminRequestFilters) {
 
 /** The cap for exactly `quantity` units of a request, from the CURRENT records. */
 function capFor(rec: EventRecords, s: ServiceState, quantity: number, exceptId: string): { capPaise: number; parts: ValuationPart[] } | null {
-  const v = valueUnits(s.lots, s.usedFront, s.removedBack, quantity)
+  const v = valuationFor(s.service)(s.lots, s.usedFront, s.removedBack, quantity)
   if (!v) return null
   return { capPaise: Math.max(0, Math.min(v.valuePaise, s.paidPaise - approvedPaiseOf(rec, s.service, exceptId))), parts: v.parts }
 }
@@ -660,6 +699,97 @@ function stageDecisionAudit(txn: Transaction, adminUid: string, id: string, r: R
   })
 }
 
+// ═══ RD-PRINT-BILL-P4 · badge refund processing (inside the mark_processed transaction) ════════════
+// A badge refund's money is attributed to the paid badge orders its approval was valued from
+// (`badgeAllocation`, exact per-order parts). Processed in full (refunded = approved = the verified
+// cap), each order gets exactly its part; anything less is attributed proportionally (rounded down),
+// so a short refund can never complete an order. Per order, badgeOrderRefunds/{orderId} keeps one
+// entry per processed REQUEST (keyed by request id ⇒ a replay adds nothing) and the running totals.
+// When an order's processed units AND money reach its full quantity AND net paid (> 0), its bound
+// coupon's ORGANIZER count is released once: badgeCoupons/{CODE}/releases/{orderId} is CREATED (a
+// second release cannot exist) and the organizer counter goes down by 1. The coupon's global
+// `currentUses` is never touched. Partial refunds release nothing. No money moves here.
+interface BadgeRefundSummary { orderId: string; units: number; paise: number; fullyRefunded: boolean; couponReleased: boolean }
+
+async function stageBadgeRefundProcessing(txn: Transaction, a: {
+  adminUid: string; requestId: string; request: RequestDoc; refundedPaise: number; externalReference: string; reason: string
+}): Promise<BadgeRefundSummary[]> {
+  const r = a.request
+  const alloc = Array.isArray(r.badgeAllocation) ? r.badgeAllocation.filter(p => p && typeof p.orderId === 'string' && int(p.units) > 0) : []
+  if (alloc.length === 0 || typeof r.badgeCapPaise !== 'number') {
+    throw new ServiceRequestError(409, 'BADGE_ALLOCATION_MISSING', 'This badge refund has no recorded allocation — it requires Super Admin review.')
+  }
+  const ids = alloc.map(p => p.orderId)
+  if (new Set(ids).size !== ids.length || ids.some(x => !ID.test(x))) throw new ServiceRequestError(409, 'BADGE_ALLOCATION_INVALID', 'This badge refund’s allocation is invalid.')
+  const valueSum = alloc.reduce((n, p) => n + int(p.valuePaise), 0)
+  const full = a.refundedPaise === r.approvedAmountPaise && r.approvedAmountPaise === r.badgeCapPaise && valueSum === r.badgeCapPaise
+  const attributed = alloc.map(p => full ? int(p.valuePaise) : valueSum > 0 ? Math.floor((a.refundedPaise * int(p.valuePaise)) / valueSum) : 0)
+
+  // ── reads (1): the orders and their trackers ──
+  const [orderSnaps, trackerSnaps] = await Promise.all([
+    Promise.all(ids.map(x => txn.get(badgeOrderRef(x)))),
+    Promise.all(ids.map(x => txn.get(badgeOrderRefundsRef(x)))),
+  ])
+  const plans = alloc.map((p, i) => {
+    const o = orderSnaps[i].exists ? orderSnaps[i].data() as Rec : undefined
+    const bp = o?.badgePurchase
+    if (!o || o.purpose !== 'print_badges' || o.status !== 'paid' || o.organizerUid !== r.organizerUid || o.eventId !== r.sourceDraftId || !isConsistentBadgeSnapshot(bp)) {
+      throw new ServiceRequestError(409, 'BADGE_ORDER_INVALID', `Badge order ${p.orderId} cannot take this refund — requires Super Admin review.`)
+    }
+    const t = trackerSnaps[i].exists ? trackerSnaps[i].data() as Rec : {}
+    const processed = (t.processed && typeof t.processed === 'object' ? t.processed : {}) as Record<string, unknown>
+    const replay = processed[a.requestId] !== undefined
+    const units = replay ? int(t.processedUnits) : int(t.processedUnits) + int(p.units)
+    const paise = replay ? int(t.processedPaise) : int(t.processedPaise) + attributed[i]
+    if (units > bp.quantity || paise > bp.netPaise) {
+      throw new ServiceRequestError(409, 'BADGE_REFUND_EXCEEDS', `Badge order ${p.orderId} would be refunded beyond what was bought or paid — requires Super Admin review.`)
+    }
+    const fullyRefunded = bp.netPaise > 0 && units === bp.quantity && paise === bp.netPaise
+    const code = bp.coupon?.code ?? null
+    return { orderId: p.orderId, part: p, attributed: attributed[i], replay, units, paise, fullyRefunded, code, bp, alreadyReleased: t.couponReleased === true }
+  })
+  // ── reads (2): release record + organizer counter, only for orders that now qualify ──
+  const releasing = plans.filter(x => x.fullyRefunded && x.code && !x.alreadyReleased)
+  const releaseSnaps = await Promise.all(releasing.map(x => txn.get(badgeCouponRef(x.code!).collection(BADGE_COUPON_RELEASES_SUBCOLLECTION).doc(x.orderId))))
+  const counterSnaps = await Promise.all(releasing.map(x => txn.get(badgeCouponOrganizerCounterRef(x.code!, r.organizerUid))))
+
+  // ── writes ──
+  const at = new Date().toISOString()
+  const released = new Set<string>()
+  releasing.forEach((x, i) => {
+    if (releaseSnaps[i].exists) { released.add(x.orderId); return }            // released before: mark only
+    const count = counterSnaps[i].exists ? (counterSnaps[i].data() as Rec).count : undefined
+    const canDecrement = typeof count === 'number' && Number.isInteger(count) && count >= 1
+    txn.create(releaseSnaps[i].ref, {
+      orderId: x.orderId, organizerUid: r.organizerUid, eventId: r.sourceDraftId, code: x.code,
+      requestId: a.requestId, releasedBy: a.adminUid, counterBefore: typeof count === 'number' ? count : null,
+      counterDecremented: canDecrement, releasedAt: FieldValue.serverTimestamp(),
+    })
+    if (canDecrement) txn.set(counterSnaps[i].ref, { count: FieldValue.increment(-1), updatedAt: FieldValue.serverTimestamp() }, { merge: true })
+    stageAdminAudit(txn, {
+      adminUid: a.adminUid, actorRole: 'super_admin', action: 'badge_coupon.organizer_usage_released',
+      entityType: 'badge_coupon', entityId: x.code!, reason: a.reason,
+      metadata: { orderId: x.orderId, organizerUid: r.organizerUid, requestId: a.requestId, counterDecremented: canDecrement, globalUsesUnchanged: true },
+      before: { organizerCount: typeof count === 'number' ? count : null },
+      after: { organizerCount: canDecrement ? (count as number) - 1 : (typeof count === 'number' ? count : null) },
+      correlation: { orderId: x.orderId, requestId: a.requestId },
+    })
+    released.add(x.orderId)
+  })
+  for (const x of plans) {
+    if (x.replay && !released.has(x.orderId)) continue
+    txn.set(badgeOrderRefundsRef(x.orderId), {
+      orderId: x.orderId, organizerUid: r.organizerUid, eventId: r.sourceDraftId,
+      quantity: x.bp.quantity, netPaise: x.bp.netPaise, couponCode: x.code,
+      ...(x.replay ? {} : { processed: { [a.requestId]: { units: int(x.part.units), paise: x.attributed, externalReference: a.externalReference, at } } }),
+      processedUnits: x.units, processedPaise: x.paise, fullyRefunded: x.fullyRefunded,
+      ...(released.has(x.orderId) ? { couponReleased: true } : {}),
+      updatedAt: FieldValue.serverTimestamp(),
+    }, { merge: true })
+  }
+  return plans.map(x => ({ orderId: x.orderId, units: x.units, paise: x.paise, fullyRefunded: x.fullyRefunded, couponReleased: released.has(x.orderId) || x.alreadyReleased }))
+}
+
 export async function decideServiceRequest(args: {
   adminUid: string; id: string; action: ServiceRequestAction; reason: string
   approvedAmountPaise?: number | null; externalReference?: string | null
@@ -718,7 +848,12 @@ export async function decideServiceRequest(args: {
       const refundedProblem = refundedAmountProblem(args.refundedAmountPaise, r.approvedAmountPaise)
       if (refundedProblem) throw new ServiceRequestError(400, 'REFUNDED_AMOUNT_INVALID', refundedProblem)
       const refunded = args.refundedAmountPaise as number
-      stageDecisionAudit(txn, adminUid, id, r, 'wallet_service_request.processed', reason, { approvedAmountPaise: r.approvedAmountPaise, refundedAmountPaise: refunded, externalReference: ref })
+      // RD-PRINT-BILL-P4 — badge refunds: per-order refund tracking + the organizer coupon release.
+      // Reads happen here, before the first write of this branch.
+      const badge = r.service === 'print_badges' && r.kind === 'refund'
+        ? await stageBadgeRefundProcessing(txn, { adminUid, requestId: id, request: r, refundedPaise: refunded, externalReference: ref, reason })
+        : null
+      stageDecisionAudit(txn, adminUid, id, r, 'wallet_service_request.processed', reason, { approvedAmountPaise: r.approvedAmountPaise, refundedAmountPaise: refunded, externalReference: ref, ...(badge ? { badgeOrders: badge } : {}) })
       txn.update(reqRef, {
         status: 'processed', externalReference: ref, refundedAmountPaise: refunded,
         processed: { by: adminUid, reason, externalReference: ref, refundedAmountPaise: refunded, at: FieldValue.serverTimestamp() },
@@ -790,6 +925,8 @@ export async function decideServiceRequest(args: {
       txn.update(reqRef, {
         status: 'approved', approvedAmountPaise: amt,
         ...(capacity ? { capacity } : {}),
+        // RD-PRINT-BILL-P4 — the exact per-order parts behind this cap (badge refunds only).
+        ...(r.service === 'print_badges' ? { badgeAllocation: cap.parts, badgeCapPaise: cap.capPaise } : {}),
         decision: { action: 'approved', by: adminUid, reason, at: FieldValue.serverTimestamp() },
         history: FieldValue.arrayUnion(entry('approved', `${reason} (₹${(amt / 100).toFixed(2)} approved; not yet refunded${capacity ? ` · capacity ${capacity.before} → ${capacity.after}` : ''})`)),
         updatedAt: FieldValue.serverTimestamp(),
@@ -916,7 +1053,7 @@ export async function reconcileServiceRefunds(opts: { cursor?: string | null; li
       .filter(x => x.kind === 'refund' && x.service === g.service && (x.status === 'approved' || x.status === 'processed'))
       .reduce((n, x) => n + x.quantity, 0)
     const ledger = ledgerSnap.exists ? ledgerSnap.data() as ServiceLedgerDoc : undefined
-    const ledgerRefunded = ledgerLine(ledger, g.service as 'whatsapp' | 'certificates' | 'media').refunded
+    const ledgerRefunded = ledgerLine(ledger, g.service as 'whatsapp' | 'certificates' | 'media' | 'print_badges').refunded
     if (ledger && ledger.organizerUid !== g.organizerUid) {
       findings.push({ organizerUid: g.organizerUid, sourceDraftId: g.draftId, service: g.service, requestId: null, code: 'LEDGER_REFUNDED_MISMATCH', confidence: 'confirmed', detail: { note: 'The ledger belongs to another organizer.' } })
     } else if (sum !== ledgerRefunded) {

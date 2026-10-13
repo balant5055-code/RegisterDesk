@@ -19,7 +19,10 @@ import {
   type PrintCanvas, type CanvasPreset, type CanvasUnit, type CanvasOrientation,
 } from '@/lib/printAssets/types'
 import type { EventListItem } from '@/app/api/organizer/events/route'
+import { sameCanvas } from '@/lib/printAssets/cardDimensions'
 import type { ListPrintTemplatesResponse, CreatePrintTemplateResponse } from '@/app/api/organizer/print-templates/route'
+import { useEventContext } from '@/components/dashboard/EventContextProvider'
+import { BadgeBalanceCard } from '@/components/print-assets/badges/BadgeBalanceCard'
 
 const STATUS_TONE: Record<PrintTemplateStatus, string> = {
   draft:     'bg-muted text-muted-foreground',
@@ -65,6 +68,9 @@ function buildCanvas(f: FormState): PrintCanvas {
 }
 
 export function PrintAssetsClient() {
+  // RD-PRINT-BILL-P6 — the ID-badge balance of the event chosen in the dashboard's event selector
+  // (its published slug comes from the ownership-checked event list, never a draft pointer).
+  const { selectedEvent } = useEventContext()
   const { showToast } = useToast()
   const router = useRouter()
   const tokenRef = useRef('')
@@ -126,9 +132,14 @@ export function PrintAssetsClient() {
       const headers = await authed()
       const canvas = buildCanvas(form)
       if (form.id) {
+        // RD-PRINT-AUDIT · send the card size ONLY when it changed. A metadata-only edit must not
+        // re-validate (a legacy size outside today's limits would refuse the rename) nor commit a
+        // new "resize" version.
+        const original = templates.find(t => t.id === form.id)
+        const canvasChanged = !original || !sameCanvas(original.canvas, canvas)
         const res = await fetch(`/api/organizer/print-templates/${form.id}`, {
           method: 'PATCH', headers,
-          body: JSON.stringify({ name: form.name.trim(), description: form.description.trim(), assetType: form.assetType, status: form.status, canvas }),
+          body: JSON.stringify({ name: form.name.trim(), description: form.description.trim(), assetType: form.assetType, status: form.status, ...(canvasChanged ? { canvas } : {}) }),
         })
         const data = await res.json() as { success: boolean; error?: string; template?: PrintTemplate }
         if (!res.ok || !data.success) { showToast(data.error ?? 'Save failed', 'error'); return }
@@ -190,6 +201,8 @@ export function PrintAssetsClient() {
           </div>
         }
       />
+
+      {selectedEvent?.slug && <BadgeBalanceCard slug={selectedEvent.slug} draftId={selectedEvent.draftId} />}
 
       {/* Filters */}
       <div className="flex flex-wrap items-center gap-3 rounded-2xl border border-border bg-card p-3">

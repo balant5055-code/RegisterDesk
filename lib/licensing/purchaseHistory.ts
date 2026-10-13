@@ -37,6 +37,8 @@ export async function readPurchaseHistory(input: { draftId: string; slug: string
     seen.add(d.id)
     const o = d.data() as Record<string, unknown>
     if (o.status !== 'paid' || o.organizerUid !== input.organizerUid) continue
+    // RD-PRINT-BILL-P4 — an ID-badge purchase is not part of the licence/services purchase history.
+    if (o.purpose === 'print_badges') continue
     const cc = (o.capacityChange ?? null) as { operation?: string; capacity?: number; previousCapacity?: number | null } | null
     const items = Array.isArray(o.serviceItems) ? o.serviceItems as Array<{ service: ServiceKind; quantity: number }> : []
     const purpose = typeof o.purpose === 'string' ? o.purpose : ''

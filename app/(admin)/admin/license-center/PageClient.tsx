@@ -27,6 +27,8 @@ import {
 import type { PillTone } from '@/components/admin'
 import { useConfirm } from '@/components/ui/ConfirmDialog'
 import { Bars, HBars } from '@/components/analytics/Charts'
+import { BadgeCouponsWorkspace } from '@/components/admin/BadgeCouponsWorkspace'
+import { BadgeAdminWorkspace } from '@/components/admin/printBadges/BadgeAdminWorkspace'
 import type {
   LicenseRow, LicenseListResponse, LicenseDetail,
   LicenseAdminActionType, LicenseAdminActionRequest,
@@ -68,11 +70,15 @@ const HEALTH_DOT: Record<HealthLevel, string> = {
   green: 'bg-emerald-500', yellow: 'bg-amber-500', red: 'bg-red-500', neutral: 'bg-muted-foreground/40',
 }
 
-type TabKey = 'overview' | 'licenses' | 'coupons' | 'business' | 'governance'
+type TabKey = 'overview' | 'licenses' | 'coupons' | 'badge-coupons' | 'id-badges' | 'business' | 'governance'
 const TABS: { key: TabKey; label: string }[] = [
   { key: 'overview',   label: 'Overview' },
   { key: 'licenses',   label: 'Licenses' },
   { key: 'coupons',    label: 'Coupons' },
+  // RD-PRINT-BILL-P3 — ID-badge purchase coupons: a separate domain from licence coupons.
+  { key: 'badge-coupons', label: 'Badge coupons' },
+  // RD-PRINT-BILL-P7 — ID-badge orders, suspicious payments, reconciliation and the tax approval (read-only).
+  { key: 'id-badges', label: 'ID badges' },
   { key: 'business',   label: 'Business' },
   { key: 'governance', label: 'Governance' },
 ]
@@ -127,6 +133,8 @@ export default function LicenseCenterPage() {
       {tab === 'overview' && (overview ? <OverviewWorkspace o={overview} onGoto={setTab} /> : !overviewErr && <CenterSpin />)}
       {tab === 'licenses' && <LicensesWorkspace />}
       {tab === 'coupons' && <CouponsWorkspace />}
+      {tab === 'badge-coupons' && <BadgeCouponsWorkspace />}
+      {tab === 'id-badges' && <BadgeAdminWorkspace />}
       {tab === 'business' && <BusinessWorkspace />}
       {tab === 'governance' && <GovernanceWorkspace />}
     </div>
@@ -166,8 +174,8 @@ function OverviewWorkspace({ o, onGoto }: { o: LicenseCenterOverview; onGoto: (t
         <Kpi icon={BadgeCheck} label="Active" value={num(o.licenses.active)} />
         <Kpi icon={CalendarX} label="Expired" value={num(o.licenses.expired)} />
         <Kpi icon={Zap} label="Consumed" value={num(o.licenses.consumed)} />
-        <Kpi icon={IndianRupee} label="Revenue" value={rupees(o.revenue.licenseRevenuePaise)} />
-        <Kpi icon={Percent} label="Discount" value={rupees(o.revenue.discountGivenPaise)} />
+        <Kpi icon={IndianRupee} label="Revenue" value={o.revenue.licenseRevenuePaise === null ? 'Unavailable' : rupees(o.revenue.licenseRevenuePaise)} />
+        <Kpi icon={Percent} label="Discount" value={o.revenue.discountGivenPaise === null ? 'Unavailable' : rupees(o.revenue.discountGivenPaise)} />
         <Kpi icon={Gift} label="Redemptions" value={num(o.revenue.couponRedemptions)} />
       </div>
 
@@ -686,10 +694,10 @@ function BusinessWorkspace() {
   return (
     <div className="space-y-4">
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
-        <Kpi icon={IndianRupee} label="License revenue" value={rupees(ls.revenuePaise)} />
-        <Kpi icon={BadgeCheck} label="Paid" value={num(ls.paidCount)} />
-        <Kpi icon={Undo2} label="Refunded" value={num(ls.refundedCount)} />
-        <Kpi icon={Percent} label="Discount given" value={rupees(ls.discountGivenPaise)} />
+        <Kpi icon={IndianRupee} label="License revenue" value={ls.revenuePaise === null ? 'Unavailable' : rupees(ls.revenuePaise)} />
+        <Kpi icon={BadgeCheck} label="Paid" value={ls.paidCount === null ? 'Unavailable' : num(ls.paidCount)} />
+        <Kpi icon={Undo2} label="Refunded" value={ls.refundedCount === null ? 'Unavailable' : num(ls.refundedCount)} />
+        <Kpi icon={Percent} label="Discount given" value={ls.discountGivenPaise === null ? 'Unavailable' : rupees(ls.discountGivenPaise)} />
         <Kpi icon={Gift} label="Redemptions" value={num(ls.couponRedemptions)} />
         <Kpi icon={IndianRupee} label="Platform gross" value={rupees(data.platform.lifetimeGrossPaise)} />
       </div>

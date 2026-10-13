@@ -33,15 +33,17 @@ describe('forced first-login password change — enforced server-side', () => {
   })
 })
 
-describe('print downloads — same gate as every sibling print route', () => {
+// RD-PRINT-P0 tightened this from `authorizeAnyWorkspace` (which only refused gate roles)
+// to the `certificates` permission, header token only — see printPhase0Contracts.test.ts.
+describe('print downloads — gate staff refused via the certificates gate', () => {
   for (const f of [
     'app/api/organizer/print-jobs/[jobId]/items/[registrationId]/download/route.ts',
     'app/api/organizer/print-packages/[jobId]/download/route.ts',
   ]) {
     it(f, () => {
       const src = read(f)
-      expect(src).toContain('const ctx = await authorizeAnyWorkspace(authReq)')
-      expect(src).toContain('if (!ctx.ok) return NextResponse.json({ error: ctx.error }, { status: ctx.status })')
+      expect(src).toContain("const authz = await authorizeWorkspace(req, 'certificates')")
+      expect(src).toContain('if (!authz.ok) return NextResponse.json({ error: authz.error }, { status: authz.status })')
       expect(src).not.toContain('resolveWorkspaceUid(')
     })
   }

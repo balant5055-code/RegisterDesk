@@ -293,16 +293,20 @@ describeEmu('RD-PRINT-SCALE-01 · job creation at 20,000 registrations', () => {
       for (const id of foreignIds) expect(got.has(id)).toBe(false)
     })
 
-    it('10 · the snapshot each item carries is complete', async () => {
+    // RD-PRINT-P0 — this used to assert the item carried the attendee's name, ticket
+    // code and QR value. Print history now holds NO attendee copy: the item is selection
+    // metadata only, and card values are read from the live registration at render time.
+    it('10 · each item carries selection metadata only — no attendee copy', async () => {
       const one = [...eligibleIds][0]
       const snap = await adminDb.collection('printGenerationJobs').doc(jobId)
         .collection('items').doc(one).get()
       const item = snap.data() as Record<string, unknown>
       expect(item.registrationId).toBe(one)
-      expect(item.name).toBe(`Runner ${one}`)
-      expect(item.ticketCode).toBe(`TC-${one}`)
-      expect(item.qrValue).toBeTruthy()
       expect(item.passName).toBeTruthy()
+      expect(Object.keys(item).sort()).toEqual(['category', 'passId', 'passName', 'registrationId'])
+      for (const k of ['name', 'email', 'phone', 'ticketCode', 'qrValue', 'formResponses', 'output']) {
+        expect(item[k], k).toBeUndefined()
+      }
     })
   })
 

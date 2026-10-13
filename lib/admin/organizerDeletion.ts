@@ -68,6 +68,7 @@ export type DeletionBlockCode =
   | 'LICENSE_RECORDS_EXIST'
   | 'TEAM_MEMBERS_EXIST'
   | 'SERVICE_REQUESTS_OPEN'
+  | 'BADGE_BILLING_RECORDS_EXIST'
 
 export interface DeletionBlocker {
   code:   DeletionBlockCode
@@ -125,6 +126,7 @@ export async function evaluateDeletionEligibility(uid: string): Promise<Deletion
     hasEvents, hasEventDrafts, hasCampaignDrafts, hasDonationCampaigns,
     hasRegistrations, walletBalance, hasClawbacks, hasPlatformTx,
     hasPendingSettlement, hasLicenses, hasTeam, hasOpenServiceRequest,
+    hasBadgeBilling,
   ] = await Promise.all([
     // ── EVENTS · every lifecycle state ────────────────────────────────────────
     // No status filter on purpose. An archived, cancelled or completed event is still an
@@ -154,6 +156,14 @@ export async function evaluateDeletionEligibility(uid: string): Promise<Deletion
     any(adminDb.collection(SERVICE_REQUESTS_COLLECTION)
       .where('organizerUid', '==', uid)
       .where('status', 'in', ['submitted', 'approved'])),
+    // RD-PRINT-BILL-P7 — ID-badge billing evidence (approved: retain AND block, like eventLicenses):
+    // a badge purchase order, an attendee billing claim or a generation billing round names this
+    // organizer. These are financial records; the manifest never deletes them, so they block instead.
+    Promise.all([
+      any(adminDb.collection('licenseOrders').where('purpose', '==', 'print_badges').where('organizerUid', '==', uid)),
+      any(adminDb.collection('printBadgeClaims').where('organizerUid', '==', uid)),
+      any(adminDb.collection('printBadgeRounds').where('organizerUid', '==', uid)),
+    ]).then(r => r.some(Boolean)),
   ])
 
   const blockers: DeletionBlocker[] = []
@@ -171,6 +181,7 @@ export async function evaluateDeletionEligibility(uid: string): Promise<Deletion
   if (hasLicenses)          add('LICENSE_RECORDS_EXIST', 'Event licence records exist and must be retained.')
   if (hasTeam)              add('TEAM_MEMBERS_EXIST', 'Team or staff members belong to this workspace.')
   if (hasOpenServiceRequest) add('SERVICE_REQUESTS_OPEN', 'An event-service refund or carry-forward request is awaiting a decision or an approved refund has not been paid out.')
+  if (hasBadgeBilling)      add('BADGE_BILLING_RECORDS_EXIST', 'ID badge purchase or billing records exist and must be retained.')
 
   return { deletable: exists && blockers.length === 0, blockers, identity, exists }
 }

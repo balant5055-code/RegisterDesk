@@ -53,6 +53,7 @@ import { getEffectiveDefinitionForVersion } from '@/lib/licensing/resolveCatalog
 import { CURRENT_LICENSE_VERSION } from '@/lib/licensing/eventLicense'
 import { activateLicenseOrder, holdExhaustedCouponRemainder, holdPhotoCapacityExceeded, PHOTO_CAPACITY_HELD_MESSAGE, orderListPricePaise } from '@/lib/licensing/finalizeLicensePurchase'
 import { activateAddonOrder } from '@/lib/licensing/draftCommerce'
+import { settleBadgePayment } from '@/lib/licensing/printBadgePurchase/settle'
 import { releaseRegistrationSessions } from '@/lib/sessions/allocation'
 import { recordRefundLedgerReconciliation } from '@/lib/payments/registrationReconciliation'
 
@@ -290,6 +291,18 @@ async function recoverLicensePaymentCaptured(
       .get()
     if (snap.empty) return 'not_license'    // not a license order — caller ignores
     const persisted = snap.docs[0].data()
+
+    // RD-PRINT-BILL-P4 · an ID-badge purchase order is settled ONLY by its own shared settlement
+    // (activate once, or a durable hold — duplicates, superseded and expired orders included). Any
+    // throw lands in the catch below ⇒ 'retry' ⇒ non-2xx, so Razorpay redelivers.
+    if (persisted.purpose === 'print_badges') {
+      const settled = await settleBadgePayment({
+        orderId: persisted.orderId, razorpayOrderId: orderId, paymentId,
+        amountPaise: paymentAmount, currency: paymentCurrency, via: 'webhook',
+      })
+      console.log('[webhook/razorpay] badge purchase settled via recovery:', { orderId, paymentId, result: settled.kind })
+      return 'handled'
+    }
 
     if (persisted.status === 'paid') {
       // RD-CE-FIX M4 — the SAME payment again is a replay: idempotent ack. A DIFFERENT captured payment

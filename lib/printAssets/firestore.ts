@@ -1,10 +1,11 @@
-// Print template persistence (PA-1). Server-only. The ONLY collection this phase
-// creates: `printTemplates`. No generated-assets / jobs / downloads / elements /
-// variables / history collections (those belong to later phases).
+// Print template persistence (PA-1). Server-only. `printTemplates` holds each template's
+// metadata and its working layout; every layout change is ALSO committed as an immutable
+// version in `printTemplateVersions` (RD-PRINT-P1 — see ./versions.ts).
 
 import { FieldValue, Timestamp } from 'firebase-admin/firestore'
 import { adminDb } from '@/lib/firebase/admin'
 import { defaultCanvas, emptyDesign } from './types'
+import { commitTemplateVersion, ensureCurrentVersion, getTemplateVersion, type CommittedVersion } from './versions'
 import type {
   PrintTemplate, PrintCanvas, PrintAssetType, PrintTemplateStatus, PrintDesign,
   CreatePrintTemplateInput, UpdatePrintTemplateInput,
@@ -36,6 +37,7 @@ function serialize(id: string, d: Record<string, unknown>): PrintTemplate {
     createdBy:    typeof d.createdBy === 'string' ? d.createdBy : undefined,
     createdAt:    toIso(d.createdAt),
     updatedAt:    toIso(d.updatedAt),
+    ...(typeof d.currentVersion === 'number' ? { currentVersion: d.currentVersion } : {}),
   }
 }
 
@@ -73,26 +75,57 @@ export async function createPrintTemplate(
   return (await getPrintTemplate(ref.id))!
 }
 
-export async function updatePrintTemplate(id: string, input: UpdatePrintTemplateInput): Promise<void> {
-  await col().doc(id).update({ ...input, updatedAt: FieldValue.serverTimestamp() })
+/**
+ * Metadata edits (name / description / assetType / status). A CANVAS change is a layout
+ * change, so it is committed as a new immutable version first (RD-PRINT-P1); every
+ * other field is plain metadata and never touches a version.
+ */
+export async function updatePrintTemplate(
+  id: string, input: UpdatePrintTemplateInput, actorUid: string,
+): Promise<void> {
+  const { canvas, ...meta } = input
+  if (canvas) await commitTemplateVersion({ templateId: id, actorUid, source: 'resize', canvas })
+  if (Object.keys(meta).length) await col().doc(id).update({ ...meta, updatedAt: FieldValue.serverTimestamp() })
 }
 
-/** Atomically overwrites the whole design JSON (single doc, no per-element writes). */
-export async function savePrintDesign(id: string, design: PrintDesign): Promise<void> {
-  await col().doc(id).update({ design, updatedAt: FieldValue.serverTimestamp() })
+/**
+ * Saves the designer document: commits it as the template's new immutable version and
+ * moves the template's pointer, in one transaction (RD-PRINT-P1). Saving an unchanged
+ * design creates no version.
+ */
+export async function savePrintDesign(
+  id: string, design: PrintDesign,
+  opts: { actorUid: string; source?: 'save' | 'import'; starter?: { collectionId: string; templateName: string } },
+): Promise<CommittedVersion> {
+  return commitTemplateVersion({ templateId: id, actorUid: opts.actorUid, source: opts.source ?? 'save', design, starter: opts.starter })
 }
 
 export async function deletePrintTemplate(id: string): Promise<void> {
   await col().doc(id).delete()
 }
 
-/** Duplicates a template into a new `draft` (name suffixed "(Copy)"). */
+/**
+ * Duplicates a template into a new `draft` (name suffixed "(Copy)") WITH its design.
+ *
+ * RD-PRINT-P1 — this used to copy only the metadata, so every copy opened blank. It now
+ * copies the source's CURRENT VERSION exactly (card + design, versioning the source
+ * first if it never was) and records it as the copy's v1, with `copiedFrom`.
+ */
 export async function duplicatePrintTemplate(source: PrintTemplate, createdBy: string): Promise<PrintTemplate> {
-  return createPrintTemplate(source.organizerUid, createdBy, {
+  const pinned  = await ensureCurrentVersion(source.id, source.organizerUid, createdBy)
+  const version = await getTemplateVersion(source.id, pinned.version)
+  const card    = version?.card ?? source.canvas
+  const copy = await createPrintTemplate(source.organizerUid, createdBy, {
     eventId:     source.eventId,
     name:        `${source.name} (Copy)`.slice(0, 120),
     description: source.description,
     assetType:   source.assetType,
-    canvas:      source.canvas,
+    canvas:      { ...card },
   })
+  await commitTemplateVersion({
+    templateId: copy.id, organizerUid: source.organizerUid, actorUid: createdBy, source: 'duplicate',
+    design: version?.design ?? source.design, canvas: { ...card },
+    copiedFrom: { templateId: source.id, version: pinned.version },
+  })
+  return (await getPrintTemplate(copy.id))!
 }

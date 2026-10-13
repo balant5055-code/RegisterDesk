@@ -192,7 +192,9 @@ export const WORKSPACE_NAV: WorkspaceNavSection[] = [
     items: [
       { key: 'certificates',  label: 'Certificates',  icon: Award,   href: ROUTES.DASHBOARD_CERTIFICATES, scope: 'event', permission: 'certificates' },
       { key: 'media-studio',  label: 'Media Studio',  icon: Camera,  href: ROUTES.MEDIA_STUDIO,           scope: 'event', permission: 'events'       },
-      { key: 'print-assets',  label: 'Print & Assets', icon: Printer, href: '/dashboard/print-assets',    scope: 'event', permission: 'events'       },
+      // RD-PRINT-P0 — `certificates`, the permission every print API requires; with
+      // `events` a manager saw the row and was refused by every request behind it.
+      { key: 'print-assets',  label: 'Print & Assets', icon: Printer, href: '/dashboard/print-assets',    scope: 'event', permission: 'certificates' },
     ],
   },
   {

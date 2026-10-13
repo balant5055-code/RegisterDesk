@@ -5,7 +5,9 @@
 // every counter, plus a handful of tiny limit-1 / small-scan reads for "oldest"
 // and "stuck" figures. Does not touch any business logic.
 
+import { FieldPath } from 'firebase-admin/firestore'
 import { adminDb } from '@/lib/firebase/admin'
+import { PRINT_BADGE_ROUNDS, STALE_ROUND_MS } from '@/lib/printAssets/badgeBilling/decisions'
 import { OPERATIONS_METRICS, type CronMetricDoc } from '@/lib/monitoring/cronMetrics'
 
 type Query = FirebaseFirestore.Query
@@ -39,6 +41,10 @@ export interface FinancialHealth {
   pendingRegistrationReconciliation: number
   pendingDonationReconciliation: number
   outstandingClawbacks: number
+  /** RD-PRINT-P8 (W6) — badge purchase payments recorded as suspicious and not yet reviewed (-1 = query failed). */
+  badgeSuspiciousUnreviewed: number
+  /** RD-PRINT-P8 (W6) — open badge billing rounds older than 24 h, from a bounded scan (a lower bound; -1 = failed). */
+  badgeRoundsStale: number
 }
 export interface WebhookHealth {
   pendingDeliveries: number
@@ -113,6 +119,8 @@ const CRON_INTERVAL_MS: Record<string, number> = {
   'session-reconciliation': 24 * 60 * MIN, 'global-reconciliation': 24 * 60 * MIN, 'storage-cleanup': 24 * 60 * MIN,
   'media-credit-reconciliation': 10 * MIN,
   'media-credit-sessions': 10 * MIN,
+  // RD-PRINT-P8 (W6) — ID-badge purchase and billing-round recovery (Group B, every 10 minutes).
+  'badge-orders-reconcile': 10 * MIN, 'badge-rounds-reconcile': 10 * MIN,
 }
 // A cron is STALE when its last success is older than 2× its interval + a 5-min grace
 // (tolerates an occasional skipped run without false-positiving). A never-recorded cron is
@@ -130,7 +138,22 @@ const CRITICAL_STALE_CRONS = new Set([
   'media-credit-reconciliation',
   // Staleness here means upload sessions are holding credits nothing will ever release.
   'media-credit-sessions',
+  // RD-PRINT-P8 (W6) — staleness here means captured badge payments go unsettled, or badge units stay
+  // reserved by rounds nothing is settling.
+  'badge-orders-reconcile', 'badge-rounds-reconcile',
 ])
+
+/** RD-PRINT-P8 (W6) — bounded scan for open badge rounds older than STALE_ROUND_MS (age checked in memory, no index). */
+const STALE_ROUND_SCAN = 500
+async function staleOpenBadgeRounds(now: number): Promise<number> {
+  try {
+    const snap = await adminDb.collection(PRINT_BADGE_ROUNDS).where('status', '==', 'reserved')
+      .orderBy(FieldPath.documentId()).select('createdAt').limit(STALE_ROUND_SCAN).get()
+    return snap.docs.filter(d => { const c = tsToMillis(d.get('createdAt')); return c > 0 && now - c > STALE_ROUND_MS }).length
+  } catch {
+    return -1
+  }
+}
 
 const DATA_INTEGRITY_WINDOW_MS = 48 * 60 * 60 * 1000
 
@@ -150,6 +173,9 @@ export async function getOperationsHealth(): Promise<OperationsHealth> {
     countOf(col('walletTopupReconciliation').where('status', '==', 'needs_review')),
     countOf(col('walletTopupReconciliation').where('status', '==', 'exhausted')),
     countOf(col('walletTopupReconciliation').where('status', '==', 'duplicate_payment')),
+    // RD-PRINT-P8 (W6) — badge billing: unreviewed suspicious payments (equality only), stale open rounds.
+    countOf(col('suspiciousPayments').where('purpose', '==', 'print_badges').where('reviewed', '==', false)),
+    staleOpenBadgeRounds(now),
   ])
 
   // ── Webhook ──
@@ -222,6 +248,7 @@ export async function getOperationsHealth(): Promise<OperationsHealth> {
       pendingSettlements: fin[0], failedRefunds: fin[1], pendingWalletTopups: fin[2],
       walletTopupsNeedsReview: fin[6], walletTopupsExhausted: fin[7], walletTopupDuplicatePayments: fin[8],
       pendingRegistrationReconciliation: fin[3], pendingDonationReconciliation: fin[4], outstandingClawbacks: fin[5],
+      badgeSuspiciousUnreviewed: fin[9], badgeRoundsStale: fin[10],
     },
     webhook: { pendingDeliveries: wh[0], failedDeliveries: wh[1], exhaustedRetries: wh[1], oldestPendingAt: wh[2] },
     broadcast: { scheduled: bc[0], sending: bc[1], failed: bc[2], stuckSending: bc[3] },
@@ -255,6 +282,12 @@ export function evaluateAlerts(h: OperationsHealth): OperationalAlert[] {
   // the dashboard shows it; only critical alerts page.
   const heldTopups = heldWalletTopupCount(h.financial)
   if (heldTopups > 0) push('wallet_topups_held', 'warning', `${heldTopups} wallet top-up(s) held for Super Admin review (Admin › Wallet Top-ups).`)
+  // RD-PRINT-P8 (W6) — a suspicious badge payment is real money nothing applied. A WARNING (dashboard):
+  // there is no "mark reviewed" action yet, so a page could never clear — its money is also covered by
+  // the open-hold (failedRefunds) critical alert where a hold exists. A stale open round holds units
+  // (the recovery cron settles ended jobs; a stale one belongs to a job still running).
+  if (h.financial.badgeSuspiciousUnreviewed > 0) push('badge_suspicious_payments', 'warning', `${h.financial.badgeSuspiciousUnreviewed} ID-badge payment(s) recorded as suspicious and not reviewed (License Center › ID badges).`)
+  if (h.financial.badgeRoundsStale > 0) push('badge_rounds_stale', 'warning', `${h.financial.badgeRoundsStale} ID-badge billing round(s) open for more than 24 hours (License Center › ID badges › Generation reconciliation).`)
   if (h.webhook.failedDeliveries > 10) push('webhook_failures', 'warning', `${h.webhook.failedDeliveries} webhook deliveries have failed (>10).`)
   const failedCrons = h.crons.filter(c => c.failedWithin24h)
   if (failedCrons.length > 0) push('cron_failure', 'critical', `Cron failure in the last 24h: ${failedCrons.map(c => c.cronName).join(', ')}.`)

@@ -1,9 +1,9 @@
 // POST /api/organizer/print-packages
 //
-// PA-6 — Creates a background packaging job that ZIPs the PDFs a PA-4 generation
-// job already produced. Returns a jobId immediately; packaging runs off the request
-// thread (first chunk inline + the print-packaging cron). NOTHING is rendered or
-// regenerated. Security: workspace auth + source-job ownership.
+// PA-6 — Creates a packaging job: which of a PA-4 generation job's cards go into one
+// ZIP. The job records METADATA only (RD-PRINT-P0); the ZIP itself is rendered on
+// demand by the download route and never stored. Security: `certificates` + source-job
+// ownership.
 //
 // Body:  { sourceJobId, filters?: { pass?, category?, registrationIds?[] } }
 // Reply: { success, jobId, job }
@@ -15,6 +15,10 @@ import {
   createPrintPackageJob, processPrintPackageChunk, getPrintPackageJob,
   toPackageJobView, type PrintPackageJobView,
 } from '@/lib/printAssets/packageJob'
+
+// RD-PRINT-P8 (W2) — explicit route budget: this route runs a seed walk or a 50 s render chunk,
+// so its limit is declared rather than left to the platform default.
+export const maxDuration = 60
 
 export type CreatePrintPackageResponse =
   | { success: true;  jobId: string; job: PrintPackageJobView }

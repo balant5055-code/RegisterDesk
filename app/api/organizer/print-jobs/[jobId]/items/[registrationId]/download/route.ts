@@ -1,46 +1,49 @@
 // GET /api/organizer/print-jobs/[jobId]/items/[registrationId]/download
 //
-// PA-4 — Secure, expiring download for ONE generated print asset. Gates the stored
-// file behind auth + ownership + expiry, then redirects to the Storage object. The
-// storage token URL is never exposed except through this authorized redirect.
-// Accepts the token via header OR ?token= (for <a download> links). Individual PDFs
-// only — no ZIP, no combined package.
+// PA-4 — Download ONE print card as a PDF.
+//
+// RD-PRINT-P0 — the card is RENDERED ON DEMAND, in memory, from the job's template and
+// the LIVE registration, and returned in this response. Nothing is read from or written
+// to Storage. This route used to redirect to a stored file's permanent, unauthenticated
+// token URL; it no longer reads that URL, even for legacy items that still carry one.
+//
+// Security:
+//   • `certificates` permission (the permission that creates print jobs) + job ownership;
+//   • the registration must be an item of THIS job, and must still exist, belong to the
+//     job's workspace and event, and be eligible for a credential;
+//   • the login token is accepted ONLY in the Authorization header — a `?token=` query
+//     parameter is ignored (it leaked the session token into URLs and browser history).
 
 import { NextRequest, NextResponse } from 'next/server'
-import { authorizeAnyWorkspace } from '@/lib/team/workspace'
-import { getPrintGenerationJob, getPrintJobItem } from '@/lib/printAssets/generationJob'
+import { authorizeWorkspace } from '@/lib/team/workspace'
+import { getPrintGenerationJob, renderPrintCard } from '@/lib/printAssets/generationJob'
+
+export const dynamic     = 'force-dynamic'
+export const maxDuration = 60
 
 export async function GET(
   req: NextRequest, { params }: { params: Promise<{ jobId: string; registrationId: string }> },
 ): Promise<NextResponse> {
   const { jobId, registrationId } = await params
 
-  const qToken = req.nextUrl.searchParams.get('token')
-  const authReq = qToken
-    ? new Request(req.url, { headers: { Authorization: `Bearer ${qToken}` } })
-    : req
-  // RD-STAFF-SEC-02 — same gate as every sibling print route (authorizeAnyWorkspace): a
-  // gate-only staff credential is refused. This route resolved the workspace by hand and
-  // skipped that, so check-in staff could download any printed credential in the workspace.
-  const ctx = await authorizeAnyWorkspace(authReq)
-  if (!ctx.ok) return NextResponse.json({ error: ctx.error }, { status: ctx.status })
+  const authz = await authorizeWorkspace(req, 'certificates')
+  if (!authz.ok) return NextResponse.json({ error: authz.error }, { status: authz.status })
 
   const job = await getPrintGenerationJob(jobId)
-  if (!job || job.organizerUid !== ctx.workspaceUid) {
+  if (!job || job.organizerUid !== authz.workspaceUid) {
     return NextResponse.json({ error: 'Job not found' }, { status: 404 })
   }
 
-  const item = await getPrintJobItem(jobId, registrationId)
-  if (!item || !item.output) {
-    return NextResponse.json({ error: 'Asset is not ready yet' }, { status: 409 })
-  }
+  const card = await renderPrintCard(job, registrationId)
+  if (!card.ok) return NextResponse.json({ error: card.error }, { status: card.status })
 
-  const expiresMs = item.output.expiresAt instanceof Object && typeof (item.output.expiresAt as { toMillis?: unknown }).toMillis === 'function'
-    ? (item.output.expiresAt as { toMillis(): number }).toMillis()
-    : 0
-  if (expiresMs > 0 && expiresMs < Date.now()) {
-    return NextResponse.json({ error: 'This download link has expired. Generate the assets again.' }, { status: 410 })
-  }
-
-  return NextResponse.redirect(item.output.url)
+  return new NextResponse(Buffer.from(card.bytes) as unknown as BodyInit, {
+    status: 200,
+    headers: {
+      'Content-Type':           'application/pdf',
+      'Content-Disposition':    `attachment; filename="${card.filename}"`,
+      'Cache-Control':          'no-store, private',
+      'X-Content-Type-Options': 'nosniff',
+    },
+  })
 }

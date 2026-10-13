@@ -39,7 +39,8 @@ export async function PATCH(req: NextRequest, { params }: Params): Promise<NextR
   const parsed = validateUpdate(body)
   if (!parsed.ok) return NextResponse.json({ success: false, error: parsed.error }, { status: 400 })
 
-  await updatePrintTemplate(id, parsed.value)
+  // A canvas change commits a new immutable version (RD-PRINT-P1); metadata does not.
+  await updatePrintTemplate(id, parsed.value, r.callerUid)
   const updated = await getPrintTemplate(id)
   return NextResponse.json({ success: true, template: updated })
 }

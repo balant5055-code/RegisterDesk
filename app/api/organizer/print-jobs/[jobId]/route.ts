@@ -1,8 +1,8 @@
 // GET /api/organizer/print-jobs/[jobId] — print-generation job progress.
-// Security: auth (any workspace member) + job ownership.
+// Security: `certificates` permission + job ownership (RD-PRINT-P0).
 
 import { NextRequest, NextResponse } from 'next/server'
-import { authorizeAnyWorkspace } from '@/lib/team/workspace'
+import { authorizeWorkspace } from '@/lib/team/workspace'
 import { getPrintGenerationJob, toPrintJobView, type PrintGenerationJobView } from '@/lib/printAssets/generationJob'
 
 export type GetPrintJobResponse =
@@ -13,7 +13,9 @@ export async function GET(
   req: NextRequest, { params }: { params: Promise<{ jobId: string }> },
 ): Promise<NextResponse<GetPrintJobResponse>> {
   const { jobId } = await params
-  const authz = await authorizeAnyWorkspace(req)
+  // RD-PRINT-P0 — print outputs carry attendee credentials: `certificates` (the permission
+  // that creates them), not merely "any non-gate member".
+  const authz = await authorizeWorkspace(req, 'certificates')
   if (!authz.ok) return NextResponse.json({ success: false, error: authz.error }, { status: authz.status })
 
   const job = await getPrintGenerationJob(jobId)

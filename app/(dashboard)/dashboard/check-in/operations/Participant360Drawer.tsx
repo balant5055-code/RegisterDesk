@@ -13,11 +13,12 @@
 //   resend     → POST /api/organizer/registrations/[id]/resend-email
 //   badge      → GET  /api/organizer/print-templates → POST /api/organizer/print-jobs
 //                 → GET .../items → .../items/[id]/download   (PA-4, unchanged)
+//                 RD-PRINT-BILL-P6 — the create goes through useBadgeGeneration (quote first; a PAID
+//                 event confirms the server quote — a reprint of a billed attendee is free).
 //   certificate→ GET  /api/certificates/download/[id]   (find-or-create, unchanged)
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
-import { auth } from '@/lib/firebase/auth'
 import { cn } from '@/lib/utils/cn'
 import { useToast } from '@/components/ui/Toast'
 import { buttonVariants, EmptyState, IconButton } from '@/components/ui'
@@ -35,6 +36,10 @@ import {
 import { identifierAssignmentBlockedBy } from '@/lib/identifiers/eligibility'
 import type { SerializedRegistration } from '@/app/api/organizer/events/[eventId]/registrations/route'
 import type { PrintTemplate } from '@/lib/printAssets/types'
+import { isPrintableTemplateStatus, printTemplatePickerLabel } from '@/lib/printAssets/types'
+import { useWorkspacePermissions } from '@/lib/hooks/useWorkspacePermissions'
+import { useBadgeGeneration } from '@/components/print-assets/badges/useBadgeGeneration'
+import { BadgeQuoteDialog } from '@/components/print-assets/badges/BadgeQuoteDialog'
 
 const rupees = (paise?: number) => (typeof paise === 'number' ? `₹${(paise / 100).toLocaleString('en-IN', { minimumFractionDigits: 0, maximumFractionDigits: 2 })}` : '—')
 const fmt = (iso?: string | null) => (iso ? new Date(iso).toLocaleString('en-IN', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : '—')
@@ -73,13 +78,16 @@ export function Participant360Drawer({ reg, eventId, token, identity, onClose, o
   // ── Badge (Print Assets) ────────────────────────────────────────────────────
   const [templates, setTemplates] = useState<PrintTemplate[] | null>(null)
   const [templateId, setTemplateId] = useState('')
-  const [badgeUrl, setBadgeUrl] = useState('')
+  // RD-PRINT-P0 — the job whose card is ready. The card is rendered on demand and fetched
+  // with the Authorization header (blobDownload); no token-bearing URL is ever built.
+  const [badgeJobId, setBadgeJobId] = useState('')
 
   const loadTemplates = useCallback(async () => {
     try {
       const res = await fetch('/api/organizer/print-templates', { headers, cache: 'no-store' })
       const data = await res.json().catch(() => ({})) as { success?: boolean; templates?: PrintTemplate[] }
-      const forEvent = (data.templates ?? []).filter(t => t.eventId === eventId)
+      // RD-PRINT-P1 — archived templates cannot start a print job; drafts are labelled.
+      const forEvent = (data.templates ?? []).filter(t => t.eventId === eventId && isPrintableTemplateStatus(t.status))
       setTemplates(forEvent)
       if (forEvent[0]) setTemplateId(forEvent[0].id)
     } catch { setTemplates([]) }
@@ -125,29 +133,43 @@ export function Participant360Drawer({ reg, eventId, token, identity, onClose, o
   const downloadTicket = () => run('ticket', () => blobDownload(`/api/tickets/${reg.id}/pdf`, `ticket-${reg.ticketCode || reg.id}.pdf`))
   const downloadCert   = () => run('cert', () => blobDownload(`/api/certificates/download/${reg.id}`, `certificate-${reg.ticketCode || reg.id}.pdf`))
 
-  // Badge: reuse PA-4 generation (create job → item ready → download token URL).
-  const generateBadge = () => run('badge', async () => {
-    if (!templateId) { showToast('Select a badge template', 'error'); return }
-    setBadgeUrl('')
-    const create = await fetch('/api/organizer/print-jobs', { method: 'POST', headers: jsonHeaders, body: JSON.stringify({ templateId, filters: { registrationIds: [reg.id] } }) })
-    const cj = await create.json().catch(() => ({})) as { success?: boolean; jobId?: string; error?: string }
-    if (!create.ok || !cj.success || !cj.jobId) { showToast(cj.error ?? 'Badge generation failed', 'error'); return }
+  // Badge: reuse PA-4 generation (create job → item ready → on-demand download).
+  // RD-PRINT-BILL-P6 — the create is the badge-generation flow; once the job exists, the same
+  // readiness check and on-demand download as before.
+  const perms = useWorkspacePermissions()
+  const [badgeDialog, setBadgeDialog] = useState(false)
+  const waitForCard = (jobId: string) => run('badge', async () => {
     // The create call hands the first chunk to after(), so the single item is usually
     // ready within a beat of the response; re-check a few times without a long poll.
     for (let i = 0; i < 4; i++) {
-      const items = await fetch(`/api/organizer/print-jobs/${cj.jobId}/items`, { headers, cache: 'no-store' })
+      const items = await fetch(`/api/organizer/print-jobs/${jobId}/items`, { headers, cache: 'no-store' })
       const data = await items.json().catch(() => ({})) as { success?: boolean; items?: { registrationId: string; ready: boolean }[] }
       const it = data.items?.find(x => x.registrationId === reg.id)
-      if (it?.ready) { setBadgeUrl(`/api/organizer/print-jobs/${cj.jobId}/items/${reg.id}/download?token=${encodeURIComponent(await auth.currentUser?.getIdToken() ?? token)}`); showToast('Badge ready', 'success'); return }
+      if (it?.ready) { setBadgeJobId(jobId); showToast('Badge ready', 'success'); return }
       await sleep(1200)
     }
     showToast('Badge is generating — check the Print Operations Center shortly', 'success')
   })
+  const gen = useBadgeGeneration(`${eventId}|${reg.id}`, {
+    onDone: s => {
+      if (s.billingMode !== 'paid') { setBadgeDialog(false); gen.reset() }
+      if (s.jobId) void waitForCard(s.jobId)
+    },
+  })
+  const generateBadge = () => {
+    if (!templateId) { showToast('Select a badge template', 'error'); return }
+    setBadgeJobId(''); setBadgeDialog(true)
+    void gen.start({ kind: 'create', templateId, filters: { registrationIds: [reg.id] } })
+  }
+
+  const downloadBadge = () => run('badge-dl', () =>
+    blobDownload(`/api/organizer/print-jobs/${badgeJobId}/items/${reg.id}/download`, `badge-${reg.ticketCode || reg.id}.pdf`))
 
   const category = reg.bibCategory || reg.passType || '—'
   const responses = Object.entries(reg.attendee.formResponses ?? {}).filter(([, v]) => v !== null && v !== undefined && typeof v !== 'object')
 
   return (
+    <>
     <div className="fixed inset-0 z-50 flex justify-end bg-black/40" onClick={onClose}>
       <div
         ref={trapRef}
@@ -233,12 +255,12 @@ export function Participant360Drawer({ reg, eventId, token, identity, onClose, o
                 <EmptyState icon={Printer} title="No badge template" description="Create a print template for this event to generate badges." />
               ) : (
                 <div className="space-y-2">
-                  <select value={templateId} onChange={e => { setTemplateId(e.target.value); setBadgeUrl('') }} className="w-full rounded-lg border border-border bg-background px-2 py-1.5 text-[13px]">
-                    {templates.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+                  <select value={templateId} onChange={e => { setTemplateId(e.target.value); setBadgeJobId('') }} className="w-full rounded-lg border border-border bg-background px-2 py-1.5 text-[13px]">
+                    {templates.map(t => <option key={t.id} value={t.id}>{printTemplatePickerLabel(t)}</option>)}
                   </select>
                   <div className="flex gap-2">
-                    <button onClick={generateBadge} disabled={busy === 'badge' || !templateId} className={cn(buttonVariants({ variant: 'outline', size: 'sm' }), 'flex-1')}>{busy === 'badge' ? <Loader2 className="size-4 animate-spin" /> : <Printer className="size-4" />} {badgeUrl ? 'Reprint' : 'Generate'}</button>
-                    {badgeUrl && <a href={badgeUrl} target="_blank" rel="noopener noreferrer" className={cn(buttonVariants({ variant: 'primary', size: 'sm' }), 'flex-1')}><Download className="size-4" /> Download</a>}
+                    <button onClick={generateBadge} disabled={busy === 'badge' || !templateId || (badgeDialog && gen.state.phase !== 'done')} className={cn(buttonVariants({ variant: 'outline', size: 'sm' }), 'flex-1')}>{busy === 'badge' ? <Loader2 className="size-4 animate-spin" /> : <Printer className="size-4" />} {badgeJobId ? 'Reprint' : 'Generate'}</button>
+                    {badgeJobId && <button type="button" onClick={downloadBadge} disabled={busy === 'badge-dl'} className={cn(buttonVariants({ variant: 'primary', size: 'sm' }), 'flex-1')}>{busy === 'badge-dl' ? <Loader2 className="size-4 animate-spin" /> : <Download className="size-4" />} Download</button>}
                   </div>
                   {!templates.length && <p className="text-[11px] text-muted-foreground">Manage templates in Print Assets.</p>}
                 </div>
@@ -274,6 +296,14 @@ export function Participant360Drawer({ reg, eventId, token, identity, onClose, o
         </div>
       </div>
     </div>
+    {/* Outside the drawer overlay: its click-to-close must not see clicks bubbling from the dialog. */}
+    <BadgeQuoteDialog
+      open={badgeDialog} state={gen.state} isOwner={perms.isOwner} draftId={eventId} title="Generate badge"
+      onConfirm={() => void gen.confirm()} onResume={() => void gen.resume()}
+      onRestart={() => { gen.reset(); setBadgeDialog(false) }}
+      onClose={() => { setBadgeDialog(false); gen.reset() }} trackHref="/dashboard/print-assets/operations"
+    />
+    </>
   )
 }
 

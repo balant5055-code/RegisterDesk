@@ -39,7 +39,7 @@ import { FieldValue, type Transaction, type DocumentSnapshot } from 'firebase-ad
 import { adminDb }        from '@/lib/firebase/admin'
 import { MAX_EVENT_PHOTO_CAPACITY } from './photoCapacity'
 import {
-  SERVICE_KINDS, EMPTY_SELECTION,
+  SERVICE_KINDS, EMPTY_SELECTION, isServicePurchaseReleased,
   type ServiceKind, type ServiceChargeItem,
   type AllowanceExhaustionPolicy, type ServicePurchased,
 } from './serviceAllowances'
@@ -62,8 +62,14 @@ export interface ServiceLedgerDoc {
   certificates?:        ServiceLedgerLine
   /** Media units RAISE the event's photo cap; usage is the event's stored-photo count, not a ledger counter. */
   media?:               ServiceLedgerLine
+  /** RD-PRINT-BILL-P1 shape; RD-PRINT-BILL-P4 — `purchased` is written only by a badge purchase activation
+   *  (printBadgePurchase/settle.ts). RD-PRINT-BILL-P5 — `consumed` is taken by badge generation rounds
+   *  (lib/printAssets/badgeBilling/store.ts), usage key `pgen_<id>_r<n>`. */
+  print_badges?:        ServiceLedgerLine
   appliedOrders?:       Record<string, boolean>
   pendingAddonOrderId?: string | null
+  /** RD-PRINT-BILL-P4 — the ONE payable badge purchase order of this event (its own slot; add-ons keep theirs). */
+  pendingBadgeOrderId?: string | null
 }
 
 export const ledgerRef = (draftId: string) => adminDb.collection(EVENT_SERVICE_ALLOWANCES).doc(draftId)
@@ -71,7 +77,7 @@ const usageRef = (draftId: string, unitKey: string) =>
   ledgerRef(draftId).collection(ALLOWANCE_USAGE_SUBCOLLECTION).doc(unitKey)
 
 const n = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : 0)
-export const ledgerLine = (d: ServiceLedgerDoc | undefined, k: ServiceKind): Required<ServiceLedgerLine> => ({
+export const ledgerLine = (d: ServiceLedgerDoc | undefined, k: ServiceKind | 'print_badges'): Required<ServiceLedgerLine> => ({
   purchased: n(d?.[k]?.purchased), consumed: n(d?.[k]?.consumed), onExhausted: d?.[k]?.onExhausted ?? null,
   carriedIn: n(d?.[k]?.carriedIn), carriedOut: n(d?.[k]?.carriedOut), refunded: n(d?.[k]?.refunded),
 })
@@ -130,6 +136,11 @@ export function txnApplyServiceItems(
   if (existing && existing.organizerUid !== args.organizerUid) {
     throw new Error('LEDGER_OWNER_MISMATCH')
   }
+  // RD-PRINT-BILL-P2 — release gate, last line of defence: a line for a service that is not
+  // released for purchase in code (RELEASED_FOR_PURCHASE) aborts the WHOLE payment transaction
+  // before any write — nothing is applied and the order is not activated (it stays for review),
+  // exactly like PHOTO_CAPACITY_EXCEEDED below. Every order path refuses such a selection first.
+  if (items.some(i => !isServicePurchaseReleased(i.service))) throw new Error('SERVICE_NOT_RELEASED')
   // RD-PHOTO-01 — last line of defence: no paid order may take an event above 3,000 photos. Every
   // order path checks this before any payment and the add-on / capacity settlements refuse it with a
   // payment hold; reaching here aborts the payment transaction (the order stays un-applied for review).
@@ -200,9 +211,10 @@ export async function reserveServiceUnits(args: {
   })
 }
 
-/** The write half of a reservation, for callers that already read inside their own transaction. */
+/** The write half of a reservation, for callers that already read inside their own transaction.
+ *  RD-PRINT-BILL-P5 — also takes `print_badges` (badge generation decides with its own blocking rule). */
 export function txnTakeUnits(
-  txn: Transaction, draftId: string, service: ServiceKind, unitKey: string, quantity: number, source: string,
+  txn: Transaction, draftId: string, service: ServiceKind | 'print_badges', unitKey: string, quantity: number, source: string,
 ): void {
   txn.set(ledgerRef(draftId), { [service]: { consumed: FieldValue.increment(quantity) }, updatedAt: FieldValue.serverTimestamp() }, { merge: true })
   txn.set(usageRef(draftId, unitKey), { service, quantity, source, createdAt: FieldValue.serverTimestamp() })
@@ -246,7 +258,7 @@ export async function txnReadUsage(txn: Transaction, draftId: string, unitKey: s
  * record, exactly as releaseServiceUnits does. Returns the units given back.
  */
 export function txnTrimUnits(
-  txn: Transaction, draftId: string, service: ServiceKind, unitKey: string, current: { exists: boolean; quantity: number }, keep: number,
+  txn: Transaction, draftId: string, service: ServiceKind | 'print_badges', unitKey: string, current: { exists: boolean; quantity: number }, keep: number,
 ): number {
   if (!current.exists) return 0
   const k = Math.max(0, Math.min(current.quantity, Math.trunc(keep)))

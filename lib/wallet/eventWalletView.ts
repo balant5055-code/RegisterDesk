@@ -104,7 +104,7 @@ export interface WalletEventsPage {
   scanLimited: boolean
 }
 
-export type OrderPurposeLabel = 'Activation' | 'Capacity increase' | 'Capacity reduction' | 'Add-on' | 'Licence upgrade' | 'Order'
+export type OrderPurposeLabel = 'Activation' | 'Capacity increase' | 'Capacity reduction' | 'Add-on' | 'Licence upgrade' | 'ID badges' | 'Order'
 export function orderPurposeLabel(purpose: unknown): OrderPurposeLabel {
   switch (purpose) {
     case 'purchase':          return 'Activation'
@@ -112,6 +112,7 @@ export function orderPurposeLabel(purpose: unknown): OrderPurposeLabel {
     case 'capacity_decrease': return 'Capacity reduction'
     case 'addon':             return 'Add-on'
     case 'upgrade':           return 'Licence upgrade'
+    case 'print_badges':      return 'ID badges'
     default:                  return 'Order'
   }
 }

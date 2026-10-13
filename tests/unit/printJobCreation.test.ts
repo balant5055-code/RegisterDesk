@@ -110,6 +110,13 @@ vi.mock('@/lib/printAssets/render', () => ({
 }))
 vi.mock('@/lib/firebase/storage/admin', () => ({ uploadServerFile: async () => ({ url: '', path: '' }) }))
 vi.mock('@/lib/notifications/inbox/notify', () => ({ notifyPrintJobComplete: async () => {} }))
+// RD-PRINT-P1 — job creation pins the template's current version (a Firestore transaction,
+// covered on the real emulator by printTemplateVersioning.emu.test.ts). This fake store has
+// no transactions, so the pin is stubbed; job SELECTION is what this file tests.
+vi.mock('@/lib/printAssets/versions', () => ({
+  ensureCurrentVersion: async () => ({ version: 1, hash: 'h1', created: false }),
+  getTemplateVersion:   async () => null,
+}))
 vi.mock('@/lib/branding/service', () => ({ resolvePublicBranding: async () => null }))
 
 const REGS = 'registrations'
@@ -400,24 +407,24 @@ describe('RD-PRINT-SCALE-01 · the job document', () => {
     expect(order.indexOf('item')).toBeLessThan(order.lastIndexOf('job'))
   })
 
-  it('26 · the seeded snapshot still carries every field generation renders from', async () => {
+  // RD-PRINT-P0 — this used to assert the OPPOSITE: that every attendee field (name,
+  // email, phone, ticket, QR value, form answers) was copied into the job. Print history
+  // must hold no attendee copy, so the seed now carries selection metadata only and the
+  // card's values are built in memory from the LIVE registration (printCardFieldsFor).
+  it('26 · the seed carries selection metadata only; card fields come from the live registration', async () => {
     reg('r1', { bibNumber: '101', companyName: 'Acme', designation: 'Dev',
                 attendee: { name: 'Asha', email: 'a@b.c', phone: '+91', formResponses: { tshirt: 'M' } } })
-    const { createPrintGenerationJob } = await import('@/lib/printAssets/generationJob')
+    const { createPrintGenerationJob, printCardFieldsFor } = await import('@/lib/printAssets/generationJob')
     const job = await createPrintGenerationJob({
       templateId: 't1', eventId: 'draft-1', eventSlug: SLUG, assetType: 'badge',
       filters: {}, organizerUid: UID, createdBy: UID,
     } as never)
     const item = store.get(`printGenerationJobs/${job.jobId}/items/r1`)!
-    expect(item.name).toBe('Asha')
-    expect(item.bibNumber).toBe('101')
-    expect(item.company).toBe('Acme')
-    expect(item.designation).toBe('Dev')
-    expect(item.category).toBe('10K')
-    expect(item.passId).toBe('pass-a')
-    expect(item.ticketCode).toBe('TC-r1')
-    expect(item.qrValue).toBeTruthy()          // built from the ticket code
-    expect(item.formResponses).toEqual({ tshirt: 'M' })
+    expect(Object.keys(item).sort()).toEqual(['category', 'passId', 'passName', 'registrationId'])
+    expect(item).toMatchObject({ registrationId: 'r1', category: '10K', passId: 'pass-a' })
+    const fields = printCardFieldsFor('r1', store.get('registrations/r1') as never, SLUG)
+    expect(fields).toMatchObject({ name: 'Asha', bibNumber: '101', company: 'Acme', designation: 'Dev', ticketCode: 'TC-r1', formResponses: { tshirt: 'M' } })
+    expect(fields.qrValue).toBeTruthy()          // built from the ticket code
   })
 })
 
@@ -444,6 +451,9 @@ describe('RD-PRINT-SCALE-01 · POST /api/organizer/print-jobs', () => {
     vi.doMock('@/lib/printAssets/generationJob', () => ({ ...gen, processPrintGenerationChunk: chunk }))
 
     store.set('users/org-1/eventDrafts/draft-1', { eventDetails: { seo: { urlSlug: SLUG } } })
+    // RD-PRINT-BILL-P5 fix 1 — the route now proves the draft's slug through the LIVE event
+    // (resolveOwnedEventSlug): publishing always stamps it with the owner uid and draft id.
+    store.set(`events/${SLUG}`, { uid: UID, draftId: 'draft-1' })
     const { POST } = await import('@/app/api/organizer/print-jobs/route')
     const { NextRequest } = await import('next/server')
     return { POST, NextRequest, chunk, deferred }
@@ -580,10 +590,13 @@ describe('RD-PRINT-SCALE-01 · the generation worker was not rewritten', () => {
     expect(code).toContain('await q.limit(SEED_PAGE_SIZE).get()')
   })
 
-  it('38 · packaging was not touched in this phase', async () => {
+  // RD-PRINT-P0 — packaging no longer reads stored PDFs (MAX_FILES / per-file fetch caps
+  // are gone): the ZIP is rendered on demand within explicit, refusing caps.
+  it('38 · packaging builds its ZIP on demand within explicit caps', async () => {
     const { readFileSync } = await import('node:fs')
     const pkg = readFileSync('lib/printAssets/packageJob.ts', 'utf8')
     expect(pkg).toContain('buildStoredZip')
-    expect(pkg).toContain('const MAX_FILES          = 20_000')
+    expect(pkg).toContain('export const PRINT_PACKAGE_MAX_CARDS = 500')
+    expect(pkg).toContain('export const PRINT_PACKAGE_MAX_BYTES = 4 * 1024 * 1024')
   })
 })

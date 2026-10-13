@@ -4,6 +4,8 @@
 // EXISTING endpoint; nothing new is built:
 //   check-in    → POST /events/[id]/registrations/bulk-jobs {kind:'check_in'}   (job runner, ≤20k)
 //   badges      → POST /api/organizer/print-jobs {templateId, filters:{registrationIds}}  (job)
+//                 RD-PRINT-BILL-P6 — through useBadgeGeneration: the Phase 5 quote first; a PAID event
+//                 shows the server quote for confirmation, free / complimentary runs exactly as before.
 //   certificates→ POST /events/[id]/certificates/jobs       (event-wide background job)
 //   ticket email→ POST /events/[id]/registrations/bulk {action:'resend_email'}   (≤200 sync)
 //   undo        → POST /organizer/registrations/[id]/undo-checkin   (no bulk engine exists →
@@ -24,8 +26,12 @@ import {
 } from 'lucide-react'
 import type { SerializedRegistration } from '@/app/api/organizer/events/[eventId]/registrations/route'
 import type { PrintTemplate } from '@/lib/printAssets/types'
+import { isPrintableTemplateStatus, printTemplatePickerLabel } from '@/lib/printAssets/types'
 import { csvCell } from '@/lib/utils/csv'
 import { useFocusTrap } from '@/lib/hooks/useFocusTrap'
+import { useWorkspacePermissions } from '@/lib/hooks/useWorkspacePermissions'
+import { useBadgeGeneration } from '@/components/print-assets/badges/useBadgeGeneration'
+import { BadgeQuoteDialog } from '@/components/print-assets/badges/BadgeQuoteDialog'
 
 interface ConfirmState { title: string; body: React.ReactNode; confirmLabel: string; onConfirm: () => void }
 
@@ -47,6 +53,28 @@ export function BulkActionBar({ eventId, selectedIds, regs, onClear, onRefresh }
   const [templates, setTemplates] = useState<PrintTemplate[] | null>(null)
   const [badgeTpl, setBadgeTpl] = useState('')
   const [jobLink, setJobLink] = useState<{ href: string; label: string } | null>(null)
+  // RD-PRINT-BILL-P6 — badge generation (quote → confirm → create). The selection is captured when
+  // the run starts; changing event drops any run in flight (scope = this event).
+  const perms = useWorkspacePermissions()
+  const [badgeDialog, setBadgeDialog] = useState(false)
+  const [badgeCount, setBadgeCount] = useState(0)
+  const PRINT_OPS = { href: '/dashboard/print-assets/operations', label: 'Track in Print Operations Center' }
+  const gen = useBadgeGeneration(eventId, {
+    onDone: s => {
+      setJobLink(PRINT_OPS)
+      // Free / complimentary: the same outcome as before — a toast, the tracking link, selection cleared.
+      if (s.billingMode !== 'paid') {
+        setBadgeDialog(false); gen.reset()
+        showToast(s.existing ? 'This badge job was already started' : `Generating ${badgeCount} badges in the background`, 'success')
+        onClear()
+      }
+    },
+  })
+  const closeBadgeDialog = () => {
+    const finished = gen.state.phase === 'done'
+    setBadgeDialog(false); gen.reset()
+    if (finished) onClear()
+  }
 
   const idSet = new Set(selectedIds)
   const selected = regs.filter(r => idSet.has(r.id))
@@ -95,7 +123,8 @@ export function BulkActionBar({ eventId, selectedIds, regs, onClear, onRefresh }
     if (!tpls) {
       const res = await fetch('/api/organizer/print-templates', { headers: { Authorization: (await headers()).Authorization } })
       const data = await res.json().catch(() => ({})) as { templates?: PrintTemplate[] }
-      tpls = (data.templates ?? []).filter(t => t.eventId === eventId)
+      // RD-PRINT-P1 — archived templates cannot start a print job; drafts are labelled.
+      tpls = (data.templates ?? []).filter(t => t.eventId === eventId && isPrintableTemplateStatus(t.status))
       setTemplates(tpls); if (tpls[0]) setBadgeTpl(tpls[0].id)
     }
     if (!tpls.length) { showToast('No badge template for this event — create one in Print Assets', 'error'); return }
@@ -104,16 +133,12 @@ export function BulkActionBar({ eventId, selectedIds, regs, onClear, onRefresh }
       title: 'Generate badges', confirmLabel: `Generate ${n}`,
       body: <div className="space-y-2"><p>Generate badges for <b>{n}</b> participant{n === 1 ? '' : 's'}? Runs as a background print job (~{estimate(n)}).</p>
         <select defaultValue={badgeTpl || first} onChange={e => setBadgeTpl(e.target.value)} className="w-full rounded-lg border border-border bg-background px-2 py-1.5 text-[13px]">
-          {tpls.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+          {tpls.map(t => <option key={t.id} value={t.id}>{printTemplatePickerLabel(t)}</option>)}
         </select></div>,
-      onConfirm: () => { setConfirm(null); void run('badges', async () => {
-        const templateId = badgeTpl || first
-        const res = await fetch('/api/organizer/print-jobs', { method: 'POST', headers: await headers(), body: JSON.stringify({ templateId, filters: { registrationIds: selectedIds } }) })
-        const data = await res.json().catch(() => ({})) as { success?: boolean; error?: string }
-        if (!res.ok || !data.success) { showToast(data.error ?? 'Badge job failed', 'error'); return }
-        showToast(`Generating ${n} badges in the background`, 'success')
-        setJobLink({ href: '/dashboard/print-assets/operations', label: 'Track in Print Operations Center' }); onClear()
-      }) },
+      onConfirm: () => {
+        setConfirm(null); setJobLink(null); setBadgeCount(n); setBadgeDialog(true)
+        void gen.start({ kind: 'create', templateId: badgeTpl || first, filters: { registrationIds: [...selectedIds] } })
+      },
     })
   })
 
@@ -177,7 +202,7 @@ export function BulkActionBar({ eventId, selectedIds, regs, onClear, onRefresh }
         <div className="mx-1 h-5 w-px bg-border" />
         <BAB icon={UserCheck} label="Check in" busy={busy === 'checkin'} onClick={checkIn} />
         <BAB icon={Undo2} label={progress && busy === 'undo' ? `Undo ${progress}` : 'Undo'} busy={busy === 'undo'} onClick={undo} />
-        <BAB icon={IdCard} label="Badges" busy={busy === 'badges' || busy === 'badges-load'} onClick={badges} />
+        <BAB icon={IdCard} label="Badges" busy={busy === 'badges-load' || (badgeDialog && (gen.state.phase === 'quoting' || gen.state.phase === 'submitting'))} onClick={badges} />
         <BAB icon={Award} label="Certificates" busy={busy === 'certs'} onClick={certificates} />
         <BAB icon={Send} label="Ticket email" busy={busy === 'email'} onClick={sendEmail} />
         <Link href="/dashboard/communications/broadcasts" className="inline-flex items-center gap-1 rounded-lg border border-border px-2.5 py-1.5 text-[12px] font-medium text-foreground hover:bg-muted"><MessageSquare className="size-3.5 text-muted-foreground" /> WhatsApp</Link>
@@ -185,6 +210,14 @@ export function BulkActionBar({ eventId, selectedIds, regs, onClear, onRefresh }
         {jobLink && <Link href={jobLink.href} className="inline-flex items-center gap-1 rounded-lg bg-primary/10 px-2.5 py-1.5 text-[12px] font-semibold text-primary hover:bg-primary/20"><Printer className="size-3.5" /> {jobLink.label} <ExternalLink className="size-3" /></Link>}
         <button onClick={onClear} className="ml-auto inline-flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-[12px] font-medium text-muted-foreground hover:bg-muted hover:text-foreground"><X className="size-3.5" /> Clear</button>
       </div>
+
+      <BadgeQuoteDialog
+        open={badgeDialog} state={gen.state} isOwner={perms.isOwner} draftId={eventId}
+        title={`Generate ${badgeCount} badge${badgeCount === 1 ? '' : 's'}`}
+        onConfirm={() => void gen.confirm()} onResume={() => void gen.resume()}
+        onRestart={() => { gen.reset(); setBadgeDialog(false) }}
+        onClose={closeBadgeDialog} trackHref={PRINT_OPS.href}
+      />
 
       {confirm && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={() => setConfirm(null)}>

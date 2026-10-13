@@ -62,7 +62,7 @@ describe('defaults apply ONLY where nothing is stored', () => {
   it('unconfigured ⇒ approved defaults, on sale', () => {
     const r = resolveServiceCatalogFromStored(undefined)
     expect(r.config.whatsapp.unitPricePaise).toBe(20); expect(r.config.certificates.unitPricePaise).toBe(150); expect(r.config.media.unitPricePaise).toBe(160)
-    expect(r.state).toEqual({ whatsapp: 'available', certificates: 'available', media: 'available' })
+    expect(r.state).toEqual({ whatsapp: 'available', certificates: 'available', media: 'available', print_badges: 'not_released' })   // RD-PRINT-BILL-P1: print_badges is catalog-only and not for sale
   })
   it('a Super Admin’s SAVED price is preserved (never overwritten by a default)', () => {
     const r = resolveServiceCatalogFromStored({ whatsapp: { ...DEFAULT_SERVICE_ALLOWANCES.whatsapp, unitPricePaise: 35, maxQuantity: 10_000 } })

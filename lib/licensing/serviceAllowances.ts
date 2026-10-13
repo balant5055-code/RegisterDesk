@@ -19,7 +19,8 @@
 //
 // Rates are GST-EXCLUSIVE, exactly like the capacity activation rate: GST is computed on the
 // base and added, once, with the same rounding (`applyPercentPaise`). All money is integer
-// paise.
+// paise. RD-PRINT-BILL-P1 — the one exception is a service whose SERVICE_PRICE_MODE is
+// 'inclusive' (print badges): its unit price already INCLUDES GST, which is extracted, not added.
 //
 // ═══ CONSUMPTION POINT (established from existing behaviour, not invented) ═══
 //   • WhatsApp     one unit per message the provider ACCEPTS — the point at which the existing
@@ -36,11 +37,74 @@
 //                  enforced at quote, order creation and settlement. Consumed at upload prepare
 //                  (one pending/ready photo = one unit). The account-level Media Credits wallet is
 //                  retired and grants nothing.
+//   • Print badges RD-PRINT-BILL-P1 — REGISTERED ONLY (catalog, pricing, ledger shape). Not
+//                  selectable, purchasable or consumed anywhere yet; see CATALOG_ONLY_SERVICE_KINDS.
 
 import { applyPercentPaise } from './capacityPricing'
 
+/**
+ * The services an organizer can SELECT and BUY today — every selection, quote, purchase,
+ * activation, coverage and organizer page iterates THIS list, and a stored selection carries
+ * exactly these keys. Unchanged by RD-PRINT-BILL-P1.
+ */
 export const SERVICE_KINDS = ['whatsapp', 'certificates', 'media'] as const
 export type ServiceKind = typeof SERVICE_KINDS[number]
+
+/**
+ * RD-PRINT-BILL-P1 — services REGISTERED in the catalog (configuration, validation, pricing,
+ * ledger shape) but deliberately NOT in SERVICE_KINDS: they cannot be selected, quoted, bought or
+ * consumed, and no stored selection or draft ever carries them (so a rollback can never meet an
+ * unknown key). A later phase moves a kind into the purchase flows explicitly.
+ */
+export const CATALOG_ONLY_SERVICE_KINDS = ['print_badges'] as const
+export const CATALOG_SERVICE_KINDS = [...SERVICE_KINDS, ...CATALOG_ONLY_SERVICE_KINDS] as const
+export type CatalogServiceKind = typeof CATALOG_SERVICE_KINDS[number]
+
+/**
+ * RD-PRINT-BILL-P2 — the HARD purchase release gate. Code only: never stored, never read from
+ * Business Configuration, never editable in the Admin UI, so no configuration (a Super Admin
+ * switching a service "for sale", a valid GST rate, a console write) can ever release a service
+ * for purchase. Enforced independently at every layer: selection parsing
+ * (parseServiceSelection), quantity validation (validateServiceQuantity), the catalog sale state
+ * (serviceAllowanceConfig → 'not_released') and prepaid activation
+ * (serviceAllowanceLedger.txnApplyServiceItems → throws SERVICE_NOT_RELEASED). Flipping a value
+ * here is a deliberate, separately approved release change.
+ */
+export const RELEASED_FOR_PURCHASE: Readonly<Record<CatalogServiceKind, boolean>> = Object.freeze({
+  whatsapp:     true,
+  certificates: true,
+  media:        true,
+  print_badges: false,
+})
+
+/** True only for a known service whose purchase has been released in code. Unknown ⇒ false. */
+export function isServicePurchaseReleased(kind: unknown): boolean {
+  return typeof kind === 'string' && (RELEASED_FOR_PURCHASE as Readonly<Record<string, boolean | undefined>>)[kind] === true
+}
+
+/**
+ * RD-PRINT-BILL-P1 — how a service's configured unit price relates to GST. A property of the
+ * SERVICE, fixed in code (never stored, never editable), so no configuration can ever make an
+ * inclusive price taxed a second time.
+ *   exclusive — the unit price EXCLUDES GST; GST is computed on the base and added (unchanged).
+ *   inclusive — the unit price INCLUDES GST; GST is extracted from within the total.
+ */
+export type ServicePriceMode = 'exclusive' | 'inclusive'
+export const SERVICE_PRICE_MODE: Readonly<Record<CatalogServiceKind, ServicePriceMode>> = {
+  whatsapp:     'exclusive',
+  certificates: 'exclusive',
+  media:        'exclusive',
+  print_badges: 'inclusive',
+}
+
+/**
+ * The GST-exclusive taxable value inside a GST-INCLUSIVE gross — the same rule as the platform's
+ * inclusive ticket tax (lib/platform/pricing/tax.ts computeTicketTax: round(gross×100/(100+rate))),
+ * so GST = gross − taxable and the two always sum to the gross exactly.
+ */
+export function inclusiveTaxablePaise(grossPaise: number, gstRatePercent: number): number {
+  return Math.round((grossPaise * 100) / (100 + gstRatePercent))
+}
 
 /** What happens to a send/issuance once the event's purchased allowance is used up. */
 export type AllowanceExhaustionPolicy = 'block' | 'wallet_payg'
@@ -49,7 +113,10 @@ export const EXHAUSTION_POLICIES: AllowanceExhaustionPolicy[] = ['block', 'walle
 export interface PrepaidServiceConfig {
   /** Master switch for SELLING this allowance. Existing allowances keep working when off. */
   enabled:        boolean
-  /** Price of one unit in paise, EXCLUDING GST. null ⇒ not configured. */
+  /**
+   * Price of one unit in paise. null ⇒ not configured. EXCLUDING GST for an exclusive service;
+   * INCLUDING GST for an inclusive one (SERVICE_PRICE_MODE — RD-PRINT-BILL-P1).
+   */
   unitPricePaise: number | null
   /** GST percent applied to the base. null ⇒ not configured (never assumed). */
   gstRatePercent: number | null
@@ -63,7 +130,7 @@ export interface PrepaidServiceConfig {
   onExhausted:    AllowanceExhaustionPolicy | null
 }
 
-export type ServiceAllowancesConfig = Record<ServiceKind, PrepaidServiceConfig>
+export type ServiceAllowancesConfig = Record<CatalogServiceKind, PrepaidServiceConfig>
 
 const UNCONFIGURED: PrepaidServiceConfig = {
   enabled: false, unitPricePaise: null, gstRatePercent: null,
@@ -82,23 +149,47 @@ export const DEFAULT_SERVICE_ALLOWANCES: ServiceAllowancesConfig = {
   whatsapp:     { enabled: true, unitPricePaise: 20,  gstRatePercent: 18, minQuantity: 1, maxQuantity: null, presets: [], onExhausted: 'block' },
   certificates: { enabled: true, unitPricePaise: 150, gstRatePercent: 18, minQuantity: 1, maxQuantity: null, presets: [], onExhausted: 'block' },
   media:        { enabled: true, unitPricePaise: 160, gstRatePercent: 18, minQuantity: 1, maxQuantity: null, presets: [], onExhausted: 'block' },
+  // RD-PRINT-BILL-P1 (approved 2026-10-10) — ₹0.20 per badge INCLUDING GST (SERVICE_PRICE_MODE),
+  // minimum purchase 100 badges (₹20), blocked when exhausted. NOT for sale: disabled, and the GST
+  // rate is left unset on purpose — it is never assumed; a Super Admin sets the configured rate
+  // (accountant-approved) before launch. Catalog-only: no flow can select or buy it yet.
+  print_badges: { enabled: false, unitPricePaise: 20, gstRatePercent: null, minQuantity: 100, maxQuantity: null, presets: [], onExhausted: 'block' },
 }
 
-export const SERVICE_LABELS: Record<ServiceKind, { title: string; unit: string; units: string }> = {
+export const SERVICE_LABELS: Record<CatalogServiceKind, { title: string; unit: string; units: string }> = {
   whatsapp:     { title: 'WhatsApp message allowance', unit: 'message',     units: 'messages' },
   certificates: { title: 'Certificate allowance',      unit: 'certificate', units: 'certificates' },
   media:        { title: 'Event photo capacity',       unit: 'photo',       units: 'photos' },
+  print_badges: { title: 'ID badge allowance',         unit: 'badge',       units: 'badges' },
 }
 
 const isInt = (v: unknown): v is number => typeof v === 'number' && Number.isInteger(v)
 
-/** Validation shared by Business Configuration (so an invalid config can never be saved). */
-export function validateServiceAllowances(v: unknown, path = 'licensing.serviceAllowances'): string[] {
+/**
+ * Validation shared by Business Configuration (so an invalid config can never be saved).
+ *
+ * RD-PRINT-BILL-P2 — `catalogOnly: 'exclude'` skips catalog-only services entirely. The
+ * Business Configuration GROUP validator uses it, so a stored catalog-only service that is
+ * invalid can never make the whole serviceAllowances group fail — which would revert the live
+ * WhatsApp/certificate/photo prices to code defaults and block every licensing save. Catalog-only
+ * services are validated per service instead (the catalog resolver fails them closed, and the
+ * Business Configuration route refuses an invalid CHANGE to one).
+ */
+export function validateServiceAllowances(
+  v: unknown, path = 'licensing.serviceAllowances', opts: { catalogOnly?: 'include' | 'exclude' } = {},
+): string[] {
   const errors: string[] = []
   if (typeof v !== 'object' || v === null || Array.isArray(v)) return [`${path} must be an object`]
   const c = v as Record<string, unknown>
-  for (const kind of SERVICE_KINDS) {
+  const kinds = opts.catalogOnly === 'exclude' ? SERVICE_KINDS : CATALOG_SERVICE_KINDS
+  for (const kind of kinds) {
     const p = `${path}.${kind}`
+    // RD-PRINT-BILL-P1 — a service added to the catalog AFTER a configuration was stored is simply
+    // ABSENT from it (production's stored group predates print_badges). Absent ⇒ its default
+    // applies; it is not an error. Otherwise every stored group would fail validation and the
+    // WHOLE serviceAllowances group — the live WhatsApp/certificate/photo prices — would fall back
+    // to code defaults. The original services stay REQUIRED, exactly as before.
+    if (c[kind] === undefined && (CATALOG_ONLY_SERVICE_KINDS as readonly string[]).includes(kind)) continue
     const s = c[kind] as Partial<PrepaidServiceConfig> | undefined
     if (typeof s !== 'object' || s === null || Array.isArray(s)) { errors.push(`${p} must be an object`); continue }
     if (typeof s.enabled !== 'boolean') errors.push(`${p}.enabled must be a boolean`)
@@ -119,9 +210,9 @@ export function validateServiceAllowances(v: unknown, path = 'licensing.serviceA
  * saved — is kept as stored. Nothing is validated here (see serviceAvailability / the resolver).
  */
 export function normalizeServiceAllowances(v: unknown): ServiceAllowancesConfig {
-  const c = (typeof v === 'object' && v !== null ? v : {}) as Partial<Record<ServiceKind, Partial<PrepaidServiceConfig>>>
+  const c = (typeof v === 'object' && v !== null ? v : {}) as Partial<Record<CatalogServiceKind, Partial<PrepaidServiceConfig>>>
   const out = {} as ServiceAllowancesConfig
-  for (const kind of SERVICE_KINDS) out[kind] = { ...DEFAULT_SERVICE_ALLOWANCES[kind], ...(c[kind] ?? {}) }
+  for (const kind of CATALOG_SERVICE_KINDS) out[kind] = { ...DEFAULT_SERVICE_ALLOWANCES[kind], ...(c[kind] ?? {}) }
   return out
 }
 
@@ -160,8 +251,10 @@ export function serviceAvailability(cfg: PrepaidServiceConfig): ServiceAvailabil
  *   disabled        — fully priced, but a Super Admin has switched sales off
  *   invalid         — the stored configuration is unusable (resolved per service; never sold)
  *   unavailable     — the configuration could not be read right now
+ *   not_released    — RD-PRINT-BILL-P2: the service is not released for purchase in code
+ *                     (RELEASED_FOR_PURCHASE), whatever its configuration says
  */
-export type ServiceSaleState = 'available' | 'not_configured' | 'disabled' | 'invalid' | 'unavailable'
+export type ServiceSaleState = 'available' | 'not_configured' | 'disabled' | 'invalid' | 'unavailable' | 'not_released'
 
 /** The sale state of a VALID (already per-service resolved) configuration. */
 export function serviceSaleState(cfg: PrepaidServiceConfig): ServiceSaleState {
@@ -171,7 +264,7 @@ export function serviceSaleState(cfg: PrepaidServiceConfig): ServiceSaleState {
 }
 
 /** The organizer-facing reason a service cannot be bought — ONE wording, server and page. */
-export function saleStateMessage(kind: ServiceKind, state: ServiceSaleState | 'no_photo_limit', missing: string[] = []): string {
+export function saleStateMessage(kind: CatalogServiceKind, state: ServiceSaleState | 'no_photo_limit', missing: string[] = []): string {
   const units = SERVICE_LABELS[kind].units
   switch (state) {
     case 'not_configured': return `Prepaid ${units} aren’t on sale yet — RegisterDesk hasn’t set the ${missing.filter(m => m !== 'enabled for sale').join(', ') || 'pricing'}. Nothing is charged for this.`
@@ -179,6 +272,7 @@ export function saleStateMessage(kind: ServiceKind, state: ServiceSaleState | 'n
     case 'invalid':        return `Prepaid ${units} can’t be bought right now — RegisterDesk is correcting their pricing. Nothing is charged for this.`
     case 'unavailable':    return `Prepaid ${units} pricing couldn’t be loaded just now. Try again in a moment — nothing is charged.`
     case 'no_photo_limit': return `This event has no photo limit, so there is nothing to add ${units} to.`
+    case 'not_released':   return `Prepaid ${units} aren’t available for purchase yet. Nothing is charged for this.`
     default:               return ''
   }
 }
@@ -195,7 +289,7 @@ export function serviceSaleReadinessErrors(v: unknown, path = 'licensing.service
   if (typeof v !== 'object' || v === null || Array.isArray(v)) return []
   const c = v as Record<string, Partial<PrepaidServiceConfig> | undefined>
   const errors: string[] = []
-  for (const kind of SERVICE_KINDS) {
+  for (const kind of CATALOG_SERVICE_KINDS) {
     const s = c[kind]
     if (!s || typeof s !== 'object') continue
     const label = SERVICE_LABELS[kind].title
@@ -222,11 +316,14 @@ export type QuantityCheck =
  * because any of them could otherwise become an amount. 0 means "not buying this service" and
  * is always valid, even for an unconfigured service.
  */
-export function validateServiceQuantity(kind: ServiceKind, raw: unknown, cfg: PrepaidServiceConfig): QuantityCheck {
+export function validateServiceQuantity(kind: CatalogServiceKind, raw: unknown, cfg: PrepaidServiceConfig): QuantityCheck {
   const label = SERVICE_LABELS[kind].units
   if (typeof raw !== 'number' || !Number.isInteger(raw)) return { ok: false, code: 'NOT_AN_INTEGER', message: `The number of ${label} must be a whole number.` }
   if (raw < 0) return { ok: false, code: 'NEGATIVE', message: `The number of ${label} cannot be negative.` }
   if (raw === 0) return { ok: true, quantity: 0 }
+  // RD-PRINT-BILL-P2 — release gate (code, not configuration): checked BEFORE the configuration,
+  // so an unreleased service is refused even when it is priced, rated and switched "for sale".
+  if (!isServicePurchaseReleased(kind)) return { ok: false, code: 'NOT_PURCHASABLE', message: `Prepaid ${label} aren’t available for purchase yet.` }
   const avail = serviceAvailability(cfg)
   if (!avail.purchasable) return { ok: false, code: 'NOT_PURCHASABLE', message: `Prepaid ${label} can’t be purchased yet — awaiting ${avail.missing.join(', ')}.` }
   if (raw < cfg.minQuantity) return { ok: false, code: 'BELOW_MINIMUM', message: `The minimum is ${cfg.minQuantity.toLocaleString('en-IN')} ${label}.` }
@@ -237,8 +334,8 @@ export function validateServiceQuantity(kind: ServiceKind, raw: unknown, cfg: Pr
 // ─── Pricing ──────────────────────────────────────────────────────────────────
 
 /** The immutable pricing record for one service line — written onto the order. */
-export interface ServiceChargeItem {
-  service:        ServiceKind
+export interface ServiceChargeItem<K extends CatalogServiceKind = ServiceKind> {
+  service:        K
   quantity:       number
   unitPricePaise: number
   basePaise:      number
@@ -254,6 +351,12 @@ export interface ServiceChargeItem {
    * which therefore cannot be valued for a refund (Super Admin review).
    */
   baseCapAtPurchase?: number
+  /**
+   * RD-PRINT-BILL-P1 — present ONLY on a GST-inclusive line ('inclusive'): `unitPricePaise` and
+   * `totalPaise` then include GST, and `basePaise`/`gstPaise` are extracted from the total. Absent
+   * on every exclusive line, so exclusive lines (all existing services) are byte-for-byte unchanged.
+   */
+  priceMode?: 'inclusive'
 }
 
 /** Records the base photo limit on every media line (no-op for other services or an unknown base). */
@@ -262,10 +365,24 @@ export function withMediaBaseCap(items: ServiceChargeItem[], baseCap: number | n
   return items.map(i => (i.service === 'media' ? { ...i, baseCapAtPurchase: baseCap } : i))
 }
 
-/** Prices `quantity` units. Caller must have validated the quantity and availability. */
-export function priceServiceItem(kind: ServiceKind, quantity: number, cfg: PrepaidServiceConfig): ServiceChargeItem {
+/**
+ * Prices `quantity` units. Caller must have validated the quantity and availability.
+ *
+ * The service's SERVICE_PRICE_MODE decides the arithmetic (RD-PRINT-BILL-P1):
+ *   exclusive — base = qty × unit; GST added on top (unchanged for every existing service);
+ *   inclusive — total = qty × unit (GST already inside); GST extracted, never added again.
+ */
+export function priceServiceItem<K extends CatalogServiceKind>(kind: K, quantity: number, cfg: PrepaidServiceConfig): ServiceChargeItem<K> {
   const unit = cfg.unitPricePaise ?? 0
   const gstRatePercent = cfg.gstRatePercent ?? 0
+  if (SERVICE_PRICE_MODE[kind] === 'inclusive') {
+    const totalPaise = quantity * unit
+    const basePaise  = inclusiveTaxablePaise(totalPaise, gstRatePercent)
+    return {
+      service: kind, quantity, unitPricePaise: unit, basePaise, gstRatePercent, gstPaise: totalPaise - basePaise,
+      totalPaise, onExhausted: cfg.onExhausted ?? 'block', priceMode: 'inclusive',
+    }
+  }
   const basePaise = quantity * unit
   const gstPaise  = applyPercentPaise(basePaise, gstRatePercent)
   return {
@@ -274,8 +391,22 @@ export function priceServiceItem(kind: ServiceKind, quantity: number, cfg: Prepa
   }
 }
 
-/** A stored line is only trusted when its own arithmetic holds (same rule as capacity snapshots). */
-export function isConsistentServiceItem(i: ServiceChargeItem): boolean {
+/**
+ * A stored line is only trusted when its own arithmetic holds (same rule as capacity snapshots).
+ * RD-PRINT-BILL-P1 — an inclusive line is checked by the inclusive rule, and its recorded mode
+ * must match its service's mode BOTH ways: an inclusive service's line without the marker, or an
+ * exclusive service's line claiming it, is inconsistent. Exclusive lines: the original rule.
+ */
+export function isConsistentServiceItem(i: ServiceChargeItem<CatalogServiceKind>): boolean {
+  const serviceMode = (SERVICE_PRICE_MODE as Readonly<Record<string, ServicePriceMode | undefined>>)[i.service]
+  if (serviceMode === 'inclusive' || i.priceMode === 'inclusive') {
+    return serviceMode === 'inclusive' && i.priceMode === 'inclusive' &&
+      isInt(i.quantity) && i.quantity > 0 && isInt(i.unitPricePaise) && isInt(i.basePaise) && isInt(i.gstPaise) &&
+      typeof i.gstRatePercent === 'number' && Number.isFinite(i.gstRatePercent) && i.gstRatePercent >= 0 &&
+      i.totalPaise === i.quantity * i.unitPricePaise &&
+      i.basePaise === inclusiveTaxablePaise(i.totalPaise, i.gstRatePercent) &&
+      i.gstPaise === i.totalPaise - i.basePaise
+  }
   return isInt(i.quantity) && i.quantity > 0 && isInt(i.unitPricePaise) && isInt(i.basePaise) && isInt(i.gstPaise) &&
     i.basePaise === i.quantity * i.unitPricePaise &&
     i.gstPaise === applyPercentPaise(i.basePaise, i.gstRatePercent) &&
@@ -307,7 +438,14 @@ export function parseServiceSelection(raw: unknown): { ok: true; selection: Serv
   if (raw === undefined || raw === null) return { ok: true, selection: { ...EMPTY_SELECTION } }
   if (typeof raw !== 'object' || Array.isArray(raw)) return { ok: false, message: 'services must be an object of quantities.' }
   const r = raw as Record<string, unknown>
-  for (const key of Object.keys(r)) if (!(SERVICE_KINDS as readonly string[]).includes(key)) return { ok: false, message: `Unknown service '${key}'.` }
+  for (const key of Object.keys(r)) {
+    // RD-PRINT-BILL-P2 — a catalog service that is not released for purchase is refused by name,
+    // before (and independently of) the selectable-services check below.
+    if ((CATALOG_SERVICE_KINDS as readonly string[]).includes(key) && !isServicePurchaseReleased(key)) {
+      return { ok: false, message: `Prepaid ${SERVICE_LABELS[key as CatalogServiceKind].units} aren’t available for purchase yet.` }
+    }
+    if (!(SERVICE_KINDS as readonly string[]).includes(key)) return { ok: false, message: `Unknown service '${key}'.` }
+  }
   const selection = { ...EMPTY_SELECTION }
   for (const k of SERVICE_KINDS) {
     const v = r[k]

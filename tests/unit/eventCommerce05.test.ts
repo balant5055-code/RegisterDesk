@@ -28,13 +28,13 @@ describe('every not-for-sale reason is distinct', () => {
   })
   it('stored corruption is "invalid" (never sold, never the defaults); absent ⇒ the approved defaults; a stored null ⇒ "not_configured"', () => {
     const r = resolveServiceCatalogFromStored({ whatsapp: WA, certificates: { ...WA, unitPricePaise: 'x' } })
-    expect(r.state).toEqual({ whatsapp: 'available', certificates: 'invalid', media: 'available' })
+    expect(r.state).toEqual({ whatsapp: 'available', certificates: 'invalid', media: 'available', print_badges: 'not_released' })   // RD-PRINT-BILL-P1: print_badges is catalog-only and not for sale
     expect(r.config.certificates.unitPricePaise).toBeNull()                    // NOT the ₹1.50 default
     expect(r.config.media.unitPricePaise).toBe(160)                            // absent ⇒ approved default
     const garbage = resolveServiceCatalogFromStored('garbage')
-    expect(garbage.state).toEqual({ whatsapp: 'invalid', certificates: 'invalid', media: 'invalid' })
+    expect(garbage.state).toEqual({ whatsapp: 'invalid', certificates: 'invalid', media: 'invalid', print_badges: 'invalid' })
     expect(garbage.config.whatsapp.unitPricePaise).toBeNull()
-    expect(resolveServiceCatalogFromStored(undefined).state).toEqual({ whatsapp: 'available', certificates: 'available', media: 'available' })
+    expect(resolveServiceCatalogFromStored(undefined).state).toEqual({ whatsapp: 'available', certificates: 'available', media: 'available', print_badges: 'not_released' })
     expect(resolveServiceCatalogFromStored({ whatsapp: { unitPricePaise: null } }).state.whatsapp).toBe('not_configured')
   })
   it('the organizer sentence names the actual reason', () => {

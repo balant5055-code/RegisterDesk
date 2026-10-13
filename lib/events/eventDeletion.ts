@@ -55,8 +55,13 @@ export const RETAINED_COLLECTIONS = [
   'platformTransactions', 'walletTransactions', 'settlementRequests', 'settlementReleases',
   'walletClawbacks', 'organizerRevenueWallets', 'eventLicenses', 'licenseOrders',
   'donations', 'donationPayments', 'donationReceipts', 'adminAuditLogs',
+  // RD-PRINT-BILL-P5 — ID-badge billing records (which attendee was billed, by which job round).
+  // They evidence consumed prepaid units, so they outlive the event like the orders that paid for them.
+  'printBadgeClaims', 'printBadgeRounds',
   // Not event-scoped despite the name — see the header.
   'paymentEvents',
+  // RD-PRINT-BILL-P7 — badge refund trackers (keyed by order id) are refund evidence, kept like the orders.
+  'badgeOrderRefunds',
   // Shared / global.
   'globalCertificateTemplates', 'emailSuppressionList', 'emailSuppressionAudit', 'platformSettings', 'users',
 ] as const
@@ -159,6 +164,10 @@ export function buildDeletionManifest(t: DeletionTarget): DeletionStep[] {
     byEventId('printGenerationJobs'),
     byEventId('printPackageJobs'),
     byEventId('printTemplates'),
+    // RD-PRINT-P1 — immutable layout versions carry the template's event draft id.
+    byEventId('printTemplateVersions'),
+    // RD-PRINT-P3 — combined print-run history (metadata only) carries the event draft id.
+    byEventId('printRuns'),
     byEventId('emailBroadcastJobs'),
     byEventId('whatsappBroadcastJobs'),
 

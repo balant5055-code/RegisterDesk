@@ -11,7 +11,11 @@ export {
   PRINT_VARIABLES, buildVariableMap, resolvePrintText, resolveWithSources,
   sampleVariableSources, type PrintVariableSources, type VariableSource,
 } from './variables'
-export { renderToPdf, renderToSvg, RenderError, type RenderInput } from './renderer'
+export {
+  renderToPdf, renderToSvg, renderSheetsToPdf, RenderError, SheetBudgetError,
+  analyzeTextOverflow, createTextMeasurer,
+  type RenderInput, type SheetRenderInput, type TextOverflow, type TextMeasure,
+} from './renderer'
 export {
   loadPrintAssets, ensurePrintAssets, collectImageSources, type PrintAssetMap,
 } from './assets'

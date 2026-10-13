@@ -2,6 +2,7 @@
 #
 # Runs once daily at an off-peak hour, STRICTLY SEQUENTIAL:
 #   global-reconciliation -> session-reconciliation -> release-funds -> storage-cleanup
+#   -> print-runs-reconcile (RD-PRINT-P4: expires abandoned print runs; metadata only)
 # The two reconcilers are single-instance (RD-OPS-GA-01 F6: their counter repairs use
 # absolute overwrites that must not race live traffic) — the concurrency group +
 # cancel-in-progress:false guarantee one run at a time.
@@ -62,5 +63,12 @@ jobs:
         continue-on-error: true
         run: |
           curl -sS -X POST "$CRON_BASE_URL/api/cron/storage-cleanup" \
+            -H "Authorization: Bearer $CRON_SECRET" \
+            --retry 2 --retry-delay 5 --max-time 65 --fail-with-body
+
+      - name: print-runs-reconcile
+        continue-on-error: true
+        run: |
+          curl -sS -X POST "$CRON_BASE_URL/api/cron/print-runs-reconcile" \
             -H "Authorization: Bearer $CRON_SECRET" \
             --retry 2 --retry-delay 5 --max-time 65 --fail-with-body

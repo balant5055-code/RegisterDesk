@@ -34,12 +34,10 @@ function readStoredZip(buf: Buffer): { name: string; data: Buffer }[] {
 }
 
 function item(p: Partial<PrintJobItem> & { registrationId: string }): PrintJobItem {
+  // RD-PRINT-P0 — items carry selection metadata only (no attendee copy).
   return {
-    registrationId: p.registrationId, name: '', email: '', phone: '', ticketCode: '',
-    qrValue: '', company: '', designation: '', category: p.category ?? '',
-    bibNumber: p.bibNumber ?? '',
-    passId: p.passId ?? '', passName: p.passName ?? '', formResponses: {},
-    output: p.output,
+    registrationId: p.registrationId, category: p.category ?? '',
+    passId: p.passId ?? '', passName: p.passName ?? '', rendered: p.rendered,
   }
 }
 

@@ -29,6 +29,8 @@ export async function recordManualRefundHold(input: {
   amountPaise:     number
   eventId:         string
   reason:          'coupon_exhausted' | 'capacity_stale' | 'superseded_paid' | 'lifecycle_ineligible' | 'photo_capacity_exceeded'
+    // RD-PRINT-BILL-P4 — a captured badge purchase that could not be activated (failReason says why).
+    | 'badge_purchase_refused'
   source:          'license' | 'license_capacity'
   failReason:      string
   /** RD-F2 — the organizer the order belongs to (recorded on the hold when known). */
@@ -147,7 +149,8 @@ export async function recordDuplicateLicensePayment(input: {
   amountPaise:       number
   eventId:           string
   organizerUid:      string
-  detectedBy:        'webhook' | 'confirm'
+  // RD-PRINT-BILL-P4 — 'sweep': found by the badge order reconciliation.
+  detectedBy:        'webhook' | 'confirm' | 'sweep'
 }): Promise<{ holdId: string; created: boolean }> {
   const holdId  = `license_dup_${input.paymentId}`
   const holdRef = adminDb.collection('failedRefunds').doc(holdId)

@@ -159,7 +159,7 @@ export const ITEM_GATES: Record<string, Gate> = {
   communications: { flag: 'broadcast', permission: 'broadcasts' },
   certificates:   { flag: 'certificates', permission: 'certificates' },
   media:          { permission: 'events' },
-  print_assets:   { permission: 'events' },
+  print_assets:   { permission: 'certificates' },   // RD-PRINT-P0 — matches the print APIs
   donations:      { flag: 'donations' },
   custom_domain:  { flag: 'customDomains' },
   white_label:    { flag: 'whiteLabel' },

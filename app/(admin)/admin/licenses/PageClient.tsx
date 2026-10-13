@@ -28,6 +28,7 @@ import type {
   LicensePaymentStatus, LicenseAdminActionType, LicenseAdminActionRequest,
 } from '@/lib/admin/licenseAdminTypes'
 import { AdminEventCommercialPanel } from '@/components/admin/AdminEventCommercialPanel'
+import { AdminPrintBadgePanel } from '@/components/admin/AdminPrintBadgePanel'
 
 const STATUS_FILTERS: { value: string; label: string }[] = [
   { value: '',              label: 'All' },
@@ -395,6 +396,9 @@ function LicenseDetailModal({ eventId, onClose, onChanged }: {
                 acting, and every change it makes appends an audit row that appears in the
                 Timeline immediately below. */}
             <AdminEventCommercialPanel eventId={eventId} getToken={getToken} />
+
+            {/* RD-PRINT-BILL-P2 · ID badge billing (Super Admin; audited; unreleased ⇒ free). */}
+            <AdminPrintBadgePanel eventId={eventId} getToken={getToken} />
 
             {/* Timeline */}
             <div>

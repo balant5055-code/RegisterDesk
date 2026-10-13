@@ -47,6 +47,21 @@ export function isPrintTemplateStatus(v: unknown): v is PrintTemplateStatus {
   return typeof v === 'string' && (PRINT_TEMPLATE_STATUSES as string[]).includes(v)
 }
 
+/**
+ * RD-PRINT-P1 — may a NEW print job use a template with this status? Archived: no (the
+ * server refuses with 409 TEMPLATE_ARCHIVED). Draft and published: yes — drafts stay
+ * printable, as they always were. Jobs already pinned to an archived template's version
+ * keep working; this only gates new jobs. One rule for the server and every picker.
+ */
+export function isPrintableTemplateStatus(status: PrintTemplateStatus): boolean {
+  return status !== 'archived'
+}
+
+/** A print picker's option label: drafts are marked so nobody prints one by surprise. */
+export function printTemplatePickerLabel(t: { name: string; status: PrintTemplateStatus }): string {
+  return t.status === 'draft' ? `${t.name} (${PRINT_TEMPLATE_STATUS_LABELS.draft})` : t.name
+}
+
 // ─── Canvas (metadata only) ─────────────────────────────────────────────────────
 
 export type CanvasUnit = 'mm' | 'in' | 'px'
@@ -165,6 +180,55 @@ export interface PrintTemplate {
   createdAt:    string   // ISO 8601
   updatedAt:    string   // ISO 8601
   createdBy?:   string
+  /**
+   * RD-PRINT-P1 — the template's CURRENT immutable version (printTemplateVersions).
+   * Absent on a template that has never been saved since versioning existed: its first
+   * save — or the first print job that uses it — snapshots the design it has as v1.
+   */
+  currentVersion?: number
+}
+
+// ─── Immutable versions (RD-PRINT-P1) ───────────────────────────────────────────
+//
+// `printTemplateVersions/{templateId}_v{n}` — one document per saved layout, written
+// once with `create()` and never updated. A print job pins (templateId, version), so a
+// later edit, rename, re-size or even deletion of the template cannot change what that
+// job renders. Holds the layout only — never generated output, never attendee data.
+
+/**
+ * The physical card a version is laid out for. Pinned per version so card width,
+ * height, units and orientation can become organizer-editable (custom sizes) without
+ * changing what an existing job prints. Same fields and meaning as PrintCanvas.
+ */
+export interface PrintCardSpec {
+  preset:      CanvasPreset
+  width:       number             // in `unit`, at portrait orientation
+  height:      number
+  unit:        CanvasUnit
+  orientation: CanvasOrientation
+}
+
+/** How a version came to exist — provenance only, never behaviour. */
+export type PrintTemplateVersionSource = 'save' | 'resize' | 'import' | 'duplicate' | 'legacy'
+
+export interface PrintTemplateVersion {
+  templateId:   string
+  version:      number            // 1, 2, 3 … per template
+  organizerUid: string
+  eventId:      string            // event draft id — event deletion removes versions with the event
+  assetType:    PrintAssetType
+  name:         string            // template name at the time of the version (display only)
+  card:         PrintCardSpec
+  design:       PrintDesign       // the complete designer document (canvas settings + elements)
+  /** sha256 of the canonical (card, design) JSON — identical layouts share a hash. */
+  contentHash:  string
+  source:       PrintTemplateVersionSource
+  /** For 'duplicate': the template + version it was copied from. */
+  copiedFrom?:  { templateId: string; version: number }
+  /** For 'import': the bundled starter collection it came from. */
+  starter?:     { collectionId: string; templateName: string }
+  createdAt:    string            // ISO 8601
+  createdBy:    string
 }
 
 // ─── Write-side input shapes (server only) ──────────────────────────────────────

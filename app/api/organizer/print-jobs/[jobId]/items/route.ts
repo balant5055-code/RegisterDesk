@@ -1,13 +1,14 @@
 // GET /api/organizer/print-jobs/[jobId]/items — generated assets for a job.
 //
-// Returns the per-registration results (name, ticket, ready/failed, expiry). The
-// stored storage path + token URL are NEVER returned — each asset downloads only
-// through the secure per-item download route. Security: auth + job ownership.
+// Returns the per-registration results (name, ticket, ready/failed). Name and ticket
+// are read from the LIVE registration (RD-PRINT-P0: items hold no attendee copy). No
+// storage path or URL is ever returned — legacy items' stored ones included; each card
+// is rendered on demand by the per-item download route. Security: `certificates` permission + job ownership (RD-PRINT-P0).
 
 import { NextRequest, NextResponse } from 'next/server'
-import { authorizeAnyWorkspace } from '@/lib/team/workspace'
+import { authorizeWorkspace } from '@/lib/team/workspace'
 import {
-  getPrintGenerationJob, listPrintJobItems, toPrintItemView, type PrintJobItemView,
+  getPrintGenerationJob, listPrintJobItemViews, type PrintJobItemView,
 } from '@/lib/printAssets/generationJob'
 
 export type GetPrintJobItemsResponse =
@@ -18,7 +19,9 @@ export async function GET(
   req: NextRequest, { params }: { params: Promise<{ jobId: string }> },
 ): Promise<NextResponse<GetPrintJobItemsResponse>> {
   const { jobId } = await params
-  const authz = await authorizeAnyWorkspace(req)
+  // RD-PRINT-P0 — print outputs carry attendee credentials: `certificates` (the permission
+  // that creates them), not merely "any non-gate member".
+  const authz = await authorizeWorkspace(req, 'certificates')
   if (!authz.ok) return NextResponse.json({ success: false, error: authz.error }, { status: authz.status })
 
   const job = await getPrintGenerationJob(jobId)
@@ -26,6 +29,6 @@ export async function GET(
     return NextResponse.json({ success: false, error: 'Job not found' }, { status: 404 })
   }
 
-  const items = (await listPrintJobItems(jobId)).map(toPrintItemView)
+  const items = await listPrintJobItemViews(jobId)
   return NextResponse.json({ success: true, items }, { headers: { 'Cache-Control': 'no-store' } })
 }

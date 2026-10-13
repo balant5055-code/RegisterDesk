@@ -29,6 +29,12 @@ import {
   validateServiceAllowances,
   type ServiceAllowancesConfig,
 } from '@/lib/licensing/serviceAllowances'
+import {
+  DEFAULT_PRINT_BADGE_BILLING,
+  validatePrintBadgeBilling,
+  type PrintBadgeBillingConfig,
+} from '@/lib/licensing/printBadgeCommercial'
+import { DEFAULT_PRINT_BADGE_PILOT, validatePrintBadgePilot, type PrintBadgePilotConfig } from '@/lib/licensing/printBadgePilot'
 
 // ─── Section schemas ────────────────────────────────────────────────────────────
 
@@ -111,6 +117,19 @@ export interface LicensingConfig {
    * price — see lib/licensing/serviceAllowances.ts.
    */
   serviceAllowances?: ServiceAllowancesConfig
+  /**
+   * RD-PRINT-BILL-P2 — the global switch for PAID badge generation (off ⇒ badges are free).
+   * OPTIONAL: absent on existing config docs ⇒ the default (off). Locked off until paid
+   * generation is released in code (PAID_BADGE_GENERATION_RELEASED) — see
+   * lib/licensing/printBadgeCommercial.ts.
+   */
+  printBadgeBilling?: PrintBadgeBillingConfig
+  /**
+   * RD-PRINT-P8 (W5) — the paid ID-badge PILOT: the workspace-owner uids that may buy badge units and
+   * use paid generation. OPTIONAL: absent ⇒ enforced with nobody listed. Authorization reads the
+   * STORED value only (lib/licensing/printBadgePilotServer.ts), never this resolved default.
+   */
+  printBadgePilot?: PrintBadgePilotConfig
 }
 
 /** Per-channel communication policy + per-message cost (paise). Email is free. */
@@ -646,7 +665,13 @@ export const BUSINESS_CONFIG_DEFAULTS: BusinessConfigSections = {
       whatsapp:     { ...DEFAULT_SERVICE_ALLOWANCES.whatsapp,     presets: [] },
       certificates: { ...DEFAULT_SERVICE_ALLOWANCES.certificates, presets: [] },
       media:        { ...DEFAULT_SERVICE_ALLOWANCES.media,        presets: [] },
+      // RD-PRINT-BILL-P1 — registered, NOT for sale (disabled; catalog-only, see serviceAllowances.ts).
+      print_badges: { ...DEFAULT_SERVICE_ALLOWANCES.print_badges, presets: [] },
     },
+    // RD-PRINT-BILL-P2 — paid badge generation OFF (badges are free) until released.
+    printBadgeBilling: { ...DEFAULT_PRINT_BADGE_BILLING },
+    // RD-PRINT-P8 (W5) — the pilot: enforced, nobody listed.
+    printBadgePilot: { ...DEFAULT_PRINT_BADGE_PILOT, organizerUids: [] },
   },
   communication: {
     email: {
@@ -997,7 +1022,16 @@ function validateLicensing(v: unknown): ConfigValidationResult {
   // disagree about what a legal value is.
   errors.push(...validateCommercialTerms(c?.commercial, 'licensing.commercial'))
   // Additive: only validated when present, so existing config docs stay valid.
-  if (c?.serviceAllowances !== undefined) errors.push(...validateServiceAllowances(c.serviceAllowances))
+  // RD-PRINT-BILL-P2 — catalog-only services (print_badges) are EXCLUDED here: an invalid stored
+  // one must never revert the whole serviceAllowances group (the live WhatsApp/certificate/photo
+  // prices) to defaults, nor block unrelated licensing saves. They are validated per service — the
+  // catalog resolver fails them closed, and the Business Configuration route refuses an invalid
+  // CHANGE to one (lib/licensing/printBadgeSettings.ts).
+  if (c?.serviceAllowances !== undefined) errors.push(...validateServiceAllowances(c.serviceAllowances, 'licensing.serviceAllowances', { catalogOnly: 'exclude' }))
+  // RD-PRINT-BILL-P2 — additive: validated only when present.
+  if (c?.printBadgeBilling !== undefined) errors.push(...validatePrintBadgeBilling(c.printBadgeBilling))
+  // RD-PRINT-P8 (W5) — additive: validated only when present.
+  if (c?.printBadgePilot !== undefined) errors.push(...validatePrintBadgePilot(c.printBadgePilot))
   return { valid: errors.length === 0, errors }
 }
 

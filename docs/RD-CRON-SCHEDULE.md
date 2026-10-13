@@ -15,7 +15,7 @@
   order listed.
 - **`vercel.json`** is `{}` — it declares **no** crons. Never add one there for a route that a
   workflow already calls: every route must have exactly one scheduler.
-- **30** cron routes exist under `app/api/cron/`; **all 30** are scheduled, each exactly once.
+- **33** cron routes exist under `app/api/cron/`; **all 33** are scheduled, each exactly once.
 
 ## Schedules (UTC)
 
@@ -25,9 +25,9 @@ treat every cadence as "at most this often".
 | Workflow | Group | Schedule | Routes, in order |
 |---|---|---|---|
 | `cron-runners.yml` | A — queue runners | `*/5 * * * *` | `broadcasts`, `email-broadcasts`, `whatsapp-broadcasts`, `print-generation`, `print-packaging`, `certificate-jobs`, `certificate-email-jobs`, `registration-import`, `registration-bulk`, `report-exports`, `identifier-assign`, `timing-tags`, `media-jobs`, `ai-jobs`, `whatsapp-inbound`, `job-reaper` |
-| `cron-recovery.yml` | B — financial recovery, retries, dispatch | `*/10 * * * *` | `registration-reconciliation`, `donation-reconciliation`, `wallet-reconciliation`, `media-credit-reconciliation`, `media-credit-sessions`, `webhooks`, `reminders`, `capacity-alerts`, `ops-alerts` |
+| `cron-recovery.yml` | B — financial recovery, retries, dispatch | `*/10 * * * *` | `registration-reconciliation`, `donation-reconciliation`, `wallet-reconciliation`, `badge-orders-reconcile`, `badge-rounds-reconcile`, `media-credit-reconciliation`, `media-credit-sessions`, `webhooks`, `reminders`, `capacity-alerts`, `ops-alerts` |
 | `cron-cleanup.yml` | C — cleanup | `0 * * * *` | `certificate-claims` |
-| `cron-maintenance.yml` | D — daily maintenance | `0 2 * * *` | `global-reconciliation`, `session-reconciliation`, `release-funds`, `storage-cleanup` |
+| `cron-maintenance.yml` | D — daily maintenance | `0 2 * * *` | `global-reconciliation`, `session-reconciliation`, `release-funds`, `storage-cleanup`, `print-runs-reconcile` |
 
 `0 2 * * *` is 02:00 UTC = **07:30 IST**.
 
@@ -46,6 +46,18 @@ treat every cadence as "at most this often".
   to a day after its hold expires.
 - **`webhooks`** — every 10 minutes (Group B): a due webhook re-delivery waits up to ~10 minutes.
 - **`ops-alerts`** — every 10 minutes, last in Group B, after the recovery jobs of the same tick.
+- **`badge-orders-reconcile`** — every 10 minutes (Group B). ID-badge purchase checkouts expire 30
+  minutes after creation; after a further 30-minute grace the sweep settles a captured payment the
+  client and webhook missed (activated once, or held for review), expires an order Razorpay confirms
+  unpaid, and leaves an authorised or unknown one for the next run. Captures on an order expired in
+  the last 7 days are held, never activated. It never refunds.
+- **`badge-rounds-reconcile`** — every 10 minutes (Group B), right after `badge-orders-reconcile`. Settles
+  ID-badge billing rounds left open by a job that ended without settling them (crash, failed or
+  cancelled job — including an Operations Center cancel whose settlement failed — or a deleted job).
+  Its own 40-second budget and a saved cursor (`system/printBadgeRoundSweep`), so it does not depend
+  on time left over in `print-generation`, whose inline sweep stays as a fast path. A round of a job
+  that is still running is never settled, however old; such rounds are counted as `staleActive`.
+  A round that fails to settle is retried first on the next run. It never charges or refunds.
 
 ## Differences from the earlier (unshipped) plan
 

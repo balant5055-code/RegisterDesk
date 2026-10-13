@@ -13,7 +13,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
 import {
   AlertCircle, ArrowUpRight, CalendarDays, ChevronRight, Image as ImageIcon, Loader2, MessageSquare,
-  Award, Users, Receipt, RotateCcw, Forward, Wallet as WalletIcon, Sparkles,
+  Award, Users, Receipt, RotateCcw, Forward, Wallet as WalletIcon, Sparkles, IdCard,
 } from 'lucide-react'
 import { auth } from '@/lib/firebase/auth'
 import { useEventContext } from '@/components/dashboard/EventContextProvider'
@@ -33,7 +33,7 @@ import { PHASE_LABEL, PHASE_TONE, SMS_NOTE, measuredText, qty, rupees } from './
 type View = EventRequestsView & { canSubmit: boolean }
 type Loaded = { eventId: string; detail: WalletEventDetail; view: View }
 
-const ICON: Record<RequestableService, React.ElementType> = { registrations: Users, whatsapp: MessageSquare, certificates: Award, media: ImageIcon }
+const ICON: Record<RequestableService, React.ElementType> = { registrations: Users, whatsapp: MessageSquare, certificates: Award, media: ImageIcon, print_badges: IdCard }
 const fmtDate = (iso: string | null) => (iso ? new Date(iso).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' }) : '—')
 const fmtDateTime = (iso: string | null) => (iso ? new Date(iso).toLocaleString('en-IN', { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' }) : '—')
 // The refund window is 24 hours, so its deadline is shown to the minute (date in the tile, time beneath it).

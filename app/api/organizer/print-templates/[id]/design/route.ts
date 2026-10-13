@@ -1,11 +1,13 @@
 // PUT /api/organizer/print-templates/[id]/design
 //
-// PA-2 — Saves the visual designer's document as ONE JSON, atomically overwriting
-// the template's `design` field (no per-element writes). Security: workspace auth +
-// template ownership.
+// PA-2 — Saves the visual designer's document as ONE JSON (no per-element writes).
+// RD-PRINT-P1 — the save commits an IMMUTABLE version (printTemplateVersions) and moves
+// the template's `currentVersion` pointer in the same transaction; an unchanged design
+// creates no version. Print jobs already pinned to an earlier version are unaffected.
+// Security: `certificates` + template ownership.
 //
 // Body:  { design: PrintDesign } | PrintDesign
-// Reply: { success, design }
+// Reply: { success, design, version }
 
 import { NextRequest, NextResponse } from 'next/server'
 import { authorizeWorkspace } from '@/lib/team/workspace'
@@ -29,6 +31,6 @@ export async function PUT(
   const parsed = validateDesign(body)
   if (!parsed.ok) return NextResponse.json({ success: false, error: parsed.error }, { status: 400 })
 
-  await savePrintDesign(id, parsed.value)
-  return NextResponse.json({ success: true, design: parsed.value })
+  const committed = await savePrintDesign(id, parsed.value, { actorUid: authz.callerUid })
+  return NextResponse.json({ success: true, design: parsed.value, version: committed.version })
 }

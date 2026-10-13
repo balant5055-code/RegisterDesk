@@ -13,6 +13,8 @@
 //   6 Photo storage            the event's PAID photo capacity (no free photos; max 3,000 per event)
 //   7 Cost summary            ONE itemized server quote (/api/licensing/checkout/quote)
 //   8 Payment                 one Razorpay payment, verified server-side (ActivationPaymentPanel)
+//   + ID badges (published events only) — RD-PRINT-BILL-P6: a SEPARATE purchase with its own Pay
+//                             button (BadgeUnitsPurchasePanel); never part of the cost summary above.
 //
 // The organizer controls QUANTITIES; RegisterDesk controls rates, ranges, GST and the quote. A
 // prepaid service that is not configured for sale is shown with its controls disabled and
@@ -49,6 +51,7 @@ import { CapacitySelector } from '@/components/wizard/CapacitySelector'
 import { ServiceQuantitySelector, SALE_STATE_BADGE } from '@/components/wizard/ServiceQuantitySelector'
 import { LicenseCostSummary, type CheckoutQuoteResponse } from '@/components/wizard/LicenseCostSummary'
 import { ActivationPaymentPanel, type PayOutcome } from '@/components/wizard/ActivationPaymentPanel'
+import { BadgeUnitsPurchasePanel } from '@/components/wizard/BadgeUnitsPurchasePanel'
 import type { PublishAgreementInput } from '@/lib/legal/organizerAgreement'
 import { CAPACITY_FIGURE_LABELS, capacityBreakdown } from '@/lib/communications/capacityFigures'
 
@@ -543,6 +546,15 @@ export function LicenseServicesStep({
               />
             </ServiceCard>
           </section>
+
+          {/* RD-PRINT-BILL-P6 · ID badges — published events only; its own order and Pay button. */}
+          {isSubmitted && !embeddedFinal && draftId && (
+            <section aria-labelledby="license-badges-heading">
+              <h2 id="license-badges-heading" className={sectionHeading}>ID badges</h2>
+              <BadgeUnitsPurchasePanel draftId={draftId}
+                onPurchased={() => { if (walletIntent) setReturnAfterPurchase(walletIntent.returnTo) }} />
+            </section>
+          )}
         </div>
 
         {/* 7 · Cost summary + 8 · Payment — stack below the sections on mobile */}

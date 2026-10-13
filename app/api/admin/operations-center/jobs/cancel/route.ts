@@ -10,6 +10,8 @@ import { cancelJob }                 from '@/lib/jobs/kernel'
 import { logAdminAction }            from '@/lib/admin/audit'
 import { ALL_COLLECTIONS }           from '@/lib/admin/operationsCenterService'
 import type { OpsCancelResponse }    from '@/lib/admin/operationsCenterTypes'
+import { settlePrintBadgeRound, BILLED_JOBS_COLLECTION } from '@/lib/printAssets/badgeBilling/store'
+import { captureError }              from '@/lib/monitoring/sentry'
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
   const adminUid = await resolveAdminUid(req.headers.get('authorization'))
@@ -27,6 +29,16 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   try {
     const status = await cancelJob(collection, jobId)
     if (status === null) return NextResponse.json({ error: 'Job not found' }, { status: 404 })
+    // RD-PRINT-P8 (W2) — a cancelled PAID badge job's open billing round settles now, exactly as the
+    // organizer cancel route does (transactional + idempotent: a free job is 'not_billed', a settled
+    // round is 'already'). The cancellation itself has already succeeded; if settling fails the round
+    // stays open and the badge-rounds-reconcile cron settles it — reported, never presented as settled.
+    if (collection === BILLED_JOBS_COLLECTION) {
+      await settlePrintBadgeRound(jobId, 'admin_cancel').catch(err => {
+        console.error('[admin/operations-center/jobs/cancel] badge round settlement deferred to the recovery cron', { type: err instanceof Error ? err.name : typeof err })
+        captureError(err, { scope: 'admin.ops_cancel.badge_round', area: 'print' })
+      })
+    }
     void logAdminAction({ adminUid, action: 'job.cancelled', entityType: 'job', entityId: jobId, metadata: { collection } }).catch(() => {})
     return NextResponse.json({ jobId, status } satisfies OpsCancelResponse)
   } catch (e) {

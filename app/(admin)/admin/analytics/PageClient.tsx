@@ -56,7 +56,7 @@ export default function AdminAnalyticsPage() {
             <Kpi icon={Building2} label="Organizers" value={String(data.platform.organizers)} />
             <Kpi icon={CalendarDays} label="Published events" value={String(data.platform.publishedEvents)} />
             <Kpi icon={Users} label="Registrations" value={data.platform.totalRegistrations.toLocaleString('en-IN')} />
-            <Kpi icon={KeyRound} label="License revenue" value={rupees(data.licenseSales.revenuePaise)} />
+            <Kpi icon={KeyRound} label="License revenue" value={data.licenseSales.revenuePaise === null ? 'Unavailable' : rupees(data.licenseSales.revenuePaise)} />
           </div>
 
           <div className="grid gap-4 lg:grid-cols-2">
@@ -67,8 +67,8 @@ export default function AdminAnalyticsPage() {
               <div className="p-4">
                 {data.licenseSales.byTier.length ? <HBars data={data.licenseSales.byTier} /> : <p className="text-[13px] text-muted-foreground">No license sales yet.</p>}
                 <div className="mt-3 flex gap-4 text-[12.5px] text-muted-foreground">
-                  <span>Paid: <strong className="text-foreground">{data.licenseSales.paidCount}</strong></span>
-                  <span>Refunded: <strong className="text-foreground">{data.licenseSales.refundedCount}</strong></span>
+                  <span>Paid: <strong className="text-foreground">{data.licenseSales.paidCount ?? 'Unavailable'}</strong></span>
+                  <span>Refunded: <strong className="text-foreground">{data.licenseSales.refundedCount ?? 'Unavailable'}</strong></span>
                 </div>
               </div>
             </Card>

@@ -51,6 +51,25 @@ jobs:
             -H "Authorization: Bearer $CRON_SECRET" \
             --retry 2 --retry-delay 5 --max-time 65 --fail-with-body
 
+      # RD-PRINT-BILL-P4 — ID-badge purchase checkouts past their window + grace: settles a
+      # captured payment (activate once, or hold), expires unpaid ones. Never refunds. Idempotent.
+      - name: badge-orders-reconcile
+        continue-on-error: true
+        run: |
+          curl -sS -X POST "$CRON_BASE_URL/api/cron/badge-orders-reconcile" \
+            -H "Authorization: Bearer $CRON_SECRET" \
+            --retry 2 --retry-delay 5 --max-time 65 --fail-with-body
+
+      # RD-PRINT-P8 (W6) — ID-badge billing rounds left open by a job that ended without settling them:
+      # settles them (transactional, idempotent; running jobs are never force-settled). Own budget and
+      # cursor — independent of print-generation's inline fast-path sweep. Never charges or refunds.
+      - name: badge-rounds-reconcile
+        continue-on-error: true
+        run: |
+          curl -sS -X POST "$CRON_BASE_URL/api/cron/badge-rounds-reconcile" \
+            -H "Authorization: Bearer $CRON_SECRET" \
+            --retry 2 --retry-delay 5 --max-time 65 --fail-with-body
+
       # MC-05 — Media Credits: retries captured-but-ungranted purchases and
       # approved-but-unpaid refunds. Idempotent; a no-op when credits are disabled.
       - name: media-credit-reconciliation

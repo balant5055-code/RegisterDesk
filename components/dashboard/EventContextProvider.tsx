@@ -312,3 +312,11 @@ export function useEventContext(): EventContextValue {
   if (!ctx) throw new Error('useEventContext must be used inside <EventContextProvider>')
   return ctx
 }
+
+/**
+ * RD-PRINT-BILL-P6 — the same context, or null outside the dashboard shell (a component that is
+ * also rendered on its own, e.g. the License & Services step's ID-badge section).
+ */
+export function useOptionalEventContext(): EventContextValue | null {
+  return useContext(EventCtx)
+}

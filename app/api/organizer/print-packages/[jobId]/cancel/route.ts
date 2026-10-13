@@ -1,8 +1,8 @@
 // POST /api/organizer/print-packages/[jobId]/cancel — cancel a packaging job.
-// Reuses the generic kernel cancelJob(). Security: auth + job ownership.
+// Reuses the generic kernel cancelJob(). Security: `certificates` permission + job ownership (RD-PRINT-P0).
 
 import { NextRequest, NextResponse } from 'next/server'
-import { authorizeAnyWorkspace } from '@/lib/team/workspace'
+import { authorizeWorkspace } from '@/lib/team/workspace'
 import { cancelJob }            from '@/lib/jobs/kernel'
 import { getPrintPackageJob, PRINT_PACKAGE_JOBS } from '@/lib/printAssets/packageJob'
 
@@ -10,7 +10,9 @@ export async function POST(
   req: NextRequest, { params }: { params: Promise<{ jobId: string }> },
 ): Promise<NextResponse> {
   const { jobId } = await params
-  const authz = await authorizeAnyWorkspace(req)
+  // RD-PRINT-P0 — print outputs carry attendee credentials: `certificates` (the permission
+  // that creates them), not merely "any non-gate member".
+  const authz = await authorizeWorkspace(req, 'certificates')
   if (!authz.ok) return NextResponse.json({ success: false, error: authz.error }, { status: authz.status })
 
   const job = await getPrintPackageJob(jobId)

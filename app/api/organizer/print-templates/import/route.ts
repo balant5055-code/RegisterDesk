@@ -63,8 +63,14 @@ export async function POST(req: NextRequest): Promise<NextResponse<ImportCollect
     })
     // Apply the collection's design via the existing validated save path.
     const parsed = validateDesign({ design: src.design })
-    if (parsed.ok) await savePrintDesign(tpl.id, parsed.value)
-    created.push({ ...tpl, design: parsed.ok ? parsed.value : tpl.design })
+    // RD-PRINT-P1 — committed as the template's v1, recording which starter it came from.
+    const committed = parsed.ok
+      ? await savePrintDesign(tpl.id, parsed.value, {
+          actorUid: authz.callerUid, source: 'import',
+          starter: { collectionId: collection.id, templateName: src.name },
+        })
+      : null
+    created.push({ ...tpl, design: parsed.ok ? parsed.value : tpl.design, ...(committed ? { currentVersion: committed.version } : {}) })
   }
 
   return NextResponse.json({ success: true, templates: created }, { status: 201 })

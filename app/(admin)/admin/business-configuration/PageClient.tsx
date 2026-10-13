@@ -25,6 +25,7 @@ import { FeesEditor } from './FeesEditor'
 import { MediaStudioEditor } from './MediaStudioEditor'
 import { PaymentGatewayEditor } from './PaymentGatewayEditor'
 import type { BusinessConfigResponse } from '@/app/api/admin/business-config/route'
+import { badgeSettingsOf, badgeSettingsChanged, badgeReasonProblem, BADGE_REASON_GUIDANCE, BADGE_REASON_MAX } from '@/lib/licensing/printBadgeSettings'
 
 type SectionDraft = Record<string, unknown>
 type DraftMap     = Record<BusinessConfigSectionKey, SectionDraft>
@@ -102,6 +103,12 @@ export default function BusinessConfigurationPage() {
     return out
   }, [data, drafts])
   const anyDirty = Object.values(dirtyBySection).some(Boolean)
+
+  // RD-PRINT-BILL-P2.1 — a licensing publish that CHANGES the ID badge settings needs a 3–500
+  // character reason; say so (and check it) before submission. Other publishes are unchanged.
+  const badgeChangeInDialog = reasonFor === 'licensing' && !!data && !!drafts
+    && badgeSettingsChanged(badgeSettingsOf(data.config.licensing), badgeSettingsOf(drafts.licensing))
+  const badgeReasonIssue = badgeChangeInDialog ? badgeReasonProblem(reasonText) : null
 
   const doPublish = useCallback(async () => {
     if (!reasonFor || !drafts) return
@@ -311,14 +318,25 @@ export default function BusinessConfigurationPage() {
           <div className="w-full max-w-md rounded-xl border border-border bg-card p-5 shadow-xl" onClick={e => e.stopPropagation()}>
             <h2 className="text-[15px] font-bold text-foreground">Publish {SECTION_LABELS[reasonFor]}</h2>
             <p className="mt-1 text-[12.5px] text-muted-foreground">This creates a new version and takes effect immediately. A reason is required for the audit trail.</p>
+            {/* RD-PRINT-BILL-P2.1 — the stricter badge reason rule is stated BEFORE submission (the server still enforces it). */}
+            {badgeChangeInDialog && (
+              <p className="mt-2 rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-[12px] text-amber-900" data-testid="publish-badge-reason-guidance">{BADGE_REASON_GUIDANCE}</p>
+            )}
             <textarea
               value={reasonText} onChange={e => setReasonText(e.target.value)} rows={3} autoFocus
               placeholder="Why are you making this change?"
+              maxLength={badgeChangeInDialog ? BADGE_REASON_MAX : undefined}
+              aria-describedby={badgeChangeInDialog ? 'publish-reason-count' : undefined}
               className="mt-3 w-full rounded-lg border border-border bg-background px-3 py-2 text-[13px] text-foreground focus:border-border-strong focus:outline-none focus:ring-2 focus:ring-primary/15"
             />
+            {badgeChangeInDialog && (
+              <p id="publish-reason-count" className={cn('mt-1 text-[11px] tabular-nums', badgeReasonIssue ? 'text-destructive' : 'text-muted-foreground')}>
+                {reasonText.trim().length}/{BADGE_REASON_MAX} characters{badgeReasonIssue ? ` — ${badgeReasonIssue}` : ''}
+              </p>
+            )}
             <div className="mt-4 flex justify-end gap-2">
               <Button type="button" variant="outline" size="sm" disabled={publishing} onClick={() => setReasonFor(null)}>Cancel</Button>
-              <Button type="button" variant="primary" size="sm" isLoading={publishing} disabled={publishing || !reasonText.trim()} onClick={doPublish}>Publish</Button>
+              <Button type="button" variant="primary" size="sm" isLoading={publishing} disabled={publishing || !reasonText.trim() || !!badgeReasonIssue} onClick={doPublish}>Publish</Button>
             </div>
           </div>
         </div>

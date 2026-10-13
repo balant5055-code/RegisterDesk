@@ -12,19 +12,22 @@
 
 import { businessConfig } from '@/lib/config/businessConfigService'
 import {
-  DEFAULT_SERVICE_ALLOWANCES, SERVICE_KINDS, NOT_FOR_SALE, normalizeServiceAllowances, validateServiceAllowances,
-  serviceSaleState,
-  type ServiceAllowancesConfig, type ServiceKind, type ServiceSaleState,
+  DEFAULT_SERVICE_ALLOWANCES, CATALOG_SERVICE_KINDS, NOT_FOR_SALE, normalizeServiceAllowances, validateServiceAllowances,
+  serviceSaleState, isServicePurchaseReleased,
+  type ServiceAllowancesConfig, type CatalogServiceKind, type ServiceSaleState,
 } from './serviceAllowances'
 
+// RD-PRINT-BILL-P1 — resolved over the whole CATALOG (CATALOG_SERVICE_KINDS), so a catalog-only
+// service (print_badges) is judged by the same per-service rules and is never silently missing
+// from a resolved config. Which services can be SOLD is still decided by SERVICE_KINDS callers.
 export interface ServiceCatalogResolution {
   config: ServiceAllowancesConfig
-  state:  Record<ServiceKind, ServiceSaleState>
+  state:  Record<CatalogServiceKind, ServiceSaleState>
 }
 
-const allOf = <T,>(v: T) => Object.fromEntries(SERVICE_KINDS.map(k => [k, v])) as Record<ServiceKind, T>
+const allOf = <T,>(v: T) => Object.fromEntries(CATALOG_SERVICE_KINDS.map(k => [k, v])) as Record<CatalogServiceKind, T>
 const notForSale = (state: ServiceSaleState): ServiceCatalogResolution => ({
-  config: Object.fromEntries(SERVICE_KINDS.map(k => [k, { ...NOT_FOR_SALE }])) as ServiceAllowancesConfig,
+  config: Object.fromEntries(CATALOG_SERVICE_KINDS.map(k => [k, { ...NOT_FOR_SALE }])) as ServiceAllowancesConfig,
   state:  allOf(state),
 })
 
@@ -36,7 +39,7 @@ export function resolveServiceCatalogFromStored(rawGroup: unknown): ServiceCatal
   const raw = (rawGroup ?? {}) as Record<string, unknown>
   const config = normalizeServiceAllowances(undefined)   // approved defaults for everything absent
   const state  = allOf<ServiceSaleState>('not_configured')
-  for (const kind of SERVICE_KINDS) {
+  for (const kind of CATALOG_SERVICE_KINDS) {
     // Judge THIS service alone (its stored fields over its defaults); siblings are unaffected.
     const stored = raw[kind]
     // A stored service that is not an object ('on', 5, [...], null) is corrupt. It must NOT be
@@ -46,7 +49,10 @@ export function resolveServiceCatalogFromStored(rawGroup: unknown): ServiceCatal
     const candidate = normalizeServiceAllowances({ ...DEFAULT_SERVICE_ALLOWANCES, [kind]: stored })
     if (!malformed && (stored === undefined || validateServiceAllowances(candidate).length === 0)) {
       config[kind] = candidate[kind]
-      state[kind]  = serviceSaleState(candidate[kind])
+      // RD-PRINT-BILL-P2 — the code release gate outranks every configured state: a service that is
+      // not released is never 'available' (nor 'disabled'/'not_configured', which imply that
+      // configuration alone could put it on sale). A corrupt stored value still reports 'invalid'.
+      state[kind]  = isServicePurchaseReleased(kind) ? serviceSaleState(candidate[kind]) : 'not_released'
     } else {
       config[kind] = { ...NOT_FOR_SALE }                  // stored, but unusable — never sold
       state[kind]  = 'invalid'

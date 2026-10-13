@@ -49,10 +49,12 @@ export interface LicenseCenterOverview {
     campaigns: number
   }
   revenue: {
-    licenseRevenuePaise: number
-    paidCount:           number
-    refundedCount:       number
-    discountGivenPaise:  number
+    /** null = unavailable, never a misleading 0: the figure's own query failed (RD-ANALYTICS-FAILCLOSED)
+     *  or, for revenue / paid count, the ID-badge exclusion was unavailable (RD-PRINT-BILL-P4.4). */
+    licenseRevenuePaise: number | null
+    paidCount:           number | null
+    refundedCount:       number | null
+    discountGivenPaise:  number | null
     couponRedemptions:   number
   }
   topCoupons:  { label: string; value: number }[]

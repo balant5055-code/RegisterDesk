@@ -6,6 +6,8 @@
 //   packages   → /api/organizer/print-ops/package-jobs (list) + /print-packages/* (actions)
 //   items      → /api/organizer/print-jobs/[jobId]/items (+ per-item secure download)
 // No renderer, designer, job, storage or schema changes.
+// RD-PRINT-BILL-P6 — a PAID badge job's Retry / Regenerate goes through /retry and the quote flow
+// (useBadgeGeneration + BadgeQuoteDialog); free jobs keep /process and /retry exactly as before.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
@@ -29,6 +31,10 @@ import type { ListGenerationJobsResponse } from '@/app/api/organizer/print-ops/g
 import type { ListPackageJobsResponse } from '@/app/api/organizer/print-ops/package-jobs/route'
 import type { GetPrintJobItemsResponse } from '@/app/api/organizer/print-jobs/[jobId]/items/route'
 import type { EventListItem } from '@/app/api/organizer/events/route'
+import PrintSheetPanel from '@/components/print-assets/PrintSheetPanel'
+import { useWorkspacePermissions } from '@/lib/hooks/useWorkspacePermissions'
+import { useBadgeGeneration, type BadgeIntent } from '@/components/print-assets/badges/useBadgeGeneration'
+import { BadgeQuoteDialog } from '@/components/print-assets/badges/BadgeQuoteDialog'
 
 type Tab = 'dashboard' | 'generation' | 'packages' | 'assets' | 'templates' | 'storage'
 type JobStatus = PrintGenerationJobView['status']
@@ -129,6 +135,23 @@ export function PrintOpsClient() {
     finally { setBusy('') }
   }, [headers, load, showToast])
 
+  // ── RD-PRINT-BILL-P6 · paid badge jobs: Retry / Regenerate through the quote flow ──────────
+  const perms = useWorkspacePermissions()
+  const [paidRun, setPaidRun] = useState<{ jobId: string; draftId: string; title: string; okMsg: string } | null>(null)
+  const gen = useBadgeGeneration(null, {
+    onDone: () => {
+      const run = paidRun
+      if (run) showToast(run.okMsg, 'success')
+      void load()
+      if (run && run.jobId === assetJobId) void loadItems(run.jobId)
+    },
+  })
+  const startPaidRun = (job: PrintGenerationJobView, intent: Extract<BadgeIntent, { kind: 'reopen' }>, title: string, okMsg: string) => {
+    setPaidRun({ jobId: job.jobId, draftId: job.eventId, title, okMsg })
+    void gen.start(intent)
+  }
+  const closePaidRun = () => { setPaidRun(null); gen.reset() }
+
   const patchTemplate = useCallback(async (id: string, status: PrintTemplateStatus) => {
     setBusy(`tpl-${id}`)
     try {
@@ -165,14 +188,35 @@ export function PrintOpsClient() {
     finally { setItemsLoading(false) }
   }, [headers, showToast])
 
-  const downloadItem = useCallback(async (jobId: string, regId: string) => {
-    const t = await token()
-    window.open(`/api/organizer/print-jobs/${jobId}/items/${regId}/download?token=${encodeURIComponent(t)}`, '_blank')
-  }, [token])
-  const downloadZip = useCallback(async (jobId: string) => {
-    const t = await token()
-    window.open(`/api/organizer/print-packages/${jobId}/download?token=${encodeURIComponent(t)}`, '_blank')
-  }, [token])
+  // RD-PRINT-P0 — cards and ZIPs are rendered ON DEMAND by the server and returned in the
+  // response (nothing is stored). The session token travels in the Authorization header
+  // only — never in the URL — so the file is fetched and handed to the browser as a blob.
+  // `preview` opens it in a tab; the tab is opened BEFORE the await so popup blockers
+  // (which only allow windows opened directly by the click) let it through.
+  const fetchFile = useCallback(async (url: string, fallbackName: string, preview: boolean) => {
+    const win = preview ? window.open('', '_blank') : null
+    try {
+      const res = await fetch(url, { headers: { Authorization: `Bearer ${await token()}` }, cache: 'no-store' })
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({})) as { error?: string }
+        win?.close()
+        showToast(d.error ?? 'Download failed', 'error')
+        return
+      }
+      const name = /filename="([^"]+)"/.exec(res.headers.get('content-disposition') ?? '')?.[1] ?? fallbackName
+      const href = URL.createObjectURL(await res.blob())
+      if (win) { win.location.href = href; setTimeout(() => URL.revokeObjectURL(href), 60_000); return }
+      const a = document.createElement('a'); a.href = href; a.download = name; a.click()
+      setTimeout(() => URL.revokeObjectURL(href), 10_000)
+    } catch {
+      win?.close()
+      showToast('Network error', 'error')
+    }
+  }, [token, showToast])
+  const downloadItem = useCallback((jobId: string, regId: string, preview = false) =>
+    fetchFile(`/api/organizer/print-jobs/${jobId}/items/${regId}/download`, `${regId}.pdf`, preview), [fetchFile])
+  const downloadZip = useCallback((jobId: string) =>
+    fetchFile(`/api/organizer/print-packages/${jobId}/download`, `${jobId}.zip`, false), [fetchFile])
 
   // ── Derived metrics ─────────────────────────────────────────────────────────
   const metrics = useMemo(() => {
@@ -300,7 +344,7 @@ export function PrintOpsClient() {
             const active = j.status === 'processing' || j.status === 'pending'
             return (
               <tr key={j.jobId} className="border-t border-border hover:bg-muted/20">
-                <td className="px-4 py-3"><p className="font-semibold text-foreground">{PRINT_ASSET_TYPE_LABELS[j.assetType]}</p><p className="text-[12px] text-muted-foreground">{eventName(j.eventId)}</p></td>
+                <td className="px-4 py-3"><p className="flex flex-wrap items-center gap-1.5 font-semibold text-foreground">{PRINT_ASSET_TYPE_LABELS[j.assetType]}<BillingChip billing={j.billing} /></p><p className="text-[12px] text-muted-foreground">{eventName(j.eventId)}</p></td>
                 <td className="px-4 py-3 text-[12px] text-muted-foreground">{j.counts.processed}/{j.counts.total} · <span className="text-emerald-600">{j.counts.succeeded} ok</span>{j.counts.failed > 0 && <> · <span className="text-rose-600">{j.counts.failed} failed</span></>}</td>
                 <td className="px-4 py-3"><Pill status={j.status} /></td>
                 <td className="px-4 py-3 text-[12px] text-muted-foreground">{fmt(j.createdAt)}</td>
@@ -308,7 +352,10 @@ export function PrintOpsClient() {
                   <div className="flex items-center justify-end gap-1">
                     <IconBtn title="View assets" onClick={() => { setTab('assets'); void loadItems(j.jobId) }}><Eye className="size-3.5" /></IconBtn>
                     {active && <IconBtn title="Resume" busy={busy === `res-${j.jobId}`} onClick={() => void act(`res-${j.jobId}`, `/api/organizer/print-jobs/${j.jobId}/process`, undefined, 'Resumed')}><Play className="size-3.5" /></IconBtn>}
-                    {j.status === 'failed' && <IconBtn title="Retry" busy={busy === `res-${j.jobId}`} onClick={() => void act(`res-${j.jobId}`, `/api/organizer/print-jobs/${j.jobId}/process`, undefined, 'Retried')}><RefreshCw className="size-3.5" /></IconBtn>}
+                    {j.status === 'failed' && <IconBtn title="Retry" busy={busy === `res-${j.jobId}` || (paidRun?.jobId === j.jobId && gen.state.phase !== 'done')} onClick={() => {
+                      if (j.billing?.mode === 'paid') startPaidRun(j, { kind: 'reopen', jobId: j.jobId, mode: 'retry' }, 'Retry ID badges', 'Retried')
+                      else void act(`res-${j.jobId}`, `/api/organizer/print-jobs/${j.jobId}/process`, undefined, 'Retried')
+                    }}><RefreshCw className="size-3.5" /></IconBtn>}
                     <IconBtn title="Package this job" busy={busy === `pkg-${j.jobId}`} onClick={() => void act(`pkg-${j.jobId}`, '/api/organizer/print-packages', { sourceJobId: j.jobId }, 'Packaging started')}><Package className="size-3.5" /></IconBtn>
                     {active && <IconBtn title="Cancel" danger busy={busy === `can-${j.jobId}`} onClick={() => void act(`can-${j.jobId}`, `/api/organizer/print-jobs/${j.jobId}/cancel`, undefined, 'Cancelled')}><X className="size-3.5" /></IconBtn>}
                   </div>
@@ -354,12 +401,21 @@ export function PrintOpsClient() {
               {genJobs.map(j => <option key={j.jobId} value={j.jobId}>{PRINT_ASSET_TYPE_LABELS[j.assetType]} · {eventName(j.eventId)} · {j.counts.succeeded} assets · {fmt(j.createdAt)}</option>)}
             </select>
             {selected.size > 0 && assetJobId && (
-              <button onClick={() => { const job = genJobs.find(g => g.jobId === assetJobId); if (job) void act(`regen`, '/api/organizer/print-jobs', { templateId: job.templateId, filters: { registrationIds: [...selected] } }, 'Regeneration started') }}
+              // RD-PRINT-AUDIT · regenerate THIS job's selected cards from the job's PINNED template
+              // version (the retry route) — never a new job from the template's current version, which
+              // printed a newer layout after an edit and was refused once the template was archived.
+              <button onClick={() => {
+                const job = genJobs.find(x => x.jobId === assetJobId)
+                if (job?.billing?.mode === 'paid') { startPaidRun(job, { kind: 'reopen', jobId: job.jobId, mode: 'regenerate', registrationIds: [...selected] }, `Regenerate ${selected.size} ID badge${selected.size === 1 ? '' : 's'}`, 'Regeneration started'); return }
+                void act(`regen`, `/api/organizer/print-jobs/${encodeURIComponent(assetJobId)}/retry`, { mode: 'regenerate', registrationIds: [...selected] }, 'Regeneration started').then(ok => { if (ok) void loadItems(assetJobId) })
+              }}
                 className={cn(buttonVariants({ variant: 'primary', size: 'sm' }), 'ml-auto')} disabled={busy === 'regen'}>
                 {busy === 'regen' ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Regenerate {selected.size} selected
               </button>
             )}
           </div>
+          {/* RD-PRINT-P2 — the job's cards on A4/A3 sheets, rendered on demand (never stored). */}
+          {assetJobId && <PrintSheetPanel jobId={assetJobId} selectedIds={[...selected]} getToken={token} notify={showToast} />}
           {!assetJobId ? <div className="rounded-2xl border border-border bg-card py-4"><EmptyState icon={Files} title="Select a generation job" description="Pick a job to browse its generated assets." /></div>
            : itemsLoading ? <div className="flex justify-center py-12"><Loader2 className="size-5 animate-spin text-muted-foreground" /></div>
            : (
@@ -369,8 +425,8 @@ export function PrintOpsClient() {
                   <td className="px-4 py-3"><input type="checkbox" checked={selected.has(it.registrationId)} onChange={e => setSelected(s => { const n = new Set(s); if (e.target.checked) n.add(it.registrationId); else n.delete(it.registrationId); return n })} /></td>
                   <td className="px-4 py-3"><p className="font-medium text-foreground">{it.name || '—'}</p><p className="font-mono text-[11px] text-muted-foreground">{it.registrationId}</p></td>
                   <td className="px-4 py-3 text-[12px] text-muted-foreground">{it.ticketCode || '—'}</td>
-                  <td className="px-4 py-3">{it.ready ? <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[12px] font-semibold text-emerald-700">Ready</span> : <span title={it.error ?? ''} className="rounded-full bg-rose-100 px-2 py-0.5 text-[12px] font-semibold text-rose-700">Failed</span>}</td>
-                  <td className="px-4 py-3"><div className="flex items-center justify-end gap-1">{it.ready && <><IconBtn title="Preview / open PDF" onClick={() => void downloadItem(assetJobId, it.registrationId)}><Eye className="size-3.5" /></IconBtn><IconBtn title="Download PDF" onClick={() => void downloadItem(assetJobId, it.registrationId)}><Download className="size-3.5" /></IconBtn></>}</div></td>
+                  <td className="px-4 py-3"><span className="inline-flex flex-wrap items-center gap-1">{it.ready ? <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[12px] font-semibold text-emerald-700">Ready</span> : <span title={it.error ?? ''} className="rounded-full bg-rose-100 px-2 py-0.5 text-[12px] font-semibold text-rose-700">Failed</span>}{it.billed && <span className="rounded-full bg-primary/[0.08] px-2 py-0.5 text-[11.5px] font-semibold text-primary">{BILLED_LABEL[it.billed]}</span>}</span></td>
+                  <td className="px-4 py-3"><div className="flex items-center justify-end gap-1">{it.ready && <><IconBtn title="Preview / open PDF" onClick={() => void downloadItem(assetJobId, it.registrationId, true)}><Eye className="size-3.5" /></IconBtn><IconBtn title="Download PDF" onClick={() => void downloadItem(assetJobId, it.registrationId)}><Download className="size-3.5" /></IconBtn></>}</div></td>
                 </tr>
               ))}
             </Table>
@@ -419,6 +475,12 @@ export function PrintOpsClient() {
           </div>
         </div>
       )}
+
+      <BadgeQuoteDialog
+        open={paidRun !== null} state={gen.state} isOwner={perms.isOwner} draftId={paidRun?.draftId ?? null}
+        title={paidRun?.title} onConfirm={() => void gen.confirm()} onResume={() => void gen.resume()}
+        onRestart={closePaidRun} onClose={closePaidRun}
+      />
     </div>
   )
 }
@@ -432,6 +494,16 @@ function Metric({ label, value, icon: Icon, tone }: { label: string; value: numb
     </div>
   )
 }
+/** RD-PRINT-BILL-P6 — how a job bills ID badges (from the job view; null ⇒ free, nothing shown). */
+function BillingChip({ billing }: { billing: PrintGenerationJobView['billing'] }) {
+  if (!billing) return null
+  return (
+    <span className="rounded-full bg-primary/[0.08] px-2 py-0.5 text-[11px] font-semibold text-primary">
+      {billing.mode === 'paid' ? `Paid badges${billing.round > 1 ? ` · run ${billing.round}` : ''}` : 'Complimentary'}
+    </span>
+  )
+}
+const BILLED_LABEL: Record<NonNullable<PrintJobItemView['billed']>, string> = { new: 'Billed', prior: 'Free reprint', complimentary: 'Complimentary' }
 function Pill({ status }: { status: JobStatus }) {
   return <span className={cn('inline-flex rounded-full px-2 py-0.5 text-[11.5px] font-semibold capitalize', STATUS_TONE[status])}>{status}</span>
 }

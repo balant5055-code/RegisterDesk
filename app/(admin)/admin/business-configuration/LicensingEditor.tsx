@@ -31,6 +31,15 @@ import {
   validateServiceAllowances, priceServiceItem, serviceSaleReadinessErrors,
   type ServiceKind, type PrepaidServiceConfig,
 } from '@/lib/licensing/serviceAllowances'
+import {
+  badgeSettingsOf, badgeSettingsChanged, defaultBadgeSettings,
+  describeBadgeSettingsProblems, badgePriceHint, BADGE_REASON_GUIDANCE, type BadgeSettingsField,
+} from '@/lib/licensing/printBadgeSettings'
+import { PRINT_BADGE_CHARGEABLE_ASSET_TYPES } from '@/lib/licensing/printBadgeCommercial'
+
+/** RD-PRINT-BILL-P2 — the sellable services only (a catalog-only service never joins their checks). */
+const sellableOnly = (v: Record<string, unknown>): Record<string, unknown> =>
+  Object.fromEntries(Object.entries(v).filter(([k]) => (SERVICE_KINDS as readonly string[]).includes(k)))
 
 type SectionDraft   = Record<string, unknown>
 const toDraft = (v: unknown): SectionDraft => JSON.parse(JSON.stringify(v ?? {})) as SectionDraft
@@ -99,9 +108,16 @@ export function LicensingEditor({
   // RD-EVENT-COMMERCE-05 — the server's save-time sale-readiness rules block Publish here too.
   const validation = useMemo(() => {
     const v = CONFIG_SECTION_REGISTRY.licensing.validate(draft)
-    const readiness = serviceSaleReadinessErrors(draft.serviceAllowances)
-    return readiness.length ? { valid: false, errors: [...v.errors, ...readiness] } : v
-  }, [draft])
+    const sa = draft.serviceAllowances
+    const readiness = serviceSaleReadinessErrors(sa && typeof sa === 'object' ? sellableOnly(sa as Record<string, unknown>) : sa)
+    // RD-PRINT-BILL-P2 — badge settings block Publish only when THIS draft changes them (an
+    // invalid or incomplete stored print_badges never blocks an unrelated licensing edit).
+    // RD-PRINT-BILL-P2.1 — administrator wording (no raw configuration paths).
+    const badge = badgeSettingsChanged(badgeSettingsOf(published), badgeSettingsOf(draft))
+      ? describeBadgeSettingsProblems(badgeSettingsOf(draft)).map(i => `ID badges: ${i.message}`) : []
+    const extra = [...readiness, ...badge]
+    return extra.length ? { valid: false, errors: [...v.errors, ...extra] } : v
+  }, [draft, published])
   const dirty      = useMemo(() => JSON.stringify(draft) !== JSON.stringify(published), [draft, published])
 
   const setTop = (key: 'defaultCurrency', value: unknown) => onDraftChange({ ...draft, [key]: value })
@@ -292,6 +308,14 @@ export function LicensingEditor({
           onChange={v => onDraftChange({ ...draft, serviceAllowances: v })}
         />
 
+        {/* ── RD-PRINT-BILL-P2 · ID badges — registered, NOT released for purchase ── */}
+        <PrintBadgesBlock
+          draft={draft}
+          published={published}
+          liveState={(serviceSaleStates as Record<string, string> | undefined)?.print_badges}
+          onChange={next => onDraftChange(next)}
+        />
+
         {/* Top-level operational settings */}
         <div className="grid grid-cols-1 gap-x-5 gap-y-3 sm:grid-cols-2">
           <label className="flex flex-col gap-1">
@@ -390,11 +414,16 @@ const EXHAUSTION_LABEL: Record<string, string> = {
 const LIVE_STATE_LABEL: Record<string, string> = {
   available: 'Live — on sale to organizers', not_configured: 'Live — not priced yet', disabled: 'Live — sales paused',
   invalid: 'Live — stored value INVALID, not sold', unavailable: 'Live — configuration unreadable',
+  not_released: 'Live — not released for purchase',
 }
 
 function ServiceAllowancesBlock({ value, onChange, liveStates }: { value: unknown; onChange: (v: Record<ServiceKind, PrepaidServiceConfig>) => void; liveStates?: Partial<Record<ServiceKind, string>> }) {
   const cfg = normalizeServiceAllowances(value)
-  const errors = value === undefined ? [] : [...validateServiceAllowances(cfg, 'serviceAllowances'), ...serviceSaleReadinessErrors(cfg, 'serviceAllowances')]
+  // RD-PRINT-BILL-P2 — the sellable services only; ID badges are judged in their own block.
+  const errors = value === undefined ? [] : [
+    ...validateServiceAllowances(cfg, 'serviceAllowances', { catalogOnly: 'exclude' }),
+    ...serviceSaleReadinessErrors(sellableOnly(cfg), 'serviceAllowances'),
+  ]
   const set = (k: ServiceKind, patch: Partial<PrepaidServiceConfig>) => onChange({ ...cfg, [k]: { ...cfg[k], ...patch } })
   // Blank ⇒ null (NOT configured). Never a silent 0.
   const nullableInt = (v: string): number | null => (v.trim() === '' ? null : Number(v))
@@ -462,6 +491,127 @@ function ServiceAllowancesBlock({ value, onChange, liveStates }: { value: unknow
       </div>
       {errors.length > 0 && (
         <ul className="mt-2 list-disc space-y-0.5 pl-4 text-[11px] text-destructive">{errors.map(e => <li key={e}>{e}</li>)}</ul>
+      )}
+    </div>
+  )
+}
+
+/**
+ * RD-PRINT-BILL-P2 — ID badges (print_badges): visible, but SAFELY RESTRICTED.
+ *   • Purchases are blocked in code (RELEASED_FOR_PURCHASE) whatever is set here, and the
+ *     for-sale switch and paid generation are LOCKED off (the server refuses either).
+ *   • Price (GST-INCLUSIVE), GST rate and quantities can be prepared; a change needs a reason of
+ *     3–500 characters and is audited. Its errors block Publish only when this draft changes it.
+ *   • Reset to defaults restores the approved values (₹0.20 incl. GST, minimum 100, rate unset).
+ */
+function PrintBadgesBlock({ draft, published, liveState, onChange }: {
+  draft: SectionDraft; published: unknown; liveState?: string; onChange: (next: SectionDraft) => void
+}) {
+  const sa = (draft.serviceAllowances && typeof draft.serviceAllowances === 'object' ? draft.serviceAllowances : {}) as Record<string, unknown>
+  const c = normalizeServiceAllowances(sa).print_badges
+  const billing = (draft.printBadgeBilling && typeof draft.printBadgeBilling === 'object' ? draft.printBadgeBilling : {}) as Record<string, unknown>
+  const after = badgeSettingsOf(draft)
+  const changed = badgeSettingsChanged(badgeSettingsOf(published), after)
+  // RD-PRINT-BILL-P2.1 — administrator wording, each issue tied to its field where it has one.
+  const issues = describeBadgeSettingsProblems(after)
+  const fieldIssues = (f: BadgeSettingsField) => issues.filter(i => i.field === f)
+  const set = (patch: Partial<PrepaidServiceConfig>) =>
+    onChange({ ...draft, serviceAllowances: { ...sa, print_badges: { ...c, ...patch } } })
+  const reset = () => {
+    const d = defaultBadgeSettings()
+    onChange({ ...draft, serviceAllowances: { ...sa, print_badges: d.printBadges }, printBadgeBilling: d.printBadgeBilling, printBadgePilot: d.printBadgePilot })
+  }
+  // RD-PRINT-P8 (W5) — the paid ID-badge pilot: workspace-owner uids, one per line. Saved like every
+  // badge setting (reason + audit); the server reads the STORED list and is the only authority.
+  const pilotCfg = (draft.printBadgePilot && typeof draft.printBadgePilot === 'object' ? draft.printBadgePilot : {}) as Record<string, unknown>
+  const pilotUids = Array.isArray(pilotCfg.organizerUids) ? pilotCfg.organizerUids.map(String) : []
+  const setPilotText = (text: string) => onChange({
+    ...draft,
+    printBadgePilot: { enforced: true, organizerUids: text.split(/[\s,]+/).map(u => u.trim()).filter(Boolean) },
+  })
+  const nullableNum = (v: string): number | null => (v.trim() === '' ? null : Number(v))
+  // Distinguishes "GST not set" from "GST invalid" (and the other gaps) — never assumes a rate.
+  const hint = badgePriceHint(c)
+  const fieldIssue = (f: BadgeSettingsField) => {
+    const list = fieldIssues(f)
+    return list.length > 0 ? <span id={`pb-${f}-err`} className="text-[10.5px] leading-snug text-destructive">{list.map(i => i.message).join(' ')}</span> : null
+  }
+  const inv = (f: BadgeSettingsField) => (fieldIssues(f).length > 0 ? { 'aria-invalid': true as const, 'aria-describedby': `pb-${f}-err` } : {})
+  const blockIssues = issues.filter(i => i.field === null || i.field === 'enabled' || i.field === 'paidGenerationEnabled' || i.field === 'allowFreeCoupons')
+  // RD-PRINT-BILL-P3 — the one EDITABLE badge switch: whether a badge-purchase coupon may make a purchase free.
+  const setBilling = (patch: Record<string, unknown>) => onChange({ ...draft, printBadgeBilling: { ...billing, ...patch } })
+  return (
+    <div className="rounded-lg border border-border/70 p-3" data-testid="print-badges-block">
+      <div className="mb-1 flex flex-wrap items-center gap-2">
+        <p className="text-[12px] font-semibold uppercase tracking-wide text-muted-foreground">ID badges (Print &amp; Assets)</p>
+        <Badge variant="outline" className="border-amber-300 bg-amber-50 text-[10.5px] text-amber-800">Not released — purchases blocked</Badge>
+        {changed && <Badge variant="outline" className="text-[10.5px]">Changed</Badge>}
+        {issues.length > 0 && <Badge variant="destructive" className="text-[10.5px]">{issues.length} issue{issues.length === 1 ? '' : 's'}</Badge>}
+      </div>
+      <p className="mb-1 text-[11px] text-muted-foreground">
+        Prepaid badge units, one per attendee badge ({PRINT_BADGE_CHARGEABLE_ASSET_TYPES.join(', ')} templates). The unit price
+        INCLUDES GST — GST is never added on top. Organizers cannot buy units, and badge generation stays free, until badge
+        billing is released; the switches here are locked until then.
+        {liveState && <> <span className="font-medium text-foreground">{LIVE_STATE_LABEL[liveState] ?? liveState}.</span></>}
+      </p>
+      <p className="mb-3 text-[11px] font-medium text-foreground" data-testid="print-badges-reason-guidance">{BADGE_REASON_GUIDANCE}</p>
+      <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+        <div className="rounded-lg border border-border/60 p-3">
+          <div className="grid grid-cols-1 gap-x-3 gap-y-2 sm:grid-cols-2">
+            <label className="flex flex-col gap-1"><span className="text-[11px] text-muted-foreground">Unit price (₹, INCLUDING GST)</span>
+              <RupeeInput paise={c.unitPricePaise} onChange={v => set({ unitPricePaise: v })} />
+              {fieldIssue('unitPricePaise')}</label>
+            <label className="flex flex-col gap-1"><span className="text-[11px] text-muted-foreground">GST (%) — set after accountant approval</span>
+              <input type="number" min={0} max={100} step={0.01} value={c.gstRatePercent ?? ''} placeholder="Not set" onChange={e => set({ gstRatePercent: nullableNum(e.target.value) })} className={inputCls} {...inv('gstRatePercent')} />
+              {fieldIssue('gstRatePercent')}</label>
+            <label className="flex flex-col gap-1"><span className="text-[11px] text-muted-foreground">Minimum purchase (badges)</span>
+              <input type="number" min={1} value={Number.isFinite(c.minQuantity) ? c.minQuantity : ''} onChange={e => set({ minQuantity: e.target.value === '' ? NaN : Number(e.target.value) })} className={inputCls} {...inv('minQuantity')} />
+              {fieldIssue('minQuantity')}</label>
+            <label className="flex flex-col gap-1"><span className="text-[11px] text-muted-foreground">Maximum (blank = no maximum)</span>
+              <input type="number" min={1} value={c.maxQuantity ?? ''} placeholder="No maximum" onChange={e => set({ maxQuantity: nullableNum(e.target.value) })} className={inputCls} {...inv('maxQuantity')} />
+              {fieldIssue('maxQuantity')}</label>
+          </div>
+          <p className={cn('mt-2 text-[10.5px] tabular-nums', hint.kind === 'example' ? 'text-muted-foreground' : hint.kind === 'gst_unset' || hint.kind === 'price_unset' ? 'text-muted-foreground' : 'text-destructive')} data-testid="print-badges-price-hint">
+            {hint.kind === 'example'
+              ? <>Example · {hint.quantity.toLocaleString('en-IN')} × {formatPaise(hint.unitPricePaise)} = <span className="font-semibold text-foreground">{formatPaise(hint.totalPaise)}</span> (includes GST {formatPaise(hint.gstPaise)} on {formatPaise(hint.basePaise)})</>
+              : hint.text}
+          </p>
+        </div>
+        <div className="space-y-2 rounded-lg border border-border/60 p-3 text-[11.5px]">
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-muted-foreground">Badge units for sale</span>
+            <span className="flex items-center gap-2 text-muted-foreground" title="Locked until badge purchases are released">
+              <span aria-disabled="true" className="pointer-events-none opacity-50"><Toggle checked={c.enabled === true} onChange={() => {}} /></span>Locked
+            </span>
+          </div>
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-muted-foreground">Paid badge generation</span>
+            <span className="flex items-center gap-2 text-muted-foreground" title="Locked until badge billing is released — generation is free">
+              <span aria-disabled="true" className="pointer-events-none opacity-50"><Toggle checked={billing.paidGenerationEnabled === true} onChange={() => {}} /></span>Locked · free
+            </span>
+          </div>
+          <div className="flex items-center justify-between gap-2" data-testid="print-badges-free-coupons">
+            <span className="text-muted-foreground">Allow free (100%) badge coupons</span>
+            <span className="flex items-center gap-2 text-muted-foreground">
+              <Toggle checked={billing.allowFreeCoupons === true} onChange={v => setBilling({ allowFreeCoupons: v })} />{billing.allowFreeCoupons === true ? 'Allowed' : 'Not allowed'}
+            </span>
+          </div>
+          <label className="flex flex-col gap-1 pt-1" data-testid="print-badges-pilot">
+            <span className="text-muted-foreground">Paid ID-badge pilot — organizer uids, one per line ({pilotUids.length} listed)</span>
+            <textarea key={pilotUids.join('|')} defaultValue={pilotUids.join('\n')} rows={3} spellCheck={false}
+              onBlur={e => setPilotText(e.target.value)} placeholder="No pilot organizers — nobody can buy badges or be charged"
+              className={cn(inputCls, 'h-auto py-1.5 font-mono text-[11.5px]')} {...inv('printBadgePilot')} />
+            <span className="text-[10.5px] text-muted-foreground">Only these organizers can buy badge units or use paid badge generation; everyone else stays free. The server decides.</span>
+            {fieldIssue('printBadgePilot')}
+          </label>
+          <Button type="button" variant="outline" size="sm" onClick={reset} className="mt-1"><RotateCcw className="size-3.5" /> Reset to defaults</Button>
+        </div>
+      </div>
+      {blockIssues.length > 0 && (
+        <ul className="mt-2 list-disc space-y-0.5 pl-4 text-[11px] text-destructive" data-testid="print-badges-issues">{blockIssues.map(i => <li key={i.message}>{i.message}</li>)}</ul>
+      )}
+      {!changed && issues.length > 0 && (
+        <p className="mt-1 text-[10.5px] text-muted-foreground">These stored values are not in use (nothing is sold) and do not block other changes. Reset to defaults to clear them.</p>
       )}
     </div>
   )

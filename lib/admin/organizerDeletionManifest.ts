@@ -30,6 +30,11 @@ export const ORGANIZER_RETAINED_COLLECTIONS = [
   'eventLicenses', 'licenseOrders', 'failedRefunds', 'suspiciousPayments',
   'adminAuditLogs', 'payoutProfileHistory', 'paymentEvents', 'paymentIntents',
   'donations', 'donationPayments', 'donationReceipts', 'donationRefunds',
+  // RD-PRINT-BILL-P7 — ID-badge billing evidence: attendee billing claims (registration ids kept as
+  // financial evidence), generation billing rounds, badge refund trackers, the prepaid-service ledger
+  // (purchased / consumed units + usage records) and generation request markers. Never deleted here;
+  // claims / rounds / badge orders also BLOCK deletion (BADGE_BILLING_RECORDS_EXIST).
+  'printBadgeClaims', 'printBadgeRounds', 'badgeOrderRefunds', 'eventServiceAllowances', 'printJobRequests',
 ] as const
 
 /**

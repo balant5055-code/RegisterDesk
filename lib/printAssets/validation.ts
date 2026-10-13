@@ -8,6 +8,7 @@ import {
   type PrintCanvas, type CreatePrintTemplateInput, type UpdatePrintTemplateInput,
   type PrintDesign, type PrintElement, type PrintElementType,
 } from './types'
+import { cardDimensionProblem, normalizePresetCanvas } from './cardDimensions'
 
 export type ValidationResult<T> = { ok: true; value: T } | { ok: false; error: string }
 
@@ -31,15 +32,17 @@ function validateCanvas(raw: unknown): ValidationResult<PrintCanvas> {
   if (typeof c.orientation !== 'string' || !(CANVAS_ORIENTATIONS as string[]).includes(c.orientation)) {
     return { ok: false, error: 'canvas.orientation must be portrait or landscape' }
   }
-  return {
-    ok: true,
-    value: {
-      preset:      c.preset as PrintCanvas['preset'],
-      width, height,
-      unit:        c.unit as PrintCanvas['unit'],
-      orientation: c.orientation as PrintCanvas['orientation'],
-    },
-  }
+  // RD-PRINT-P2 — a preset's size is authoritative; custom sizes must be a printable card
+  // (at least CARD_MIN_MM, and small enough to fit on A3 in some orientation).
+  const canvas = normalizePresetCanvas({
+    preset:      c.preset as PrintCanvas['preset'],
+    width, height,
+    unit:        c.unit as PrintCanvas['unit'],
+    orientation: c.orientation as PrintCanvas['orientation'],
+  })
+  const problem = cardDimensionProblem(canvas)
+  if (problem) return { ok: false, error: problem }
+  return { ok: true, value: canvas }
 }
 
 export function validateCreate(body: unknown): ValidationResult<CreatePrintTemplateInput> {

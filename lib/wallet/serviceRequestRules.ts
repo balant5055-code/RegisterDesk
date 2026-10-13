@@ -49,10 +49,12 @@ export type ServiceRequestStatus = 'submitted' | 'approved' | 'rejected' | 'proc
 export const SERVICE_REQUEST_STATUSES: readonly ServiceRequestStatus[] = ['submitted', 'approved', 'rejected', 'processed']
 
 /** Every event service the Wallet shows, in display order. */
-export type RequestableService = 'registrations' | 'whatsapp' | 'certificates' | 'media'
-export const REQUESTABLE_SERVICES: readonly RequestableService[] = ['registrations', 'whatsapp', 'certificates', 'media']
+// RD-PRINT-BILL-P4 — 'print_badges': prepaid ID-badge units (bought only through a badge purchase
+// order; never in the generic add-on selection — SERVICE_KINDS is unchanged).
+export type RequestableService = 'registrations' | 'whatsapp' | 'certificates' | 'media' | 'print_badges'
+export const REQUESTABLE_SERVICES: readonly RequestableService[] = ['registrations', 'whatsapp', 'certificates', 'media', 'print_badges']
 /** Services whose units can be carried to another event (capacity cannot — decided 2026-10-02). */
-export const CARRYABLE_SERVICES: readonly RequestableService[] = ['whatsapp', 'certificates', 'media']
+export const CARRYABLE_SERVICES: readonly RequestableService[] = ['whatsapp', 'certificates', 'media', 'print_badges']
 /** The allowance-ledger services (eventServiceAllowances lines). */
 export type LedgerService = Exclude<RequestableService, 'registrations'>
 export const isLedgerService = (s: RequestableService): s is LedgerService => s !== 'registrations'
@@ -132,6 +134,36 @@ export function valueUnits(lots: readonly PurchaseLot[], usedFront: number, remo
   return { valuePaise: parts.reduce((n, p) => n + p.valuePaise, 0), parts }
 }
 
+/**
+ * RD-PRINT-BILL-P4 · Pure. The EXACT valuation used for badge lots only (every other service keeps
+ * valueUnits above, unchanged). A lot's unit at position i (0-based, oldest first) is worth
+ * F(i+1) − F(i) with F(n) = ⌊n × total ÷ quantity⌋, so the parts of ONE lot always add up to its
+ * total exactly — however many separate refunds take them. With valueUnits' per-part floor, two
+ * half refunds of a 2,001-paise lot would come to 2,000 and the lot could never be fully refunded.
+ * Same positions, same parts and the same null on inconsistency as valueUnits.
+ */
+export function valueUnitsExact(lots: readonly PurchaseLot[], usedFront: number, removedBack: number, k: number): { valuePaise: number; parts: ValuationPart[] } | null {
+  const sorted = [...lots].filter(l => l.quantity > 0).sort((a, b) => a.at - b.at || a.orderId.localeCompare(b.orderId))
+  const total = sorted.reduce((n, l) => n + l.quantity, 0)
+  const take = Math.trunc(k)
+  if (take < 0 || usedFront < 0 || removedBack < 0 || usedFront + removedBack + take > total) return null
+  const end = total - removedBack, start = end - take
+  const parts: ValuationPart[] = []
+  let pos = 0
+  for (const l of sorted) {
+    const s = Math.max(start, pos), e = Math.min(end, pos + l.quantity)
+    if (e > s) {
+      const F = (n: number) => Math.floor((n * l.totalPaise) / l.quantity)
+      parts.push({ orderId: l.orderId, units: e - s, valuePaise: F(e - pos) - F(s - pos) })
+    }
+    pos += l.quantity
+  }
+  return { valuePaise: parts.reduce((n, p) => n + p.valuePaise, 0), parts }
+}
+
+/** The valuation a service's refunds use: exact for badge lots, valueUnits for everything else. */
+export const valuationFor = (service: RequestableService) => service === 'print_badges' ? valueUnitsExact : valueUnits
+
 // ── eligibility ─────────────────────────────────────────────────────────────────────────────────
 export type IneligibleCode =
   | 'EVENT_NOT_CLOSED'
@@ -178,7 +210,7 @@ export function requestEligibility(kind: ServiceRequestKind, s: ServiceState, c:
     const w = refundWindowProblem({ closedAtMs: c.closedAtMs, windowAt: c.windowAt })
     if (w) return w
   }
-  const v = valueUnits(s.lots, s.usedFront, s.removedBack, s.ownUnused)
+  const v = valuationFor(s.service)(s.lots, s.usedFront, s.removedBack, s.ownUnused)
   if (!v) return no('LEDGER_UNRECONCILED', 'The unused units do not match the paid purchase lines — requires Super Admin review.')
   const cap = Math.max(0, Math.min(v.valuePaise, s.paidPaise - Math.max(0, c.approvedPaise)))
   if (cap <= 0) return no('NO_PAID_BASIS', 'No paid amount is on record for these units — requires Super Admin review.')
@@ -369,9 +401,11 @@ export interface EventRequestsView {
 
 export const SERVICE_LABEL: Record<RequestableService, string> = {
   registrations: 'Registration capacity', whatsapp: 'WhatsApp messages', certificates: 'Certificates', media: 'Event photos',
+  print_badges: 'ID badges',
 }
 export const SERVICE_UNIT: Record<RequestableService, string> = {
   registrations: 'registrations', whatsapp: 'messages', certificates: 'certificates', media: 'photos',
+  print_badges: 'badges',
 }
 
 export const REQUEST_KIND_LABEL: Record<ServiceRequestKind, string> = { refund: 'Refund', carry_forward: 'Carry forward' }

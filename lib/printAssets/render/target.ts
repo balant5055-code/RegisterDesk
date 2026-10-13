@@ -78,6 +78,12 @@ export class PdfTarget implements DrawTarget {
     private readonly fonts: FontSet,
     private readonly W: number,
     private readonly H: number,
+    /**
+     * RD-PRINT-P2 — embedded images by source bytes, shared across every card drawn into
+     * the same document, so a logo on 500 cards is embedded ONCE (null = undecodable).
+     * Omitted ⇒ a private cache (one card per document, as before).
+     */
+    private readonly imageCache: Map<Uint8Array, PDFImage | null> = new Map(),
   ) {}
 
   fillBackground(color: string): void {
@@ -120,12 +126,16 @@ export class PdfTarget implements DrawTarget {
   }
 
   async image(box: Box, o: ImageDraw): Promise<void> {
-    let img: PDFImage
-    try {
-      img = isJpeg(o.bytes) || o.contentType === 'image/jpeg'
-        ? await this.doc.embedJpg(o.bytes)
-        : await this.doc.embedPng(o.bytes)
-    } catch { return }   // undecodable asset — skip (matches certificate renderer)
+    let img = this.imageCache.get(o.bytes)
+    if (img === undefined) {
+      try {
+        img = isJpeg(o.bytes) || o.contentType === 'image/jpeg'
+          ? await this.doc.embedJpg(o.bytes)
+          : await this.doc.embedPng(o.bytes)
+      } catch { img = null }   // undecodable asset — skip (matches certificate renderer)
+      this.imageCache.set(o.bytes, img)
+    }
+    if (!img) return
 
     // Fit the image inside the box, then rotate the placement about the box center.
     const ar = img.width / img.height
@@ -150,11 +160,16 @@ export class PdfTarget implements DrawTarget {
     this.drawRectTL(ox, oy, s, s, box.rotation, { fill: '#ffffff', opacity: o.opacity }, pivot)
     const { dim, isDark } = qrModules(o.value)
     const cell = s / dim
+    // RD-PRINT-P2 — one rectangle per horizontal RUN of dark modules, not per module: the
+    // covered area is identical (same pixels, same rotation pivot) with a fraction of the
+    // drawing operators, which is what dominated a card's size on a 500-card sheet.
     for (let row = 0; row < dim; row++) {
-      for (let col = 0; col < dim; col++) {
-        if (isDark(row, col)) {
-          this.drawRectTL(ox + col * cell, oy + row * cell, cell, cell, box.rotation, { fill: o.dark, opacity: o.opacity }, pivot)
-        }
+      let col = 0
+      while (col < dim) {
+        if (!isDark(row, col)) { col++; continue }
+        const start = col
+        while (col < dim && isDark(row, col)) col++
+        this.drawRectTL(ox + start * cell, oy + row * cell, (col - start) * cell, cell, box.rotation, { fill: o.dark, opacity: o.opacity }, pivot)
       }
     }
   }

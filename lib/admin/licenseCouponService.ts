@@ -15,6 +15,12 @@ import {
 } from '@/lib/licensing/coupons'
 import { LICENSE_ORDERS_COLLECTION } from '@/lib/licensing/schema'
 import { isEventLicenseTier, isEventLicenseTierV2, type AnyEventLicenseTier } from '@/lib/licensing/eventLicense'
+// RD-PRINT-BILL-P3 — licence and ID-badge coupons share ONE code namespace (read-only here).
+import { BADGE_COUPONS_COLLECTION } from '@/lib/licensing/badgeCoupons/types'
+
+/** The badge-coupon document holding a code, read inside a create/clone transaction (never written here). */
+const badgeNamespaceRef = (code: string) => adminDb.collection(BADGE_COUPONS_COLLECTION).doc(code)
+const CODE_TAKEN_BY_BADGE = 'This code is already used by an ID badge coupon. Coupon codes are unique across licence and badge coupons.'
 
 export class CouponAdminError extends Error {
   constructor(message: string, public readonly status = 400) { super(message); this.name = 'CouponAdminError' }
@@ -151,7 +157,9 @@ export async function createCoupon(input: CouponInput, adminUid: string, reason:
   // creates of one code can no longer both "succeed" (the old get-then-set let the second
   // silently overwrite the first, currentUses included).
   await adminDb.runTransaction(async tx => {
-    if ((await tx.get(ref)).exists) throw new CouponAdminError('A coupon with this code already exists', 409)
+    const [mine, badge] = await Promise.all([tx.get(ref), tx.get(badgeNamespaceRef(code))])
+    if (mine.exists) throw new CouponAdminError('A coupon with this code already exists', 409)
+    if (badge.exists) throw new CouponAdminError(CODE_TAKEN_BY_BADGE, 409)
     tx.create(ref, doc)
     stageAudit(tx, adminUid, 'license_coupon.created', code, reason, {
       metadata: { type: doc.type, value: doc.value },
@@ -193,9 +201,10 @@ export async function cloneCoupon(code: string, newCode: string, adminUid: strin
   if (!/^[A-Z0-9_-]{3,40}$/.test(nc)) throw new CouponAdminError('New code must be 3–40 chars: A–Z, 0–9, _ or -')
   // RD-PHASE4-S4 — append-only create of the clone, with its audit row, in one transaction.
   const clone = await adminDb.runTransaction(async tx => {
-    const [src, dst] = await Promise.all([tx.get(col().doc(normalizeCouponCode(code))), tx.get(col().doc(nc))])
+    const [src, dst, badge] = await Promise.all([tx.get(col().doc(normalizeCouponCode(code))), tx.get(col().doc(nc)), tx.get(badgeNamespaceRef(nc))])
     if (!src.exists) throw new CouponAdminError('Source coupon not found', 404)
     if (dst.exists) throw new CouponAdminError('A coupon with the new code already exists', 409)
+    if (badge.exists) throw new CouponAdminError(CODE_TAKEN_BY_BADGE, 409)
     const c = src.data() as LicenseCouponDoc
     const next: LicenseCouponDoc = {
       ...c, code: nc, currentUses: 0, enabled: false, paused: false, archived: false, version: 1,

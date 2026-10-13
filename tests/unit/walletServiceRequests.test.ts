@@ -40,9 +40,10 @@ describe('which events and services', () => {
     for (const l of ['published', 'registration_closed', 'unpublished', 'draft', 'pending_review'] as const) expect(isClosedLifecycle(l)).toBe(false)
     expect(requestEligibility('refund', state(), ctx({ lifecycle: 'published' }))).toMatchObject({ eligible: false, code: 'EVENT_NOT_CLOSED' })
   })
-  it('all four services are requestable; capacity is refund-only (never carried)', () => {
-    expect(REQUESTABLE_SERVICES).toEqual(['registrations', 'whatsapp', 'certificates', 'media'])
-    expect(CARRYABLE_SERVICES).toEqual(['whatsapp', 'certificates', 'media'])
+  // RD-PRINT-BILL-P4 — ID badges (prepaid units bought through a badge purchase order) join as a fifth.
+  it('all five services are requestable; capacity is refund-only (never carried)', () => {
+    expect(REQUESTABLE_SERVICES).toEqual(['registrations', 'whatsapp', 'certificates', 'media', 'print_badges'])
+    expect(CARRYABLE_SERVICES).toEqual(['whatsapp', 'certificates', 'media', 'print_badges'])
     expect(isRequestableService('sms')).toBe(false)
     expect(requestEligibility('carry_forward', state({ service: 'registrations' }), ctx())).toMatchObject({ eligible: false, code: 'SERVICE_NOT_SUPPORTED' })
     expect(requestEligibility('refund', state({ service: 'registrations' }), ctx())).toMatchObject({ eligible: true })

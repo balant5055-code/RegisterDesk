@@ -25,6 +25,7 @@ import { LICENSE_ORDERS_COLLECTION, licenseOrderConverter } from '@/lib/licensin
 import { deriveLicenseCharge, activateLicenseOrder, holdExhaustedCouponRemainder, holdPhotoCapacityExceeded, PHOTO_CAPACITY_HELD_MESSAGE, orderListPricePaise } from '@/lib/licensing/finalizeLicensePurchase'
 import { isConsistentServiceItem } from '@/lib/licensing/serviceAllowances'
 import { activateAddonOrder } from '@/lib/licensing/draftCommerce'
+import { confirmBadgePurchase } from '@/lib/licensing/printBadgePurchase/confirm'
 import { holdSupersededPayment, isSupersededUnheld, supersededActivationOrderId, RAZORPAY_ORDER_ID_RE, recordDuplicateLicensePayment } from '@/lib/licensing/manualRefundHold'
 import { NotificationType } from '@/lib/notifications'
 import { sendOrganizerWhatsApp } from '@/lib/notifications/organizerWhatsApp'
@@ -44,6 +45,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
   const eventId = typeof body.eventId === 'string' ? body.eventId.trim() : ''
   if (!eventId) return NextResponse.json({ error: 'eventId is required' }, { status: 400 })
+
+  // ══ RD-PRINT-BILL-P4 · ID-BADGE PURCHASE ORDER (bdg_…) ═════════════════════════════
+  // Owner only. The payment is bound to the order's own Razorpay id + amount, verified (signature +
+  // fetched CAPTURED payment) here, then settled by the SAME function the webhook and sweep use:
+  // activated once, or durably held — never acknowledged otherwise.
+  if (typeof body.orderId === 'string' && body.orderId.trim().startsWith('bdg_')) {
+    return confirmBadgePurchase({ uid, isOwner: authz.isOwner, eventId, orderId: body.orderId.trim(), body })
+  }
 
   // ══ RD-EVENT-COMMERCE-02 · ADD-ON ORDER (pre-publish top-up) ═══════════════════════
   // Settled by its own shared transaction (also used by the webhook). The order must belong to

@@ -6,7 +6,8 @@
 //
 // Safety (inherited from the runner):
 //   - Leases: a job already being driven returns `busy` and is skipped cheaply.
-//   - Idempotent: a re-run re-reads the PDFs and overwrites the same ZIP path.
+//   - Idempotent: a re-run recomputes the same metadata (RD-PRINT-P0 — nothing is
+//     stored; the ZIP is rendered on demand at download time).
 //   - Per-page commit + cursor: an interrupted build resumes, never double-runs.
 //
 // Auth: Vercel Cron sends `Authorization: Bearer <CRON_SECRET>`. Fail-closed.
@@ -41,9 +42,11 @@ async function handle(req: NextRequest): Promise<NextResponse> {
       const r = await processPrintPackageChunk(job.jobId)
       outcomes.push({ jobId: job.jobId, status: r.status, processed: r.processed, reason: r.reason })
     } catch (err) {
-      console.error('[cron/print-packaging] job error:', { jobId: job.jobId, err })
+      // RD-PRINT-AUDIT · neither the log line nor the response (printed in the Actions log)
+      // carries the exception's text — only its type and a fixed reason.
+      console.error('[cron/print-packaging] job error:', { jobId: job.jobId, type: err instanceof Error ? err.name : typeof err })
       captureError(err, { scope: 'cron.print_packaging', area: 'print', jobId: job.jobId })
-      outcomes.push({ jobId: job.jobId, status: 'error', processed: 0, reason: err instanceof Error ? err.message : 'error' })
+      outcomes.push({ jobId: job.jobId, status: 'error', processed: 0, reason: 'packaging step failed' })
     }
   }
 

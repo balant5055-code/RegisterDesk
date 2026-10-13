@@ -19,6 +19,7 @@ import { captureError, flushMonitoring } from '@/lib/monitoring/sentry'
 import {
   processPrintGenerationChunk, PRINT_GENERATION_JOBS, type PrintGenerationJob,
 } from '@/lib/printAssets/generationJob'
+import { sweepPrintBadgeRounds } from '@/lib/printAssets/badgeBilling/store'
 
 export const dynamic     = 'force-dynamic'
 export const maxDuration = 60
@@ -41,14 +42,28 @@ async function handle(req: NextRequest): Promise<NextResponse> {
       const r = await processPrintGenerationChunk(job.jobId)
       outcomes.push({ jobId: job.jobId, status: r.status, processed: r.processed, reason: r.reason })
     } catch (err) {
-      console.error('[cron/print-generation] job error:', { jobId: job.jobId, err })
+      // RD-PRINT-AUDIT · neither the log line nor the response (printed in the Actions log)
+      // carries the exception's text — only its type and a fixed reason.
+      console.error('[cron/print-generation] job error:', { jobId: job.jobId, type: err instanceof Error ? err.name : typeof err })
       captureError(err, { scope: 'cron.print_generation', area: 'print', jobId: job.jobId })
-      outcomes.push({ jobId: job.jobId, status: 'error', processed: 0, reason: err instanceof Error ? err.message : 'error' })
+      outcomes.push({ jobId: job.jobId, status: 'error', processed: 0, reason: 'generation step failed' })
+    }
+  }
+
+  // RD-PRINT-BILL-P5 — settle badge rounds whose job ended without settling (a crash after the
+  // last chunk, a cancel whose settlement failed, a failed job). Idempotent; bounded.
+  let badgeRounds: { scanned: number; settled: number } | { error: true } = { scanned: 0, settled: 0 }
+  if (Date.now() - start <= CRON_BUDGET_MS) {
+    try {
+      badgeRounds = await sweepPrintBadgeRounds()
+    } catch (err) {
+      captureError(err, { scope: 'cron.print_generation.badge_rounds', area: 'print' })
+      badgeRounds = { error: true }
     }
   }
 
   await flushMonitoring()   // deliver captured events before the serverless run ends
-  return NextResponse.json({ scanned: jobs.length, durationMs: Date.now() - start, jobs: outcomes })
+  return NextResponse.json({ scanned: jobs.length, durationMs: Date.now() - start, jobs: outcomes, badgeRounds })
 }
 
 export const GET  = withCronMetrics('print-generation', handle)

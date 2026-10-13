@@ -9,7 +9,13 @@ import { NextRequest, NextResponse } from 'next/server'
 import { resolveAdminUid, resolveSuperAdminUid } from '@/lib/admin/auth'
 import { resolveGlobalCommercialTerms } from '@/lib/licensing/resolveCommercialTerms'
 import { getServiceCatalog } from '@/lib/licensing/serviceAllowanceConfig'
-import { serviceSaleReadinessErrors, type ServiceKind, type ServiceSaleState } from '@/lib/licensing/serviceAllowances'
+import { serviceSaleReadinessErrors, SERVICE_KINDS, type ServiceKind, type ServiceSaleState } from '@/lib/licensing/serviceAllowances'
+import { FieldValue } from 'firebase-admin/firestore'
+import { parseFinancialReason } from '@/lib/admin/financialGuard'
+import type { AdminAuditLog } from '@/lib/admin/auditConstants'
+import {
+  badgeSettingsOf, badgeSettingsChanged, badgeSettingsProblems, BadgeSettingsError, describeBadgeSettingsIssue,
+} from '@/lib/licensing/printBadgeSettings'
 import {
   isCashfreeEnabled, isCashfreeSandboxEnabled, isCashfreeProductionEnabled,
 } from '@/lib/payments/providers'
@@ -228,7 +234,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       typeof patched[k] === 'object' && patched[k] !== null && !Array.isArray(patched[k])
         ? { ...(current?.[k] ?? {}), ...(patched[k] as Record<string, unknown>) }
         : patched[k] ?? current?.[k]])) }
-    const readiness = serviceSaleReadinessErrors(candidate.serviceAllowances)
+    // RD-PRINT-BILL-P2 — readiness is judged for the SELLABLE services only. A catalog-only
+    // service (print_badges) is judged in the save transaction below, and only when this save
+    // CHANGES it — so an incomplete stored one can never block an unrelated licensing edit.
+    const readiness = serviceSaleReadinessErrors(Object.fromEntries(
+      Object.entries(candidate.serviceAllowances).filter(([k]) => (SERVICE_KINDS as readonly string[]).includes(k))))
     if (readiness.length > 0) {
       return NextResponse.json({ error: `Not published: ${readiness.join('; ')}`, code: 'SERVICE_NOT_READY', details: readiness }, { status: 400, headers: NO_STORE })
     }
@@ -241,14 +251,59 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const result = await businessConfig.updateSection(
       body.section,
       body.patch as Partial<BusinessConfigSections[BusinessConfigSectionKey]>,
-      { updatedBy: adminUid, reason, canEditPricing: isSuperAdmin },
+      {
+        updatedBy: adminUid, reason, canEditPricing: isSuperAdmin,
+        ...(body.section === 'licensing' ? { stageInTransaction: badgeSettingsGuard(adminUid, body.reason) } : {}),
+      },
     )
     return NextResponse.json({ ok: true, version: result.version, section: result.section }, { headers: NO_STORE })
   } catch (e) {
+    if (e instanceof BadgeSettingsError) {
+      // Nothing was written: the save transaction aborted before commit.
+      const status = e.code === 'BADGE_SETTINGS_LOCKED' ? 409 : 400
+      return NextResponse.json({ error: e.message, code: e.code, details: e.details }, { status, headers: NO_STORE })
+    }
     if (e instanceof CentralPricingPermissionError) {
       // Nothing was written: the transaction threw before any write.
       return NextResponse.json({ error: e.message, code: 'SUPER_ADMIN_REQUIRED', fields: e.fields }, { status: 403, headers: NO_STORE })
     }
     return NextResponse.json({ error: e instanceof Error ? e.message : 'Update failed' }, { status: 400, headers: NO_STORE })
+  }
+}
+
+/**
+ * RD-PRINT-BILL-P2 — the badge-settings rules, run INSIDE the licensing save transaction against
+ * the fresh stored state (`before`) and exactly what will be stored (`after`). Only a save that
+ * CHANGES the badge settings is affected: it must carry a 3–500 character reason, keep the
+ * for-sale switch and paid generation locked off, and be valid; it then stages ONE extra admin
+ * audit row (deterministic id per config version) in the same commit. Throwing aborts the whole
+ * save — nothing is written. Unrelated licensing saves are untouched (their existing audit stands).
+ */
+function badgeSettingsGuard(adminUid: string, rawReason: unknown) {
+  return (txn: FirebaseFirestore.Transaction, info: { version: number; before: unknown; after: unknown; db: FirebaseFirestore.Firestore }): void => {
+    const before = badgeSettingsOf(info.before)
+    const after  = badgeSettingsOf(info.after)
+    if (!badgeSettingsChanged(before, after)) return
+    const reason = parseFinancialReason(rawReason)
+    if (!reason.ok) throw new BadgeSettingsError(reason.code, `Badge settings: ${reason.error}`)
+    const problems = badgeSettingsProblems(after)
+    // RD-PRINT-BILL-P2.1 — administrator wording (the raw configuration paths stay out of the banner).
+    const words = (list: string[]) => list.map(m => describeBadgeSettingsIssue(m).message)
+    if (problems.locked.length > 0) throw new BadgeSettingsError('BADGE_SETTINGS_LOCKED', `Not published — ID badges: ${words(problems.locked).join(' ')}`, words(problems.locked))
+    if (problems.errors.length > 0) throw new BadgeSettingsError('BADGE_SETTINGS_INVALID', `Not published — ID badges: ${words(problems.errors).join(' ')}`, words(problems.errors))
+    const audit: AdminAuditLog = {
+      adminUid,
+      action:     'print_badge_settings.updated',
+      entityType: 'platform_settings',
+      entityId:   'licensing.print_badges',
+      metadata: {
+        reason: reason.reason, configVersion: info.version,
+        before: { printBadges: before.printBadges ?? null, printBadgeBilling: before.printBadgeBilling ?? null, printBadgePilot: before.printBadgePilot ?? null },
+        after:  { printBadges: after.printBadges ?? null,  printBadgeBilling: after.printBadgeBilling ?? null,  printBadgePilot: after.printBadgePilot ?? null },
+      },
+      createdAt: FieldValue.serverTimestamp(),
+    }
+    // The service's own database handle — this route keeps no direct Firestore import.
+    txn.set(info.db.collection('adminAuditLogs').doc(`badge_settings_v${info.version}`), audit)
   }
 }

@@ -103,7 +103,9 @@ export async function getPlatformOverview(): Promise<PlatformOverview> {
   const audit24h = await tryCount(adminDb.collection('adminAuditLogs').where('createdAt', '>=', Timestamp.fromMillis(Date.now() - 24 * 3600 * 1000)))
   push('security', 'Security', audit24h == null ? 'neutral' : 'green', audit24h == null ? 'Unavailable' : `${audit24h} admin actions / 24h`)
 
-  push('licensing', 'Licensing', ls && ls.paidCount > 0 ? 'green' : 'neutral', ls ? `${ls.paidCount} paid licenses` : 'Unavailable')
+  // RD-PRINT-BILL-P4.4 — licence totals are unavailable (null) when ID-badge orders could not be excluded.
+  const lsPaid = ls ? ls.paidCount : null
+  push('licensing', 'Licensing', lsPaid !== null && lsPaid > 0 ? 'green' : 'neutral', lsPaid !== null ? `${lsPaid} paid licenses` : 'Unavailable')
 
   // Honest: no Firestore/Storage metrics source exists → Unavailable (neutral).
   push('storage', 'Storage', 'neutral', 'Unavailable')
@@ -137,6 +139,18 @@ function jobService(key: string, label: string, r: { completed: number; failed: 
   return { key, label, level, detail: r.total === 0 ? 'No jobs yet' : `${r.total} jobs`, metric }
 }
 
+/** RD-ANALYTICS-FAILCLOSED — the Licensing tile from the licence figures, each judged on its own. */
+export function licensingService(ls: { paidCount: number | null; revenuePaise: number | null } | null | undefined): ServiceHealth {
+  if (ls == null) return { key: 'licensing', label: 'Licensing', level: 'unavailable', detail: 'Unavailable', metric: null }
+  if (ls.paidCount === null) {
+    return { key: 'licensing', label: 'Licensing', level: 'warning', detail: 'Paid licence count unavailable', metric: null }
+  }
+  if (ls.revenuePaise === null) {
+    return { key: 'licensing', label: 'Licensing', level: 'warning', detail: `${ls.paidCount} paid licenses · revenue unavailable`, metric: ls.paidCount > 0 ? `${ls.paidCount}` : null }
+  }
+  return { key: 'licensing', label: 'Licensing', level: ls.paidCount > 0 ? 'healthy' : 'unavailable', detail: `${ls.paidCount} paid licenses`, metric: ls.paidCount > 0 ? `${ls.paidCount}` : null }
+}
+
 export async function getPlatformServices(): Promise<ServiceHealth[]> {
   const [analytics, comm, cert, print, report] = await Promise.all([
     getAdminAnalytics().catch(() => null),
@@ -149,14 +163,17 @@ export async function getPlatformServices(): Promise<ServiceHealth[]> {
   const services: ServiceHealth[] = []
   const ls = analytics?.licenseSales
 
-  // Payments
-  services.push(ls == null
+  // Payments — RD-PRINT-BILL-P4.4: unavailable (never a misleading total) when the badge exclusion failed.
+  const lsT = ls && ls.paidCount !== null && ls.revenuePaise !== null ? { ...ls, paidCount: ls.paidCount, revenuePaise: ls.revenuePaise } : null
+  services.push(lsT == null
     ? { key: 'payments', label: 'Payments', level: 'unavailable', detail: 'Unavailable', metric: null }
     : {
         key: 'payments', label: 'Payments',
-        level: ls.revenuePaise > 0 ? (ls.refundedCount > ls.paidCount ? 'warning' : 'healthy') : 'unavailable',
-        detail: `${ls.paidCount} paid · ${ls.refundedCount} refunded`,
-        metric: `₹${Math.round(ls.revenuePaise / 100).toLocaleString('en-IN')}`,
+        // RD-ANALYTICS-FAILCLOSED — an unknown refunded count cannot be compared with paid: a warning,
+        // never "healthy" by default.
+        level: lsT.revenuePaise > 0 ? (lsT.refundedCount === null || lsT.refundedCount > lsT.paidCount ? 'warning' : 'healthy') : 'unavailable',
+        detail: `${lsT.paidCount} paid · ${lsT.refundedCount === null ? 'refunded count unavailable' : `${lsT.refundedCount} refunded`}`,
+        metric: `₹${Math.round(lsT.revenuePaise / 100).toLocaleString('en-IN')}`,
       })
 
   // Email + WhatsApp
@@ -176,10 +193,10 @@ export async function getPlatformServices(): Promise<ServiceHealth[]> {
   services.push(jobService('print', 'Print', print))
   services.push(jobService('reports', 'Reports & Exports', report))
 
-  // Licensing + Coupons (from license sales)
-  services.push(ls == null
-    ? { key: 'licensing', label: 'Licensing', level: 'unavailable', detail: 'Unavailable', metric: null }
-    : { key: 'licensing', label: 'Licensing', level: ls.paidCount > 0 ? 'healthy' : 'unavailable', detail: `${ls.paidCount} paid licenses`, metric: ls.paidCount > 0 ? `${ls.paidCount}` : null })
+  // Licensing + Coupons (from license sales). RD-ANALYTICS-FAILCLOSED — paid count and revenue are
+  // judged independently: a known paid count is shown even when revenue is unavailable (as a warning,
+  // naming what is missing); an unknown paid count is a warning, never a 0.
+  services.push(licensingService(ls))
   services.push(ls == null
     ? { key: 'coupons', label: 'Coupons', level: 'unavailable', detail: 'Unavailable', metric: null }
     : { key: 'coupons', label: 'Coupons', level: ls.couponRedemptions > 0 ? 'healthy' : 'unavailable', detail: ls.couponRedemptions > 0 ? `${ls.couponRedemptions} redemptions` : 'No redemptions', metric: ls.couponRedemptions > 0 ? `${ls.couponRedemptions}` : null })

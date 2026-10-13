@@ -168,7 +168,9 @@ export interface EventLicenseAdminOverlay {
 //
 // A one-time purchase/upgrade order for an event license (doc id = orderId).
 
-export type LicenseOrderStatus  = 'created' | 'paid' | 'failed' | 'refunded'
+// RD-PRINT-BILL-P4 — 'expired': a badge purchase order whose checkout window lapsed with no capture
+// (lib/licensing/printBadgePurchase/orderDoc.ts). No other purpose ever uses it.
+export type LicenseOrderStatus  = 'created' | 'paid' | 'failed' | 'refunded' | 'expired'
 /**
  * Why an order exists.
  *
@@ -188,6 +190,9 @@ export type LicenseOrderPurpose =
   // RD-EVENT-COMMERCE-02 — a PRE-PUBLISH top-up after the activation order was paid: more
   // capacity and/or more prepaid service units for the same draft. Id `add_<draftId>_<n>`.
   | 'addon'
+  // RD-PRINT-BILL-P4 — prepaid ID-badge units for a PUBLISHED event. Id `bdg_<hash>`; its own
+  // document shape (printBadgePurchase/orderDoc.ts) — no tier, service lines or capacity.
+  | 'print_badges'
 
 /** The purposes that represent a capacity CHANGE (not the first activation). */
 export const CAPACITY_CHANGE_PURPOSES: LicenseOrderPurpose[] = ['capacity_increase', 'capacity_decrease']
@@ -292,6 +297,12 @@ export type LicenseHistoryAction =
   | 'capacity_activated' | 'capacity_increased' | 'capacity_decreased'
   // An admin change to an event's commercial terms (rate / free capacity / GST / …).
   | 'commercial_terms_override'
+  // RD-PRINT-BILL-P2 — an admin change to an event's print badge billing (price / free / complimentary / coupons).
+  | 'print_badge_override'
+  // RD-PRINT-BILL-P4 — prepaid ID-badge units bought (or granted by a free coupon) for an event.
+  | 'print_badges_purchased'
+  // RD-PRINT-BILL-P5 — one settled badge-generation round: units kept for attendees billed, the rest released.
+  | 'print_badges_consumed'
 export type LicenseHistorySource = 'self_serve' | 'admin' | 'system'
 
 export interface LicenseHistoryDoc {

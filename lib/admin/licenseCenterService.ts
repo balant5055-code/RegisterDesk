@@ -68,10 +68,12 @@ export async function getLicenseCenterOverview(): Promise<LicenseCenterOverview>
 
   const sales = analytics?.licenseSales
   const revenue = {
-    licenseRevenuePaise: sales?.revenuePaise ?? 0,
-    paidCount:           sales?.paidCount ?? 0,
-    refundedCount:       sales?.refundedCount ?? 0,
-    discountGivenPaise:  sales?.discountGivenPaise ?? 0,
+    // RD-PRINT-BILL-P4.4 / RD-ANALYTICS-FAILCLOSED — a null (its query or the badge exclusion failed)
+    // stays null; it is never read as 0. Only a missing analytics payload falls back as before.
+    licenseRevenuePaise: sales ? sales.revenuePaise : 0,
+    paidCount:           sales ? sales.paidCount : 0,
+    refundedCount:       sales ? sales.refundedCount : 0,
+    discountGivenPaise:  sales ? sales.discountGivenPaise : 0,
     couponRedemptions:   sales?.couponRedemptions ?? 0,
   }
 
@@ -81,13 +83,31 @@ export async function getLicenseCenterOverview(): Promise<LicenseCenterOverview>
 
   push('license_engine', 'License Engine', active > 0 ? 'green' : total > 0 ? 'yellow' : 'neutral', `${active} active / ${total}`)
   push('coupon_engine', 'Coupon Engine', couponCounts.active > 0 ? 'green' : couponCounts.total > 0 ? 'yellow' : 'neutral', `${couponCounts.active} active / ${couponCounts.total}`)
-  push('payments', 'Payments', revenue.paidCount > 0 ? 'green' : 'neutral', `${revenue.paidCount} paid · ${revenue.refundedCount} refunded`)
-  push('revenue', 'Revenue', revenue.licenseRevenuePaise > 0 ? 'green' : 'neutral', `₹${Math.round(revenue.licenseRevenuePaise / 100).toLocaleString('en-IN')}`)
+  const refundedText = revenue.refundedCount === null ? 'refunded unavailable' : `${revenue.refundedCount} refunded`
+  if (revenue.paidCount === null) {
+    push('payments', 'Payments', 'yellow', `Paid licences unavailable · ${refundedText}`)
+  } else {
+    push('payments', 'Payments', revenue.paidCount > 0 ? 'green' : 'neutral', `${revenue.paidCount} paid · ${refundedText}`)
+  }
+  if (revenue.licenseRevenuePaise === null) {
+    push('revenue', 'Revenue', 'yellow', 'Unavailable — licence revenue could not be read (or ID-badge purchases could not be excluded)')
+  } else {
+    push('revenue', 'Revenue', revenue.licenseRevenuePaise > 0 ? 'green' : 'neutral', `₹${Math.round(revenue.licenseRevenuePaise / 100).toLocaleString('en-IN')}`)
+  }
   push('expiry', 'Expiry', expired > 0 ? 'yellow' : 'green', expired > 0 ? `${expired} expired windows` : 'None expired')
   push('campaigns', 'Campaigns', campaignSet.size > 0 ? 'green' : 'neutral', `${campaignSet.size} campaigns`)
-  const discountRatio = revenue.licenseRevenuePaise > 0 ? revenue.discountGivenPaise / (revenue.licenseRevenuePaise + revenue.discountGivenPaise) : 0
-  push('discount_budget', 'Discount Budget', discountRatio > 0.4 ? 'yellow' : 'green',
-    `₹${Math.round(revenue.discountGivenPaise / 100).toLocaleString('en-IN')} given (${Math.round(discountRatio * 100)}%)`)
+  if (revenue.discountGivenPaise === null) {
+    push('discount_budget', 'Discount Budget', 'yellow', 'Unavailable — discount given could not be read')
+  } else if (revenue.licenseRevenuePaise === null || (revenue.licenseRevenuePaise === 0 && revenue.discountGivenPaise > 0)) {
+    // RD-ANALYTICS-FAILCLOSED — a share of revenue is not meaningful without revenue: unknown revenue,
+    // or ₹0 revenue against a real discount, is shown as Unavailable (yellow) — never a 0%.
+    push('discount_budget', 'Discount Budget', 'yellow',
+      `₹${Math.round(revenue.discountGivenPaise / 100).toLocaleString('en-IN')} given (% of revenue: Unavailable)`)
+  } else {
+    const discountRatio = revenue.licenseRevenuePaise !== null && revenue.licenseRevenuePaise > 0 ? revenue.discountGivenPaise / (revenue.licenseRevenuePaise + revenue.discountGivenPaise) : 0
+    push('discount_budget', 'Discount Budget', discountRatio > 0.4 ? 'yellow' : 'green',
+      `₹${Math.round(revenue.discountGivenPaise / 100).toLocaleString('en-IN')} given (${Math.round(discountRatio * 100)}%)`)
+  }
 
   return {
     licenses: { total, active, pending, suspended, cancelled, consumed, expired },

@@ -12,7 +12,8 @@ import type { RequestableService } from './serviceRequestRules'
 
 const KEY = 'rd_wallet_purchase_intent'
 const TTL_MS = 60 * 60 * 1000
-const SERVICES: readonly RequestableService[] = ['registrations', 'whatsapp', 'certificates', 'media']
+// RD-PRINT-BILL-P6 — 'print_badges' lands on License & Services' own ID badges section (published events).
+const SERVICES: readonly RequestableService[] = ['registrations', 'whatsapp', 'certificates', 'media', 'print_badges']
 
 export interface PurchaseIntent {
   draftId:  string

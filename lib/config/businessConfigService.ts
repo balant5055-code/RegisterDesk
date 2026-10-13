@@ -47,6 +47,14 @@ export interface ConfigUpdateContext {
    * internal callers that pass nothing; the admin route always passes it explicitly.
    */
   canEditPricing?: boolean
+  /**
+   * RD-PRINT-BILL-P2 — optional extra work INSIDE the save transaction, after the history and
+   * configuration-audit rows are staged: `before` is the section as resolved from the FRESH stored
+   * doc (not the cache), `after` is exactly what will be resolved after the write. It may stage
+   * more writes (they commit or fail with the change) or THROW to abort the whole save (nothing
+   * is written). Absent ⇒ behaviour unchanged.
+   */
+  stageInTransaction?: (txn: FirebaseFirestore.Transaction, info: { version: number; before: unknown; after: unknown; db: FirebaseFirestore.Firestore }) => void
 }
 
 export interface ConfigAuditEntry {
@@ -130,8 +138,11 @@ export class BusinessConfigurationService {
    * but invalid" or "unreadable" — which the resolved view deliberately hides behind defaults.
    * Read-only: nothing here repairs or rewrites the stored doc.
    */
-  async getStoredLayer(): Promise<{ stored: DeepPartialSections; loadFailed: boolean }> {
-    const c = await this.loadStored()
+  async getStoredLayer(opts: { fresh?: boolean } = {}): Promise<{ stored: DeepPartialSections; loadFailed: boolean }> {
+    // RD-PRINT-P8 (W5) — `fresh` re-reads Firestore for THIS call (an authorization boundary that
+    // must not act on a value up to CACHE_TTL_MS old, e.g. pilot membership at badge activation).
+    // It refreshes the shared cache as any load does; the default cached behaviour is unchanged.
+    const c = await this.loadStored(opts.fresh === true)
     return { stored: c.stored, loadFailed: c.failed === true }
   }
 
@@ -242,6 +253,17 @@ export class BusinessConfigurationService {
         section: key, before: beforeSection ?? null, after: freshCandidate,
         updatedBy: ctx.updatedBy, reason: ctx.reason, version, at: FieldValue.serverTimestamp(),
       } satisfies ConfigAuditEntry & { at: unknown })
+
+      if (ctx.stageInTransaction) {
+        // `after` uses Firestore's merge semantics (a patched null REPLACES), i.e. exactly what will
+        // be stored and then resolved — not deepMerge, which would keep the old value for a null.
+        const storedAfter = firestoreMergePatch((freshSections as Record<string, unknown>)[key], patch)
+        ctx.stageInTransaction(txn, {
+          version, db: adminDb,
+          before: resolveSection(key, freshSections as DeepPartialSections),
+          after:  resolveSection(key, { ...(freshSections as DeepPartialSections), [key]: storedAfter } as DeepPartialSections),
+        })
+      }
 
       return { before: beforeSection ?? null, after: freshCandidate, newVersion: version }
     })
