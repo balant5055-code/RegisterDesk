@@ -25,7 +25,10 @@
 
 import type { Metadata } from 'next'
 import Link from 'next/link'
-import { ArrowRight, Check, Layers3, ReceiptText, ShieldCheck, type LucideIcon } from 'lucide-react'
+import {
+  ArrowRight, Award, BarChart3, Check, CreditCard, Layers3, Medal, MessageSquare, ReceiptText, Rocket,
+  ScanLine, ShieldCheck, Ticket, Users, type LucideIcon,
+} from 'lucide-react'
 import { cn } from '@/lib/utils/cn'
 import { marketingButton } from '@/lib/marketing/theme'
 import { getCta } from '@/lib/marketing/cta'
@@ -186,6 +189,86 @@ function PricingCard({ tier, index }: { tier: PricingTier; index: number }) {
   )
 }
 
+// ─── Everything included ──────────────────────────────────────────────────────
+// 2026-10-11 (owner): every RegisterDesk feature, listed on the pricing page. There are no
+// feature tiers, so this is ONE list that every event gets — grouped by the job it does.
+// Audited against the codebase the same day: only SHIPPED, switched-on features are listed
+// (waitlist is disabled platform-wide; bib auto-detection, SMS and push have no provider;
+// the WhatsApp Inbox ships behind the `whatsappInbox` flag, which defaults to OFF — list it
+// here only once that flag is switched on for every organizer).
+
+const FEATURE_GROUPS: { title: string; icon: LucideIcon; items: string[] }[] = [
+  { title: 'Set up & publish', icon: Rocket, items: [
+    'Create Your Own Event', 'Public & Private Events', 'Open Registration & Invite Codes',
+    'Category Event Templates', 'Agenda & Speaker Pages', 'Custom Event Branding',
+    'Multi-Event Management', 'Event Discovery Listing',
+  ] },
+  { title: 'Registration & tickets', icon: Ticket, items: [
+    'Dynamic Registration Forms', 'Multiple Passes & Categories', 'Free & Paid Registrations',
+    'Discount Coupons', 'QR Code Tickets', 'Self-Service Ticket Download', 'Walk-in Registration',
+  ] },
+  { title: 'Payments & fundraising', icon: CreditCard, items: [
+    'Online Payment Collection', 'Payment Tracking', 'Payment Receipts', 'Refund Management',
+    'Donation Campaigns', '80G Donation Receipts',
+  ] },
+  { title: 'Attendees & partners', icon: Users, items: [
+    'Attendee Management', 'Bulk Participant Import', 'Participant Data Export', 'Attendee Lead Management',
+    'Speaker Applications', 'Sponsorship Applications', 'Sponsor Display',
+  ] },
+  { title: 'Event day', icon: ScanLine, items: [
+    'QR Code Check-in', 'BIB Number Assignment', 'Timing Chip Mapping', 'Team & Staff Management',
+    'Event Operations Center',
+  ] },
+  { title: 'Results & photos', icon: Medal, items: [
+    'Race Results Publishing', 'Finisher Badges', 'Media Studio', 'Event Photo Gallery', 'Find Your Race Photos',
+  ] },
+  { title: 'Communication', icon: MessageSquare, items: [
+    'Email Confirmations', 'WhatsApp Notifications', 'Event Reminders', 'Communication Center',
+  ] },
+  { title: 'Certificates & print', icon: Award, items: [
+    'Certificate Builder', 'Digital Certificates', 'Certificate Verification',
+    'Badge & ID Card Designer', 'Custom Print Layouts', 'Bulk PDF Generation',
+  ] },
+  { title: 'Reports & insights', icon: BarChart3, items: [
+    'Event Reports', 'Attendance Reports', 'Financial Reports', 'Analytics Dashboard',
+    'Organizer Dashboard', 'Event Performance Tracking', 'Admin Audit Logs',
+  ] },
+]
+const FEATURE_COUNT = FEATURE_GROUPS.reduce((n, g) => n + g.items.length, 0)
+
+/** One group: a bronze icon tile, a serif title with its count, then a ticked list. */
+function FeatureGroup({ group, index }: { group: (typeof FEATURE_GROUPS)[number]; index: number }) {
+  return (
+    // On a phone the icon and title share one row (no index) so eight cards stay short;
+    // from sm up the icon sits above the title with the index in the corner.
+    <li className="relative flex min-w-0 flex-col rounded-[var(--radius-panel)] border border-border/70 bg-card p-4 transition-colors hover:border-hero-accent-rule/40 sm:p-6">
+      <span aria-hidden className="absolute right-6 top-7 hidden text-fs-2xs font-semibold tabular-nums tracking-[0.16em] text-hero-eyebrow sm:block">
+        {String(index + 1).padStart(2, '0')}
+      </span>
+      <div className="flex items-center gap-3.5 sm:flex-col sm:items-start sm:gap-0">
+        <span aria-hidden className="inline-flex size-10 shrink-0 items-center justify-center rounded-[var(--radius-control)] border border-hero-accent-rule/40 bg-hero-accent-rule/[0.06] text-hero-accent-rule">
+          <group.icon className="size-[18px]" strokeWidth={1.6} />
+        </span>
+        <div className="min-w-0 sm:mt-4">
+          <h3 className="font-display text-fs-lg font-light leading-snug text-hero-ink">{group.title}</h3>
+          <p className="mt-0.5 text-fs-2xs font-semibold uppercase tracking-[0.14em] text-hero-accent-rule">
+            {group.items.length} {group.items.length === 1 ? 'feature' : 'features'}
+          </p>
+        </div>
+      </div>
+      <span aria-hidden className="mt-3.5 block h-px w-full bg-border/70 sm:mt-4" />
+      <ul className="mt-3.5 space-y-2 sm:mt-4 sm:space-y-2.5">
+        {group.items.map(item => (
+          <li key={item} className="flex items-start gap-2.5 text-fs-sm leading-snug text-hero-ink-soft">
+            <Check className="mt-0.5 size-3.5 shrink-0 text-action" strokeWidth={2.5} aria-hidden />
+            <span>{item}</span>
+          </li>
+        ))}
+      </ul>
+    </li>
+  )
+}
+
 export default async function PricingPage() {
   const jsonLd = [
     organizationJsonLd(),
@@ -262,6 +345,30 @@ export default async function PricingPage() {
                 <PricingCalculator ctaHref={startFree.href} ctaLabel="Start your event" initialPricing={pricing} />
               </div>
             </section>
+          </div>
+        </section>
+
+        {/* ══ 2b · EVERYTHING INCLUDED — every feature, one list, no tiers ══ */}
+        <section id="features" aria-labelledby="pricing-features-heading" className="border-t border-border/60 bg-background">
+          <div className={cn(MARKETING_CONTAINER.page, 'py-12 sm:py-16')}>
+            <div className="mx-auto max-w-2xl text-center">
+              <EditorialOverline>Everything included</EditorialOverline>
+              <h2 id="pricing-features-heading" className="mt-4 font-display text-fs-3xl font-light tracking-[-0.015em] text-hero-ink sm:text-fs-display-sm">
+                Every feature, on every event.
+              </h2>
+              <span aria-hidden className="mx-auto mt-4 block h-px w-10 bg-hero-accent-rule" />
+              <p className="mt-4 text-fs-base leading-relaxed text-hero-ink-soft">
+                No feature tiers. From the first registration to the final report, all {FEATURE_COUNT} tools
+                are available on every event you run — usage-based services like photos and WhatsApp
+                are priced in the estimate above.
+              </p>
+            </div>
+
+            <ul className="mx-auto mt-8 grid max-w-6xl gap-3 sm:mt-10 sm:grid-cols-2 sm:gap-5 lg:grid-cols-3">
+              {FEATURE_GROUPS.map((group, index) => (
+                <FeatureGroup key={group.title} group={group} index={index} />
+              ))}
+            </ul>
           </div>
         </section>
 

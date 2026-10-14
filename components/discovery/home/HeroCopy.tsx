@@ -99,7 +99,9 @@ export function HeroCopy({ index, onPrev, onNext, credits }: HeroCopyProps) {
   const slide = HERO_SLIDES[index]
 
   return (
-    <div className="relative z-[3] flex h-full flex-col justify-end">
+    // Phones: copy from the top, controls pinned to the bottom (mt-auto) so any spare
+    // height falls between them, never under the header. sm+: bottom-anchored as before.
+    <div className="relative z-[3] flex h-full flex-col justify-start sm:justify-end">
       {/* ── The statement. One box for every slide; the copy changes inside it. ── */}
       <div className="mx-auto w-full max-w-[52rem] text-center">
         <AnimatePresence mode="wait" initial={false}>
@@ -152,7 +154,7 @@ export function HeroCopy({ index, onPrev, onNext, credits }: HeroCopyProps) {
 
       {/* ── The highlights (lg) and the chapter controls, centred. Normal flow, below the
              statement, so they never move when the copy above changes. ── */}
-      <div className="mt-7 flex flex-col items-center gap-6 lg:mt-8 lg:gap-7">
+      <div className="mt-auto flex flex-col items-center gap-6 pt-6 sm:mt-7 sm:pt-0 lg:mt-8 lg:gap-7">
         <AnimatePresence mode="wait" initial={false}>
           <motion.ul
             key={slide.id}

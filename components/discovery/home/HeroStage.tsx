@@ -71,10 +71,17 @@ function autoplayMs(): number {
  *   lg       copy runs 348–368px as the headline takes its display sizes; 26.5rem (424px)
  *            left 56–76px. The CENTRED layout (2026-09-23) adds the highlights as their own
  *            row above the controls (~70px), so lg is now 29rem / 64svh.
+ *
+ * 2026-10-12 (owner): below sm the copy is now TOP-anchored (24px under the header) with the
+ * controls pinned to the bottom, so the slack shows between the description and the arrows
+ * instead. Re-measured per slide: 320 keeps 23rem (its tallest slide fills it exactly);
+ * 360–419 holds a 194px copy box at most → 21.5rem; 420–639 holds 170px → 20rem. That
+ * leaves ~34px between the description and the arrows on every phone.
  */
 export const HERO_STAGE_H =
   'min-h-[23rem] h-[min(52svh,23rem)] ' +
-  'min-[420px]:min-h-[21.5rem] min-[420px]:h-[min(52svh,21.5rem)] ' +
+  'min-[360px]:min-h-[21.5rem] min-[360px]:h-[min(52svh,21.5rem)] ' +
+  'min-[420px]:min-h-[20rem] min-[420px]:h-[min(52svh,20rem)] ' +
   'sm:min-h-[21rem] sm:h-[min(58svh,22rem)] ' +
   'lg:min-h-[26rem] lg:h-[min(64svh,29rem)]'
 
@@ -133,8 +140,11 @@ export function HeroStage({ backdrop, credits }: HeroStageProps) {
     >
       {backdrop}
 
-      {/* the copy, in the page container, bottom-anchored above the capsule's overlap */}
-      <div className={cn(container.page, 'relative z-[3] flex h-full flex-col pb-12 pt-7 sm:pb-14 lg:pb-14')}>
+      {/* the copy, in the page container, bottom-anchored above the capsule's overlap.
+          2026-10-12 (owner, phones): below sm the copy is TOP-anchored instead, a fixed
+          24px under the header — bottom-anchoring left 50–77px of empty sky
+          under the header that changed with every slide and phone width. */}
+      <div className={cn(container.page, 'relative z-[3] flex h-full flex-col pb-12 pt-6 sm:pb-14 sm:pt-7 lg:pb-14')}>
         <HeroCopy index={index} onPrev={prev} onNext={next} credits={credits} />
       </div>
     </div>
