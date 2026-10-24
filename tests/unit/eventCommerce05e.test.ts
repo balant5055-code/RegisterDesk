@@ -34,13 +34,18 @@ const SWEEP = read('lib/payments/registrationReconciliation.ts')
 describe('Fee Collection Method is organizer-editable after publishing — and only it', () => {
   const draft = { pricing: { feeModel: 'organizer_absorbs', passes: [{ id: 'p1', name: '10K', price: 500 }] } }
 
-  // RD-PHASE4-S3 · Q1 — SUPERSEDED: fee collection is fixed to organizer-pays and organizers no longer
-  // choose it, so `feeModel` is no longer a safe edit key and the mapper refuses it outright.
-  it('is NOT an editable key any more; prices, free/paid and licence fields stay forbidden too', () => {
-    expect(classifyEditKey('feeModel')).not.toBe('safe')
-    expect(findForbiddenEditKeys(['feeModel'])).toEqual(['feeModel'])
+  // RD-FEE-RESTORE-01 — this file's ORIGINAL title is true again: the Fee Collection Method is
+  // organizer-editable after publishing. RD-PHASE4-S3 · Q1 had inverted these cases; the
+  // inversion is now itself superseded, so they return to asserting editability — with the
+  // flag gate (tests/unit/feeModelRestore.test.ts) as the new control.
+  //
+  // The second half of the case is unchanged and is the part that always mattered: making
+  // `feeModel` editable must not make any PRICE field editable.
+  it('is an editable key again; prices, free/paid and licence fields stay forbidden', () => {
+    expect(classifyEditKey('feeModel')).toBe('safe')
+    expect(findForbiddenEditKeys(['feeModel'])).toEqual([])
     expect(findForbiddenEditKeys(['feeModel', 'price', 'passPrices', 'pricingModel', 'licenseTier']).sort())
-      .toEqual(['feeModel', 'licenseTier', 'passPrices', 'price', 'pricingModel'])
+      .toEqual(['licenseTier', 'passPrices', 'price', 'pricingModel'])
   })
   it('the mapper never writes pricing.feeModel — any feeModel in a payload is refused', () => {
     for (const v of ['attendee_pays', 'organizer_absorbs']) {
@@ -105,7 +110,12 @@ describe('an in-progress checkout keeps the fee terms it started with', () => {
     expect(openAttemptFeeModel({ ...open, createdAtMs: now - INTENT_REUSE_WINDOW_MS - 1 }, req)).toBeNull()
   })
   it('create-order prefers the pinned model; settlement and the ledger sweep read the INTENT snapshot', () => {
-    expect(ORDER).toContain('eventFeeModel: pinnedFeeModel ?? builderFeeModelToEngine(')
+    // RD-FEE-RESTORE-01 — the fallback behind the pin is now the explicit record before the
+    // supported default, so the single-line form became three branches. The property this case
+    // asserts is unchanged: the PIN is consulted first.
+    expect(ORDER).toContain('eventFeeModel: pinnedFeeModel')
+    expect(ORDER.indexOf('eventFeeModel: pinnedFeeModel'))
+      .toBeLessThan(ORDER.indexOf('explicitFeeModel(rawPricing)'))
     expect(ORDER).toContain('feeModel: priorIntent.financials?.feeModel ?? null')
     expect(SWEEP).toContain('financials:       intent.financials,')
     expect(read('lib/payments/settleCapturedRegistration.ts')).toContain('financials:       intent.financials,')
@@ -125,8 +135,14 @@ describe('Fee Collection Method UI: License & Services only, saved on the server
     expect(submitted).toContain('onServerSaved={markPublished}')
     expect(submitted).toContain('onSaveDraft={data => saveDraft(reviewStepIndex, data)}')
   })
-  it('the wizard never sends a fee model — no draft save of it, no PATCH /edit { feeModel }', () => {
-    expect(PAGE).not.toContain('JSON.stringify({ feeModel')
+  // RD-FEE-RESTORE-02 — the wizard DOES send a fee model again, and it must: writing only the
+  // draft was the reported defect (the builder previewed ₹1.04 from the draft while an attendee
+  // was charged ₹1 from the live event). What the case still pins is the part that mattered —
+  // the two bespoke savers that used to exist alongside PATCH /edit have not come back, so there
+  // remains exactly ONE write path for the fee model.
+  it('the wizard sends the fee model through PATCH /edit — and through nothing else', () => {
+    expect(PAGE).toContain('JSON.stringify({ feeModel: model })')
+    expect(PAGE).toContain("method:  'PATCH'")
     expect(PAGE).not.toContain('saveLiveFeeModel')
     expect(PAGE).not.toContain('savePricingChanges')
   })

@@ -16,6 +16,8 @@ import type { Metadata }       from 'next'
 import { buildMetadata }       from '@/lib/marketing/seo'
 import { ToastProvider } from '@/components/ui/Toast'
 import { RegisterClient }      from './RegisterClient'
+import { explicitFeeModel }    from '@/lib/fees/explicitFeeModel'
+import { resolvePlatformPricing } from '@/lib/platform/pricing/resolver'
 import { PassPrice }          from './PassPrice'
 import { ageRangeLabel }      from '@/lib/registrations/ageEligibility'
 import { WaitlistJoinClient }  from './WaitlistJoinClient'
@@ -497,6 +499,16 @@ export default async function RegisterPage({
         refundPolicyUrl={refundPolicyUrl}
         // RD-COMMS-WA-CONSENT — offer the WhatsApp-updates opt-in only where WhatsApp is on.
         whatsappUpdatesAvailable={rawPricing?.whatsappEnabled === true}
+        // RD-FEE-RESTORE-03 — does THIS event add platform fees to the attendee's charge?
+        //
+        // Resolved here, on the server, through the SAME function checkout prices with
+        // (`explicitFeeModel`) and behind the SAME flag — so the summary's wording and the
+        // amount the attendee is actually charged can never come from different rules. A
+        // legacy event has no explicit record and resolves to false, exactly as it is charged.
+        attendeePaysFees={
+          (await resolvePlatformPricing()).features.pricingEngineEnabled
+          && explicitFeeModel(rawPricing) === 'customer_pays'
+        }
       />
     </ToastProvider>
   )

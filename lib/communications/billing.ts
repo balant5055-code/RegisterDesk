@@ -18,7 +18,7 @@ import { getWalletConfig } from '@/lib/wallet/resolveWalletConfig'
 import type { OrganizerWallet } from '@/types/events'
 import type { WalletTxnType }   from '@/lib/wallet/types'
 import { decideReserve, txnReadForReserve, txnTakeUnits, draftIdForEventSlug, txnReadUsage, txnTrimUnits } from '@/lib/licensing/serviceAllowanceLedger'
-import { legacyBalanceCanFund } from './capacity'
+import { legacyBalanceCanFundNewWhatsApp } from './capacity'
 import { WHATSAPP_BROADCAST_JOBS_COLLECTION } from '@/lib/whatsapp/acceptance'
 import { HOLD_RELEASE_AFTER_MS } from '@/lib/whatsapp/funding'
 
@@ -120,7 +120,8 @@ export async function chargeAndStartCampaign(args: {
     // RD-COMMS-P1 — not covered by the event's capacity (none bought, used up — whatever the
     // stored exhaustion policy says): the LEGACY balance may fund it only if it covers the WHOLE
     // cost; otherwise nothing is sent and nothing is charged. There is no new pay-as-you-go path.
-    if (args.channel === 'whatsapp' && units > 0 && !legacyBalanceCanFund(balance, cost)) {
+    // RD-WA-BLOCK-01 — the legacy balance no longer funds a NEW broadcast: capacity or nothing.
+    if (args.channel === 'whatsapp' && units > 0 && !legacyBalanceCanFundNewWhatsApp(balance, cost)) {
       const reason = outcome.mode === 'exhausted' ? 'allowance_exhausted' as const : 'allowance_required' as const
       txn.update(campaignRef, {
         status: 'failed', failReason: reason, actualCostPaise: 0,

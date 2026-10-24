@@ -663,6 +663,8 @@ export default function CouponsTab({ event, token }: { event: EventDetailRespons
   const [published,      setPublished]      = useState(true)
   const [truncated,      setTruncated]      = useState(false)
   const [couponsEnabled, setCouponsEnabled] = useState(true)
+  // RD-COUPON-SWITCH-01 — switched off for THIS event by RegisterDesk (Super Admin).
+  const [couponsDisabledForEvent, setCouponsDisabledForEvent] = useState(false)
 
   const [adding,    setAdding]    = useState(false)
   const [editingId, setEditingId] = useState<string | null>(null)
@@ -708,6 +710,7 @@ export default function CouponsTab({ event, token }: { event: EventDetailRespons
         setPublished(json.eventPublished !== false)
         setTruncated(json.truncated === true)
         setCouponsEnabled(json.couponsEnabled !== false)
+        setCouponsDisabledForEvent(json.couponsDisabledForEvent === true)
         setState('ready')
       } catch {
         if (loadKey.current !== key) return
@@ -937,9 +940,33 @@ export default function CouponsTab({ event, token }: { event: EventDetailRespons
                 registration. You decide what it takes off, which passes it works on, when it works
                 and how many times it can be used.
               </p>
-              <button type="button" onClick={() => setAdding(true)} className={cn(PRIMARY_BTN, 'mt-5')}>
-                Create the first coupon <ArrowRight className="size-4" aria-hidden />
-              </button>
+              {/* RD-COUPON-SWITCH-01 — the early return skipped both switch notices, so an event with
+                  no coupons offered "Create the first coupon" while RegisterDesk had them switched off. */}
+              {couponsDisabledForEvent ? (
+                <p role="status" className="mx-auto mt-5 flex max-w-md items-start gap-1.5 text-left text-fs-xs text-muted-foreground">
+                  <AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-warning" aria-hidden />
+                  <span>
+                    RegisterDesk has switched coupons off for this event, so <strong className="font-semibold text-foreground">new
+                    coupons cannot be created and no code is accepted at checkout</strong>. Contact RegisterDesk
+                    support for details.
+                  </span>
+                </p>
+              ) : (
+                <>
+                  {!couponsEnabled && (
+                    <p role="status" className="mx-auto mt-4 flex max-w-md items-start gap-1.5 text-left text-fs-xs text-muted-foreground">
+                      <AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-warning" aria-hidden />
+                      <span>
+                        Coupons are switched off across the platform right now, so <strong className="font-semibold text-foreground">no
+                        code will be accepted at checkout</strong> until the switch returns.
+                      </span>
+                    </p>
+                  )}
+                  <button type="button" onClick={() => setAdding(true)} className={cn(PRIMARY_BTN, 'mt-5')}>
+                    Create the first coupon <ArrowRight className="size-4" aria-hidden />
+                  </button>
+                </>
+              )}
             </div>
           </section>
         )}
@@ -1005,7 +1032,7 @@ export default function CouponsTab({ event, token }: { event: EventDetailRespons
                 className={cn(FIELD, 'h-11 pl-9 sm:h-9')}
               />
             </div>
-            {!adding && !editingId && (
+            {!adding && !editingId && !couponsDisabledForEvent && (
               <button
                 type="button"
                 onClick={() => { setAdding(true); setSaveErr(null) }}
@@ -1051,6 +1078,15 @@ export default function CouponsTab({ event, token }: { event: EventDetailRespons
               Coupons are switched off across the platform right now, so <strong className="font-semibold text-foreground">no
               code below will be accepted at checkout</strong> — whatever its status says here.
               Your configuration is kept and starts working again when the switch returns.
+            </p>
+          )}
+
+          {couponsEnabled && couponsDisabledForEvent && (
+            <p className="flex items-start gap-1.5 border-t border-border px-4 py-2.5 text-fs-xs text-muted-foreground">
+              <AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-warning" aria-hidden />
+              RegisterDesk has switched coupons off for this event, so <strong className="font-semibold text-foreground">no
+              code below will be accepted at checkout</strong> and new coupons cannot be created. Your coupons
+              are kept and start working again if they are switched back on. Contact RegisterDesk support for details.
             </p>
           )}
 

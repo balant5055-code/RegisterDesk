@@ -48,6 +48,7 @@ import type { RegistrationRules } from '@/components/wizard/registrationFormConf
 import { resolvePlatformPricing }    from '@/lib/platform/pricing/resolver'
 import { resolveCheckoutCharge }     from '@/lib/fees/checkoutCharge'
 import { builderFeeModelToEngine, SUPPORTED_FEE_MODEL } from '@/lib/events/builder/types'
+import { explicitFeeModel } from '@/lib/fees/explicitFeeModel'
 import { resolveEventFeeConfig, PRICING_UNAVAILABLE } from '@/lib/fees/resolveEventFeeConfig'
 import { isCheckoutFeeInputs, type FeeConfig, type FeeBreakdownRecord, type CheckoutFeeInputs } from '@/lib/fees/types'
 
@@ -440,10 +441,26 @@ export async function POST(
   const charge = resolveCheckoutCharge({
     pricingEngineEnabled: platformSettings.features.pricingEngineEnabled,
     finalAmountPaise,
-    // RD-PHASE4-S3 · Q1 — fee collection is fixed to organizer-pays: the event's stored fee model
-    // (organizer-controlled, possibly legacy attendee_pays) is NOT an input. An open attempt keeps the
-    // model it started with (pinnedFeeModel) — historical and in-flight checkouts are never re-priced.
-    eventFeeModel: pinnedFeeModel ?? builderFeeModelToEngine(SUPPORTED_FEE_MODEL),
+    // RD-FEE-RESTORE-01 — three branches, in this order, and the order is the whole contract:
+    //
+    //   1. pinnedFeeModel        an attempt already open keeps the terms it began with, so an
+    //                            organizer changing the model mid-checkout cannot re-price a
+    //                            customer who is already at the gateway (RD-EVENT-COMMERCE-05E).
+    //   2. explicitFeeModel      the organizer's RECORDED choice — `pricing.feeCollection`, and
+    //                            ONLY that. The legacy `pricing.feeModel` is never read: it has
+    //                            never charged anybody (RD-PHASE4-S3 · Q1 pinned every event to
+    //                            organizer-pays), so reading it now would start charging fees on
+    //                            live events whose real behaviour never included them.
+    //   3. SUPPORTED_FEE_MODEL   every event that predates the restored flow. Absence of the
+    //                            record IS the compatibility guarantee — no backfill exists or
+    //                            is needed, and these events are charged exactly as today.
+    //
+    // Gated server-side, not merely in the builder: with the engine off the explicit record is
+    // ignored even if one was somehow written, so the flag alone decides whether an attendee can
+    // be charged fees.
+    eventFeeModel: pinnedFeeModel
+      ?? (platformSettings.features.pricingEngineEnabled ? explicitFeeModel(rawPricing) : null)
+      ?? builderFeeModelToEngine(SUPPORTED_FEE_MODEL),
     feeConfig,
     context: { organizerUid: event.uid, eventId: slug },
   })

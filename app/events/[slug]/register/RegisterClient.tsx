@@ -24,7 +24,7 @@ import {
   classifyCreateOrderOutcome, CREATE_ORDER_TIMEOUT_MS,
   type VerifyOutcome, type VerifyResponseLike,
 } from '@/lib/registrations/paymentVerification'
-import { TAX_INCLUSIVE_NOTE } from '@/lib/pricing/copy'
+import { TAX_INCLUSIVE_NOTE, FEES_ADDED_AT_CHECKOUT_NOTE } from '@/lib/pricing/copy'
 import type { FeeBreakdownRecord } from '@/lib/fees/types'
 import { buildAttendeeFeeBreakdown, formatPaise, type AttendeeFeeBreakdown } from '@/lib/fees/attendeeBreakdown'
 // RD-RT1.0: the presentation layer now lives in RegistrationUI. Logic stays here.
@@ -146,6 +146,14 @@ export interface RegisterClientProps {
   refundPolicyUrl?:   string
   /** RD-COMMS-WA-CONSENT — the event sends WhatsApp, so the optional opt-in box is offered. */
   whatsappUpdatesAvailable?: boolean
+  /**
+   * RD-FEE-RESTORE-03 — true when THIS event adds platform fees to the attendee's charge.
+   *
+   * Server-resolved through the same `explicitFeeModel` + flag that price the checkout, so the
+   * summary's wording cannot disagree with the amount charged. Display only: it selects a note,
+   * never a number. Defaults false, which is every legacy event and every organizer-absorbs one.
+   */
+  attendeePaysFees?: boolean
 }
 
 type FieldState = { visible: boolean; required: boolean; disabled: boolean }
@@ -638,6 +646,7 @@ export function RegisterClient({
   termsUrl,
   refundPolicyUrl,
   whatsappUpdatesAvailable = false,
+  attendeePaysFees = false,
 }: RegisterClientProps) {
   const router = useRouter()
 
@@ -1947,7 +1956,10 @@ export function RegisterClient({
       : null,
     couponCode:  couponApplied?.code ?? null,
     isEarlyBird,
-    taxNote:     isPaid ? TAX_INCLUSIVE_NOTE : null,
+    // RD-FEE-RESTORE-03 — "All prices include taxes" is FALSE under attendee-pays: fees are
+    // added on top at checkout. Stating it beside a total that is about to grow is what made a
+    // ₹1 ticket read as a ₹1 charge on the desktop summary, which carries no other disclaimer.
+    taxNote:     !isPaid ? null : attendeePaysFees ? FEES_ADDED_AT_CHECKOUT_NOTE : TAX_INCLUSIVE_NOTE,
   }
 
   // Derived from the real number of fields the attendee must fill — not a stored value.

@@ -132,19 +132,38 @@ describe('Q1 · fee collection is fixed to organizer-pays at every trusted bound
     expect(organizerPaysPricing(p)).toEqual({ ...p, feeModel: SUPPORTED_FEE_MODEL })
     expect(organizerPaysPricing(null)).toBeNull()
   })
-  it('publish and duplicate store organizer-pays; checkout charges by SUPPORTED_FEE_MODEL (pins kept)', () => {
-    // RD-CE-FIX H3 — still organizer-pays; passes additionally carry sport details only for sport types.
+  // ═══ RD-FEE-RESTORE-01 · Q1 IS DELIBERATELY SUPERSEDED ═══════════════════════
+  //
+  // Q1 fixed fee collection to organizer-pays and these two cases locked that in. The product
+  // decision has been reversed: organizers choose again, gated on `pricingEngineEnabled`.
+  //
+  // The cases are REWRITTEN rather than deleted, because the thing Q1 was protecting is still
+  // real and still enforced — an organizer-controlled value must never reach checkout by
+  // accident. What changed is HOW: instead of ignoring the organizer entirely, checkout reads
+  // ONLY an explicit `pricing.feeCollection` record (lib/fees/explicitFeeModel.ts), and only
+  // while the engine is on. The legacy `pricing.feeModel` is still never an input, which is why
+  // every event that exists today still charges exactly what it charged under Q1.
+  it('the LEGACY stored fee model still reaches no money path (the Q1 guarantee, preserved)', () => {
     expect(code('app/api/events/publish/route.ts')).toContain('const p = organizerPaysPricing(draft.pricing ?? null) as Record<string, unknown> | null')
     expect(code('app/api/organizer/events/[eventId]/duplicate/route.ts')).toContain('organizerPaysPricing({ ...srcPricing, passes: newPasses })')
-    const order = code('app/api/registrations/create-order/route.ts')
-    expect(order).toContain('eventFeeModel: pinnedFeeModel ?? builderFeeModelToEngine(SUPPORTED_FEE_MODEL),')
-    expect(order).not.toContain('normalizeFeeModel(rawPricing?.feeModel')
-    expect(code('app/api/registrations/fee-preview/route.ts')).toContain('eventFeeModel: builderFeeModelToEngine(SUPPORTED_FEE_MODEL),')
+    for (const f of ['app/api/registrations/create-order/route.ts', 'app/api/registrations/fee-preview/route.ts']) {
+      const src = code(f)
+      expect(src, f).not.toContain('normalizeFeeModel(rawPricing?.feeModel')
+      expect(src, f).not.toMatch(/rawPricing[?.\s]*\.feeModel/)
+      // The explicit record, gated on the flag, with the Q1 model as the fallback.
+      expect(src, f).toMatch(/pricingEngineEnabled \? explicitFeeModel\(rawPricing\) : null/)
+      expect(src, f).toContain('?? builderFeeModelToEngine(SUPPORTED_FEE_MODEL)')
+    }
+    // The in-flight pin is still consulted before anything else.
+    expect(code('app/api/registrations/create-order/route.ts')).toContain('eventFeeModel: pinnedFeeModel')
   })
-  it('feeModel is not an organizer edit key; the route refuses it with a stable 403', async () => {
+  it('feeModel is an organizer edit key again, still refused with the stable 403 while the engine is off', async () => {
     const { SAFE_EDIT_KEYS } = await import('@/lib/events/editing/fieldClassification')
-    expect(SAFE_EDIT_KEYS).not.toContain('feeModel')
-    expect(code('app/api/organizer/events/[eventId]/edit/route.ts')).toContain("code: 'PRICING_NOT_ORGANIZER_EDITABLE'")
+    expect(SAFE_EDIT_KEYS).toContain('feeModel')
+    const route = code('app/api/organizer/events/[eventId]/edit/route.ts')
+    // Same code and same refusal as Q1 — now conditional on the live flag rather than absolute.
+    expect(route).toContain("code: 'PRICING_NOT_ORGANIZER_EDITABLE'")
+    expect(route).toContain('feeModelEditable = (await resolvePlatformPricing()).features.pricingEngineEnabled')
   })
 })
 

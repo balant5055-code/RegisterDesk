@@ -112,14 +112,15 @@ describeEmu('RD-COMMS-P1 · communication capacity on real Firestore', () => {
   }, T)
 
   // ── 4 · exhausted + legacy balance ⇒ controlled drain ──────────────────────
-  it('4 · capacity used up + an EXISTING legacy balance that covers it ⇒ the legacy balance drains', async () => {
+  it('RD-WA-BLOCK-01 · 4 · capacity used up + a legacy balance that WOULD cover it ⇒ BLOCKED; the balance is not touched', async () => {
     const { d, slug } = await event({ whatsapp: { purchased: 10, consumed: 10 } })
     await walletRef().set({ balancePaise: 5_000, currency: 'INR' })
     const id = await campaign(slug, 20)
-    expect(await start(id, 20)).toEqual({ ok: true, costPaise: 20 * PRICE })
-    expect(await balance()).toBe(5_000 - 20 * PRICE)
-    expect(await ledgerRow(`broadcast_${id}`)).toBe(true)
-    expect((await ledgerOf(d))?.whatsapp?.consumed).toBe(10)            // the allowance is not touched
+    expect(await start(id, 20)).toEqual({ ok: false, reason: 'allowance_exhausted' })
+    expect(await camp(id)).toMatchObject({ status: 'failed', failReason: 'allowance_exhausted', actualCostPaise: 0 })
+    expect(await balance()).toBe(5_000)                                 // the legacy balance funds nothing new
+    expect(await ledgerRow(`broadcast_${id}`)).toBe(false)
+    expect((await ledgerOf(d))?.whatsapp?.consumed).toBe(10)
   }, T)
 
   // ── 5 · exhausted + no legacy balance ⇒ blocked (also for a stored wallet_payg) ──

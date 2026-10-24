@@ -20,9 +20,10 @@ import {
   Send, Activity, ScrollText, RefreshCw, PlayCircle, PauseCircle, XCircle,
   BadgeCheck, Undo2,
   Gift, CalendarPlus, CalendarMinus, CalendarX, Unlock, Fingerprint, ShieldAlert,
-  Zap, RotateCcw, CheckCircle2, Ban, Clock,
+  Zap, RotateCcw, CheckCircle2, Ban, Clock, TicketPercent,
 } from 'lucide-react'
 import { StatusPill, ErrorBanner } from '@/components/admin'
+import type { AdminEventCouponSwitchResponse as CouponSwitchView } from '@/app/api/admin/events/[slug]/coupons/route'
 // RD-ADMIN-CLOSURE-01 · the EXISTING breadcrumb component. No second breadcrumb system.
 import { Breadcrumbs } from '@/components/ui'
 import { ROUTES } from '@/config/navigation'
@@ -562,6 +563,8 @@ function GovernanceWorkspace({ slug, o, onChanged }: {
   const [err, setErr] = useState<string | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
   const [reloadKey, setReloadKey] = useState(0)
+  // RD-COUPON-SWITCH-01 — the event's coupon switch (Super Admin only). null = not loaded / unavailable.
+  const [couponSwitch, setCouponSwitch] = useState<CouponSwitchView | null>(null)
   const { confirm, prompt } = useConfirm()
 
   // Inline async IIFE (setState only after await) — re-runs when reloadKey bumps.
@@ -575,6 +578,9 @@ function GovernanceWorkspace({ slug, o, onChanged }: {
         ])
         if (!alive) return
         setErr(null); setGov(g); setTimeline(t.entries)
+        // Separate and non-fatal: the page works without it; the card then says 'unavailable'.
+        const cs = await authedGet<CouponSwitchView>(`/api/admin/events/${slug}/coupons`).catch(() => null)
+        if (alive) setCouponSwitch(cs)
       } catch (e) {
         if (alive) setErr(e instanceof Error ? e.message : 'Failed to load governance')
       }
@@ -699,6 +705,35 @@ function GovernanceWorkspace({ slug, o, onChanged }: {
     } finally { setBusy(null) }
   }
 
+  // ── RD-COUPON-SWITCH-01 — switch this event's coupons off / back on (POST …/coupons, reason required) ──
+  // Not optimistic: the card only changes after the server confirms (afterMutation re-reads it).
+  async function setEventCoupons(enabled: boolean) {
+    const reason = (await prompt({
+      title: enabled ? 'Allow coupons again' : 'Turn coupons off for this event',
+      message: enabled
+        ? 'Reason for allowing coupons again (min 3 chars):'
+        : "Reason (min 3 chars). No coupon code will be accepted for this event at checkout; the organizer's coupons are kept:",
+      required: true,
+    }))?.trim()
+    if (!reason || reason.length < 3) return
+    setBusy('coupons'); setErr(null)
+    try {
+      const token = await getToken()
+      const res = await fetch(`/api/admin/events/${slug}/coupons`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ enabled, reason }),
+      })
+      if (!res.ok) {
+        const b = await res.json().catch(() => null) as { error?: string } | null
+        throw new Error(b?.error ?? `Request failed (${res.status})`)
+      }
+      afterMutation()
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : 'Could not change the coupon setting')
+    } finally { setBusy(null) }
+  }
+
   const reviewable = o.reviewStatus === 'pending_review'
   const overrides = gov?.baseline?.overrides
 
@@ -756,6 +791,40 @@ function GovernanceWorkspace({ slug, o, onChanged }: {
               disabled={o.emailProvider === 'resend'} busy={busy === 'emailProvider'}
               onClick={() => void changeEmailProvider('resend')} />
           </div>
+        </div>
+      </Card>
+
+      {/* Event coupons — SUPER ADMIN switch (RD-COUPON-SWITCH-01). */}
+      <Card title="Event coupons" icon={TicketPercent}>
+        <div className="space-y-3 p-4">
+          {couponSwitch === null ? (
+            <p className="text-[12.5px] text-muted-foreground">Coupon setting unavailable.</p>
+          ) : (
+            <>
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-[12.5px] text-muted-foreground">This event:</span>
+                <StatusPill tone={couponSwitch.couponsDisabled ? 'warning' : 'success'}>
+                  {couponSwitch.couponsDisabled ? 'Coupons off' : 'Coupons allowed'}
+                </StatusPill>
+                {couponSwitch.platformCouponsEnabled === false && <StatusPill tone="warning">Off across the platform</StatusPill>}
+              </div>
+              {couponSwitch.couponsDisabled && couponSwitch.reason && (
+                <p className="text-[12.5px] text-muted-foreground">Reason: {couponSwitch.reason}</p>
+              )}
+              <p className="text-[12.5px] text-muted-foreground">
+                While off, no coupon code is accepted for this event at checkout. The organizer&rsquo;s coupons
+                are kept and work again when switched back on; orders already created keep their price.
+              </p>
+              <div className="flex flex-wrap gap-2">
+                <Act icon={Ban} label="Turn coupons off" tone="amber"
+                  disabled={couponSwitch.couponsDisabled} busy={busy === 'coupons'}
+                  onClick={() => void setEventCoupons(false)} />
+                <Act icon={CheckCircle2} label="Allow coupons" tone="emerald"
+                  disabled={!couponSwitch.couponsDisabled} busy={busy === 'coupons'}
+                  onClick={() => void setEventCoupons(true)} />
+              </div>
+            </>
+          )}
         </div>
       </Card>
 

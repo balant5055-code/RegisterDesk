@@ -143,7 +143,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const planned: Partial<Record<MediaRendition, RenditionRecord>> = {}
   for (const r of outcome.renditions) {
     planned[r.rendition] = {
-      path: r.path, size: 0, mimeType: r.mimeType, width: null, height: null,
+      // RD-MEDIA-SIZE-01 — the DECLARED size is recorded on the reservation, so /complete can
+      // refuse an object whose real size differs from what was authorised here.
+      path: r.path, size: requests.find(q => q.rendition === r.rendition)?.size ?? 0,
+      mimeType: r.mimeType, width: null, height: null,
     }
   }
 

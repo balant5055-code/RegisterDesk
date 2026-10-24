@@ -66,7 +66,7 @@ vi.mock('@/lib/team/workspace', () => ({
   authorizeWorkspace: async () => ({ ok: true, status: 200, error: '', workspaceUid: 'org-1', callerUid: 'org-1', permissions: ['wallet'] }),
 }))
 
-import { legacyBalanceCanFund, WHATSAPP_CAPACITY_REQUIRED, CERTIFICATE_CAPACITY_REQUIRED, LICENSE_SERVICES_CTA } from '@/lib/communications/capacity'
+import { legacyBalanceCanFund, legacyBalanceCanFundNewWhatsApp, LEGACY_BALANCE_FUNDS_NEW_WHATSAPP, WHATSAPP_CAPACITY_REQUIRED, CERTIFICATE_CAPACITY_REQUIRED, LICENSE_SERVICES_CTA } from '@/lib/communications/capacity'
 
 const TEMPLATE = {
   templateId: 'TPL-1', organizerUid: 'org-1', eventId: 'draft-1', templateType: 'png',
@@ -86,7 +86,16 @@ beforeEach(() => {
 })
 
 // ═══ the drain rule ════════════════════════════════════════════════════════════
-describe('legacyBalanceCanFund — the ONE rule for the legacy balance', () => {
+describe('RD-WA-BLOCK-01 · a NEW WhatsApp message is never funded by the legacy balance', () => {
+  it('the policy is off, so even a balance that covers the whole cost funds nothing new', () => {
+    expect(LEGACY_BALANCE_FUNDS_NEW_WHATSAPP).toBe(false)
+    expect(legacyBalanceCanFundNewWhatsApp(5_000, 50)).toBe(false)
+    expect(legacyBalanceCanFundNewWhatsApp(50, 50)).toBe(false)
+    expect(legacyBalanceCanFundNewWhatsApp(Number.MAX_SAFE_INTEGER, 1)).toBe(false)
+  })
+})
+
+describe('legacyBalanceCanFund — the settlement rule for what the legacy balance ALREADY funded', () => {
   it('funds only when there is a real price and the balance covers ALL of it', () => {
     expect(legacyBalanceCanFund(5_000, 50)).toBe(true)
     expect(legacyBalanceCanFund(50, 50)).toBe(true)
@@ -133,7 +142,8 @@ describe('certificate issuance requires certificate capacity (no wallet, no free
   }
   it('the issue API answers 402 with that message; a bulk job reports it per item without alerting', () => {
     const route = code('app/api/organizer/events/[eventId]/certificates/issue/route.ts')
-    expect(route).toMatch(/err instanceof CertificateAllowanceExhaustedError\) \{\s*return NextResponse\.json\(\{ error: err\.message \}, \{ status: 402 \}\)/)
+    // RD-CERT-CAPACITY-UX-01 — the same 402 and message, plus an additive machine-readable code.
+    expect(route).toMatch(/err instanceof CertificateAllowanceExhaustedError\) \{[\s\S]{0,200}?return NextResponse\.json\(\{ error: err\.message, code: 'CERTIFICATE_CAPACITY_REQUIRED' \}, \{ status: 402 \}\)/)
     const jobs = code('lib/certificates/jobs.ts')
     expect(jobs).toMatch(/err instanceof CertificateAllowanceExhaustedError\) \{\s*return \{ ok: false, error: err\.message \}/)
   })
@@ -159,7 +169,7 @@ describe('new communication-balance top-ups are retired', () => {
 })
 
 // ═══ server send paths follow the rule ═════════════════════════════════════════
-describe('every WhatsApp send path: event capacity first, then ONLY a covering legacy balance', () => {
+describe('every WhatsApp send path: event capacity, or blocked (RD-WA-BLOCK-01 — the legacy balance funds nothing new)', () => {
   for (const f of ['lib/registrations/sendWhatsAppConfirmation.ts', 'lib/certificates/whatsapp.ts', 'lib/email-logs/whatsappRetry.ts']) {
     it(`${f}`, () => {
       const s = code(f)
@@ -179,11 +189,13 @@ describe('every WhatsApp send path: event capacity first, then ONLY a covering l
     // The legacy drain never goes below zero, whatever allowNegativeBalance says.
     const acc = code('lib/whatsapp/acceptance.ts')
     expect(acc).not.toMatch(/allowNegativeBalance|getWalletConfig/)
-    expect(acc).toContain('legacyBalanceCanFund(balance, f.legacyPricePaise)')
+    // RD-WA-BLOCK-01 — funding a message with no usable hold is a NEW funding decision: capacity only.
+    expect(acc).toContain('legacyBalanceCanFundNewWhatsApp(balance, f.legacyPricePaise)')
+    expect(acc).not.toContain('legacyBalanceCanFund(balance, f.legacyPricePaise)')
   })
-  it('broadcasts: email is never charged; WhatsApp not covered by capacity drains a covering legacy balance or fails', () => {
+  it('broadcasts: email is never charged; WhatsApp not covered by capacity fails (RD-WA-BLOCK-01)', () => {
     const s = code('lib/communications/billing.ts')
-    expect(s).toContain("if (args.channel === 'whatsapp' && units > 0 && !legacyBalanceCanFund(balance, cost)) {")
+    expect(s).toContain("if (args.channel === 'whatsapp' && units > 0 && !legacyBalanceCanFundNewWhatsApp(balance, cost)) {")
     expect(s).toMatch(/: args\.channel === 'sms'\s+\? comm\.sms\.pricePaise\s+: 0/)   // email ⇒ price 0
     const route = code('app/api/organizer/broadcasts/route.ts')
     expect(route).toContain("error: 'WHATSAPP_CAPACITY_REQUIRED', message: WHATSAPP_BROADCAST_CAPACITY_REQUIRED")

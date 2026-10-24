@@ -29,7 +29,9 @@ describe('M1 · the count preview carries the server capacity quote', () => {
   it('the composer shows the four figures, gates Send on the quote, and offers License & Services', () => {
     const src = read(CLIENT)
     expect(src).toContain("const capacityShort = channel === 'whatsapp' && capacity !== null && !capacity.sufficient")
-    expect(src).toContain('recipientCount > 0 && !capacityShort')
+    // RD-BCAST-ESTIMATE-01 — Send now needs a positive quote (broadcastEstimate 'ready'), which is
+    // stricter than "not short": a missing WhatsApp quote no longer counts as enough.
+    expect(src).toContain('const canSend = !!eventSlug && contentReady && estimateAllowsSend(estimate)')
     for (const label of ['Eligible recipients', 'Available messages', 'Required', 'Additional capacity needed']) expect(src, label).toContain(`<dt>${label}</dt>`)
     expect(src).toContain("can’t be sent or scheduled.{' '}")
     expect(src).toContain('{capacityPurchaseHref && <a href={capacityPurchaseHref}')

@@ -52,7 +52,7 @@ export type RecipientCountState =
   | { status: 'idle' }
   | { status: 'loading' }
   // `capacity` is present only when the server sent one (WhatsApp); never invented here.
-  | { status: 'ready'; count: number; meta: RecipientCountMeta | null; capacity?: RecipientCapacity }
+  | { status: 'ready'; count: number; meta: RecipientCountMeta | null; capacity?: RecipientCapacity; excluded?: WhatsAppExcluded }
   | { status: 'error'; message: string }
 
 export interface CountApiResponse {
@@ -63,6 +63,7 @@ export interface CountApiResponse {
   dateLabel?:    string
   undatedCount?: number
   capacity?:     unknown
+  whatsappExcluded?: unknown
 }
 
 function asCapacity(v: unknown): RecipientCapacity | null {
@@ -71,6 +72,16 @@ function asCapacity(v: unknown): RecipientCapacity | null {
   const nums = [c.required, c.available, c.shortfall].every(n => typeof n === 'number' && Number.isFinite(n))
   return nums && typeof c.sufficient === 'boolean'
     ? { required: c.required!, available: c.available!, shortfall: c.shortfall!, sufficient: c.sufficient, fundedBy: c.fundedBy === 'event_capacity' || c.fundedBy === 'legacy_balance' ? c.fundedBy : null }
+    : null
+}
+
+/** RD-BCAST-ESTIMATE-01 — why WhatsApp registrations were left out of the count (server-reported). */
+export interface WhatsAppExcluded { noConsent: number; optedOut: number }
+
+function asExcluded(v: unknown): WhatsAppExcluded | null {
+  const e = v as Partial<WhatsAppExcluded> | null | undefined
+  return e && typeof e === 'object' && [e.noConsent, e.optedOut].every(n => typeof n === 'number' && Number.isFinite(n))
+    ? { noConsent: e.noConsent!, optedOut: e.optedOut! }
     : null
 }
 
@@ -97,7 +108,59 @@ export function toRecipientCountState(ok: boolean, body: CountApiResponse | null
       ? { timezone: body.timezone, dateLabel: body.dateLabel, undatedCount: body.undatedCount ?? null }
       : null,
     ...(asCapacity(body.capacity) ? { capacity: asCapacity(body.capacity)! } : {}),
+    ...(asExcluded(body.whatsappExcluded) ? { excluded: asExcluded(body.whatsappExcluded)! } : {}),
   }
+}
+
+// ─── RD-BCAST-ESTIMATE-01 · what the "Estimated cost" line may say ─────────────────────────────
+//
+// The line used to be a ternary on the recipient count alone: every state that was not "a
+// positive count" — no event, filters incomplete, loading, a failed count, a CONFIRMED zero, a
+// missing capacity quote — rendered the same bare "—". A WhatsApp broadcast spends no money at
+// send time: it consumes the event's PREPAID WhatsApp capacity (bought on License & Services), so
+// the honest estimate is "N messages from prepaid capacity", and only when the server quoted it.
+// Anything not proven is a state with its own sentence — never a number, never "free".
+
+export type BroadcastEstimate =
+  | { kind: 'no_event' }
+  | { kind: 'filters_incomplete' }
+  | { kind: 'loading' }
+  | { kind: 'error' }
+  | { kind: 'no_recipients'; excluded: WhatsAppExcluded | null }
+  | { kind: 'email_free'; count: number }
+  | { kind: 'capacity_unknown'; count: number }
+  | { kind: 'no_capacity'; count: number }
+  | { kind: 'insufficient'; count: number; available: number; shortfall: number }
+  | { kind: 'ready'; count: number; available: number }
+
+export function broadcastEstimate(i: {
+  channel:        'email' | 'whatsapp'
+  eventSelected:  boolean
+  filtersReady:   boolean
+  loading:        boolean
+  failed:         boolean
+  recipientCount: number | null
+  capacity:       RecipientCapacity | null
+  excluded:       WhatsAppExcluded | null
+}): BroadcastEstimate {
+  if (!i.eventSelected) return { kind: 'no_event' }
+  if (!i.filtersReady)  return { kind: 'filters_incomplete' }
+  if (i.loading)        return { kind: 'loading' }
+  if (i.failed || i.recipientCount === null) return { kind: 'error' }
+  const count = i.recipientCount
+  if (count <= 0) return { kind: 'no_recipients', excluded: i.channel === 'whatsapp' ? i.excluded : null }
+  if (i.channel === 'email') return { kind: 'email_free', count }
+  // WhatsApp: only the server's quote proves funding. No quote ⇒ unknown, never "available".
+  const c = i.capacity
+  if (!c) return { kind: 'capacity_unknown', count }
+  if (c.sufficient && c.fundedBy === 'event_capacity') return { kind: 'ready', count, available: c.available }
+  if (c.available <= 0) return { kind: 'no_capacity', count }
+  return { kind: 'insufficient', count, available: c.available, shortfall: Math.max(c.shortfall, count - c.available, 0) }
+}
+
+/** Send / Schedule may be offered only in these states (the server re-checks regardless). */
+export function estimateAllowsSend(e: BroadcastEstimate): boolean {
+  return e.kind === 'ready' || e.kind === 'email_free'
 }
 
 export interface RecipientCountController {

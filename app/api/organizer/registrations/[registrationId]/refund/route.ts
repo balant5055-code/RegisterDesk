@@ -21,7 +21,7 @@ import { updatePaymentIntentRefund }    from '@/lib/firebase/firestore/paymentIn
 import { writeAuditEntry, loadOwnedRegistration } from '@/lib/firebase/firestore/registrations'
 import { reversePlatformTransactionAndDebit } from '@/lib/firebase/firestore/platformTransactions'
 import { recordRefundLedgerReconciliation } from '@/lib/payments/registrationReconciliation'
-import { ensureRegistrationRefundRecord, finalizePendingRegistrationRefund } from '@/lib/refunds/registrationRefunds'
+import { ensureRegistrationRefundRecord, finalizePendingRegistrationRefund, resolveQueuedRefundReversal, holdSettlementForPendingRefund } from '@/lib/refunds/registrationRefunds'
 import { checkRateLimit }               from '@/lib/rateLimit'
 import { sendRefundEmail }              from '@/lib/registrations/sendRefundEmail'
 import { releaseIdentifier }            from '@/lib/identifiers/engine'
@@ -37,6 +37,12 @@ export interface RefundRegistrationResponse {
   refundId?:    string
   refundAmount?: number
   error?:        string
+  /**
+   * RD-REFUND-STATUS-01 — true when Razorpay accepted the refund but has NOT yet processed it. The
+   * registration stays `refund_pending` and is finalized by the refund.processed webhook (gateway
+   * evidence); nothing is reversed or emailed until then.
+   */
+  pending?:      boolean
 }
 
 // H2 idempotency: returns the id of an existing non-failed Razorpay refund of the given
@@ -44,12 +50,13 @@ export interface RefundRegistrationResponse {
 // (timed-out) attempt already created instead of issuing a second gateway refund. On lookup
 // failure returns null and falls through to create — the transactional claim + revert-on-error
 // still guard concurrency, so this can only ever ADD safety, never remove it.
-async function findExistingRefund(paymentId: string, amount: number): Promise<string | null> {
+async function findExistingRefund(paymentId: string, amount: number): Promise<{ id: string; status: unknown } | null> {
   try {
     const res   = await razorpay.payments.fetchMultipleRefund(paymentId)
     const items = Array.isArray(res?.items) ? res.items : []
     const match = items.find(r => r.amount === amount && r.status !== 'failed')
-    return match?.id ?? null
+    // RD-REFUND-STATUS-01 — the reused refund's own status decides, exactly as for a new one.
+    return match ? { id: match.id, status: match.status } : null
   } catch (err) {
     console.error('[refund] existing-refund lookup failed:', { paymentId, err })
     return null
@@ -246,6 +253,8 @@ export async function POST(
   // Pass registrationId in notes for Razorpay-side traceability and as a
   // deterministic receipt for deduplication on the Razorpay dashboard.
   let refundId: string
+  // RD-REFUND-STATUS-01 — Razorpay's status for THIS refund ('pending' | 'processed' | 'failed').
+  let refundStatus: unknown
   try {
     // Idempotency (H2): a PRIOR attempt for this payment may have already created a
     // Razorpay refund whose HTTP response was lost (timeout/proxy), after which step 5's
@@ -253,9 +262,10 @@ export async function POST(
     // NEW refund, ask Razorpay whether this payment already carries a matching refund and
     // reuse it — so a retry can never issue a SECOND gateway refund. Reuses the existing
     // razorpay.payments.fetchMultipleRefund read API (no Razorpay integration change).
-    const existingRefundId = await findExistingRefund(paymentId, refundAmount)
-    if (existingRefundId) {
-      refundId = existingRefundId
+    const existing = await findExistingRefund(paymentId, refundAmount)
+    if (existing) {
+      refundId = existing.id
+      refundStatus = existing.status
     } else {
       const refund = await razorpay.payments.refund(paymentId, {
         amount:  refundAmount,
@@ -264,6 +274,7 @@ export async function POST(
         receipt: `rfnd_${registrationId}`.slice(0, 40),
       })
       refundId = refund.id
+      refundStatus = (refund as { status?: unknown }).status
     }
   } catch (err) {
     console.error('[refund] Razorpay API error:', { registrationId, paymentId, err })
@@ -277,6 +288,21 @@ export async function POST(
     }).catch(e => console.error('[refund] Failed to revert refund_pending to paid:', e))
     return NextResponse.json(
       { success: false, error: 'Razorpay refund failed. Please try again or contact support.' },
+      { status: 502 },
+    )
+  }
+
+  // ── RD-REFUND-STATUS-01 · Razorpay said the refund FAILED: no money moved ──
+  // Nothing is recorded (a refund record would count as money out); the claim is released exactly as
+  // the error path above does, so the Super Admin can retry.
+  if (refundStatus === 'failed') {
+    await adminDb.runTransaction(async tx => {
+      if ((await tx.get(regRef)).get('paymentStatus') === 'refund_pending') {
+        tx.update(regRef, { paymentStatus: 'paid', refundClaim: FieldValue.delete(), updatedAt: FieldValue.serverTimestamp() })
+      }
+    }).catch(e => console.error('[refund] Failed to revert refund_pending to paid:', e))
+    return NextResponse.json(
+      { success: false, error: 'Razorpay reported this refund as failed. No money was returned; you can try again.' },
       { status: 502 },
     )
   }
@@ -306,6 +332,29 @@ export async function POST(
     console.error('[refund] refund record write failed:', { registrationId, refundId, err })
   })
 
+  // ── RD-REFUND-STATUS-01 · accepted but NOT yet processed by Razorpay ──────────
+  // The refund EXISTS (recorded above) but has not completed, so nothing is finalized here: the
+  // registration stays `refund_pending` with its claim, no ledger is reversed, no email is sent.
+  // The refund.processed webhook finalizes it with gateway evidence (finalizePendingRegistrationRefund,
+  // which also holds the settlement and queues the reversal); refund.failed is flagged for review
+  // (failed_while_pending). The Super Admin's request and reason are audited now.
+  if (refundStatus !== 'processed') {
+    // The money is on its way back: the unreleased settlement must not be paid out meanwhile.
+    await holdSettlementForPendingRefund(registrationId, refundId).catch(err =>
+      console.error('[refund] Failed to hold the settlement for a pending refund:', { registrationId, refundId, err }))
+    await logAdminActionOrRecord({
+      adminUid:    callerUid,
+      actorRole:   'super_admin',
+      action:      'registration.refund_initiated',
+      entityType:  'registration',
+      entityId:    registrationId,
+      reason:      refundReason,
+      metadata:    { organizerUid: uid, refundAmountPaise: refundAmount, refundId, paymentId, orderId, gatewayStatus: typeof refundStatus === 'string' ? refundStatus : 'unknown' },
+      correlation: { registrationId, refundId, paymentId, orderId, organizerUid: uid },
+    })
+    return NextResponse.json({ success: true, refundId, refundAmount, pending: true })
+  }
+
   // RD-FIN-02 · the ONE evidence-checked transition (shared with the refund.processed webhook).
   const fin = await finalizePendingRegistrationRefund(registrationId, { refundId, amountPaise: refundAmount, gatewayPaymentId: paymentId })
   if (fin === 'already_refunded') {
@@ -329,8 +378,12 @@ export async function POST(
   // concurrently, only one call debits the wallet — no double-debit. No-op if no
   // ledger entry exists (registration predates the ledger). Awaited so a failure
   // is logged rather than lost as an unhandled rejection.
+  // RD-REFUND-RECOVER-01 — finalize (above) already held the unreleased settlement and queued this
+  // reversal in the same transaction that marked the registration refunded, so a crash before or
+  // during this call is recovered by the drain. On success the queued record is resolved.
   try {
     await reversePlatformTransactionAndDebit(`ptx_${registrationId}`)
+    await resolveQueuedRefundReversal(registrationId)
   } catch (err) {
     console.error('[refund] Failed to reverse platform transaction or debit wallet:', { registrationId, err })
     // The Razorpay refund already succeeded, so the registration is validly

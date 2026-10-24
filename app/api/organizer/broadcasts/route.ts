@@ -365,8 +365,10 @@ export async function POST(req: NextRequest): Promise<NextResponse<PostBroadcast
   // funding transaction makes (lib/communications/capacityQuote). Not enough ⇒ nothing is created,
   // charged, queued or sent, and the organizer is told required vs available. The funding
   // transaction at start still decides (capacity can change before a scheduled send).
+  let waFundedBy: 'event_capacity' | 'legacy_balance' | null = null
   if (chosenChannel === 'whatsapp') {
     const capacity = await quoteWhatsAppBroadcastCapacity({ organizerUid: uid, eventSlug, recipientCount })
+    waFundedBy = capacity.fundedBy
     if (!capacity.sufficient) {
       return NextResponse.json(
         { success: false, error: 'WHATSAPP_CAPACITY_REQUIRED', message: WHATSAPP_BROADCAST_CAPACITY_REQUIRED, capacity },
@@ -404,9 +406,16 @@ export async function POST(req: NextRequest): Promise<NextResponse<PostBroadcast
     : typeof scheduledFor === 'number' ? scheduledFor : NaN
   const isScheduled = Number.isFinite(scheduledMs) && scheduledMs > Date.now()
 
-  // Email is free (estimate 0); WhatsApp is priced per message from Business
-  // Configuration (the same unit price chargeAndStartCampaign actually charges).
-  const estimatedCostPaise = chosenChannel === 'whatsapp'
+  // RD-BCAST-COST-01 — `estimatedCostPaise` is the MONEY this campaign is expected to debit from
+  // the organizer's wallet at start, i.e. what chargeAndStartCampaign would write as
+  // `actualCostPaise`. It used to be `whatsapp.pricePaise × recipients` unconditionally — the
+  // legacy wallet price — while a WhatsApp broadcast is now funded from the event's PREPAID
+  // capacity (units, `actualCostPaise: 0`; the money was paid when the capacity was bought) and
+  // the legacy balance funds nothing new (RD-WA-BLOCK-01). So it is decided by the SAME funding
+  // quote just made: prepaid ⇒ 0; legacy balance ⇒ the legacy price, exactly what would be debited.
+  // Units consumed are recorded by billing (`chargedUnits`). Email is free (0). Display/API only:
+  // no finance, report or gate reads this field; existing campaigns keep what they stored.
+  const estimatedCostPaise = chosenChannel === 'whatsapp' && waFundedBy === 'legacy_balance'
     ? Math.max(0, Math.round((await getCommunicationConfig()).whatsapp.pricePaise * recipientCount))
     : 0
 

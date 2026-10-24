@@ -127,8 +127,14 @@ describe('D1 · certificate issuance continues without a human', () => {
 
 describe('D2 · a venue behind one NAT address is not throttled as one attendee', () => {
   it('certificateLookup is keyed on IP AND the supplied identifier', () => {
-    expect(LOOKUP).toContain('checkPolicy(`${getClientIp(req)}|${lookupKey}`, RATE_POLICY.certificateLookup)')
+    expect(LOOKUP).toContain('checkPolicy(`${ip}|${lookupKey}`, RATE_POLICY.certificateLookup)')
     expect(LOOKUP).not.toContain('checkPolicy(getClientIp(req), RATE_POLICY.certificateLookup)')
+    expect(LOOKUP).not.toContain('checkPolicy(ip, RATE_POLICY.certificateLookup)')
+  })
+
+  it('RD-CERT-SEC-02 · …and ALSO capped per IP across every identifier, so guessing is bounded', () => {
+    expect(LOOKUP).toContain('checkPolicy(ip, LOOKUP_PER_IP)')
+    expect(LOOKUP).toMatch(/LOOKUP_PER_IP: RatePolicy = \{ route: 'certificate-lookup-ip', limit: \d+, windowMs: [^}]+\}/)
   })
 
   it('every distinct lookup mode gets its own bucket, prefixed so they cannot collide', () => {

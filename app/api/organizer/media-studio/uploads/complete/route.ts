@@ -14,8 +14,9 @@ import { NextRequest, NextResponse } from 'next/server'
 import { storage } from '@/features/platform-storage'
 import { authorizeMedia } from '@/features/media-studio/services/authorize'
 import { getOwnedAlbum, getOwnedGallery } from '@/features/media-studio/repositories/galleryRepo'
-import { registerAsset, serializeAsset, UnreservedAssetError } from '@/features/media-studio/repositories/assetRepo'
-import { resolveRenditionUrl } from '@/features/media-studio/services/uploadService'
+import { registerAsset, serializeAsset, UnreservedAssetError, getOwnedAsset } from '@/features/media-studio/repositories/assetRepo'
+import { resolveRenditionUrl, storedRenditionSizeError } from '@/features/media-studio/services/uploadService'
+import { checkSize } from '@/lib/config/mediaLimitLayers'
 // RD-MS-CLOSURE-01 · ONE configuration source for the upload path.
 //
 // This route used to read `defaultVisibility` from the organizer's `mediaSettings` document
@@ -136,6 +137,29 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       { error: `The ${missing.c.rendition} image was not found in storage. The upload did not complete.` },
       { status: 409 },
     )
+  }
+
+  // ── RD-MEDIA-SIZE-01: the REAL size must be within limits and match the declaration ──
+  // The signed PUT does not bind a length, so the bytes in the bucket can exceed what /prepare
+  // authorised. Checked against the platform ceiling, this event's configured maximum (the
+  // same limit /prepare applies) and the size declared on the reservation — BEFORE recording.
+  const reservation = await getOwnedAsset(assetId, authz.workspaceUid)
+  const violation = metas.map(({ c, meta }) => {
+    const size = meta?.size ?? 0
+    const declared = reservation?.renditions?.[c.rendition]?.size ?? 0
+    return storedRenditionSizeError(c.rendition, size, typeof declared === 'number' ? declared : 0)
+      ?? (checkSize(size, mediaConfig.maxUploadFileSizeBytes).ok ? null : `The ${c.rendition} image is larger than allowed for this event.`)
+  }).find((e): e is string => !!e)
+  if (violation) {
+    // Delete ONLY what is provably this upload's own, still-unfinished objects: the reservation
+    // is this organizer's, still `pending`, for this event, and every path is exactly a key it
+    // authorised. A `ready` asset (an idempotent replay) is never touched; anything else is left
+    // for the reclamation sweep, which deletes a pending reservation's keys and frees its unit.
+    const ownPending = !!reservation && reservation.status === 'pending'
+      && reservation.eventSlug === gallery.eventSlug
+      && claims.every(c => reservation.renditions?.[c.rendition]?.path === c.path)
+    if (ownPending) await Promise.all(claims.map(c => storage.delete(c.path).catch(() => undefined)))
+    return NextResponse.json({ error: violation, code: 'UPLOAD_SIZE_REJECTED' }, { status: 413 })
   }
 
   for (const { c, meta } of metas) {

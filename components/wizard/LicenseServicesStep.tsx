@@ -46,7 +46,8 @@ import { ROUTES } from '@/config/navigation'
 import { Stepper } from '@/components/event-builder/Stepper'
 import { WizardFooter } from '@/components/wizard/WizardFooter'
 import { useRouter } from 'next/navigation'
-import { readIntent, clearIntent, type PurchaseIntent } from '@/lib/wallet/purchaseIntent'
+import { useToast } from '@/components/ui/Toast'
+import { readIntent, clearIntent, returnLabelFor, type PurchaseIntent } from '@/lib/wallet/purchaseIntent'
 import { CapacitySelector } from '@/components/wizard/CapacitySelector'
 import { ServiceQuantitySelector, SALE_STATE_BADGE } from '@/components/wizard/ServiceQuantitySelector'
 import { LicenseCostSummary, type CheckoutQuoteResponse } from '@/components/wizard/LicenseCostSummary'
@@ -69,7 +70,15 @@ export interface LicenseServicesStepProps {
   onServiceSelectionChange: (selection: ServiceSelection) => void
   onSettle?:        () => Promise<boolean>
   pricing:          Record<string, unknown> | null
-  onServicesChange: (values: PaygServiceFlags) => void
+  /**
+   * RD-LICENSE-LOCK-02 — persists the service flags.
+   *
+   * For a SUBMITTED event this is an authenticated server call that writes the draft and the
+   * live document together; for an unpublished draft it is the direct draft write it always was.
+   * Resolves FALSE when nothing was saved, so the caller restores the previous switch state
+   * rather than leaving the UI asserting a flag the server never accepted.
+   */
+  onServicesChange: (values: PaygServiceFlags) => Promise<boolean>
   /** Server-written draft status (clients cannot write it). */
   draftStatus:      string | null
   draftId:          string | null
@@ -101,6 +110,13 @@ export interface FinalPayContext {
   pay:          (agreement?: PublishAgreementInput) => Promise<PayOutcome>
   /** Re-reads the coverage-aware quote (after a payment / failed submission). */
   refresh:      () => void
+  /**
+   * RD-LICENSE-LOCK-01 — true while a SUBMITTED event's purchase surface is read-only
+   * (before "Unlock to edit"). Reported upward because the final step renders ONE control
+   * outside this component — the Fee Collection Method — which must obey the same lock.
+   * Always false for an unpublished draft, which is never locked.
+   */
+  locked:       boolean
 }
 
 function Switch({ checked, onChange, label, disabled }: { checked: boolean; onChange: (v: boolean) => void; label: string; disabled?: boolean }) {
@@ -163,6 +179,15 @@ export function LicenseServicesStep({
   initialServiceSelection, onServiceSelectionChange, onSettle, pricing, onServicesChange, draftStatus, draftId, embeddedFinal, liveStatus,
 }: LicenseServicesStepProps) {
   const isSubmitted     = isSubmittedDraftStatus(draftStatus)
+  // ── RD-EVENT-COMMERCE-05E · locked by default (submitted events) ──────────────────────
+  //
+  // RD-LICENSE-LOCK-01 moved this ABOVE the handlers rather than leaving it beside the purchase
+  // state below. `setFlag` now refuses while locked, and a `const` read by a callback declared
+  // earlier in the body defeats the React Compiler's analysis — it answers "Compilation Skipped:
+  // Existing memoization could not be preserved" and drops memoization for the whole component,
+  // which on this step means re-rendering the quote panel on every keystroke.
+  const [editing, setEditing] = useState(false)
+  const locked = isSubmitted && !editing
   const isPendingReview = draftStatus === 'pending_review'
   const mode: 'draft' | 'published' = isSubmitted ? 'published' : 'draft'
 
@@ -179,8 +204,30 @@ export function LicenseServicesStep({
   const [mediaOpen, setMediaOpen] = useState<boolean>(initialServiceSelection.media > 0)
 
   const setFlag = (field: keyof PaygServiceFlags, value: boolean) => {
+    // RD-LICENSE-LOCK-01 · the lock enforced at the WRITE, not only on each control.
+    //
+    // Two switches shipped without `disabled={locked}` and persisted straight through here, so
+    // the one disabled attribute per control was never a sufficient guard — a third control
+    // added later would have the same hole. `setQty` already refuses for a submitted event on
+    // the same principle (`if (!isSubmitted)`); this is its flag equivalent.
+    //
+    // RD-LICENSE-LOCK-02 · for a submitted event the write now goes through PATCH /edit, which
+    // re-checks the caller and the event's ownership server-side. This client guard stays as the
+    // affordance's own backstop; it is no longer the only thing standing between a flipped
+    // switch and a persisted flag.
+    if (locked) return
+    const previous = payg
     const next = { ...payg, [field]: value }   // the full set every time — no stale merge
-    setPayg(next); onServicesChange(next)
+    setPayg(next)
+    void (async () => {
+      const saved = await onServicesChange(next)
+      if (!saved) {
+        // Nothing was persisted — restore the switch rather than show a service as on when the
+        // server does not have it. Quantities below are untouched on this path.
+        setPayg(previous)
+        showToast('That service setting could not be saved. Nothing was changed — please try again.', 'error')
+      }
+    })()
     // Switching a service OFF collapses its panel and stops buying it. Anything already
     // purchased (and its usage) is untouched — it lives in the server ledger, not here.
     if (!value && field === 'whatsappEnabled') setQty('whatsapp', 0)
@@ -234,9 +281,6 @@ export function LicenseServicesStep({
   // never by a failed / cancelled / unverified attempt, so the organizer can simply retry.
   const onSettled = useCallback(() => { setRefreshKey(k => k + 1) }, [])
 
-  // ── RD-EVENT-COMMERCE-05E · locked by default (submitted events) ──────────────────────
-  const [editing, setEditing] = useState(false)
-  const locked = isSubmitted && !editing
   const [purchaseStage, setPurchaseStage] = useState<'paying' | null>(null)
   const purchaseInFlight = useRef(false)
   // What the event HAS (capacity + purchased units). When it changes after the first read — a
@@ -323,9 +367,10 @@ export function LicenseServicesStep({
   const ctxCovered = ctxReady && payable?.kind === 'covered'
   const ctxPayable = ctxReady ? (payNowPaise ?? payable?.totalPaise ?? null) : null
   useEffect(() => {
-    finalOnContext?.({ quoteReady: ctxReady, covered: ctxCovered, payablePaise: ctxPayable, blockedReason, pay: payViaPanel, refresh: refreshQuote })
-  }, [finalOnContext, ctxReady, ctxCovered, ctxPayable, blockedReason, payViaPanel, refreshQuote])
+    finalOnContext?.({ quoteReady: ctxReady, covered: ctxCovered, payablePaise: ctxPayable, blockedReason, pay: payViaPanel, refresh: refreshQuote, locked })
+  }, [finalOnContext, ctxReady, ctxCovered, ctxPayable, blockedReason, payViaPanel, refreshQuote, locked])
   const router = useRouter()
+  const { showToast } = useToast()
   useEffect(() => {
     if (!returnAfterPurchase) return
     clearIntent()
@@ -358,7 +403,66 @@ export function LicenseServicesStep({
   const mediaCeiling = quote ? (isSubmitted ? quote.media.maxAdditional : quote.media.maxAdditional + quote.media.purchased) : mediaMaxTotal
 
   // ── RD-EVENT-COMMERCE-05E · the submitted event's footer: exactly ONE primary action ─────
-  const goDone = () => router.push(ROUTES.DASHBOARD_EVENTS)
+  // ── RD-LICENSE-ZEROCAP-01 · a service that cannot possibly run is switched OFF on Done ──────
+  //
+  // An organizer could leave this step with WhatsApp ON, nothing bought and nothing left to send
+  // with. The switch said the service was on; every send would then fail for want of capacity.
+  // Done saves nothing of its own (it is a navigation), so the stale ON had already been written
+  // the moment the switch was flipped — which is why the correction happens here rather than in
+  // a save handler.
+  //
+  // Three deliberate limits:
+  //   • it fires ONLY on a service with zero USABLE capacity AND zero additional selected. A
+  //     service with an existing allowance stays on, whatever the purchase quantity is.
+  //   • it needs real coverage data. `coverage` is null while the quote is loading or after a
+  //     network error, and treating that as "no capacity" would switch a working service off
+  //     because a request failed — so an absent quote changes nothing.
+  //   • it touches the FLAG only. Purchased capacity, the allowance ledger and every billing
+  //     record are server-side and are not read or written here.
+  //
+  // Photos are deliberately absent: `mediaOpen` is local UI state derived from the pending
+  // selection, not a persisted flag, so there is no stored "photos on" to contradict.
+  //
+  // It runs even while locked, on purpose: this is a correction of an impossible state, not an
+  // organizer edit, and leaving it uncorrected is what produces failed sends.
+  const goDone = () => {
+    if (!coverage) { router.push(ROUTES.DASHBOARD_EVENTS); return }
+
+    const off: string[] = []
+    const next = { ...payg }
+    if (payg.whatsappEnabled && (coverage.remaining.whatsapp ?? 0) <= 0 && selection.whatsapp <= 0) {
+      next.whatsappEnabled = false
+      off.push('WhatsApp notifications')
+    }
+    if (payg.certEnabled && (coverage.remaining.certificates ?? 0) <= 0 && selection.certificates <= 0) {
+      next.certEnabled = false
+      off.push('Participation certificates')
+    }
+    if (off.length === 0) { router.push(ROUTES.DASHBOARD_EVENTS); return }
+
+    // RD-LICENSE-LOCK-02 · AWAIT the persist before navigating.
+    //
+    // The correction must reach the LIVE document, because that is what every sender reads —
+    // and for a submitted event `onServicesChange` is the authenticated PATCH that writes the
+    // draft and the live event together. Navigating first (the previous shape) could abandon
+    // that request mid-flight and leave the organizer on the events list believing WhatsApp was
+    // off while the event still had it on.
+    //
+    // A failure navigates anyway: this is a correction, not an edit the organizer asked for, so
+    // trapping them on the step would be worse than telling them it did not stick.
+    setPayg(next)
+    void (async () => {
+      const saved = await onServicesChange(next)
+      showToast(
+        saved
+          ? `${off.join(' and ')} switched off — there is no capacity left to use, and none was added. Buy capacity here to switch it back on.`
+          : `${off.join(' and ')} has no capacity left, but the change could not be saved. Open License & Services and switch it off, or buy capacity.`,
+        saved ? 'info' : 'error',
+      )
+      if (!saved) setPayg(payg)
+      router.push(ROUTES.DASHBOARD_EVENTS)
+    })()
+  }
   const fm = submittedPurchaseFooter({
     locked, paying: purchaseStage !== null, quoting, quoteReady: ctxReady,
     payableKind: payable?.kind ?? null, payablePaise: ctxPayable, blocked: !!blockedReason,
@@ -430,7 +534,8 @@ export function LicenseServicesStep({
       {walletIntent && (
         <Link href={walletIntent.returnTo} onClick={() => clearIntent()}
           className="mt-4 inline-flex min-h-11 items-center gap-1.5 self-start rounded-lg px-1 text-[13px] font-semibold text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary">
-          <ArrowLeft className="size-3.5" aria-hidden />Back to Wallet
+          {/* RD-PURCHASE-RETURN-01 — named after where it goes (Wallet / Certificates / Broadcasts). */}
+          <ArrowLeft className="size-3.5" aria-hidden />{returnLabelFor(walletIntent.returnTo)}
         </Link>
       )}
 
@@ -481,7 +586,14 @@ export function LicenseServicesStep({
             <ServiceCard anchor="license-service-whatsapp" icon={MessageSquare} title="WhatsApp notifications" open={payg.whatsappEnabled && !locked}
               badge={<Badge tone="opt">Optional</Badge>}
               description={<>Registration confirmations and updates on WhatsApp, sent from the WhatsApp messages you buy here. Without WhatsApp capacity, attendees receive email only.</>}
-              control={<Switch checked={payg.whatsappEnabled} onChange={v => setFlag('whatsappEnabled', v)} label={`${payg.whatsappEnabled ? 'Disable' : 'Enable'} WhatsApp notifications`} />}>
+              // RD-LICENSE-LOCK-01 · `disabled={locked}` was missing here (and on certificates),
+              // while the media switch below has always had it. `open={… && !locked}` only
+              // collapses the card BODY, so the toggle itself stayed live: a submitted event
+              // showed "Unlock to edit" and yet let WhatsApp be switched on or off, and `setFlag`
+              // persisted that to the draft immediately. The documented rule for submitted mode is
+              // one read-only panel until Unlock, so the flag belongs behind the same gate as the
+              // quantity it controls.
+              control={<Switch checked={payg.whatsappEnabled} disabled={locked} onChange={v => setFlag('whatsappEnabled', v)} label={`${payg.whatsappEnabled ? 'Disable' : 'Enable'} WhatsApp notifications`} />}>
               <ServiceQuantitySelector
                 title="Prepaid WhatsApp messages" unit="message" units="messages" mode={qtyMode}
                 usageRule={`One message is used when WhatsApp accepts a message to an attendee — a registration confirmation, a certificate-ready notice, a retry of a failed confirmation, or one per recipient when a broadcast starts. A message WhatsApp rejects is not counted.${policy('whatsapp')}`}
@@ -517,7 +629,8 @@ export function LicenseServicesStep({
             <ServiceCard anchor="license-service-certificates" icon={Award} title="Participation certificates" open={payg.certEnabled && !locked}
               badge={<Badge tone="opt">Optional</Badge>}
               description={<>Issue certificates from the event’s Certificates tab. Each certificate uses one unit of the certificate capacity you buy here — certificates cannot be issued without it.</>}
-              control={<Switch checked={payg.certEnabled} onChange={v => setFlag('certEnabled', v)} label={`${payg.certEnabled ? 'Disable' : 'Enable'} participation certificates`} />}>
+              // RD-LICENSE-LOCK-01 · see the WhatsApp switch above — same missing gate.
+              control={<Switch checked={payg.certEnabled} disabled={locked} onChange={v => setFlag('certEnabled', v)} label={`${payg.certEnabled ? 'Disable' : 'Enable'} participation certificates`} />}>
               <ServiceQuantitySelector
                 title="Prepaid certificates" unit="certificate" units="certificates" mode={qtyMode}
                 usageRule={`One is used when a certificate is issued to a participant. Re-downloading, emailing or re-issuing the same certificate uses nothing.${policy('certificates')}`}

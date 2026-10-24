@@ -30,6 +30,7 @@ import { resolvePlatformPricing }    from '@/lib/platform/pricing/resolver'
 import { resolveCheckoutCharge }     from '@/lib/fees/checkoutCharge'
 import { resolveEventFeeConfig, PRICING_UNAVAILABLE } from '@/lib/fees/resolveEventFeeConfig'
 import { builderFeeModelToEngine, SUPPORTED_FEE_MODEL } from '@/lib/events/builder/types'
+import { explicitFeeModel } from '@/lib/fees/explicitFeeModel'
 import type { FeeConfig, FeeBreakdownRecord } from '@/lib/fees/types'
 import { getClientIp }               from '@/lib/rateLimit'
 import { checkDistributedRateLimit } from '@/lib/rateLimit/redis'
@@ -119,8 +120,14 @@ export async function POST(req: NextRequest): Promise<NextResponse<FeePreviewRes
   const charge = resolveCheckoutCharge({
     pricingEngineEnabled: platformSettings.features.pricingEngineEnabled,
     finalAmountPaise,
-    // RD-PHASE4-S3 · Q1 — fee collection is fixed to organizer-pays (the stored event value is not an input).
-    eventFeeModel: builderFeeModelToEngine(SUPPORTED_FEE_MODEL),
+    // RD-FEE-RESTORE-01 — the SAME resolution create-order uses, minus the pin: a preview has no
+    // attempt of its own to inherit terms from. The explicit record wins when the engine is on;
+    // the legacy `pricing.feeModel` is never read; absence keeps today's organizer-absorbs.
+    //
+    // A preview that disagreed with the order it precedes would quote one total and charge
+    // another, so the two call sites must stay identical in everything but the pin.
+    eventFeeModel: (platformSettings.features.pricingEngineEnabled ? explicitFeeModel(rawPricing) : null)
+      ?? builderFeeModelToEngine(SUPPORTED_FEE_MODEL),
     feeConfig,
     context: { organizerUid: event.uid, eventId: slug },
   })

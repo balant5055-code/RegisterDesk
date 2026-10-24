@@ -11,6 +11,7 @@
 
 import type { EventEditPayload } from '@/types/events'
 import { IMPACTFUL_EDIT_KEYS } from './fieldClassification'
+import { buildFeeCollection } from '@/lib/fees/explicitFeeModel'
 
 const s = (v: unknown): string | null => (typeof v === 'string' && v ? v : null)
 
@@ -31,10 +32,29 @@ export interface EditUpdateResult {
  * `passCounts` (passId → sold) enforces the capacity floor. Throws RangeError if a pass
  * capacity would fall below its sold count. Pure.
  */
+/**
+ * RD-FEE-RESTORE-01 — what this edit is permitted to touch, and by whom.
+ *
+ * Defaulted so every existing caller (and every existing test) behaves exactly as before:
+ * `feeModelEditable: false` reproduces the RD-PHASE4-S3 · Q1 refusal. The route supplies
+ * `true` only when the pricing engine is on, so the gate is enforced HERE as well as at the
+ * route — a future caller cannot write a fee model by forgetting to check the flag.
+ */
+export interface EditMapperContext {
+  feeModelEditable: boolean
+  /** The AUTHENTICATED actor (callerUid), recorded on the stored record — not the workspace uid. */
+  actorUid:         string
+  /** ISO-8601, passed in so a retried transaction and a test both produce a stable value. */
+  nowIso:           string
+}
+
+const DEFAULT_MAPPER_CONTEXT: EditMapperContext = { feeModelEditable: false, actorUid: '', nowIso: '' }
+
 export function buildEventEditUpdate(
   payload:    EventEditPayload,
   draftData:  Record<string, unknown>,
   passCounts: Record<string, number>,
+  ctx:        EditMapperContext = DEFAULT_MAPPER_CONTEXT,
 ): EditUpdateResult {
   const details = (draftData.eventDetails as Record<string, unknown>) ?? {}
   const pricing = (draftData.pricing as Record<string, unknown>) ?? {}
@@ -111,10 +131,42 @@ export function buildEventEditUpdate(
   if (payload.metaDescription !== undefined) set('metaDescription', 'eventDetails.seo.metaDescription', payload.metaDescription.trim())
   if (payload.keywords        !== undefined) set('keywords',        'eventDetails.seo.keywords',        payload.keywords.map(k => k.trim()).filter(Boolean))
 
-  // RD-PHASE4-S3 · Q1 — the Fee Collection Method is not organizer-editable (fixed organizer-pays).
-  // Refused as a pure rule too, so no future caller of this mapper can write it.
+  // RD-FEE-RESTORE-01 — the Fee Collection Method, restored as organizer-editable AFTER PUBLISH,
+  // for FUTURE checkouts only (an attempt already open keeps its own terms — see
+  // openAttemptFeeModel in lib/registrations/paymentAttempt.ts).
+  //
+  // Two things make this safe to re-enable:
+  //   • it writes `pricing.feeCollection`, NOT the legacy `pricing.feeModel`. The legacy field has
+  //     never charged anybody, so leaving it untouched is what keeps every existing event on its
+  //     current behaviour (lib/fees/explicitFeeModel.ts explains why in full).
+  //   • the refusal is unchanged whenever the engine is off, and that refusal lives HERE as a pure
+  //     rule as well as at the route, so a caller that forgets the flag still cannot write it.
   if (payload.feeModel !== undefined) {
-    throw new RangeError('The fee collection method is managed by RegisterDesk and cannot be changed.')
+    if (!ctx.feeModelEditable) {
+      throw new RangeError('The fee collection method is managed by RegisterDesk and cannot be changed.')
+    }
+    if (!(FEE_MODELS as readonly unknown[]).includes(payload.feeModel)) {
+      throw new RangeError('Choose either Attendee Pays Fees or Organizer Absorbs Fees.')
+    }
+    if (!ctx.actorUid || !ctx.nowIso) {
+      // Never record a money-affecting choice without knowing who made it and when.
+      throw new RangeError('The fee collection method cannot be recorded without an authenticated actor.')
+    }
+    // Keyed 'feeModel' so it reaches changedFields, the edit history and the before/after
+    // snapshots under the name the organizer and the audit reader already know.
+    set('feeModel', 'pricing.feeCollection', buildFeeCollection(payload.feeModel, ctx.actorUid, ctx.nowIso))
+  }
+
+  // RD-LICENSE-LOCK-02 — the prepaid service FLAGS, written to the same `pricing` object the
+  // senders read. Each is mapped on its own so an absent key leaves the stored value untouched
+  // (a partial payload must never reset a flag the organizer did not send), and `=== true`
+  // because the value crosses the wire as JSON and anything non-boolean must not read as on.
+  //
+  // Deliberately NOT gated on draft status here: the route decides WHO may send them, and the
+  // unpublished wizard never uses this path at all. Quantities are absent by design — they are
+  // priced and paid for through the licensing quote, never through a content edit.
+  for (const flag of ['whatsappEnabled', 'certEnabled', 'smsEnabled'] as const) {
+    if (payload[flag] !== undefined) set(flag, `pricing.${flag}`, payload[flag] === true)
   }
 
   // Pass capacity — can only stay ≥ sold count (never corrupts a sold pass)

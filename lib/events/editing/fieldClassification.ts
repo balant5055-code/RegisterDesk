@@ -26,9 +26,17 @@ export const SAFE_EDIT_KEYS: readonly string[] = [
   'speakers', 'sponsors', 'galleryImages',
   'metaTitle', 'metaDescription', 'keywords',
   'passCapacityUpdates',
-  // RD-PHASE4-S3 · Q1 — `feeModel` is NO LONGER here: fee collection is fixed to organizer-pays and
-  // organizers do not choose it (it was organizer-editable under RD-EVENT-COMMERCE-05E). The edit
-  // route refuses it with 403 PRICING_NOT_ORGANIZER_EDITABLE.
+  // RD-FEE-RESTORE-01 — `feeModel` is editable again (it was, under RD-EVENT-COMMERCE-05E, until
+  // RD-PHASE4-S3 · Q1 removed it). Classifying it 'safe' only means the key is not rejected as
+  // unknown; whether it may actually be WRITTEN is decided twice downstream — the edit route
+  // returns 403 PRICING_NOT_ORGANIZER_EDITABLE while the pricing engine is off, and the pure
+  // mapper throws for the same reason. Nothing here grants permission.
+  'feeModel',
+  // RD-LICENSE-LOCK-02 — the prepaid service flags of a submitted event. 'safe' means only that
+  // the key is not rejected as unknown; the route decides who may send it and the mapper writes
+  // flags only. Quantities are deliberately absent — those are priced through the licensing
+  // quote and paid for, never changed by a content edit.
+  'whatsappEnabled', 'certEnabled', 'smsEnabled',
 ] as const
 
 /**

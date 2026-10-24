@@ -17,10 +17,36 @@
 import {
   StorageError, storage,
   assertMimeAllowed, assertSizeAllowed, buildObjectKey, generateObjectId,
-  isDegradedPublicUrl, resolveUrlStrategy,
+  isDegradedPublicUrl, resolveUrlStrategy, maxBytesFor,
   type StorageAssetType,
 } from '@/features/platform-storage'
 import { UPLOAD_URL_TTL_SECONDS, type MediaRendition } from '@/features/media-studio/types'
+
+/**
+ * RD-MEDIA-SIZE-01 — the verdict on what ACTUALLY landed in the bucket for one rendition.
+ *
+ * The signed upload URL binds the key and content-type, not the length, so the size the
+ * client declared at /prepare is only a claim. /complete reads the real size back from
+ * storage and asks this, before recording anything:
+ *   • never above the platform policy ceiling for the rendition's asset type;
+ *   • exactly the size declared at /prepare, when the reservation recorded one (reservations
+ *     created before the declared size was stored carry 0 and skip only this comparison).
+ * Pure. Returns a user-safe message, or null when the stored object is acceptable.
+ */
+export function storedRenditionSizeError(
+  rendition:    MediaRendition,
+  actualSize:   number,
+  declaredSize: number,
+): string | null {
+  const assetType = RENDITION_ASSET_TYPE[rendition]
+  if (!assetType) return `Unknown rendition: ${rendition}`
+  if (!Number.isFinite(actualSize) || actualSize <= 0) return `The ${rendition} image is empty.`
+  if (actualSize > maxBytesFor(assetType)) return `The ${rendition} image is larger than allowed.`
+  if (declaredSize > 0 && actualSize !== declaredSize) {
+    return `The ${rendition} image does not match the size declared for this upload.`
+  }
+  return null
+}
 
 /** Which storage asset type backs each rendition. */
 const RENDITION_ASSET_TYPE: Readonly<Record<MediaRendition, StorageAssetType>> = {

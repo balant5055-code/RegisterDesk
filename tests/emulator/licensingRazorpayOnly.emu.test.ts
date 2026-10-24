@@ -327,21 +327,17 @@ describeEmu('RD-LICENSE-PAYMENT-01 · activation is Razorpay-only, the communica
     expect(await licenceTxns()).toHaveLength(0)
   }, T)
 
-  // ═══ communication billing still debits its own wallet exactly as before ═════
-  it('the communication wallet still pays for a WhatsApp broadcast (unchanged behaviour)', async () => {
+  // ═══ communication billing is untouched by licensing — and (RD-WA-BLOCK-01) never funds a NEW message ═════
+  it('RD-WA-BLOCK-01 · a WhatsApp broadcast with no event capacity is refused; the communication wallet is not charged', async () => {
     const { chargeAndStartCampaign } = await import('@/lib/communications/billing')
     await setWallet(500_000)
     const campaignId = `licpay-camp-${process.pid}`
     await adminDb.doc(`broadcastCampaigns/${campaignId}`).set({ organizerUid: UID, status: 'draft', channel: 'whatsapp' })
     const r = await chargeAndStartCampaign({ campaignId, organizerUid: UID, channel: 'whatsapp', recipientCount: 10 })
-    expect(r.ok).toBe(true)
-    if (!r.ok) return
-    expect(r.costPaise).toBeGreaterThan(0)
-    expect(await balance()).toBe(500_000 - r.costPaise)
-    const ledger = (await adminDb.doc(`walletTransactions/broadcast_${campaignId}`).get()).data()!
-    expect(ledger.type).toBe('broadcast_whatsapp')
-    expect(ledger.amountPaise).toBe(r.costPaise)
-    await adminDb.doc(`walletTransactions/broadcast_${campaignId}`).delete()
+    // Owner decision 2026-10-24: event capacity or nothing — the legacy balance no longer funds new messages.
+    expect(r).toEqual({ ok: false, reason: 'allowance_required' })
+    expect(await balance()).toBe(500_000)
+    expect((await adminDb.doc(`walletTransactions/broadcast_${campaignId}`).get()).exists).toBe(false)
     await adminDb.doc(`broadcastCampaigns/${campaignId}`).delete()
   }, T)
 })

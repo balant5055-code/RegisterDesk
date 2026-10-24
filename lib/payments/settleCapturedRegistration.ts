@@ -482,6 +482,10 @@ export async function settleCapturedRegistration(args: {
           ...buildRegistrationPaymentFields(intent.provider, orderId),
           paymentId,
           ticketCode,
+          // RD-CHECKIN-FILTER-01 — written explicitly, as createRegistration does for free / walk-in
+          // registrations. Without it a paid registration had NO `checkedIn` field, so the
+          // Registrations "Not checked in" filter (an equality on `false`) never matched it.
+          checkedIn:       false,
           // Consent audit trail — from the intent snapshot, never a client on this path.
           ...(intent.termsAccepted === true ? {
             termsAccepted:   true,
@@ -594,6 +598,9 @@ export async function settleCapturedRegistration(args: {
           organizerUid:  intent.organizerUid,
           eventSlug:     intent.eventSlug,
           amountPaid:    intent.amount,
+          // RD-FEE-RESTORE-01 — the canonical record this capture was priced with. Present only
+          // when the pricing engine wrote one; null/absent keeps the email exactly as it is today.
+          financials:    intent.financials ?? null,
         })
       } catch (emailErr) {
         captureFinancialError(emailErr, { scope: `settleCaptured.${source}.email_failed`, detail: 'non-fatal', registrationId })

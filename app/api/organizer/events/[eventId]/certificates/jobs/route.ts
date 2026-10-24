@@ -11,6 +11,7 @@ import { organizerStatusGuard }      from '@/lib/admin/organizerStatus'
 import { createJob, getActiveTemplate, getTemplateById, getSettings, listJobs } from '@/lib/certificates/firestore'
 import { loadEventContext, countScopeTotal } from '@/lib/certificates/jobs'
 import { validateJobCreate }         from '@/lib/certificates/validation'
+import { readCertificateCapacity, newCertificatesAtLeast, certificateJobCapacityDecision } from '@/lib/certificates/capacity'
 import { serializeCertificateJob }   from '@/lib/certificates/types'
 import type { SerializedCertificateJob, CertificateType, CertificateTemplateDoc } from '@/lib/certificates/types'
 import type { AssignmentRule }       from '@/lib/certificates/assignment'
@@ -95,6 +96,22 @@ export async function POST(req: NextRequest, { params }: Params): Promise<NextRe
 
   if (!template) {
     return NextResponse.json({ error: 'No active certificate template for this event' }, { status: 422 })
+  }
+
+  // RD-CERT-JOB-CAPACITY-01 — refuse UP FRONT a job that certainly needs more new certificates than
+  // the event can fund (402, same code as the issue route), instead of accepting it and failing
+  // every new certificate one by one. Only a CERTAIN shortfall is refused: the bound is a lower
+  // bound, and an unreadable ledger or an unboundable job (program filter, many explicit ids) is
+  // accepted — generateCertificate's transactional reservation stays the authority, including
+  // between concurrent jobs that each passed this check.
+  const capacity = await readCertificateCapacity(eventId).catch(() => null)
+  if (capacity) {
+    const needAtLeast = await newCertificatesAtLeast({
+      organizerUid: auth.uid, eventId, eventSlug: ctx.ctx.eventSlug, certificateType,
+      scope, registrationIds, programFilter: assignmentFilter !== null,
+    }).catch(() => null)
+    const decision = certificateJobCapacityDecision(capacity, needAtLeast)
+    if (!decision.ok) return NextResponse.json(decision.body, { status: 402 })
   }
 
   // Progress denominator (a program filter is applied per-page, so this may over-count).

@@ -278,7 +278,7 @@ describe('8 · a zero fee must not be mistaken for a broken one', () => {
   // balance that covers the whole price (a zero price funds nothing).
   it('the legacy-balance gate applies only to sends the event capacity does not cover', () => {
     const funding = read('lib/whatsapp/funding.ts')
-    expect(funding.indexOf("outcome.mode === 'allowance' && req.draftId")).toBeLessThan(funding.indexOf('if (!legacyBalanceCanFund(balance, req.legacyPricePaise)) {'))
+    expect(funding.indexOf("outcome.mode === 'allowance' && req.draftId")).toBeLessThan(funding.indexOf('if (!legacyBalanceCanFundNewWhatsApp(balance, req.legacyPricePaise)) {'))
     expect(src).toContain('reserveWhatsAppFunding({')
   })
 

@@ -31,6 +31,7 @@ import { COUPON_DOC_BUDGET }           from '@/lib/analytics/couponPerformance'
 import { couponToday }                 from '@/lib/coupons/couponState'
 import { validateCouponInput, type CouponInput } from '@/lib/coupons/couponInput'
 import { getFeatureFlags }             from '@/lib/config/resolveFeatureFlags'
+import { getEventCouponSwitch, COUPONS_OFF_EVENT } from '@/lib/coupons/eventCouponSwitch'
 import type { CouponDocument }         from '@/lib/coupons/types'
 import type { CouponRow }              from '@/lib/coupons/couponView'
 import { resolveOwnedEventSlug } from '@/lib/events/liveEventRef'
@@ -53,6 +54,11 @@ export interface CouponsListResponse {
    * whatever is configured — the workspace has to say so rather than look functional.
    */
   couponsEnabled: boolean
+  /**
+   * RD-COUPON-SWITCH-01 — a Super Admin switched coupons OFF for THIS event. Codes are refused at
+   * checkout while true; the configuration below is kept. Optional so older clients ignore it.
+   */
+  couponsDisabledForEvent?: boolean
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -157,6 +163,10 @@ export async function GET(
     return NextResponse.json(body)
   }
 
+  // RD-COUPON-SWITCH-01 — the event switch, reported so the tab can say WHY codes will not apply.
+  // A failed read reports 'not disabled' (display only — checkout enforces the switch fail-closed).
+  const couponsDisabledForEvent = await getEventCouponSwitch(slug).then(sw => sw.disabled, () => false)
+
   try {
     // +1 so a full page is distinguishable from a page that happens to be exactly the cap.
     const snap = await adminDb
@@ -175,6 +185,7 @@ export async function GET(
       eventPublished: true,
       truncated,
       couponsEnabled,
+      couponsDisabledForEvent,
     }
     return NextResponse.json(body)
   } catch {
@@ -197,6 +208,15 @@ export async function POST(
 
   if (!slug) {
     return err('Publish this event before creating coupons.', 409)
+  }
+
+  // RD-COUPON-SWITCH-01 — no NEW coupon while RegisterDesk has switched coupons off for this event.
+  // Fail-closed: an unreadable switch refuses the create rather than guess. Existing coupons are
+  // untouched (checkout already refuses them via validateCoupon).
+  const couponSwitch = await getEventCouponSwitch(slug).catch(() => null)
+  if (!couponSwitch) return err('Coupons could not be checked. Please try again.', 503)
+  if (couponSwitch.disabled) {
+    return NextResponse.json({ error: COUPONS_OFF_EVENT, code: 'COUPONS_DISABLED_FOR_EVENT' }, { status: 403 })
   }
 
   let body: unknown

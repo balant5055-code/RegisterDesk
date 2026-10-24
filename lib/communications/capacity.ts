@@ -11,9 +11,10 @@
 //     inflows settle money that was already paid before retirement (a top-up order created
 //     before it, a broadcast refund of a legacy charge, a legacy licence refund), so EVERY paise
 //     in it is legacy by construction — no per-paise "is this legacy?" marker is needed;
-//   • it may still fund a WhatsApp message the event's allowance does not cover, at the
-//     configured legacy per-message price, while it can pay the WHOLE cost — never going below
-//     zero, never as credit;
+//   • RD-WA-BLOCK-01 (2026-10-24): it NO LONGER funds a new WhatsApp message (see
+//     legacyBalanceCanFundNewWhatsApp below) — capacity exhausted ⇒ the message is blocked. It
+//     used to fund one at the configured legacy per-message price while it could pay the WHOLE
+//     cost; what it already funded still settles (holds, charge-backs, refunds) unchanged;
 //   • it never funds a certificate (certificates require certificate capacity);
 //   • once it cannot cover a message, the message is BLOCKED and the organizer is sent to
 //     License & Services. There is no other pay-as-you-go path.
@@ -30,6 +31,22 @@ export const WHATSAPP_BROADCAST_CAPACITY_REQUIRED =
   'WhatsApp capacity is required for this broadcast. Purchase communication capacity in License & Services.'
 export const CERTIFICATE_CAPACITY_REQUIRED =
   'Certificate capacity is required. Purchase certificate capacity in License & Services.'
+
+/**
+ * RD-WA-BLOCK-01 — owner decision 2026-10-24: a NEW WhatsApp message is funded ONLY by the event's
+ * prepaid WhatsApp capacity. When that capacity is exhausted the message is BLOCKED; the legacy
+ * communication balance no longer funds new messages (it charged the legacy per-message price,
+ * not the prepaid 20p + GST). Settlement of what the legacy balance ALREADY funded is unchanged —
+ * a hold taken before this, a broadcast charge-back against an existing legacy charge, and refunds
+ * into the balance all keep using `legacyBalanceCanFund` below.
+ *
+ * Every point that decides how a NEW message is paid for asks this, never `legacyBalanceCanFund`.
+ */
+export const LEGACY_BALANCE_FUNDS_NEW_WHATSAPP = false
+
+export function legacyBalanceCanFundNewWhatsApp(balancePaise: number, costPaise: number): boolean {
+  return LEGACY_BALANCE_FUNDS_NEW_WHATSAPP && legacyBalanceCanFund(balancePaise, costPaise)
+}
 
 /**
  * Pure. May the organizer's LEGACY communication balance fund a send the event's allowance does

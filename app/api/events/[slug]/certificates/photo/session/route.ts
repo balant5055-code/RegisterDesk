@@ -2,6 +2,10 @@
 //
 // RD-CERT-PHOTO-03 — mints a certificate-photo grant WITHOUT an OTP.
 //
+// RD-CERT-SEC-01 · NOTE: the photo route's writes change the certificate's PERSISTED photo, so
+// they now also require an OTP-verified attendee session owning the registration. This grant
+// alone authorises no write; the "temporary / 20 minutes" description below is historical.
+//
 // This replaces `photo/otp/verify`. The product decision is that adding a photo to your own
 // certificate should not require a code: the attendee has already found their certificate by
 // email / mobile / registration id / bib and explicitly confirmed WHICH person they are.
