@@ -10,6 +10,7 @@
 
 import { FieldValue }                     from 'firebase-admin/firestore'
 import { adminDb }                         from '@/lib/firebase/admin'
+import { buildAttendeeFeeBreakdown, type AttendeeFinancials } from '@/lib/fees/attendeeBreakdown'
 import { fmtEmailDate }                    from '@/lib/email'
 import { notificationEngine, NotificationType, NotificationChannel } from '@/lib/notifications'
 import { resolveEventEmailProvider } from '@/lib/email/resolveEventProvider'
@@ -36,6 +37,17 @@ export interface ConfirmationEmailArgs {
   eventSlug:      string
   /** Paise amount paid — when > 0, a receipt download link is included in the email. */
   amountPaid?:    number
+  /**
+   * RD-FEE-RESTORE-01 — the canonical fee record from the payment intent, when one exists.
+   *
+   * Optional: absent for free registrations, for every organizer-absorbs registration (the
+   * record carries no attendee fees, so `buildAttendeeFeeBreakdown` returns null anyway) and
+   * for any caller that has not got it. The email then renders exactly as it does today.
+   *
+   * Passed as DATA rather than fetched here: the two callers already hold the intent, and a
+   * read inside the mailer would add a Firestore round trip to every confirmation.
+   */
+  financials?:    AttendeeFinancials | null
 }
 
 // ─── Sender ───────────────────────────────────────────────────────────────────
@@ -48,7 +60,7 @@ export async function sendConfirmationEmail(args: ConfirmationEmailArgs): Promis
 
   const {
     registrationId, ticketCode, attendeeName, attendeeEmail,
-    eventName, passName, rawDetails, organizerUid, eventSlug, amountPaid,
+    eventName, passName, rawDetails, organizerUid, eventSlug, amountPaid, financials,
   } = args
 
   // Extract schedule + venue from the denormalised EventDetailsDraft
@@ -141,6 +153,9 @@ export async function sendConfirmationEmail(args: ConfirmationEmailArgs): Promis
       pdfDownloadUrl:     pdfUrl,
       receiptDownloadUrl: receiptUrl,
       icsContent,
+      // RD-FEE-RESTORE-01 — null for organizer-absorbs and free registrations (the record
+      // carries no attendee fees), so the email is unchanged for every registration sent today.
+      feeBreakdown: buildAttendeeFeeBreakdown(financials) ?? undefined,
     }, emailProviderName)
 
     emailStatus = result.success ? 'sent' : 'failed'

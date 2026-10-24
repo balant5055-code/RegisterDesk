@@ -49,7 +49,10 @@ describe('the warning rule (from the server quote — no second calculation)', (
 describe('composer wiring — the warning never changes what can be sent', () => {
   const src = read(CLIENT)
   it('Send is still gated ONLY by the existing capacity rule (the warning is not part of canSend)', () => {
-    expect(src).toContain('const canSend = !!eventSlug && contentReady && recipientCount !== null && recipientCount > 0 && !capacityShort')
+    // RD-BCAST-ESTIMATE-01 — the capacity rule is now the single estimate decision (stricter: a
+    // missing quote is not "enough"); the warning is still not part of it.
+    expect(src).toContain('const canSend = !!eventSlug && contentReady && estimateAllowsSend(estimate)')
+    expect(src).not.toMatch(/broadcastEstimate\(\{[^}]*capacityWarning/)
     expect(src).toContain("const capacityWarning = channel === 'whatsapp' ? broadcastCapacityWarning(capacity) : null")
     expect(src).not.toMatch(/canSend[^\n]*capacityWarning/)
   })

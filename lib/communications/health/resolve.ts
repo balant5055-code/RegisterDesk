@@ -68,7 +68,9 @@ function gatherSignals(
       configured:         isChannelConfigured(NotificationChannel.WHATSAPP),
       platformEnabled:    config.whatsapp.enabled,
       healthy:            true,
-      funded:             fundedFor(config.whatsapp.pricePaise),
+      // RD-WA-BLOCK-01 — WhatsApp is funded per EVENT by prepaid capacity, never by the organizer
+      // wallet, so a wallet-based answer would be wrong; per-event capacity is shown where it applies.
+      funded:             null,
       templatesAvailable: WHATSAPP_TEMPLATES_PRESENT,
       event:              eventScoped ? { enabled: Boolean(opts?.event?.whatsappEnabled) } : undefined,
     },

@@ -7,8 +7,8 @@
 //  1. Load registration
 //  2. Load certificate template for the event
 //  3. Check eligibility (template.enabled, type, check-in status)
-//  4. Find or create a certificate record
-//  5. Generate and return the PDF
+//  4. Find the issued certificate (modern → redirect; legacy record → serve). Never creates one.
+//  5. Render and return the PDF of an issued legacy record
 
 import { NextRequest, NextResponse }         from 'next/server'
 import { adminDb }                           from '@/lib/firebase/admin'
@@ -16,13 +16,11 @@ import {
   getTemplate,
   getCertificateByRegistrationId,
   findCertificate,
-  createCertificateRecord,
   incrementDownloadCount,
   getSettings,
 }                                            from '@/lib/certificates/firestore'
 import { defaultCertificateSettings }        from '@/lib/certificates/types'
 import { generateCertificatePdf }            from '@/lib/certificates/pdf'
-import { generateCertificateId }             from '@/lib/certificates/id'
 import { getClientIp }                       from '@/lib/rateLimit'
 import { RATE_POLICY, checkPolicy }          from '@/lib/rateLimit/policies'
 import type { RegistrationDocument }         from '@/lib/registrations/types'
@@ -38,7 +36,9 @@ export interface CertificateEligibilityResponse {
   eligible: false
   // RD-CERT-03 · 'revoked' is additive: a modern certificate can be revoked, and the
   // attendee must be told that rather than silently handed a regenerated PDF.
-  reason:   'not_enabled' | 'checkin_required' | 'not_confirmed' | 'not_found' | 'refunded' | 'downloads_disabled' | 'verification_required' | 'revoked'
+  // RD-CERT-BILL-01 · 'not_issued': no certificate has been issued for this registration yet
+  // (this route serves issued certificates; it never mints one).
+  reason:   'not_enabled' | 'checkin_required' | 'not_confirmed' | 'not_found' | 'refunded' | 'downloads_disabled' | 'verification_required' | 'revoked' | 'not_issued'
 }
 
 function fmtDate(iso: string): string {
@@ -177,37 +177,15 @@ export async function GET(req: NextRequest, { params }: Params): Promise<NextRes
     return NextResponse.redirect(new URL(target, req.nextUrl.origin), 307)
   }
 
-  // Find existing or create new certificate record
-  let record = await getCertificateByRegistrationId(registrationId)
-
+  // RD-CERT-BILL-01 — a legacy (MVP) record ALREADY issued is still served, exactly as before.
+  // This route no longer CREATES one: the auto-generate here minted a verifiable certificate
+  // without reserving the event's paid certificate capacity (an unmetered path, reachable by
+  // anyone holding the registrationId). New certificates are issued through the modern engine
+  // (organizer issue / bulk jobs → generateCertificate), which reserves a unit BEFORE any
+  // render, upload or record write. Refused here before any write or PDF render.
+  const record = await getCertificateByRegistrationId(registrationId)
   if (!record) {
-    // Auto-generate
-    const draft    = draftsSnap.docs.find(d => d.id === eventId)!.data() as Record<string, unknown>
-    const details  = (draft.eventDetails as Record<string, unknown>) ?? {}
-    const info     = (details.info       as Record<string, unknown>) ?? {}
-    const sched    = (details.schedule   as Record<string, unknown>) ?? {}
-    const eventName = typeof info.name === 'string' ? info.name : reg.eventName
-    const startDate = typeof sched.startDate === 'string'
-      ? fmtDate(new Date(sched.startDate).toISOString())
-      : ''
-
-    const certificateId = generateCertificateId()
-    await createCertificateRecord({
-      certificateId,
-      eventId,
-      eventSlug:      reg.eventSlug,
-      registrationId,
-      organizerUid:   reg.organizerUid,
-      attendeeName:   reg.attendee.name,
-      attendeeEmail:  reg.attendee.email,
-      eventName,
-      eventDate:      startDate,
-    })
-
-    record = await getCertificateByRegistrationId(registrationId)
-    if (!record) {
-      return NextResponse.json({ error: 'Certificate generation failed' }, { status: 500 })
-    }
+    return NextResponse.json({ eligible: false, reason: 'not_issued' } satisfies CertificateEligibilityResponse, { status: 404 })
   }
 
   // Generate PDF

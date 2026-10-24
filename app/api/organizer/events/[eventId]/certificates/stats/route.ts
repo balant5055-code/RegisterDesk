@@ -9,6 +9,9 @@ import { AggregateField }                  from 'firebase-admin/firestore'
 import { authorizeWorkspace }              from '@/lib/team/workspace'
 import type { SerializedCertificateRecord, CertificateRecord } from '@/lib/certificates/types'
 import { LEGACY_CERTIFICATE_RECORDS, COLLECTIONS } from '@/lib/certificates/constants'
+import { readCertificateCapacity, type CertificateCapacityStatus } from '@/lib/certificates/capacity'
+
+export type { CertificateCapacityStatus }
 
 type Params = { params: Promise<{ eventId: string }> }
 
@@ -37,7 +40,14 @@ export interface CertificateStatsResponse {
    * come from the authoritative store and are what Reports consumes.
    */
   current?: CurrentCertificateStats
+  /**
+   * RD-CERT-CAPACITY-UX-01 · can a NEW certificate be issued right now? `null` = the ledger could
+   * not be read — unknown, never "available". Additive: older clients ignore it.
+   */
+  certificateCapacity?: CertificateCapacityStatus | null
 }
+
+// CertificateCapacityStatus — see lib/certificates/capacity.ts (shared with the bulk-job pre-check).
 
 export interface CurrentCertificateStats {
   /** `certificateTemplates/{eventId}.enabled` — the ONLY applicability source. */
@@ -257,7 +267,10 @@ export async function GET(req: NextRequest, { params }: Params): Promise<NextRes
     eligible, refunded: rRefunded,
   }
 
+  // RD-CERT-CAPACITY-UX-01 — the ledger is keyed by this draft id (the caller's own, proven above).
+  const certificateCapacity: CertificateCapacityStatus | null = await readCertificateCapacity(eventId).catch(() => null)
+
   return NextResponse.json({
-    generated, downloaded, emailed, pending, recent, current,
+    generated, downloaded, emailed, pending, recent, current, certificateCapacity,
   } satisfies CertificateStatsResponse)
 }

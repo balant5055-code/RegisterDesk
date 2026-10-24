@@ -43,7 +43,7 @@ import {
   closeRefundHoldAfterFullRefund,
 } from '@/lib/refunds/registrationRefunds'
 import { registrationBlocksRefundSideEffects, parseRazorpayRefundEvent, type ParsedRefundEvent } from '@/lib/refunds/refundPolicy'
-import { finalizePendingRegistrationRefund } from '@/lib/refunds/registrationRefunds'
+import { finalizePendingRegistrationRefund, resolveQueuedRefundReversal } from '@/lib/refunds/registrationRefunds'
 import { extractActualGatewayFee, recordActualGatewayFee } from '@/lib/payments/actualGatewayFee'
 import { flagSuspiciousPayment }      from '@/lib/payments/flagSuspicious'
 // RD-PAY-P0-3 — the ONE settlement path, shared with the reconciliation sweep.
@@ -312,8 +312,11 @@ async function handleRegistrationRefund(ev: ParsedRefundEvent): Promise<void> {
     }
     return
   } else {
-    // 3b. Exactly-once claim, now held by the refund RECORD.
-    const claim = await claimRefundSideEffects(razorpayRefundId)
+    // 3b. Exactly-once claim, now held by the refund RECORD. RD-REFUND-RECOVER-01 — the registration is
+    //     marked refunded, the unreleased settlement held and the ledger reversal QUEUED in the SAME
+    //     transaction as the claim: a crash after it can no longer leave the registration `paid` with
+    //     the ledger unreversed behind a claim every redelivery finds taken.
+    const claim = await claimRefundSideEffects(razorpayRefundId, { markRegistration: { registrationId, refundAmountPaise: cumulativeRefund } })
     if (!claim.claimed) {
       // F3 — refused because the gateway reported this refund FAILED meanwhile: a durable review, not a log.
       if (claim.record?.status === 'failed') return review('processed_after_failed', { gatewayPaymentId, stage: 'claim' })
@@ -352,6 +355,9 @@ async function handleRegistrationRefund(ev: ParsedRefundEvent): Promise<void> {
   // reconciliation queue (the same backstop the registration refund route uses), never thrown.
   try {
     const result = await reversePlatformTransactionAndDebit(`ptx_${registrationId}`)
+    // RD-REFUND-RECOVER-01 — the reversal queued with the refund is done; resolve it (best-effort —
+    // a record left pending is replayed by the drain as an idempotent no-op).
+    await resolveQueuedRefundReversal(registrationId)
     // Recorded onto the refund so "was the ledger actually reversed, and by how much?"
     // is answerable from the refund itself rather than by joining two collections.
     await recordRefundLedgerOutcome(razorpayRefundId, {

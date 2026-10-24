@@ -30,6 +30,14 @@ const h = vi.hoisted(() => ({
   noProvider: false,
 }))
 
+// RD-WA-BLOCK-01 — production no longer funds a NEW WhatsApp message from the legacy balance (blocked
+// when event capacity is exhausted). This suite exercises the acceptance / settlement MECHANICS that
+// still apply to legacy money taken before that change (holds, charge-backs, credit-backs), using a
+// legacy-funded send as its fixture — so it re-enables the old funding rule for THIS suite only.
+vi.mock('@/lib/communications/capacity', async orig => {
+  const real = await orig<typeof import('@/lib/communications/capacity')>()
+  return { ...real, legacyBalanceCanFundNewWhatsApp: real.legacyBalanceCanFund }
+})
 vi.mock('@/lib/whatsapp', async orig => {
   const real = await orig<typeof import('@/lib/whatsapp')>()
   return {

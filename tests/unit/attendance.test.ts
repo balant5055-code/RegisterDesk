@@ -433,18 +433,21 @@ describe('Attendance can actually admit someone', () => {
     expect(filterParam('out')).toBe('no')
     expect(filterParam('all')).toBeNull()
     expect(REGAPI).toContain("if (checkinF === 'yes')     query = query.where('checkedIn', '==', true)")
-    expect(REGAPI).toContain("else if (checkinF === 'no') query = query.where('checkedIn', '==', false)")
+    // RD-CHECKIN-FILTER-01 — 'no' is NOT an `== false` query: that excluded every paid
+    // registration without the field. It is filtered while paging, server-side.
+    expect(REGAPI).not.toContain("query.where('checkedIn', '==', false)")
+    expect(REGAPI).toContain("const isNotCheckedIn = (d: FirebaseFirestore.QueryDocumentSnapshot) => d.get('checkedIn') !== true")
   })
 
-  it('an incomplete not-arrived list is declared, never quietly served', () => {
-    // Firestore cannot match an ABSENT field, so a legacy row without `checkedIn`
-    // would silently vanish from the roll call — the worst possible way to be wrong
-    // about who is still outside.
-    expect(REGAPI).toContain('checkinFilterComplete')
-    expect(REGAPI).toContain(".where('checkedIn', '==', false)")
-    expect(REGAPI).toContain('checkinFilterComplete = seen === null ? undefined : seen >= (stats.total - stats.checkedIn)')
+  it('RD-CHECKIN-FILTER-01 · the not-arrived list includes registrations WITHOUT the field, and says it is complete', () => {
+    // Firestore cannot match an ABSENT field, so a paid registration without `checkedIn`
+    // used to vanish from the roll call. It is now filtered in memory (bounded, resumable).
+    expect(REGAPI).toContain('NOT_CHECKED_IN_SCAN_CAP')
+    expect(REGAPI).toContain("const checkinFilterComplete: boolean | undefined = checkinF === 'no' ? true : undefined")
     expect(TAB).toContain('setListComplete(j.checkinFilterComplete !== false)')
     expect(TAB).toContain('are missing from this')
+    // …and newly settled PAID registrations carry the field, like free / walk-in ones.
+    expect(readFileSync(resolve(process.cwd(), 'lib/payments/settleCapturedRegistration.ts'), 'utf8')).toMatch(/checkedIn:\s+false,/)
   })
 
   it('check-in and undo reuse the canonical routes', () => {

@@ -8,15 +8,12 @@
 //   status   — registration status equality filter
 //   payment  — paymentStatus equality filter
 //   passId   — passId equality filter
-//   checkin  — 'yes' → checkedIn==true; 'no' → checkedIn==false.
-//              RD-EVENT-11: 'no' IS server-filtered now. `createRegistration` writes
-//              `checkedIn: !!input.checkInOnCreate` on every registration and
-//              `uncheckInRegistration` sets it back to `false`, so the field is present
-//              on documents written by the current code — the note that used to stand
-//              here (that the field is absent) describes only pre-existing legacy rows.
-//              Because Firestore cannot match an ABSENT field, such rows would be
-//              silently omitted, so the response carries `checkinFilterComplete` and the
-//              caller is told rather than quietly under-listing who has not arrived.
+//   checkin  — 'yes' → checkedIn==true (server-side); 'no' → checkedIn !== true.
+//              RD-CHECKIN-FILTER-01: 'no' is applied IN MEMORY while paging (bounded scan,
+//              resumable cursor), because paid registrations settled before
+//              settleCapturedRegistration wrote `checkedIn: false` carry NO such field, and
+//              Firestore's `== false` silently excluded every one of them. The list is exact;
+//              `checkinFilterComplete` is still returned (always true) for existing clients.
 //   coupon   — 'with' → any coupon; or an exact coupon CODE. There is deliberately no
 //              'without': `couponCode` is not written at all when no coupon is used
 //              (see createRegistration), and Firestore cannot query for an absent field —
@@ -488,7 +485,10 @@ export async function GET(
       // the same one `yes` uses — so this paginates over the WHOLE matching set and
       // needs no new index.
       if (checkinF === 'yes')     query = query.where('checkedIn', '==', true)
-      else if (checkinF === 'no') query = query.where('checkedIn', '==', false)
+      // RD-CHECKIN-FILTER-01 · 'no' is NOT pushed to Firestore. Paid registrations settled before
+      // the fix carry NO `checkedIn` field, and an `== false` query excludes documents missing the
+      // field — it silently dropped every one of them. 'no' is applied in memory below
+      // (`checkedIn !== true`), the same rule the export uses.
       // 'WITH' uses a range predicate because every stored code is a non-empty string, so
       // >= '' matches exactly the documents that HAVE the field. Documents without a coupon
       // are absent from this index entirely, which is precisely why the inverse is impossible.
@@ -510,40 +510,76 @@ export async function GET(
     return pageQuery.get()
   }
 
-  let snap: FirebaseFirestore.QuerySnapshot
-  try {
-    snap = await runPaged(buildQuery(true))
-  } catch {
-    // Missing composite index for this rare filter combination → degrade to the base
-    // indexed query; the client's refinement covers the remaining predicates.
-    snap = await runPaged(buildQuery(false))
+  // RD-CHECKIN-FILTER-01 · "Not checked in" — the other filters stay server-side; `checkedIn !== true`
+  // is applied while paging, so registrations WITHOUT the field (paid ones settled before the fix)
+  // are included. Bounded: at most NOT_CHECKED_IN_SCAN_CAP documents are read per request; a request
+  // that hits the bound before filling its page returns what it found with `hasMore` and a cursor at
+  // the last row SCANNED, so the next page resumes exactly there and nothing is skipped or repeated.
+  const NOT_CHECKED_IN_SCAN_CAP = 2000
+  const isNotCheckedIn = (d: FirebaseFirestore.QueryDocumentSnapshot) => d.get('checkedIn') !== true
+  async function runNotCheckedIn(base: FirebaseFirestore.Query): Promise<{ docs: FirebaseFirestore.QueryDocumentSnapshot[]; more: boolean; next: string | null }> {
+    if (allMode) {
+      const s = await base.limit(2000).get()
+      return { docs: s.docs.filter(isNotCheckedIn), more: s.size === 2000, next: null }
+    }
+    let q = base
+    if (cursor) {
+      const cursorDoc = await adminDb.collection('registrations').doc(cursor).get()
+      if (cursorDoc.exists) q = base.startAfter(cursorDoc)
+    }
+    const kept: FirebaseFirestore.QueryDocumentSnapshot[] = []
+    let scanned = 0
+    let last: FirebaseFirestore.QueryDocumentSnapshot | null = null
+    for (;;) {
+      const batchSize = Math.min(500, NOT_CHECKED_IN_SCAN_CAP - scanned)
+      const s = await q.limit(batchSize).get()
+      for (const d of s.docs) {
+        scanned++; last = d
+        if (isNotCheckedIn(d)) kept.push(d)
+        if (kept.length > pageSize) break
+      }
+      if (kept.length > pageSize) return { docs: kept.slice(0, pageSize), more: true, next: kept[pageSize - 1].id }
+      if (s.size < batchSize || !last) return { docs: kept, more: false, next: null }
+      if (scanned >= NOT_CHECKED_IN_SCAN_CAP) return { docs: kept, more: true, next: last.id }
+      q = base.startAfter(last)
+    }
   }
 
-  if (allMode) {
-    registrations = snap.docs.map(serializeDoc)
-    hasMore = snap.size === 2000
-  } else {
-    hasMore    = snap.size > pageSize
-    const docs = hasMore ? snap.docs.slice(0, pageSize) : snap.docs
-    nextCursor = hasMore ? docs[docs.length - 1].id : null
-    registrations = docs.map(serializeDoc)
-  }
-
-  // RD-EVENT-11 · One `count()` aggregate (zero documents), and ONLY for the
-  // not-checked-in filter. Every registration is either checked in or not, so
-  // `count(checkedIn == false)` must equal `total - checkedIn`. A shortfall means
-  // documents without the field, which this query cannot see — so the caller learns
-  // the list is partial instead of trusting a quietly incomplete roll call.
-  let checkinFilterComplete: boolean | undefined
   if (checkinF === 'no') {
-    const seen = await adminDb.collection('registrations')
-      .where('organizerUid', '==', uid).where('eventSlug', '==', slug)
-      .where('checkedIn', '==', false)
-      .count().get()
-      .then(s => s.data().count as number)
-      .catch(() => null)
-    checkinFilterComplete = seen === null ? undefined : seen >= (stats.total - stats.checkedIn)
+    let page: Awaited<ReturnType<typeof runNotCheckedIn>>
+    try {
+      page = await runNotCheckedIn(buildQuery(true))
+    } catch {
+      // Missing composite index for this rare filter combination → the base indexed query, as below.
+      page = await runNotCheckedIn(buildQuery(false))
+    }
+    registrations = page.docs.map(serializeDoc)
+    hasMore       = page.more
+    nextCursor    = allMode ? null : page.next
+  } else {
+    let snap: FirebaseFirestore.QuerySnapshot
+    try {
+      snap = await runPaged(buildQuery(true))
+    } catch {
+      // Missing composite index for this rare filter combination → degrade to the base
+      // indexed query; the client's refinement covers the remaining predicates.
+      snap = await runPaged(buildQuery(false))
+    }
+
+    if (allMode) {
+      registrations = snap.docs.map(serializeDoc)
+      hasMore = snap.size === 2000
+    } else {
+      hasMore    = snap.size > pageSize
+      const docs = hasMore ? snap.docs.slice(0, pageSize) : snap.docs
+      nextCursor = hasMore ? docs[docs.length - 1].id : null
+      registrations = docs.map(serializeDoc)
+    }
   }
+
+  // RD-EVENT-11 · kept for the clients that read it. The "not checked in" list is now exact (it no
+  // longer depends on documents carrying the field), so it is always complete.
+  const checkinFilterComplete: boolean | undefined = checkinF === 'no' ? true : undefined
 
   return NextResponse.json({
     registrations,

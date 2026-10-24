@@ -26,7 +26,7 @@
 
 import { FieldValue, Timestamp } from 'firebase-admin/firestore'
 import { adminDb } from '@/lib/firebase/admin'
-import { legacyBalanceCanFund } from '@/lib/communications/capacity'
+import { legacyBalanceCanFundNewWhatsApp } from '@/lib/communications/capacity'
 import {
   ledgerRef as serviceLedgerRef, decideReserve, txnTakeUnits, ALLOWANCE_USAGE_SUBCOLLECTION, type ServiceLedgerDoc,
 } from '@/lib/licensing/serviceAllowanceLedger'
@@ -104,7 +104,8 @@ export async function reserveWhatsAppFunding(req: WhatsAppFundingRequest): Promi
     }
 
     const balance = walletSnap.exists ? ((walletSnap.data() as OrganizerWallet).balancePaise ?? 0) : 0
-    if (!legacyBalanceCanFund(balance, req.legacyPricePaise)) {
+    // RD-WA-BLOCK-01 — a NEW message is funded by event capacity only; exhausted ⇒ blocked.
+    if (!legacyBalanceCanFundNewWhatsApp(balance, req.legacyPricePaise)) {
       return { ok: false, reason: outcome.mode === 'exhausted' ? 'allowance_exhausted' : 'allowance_required' }
     }
     const after = balance - req.legacyPricePaise

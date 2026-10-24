@@ -31,7 +31,10 @@ import { adminDb }                   from '@/lib/firebase/admin'
 import { COLLECTIONS }               from '@/lib/certificates/constants'
 import { signCertificateDownloadCapability } from '@/lib/certificates/downloadCapability'
 import { getClientIp }               from '@/lib/rateLimit'
-import { RATE_POLICY, checkPolicy }  from '@/lib/rateLimit/policies'
+import { RATE_POLICY, checkPolicy, type RatePolicy } from '@/lib/rateLimit/policies'
+
+/** RD-CERT-SEC-02 — lookups per client IP across ALL identifiers (see the check below). */
+const LOOKUP_PER_IP: RatePolicy = { route: 'certificate-lookup-ip', limit: 120, windowMs: 10 * 60 * 1000 }
 import { normalizePhoneNumber }     from '@/lib/communication/phone'
 import type { Certificate }          from '@/lib/certificates/types'
 
@@ -176,7 +179,13 @@ export async function POST(req: NextRequest, { params }: Params): Promise<NextRe
     : bibNumber      ? `b:${bibNumber}`
     :                  `t:${ticketCode}`
 
-  const rl = checkPolicy(`${getClientIp(req)}|${lookupKey}`, RATE_POLICY.certificateLookup)
+  // RD-CERT-SEC-02 — a SECOND, per-IP cap on top of the per-identifier one. The bucket above is
+  // keyed per identifier (so a venue sharing one NAT address is not starved), which also gave
+  // every newly GUESSED bib / mobile a fresh allowance: enumeration was unbounded. This cap is
+  // sized for a shared venue address (well above what real attendees need) and bounds guessing.
+  const ip = getClientIp(req)
+  const ipRl = checkPolicy(ip, LOOKUP_PER_IP)
+  const rl = ipRl.limited ? ipRl : checkPolicy(`${ip}|${lookupKey}`, RATE_POLICY.certificateLookup)
   if (rl.limited) {
     return NextResponse.json(
       { error: 'Too many lookups. Please wait a moment and try again.' },

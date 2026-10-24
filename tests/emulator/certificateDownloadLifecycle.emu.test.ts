@@ -121,7 +121,7 @@ describeEmu('RD-CERT-03 · attendee download lifecycle', () => {
       // has its own test below.
       adminDb.doc(`certificateTemplates/${EV}`).set({
         eventId: EV, enabled: true, type: 'participation', title: 'Certificate',
-        subtitle: 'This is to certify that', issuedBy: 'RD', signatoryName: 'Director',
+        subtitle: 'This is to certify that', issuedBy: 'RD', signatoryName: 'Director', signatoryDesignation: 'Race Director',
       }),
     ])
 
@@ -219,17 +219,34 @@ describeEmu('RD-CERT-03 · attendee download lifecycle', () => {
     })
   })
 
-  it('the legacy find-or-create still serves an event that never used the engine', async () => {
-    // Backward compatibility is preserved: a confirmed participant with NO modern
-    // certificate still gets one produced the old way.
-    const before = await inventory(noCert(0))
-    expect(before.modern).toBe(0)
-    const r = await download(noCert(0))
-    // A PDF (200) or a generation failure — never a redirect, because there is
-    // nothing modern to redirect to.
-    expect(r.status).not.toBe(307)
-    const after = await inventory(noCert(0))
-    expect(after.modern).toBe(0)
+  it('RD-CERT-BILL-01 · a participant with NO issued certificate is refused — nothing is minted, however often asked', async () => {
+    // The legacy find-or-create minted a verifiable certificate without reserving the event's
+    // paid certificate capacity. New certificates now come only from the modern engine
+    // (organizer issue / bulk jobs), which reserves a unit before rendering.
+    expect(await inventory(noCert(0))).toEqual({ modern: 0, legacy: 0 })
+    for (let k = 0; k < 3; k++) {
+      const r = await download(noCert(0))
+      expect(r.status).toBe(404)
+      expect(r.body?.reason).toBe('not_issued')
+    }
+    expect(await inventory(noCert(0))).toEqual({ modern: 0, legacy: 0 })
+  })
+
+  it('RD-CERT-BILL-01 · a legacy certificate ISSUED before the change is still served', async () => {
+    const regId = noCert(1)
+    const certificateId = `RDC-${EV}-legacy`
+    await adminDb.collection('certificateRecords').doc(certificateId).set({
+      certificateId, eventId: EV, eventSlug: EV, registrationId: regId, organizerUid: UID,
+      attendeeName: 'P7', attendeeEmail: 'p7@test.local', eventName: 'Lifecycle Event',
+      eventDate: '1 December 2026', issuedAt: new Date(), downloadCount: 0,
+    })
+    const res = await downloadGET(
+      new NextRequest(`http://localhost/api/certificates/download/${regId}`, { redirect: 'manual' }),
+      { params: Promise.resolve({ registrationId: regId }) },
+    )
+    expect(res.status).toBe(200)
+    expect(res.headers.get('content-type')).toBe('application/pdf')
+    expect(await inventory(regId)).toEqual({ modern: 0, legacy: 1 })   // served, not re-minted
   })
 
   // ═══ §3 · ELIGIBILITY, ENFORCED THE SAME WAY ═══════════════════════════════

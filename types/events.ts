@@ -104,6 +104,25 @@ export interface EventEditPayload {
   passCapacityUpdates?: Array<{ passId: string; newCapacity: number | null }>
   // RD-EVENT-COMMERCE-05E — Fee Collection Method (pricing.feeModel); future checkouts only.
   feeModel?: 'attendee_pays' | 'organizer_absorbs'
+  /**
+   * RD-LICENSE-LOCK-02 — the prepaid SERVICE FLAGS of a submitted event.
+   *
+   * These gate whether anything is sent at all (`pricing.whatsappEnabled` is read by every
+   * WhatsApp sender), and until now the wizard wrote them straight to the draft with the client
+   * SDK — so the only server check was firestore.rules, and the live event they actually govern
+   * was updated by a separate Save Changes the organizer might never press.
+   *
+   * Routing them here puts them behind the same gate as every other post-publish edit:
+   * authenticated caller, verified draft AND live ownership of the SAME event, one batch across
+   * both documents, one edit-history row. They are flags only — no quantity, order, allowance or
+   * billing record is reachable from this payload.
+   *
+   * `smsEnabled` is accepted for shape fidelity with the wizard's flag set and is inert: SMS has
+   * no transport, so the value is stored and nothing sends either way.
+   */
+  whatsappEnabled?: boolean
+  certEnabled?:     boolean
+  smsEnabled?:      boolean
   // RD-PRODUCT-01F — optional edit reason, recorded in version history (not a field edit).
   reason?: string
 }

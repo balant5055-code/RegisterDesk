@@ -171,10 +171,16 @@ export function AttendeePhotoCard({
     setStatus('removing')
     setError(null)
     try {
-      await fetch(endpoint, { method: 'DELETE', headers: authHeaders() })
+      const res = await fetch(endpoint, { method: 'DELETE', headers: authHeaders() })
+      // A refused removal must not look like a successful one — the photo is still there.
+      if (!res.ok) {
+        const body = await res.json().catch(() => null) as { error?: string } | null
+        throw new Error(body?.error ?? 'remove_failed')
+      }
       setPhotoUrl(null)
-    } catch {
-      setError('Could not remove the photo. Please try again.')
+    } catch (err) {
+      const code = err instanceof Error ? err.message : 'remove_failed'
+      setError(code === 'remove_failed' ? 'Could not remove the photo. Please try again.' : messageFor(code))
     } finally {
       setStatus('idle')
     }
@@ -327,6 +333,9 @@ function messageFor(code: string): string {
     case 'unsupported_type': return 'That file type is not supported. Use a JPEG, PNG or WebP image.'
     case 'forbidden':        return 'You are not signed in as the owner of this registration.'
     case 'unauthorized':     return 'Please sign in again to update your photo.'
+    // RD-CERT-SEC-01 — a photo change now needs the attendee's own verified sign-in.
+    case 'verification_required':
+      return 'To add or change your photo, sign in to your attendee account with the code sent to your email, then try again.'
     case 'not_found':        return 'We could not find that registration.'
     default:                 return 'Could not save the photo. Please try again.'
   }

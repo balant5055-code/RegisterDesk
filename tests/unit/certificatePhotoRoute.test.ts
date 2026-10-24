@@ -89,6 +89,11 @@ vi.mock('@/lib/rateLimit/policies', () => ({
   },
   checkPolicy: () => ({ limited: false, retryAfter: 30 }),
 }))
+// RD-CERT-SEC-01 — a photo WRITE also needs an OTP-verified attendee session that owns the
+// certificate's registration. Defaults (beforeEach) to the owner, so the grant-path tests below
+// keep exercising the legitimate flow; the SEC-01 block switches it off / to a stranger.
+let attendeeSession: { sessionId: string; email: string; normalizedEmail: string } | null = null
+vi.mock('@/lib/attendee/auth', () => ({ requireAttendee: async () => attendeeSession }))
 vi.mock('@/lib/config/resolveSecurityConfig', () => ({
   getSecurityConfig: async () => ({ otpDigits: 6, otpTtlSeconds: 600, otpResendWaitSeconds: 60, otpMaxSendsPerHour: 5 }),
 }))
@@ -155,6 +160,7 @@ beforeEach(() => {
   copied.length = 0
   deleted.length = 0
   updatedRegistrationId = null
+  attendeeSession = { sessionId: 's-owner', email: 'family@example.com', normalizedEmail: 'family@example.com' }
   for (const k of Object.keys(registrations)) delete registrations[k]
   registrations['reg-child-2'] = { eventSlug: SLUG, attendee: { name: 'Child 2', email: 'family@example.com' } }
   registrations['reg-father']  = { eventSlug: SLUG, attendee: { name: 'Father',  email: 'family@example.com' } }
@@ -291,6 +297,71 @@ describe('the granted verbs', () => {
     expect((await DELETE(photoReq('DELETE', { certificateId: CHILD2, grant }), ctx())).status).toBe(200)
     expect((await DELETE(photoReq('DELETE', { certificateId: CHILD2, grant }), ctx())).status).toBe(200)
     expect(registrations['reg-father'].attendeePhotoKey).toBe('events/evt/attendee-photos/father')
+  })
+})
+
+// ─── RD-CERT-SEC-01 · a lookup-derived grant alone can no longer change a photo ─────
+
+describe('RD-CERT-SEC-01 · persistent photo writes need an OTP-verified owner session', () => {
+  const lookupGrant = async () => {
+    // Exactly what a stranger gets from a public lookup (guessed bib / mobile / email): the
+    // download capability, exchanged at the session route for a grant — no OTP anywhere.
+    const res = await PHOTO_SESSION(jsonReq({ certificateId: CHILD2, capability: signCertificateDownloadCapability(CHILD2, SLUG) }), ctx())
+    return (await res.json() as { grant: string }).grant
+  }
+  const original = `events/${SLUG}/certificate-photos/${CHILD2}/original.jpg`
+
+  it('POST with a lookup grant and NO attendee session is refused — nothing uploaded, nothing persisted', async () => {
+    seedCert(CHILD2, { attendeePhotoKey: original })
+    attendeeSession = null
+    const grant = await lookupGrant()
+    const res = await PHOTO_POST(photoReq('POST', { certificateId: CHILD2, grant, body: JPEG, contentType: 'image/jpeg' }), ctx())
+    expect(res.status).toBe(401)
+    expect((await res.json()).error).toBe('verification_required')
+    expect(uploadedFor).toEqual([])
+    expect(copied).toEqual([])
+    expect(deleted).toEqual([])
+    expect(store.get(`certificates/${CHILD2}`)?.attendeePhotoKey).toBe(original)
+  })
+
+  it('DELETE with a lookup grant and NO attendee session is refused — the photo survives', async () => {
+    seedCert(CHILD2, { attendeePhotoKey: original })
+    attendeeSession = null
+    const grant = await lookupGrant()
+    const res = await DELETE(photoReq('DELETE', { certificateId: CHILD2, grant }), ctx())
+    expect(res.status).toBe(401)
+    expect(deleted).toEqual([])
+    expect(store.get(`certificates/${CHILD2}`)?.attendeePhotoKey).toBe(original)
+  })
+
+  it('a VERIFIED session for a DIFFERENT email is refused (403) — POST and DELETE, repeatedly', async () => {
+    seedCert(CHILD2, { attendeePhotoKey: original })
+    attendeeSession = { sessionId: 's-stranger', email: 'stranger@example.com', normalizedEmail: 'stranger@example.com' }
+    const grant = await lookupGrant()
+    for (let k = 0; k < 3; k++) {
+      expect((await PHOTO_POST(photoReq('POST', { certificateId: CHILD2, grant, body: JPEG, contentType: 'image/jpeg' }), ctx())).status).toBe(403)
+      expect((await DELETE(photoReq('DELETE', { certificateId: CHILD2, grant }), ctx())).status).toBe(403)
+    }
+    expect(uploadedFor).toEqual([])
+    expect(deleted).toEqual([])
+    expect(store.get(`certificates/${CHILD2}`)?.attendeePhotoKey).toBe(original)
+  })
+
+  it('reads are unchanged: the lookup grant / capability still READS the photo without a session', async () => {
+    seedCert(CHILD2, { attendeePhotoKey: original })
+    attendeeSession = null
+    const grant = await lookupGrant()
+    const res = await GET(photoReq('GET', { certificateId: CHILD2, grant }), ctx())
+    expect(res.status).toBe(200)
+    expect((await res.json()).hasPhoto).toBe(true)
+  })
+
+  it('the owner’s verified session + grant still writes (the legitimate path)', async () => {
+    seedCert(CHILD2)
+    const grant = await lookupGrant()
+    const res = await PHOTO_POST(photoReq('POST', { certificateId: CHILD2, grant, body: JPEG, contentType: 'image/jpeg' }), ctx())
+    expect(res.status).toBe(200)
+    expect(store.get(`certificates/${CHILD2}`)?.attendeePhotoKey).toContain(`/certificate-photos/${CHILD2}/`)
   })
 })
 

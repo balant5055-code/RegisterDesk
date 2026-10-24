@@ -3,6 +3,7 @@
 // that happens atomically inside the Firestore registration transaction.
 
 import { adminDb }  from '@/lib/firebase/admin'
+import { couponsAllowedForEvent } from './eventCouponSwitch'
 import type { CouponDocument, CouponValidationResult } from './types'
 
 export function computeDiscount(coupon: CouponDocument, originalPaise: number): number {
@@ -34,6 +35,11 @@ export async function validateCoupon(
 ): Promise<CouponValidationResult> {
   const normalized = couponCode.trim().toUpperCase()
   if (!normalized) return { valid: false, error: 'Please enter a coupon code.' }
+
+  // RD-COUPON-SWITCH-01 — the platform switch AND the event's Super Admin switch, checked HERE so
+  // every caller (preview, fee preview, paid checkout, free-via-coupon submit) is gated identically.
+  const allowed = await couponsAllowedForEvent(eventSlug)
+  if (!allowed.ok) return { valid: false, error: allowed.error }
 
   const snap = await adminDb
     .collection('events').doc(eventSlug)

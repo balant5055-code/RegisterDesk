@@ -31,6 +31,7 @@ import {
 } from '@/lib/events/liveEventRef'
 import type { EventEditPayload, EventEditResponse } from '@/types/events'
 import { introducedValueIssues, applyFieldPaths } from '@/lib/events/eventValueRules'
+import { resolvePlatformPricing }    from '@/lib/platform/pricing/resolver'
 
 // ─── Handler ──────────────────────────────────────────────────────────────────
 
@@ -69,13 +70,19 @@ export async function PATCH(
     )
   }
 
-  // RD-PHASE4-S3 · Q1 — pricing is not organizer-editable. Named (not merely 'unknown') so the refusal
-  // is an honest 403 with a stable code, and survives any future re-classification.
+  // RD-FEE-RESTORE-01 — the Fee Collection Method is organizer-editable again, but ONLY while the
+  // pricing engine is on. The gate is SERVER-SIDE and independent of the builder: hiding the control
+  // in the wizard is a courtesy, this is the control. The same 403 and stable code as before are
+  // returned when the engine is off, so nothing an existing client does changes behaviour.
+  let feeModelEditable = false
   if (Object.prototype.hasOwnProperty.call(body, 'feeModel')) {
-    return NextResponse.json(
-      { success: false, error: 'The fee collection method is managed by RegisterDesk and cannot be changed here.', code: 'PRICING_NOT_ORGANIZER_EDITABLE' },
-      { status: 403 },
-    )
+    feeModelEditable = (await resolvePlatformPricing()).features.pricingEngineEnabled
+    if (!feeModelEditable) {
+      return NextResponse.json(
+        { success: false, error: 'The fee collection method is managed by RegisterDesk and cannot be changed here.', code: 'PRICING_NOT_ORGANIZER_EDITABLE' },
+        { status: 403 },
+      )
+    }
   }
 
   const forbidden = findForbiddenEditKeys(Object.keys(body))
@@ -141,7 +148,13 @@ export async function PATCH(
   // ── 5. Build the field-path updates via the shared (pure) mapper ────────────
   let built
   try {
-    built = buildEventEditUpdate(payload, d, passCounts)
+    // RD-FEE-RESTORE-01 — `authz.callerUid` (the authenticated human), not `uid` (the workspace),
+    // so the recorded actor is the person who made the choice even on a delegated workspace.
+    built = buildEventEditUpdate(payload, d, passCounts, {
+      feeModelEditable,
+      actorUid: authz.callerUid,
+      nowIso:   new Date().toISOString(),
+    })
   } catch (err) {
     if (err instanceof RangeError) {
       return NextResponse.json({ success: false, error: err.message }, { status: 400 })

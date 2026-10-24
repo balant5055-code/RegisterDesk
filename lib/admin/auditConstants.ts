@@ -129,6 +129,9 @@ export const AUDIT_ACTIONS = [
   // which third party handles attendee mail for a live event, and the only record of WHY
   // is what the admin recorded here.
   'event.email_provider_changed',
+  // RD-COUPON-SWITCH-01 — a Super Admin switched an event's coupons off / back on.
+  'event.coupons_disabled',
+  'event.coupons_enabled',
   // RD-EVENT-COMMERCE-04 — per-event capacity commercial terms (events/{slug}.commercial).
   // Also recorded in licenseHistory; mirrored here so it appears in the admin audit log.
   'commercial_terms.set',
@@ -163,6 +166,7 @@ export const AUDIT_ACTIONS = [
   'failed_refund.review_resolved',        // a 'review' hold closed (resolved / ignored) with a reason
   'failed_refund.review_refund_approved', // a 'review' hold approved for an explicit Super Admin refund
   'registration.refunded',                // a Super Admin registration refund (gateway id + amount)
+  'registration.refund_initiated',        // RD-REFUND-STATUS-01 — accepted by Razorpay, not yet processed
   // RD-REFUND-MANUAL-01 — a MANUAL attendee refund (money returned outside the gateway): maker requests,
   // a different Super Admin records the completed transfer (reference) — or the request is cancelled.
   'registration.manual_refund_requested',
@@ -240,7 +244,7 @@ export const FINANCIAL_AUDIT_ENTITY_TYPES: readonly AdminAuditEntityType[] = [
   'license', 'license_coupon', 'badge_coupon', 'platform_settings', 'media_credit_refund', 'media_credit_grant',
   'audit_failure', 'wallet_topup', 'wallet_service_request',
 ]
-const FINANCIAL_ACTION_PREFIXES = ['registration.refunded', 'registration.manual_refund_', 'commercial_terms.', 'pricing_override.', 'settlement.', 'finance.', 'license.', 'license_coupon.', 'badge_coupon.', 'print_badge_', 'clawback.', 'donation.', 'media_credit']
+const FINANCIAL_ACTION_PREFIXES = ['registration.refunded', 'registration.refund_initiated', 'registration.manual_refund_', 'commercial_terms.', 'pricing_override.', 'settlement.', 'finance.', 'license.', 'license_coupon.', 'badge_coupon.', 'print_badge_', 'clawback.', 'donation.', 'media_credit']
 
 export function isFinancialAuditEntry(row: { entityType?: unknown; action?: unknown }): boolean {
   if (typeof row.entityType === 'string' && (FINANCIAL_AUDIT_ENTITY_TYPES as readonly string[]).includes(row.entityType)) return true

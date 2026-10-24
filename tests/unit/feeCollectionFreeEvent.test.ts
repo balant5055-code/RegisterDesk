@@ -103,8 +103,17 @@ describe('the canonical condition is the event-level pricing.eventType', () => {
 // organizers do not choose it). The free-event safety invariant this file protected now applies to the
 // one element left in the card's place: the informational Easy Split notice, paid events only.
 describe('FeeCollectionCard renders only when the event is paid', () => {
-  it('there is no fee-collection card or selector at all', () => {
-    expect(code).not.toMatch(/<FeeCollectionCard|<FeeCollectionSection/)
+  // RD-FEE-RESTORE-01 — this case previously asserted the selector did not exist at all, which
+  // was true while RD-PHASE4-S3 · Q1 had removed it. The selector is back, so the assertion
+  // moves from "it is absent" to "it is absent FOR A FREE EVENT" — which is, and always was,
+  // the property this file exists to protect.
+  it('the fee-collection selector is guarded by !isFreeEvent', () => {
+    expect(code).toContain("phase === 'final' && !isFreeEvent && pricingEngineOn && feeSamplePrice !== null")
+    const lines = code.split('\n')
+    const at = lines.findIndex(l => l.includes('<FeeCollectionSection'))
+    expect(at).toBeGreaterThan(-1)
+    // The guard sits on the conditional immediately above the element.
+    expect(lines.slice(Math.max(0, at - 3), at).join('\n')).toContain('!isFreeEvent')
   })
 
   it('the notice in its place is guarded by !isFreeEvent (NOT rendered unconditionally)', () => {
@@ -127,8 +136,17 @@ describe('FeeCollectionCard renders only when the event is paid', () => {
     }
   })
 
-  it('no sample ticket price is invented to demonstrate fees any more', () => {
-    expect(code).not.toContain('samplePrice=')
+  // RD-FEE-RESTORE-01 — the ACTUAL bug this file was written for was never the prop; it was the
+  // DEFAULT behind it (`samplePrice = 500`), which let a free event demonstrate fees on a ticket
+  // that does not exist. The prop is back; the default is not, and the value passed is the
+  // event's own cheapest paid pass or nothing at all.
+  it('no sample ticket price is ever invented', () => {
+    expect(code).not.toMatch(/samplePrice\s*=\s*500/)
+    expect(code).toContain('samplePrice: number')              // required, no default
+    expect(code).toContain('samplePrice={feeSamplePrice}')      // the event's own price
+    // …and when there is no paid pass, the control does not render at all.
+    expect(code).toContain('feeSamplePrice !== null')
+    expect(code).toContain('paid.length > 0 ? Math.min(...paid) : null')
   })
 
   it('it follows the guard pattern the sibling sections already use', () => {
@@ -157,9 +175,14 @@ describe('TEST 5 — the Final Cost Summary still states the free-event position
 describe('TEST 6 — paid-event behaviour and the payment path are untouched', () => {
   // RD-PHASE4-S3 · Q1 — SUPERSEDED: the fee model is FIXED (organizer-pays); the organizer's stored
   // choice is neither honoured nor persisted by the wizard any more.
-  it('the fee model is fixed to the supported (organizer-pays) model', () => {
-    expect(code).toContain('const localFeeModel: FeeModel = SUPPORTED_FEE_MODEL')
+  // RD-FEE-RESTORE-01 — the fee model is the organizer's choice again, but ONLY with the pricing
+  // engine on. With it off the behaviour this case guarded is unchanged, and that is what is
+  // asserted now: the flag-off branch still resolves to SUPPORTED_FEE_MODEL, and the legacy
+  // stored field is still never the seed.
+  it('falls back to the supported (organizer-pays) model whenever the engine is off', () => {
+    expect(code).toContain('!pricingEngineOn ? SUPPORTED_FEE_MODEL : (recordedFeeModel ?? DEFAULT_FEE_MODEL_WHEN_ENABLED)')
     expect(code).not.toContain('normalizeFeeModel(pricingData?.feeModel')
+    expect(code).not.toMatch(/pricingData\?\.feeModel/)
   })
 
   it('no organizer fee-model persistence remains', () => {

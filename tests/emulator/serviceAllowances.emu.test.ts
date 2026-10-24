@@ -2074,7 +2074,7 @@ describeEmu('RD-EVENT-COMMERCE-02 · prepaid services on real Firestore', () => 
     expect((await adminDb.doc(`registrations/r3-${process.pid}`).get()).data()!.whatsappStatus).toBe('skipped_allowance_exhausted')
   }, T)
 
-  it('broadcast: funded from the allowance in the billing transaction; exhausted ⇒ blocked, or drains an existing legacy balance', async () => {
+  it('broadcast: funded from the allowance in the billing transaction; exhausted ⇒ blocked, even with a legacy balance (RD-WA-BLOCK-01)', async () => {
     const d = id('bc'), slug = `c02-bc-ev-${process.pid}`
     drafts.add(d); slugs.add(slug)
     await adminDb.doc(`events/${slug}`).set({ uid: UID, draftId: d })
@@ -2096,13 +2096,12 @@ describeEmu('RD-EVENT-COMMERCE-02 · prepaid services on real Firestore', () => 
     expect((await adminDb.doc(`broadcastCampaigns/bc2-${process.pid}`).get()).data()!.failReason).toBe('allowance_exhausted')
     expect(((await ledger(d))!.whatsapp as { consumed: number }).consumed).toBe(60)
 
-    // RD-COMMS-P1 — exhausted + an existing legacy balance that covers it ⇒ the controlled drain
-    // (whatever the stored policy: `wallet_payg` is retired and adds nothing).
+    // RD-WA-BLOCK-01 — exhausted + a legacy balance that WOULD cover it ⇒ still blocked; nothing drained.
     await walletRef().set({ balancePaise: 100_000, currency: 'INR' })
     await camp(`bc3-${process.pid}`)
     const r3 = await billing.chargeAndStartCampaign({ campaignId: `bc3-${process.pid}`, organizerUid: UID, channel: 'whatsapp', recipientCount: 60 })
-    expect(r3).toEqual({ ok: true, costPaise: 3_000 })
-    expect((await walletRef().get()).data()!.balancePaise).toBe(97_000)
+    expect(r3).toEqual({ ok: false, reason: 'allowance_exhausted' })
+    expect((await walletRef().get()).data()!.balancePaise).toBe(100_000)
   }, T)
 
   // ═══ RD-EVENT-COMMERCE-03 · published events buy more IN PLACE ════════════════════

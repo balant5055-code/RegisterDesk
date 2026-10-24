@@ -190,7 +190,8 @@ export async function POST(req: NextRequest, { params }: Params): Promise<NextRe
       return NextResponse.json({ error: err.message }, { status: 422 })
     }
     if (err instanceof CertificateAllowanceExhaustedError) {
-      return NextResponse.json({ error: err.message }, { status: 402 })
+      // RD-CERT-CAPACITY-UX-01 — `code` lets the workspace offer the purchase path (additive).
+      return NextResponse.json({ error: err.message, code: 'CERTIFICATE_CAPACITY_REQUIRED' }, { status: 402 })
     }
     if (err instanceof CertificateIneligibleError) {
       return NextResponse.json({ error: `Registration is not eligible for a certificate (${err.reason}).` }, { status: 422 })

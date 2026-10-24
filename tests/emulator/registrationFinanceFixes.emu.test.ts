@@ -26,6 +26,8 @@ const h = vi.hoisted(() => ({
   payments: new Map<string, Array<Record<string, unknown>>>(),
   refunds: new Map<string, Array<Record<string, unknown>>>(),   // paymentId → gateway refunds (stub)
   refundCalls: 0,
+  /** RD-REFUND-STATUS-01 — the status the refund stub reports for a NEW refund (Razorpay: pending | processed | failed). */
+  refundStatus: 'processed' as 'pending' | 'processed' | 'failed',
   gateOverride: null as null | { allowed: boolean; reason?: string },
   /** M1 — every captureFinancialError (message + context), so a test can assert an alert or its absence. */
   alerts: [] as Array<Record<string, unknown>>,
@@ -50,7 +52,7 @@ vi.mock('@/lib/razorpay/client', () => ({
       // An in-memory stub: it RECORDS a refund object; no money moves anywhere.
       refund: async (paymentId: string, opts: { amount: number }) => {
         h.refundCalls++
-        const r = { id: `rfnd_finfix_${process.pid}_${h.refundCalls}`, amount: opts.amount, status: 'processed', payment_id: paymentId }
+        const r = { id: `rfnd_finfix_${process.pid}_${h.refundCalls}`, amount: opts.amount, status: h.refundStatus, payment_id: paymentId }
         h.refunds.set(paymentId, [...(h.refunds.get(paymentId) ?? []), r])
         return r
       },
@@ -221,7 +223,7 @@ describeEmu('RD-FIN-02 · registration / dashboard / finance fix pass (real rout
     }
     await db.doc(`users/${OWNER}`).set({ uid: OWNER, role: 'organizer', accountStatus: 'active', workspaceOwner: true })
   }, T)
-  beforeEach(() => { h.gateOverride = null })
+  beforeEach(() => { h.gateOverride = null; h.refundStatus = 'processed' })
 
   // ═══ PART 1 · B5 — one ticket-revenue basis, future attendee-pays included ═══════════════════
   it('B5 · an attendee-pays charge: counter, daily rollup, Σ revenue, cancel, restore and reconciliation all use the TICKET BASIS', async () => {
@@ -444,6 +446,52 @@ describeEmu('RD-FIN-02 · registration / dashboard / finance fix pass (real rout
     expect(again.status).toBe(409)
     expect((h.refunds.get(s.pay.id) ?? []).length).toBe(1)
   }, T)
+  // ═══ RD-REFUND-STATUS-01 · a refund Razorpay has ACCEPTED but not yet PROCESSED ═══════════════════════════
+  it('RD-REFUND-STATUS-01 · pending at Razorpay: stays refund_pending, settlement held, nothing reversed; the webhook finalizes it', async () => {
+    const { POST: refundRoute } = await import('@/app/api/organizer/registrations/[registrationId]/refund/route')
+    const { releaseEligibleFunds } = await import('@/lib/settlements/releaseFunds')
+    const call = (registrationId: string) => refundRoute(new NextRequest('http://x', { method: 'POST',
+      headers: { authorization: 'Bearer super', 'content-type': 'application/json' }, body: JSON.stringify({ reason: 'attendee asked for a refund' }) }),
+      { params: Promise.resolve({ registrationId }) } as never)
+    await seedEvent(50)
+    const s = await paidRegistration(`rs01-pending@finfix.test`)
+    const ptxRef = db.doc(`platformTransactions/ptx_${s.registrationId}`)
+    h.refundStatus = 'pending'
+    const res = await json(await call(s.registrationId))
+    expect(res).toMatchObject({ status: 200, body: { success: true, pending: true } })
+    const rid = res.body.refundId as string
+    expect((await db.doc(`registrations/${s.registrationId}`).get()).data()).toMatchObject({ paymentStatus: 'refund_pending', refundClaim: { paymentId: s.pay.id, amountPaise: PRICE } })
+    expect((await ptxRef.get()).data()).toMatchObject({ status: 'completed', releaseStatus: 'held', releaseHold: { reason: 'refund_review', refundIds: [rid] } })
+    expect((await db.collection('adminAuditLogs').where('entityId', '==', s.registrationId).where('action', '==', 'registration.refund_initiated').get()).size).toBe(1)
+    expect((await db.collection('adminAuditLogs').where('entityId', '==', s.registrationId).where('action', '==', 'registration.refunded').get()).size).toBe(0)
+    // the release job cannot pay the organizer money that is on its way back
+    await ptxRef.update({ paidAt: new Date(Date.now() - 30 * 86_400_000) })
+    await releaseEligibleFunds({ limit: 500 })
+    expect((await ptxRef.get()).data()).toMatchObject({ status: 'completed', releaseStatus: 'held' })
+    // a repeat request while pending never creates a second gateway refund
+    expect((await call(s.registrationId)).status).toBe(409)
+    expect((h.refunds.get(s.pay.id) ?? []).length).toBe(1)
+    // Razorpay processes it → the webhook finalizes with evidence: refunded, ledger reversed
+    expect((await refundHook('refund.processed', { id: rid, pay: { id: s.pay.id, order_id: s.orderId }, amount: PRICE })).status).toBe(200)
+    expect((await db.doc(`registrations/${s.registrationId}`).get()).data()).toMatchObject({ paymentStatus: 'refunded', refundId: rid })
+    expect((await ptxRef.get()).data()).toMatchObject({ status: 'refunded' })
+  }, T)
+
+  it('RD-REFUND-STATUS-01 · Razorpay reports the refund FAILED: no money moved — the claim is released, nothing recorded', async () => {
+    const { POST: refundRoute } = await import('@/app/api/organizer/registrations/[registrationId]/refund/route')
+    await seedEvent(50)
+    const s = await paidRegistration(`rs01-failed@finfix.test`)
+    h.refundStatus = 'failed'
+    const res = await refundRoute(new NextRequest('http://x', { method: 'POST',
+      headers: { authorization: 'Bearer super', 'content-type': 'application/json' }, body: JSON.stringify({ reason: 'attendee asked for a refund' }) }),
+      { params: Promise.resolve({ registrationId: s.registrationId }) } as never)
+    expect(res.status).toBe(502)
+    expect((await db.doc(`registrations/${s.registrationId}`).get()).data()).toMatchObject({ paymentStatus: 'paid' })
+    expect((await db.doc(`registrations/${s.registrationId}`).get()).get('refundClaim')).toBeUndefined()
+    expect((await db.collection('registrationRefunds').where('gatewayPaymentId', '==', s.pay.id).get()).size).toBe(0)
+    expect((await db.doc(`platformTransactions/ptx_${s.registrationId}`).get()).data()).toMatchObject({ status: 'completed', releaseStatus: 'pending' })
+  }, T)
+
   // ═══ PART 15 · end-to-end reconciliation across every source, two events ══════════════════════
   it('PART 15 · two events, every path (free, paid, failed, duplicate webhook, verify retry, refund, refund+cancel, cancel): every source reconciles', async () => {
     const { createRegistration } = await import('@/lib/firebase/firestore/registrations')

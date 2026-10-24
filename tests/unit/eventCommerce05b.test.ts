@@ -116,9 +116,15 @@ describe('Fee Collection Method: License & Services only, one source of truth, s
     expect(STEP7).toContain("{phase === 'final' && !isFreeEvent && <EasySplitNotice />}")
     expect((STEP7.match(/<EasySplitNotice \/>/g) ?? []).length).toBe(1)
   })
-  it('the fee model is FIXED (organizer-pays): no organizer state, no draft save, no live save', () => {
-    expect(STEP7).toContain('const localFeeModel: FeeModel = SUPPORTED_FEE_MODEL')
-    expect(STEP7).not.toContain('setLocalFeeModel')
+  // RD-FEE-RESTORE-01 — the fee model is organizer-selectable again behind pricingEngineEnabled,
+  // so "no organizer state" is no longer the property to hold. What still must hold, and is now
+  // asserted: with the engine OFF the model is the fixed supported one, and the old ad-hoc save
+  // paths this case was really guarding against have NOT come back — persistence goes through
+  // the draft, exactly as every other Step-7 value does.
+  it('the fee model is organizer state ONLY behind the flag; no ad-hoc save paths return', () => {
+    expect(STEP7).toContain('!pricingEngineOn ? SUPPORTED_FEE_MODEL : (recordedFeeModel ?? DEFAULT_FEE_MODEL_WHEN_ENABLED)')
+    expect(STEP7).toContain('setLocalFeeModel')
+    // The two bespoke savers that used to exist alongside the draft write stay gone.
     expect(STEP7).not.toContain('saveLiveFeeModel')
     expect(STEP7).not.toContain('savePricingChanges')
   })
@@ -127,7 +133,15 @@ describe('Fee Collection Method: License & Services only, one source of truth, s
     expect(finalBlock).toContain('onSaveDraft={data => saveDraft(reviewStepIndex, data)}')
     expect(finalBlock).not.toContain('onSaveDraft={handleSaveDraft}')
   })
-  it('no fee-collection control exists in the page at all (RD-PHASE4-S3)', () => {
-    expect(PAGE).not.toMatch(/<FeeCollectionCard|<FeeCollectionSection|function FeeCollection/)
+  // RD-FEE-RESTORE-01 — replaces "no fee-collection control exists". One exists again. What this
+  // case now pins is the shape the original decision cared about: exactly ONE control, in the
+  // one place (final phase, paid events), and the Easy Split notice still beside it rather than
+  // replaced by it.
+  it('exactly ONE fee-collection control exists, in the final phase for paid events', () => {
+    expect((PAGE.match(/<FeeCollectionSection/g) ?? []).length).toBe(1)
+    expect((PAGE.match(/function FeeCollectionSection/g) ?? []).length).toBe(1)
+    // The card wrapper that used to double as a second entry point stays gone.
+    expect(PAGE).not.toMatch(/<FeeCollectionCard|function FeeCollectionCard/)
+    expect(PAGE).toContain("phase === 'final' && !isFreeEvent && pricingEngineOn && feeSamplePrice !== null")
   })
 })

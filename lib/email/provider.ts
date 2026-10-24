@@ -4,6 +4,7 @@
 // implementation change and zero business-logic changes.
 
 import type { EmailBranding } from './templates/base'
+import type { AttendeeFeeBreakdown } from '@/lib/fees/attendeeBreakdown'
 
 export type EmailStatus = 'pending' | 'sent' | 'failed'
 
@@ -44,6 +45,17 @@ export interface RegistrationEmailParams {
   /** Raw ICS text — when present, attached as calendar-invite.ics in the email. */
   icsContent?:    string
   branding?:      EmailBranding   // RD-PRODUCT-01C white-label (covers ticket via alias)
+  /**
+   * RD-FEE-RESTORE-01 — the attendee-paid fee itemisation, for an `attendee_pays` registration.
+   *
+   * Absent for organizer-absorbs and free registrations, where the attendee bore no fees and
+   * there is nothing to itemise — `buildAttendeeFeeBreakdown` returns null for exactly those,
+   * so passing its result through is enough and no caller needs to know the fee model.
+   *
+   * Built from the SAME canonical record the receipt and the checkout confirmation render, so
+   * the figures in the email cannot disagree with what was charged.
+   */
+  feeBreakdown?:  AttendeeFeeBreakdown
 }
 
 // Ticket re-delivery email — same shape as registration confirmation

@@ -7,6 +7,7 @@
 //
 //   Wallet ──Increase Limit──▶ /dashboard/events/new/visibility?draftId=…&step=license&service=…&returnTo=…
 //          ◀──── after a VERIFIED purchase (published events) the step returns to `returnTo`
+//                (the Wallet, or — RD-PURCHASE-RETURN-01 — the Certificates tab / Broadcasts it came from)
 
 import type { RequestableService } from './serviceRequestRules'
 
@@ -22,17 +23,42 @@ export interface PurchaseIntent {
   at:       number
 }
 
-/** Only the Wallet itself may be a return target (never an arbitrary / external URL). */
+/**
+ * RD-PURCHASE-RETURN-01 — the ONLY return targets (never an arbitrary / external URL): the Wallet,
+ * an event's Certificates tab, and the Broadcasts composer. Exact shapes — no extra parameters, no
+ * fragments. Checked when the hand-off is built (increaseLimitHref), recorded (intentFromParams) and
+ * consumed (readIntent). Navigation only — never authorization: the draft is scoped by its id and
+ * every purchase is verified server-side, wherever the organizer lands afterwards.
+ */
+const RETURN_TARGETS: readonly { re: RegExp; label: string }[] = [
+  { re: /^\/dashboard\/wallet(\?eventId=[A-Za-z0-9_-]{1,128})?$/,                label: 'Return to Wallet' },
+  { re: /^\/dashboard\/events\/[A-Za-z0-9_-]{1,128}\?tab=certificates$/,          label: 'Return to Certificates' },
+  { re: /^\/dashboard\/communications\/broadcasts(\?event=[A-Za-z0-9_-]{1,200})?$/, label: 'Return to Broadcasts' },
+]
+
 export function safeReturnTo(v: unknown): string | null {
   if (typeof v !== 'string') return null
-  if (!/^\/dashboard\/wallet(\?eventId=[A-Za-z0-9_-]{1,128})?$/.test(v)) return null
-  return v
+  return RETURN_TARGETS.some(t => t.re.test(v)) ? v : null
+}
+
+/** The link text for a (validated) return target — named after where it actually goes. */
+export function returnLabelFor(returnTo: string): string {
+  return RETURN_TARGETS.find(t => t.re.test(returnTo))?.label ?? 'Return to Wallet'
 }
 
 export const walletHrefFor = (draftId: string) => `/dashboard/wallet?eventId=${encodeURIComponent(draftId)}`
+/** RD-PURCHASE-RETURN-01 — the event's Certificates tab (`draftId` is the dashboard event id). */
+export const certificatesTabHrefFor = (draftId: string) => `/dashboard/events/${encodeURIComponent(draftId)}?tab=certificates`
+/** RD-PURCHASE-RETURN-01 — the Broadcasts composer, preselecting the event by its public slug. */
+export const broadcastsHrefFor = (eventSlug?: string | null) =>
+  eventSlug ? `/dashboard/communications/broadcasts?event=${encodeURIComponent(eventSlug)}` : '/dashboard/communications/broadcasts'
 
-export function increaseLimitHref(draftId: string, service: RequestableService): string {
-  const qs = new URLSearchParams({ draftId, step: 'license', service, returnTo: walletHrefFor(draftId) })
+/**
+ * `returnTo` defaults to the Wallet — the existing behaviour for every Wallet-started purchase. A
+ * target outside the allow-list is replaced by the Wallet, never passed through.
+ */
+export function increaseLimitHref(draftId: string, service: RequestableService, returnTo?: string | null): string {
+  const qs = new URLSearchParams({ draftId, step: 'license', service, returnTo: safeReturnTo(returnTo) ?? walletHrefFor(draftId) })
   return `/dashboard/events/new/visibility?${qs.toString()}`
 }
 

@@ -11,11 +11,13 @@ import { formatINR } from '@/lib/events/builder/format'
 import { computeFeePreview } from '@/lib/events/builder/feePreview'
 import {
   type WizardStep, type StepViewProps, type VisibilityId,
-  type FeeModel, SUPPORTED_FEE_MODEL,
+  type FeeModel, SUPPORTED_FEE_MODEL, DEFAULT_FEE_MODEL_WHEN_ENABLED,
   type FeeRates, type StepSummary, type ReadinessReport,
 } from '@/lib/events/builder/types'
+import { readFeeCollection, buildFeeCollection } from '@/lib/fees/explicitFeeModel'
+import { useAuth } from '@/components/auth/AuthProvider'
 import { draftKeyFor, indexOfStep, resumeStepFor, isSubmittedDraftStatus, type WizardFlow } from '@/lib/events/builder/stepRegistry'
-import { readIntent, clearIntent } from '@/lib/wallet/purchaseIntent'
+import { readIntent, clearIntent, returnLabelFor } from '@/lib/wallet/purchaseIntent'
 import { validateStep } from '@/lib/events/builder/stepValidation'
 import { EASE, WIZARD_STEPS } from '@/lib/events/builder/constants'
 import { Stepper } from '@/components/event-builder/Stepper'
@@ -200,9 +202,103 @@ const FEE_MODEL_LABELS: Record<FeeModel, string> = {
 // Card used by EventTypeSelectorSection — self-contained popover for examples
 
 
-// RD-PHASE4-S3 · Q1 — the Fee Collection Method selector is REMOVED: fee collection is fixed to
-// organizer-pays and organizers do not choose it (RegisterDesk manages pricing). What remains here is
-// the informational Cashfree Easy Split notice that used to sit under that selector.
+// ─── RD-FEE-RESTORE-01 · Fee Collection Method ────────────────────────────────
+//
+// Restored (it existed until RD-PHASE4-S3 · Q1 removed it), gated on the live pricing-engine
+// flag. Three things differ from the version that was removed, each fixing a real defect:
+//
+//   • it prices through `computeFeePreview` — the canonical engine adapter. The old version
+//     used a page-local `calcFees` that taxed platform+gateway for GST while the engine taxes
+//     the platform fee only, so the organizer was shown a number checkout never charged.
+//   • `samplePrice` is REQUIRED. The old default of 500 is what let a free event render a
+//     fee comparison for an invented ₹500 ticket (tests/unit/feeCollectionFreeEvent.test.ts).
+//   • it renders only when the engine is on AND the event is paid. The caller owns both
+//     conditions; this component never decides its own visibility.
+//
+// This control chooses what to RECORD. What is CHARGED is decided server-side from
+// `pricing.feeCollection` (lib/fees/explicitFeeModel.ts) with the same flag re-checked there,
+// so the UI is a convenience and never the authority.
+function FeeCollectionSection({
+  feeModel,
+  onChange,
+  samplePrice,
+  locked = false,
+}: {
+  feeModel:    FeeModel
+  onChange:    (m: FeeModel) => void
+  samplePrice: number
+  /** RD-LICENSE-LOCK-01 — read-only while a submitted event's purchase surface is locked. */
+  locked?:     boolean
+}) {
+  const rates  = feeRatesFrom(useFeesConfig())
+  const apFees = computeFeePreview(samplePrice, 'attendee_pays', rates)
+  const oaFees = computeFeePreview(samplePrice, 'organizer_absorbs', rates)
+
+  const OPTIONS = [
+    {
+      id: 'attendee_pays' as FeeModel,
+      label: 'Attendee Pays Fees',
+      desc: 'Fees are added on top of your ticket price. You receive the full ticket value.',
+      fees: apFees,
+      note: 'You receive the full amount',
+      noteCls: 'text-emerald-700',
+    },
+    {
+      id: 'organizer_absorbs' as FeeModel,
+      label: 'Organizer Absorbs Fees',
+      desc: 'Attendees pay only the ticket price. Platform fees are deducted from your payout.',
+      fees: oaFees,
+      note: 'Fees deducted from your payout',
+      noteCls: 'text-amber-700',
+    },
+  ] as const
+
+  return (
+    <div className="rounded-xl border border-border bg-card p-4">
+      <p className="text-[13px] font-semibold text-foreground">Fee Collection Method</p>
+      <p className="mb-4 mt-1 text-[12px] text-muted-foreground">
+        Choose who pays RegisterDesk platform charges — shown for a {formatINR(samplePrice)} ticket.
+        You can change this later; it applies to new registrations only.
+      </p>
+
+      <div
+        role="radiogroup"
+        aria-label="Fee Collection Method"
+        className="grid grid-cols-1 gap-3 sm:grid-cols-2"
+      >
+        {OPTIONS.map(opt => {
+          const selected = feeModel === opt.id
+          return (
+            <button
+              key={opt.id}
+              type="button"
+              role="radio"
+              aria-checked={selected}
+              disabled={locked}
+              onClick={() => { if (!locked) onChange(opt.id) }}
+              className={cn(
+                'rounded-xl border p-3 text-left transition-colors',
+                'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40',
+                selected ? 'border-primary bg-primary/[0.06]' : 'border-border hover:border-border-strong',
+                locked && 'cursor-not-allowed opacity-60 hover:border-border',
+              )}
+            >
+              <span className="block text-[13px] font-semibold text-foreground">{opt.label}</span>
+              <span className="mt-1 block text-[12px] text-muted-foreground">{opt.desc}</span>
+              <span className="mt-2 block text-[12px] text-foreground">
+                Attendee pays <strong>{formatINR(opt.fees.attendeePays)}</strong> · you receive{' '}
+                <strong>{formatINR(opt.fees.organizerGets)}</strong>
+              </span>
+              <span className={cn('mt-1 block text-[11.5px] font-medium', opt.noteCls)}>{opt.note}</span>
+            </button>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+// The informational Cashfree Easy Split notice that sits under the selector above.
 function EasySplitNotice() {
   return (
     <div>
@@ -1832,7 +1928,7 @@ function buildReadinessReport(
 // fee-collection choice, the server's activation state and the publish agreement, and submits.
 function Step7View({
   currentStep, completedValues, onNext, onBack, initialData, onGoToStep, wizardSteps,
-  onSettle, phase = 'review', renderLicense, onServerSaved,
+  onSettle, phase = 'review', renderLicense, onServerSaved, onFeeModelChange,
 }: StepViewProps & {
   /** RD-EVENT-COMMERCE-05D — called after the SERVER confirmed Save Changes (re-align the draft baseline). */
   onServerSaved?: () => void
@@ -1856,6 +1952,15 @@ function Step7View({
    * writes could not be confirmed — submission is then refused, never attempted.
    */
   onSettle?: () => Promise<boolean>
+  /**
+   * RD-FEE-RESTORE-01/02 — persists the organizer's Fee Collection Method.
+   *
+   * Resolves FALSE when nothing was saved, so the caller restores the previous selection rather
+   * than showing a choice the server does not have. For a PUBLISHED event this goes through
+   * PATCH /edit (draft + live in one batch); for a draft it writes the draft, and publish carries
+   * it across.
+   */
+  onFeeModelChange?: (m: FeeModel) => Promise<boolean>
 }) {
   // RD-EVENT-26 — which wizard this Review belongs to, read off the step list this view was
   // already given. Derived from the registry's own titles rather than a step count or a new
@@ -1952,9 +2057,55 @@ function Step7View({
   }), [termInfo, isFreeEvent, termsFees, consentFeeModel, consentTimeline])
 
   // ── Interactive state — initialized from draft, persisted via onSaveDraft ──
-  // RD-PHASE4-S3 · Q1 — fee collection is FIXED to organizer-pays: organizers do not choose it, so
-  // the draft always carries (and every summary shows) the supported model.
-  const localFeeModel: FeeModel = SUPPORTED_FEE_MODEL
+  //
+  // RD-FEE-RESTORE-01 — the Fee Collection Method is the organizer's choice again, gated on the
+  // live pricing-engine flag.
+  //
+  // Initialisation, in order: the draft's RECORDED choice (`pricing.feeCollection`), else the
+  // default for the current flag state. The legacy `pricing.feeModel` is deliberately NOT read —
+  // it has never charged anybody, and seeding the control from it would show an organizer a
+  // selection their event has never actually used (lib/fees/explicitFeeModel.ts).
+  //
+  // Flag OFF ⇒ SUPPORTED_FEE_MODEL and no control is rendered, exactly as before.
+  const pricingEngineOn = useFeesConfig().pricingEngineEnabled === true
+  const recordedFeeModel = readFeeCollection(pricingData)?.model ?? null
+  const desiredFeeModel: FeeModel =
+    !pricingEngineOn ? SUPPORTED_FEE_MODEL : (recordedFeeModel ?? DEFAULT_FEE_MODEL_WHEN_ENABLED)
+  const [localFeeModel, setLocalFeeModel] = useState<FeeModel>(desiredFeeModel)
+
+  // RD-FEE-RESTORE-04 · re-sync when the SOURCES arrive, not only on first mount.
+  //
+  // `useState`'s initialiser runs once, and both of its inputs start wrong and settle later:
+  // `pricingEngineOn` comes from BusinessConfigProvider, whose state begins at the code defaults
+  // (pricingEngineEnabled: false) and flips only after /api/config/public resolves; `pricingData`
+  // arrives with the draft. Mount before either lands and the control showed the fallback model
+  // for the rest of the session — so a reload could display Organizer Absorbs on an event whose
+  // stored record says Attendee Pays, which is the same class of lie as the ₹1 summary.
+  //
+  // Derived during render rather than in an effect (the idiom LicenseServicesStep already uses
+  // for `grantKey`): an effect here would be a setState-in-effect cascade, which this file's
+  // lint rules reject for good reason.
+  //
+  // `feeResyncHold` is what keeps it from fighting the organizer: while a save is pending the
+  // optimistic selection must stand, or a slow round trip would snap the card back mid-request.
+  const feeSourceKey = `${pricingEngineOn}|${recordedFeeModel ?? ''}`
+  const [seenFeeSourceKey, setSeenFeeSourceKey] = useState(feeSourceKey)
+  // STATE, not a ref: this is read during render to decide whether to re-sync, and a ref read
+  // at render time is exactly what React forbids ("Cannot access refs during render") — it is
+  // invisible to the renderer and wrong under concurrent rendering.
+  const [feeResyncHold, setFeeResyncHold] = useState(false)
+  if (feeSourceKey !== seenFeeSourceKey) {
+    setSeenFeeSourceKey(feeSourceKey)
+    if (!feeResyncHold) setLocalFeeModel(desiredFeeModel)
+  }
+  // The event's own cheapest PAID pass. `null` when there is none, which suppresses the
+  // selector entirely rather than falling back to an invented sample ticket.
+  const feeSamplePrice = useMemo(() => {
+    const paid = ((pricingData?.passes as EventPassFull[] | undefined) ?? [])
+      .map(p => p.price ?? 0)
+      .filter(p => p > 0)
+    return paid.length > 0 ? Math.min(...paid) : null
+  }, [pricingData])
   // RD-EVENT-COMMERCE-02 — the service switches moved to License & Services; here they are
   // read-only facts of the draft.
   const localWhatsapp = !!pricingData?.whatsappEnabled
@@ -2230,7 +2381,8 @@ function Step7View({
           const walletIntent = readIntent(draftId)
           return walletIntent ? (
             <Link href={walletIntent.returnTo} onClick={() => clearIntent()} className={cn(buttonVariants({ variant: 'primary' }), 'gap-1.5')}>
-              <ArrowLeft className="size-4" aria-hidden />Return to Wallet
+              {/* RD-PURCHASE-RETURN-01 — named after where it goes (Wallet / Certificates / Broadcasts). */}
+              <ArrowLeft className="size-4" aria-hidden />{returnLabelFor(walletIntent.returnTo)}
             </Link>
           ) : null
         })()}
@@ -2470,6 +2622,50 @@ function Step7View({
       <div className="mt-4 flex flex-col gap-4">
         {/* RD-PHASE4-S3 · Q1 — the Fee Collection Method card is removed (fee collection is fixed to
             organizer-pays). The informational Easy Split notice keeps its place: paid events, final step. */}
+        {/* RD-FEE-RESTORE-01 — the selector sits where it always did: final phase, PAID events only.
+            `!isFreeEvent` is the guard whose absence was the original defect — a free event showed
+            a fee comparison for a ticket nobody buys. `pricingEngineOn` is the live flag; with it
+            off this renders nothing and the Easy Split notice below keeps the slot unchanged.
+            `samplePrice` is the event's own cheapest paid pass — never an invented default. */}
+        {/* RD-LICENSE-LOCK-01 — a SUBMITTED event's purchase surface is read-only until "Unlock
+            to edit", and this control sits on that surface, so it obeys the same lock. The flag
+            is reported up by LicenseServicesStep (payCtx.locked); it is false for an unpublished
+            draft, which is never locked, so the new-event flow is untouched. */}
+        {phase === 'final' && !isFreeEvent && pricingEngineOn && feeSamplePrice !== null && (
+          <FeeCollectionSection
+            feeModel={localFeeModel}
+            // RD-LICENSE-LOCK-03 · fails CLOSED while the lock state is unknown.
+            //
+            // `payCtx` starts null and is only populated once LicenseServicesStep reports, so
+            // `payCtx?.locked === true` was false for the first render(s) — a submitted event's
+            // fee options were briefly live before the lock arrived. Reading it as "locked unless
+            // explicitly told otherwise" removes that window; an unpublished draft is never
+            // submitted, so it stays unlocked exactly as before.
+            locked={isSubmitted && payCtx?.locked !== false}
+            samplePrice={feeSamplePrice}
+            // RD-FEE-RESTORE-02 — optimistic, then REVERTED if the server did not take it.
+            // Leaving the card selected after a failed save is how the organizer came to believe
+            // a choice was live when checkout had never seen it.
+            onChange={m => {
+              const previous = localFeeModel
+              setLocalFeeModel(m)
+              setFeeResyncHold(true)
+              void (async () => {
+                try {
+                  const saved = await onFeeModelChange?.(m)
+                  if (saved === false) {
+                    setLocalFeeModel(previous)
+                    showToast('That fee setting could not be saved. Nothing was changed — please try again.', 'error')
+                  }
+                } finally {
+                  // Cleared in `finally`: a throw that left this set would freeze the re-sync
+                  // above for the rest of the session.
+                  setFeeResyncHold(false)
+                }
+              })()
+            }}
+          />
+        )}
         {phase === 'final' && !isFreeEvent && <EasySplitNotice />}
 
         {/* RD-COMMS-P1 — WhatsApp needs WhatsApp capacity from this step (no wallet top-up). */}
@@ -3442,9 +3638,45 @@ export default function CreateEventWizard() {
   // where every sender already reads them (`pricing.whatsappEnabled` gates each WhatsApp send).
   // Merged over the current pricing so no pass, date or fee field is touched.
   const draftPricing = draft?.pricing
+  // RD-LICENSE-LOCK-02 — declared HERE, above every callback that reads them. A `const` read by
+  // a useCallback defined earlier in the body defeats the React Compiler's analysis ("Compilation
+  // Skipped: Existing memoization could not be preserved") and drops memoization for the whole
+  // wizard, which on this page means re-rendering the builder on every keystroke.
+  const isPublishedDraft = draft?.status === 'published'
+  const feeEditDraftId   = draft?.id ?? ''
+  // RD-LICENSE-LOCK-02 — a SUBMITTED event's service flags go through the server.
+  //
+  // These flags gate whether anything is sent at all, and the wizard used to write them straight
+  // to the draft with the client SDK: no server authorization beyond firestore.rules, and the
+  // LIVE event they actually govern was only updated by a separate Save Changes the organizer
+  // might never press — so the switch and the sending behaviour could disagree indefinitely.
+  //
+  // PATCH /edit verifies the caller, verifies that the draft AND the live document are the same
+  // event owned by them, writes both in ONE batch and records an edit-history row. An unpublished
+  // draft keeps the direct write: it has no live document, no lock, and nothing to desynchronise.
+  //
+  // Resolves false when nothing was saved, so the caller can restore the previous switch state
+  // rather than leave the UI asserting something the server never accepted.
   const onServicesChange = useCallback(
-    (values: PaygServiceFlags) => { void updateDraft({ pricing: { ...(draftPricing ?? {}), ...values } }) },
-    [updateDraft, draftPricing],
+    async (values: PaygServiceFlags): Promise<boolean> => {
+      if (!isPublishedDraft || !feeEditDraftId) {
+        void updateDraft({ pricing: { ...(draftPricing ?? {}), ...values } })
+        return true
+      }
+      try {
+        const token = await auth.currentUser?.getIdToken()
+        const res = await fetch(`/api/organizer/events/${feeEditDraftId}/edit`, {
+          method:  'PATCH',
+          headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+          body:    JSON.stringify(values),
+        })
+        const json = await res.json().catch(() => ({})) as { success?: boolean }
+        return res.ok && json.success === true
+      } catch {
+        return false
+      }
+    },
+    [updateDraft, draftPricing, isPublishedDraft, feeEditDraftId],
   )
   // RD-EVENT-COMMERCE-02 — the prepaid service QUANTITIES selected on License & Services.
   // Intent only (publish checks it against the allowance ledger). A malformed stored value reads
@@ -3457,6 +3689,58 @@ export default function CreateEventWizard() {
   const onServiceSelectionChange = useCallback(
     (selection: ServiceSelection) => { void updateDraft({ serviceSelection: selection }) },
     [updateDraft],
+  )
+  // RD-FEE-RESTORE-01 — the Fee Collection Method, merged over the current pricing exactly as
+  // the service switches above are, so no pass, date or fee field is disturbed.
+  //
+  // Writes `feeCollection` (the explicit record) and deliberately leaves the legacy
+  // `pricing.feeModel` alone: that field is what every pre-existing event carries, and the
+  // server never reads it. `setBy` is the authenticated uid — without one no record is written,
+  // so an unauthenticated client cannot produce a selection that would later be honoured.
+  // RD-FEE-RESTORE-02 — a PUBLISHED event must also reach `events/{slug}`.
+  //
+  // The draft write alone was the reported defect: the builder previews from the draft and
+  // showed ₹1.04, while an attendee — priced from the LIVE document, which had no record — was
+  // charged ₹1. For an unpublished draft the gap closes at publish (which copies pricing
+  // wholesale); for an already-published event nothing in this path wrote the live document, so
+  // the choice stayed invisible to checkout until the organizer happened to press Save Changes.
+  //
+  // PATCH /edit is the designated path for exactly this (lib/events/editing/applyEdit.ts): it is
+  // engine-gated, validated, audited, and writes the draft and the live event in ONE batch. It is
+  // used INSTEAD of the draft write for a published event rather than in addition to it, so the
+  // two documents can never be left disagreeing by a partial success.
+  //
+  // Returns false when nothing was saved, so the caller can restore the previous selection
+  // instead of leaving the UI showing a choice the server does not have.
+  // `isPublishedDraft` / `feeEditDraftId` are declared once, above onServicesChange — both
+  // callbacks read them, and a later declaration would defeat the React Compiler for both.
+  const feeActorUid = useAuth().user?.uid ?? ''
+  const onFeeModelChange = useCallback(
+    async (model: FeeModel): Promise<boolean> => {
+      if (!feeActorUid || !feeEditDraftId) return false
+      if (isPublishedDraft) {
+        try {
+          const token = await auth.currentUser?.getIdToken()
+          const res = await fetch(`/api/organizer/events/${feeEditDraftId}/edit`, {
+            method:  'PATCH',
+            headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+            body:    JSON.stringify({ feeModel: model }),
+          })
+          const json = await res.json().catch(() => ({})) as { success?: boolean }
+          return res.ok && json.success === true
+        } catch {
+          return false
+        }
+      }
+      void updateDraft({
+        pricing: {
+          ...(draftPricing ?? {}),
+          feeCollection: buildFeeCollection(model, feeActorUid, new Date().toISOString()),
+        },
+      })
+      return true
+    },
+    [updateDraft, draftPricing, feeActorUid, isPublishedDraft, feeEditDraftId],
   )
   const draftStatus = typeof draft?.status === 'string' ? draft.status : null
 
@@ -3707,6 +3991,7 @@ export default function CreateEventWizard() {
           {...sharedProps}
           onGoToStep={goToStep}
           onSaveDraft={data => saveDraft(reviewStepIndex, data)}
+          onFeeModelChange={onFeeModelChange}
           initialData={reviewInitialData}
           renderLicense={() => (
             <LicenseStepView
@@ -3740,6 +4025,7 @@ export default function CreateEventWizard() {
           // (License → `licenseTier`) and put the pricing object in the wrong field, so the save is
           // routed through the Review step's key (`pricing`) explicitly.
           onSaveDraft={data => saveDraft(reviewStepIndex, data)}
+          onFeeModelChange={onFeeModelChange}
           initialData={reviewInitialData}
           renderLicense={onContext => (
             <LicenseStepView

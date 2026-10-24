@@ -64,6 +64,30 @@ export type FeeModel = 'attendee_pays' | 'organizer_absorbs'
 // placeholder only. See RD-EVENT-02 Sprint 1A (H4 honesty fix).
 export const SUPPORTED_FEE_MODEL: FeeModel = 'organizer_absorbs'
 
+/**
+ * RD-FEE-RESTORE-01 — the model a NEW paid event starts on once the pricing engine is enabled.
+ *
+ * ORGANIZER-ABSORBS, deliberately the same as `SUPPORTED_FEE_MODEL`, so that turning the pricing
+ * engine on changes what nobody is charged until an organizer actively chooses otherwise. The
+ * selector offers Attendee Pays Fees exactly as before — this governs only which card starts
+ * selected, never which models exist.
+ *
+ * It was briefly `attendee_pays` (the recommendation from when the selector last existed), and
+ * that was changed on the owner's call for the release: with the flag already ON in production,
+ * an attendee-pays default would have begun charging attendees platform fees on every new paid
+ * event the moment this deployed. Opt-in is the quieter rollout.
+ *
+ * A DEFAULT, not a coercion: it pre-selects the control for a new paid event while the engine is
+ * on. It changes nothing for an existing event (those carry no `feeCollection` record and are
+ * resolved by `SUPPORTED_FEE_MODEL` server-side), and nothing at all while the engine is off.
+ *
+ * Kept as its own constant rather than collapsed into `SUPPORTED_FEE_MODEL`: the two mean
+ * different things — one is the fallback for an event that never chose, the other is the
+ * starting point for an organizer who is about to. Merging them would lose that distinction the
+ * next time either moves.
+ */
+export const DEFAULT_FEE_MODEL_WHEN_ENABLED: FeeModel = 'organizer_absorbs'
+
 // Resolve a stored/legacy fee-model value to the model the builder should use.
 // RD-PAYMENT-02 Phase 7: gated by the pricing engine. When `engineEnabled` is FALSE
 // (production default) this always coerces to organizer_absorbs — attendee_pays stays
@@ -99,7 +123,19 @@ export function organizerPaysPricing<T>(pricing: T): T {
 
 export interface EventPricingDraft {
   eventType:               EventPricingType
+  /**
+   * LEGACY. Still written (always `SUPPORTED_FEE_MODEL`) and still read by summaries, but it has
+   * never decided a charge — see lib/fees/explicitFeeModel.ts. Kept so existing readers and
+   * stored documents are undisturbed.
+   */
   feeModel:                FeeModel
+  /**
+   * RD-FEE-RESTORE-01 — the organizer's EXPLICIT Fee Collection Method, when they have chosen one.
+   * Optional on purpose: its absence is what keeps every pre-existing event on organizer-absorbs,
+   * and it is the ONLY field checkout consults. Typed loosely (the record's own module owns the
+   * shape) so this type file stays free of a runtime import.
+   */
+  feeCollection?:          { model: FeeModel; setAt: string; setBy: string; version: number }
   estimatedRegistrations:  number            // used only for simulation when unlimited passes exist
   passes:                  EventPass[]
   registrationOpenDate:    string

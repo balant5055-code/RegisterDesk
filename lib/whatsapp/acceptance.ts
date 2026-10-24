@@ -29,7 +29,7 @@
 import { FieldValue } from 'firebase-admin/firestore'
 import { adminDb } from '@/lib/firebase/admin'
 import type { OrganizerWallet } from '@/types/events'
-import { legacyBalanceCanFund } from '@/lib/communications/capacity'
+import { legacyBalanceCanFund, legacyBalanceCanFundNewWhatsApp } from '@/lib/communications/capacity'
 import { WHATSAPP_HOLDS } from './funding'
 import type { WriteEmailLogInput } from '@/lib/email-logs/types'
 import {
@@ -176,7 +176,9 @@ export async function recordMessageAcceptance(input: MessageAcceptanceInput): Pr
       if (f.draftId && takeUnitRef && available >= 1) {
         txn.set(serviceLedgerRef(f.draftId), { whatsapp: { consumed: FieldValue.increment(1) }, updatedAt: FieldValue.serverTimestamp() }, { merge: true })
         txn.set(takeUnitRef, { service: 'whatsapp', quantity: 1, source: `${input.templateKey}_${input.source}`, acceptedWamid: input.wamid, createdAt: FieldValue.serverTimestamp() })
-      } else if (chargeRef && legacyBalanceCanFund(balance, f.legacyPricePaise)) {
+      // RD-WA-BLOCK-01 — funding a message that had no usable hold is a NEW funding decision:
+      // event capacity only (otherwise recorded unbilled below, never silently free).
+      } else if (chargeRef && legacyBalanceCanFundNewWhatsApp(balance, f.legacyPricePaise)) {
         // Never below zero: legacyBalanceCanFund requires the WHOLE price, whatever allowNegativeBalance says.
         txn.set(walletRef, { balancePaise: balance - f.legacyPricePaise, currency: 'INR', updatedAt: FieldValue.serverTimestamp() }, { merge: true })
         txn.set(chargeRef, {
@@ -275,6 +277,8 @@ function txnWriteChargeBack(
     amount = unitPaise * units
     const balance = walletSnap?.exists ? ((walletSnap.data() as OrganizerWallet).balancePaise ?? 0) : 0
     // RD-COMMS-P2-A — the LEGACY balance is drained, never extended: allowNegativeBalance does not apply.
+    // RD-WA-BLOCK-01 — deliberately NOT the new-message rule: this settles a campaign the legacy balance
+    // ALREADY funded (its charge row exists), for messages Meta accepted after their units were refunded.
     if (legacyBalanceCanFund(balance, amount)) {
       txn.set(walletRef, { balancePaise: balance - amount, currency: 'INR', updatedAt: FieldValue.serverTimestamp() }, { merge: true })
       txn.set(ledgerRef, {

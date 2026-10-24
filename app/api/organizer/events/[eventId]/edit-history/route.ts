@@ -16,6 +16,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { FieldValue } from 'firebase-admin/firestore'
 import { adminDb } from '@/lib/firebase/admin'
 import { authorizeWorkspace } from '@/lib/team/workspace'
+import { resolvePlatformPricing } from '@/lib/platform/pricing/resolver'
 import { findForbiddenEditKeys, requiresAttendeeNotification } from '@/lib/events/editing/fieldClassification'
 import { buildEventEditUpdate } from '@/lib/events/editing/applyEdit'
 import {
@@ -99,7 +100,14 @@ export async function POST(
 
   let built
   try {
-    built = buildEventEditUpdate(restore, d, passCounts)
+    // RD-FEE-RESTORE-01 — a rollback replays a stored payload, so it can contain a fee model if the
+    // edit it reverses did. Gated on the SAME live flag as a forward edit: with the engine off this
+    // keeps throwing (400), and the rollback is refused rather than quietly dropping the field.
+    built = buildEventEditUpdate(restore, d, passCounts, {
+      feeModelEditable: (await resolvePlatformPricing()).features.pricingEngineEnabled,
+      actorUid: authz.callerUid,
+      nowIso:   new Date().toISOString(),
+    })
   } catch (err) {
     if (err instanceof RangeError) return NextResponse.json({ success: false, error: err.message }, { status: 400 })
     return NextResponse.json({ success: false, error: 'Failed to prepare rollback' }, { status: 500 })

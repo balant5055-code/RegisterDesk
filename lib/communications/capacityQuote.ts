@@ -6,8 +6,8 @@
 //
 //   1. the event's WhatsApp capacity (decideReserve / availableUnits) covers EVERY recipient
 //      ⇒ funded by event capacity;
-//   2. otherwise the LEGACY balance covers the WHOLE cost (legacyBalanceCanFund)
-//      ⇒ funded by the legacy balance;
+//   2. (RD-WA-BLOCK-01: retired — legacyBalanceCanFundNewWhatsApp is false; the legacy balance no
+//      longer funds a new broadcast)
 //   3. otherwise ⇒ insufficient. There is no partial send.
 //
 // It is advisory for the organizer (composer preview, scheduling refusal). The funding
@@ -16,7 +16,7 @@
 import { adminDb } from '@/lib/firebase/admin'
 import { decideReserve, draftIdForEventSlug, ledgerRef, viewOf, type ServiceLedgerDoc } from '@/lib/licensing/serviceAllowanceLedger'
 import { getCommunicationConfig } from './resolveCommunicationConfig'
-import { legacyBalanceCanFund } from './capacity'
+import { legacyBalanceCanFundNewWhatsApp } from './capacity'
 
 export interface WhatsAppCapacityQuote {
   /** Messages this broadcast needs: one per eligible recipient. */
@@ -48,7 +48,8 @@ export async function quoteWhatsAppBroadcastCapacity(args: {
   ])
   const balance = wallet.exists ? Number((wallet.data() as { balancePaise?: unknown }).balancePaise ?? 0) : 0
   const cost = Math.max(0, Math.round(comm.whatsapp.pricePaise * required))
-  if (required > 0 && legacyBalanceCanFund(balance, cost)) {
+  // RD-WA-BLOCK-01 — the same rule the funding transaction applies (capacity or nothing).
+  if (required > 0 && legacyBalanceCanFundNewWhatsApp(balance, cost)) {
     return { required, available, shortfall: 0, sufficient: true, fundedBy: 'legacy_balance' }
   }
   return { required, available, shortfall: Math.max(0, required - available), sufficient: false, fundedBy: null }

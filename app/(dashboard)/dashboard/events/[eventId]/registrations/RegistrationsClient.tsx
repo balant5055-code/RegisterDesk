@@ -715,8 +715,11 @@ function RegistrationDrawer({
       })
       const body = await res.json() as RefundRegistrationResponse
       if (body.success) {
-        setLocalPaymentStatus('refunded')
-        onUpdate({ paymentStatus: 'refunded' })
+        // RD-REFUND-STATUS-01 — accepted but not yet processed by Razorpay: the registration stays
+        // 'refund_pending' until the gateway confirms it (it is never shown refunded early).
+        const next = body.pending ? 'refund_pending' : 'refunded'
+        setLocalPaymentStatus(next)
+        onUpdate({ paymentStatus: next })
         setConfirmRefund(false)
       } else {
         setRefundError(body.error ?? 'Failed to issue refund.')

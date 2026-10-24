@@ -1,7 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Loader2, Users, UserCheck, ListChecks, User, Play, RefreshCw, Ban, X, Mail } from 'lucide-react'
+import { Loader2, Users, UserCheck, ListChecks, User, Play, RefreshCw, Ban, X, Mail, AlertTriangle, Info } from 'lucide-react'
 import {
   CERTIFICATE_TYPES, CERTIFICATE_TYPE_LABELS, CERTIFICATE_JOB_STATUS_LABELS,
 } from '@/lib/certificates/constants'
@@ -11,6 +11,9 @@ import { ErrorBox, Badge, FieldLabel, selectCls, btnGhost } from './ui'
 import type { CertApi } from './api'
 import type { CertificateType, CertificateJobScope, SerializedCertificateJob } from '@/lib/certificates/types'
 import type { SerializedRegistration } from '@/app/api/organizer/events/[eventId]/registrations/route'
+import type { CertificateCapacityStatus } from '@/app/api/organizer/events/[eventId]/certificates/stats/route'
+import { certificateIssueGate } from '@/lib/certificates/capacityGate'
+import { LICENSE_SERVICES_CTA, CERTIFICATE_CAPACITY_REQUIRED } from '@/lib/communications/capacity'
 
 const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms))
 const jobTone: Record<string, Parameters<typeof Badge>[0]['tone']> = {
@@ -33,6 +36,16 @@ export default function IssueBulkPanel({ api }: { api: CertApi }) {
   const refreshJobs = useCallback(() => api.listJobs().then(r => setJobs(r.jobs)).catch(() => {}), [api])
   useEffect(() => { refreshJobs() }, [refreshJobs])
 
+  // RD-CERT-CAPACITY-UX-01 — certificate capacity, from the same stats endpoint the Overview reads.
+  // undefined = loading · null = could not be read (unknown, never "available").
+  const [capacity, setCapacity] = useState<CertificateCapacityStatus | null | undefined>(undefined)
+  const refreshCapacity = useCallback(
+    () => api.getStats().then(r => setCapacity(r.certificateCapacity ?? null)).catch(() => setCapacity(null)),
+    [api],
+  )
+  useEffect(() => { void refreshCapacity() }, [refreshCapacity])
+  const gate = certificateIssueGate(capacity)
+
   // Client-side driver: repeatedly call /process until the job is done.
   const drive = useCallback(async (jobId: string) => {
     if (running.current.has(jobId)) return
@@ -46,8 +59,8 @@ export default function IssueBulkPanel({ api }: { api: CertApi }) {
         await sleep(300)
       }
     } catch { /* surfaced via job status on next refresh */ }
-    finally { running.current.delete(jobId) }
-  }, [api])
+    finally { running.current.delete(jobId); void refreshCapacity() }
+  }, [api, refreshCapacity])
 
   async function createJob(scope: CertificateJobScope, registrationIds?: string[]) {
     setBusy(true); setErr(null); setNotice(null)
@@ -59,6 +72,7 @@ export default function IssueBulkPanel({ api }: { api: CertApi }) {
       setNotice(`Job started for "${scope.replace('_', ' ')}" attendees.`)
     } catch (e) {
       setErr(e instanceof Error ? e.message : 'Failed to start job')
+      void refreshCapacity()   // RD-CERT-JOB-CAPACITY-01 — a 402 refusal re-reads the gate
     } finally { setBusy(false) }
   }
 
@@ -67,9 +81,11 @@ export default function IssueBulkPanel({ api }: { api: CertApi }) {
     try {
       const r = await api.issue(registrationId, certType)
       setNotice(r.created ? 'Certificate generated.' : 'Certificate already existed.')
+      if (r.created) void refreshCapacity()
       setPicker(null); setChosen(new Set())
     } catch (e) {
       setErr(e instanceof Error ? e.message : 'Failed to issue certificate')
+      void refreshCapacity()
     } finally { setBusy(false) }
   }
 
@@ -93,6 +109,27 @@ export default function IssueBulkPanel({ api }: { api: CertApi }) {
         <h3 className="text-[14px] font-semibold text-foreground">Generate Certificates</h3>
         <p className="mt-1 text-[13px] text-muted-foreground">Requires an active template (set one in Templates).</p>
 
+        {gate.message && (
+          <p
+            role={gate.blocked ? 'alert' : 'status'}
+            data-testid="certificate-capacity-gate"
+            className={cn(
+              'mt-3 flex items-start gap-1.5 rounded-lg border px-3 py-2 text-[12.5px]',
+              gate.tone === 'warning' ? 'border-amber-300 bg-amber-50 text-amber-900' : 'border-border bg-muted/30 text-muted-foreground',
+            )}
+          >
+            {gate.tone === 'warning'
+              ? <AlertTriangle className="mt-0.5 size-3.5 shrink-0" aria-hidden />
+              : <Info className="mt-0.5 size-3.5 shrink-0" aria-hidden />}
+            <span>
+              {gate.message}{' '}
+              {gate.href && (
+                <a href={gate.href} className="font-semibold text-primary underline underline-offset-2">{LICENSE_SERVICES_CTA}</a>
+              )}
+            </span>
+          </p>
+        )}
+
         <div className="mt-4 grid gap-4 sm:grid-cols-2">
           <div>
             <FieldLabel>Certificate Type</FieldLabel>
@@ -111,10 +148,10 @@ export default function IssueBulkPanel({ api }: { api: CertApi }) {
         </div>
 
         <div className="mt-4 flex flex-wrap gap-2">
-          <button type="button" className={btnGhost} disabled={busy} onClick={() => createJob('all')}><Users className="size-3.5" /> All confirmed</button>
-          <button type="button" className={btnGhost} disabled={busy} onClick={() => createJob('checked_in')}><UserCheck className="size-3.5" /> Checked-in</button>
-          <button type="button" className={btnGhost} disabled={busy} onClick={() => openPicker('selected')}><ListChecks className="size-3.5" /> Selected…</button>
-          <button type="button" className={btnGhost} disabled={busy} onClick={() => openPicker('single')}><User className="size-3.5" /> Single…</button>
+          <button type="button" className={btnGhost} disabled={busy || gate.blocked} onClick={() => createJob('all')}><Users className="size-3.5" /> All confirmed</button>
+          <button type="button" className={btnGhost} disabled={busy || gate.blocked} onClick={() => createJob('checked_in')}><UserCheck className="size-3.5" /> Checked-in</button>
+          <button type="button" className={btnGhost} disabled={busy || gate.blocked} onClick={() => openPicker('selected')}><ListChecks className="size-3.5" /> Selected…</button>
+          <button type="button" className={btnGhost} disabled={busy || gate.blocked} onClick={() => openPicker('single')}><User className="size-3.5" /> Single…</button>
         </div>
 
         {notice && <p className="mt-3 text-[13px] text-emerald-600">{notice}</p>}
@@ -150,7 +187,7 @@ export default function IssueBulkPanel({ api }: { api: CertApi }) {
               </div>
               <div className="mt-3 flex items-center gap-3">
                 <button type="button" className="flex items-center gap-2 rounded-xl bg-primary px-4 py-2 text-[14px] font-semibold text-white hover:opacity-90 disabled:opacity-60"
-                  disabled={busy || chosen.size === 0}
+                  disabled={busy || gate.blocked || chosen.size === 0}
                   onClick={() => picker === 'single' ? issueSingle([...chosen][0]) : createJob('selected', [...chosen])}>
                   {busy ? <Loader2 className="size-4 animate-spin" /> : null}
                   {picker === 'single' ? 'Generate certificate' : `Generate for ${chosen.size} selected`}
@@ -194,7 +231,16 @@ export default function IssueBulkPanel({ api }: { api: CertApi }) {
                     <span className="text-emerald-600">✓ {j.counts.succeeded}</span>
                     <span className="text-red-600">✗ {j.counts.failed}</span>
                   </div>
-                  {j.error && <p className="mt-1 text-[12px] text-red-600">{j.error}</p>}
+                  {j.error && (
+                    <p className="mt-1 text-[12px] text-red-600">
+                      {j.error}
+                      {/* RD-CERT-JOB-CAPACITY-01 — a job that ran out of capacity says how to continue:
+                          buy more, then run it again (existing certificates are reused, not re-created). */}
+                      {j.error === CERTIFICATE_CAPACITY_REQUIRED && gate.href && (
+                        <>{' '}<a href={gate.href} className="font-semibold text-primary underline underline-offset-2">{LICENSE_SERVICES_CTA}</a></>
+                      )}
+                    </p>
+                  )}
                 </div>
               )
             })}

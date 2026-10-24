@@ -75,16 +75,33 @@ const orderReq = (key: string, email = 'runner@example.test') => new NextRequest
   body: JSON.stringify({ slug: SLUG, passId: PASS.id, attendee: { name: 'Runner', email }, formResponses: {}, idempotencyKey: key, termsAccepted: true }),
 })
 
-describeEmu('RD-EVENT-COMMERCE-05E · Fee Collection Method after publishing — future checkouts only', () => {
+const previewReq = () => new NextRequest('http://x/api/registrations/fee-preview', {
+  method: 'POST', headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ slug: SLUG, passId: PASS.id }),
+})
+
+// Stub rates: 2% platform + 18% GST on it, 2% gateway estimate, on a ₹500 ticket (50,000 paise).
+const TICKET          = 50_000
+const PLATFORM_BASE   = 1_000     // 2% of 50,000
+const PLATFORM_GST    = 180       // 18% of 1,000
+const GATEWAY_EST     = 1_000     // 2% of 50,000
+const ATTENDEE_CHARGE = TICKET + PLATFORM_BASE + PLATFORM_GST + GATEWAY_EST   // 52,180
+const ORGANIZER_NET   = TICKET - PLATFORM_BASE - PLATFORM_GST - GATEWAY_EST   // 47,820
+
+describeEmu('RD-FEE-RESTORE-01 · Fee Collection Method after publishing — future checkouts only', () => {
   let adminDb: import('firebase-admin/firestore').Firestore
   let editRoute: (r: NextRequest, c: { params: Promise<{ eventId: string }> }) => Promise<Response>
   let createOrder: (r: NextRequest) => Promise<Response>
+  let feePreview: (r: NextRequest) => Promise<Response>
 
   const draftRef = (uid = OWNER) => adminDb.doc(`users/${uid}/eventDrafts/${DRAFT}`)
   const liveRef  = () => adminDb.doc(`events/${SLUG}`)
   const edit = (body: unknown) => editRoute(patch(body), { params: Promise.resolve({ eventId: DRAFT }) })
   const liveFee  = async () => ((await liveRef().get()).data()!.pricing as { feeModel?: string }).feeModel
   const draftFee = async () => ((await draftRef().get()).data()!.pricing as { feeModel?: string }).feeModel
+  /** RD-FEE-RESTORE-01 — the EXPLICIT record, which is the only thing checkout reads. */
+  const liveChoice  = async () => ((await liveRef().get()).data()!.pricing as { feeCollection?: { model?: string } }).feeCollection?.model ?? null
+  const draftChoice = async () => ((await draftRef().get()).data()!.pricing as { feeCollection?: { model?: string } }).feeCollection?.model ?? null
   const intent = async (orderId: string) => (await adminDb.doc(`paymentIntents/${orderId}`).get()).data()!
 
   async function seed(status: 'published' | 'pending_review', feeModel = 'organizer_absorbs') {
@@ -106,90 +123,150 @@ describeEmu('RD-EVENT-COMMERCE-05E · Fee Collection Method after publishing —
     ;({ adminDb } = await import('@/lib/firebase/admin'))
     ;({ PATCH: editRoute } = await import('@/app/api/organizer/events/[eventId]/edit/route'))
     ;({ POST: createOrder } = await import('@/app/api/registrations/create-order/route'))
+    ;({ POST: feePreview } = await import('@/app/api/registrations/fee-preview/route'))
   }, T)
   afterAll(wipe, T)
   beforeEach(async () => { h.uid = OWNER; h.engine = true; await wipe() }, T)
 
-  // ═══ RD-PHASE4-S3 · Q1 — SUPERSEDES the RD-EVENT-COMMERCE-05E behaviour ══════════════════════
-  // Fee collection is FIXED to organizer-pays. The Fee Collection Method is no longer organizer-editable
-  // (before or after publishing), and a stored legacy value never makes an attendee pay platform fees.
-  // What remains pinned from 05E: an in-progress checkout keeps its own terms, and completed ones never move.
+  // ═══ RD-FEE-RESTORE-01 — SUPERSEDES the Q1 inversion of this file ════════════════════════════
+  // Q1 fixed fee collection to organizer-pays and these cases asserted the refusal. The product
+  // decision has been reversed: organizers choose again, gated on pricingEngineEnabled. What Q1
+  // was really protecting is unchanged and is case 4 below — a stored LEGACY value still never
+  // charges an attendee, so every event that exists today is priced exactly as it is today.
 
-  it('the organizer can NOT change it on a LIVE event (403 PRICING_NOT_ORGANIZER_EDITABLE); nothing is written', async () => {
+  it('1 · engine OFF: the change is refused (403) and nothing is written — Q1 behaviour, preserved', async () => {
     await seed('published')
-    const before = (await liveRef().get()).data()!
+    h.engine = false
     for (const v of ['attendee_pays', 'organizer_absorbs']) {
       const res = await edit({ feeModel: v })
       expect(res.status, v).toBe(403)
       expect(await res.json(), v).toMatchObject({ success: false, code: 'PRICING_NOT_ORGANIZER_EDITABLE' })
     }
+    expect(await liveChoice()).toBeNull()
+    expect(await draftChoice()).toBeNull()
     expect(await liveFee()).toBe('organizer_absorbs')
-    expect(await draftFee()).toBe('organizer_absorbs')
-    const after = (await liveRef().get()).data()!
-    expect(after.lifecycleStatus).toBe('published')
-    expect(after.publishedAt ?? null).toEqual(before.publishedAt ?? null)
-    expect((await adminDb.collection('licenseOrders').where('eventId', 'in', [DRAFT, SLUG]).get()).size).toBe(0)
-    expect(h.orders).toHaveLength(0)
   }, T)
 
-  it('another organizer is refused too (the pricing refusal comes before any lookup); nothing is written', async () => {
+  it('2 · engine ON: the choice is recorded on BOTH the draft and the live event, atomically', async () => {
+    await seed('published')
+    const res = await edit({ feeModel: 'attendee_pays' })
+    expect(res.status).toBe(200)
+    // Both documents, or neither — the batch is what stops a republish silently reverting it.
+    expect(await liveChoice()).toBe('attendee_pays')
+    expect(await draftChoice()).toBe('attendee_pays')
+    // The LEGACY field is deliberately untouched: it is what every pre-existing event carries.
+    expect(await liveFee()).toBe('organizer_absorbs')
+    expect(await draftFee()).toBe('organizer_absorbs')
+    // Provenance is recorded with the choice.
+    const fc = ((await liveRef().get()).data()!.pricing as { feeCollection: { setBy: string; setAt: string; version: number } }).feeCollection
+    expect(fc.setBy).toBe(OWNER)
+    expect(typeof fc.setAt).toBe('string')
+    expect(fc.version).toBe(1)
+  }, T)
+
+  it('3 · another organizer cannot change it — the draft path is uid-scoped', async () => {
     await seed('published')
     h.uid = INTRUDER
-    expect((await edit({ feeModel: 'attendee_pays' })).status).toBe(403)
-    expect(await liveFee()).toBe('organizer_absorbs')
+    const res = await edit({ feeModel: 'attendee_pays' })
+    expect(res.status).not.toBe(200)
+    expect(await liveChoice()).toBeNull()
   }, T)
 
-  it('refused whatever the value, whatever the engine state, and whatever else rides along', async () => {
+  it('4 · THE COMPATIBILITY GUARANTEE: a stored legacy attendee_pays still charges the ticket only', async () => {
+    // The exact shape of a live event today: `pricing.feeModel = attendee_pays`, no explicit
+    // record. It has been charged organizer-absorbs for its whole life and must keep being so.
+    await seed('published', 'attendee_pays')
+    const o = await (await createOrder(orderReq('c05eLegacyAAAAA'))).json() as { orderId: string; amount: number }
+    expect(o.amount).toBe(TICKET)
+    const f = (await intent(o.orderId)).financials
+    expect(f.feeModel).toBe('organizer_pays')
+    expect(f.chargeAmountPaise).toBe(TICKET)
+    expect(f.netSettlementPaise).toBe(ORGANIZER_NET)
+  }, T)
+
+  it('5 · ORGANIZER-ABSORBS checkout: the attendee pays the ticket, fees come off the payout', async () => {
     await seed('published')
-    for (const engine of [true, false]) {
-      h.engine = engine
-      for (const body of [{ feeModel: 'customer_pays' }, { feeModel: 'attendee_pays' }, { feeModel: 'attendee_pays', passPrices: { pass_10k: 1 } }, { feeModel: 'organizer_absorbs', tagline: 'x' }]) {
-        expect((await edit(body)).status, JSON.stringify({ engine, body })).toBe(403)
-      }
+    expect((await edit({ feeModel: 'organizer_absorbs' })).status).toBe(200)
+    const o = await (await createOrder(orderReq('c05eOaAAAAAAAAA'))).json() as { orderId: string; amount: number }
+    expect(o.amount).toBe(TICKET)
+    const f = (await intent(o.orderId)).financials
+    expect(f.feeModel).toBe('organizer_pays')
+    expect(f.chargeAmountPaise).toBe(TICKET)
+    expect(f.netSettlementPaise).toBe(ORGANIZER_NET)
+    // The gateway was asked for exactly the charge.
+    expect(h.orders.at(-1)!.amountPaise).toBe(TICKET)
+  }, T)
+
+  it('6 · ATTENDEE-PAYS checkout: fees are added on top and the organizer receives the full ticket', async () => {
+    await seed('published')
+    expect((await edit({ feeModel: 'attendee_pays' })).status).toBe(200)
+    const o = await (await createOrder(orderReq('c05eApAAAAAAAAA'))).json() as { orderId: string; amount: number }
+    expect(o.amount).toBe(ATTENDEE_CHARGE)
+    const f = (await intent(o.orderId)).financials
+    expect(f.feeModel).toBe('customer_pays')
+    expect(f.ticketBasePaise).toBe(TICKET)
+    expect(f.chargeAmountPaise).toBe(ATTENDEE_CHARGE)
+    expect(f.netSettlementPaise).toBe(TICKET)           // the organizer receives the FULL ticket
+    expect(f.attendeeFeeTotalPaise).toBe(ATTENDEE_CHARGE - TICKET)
+    expect(h.orders.at(-1)!.amountPaise).toBe(ATTENDEE_CHARGE)
+  }, T)
+
+  it('7 · the QUOTE equals the CHARGE, under both models', async () => {
+    await seed('published')
+    const cases = [
+      { model: 'organizer_absorbs', expected: TICKET,          key: 'c05eQoaAAAAAAAA', email: 'quote-oa@example.test' },
+      { model: 'attendee_pays',     expected: ATTENDEE_CHARGE, key: 'c05eQapAAAAAAAA', email: 'quote-ap@example.test' },
+    ] as const
+    for (const c of cases) {
+      expect((await edit({ feeModel: c.model })).status, c.model).toBe(200)
+      const q = await (await feePreview(previewReq())).json() as { amountPaise: number }
+      const o = await (await createOrder(orderReq(c.key, c.email))).json() as { amount: number }
+      expect(q.amountPaise, `${c.model} quote`).toBe(c.expected)
+      expect(o.amount, `${c.model} charge`).toBe(c.expected)
+      expect(q.amountPaise, `${c.model} quote vs charge`).toBe(o.amount)
     }
-    expect(await liveFee()).toBe('organizer_absorbs')
-    expect(await draftFee()).toBe('organizer_absorbs')
   }, T)
 
-  it('awaiting approval: refused as well; a content-only edit stays draft-only and the approval status is unchanged', async () => {
-    await seed('pending_review')
-    expect((await edit({ feeModel: 'attendee_pays' })).status).toBe(403)
-    const res = await edit({ tagline: 'Draft-only tagline' })
-    expect(res.status).toBe(200)
-    const live = (await liveRef().get()).data()!
-    expect((live.pricing as { feeModel: string }).feeModel).toBe('organizer_absorbs')
-    expect((live.eventDetails as { info: { tagline?: string } }).info.tagline).toBeUndefined()   // other content: draft only
-    expect(live.lifecycleStatus).toBe('pending_review')
-    const dr = (await draftRef().get()).data()!
-    expect(dr.status).toBe('pending_review')
-    expect((dr.pricing as { feeModel: string }).feeModel).toBe('organizer_absorbs')
+  it('8 · an OPEN attempt keeps its original model AND amount when the organizer changes the setting', async () => {
+    await seed('published')
+    expect((await edit({ feeModel: 'attendee_pays' })).status).toBe(200)
+
+    const a1 = await (await createOrder(orderReq('c05ePinAAAAAAAA'))).json() as { orderId: string; amount: number }
+    expect(a1.amount).toBe(ATTENDEE_CHARGE)
+
+    // The organizer switches mid-checkout. The customer is already at the gateway.
+    expect((await edit({ feeModel: 'organizer_absorbs' })).status).toBe(200)
+    expect(await liveChoice()).toBe('organizer_absorbs')
+
+    // The retry is the SAME order at the SAME amount, still priced attendee-pays.
+    const a2 = await (await createOrder(orderReq('c05ePinAAAAAAAA'))).json() as { orderId: string; amount: number; reused?: boolean }
+    expect(a2).toMatchObject({ orderId: a1.orderId, amount: ATTENDEE_CHARGE, reused: true })
+    expect((await intent(a1.orderId)).financials.feeModel).toBe('customer_pays')
   }, T)
 
-  it('a stored legacy attendee_pays never charges the attendee; an in-progress checkout keeps its terms; completed terms never move', async () => {
-    await seed('published', 'attendee_pays')                      // a legacy / organizer-written value on the LIVE event
-    const regRef = adminDb.doc(`registrations/c05e-reg-${process.pid}`)
-    await regRef.set({ eventSlug: SLUG, amountPaise: 50_000, financials: { feeModel: 'organizer_pays', chargeAmountPaise: 50_000 } })
-    const regBefore = (await regRef.get()).data()
+  it('9 · a NEW attempt uses the UPDATED model', async () => {
+    await seed('published')
+    expect((await edit({ feeModel: 'attendee_pays' })).status).toBe(200)
+    const a = await (await createOrder(orderReq('c05eNewAAAAAAAA'))).json() as { orderId: string; amount: number }
+    expect(a.amount).toBe(ATTENDEE_CHARGE)
 
-    // 1. Checkout A (engine ON): organizer-pays — the attendee is charged the ticket only.
-    const a1 = await (await createOrder(orderReq('c05eKeyAAAAAAAA'))).json() as { orderId: string; amount: number }
-    expect(a1.amount).toBe(50_000)
-    expect((await intent(a1.orderId)).financials.feeModel).toBe('organizer_pays')
-
-    // 2. Retried: SAME order, SAME amount, SAME terms — nothing re-priced or superseded.
-    const a2 = await (await createOrder(orderReq('c05eKeyAAAAAAAA'))).json() as { orderId: string; amount: number; reused?: boolean }
-    expect(a2).toMatchObject({ orderId: a1.orderId, amount: 50_000, reused: true })
-    expect((await intent(a1.orderId)).financials.feeModel).toBe('organizer_pays')
-
-    // 3. A NEW checkout B is organizer-pays too — the stored attendee_pays is not an input.
-    const b = await (await createOrder(orderReq('c05eKeyBBBBBBBB', 'second@example.test'))).json() as { orderId: string; amount: number }
-    expect(b.orderId).not.toBe(a1.orderId)
-    expect(b.amount).toBe(50_000)
+    expect((await edit({ feeModel: 'organizer_absorbs' })).status).toBe(200)
+    // Different attendee + different key ⇒ a genuinely new attempt, not a retry.
+    const b = await (await createOrder(orderReq('c05eNewBBBBBBBB', 'later@example.test'))).json() as { orderId: string; amount: number }
+    expect(b.orderId).not.toBe(a.orderId)
+    expect(b.amount).toBe(TICKET)
     expect((await intent(b.orderId)).financials.feeModel).toBe('organizer_pays')
-    expect(h.orders).toHaveLength(2)
+    // …and the earlier intent was never re-priced.
+    expect((await intent(a.orderId)).financials.chargeAmountPaise).toBe(ATTENDEE_CHARGE)
+  }, T)
 
-    // 4. The completed registration is untouched.
-    expect((await regRef.get()).data()).toEqual(regBefore)
+  it('10 · a completed registration is never touched by a later change', async () => {
+    await seed('published')
+    const regRef = adminDb.doc(`registrations/c05e-reg-${process.pid}`)
+    await regRef.set({ eventSlug: SLUG, amountPaise: TICKET, financials: { feeModel: 'organizer_pays', chargeAmountPaise: TICKET } })
+    const before = (await regRef.get()).data()
+    expect((await edit({ feeModel: 'attendee_pays' })).status).toBe(200)
+    expect((await regRef.get()).data()).toEqual(before)
     await regRef.delete()
   }, T)
 })

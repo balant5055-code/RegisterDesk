@@ -597,8 +597,8 @@ describe('server contracts', () => {
     const s = code('lib/communications/billing.ts')
     expect(s).toContain("decideReserve(allowanceRead.ledger, allowanceRead.usageExists, 'whatsapp', units)")
     expect(s).toContain("txnTakeUnits(txn, allowanceDraftId, 'whatsapp', unitKey, units, 'broadcast')")
-    // RD-COMMS-P1 — anything the capacity does not cover drains a covering legacy balance or fails.
-    expect(s).toContain('!legacyBalanceCanFund(balance, cost)')
+    // RD-WA-BLOCK-01 — anything the capacity does not cover fails (the legacy balance funds nothing new).
+    expect(s).toContain('!legacyBalanceCanFundNewWhatsApp(balance, cost)')   // RD-WA-BLOCK-01
     expect(s).toContain("const reason = outcome.mode === 'exhausted' ? 'allowance_exhausted' as const : 'allowance_required' as const")
   })
   it('certificate issuance reserves before rendering and releases on failure', () => {

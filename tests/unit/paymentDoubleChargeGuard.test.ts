@@ -259,7 +259,10 @@ describe('8–11 · webhook and client callback are idempotent in any order', ()
     // The marker was claimed BEFORE the refund was stored and before attribution was
     // attempted, so a refund with no resolvable registration consumed its own idempotency
     // token and became unrecoverable. Two real refunds were lost that way.
-    expect(webhook).toMatch(/claimRefundSideEffects\(razorpayRefundId\)/)
+    expect(webhook).toMatch(/claimRefundSideEffects\(razorpayRefundId[,)]/)
+    // RD-REFUND-RECOVER-01 — the claim also marks the registration refunded (and queues the
+    // reversal) in the SAME transaction, so a crash after it cannot strand the side effects.
+    expect(webhook).toMatch(/claimRefundSideEffects\(razorpayRefundId, \{ markRegistration: \{ registrationId, refundAmountPaise: cumulativeRefund \} \}\)/)
     // Asserted on USE, not on mention — the comment above the handler names the retired
     // marker deliberately, so that the reason it went away survives the code that used it.
     expect(webhook).not.toMatch(/collection\('refundWebhookEvents'\)/)

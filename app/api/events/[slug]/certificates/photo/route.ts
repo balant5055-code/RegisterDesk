@@ -1,6 +1,12 @@
 // GET/POST/DELETE /api/events/{slug}/certificates/photo?certificateId=…
 //
-// RD-CERT-PHOTO-03 — the PUBLIC Certificate Center's photo, and it is TEMPORARY.
+// RD-CERT-PHOTO-03 — the PUBLIC Certificate Center's photo.
+//
+// RD-CERT-SEC-01 · CORRECTION: POST/DELETE below change the certificate's PERSISTED
+// `attendeePhotoKey` (steps 2-4), not only a temporary object. Writes therefore require, in
+// addition to the photo grant, an OTP-verified attendee session that owns the certificate's
+// registration (see context()). A lookup-derived grant alone can no longer change any photo.
+// Reads are unchanged (grant or the certificate's download capability).
 //
 // ─── Why this no longer touches the registration ─────────────────────────────
 // This route used to call setAttendeePhoto(), writing `registration.attendeePhotoKey`
@@ -32,7 +38,8 @@ import { COLLECTIONS }                 from '@/lib/certificates/constants'
 import { adminDb }                     from '@/lib/firebase/admin'
 import { FieldValue }                  from 'firebase-admin/firestore'
 import { verifyCertificateDownloadCapability } from '@/lib/certificates/downloadCapability'
-import { sniffImageMime, ATTENDEE_PHOTO_MAX_BYTES } from '@/lib/registrations/attendeePhoto'
+import { sniffImageMime, ATTENDEE_PHOTO_MAX_BYTES, loadOwnedRegistration } from '@/lib/registrations/attendeePhoto'
+import { requireAttendee }          from '@/lib/attendee/auth'
 import { getClientIp }              from '@/lib/rateLimit'
 import { RATE_POLICY, checkPolicy } from '@/lib/rateLimit/policies'
 
@@ -42,7 +49,7 @@ export const maxDuration = 30
 type Params = { params: Promise<{ slug: string }> }
 
 const STATUS: Record<string, number> = {
-  unauthorized: 401, forbidden: 403, not_found: 404,
+  unauthorized: 401, verification_required: 401, forbidden: 403, not_found: 404,
   too_large: 413, unsupported_type: 415, empty: 400,
 }
 function fail(error: string): NextResponse {
@@ -104,6 +111,21 @@ async function context(req: NextRequest, slug: string, opts: { write: boolean })
   const cert = await getCertificate(certificateId)
   if (!cert || cert.eventSlug !== slug) return { error: fail('unauthorized') }
   if (cert.status === 'revoked' || cert.revokedAt) return { error: fail('forbidden') }
+
+  // RD-CERT-SEC-01 — a WRITE changes the certificate's PERSISTED photo (rendered into every later
+  // download). A grant proves only a completed public lookup (an email, mobile, registration id
+  // or bib — all guessable), so it can no longer authorise that on its own. The caller must ALSO
+  // hold an OTP-verified attendee session whose email owns this certificate's registration —
+  // the same proof the attendee portal (/api/attendee/photo) requires. The grant still binds the
+  // write to exactly this certificate and event; the session proves who is making it.
+  if (opts.write) {
+    const session = await requireAttendee()
+    if (!session) return { error: fail('verification_required') }
+    const registrationId = grant?.registrationId ?? (typeof cert.registrationId === 'string' ? cert.registrationId : '')
+    if (!registrationId || registrationId !== cert.registrationId) return { error: fail('forbidden') }
+    const owned = await loadOwnedRegistration(registrationId, session.normalizedEmail)
+    if (!owned.ok) return { error: fail('forbidden') }
+  }
 
   return {
     ...(grant ? { token } : {}),

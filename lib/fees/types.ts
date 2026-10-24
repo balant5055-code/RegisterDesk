@@ -276,7 +276,9 @@ export interface PlatformTransactionDocument {
   releasedAt?:    unknown   // set by release-funds route; FieldValue.serverTimestamp()
   /** F1 — why release is held: the open refund(s) of this payment awaiting review. Never lifted automatically. */
   releaseHold?: {
-    reason:        'refund_review'
+    /** RD-REFUND-RECOVER-01 · 'refund_reversal_pending' — a full refund is recorded and its ledger
+     *  reversal is queued; held only so the release job cannot release refunded money meanwhile. */
+    reason:        'refund_review' | 'refund_reversal_pending'
     refundIds:     string[]
     heldAt:        unknown
     /** True when the funds had ALREADY been released before the refund was seen (nothing could be held). */

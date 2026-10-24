@@ -1,6 +1,6 @@
 // RD-FIN-01 · Firestore I/O for registration refunds. Decisions live in `refundPolicy.ts`.
 
-import { FieldValue } from 'firebase-admin/firestore'
+import { FieldValue, Timestamp } from 'firebase-admin/firestore'
 import { adminDb }    from '@/lib/firebase/admin'
 import { stageAdminAudit } from '@/lib/admin/audit'
 import { pendingRefundMatches, accumulateRefund, isCountedRefund, type RefundAccumulation } from '@/lib/refunds/refundPolicy'
@@ -108,16 +108,120 @@ export async function linkRefundToRegistration(
  */
 export async function claimRefundSideEffects(
   razorpayRefundId: string,
+  /**
+   * RD-REFUND-RECOVER-01 — when given, the registration is marked refunded and the ledger reversal
+   * is made RECOVERABLE in the SAME transaction as the claim (see stageReversalOwed). Without it a
+   * crash after the claim left the registration `paid` with the ledger unreversed, and every
+   * redelivery found the claim taken and returned. Refused (claimed:false) unless the registration
+   * is still `paid` inside the transaction.
+   */
+  opts: { markRegistration?: { registrationId: string; refundAmountPaise: number } } = {},
 ): Promise<{ claimed: boolean; record: RegistrationRefundDocument | null }> {
   const ref = refundsCol().doc(razorpayRefundId)
+  const mark = opts.markRegistration
   return adminDb.runTransaction(async tx => {
-    const snap = await tx.get(ref)
+    const regRef = mark ? adminDb.collection('registrations').doc(mark.registrationId) : null
+    const ptxRef = mark ? adminDb.collection('platformTransactions').doc(`ptx_${mark.registrationId}`) : null
+    const [snap, regSnap, ptxSnap] = await Promise.all([
+      tx.get(ref), regRef ? tx.get(regRef) : Promise.resolve(null), ptxRef ? tx.get(ptxRef) : Promise.resolve(null),
+    ])
     if (!snap.exists) return { claimed: false, record: null }
     const record = snap.data() as RegistrationRefundDocument
     if (!canApplySideEffects(record.status)) return { claimed: false, record }
+    // Re-checked HERE: a registration that became refund_pending / refunded since the caller read it
+    // belongs to the finalize path (or is done) — never re-marked from this one.
+    const regStatus = regSnap?.get('paymentStatus')
+    if (mark && (!regSnap?.exists || regStatus === 'refund_pending' || regStatus === 'refunded')) return { claimed: false, record }
     tx.update(ref, { status: 'processed', processedAt: FieldValue.serverTimestamp() })
+    if (mark && regRef && ptxSnap) {
+      tx.update(regRef, {
+        paymentStatus: 'refunded', refundId: razorpayRefundId, refundAmount: mark.refundAmountPaise,
+        refundedAt: FieldValue.serverTimestamp(), updatedAt: FieldValue.serverTimestamp(),
+      })
+      stageReversalOwed(tx, mark.registrationId, razorpayRefundId, ptxSnap, regSnap?.get('organizerUid'))
+    }
     return { claimed: true, record }
   })
+}
+
+// ─── RD-REFUND-RECOVER-01 · a refund's ledger reversal is OWED from the moment it is recorded ──────
+
+/** Drained by lib/payments/registrationReconciliation.ts retryPendingRefundLedgerReversals (same doc shape). */
+export const REFUND_REVERSAL_QUEUE = 'refundLedgerReconciliation'
+/** The inline reversal normally runs within seconds; the drain waits this long before replaying it. */
+export const REVERSAL_QUEUE_GRACE_MS = 5 * 60 * 1000
+
+/**
+ * WRITES, inside the transaction that marks a registration refunded (after every read). Two things,
+ * atomic with that transition, so no crash between "refunded" and "ledger reversed" can lose either:
+ *   • an UNRELEASED settlement is held (`releaseStatus: 'held'`, reason `refund_reversal_pending`): the
+ *     release job only takes pending, unheld rows, so money the attendee got back is never released to
+ *     the organizer while its reversal is outstanding. An existing hold (a refund review) is kept as is.
+ *   • the reversal is queued (`refundLedgerReconciliation/{registrationId}`, due after a grace period):
+ *     the drain replays the idempotent reversal, so it happens even if this process dies right after.
+ * A row already reversed (not `completed`) or absent needs neither.
+ */
+function stageReversalOwed(
+  tx: FirebaseFirestore.Transaction, registrationId: string, refundId: string,
+  ptxSnap: FirebaseFirestore.DocumentSnapshot, organizerUid: unknown,
+): void {
+  const ptx = ptxSnap.exists ? ptxSnap.data() as { status?: unknown; releaseStatus?: unknown; releaseHold?: unknown } : null
+  if (!ptx || ptx.status !== 'completed') return
+  if (ptx.releaseStatus === 'pending' && !ptx.releaseHold) {
+    tx.update(ptxSnap.ref, {
+      releaseStatus: 'held',
+      releaseHold:   { reason: 'refund_reversal_pending', refundIds: [refundId], heldAt: FieldValue.serverTimestamp() },
+      updatedAt:     FieldValue.serverTimestamp(),
+    })
+  }
+  tx.set(adminDb.collection(REFUND_REVERSAL_QUEUE).doc(registrationId), {
+    registrationId,
+    ptxId:         ptxSnap.id,
+    ...(typeof organizerUid === 'string' && organizerUid ? { organizerUid } : {}),
+    status:        'pending',
+    lastError:     'queued with the refund — the inline reversal normally resolves it',
+    nextAttemptAt: Timestamp.fromMillis(Date.now() + REVERSAL_QUEUE_GRACE_MS),
+    updatedAt:     FieldValue.serverTimestamp(),
+    firstSeenAt:   FieldValue.serverTimestamp(),
+  }, { merge: true })
+}
+
+/**
+ * RD-REFUND-STATUS-01 — a refund Razorpay ACCEPTED but has not yet processed: hold the UNRELEASED
+ * settlement so the release job cannot pay the organizer money that is on its way back to the
+ * attendee. Nothing is reversed or queued (the refund may still fail). The hold is the existing
+ * refund-review hold, so it is visible in the Super Admin refund-holds review: refund.processed then
+ * finalizes (the hold is kept, the reversal runs, the full-refund closure lifts it); refund.failed
+ * leaves it for review, where it can be lifted once the gateway shows no refund. Idempotent; an
+ * existing hold, a released or a reversed row is left as it is. Returns whether it placed the hold.
+ */
+export async function holdSettlementForPendingRefund(registrationId: string, refundId: string): Promise<boolean> {
+  const ref = adminDb.collection('platformTransactions').doc(`ptx_${registrationId}`)
+  return adminDb.runTransaction(async tx => {
+    const snap = await tx.get(ref)
+    const d = snap.exists ? snap.data() as { status?: unknown; releaseStatus?: unknown; releaseHold?: unknown } : null
+    if (!d || d.status !== 'completed' || d.releaseStatus !== 'pending' || d.releaseHold) return false
+    tx.update(ref, {
+      releaseStatus: 'held',
+      releaseHold:   { reason: 'refund_review', refundIds: [refundId], heldAt: FieldValue.serverTimestamp() },
+      updatedAt:     FieldValue.serverTimestamp(),
+    })
+    return true
+  })
+}
+
+/**
+ * After the inline reversal SUCCEEDED: resolves the queued record (only while still `pending`, so a
+ * drain that already took it is never overwritten). Best-effort — a record left pending is replayed
+ * by the drain as an idempotent no-op and resolved there.
+ */
+export async function resolveQueuedRefundReversal(registrationId: string): Promise<void> {
+  const ref = adminDb.collection(REFUND_REVERSAL_QUEUE).doc(registrationId)
+  await adminDb.runTransaction(async tx => {
+    const snap = await tx.get(ref)
+    if (!snap.exists || snap.get('status') !== 'pending') return
+    tx.update(ref, { status: 'resolved', resolvedAt: FieldValue.serverTimestamp(), updatedAt: FieldValue.serverTimestamp(), nextAttemptAt: FieldValue.delete() })
+  }).catch(() => undefined)
 }
 
 /** Record the ledger outcome after the reversal ran. Best-effort, never blocks. */
@@ -329,8 +433,9 @@ export async function finalizePendingRegistrationRefund(
 ): Promise<FinalizeRefundOutcome> {
   const regRef = adminDb.collection('registrations').doc(registrationId)
   const recRef = refundsCol().doc(refund.refundId)
+  const ptxRef = adminDb.collection('platformTransactions').doc(`ptx_${registrationId}`)
   return adminDb.runTransaction(async tx => {
-    const [regSnap, recSnap] = await Promise.all([tx.get(regRef), tx.get(recRef)])
+    const [regSnap, recSnap, ptxSnap] = await Promise.all([tx.get(regRef), tx.get(recRef), tx.get(ptxRef)])
     const reg = regSnap.data() as Parameters<typeof pendingRefundMatches>[0] | undefined
     const rec = recSnap.exists ? recSnap.data() as RegistrationRefundDocument : null
     if (rec?.status === 'failed') return 'refund_failed'
@@ -346,6 +451,10 @@ export async function finalizePendingRegistrationRefund(
       paymentStatus: 'refunded', refundId: refund.refundId, refundAmount: refund.amountPaise,
       refundedAt: FieldValue.serverTimestamp(), updatedAt: FieldValue.serverTimestamp(),
     })
+    // RD-REFUND-RECOVER-01 — atomic with "refunded": hold the unreleased settlement and queue the
+    // reversal, so a route / webhook dying before its reversal call can neither lose the reversal
+    // nor let the release job pay the organizer the refunded money meanwhile.
+    stageReversalOwed(tx, registrationId, refund.refundId, ptxSnap, (regSnap.data() as { organizerUid?: unknown }).organizerUid)
     return 'won'
   })
 }
