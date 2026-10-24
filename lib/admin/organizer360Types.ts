@@ -10,7 +10,7 @@
 // All MUTATIONS reuse existing admin routes — no new mutation logic here.
 
 import type { AnyEventLicenseTier } from '@/lib/licensing/eventLicense'
-import type { AccountStatus } from '@/lib/admin/organizerTypes'
+import type { AccountStatus, EmailVerificationState } from '@/lib/admin/organizerTypes'
 
 // ─── Health Panel ───────────────────────────────────────────────────────────
 
@@ -36,7 +36,11 @@ export interface Organizer360Overview {
     email:            string
     organizationName: string
     role:             string
+    /** the account mobile (users.mobile.e164), falling back to a legacy `phone` field */
     phone:            string | null
+    phoneSource:      'mobile' | 'legacy_phone' | null
+    /** recorded mobile verification: none recorded ⇒ 'missing'. Phone OTP is not offered. */
+    mobileVerification: 'verified' | 'unverified' | 'missing'
     createdAt:        string | null
   }
   account: {
@@ -44,12 +48,31 @@ export interface Organizer360Overview {
     statusReason:    string | null
     statusUpdatedAt: string | null
     statusUpdatedBy: string | null
+    /** false ⇒ the document records no accountStatus (legacy; effective status 'active') */
+    statusRecorded:      boolean
+    /** pending signup, or an explicitly unverified email */
+    pendingVerification: boolean
   }
   verification: {
     emailVerified:  boolean
     payoutExists:   boolean
     payoutVerified: boolean
     payoutMethod:   'bank' | 'upi' | null
+    /** as RECORDED — absent fields read 'unknown', never 'verified' */
+    email: { state: EmailVerificationState; method: string | null; verifiedAt: string | null }
+  }
+  /** users.trust when present; null when the profile records none */
+  trust: { level: string | null; score: number | null } | null
+  /**
+   * Onboarding progress, derived read-only from existing fields with the SAME checks the
+   * organizer's own dashboard uses (lib/dashboard/workspaceHealth), plus payout setup.
+   * Nothing is stored for it.
+   */
+  onboarding: {
+    checks: { id: string; label: string; done: boolean }[]
+    done:   number
+    total:  number
+    payout: 'verified' | 'unverified' | 'missing'
   }
   team: { memberCount: number; inviteCount: number }
   entitlements: {

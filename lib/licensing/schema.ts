@@ -303,6 +303,13 @@ export type LicenseHistoryAction =
   | 'print_badges_purchased'
   // RD-PRINT-BILL-P5 — one settled badge-generation round: units kept for attendees billed, the rest released.
   | 'print_badges_consumed'
+  // RD-SA-COMMERCE-P1 — a licence refund that needs a Super Admin decision (nothing moved), and a
+  // Super Admin release of a refund hold left by a refund that never moved money.
+  | 'refund_review_required' | 'refund_hold_released'
+  // RD-SA-COMMERCE-P1 (P1-1/P1-4) — gateway outcome unknown (held), and a completed interrupted refund.
+  | 'refund_outcome_unknown' | 'refund_completed'
+  // M2 — a licence refund the gateway accepted then reported failed; and its Super Admin acknowledgement.
+  | 'refund_failed_at_gateway' | 'refund_failure_acknowledged'
 export type LicenseHistorySource = 'self_serve' | 'admin' | 'system'
 
 export interface LicenseHistoryDoc {

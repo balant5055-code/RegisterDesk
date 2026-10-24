@@ -8,8 +8,11 @@
 // fetchSignInMethodsForEmail and LINK the new credential onto the existing account
 // (linkWithCredential) instead of creating a second account. The Firestore organizer
 // profile is created — if missing — by the existing idempotent server seam
-// (ensureOrganizerProfile at dashboard boot), so no new profile-creation path is
-// introduced and no duplicate /users/{uid} document can be produced.
+// (ensureOrganizerProfile), called right after sign-in through
+// POST /api/auth/social-profile (ensureSocialOrganizerProfile below) so a social signup
+// is visible to admins before its first dashboard visit; dashboard boot stays the
+// safety net. The seam never overwrites an existing /users/{uid} document, and the route
+// skips staff credentials and team members.
 //
 // DEPLOYMENT PREREQUISITES (outside code): each provider must be enabled in the
 // Firebase console with its OAuth client id/secret, and the project's
@@ -136,6 +139,20 @@ export async function linkPendingCredentialWithPassword(
   const { user } = await signInWithEmailAndPassword(auth, email, password)
   await linkWithCredential(user, pendingCredential)
   return user
+}
+
+/**
+ * Best-effort: ask the server to create the organizer profile for this social sign-in if
+ * it has none (see app/api/auth/social-profile). Never throws — a failure leaves the
+ * dashboard-boot heal to create it.
+ */
+export async function ensureSocialOrganizerProfile(user: User): Promise<void> {
+  try {
+    const token = await user.getIdToken()
+    await fetch('/api/auth/social-profile', { method: 'POST', headers: { Authorization: `Bearer ${token}` } })
+  } catch {
+    // best-effort
+  }
 }
 
 /**

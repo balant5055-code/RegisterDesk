@@ -70,6 +70,19 @@ export interface ServiceLedgerDoc {
   pendingAddonOrderId?: string | null
   /** RD-PRINT-BILL-P4 — the ONE payable badge purchase order of this event (its own slot; add-ons keep theirs). */
   pendingBadgeOrderId?: string | null
+  /**
+   * RD-SA-COMMERCE-P1 — a licence refund is returning the money for these unused units. Written by the
+   * refund's claim transaction, cleared by its finalize (which retires exactly these units) or by its
+   * rollback. While present, every consumer treats them as unavailable: decideReserve (WhatsApp,
+   * certificates) and the photo gate (media) subtract them, so nothing can use a unit being refunded.
+   */
+  refundHold?:          { orderId: string; units: Partial<Record<ServiceKind, number>>; at?: unknown } | null
+}
+
+/** RD-SA-COMMERCE-P1 — units of `service` held by an in-flight licence refund (0 when none). */
+export function heldRefundUnits(d: Pick<ServiceLedgerDoc, 'refundHold'> | undefined, service: ServiceKind | 'print_badges'): number {
+  const v = (d?.refundHold?.units as Record<string, unknown> | undefined)?.[service]
+  return typeof v === 'number' && Number.isFinite(v) && v > 0 ? Math.floor(v) : 0
 }
 
 export const ledgerRef = (draftId: string) => adminDb.collection(EVENT_SERVICE_ALLOWANCES).doc(draftId)
@@ -183,7 +196,8 @@ export function decideReserve(
   const l = line(ledger, service)
   if (l.purchased + l.carriedIn <= 0) return { mode: 'none' }
   if (usageExists) return { mode: 'allowance', already: true }
-  if (availableUnits(l) >= quantity) return { mode: 'allowance', already: false }
+  // RD-SA-COMMERCE-P1 — units held by an in-flight licence refund are not available.
+  if (availableUnits(l) - heldRefundUnits(ledger, service) >= quantity) return { mode: 'allowance', already: false }
   // RD-WALLET-REQ — units only CARRIED IN (nothing bought here) carry no exhaustion policy the
   // organizer agreed to for this event: once they run out the event is back on pay-as-you-go,
   // exactly as it was before the carry-forward.

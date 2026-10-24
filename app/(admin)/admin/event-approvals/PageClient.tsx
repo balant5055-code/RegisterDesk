@@ -25,8 +25,6 @@ interface Row {
   eventType:           string | null
   licenseTier:         string | null
   licensePaymentPaise: number
-  walletPaymentPaise:  number
-  walletPaymentStatus: string | null
   registrationLimit:   number | null
   submittedAt:         string | null
   eventDate:           string | null
@@ -47,7 +45,6 @@ interface Detail {
   eventDetails: Record<string, unknown>
   license:      Record<string, unknown> | null
   payment:      Record<string, unknown>
-  wallet:       Record<string, unknown>
   organizer:    Record<string, unknown>
   venue:        Record<string, unknown>
   pricing:      { eventType: unknown; passes: Array<Record<string, unknown>>; totalCapacity: unknown }
@@ -303,8 +300,7 @@ export default function AdminEventApprovalsPage() {
                   <span className="inline-flex rounded-full bg-muted px-2 py-0.5 text-[11.5px] font-semibold capitalize text-foreground">{r.licenseTier ?? '—'}</span>
                 </Td>
                 <Td className="text-[12px]">
-                  <div>License: {inr(r.licensePaymentPaise)}</div>
-                  <div className="text-muted-foreground">Wallet: {inr(r.walletPaymentPaise)}{r.walletPaymentStatus ? ` (${r.walletPaymentStatus})` : ''}</div>
+                  <div title="The paid activation order. Pre-publish add-ons are separate and not included.">Activation paid: {inr(r.licensePaymentPaise)}</div>
                 </Td>
                 <Td>{r.registrationLimit == null ? 'Unlimited' : r.registrationLimit.toLocaleString('en-IN')}</Td>
                 <Td className="text-[12px]">
@@ -317,7 +313,9 @@ export default function AdminEventApprovalsPage() {
                       className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-[11.5px] font-semibold text-foreground"><Eye className="size-3.5" /> Details</button>
                     <Link href={`/admin/events/${r.slug}`} title="Open Event 360 console"
                       className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-[11.5px] font-semibold text-foreground"><LayoutGrid className="size-3.5" /> 360</Link>
-                    <a href={`/events/${r.slug}`} target="_blank" rel="noreferrer" title="Preview public page"
+                    {/* The real public page, rendered for review. /events/{slug} 404s until
+                        approval, so it can never preview a pending event. */}
+                    <a href={`/admin/preview/events/${encodeURIComponent(r.slug)}`} target="_blank" rel="noreferrer" title="Preview the public page before approving"
                       className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-[11.5px] font-semibold text-foreground"><ExternalLink className="size-3.5" /> Preview</a>
                     <button type="button" disabled={busy === r.slug} onClick={async () => {
                         const ok = await confirm({
@@ -389,14 +387,24 @@ export default function AdminEventApprovalsPage() {
               <div className="flex justify-center py-12"><Loader2 className="size-5 animate-spin text-muted-foreground" /></div>
             ) : (
               <div className="space-y-4 text-[12.5px]">
+                <a href={`/admin/preview/events/${encodeURIComponent(detailRow.slug)}`} target="_blank" rel="noreferrer"
+                  className="flex items-center justify-center gap-1.5 rounded-md bg-primary px-3 py-2 text-[12.5px] font-semibold text-primary-foreground">
+                  <ExternalLink className="size-3.5" /> Full review — open the public page preview
+                </a>
                 <Section title="General" rows={[['Slug', txt(detail.general.slug)], ['Type', txt(detail.general.eventType)], ['Status', txt(detail.general.status)], ['Tagline', txt(detail.general.tagline)]]} />
                 <Section title="Event details" rows={[['Start', `${txt(detail.eventDetails.startDate)} ${txt(detail.eventDetails.startTime)}`], ['End', txt(detail.eventDetails.endDate)], ['Timezone', txt(detail.eventDetails.timezone)]]} />
                 <Section title="License" rows={detail.license ? [['Tier', txt(detail.license.tier)], ['Status', txt(detail.license.status)], ['Amount', inr(Number(detail.license.amountPaise) || 0)]] : [['License', 'None']]} />
-                <Section title="Payment" rows={[['License paid', inr(Number(detail.payment.licensePaise) || 0)], ['Order', txt(detail.payment.licenseOrderId)], ['Paid at', fmtDateTime(detail.payment.licensePaidAt)]]} />
-                <Section title="Wallet (comms)" rows={[['Required', detail.wallet.required ? 'Yes' : 'No'], ['Amount', inr(Number(detail.wallet.amountPaise) || 0)], ['Status', txt(detail.wallet.status)]]} />
+                <Section title="Payment" rows={[['Activation paid', inr(Number(detail.payment.licensePaise) || 0)], ['Order', txt(detail.payment.licenseOrderId)], ['Paid at', fmtDateTime(detail.payment.licensePaidAt)]]} />
+                <p className="-mt-2 px-1 text-[11px] text-muted-foreground">Activation order only — pre-publish capacity or service add-ons are separate orders.</p>
                 <Section title="Organizer" rows={[['Name', txt(detail.organizer.name)], ['Email', txt(detail.organizer.email)], ['Workspace', txt(detail.organizer.workspace)], ['Phone', txt(detail.organizer.supportPhone)]]} />
                 <Section title="Venue" rows={[['Type', txt(detail.venue.type)], ['Name', txt(detail.venue.name)], ['City', txt(detail.venue.city)], ['State', txt(detail.venue.state)]]} />
-                <Section title="Pricing" rows={[['Model', txt(detail.pricing.eventType)], ['Capacity', txt(detail.pricing.totalCapacity)], ['Passes', String(detail.pricing.passes.length)]]} />
+                <Section title="Pricing" rows={[['Model', txt(detail.pricing.eventType)], ['Capacity', txt(detail.pricing.totalCapacity)], ['Fee collection', 'Organizer pays (fixed)']]} />
+                <Section title={`Tickets (${detail.pricing.passes.length})`} rows={detail.pricing.passes.length
+                  ? detail.pricing.passes.map(p => [
+                      `${txt(p.name)}${p.status === 'inactive' ? ' · INACTIVE' : ''}${p.visibility && p.visibility !== 'public' ? ` · ${p.visibility}` : ''}${p.type === 'complimentary' ? ' · complimentary' : ''}`,
+                      `${Number(p.price) > 0 ? inr(Math.round(Number(p.price) * 100)) : 'Free'} · ${p.unlimited ? 'unlimited' : `qty ${txt(p.quantity)}`}${p.salesEndDate ? ` · sales end ${p.salesEndDate}` : ''}`,
+                    ] as [string, string])
+                  : [['Tickets', 'None configured']]} />
                 <Section title="Timeline" rows={[['Created', fmtDateTime(detail.timeline.createdAt)], ['Submitted', fmtDateTime(detail.timeline.submittedAt)], ['Approved', fmtDateTime(detail.timeline.approvedAt)], ['Rejected', fmtDateTime(detail.timeline.rejectedAt)]]} />
               </div>
             )}

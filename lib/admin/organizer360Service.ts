@@ -24,7 +24,8 @@ import type {
   Organizer360License, Organizer360Job, Organizer360TimelineEntry,
   HealthIndicator, HealthLevel, OrgTimelineSource,
 } from '@/lib/admin/organizer360Types'
-import { resolveAccountStatus, type AccountStatus } from '@/lib/admin/organizerTypes'
+import { resolveAccountStatus, resolveEmailVerification, isPendingVerification, isStatusRecorded, type AccountStatus } from '@/lib/admin/organizerTypes'
+import { buildWorkspaceHealth } from '@/lib/dashboard/workspaceHealth'
 
 const EVENTS_CAP     = 60    // bounded per-organizer event fan-out
 const LICENSES_CAP   = 200
@@ -137,27 +138,56 @@ export async function getOrganizer360Overview(uid: string): Promise<Organizer360
   const regTotal   = eventsRollup.events.reduce((a, e) => a + e.registrations, 0)
   const checkedIn  = eventsRollup.events.reduce((a, e) => a + e.checkedIn, 0)
 
+  const status            = effectiveStatus(u.accountStatus)
+  const emailVerification = resolveEmailVerification(u)
   const account = {
-    status:          effectiveStatus(u.accountStatus),
+    status,
     statusReason:    str(u.statusReason),
     statusUpdatedAt: tsToISO(u.statusUpdatedAt),
     statusUpdatedBy: str(u.statusUpdatedBy),
+    statusRecorded:      isStatusRecorded(u.accountStatus),
+    pendingVerification: isPendingVerification(status, emailVerification),
   }
+  const emailRec = rec(rec(u.verification).email)
   const verification = {
     emailVerified:  u.emailVerified === true,
     payoutExists:   payoutSnap.exists,
     payoutVerified: p?.isVerified === true,
     payoutMethod:   payoutMethodOf(p?.payoutMethod),
+    // as recorded: a method / time is shown only when the profile actually holds one
+    email: {
+      state:      emailVerification,
+      method:     emailVerification === 'verified' ? str(emailRec.verifiedMethod) : null,
+      verifiedAt: emailVerification === 'verified' ? tsToISO(emailRec.verifiedAt) : null,
+    },
   }
+
+  // Account mobile (users.mobile.e164, written at signup / in settings), falling back to a
+  // legacy flat `phone`. Phone OTP is not offered, so verification is only what is recorded.
+  const mobile    = rec(u.mobile)
+  const mobileE164 = str(mobile.e164)
+  const legacyPhone = str(u.phone)
+  const phone = mobileE164 ?? legacyPhone
+  const phoneSource: 'mobile' | 'legacy_phone' | null = mobileE164 ? 'mobile' : legacyPhone ? 'legacy_phone' : null
+  const mobileVerification: 'verified' | 'unverified' | 'missing' =
+    !phone ? 'missing' : mobileE164 && mobile.verified === true ? 'verified' : 'unverified'
+
+  const trustRec = u.trust && typeof u.trust === 'object' ? rec(u.trust) : null
+  const trust = trustRec
+    ? { level: str(trustRec.level), score: typeof trustRec.score === 'number' && Number.isFinite(trustRec.score) ? trustRec.score : null }
+    : null
   const overrideTier = entitlements?.source === 'admin_override' ? entitlements.effectiveTier : null
 
   // ── Health ──
   const health: HealthIndicator[] = []
   const push = (key: HealthIndicator['key'], label: string, level: HealthLevel, detail: string) => health.push({ key, label, level, detail })
 
+  // a pending signup is on its way in, not a fault: amber with an explicit label (red stays
+  // for banned). Suspended keeps its existing amber.
   push('account', 'Account',
-    account.status === 'active' ? 'green' : account.status === 'suspended' ? 'yellow' : 'red',
-    account.status)
+    account.status === 'active' ? 'green'
+      : account.status === 'suspended' || account.status === 'pending' ? 'yellow' : 'red',
+    account.status === 'pending' ? 'pending verification' : account.status)
 
   const vLevel: HealthLevel = verification.emailVerified && verification.payoutVerified ? 'green'
     : verification.emailVerified || verification.payoutVerified ? 'yellow' : 'red'
@@ -180,6 +210,29 @@ export async function getOrganizer360Overview(uid: string): Promise<Organizer360
   push('payments', 'Payments', pLevel,
     verification.payoutVerified ? 'Payout verified' : verification.payoutExists ? 'Payout unverified' : 'No payout')
 
+  // ── Onboarding (read-only; the organizer dashboard's own setup checks) ──
+  const branding    = rec(u.branding)
+  const orgProfile  = rec(u.organizationProfile)
+  const commsConfig = rec(u.communications)
+  const setup = buildWorkspaceHealth({
+    profile: {
+      organizationName: typeof u.organizationName === 'string' ? u.organizationName : null,
+      supportEmail:     typeof orgProfile.supportEmail === 'string' ? orgProfile.supportEmail : null,
+      logoUrl:          typeof branding.logoUrl === 'string' ? branding.logoUrl : null,
+      certSignatureUrl: typeof branding.certSignatureUrl === 'string' ? branding.certSignatureUrl : null,
+      sendRegistrationConfirmation: typeof commsConfig.sendRegistrationConfirmation === 'boolean'
+        ? commsConfig.sendRegistrationConfirmation
+        : undefined,
+    },
+    events: { publishedCount: pubCount?.data().count ?? 0, gaps: [] },
+  })
+  const onboarding = {
+    checks: setup.checks.map(c => ({ id: c.id, label: c.label, done: c.done })),
+    done:   setup.checks.filter(c => c.done).length,
+    total:  setup.checks.length,
+    payout: (p?.isVerified === true ? 'verified' : payoutSnap.exists ? 'unverified' : 'missing') as 'verified' | 'unverified' | 'missing',
+  }
+
   // Deferred — upgraded client-side once Operations loads.
   push('communications', 'Communications', 'neutral', 'Open Operations')
   push('jobs', 'Background Jobs', 'neutral', 'Open Operations')
@@ -192,11 +245,15 @@ export async function getOrganizer360Overview(uid: string): Promise<Organizer360
       email:            str(u.email) ?? '',
       organizationName: str(u.organizationName) ?? '',
       role:             str(u.role) ?? ORGANIZER_ROLE,
-      phone:            str(u.phone),
+      phone,
+      phoneSource,
+      mobileVerification,
       createdAt:        tsToISO(u.createdAt),
     },
     account,
     verification,
+    trust,
+    onboarding,
     // `inviteCount` is retained at 0 so the admin response shape is unchanged for
     // existing consumers; the invitation flow that produced it is gone.
     team: { memberCount: team.members.length, inviteCount: 0 },

@@ -305,6 +305,7 @@ export type RegistrationBlockReason =
   | 'INVITE_CODE_INVALID'     // invite code provided but does not match
   | 'WAITLIST_AVAILABLE'      // capacity full but waitlist is open for this event
   | 'EVENT_UNAVAILABLE'       // admin took the event down (moderation)
+  | 'LICENCE_INACTIVE'        // RD-SA-COMMERCE-P1 — licence suspended / cancelled / refunded
 
 export interface RegistrationGateResult {
   allowed:          boolean

@@ -6,6 +6,7 @@ import type { DonationSettingsDraft } from '@/lib/campaigns/donationSettingsConf
 import type { ModerationStatus }      from '@/lib/admin/moderation'
 import { isContentTakenDown }         from '@/lib/admin/moderation'
 import { safeImageUrl }               from '@/lib/utils/imageUrl'
+import { linkedEventSlugOf, linkedEventsAllowingCampaigns } from '@/lib/campaigns/linkedEventGate'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -87,11 +88,20 @@ export async function listCampaigns(): Promise<CampaignListItem[]> {
     .limit(100)
     .get()
 
+  // A campaign linked to an event is listed only while that event is public (approved, not
+  // cancelled / unpublished / taken down) — lib/campaigns/linkedEventGate. One batched read.
+  const linkedSlugs = snap.docs.map(doc => linkedEventSlugOf(doc.data() as PublishedCampaign, doc.id)).filter((s): s is string => !!s)
+  const allowedEvents = await linkedEventsAllowingCampaigns(linkedSlugs)
+
   return snap.docs
     // Exclude admin-taken-down campaigns from public discovery (status stays
     // 'active'; moderation is a separate axis). Filtered in memory — 'active' is
     // the absence of the field and can't be queried directly.
     .filter(doc => !isContentTakenDown((doc.data() as PublishedCampaign).moderationStatus))
+    .filter(doc => {
+      const eventSlug = linkedEventSlugOf(doc.data() as PublishedCampaign, doc.id)
+      return eventSlug === null || allowedEvents.has(eventSlug)
+    })
     .map(doc => {
     const d  = doc.data() as PublishedCampaign
     const cd = d.campaignDetails

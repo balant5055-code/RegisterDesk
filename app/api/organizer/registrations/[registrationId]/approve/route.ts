@@ -48,7 +48,9 @@ export async function POST(
       return NextResponse.json({ success: false, error: 'Registration is not pending approval' }, { status: 409 })
     }
     if (err instanceof CapacityBlocksApprovalError) {
-      const msg = err.reason === 'EVENT_CAPACITY_FULL'
+      const msg = err.reason === 'LICENCE_INACTIVE'
+        ? "Cannot approve — this event's licence is not active (suspended, cancelled or refunded)."
+        : err.reason === 'EVENT_CAPACITY_FULL'
         ? 'Event is at full capacity — cannot approve.'
         : 'This pass is at full capacity — cannot approve.'
       return NextResponse.json({ success: false, error: msg }, { status: 409 })

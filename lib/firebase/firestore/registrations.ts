@@ -12,6 +12,8 @@ import { buildCounterIncrement, writeCheckinDelta } from '@/lib/firebase/firesto
 import { stageDailyStatsIncrement } from '@/lib/dashboard/dailyStatsAdmin'
 import { registrationRevenueBasisPaise } from '@/lib/registrations/revenueBasis'
 import { deriveStoredEventCapacity } from '@/lib/registrations/capacity'
+import { EVENT_LICENSES_COLLECTION } from '@/lib/licensing/schema'
+import { licenceRegistrationBlock, LICENCE_INACTIVE } from '@/lib/licensing/licenceRegistrationBlock'
 import { buildQrValue }          from '@/lib/tickets/generate'
 import { enqueueWebhook }        from '@/lib/integrations/webhooks'
 import { whatsappConsentFields } from '@/lib/whatsapp/broadcastConsent'
@@ -86,7 +88,7 @@ export interface CreateRegistrationResult {
 }
 
 export class CapacityExceededError extends Error {
-  constructor(public readonly reason: 'EVENT_CAPACITY_FULL' | 'PASS_CAPACITY_FULL' | 'PASS_NOT_AVAILABLE') {
+  constructor(public readonly reason: 'EVENT_CAPACITY_FULL' | 'PASS_CAPACITY_FULL' | 'PASS_NOT_AVAILABLE' | typeof LICENCE_INACTIVE) {
     super(reason)
     this.name = 'CapacityExceededError'
   }
@@ -185,6 +187,7 @@ export async function createRegistration(
   const normPhone = input.attendee.phone
 
   const eventRef   = adminDb.collection('events').doc(input.eventSlug)
+  const licenceRef = adminDb.collection(EVENT_LICENSES_COLLECTION).doc(input.eventSlug)
   const counterRef = adminDb.collection('registrationCounters').doc(input.eventSlug)
   const regRef     = adminDb.collection('registrations').doc(registrationId)
 
@@ -232,8 +235,8 @@ export async function createRegistration(
           couponRef        ? txn.get(couponRef)        : Promise.resolve(null),
         ] as const
 
-        const [eventSnap, emailClaimSnap, phoneClaimSnap, ticketClaimSnap, idempotencySnap, couponSnap] =
-          await Promise.all([txn.get(eventRef), ...claimReads])
+        const [eventSnap, licenceSnap, emailClaimSnap, phoneClaimSnap, ticketClaimSnap, idempotencySnap, couponSnap] =
+          await Promise.all([txn.get(eventRef), txn.get(licenceRef), ...claimReads])
 
         const eventData = eventSnap.data() as {
           totalCapacity?: number | null
@@ -245,6 +248,10 @@ export async function createRegistration(
           const existing = idempotencySnap.data() as { registrationId: string; ticketCode: string }
           throw new IdempotencyHitError(existing.registrationId, existing.ticketCode)
         }
+
+        // RD-SA-COMMERCE-P1 — a suspended / cancelled / refunded licence takes no NEW seats. Read in
+        // THIS transaction, so a concurrent licence action and this registration serialize.
+        if (licenceRegistrationBlock(licenceSnap.data())) throw new CapacityExceededError(LICENCE_INACTIVE)
 
         // F1: ticket code collision — throws so outer loop retries with new code
         if (ticketClaimSnap.exists) throw new TicketCodeCollisionError()
@@ -610,7 +617,7 @@ export class NotCancelledError extends Error {
 }
 
 export class CapacityBlocksRestoreError extends Error {
-  constructor(public readonly reason: 'EVENT_CAPACITY_FULL' | 'PASS_CAPACITY_FULL') {
+  constructor(public readonly reason: 'EVENT_CAPACITY_FULL' | 'PASS_CAPACITY_FULL' | typeof LICENCE_INACTIVE) {
     super(reason)
     this.name = 'CapacityBlocksRestoreError'
   }
@@ -639,11 +646,16 @@ export async function restoreRegistration(
 
     const counterRef = adminDb.collection('registrationCounters').doc(reg.eventSlug)
     const eventRef   = adminDb.collection('events').doc(reg.eventSlug)
+    const licenceRef = adminDb.collection(EVENT_LICENSES_COLLECTION).doc(reg.eventSlug)
 
-    const [counterSnap, eventSnap] = await Promise.all([
+    const [counterSnap, eventSnap, licenceSnap] = await Promise.all([
       txn.get(counterRef),
       txn.get(eventRef),
+      txn.get(licenceRef),
     ])
+    // RD-SA-COMMERCE-P1 — confirming this registration adds a seat: a suspended / cancelled /
+    // refunded licence refuses it, read in THIS transaction (serializes with licence actions).
+    const licenceBlocked = licenceRegistrationBlock(licenceSnap.data()) !== null
 
     const counterData = counterSnap.exists
       ? counterSnap.data() as { totalCount?: number; passCounts?: Record<string, number> }
@@ -654,6 +666,8 @@ export async function restoreRegistration(
 
     const totalCount = counterData?.totalCount ?? 0
     const passCount  = (counterData?.passCounts ?? {})[reg.passId] ?? 0
+
+    if (licenceBlocked) throw new CapacityBlocksRestoreError(LICENCE_INACTIVE)
 
     // Event-level capacity check
     const eventCapacity = deriveStoredEventCapacity(eventData)
@@ -950,7 +964,7 @@ export class AlreadyRejectedError extends Error {
 }
 
 export class CapacityBlocksApprovalError extends Error {
-  constructor(public readonly reason: 'EVENT_CAPACITY_FULL' | 'PASS_CAPACITY_FULL') {
+  constructor(public readonly reason: 'EVENT_CAPACITY_FULL' | 'PASS_CAPACITY_FULL' | typeof LICENCE_INACTIVE) {
     super(reason)
     this.name = 'CapacityBlocksApprovalError'
   }
@@ -982,11 +996,16 @@ export async function approveRegistration(
 
     const counterRef = adminDb.collection('registrationCounters').doc(reg.eventSlug)
     const eventRef   = adminDb.collection('events').doc(reg.eventSlug)
+    const licenceRef = adminDb.collection(EVENT_LICENSES_COLLECTION).doc(reg.eventSlug)
 
-    const [counterSnap, eventSnap] = await Promise.all([
+    const [counterSnap, eventSnap, licenceSnap] = await Promise.all([
       txn.get(counterRef),
       txn.get(eventRef),
+      txn.get(licenceRef),
     ])
+    // RD-SA-COMMERCE-P1 — confirming this registration adds a seat: a suspended / cancelled /
+    // refunded licence refuses it, read in THIS transaction (serializes with licence actions).
+    const licenceBlocked = licenceRegistrationBlock(licenceSnap.data()) !== null
 
     const counterData = counterSnap.exists
       ? counterSnap.data() as { totalCount?: number; passCounts?: Record<string, number> }
@@ -997,6 +1016,8 @@ export async function approveRegistration(
 
     const totalCount = counterData?.totalCount ?? 0
     const passCount  = (counterData?.passCounts ?? {})[reg.passId] ?? 0
+
+    if (licenceBlocked) throw new CapacityBlocksApprovalError(LICENCE_INACTIVE)
 
     // Event-level capacity check
     const eventCapacity = deriveStoredEventCapacity(eventData)

@@ -103,7 +103,7 @@ export async function openCapacityCheckout(input: {
         if (!(await supersedeCapacityOrder(created.pending.orderId, created.pending.razorpayOrderId))) return processing
         continue
       }
-      const status = created.code === 'FORBIDDEN' ? 403 : created.code === 'EVENT_NOT_FOUND' ? 404 : 422
+      const status = created.code === 'FORBIDDEN' ? 403 : created.code === 'EVENT_NOT_FOUND' ? 404 : created.code === 'LICENCE_INACTIVE' ? 409 : 422
       return { kind: 'fail', status, code: created.code, message: created.message }
     }
 

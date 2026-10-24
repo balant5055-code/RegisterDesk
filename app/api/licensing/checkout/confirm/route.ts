@@ -24,7 +24,7 @@ import { getEffectiveDefinitionForVersion } from '@/lib/licensing/resolveCatalog
 import { LICENSE_ORDERS_COLLECTION, licenseOrderConverter } from '@/lib/licensing/schema'
 import { deriveLicenseCharge, activateLicenseOrder, holdExhaustedCouponRemainder, holdPhotoCapacityExceeded, PHOTO_CAPACITY_HELD_MESSAGE, orderListPricePaise } from '@/lib/licensing/finalizeLicensePurchase'
 import { isConsistentServiceItem } from '@/lib/licensing/serviceAllowances'
-import { activateAddonOrder } from '@/lib/licensing/draftCommerce'
+import { activateAddonOrder, holdLicenceInactiveAddon, ADDON_LICENCE_INACTIVE } from '@/lib/licensing/draftCommerce'
 import { confirmBadgePurchase } from '@/lib/licensing/printBadgePurchase/confirm'
 import { holdSupersededPayment, isSupersededUnheld, supersededActivationOrderId, RAZORPAY_ORDER_ID_RE, recordDuplicateLicensePayment } from '@/lib/licensing/manualRefundHold'
 import { NotificationType } from '@/lib/notifications'
@@ -71,7 +71,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     // RD-F2 — a SUPERSEDED add-on is still verified (below) so that a captured payment on it can be
     // recorded as a manual-refund hold; it is never settled.
     const supersededAddon = isSupersededUnheld(addon as never, `license_hold_${addonOrderId}`)
-    if ((addon.status !== 'created' && !supersededAddon) || !addon.razorpayOrderId) {
+    // RD-SA-COMMERCE-P1 — refused for an inactive licence: verified below so its hold can be (re)completed.
+    const licenceRefusedAddon = addon.status === 'failed' && (addon as { failReason?: unknown }).failReason === ADDON_LICENCE_INACTIVE
+    if ((addon.status !== 'created' && !supersededAddon && !licenceRefusedAddon) || !addon.razorpayOrderId) {
       return NextResponse.json({ error: 'This checkout is no longer valid. Please restart the payment.' }, { status: 409 })
     }
     const aOrderId   = typeof body.razorpay_order_id   === 'string' ? body.razorpay_order_id   : null
@@ -131,6 +133,26 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         error: 'This purchase would take the event above its maximum of 3,000 photos, so nothing was applied. Your payment is on hold for review by the RegisterDesk team — please do not pay again.',
         code: 'PAYMENT_HELD',
       }, { status: 409, headers: { 'Cache-Control': 'no-store' } })
+    }
+    // RD-SA-COMMERCE-P1 — the event's licence is suspended / cancelled / refunded: nothing granted, the
+    // order failed in that transaction; the captured payment is held for a Super Admin refund decision.
+    if (result === 'licence_inactive') {
+      const held = await holdLicenceInactiveAddon({
+        orderId: addonOrderId, razorpayOrderId: aOrderId, paymentId: aPaymentId,
+        amountPaise: addon.razorpayAmountPaise ?? 0, eventId, organizerUid: uid, detectedBy: 'confirm',
+      })
+      console.warn(`[license] add-on refused (licence inactive) — HELD for review · order=${addonOrderId} created=${held.created} skipped=${held.skipped === true}`)
+      return NextResponse.json({
+        error: "This event's licence is not active, so nothing was applied. Your payment is on hold for review by the RegisterDesk team — nothing further will be charged. Please do not pay again.",
+        code: 'PAYMENT_HELD',
+      }, { status: 409, headers: { 'Cache-Control': 'no-store' } })
+    }
+    if (result === 'inconsistent') {
+      // A verified, captured payment on an order whose snapshot does not re-derive: recorded durably for review.
+      await flagSuspiciousPayment({
+        source: 'license', reason: 'addon_inconsistent', paymentId: aPaymentId, orderId: aOrderId, entityId: eventId,
+        expectedAmountPaise: addon.razorpayAmountPaise ?? 0, actualAmountPaise: pay.amount, expectedCurrency: 'INR', actualCurrency: pay.currency,
+      })
     }
     if (result === 'inconsistent' || result === 'not_payable') {
       console.error(`[license] add-on settlement refused (${result}) · eventId=${eventId} order=${addonOrderId}`)

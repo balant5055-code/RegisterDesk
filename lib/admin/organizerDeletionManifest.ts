@@ -35,6 +35,14 @@ export const ORGANIZER_RETAINED_COLLECTIONS = [
   // (purchased / consumed units + usage records) and generation request markers. Never deleted here;
   // claims / rounds / badge orders also BLOCK deletion (BADGE_BILLING_RECORDS_EXIST).
   'printBadgeClaims', 'printBadgeRounds', 'badgeOrderRefunds', 'eventServiceAllowances', 'printJobRequests',
+  // M1.3 — the one-UTR-one-payout reservations (lib/settlements/confirmedTransfer.ts): financial evidence that a bank
+  // transfer reference was recorded against a payout. Retained (never in the plan); they hold ids and amounts only
+  // (no bank details). They do not BLOCK deletion — the payout requests they point to are retained already.
+  'payoutTransferReferences',
+  // RD-REFUND-MANUAL-01 — Super Admin manual attendee refunds (lib/refunds/manualRefundRules.ts) and their
+  // one-reference-one-refund reservations: evidence that money was returned outside the gateway. Retained; they do
+  // not BLOCK deletion — the platformTransactions rows they account against are retained already.
+  'manualRegistrationRefunds', 'manualRefundReferences',
 ] as const
 
 /**

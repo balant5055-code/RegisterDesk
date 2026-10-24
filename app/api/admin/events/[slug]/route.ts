@@ -113,7 +113,6 @@ export async function GET(req: NextRequest, ctx: RouteContext): Promise<NextResp
   const venue     = rec(ed.venue)
   const organizer = rec(ed.organizer)
   const pricing   = rec(ev.pricing)
-  const comm      = rec(draft?.communicationBilling)
 
   const detail = {
     general: {
@@ -142,12 +141,9 @@ export async function GET(req: NextRequest, ctx: RouteContext): Promise<NextResp
       licenseOrderId: lic?.orderId ?? null,
       licensePaidAt:  tsToISO(lic?.paidAt),
     },
-    wallet: {
-      required:    comm.required === true,
-      amountPaise: typeof comm.amount === 'number' ? comm.amount : 0,
-      status:      comm.status ?? null,
-      paymentId:   comm.paymentId ?? null,
-    },
+    // The former "wallet (comms)" block read draft.communicationBilling, which nothing writes any
+    // more (communication is billed pay-as-you-use at send time; completeCommunicationPayment has
+    // no caller) — it always showed an empty legacy record, so it is no longer returned.
     organizer: {
       uid,
       name:         user?.name ?? organizer.name ?? null,
@@ -166,9 +162,15 @@ export async function GET(req: NextRequest, ctx: RouteContext): Promise<NextResp
       eventType: pricing.eventType ?? null,
       passes:    Array.isArray(pricing.passes)
         ? (pricing.passes as Array<Record<string, unknown>>).map(p => ({
-            name:     p.name ?? '',
-            price:    p.price ?? 0,
-            quantity: p.quantity ?? null,
+            name:           p.name ?? '',
+            price:          p.price ?? 0,
+            quantity:       p.unlimited === true ? null : (p.quantity ?? null),
+            unlimited:      p.unlimited === true,
+            type:           p.type ?? null,
+            status:         p.status ?? 'active',
+            visibility:     p.visibility ?? 'public',
+            salesStartDate: p.salesStartDate || null,
+            salesEndDate:   p.salesEndDate || null,
           }))
         : [],
       totalCapacity: ev.totalCapacity ?? null,

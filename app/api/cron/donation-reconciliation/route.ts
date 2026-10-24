@@ -12,6 +12,7 @@
 
 import { NextRequest, NextResponse } from 'next/server'
 import { retryPendingDonationFinancials, recoverUncreditedDonations } from '@/lib/donations/donationReconciliation'
+import { retryDonationRefundAccounting, reconcileDonationRefundAttempts } from '@/lib/donations/refundService'
 import { isAuthorizedCron, cronUnauthorized } from '@/lib/cron/auth'
 import { captureFinancialError, flushMonitoring } from '@/lib/monitoring/sentry'
 import { recordCronExecution } from '@/lib/monitoring/cronMetrics'
@@ -27,7 +28,13 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     // RD-PAY-GA-01B — self-heal successful donations missing their ptx_ ledger (the hard-kill
     // window that leaves no reconciliation record). Idempotent + recency-window bounded.
     const ledgerSweep = await recoverUncreditedDonations(500)
-    const result = { credits, ledgerSweep }
+    // Phase 2 — refunds the gateway PROCESSED whose accounting failed: bounded, backed-off retries of
+    // the internal accounting only (never a gateway call); exhausted ones become needs_review.
+    const refundAccounting = await retryDonationRefundAccounting(50)
+    // Phase 2.2 — refund requests whose gateway outcome is unknown: matched ONLY by the attempt id Razorpay
+    // echoes in the refund's notes (read-only lookup). Never resolved as "no refund" here, never retried.
+    const refundAttempts = await reconcileDonationRefundAttempts(25)
+    const result = { credits, ledgerSweep, refundAccounting, refundAttempts }
     ok = true; detail = JSON.stringify(result)
     return NextResponse.json(result)
   } catch (err) {

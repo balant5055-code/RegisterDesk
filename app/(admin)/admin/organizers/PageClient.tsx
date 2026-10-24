@@ -19,11 +19,14 @@ import type {
   AdminOrganizersListResponse,
   AdminOrganizerDetail,
 } from '@/lib/admin/organizerTypes'
+import {
+  fmtSafeDate, rupees, walletAmountLabel, payoutLabel, emailVerificationLabel,
+  PENDING_VERIFICATION_LABEL, WITHHELD,
+} from '@/lib/admin/organizerDisplay'
 
-// RD-ORGANIZER-SIGNUP-02 · "All" is every ORGANIZER — it does not include signups that
-// have not verified their email, because those are not organizers yet (the route excludes
-// them from the unfiltered list). "Pending" is how an admin asks to see them, and it is
-// the only way to reach them here.
+// Organizer visibility (Option A) · "All" is every organizer, pending signups included —
+// each is badged "Pending verification" rather than hidden, so the list matches the
+// organizer count the admin stats report. "Pending" still narrows to just those signups.
 const STATUS_FILTERS: { value: '' | AccountStatus; label: string }[] = [
   { value: '',          label: 'All' },
   { value: 'active',    label: 'Active' },
@@ -38,9 +41,9 @@ async function getToken(): Promise<string> {
   return u.getIdToken()
 }
 
+// absent or unparseable timestamps read '—' (never "Invalid Date")
 function fmtDate(iso: string | null): string {
-  if (!iso) return '—'
-  return new Date(iso).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
+  return fmtSafeDate(iso)
 }
 
 const STATUS_TONE: Record<AccountStatus, PillTone> = {
@@ -52,8 +55,17 @@ const STATUS_TONE: Record<AccountStatus, PillTone> = {
   banned:    'danger',
 }
 
-function StatusBadge({ status }: { status: AccountStatus }) {
-  return <StatusPill tone={STATUS_TONE[status]}>{status}</StatusPill>
+function StatusBadge({ status, pendingVerification, statusRecorded }: {
+  status: AccountStatus; pendingVerification?: boolean; statusRecorded?: boolean
+}) {
+  return (
+    <span className="inline-flex flex-wrap items-center gap-1">
+      <StatusPill tone={STATUS_TONE[status]}>{status}</StatusPill>
+      {pendingVerification && <StatusPill tone="warning">{PENDING_VERIFICATION_LABEL}</StatusPill>}
+      {/* legacy record: no accountStatus stored, effective status shown */}
+      {statusRecorded === false && <span className="text-[11px] text-muted-foreground" title="This profile records no account status; it is treated as active.">no status recorded</span>}
+    </span>
+  )
 }
 
 export default function AdminOrganizersPage() {
@@ -186,7 +198,7 @@ export default function AdminOrganizersPage() {
                 <Td className="font-medium text-foreground">{o.name || '—'}</Td>
                 <Td className="text-muted-foreground">{o.email || '—'}</Td>
                 <Td className="text-muted-foreground">{o.organizationName || '—'}</Td>
-                <Td><StatusBadge status={o.accountStatus} /></Td>
+                <Td><StatusBadge status={o.accountStatus} pendingVerification={o.pendingVerification} statusRecorded={o.statusRecorded} /></Td>
                 <Td className="text-muted-foreground">{fmtDate(o.createdAt)}</Td>
                 <Td>
                   <div className="flex items-center justify-end gap-1.5">
@@ -264,7 +276,8 @@ const btnGhost = 'flex items-center justify-center rounded-md border border-bord
 // ─── Detail modal ───────────────────────────────────────────────────────────────
 
 function OrganizerDetailModal({ uid, onClose }: { uid: string; onClose: () => void }) {
-  const [detail, setDetail] = useState<AdminOrganizerDetail | null>(null)
+  // wallet / payoutProfile / settlements are null when the caller's financial view is redacted
+  const [detail, setDetail] = useState<(AdminOrganizerDetail & { financialRedacted?: boolean }) | null>(null)
   const [error,  setError]  = useState<string | null>(null)
 
   useEffect(() => {
@@ -285,8 +298,6 @@ function OrganizerDetailModal({ uid, onClose }: { uid: string; onClose: () => vo
     return () => { cancelled = true }
   }, [uid])
 
-  const rupees = (paise: number) => `₹${(paise / 100).toLocaleString('en-IN', { minimumFractionDigits: 2 })}`
-
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={onClose}>
       <div className="w-full max-w-lg rounded-2xl bg-card p-5 shadow-xl" onClick={e => e.stopPropagation()}>
@@ -305,7 +316,11 @@ function OrganizerDetailModal({ uid, onClose }: { uid: string; onClose: () => vo
               <p className="font-semibold text-foreground">{detail.profile.name || '—'}</p>
               <p className="text-muted-foreground">{detail.profile.email}</p>
               <p className="text-muted-foreground">{detail.profile.organizationName || '—'}</p>
-              <div className="mt-2"><StatusBadge status={detail.profile.accountStatus} /></div>
+              <div className="mt-2"><StatusBadge status={detail.profile.accountStatus} pendingVerification={detail.profile.pendingVerification} statusRecorded={detail.profile.statusRecorded} /></div>
+              <p className="mt-1 text-[12px] text-muted-foreground">
+                Signed up: {detail.profile.createdAt ? fmtDate(detail.profile.createdAt) : 'Not recorded'}
+                {' · '}Email: {emailVerificationLabel(detail.profile.emailVerification)}
+              </p>
               {detail.profile.statusReason && (
                 <p className="mt-1 text-[12px] text-muted-foreground">Reason: {detail.profile.statusReason}</p>
               )}
@@ -314,13 +329,16 @@ function OrganizerDetailModal({ uid, onClose }: { uid: string; onClose: () => vo
             <div className="grid grid-cols-2 gap-3">
               <Stat label="Events"    value={String(detail.eventCount)} />
               <Stat label="Campaigns" value={String(detail.campaignCount)} />
-              <Stat label="Available" value={detail.wallet.exists ? rupees(detail.wallet.availablePaise) : '—'} />
-              <Stat label="Pending"   value={detail.wallet.exists ? rupees(detail.wallet.pendingPaise) : '—'} />
-              <Stat label="Payout"    value={detail.payoutProfile.exists ? (detail.payoutProfile.isVerified ? 'Verified' : 'Unverified') : 'None'} />
-              <Stat label="Settled"   value={detail.wallet.exists ? rupees(detail.wallet.settledPaise) : '—'} />
+              <Stat label="Available" value={walletAmountLabel(detail.wallet, 'availablePaise', detail.financialRedacted === true)} />
+              <Stat label="Pending"   value={walletAmountLabel(detail.wallet, 'pendingPaise', detail.financialRedacted === true)} />
+              <Stat label="Payout"    value={payoutLabel(detail.payoutProfile, detail.financialRedacted === true)} />
+              <Stat label="Settled"   value={walletAmountLabel(detail.wallet, 'settledPaise', detail.financialRedacted === true)} />
             </div>
 
-            {detail.settlements.length > 0 && (
+            {(detail.financialRedacted === true || detail.settlements === null) && (
+              <p className="text-[12px] text-muted-foreground">Settlements: {WITHHELD}</p>
+            )}
+            {Array.isArray(detail.settlements) && detail.settlements.length > 0 && (
               <div>
                 <p className="mb-1.5 text-[12px] font-semibold text-muted-foreground">Recent settlements</p>
                 <div className="space-y-1">

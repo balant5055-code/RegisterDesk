@@ -131,8 +131,13 @@ export async function POST(req: NextRequest, ctx: RouteContext): Promise<NextRes
     // RD-FIN-02 · read the payment intent in THIS transaction (reads before the claim write).
     const pi = d.orderId
       ? (await txn.get(adminDb.doc(`paymentIntents/${d.orderId}`))).data() as
-          { status?: string; paymentId?: string; registrationId?: string; provider?: unknown; organizerUid?: string; eventSlug?: string } | undefined
+          { status?: string; paymentId?: string; registrationId?: string; provider?: unknown; organizerUid?: string; eventSlug?: string; manualRefundsPaise?: Record<string, unknown> } | undefined
       : undefined
+    // RD-REFUND-MANUAL-01 — the attendee is being / was repaid MANUALLY for this payment (a transfer the gateway
+    // cannot see): a gateway refund from here would pay twice. Refused before the claim.
+    if (pi?.manualRefundsPaise && Object.keys(pi.manualRefundsPaise).length > 0 && (!pi.paymentId || pi.paymentId === d.paymentId)) {
+      return { ok: false as const, status: 409, error: 'A manual refund of this payment exists (pending or completed). A gateway refund would pay the attendee twice — reconcile it manually.' }
+    }
     // A non-Razorpay payment must never be sent to Razorpay's refund API.
     if (pi && readProvider(pi.provider) !== 'razorpay') {
       return { ok: false as const, status: 409, error: 'This payment was not taken through Razorpay — refund it through its own provider.' }

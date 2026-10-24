@@ -37,8 +37,12 @@ import {
   ensureRegistrationRefundRecord,
   claimRefundSideEffects,
   recordRefundLedgerOutcome,
+  accumulatePaymentRefund,
+  flagRefundForReview,
+  recordRefundFailure,
+  closeRefundHoldAfterFullRefund,
 } from '@/lib/refunds/registrationRefunds'
-import { registrationBlocksRefundSideEffects } from '@/lib/refunds/refundPolicy'
+import { registrationBlocksRefundSideEffects, parseRazorpayRefundEvent, type ParsedRefundEvent } from '@/lib/refunds/refundPolicy'
 import { finalizePendingRegistrationRefund } from '@/lib/refunds/registrationRefunds'
 import { extractActualGatewayFee, recordActualGatewayFee } from '@/lib/payments/actualGatewayFee'
 import { flagSuspiciousPayment }      from '@/lib/payments/flagSuspicious'
@@ -47,15 +51,16 @@ import { settleCapturedRegistration, recordDuplicateRegistrationPayment } from '
 import { resolvePaymentProvider } from '@/lib/payments/providers'
 import { captureFinancialError, captureWebhookError } from '@/lib/monitoring/sentry'
 import { LICENSE_ORDERS_COLLECTION, licenseOrderConverter, isCapacityChangePurpose } from '@/lib/licensing/schema'
+import { classifyLicenceRefundEvent, recordLicenceRefundFailure } from '@/lib/admin/licenseAdminService'
 import { holdSupersededPayment, isSupersededUnheld, recordManualRefundHold, recordDuplicateLicensePayment } from '@/lib/licensing/manualRefundHold'
 import { applyCapacityChange, holdStaleCapacityRemainder } from '@/lib/licensing/capacityChange'
 import { getEffectiveDefinitionForVersion } from '@/lib/licensing/resolveCatalog'
 import { CURRENT_LICENSE_VERSION } from '@/lib/licensing/eventLicense'
 import { activateLicenseOrder, holdExhaustedCouponRemainder, holdPhotoCapacityExceeded, PHOTO_CAPACITY_HELD_MESSAGE, orderListPricePaise } from '@/lib/licensing/finalizeLicensePurchase'
-import { activateAddonOrder } from '@/lib/licensing/draftCommerce'
+import { activateAddonOrder, holdLicenceInactiveAddon, ADDON_LICENCE_INACTIVE } from '@/lib/licensing/draftCommerce'
 import { settleBadgePayment } from '@/lib/licensing/printBadgePurchase/settle'
 import { releaseRegistrationSessions } from '@/lib/sessions/allocation'
-import { recordRefundLedgerReconciliation } from '@/lib/payments/registrationReconciliation'
+import { recordRefundLedgerReconciliation, recordRefundHoldClosureRetry } from '@/lib/payments/registrationReconciliation'
 
 // ─── Signature verification ────────────────────────────────────────────────────
 
@@ -98,25 +103,117 @@ async function verifyWebhookSignature(rawBody: string, signature: string): Promi
 // persisted first and an unattributable one stays claimable for later reconciliation
 // instead of being silently consumed.
 
-async function handleRegistrationRefund(
-  orderId:          string,
-  razorpayRefundId: string,
-  refundAmount:     number,
-  gatewayPaymentId: string | null,
-): Promise<void> {
+// ─── W1 · refund-to-order association ─────────────────────────────────────────
+//
+// Razorpay's refund entity carries the PAYMENT id, never the order id; the order is on
+// payload.payment.entity (parseRazorpayRefundEvent takes it only from the refund's own payment).
+// When the payment entity is absent the order is resolved from RegisterDesk's own record of that
+// payment (paymentIntents.paymentId), and only when exactly one intent names it.
+
+/** The order id for a payment, from the trusted intent record; null when none or ambiguous. */
+async function orderIdForPayment(paymentId: string): Promise<string | null> {
+  const snap = await adminDb.collection('paymentIntents').where('paymentId', '==', paymentId).limit(2).get()
+  return snap.size === 1 ? snap.docs[0].id : null
+}
+
+/**
+ * A refund of a payment that is NOT a registration (licence / capacity / add-on / badge order, wallet
+ * top-up, donation) is not this ledger's: it must never become a registrationRefunds row (every row is
+ * counted as registration money out). Identified from server-written records only.
+ */
+async function nonRegistrationPurpose(orderId: string): Promise<'license' | 'wallet_topup' | 'donation' | null> {
+  const [topup, lic, donation] = await Promise.all([
+    adminDb.collection('walletTopups').doc(orderId).get(),
+    adminDb.collection(LICENSE_ORDERS_COLLECTION).where('razorpayOrderId', '==', orderId).limit(1).get(),
+    adminDb.collection('donations').where('razorpayOrderId', '==', orderId).limit(1).get(),
+  ])
+  if (topup.exists) return 'wallet_topup'
+  if (!lic.empty) return 'license'
+  if (!donation.empty) return 'donation'
+  return null
+}
+
+type RefundAttribution =
+  | { kind: 'other_purpose'; orderId: string; purpose: string }
+  | { kind: 'resolved'; orderId: string | null; intent: Awaited<ReturnType<typeof getPaymentIntent>>; registrationId: string | null
+      /** The intent's payment is a DIFFERENT payment (a held duplicate capture): never this registration's refund. */
+      otherPaymentOfOrder: boolean
+      /** The intent does not record which payment it settled: the refund cannot be verified against it. */
+      intentPaymentUnknown: boolean
+      currencyMismatch: boolean }
+
+async function attributeRefund(ev: ParsedRefundEvent): Promise<RefundAttribution> {
+  const orderId = ev.paymentMismatch ? null : (ev.orderId ?? await orderIdForPayment(ev.paymentId))
+  const intent = orderId ? await getPaymentIntent(orderId) : null
+  if (orderId && !intent) {
+    const purpose = await nonRegistrationPurpose(orderId)
+    if (purpose) return { kind: 'other_purpose', orderId, purpose }
+  }
+  const intentPaymentId = intent?.paymentId ?? null
+  const otherPaymentOfOrder = !!intentPaymentId && intentPaymentId !== ev.paymentId
+  const intentPaymentUnknown = !!intent && !intentPaymentId
+  const currencyMismatch = !!intent && !!ev.currency && ev.currency !== (intent.currency ?? 'INR')
+  const verified = !!intent && intentPaymentId === ev.paymentId && !currencyMismatch
+  return {
+    kind: 'resolved', orderId, intent, registrationId: verified ? (intent!.registrationId ?? null) : null,
+    otherPaymentOfOrder, intentPaymentUnknown, currencyMismatch,
+  }
+}
+
+/**
+ * M1 — close the settlement refund hold of a payment that is now FULLY refunded and reversed. The closure
+ * (one transaction, audit row included) re-checks all evidence and moves no money. A closure the evidence
+ * REFUSES (an open contradiction) is alerted and left for the Super Admin review. A closure that FAILED,
+ * or cannot run yet (ledger reversal not landed), is queued durably for the reconciliation cron
+ * (refundHoldClosureReconciliation) — the hold stays in place meanwhile. Returns false only when that
+ * queue record could not be written either: the caller then answers non-2xx so Razorpay redelivers, and
+ * the redelivery retries the closure (and nothing else — its side effects are already claimed).
+ */
+async function closeRefundHoldOrQueue(orderId: string, registrationId: string, refundId: string): Promise<boolean> {
+  try {
+    const closed = await closeRefundHoldAfterFullRefund({ orderId, registrationId })
+    if (closed.closed || closed.why === 'no_hold') return true
+    if (closed.why === 'not_reversed') return recordRefundHoldClosureRetry({ registrationId, orderId, refundId, error: 'not_reversed' })
+    captureFinancialError(new Error(`refund hold not closed after full refund: ${closed.why}`), { scope: 'razorpay.refund_processed.hold_not_closed', why: closed.why, registrationId, orderId })
+    return true
+  } catch (err) {
+    captureFinancialError(err, { scope: 'razorpay.refund_processed.hold_close_failed', registrationId, orderId })
+    return recordRefundHoldClosureRetry({ registrationId, orderId, refundId, error: err instanceof Error ? err.message : 'hold closure failed' })
+  }
+}
+
+async function handleRegistrationRefund(ev: ParsedRefundEvent): Promise<void> {
+  const { refundId: razorpayRefundId, amountPaise: refundAmount, paymentId: gatewayPaymentId } = ev
+  const at = await attributeRefund(ev)
+  if (at.kind === 'other_purpose') {
+    // Not a registration payment. A donation refund is synced by the donation webhook; a licence /
+    // capacity / add-on / badge / top-up refund made outside RegisterDesk is surfaced, never applied here.
+    // M3 — the EXPECTED echo of a licence refund RegisterDesk itself issued (activation order being
+    // refunded, same payment, same amount, licence refunded / on hold) is not an anomaly: logged only.
+    // Every other non-registration refund — and any licence refund that does not match — still alerts.
+    const licenceEcho = at.purpose === 'license' ? await classifyLicenceRefundEvent(at.orderId, { paymentId: ev.paymentId, amountPaise: ev.amountPaise, currency: ev.currency }, { gateway: { refundId: razorpayRefundId } }) : null
+    if (licenceEcho?.expected) {
+      console.log('[webhook/razorpay] refund.processed — expected licence refund echo:', { orderId: at.orderId, licenseOrderId: licenceEcho.licenseOrderId, razorpayRefundId })
+      return
+    }
+    if (at.purpose !== 'donation') {
+      captureFinancialError(new Error('non-registration refund observed at gateway'), { scope: 'razorpay.refund_processed.non_registration', purpose: at.purpose, orderId: at.orderId, razorpayRefundId, ...(licenceEcho && !licenceEcho.expected ? { licenceMismatch: licenceEcho.why } : {}) })
+    }
+    console.log('[webhook/razorpay] refund.processed — not a registration payment, not recorded here:', { orderId: at.orderId, purpose: at.purpose, razorpayRefundId })
+    return
+  }
+  const { orderId, intent, registrationId } = at
+
   // ── 0. PERSIST THE GATEWAY FACT FIRST ───────────────────────────────────────
   // Before any lookup that can fail. A refund happened at the gateway whether or not
   // RegisterDesk can name the attendee it belongs to, and storing it is not conditional
   // on attribution. Idempotent on the Razorpay refund id.
-  const intent = await getPaymentIntent(orderId)
   // RD-FIN-02 · B6 — a refund of a DIFFERENT payment on this order (a duplicate capture held for
   // review) is not this registration's refund: never mark the settled registration refunded, never
   // reverse its ledger or debit the wallet for it. Recorded as a processed, unlinked refund.
-  const samePayment = !gatewayPaymentId || !intent?.paymentId || gatewayPaymentId === intent.paymentId
-  const registrationId = samePayment ? (intent?.registrationId ?? null) : null
-
+  let record: Awaited<ReturnType<typeof ensureRegistrationRefundRecord>>['record']
   try {
-    await ensureRegistrationRefundRecord({
+    ;({ record } = await ensureRegistrationRefundRecord({
       razorpayRefundId,
       gatewayPaymentId,
       gatewayOrderId:  orderId,
@@ -126,8 +223,11 @@ async function handleRegistrationRefund(
       reason:          'gateway_refund_processed',
       registrationId,
       eventSlug:       intent?.eventSlug ?? null,
-      ...(samePayment ? {} : { status: 'processed' as const, metadata: { duplicatePaymentRefund: true } }),
-    })
+      // W1 — the owner from the payment's OWN intent (the attribution recoverUnattributed already trusts),
+      // so organizer refund totals never depend on the capped unattributed-refund recovery.
+      organizerUid:    intent?.organizerUid ?? null,
+      ...(at.otherPaymentOfOrder ? { status: 'processed' as const, metadata: { duplicatePaymentRefund: true } } : {}),
+    }))
   } catch (err) {
     // A refund we cannot even record must NOT be acknowledged as handled — let Razorpay
     // retry. This is the one place in this handler where failing loudly is correct.
@@ -135,13 +235,47 @@ async function handleRegistrationRefund(
     throw err
   }
 
+  // W1 — the reasons a recorded refund gets NO side effects, each flagged for a human, never guessed.
+  const review = async (reason: Parameters<typeof flagRefundForReview>[1], detail: Record<string, unknown>) => {
+    await flagRefundForReview(razorpayRefundId, reason, detail)
+    captureFinancialError(new Error(`registration refund needs review: ${reason}`), { scope: 'razorpay.refund_processed.review', reason, razorpayRefundId, orderId, ...detail })
+  }
+  if (record.status === 'failed') return review('processed_after_failed', { gatewayPaymentId })
+  if (ev.paymentMismatch) return review('payment_mismatch', { gatewayPaymentId, note: 'payment entity names another payment' })
+  if (at.currencyMismatch) return review('currency_mismatch', { refundCurrency: ev.currency, intentCurrency: intent?.currency ?? null })
+  if (at.intentPaymentUnknown) return review('payment_mismatch', { gatewayPaymentId, note: 'intent records no payment id' })
+
   // 1. No intent → the refund is recorded and `unlinked`. Reconciliation can attribute it
   //    later; nothing is lost.
-  if (!intent || !registrationId) {
+  if (!intent || !registrationId || !orderId) {
     console.log('[webhook/razorpay] refund.processed — recorded UNLINKED (no intent/registration):',
       { orderId, razorpayRefundId })
     return
   }
+
+  // 1b. W1 — cumulative accounting against the CHARGED amount, exactly once per refund id. Only the
+  //     refund that brings the total to the full charge may apply the full-refund side effects; a
+  //     partial refund is recorded (it IS counted as money out in every refund total) and flagged —
+  //     the registration stays as it is and nothing is reversed, because no partial ledger model exists.
+  // F1 / F2 — a partial / exceeding / after-full refund gets its review reason AND the payment's settlement
+  //     hold in the SAME transaction as the counting (so neither can be lost to a failed second write and a
+  //     redelivery that then sees a duplicate). Only the alert below is outside it.
+  const acc = await accumulatePaymentRefund(orderId, razorpayRefundId, refundAmount)
+  if (acc.kind === 'refund_failed') return review('processed_after_failed', { gatewayPaymentId })
+  if (acc.kind === 'no_intent') return
+  // RD-REFUND-MANUAL-01 — 'manual_conflict': a manual refund of this payment exists; the gateway refund is held for review.
+  if (acc.kind === 'partial' || acc.kind === 'exceeds' || acc.kind === 'already_full' || acc.kind === 'manual_conflict') {
+    captureFinancialError(new Error(`registration refund needs review: ${acc.kind}`), {
+      scope: 'razorpay.refund_processed.review', kind: acc.kind, razorpayRefundId, orderId,
+      priorPaise: acc.priorPaise, refundPaise: refundAmount, chargedPaise: intent.amount,
+      settlementHeld: acc.settlementHeld === true, settlementAlreadyReleased: acc.settlementAlreadyReleased === true,
+    })
+    return
+  }
+  // `duplicate`: a redelivery. Only the refund that completed the full amount continues (a crash-retry of
+  // its side effects, still guarded exactly-once below); a redelivered partial changes nothing.
+  if (acc.kind === 'duplicate' && acc.fullBy !== razorpayRefundId) return
+  const cumulativeRefund = intent.amount
 
   // 2. Load registration.
   const regRef  = adminDb.collection('registrations').doc(registrationId)
@@ -157,8 +291,12 @@ async function handleRegistrationRefund(
   // RD-FIN-02 · a Super Admin refund that reached the gateway but whose route died (or is slower than
   // this delivery) sits in refund_pending. Finish it HERE, with evidence, exactly once: the transition
   // is the gate both paths contend on. Anything else in refund_pending / refunded is skipped as before.
+  // F3 — the record's claim commits in the SAME transaction as the registration transition, and that
+  // transaction refuses a refund recorded FAILED: a concurrent refund.failed lands either before (no
+  // transition, flagged here) or after (it finds the refund processed and is flagged, never overwriting).
   if (regData.paymentStatus === 'refund_pending') {
-    const fin = await finalizePendingRegistrationRefund(registrationId, { refundId: razorpayRefundId, amountPaise: refundAmount, gatewayPaymentId })
+    const fin = await finalizePendingRegistrationRefund(registrationId, { refundId: razorpayRefundId, amountPaise: refundAmount, gatewayPaymentId }, { claimRecord: true })
+    if (fin === 'refund_failed') return review('processed_after_failed', { gatewayPaymentId, stage: 'finalize' })
     if (fin !== 'won') {
       console.log('[webhook/razorpay] refund.processed — pending refund not finalized:', { registrationId, fin })
       return
@@ -167,21 +305,28 @@ async function handleRegistrationRefund(
     console.log('[webhook/razorpay] refund.processed — already in state, skipping:', {
       registrationId, paymentStatus: regData.paymentStatus,
     })
+    // M1 — a redelivery (or the echo of an in-app full refund): only the hold closure is retried here —
+    // idempotent, evidence-gated, no money; every other side effect stays claimed and is not repeated.
+    if (regData.paymentStatus === 'refunded' && !(await closeRefundHoldOrQueue(orderId, registrationId, razorpayRefundId))) {
+      throw new Error('refund hold closure failed and could not be queued — redelivery required')
+    }
     return
+  } else {
+    // 3b. Exactly-once claim, now held by the refund RECORD.
+    const claim = await claimRefundSideEffects(razorpayRefundId)
+    if (!claim.claimed) {
+      // F3 — refused because the gateway reported this refund FAILED meanwhile: a durable review, not a log.
+      if (claim.record?.status === 'failed') return review('processed_after_failed', { gatewayPaymentId, stage: 'claim' })
+      console.log('[webhook/razorpay] refund.processed — side effects already applied:', razorpayRefundId)
+      return
+    }
   }
 
-  // 3b. Exactly-once claim, now held by the refund RECORD.
-  const claim = await claimRefundSideEffects(razorpayRefundId)
-  if (!claim.claimed) {
-    console.log('[webhook/razorpay] refund.processed — side effects already applied:', razorpayRefundId)
-    return
-  }
-
-  // 4. Mark registration as refunded.
+  // 4. Mark registration as refunded (the cumulative refunded amount — the full charge).
   await regRef.update({
     paymentStatus: 'refunded',
     refundId:      razorpayRefundId,
-    refundAmount,
+    refundAmount:  cumulativeRefund,
     refundedAt:    FieldValue.serverTimestamp(),
     updatedAt:     FieldValue.serverTimestamp(),
   })
@@ -192,9 +337,10 @@ async function handleRegistrationRefund(
     .catch(err => captureFinancialError(err, { scope: 'razorpay.refund_processed.session_release_failed', registrationId }))
 
   // 5. Update paymentIntents record (awaited; best-effort — refund already persisted above).
-  await updatePaymentIntentRefund(orderId, razorpayRefundId, 'processed', refundAmount)
+  await updatePaymentIntentRefund(orderId, razorpayRefundId, 'processed', cumulativeRefund)
     .catch(err => captureFinancialError(err, { scope: 'razorpay.refund_processed.intent_update_failed', orderId }))
 
+  let holdClosureQueued = true
   // 6. Reverse platform ledger + debit organizer revenue wallet — ATOMIC.
   // Status flip + wallet debit happen in one Firestore transaction; only the
   // call that flips the status performs the debit, so concurrent/duplicate
@@ -211,6 +357,10 @@ async function handleRegistrationRefund(
     await recordRefundLedgerOutcome(razorpayRefundId, {
       reversed: result.reversed, debitedPaise: result.debited,
     }).catch(() => {})
+    // M1 — the payment is now FULLY refunded and its settlement reversed: a refund hold an earlier partial
+    // refund placed has nothing left to protect. Closed only on full, consistent evidence (else it stays
+    // open and visible); a failed closure is queued for retry (see closeRefundHoldOrQueue).
+    holdClosureQueued = await closeRefundHoldOrQueue(orderId, registrationId, razorpayRefundId)
   } catch (err) {
     captureFinancialError(err, { scope: 'razorpay.refund_processed.ledger_reversal_failed', registrationId })
     await recordRefundLedgerReconciliation({
@@ -219,6 +369,10 @@ async function handleRegistrationRefund(
       organizerUid: typeof regData.organizerUid === 'string' ? regData.organizerUid : '',
       error:        err instanceof Error ? err.message : 'ledger reversal failed',
     })
+    // M1 — the closure depends on that reversal: queue it too when the payment carries a refund hold
+    // (drained after the reversal retry; it waits while the ledger is not reversed).
+    const held = await adminDb.doc(`platformTransactions/ptx_${registrationId}`).get().then(s => s.get('releaseHold') != null, () => true)
+    if (held) holdClosureQueued = await recordRefundHoldClosureRetry({ registrationId, orderId, refundId: razorpayRefundId, error: 'ledger reversal deferred' })
   }
 
   // 7. Registration-level audit entry (awaited; a failure is reported, never thrown).
@@ -231,8 +385,59 @@ async function handleRegistrationRefund(
     .catch(err => captureWebhookError(err, { scope: 'razorpay.refund_processed.email_failed', registrationId }))
 
   console.log('[webhook/razorpay] refund.processed — registration synced:', {
-    orderId, registrationId, refundId: razorpayRefundId, refundAmount,
+    orderId, registrationId, refundId: razorpayRefundId, refundAmount: cumulativeRefund,
   })
+  // M1 — thrown LAST (after the audit entry and email above): a closure that failed and could not be
+  // queued must not be acknowledged; the redelivery retries only the closure.
+  if (!holdClosureQueued) throw new Error('refund hold closure failed and could not be queued — redelivery required')
+}
+
+/**
+ * W1 · refund.failed — the gateway reports that a refund did NOT go through. Recorded durably on the
+ * refund record (never counted as money out), idempotently. NOTHING is reversed, re-credited, retried,
+ * reactivated or cancelled, and no refund is initiated: a failure that contradicts state RegisterDesk
+ * already applied (a processed refund, a registration already marked refunded / ledger reversed, or a
+ * refund_pending registration) is flagged for a human instead.
+ */
+async function handleRegistrationRefundFailed(ev: ParsedRefundEvent): Promise<void> {
+  const { refundId: razorpayRefundId, amountPaise, paymentId: gatewayPaymentId } = ev
+  const at = await attributeRefund(ev)
+  if (at.kind === 'other_purpose') {
+    // M2 — a licence refund RegisterDesk issued, accepted by the gateway, now reported FAILED: recorded as a
+    // durable manual-review state on the licence (nothing retried, reactivated or restored). A failure the
+    // in-app refund does not explain still alerts as before. Both are genuine financial events: alerted.
+    if (at.purpose === 'license') {
+      const r = await recordLicenceRefundFailure({ razorpayOrderId: at.orderId, refundId: razorpayRefundId, paymentId: gatewayPaymentId, amountPaise, currency: ev.currency, failureReason: ev.failureReason })
+      if (r.outcome === 'duplicate') return
+      captureFinancialError(new Error('licence refund FAILED at gateway'), { scope: 'razorpay.refund_failed.licence', orderId: at.orderId, razorpayRefundId, outcome: r.outcome, ...(r.outcome === 'not_applicable' ? { why: r.why } : { evidence: r.evidence, licence: r.licenceSlug }) })
+      return
+    }
+    if (at.purpose !== 'donation') {
+      captureFinancialError(new Error('non-registration refund FAILED at gateway'), { scope: 'razorpay.refund_failed.non_registration', purpose: at.purpose, orderId: at.orderId, razorpayRefundId })
+    }
+    return
+  }
+  const { orderId, intent, registrationId } = at
+  let res: Awaited<ReturnType<typeof recordRefundFailure>>
+  try {
+    res = await recordRefundFailure({
+      razorpayRefundId, gatewayPaymentId, gatewayOrderId: orderId, amountPaise,
+      origin: 'webhook', initiatedBy: 'webhook', reason: 'gateway_refund_failed',
+      registrationId, eventSlug: intent?.eventSlug ?? null, organizerUid: intent?.organizerUid ?? null, failureReason: ev.failureReason,
+    })
+  } catch (err) {
+    captureFinancialError(err, { scope: 'razorpay.refund_failed_record_failed', razorpayRefundId, orderId })
+    throw err                                     // non-2xx: Razorpay redelivers
+  }
+  if (res.outcome === 'duplicate') return
+  // F2 / F3 — every consequence (un-counting, side-effect / pending conflicts) was decided from that
+  // transaction's own reads and written with it; this only raises the alert.
+  if (res.outcome === 'conflict_processed' || res.reasons.length) {
+    captureFinancialError(new Error('registration refund failed — needs review'), {
+      scope: 'razorpay.refund_failed.review', razorpayRefundId, orderId, outcome: res.outcome,
+      reasons: res.outcome === 'conflict_processed' ? ['failed_after_processed'] : res.reasons,
+    })
+  }
 }
 
 /**
@@ -348,6 +553,18 @@ async function recoverLicensePaymentCaptured(
     // hold, re-checked in its transaction (still stale, same Razorpay order + amount, no other hold).
     // RD-L6 D3 — the same for an order made terminal because its event is no longer live.
     if (await completeRefusedCapacityHold(persisted, orderId, paymentId, paymentAmount, paymentCurrency)) return 'handled'
+    // RD-SA-COMMERCE-P1 — an add-on refused for an inactive licence: complete THE same deterministic hold if
+    // an earlier delivery's write failed (re-checked in its transaction); a different payment on an order
+    // already held is recorded as a duplicate. Never granted.
+    if (persisted.purpose === 'addon' && persisted.status === 'failed'
+        && (persisted as { failReason?: unknown }).failReason === ADDON_LICENCE_INACTIVE) {
+      const amount = Math.max(0, persisted.razorpayAmountPaise ?? 0)
+      if (paymentCurrency === 'INR' && paymentAmount === amount && amount > 0) {
+        await holdLicenceInactiveAddon({ orderId: persisted.orderId, razorpayOrderId: orderId, paymentId, amountPaise: amount, eventId: persisted.eventId, organizerUid: persisted.organizerUid, detectedBy: 'webhook' })
+        console.warn('[webhook/razorpay] add-on licence-inactive hold completed on retry:', { orderId, eventId: persisted.eventId })
+      }
+      return 'handled'
+    }
     if (persisted.status !== 'created') return 'handled' // failed/refunded — nothing to recover
 
     const razorpayAmountPaise = Math.max(0, persisted.razorpayAmountPaise ?? 0)
@@ -447,7 +664,22 @@ async function recoverLicensePaymentCaptured(
         console.warn('[webhook/razorpay] add-on would exceed the 3,000-photo maximum — payment HELD for review:', { orderId, paymentId, eventId: persisted.eventId, created: held.created })
         return 'handled'
       }
-      if (r === 'inconsistent') captureFinancialError('addon_inconsistent', { scope: 'razorpay.addon_inconsistent', orderId, paymentId })
+      // RD-SA-COMMERCE-P1 — the event's licence is inactive: nothing granted, order failed; hold the payment.
+      if (r === 'licence_inactive') {
+        const held = await holdLicenceInactiveAddon({
+          orderId: persisted.orderId, razorpayOrderId: orderId, paymentId, amountPaise: razorpayAmountPaise,
+          eventId: persisted.eventId, organizerUid: persisted.organizerUid, detectedBy: 'webhook',
+        })
+        console.warn('[webhook/razorpay] add-on refused (licence inactive) — payment HELD for review:', { orderId, paymentId, eventId: persisted.eventId, created: held.created })
+        return 'handled'
+      }
+      if (r === 'inconsistent') {
+        captureFinancialError('addon_inconsistent', { scope: 'razorpay.addon_inconsistent', orderId, paymentId })
+        await flagSuspiciousPayment({
+          source: 'license', reason: 'addon_inconsistent', paymentId, orderId, entityId: persisted.eventId,
+          expectedAmountPaise: razorpayAmountPaise, actualAmountPaise: paymentAmount, expectedCurrency: 'INR', actualCurrency: paymentCurrency,
+        })
+      }
       if (r === 'ok' || r === 'already') scheduleServicePurchaseNotification(persisted.orderId)   // Wallet-02 — purchase notifications, once per order (claim-deduplicated; never throws).
       console.log('[webhook/razorpay] add-on settled via recovery:', { orderId, paymentId, eventId: persisted.eventId, result: r })
       return 'handled'
@@ -585,22 +817,24 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ received: true })
   }
 
-  // ── 3b. refund.processed — sync dashboard/chargeback refunds to Firestore ───
-  if (eventType === 'refund.processed') {
-    const rPayload = event.payload as Record<string, unknown> | undefined
-    const rEntity  = (rPayload?.refund as Record<string, unknown> | undefined)
-      ?.entity as Record<string, unknown> | undefined
-    const rOrderId   = rEntity?.order_id   as string | undefined
-    const rRefundId  = rEntity?.id         as string | undefined
-    const rAmount    = rEntity?.amount     as number | undefined
-    const rPaymentId = rEntity?.payment_id as string | undefined
-
-    if (rOrderId && rRefundId && typeof rAmount === 'number') {
-      await handleRegistrationRefund(rOrderId, rRefundId, rAmount, rPaymentId ?? null)
-    } else {
-      console.warn('[webhook/razorpay] refund.processed — missing fields in payload:', {
-        rOrderId, rRefundId, rAmount,
-      })
+  // ── 3b. refund.processed / refund.failed — sync gateway refunds to Firestore (W1) ───────
+  // The documented payload: payload.refund.entity (no order_id) + payload.payment.entity (order_id).
+  // Records and reconciles only — nothing here (or in the handlers) ever initiates a refund.
+  if (eventType === 'refund.processed' || eventType === 'refund.failed') {
+    const parsed = parseRazorpayRefundEvent(event.payload)
+    if (!parsed.ok) {
+      // Permanently unusable (no refund id / amount / payment id): a redelivery cannot fix it, so it is
+      // acknowledged — and surfaced, never dropped silently.
+      captureFinancialError(new Error(`refund webhook payload unusable: ${parsed.reason}`), { scope: 'razorpay.refund_payload_unusable', eventType, reason: parsed.reason })
+      console.warn('[webhook/razorpay] refund event unusable:', { eventType, reason: parsed.reason })
+      return NextResponse.json({ received: true })
+    }
+    try {
+      if (eventType === 'refund.processed') await handleRegistrationRefund(parsed.event)
+      else await handleRegistrationRefundFailed(parsed.event)
+    } catch (err) {
+      captureWebhookError(err, { scope: 'razorpay.refund_event_failed', eventType, razorpayRefundId: parsed.event.refundId })
+      return NextResponse.json({ error: 'Temporary processing failure — please retry.' }, { status: 500 })
     }
     return NextResponse.json({ received: true })
   }

@@ -121,7 +121,15 @@ export function SettlementHistoryTable({ settlements, loading, enableControls = 
                     {s.paidAt && <span className="mt-0.5 block text-[12px]">Paid {formatShortDate(s.paidAt)}</span>}
                   </td>
                   <td className="px-4 py-3.5 font-semibold tabular-nums text-foreground">{formatCompactINR(s.amountPaise)}</td>
-                  <td className="px-4 py-3.5"><SettlementStatusBadge status={s.status} /></td>
+                  <td className="px-4 py-3.5">
+                    <SettlementStatusBadge status={s.status} />
+                    {/* M1 — held for review after a refund reduced the balance backing it */}
+                    {s.underReview && (
+                      <span className="ml-1.5 inline-block rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-semibold text-amber-800 dark:bg-amber-900/30 dark:text-amber-300" title="A refund reduced the balance available for this payout. It is on hold until our team reviews it.">
+                        On hold for review
+                      </span>
+                    )}
+                  </td>
                   <td className="px-4 py-3.5 text-muted-foreground">
                     {s.utrNumber ? <span className="font-mono text-[12.5px] text-foreground">{s.utrNumber}</span> : '—'}
                     {s.bankReference && <span className="mt-0.5 block text-[12px]">{s.bankReference}</span>}

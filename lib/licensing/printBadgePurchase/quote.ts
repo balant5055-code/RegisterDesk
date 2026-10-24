@@ -25,6 +25,8 @@ import { normalizeBadgeCouponCode, BADGE_COUPON_CODE_RE, validateBadgeCoupon } f
 import { readBadgeTaxApproval } from './taxApproval'
 import { readPrintBadgePilot } from '../printBadgePilotServer'
 import { isPilotOrganizer } from '../printBadgePilot'
+import { EVENT_LICENSES_COLLECTION } from '../schema'
+import { licenceRegistrationBlock, LICENCE_INACTIVE } from '../licenceRegistrationBlock'
 import {
   BADGE_ORDER_PURPOSE, isBadgePurchaseLifecycle, quantityBounds, buildBadgeSnapshot, badgeTaxApprovalProblem,
   type BadgePurchaseSnapshot, type BadgeOrderCoupon,
@@ -85,6 +87,11 @@ export async function quoteBadgePurchase(args: {
   if (!live) return no(404, 'EVENT_NOT_FOUND', 'Event not found.')
   const evProblem = badgeEventProblem(live.ev, args.workspaceUid, live.draftId)
   if (evProblem) return no(409, evProblem, 'Badges can be bought only for a published event that is not cancelled, completed or archived.')
+  // 3b — RD-SA-COMMERCE-P1: never sell new units on an inactive licence (settlement re-checks in its transaction).
+  const lic = await adminDb.collection(EVENT_LICENSES_COLLECTION).doc(args.slug).get()
+  if (licenceRegistrationBlock(lic.exists ? lic.data() : undefined)) {
+    return no(409, LICENCE_INACTIVE, "This event's licence is not active (suspended, cancelled or refunded), so badges cannot be bought. Contact RegisterDesk support.")
+  }
   // 4 — the event override.
   const ov = readStoredPrintBadgeOverride(live.ev.printBadgeCommercial)
   if (!ov.ok) return no(409, 'OVERRIDE_UNREADABLE', 'This event’s badge settings need attention from RegisterDesk before badges can be bought.')

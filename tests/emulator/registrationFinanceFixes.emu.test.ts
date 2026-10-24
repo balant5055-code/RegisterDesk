@@ -27,6 +27,8 @@ const h = vi.hoisted(() => ({
   refunds: new Map<string, Array<Record<string, unknown>>>(),   // paymentId → gateway refunds (stub)
   refundCalls: 0,
   gateOverride: null as null | { allowed: boolean; reason?: string },
+  /** M1 — every captureFinancialError (message + context), so a test can assert an alert or its absence. */
+  alerts: [] as Array<Record<string, unknown>>,
 }))
 
 vi.mock('@/lib/razorpay/client', () => ({
@@ -83,7 +85,8 @@ vi.mock('@/lib/notifications/inbox/notify', async orig => ({
 }))
 vi.mock('@/lib/monitoring/sentry', async orig => ({
   ...(await orig<typeof import('@/lib/monitoring/sentry')>()),
-  captureFinancialError: () => undefined, captureError: () => undefined,
+  captureFinancialError: (e: unknown, ctx?: Record<string, unknown>) => { h.alerts.push({ message: e instanceof Error ? e.message : String(e), ...(ctx ?? {}) }) },
+  captureError: () => undefined,
 }))
 vi.mock('@/lib/admin/auth', () => ({
   resolveAdminUid:      async (hd: string | null) => (hd === 'Bearer super' ? `finfix-super-${process.pid}` : null),
@@ -156,6 +159,29 @@ describeEmu('RD-FIN-02 · registration / dashboard / finance fix pass (real rout
     return webhook(new NextRequest('http://x/api/webhooks/razorpay', { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-razorpay-signature': sig }, body }))
   }
   const captured = (p: Record<string, unknown>) => hook('payment.captured', { payment: { entity: p } })
+  /**
+   * W1 — the DOCUMENTED Razorpay refund webhook payload (refund.created / processed / failed):
+   * payload.refund.entity has NO order_id; the order is on payload.payment.entity
+   * (https://razorpay.com/docs/webhooks/payloads/refunds/ — "contains": ["refund","payment"]).
+   */
+  function refundPayload(o: {
+    id: string; pay: { id: string; order_id: string; amount?: number }; amount: number
+    status?: string; currency?: string; withPayment?: boolean; payment?: Record<string, unknown>
+  }) {
+    return {
+      refund: { entity: {
+        id: o.id, entity: 'refund', amount: o.amount, currency: o.currency ?? 'INR', payment_id: o.pay.id,
+        notes: {}, receipt: null, acquirer_data: {}, created_at: 0, batch_id: null,
+        status: o.status ?? 'processed', speed_processed: 'normal', speed_requested: 'optimum',
+      } },
+      ...(o.withPayment === false ? {} : { payment: { entity: {
+        id: o.pay.id, entity: 'payment', amount: o.pay.amount ?? PRICE, currency: 'INR', status: 'captured',
+        order_id: o.pay.order_id, amount_refunded: o.amount, refund_status: (o.amount >= (o.pay.amount ?? PRICE)) ? 'full' : 'partial', ...(o.payment ?? {}),
+      } } }),
+    }
+  }
+  const refundHook = (event: 'refund.processed' | 'refund.failed', o: Parameters<typeof refundPayload>[0]) =>
+    hook(event, refundPayload({ ...o, status: o.status ?? (event === 'refund.failed' ? 'failed' : 'processed') }))
   const today = async () => (await L.daily(OWNER, slug, [L.dayKey(Date.now())]))[0]
   const counter = async () => (await db.doc(`registrationCounters/${slug}`).get()).data() ?? {}
   const regsOf = async () => (await db.collection('registrations').where('eventSlug', '==', slug).get()).docs.map(d => ({ id: d.id, ...d.data() } as Record<string, unknown>))
@@ -317,7 +343,8 @@ describeEmu('RD-FIN-02 · registration / dashboard / finance fix pass (real rout
     expect((await regsOf()).length).toBe(before.regs)
     expect(await counter()).toEqual(before.counter)
     // a refund of P2 (the duplicate) must not refund the settled registration
-    await hook('refund.processed', { refund: { entity: { id: `rfnd_b6_${P}`, order_id: first.orderId, payment_id: p2.id, amount: PRICE } } })
+    // W1 — documented shape: the payment entity is P2 (on the SAME order as the settled payment)
+    await refundHook('refund.processed', { id: `rfnd_b6_${P}`, pay: { id: p2.id, order_id: first.orderId }, amount: PRICE })
     expect((await db.doc(`registrations/${first.registrationId}`).get()).get('paymentStatus')).toBe('paid')
     expect((await db.doc(`registrationRefunds/rfnd_b6_${P}`).get()).data()).toMatchObject({ registrationId: null, status: 'processed' })
     expect((await db.doc(`platformTransactions/ptx_${first.registrationId}`).get()).get('status')).not.toBe('refunded')
@@ -381,12 +408,17 @@ describeEmu('RD-FIN-02 · registration / dashboard / finance fix pass (real rout
     await seedEvent(100)
     const s = await paidRegistration('p13@finfix.test')
     await db.doc(`registrations/${s.registrationId}`).update({ paymentStatus: 'refund_pending', refundClaim: { paymentId: s.pay.id, amountPaise: PRICE, by: 'super' } })
-    // a refund of the WRONG amount is not evidence: it stays pending
-    await hook('refund.processed', { refund: { entity: { id: `rfnd_p13_bad_${P}`, order_id: s.orderId, payment_id: s.pay.id, amount: 100 } } })
-    expect((await db.doc(`registrations/${s.registrationId}`).get()).get('paymentStatus')).toBe('refund_pending')
+    // a refund of the WRONG amount is not evidence: it stays pending (W1 — a partial refund: recorded and
+    // flagged for review, nothing applied). Checked on a SEPARATE registration: on this one a ₹1 refund
+    // followed by the full ₹500 would exceed the charge — impossible at the gateway, and W1 refuses it.
+    const bad = await paidRegistration('p13bad@finfix.test')
+    await db.doc(`registrations/${bad.registrationId}`).update({ paymentStatus: 'refund_pending', refundClaim: { paymentId: bad.pay.id, amountPaise: PRICE, by: 'super' } })
+    await refundHook('refund.processed', { id: `rfnd_p13_bad_${P}`, pay: bad.pay, amount: 100 })
+    expect((await db.doc(`registrations/${bad.registrationId}`).get()).get('paymentStatus')).toBe('refund_pending')
+    expect((await db.doc(`registrationRefunds/rfnd_p13_bad_${P}`).get()).get('reviewRequired')).toBe('partial_refund')
     // the real one finishes it
     const refundId = `rfnd_p13_${P}`
-    for (let i = 0; i < 2; i++) await hook('refund.processed', { refund: { entity: { id: refundId, order_id: s.orderId, payment_id: s.pay.id, amount: PRICE } } })
+    for (let i = 0; i < 2; i++) await refundHook('refund.processed', { id: refundId, pay: s.pay, amount: PRICE })
     const reg = (await db.doc(`registrations/${s.registrationId}`).get()).data()!
     expect(reg).toMatchObject({ paymentStatus: 'refunded', refundId, refundAmount: PRICE })
     expect((await db.doc(`platformTransactions/ptx_${s.registrationId}`).get()).get('status')).toBe('refunded')
@@ -486,5 +518,602 @@ describeEmu('RD-FIN-02 · registration / dashboard / finance fix pass (real rout
     // the wallet (both events, all reversals) reconciles — no false mismatch
     expect(await L.reconcileWallet(OWNER, (await db.doc(`organizerRevenueWallets/${OWNER}`).get()).data()!)).toEqual([])
     console.log('RD-FIN-02 reconciliation', JSON.stringify(table))
+  }, T)
+  // ═══ W1 · refund webhook: documented payload, full / partial / cumulative, refund.failed, ordering ══════
+  const ADMIN_ALL = { from: new Date(Date.now() - 3_600_000), to: new Date(Date.now() + 3_600_000) } as never   // the window shape the ADMIN REPORT test uses
+  const regDoc    = async (id: string) => (await db.doc(`registrations/${id}`).get()).data() ?? {}
+  const refundDoc = async (id: string) => (await db.doc(`registrationRefunds/${id}`).get()).data()
+  const ptxStatus = async (regId: string) => (await db.doc(`platformTransactions/ptx_${regId}`).get()).get('status')
+  const intentDoc = async (orderId: string) => (await db.doc(`paymentIntents/${orderId}`).get()).data() ?? {}
+  const walletClean = async () => expect(await L.reconcileWallet(OWNER, (await db.doc(`organizerRevenueWallets/${OWNER}`).get()).data()!)).toEqual([])
+  const refundTotal = async () => {
+    const read = await L.readRefunds({ organizerUid: OWNER, eventSlug: slug })
+    return read.records.reduce((a, r) => a + Number(r.amountPaise ?? 0), 0)
+  }
+
+  it('W1 · a real-shaped dashboard FULL refund (order only on payload.payment.entity) is associated and applied once; redeliveries change nothing', async () => {
+    await seedEvent(100)
+    const s = await paidRegistration('w1full@finfix.test')
+    const id = `rfnd_w1full_${P}`
+    for (let i = 0; i < 3; i++) expect((await refundHook('refund.processed', { id, pay: s.pay, amount: PRICE })).status).toBe(200)
+    expect(await regDoc(s.registrationId)).toMatchObject({ paymentStatus: 'refunded', refundId: id, refundAmount: PRICE })
+    expect(await ptxStatus(s.registrationId)).toBe('refunded')
+    // attributed to the payment's owner from its own intent — never left to the capped unattributed recovery
+    expect(await refundDoc(id)).toMatchObject({ status: 'processed', registrationId: s.registrationId, organizerUid: OWNER, gatewayOrderId: s.orderId, gatewayPaymentId: s.pay.id, amountPaise: PRICE, ledgerReversed: true })
+    expect(await intentDoc(s.orderId)).toMatchObject({ gatewayRefundsPaise: { [id]: PRICE }, gatewayRefundFullBy: id, refundAmount: PRICE })
+    expect(await refundTotal()).toBe(PRICE)
+    await walletClean()                                                   // reversed and debited exactly once
+  }, T)
+
+  it('W1 · a PARTIAL refund is recorded (and counted as money out) but never marks the registration refunded or reverses its ledger; a redelivery is not double-counted', async () => {
+    await seedEvent(100)
+    const s = await paidRegistration('w1part@finfix.test')
+    const id = `rfnd_w1part_${P}`
+    for (let i = 0; i < 2; i++) await refundHook('refund.processed', { id, pay: s.pay, amount: 20_000 })
+    expect(await regDoc(s.registrationId)).toMatchObject({ paymentStatus: 'paid' })
+    expect(await ptxStatus(s.registrationId)).not.toBe('refunded')
+    expect(await refundDoc(id)).toMatchObject({ status: 'linked', amountPaise: 20_000, reviewRequired: 'partial_refund', reviewReasons: ['partial_refund'], reviewDetails: { partial_refund: { cumulativePaise: 20_000, chargedPaise: PRICE, settlementHeld: true } } })
+    // F1 — this payment's settlement is HELD (never released while the partial refund is open)
+    expect((await db.doc(`platformTransactions/ptx_${s.registrationId}`).get()).data()).toMatchObject({ releaseStatus: 'held', releaseHold: { reason: 'refund_review', refundIds: [id] } })
+    expect((await intentDoc(s.orderId)).gatewayRefundsPaise).toEqual({ [id]: 20_000 })
+    expect((await intentDoc(s.orderId)).gatewayRefundFullBy).toBeUndefined()
+    expect(await refundTotal()).toBe(20_000)
+    await walletClean()
+  }, T)
+
+  it('W1 · multiple partial refunds accumulate; the one that completes the full charge applies the full-refund effects exactly once', async () => {
+    await seedEvent(100)
+    const s = await paidRegistration('w1multi@finfix.test')
+    const a = `rfnd_w1m_a_${P}`, b = `rfnd_w1m_b_${P}`, c = `rfnd_w1m_c_${P}`
+    await refundHook('refund.processed', { id: a, pay: s.pay, amount: 10_000 })
+    await refundHook('refund.processed', { id: b, pay: s.pay, amount: 15_000 })
+    expect(await regDoc(s.registrationId)).toMatchObject({ paymentStatus: 'paid' })
+    await refundHook('refund.processed', { id: c, pay: s.pay, amount: 25_000 })       // 10k + 15k + 25k = the full 50k
+    expect(await regDoc(s.registrationId)).toMatchObject({ paymentStatus: 'refunded', refundId: c, refundAmount: PRICE })
+    expect(await ptxStatus(s.registrationId)).toBe('refunded')
+    expect(await refundDoc(c)).toMatchObject({ status: 'processed' })
+    expect((await refundDoc(a))?.status).toBe('linked'); expect((await refundDoc(b))?.status).toBe('linked')
+    expect(await intentDoc(s.orderId)).toMatchObject({ gatewayRefundsPaise: { [a]: 10_000, [b]: 15_000, [c]: 25_000 }, gatewayRefundFullBy: c })
+    expect(await refundTotal()).toBe(PRICE)
+    // a stale redelivery of an earlier partial after the full refund changes nothing
+    await refundHook('refund.processed', { id: a, pay: s.pay, amount: 10_000 })
+    expect((await intentDoc(s.orderId)).gatewayRefundFullBy).toBe(c)
+    await walletClean()
+  }, T)
+
+  it('W1 · a refund AFTER the payment is fully refunded, and a refund that would EXCEED the charge, are flagged — never applied, never counted toward the charge', async () => {
+    await seedEvent(100)
+    const s = await paidRegistration('w1over@finfix.test')
+    await refundHook('refund.processed', { id: `rfnd_w1o_a_${P}`, pay: s.pay, amount: 40_000 })
+    await refundHook('refund.processed', { id: `rfnd_w1o_b_${P}`, pay: s.pay, amount: 20_000 })       // 60k > 50k
+    expect(await refundDoc(`rfnd_w1o_b_${P}`)).toMatchObject({ reviewRequired: 'refund_exceeds_charge', status: 'linked' })
+    expect((await intentDoc(s.orderId)).gatewayRefundsPaise).toEqual({ [`rfnd_w1o_a_${P}`]: 40_000 })
+    expect(await regDoc(s.registrationId)).toMatchObject({ paymentStatus: 'paid' })
+    const f = await paidRegistration('w1after@finfix.test')
+    await refundHook('refund.processed', { id: `rfnd_w1af_a_${P}`, pay: f.pay, amount: PRICE })
+    await refundHook('refund.processed', { id: `rfnd_w1af_b_${P}`, pay: f.pay, amount: 100 })
+    expect(await refundDoc(`rfnd_w1af_b_${P}`)).toMatchObject({ reviewRequired: 'refund_after_full' })
+    expect(await regDoc(f.registrationId)).toMatchObject({ paymentStatus: 'refunded', refundId: `rfnd_w1af_a_${P}`, refundAmount: PRICE })
+    await walletClean()
+  }, T)
+
+  it('W1 · refund.failed records the failure (never money out), changes no registration or ledger; a duplicate changes nothing; a success arriving AFTER it is flagged, not applied', async () => {
+    await seedEvent(100)
+    const s = await paidRegistration('w1fail@finfix.test')
+    const id = `rfnd_w1fail_${P}`
+    const adminBefore = (await L.adminTotals(ADMIN_ALL)).registrationRefundsPaise
+    for (let i = 0; i < 2; i++) expect((await refundHook('refund.failed', { id, pay: s.pay, amount: PRICE })).status).toBe(200)
+    expect(await refundDoc(id)).toMatchObject({ status: 'failed', registrationId: s.registrationId, amountPaise: PRICE })
+    expect(await regDoc(s.registrationId)).toMatchObject({ paymentStatus: 'paid' })
+    expect(await ptxStatus(s.registrationId)).not.toBe('refunded')
+    expect(await refundTotal()).toBe(0)                                   // a failed refund is never counted
+    expect((await L.adminTotals(ADMIN_ALL)).registrationRefundsPaise).toBe(adminBefore)     // nor in the platform report
+    await refundHook('refund.processed', { id, pay: s.pay, amount: PRICE })                 // out of order
+    expect(await refundDoc(id)).toMatchObject({ status: 'failed', reviewRequired: 'processed_after_failed' })
+    expect(await regDoc(s.registrationId)).toMatchObject({ paymentStatus: 'paid' })
+    expect((await intentDoc(s.orderId)).gatewayRefundsPaise).toBeUndefined()
+    await walletClean()
+  }, T)
+
+  it('W1 · refund.failed AFTER a processed refund never overwrites the success: flagged for review, nothing rolled back', async () => {
+    await seedEvent(100)
+    const s = await paidRegistration('w1fap@finfix.test')
+    const id = `rfnd_w1fap_${P}`
+    await refundHook('refund.processed', { id, pay: s.pay, amount: PRICE })
+    await refundHook('refund.failed', { id, pay: s.pay, amount: PRICE })
+    expect(await refundDoc(id)).toMatchObject({ status: 'processed', reviewRequired: 'failed_after_processed' })
+    expect(await regDoc(s.registrationId)).toMatchObject({ paymentStatus: 'refunded' })
+    expect(await ptxStatus(s.registrationId)).toBe('refunded')
+    expect(await refundTotal()).toBe(PRICE)
+    await walletClean()
+  }, T)
+
+  it('W1 · an APP-initiated refund and its webhook never double-apply; a later refund.failed for it is flagged (no automatic re-credit, no second refund)', async () => {
+    await seedEvent(100)
+    const s = await paidRegistration('w1app@finfix.test')
+    const { POST: refundRoute } = await import('@/app/api/organizer/registrations/[registrationId]/refund/route')
+    const callsBefore = h.refundCalls
+    const r = await refundRoute(new NextRequest('http://x', { method: 'POST',
+      headers: { authorization: 'Bearer super', 'content-type': 'application/json' }, body: JSON.stringify({ reason: 'attendee asked for a refund' }) }),
+      { params: Promise.resolve({ registrationId: s.registrationId }) } as never)
+    expect(r.status).toBe(200)
+    expect(h.refundCalls).toBe(callsBefore + 1)                           // the explicit Super Admin action
+    const refundId = (await regDoc(s.registrationId)).refundId as string
+    expect(await regDoc(s.registrationId)).toMatchObject({ paymentStatus: 'refunded' })
+    // the corresponding webhook (twice) adds nothing
+    for (let i = 0; i < 2; i++) await refundHook('refund.processed', { id: refundId, pay: s.pay, amount: PRICE })
+    expect(await ptxStatus(s.registrationId)).toBe('refunded')
+    expect(await refundTotal()).toBe(PRICE)
+    await walletClean()
+    // …and if the gateway later reports that refund FAILED: recorded + flagged, nothing re-credited or retried
+    await refundHook('refund.failed', { id: refundId, pay: s.pay, amount: PRICE })
+    // The app route's record stays `linked` (its side effects ran through the route), so the failure marks it
+    // failed, UN-counts it from the intent and flags BOTH facts — in one transaction (F2 / F3).
+    const rec = await refundDoc(refundId)
+    expect(rec).toMatchObject({ status: 'failed', reviewRequired: 'failed_after_counted' })
+    expect([...(rec?.reviewReasons ?? [])].sort()).toEqual(['failed_after_counted', 'failed_after_side_effects'])
+    expect((await intentDoc(s.orderId)).gatewayRefundsPaise?.[refundId]).toBeUndefined()
+    expect((await intentDoc(s.orderId)).gatewayRefundFullBy).toBeUndefined()
+    expect(await regDoc(s.registrationId)).toMatchObject({ paymentStatus: 'refunded' })
+    expect(await ptxStatus(s.registrationId)).toBe('refunded')
+    expect(h.refundCalls).toBe(callsBefore + 1)                           // the webhook never refunds
+  }, T)
+
+  it('W1 · association: no payment entity ⇒ resolved from the trusted intent by payment id; an unknown payment ⇒ recorded unlinked; a mismatched payment entity ⇒ flagged, nothing applied', async () => {
+    await seedEvent(100)
+    const s = await paidRegistration('w1assoc@finfix.test')
+    await refundHook('refund.processed', { id: `rfnd_w1np_${P}`, pay: s.pay, amount: PRICE, withPayment: false })
+    expect(await regDoc(s.registrationId)).toMatchObject({ paymentStatus: 'refunded', refundId: `rfnd_w1np_${P}` })
+    // unknown payment, no payment entity: the gateway fact is kept, attributed to nothing
+    await refundHook('refund.processed', { id: `rfnd_w1unk_${P}`, pay: { id: `pay_w1_unknown_${P}`, order_id: 'x' }, amount: 999, withPayment: false })
+    expect(await refundDoc(`rfnd_w1unk_${P}`)).toMatchObject({ status: 'unlinked', registrationId: null, gatewayOrderId: null })
+    // mismatched: the payment entity names ANOTHER payment than the refund
+    const m = await paidRegistration('w1mis@finfix.test')
+    await refundHook('refund.processed', { id: `rfnd_w1mis_${P}`, pay: m.pay, amount: PRICE, payment: { id: `pay_someone_else_${P}` } })
+    expect(await refundDoc(`rfnd_w1mis_${P}`)).toMatchObject({ registrationId: null, reviewRequired: 'payment_mismatch' })
+    expect(await regDoc(m.registrationId)).toMatchObject({ paymentStatus: 'paid' })
+    expect(await ptxStatus(m.registrationId)).not.toBe('refunded')
+    await walletClean()
+  }, T)
+
+  it('W1 · malformed refund payloads and a currency mismatch never touch a registration', async () => {
+    await seedEvent(100)
+    const s = await paidRegistration('w1bad@finfix.test')
+    const base = refundPayload({ id: `rfnd_w1bad_${P}`, pay: s.pay, amount: PRICE })
+    const variants = [
+      { ...base, refund: { entity: { ...base.refund.entity, amount: -5 } } },
+      { ...base, refund: { entity: { ...base.refund.entity, amount: 12.5 } } },
+      { ...base, refund: { entity: { ...base.refund.entity, id: '' } } },
+      { ...base, refund: { entity: { ...base.refund.entity, payment_id: undefined } } },
+      { payment: base.payment },
+    ]
+    for (const v of variants) expect((await hook('refund.processed', v)).status).toBe(200)
+    expect(await refundDoc(`rfnd_w1bad_${P}`)).toBeUndefined()
+    await refundHook('refund.processed', { id: `rfnd_w1usd_${P}`, pay: s.pay, amount: PRICE, currency: 'USD' })
+    expect(await refundDoc(`rfnd_w1usd_${P}`)).toMatchObject({ registrationId: null, reviewRequired: 'currency_mismatch' })
+    expect(await regDoc(s.registrationId)).toMatchObject({ paymentStatus: 'paid' })
+    expect(await ptxStatus(s.registrationId)).not.toBe('refunded')
+  }, T)
+
+  it('W1 · concurrency: two DIFFERENT refunds completing one payment, and three concurrent deliveries of one refund, apply the full-refund effects exactly once', async () => {
+    await seedEvent(100)
+    const s = await paidRegistration('w1conc@finfix.test')
+    const a = `rfnd_w1c_a_${P}`, b = `rfnd_w1c_b_${P}`
+    const rs = await Promise.all([
+      refundHook('refund.processed', { id: a, pay: s.pay, amount: 25_000 }),
+      refundHook('refund.processed', { id: b, pay: s.pay, amount: 25_000 }),
+    ])
+    expect(rs.map(r => r.status)).toEqual([200, 200])
+    const it1 = await intentDoc(s.orderId)
+    expect(it1.gatewayRefundsPaise).toEqual({ [a]: 25_000, [b]: 25_000 })
+    expect([a, b]).toContain(it1.gatewayRefundFullBy)
+    expect(await regDoc(s.registrationId)).toMatchObject({ paymentStatus: 'refunded', refundAmount: PRICE, refundId: it1.gatewayRefundFullBy })
+    expect([(await refundDoc(a))?.status, (await refundDoc(b))?.status].sort()).toEqual(['linked', 'processed'])
+    await walletClean()
+
+    const d = await paidRegistration('w1dup@finfix.test')
+    const id = `rfnd_w1dup_${P}`
+    const ds = await Promise.all([0, 1, 2].map(() => refundHook('refund.processed', { id, pay: d.pay, amount: PRICE })))
+    expect(ds.every(r => r.status === 200)).toBe(true)
+    expect(await regDoc(d.registrationId)).toMatchObject({ paymentStatus: 'refunded', refundId: id })
+    expect(await refundDoc(id)).toMatchObject({ status: 'processed', ledgerReversed: true })
+    expect((await intentDoc(d.orderId)).gatewayRefundsPaise).toEqual({ [id]: PRICE })
+    await walletClean()
+  }, T)
+
+  it('W1 · a refund of a NON-registration payment (licence order / donation) never becomes a registration refund', async () => {
+    await seedEvent(100)
+    const licOrder = `order_w1lic_${P}`, donOrder = `order_w1don_${P}`
+    await db.doc(`licenseOrders/w1lic_${P}`).set({ orderId: `w1lic_${P}`, razorpayOrderId: licOrder, status: 'paid', purpose: 'purchase' })
+    await db.doc(`donations/w1don_${P}`).set({ razorpayOrderId: donOrder, status: 'completed' })
+    await refundHook('refund.processed', { id: `rfnd_w1lic_${P}`, pay: { id: `pay_w1lic_${P}`, order_id: licOrder }, amount: 1_000 })
+    await refundHook('refund.processed', { id: `rfnd_w1don_${P}`, pay: { id: `pay_w1don_${P}`, order_id: donOrder }, amount: 1_000 })
+    await refundHook('refund.failed', { id: `rfnd_w1donf_${P}`, pay: { id: `pay_w1don_${P}`, order_id: donOrder }, amount: 1_000 })
+    expect(await refundDoc(`rfnd_w1lic_${P}`)).toBeUndefined()
+    expect(await refundDoc(`rfnd_w1don_${P}`)).toBeUndefined()
+    expect(await refundDoc(`rfnd_w1donf_${P}`)).toBeUndefined()
+    await db.doc(`licenseOrders/w1lic_${P}`).delete(); await db.doc(`donations/w1don_${P}`).delete()
+  }, T)
+  // ═══ F1 · a partial refund holds THAT payment's settlement; unrelated settlements still release ══════
+  const ptxDoc = async (regId: string) => (await db.doc(`platformTransactions/ptx_${regId}`).get()).data() ?? {}
+  const backdate = (regId: string) => db.doc(`platformTransactions/ptx_${regId}`).update({ paidAt: new Date(Date.now() - 5 * 86_400_000) })
+
+  it('F1 · partial refund ⇒ that settlement is held (concurrent release runs never release it); an unrelated settlement releases; a stale-query hold is refused in-transaction', async () => {
+    await seedEvent(100)
+    const { releaseEligibleFunds } = await import('@/lib/settlements/releaseFunds')
+    const held = await paidRegistration('f1held@finfix.test')
+    const free = await paidRegistration('f1free@finfix.test')
+    await refundHook('refund.processed', { id: `rfnd_f1_${P}`, pay: held.pay, amount: 20_000 })
+    expect(await ptxDoc(held.registrationId)).toMatchObject({ status: 'completed', releaseStatus: 'held', releaseHold: { reason: 'refund_review', refundIds: [`rfnd_f1_${P}`] } })
+    await backdate(held.registrationId); await backdate(free.registrationId)
+    await Promise.all([releaseEligibleFunds({ limit: 500 }), releaseEligibleFunds({ limit: 500 })])
+    expect((await ptxDoc(free.registrationId)).releaseStatus).toBe('released')          // unrelated: released
+    expect((await ptxDoc(held.registrationId)).releaseStatus).toBe('held')              // affected: never
+    expect((await db.collection('settlementReleases').where('transactionId', '==', `ptx_${held.registrationId}`).get()).size).toBe(0)
+    // a hold placed after the release query ran (simulated: status 'pending' but releaseHold present) is refused in the txn
+    await db.doc(`platformTransactions/ptx_${held.registrationId}`).update({ releaseStatus: 'pending' })
+    const r = await releaseEligibleFunds({ limit: 500 })
+    expect(r.held ?? 0).toBeGreaterThanOrEqual(1)
+    expect((await ptxDoc(held.registrationId)).releaseStatus).toBe('pending')           // still not released
+    expect((await db.collection('settlementReleases').where('transactionId', '==', `ptx_${held.registrationId}`).get()).size).toBe(0)
+    await db.doc(`platformTransactions/ptx_${held.registrationId}`).update({ releaseStatus: 'held' })
+    await walletClean()
+  }, T)
+
+  it('F1 · a partial refund of funds ALREADY released cannot be held: recorded on the hold and in the review evidence', async () => {
+    await seedEvent(100)
+    const { releaseEligibleFunds } = await import('@/lib/settlements/releaseFunds')
+    const s = await paidRegistration('f1rel@finfix.test')
+    await backdate(s.registrationId)
+    await releaseEligibleFunds({ limit: 500 })
+    expect((await ptxDoc(s.registrationId)).releaseStatus).toBe('released')
+    await refundHook('refund.processed', { id: `rfnd_f1rel_${P}`, pay: s.pay, amount: 10_000 })
+    expect(await ptxDoc(s.registrationId)).toMatchObject({ releaseStatus: 'released', releaseHold: { alreadyReleased: true, refundIds: [`rfnd_f1rel_${P}`] } })
+    expect(await refundDoc(`rfnd_f1rel_${P}`)).toMatchObject({ reviewRequired: 'partial_refund', reviewDetails: { partial_refund: { settlementHeld: false, settlementAlreadyReleased: true } } })
+  }, T)
+
+  // ═══ F2 · review reasons are durable across a failed write + redelivery, and accumulate ═════════════
+  it('F2 · the counting+review transaction fails on the first delivery ⇒ 500, redelivery counts ONCE and the review + hold are durable', async () => {
+    await seedEvent(100)
+    const s = await paidRegistration('f2dur@finfix.test')
+    const id = `rfnd_f2_${P}`
+    const orig = db.runTransaction.bind(db)
+    let calls = 0
+    vi.spyOn(db, 'runTransaction').mockImplementation((async (fn: never, opts?: never) => {
+      calls++
+      if (calls === 2) throw new Error('simulated review/counting write failure')      // ensureRecord(1) · accumulate(2)
+      return orig(fn, opts)
+    }) as never)
+    expect((await refundHook('refund.processed', { id, pay: s.pay, amount: 20_000 })).status).toBe(500)
+    vi.restoreAllMocks()
+    expect(await refundDoc(id)).toMatchObject({ status: 'linked' })                     // the gateway fact was kept
+    expect((await refundDoc(id))?.reviewRequired).toBeUndefined()
+    for (let i = 0; i < 2; i++) expect((await refundHook('refund.processed', { id, pay: s.pay, amount: 20_000 })).status).toBe(200)
+    expect(await refundDoc(id)).toMatchObject({ reviewRequired: 'partial_refund', reviewReasons: ['partial_refund'] })
+    expect((await intentDoc(s.orderId)).gatewayRefundsPaise).toEqual({ [id]: 20_000 })
+    expect((await ptxDoc(s.registrationId)).releaseStatus).toBe('held')
+  }, T)
+
+  it('F2 · refund.failed: the record+review transaction fails ⇒ 500; redelivery records it once; reasons accumulate (first reason kept)', async () => {
+    await seedEvent(100)
+    const s = await paidRegistration('f2fail@finfix.test')
+    const id = `rfnd_f2f_${P}`
+    await refundHook('refund.processed', { id, pay: s.pay, amount: 20_000 })              // partial: reason #1
+    const orig = db.runTransaction.bind(db)
+    let calls = 0
+    vi.spyOn(db, 'runTransaction').mockImplementation((async (fn: never, opts?: never) => {
+      calls++
+      if (calls === 1) throw new Error('simulated failure-record write failure')
+      return orig(fn, opts)
+    }) as never)
+    expect((await refundHook('refund.failed', { id, pay: s.pay, amount: 20_000 })).status).toBe(500)
+    vi.restoreAllMocks()
+    expect((await refundDoc(id))?.status).toBe('linked')
+    for (let i = 0; i < 2; i++) expect((await refundHook('refund.failed', { id, pay: s.pay, amount: 20_000 })).status).toBe(200)
+    const rec = await refundDoc(id)
+    expect(rec).toMatchObject({ status: 'failed', reviewRequired: 'partial_refund' })   // the first reason is never overwritten
+    expect([...(rec?.reviewReasons ?? [])].sort()).toEqual(['failed_after_counted', 'partial_refund'])
+    expect((await intentDoc(s.orderId)).gatewayRefundsPaise?.[id]).toBeUndefined()      // F3 — no longer counted
+    expect(await refundTotal()).toBe(0)
+    expect((await ptxDoc(s.registrationId)).releaseStatus).toBe('held')                // contradictory: hold kept for review
+  }, T)
+
+  // ═══ F3 · success and failure for the SAME refund at the same time ═════════════════════════════════
+  /** The only consistent end states: applied in full (failure flagged after), or failed and nothing applied. */
+  async function assertConsistent(s: { registrationId: string; orderId: string }, id: string) {
+    const rec = (await refundDoc(id))!
+    const reg = await regDoc(s.registrationId)
+    const intent = await intentDoc(s.orderId)
+    const ptx = await ptxDoc(s.registrationId)
+    if (rec.status === 'processed') {
+      expect(reg.paymentStatus).toBe('refunded')
+      expect(ptx.status).toBe('refunded')
+      expect(intent.gatewayRefundsPaise?.[id]).toBe(PRICE)
+      expect(rec.reviewReasons ?? []).toContain('failed_after_processed')             // the later failure is flagged
+    } else {
+      expect(rec.status).toBe('failed')
+      expect(reg.paymentStatus === 'paid' || reg.paymentStatus === 'refund_pending').toBe(true)
+      expect(ptx.status).not.toBe('refunded')
+      expect(intent.gatewayRefundsPaise?.[id]).toBeUndefined()                          // never stays counted
+      expect(intent.gatewayRefundFullBy).toBeUndefined()
+      expect((rec.reviewReasons ?? []).length).toBeGreaterThan(0)                         // never silent
+    }
+    await walletClean()
+  }
+
+  it('F3 · refund.processed and refund.failed for one refund, simultaneously (paid registration) ⇒ always a consistent, reviewed end state', async () => {
+    await seedEvent(100)
+    for (let round = 0; round < 4; round++) {
+      const s = await paidRegistration(`f3paid${round}@finfix.test`)
+      const id = `rfnd_f3p${round}_${P}`
+      const order = round % 2 === 0
+        ? [refundHook('refund.processed', { id, pay: s.pay, amount: PRICE }), refundHook('refund.failed', { id, pay: s.pay, amount: PRICE })]
+        : [refundHook('refund.failed', { id, pay: s.pay, amount: PRICE }), refundHook('refund.processed', { id, pay: s.pay, amount: PRICE })]
+      const rs = await Promise.all(order)
+      expect(rs.every(r => r.status === 200)).toBe(true)
+      await assertConsistent(s, id)
+    }
+  }, T)
+
+  it('F3 · the refund_pending variant: success + failure simultaneously never leave the registration refunded on a failed refund', async () => {
+    await seedEvent(100)
+    for (let round = 0; round < 4; round++) {
+      const s = await paidRegistration(`f3pend${round}@finfix.test`)
+      await db.doc(`registrations/${s.registrationId}`).update({ paymentStatus: 'refund_pending', refundClaim: { paymentId: s.pay.id, amountPaise: PRICE, by: 'super' } })
+      const id = `rfnd_f3q${round}_${P}`
+      const rs = await Promise.all([
+        refundHook('refund.processed', { id, pay: s.pay, amount: PRICE }),
+        refundHook('refund.failed', { id, pay: s.pay, amount: PRICE }),
+      ])
+      expect(rs.every(r => r.status === 200)).toBe(true)
+      await assertConsistent(s, id)
+      const rec = (await refundDoc(id))!
+      if (rec.status === 'failed') expect((await regDoc(s.registrationId)).paymentStatus).toBe('refund_pending')
+    }
+  }, T)
+
+  it('F3 · sequential failure-before-success and success-before-failure, both orders, end consistent', async () => {
+    await seedEvent(100)
+    const a = await paidRegistration('f3seqa@finfix.test')
+    await refundHook('refund.failed', { id: `rfnd_f3sa_${P}`, pay: a.pay, amount: PRICE })
+    await refundHook('refund.processed', { id: `rfnd_f3sa_${P}`, pay: a.pay, amount: PRICE })
+    await assertConsistent(a, `rfnd_f3sa_${P}`)
+    expect((await refundDoc(`rfnd_f3sa_${P}`))?.reviewReasons).toContain('processed_after_failed')
+    const b = await paidRegistration('f3seqb@finfix.test')
+    await refundHook('refund.processed', { id: `rfnd_f3sb_${P}`, pay: b.pay, amount: PRICE })
+    await refundHook('refund.failed', { id: `rfnd_f3sb_${P}`, pay: b.pay, amount: PRICE })
+    await assertConsistent(b, `rfnd_f3sb_${P}`)
+  }, T)
+
+  // ═══ M1 · a hold whose payment is now FULLY refunded and reversed is closed — on consistent evidence only ═══
+  const holdAudits = async (regId: string) =>
+    (await db.collection('adminAuditLogs').where('entityId', '==', `ptx_${regId}`).where('action', '==', 'settlement.refund_hold_closed').get()).docs
+  const holdAlerts = () => h.alerts.filter(a => String(a.scope ?? '').startsWith('razorpay.refund_processed.hold_'))
+  const closureDoc = async (regId: string) => (await db.doc(`refundHoldClosureReconciliation/${regId}`).get()).data()
+  const L2 = { drain: async (n: number) => (await import('@/lib/payments/registrationReconciliation')).retryPendingRefundHoldClosures(n) }
+
+  it('M1 · partial refund ⇒ held; the remainder completes the FULL refund ⇒ hold closed (evidence kept), review closed, audited once; never released; health drops while a real hold stays visible', async () => {
+    await seedEvent(100)
+    const { releaseEligibleFunds } = await import('@/lib/settlements/releaseFunds')
+    const { getOperationsHealth } = await import('@/lib/operations/healthMetrics')
+    const s = await paidRegistration('m1close@finfix.test')
+    const other = await paidRegistration('m1open@finfix.test')
+    const a = `rfnd_m1_a_${P}`, b = `rfnd_m1_b_${P}`, o = `rfnd_m1_o_${P}`
+    await refundHook('refund.processed', { id: a, pay: s.pay, amount: 20_000 })
+    await refundHook('refund.processed', { id: o, pay: other.pay, amount: 20_000 })         // a genuinely unresolved hold
+    expect(await ptxDoc(s.registrationId)).toMatchObject({ releaseStatus: 'held', releaseHold: { reason: 'refund_review', refundIds: [a] } })
+    expect(await refundDoc(a)).toMatchObject({ reviewOpen: true, reviewReasons: ['partial_refund'] })
+    const before = (await getOperationsHealth()).financial
+    h.alerts.length = 0
+    const refundCallsBefore = h.refundCalls
+
+    for (let i = 0; i < 2; i++) expect((await refundHook('refund.processed', { id: b, pay: s.pay, amount: 30_000 })).status).toBe(200)   // + a redelivery
+    expect(await regDoc(s.registrationId)).toMatchObject({ paymentStatus: 'refunded', refundId: b, refundAmount: PRICE })
+    const ptx = await ptxDoc(s.registrationId)
+    expect(ptx.status).toBe('refunded')                                                    // reversed — never released
+    expect(ptx.releaseHold).toBeUndefined()
+    expect(ptx.releaseStatus).toBe('pending')
+    const closure = ptx.releaseHoldHistory?.[`full_refund_${b}`]
+    expect(closure).toMatchObject({
+      hold: { reason: 'refund_review', refundIds: [a], alreadyReleased: false },
+      outcome: 'closed_full_refund', by: 'system:full_refund',
+      evidence: { gatewayRefundFullBy: b, countedRefundsPaise: PRICE, chargedPaise: PRICE, ledgerStatus: 'refunded' },
+    })
+    expect(closure.hold.heldAt).toBeTruthy()                                               // the original hold evidence
+    // the review is CLOSED, its reasons and details preserved
+    expect(await refundDoc(a)).toMatchObject({
+      reviewOpen: false, reviewRequired: 'partial_refund', reviewReasons: ['partial_refund'],
+      reviewDetails: { partial_refund: { cumulativePaise: 20_000, chargedPaise: PRICE } },
+      reviewClosed: { by: 'system:full_refund', closedReasons: ['partial_refund'], evidence: { gatewayRefundFullBy: b } },
+    })
+    const audit = await holdAudits(s.registrationId)
+    expect(audit).toHaveLength(1)                                                          // the redelivery closed nothing twice
+    expect(audit[0].data()).toMatchObject({
+      actorRole: 'system', adminUid: 'system:razorpay_webhook', entityType: 'settlement',
+      before: { releaseStatus: 'held', refundIds: [a] }, after: { releaseStatus: 'pending', ledgerStatus: 'refunded' },
+      metadata: { outcome: 'closed_full_refund', closedRefundIds: [a] },
+      correlation: { registrationId: s.registrationId, orderId: s.orderId, paymentId: s.pay.id },
+    })
+    expect(holdAlerts()).toEqual([])
+    // the release job never takes the reversed transaction, however old
+    await backdate(s.registrationId)
+    await releaseEligibleFunds({ limit: 500 })
+    expect(await ptxDoc(s.registrationId)).toMatchObject({ status: 'refunded', releaseStatus: 'pending' })
+    expect((await db.collection('settlementReleases').where('transactionId', '==', `ptx_${s.registrationId}`).get()).size).toBe(0)
+    // the unrelated, genuinely unresolved hold is untouched — and still counted
+    expect(await ptxDoc(other.registrationId)).toMatchObject({ releaseStatus: 'held', releaseHold: { refundIds: [o] } })
+    expect(await refundDoc(o)).toMatchObject({ reviewOpen: true })
+    const after = (await getOperationsHealth()).financial
+    expect(after.settlementsHeldForRefundReview).toBe(before.settlementsHeldForRefundReview - 1)
+    expect(after.registrationRefundsNeedingReview).toBe(before.registrationRefundsNeedingReview - 1)
+    expect(after.settlementsHeldForRefundReview).toBeGreaterThanOrEqual(1)
+    expect(after.registrationRefundsNeedingReview).toBeGreaterThanOrEqual(1)
+    expect(h.refundCalls).toBe(refundCallsBefore)                                          // no money moved by RegisterDesk
+    await walletClean()
+  }, T)
+
+  it('M1 · an unresolved contradiction PREVENTS closure: an exceeding refund, or a failure of a counted refund, keeps the hold and every review open (alerted, still counted)', async () => {
+    await seedEvent(100)
+    const { releaseEligibleFunds } = await import('@/lib/settlements/releaseFunds')
+    const { closeRefundHoldAfterFullRefund } = await import('@/lib/refunds/registrationRefunds')
+    h.alerts.length = 0
+    // (a) 40k partial, a 20k refund that would EXCEED the charge, then 10k completes the charge
+    const x = await paidRegistration('m1exceed@finfix.test')
+    const x1 = `rfnd_m1x1_${P}`, x2 = `rfnd_m1x2_${P}`, x3 = `rfnd_m1x3_${P}`
+    await refundHook('refund.processed', { id: x1, pay: x.pay, amount: 40_000 })
+    await refundHook('refund.processed', { id: x2, pay: x.pay, amount: 20_000 })
+    await refundHook('refund.processed', { id: x3, pay: x.pay, amount: 10_000 })
+    expect(await regDoc(x.registrationId)).toMatchObject({ paymentStatus: 'refunded', refundAmount: PRICE })
+    expect(await ptxDoc(x.registrationId)).toMatchObject({ status: 'refunded', releaseStatus: 'held', releaseHold: { reason: 'refund_review' } })
+    expect((await ptxDoc(x.registrationId)).releaseHoldHistory).toBeUndefined()
+    expect(await refundDoc(x1)).toMatchObject({ reviewOpen: true })
+    expect(await refundDoc(x2)).toMatchObject({ reviewOpen: true, reviewRequired: 'refund_exceeds_charge' })
+    expect((await refundDoc(x1))?.reviewClosed).toBeUndefined()
+    expect(holdAlerts()).toEqual([expect.objectContaining({ scope: 'razorpay.refund_processed.hold_not_closed', why: 'contradictory_review', registrationId: x.registrationId })])
+    expect(await closeRefundHoldAfterFullRefund({ orderId: x.orderId, registrationId: x.registrationId })).toEqual({ closed: false, why: 'contradictory_review' })
+    expect(await holdAudits(x.registrationId)).toHaveLength(0)
+
+    // (b) 20k partial that then FAILS at the gateway (uncounted, flagged), then 30k + 20k complete the charge
+    const y = await paidRegistration('m1failed@finfix.test')
+    const y1 = `rfnd_m1y1_${P}`, y2 = `rfnd_m1y2_${P}`, y3 = `rfnd_m1y3_${P}`
+    await refundHook('refund.processed', { id: y1, pay: y.pay, amount: 20_000 })
+    await refundHook('refund.failed', { id: y1, pay: y.pay, amount: 20_000 })
+    await refundHook('refund.processed', { id: y2, pay: y.pay, amount: 30_000 })
+    await refundHook('refund.processed', { id: y3, pay: y.pay, amount: 20_000 })
+    expect(await intentDoc(y.orderId)).toMatchObject({ gatewayRefundsPaise: { [y2]: 30_000, [y3]: 20_000 } })
+    expect(await ptxDoc(y.registrationId)).toMatchObject({ status: 'refunded', releaseStatus: 'held' })
+    expect(await refundDoc(y1)).toMatchObject({ status: 'failed', reviewOpen: true })
+    expect([...((await refundDoc(y1))?.reviewReasons ?? [])]).toContain('failed_after_counted')
+    expect(holdAlerts().filter(a => a.registrationId === y.registrationId)).toEqual([expect.objectContaining({ why: 'contradictory_review' })])
+
+    // (c) a payment only PARTIALLY refunded is never closed by a direct call either
+    const z = await paidRegistration('m1partial@finfix.test')
+    await refundHook('refund.processed', { id: `rfnd_m1z_${P}`, pay: z.pay, amount: 20_000 })
+    expect(await closeRefundHoldAfterFullRefund({ orderId: z.orderId, registrationId: z.registrationId })).toEqual({ closed: false, why: 'not_reversed' })
+    expect(await ptxDoc(z.registrationId)).toMatchObject({ status: 'completed', releaseStatus: 'held' })
+
+    // none of the contradictory holds is ever released
+    for (const r of [x, y, z]) await backdate(r.registrationId)
+    await releaseEligibleFunds({ limit: 500 })
+    for (const r of [x, y, z]) {
+      expect((await ptxDoc(r.registrationId)).releaseStatus).toBe('held')
+      expect((await db.collection('settlementReleases').where('transactionId', '==', `ptx_${r.registrationId}`).get()).size).toBe(0)
+    }
+    await walletClean()
+  }, T)
+
+  it('M1 · closure is all-or-nothing with its audit row (a failed audit write closes NOTHING, alerted); concurrent closures close exactly once', async () => {
+    await seedEvent(100)
+    const { closeRefundHoldAfterFullRefund } = await import('@/lib/refunds/registrationRefunds')
+    const s = await paidRegistration('m1audit@finfix.test')
+    const a = `rfnd_m1au_a_${P}`, b = `rfnd_m1au_b_${P}`
+    await refundHook('refund.processed', { id: a, pay: s.pay, amount: 20_000 })
+    // the audit row is append-only (create): an existing row at its id makes the closure transaction FAIL
+    const blocker = db.doc(`adminAuditLogs/settlement_hold_ptx_${s.registrationId}_full_refund_${b}`)
+    await blocker.set({ action: 'blocker', entityId: 'none' })
+    h.alerts.length = 0
+    expect((await refundHook('refund.processed', { id: b, pay: s.pay, amount: 30_000 })).status).toBe(200)
+    expect(await regDoc(s.registrationId)).toMatchObject({ paymentStatus: 'refunded' })     // the refund itself is applied
+    const ptx = await ptxDoc(s.registrationId)
+    expect(ptx).toMatchObject({ status: 'refunded', releaseStatus: 'held', releaseHold: { refundIds: [a] } })
+    expect(ptx.releaseHoldHistory).toBeUndefined()
+    expect(await refundDoc(a)).toMatchObject({ reviewOpen: true })
+    expect((await refundDoc(a))?.reviewClosed).toBeUndefined()
+    expect(holdAlerts()).toEqual([expect.objectContaining({ scope: 'razorpay.refund_processed.hold_close_failed', registrationId: s.registrationId })])
+    // the failure is QUEUED durably (that is why the webhook could answer 200) — and visible in health
+    expect(await closureDoc(s.registrationId)).toMatchObject({ status: 'pending', attempts: 1, orderId: s.orderId, ptxId: `ptx_${s.registrationId}`, refundId: b })
+    expect(h.alerts.some(x => x.scope === 'refundHoldClosureReconciliation.recorded')).toBe(true)
+    const { getOperationsHealth } = await import('@/lib/operations/healthMetrics')
+    const pending0 = (await getOperationsHealth()).financial.refundHoldClosuresPending
+    expect(pending0).toBeGreaterThanOrEqual(1)
+    // the cron retry while the cause persists: still pending, nothing closed, attempts counted
+    const r1 = await L2.drain(500)
+    expect(r1.stillPending).toBeGreaterThanOrEqual(1)
+    expect(await closureDoc(s.registrationId)).toMatchObject({ status: 'pending', attempts: 2 })
+    expect((await ptxDoc(s.registrationId)).releaseHold).toBeTruthy()
+    await blocker.delete()
+    // two concurrent cron runs: exactly one closure (one audit row); the record resolves; health drops
+    await Promise.all([L2.drain(500), L2.drain(500)])
+    expect(await holdAudits(s.registrationId)).toHaveLength(1)
+    expect(await closureDoc(s.registrationId)).toMatchObject({ status: 'resolved' })
+    expect(['closed', 'no_hold']).toContain((await closureDoc(s.registrationId))!.outcome)
+    expect(await ptxDoc(s.registrationId)).toMatchObject({ status: 'refunded', releaseStatus: 'pending' })
+    expect((await ptxDoc(s.registrationId)).releaseHold).toBeUndefined()
+    expect(await refundDoc(a)).toMatchObject({ reviewOpen: false })
+    expect((await getOperationsHealth()).financial.refundHoldClosuresPending).toBe(pending0 - 1)
+    // a direct repeat changes nothing
+    expect(await closeRefundHoldAfterFullRefund({ orderId: s.orderId, registrationId: s.registrationId })).toEqual({ closed: false, why: 'no_hold' })
+    await walletClean()
+  }, T)
+
+  it('M1 · the closure failed AND its retry record could not be written ⇒ 500; the redelivery retries ONLY the closure (no second debit, refund or side effect)', async () => {
+    await seedEvent(100)
+    const s = await paidRegistration('m1redeliver@finfix.test')
+    const a = `rfnd_m1rd_a_${P}`, b = `rfnd_m1rd_b_${P}`
+    await refundHook('refund.processed', { id: a, pay: s.pay, amount: 20_000 })
+    const blocker = db.doc(`adminAuditLogs/settlement_hold_ptx_${s.registrationId}_full_refund_${b}`)
+    await blocker.set({ action: 'blocker', entityId: 'none' })
+    const origCol = db.collection.bind(db)
+    vi.spyOn(db, 'collection').mockImplementation(((name: string) => name === 'refundHoldClosureReconciliation'
+      ? { doc: () => ({ set: async () => { throw new Error('simulated queue write failure') } }) }
+      : origCol(name)) as never)
+    h.alerts.length = 0
+    const refundCalls = h.refundCalls
+    expect((await refundHook('refund.processed', { id: b, pay: s.pay, amount: 30_000 })).status).toBe(500)
+    vi.restoreAllMocks()
+    expect(h.alerts.some(x => x.scope === 'refundHoldClosureReconciliation.persist_failed')).toBe(true)
+    expect(await regDoc(s.registrationId)).toMatchObject({ paymentStatus: 'refunded', refundId: b })   // the refund itself was applied
+    expect(await ptxDoc(s.registrationId)).toMatchObject({ status: 'refunded', releaseStatus: 'held' })
+    expect(await closureDoc(s.registrationId)).toBeUndefined()
+    const reversedOnce = (await refundDoc(b))!
+    expect(reversedOnce).toMatchObject({ status: 'processed', ledgerReversed: true })
+    await blocker.delete()
+    expect((await refundHook('refund.processed', { id: b, pay: s.pay, amount: 30_000 })).status).toBe(200)   // Razorpay redelivers
+    expect((await ptxDoc(s.registrationId)).releaseHold).toBeUndefined()
+    expect(await holdAudits(s.registrationId)).toHaveLength(1)
+    expect(await refundDoc(a)).toMatchObject({ reviewOpen: false })
+    expect((await refundDoc(b))?.ledgerReversedPaise).toEqual(reversedOnce.ledgerReversedPaise)
+    expect(await intentDoc(s.orderId)).toMatchObject({ gatewayRefundsPaise: { [a]: 20_000, [b]: 30_000 }, gatewayRefundFullBy: b })
+    expect(h.refundCalls).toBe(refundCalls)                                                     // never a gateway refund
+    await walletClean()                                                                          // debited exactly once
+  }, T)
+
+  it('M1 · the retry queue never forces a closure: it WAITS while the settlement is not reversed, and a contradiction is REFUSED (alerted, hold kept)', async () => {
+    await seedEvent(100)
+    const { recordRefundHoldClosureRetry } = await import('@/lib/payments/registrationReconciliation')
+    const w = await paidRegistration('m1wait@finfix.test')
+    await refundHook('refund.processed', { id: `rfnd_m1w_${P}`, pay: w.pay, amount: 20_000 })   // partial: held, NOT reversed
+    expect(await recordRefundHoldClosureRetry({ registrationId: w.registrationId, orderId: w.orderId, refundId: `rfnd_m1w_${P}`, error: 'test' })).toBe(true)
+    await L2.drain(500)
+    expect(await closureDoc(w.registrationId)).toMatchObject({ status: 'pending', lastError: 'waiting: not_reversed' })
+    expect(await ptxDoc(w.registrationId)).toMatchObject({ status: 'completed', releaseStatus: 'held' })
+
+    const x = await paidRegistration('m1refuse@finfix.test')
+    await refundHook('refund.processed', { id: `rfnd_m1r1_${P}`, pay: x.pay, amount: 40_000 })
+    await refundHook('refund.processed', { id: `rfnd_m1r2_${P}`, pay: x.pay, amount: 20_000 })   // exceeds: a contradiction
+    await refundHook('refund.processed', { id: `rfnd_m1r3_${P}`, pay: x.pay, amount: 10_000 })   // completes the charge
+    expect(await recordRefundHoldClosureRetry({ registrationId: x.registrationId, orderId: x.orderId, refundId: `rfnd_m1r3_${P}`, error: 'test' })).toBe(true)
+    h.alerts.length = 0
+    await L2.drain(500)
+    expect(await closureDoc(x.registrationId)).toMatchObject({ status: 'refused', outcome: 'contradictory_review' })
+    expect(h.alerts).toEqual(expect.arrayContaining([expect.objectContaining({ scope: 'refundHoldClosureReconciliation.refused', why: 'contradictory_review' })]))
+    expect(await ptxDoc(x.registrationId)).toMatchObject({ status: 'refunded', releaseStatus: 'held' })
+    expect(await holdAudits(x.registrationId)).toHaveLength(0)
+    await db.doc(`refundHoldClosureReconciliation/${w.registrationId}`).delete()   // leave no pending test record behind
+    await walletClean()
+  }, T)
+
+  it('M1 · a NEW review reason on a closed record REOPENS it (reviewOpen) — a closure never hides a later contradiction', async () => {
+    await seedEvent(100)
+    const s = await paidRegistration('m1reopen@finfix.test')
+    const a = `rfnd_m1ro_a_${P}`, b = `rfnd_m1ro_b_${P}`
+    await refundHook('refund.processed', { id: a, pay: s.pay, amount: 20_000 })
+    await refundHook('refund.processed', { id: b, pay: s.pay, amount: 30_000 })
+    expect(await refundDoc(a)).toMatchObject({ reviewOpen: false })
+    await refundHook('refund.failed', { id: a, pay: s.pay, amount: 20_000 })               // the counted partial now FAILS
+    const rec = (await refundDoc(a))!
+    expect(rec.reviewOpen).toBe(true)
+    expect(rec.reviewReasons).toContain('failed_after_counted')
+    expect(rec.reviewClosed).toMatchObject({ by: 'system:full_refund' })                   // the earlier closure stays on record
   }, T)
 })

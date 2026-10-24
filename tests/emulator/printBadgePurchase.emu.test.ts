@@ -727,6 +727,105 @@ describeEmu('RD-PRINT-BILL-P4 · prepaid badge purchases (real Firestore)', () =
     } finally { h.gateOpen = true; await setPilot(PILOT_ON) }
   }, T)
 
+  // ── SA-P1 · RD-SA-COMMERCE-P1: no new paid entitlements on an inactive licence ───────────────
+  const setLicence = (slug: string, data: Rec) => adminDb.doc(`eventLicenses/${slug}`).set({ eventId: slug, organizerUid: UID, status: 'active', ...data })
+  const dropLicence = (slug: string) => adminDb.doc(`eventLicenses/${slug}`).delete().catch(() => null)
+
+  it('SA-P1a · badges: an inactive licence refuses the quote; an order opened before it ⇒ capture HELD (badge_licence_inactive), nothing granted', async () => {
+    const { slug, draft } = await newEvent()
+    const a = await buy(slug, 100)
+    const orderId = a.body.orderId as string, rzp = (a.body.checkout as Rec).razorpayOrderId as string
+    try {
+      for (const lic of [{ admin: { lifecycle: 'suspended' } }, { admin: { lifecycle: 'cancelled' } }, { refundedAt: new Date() }, { refundHold: { orderId: 'x' } }]) {
+        await setLicence(slug, lic)
+        expect((await quote(slug, { quantity: 100 })).body.code).toBe('LICENCE_INACTIVE')
+      }
+      await setLicence(slug, { admin: { lifecycle: 'suspended' } })
+      const pay = capture(rzp, a.net)
+      expect(await webhookCaptured(rzp, pay, a.net)).toBe(200)                  // acknowledged because the hold exists
+      expect(await order(orderId)).toMatchObject({ status: 'failed', failReason: 'badge_licence_inactive', manualRefundHoldId: `license_hold_${orderId}` })
+      expect(await hold(`license_hold_${orderId}`)).toMatchObject({ status: 'open', paymentId: pay, reason: 'badge_purchase_refused', amountPaise: a.net })
+      expect(await webhookCaptured(rzp, pay, a.net)).toBe(200)                  // a replay keeps ONE hold
+      expect((await adminDb.collection('failedRefunds').where('licenseOrderId', '==', orderId).get()).size).toBe(1)
+      expect(await purchased(draft)).toBe(0)
+      // A restored entitlement sells again.
+      await setLicence(slug, { refundedAt: new Date(), entitlementRestoredAt: new Date() })
+      expect((await quote(slug, { quantity: 100 })).status).toBe(200)
+    } finally { await dropLicence(slug) }
+  }, T)
+
+  it('SA-P1b · add-ons: no checkout on an inactive licence; a captured add-on is refused + HELD once via confirm or webhook; a crash before the hold is completed on retry; pre-publish drafts unaffected', async () => {
+    const dc = await import('@/lib/licensing/draftCommerce')
+    const { priceServiceItem } = await import('@/lib/licensing/serviceAllowances')
+    const cfg = { enabled: true, unitPricePaise: 100, gstRatePercent: 18, onExhausted: 'block' } as never
+    const item = priceServiceItem('whatsapp', 10, cfg)
+    const none = { whatsapp: 0, certificates: 0, media: 0, print_badges: 0 }
+    const addon = async (draft: string, k: string) => {
+      const orderId = `add_${draft}_${k}`, rzp = `order_p4b_add_${k}_${PID}`
+      await adminDb.doc(`licenseOrders/${orderId}`).set({
+        orderId, eventId: draft, organizerUid: UID, tier: 'free', fromTier: null, purpose: 'addon', status: 'created',
+        amountPaise: item.totalPaise, currency: 'INR', razorpayOrderId: rzp, razorpayPaymentId: null, razorpayAmountPaise: item.totalPaise,
+        serviceItems: [item], servicesTotalPaise: item.totalPaise, selection: { capacity: 0, services: { ...none, whatsapp: 10 } },
+        createdAt: new Date(), updatedAt: new Date(), paidAt: null,
+      })
+      await adminDb.doc(`eventServiceAllowances/${draft}`).set({ draftId: draft, organizerUid: UID, pendingAddonOrderId: orderId }, { merge: true })
+      return { orderId, rzp }
+    }
+    const wa = async (draft: string) => Number(((await ledger(draft)).whatsapp as Rec | undefined)?.purchased ?? 0)
+
+    const { slug, draft } = await newEvent()
+    await setLicence(slug, { admin: { lifecycle: 'suspended' } })
+    try {
+      // 1 — no checkout is opened (no Razorpay order) for a published event with an inactive licence.
+      const before = h.created.length
+      const r = await dc.purchaseAddon({
+        draftId: draft, organizerUid: UID, tier: 'free' as never, capacity: 0, services: { ...none, whatsapp: 20 },
+        catalog: { whatsapp: cfg, certificates: cfg, media: cfg } as never,
+        coverage: { activation: null, paidCapacity: null, purchased: { ...none, whatsapp: 10 }, pendingAddon: null } as never,
+      })
+      expect(r).toMatchObject({ kind: 'error' })
+      expect(h.created.length).toBe(before)
+
+      // 2 — confirm: an add-on opened before the suspension, captured after it ⇒ refused, held, nothing granted.
+      const c = await addon(draft, 'c')
+      const payC = capture(c.rzp, item.totalPaise)
+      const res = await confirm(draft, c.orderId, c.rzp, payC)
+      expect(res.status).toBe(409)
+      expect(res.body.code).toBe('PAYMENT_HELD')
+      expect(await order(c.orderId)).toMatchObject({ status: 'failed', failReason: 'licence_inactive', manualRefundHoldId: `license_hold_${c.orderId}` })
+      expect(await hold(`license_hold_${c.orderId}`)).toMatchObject({ status: 'open', paymentId: payC, reason: 'lifecycle_ineligible', amountPaise: item.totalPaise })
+      expect((await ledger(draft)).pendingAddonOrderId).toBeNull()
+      expect(await wa(draft)).toBe(0)
+      expect((await confirm(draft, c.orderId, c.rzp, payC)).body.code).toBe('PAYMENT_HELD')   // replay: same ONE hold
+      expect((await adminDb.collection('failedRefunds').where('licenseOrderId', '==', c.orderId).get()).size).toBe(1)
+      // A SECOND captured payment on the same refused order is recorded separately (never absorbed, never granted).
+      const payC2 = capture(c.rzp, item.totalPaise)
+      expect(await webhookCaptured(c.rzp, payC2, item.totalPaise)).toBe(200)
+      expect(await hold(`license_dup_${payC2}`)).toMatchObject({ paymentId: payC2 })
+      expect(await wa(draft)).toBe(0)
+
+      // 3 — webhook, with a "crash" between the refusal transaction and the hold: the redelivery completes it.
+      const w = await addon(draft, 'w')
+      const payW = capture(w.rzp, item.totalPaise)
+      expect(await dc.activateAddonOrder({ orderId: w.orderId, razorpayOrderId: w.rzp, razorpayPaymentId: payW })).toBe('licence_inactive')
+      expect(await order(w.orderId)).toMatchObject({ status: 'failed', failReason: 'licence_inactive' })
+      expect(await hold(`license_hold_${w.orderId}`)).toBeUndefined()
+      expect(await webhookCaptured(w.rzp, payW, item.totalPaise)).toBe(200)
+      expect(await hold(`license_hold_${w.orderId}`)).toMatchObject({ status: 'open', paymentId: payW, reason: 'lifecycle_ineligible' })
+      expect(await webhookCaptured(w.rzp, payW, item.totalPaise)).toBe(200)
+      expect((await adminDb.collection('failedRefunds').where('licenseOrderId', '==', w.orderId).get()).size).toBe(1)
+      expect(await wa(draft)).toBe(0)
+    } finally { await dropLicence(slug) }
+
+    // 4 — a draft that was never published has no live event and no licence: its add-on settles normally.
+    const k = ++n
+    const pre = `p4b-dr-${PID}-${k}`
+    events.push({ slug: `p4b-ev-${PID}-${k}`, draft: pre })
+    const p = await addon(pre, 'p')
+    expect(await dc.activateAddonOrder({ orderId: p.orderId, razorpayOrderId: p.rzp, razorpayPaymentId: `pay_p4b_pre_${k}` })).toBe('ok')
+    expect(await wa(pre)).toBe(10)
+  }, T)
+
   it('F1 · reconciliation is clean for consistent data and names each injected mismatch; it writes nothing', async () => {
     const { slug, draft } = await newEvent()
     const code = await newCoupon()

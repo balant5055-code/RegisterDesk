@@ -31,6 +31,10 @@ import type {
   Organizer360Business, Organizer360Governance, Organizer360Timeline,
   Organizer360TimelineEntry, HealthIndicator, HealthLevel,
 } from '@/lib/admin/organizer360Types'
+import {
+  fmtSafeDate, statusText, emailVerificationLabel, mobileLabel, trustLabel, payoutLabel,
+  PENDING_VERIFICATION_LABEL,
+} from '@/lib/admin/organizerDisplay'
 
 // ─── Utilities ──────────────────────────────────────────────────────────────
 
@@ -52,10 +56,9 @@ async function authedGet<T>(url: string): Promise<T> {
 // RD-CLOSE — a withheld (null) amount — financial fields are Super Admin only — reads '—', never ₹0.
 const rupees = (p: number | null | undefined): string => (typeof p === 'number' ? `₹${(p / 100).toLocaleString('en-IN', { maximumFractionDigits: 0 })}` : '—')
 const num = (n: number): string => n.toLocaleString('en-IN')
-const fmtDate = (iso: string | null): string =>
-  iso ? new Date(iso).toLocaleString(undefined, { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—'
-const fmtDay = (iso: string | null): string =>
-  iso ? new Date(iso).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }) : '—'
+// absent or unparseable timestamps read '—' (never "Invalid Date")
+const fmtDate = (iso: string | null): string => fmtSafeDate(iso, true)
+const fmtDay = (iso: string | null): string => fmtSafeDate(iso)
 
 const HEALTH_DOT: Record<HealthLevel, string> = {
   green: 'bg-emerald-500', yellow: 'bg-amber-500', red: 'bg-red-500', neutral: 'bg-muted-foreground/40',
@@ -142,7 +145,9 @@ export default function Organizer360Page() {
           </h1>
           <div className="mt-1 flex flex-wrap items-center gap-2 text-[12.5px] text-muted-foreground">
             <span className="font-mono">{organizerUid}</span>
-            {overview && <StatusPill tone={overview.account.status === 'active' ? 'success' : overview.account.status === 'suspended' ? 'warning' : 'danger'}>{overview.account.status}</StatusPill>}
+            {/* a pending signup is not a fault: neutral, with the explicit verification badge */}
+            {overview && <StatusPill tone={overview.account.status === 'active' ? 'success' : overview.account.status === 'suspended' ? 'warning' : overview.account.status === 'pending' ? 'neutral' : 'danger'}>{overview.account.status}</StatusPill>}
+            {overview?.account.pendingVerification && <StatusPill tone="warning">{PENDING_VERIFICATION_LABEL}</StatusPill>}
           </div>
         </div>
         <button onClick={refreshOverview} className={btnOutline}><RefreshCw className="size-3.5" /> Refresh</button>
@@ -257,8 +262,9 @@ function OverviewWorkspace({ o, uid, onGoto, onChanged }: {
         <Kpi icon={BadgeCheck} label="Published" value={num(o.events.published)} />
         <Kpi icon={Users} label="Registrations" value={num(o.registrations.total)} />
         <Kpi icon={KeyRound} label="Active licenses" value={num(o.licenses.active)} />
-        <Kpi icon={IndianRupee} label="Available" value={rupees(o.revenue.availablePaise)} />
-        <Kpi icon={IndianRupee} label="Settled" value={rupees(o.revenue.settledPaise)} />
+        {/* revenue is null when the caller's financial view is redacted */}
+        <Kpi icon={IndianRupee} label="Available" value={rupees(o.revenue?.availablePaise)} />
+        <Kpi icon={IndianRupee} label="Settled" value={rupees(o.revenue?.settledPaise)} />
       </div>
       {o.registrations.truncated && <p className="text-[12px] text-muted-foreground">Registration/revenue rollup sampled the {num(o.registrations.sampledEvents)} most recent events.</p>}
 
@@ -269,23 +275,32 @@ function OverviewWorkspace({ o, uid, onGoto, onChanged }: {
             <Row label="Organization" value={o.profile.organizationName || '—'} />
             <Row label="Role" value={o.profile.role} />
             <Row label="Email" value={o.profile.email || '—'} icon={Mail} />
-            <Row label="Phone" value={o.profile.phone ?? '—'} icon={Phone} />
-            <Row label="Joined" value={fmtDay(o.profile.createdAt)} />
+            <Row label="Mobile" value={mobileLabel(o.profile.phone, o.profile.mobileVerification)} icon={Phone} />
+            {o.profile.phoneSource === 'legacy_phone' && <Row label="Mobile source" value="legacy phone field" />}
+            <Row label="Signed up" value={o.profile.createdAt ? fmtDay(o.profile.createdAt) : 'Not recorded'} />
           </dl>
         </Card>
 
         <Card title="Verification & account" icon={Fingerprint}>
           <div className="space-y-3 p-4">
             <div className="flex flex-wrap items-center gap-2">
-              <StatusPill tone={o.verification.emailVerified ? 'success' : 'warning'}>{o.verification.emailVerified ? 'email verified' : 'email unverified'}</StatusPill>
-              <StatusPill tone={o.verification.payoutVerified ? 'success' : o.verification.payoutExists ? 'warning' : 'neutral'}>
-                {o.verification.payoutVerified ? 'payout verified' : o.verification.payoutExists ? 'payout unverified' : 'no payout'}
+              <StatusPill tone={o.verification.email.state === 'verified' ? 'success' : o.verification.email.state === 'unverified' ? 'warning' : 'neutral'}>
+                email {emailVerificationLabel(o.verification.email.state).toLowerCase()}
+              </StatusPill>
+              {/* payout flags are null when the financial view is redacted */}
+              <StatusPill tone={o.verification.payoutVerified === true ? 'success' : o.verification.payoutExists === true ? 'warning' : 'neutral'}>
+                payout {payoutLabel(o.verification.payoutExists === null || o.verification.payoutVerified === null ? null
+                  : o.verification.payoutVerified ? 'verified' : o.verification.payoutExists ? 'unverified' : 'missing', false).toLowerCase()}
               </StatusPill>
               {o.verification.payoutMethod && <StatusPill tone="neutral">{o.verification.payoutMethod}</StatusPill>}
             </div>
             <dl className="space-y-2 text-[13.5px]">
-              <Row label="Account status" value={o.account.status} />
+              <Row label="Account status" value={statusText(o.account.status, o.account.statusRecorded)} />
               {o.account.statusReason && <Row label="Reason" value={o.account.statusReason} />}
+              <Row label="Email verification" value={emailVerificationLabel(o.verification.email.state)} icon={Mail} />
+              {o.verification.email.method && <Row label="Verified via" value={o.verification.email.method} />}
+              {o.verification.email.verifiedAt && <Row label="Verified at" value={fmtDate(o.verification.email.verifiedAt)} />}
+              <Row label="Trust" value={trustLabel(o.trust)} icon={ShieldCheck} />
               <Row label="Team" value={`${o.team.memberCount} members · ${o.team.inviteCount} invites`} icon={Users} />
             </dl>
           </div>
@@ -293,11 +308,21 @@ function OverviewWorkspace({ o, uid, onGoto, onChanged }: {
 
         <Card title="Revenue summary" icon={Wallet}>
           <dl className="space-y-2 p-4 text-[13.5px]">
-            <Row label="Available" value={rupees(o.revenue.availablePaise)} />
-            <Row label="Pending" value={rupees(o.revenue.pendingPaise)} />
-            <Row label="In transit" value={rupees(o.revenue.inTransitPaise)} />
-            <Row label="Settled" value={rupees(o.revenue.settledPaise)} />
+            <Row label="Available" value={rupees(o.revenue?.availablePaise)} />
+            <Row label="Pending" value={rupees(o.revenue?.pendingPaise)} />
+            <Row label="In transit" value={rupees(o.revenue?.inTransitPaise)} />
+            <Row label="Settled" value={rupees(o.revenue?.settledPaise)} />
             <Row label="License revenue" value={rupees(o.licenses.revenuePaise)} />
+          </dl>
+        </Card>
+
+        {/* Onboarding — read-only, the organizer dashboard's own setup checks + payout */}
+        <Card title={`Onboarding progress · ${o.onboarding?.done ?? 0}/${o.onboarding?.total ?? 0}`} icon={BadgeCheck}>
+          <dl className="space-y-2 p-4 text-[13.5px]">
+            {(o.onboarding?.checks ?? []).map(c => (
+              <Row key={c.id} label={c.label} value={c.done ? 'Done' : 'Not done'} />
+            ))}
+            <Row label="Payout details" value={payoutLabel(o.onboarding?.payout ?? null, false)} icon={Wallet} />
           </dl>
         </Card>
 

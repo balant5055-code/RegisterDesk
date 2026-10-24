@@ -6,6 +6,7 @@
 // (instant if the gateway returns 'processed', else via the refund.processed
 // webhook). On any Razorpay failure, NO local financial state changes persist.
 
+import crypto from 'crypto'
 import { NextRequest, NextResponse } from 'next/server'
 import { adminDb }                   from '@/lib/firebase/admin'
 import { verifyCaller }              from '@/lib/team/access'
@@ -16,8 +17,16 @@ import { logAdminActionOrRecord }    from '@/lib/admin/audit'
 import { parseFinancialReason }      from '@/lib/admin/financialGuard'
 import { getDonation }               from '@/lib/firebase/firestore/donations'
 import {
-  reserveRefund, releaseReservation, ensureRefundRecord, applyDonationRefundAccounting,
+  reserveRefund, releaseReservation, applyDonationRefundAccounting,
+  recordDonationRefundAccountingFailure, recordDonationRefundGatewayOutcome,
+  beginDonationRefundAttempt, settleDonationRefundAttempt,
 } from '@/lib/donations/refundService'
+import { isDefinitiveGatewayRejection, gatewayErrorMessage } from '@/lib/licensing/licenceRefundHold'
+
+// Phase 2.2 — an unknown-outcome attempt may be resolved as "no refund" only once it is older than
+// REFUND_HOLD_MIN_RELEASE_AGE_MS (15 min, PD-2); this request can never outlive that.
+export const maxDuration = 120
+import { captureFinancialError }     from '@/lib/monitoring/sentry'
 import type { DonationRefundDocument } from '@/lib/donations/types'
 
 type ExistingRefundLookup =
@@ -190,6 +199,12 @@ export async function POST(
   if (!donation.razorpayPaymentId) {
     return NextResponse.json({ success: false, error: 'No payment id recorded — cannot refund' }, { status: 422 })
   }
+  if (donation.hasOpenRefundAttempt === true) {
+    return NextResponse.json({
+      success: false, code: 'REFUND_ATTEMPT_UNRESOLVED',
+      error: 'An earlier refund request for this donation has an unresolved gateway outcome. It is held for reconciliation; no new refund can be issued until it is resolved.',
+    }, { status: 409 })
+  }
   const refundable = donation.amountPaise - (donation.refundedAmountPaise ?? 0) - (donation.pendingRefundPaise ?? 0)
   if (amountPaise > refundable) {
     return NextResponse.json(
@@ -227,43 +242,78 @@ export async function POST(
       error:   'Razorpay shows a refund on this payment that RegisterDesk has not recorded (or the refund status could not be checked). No new refund was issued; reconcile this donation before retrying.',
     }, { status: 409 })
   }
-  try {
-    if (existing.kind === 'found') {
-      // A previous attempt's refund whose response was lost — adopt it, never create a second.
-      refundId      = existing.refundId
-      gatewayStatus = existing.status
-    } else {
+  let linkAttemptId: string | null = null
+  if (existing.kind === 'found') {
+    // A previous attempt's refund whose response was lost — adopt it, never create a second.
+    refundId      = existing.refundId
+    gatewayStatus = existing.status
+  } else {
+    // Phase 2.2 — the attempt is recorded (and the unreleased donation held) BEFORE the gateway call;
+    // its id travels in the refund's notes so the outcome can be matched later from trusted evidence.
+    const attemptId = `att_${crypto.randomUUID().replace(/-/g, '')}`
+    let begun: Awaited<ReturnType<typeof beginDonationRefundAttempt>>
+    try {
+      begun = await beginDonationRefundAttempt({ donationId, attemptId, amountPaise, paymentId: donation.razorpayPaymentId, by: superAdminUid })
+    } catch (err) {
+      // Confirmed PRE-submission failure: nothing was recorded and the gateway was never called.
+      await releaseReservation(donationId, amountPaise)
+      await logAdminActionOrRecord({
+        adminUid: superAdminUid, actorRole: 'super_admin', action: 'donation.refund_failed', entityType: 'donation', entityId: donationId,
+        reason, metadata: { amountPaise, outcome: 'not_submitted', error: err instanceof Error ? err.message.slice(0, 300) : 'unknown' },
+        correlation: { donationId, paymentId: donation.razorpayPaymentId },
+      })
+      return NextResponse.json({ success: false, code: 'REFUND_NOT_SUBMITTED', error: 'The refund could not be started. Nothing was sent to Razorpay; please try again.' }, { status: 503 })
+    }
+    if (!begun.ok) {
+      await releaseReservation(donationId, amountPaise)
+      return NextResponse.json({ success: false, code: begun.code, error: 'An earlier refund request for this donation has an unresolved gateway outcome. No new refund was issued.' }, { status: 409 })
+    }
+    try {
       const refund = await razorpay.payments.refund(donation.razorpayPaymentId, {
         amount:  amountPaise,
         speed:   'optimum',
-        notes:   { donationId, reason: 'organizer_initiated' },
+        notes:   { donationId, reason: 'organizer_initiated', attemptId },
         receipt: `rfnd_don_${donationId}`.slice(0, 40),
       }) as { id: string; status: string }
       refundId      = refund.id
       gatewayStatus = refund.status
+      linkAttemptId = attemptId     // linked in the SAME transaction that records the refund (step 6)
+    } catch (err) {
+      const msg = gatewayErrorMessage(err)
+      console.error('[donation/refund] Razorpay refund failed:', { donationId, attemptId, err })
+      if (isDefinitiveGatewayRejection(err)) {
+        // A structured 4xx: proof no refund was created — the attempt is rejected and ITS reservation freed.
+        await settleDonationRefundAttempt(donationId, attemptId, { kind: 'rejected', error: msg })
+          .catch(e => captureFinancialError(e, { scope: 'donation_refund.attempt_reject_failed', donationId, attemptId }))
+        await logAdminActionOrRecord({
+          adminUid: superAdminUid, actorRole: 'super_admin', action: 'donation.refund_failed', entityType: 'donation', entityId: donationId,
+          reason, metadata: { amountPaise, outcome: 'rejected', attemptId, error: msg.slice(0, 300) },
+          correlation: { donationId, paymentId: donation.razorpayPaymentId },
+        })
+        return NextResponse.json({ success: false, code: 'REFUND_REJECTED', error: 'Razorpay rejected the refund. No refund was issued.' }, { status: 502 })
+      }
+      // No proof either way: the reservation and the hold STAY; reconciliation decides (never a retry).
+      await settleDonationRefundAttempt(donationId, attemptId, { kind: 'unknown', error: msg })
+        .catch(e => captureFinancialError(e, { scope: 'donation_refund.attempt_unknown_record_failed', donationId, attemptId }))
+      await logAdminActionOrRecord({
+        adminUid: superAdminUid, actorRole: 'super_admin', action: 'donation.refund_failed', entityType: 'donation', entityId: donationId,
+        reason, metadata: { amountPaise, outcome: 'outcome_unknown', attemptId, error: msg.slice(0, 300) },
+        correlation: { donationId, paymentId: donation.razorpayPaymentId },
+      })
+      return NextResponse.json({
+        success: false, code: 'REFUND_OUTCOME_UNKNOWN', attemptId,
+        error: 'Razorpay did not confirm the refund. It may or may not have been issued, so the donation is held for reconciliation. Do not retry.',
+      }, { status: 502 })
     }
-  } catch (err) {
-    await releaseReservation(donationId, amountPaise)   // undo the reservation
-    console.error('[donation/refund] Razorpay refund failed:', { donationId, err })
-    await logAdminActionOrRecord({
-      adminUid: superAdminUid, actorRole: 'super_admin', action: 'donation.refund_failed', entityType: 'donation', entityId: donationId,
-      reason,
-      metadata: { amountPaise, reason },
-      correlation: { donationId, paymentId: donation.razorpayPaymentId },
-    })
-    return NextResponse.json({ success: false, error: 'Razorpay refund failed. Please try again.' }, { status: 502 })
   }
 
   // ── 6. Record (immutable) + audit initiated ────────────────────────────────
-  await ensureRefundRecord({
-    refundId, donationId,
-    campaignId:        donation.campaignId,
-    campaignSlug:      donation.campaignSlug,
-    organizerUid:      donation.organizerUid,
-    razorpayPaymentId: donation.razorpayPaymentId,
-    amountPaise,
-    reason,
-    initiatedBy:       superAdminUid,
+  // Phase 3.1 — attempt link + refund record + (processed ⇒ accounting-pending / otherwise awaiting the
+  // gateway, donation held) in ONE transaction: a crash after the gateway call never loses the refund.
+  // If this write fails the attempt stays open (held) and the sweep links it from Razorpay's refund list.
+  const outcome = await recordDonationRefundGatewayOutcome({
+    donationId, refundId, paymentId: donation.razorpayPaymentId, amountPaise, gatewayStatus,
+    evidence: 'api_refund_processed', source: 'organizer', attemptId: linkAttemptId, initiatedBy: superAdminUid, reason,
   })
   // Money has moved: awaited, never throws; a failed audit write is recorded for reconciliation.
   await logAdminActionOrRecord({
@@ -274,7 +324,7 @@ export async function POST(
   })
 
   // ── 7. Apply accounting now if the gateway already settled it ──────────────
-  if (gatewayStatus === 'processed') {
+  if (gatewayStatus === 'processed' && outcome.record !== 'conflict') {
     try {
       await applyDonationRefundAccounting(refundId)
       await logAdminActionOrRecord({
@@ -283,10 +333,17 @@ export async function POST(
         correlation: { donationId, refundId },
       })
     } catch (err) {
-      // Reservation stays; the refund.processed webhook will complete accounting.
-      console.error('[donation/refund] accounting deferred to webhook:', { donationId, refundId, err })
+      // Reservation stays. Phase 2 — Razorpay itself returned 'processed' (trusted evidence): the
+      // failure is recorded durably (bounded retries by the donation-reconciliation drain, then
+      // needs_review) and the unreleased donation is held. The refund.processed webhook may also
+      // complete it; the accounting gate makes either path apply exactly once.
+      console.error('[donation/refund] accounting deferred:', { donationId, refundId, err })
+      await recordDonationRefundAccountingFailure(refundId, {
+        gatewayEvidence: 'api_refund_processed', error: err instanceof Error ? err.message : 'accounting_failed', source: 'organizer',
+      }).catch(e => captureFinancialError(e, { scope: 'donation_refund.accounting_failure_record_failed', donationId, refundId }))
     }
   }
+  // Accepted, not yet processed: recorded as awaiting the gateway (donation held) in step 6; never accounted.
 
   return NextResponse.json({ success: true, refundId, status: gatewayStatus })
 }

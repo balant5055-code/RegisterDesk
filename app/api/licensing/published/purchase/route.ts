@@ -97,7 +97,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
   // ── Capacity: target vs the ENFORCED capacity, never below registrations taken ────────
   const loaded = await loadCapacityChangeContext(slug, uid)
-  if (!loaded.ok) return fail(loaded.code === 'FORBIDDEN' ? 403 : 422, loaded.code, loaded.message)
+  if (!loaded.ok) return fail(loaded.code === 'FORBIDDEN' ? 403 : loaded.code === 'LICENCE_INACTIVE' ? 409 : 422, loaded.code, loaded.message)
   const { currentCapacity, terms } = loaded.ctx
   const target = body.capacity === undefined || body.capacity === null ? currentCapacity : body.capacity
   const q = quoteCapacityChange({ currentCapacity, newCapacity: target, terms })
@@ -149,6 +149,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const applied = await applyFreeCapacityChange({ eventId: slug, organizerUid: uid, snapshot: opened.snapshot })
     if (applied === 'stale') return fail(409, 'STALE_CAPACITY', 'The capacity changed while you were editing. Refresh and try again.')
     if (applied === 'not_found') return fail(404, 'EVENT_NOT_FOUND', 'Event not found.')
+    // RD-SA-COMMERCE-P1 — the licence went inactive between the quote and this change.
+    if (applied === 'lifecycle_ineligible') return fail(409, 'LICENCE_INACTIVE', "This event's licence is not active (suspended, cancelled or refunded), so its capacity cannot be changed. Contact RegisterDesk support.")
     return NextResponse.json({ ok: true, confirmVia: null, applied: true, capacity: opened.snapshot.capacity, checkout: null }, { headers: noStore })
   }
 

@@ -223,8 +223,27 @@ export function needsResubmit(e: EventListItem): boolean {
 
 // ─── Card navigation ──────────────────────────────────────────────────────────
 
+/**
+ * Where the card's PRIMARY action goes.
+ *
+ * RD-EVENT-DRAFT-NAV-01 · a DRAFT goes to the wizard, everything else to the event workspace.
+ *
+ * `primaryActionLabel` has said "Continue setup" for a draft for a long time, but this
+ * function had no draft case — so the label changed and the destination never did. The
+ * button landed on the Event Command Center, which is the workspace for an event that
+ * already exists: readiness panels, registrations, check-in. An organizer who clicked the
+ * one control labelled "Continue setup" did not reach setup, and the only route to the
+ * wizard was the overflow menu, where it was duplicated under the SAME name.
+ *
+ * The relay target (`new/visibility?draftId=…`) is the existing entry point every other
+ * deep-link into the wizard already uses — EventActionsPanel, the command palette, the
+ * wallet's purchase intent. This adds no new route; it points the button at the one that
+ * was already correct.
+ */
 export function manageHref(e: EventListItem): string {
-  return `/dashboard/events/${e.draftId}`
+  return e.lifecycleStatus === 'draft'
+    ? `/dashboard/events/new/visibility?draftId=${encodeURIComponent(e.draftId)}`
+    : `/dashboard/events/${e.draftId}`
 }
 
 export function publicHref(e: EventListItem): string | null {

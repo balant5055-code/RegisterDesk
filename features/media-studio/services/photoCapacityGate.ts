@@ -12,7 +12,7 @@
 
 import { FieldValue, type Transaction } from 'firebase-admin/firestore'
 import { adminDb } from '@/lib/firebase/admin'
-import { ledgerRef, type ServiceLedgerDoc } from '@/lib/licensing/serviceAllowanceLedger'
+import { ledgerRef, heldRefundUnits, type ServiceLedgerDoc } from '@/lib/licensing/serviceAllowanceLedger'
 import {
   paidPhotoCapacity, photoCapacityFigures, PHOTO_CAPACITY_REQUIRED_MESSAGE,
   type PhotoCapacityFigures,
@@ -33,6 +33,17 @@ function ownedMediaLine(snap: FirebaseFirestore.DocumentSnapshot, organizerUid: 
 }
 
 /**
+ * RD-SA-COMMERCE-P1 — the paid photo capacity a NEW upload may use: the ledger's media capacity minus
+ * any media units an in-flight licence refund is returning the money for (held on the ledger by the
+ * refund's claim transaction, which this transaction reads — so an upload and the refund serialize).
+ */
+function usablePhotoCapacity(snap: FirebaseFirestore.DocumentSnapshot, organizerUid: string): number {
+  const line = ownedMediaLine(snap, organizerUid)
+  if (!line) return 0
+  return Math.max(0, paidPhotoCapacity(line) - heldRefundUnits(snap.data() as ServiceLedgerDoc, 'media'))
+}
+
+/**
  * Inside a transaction (reads only): the event's paid capacity and the photos holding it. The
  * counter is used when initialised; otherwise (first use) it is counted once from the assets.
  */
@@ -42,7 +53,7 @@ export async function txnReadPhotoCapacity(
   const [ledgerSnap, lockSnap] = await Promise.all([txn.get(ledgerRef(draftId)), txn.get(photoUsageLockRef(draftId))])
   const held = heldOf(lockSnap)
   const used = held ?? (await txn.get(photoCapacityUsageQuery(organizerUid, draftId).count())).data().count
-  return { capacity: paidPhotoCapacity(ownedMediaLine(ledgerSnap, organizerUid)), used }
+  return { capacity: usablePhotoCapacity(ledgerSnap, organizerUid), used }
 }
 
 /** The counter write every capacity-changing transaction makes (serialises them). */
@@ -105,5 +116,5 @@ export async function readEventPhotoCapacity(organizerUid: string, draftId: stri
     adminDb.collection(MEDIA_ASSETS).where('organizerUid', '==', organizerUid).where('eventId', '==', draftId).where('status', '==', 'ready').count().get(),
   ])
   const used = usedAgg.data().count, stored = readyAgg.data().count
-  return { ...photoCapacityFigures(paidPhotoCapacity(ownedMediaLine(ledgerSnap, organizerUid)), used), stored, inFlight: Math.max(0, used - stored) }
+  return { ...photoCapacityFigures(usablePhotoCapacity(ledgerSnap, organizerUid), used), stored, inFlight: Math.max(0, used - stored) }
 }

@@ -28,6 +28,7 @@ import { Breadcrumbs } from '@/components/ui'
 import { ROUTES } from '@/config/navigation'
 import type { PillTone } from '@/components/admin'
 import { useConfirm } from '@/components/ui/ConfirmDialog'
+import { postLicenceAction, refundWithPreview, LicenceActionCancelled } from '@/lib/admin/licenceActionClient'
 import { Bars, HBars, Donut, Funnel } from '@/components/analytics/Charts'
 import type {
   Event360Overview, Event360Response, Event360Analytics, Event360Governance,
@@ -37,6 +38,7 @@ import type { LicenseAdminActionType, LicenseAdminActionRequest } from '@/lib/ad
 import type { EventAnalytics } from '@/lib/analytics/eventAnalytics'
 import type { MaybeMoney } from '@/lib/finance/financeAnalytics'
 import { GatewayVarianceCard } from '@/components/admin/GatewayVarianceCard'
+import { LicenceRefundStatePanel } from '@/components/admin/LicenceRefundStatePanel'
 
 // ─── Utilities ──────────────────────────────────────────────────────────────
 
@@ -587,19 +589,24 @@ function GovernanceWorkspace({ slug, o, onChanged }: {
   async function postLicense(action: LicenseAdminActionType, body: Partial<LicenseAdminActionRequest>) {
     setBusy(action); setErr(null)
     try {
-      const token = await getToken()
-      const res = await fetch(`/api/admin/licenses/${slug}`, {
-        method: 'POST',
-        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
-        body: JSON.stringify({ action, reason: '', ...body }),
-      })
-      if (!res.ok) {
-        const b = await res.json().catch(() => null) as { error?: string } | null
-        throw new Error(b?.error ?? `Request failed (${res.status})`)
-      }
+      // RD-SA-COMMERCE-P1 — shared client: confirms server-requested confirmations (refunded-licence restore).
+      await postLicenceAction(slug, { action, ...body }, getToken, confirm)
       afterMutation()
     } catch (e) {
-      setErr(e instanceof Error ? e.message : 'Action failed')
+      if (!(e instanceof LicenceActionCancelled)) setErr(e instanceof Error ? e.message : 'Action failed')
+    } finally { setBusy(null) }
+  }
+
+  // RD-SA-COMMERCE-P1 — refund: reason → server preview (amount, capacity before/after) → confirm → refund.
+  async function refundLicence() {
+    const reason = (await prompt({ title: 'Reason required', message: 'Reason for "refund":', required: true }))?.trim()
+    if (!reason) return
+    setBusy('refund'); setErr(null)
+    try {
+      await refundWithPreview(slug, reason, getToken, confirm)
+      afterMutation()
+    } catch (e) {
+      if (!(e instanceof LicenceActionCancelled)) setErr(e instanceof Error ? e.message : 'Refund failed')
     } finally { setBusy(null) }
   }
 
@@ -779,13 +786,23 @@ function GovernanceWorkspace({ slug, o, onChanged }: {
       {/* License actions — the full EA-4 set incl. the 8 API-only actions */}
       <Card title="License actions" icon={KeyRound}>
         <div className="space-y-3 p-4">
+          {/* RD-SA-COMMERCE-P1 (P1-5) — the same refund-state panel as the Licenses and License Center drawers. */}
+          {gov?.license?.refundState && (
+            <LicenceRefundStatePanel
+              state={gov.license.refundState}
+              busy={busy === 'releaseRefundHold' || busy === 'completeRefund' || busy === 'acknowledgeRefundFailure'}
+              onAcknowledgeFailure={() => void withReason('acknowledgeRefundFailure', {}, 'Acknowledge this failed refund? It records your decision only — nothing is refunded or restored.')}
+              onRelease={() => void withReason('releaseRefundHold', {}, 'Release this licence’s refund hold? Only possible when Razorpay confirms no refund was issued and the hold is at least 15 minutes old.')}
+              onComplete={() => void withReason('completeRefund', {}, 'Complete this refund? Only possible when Razorpay shows the full refund (or the wallet credit-back exists).', 'danger')}
+            />
+          )}
           <div className="flex flex-wrap gap-2">
             {o.license?.displayStatus === 'active'
               ? <Act icon={PauseCircle} label="Suspend" tone="amber" busy={busy === 'suspend'} onClick={() => void withReason('suspend')} />
               : <Act icon={PlayCircle} label="Reactivate" tone="emerald" busy={busy === 'reactivate'} onClick={() => void withReason('reactivate', {}, 'Reactivate this license?')} />}
             <Act icon={XCircle} label="Cancel" tone="red" busy={busy === 'cancel'} onClick={() => void withReason('cancel', {}, 'Cancel this license?', 'danger')} />
             <Act icon={BadgeCheck} label="Mark paid" tone="emerald" busy={busy === 'markPaymentReceived'} onClick={() => void withReason('markPaymentReceived', {}, 'Mark payment as received?')} />
-            <Act icon={Undo2} label="Refund" tone="red" busy={busy === 'refund'} onClick={() => void withReason('refund', {}, 'Refund and cancel this license?', 'danger')} />
+            <Act icon={Undo2} label="Refund" tone="red" busy={busy === 'refund'} onClick={() => void refundLicence()} />
             <Act icon={RefreshCw} label="Reissue" busy={busy === 'reissue'} onClick={() => void withReason('reissue', {}, 'Reissue this license?')} />
           </div>
 

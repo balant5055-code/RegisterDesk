@@ -13,6 +13,7 @@ import { captureFinancialError }            from '@/lib/monitoring/sentry'
 import { adminAuth }                        from '@/lib/firebase/admin'
 import { getCampaignBySlug }               from '@/lib/firebase/firestore/campaigns'
 import { isContentTakenDown }              from '@/lib/admin/moderation'
+import { campaignLinkedEventAllows }       from '@/lib/campaigns/linkedEventGate'
 import {
   initiateDonation,
   createDonationGatewayOrder,
@@ -123,6 +124,13 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       { error: 'This campaign is no longer available.', reason: 'CAMPAIGN_UNAVAILABLE' },
       { status: 403 },
     )
+  }
+
+  // A campaign linked to an event takes money only while that event is public (approved,
+  // not cancelled / unpublished / archived / taken down). Its page 404s otherwise, so the
+  // order answers the same: there is no public campaign here. Checked before any write.
+  if (!(await campaignLinkedEventAllows(campaign, campaignSlug))) {
+    return NextResponse.json({ error: 'Campaign not found.' }, { status: 404 })
   }
 
   const cd = campaign.campaignDetails

@@ -41,6 +41,8 @@ import { buildCounterIncrement }     from '@/lib/firebase/firestore/registration
 import { stageDailyStatsIncrement }  from '@/lib/dashboard/dailyStatsAdmin'
 import { settlementRevenueBasisPaise } from '@/lib/registrations/revenueBasis'
 import { deriveStoredEventCapacity } from '@/lib/registrations/capacity'
+import { EVENT_LICENSES_COLLECTION } from '@/lib/licensing/schema'
+import { licenceRegistrationBlock, LICENCE_INACTIVE } from '@/lib/licensing/licenceRegistrationBlock'
 import { checkRegistrationGate }     from '@/lib/registrations/gate'
 import {
   CapacityExceededError,
@@ -337,6 +339,7 @@ export async function settleCapturedRegistration(args: {
 
   const intentRef  = adminDb.collection('paymentIntents').doc(orderId)
   const eventRef   = adminDb.collection('events').doc(intent.eventSlug)
+  const licenceRef = adminDb.collection(EVENT_LICENSES_COLLECTION).doc(intent.eventSlug)
   const counterRef = adminDb.collection('registrationCounters').doc(intent.eventSlug)
   const regRef     = adminDb.collection('registrations').doc(crypto.randomUUID())
 
@@ -397,9 +400,13 @@ export async function settleCapturedRegistration(args: {
         // Phase 2: the base counter is deliberately NOT read here (GA-7C P1-4) — it is read
         // below only when a capacity limit actually gates this registration, so uncapped
         // settlements don't abort each other on a single hot document.
-        const [eventSnap, emailClaimSnap, ticketClaimSnap] = await Promise.all([
-          txn.get(eventRef), txn.get(emailClaimRef), txn.get(ticketCodeClaimRef),
+        const [eventSnap, licenceSnap, emailClaimSnap, ticketClaimSnap] = await Promise.all([
+          txn.get(eventRef), txn.get(licenceRef), txn.get(emailClaimRef), txn.get(ticketCodeClaimRef),
         ])
+        // RD-SA-COMMERCE-P1 — a suspended / cancelled / refunded licence takes no new seat. Read in
+        // THIS transaction; the refusal parks the captured payment for Super Admin review (never an
+        // automatic refund), exactly like a full event.
+        if (licenceRegistrationBlock(licenceSnap.data())) throw new CapacityExceededError(LICENCE_INACTIVE)
         const phoneClaimSnap = phoneClaimRef ? await txn.get(phoneClaimRef) : null
         const couponSnap     = couponRef     ? await txn.get(couponRef)     : null
 

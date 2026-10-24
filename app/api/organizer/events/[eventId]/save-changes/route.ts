@@ -31,8 +31,7 @@ import { authorizeWorkspace }        from '@/lib/team/workspace'
 import {
   resolveLiveEventRef, liveEventLookupMessage, liveEventLookupStatus,
 } from '@/lib/events/liveEventRef'
-import { findCommercialPricingChanges } from '@/lib/events/editing/pricingIntegrity'
-import { introducedValueIssues } from '@/lib/events/eventValueRules'
+import { buildLiveContentSync } from '@/lib/events/editing/liveContentSync'
 
 /** A refusal decided inside the transaction — carried out so no write is committed. */
 class SaveRefusal extends Error {
@@ -118,129 +117,16 @@ export async function POST(
         throw new SaveRefusal('This event’s live page belongs to a different draft.', 409)
       }
 
-      // ── 4a. Commercial pricing is frozen after publish (RD-PRICING-SAFETY-01) ──
-      const commercial = findCommercialPricingChanges(live.pricing, dn.pricing, { ignoreFeeModel: true })
-      if (commercial.length > 0) {
-        throw new SaveRefusal(
-          `Ticket prices and free/paid settings can’t be changed on a published event. ` +
-          `Changed: ${commercial.join('; ')}. Undo these changes to save your other edits.`,
-          409,
-        )
-      }
+      // ── 4a–4d. The copy rule — commercial + identity freeze, value rules, sold-count floor,
+      // change-log fields, and exactly which content fields move — lives in ONE place, shared
+      // with the resubmit / republish lifecycle transitions (lib/events/editing/liveContentSync).
+      const sync = buildLiveContentSync(dn, live, slug, (counterNow.data()?.passCounts ?? {}) as Record<string, number>)
+      if (!sync.ok) throw new SaveRefusal(sync.message, sync.status)
 
-      // ── 4a'. RD-CE-FIX H5 · identity is frozen after publish ──────────────
-      // Save Changes pushes whole content blocks, so it enforces the identity keys PATCH /edit
-      // lists as RESTRICTED (eventType/eventSubtype/campaignType, registrationMode, currency). The
-      // draft API and firestore.rules already refuse these on a published draft; this catches a
-      // draft that drifted before that lock existed, so it can never re-type the live event.
-      const strOf = (v: unknown) => (typeof v === 'string' ? v : null)
-      const regMode = (x: Record<string, unknown>) =>
-        strOf(((x.registrationForm as Record<string, unknown> | null)?.registrationRules as Record<string, unknown> | null)?.registrationMode)
-      const currencyOf = (x: Record<string, unknown>) => strOf((x.pricing as Record<string, unknown> | null)?.currency)
-      // Only identity the LIVE document records is compared: a legacy live doc without a value has
-      // nothing to drift from, and an unknown must never block an ordinary content save.
-      const differs = (a: string | null, b: string | null) => b !== null && a !== b
-      const identityDrift = [
-        ...(['eventType', 'eventSubtype', 'campaignType'] as const).filter(k => differs(strOf(dn[k]), strOf(live[k]))),
-        ...(differs(regMode(dn), regMode(live)) ? ['registrationMode'] : []),
-        ...(differs(currencyOf(dn), currencyOf(live)) ? ['currency'] : []),
-      ]
-      if (identityDrift.length > 0) {
-        throw new SaveRefusal(
-          `These settings can’t be changed on a published event: ${identityDrift.join(', ')}. ` +
-          `Duplicate the event to publish it with different settings.`,
-          409,
-        )
-      }
-
-      // ── 4a''. RD-CE-FIX H1 · the VALUES pushed must pass the server's rules ─
-      // Only issues this save introduces (vs the live event) are refused, so a legacy event with
-      // an old inconsistency can still be edited — but no save can make it invalid.
-      const introduced = introducedValueIssues(
-        { eventDetails: live.eventDetails, pricing: live.pricing },
-        { eventDetails: dn.eventDetails, pricing: dn.pricing },
-      )
-      if (introduced.length > 0) throw new SaveRefusal(introduced.map(i => i.message).join(' '), 422)
-
-      // ── 4b. Pricing integrity guard (parity with PATCH /edit) ─────────────
-      // /edit blocks lowering a pass capacity below its sold count on a published event
-      // (edit/route.ts RangeError). save-changes pushes the whole draft.pricing, so it
-      // enforces the identical invariant, reading the authoritative per-pass sold counter.
-      const draftPasses = Array.isArray((dn.pricing as Record<string, unknown> | null)?.passes)
-        ? ((dn.pricing as Record<string, unknown>).passes as Record<string, unknown>[])
-        : []
-      const passCounts = (counterNow.data()?.passCounts ?? {}) as Record<string, number>
-      for (const pass of draftPasses) {
-        const pid  = typeof pass.id === 'string' ? pass.id : ''
-        const sold = passCounts[pid] ?? 0
-        const qty  = pass.unlimited === true ? null : (typeof pass.quantity === 'number' ? pass.quantity : null)
-        if (qty !== null && qty < sold) {
-          throw new SaveRefusal(
-            `Pass "${typeof pass.name === 'string' ? pass.name : pid}" capacity (${qty}) cannot be less than its sold count (${sold}).`,
-            400,
-          )
-        }
-      }
-
-      // ── 4c. Change-log fields (schedule + venue) ─────────────────────────
-      const details     = (dn.eventDetails as Record<string, unknown>) ?? {}
-      const liveSched   = ((live.eventDetails as Record<string, unknown>)?.schedule   as Record<string, unknown>) ?? {}
-      const liveVenue   = ((live.eventDetails as Record<string, unknown>)?.venue      as Record<string, unknown>) ?? {}
-      const livePhys    = (liveVenue.physical as Record<string, unknown>) ?? {}
-      const liveOnline  = (liveVenue.online   as Record<string, unknown>) ?? {}
-      const draftSched  = (details.schedule   as Record<string, unknown>) ?? {}
-      const draftVenue  = (details.venue      as Record<string, unknown>) ?? {}
-      const draftPhys   = (draftVenue.physical as Record<string, unknown>) ?? {}
-      const draftOnline = (draftVenue.online   as Record<string, unknown>) ?? {}
-
-      const changed: string[] = []
-      const checkField = (key: string, draftVal: unknown, liveVal: unknown) => {
-        const a = typeof draftVal === 'string' ? draftVal.trim() : draftVal
-        const b = typeof liveVal  === 'string' ? liveVal.trim()  : liveVal
-        if (a !== b) changed.push(key)
-      }
-      checkField('startDate',      draftSched.startDate,    liveSched.startDate)
-      checkField('startTime',      draftSched.startTime,    liveSched.startTime)
-      checkField('endDate',        draftSched.endDate,      liveSched.endDate)
-      checkField('endTime',        draftSched.endTime,      liveSched.endTime)
-      checkField('venueType',      draftVenue.type,         liveVenue.type)
-      checkField('venueName',      draftPhys.name,          livePhys.name)
-      checkField('venueCity',      draftPhys.city,          livePhys.city)
-      checkField('venueAddress',   draftPhys.addressLine1,  livePhys.addressLine1)
-      checkField('onlinePlatform', draftOnline.platform,    liveOnline.platform)
-      checkField('onlineMeetingUrl', draftOnline.meetingUrl, liveOnline.meetingUrl)
-
-      // ── 4d. Writes: touch draft + sync all content fields to live event ───
       const ts = FieldValue.serverTimestamp()
       txn.update(draftRef, { updatedAt: ts, updatedBy: uid })
-      // The public slug is IDENTITY, not content. `eventDetails` is pushed wholesale, so
-      // without this the draft's `seo.urlSlug` would be copied onto the live document —
-      // and since the document id can never change, that would leave the live page
-      // disagreeing with its own address. `urlSlug` is already RESTRICTED_EDIT_KEYS
-      // (frozen after publish); this is that policy enforced on the one path that writes
-      // the whole block. Saving can change what the page says, never where it lives.
-      const liveDetails = dn.eventDetails
-        ? { ...(dn.eventDetails as Record<string, unknown>),
-            seo: { ...((dn.eventDetails as Record<string, unknown>).seo as Record<string, unknown> ?? {}), urlSlug: slug } }
-        : null
-      // RD-EVENT-COMMERCE-05E — the live fee model is preserved exactly (absent stays absent).
-      const livePricing = (live.pricing ?? null) as Record<string, unknown> | null
-      const draftPricing = (dn.pricing ?? null) as Record<string, unknown> | null
-      let nextPricing: Record<string, unknown> | null = draftPricing
-      if (draftPricing) {
-        const { feeModel: _draftFeeModel, ...rest } = draftPricing
-        void _draftFeeModel
-        nextPricing = livePricing && 'feeModel' in livePricing ? { ...rest, feeModel: livePricing.feeModel } : rest
-      }
-      txn.update(eventRef, {
-        eventDetails:     liveDetails,
-        pricing:          nextPricing,
-        registrationForm: dn.registrationForm ?? null,
-        accessControl:    dn.accessControl    ?? null,
-        updatedAt:        ts,
-        updatedBy:        uid,
-      })
-      impactful = changed
+      txn.update(eventRef, { ...sync.update, updatedAt: ts, updatedBy: uid })
+      impactful = sync.changed
     })
   } catch (err) {
     if (err instanceof SaveRefusal) {

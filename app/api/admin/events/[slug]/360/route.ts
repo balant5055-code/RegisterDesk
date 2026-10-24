@@ -100,6 +100,7 @@ export async function GET(req: NextRequest, ctx: RouteContext): Promise<NextResp
     complimentary:     row.complimentary,
     expiresAt:         tsToISO(licDoc?.expiresAt),
     consumed,
+    refundState:       licenseDetail?.refundState ?? null,
   } : null
 
   const counter = stats.counter
@@ -118,8 +119,17 @@ export async function GET(req: NextRequest, ctx: RouteContext): Promise<NextResp
   // License
   {
     let level: HealthLevel = 'neutral'; let detail = 'No license'
+    const rs = license?.refundState ?? null
     if (license) {
-      if (license.displayStatus === 'suspended' || license.displayStatus === 'cancelled') {
+      // RD-SA-COMMERCE-P1 (P1-5) — the refund state outranks every lifecycle label: a licence on refund
+      // hold (or refunded and not restored) refuses ALL new sales, whatever its lifecycle says.
+      if (rs?.hold) {
+        level = 'red'; detail = rs.hold.phase === 'unknown' ? 'Refund outcome unconfirmed — sales blocked' : 'Refund in progress — sales blocked'
+      } else if (rs?.refundedAt && !rs.entitlementRestoredAt) {
+        level = 'red'; detail = 'Refunded — sales blocked'
+      } else if (rs?.legacyRefundingOrder) {
+        level = 'yellow'; detail = 'Order stuck in refunding — reconcile'
+      } else if (license.displayStatus === 'suspended' || license.displayStatus === 'cancelled') {
         level = 'red'; detail = `License ${license.displayStatus}`
       } else if (expired) {
         level = 'red'; detail = 'License expired'
@@ -142,6 +152,7 @@ export async function GET(req: NextRequest, ctx: RouteContext): Promise<NextResp
     else if (ps === 'pending') { level = 'yellow'; detail = 'Payment pending' }
     else if (ps === 'failed') { level = 'red'; detail = 'Payment failed' }
     else if (ps === 'refunded') { level = 'yellow'; detail = 'Refunded' }
+    else if (ps === 'refunding') { level = 'yellow'; detail = 'Refund in progress' }
     health.push({ key: 'payments', label: 'Payments', level, detail })
   }
 

@@ -11,7 +11,7 @@ import { adminDb }                   from '@/lib/firebase/admin'
 import { resolveAdminUid }           from '@/lib/admin/auth'
 import { setOrganizerAccountStatus, organizerActionRequiresReason } from '@/lib/admin/organizerService'
 import { ORGANIZER_ROLE }             from '@/lib/organizer/identity'
-import { resolveAccountStatus } from '@/lib/admin/organizerTypes'
+import { resolveAccountStatus, resolveEmailVerification, isPendingVerification, isStatusRecorded } from '@/lib/admin/organizerTypes'
 import type {
   AccountStatus,
   AdminOrganizerDetail,
@@ -65,6 +65,8 @@ export async function GET(req: NextRequest, ctx: RouteContext): Promise<NextResp
 
   const w = walletSnap.exists ? walletSnap.data() as Record<string, number> : null
   const p = payoutSnap.exists ? payoutSnap.data() as Record<string, unknown> : null
+  const accountStatus     = effectiveStatus(u.accountStatus as AccountStatus | undefined)
+  const emailVerification = resolveEmailVerification(u)
 
   const detail: AdminOrganizerDetail = {
     profile: {
@@ -73,11 +75,15 @@ export async function GET(req: NextRequest, ctx: RouteContext): Promise<NextResp
       email:            typeof u.email === 'string' ? u.email : '',
       organizationName: typeof u.organizationName === 'string' ? u.organizationName : '',
       role:             typeof u.role === 'string' ? u.role : ORGANIZER_ROLE,
-      accountStatus:    effectiveStatus(u.accountStatus as AccountStatus | undefined),
+      accountStatus,
       statusReason:     typeof u.statusReason === 'string' ? u.statusReason : null,
       statusUpdatedAt:  tsToISO(u.statusUpdatedAt),
       statusUpdatedBy:  typeof u.statusUpdatedBy === 'string' ? u.statusUpdatedBy : null,
       createdAt:        tsToISO(u.createdAt),
+      // organizer visibility · additive: what the list row badges, read the same way
+      statusRecorded:      isStatusRecorded(u.accountStatus),
+      emailVerification,
+      pendingVerification: isPendingVerification(accountStatus, emailVerification),
     },
     wallet: {
       exists:         walletSnap.exists,

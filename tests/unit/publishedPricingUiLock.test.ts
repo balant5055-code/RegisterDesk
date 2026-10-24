@@ -239,7 +239,10 @@ describe('source contracts', () => {
     for (const k of ['status', 'lifecycleStatus', 'publishedAt', 'completedAt', 'restoredAt', 'reviewStatus']) expect(keys).not.toContain(`'${k}'`)
   })
   it('the server-side protection is untouched', () => {
-    expect(read('app/api/organizer/events/[eventId]/save-changes/route.ts'))
+    // The copy rule moved verbatim into lib/events/editing/liveContentSync; save-changes calls it.
+    expect(read('lib/events/editing/liveContentSync.ts'))
       .toContain('findCommercialPricingChanges(live.pricing, dn.pricing, { ignoreFeeModel: true })')
+    expect(read('app/api/organizer/events/[eventId]/save-changes/route.ts'))
+      .toContain('if (!sync.ok) throw new SaveRefusal(sync.message, sync.status)')
   })
 })

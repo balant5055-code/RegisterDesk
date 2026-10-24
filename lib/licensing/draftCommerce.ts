@@ -21,7 +21,7 @@ import { FieldValue } from 'firebase-admin/firestore'
 import { adminDb }  from '@/lib/firebase/admin'
 import { razorpay } from '@/lib/razorpay/client'
 import {
-  LICENSE_ORDERS_COLLECTION, LICENSE_HISTORY_COLLECTION, licenseOrderConverter, licenseHistoryConverter,
+  EVENT_LICENSES_COLLECTION, LICENSE_ORDERS_COLLECTION, LICENSE_HISTORY_COLLECTION, licenseOrderConverter, licenseHistoryConverter,
   type LicenseOrderDoc, type LicenseHistoryDoc,
 } from './schema'
 import {
@@ -31,6 +31,8 @@ import {
 import { ledgerRef, txnApplyServiceItems, type ServiceLedgerDoc } from './serviceAllowanceLedger'
 import { checkPhotoPurchase, mediaUnitsIn, paidPhotoCapacity } from './photoCapacity'
 import { quoteAddon, type DraftCoverage } from './draftCoverage'
+import { licenceRegistrationBlock } from './licenceRegistrationBlock'
+import { recordManualRefundHold, recordDuplicateLicensePayment } from './manualRefundHold'
 export { readDraftCoverage, quoteAddon, type DraftCoverage } from './draftCoverage'
 import type { AnyEventLicenseTier } from './eventLicense'
 
@@ -51,6 +53,16 @@ async function hasCapturedPayment(razorpayOrderId: string, amountPaise: number):
   } catch {
     return 'unknown'
   }
+}
+
+/** The workspace's live events for a draft (events/{slug}.draftId is written by publish only). */
+const liveEventsForDraft = (draftId: string) => adminDb.collection('events').where('draftId', '==', draftId)
+
+async function addonLicenceBlocked(draftId: string, organizerUid: string): Promise<boolean> {
+  const live = (await liveEventsForDraft(draftId).get()).docs.filter(d => d.get('uid') === organizerUid)
+  if (!live.length) return false
+  const lics = await adminDb.getAll(...live.map(d => adminDb.collection(EVENT_LICENSES_COLLECTION).doc(d.id)))
+  return lics.some(l => licenceRegistrationBlock(l.exists ? l.data() : undefined))
 }
 
 export type AddonPurchaseResult =
@@ -74,6 +86,11 @@ export async function purchaseAddon(args: {
   const quote = quoteAddon({ coverage, capacity, services, catalog: args.catalog })
   if (!quote.ok) return { kind: 'error', message: quote.message }
   if (quote.totalPaise <= 0) return { kind: 'covered' }
+  // RD-SA-COMMERCE-P1 — never open a checkout for a published event whose licence is inactive
+  // (settlement re-checks in its transaction and holds any payment that still arrives).
+  if (await addonLicenceBlocked(draftId, organizerUid)) {
+    return { kind: 'error', message: "This event's licence is not active (suspended, cancelled or refunded), so nothing can be bought for it. Contact RegisterDesk support." }
+  }
 
   // RD-PHOTO-01 — the photo units this order adds may never take the event above 3,000. Checked
   // against the ledger here (before any Razorpay order exists) and again in the pointer
@@ -150,7 +167,41 @@ export async function purchaseAddon(args: {
  * 3,000 (a concurrent photo purchase settled first). Nothing is granted; the order is marked
  * superseded in the same transaction so the caller records the standard manual-refund hold.
  */
-export type AddonActivationKind = 'ok' | 'already' | 'not_payable' | 'inconsistent' | 'over_capacity'
+export type AddonActivationKind = 'ok' | 'already' | 'not_payable' | 'inconsistent' | 'over_capacity' | 'licence_inactive'
+
+/**
+ * RD-SA-COMMERCE-P1 · 'licence_inactive' — the published event's licence is suspended, cancelled,
+ * refunded or mid-refund, so no units may be granted. The settlement transaction marks the order
+ * failed with this reason and releases the add-on slot; the caller then records THE manual-refund
+ * hold (holdLicenceInactiveAddon). A crash between the two leaves a failed, unheld order, and the
+ * next delivery / confirm retry sees 'licence_inactive' again and completes the same hold.
+ */
+export const ADDON_LICENCE_INACTIVE = 'licence_inactive'
+
+export async function holdLicenceInactiveAddon(input: {
+  orderId: string; razorpayOrderId: string; paymentId: string; amountPaise: number; eventId: string; organizerUid: string
+  detectedBy: 'webhook' | 'confirm'
+}): Promise<{ holdId: string; created: boolean; skipped?: boolean }> {
+  const held = await recordManualRefundHold({
+    orderDocId: input.orderId, razorpayOrderId: input.razorpayOrderId, paymentId: input.paymentId,
+    amountPaise: input.amountPaise, eventId: input.eventId, organizerUid: input.organizerUid,
+    reason: 'lifecycle_ineligible', source: 'license', failReason: ADDON_LICENCE_INACTIVE,
+    onlyIfOrder: (o, holdId) => o?.purpose === 'addon' && o?.status === 'failed' && o?.failReason === ADDON_LICENCE_INACTIVE
+      && (o?.manualRefundHoldId == null || o?.manualRefundHoldId === holdId) && o?.razorpayOrderId === input.razorpayOrderId,
+  })
+  if (held.created || held.skipped) return held
+  // The order's hold already exists: for THIS payment it is the answer; a different captured payment on
+  // the same order is real money nothing else records — held separately, never granted.
+  const h = await adminDb.collection('failedRefunds').doc(held.holdId).get()
+  const heldPayment = h.exists ? (h.data() as { paymentId?: unknown }).paymentId : null
+  if (heldPayment === input.paymentId) return held
+  const dup = await recordDuplicateLicensePayment({
+    orderDocId: input.orderId, razorpayOrderId: input.razorpayOrderId, paymentId: input.paymentId,
+    creditedPaymentId: typeof heldPayment === 'string' ? heldPayment : null, amountPaise: input.amountPaise,
+    eventId: input.eventId, organizerUid: input.organizerUid, detectedBy: input.detectedBy,
+  })
+  return { holdId: dup.holdId, created: dup.created }
+}
 
 /**
  * The add-on settlement transaction — shared by /checkout/confirm and the webhook backstop.
@@ -167,6 +218,8 @@ export async function activateAddonOrder(input: {
     const o = snap.exists ? snap.data() : undefined
     if (!o || o.purpose !== 'addon') return 'not_payable'
     if (o.status === 'paid') return 'already'
+    // Refused earlier for an inactive licence: report it again so the caller (re)completes the hold.
+    if (o.status === 'failed' && (o as { failReason?: unknown }).failReason === ADDON_LICENCE_INACTIVE) return 'licence_inactive'
     if (o.status !== 'created') return 'not_payable'
     const items = o.serviceItems ?? []
     const cap = o.capacityChange ?? null
@@ -174,6 +227,17 @@ export async function activateAddonOrder(input: {
     const total = (cap?.totalPaise ?? 0) + sumServiceItems(items)
     if (!capOk || !items.every(isConsistentServiceItem) || total !== o.amountPaise || o.razorpayAmountPaise !== o.amountPaise) return 'inconsistent'
     const ledgerSnap = await txn.get(ledgerRef(o.eventId))
+    // RD-SA-COMMERCE-P1 — the licence of this workspace's live event for the draft (events/{slug}.draftId
+    // is server-written by publish). A draft that was never published has no live event and no licence.
+    const live = (await txn.get(liveEventsForDraft(o.eventId))).docs.filter(d => d.get('uid') === o.organizerUid)
+    const lics = await Promise.all(live.map(d => txn.get(adminDb.collection(EVENT_LICENSES_COLLECTION).doc(d.id))))
+    if (lics.some(l => licenceRegistrationBlock(l.exists ? l.data() : undefined))) {
+      txn.set(adminDb.collection(LICENSE_ORDERS_COLLECTION).doc(o.orderId), { status: 'failed', failReason: ADDON_LICENCE_INACTIVE, updatedAt: now() }, { merge: true })
+      if ((ledgerSnap.data() as ServiceLedgerDoc | undefined)?.pendingAddonOrderId === o.orderId) {
+        txn.set(ledgerRef(o.eventId), { pendingAddonOrderId: null, updatedAt: FieldValue.serverTimestamp() }, { merge: true })
+      }
+      return 'licence_inactive'
+    }
     const mediaAdding = mediaUnitsIn(items)
     if (mediaAdding > 0) {
       const l = ledgerSnap.exists ? ledgerSnap.data() as ServiceLedgerDoc : undefined

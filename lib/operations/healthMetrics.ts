@@ -5,10 +5,11 @@
 // every counter, plus a handful of tiny limit-1 / small-scan reads for "oldest"
 // and "stuck" figures. Does not touch any business logic.
 
-import { FieldPath } from 'firebase-admin/firestore'
+import { FieldPath, Timestamp } from 'firebase-admin/firestore'
 import { adminDb } from '@/lib/firebase/admin'
 import { PRINT_BADGE_ROUNDS, STALE_ROUND_MS } from '@/lib/printAssets/badgeBilling/decisions'
 import { OPERATIONS_METRICS, type CronMetricDoc } from '@/lib/monitoring/cronMetrics'
+import { REFUND_HOLD_MIN_RELEASE_AGE_MS } from '@/lib/licensing/licenceRefundHold'
 
 type Query = FirebaseFirestore.Query
 
@@ -45,6 +46,35 @@ export interface FinancialHealth {
   badgeSuspiciousUnreviewed: number
   /** RD-PRINT-P8 (W6) — open badge billing rounds older than 24 h, from a bounded scan (a lower bound; -1 = failed). */
   badgeRoundsStale: number
+  /** RD-SA-COMMERCE-P1 (P1-5) — licence refund holds older than 15 min: an unfinished refund that is blocking
+   *  ALL sales of its event (-1 = query failed). Never auto-released — a Super Admin resolves each one. */
+  licenceRefundHoldsStale: number
+  /** Licence orders in `refunding` (an unfinished refund; includes ones the pre-hold code left; -1 = failed). */
+  licenceOrdersRefunding: number
+  /** M2 — licences whose refund the gateway accepted then reported FAILED, not yet acknowledged (-1 = failed). */
+  licenceRefundFailuresOpen: number
+  /** M1 — settlement refund-hold closures that failed and wait in refundHoldClosureReconciliation (-1 = failed). */
+  refundHoldClosuresPending: number
+  /** Phase 2 — donation refunds the gateway PROCESSED whose accounting failed and is being retried (-1 = failed). */
+  donationRefundAccountingRetrying: number
+  /** Phase 2 — donation refund accounting that exhausted retries or failed permanently: manual (-1 = failed). */
+  donationRefundAccountingNeedsReview: number
+  /** Phase 2 — donation refunds accepted but not reported processed by the gateway for > 24 h (-1 = failed; bounded scan). */
+  donationRefundsAwaitingGatewayStale: number
+  /** Phase 2.2 — donations with a refund REQUEST whose gateway outcome is unresolved (held; -1 = failed). */
+  donationRefundAttemptsUnresolved: number
+  /** Phase 3.3 — registration refund ledger reversals queued for retry (refundLedgerReconciliation 'pending'; -1 = failed). */
+  refundLedgerReversalsPending: number
+  /** Phase 3.3 — ledger reversals that exhausted their retries or failed permanently: manual (-1 = failed). */
+  refundLedgerReversalsNeedsReview: number
+  /** Phase 3.3 — hold closures the evidence REFUSED (an open contradiction; the hold stays; -1 = failed). */
+  refundHoldClosuresRefused: number
+  /** Phase 3.3 — hold closures that exhausted their retries or failed permanently: manual (-1 = failed). */
+  refundHoldClosuresNeedsReview: number
+  /** F1 — settlement transactions held because a refund of their payment is open for review (-1 = failed). */
+  settlementsHeldForRefundReview: number
+  /** F2 — registration refunds carrying a review reason (partial / contradictory / failed-after; -1 = failed). */
+  registrationRefundsNeedingReview: number
 }
 export interface WebhookHealth {
   pendingDeliveries: number
@@ -74,6 +104,17 @@ export interface DataIntegrity {
   campaignMismatches: number
   sessionMismatches:  number
   walletMismatches:   number   // report-only — financial, never auto-repaired
+  /** Phase 3.6A — per-donation refund integrity mismatches (report-only). */
+  donationMismatches: number
+  /** Phase 3.6A — wallets / donations whose checks could NOT complete (never counted as clean). */
+  walletUnverifiable:   number
+  donationUnverifiable: number
+  /** Phase 3.8 — registration refund integrity mismatches / unverifiable checks (report-only). */
+  registrationMismatches:   number
+  registrationUnverifiable: number
+  /** Phase 3.8 — settlement releases confirmed STUCK (a deterministic blocker) / overdue but unverifiable. */
+  stuckReleases:            number
+  releaseUnverifiable:      number
 }
 export interface OperationsHealth {
   financial:    FinancialHealth
@@ -104,29 +145,42 @@ const CRON_NAMES = [
   'media-credit-sessions',
 ]
 
-// GA-7E S1: expected execution interval per cron (from vercel.json schedules), used to
-// detect a cron that has STOPPED FIRING — the audit's dead-cron blind spot. evaluateAlerts
-// only flagged RECORDED failures; a cron that silently stops (scheduler drop, 401, boot
-// crash) records nothing and was invisible.
+// GA-7E S1: expected execution interval per cron, used to detect a cron that has STOPPED FIRING —
+// the audit's dead-cron blind spot. evaluateAlerts only flagged RECORDED failures; a cron that
+// silently stops (scheduler drop, 401, boot crash) records nothing and was invisible.
+//
+// RD-CRON-ALERT-01 — these MUST be the intervals of the scheduler that actually runs the routes:
+// the GitHub Actions workflows (.github/workflows/cron-*.yml; vercel.json has no crons). They were
+// copied from an earlier all-Vercel plan and never updated when scheduling moved, so `release-funds`
+// was expected HOURLY while it runs DAILY at 02:00 UTC — every healthy run tripped the critical
+// "Cron(s) have stopped running: release-funds" alert ~2 hours later. `webhooks` (1 min expected vs
+// every 10 min) had the same defect. tests/unit/cronAlertIntervals.test.ts now pins every entry to
+// its workflow's schedule.
 const MIN = 60 * 1000
-const CRON_INTERVAL_MS: Record<string, number> = {
-  'certificate-jobs': MIN, 'registration-import': MIN, 'registration-bulk': MIN,
-  'broadcasts': MIN, 'whatsapp-broadcasts': MIN, 'email-broadcasts': MIN,
-  'report-exports': MIN, 'print-generation': MIN, 'print-packaging': MIN, 'webhooks': MIN,
+export const CRON_INTERVAL_MS: Record<string, number> = {
+  // Group A — cron-runners.yml, every 5 minutes
+  'certificate-jobs': 5 * MIN, 'registration-import': 5 * MIN, 'registration-bulk': 5 * MIN,
+  'broadcasts': 5 * MIN, 'whatsapp-broadcasts': 5 * MIN, 'email-broadcasts': 5 * MIN,
+  'report-exports': 5 * MIN, 'print-generation': 5 * MIN, 'print-packaging': 5 * MIN,
+  // Group B — cron-recovery.yml, every 10 minutes
+  'webhooks': 10 * MIN,
   'registration-reconciliation': 10 * MIN, 'wallet-reconciliation': 10 * MIN, 'donation-reconciliation': 10 * MIN,
-  'certificate-claims': 15 * MIN, 'reminders': 15 * MIN, 'ops-alerts': 15 * MIN,
-  'release-funds': 60 * MIN,
-  'session-reconciliation': 24 * 60 * MIN, 'global-reconciliation': 24 * 60 * MIN, 'storage-cleanup': 24 * 60 * MIN,
+  'reminders': 10 * MIN, 'ops-alerts': 10 * MIN,
   'media-credit-reconciliation': 10 * MIN,
   'media-credit-sessions': 10 * MIN,
-  // RD-PRINT-P8 (W6) — ID-badge purchase and billing-round recovery (Group B, every 10 minutes).
+  // RD-PRINT-P8 (W6) — ID-badge purchase and billing-round recovery.
   'badge-orders-reconcile': 10 * MIN, 'badge-rounds-reconcile': 10 * MIN,
+  // Group C — cron-cleanup.yml, hourly
+  'certificate-claims': 60 * MIN,
+  // Group D — cron-maintenance.yml, daily at 02:00 UTC
+  'release-funds': 24 * 60 * MIN,
+  'session-reconciliation': 24 * 60 * MIN, 'global-reconciliation': 24 * 60 * MIN, 'storage-cleanup': 24 * 60 * MIN,
 }
 // A cron is STALE when its last success is older than 2× its interval + a 5-min grace
 // (tolerates an occasional skipped run without false-positiving). A never-recorded cron is
 // left to the dashboard (lastSuccessAt null) to avoid false alerts right after a deploy.
 function staleThresholdMs(interval: number): number { return interval * 2 + 5 * MIN }
-function isStale(name: string, lastSuccessMs: number, now: number): boolean {
+export function isStale(name: string, lastSuccessMs: number, now: number): boolean {
   const interval = CRON_INTERVAL_MS[name]
   return interval != null && lastSuccessMs > 0 && now - lastSuccessMs > staleThresholdMs(interval)
 }
@@ -176,6 +230,35 @@ export async function getOperationsHealth(): Promise<OperationsHealth> {
     // RD-PRINT-P8 (W6) — badge billing: unreviewed suspicious payments (equality only), stale open rounds.
     countOf(col('suspiciousPayments').where('purpose', '==', 'print_badges').where('reviewed', '==', false)),
     staleOpenBadgeRounds(now),
+    // RD-SA-COMMERCE-P1 (P1-5) — single-field range / equality: no composite index.
+    countOf(col('eventLicenses').where('refundHold.at', '<', Timestamp.fromMillis(now - REFUND_HOLD_MIN_RELEASE_AGE_MS))),
+    countOf(col('licenseOrders').where('status', '==', 'refunding')),
+    // F1 / F2 — single-field equality / inequality: no composite index.
+    countOf(col('platformTransactions').where('releaseStatus', '==', 'held')),
+    // M1 — OPEN reviews only: a review closed with evidence (reviewClosed) no longer alerts.
+    countOf(col('registrationRefunds').where('reviewOpen', '==', true)),
+    // M2 — index 15 (appended last so no earlier index moves).
+    countOf(col('eventLicenses').where('refundFailure.status', '==', 'open')),
+    // M1 — index 16: hold closures queued for retry (failed, or waiting for a deferred ledger reversal).
+    countOf(col('refundHoldClosureReconciliation').where('status', '==', 'pending')),
+    // Phase 2 — indices 17 / 18 / 19: donation refund ACCOUNTING recovery (single-field equality on a
+    // nested field: automatic index). Awaiting-gateway age is checked in memory over a bounded read.
+    countOf(col('donationRefunds').where('accountingRecovery.state', '==', 'retry')),
+    countOf(col('donationRefunds').where('accountingRecovery.state', '==', 'needs_review')),
+    col('donationRefunds').where('accountingRecovery.state', '==', 'awaiting_gateway').limit(500).get().then(snap => {
+      const cutoff = Date.now() - 24 * 60 * 60_000
+      return snap.docs.filter(d => {
+        const t = d.get('createdAt') as { toMillis?: () => number } | undefined
+        return typeof t?.toMillis === 'function' && t.toMillis() < cutoff
+      }).length
+    }).catch(() => -1),
+    // Phase 2.2 — index 20.
+    countOf(col('donations').where('hasOpenRefundAttempt', '==', true)),
+    // Phase 3.3 — indices 21–24: the registration refund queues (equality only).
+    countOf(col('refundLedgerReconciliation').where('status', '==', 'pending')),
+    countOf(col('refundLedgerReconciliation').where('status', '==', 'needs_review')),
+    countOf(col('refundHoldClosureReconciliation').where('status', '==', 'refused')),
+    countOf(col('refundHoldClosureReconciliation').where('status', '==', 'needs_review')),
   ])
 
   // ── Webhook ──
@@ -230,18 +313,43 @@ export async function getOperationsHealth(): Promise<OperationsHealth> {
   const integrityP = col('reconciliationReports').orderBy('createdAt', 'desc').limit(1000).get()
     .then(snap => {
       const cutoff = now - DATA_INTEGRITY_WINDOW_MS
-      const t = { event: 0, pass: 0, campaign: 0, session: 0, wallet: 0 }
+      const t = { event: 0, pass: 0, campaign: 0, session: 0, wallet: 0, donation: 0, registration: 0, release: 0, walletUnverifiable: 0, donationUnverifiable: 0, registrationUnverifiable: 0, releaseUnverifiable: 0 }
       for (const d of snap.docs) {
-        const r = d.data() as { entityType?: string; createdAt?: unknown }
+        const r = d.data() as { entityType?: string; kind?: string; createdAt?: unknown }
         if (tsToMillis(r.createdAt) < cutoff) break   // desc order → rest are older
         const key = r.entityType
-        if (key === 'event' || key === 'pass' || key === 'campaign' || key === 'session' || key === 'wallet') t[key]++
+        if (r.kind === 'unverifiable') {   // Phase 3.6A — a check that could not complete is never a mismatch count
+          if (key === 'wallet') t.walletUnverifiable++
+          else if (key === 'donation') t.donationUnverifiable++
+          else if (key === 'registration') t.registrationUnverifiable++
+          else if (key === 'release') t.releaseUnverifiable++
+          continue
+        }
+        if (key === 'event' || key === 'pass' || key === 'campaign' || key === 'session' || key === 'wallet' || key === 'donation' || key === 'registration' || key === 'release') t[key]++
       }
       return t
     })
-    .catch(() => ({ event: -1, pass: -1, campaign: -1, session: -1, wallet: -1 }))
+    .catch(() => ({ event: -1, pass: -1, campaign: -1, session: -1, wallet: -1, donation: -1, registration: -1, release: -1, walletUnverifiable: -1, donationUnverifiable: -1, registrationUnverifiable: -1, releaseUnverifiable: -1 }))
+  // Phase 3.9 — the window above holds at most 1,000 reports, so a flood (a first run over legacy data writes
+  // thousands) pushes older findings — including urgent ones — out of it. The global run now records its EXACT
+  // counts (reconciliationRuns); when the latest run is inside the window, its counts are used instead.
+  const runP = col('reconciliationRuns').orderBy('finishedAt', 'desc').limit(1).get()
+    .then(s => (s.empty ? null : s.docs[0].data() as { finishedAt?: unknown; mismatchesByType?: Record<string, number>; unverifiableByType?: Record<string, number> }))
+    .catch(() => null)
 
-  const [fin, wh, bc, integrity, crons] = await Promise.all([financialP, webhookP, broadcastP, integrityP, cronP])
+  const [fin, wh, bc, tally, crons, run] = await Promise.all([financialP, webhookP, broadcastP, integrityP, cronP, runP])
+  const integrity = run && tsToMillis(run.finishedAt) >= now - DATA_INTEGRITY_WINDOW_MS
+    ? (() => {
+      const m = run.mismatchesByType ?? {}, u = run.unverifiableByType ?? {}
+      const c = (o: Record<string, number>, k: string) => (typeof o[k] === 'number' ? o[k] : 0)
+      return {
+        // events and passes share one reconciler; its mismatches carry their own entity types
+        event: c(m, 'event'), pass: c(m, 'pass'), campaign: c(m, 'campaign'), session: c(m, 'session'), wallet: c(m, 'wallet'),
+        donation: c(m, 'donation'), registration: c(m, 'registration'), release: c(m, 'release'),
+        walletUnverifiable: c(u, 'wallet'), donationUnverifiable: c(u, 'donation'), registrationUnverifiable: c(u, 'registration'), releaseUnverifiable: c(u, 'release'),
+      }
+    })()
+    : tally
 
   return {
     financial: {
@@ -249,6 +357,10 @@ export async function getOperationsHealth(): Promise<OperationsHealth> {
       walletTopupsNeedsReview: fin[6], walletTopupsExhausted: fin[7], walletTopupDuplicatePayments: fin[8],
       pendingRegistrationReconciliation: fin[3], pendingDonationReconciliation: fin[4], outstandingClawbacks: fin[5],
       badgeSuspiciousUnreviewed: fin[9], badgeRoundsStale: fin[10],
+      licenceRefundHoldsStale: fin[11], licenceOrdersRefunding: fin[12], licenceRefundFailuresOpen: fin[15], refundHoldClosuresPending: fin[16],
+      donationRefundAccountingRetrying: fin[17], donationRefundAccountingNeedsReview: fin[18], donationRefundsAwaitingGatewayStale: fin[19], donationRefundAttemptsUnresolved: fin[20],
+      refundLedgerReversalsPending: fin[21], refundLedgerReversalsNeedsReview: fin[22], refundHoldClosuresRefused: fin[23], refundHoldClosuresNeedsReview: fin[24],
+      settlementsHeldForRefundReview: fin[13], registrationRefundsNeedingReview: fin[14],
     },
     webhook: { pendingDeliveries: wh[0], failedDeliveries: wh[1], exhaustedRetries: wh[1], oldestPendingAt: wh[2] },
     broadcast: { scheduled: bc[0], sending: bc[1], failed: bc[2], stuckSending: bc[3] },
@@ -256,6 +368,9 @@ export async function getOperationsHealth(): Promise<OperationsHealth> {
       eventMismatches: integrity.event, passMismatches: integrity.pass,
       campaignMismatches: integrity.campaign, sessionMismatches: integrity.session,
       walletMismatches: integrity.wallet,
+      donationMismatches: integrity.donation, walletUnverifiable: integrity.walletUnverifiable, donationUnverifiable: integrity.donationUnverifiable,
+      registrationMismatches: integrity.registration, registrationUnverifiable: integrity.registrationUnverifiable,
+      stuckReleases: integrity.release, releaseUnverifiable: integrity.releaseUnverifiable,
     },
     crons,
     generatedAt: new Date(now).toISOString(),
@@ -277,6 +392,24 @@ export function evaluateAlerts(h: OperationsHealth): OperationalAlert[] {
   const push = (id: string, severity: AlertSeverity, message: string) => alerts.push({ id, severity, message })
 
   if (h.financial.failedRefunds > 0) push('failed_refunds', 'critical', `${h.financial.failedRefunds} failed refund(s) need manual action.`)
+  // RD-SA-COMMERCE-P1 (P1-5) — an unfinished licence refund stops every sale of its event. Critical, with the
+  // count in the message (a new hold changes it). Never auto-released: Admin › Licenses › "Refund hold".
+  if (h.financial.licenceRefundHoldsStale > 0) push('licence_refund_holds_stale', 'critical', `${h.financial.licenceRefundHoldsStale} licence refund hold(s) older than 15 minutes are blocking sales (Admin › Licenses › Refund hold).`)
+  // M2 — money the organizer was told was refunded may not have left: critical until a Super Admin decides.
+  if (h.financial.donationRefundAccountingNeedsReview > 0) push('donation_refund_accounting_needs_review', 'critical', `${h.financial.donationRefundAccountingNeedsReview} donation refund(s) were PROCESSED by the gateway but their accounting failed permanently or exhausted its retries — the donation stays held; manual intervention required (donationRefunds.accountingRecovery.state 'needs_review').`)
+  if (h.financial.donationRefundAccountingRetrying > 0) push('donation_refund_accounting_retrying', 'warning', `${h.financial.donationRefundAccountingRetrying} donation refund(s) processed by the gateway are awaiting an accounting retry by the donation-reconciliation cron — the affected donations stay held.`)
+  if (h.financial.donationRefundAttemptsUnresolved > 0) push('donation_refund_attempts_unresolved', 'warning', `${h.financial.donationRefundAttemptsUnresolved} donation(s) have a refund request whose gateway outcome is UNKNOWN — held; matched automatically when Razorpay shows the refund, otherwise resolved by a Super Admin (Refund holds) after 15 minutes.`)
+  if (h.financial.donationRefundsAwaitingGatewayStale > 0) push('donation_refunds_awaiting_gateway', 'warning', `${h.financial.donationRefundsAwaitingGatewayStale} donation refund(s) accepted by the gateway more than 24 h ago were never reported processed — reconcile against Razorpay (nothing is accounted speculatively).`)
+  if (h.financial.refundLedgerReversalsNeedsReview > 0) push('refund_ledger_reversals_needs_review', 'critical', `${h.financial.refundLedgerReversalsNeedsReview} registration refund ledger reversal(s) exhausted their retries or failed permanently — the refund left but the ledger/wallet were not debited; manual intervention required (refundLedgerReconciliation 'needs_review').`)
+  if (h.financial.refundLedgerReversalsPending > 0) push('refund_ledger_reversals_pending', 'warning', `${h.financial.refundLedgerReversalsPending} registration refund ledger reversal(s) are queued for retry by the registration-reconciliation cron (refundLedgerReconciliation).`)
+  if (h.financial.refundHoldClosuresNeedsReview > 0) push('refund_hold_closures_needs_review', 'critical', `${h.financial.refundHoldClosuresNeedsReview} settlement refund-hold closure(s) exhausted their retries or failed permanently — the holds stay; manual intervention required (refundHoldClosureReconciliation 'needs_review').`)
+  if (h.financial.refundHoldClosuresRefused > 0) push('refund_hold_closures_refused', 'warning', `${h.financial.refundHoldClosuresRefused} settlement refund-hold closure(s) were refused by the evidence (an open contradiction) — the holds stay for the Super Admin refund-hold review.`)
+  if (h.financial.refundHoldClosuresPending > 0) push('refund_hold_closures_pending', 'warning', `${h.financial.refundHoldClosuresPending} settlement refund-hold closure(s) failed and are queued for retry by the registration-reconciliation cron (refundHoldClosureReconciliation) — the holds stay in place.`)
+  if (h.financial.licenceRefundFailuresOpen > 0) push('licence_refund_failures', 'critical', `${h.financial.licenceRefundFailuresOpen} licence refund(s) FAILED at the gateway after being accepted — the licence stays refunded; a Super Admin must decide (Admin › Licenses).`)
+  // F1 / F2 — never resolve on their own; a Super Admin decides each one (funds stay unreleased meanwhile).
+  if (h.financial.settlementsHeldForRefundReview > 0) push('settlements_held_refund_review', 'warning', `${h.financial.settlementsHeldForRefundReview} settlement transaction(s) held: a refund of the payment is open for review (platformTransactions releaseStatus 'held').`)
+  if (h.financial.registrationRefundsNeedingReview > 0) push('registration_refunds_review', 'warning', `${h.financial.registrationRefundsNeedingReview} registration refund(s) need review (registrationRefunds.reviewOpen).`)
+  if (h.financial.licenceOrdersRefunding > 0) push('licence_orders_refunding', 'warning', `${h.financial.licenceOrdersRefunding} licence order(s) in "refunding" — an unfinished refund (Admin › License Center).`)
   if (h.financial.outstandingClawbacks > 0) push('clawbacks', 'warning', `${h.financial.outstandingClawbacks} outstanding clawback(s).`)
   // RD-WALLET-W2.g — held top-ups never resolve on their own (guard -1 = query failed). A warning:
   // the dashboard shows it; only critical alerts page.
@@ -302,6 +435,15 @@ export function evaluateAlerts(h: OperationsHealth): OperationalAlert[] {
   // GA-7E S1 — financial integrity: wallet mismatches are report-only (never auto-repaired),
   // so a mismatch requires manual review and must PAGE, not sit on a dashboard.
   if (h.dataIntegrity.walletMismatches > 0) push('wallet_mismatch', 'critical', `${h.dataIntegrity.walletMismatches} wallet balance mismatch(es) detected (report-only) — manual review required.`)
+  // Phase 3.6A — a wallet that could not be verified is NOT clean: surfaced, never silent (legacy data or a failed
+  // read). Report-only; the reasons are in reconciliationReports (kind 'unverifiable').
+  if ((h.dataIntegrity.walletUnverifiable ?? 0) > 0) push('wallet_unverifiable', 'warning', `${h.dataIntegrity.walletUnverifiable} wallet check(s) could not complete in the last 48h (unreadable or legacy records) — those balances are unverified, not clean.`)
+  if ((h.dataIntegrity.donationMismatches ?? 0) > 0) push('donation_refund_mismatch', 'critical', `${h.dataIntegrity.donationMismatches} donation refund integrity mismatch(es) detected (report-only) — manual review required.`)
+  if ((h.dataIntegrity.registrationMismatches ?? 0) > 0) push('registration_refund_mismatch', 'critical', `${h.dataIntegrity.registrationMismatches} registration refund integrity finding(s) in the last 48h (report-only; includes the known M4 partial-refund-on-released-funds gap) — manual review required.`)
+  if ((h.dataIntegrity.registrationUnverifiable ?? 0) > 0) push('registration_refund_unverifiable', 'warning', `${h.dataIntegrity.registrationUnverifiable} registration refund check(s) could not complete in the last 48h — unverified, not clean.`)
+  if ((h.dataIntegrity.stuckReleases ?? 0) > 0) push('settlement_release_stuck', 'critical', `${h.dataIntegrity.stuckReleases} settlement release(s) are STUCK: the organizer's pending balance cannot cover them, so every daily run refuses them again (report-only; nothing was retried).`)
+  if ((h.dataIntegrity.releaseUnverifiable ?? 0) > 0) push('settlement_release_unverifiable', 'warning', `${h.dataIntegrity.releaseUnverifiable} overdue settlement release(s) whose cause cannot be established (paused, backlog, unreadable, or no persisted failure evidence).`)
+  if ((h.dataIntegrity.donationUnverifiable ?? 0) > 0) push('donation_refund_unverifiable', 'warning', `${h.dataIntegrity.donationUnverifiable} donation refund check(s) could not complete in the last 48h — unverified, not clean.`)
   // Other counter drift auto-repairs, but persistent drift is worth surfacing (guard -1 = query failed).
   const drift = Math.max(0, h.dataIntegrity.eventMismatches) + Math.max(0, h.dataIntegrity.passMismatches)
     + Math.max(0, h.dataIntegrity.campaignMismatches) + Math.max(0, h.dataIntegrity.sessionMismatches)

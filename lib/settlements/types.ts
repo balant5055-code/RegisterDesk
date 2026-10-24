@@ -31,6 +31,69 @@ export interface SettlementRequestDoc {
   rejectedBy?:   string
   /** The verified payout destination this request was made against (masked). */
   payoutDestination?: SettlementPayoutDestination | null
+  /**
+   * M1 — payout review. Set when a refund (or a payout recorded after a confirmed transfer) left the wallet
+   * unable to back this request: the request keeps its status and FULL amount, its reservation is released
+   * (`reserved: false`, so inTransitPaise stays ≤ availablePaise) and it cannot be approved or marked paid
+   * until a Super Admin resolves the review (lib/settlements/payoutReview.ts). Absent = never reviewed.
+   */
+  payoutReview?: SettlementPayoutReview
+  /**
+   * M1.2 — the changed-destination exception: recording a transfer that ALREADY completed to the ORIGINAL
+   * destination after the organizer's payout details changed (lib/settlements/confirmedTransfer.ts). Initiated by
+   * one Super Admin, approved by another; never sends money. Absent = never requested.
+   */
+  transferException?: SettlementTransferException
+  /** M1.2 — earlier exception attempts that were declined (kept as evidence), keyed by attempt */
+  transferExceptionHistory?: Record<string, SettlementTransferException>
+}
+
+export interface SettlementTransferException {
+  status:         'pending_approval' | 'approved' | 'declined'
+  amountPaise:    number
+  /** normalized UTR / bank transfer reference */
+  utrNumber:      string
+  reason:         string
+  evidence:       {
+    originalDestination: { verifiedVersion: number; label: string | null }
+    transfer:            { source: string; reference: string; observation: 'transfer_completed' }
+  }
+  /** the binding the approval must restate (request, amount, UTR, evidence) */
+  fingerprint:    string
+  /** why the standard path refused when the exception was requested */
+  bindingCodeAtRequest: 'UNVERIFIED_PROFILE' | 'DESTINATION_CHANGED'
+  initiatedBy:    string
+  initiatedAt:    unknown
+  approvedBy?:    string
+  approvedAt?:    unknown
+  approvalReason?: string
+  declinedBy?:    string
+  declinedAt?:    unknown
+  declineReason?: string
+}
+
+export type PayoutReviewTriggerKind = 'registration_refund' | 'donation_refund' | 'payout_after_transfer' | 'manual_recheck'
+export type PayoutReviewOutcome = 'resumed' | 'rejected' | 'paid_after_transfer'
+
+export interface SettlementPayoutReview {
+  status:                 'open' | 'resolved'
+  reason:                 'available_below_reservations'
+  trigger:                { kind: PayoutReviewTriggerKind; ref: string }
+  openedAt:               unknown
+  /** the request's status and amount when the review opened (the amount is never changed) */
+  statusAtReview:         'pending' | 'approved'
+  requestedAmountPaise:   number
+  /** availablePaise after the triggering change, and what the requests kept ahead of this one already held */
+  availableAtReviewPaise: number
+  keptAheadPaise:         number
+  // ── set on resolution ──
+  outcome?:               PayoutReviewOutcome
+  resolvedAt?:            unknown
+  resolvedBy?:            string
+  resolutionReason?:      string
+  /** paid_after_transfer: the part available could not cover (recorded as a clawback) */
+  shortfallPaise?:        number
+  clawbackId?:            string | null
 }
 
 export interface SettlementRequestSummary {
@@ -46,6 +109,8 @@ export interface SettlementRequestSummary {
   bankReference?: string
   paidBy?:        string
   paymentNotes?:  string
+  /** M1 — the request is held for review (a refund reduced the balance backing it) */
+  underReview?:   boolean
 }
 
 export interface SettlementsApiResponse {

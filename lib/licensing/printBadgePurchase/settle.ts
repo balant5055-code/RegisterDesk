@@ -27,7 +27,7 @@
 
 import { FieldValue, type Transaction } from 'firebase-admin/firestore'
 import { adminDb } from '@/lib/firebase/admin'
-import { LICENSE_HISTORY_COLLECTION, type LicenseHistoryDoc } from '../schema'
+import { EVENT_LICENSES_COLLECTION, LICENSE_HISTORY_COLLECTION, type LicenseHistoryDoc } from '../schema'
 import { defaultLicenseTierForVersion, CURRENT_LICENSE_VERSION } from '../eventLicense'
 import { isServicePurchaseReleased, type ServiceChargeItem } from '../serviceAllowances'
 import { ledgerRef, txnApplyServiceItems, type ServiceLedgerDoc } from '../serviceAllowanceLedger'
@@ -43,6 +43,7 @@ import { badgeOrderRef, type BadgeOrderDoc } from './orderDoc'
 import { recordBadgeSuspiciousPayment } from './suspicious'
 import { readPrintBadgePilot } from '../printBadgePilotServer'
 import { isPilotOrganizer } from '../printBadgePilot'
+import { licenceRegistrationBlock } from '../licenceRegistrationBlock'
 
 const now = () => FieldValue.serverTimestamp()
 const SLUG_RE = /^[A-Za-z0-9_-]{1,128}$/
@@ -58,6 +59,7 @@ export type BadgeRefusalReason =
   | 'coupon_changed'         // the bound coupon's eligibility or financial terms changed
   | 'coupon_conflict'        // a redemption for this order already exists
   | 'not_in_pilot'           // RD-PRINT-P8 — the organizer is not (or no longer) a paid ID-badge pilot organizer
+  | 'licence_inactive'       // RD-SA-COMMERCE-P1 — the event licence is suspended, cancelled, refunded or mid-refund
 
 export type BadgeActivation =
   | { kind: 'ok' }
@@ -127,7 +129,10 @@ export async function activateBadgeOrder(input: {
     if (!SLUG_RE.test(String(o.eventSlug)) || !SLUG_RE.test(String(o.eventId))) return { kind: 'not_payable' }
 
     const s = o.badgePurchase
-    const [ledgerSnap, evSnap] = await Promise.all([txn.get(ledgerRef(o.eventId)), txn.get(adminDb.collection('events').doc(o.eventSlug))])
+    const [ledgerSnap, evSnap, licSnap] = await Promise.all([
+      txn.get(ledgerRef(o.eventId)), txn.get(adminDb.collection('events').doc(o.eventSlug)),
+      txn.get(adminDb.collection(EVENT_LICENSES_COLLECTION).doc(o.eventSlug)),
+    ])
     const bound = s?.coupon ?? null
     const couponRead = bound ? await txnReadBadgeCouponRedemption(txn, bound.code, o.organizerUid, o.orderId) : null
     // ── every read is done; refusals below write nothing (a free order records its own failure) ──
@@ -147,6 +152,8 @@ export async function activateBadgeOrder(input: {
     if (!isPilotOrganizer(pilot, o.organizerUid)) return refuse('not_in_pilot')
     const ev = evSnap.exists ? evSnap.data() as Record<string, unknown> : undefined
     if (badgeEventProblem(ev, o.organizerUid, o.eventId)) return refuse('event_ineligible')
+    // RD-SA-COMMERCE-P1 — no new units on an inactive licence; a captured payment is held (T2) for review.
+    if (licenceRegistrationBlock(licSnap.exists ? licSnap.data() : undefined)) return refuse('licence_inactive')
     const ov = readStoredPrintBadgeOverride(ev?.printBadgeCommercial)
     if (!ov.ok || ov.override?.enabled === false || ov.override?.complimentary === true) return refuse('event_ineligible')
     const ledger = ledgerSnap.exists ? ledgerSnap.data() as ServiceLedgerDoc : undefined

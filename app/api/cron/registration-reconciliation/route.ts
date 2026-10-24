@@ -9,7 +9,7 @@
 // when CRON_SECRET is unset.
 
 import { NextRequest, NextResponse } from 'next/server'
-import { retryPendingRegistrationFinancials, retryPendingRefundLedgerReversals, recoverUncreditedRegistrations, recoverCapturedPaymentIntents } from '@/lib/payments/registrationReconciliation'
+import { retryPendingRegistrationFinancials, retryPendingRefundLedgerReversals, retryPendingRefundHoldClosures, recoverUncreditedRegistrations, recoverCapturedPaymentIntents } from '@/lib/payments/registrationReconciliation'
 import { isAuthorizedCron, cronUnauthorized } from '@/lib/cron/auth'
 import { captureFinancialError, flushMonitoring } from '@/lib/monitoring/sentry'
 import { recordCronExecution } from '@/lib/monitoring/cronMetrics'
@@ -28,10 +28,13 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     const captureSweep = await recoverCapturedPaymentIntents(200)
     const credits   = await retryPendingRegistrationFinancials(100)
     const reversals = await retryPendingRefundLedgerReversals(100)
+    // M1 — settlement refund-hold closures that failed or waited for a reversal (after the reversals).
+    // Evidence-gated, audited, idempotent; moves no money.
+    const holdClosures = await retryPendingRefundHoldClosures(100)
     // RD-PAY-GA-01A — self-heal paid registrations missing their ptx_ ledger (the residual
     // hard-kill window that leaves no reconciliation record). Idempotent + cursor-bounded.
     const ledgerSweep = await recoverUncreditedRegistrations(500)
-    const result = { captureSweep, credits, reversals, ledgerSweep }
+    const result = { captureSweep, credits, reversals, holdClosures, ledgerSweep }
     ok = true; detail = JSON.stringify(result)
     return NextResponse.json(result)
   } catch (err) {

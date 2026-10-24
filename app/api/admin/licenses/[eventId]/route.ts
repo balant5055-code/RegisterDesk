@@ -19,6 +19,12 @@ import {
   type LicenseAdminActionType,
 } from '@/lib/admin/licenseAdminTypes'
 
+// RD-SA-COMMERCE-P1 (P1-2) — a refund request can never outlive this. Releasing a refund hold requires the
+// hold to be older than REFUND_HOLD_MIN_RELEASE_AGE_MS (15 min), so the request that created it has
+// ended — together with the attempt fence, a release can never race a refund still in flight.
+// Pinned by tests/unit/licenceRefundHoldAge.test.ts; keep it well under 15 minutes.
+export const maxDuration = 120
+
 const VALID_ACTIONS: LicenseAdminActionType[] = [
   'grant', 'suspend', 'reactivate', 'cancel', 'upgrade', 'downgrade',
   'overridePrice', 'overrideLimit', 'overrideFeatures', 'markPaymentReceived',
@@ -27,6 +33,10 @@ const VALID_ACTIONS: LicenseAdminActionType[] = [
   'extendExpiry', 'reduceExpiry', 'disableExpiry',
   'overridePublish', 'overrideIdentity', 'overrideRegistrationSafety',
   'forceConsume', 'resetLicense',
+  // RD-SA-COMMERCE-P1 — release the hold of a refund that never moved money (Super Admin, reason, audited)
+  'releaseRefundHold',
+  'completeRefund',
+  'acknowledgeRefundFailure',
 ]
 
 /**
@@ -103,7 +113,9 @@ export async function POST(
     return NextResponse.json(result)
   } catch (e) {
     if (e instanceof LicenseActionError) {
-      return NextResponse.json({ error: e.message }, { status: e.status })
+      // RD-SA-COMMERCE-P1 — machine-readable extras (REFUND_REVIEW_REQUIRED + assessment,
+      // CONFIRMATION_REQUIRED + the field to confirm) ride beside the message.
+      return NextResponse.json({ error: e.message, ...(e.details ?? {}) }, { status: e.status })
     }
     console.error('[admin/licenses] action failed', e)
     return NextResponse.json({ error: 'Action failed' }, { status: 500 })

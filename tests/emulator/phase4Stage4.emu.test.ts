@@ -105,6 +105,9 @@ describeEmu('RD-PHASE4-S4 · financial controls & audit logging on real Firestor
   afterAll(async () => {
     process.env.ADMIN_UIDS = savedAdminUids
     for (const p of cleanup) await adminDb.doc(p).delete().catch(() => null)
+    // M1.3 — the transfer-reference reservations this suite's payouts created (one UTR, one payout)
+    const refs = await adminDb.collection('payoutTransferReferences').where('organizerUid', '>=', 'p4s4-org-').where('organizerUid', '<', 'p4s4-org-\uf8ff').get()
+    for (const d of refs.docs) await d.ref.delete().catch(() => null)
   }, T)
   beforeEach(() => { h.who = ''; h.admin = ''; h.refunds.clear(); h.refundCalls = 0; h.lookupPlan = [] })
   afterEach(() => { vi.restoreAllMocks() })

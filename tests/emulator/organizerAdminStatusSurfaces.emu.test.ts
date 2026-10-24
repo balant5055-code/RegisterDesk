@@ -141,13 +141,16 @@ describeEmu('RD-ORGANIZER-SIGNUP-FIX-02 · admin surfaces report pending honestl
     expect(detail.profile.accountStatus).toBe(row!.accountStatus)
   }, T)
 
-  it('D1 · a pending signup is still absent from the DEFAULT list', async () => {
-    // Unchanged by this fix, and re-pinned here because making the detail endpoint honest
-    // would be pointless if the unfiltered list started publishing unverified signups.
+  it('D1 · a pending signup is in the DEFAULT list, flagged pending verification (Option A)', async () => {
+    // Superseded decision: the unfiltered list used to hide pending signups. It now lists
+    // them — still reading pending, never active — with the flag the console badges.
     const token = await idToken(adminUid)
     const res = await listOrganizers(adminGet('http://localhost/api/admin/organizers?pageSize=100', token) as never)
-    const body = await res.json() as { items: { uid: string }[] }
-    expect(body.items.find(i => i.uid === orgUid)).toBeUndefined()
+    const body = await res.json() as { items: { uid: string; accountStatus: string; pendingVerification: boolean }[] }
+    const row = body.items.find(i => i.uid === orgUid)
+    expect(row, 'the pending signup is missing from the default list').toBeDefined()
+    expect(row!.accountStatus).toBe('pending')
+    expect(row!.pendingVerification).toBe(true)
   }, T)
 
   // ─── D2 ─────────────────────────────────────────────────────────────────────

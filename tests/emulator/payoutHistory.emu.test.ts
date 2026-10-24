@@ -82,7 +82,14 @@ describeEmu('RD-FINANCE-CLOSURE-02 · payout-profile change history', () => {
       organizerUid: uid, actorUid: actor, before, after: snap,
       wasVerified, requestIp: '203.0.113.9', userAgent: 'emu',
     }))
-    await batch.commit()
+    const [written] = await batch.commit()
+    // `createdAt` is a server timestamp stored at MILLISECOND precision, and the read orders newest-first by
+    // it. The emulator's clock is coarse and runs behind the host's, so two quick consecutive commits can be
+    // stamped the same millisecond — a tie has no defined order (it falls back to the random doc id). Real
+    // changes are seconds apart; the test models that by not starting the NEXT change until the EMULATOR's
+    // clock (a read's readTime) has passed this commit. Production code and the order assertions are unchanged.
+    const committedMs = written.writeTime.toMillis()
+    while ((await ref.get()).readTime.toMillis() <= committedMs) await new Promise(r => setTimeout(r, 1))
   }
 
   // ═══════════════════════════════════════════════════════════════════════════

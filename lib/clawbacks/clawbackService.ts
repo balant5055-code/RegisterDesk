@@ -5,11 +5,13 @@
 // A clawback is created when a reversal (refund/dispute/chargeback/settlement
 // reversal) needs to debit N paise from an organizer's revenue wallet but only M
 // < N is available. The shortfall (N − M) is persisted as a debt that is paid
-// down automatically whenever new revenue credits the wallet, oldest debt first.
+// down automatically, oldest debt first, when the organizer's later revenue is
+// RELEASED — inside the release transaction (Phase 3 · Option C; see
+// lib/settlements/releaseFunds.ts and lib/clawbacks/recoveryPlan.ts). It is never
+// recovered from pendingPaise at credit time.
 
 import { FieldValue }   from 'firebase-admin/firestore'
 import { adminDb }      from '@/lib/firebase/admin'
-import { captureFinancialError } from '@/lib/monitoring/sentry'
 import { logAdminActionOrRecord, stageAdminAudit } from '@/lib/admin/audit'
 import type {
   ClawbackDocument, ClawbackStatus, ClawbackReason, ClawbackSourceType, ClawbackView,
@@ -84,102 +86,16 @@ export function writeClawbackOnShortfall(
     updatedAt:              FieldValue.serverTimestamp(),
     resolvedAt:             null,
     resolvedBy:             null,
-  } satisfies Record<keyof ClawbackDocument, unknown>)
+  } satisfies Record<Exclude<keyof ClawbackDocument, 'offPlatformRecoveredAmountPaise' | 'offPlatformRecoveries'>, unknown>)   // off-platform fields are added only by a manual recovery
 
   return { clawbackId: id, outstandingPaise: outstanding }
 }
 
-// ─── Recovery (called AFTER revenue credits the wallet) ───────────────────────
-
-interface RecoveryEvent { clawbackId: string; recoveredPaise: number; fullyRecovered: boolean }
-
-/**
- * Pays down open clawbacks from freshly-credited revenue, oldest first, bounded
- * by `budgetPaise` (the net amount that just credited). Each clawback is settled
- * in its own transaction that re-reads the wallet + clawback, so it is safe under
- * concurrency with refunds/disputes/other credits. Recovery never causes a new
- * shortfall: it debits at most the wallet's current (pending+available) balance,
- * which already includes the just-credited budget. Best-effort: never throws into
- * the credit path.
- */
-export async function recoverClawbacks(organizerUid: string, budgetPaise: number): Promise<void> {
-  if (!Number.isFinite(budgetPaise) || budgetPaise <= 0) return
-
-  const walletRef = adminDb.collection('organizerRevenueWallets').doc(organizerUid)
-  const events: RecoveryEvent[] = []
-  let remaining = Math.floor(budgetPaise)
-
-  try {
-    // Bounded loop — each iteration settles the single oldest open clawback.
-    for (let i = 0; i < 50 && remaining > 0; i++) {
-      const snap = await adminDb.collection(COLLECTION)
-        .where('organizerUid', '==', organizerUid)
-        .where('status', 'in', ['open', 'partially_recovered'])
-        .orderBy('createdAt', 'asc')
-        .limit(1)
-        .get()
-      if (snap.empty) break
-
-      const ref = snap.docs[0].ref
-      const budgetForTxn = remaining
-
-      const ev = await adminDb.runTransaction<RecoveryEvent | { stop: true } | null>(async tx => {
-        const [cwSnap, wSnap] = await Promise.all([tx.get(ref), tx.get(walletRef)])
-        if (!cwSnap.exists || !wSnap.exists) return null
-        const c = cwSnap.data() as ClawbackDocument
-        if (c.status === 'recovered' || c.status === 'waived') return null
-
-        const pending   = (wSnap.data() as { pendingPaise?: number }).pendingPaise   ?? 0
-        const available = (wSnap.data() as { availablePaise?: number }).availablePaise ?? 0
-        const inTransit = (wSnap.data() as { inTransitPaise?: number }).inTransitPaise ?? 0
-
-        const recoverable = Math.min(c.outstandingAmountPaise, budgetForTxn, pending + available)
-        if (recoverable <= 0) return { stop: true }   // wallet drained — try later
-
-        // Debit pending first, then available (mirrors computeWalletDebit).
-        const fromPending   = Math.min(pending, recoverable)
-        const fromAvailable = Math.min(available, recoverable - fromPending)
-        const newAvailable  = available - fromAvailable
-        const newInTransit  = Math.min(inTransit, newAvailable)   // preserve invariant
-
-        tx.update(walletRef, {
-          pendingPaise:   pending - fromPending,
-          availablePaise: newAvailable,
-          inTransitPaise: newInTransit,
-          updatedAt:      FieldValue.serverTimestamp(),
-        })
-
-        const newRecovered   = c.recoveredAmountPaise + recoverable
-        const newOutstanding = c.outstandingAmountPaise - recoverable
-        const fully          = newOutstanding <= 0
-        tx.update(ref, {
-          recoveredAmountPaise:   newRecovered,
-          outstandingAmountPaise: Math.max(0, newOutstanding),
-          status:                 (fully ? 'recovered' : 'partially_recovered') satisfies ClawbackStatus,
-          updatedAt:              FieldValue.serverTimestamp(),
-          ...(fully ? { resolvedAt: FieldValue.serverTimestamp(), resolvedBy: 'system' } : {}),
-        })
-
-        return { clawbackId: c.clawbackId, recoveredPaise: recoverable, fullyRecovered: fully }
-      })
-
-      if (!ev || 'stop' in ev) break
-      remaining -= ev.recoveredPaise
-      events.push(ev)
-    }
-  } catch (err) {
-    captureFinancialError(err, { scope: 'recoverClawbacks.recovery_failed', detail: 'recovery pass failed (non-fatal)', organizerUid })
-  }
-
-  for (const e of events) {
-    await logClawbackEvent(
-      'system',
-      e.fullyRecovered ? 'clawback.recovered' : 'clawback.partially_recovered',
-      e.clawbackId,
-      { recoveredPaise: e.recoveredPaise, auto: true },
-    )
-  }
-}
+// ─── Recovery ─────────────────────────────────────────────────────────────────
+// Phase 3 (Option C): automatic recovery happens ONLY inside the settlement-release transaction
+// (lib/settlements/releaseFunds.ts, planned by lib/clawbacks/recoveryPlan.ts). The former credit-time
+// recoverClawbacks — which took the debt from pendingPaise and left the credited transaction fully
+// releasable — was removed.
 
 // ─── Queries + serialization (admin APIs) ─────────────────────────────────────
 
@@ -200,6 +116,7 @@ export function toClawbackView(d: ClawbackDocument): ClawbackView {
     reversalAmountPaise:    d.reversalAmountPaise,
     recoveredAmountPaise:   d.recoveredAmountPaise,
     outstandingAmountPaise: d.outstandingAmountPaise,
+    offPlatformRecoveredAmountPaise: typeof d.offPlatformRecoveredAmountPaise === 'number' ? d.offPlatformRecoveredAmountPaise : 0,
     status:                 d.status,
     reason:                 d.reason,
     createdAt:              tsToISO(d.createdAt),
@@ -284,36 +201,76 @@ export async function waiveClawback(id: string, adminUid: string, reason: string
  * (e.g. funds collected via a separate channel). Zeroes the outstanding without
  * debiting the wallet (the money came from elsewhere).
  */
-export async function markClawbackRecovered(id: string, adminUid: string, reason: string): Promise<AdminClawbackResult> {
+const CLAWBACK_REQUEST_ID_RE = /^[A-Za-z0-9_-]{8,64}$/
+
+/**
+ * Super Admin — the debt (or part of it) was collected OUTSIDE the wallet (e.g. a bank transfer).
+ * Phase 3.3: the amount is recorded in `offPlatformRecoveredAmountPaise` (+ an `offPlatformRecoveries`
+ * entry), SEPARATE from `recoveredAmountPaise` (wallet-funded recovery, which is kept as it was). No
+ * wallet balance changes — the wallet was never debited for this part, and reconciliation counts it as
+ * still held in the wallet (lib/reconciliation/wallets.ts clawbackWalletHeldPaise).
+ *   • no amount ⇒ the whole outstanding debt (status 'recovered', resolved);
+ *   • an amount ⇒ a PARTIAL recovery (1 … outstanding paise; requestId required). Equal to the
+ *     outstanding ⇒ 'recovered'; less ⇒ 'partially_recovered' (the rest stays recoverable).
+ * A requestId makes the call idempotent: the same requestId again returns the current state unchanged.
+ */
+export async function markClawbackRecovered(
+  id: string, adminUid: string, reason: string, opts: { amountPaise?: number; requestId?: string } = {},
+): Promise<AdminClawbackResult & { duplicate?: boolean }> {
   const note = reason
   const ref = clawbackRef(id)
-  const result = await adminDb.runTransaction<AdminClawbackResult>(async tx => {
-    const snap = await tx.get(ref)
+  const partialRequested = opts.amountPaise !== undefined
+  if (partialRequested && (!Number.isSafeInteger(opts.amountPaise) || (opts.amountPaise as number) <= 0)) {
+    return { ok: false, status: 400, error: 'amountPaise must be a positive whole number of paise.' }
+  }
+  if (opts.requestId !== undefined && !CLAWBACK_REQUEST_ID_RE.test(opts.requestId)) {
+    return { ok: false, status: 400, error: 'requestId must be 8–64 letters, digits, "-" or "_".' }
+  }
+  if (partialRequested && !opts.requestId) return { ok: false, status: 400, error: 'A requestId is required for a partial recovery.' }
+  const auditId = opts.requestId ? `clawback_recovered_${id}_${opts.requestId}`.slice(0, 1400) : undefined
+  const auditRef = auditId ? adminDb.collection('adminAuditLogs').doc(auditId) : null
+  const result = await adminDb.runTransaction<AdminClawbackResult & { duplicate?: boolean }>(async tx => {
+    const [snap, prior] = await Promise.all([tx.get(ref), auditRef ? tx.get(auditRef) : Promise.resolve(null)])
     if (!snap.exists) return { ok: false, status: 404, error: 'Clawback not found' }
     const c = snap.data() as ClawbackDocument
+    // A repeated request (same requestId) is answered from the current state — nothing is recorded twice.
+    if (prior?.exists) {
+      const m = (prior.data() as { metadata?: { amountPaise?: unknown; partialRequested?: unknown } }).metadata
+      if (partialRequested && m?.amountPaise !== opts.amountPaise) return { ok: false, status: 409, error: 'This requestId was already used for a different amount.' }
+      return { ok: true, duplicate: true, view: toClawbackView(c) }
+    }
     if (c.status === 'recovered' || c.status === 'waived') {
       return { ok: false, status: 409, error: `Clawback is already ${c.status}.` }
     }
+    const outstanding = c.outstandingAmountPaise
+    if (!Number.isSafeInteger(outstanding) || outstanding <= 0) return { ok: false, status: 409, error: 'This clawback has no recoverable outstanding amount.' }
+    const amount = partialRequested ? opts.amountPaise as number : outstanding
+    if (amount > outstanding) return { ok: false, status: 400, error: `amountPaise exceeds the outstanding ${outstanding} paise.` }
+    const prevOff = typeof c.offPlatformRecoveredAmountPaise === 'number' ? c.offPlatformRecoveredAmountPaise : 0
+    const nextOutstanding = outstanding - amount
+    const full = nextOutstanding === 0
+    const status: ClawbackStatus = full ? 'recovered' : 'partially_recovered'
+    const key = opts.requestId ?? `full_${Date.now()}`
     tx.update(ref, {
-      recoveredAmountPaise:   c.reversalAmountPaise,
-      outstandingAmountPaise: 0,
-      status:     'recovered' satisfies ClawbackStatus,
-      resolvedAt: FieldValue.serverTimestamp(),
-      resolvedBy: adminUid,
+      offPlatformRecoveredAmountPaise: prevOff + amount,
+      [`offPlatformRecoveries.${key}`]: { amountPaise: amount, by: adminUid, at: FieldValue.serverTimestamp(), reason: note.slice(0, 500) },
+      outstandingAmountPaise: nextOutstanding,
+      status,
+      ...(full ? { resolvedAt: FieldValue.serverTimestamp(), resolvedBy: adminUid } : {}),
       updatedAt:  FieldValue.serverTimestamp(),
-      ...(note ? { resolutionNote: note.slice(0, 500) } : {}),
+      ...(note && full ? { resolutionNote: note.slice(0, 500) } : {}),
     })
     // RD-PHASE4-S4 — the audit row commits WITH the resolution (or neither does).
     stageAdminAudit(tx, {
       adminUid, actorRole: 'super_admin', action: 'clawback.recovered', entityType: 'clawback', entityId: id,
       reason,
-      changedFields: ['status', 'recoveredAmountPaise', 'outstandingAmountPaise', 'resolvedAt', 'resolvedBy', 'resolutionNote'],
-      before: { status: c.status, recoveredAmountPaise: c.recoveredAmountPaise, outstandingAmountPaise: c.outstandingAmountPaise },
-      after:  { status: 'recovered', recoveredAmountPaise: c.reversalAmountPaise, outstandingAmountPaise: 0 },
-      metadata: { manual: true, note, organizerUid: c.organizerUid },
+      changedFields: ['status', 'offPlatformRecoveredAmountPaise', 'offPlatformRecoveries', 'outstandingAmountPaise', ...(full ? ['resolvedAt', 'resolvedBy', 'resolutionNote'] : [])],
+      before: { status: c.status, recoveredAmountPaise: c.recoveredAmountPaise, offPlatformRecoveredAmountPaise: prevOff, outstandingAmountPaise: outstanding },
+      after:  { status, recoveredAmountPaise: c.recoveredAmountPaise, offPlatformRecoveredAmountPaise: prevOff + amount, outstandingAmountPaise: nextOutstanding },
+      metadata: { manual: true, offPlatform: true, amountPaise: amount, partial: !full, note, organizerUid: c.organizerUid, ...(opts.requestId ? { requestId: opts.requestId } : {}) },
       correlation: { clawbackId: id, organizerUid: c.organizerUid, transactionId: c.transactionId },
-    })
-    return { ok: true, view: { ...toClawbackView(c), recoveredAmountPaise: c.reversalAmountPaise, outstandingAmountPaise: 0, status: 'recovered', resolvedBy: adminUid } }
+    }, auditId)
+    return { ok: true, duplicate: false, view: { ...toClawbackView(c), offPlatformRecoveredAmountPaise: prevOff + amount, outstandingAmountPaise: nextOutstanding, status, ...(full ? { resolvedBy: adminUid } : {}) } }
   })
   return result
 }

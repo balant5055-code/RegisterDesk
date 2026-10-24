@@ -51,6 +51,7 @@ import { SERVICE_KINDS, sumServiceItems, isConsistentServiceItem, type ServiceCh
 import { ledgerRef, txnApplyServiceItems, type ServiceLedgerDoc } from './serviceAllowanceLedger'
 import { checkPhotoPurchase, mediaUnitsIn, paidPhotoCapacity } from './photoCapacity'
 import { recordManualRefundHold } from './manualRefundHold'
+import { licenceRegistrationBlock } from './licenceRegistrationBlock'
 
 const now = () => FieldValue.serverTimestamp() as unknown as FirebaseFirestore.Timestamp
 
@@ -150,6 +151,7 @@ export type CapacityChangeFailure =
   | 'ALREADY_APPLIED'
   | 'BELOW_SOLD'                  // RD-EVENT-COMMERCE-03 — would drop below registrations already taken
   | 'LIFECYCLE_INELIGIBLE'        // RD-EVENT-COMMERCE-03 — cancelled / archived / completed / rejected
+  | 'LICENCE_INACTIVE'            // RD-SA-COMMERCE-P1 — licence suspended / cancelled / refunded / refund in progress
 
 /**
  * Load everything a quote needs, with ownership enforced. READ-ONLY.
@@ -171,6 +173,10 @@ export async function loadCapacityChangeContext(
 
   const ev = evSnap.data() as Record<string, unknown>
   if (ev.uid !== organizerUid) return { ok: false, code: 'FORBIDDEN', message: 'You do not manage this event.' }
+  // RD-SA-COMMERCE-P1 — buying capacity can never restart sales on an inactive licence.
+  if (licenceRegistrationBlock(licSnap.exists ? licSnap.data() : undefined)) {
+    return { ok: false, code: 'LICENCE_INACTIVE', message: "This event's licence is not active (suspended, cancelled or refunded), so its capacity cannot be changed. Contact RegisterDesk support." }
+  }
 
   const currentCapacity = currentCapacityFromEvent(ev)
   if (currentCapacity === null) {
@@ -295,6 +301,10 @@ export async function createCapacityChangeOrder(input: {
 
     const ev = evSnap.data() as Record<string, unknown>
     if (ev.uid !== organizerUid) return { kind: 'fail', code: 'FORBIDDEN', message: 'You do not manage this event.' }
+    // RD-SA-COMMERCE-P1 — read in THIS transaction: no capacity order (paid or free) for an inactive licence.
+    if (licenceRegistrationBlock(licSnap.exists ? licSnap.data() : undefined)) {
+      return { kind: 'fail', code: 'LICENCE_INACTIVE', message: "This event's licence is not active (suspended, cancelled or refunded), so its capacity cannot be changed. Contact RegisterDesk support." }
+    }
     if (!isPurchaseEligibleLifecycle(ev)) {
       return { kind: 'fail', code: 'LIFECYCLE_INELIGIBLE', message: 'This event is no longer live, so its capacity cannot be changed.' }
     }
@@ -488,7 +498,7 @@ export async function applyCapacityChange(input: {
 
   return adminDb.runTransaction<ApplyCapacityChangeResult>(async (txn) => {
     // READS first (Firestore requirement).
-    const [orderSnap, evSnap, ctrSnap] = await Promise.all([txn.get(orderRef), txn.get(eventRef(eventId)), txn.get(counterRef(eventId))])
+    const [orderSnap, evSnap, ctrSnap, licSnap] = await Promise.all([txn.get(orderRef), txn.get(eventRef(eventId)), txn.get(counterRef(eventId)), txn.get(licenceRef(eventId))])
     if (!orderSnap.exists) return { kind: 'not_found', razorpayAmountPaise: 0, totalPaise: 0, newCapacity: null }
 
     const order = orderSnap.data() as LicenseOrderDoc & { allowanceDraftId?: string }
@@ -537,6 +547,14 @@ export async function applyCapacityChange(input: {
     // atomically with every other check; nothing else is written. The caller holds the payment.
     if (!isPurchaseEligibleLifecycle(ev)) {
       markStale('lifecycle_ineligible')
+      return { kind: 'lifecycle_ineligible', razorpayAmountPaise, totalPaise: total, newCapacity: snap.capacity }
+    }
+    // RD-SA-COMMERCE-P1 — the licence went inactive (suspended / cancelled / refunded) after the order
+    // was created: the capacity is NOT applied and the order is terminal, exactly like an event that is
+    // no longer live — the caller holds the captured payment for a manual refund decision.
+    if (licenceRegistrationBlock(licSnap.exists ? licSnap.data() : undefined)) {
+      markStale('lifecycle_ineligible')
+      txn.set(adminDb.collection(LICENSE_ORDERS_COLLECTION).doc(orderId), { licenceInactiveAtSettlement: true }, { merge: true })
       return { kind: 'lifecycle_ineligible', razorpayAmountPaise, totalPaise: total, newCapacity: snap.capacity }
     }
     if (currentCapacityFromEvent(ev) !== snap.previousCapacity) {
@@ -672,10 +690,12 @@ export async function applyFreeCapacityChange(input: {
   if (snapshot.totalPaise !== 0) return 'stale'   // never a free path for a real charge
 
   return adminDb.runTransaction<CapacityApplyKind>(async (txn) => {
-    const [evSnap, ctrSnap] = await Promise.all([txn.get(eventRef(eventId)), txn.get(counterRef(eventId))])
+    const [evSnap, ctrSnap, licSnap] = await Promise.all([txn.get(eventRef(eventId)), txn.get(counterRef(eventId)), txn.get(licenceRef(eventId))])
     if (!evSnap.exists) return 'not_found'
     const ev = evSnap.data() as Record<string, unknown>
     if (ev.uid !== organizerUid) return 'not_found'
+    // RD-SA-COMMERCE-P1 — no capacity change, even a free one, on an inactive licence.
+    if (licenceRegistrationBlock(licSnap.exists ? licSnap.data() : undefined)) return 'lifecycle_ineligible'
     if (currentCapacityFromEvent(ev) !== snapshot.previousCapacity) return 'stale'
     // RD-EVENT-COMMERCE-03 — never below registrations already taken.
     if (snapshot.capacity < soldFromCounter(ctrSnap.exists ? ctrSnap.data() as Record<string, unknown> : undefined)) return 'stale'

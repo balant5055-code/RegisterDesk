@@ -4,6 +4,9 @@
 import { getEventBySlug }          from '@/lib/firebase/firestore/events'
 import { getRegistrationCounter }  from '@/lib/firebase/firestore/registrationCounters'
 import { isContentTakenDown }      from '@/lib/admin/moderation'
+import { adminDb }                 from '@/lib/firebase/admin'
+import { EVENT_LICENSES_COLLECTION } from '@/lib/licensing/schema'
+import { licenceRegistrationBlock } from '@/lib/licensing/licenceRegistrationBlock'
 import { computePassAvailability, resolveTotalCapacity } from './capacity'
 import { resolveWaitlistSettings, type WaitlistSettingSource } from '@/lib/waitlist/waitlistSettings'
 import { todayISOInTz, nowLocalInTz, windowKey } from './salesWindow'
@@ -107,6 +110,14 @@ export async function checkRegistrationGate(
   //        like any other and refund the captured payment.
   if (isContentTakenDown(event.moderationStatus)) {
     return { allowed: false, reason: 'EVENT_UNAVAILABLE' }
+  }
+
+  // ── 1c. RD-SA-COMMERCE-P1 — the event's licence. Suspended / cancelled / refunded ⇒ no new
+  //        registrations or sales. A fast pre-check so no payment is taken; the transaction that
+  //        adds the seat re-reads the licence and is the authority.
+  const licenceSnap = await adminDb.collection(EVENT_LICENSES_COLLECTION).doc(slug).get()
+  if (licenceRegistrationBlock(licenceSnap.data())) {
+    return { allowed: false, reason: 'LICENCE_INACTIVE' }
   }
 
   // ── 2a. Lifecycle status (authoritative — set by organizer actions) ─────────
@@ -243,4 +254,5 @@ export const GATE_REASON_LABELS: Record<RegistrationBlockReason, string> = {
   INVITE_CODE_INVALID:   'The invite code you entered is invalid or has expired.',
   WAITLIST_AVAILABLE:    'This event is full. You can join the waitlist for a chance to attend.',
   EVENT_UNAVAILABLE:     'This event is no longer available.',
+  LICENCE_INACTIVE:      'This event is not accepting registrations right now.',
 }

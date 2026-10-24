@@ -30,6 +30,8 @@ import { resolveEffectivePassPricePaise, eventTimezone } from '@/lib/pricing/ear
 import { validateFormResponses, sanitizeFormResponses } from '@/lib/registrations/validateFormResponses'
 import { resolveServerEligibility }  from '@/lib/registrations/ageEligibility'
 import { resolveAttendeeIdentity }   from '@/lib/registrations/attendeeIdentity'
+import { checkApprovedContactAccess, verifiedRegistrationEmails } from '@/lib/registrations/approvedContactAccess'
+import type { DecodedIdToken } from 'firebase-admin/auth'
 import type { IdentityField }        from '@/lib/registrations/attendeeIdentity'
 import type { RegistrationRules } from '@/components/wizard/registrationFormConfig'
 
@@ -96,12 +98,14 @@ export async function POST(
 
   // ── 1. Optional auth — guest registration is allowed ──────────────────────
   let uid: string | undefined
+  let decodedToken: DecodedIdToken | null = null
   const authHeader = req.headers.get('authorization') ?? ''
   const token      = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : ''
   if (token) {
     try {
       const decoded = await adminAuth.verifyIdToken(token)
       uid = decoded.uid
+      decodedToken = decoded
     } catch {
       // Invalid token — fall through as guest; don't block
     }
@@ -279,6 +283,18 @@ export async function POST(
       { success: false, reason: 'LOGIN_REQUIRED', error: 'You must be signed in to register for this event.' },
       { status: 401 },
     )
+  }
+
+  // ── 7a'. Approved Contact List (lib/registrations/approvedContactAccess) ────
+  // Only a VERIFIED email (attendee session or a verified sign-in) on the event's list may
+  // register, and only for itself. Same rule as create-order; fails closed.
+  const acAccess = checkApprovedContactAccess({
+    accessControl:  event.accessControl,
+    attendeeEmail:  attendee.email,
+    verifiedEmails: await verifiedRegistrationEmails(event.accessControl, decodedToken),
+  })
+  if (!acAccess.ok) {
+    return NextResponse.json({ success: false, reason: acAccess.reason, error: acAccess.error }, { status: acAccess.status })
   }
 
   // ── 7b. Enforce limitPerMobile requires a phone ────────────────────────────
@@ -465,7 +481,9 @@ export async function POST(
         {
           success: false,
           reason:  err.reason,
-          error:   err.reason === 'EVENT_CAPACITY_FULL'
+          error:   err.reason === 'LICENCE_INACTIVE'
+            ? 'This event is not accepting registrations right now.'
+            : err.reason === 'EVENT_CAPACITY_FULL'
             ? 'This event is now full.'
             : err.reason === 'PASS_NOT_AVAILABLE'
             ? 'This pass is no longer available.'

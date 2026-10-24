@@ -13,7 +13,7 @@ import { adminDb } from '@/lib/firebase/admin'
 import { getAdminAnalytics } from '@/lib/analytics/adminAnalytics'
 import { listCoupons } from '@/lib/admin/licenseCouponService'
 import { deriveCouponLifecycle } from '@/lib/licensing/coupons/validate'
-import { LICENSE_HISTORY_COLLECTION } from '@/lib/licensing/schema'
+import { LICENSE_HISTORY_COLLECTION, LICENSE_ORDERS_COLLECTION } from '@/lib/licensing/schema'
 import type {
   LicenseCenterOverview, LicenseCenterTimelineEntry,
   HealthIndicator, HealthLevel, CenterTimelineSource,
@@ -39,7 +39,11 @@ async function countOf(q: FirebaseFirestore.Query): Promise<number> {
 export async function getLicenseCenterOverview(): Promise<LicenseCenterOverview> {
   const now = Timestamp.now()
 
-  const [analytics, coupons, total, active, pending, suspended, cancelled, consumed, expired] = await Promise.all([
+  // RD-SA-COMMERCE-P1 (P1-5) — fail-closed counts: null (Unavailable), never a misleading 0.
+  const countOrNull = async (q: FirebaseFirestore.Query): Promise<number | null> => {
+    try { return (await q.count().get()).data().count } catch { return null }
+  }
+  const [analytics, coupons, total, active, pending, suspended, cancelled, consumed, expired, refundHold, refundingOrders] = await Promise.all([
     getAdminAnalytics().catch(() => null),
     listCoupons({ includeArchived: true }).catch(() => []),
     countOf(LICENSES()),
@@ -49,6 +53,8 @@ export async function getLicenseCenterOverview(): Promise<LicenseCenterOverview>
     countOf(LICENSES().where('admin.lifecycle', '==', 'cancelled')),
     countOf(LICENSES().where('consumed', '==', true)),
     countOf(LICENSES().where('expiresAt', '<', now)),
+    countOrNull(LICENSES().where('refundHold', '!=', null)),
+    countOrNull(adminDb.collection(LICENSE_ORDERS_COLLECTION).where('status', '==', 'refunding')),
   ])
 
   // Coupon lifecycle rollup (single bounded read, in-memory tally).
@@ -94,6 +100,12 @@ export async function getLicenseCenterOverview(): Promise<LicenseCenterOverview>
   } else {
     push('revenue', 'Revenue', revenue.licenseRevenuePaise > 0 ? 'green' : 'neutral', `₹${Math.round(revenue.licenseRevenuePaise / 100).toLocaleString('en-IN')}`)
   }
+  if (refundHold === null || refundingOrders === null) {
+    push('refund_holds', 'Refund holds', 'yellow', 'Unavailable — refund holds could not be counted')
+  } else {
+    push('refund_holds', 'Refund holds', refundHold > 0 || refundingOrders > 0 ? 'red' : 'green',
+      refundHold > 0 || refundingOrders > 0 ? `${refundHold} licence(s) on refund hold · ${refundingOrders} order(s) refunding` : 'None')
+  }
   push('expiry', 'Expiry', expired > 0 ? 'yellow' : 'green', expired > 0 ? `${expired} expired windows` : 'None expired')
   push('campaigns', 'Campaigns', campaignSet.size > 0 ? 'green' : 'neutral', `${campaignSet.size} campaigns`)
   if (revenue.discountGivenPaise === null) {
@@ -110,7 +122,7 @@ export async function getLicenseCenterOverview(): Promise<LicenseCenterOverview>
   }
 
   return {
-    licenses: { total, active, pending, suspended, cancelled, consumed, expired },
+    licenses: { total, active, pending, suspended, cancelled, consumed, expired, refundHold, refundingOrders },
     coupons: { ...couponCounts, campaigns: campaignSet.size },
     revenue,
     topCoupons: sales?.topCoupons ?? [],

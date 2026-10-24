@@ -22,7 +22,12 @@ const strip = (s: string) =>
    .replace(/\{\/\*[\s\S]*?\*\/\}/g, '')
    .replace(/^\s*\/\/.*$/gm, '')
 
-const PUBLIC_PAGE   = 'app/events/[slug]/page.tsx'
+// The public event page's template projection moved VERBATIM into the shared builder
+// (lib/events/eventPageProps.ts) so the Super Admin pre-approval preview renders the same
+// page. These assertions follow the code to its new home; the page itself is pinned below
+// to delegate to that builder, so they still describe what the public page renders.
+const PUBLIC_PAGE   = 'lib/events/eventPageProps.ts'
+const PUBLIC_ROUTE  = 'app/events/[slug]/page.tsx'
 const REGISTER_PAGE = 'app/events/[slug]/register/page.tsx'
 const CLIENT        = 'app/events/[slug]/register/RegisterClient.tsx'
 const RESOLVER      = 'lib/events/milestoneAlerts.ts'
@@ -321,5 +326,14 @@ describe('extractPasses carries milestone configuration through (executed, not g
 
   it('inactive passes are still filtered out', () => {
     expect(extractPasses({ passes: [{ ...STORED_PASS, status: 'inactive' }] })).toEqual([])
+  })
+})
+
+describe('the public event page renders through the shared builder', () => {
+  it('delegates its template props to lib/events/eventPageProps (no second projection)', () => {
+    const src = strip(read(PUBLIC_ROUTE))
+    expect(src).toContain('buildEventPageProps(slug, event, data)')
+    expect(src).toContain('<TemplateRouter {...props} />')
+    expect(src).not.toMatch(/resolveMilestoneAlert|computeEventAvailability|getRegistrationCounter\(/)
   })
 })

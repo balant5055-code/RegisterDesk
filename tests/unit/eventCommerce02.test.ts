@@ -676,7 +676,10 @@ describe('COMMERCE-03 · server guarantees', () => {
     expect(prep).not.toContain('maxPhotosPerEvent +')
     expect(prep).not.toContain('getCreditPolicy')
     const gate = code('features/media-studio/services/photoCapacityGate.ts')
-    expect(gate).toContain('paidPhotoCapacity(ownedMediaLine(ledgerSnap, organizerUid))')
+    // RD-SA-COMMERCE-P1 — the paid media capacity, minus units held by an in-flight licence refund,
+    // is what BOTH the transactional gate and the display reader use.
+    expect(gate).toContain('paidPhotoCapacity(line) - heldRefundUnits(snap.data() as ServiceLedgerDoc, \'media\')')
+    expect(gate).toContain('return { capacity: usablePhotoCapacity(ledgerSnap, organizerUid), used }')
     expect(gate).toContain('if (used + 1 > capacity)')
   })
   it('draft purchase: stale-quote guard on activation and add-on', () => {

@@ -5,7 +5,7 @@ import { FieldValue }  from 'firebase-admin/firestore'
 import { adminDb }     from '@/lib/firebase/admin'
 import { captureFinancialError } from '@/lib/monitoring/sentry'
 import type { OrganizerRevenueWallet } from '@/lib/fees/types'
-import { recoverClawbacks, writeClawbackOnShortfall, logClawbackEvent } from '@/lib/clawbacks/clawbackService'
+import { writeClawbackOnShortfall, logClawbackEvent } from '@/lib/clawbacks/clawbackService'
 import type { ClawbackReason, ClawbackSourceType } from '@/lib/clawbacks/types'
 
 // Returned by debitRevenueWallet so callers can detect insolvency.
@@ -37,6 +37,44 @@ export function computeWalletDebit(
   const remaining     = netSettlementPaise - fromPending
   const fromAvailable = Math.min(wallet.availablePaise, remaining)
   return { fromPending, fromAvailable, totalDebited: fromPending + fromAvailable }
+}
+
+// ─── Reversal of ONE ledger transaction: debit the bucket that holds ITS net ─────────────────
+//
+// A transaction's net is credited to pendingPaise and moved to availablePaise only by the release
+// job, which flips its releaseStatus to 'released' in the same Firestore transaction. So the
+// transaction's AUTHORITATIVE releaseStatus says where its net sits:
+//   'pending' / 'held' → pendingPaise   (never released; a refund hold keeps it in pending)
+//   'released'         → availablePaise
+// Anything else (absent on a legacy / corrupt row) is unknown: callers fail closed — no debit.
+// The pending-first computeWalletDebit must NOT be used for a reversal: reversing a released
+// transaction from pendingPaise consumes the net of OTHER, unreleased transactions, whose release
+// then fails (INSUFFICIENT) while availablePaise stays overstated.
+
+export type WalletBucket = 'pending' | 'available'
+
+/** The bucket holding a ledger transaction's net, from its releaseStatus; null = unknown (fail closed). */
+export function walletBucketForRelease(releaseStatus: unknown): WalletBucket | null {
+  if (releaseStatus === 'released') return 'available'
+  if (releaseStatus === 'pending' || releaseStatus === 'held') return 'pending'
+  return null
+}
+
+/**
+ * Pure debit plan for reversing `netPaise` of a transaction whose net sits in `bucket`. Debits ONLY
+ * that bucket (clamped at what it holds); a shortfall is reported (`totalDebited < netPaise`) for the
+ * caller's existing clawback path — it is never taken from the other bucket.
+ */
+export function computeReversalDebit(
+  wallet:   Pick<OrganizerRevenueWallet, 'pendingPaise' | 'availablePaise'>,
+  netPaise: number,
+  bucket:   WalletBucket,
+): WalletDebitPlan {
+  const held = Math.max(0, (bucket === 'pending' ? wallet.pendingPaise : wallet.availablePaise) ?? 0)
+  const take = Math.min(held, Math.max(0, netPaise))
+  return bucket === 'pending'
+    ? { fromPending: take, fromAvailable: 0, totalDebited: take }
+    : { fromPending: 0, fromAvailable: take, totalDebited: take }
 }
 
 export async function getRevenueWallet(
@@ -94,8 +132,7 @@ export async function creditRevenueWallet(
     buildRevenueCreditUpdate(organizerUid, grossAmountPaise, feesTotalPaise, netSettlementPaise) as unknown as OrganizerRevenueWallet,
     { merge: true },
   )
-  // New revenue → pay down any open clawbacks (oldest first), bounded by net.
-  await recoverClawbacks(organizerUid, netSettlementPaise).catch(() => {})
+  // Phase 3 (Option C) — clawback debt is recovered at RELEASE (lib/settlements/releaseFunds.ts), never here.
 }
 
 // Debit on refund. Atomically routes the debit across both balance buckets:

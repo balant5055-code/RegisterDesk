@@ -23,11 +23,13 @@ import {
 } from '@/components/admin'
 import type { PillTone } from '@/components/admin'
 import { useConfirm } from '@/components/ui/ConfirmDialog'
+import { postLicenceAction, refundWithPreview, LicenceActionCancelled } from '@/lib/admin/licenceActionClient'
 import type {
   LicenseRow, LicenseListResponse, LicenseDetail, LicenseDisplayStatus,
   LicensePaymentStatus, LicenseAdminActionType, LicenseAdminActionRequest,
 } from '@/lib/admin/licenseAdminTypes'
 import { AdminEventCommercialPanel } from '@/components/admin/AdminEventCommercialPanel'
+import { LicenceRefundStatePanel } from '@/components/admin/LicenceRefundStatePanel'
 import { AdminPrintBadgePanel } from '@/components/admin/AdminPrintBadgePanel'
 
 const STATUS_FILTERS: { value: string; label: string }[] = [
@@ -37,6 +39,8 @@ const STATUS_FILTERS: { value: string; label: string }[] = [
   { value: 'suspended',     label: 'Suspended' },
   { value: 'cancelled',     label: 'Cancelled' },
   { value: 'complimentary', label: 'Comp' },
+  // RD-SA-COMMERCE-P1 (P1-5) — every licence whose refund hold is blocking sales, platform-wide.
+  { value: 'refund_hold',   label: 'Refund hold' },
 ]
 
 async function getToken(): Promise<string> {
@@ -53,7 +57,7 @@ const STATUS_TONE: Record<LicenseDisplayStatus, PillTone> = {
   active: 'success', pending: 'warning', suspended: 'warning', cancelled: 'danger',
 }
 const PAYMENT_TONE: Record<LicensePaymentStatus, PillTone> = {
-  paid: 'success', pending: 'warning', failed: 'danger', refunded: 'neutral', free: 'neutral', complimentary: 'accent',
+  paid: 'success', pending: 'warning', failed: 'danger', refunded: 'neutral', free: 'neutral', complimentary: 'accent', refunding: 'warning',
 }
 
 function StatusBadge({ status }: { status: LicenseDisplayStatus }) {
@@ -274,20 +278,28 @@ function LicenseDetailModal({ eventId, onClose, onChanged }: {
   async function act(action: LicenseAdminActionType, body: Partial<LicenseAdminActionRequest>) {
     setBusy(action); setError(null)
     try {
-      const token = await getToken()
-      const res = await fetch(`/api/admin/licenses/${eventId}`, {
-        method: 'POST',
-        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
-        body: JSON.stringify({ action, reason: '', ...body }),
-      })
-      if (!res.ok) {
-        const b = await res.json().catch(() => null) as { error?: string } | null
-        throw new Error(b?.error ?? `Request failed (${res.status})`)
-      }
+      // RD-SA-COMMERCE-P1 — shared client: confirms server-requested confirmations (refunded-licence restore).
+      await postLicenceAction(eventId, { action, ...body }, getToken, confirm)
       await reload()
       onChanged()
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Action failed')
+      if (!(e instanceof LicenceActionCancelled)) setError(e instanceof Error ? e.message : 'Action failed')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  // RD-SA-COMMERCE-P1 — refund: reason → server preview (amount, capacity before/after) → confirm → refund.
+  async function refundLicence() {
+    const reason = (await prompt({ title: 'Reason required', message: 'Reason for "refund":', required: true }))?.trim()
+    if (!reason) return
+    setBusy('refund'); setError(null)
+    try {
+      await refundWithPreview(eventId, reason, getToken, confirm)
+      await reload()
+      onChanged()
+    } catch (e) {
+      if (!(e instanceof LicenceActionCancelled)) setError(e instanceof Error ? e.message : 'Refund failed')
     } finally {
       setBusy(null)
     }
@@ -371,6 +383,18 @@ function LicenseDetailModal({ eventId, onClose, onChanged }: {
               {detail?.order?.razorpayPaymentId && <Stat label="Razorpay payment" value={detail.order.razorpayPaymentId} />}
             </div>
 
+            {/* RD-SA-COMMERCE-P1 — refund state (read-only). A hold is never released for being old:
+                see docs/RD-SA-COMMERCE-P1-REFUND-HOLDS.md before using "Release refund hold". */}
+            {detail?.refundState && (
+              <LicenceRefundStatePanel
+                state={detail.refundState}
+                busy={busy === 'releaseRefundHold' || busy === 'completeRefund' || busy === 'acknowledgeRefundFailure'}
+                onAcknowledgeFailure={() => withReason('acknowledgeRefundFailure', {}, 'Acknowledge this failed refund? It records your decision only — nothing is refunded or restored.')}
+                onRelease={() => withReason('releaseRefundHold', {}, 'Release this licence’s refund hold? Only possible when Razorpay confirms no refund was issued and the hold is at least 15 minutes old.')}
+                onComplete={() => withReason('completeRefund', {}, 'Complete this refund? Only possible when Razorpay shows the full refund (or the wallet credit-back exists). It cancels the licence and retires the held units.')}
+              />
+            )}
+
             {/* Actions */}
             <div>
               <p className="mb-2 text-[12px] font-semibold uppercase tracking-wide text-muted-foreground">Actions</p>
@@ -386,7 +410,7 @@ function LicenseDetailModal({ eventId, onClose, onChanged }: {
                 {/* RD-EVENT-COMMERCE-05 — no tier Upgrade / Downgrade / Grant: retired (410). "Mark paid"
                     stays hidden for capacity licences (04A). */}
                 <ActBtn icon={RefreshCw} label="Reissue" busy={busy === 'reissue'} onClick={() => withReason('reissue', {}, 'Reissue this license?')} />
-                <ActBtn icon={Undo2} label="Refund" tone="red" busy={busy === 'refund'} onClick={() => withReason('refund', {}, 'Refund this license? This cancels it and refunds any payment.')} />
+                <ActBtn icon={Undo2} label="Refund" tone="red" busy={busy === 'refund'} onClick={() => void refundLicence()} />
                 <ActBtn icon={StickyNote} label="Add note" busy={busy === 'addNote'} onClick={addNote} />
               </div>
             </div>

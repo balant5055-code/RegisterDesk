@@ -16,7 +16,9 @@ import type { AdminTransaction, AdminTransactionsResponse }
   from '@/app/api/admin/transactions/route'
 import type { ReleasePreviewResponse } from '@/app/api/admin/finance/release-preview/route'
 import type { ReleaseFundsResponse }   from '@/app/api/admin/finance/release-funds/route'
+import { releaseRunNotice }            from '@/lib/settlements/releaseRunSummary'
 import { GatewayVarianceCard } from '@/components/admin/GatewayVarianceCard'
+import { RefundHoldsPanel } from '@/components/admin/RefundHoldsPanel'
 import type {
   AdminPayoutProfileSummary,
   AdminPayoutProfilesResponse,
@@ -61,7 +63,7 @@ async function getToken() {
 
 // ─── Sub-components ───────────────────────────────────────────────────────────
 
-type TabId = 'overview' | 'settlements' | 'transactions' | 'release' | 'payout-profiles' | 'failed-refunds'
+type TabId = 'overview' | 'settlements' | 'transactions' | 'release' | 'payout-profiles' | 'failed-refunds' | 'refund-holds'
 type SettlementFilter = 'all' | 'pending' | 'approved' | 'paid' | 'rejected'
 
 function StatusBadge({ status }: { status: string }) {
@@ -108,12 +110,78 @@ function KpiCard({ label, value, sub, icon: Icon, accent }: {
   )
 }
 
+// ─── M1.2 · changed-destination transfer exception (request step) ─────────────
+// Records a bank transfer that ALREADY completed to the request's ORIGINAL destination after the organizer's
+// payout details changed. It never sends money; a second Super Admin must approve it. The server validates
+// everything — this form only collects the evidence.
+
+function TransferExceptionModal({ settlement, onClose, onSubmit }: {
+  settlement: AdminSettlement
+  onClose:    () => void
+  onSubmit:   (input: { utrNumber: string; reason: string; source: string; reference: string }) => Promise<void>
+}) {
+  const [utrNumber, setUtrNumber] = useState('')
+  const [reason,    setReason]    = useState('')
+  const [source,    setSource]    = useState('bank_statement')
+  const [reference, setReference] = useState('')
+  const [confirmed, setConfirmed] = useState(false)
+  const [busy,      setBusy]      = useState(false)
+  const ready = utrNumber.trim().length >= 6 && reason.trim().length >= 3 && reference.trim().length >= 3 && confirmed && !busy
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
+      <div role="dialog" aria-modal="true" aria-labelledby="tx-exception-title" className="w-full max-w-md rounded-xl border border-border bg-card p-6 shadow-xl" onClick={e => e.stopPropagation()}>
+        <h2 id="tx-exception-title" className="text-[16px] font-semibold text-foreground">Record a completed transfer — changed destination</h2>
+        <p className="mt-0.5 text-[12.5px] text-muted-foreground">{settlement.organizerName || settlement.organizerEmail} · {paise(settlement.amountPaise)}</p>
+        <p className="mt-3 text-[12.5px] text-amber-800 dark:text-amber-300">
+          Use this only when the bank transfer has ALREADY succeeded to the original destination
+          {settlement.destination?.label ? <> (<span className="font-mono">{settlement.destination.label}</span>)</> : null}, and the organizer has
+          since changed their payout details. Nothing is sent. A different Super Admin must approve before it is recorded.
+        </p>
+        <div className="mt-4 space-y-3 text-[13px]">
+          <label className="block">UTR / bank transfer reference
+            <input value={utrNumber} onChange={e => setUtrNumber(e.target.value)} className="mt-1 w-full rounded-lg border border-border bg-background px-3 py-2 font-mono" />
+          </label>
+          <label className="block">Evidence of the completed transfer
+            <select value={source} onChange={e => setSource(e.target.value)} className="mt-1 w-full rounded-lg border border-border bg-background px-3 py-2">
+              <option value="bank_statement">Bank statement</option>
+              <option value="bank_transfer_confirmation">Bank transfer confirmation</option>
+              <option value="payout_report">Payout report</option>
+            </select>
+          </label>
+          <label className="block">Evidence document reference (never account numbers)
+            <input value={reference} onChange={e => setReference(e.target.value)} className="mt-1 w-full rounded-lg border border-border bg-background px-3 py-2" />
+          </label>
+          <label className="block">Reason for the exception
+            <input value={reason} onChange={e => setReason(e.target.value)} className="mt-1 w-full rounded-lg border border-border bg-background px-3 py-2" />
+          </label>
+          <label className="flex items-start gap-2">
+            <input type="checkbox" checked={confirmed} onChange={e => setConfirmed(e.target.checked)} className="mt-0.5" />
+            <span>I have verified the transfer COMPLETED to the original destination shown above.</span>
+          </label>
+        </div>
+        <div className="mt-5 flex justify-end gap-2">
+          <button onClick={onClose} className="rounded-lg border border-border px-3 py-2 text-[13px] font-medium text-muted-foreground hover:text-foreground">Cancel</button>
+          <button
+            disabled={!ready}
+            onClick={async () => { setBusy(true); try { await onSubmit({ utrNumber, reason, source, reference }) } finally { setBusy(false) } }}
+            className="rounded-lg bg-primary px-4 py-2 text-[13px] font-semibold text-primary-foreground hover:opacity-90 disabled:opacity-50"
+          >
+            Request approval
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ─── Mark Paid modal ──────────────────────────────────────────────────────────
 
 interface MarkPaidModalProps {
   settlement: AdminSettlement
   onClose:    () => void
   onConfirm:  (proof: PayoutProof, note: string) => Promise<void>
+  /** M1 — 'transfer': record a bank transfer that ALREADY completed for a request under review */
+  mode?:      'paid' | 'transfer'
 }
 
 interface PayoutProof {
@@ -123,7 +191,7 @@ interface PayoutProof {
   paymentNotes:  string
 }
 
-function MarkPaidModal({ settlement, onClose, onConfirm }: MarkPaidModalProps) {
+function MarkPaidModal({ settlement, onClose, onConfirm, mode = 'paid' }: MarkPaidModalProps) {
   const [utrNumber,     setUtrNumber]     = useState('')
   const [bankReference, setBankReference] = useState('')
   const [paidBy,        setPaidBy]        = useState('')
@@ -185,11 +253,17 @@ function MarkPaidModal({ settlement, onClose, onConfirm }: MarkPaidModalProps) {
         <div className="mb-5 flex items-center justify-between">
           <div>
             <h2 id="mark-paid-title" className="text-[16px] font-semibold text-foreground">
-              Mark as Paid
+              {mode === 'transfer' ? 'Record completed transfer' : 'Mark as Paid'}
             </h2>
             <p className="mt-0.5 text-[12.5px] text-muted-foreground">
               {settlement.organizerName || settlement.organizerEmail} · {paise(settlement.amountPaise)}
             </p>
+            {mode === 'transfer' && (
+              <p className="mt-2 text-[12.5px] text-amber-800 dark:text-amber-300">
+                Use this only when the bank transfer has already succeeded. Nothing is sent again. If the available balance
+                no longer covers the full amount, the difference is recorded as a clawback owed by the organizer.
+              </p>
+            )}
           </div>
           <button
             onClick={onClose}
@@ -753,6 +827,8 @@ export default function AdminFinancePage() {
   const [noteText,       setNoteText]       = useState('')
   const [processing,     setProcessing]     = useState<string | null>(null) // settlement id being processed
   const [markPaidModal,  setMarkPaidModal]  = useState<AdminSettlement | null>(null)
+  const [markPaidMode,   setMarkPaidMode]   = useState<'paid' | 'transfer'>('paid')   // M1
+  const [exceptionModal, setExceptionModal] = useState<AdminSettlement | null>(null)   // M1.2
 
   // ── Fetch settlements ────────────────────────────────────────────────────────
 
@@ -1068,6 +1144,35 @@ export default function AdminFinancePage() {
 
   // ── Settlement actions ────────────────────────────────────────────────────────
 
+  /** M1 — review resolutions; the list is re-read afterwards (the server decides the resulting state). */
+  async function runReviewAction(
+    id:     string,
+    action: 'resume_review' | 'reject' | 'record_transfer' | 'transfer_exception_initiate' | 'transfer_exception_approve' | 'transfer_exception_decline',
+    note:   string,
+    extra?: Record<string, unknown>,
+  ) {
+    setProcessing(id)
+    try {
+      const token = await getToken()
+      const res   = await fetch(`/api/admin/settlements/${id}`, {
+        method:  'PATCH',
+        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+        body:    JSON.stringify({ action, reason: note, adminNote: action === 'reject' || action === 'record_transfer' ? note : '', ...extra }),
+      })
+      if (!res.ok) {
+        const body = await res.json() as { error?: string }
+        showToast(body.error ?? `Action failed (${res.status})`, 'error')
+        return
+      }
+      setExpanded(null); setNoteText('')
+      await fetchSettlements()
+    } catch {
+      showToast('Network error — please try again.', 'error')
+    } finally {
+      setProcessing(null)
+    }
+  }
+
   async function runAction(
     id:     string,
     action: 'approve' | 'reject' | 'paid',
@@ -1146,6 +1251,8 @@ export default function AdminFinancePage() {
         ? `Failed Refunds (${failedRefundsStats.openCount})`
         : 'Failed Refunds',
     },
+    // F1 follow-up — settlements held because a refund could not be applied in full.
+    { id: 'refund-holds', label: 'Refund Holds' },
   ]
 
   return (
@@ -1197,6 +1304,8 @@ export default function AdminFinancePage() {
           {error}
         </div>
       )}
+
+      {activeTab === 'refund-holds' && <RefundHoldsPanel />}
 
       {/* ══════════════════════════════════════════════════════════════════════ */}
       {/* OVERVIEW TAB                                                          */}
@@ -1398,11 +1507,96 @@ export default function AdminFinancePage() {
                           </td>
                           <td className="px-4 py-3.5">
                             <StatusBadge status={s.status} />
+                            {s.review && (
+                              <span className="ml-1.5" title={`Held for review after a refund (balance then ${paise(s.review.availableAtReviewPaise)}).`}>
+                                <StatusBadge status="review" />
+                              </span>
+                            )}
                           </td>
                           <td className="px-4 py-3.5">
                             <div className="flex items-center gap-2">
+                              {/* M1.2 — a pending changed-destination exception: only approve / decline */}
+                              {s.transferException && s.status === 'approved' && (
+                                <>
+                                  <span className="text-[11.5px] text-amber-800 dark:text-amber-300" title={`Requested by ${s.transferException.initiatedBy}: ${s.transferException.reason}`}>
+                                    Transfer exception pending · UTR <span className="font-mono">{s.transferException.utrNumber}</span>
+                                  </span>
+                                  <button
+                                    disabled={busy}
+                                    onClick={async () => {
+                                      const ex = s.transferException!
+                                      const ok = await confirm({
+                                        title: 'Approve transfer exception?',
+                                        message: `This records ${paise(ex.amountPaise)} as ALREADY transferred to the original destination (evidence: ${ex.evidenceSource} · ${ex.evidenceReference}). Nothing is sent. You must not be the Super Admin who requested it or who approved the payout.`,
+                                        confirmLabel: 'Continue', tone: 'danger',
+                                      })
+                                      if (!ok) return
+                                      const utr = (await prompt({ title: 'Re-enter the UTR', message: 'Type the transfer reference exactly, to confirm it matches the request:', required: true }))?.trim()
+                                      if (!utr) return
+                                      const reason = (await prompt({ title: 'Reason required', message: 'Reason for approving this exception:', required: true }))?.trim()
+                                      if (reason) await runReviewAction(s.id, 'transfer_exception_approve', reason, { utrNumber: utr, expectedAmountPaise: ex.amountPaise, evidenceFingerprint: ex.fingerprint })
+                                    }}
+                                    className="rounded-md bg-primary px-2.5 py-1.5 text-[12px] font-semibold text-primary-foreground hover:opacity-90 disabled:opacity-50"
+                                  >
+                                    Approve exception
+                                  </button>
+                                  <button
+                                    disabled={busy}
+                                    onClick={async () => {
+                                      const reason = (await prompt({ title: 'Decline exception', message: 'Reason for declining (the evidence is kept):', required: true }))?.trim()
+                                      if (reason) await runReviewAction(s.id, 'transfer_exception_decline', reason)
+                                    }}
+                                    className="rounded-md border border-border px-2.5 py-1.5 text-[12px] font-medium text-muted-foreground hover:text-foreground disabled:opacity-50"
+                                  >
+                                    Decline
+                                  </button>
+                                </>
+                              )}
+                              {/* M1 — under review: only the review resolutions are offered */}
+                              {!s.transferException && s.review && (s.status === 'pending' || s.status === 'approved') && (
+                                <>
+                                  <button
+                                    disabled={busy}
+                                    onClick={async () => {
+                                      const reason = (await prompt({ title: 'Resume payout request', message: 'It is re-reserved only if the free balance covers it now. Reason:', required: true }))?.trim()
+                                      if (reason) await runReviewAction(s.id, 'resume_review', reason)
+                                    }}
+                                    className="rounded-md bg-primary px-2.5 py-1.5 text-[12px] font-semibold text-primary-foreground hover:opacity-90 disabled:opacity-50"
+                                  >
+                                    Resume
+                                  </button>
+                                  {s.status === 'approved' && (
+                                    <button
+                                      disabled={busy}
+                                      onClick={() => { setMarkPaidMode('transfer'); setMarkPaidModal(s) }}
+                                      className="rounded-md border border-border px-2.5 py-1.5 text-[12px] font-medium text-foreground hover:bg-muted disabled:opacity-50"
+                                    >
+                                      Record transfer
+                                    </button>
+                                  )}
+                                  <button
+                                    disabled={busy}
+                                    onClick={async () => {
+                                      if (s.status === 'approved') {
+                                        const ok = await confirm({
+                                          title: 'Reject — no transfer was made?',
+                                          message: `Reject ${paise(s.amountPaise)} only if you have confirmed that NO bank transfer was made for it. If it was transferred, use Record transfer instead.`,
+                                          confirmLabel: 'No transfer was made — reject',
+                                          tone: 'danger',
+                                        })
+                                        if (!ok) return
+                                      }
+                                      const reason = (await prompt({ title: 'Reason required', message: 'Reason for rejecting this payout request:', required: true }))?.trim()
+                                      if (reason) await runReviewAction(s.id, 'reject', reason, s.status === 'approved' ? { confirmNoTransfer: true } : undefined)
+                                    }}
+                                    className="rounded-md border border-border px-2.5 py-1.5 text-[12px] font-medium text-muted-foreground hover:text-foreground disabled:opacity-50"
+                                  >
+                                    Reject
+                                  </button>
+                                </>
+                              )}
                               {/* pending actions */}
-                              {s.status === 'pending' && (
+                              {!s.review && s.status === 'pending' && (
                                 <>
                                   <button
                                     disabled={busy}
@@ -1441,12 +1635,23 @@ export default function AdminFinancePage() {
                                   </button>
                                 </>
                               )}
+                              {/* M1.2 — the changed-destination exception is offered on any approved payout without one pending */}
+                              {!s.transferException && s.status === 'approved' && s.destination && (
+                                <button
+                                  disabled={busy}
+                                  onClick={() => setExceptionModal(s)}
+                                  title="The organizer's payout details changed after this request, and the transfer had already been made to the original destination."
+                                  className="rounded-md border border-amber-300 px-2.5 py-1.5 text-[12px] font-medium text-amber-800 hover:bg-amber-50 disabled:opacity-50 dark:border-amber-800 dark:text-amber-300 dark:hover:bg-amber-900/20"
+                                >
+                                  Changed-destination transfer
+                                </button>
+                              )}
                               {/* approved actions */}
-                              {s.status === 'approved' && (
+                              {!s.transferException && !s.review && s.status === 'approved' && (
                                 <>
                                   <button
                                     disabled={busy}
-                                    onClick={() => setMarkPaidModal(s)}
+                                    onClick={() => { setMarkPaidMode('paid'); setMarkPaidModal(s) }}
                                     className="rounded-md bg-emerald-600 px-2.5 py-1.5 text-[12px] font-semibold text-white hover:bg-emerald-700 disabled:opacity-50"
                                   >
                                     Mark Paid
@@ -1508,7 +1713,16 @@ export default function AdminFinancePage() {
                                 </div>
                                 <button
                                   disabled={busy}
-                                  onClick={() => runAction(s.id, 'reject', noteText)}
+                                  onClick={async () => {
+                                    if (s.status !== 'approved') { await runAction(s.id, 'reject', noteText); return }
+                                    // M1.2 (policy A) — the server refuses without this confirmation
+                                    const ok = await confirm({
+                                      title: 'Reject — no transfer was made?',
+                                      message: `Reject ${paise(s.amountPaise)} only if you have confirmed that NO bank transfer was made for it. If it was transferred, record the transfer instead.`,
+                                      confirmLabel: 'No transfer was made — reject', tone: 'danger',
+                                    })
+                                    if (ok) await runReviewAction(s.id, 'reject', noteText, { confirmNoTransfer: true })
+                                  }}
                                   className="shrink-0 rounded-lg bg-red-600 px-4 py-2 text-[13px] font-semibold text-white hover:bg-red-700 disabled:opacity-50"
                                 >
                                   {busy ? 'Processing…' : 'Confirm Reject'}
@@ -1616,19 +1830,34 @@ export default function AdminFinancePage() {
       {activeTab === 'release' && (
         <div className="space-y-4">
 
-          {/* Success banner */}
-          {releaseResult && (
-            <div className="flex items-start gap-3 rounded-xl border border-emerald-200 bg-emerald-50 px-5 py-4 dark:border-emerald-800 dark:bg-emerald-900/20">
-              <CheckCircle2 className="mt-0.5 size-5 shrink-0 text-emerald-600 dark:text-emerald-400" aria-hidden />
-              <div>
-                <p className="text-[14px] font-semibold text-emerald-800 dark:text-emerald-300">Release Complete</p>
-                <p className="mt-0.5 text-[13px] text-emerald-700 dark:text-emerald-400">
-                  Released {releaseResult.releasedTransactions} transaction{releaseResult.releasedTransactions !== 1 ? 's' : ''} · {paise(releaseResult.releasedAmountPaise)}
-                  {releaseResult.skippedTransactions > 0 && ` · ${releaseResult.skippedTransactions} skipped`}
-                </p>
+          {/* Success banner — Phase 3.10D: amber when the run stopped early at its time limit */}
+          {releaseResult && (() => {
+            const notice = releaseRunNotice(releaseResult)
+            const summary = (
+              <>
+                Released {releaseResult.releasedTransactions} transaction{releaseResult.releasedTransactions !== 1 ? 's' : ''} · {paise(releaseResult.releasedAmountPaise)}
+                {releaseResult.skippedTransactions > 0 && ` · ${releaseResult.skippedTransactions} skipped`}
+              </>
+            )
+            return notice.stoppedEarly ? (
+              <div role="status" className="flex items-start gap-3 rounded-xl border border-amber-200 bg-amber-50 px-5 py-4 dark:border-amber-800 dark:bg-amber-900/20">
+                <AlertCircle className="mt-0.5 size-5 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden />
+                <div>
+                  <p className="text-[14px] font-semibold text-amber-800 dark:text-amber-300">{notice.title}</p>
+                  <p className="mt-0.5 text-[13px] text-amber-800 dark:text-amber-300">{summary}</p>
+                  <p className="mt-1 text-[13px] text-amber-800 dark:text-amber-300">{notice.remainderNote}</p>
+                </div>
               </div>
-            </div>
-          )}
+            ) : (
+              <div className="flex items-start gap-3 rounded-xl border border-emerald-200 bg-emerald-50 px-5 py-4 dark:border-emerald-800 dark:bg-emerald-900/20">
+                <CheckCircle2 className="mt-0.5 size-5 shrink-0 text-emerald-600 dark:text-emerald-400" aria-hidden />
+                <div>
+                  <p className="text-[14px] font-semibold text-emerald-800 dark:text-emerald-300">{notice.title}</p>
+                  <p className="mt-0.5 text-[13px] text-emerald-700 dark:text-emerald-400">{summary}</p>
+                </div>
+              </div>
+            )
+          })()}
 
           {/* Error banner */}
           {releaseError && (
@@ -2094,13 +2323,34 @@ export default function AdminFinancePage() {
         </div>
       )}
 
+      {/* ── M1.2 · changed-destination transfer exception ── */}
+      {exceptionModal && (
+        <TransferExceptionModal
+          settlement={exceptionModal}
+          onClose={() => setExceptionModal(null)}
+          onSubmit={async input => {
+            const s = exceptionModal
+            await runReviewAction(s.id, 'transfer_exception_initiate', input.reason.trim(), {
+              utrNumber: input.utrNumber,
+              evidence: {
+                originalDestination: { verifiedVersion: s.destination?.verifiedVersion, label: s.destination?.label ?? null },
+                transfer: { source: input.source, reference: input.reference.trim(), observation: 'transfer_completed' },
+              },
+            })
+            setExceptionModal(null)
+          }}
+        />
+      )}
+
       {/* ── Mark Paid modal ── */}
       {markPaidModal && (
         <MarkPaidModal
           settlement={markPaidModal}
+          mode={markPaidMode}
           onClose={() => setMarkPaidModal(null)}
           onConfirm={async (proof, note) => {
-            await runAction(markPaidModal.id, 'paid', note, proof)
+            if (markPaidMode === 'transfer') await runReviewAction(markPaidModal.id, 'record_transfer', note, { ...proof })
+            else await runAction(markPaidModal.id, 'paid', note, proof)
           }}
         />
       )}

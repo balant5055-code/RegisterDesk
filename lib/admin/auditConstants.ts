@@ -48,6 +48,17 @@ export const AUDIT_ACTIONS = [
   'donation.refund_initiated',
   'donation.refund_processed',
   'donation.refund_failed',
+  // Phase 3 · G9 — a refund attempt with an unknown gateway outcome, resolved by a Super Admin
+  'donation.refund_attempt_resolved_none',
+  'donation.refund_attempt_linked',
+  // Phase 3.3 · E — a refund in accounting needs_review, resolved by a Super Admin on fresh gateway evidence
+  'donation.refund_review_accounting_retried',
+  'donation.refund_review_recorded_failed',
+  'donation.refund_review_attempt_linked',
+  // Phase 3.4 — a contradictory refund outcome closed on agreeing evidence / a discrepancy recorded / a compensating entry
+  'donation.refund_conflict_resolved',
+  'donation.refund_conflict_discrepancy',
+  'donation.refund_reversal_compensated',
   // Wallet clawbacks (insolvent reversals)
   'clawback.created',
   'clawback.recovered',
@@ -136,11 +147,38 @@ export const AUDIT_ACTIONS = [
   'print_badge_billing.event_billing_viewed',
   // RD-PHASE4-S4 — financial controls & audit logging.
   'settlement.requested',                 // organizer request (destination snapshot)
+  // F1 follow-up — Super Admin review of settlement holds caused by refunds (lib/settlements/refundHoldReview).
+  'settlement.refund_hold_reviewed',      // review note recorded; the hold stays
+  'settlement.refund_hold_lifted',        // hold lifted on verified evidence that no refund money left
+  'settlement.refund_hold_closed',        // M1 — payment fully refunded + settlement reversed: hold closed (system)
+  // M1 (payout/refund integrity) — a payout request the wallet can no longer back is held for review (system),
+  // then resolved by a Super Admin. A rejection uses 'settlement.rejected'; a transfer that DID complete is
+  // recorded with 'settlement.paid' (metadata.reviewResolution); a re-check is audited per request it opens.
+  'settlement.review_opened',
+  'settlement.review_resumed',
+  // M1.2 — the changed-destination exception for a transfer that already completed (approval → 'settlement.paid')
+  'settlement.transfer_exception_requested',
+  'settlement.transfer_exception_declined',
   'finance.auto_release',                 // the automatic (cron) fund release run
   'failed_refund.review_resolved',        // a 'review' hold closed (resolved / ignored) with a reason
   'failed_refund.review_refund_approved', // a 'review' hold approved for an explicit Super Admin refund
   'registration.refunded',                // a Super Admin registration refund (gateway id + amount)
+  // RD-REFUND-MANUAL-01 — a MANUAL attendee refund (money returned outside the gateway): maker requests,
+  // a different Super Admin records the completed transfer (reference) — or the request is cancelled.
+  'registration.manual_refund_requested',
+  'registration.manual_refund_completed',
+  'registration.manual_refund_cancelled',
   'license.refund_audit_recovered',
+  // RD-SA-COMMERCE-P1 — licence refund review state + refund-hold release.
+  'license.refund_review_required',
+  'license.refund_hold_released',
+  // RD-SA-COMMERCE-P1 (P1-1/P1-4) — a refund whose gateway outcome could not be established (held for
+  // reconciliation), and the audited completion of a refund whose money had already moved.
+  'license.refund_outcome_unknown',
+  'license.refund_completed',
+  // M2 — a licence refund the gateway accepted then reported FAILED (system), and its acknowledgement.
+  'license.refund_failed_at_gateway',
+  'license.refund_failure_acknowledged',
   // RD-PHASE4-S4 closeout — reconciliation of a recorded audit-write failure (adminAuditFailures).
   'audit_failure.replayed',
   'audit_failure.resolved_present',
@@ -202,7 +240,7 @@ export const FINANCIAL_AUDIT_ENTITY_TYPES: readonly AdminAuditEntityType[] = [
   'license', 'license_coupon', 'badge_coupon', 'platform_settings', 'media_credit_refund', 'media_credit_grant',
   'audit_failure', 'wallet_topup', 'wallet_service_request',
 ]
-const FINANCIAL_ACTION_PREFIXES = ['registration.refunded', 'commercial_terms.', 'pricing_override.', 'settlement.', 'finance.', 'license.', 'license_coupon.', 'badge_coupon.', 'print_badge_', 'clawback.', 'donation.', 'media_credit']
+const FINANCIAL_ACTION_PREFIXES = ['registration.refunded', 'registration.manual_refund_', 'commercial_terms.', 'pricing_override.', 'settlement.', 'finance.', 'license.', 'license_coupon.', 'badge_coupon.', 'print_badge_', 'clawback.', 'donation.', 'media_credit']
 
 export function isFinancialAuditEntry(row: { entityType?: unknown; action?: unknown }): boolean {
   if (typeof row.entityType === 'string' && (FINANCIAL_AUDIT_ENTITY_TYPES as readonly string[]).includes(row.entityType)) return true

@@ -13,11 +13,16 @@
 // shared moderation takedown. Those are exactly the two conditions app/campaign/[slug]/
 // page.tsx already applied; this hoists them rather than inventing a new policy, and the
 // page keeps its own copy so the rule still holds if this layout is ever removed.
+//
+// A campaign LINKED to an event additionally needs that event to be public (and not
+// cancelled) — see lib/campaigns/linkedEventGate. That rule lives only here for the page:
+// without it the campaign of an event still awaiting approval was publicly reachable.
 
 import type { ReactNode } from 'react'
 import { notFound } from 'next/navigation'
 import { getCampaignBySlug } from '@/lib/firebase/firestore/campaigns'
 import { isContentTakenDown } from '@/lib/admin/moderation'
+import { campaignLinkedEventAllows } from '@/lib/campaigns/linkedEventGate'
 
 export default async function CampaignSlugLayout({
   children, params,
@@ -29,6 +34,7 @@ export default async function CampaignSlugLayout({
   const campaign = await getCampaignBySlug(slug)
   if (!campaign || campaign.status === 'cancelled') notFound()
   if (isContentTakenDown(campaign.moderationStatus)) notFound()
+  if (!(await campaignLinkedEventAllows(campaign, slug))) notFound()
 
   // No wrapper element — the page owns its own chrome.
   return <>{children}</>

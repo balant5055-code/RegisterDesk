@@ -26,6 +26,7 @@ import {
   signInWithSocial,
   linkPendingCredentialWithPassword,
   linkPendingCredentialWithProvider,
+  ensureSocialOrganizerProfile,
   type SocialProviderKey,
   type SocialSignInResult,
 } from '@/lib/firebase/auth/social'
@@ -482,6 +483,7 @@ export default function LoginPage({
         setLinkState(result)
         return
       }
+      await ensureSocialOrganizerProfile(result.user)
       await routeAfterAuth(result.user.emailVerified)
     } catch (err) {
       const msg = mapAuthError(err)
@@ -499,6 +501,7 @@ export default function LoginPage({
     try {
       const user = await linkPendingCredentialWithPassword(linkState.email, linkPassword, linkState.pendingCredential)
       setLinkState(null)
+      await ensureSocialOrganizerProfile(user)
       await routeAfterAuth(user.emailVerified)
     } catch (err) {
       setLinkError(mapAuthError(err))
@@ -514,6 +517,7 @@ export default function LoginPage({
     try {
       const user = await linkPendingCredentialWithProvider(existingKey, linkState.pendingCredential)
       setLinkState(null)
+      await ensureSocialOrganizerProfile(user)
       await routeAfterAuth(user.emailVerified)
     } catch (err) {
       setLinkError(mapAuthError(err))

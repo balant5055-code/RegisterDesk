@@ -54,7 +54,9 @@ export async function POST(
       return NextResponse.json({ success: false, error: 'Forbidden' }, { status: 403 })
     }
     if (err instanceof CapacityBlocksRestoreError) {
-      const msg = err.reason === 'PASS_CAPACITY_FULL'
+      const msg = err.reason === 'LICENCE_INACTIVE'
+        ? "Cannot restore — this event's licence is not active (suspended, cancelled or refunded)."
+        : err.reason === 'PASS_CAPACITY_FULL'
         ? 'Cannot restore — this pass is sold out.'
         : 'Cannot restore — the event is at full capacity.'
       return NextResponse.json({ success: false, error: msg }, { status: 422 })

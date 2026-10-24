@@ -85,19 +85,33 @@ describeEmu('RD-COMMS-P1 · licence refunds and the communication wallet (real F
   afterAll(wipe, T)
 
   // ── 1 · 2 · 6 — current Razorpay-only licence ──────────────────────────────────────────────────
+  // RD-SA-COMMERCE-P1 — the full activation refund would also return the money for 30 units already
+  // used. The policy has no partial amount, so it is refused for a Super Admin decision: nothing moves.
+  it('consumed prepaid units: the full refund is refused for review — no gateway call, nothing changed, no hold left', async () => {
+    const { uid, d, slug, orderId } = await licence({ order: { paymentId: `pay_lrw_used_${P}`, amountPaise: 5_310, whatsapp: { bought: 100, consumed: 30 } } })
+    await expect(refund(slug)).rejects.toMatchObject({ status: 409, details: { code: 'REFUND_REVIEW_REQUIRED' } })
+    expect(h.refunds).toHaveLength(0)
+    expect(await get(`licenseOrders/${orderId}`)).toMatchObject({ status: 'paid' })
+    expect((await get(`eventServiceAllowances/${d}`))!.whatsapp).toMatchObject({ purchased: 100, consumed: 30 })
+    const lic = (await get(`eventLicenses/${slug}`))!
+    expect(lic.refundedAt).toBeUndefined()
+    expect(lic.refundHold).toBeUndefined()
+    expect(await walletRows(uid)).toHaveLength(0)
+  }, T)
+
   it('current Razorpay-only licence: gateway refund + unused units retired, and NO communication-wallet operation at all', async () => {
-    const { uid, d, slug, orderId } = await licence({ order: { paymentId: `pay_lrw_cur_${P}`, amountPaise: 5_310, whatsapp: { bought: 100, consumed: 30 } } })
+    const { uid, d, slug, orderId } = await licence({ order: { paymentId: `pay_lrw_cur_${P}`, amountPaise: 5_310, whatsapp: { bought: 100, consumed: 0 } } })
 
     const res = await refund(slug)
-    expect(res.refund).toMatchObject({ gatewayRefunded: true, walletCreditedPaise: 0, servicesRetired: { whatsapp: 70 } })
+    expect(res.refund).toMatchObject({ gatewayRefunded: true, walletCreditedPaise: 0, servicesRetired: { whatsapp: 100 } })
     expect(h.refunds).toEqual([{ paymentId: `pay_lrw_cur_${P}`, amount: 5_310 }])          // the external amount is unchanged
     // No wallet money, no ₹0 ledger row, no wallet document.
     expect((await adminDb.doc(`organizerWallets/${uid}`).get()).exists).toBe(false)
     expect((await adminDb.doc(`walletTransactions/license_refund_${slug}`).get()).exists).toBe(false)
     expect(await walletRows(uid)).toHaveLength(0)
-    // Service allowance reconciliation is unchanged: unused units retired, consumed ones stay.
-    expect((await get(`eventServiceAllowances/${d}`))!.whatsapp).toMatchObject({ purchased: 30, consumed: 30 })
-    expect(await get(`licenseOrders/${orderId}`)).toMatchObject({ status: 'refunded', servicesRetiredOnRefund: { whatsapp: 70 } })
+    // Service allowance reconciliation: every (unused) unit retired.
+    expect((await get(`eventServiceAllowances/${d}`))!.whatsapp).toMatchObject({ purchased: 0, consumed: 0 })
+    expect(await get(`licenseOrders/${orderId}`)).toMatchObject({ status: 'refunded', servicesRetiredOnRefund: { whatsapp: 100 } })
     // The licence is cancelled and carries the (non-wallet) refund marker; one history entry.
     const lic = (await get(`eventLicenses/${slug}`))!
     expect((lic.admin as { lifecycle: string }).lifecycle).toBe('cancelled')
@@ -107,7 +121,7 @@ describeEmu('RD-COMMS-P1 · licence refunds and the communication wallet (real F
     // 2 · a repeat is refused and never refunds twice.
     await expect(refund(slug, 'again please')).rejects.toMatchObject({ status: 409 })
     expect(h.refunds).toHaveLength(1)
-    expect((await get(`eventServiceAllowances/${d}`))!.whatsapp).toMatchObject({ purchased: 30 })
+    expect((await get(`eventServiceAllowances/${d}`))!.whatsapp).toMatchObject({ purchased: 0 })
     expect((await adminDb.doc(`organizerWallets/${uid}`).get()).exists).toBe(false)
   }, T)
 

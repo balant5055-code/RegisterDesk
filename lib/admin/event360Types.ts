@@ -10,7 +10,7 @@
 
 import type { EmailProviderName } from '@/lib/email/providerName'
 import type { EventAnalytics } from '@/lib/analytics/eventAnalytics'
-import type { LicenseDetail } from '@/lib/admin/licenseAdminTypes'
+import type { LicenseDetail, LicenseRefundStateView } from '@/lib/admin/licenseAdminTypes'
 
 // ─── Health Panel ───────────────────────────────────────────────────────────
 // A permanent green/yellow/red (+neutral “not yet evaluated”) strip. The core
@@ -77,6 +77,8 @@ export interface Event360Overview {
     complimentary:     boolean
     expiresAt:         string | null
     consumed:          boolean
+    /** RD-SA-COMMERCE-P1 (P1-5) — refund hold / review / refunded state (null when there is none to show). */
+    refundState:       LicenseRefundStateView | null
   } | null
   coupon: {
     code:            string | null

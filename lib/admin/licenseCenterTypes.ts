@@ -19,6 +19,8 @@ export type HealthLevel = 'green' | 'yellow' | 'red' | 'neutral'
 export type HealthKey =
   | 'license_engine' | 'coupon_engine' | 'payments' | 'revenue'
   | 'expiry' | 'campaigns' | 'discount_budget'
+  // RD-SA-COMMERCE-P1 (P1-5) — licence refunds holding sales, and orders left `refunding`.
+  | 'refund_holds'
 
 export interface HealthIndicator {
   key:    HealthKey
@@ -38,6 +40,10 @@ export interface LicenseCenterOverview {
     cancelled: number
     consumed:  number
     expired:   number
+    /** RD-SA-COMMERCE-P1 (P1-5) — licences on refund hold (sales blocked). null = could not be counted. */
+    refundHold:      number | null
+    /** Licence orders in `refunding` (an unfinished refund — includes ones the pre-hold code left). */
+    refundingOrders: number | null
   }
   coupons: {
     total:     number

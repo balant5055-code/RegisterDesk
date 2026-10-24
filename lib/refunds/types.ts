@@ -28,11 +28,33 @@
  *   unlinked  — no registration could be resolved from the order id. NOT an error and
  *               NOT terminal: the record is complete and awaits reconciliation. This is
  *               the state the two orphaned refunds would have carried.
+ *   failed    — W1: the gateway reported this refund FAILED (`refund.failed`): no money left. Terminal,
+ *               never counted as money out, never given side effects. A failure observed AFTER the
+ *               refund was processed never overwrites `processed` — it is flagged for review instead.
  */
-export type RegistrationRefundStatus = 'recorded' | 'linked' | 'processed' | 'unlinked'
+export type RegistrationRefundStatus = 'recorded' | 'linked' | 'processed' | 'unlinked' | 'failed'
+
+/**
+ * W1 — why a refund needs a human: RegisterDesk recorded the gateway fact but deliberately applied NO
+ * registration / ledger side effect, because doing so would have been a guess.
+ */
+export type RefundReviewReason =
+  | 'partial_refund'              // less than the full charged amount (cumulative): no partial ledger model exists
+  | 'refund_exceeds_charge'       // cumulative refunds would exceed the charged amount
+  | 'refund_after_full'           // another refund after the payment was already fully refunded
+  | 'payment_mismatch'            // the refund's payment id differs from the payment entity / intent
+  | 'currency_mismatch'
+  | 'processed_after_failed'      // a success event for a refund already recorded as failed
+  | 'failed_after_processed'      // a failure event for a refund already processed
+  | 'failed_after_side_effects'   // the refund failed but the registration was already marked refunded / ledger reversed
+  | 'failed_while_pending'        // the refund failed while the registration is refund_pending
+  | 'failed_after_counted'        // F3 — a refund counted toward the payment's refunds then reported failed: un-counted, reviewed
+  | 'manual_refund_conflict'      // RD-REFUND-MANUAL-01 — a gateway refund of a payment with a MANUAL refund (pending or done): never applied
 
 /** Who caused the refund to be recorded. Not who authorised it at the gateway. */
-export type RegistrationRefundOrigin = 'organizer' | 'webhook' | 'admin'   // RD-FIN-02 · 'admin' = failed-refund / hold retry
+// RD-FIN-02 · 'admin' = failed-refund / hold retry. RD-REFUND-MANUAL-01 · 'manual' = a COMPLETED manual refund
+// (manualRegistrationRefunds) projected into the organizer refund read — never stored in registrationRefunds.
+export type RegistrationRefundOrigin = 'organizer' | 'webhook' | 'admin' | 'manual'
 
 /**
  * registrationRefunds/{razorpayRefundId}
@@ -80,6 +102,20 @@ export interface RegistrationRefundDocument {
   createdAt:          unknown          // Firestore Timestamp
   processedAt?:       unknown          // Firestore Timestamp — set on `processed`
   linkedAt?:          unknown          // Firestore Timestamp — set when linkage resolved
+
+  /** W1 — set when the gateway reported the refund failed. */
+  failedAt?:          unknown
+  failureReason?:     string | null
+  /** W1 — set when a human must reconcile this refund; no side effect was applied because of it.
+   *  F2 — `reviewRequired` is the FIRST reason (never overwritten); `reviewReasons` holds every reason,
+   *  `reviewDetails` the evidence per reason. Written in the same transaction as the state they explain. */
+  reviewRequired?:    RefundReviewReason
+  reviewReasons?:     RefundReviewReason[]
+  reviewDetails?:     Partial<Record<RefundReviewReason, Record<string, unknown>>>
+  reviewFlaggedAt?:   unknown
+  /** M1 — true while a review is open; false once explicitly closed (reviewClosed). Queryable on one field. */
+  reviewOpen?:        boolean
+  reviewClosed?:      { at: unknown; by: string; reason: string; closedReasons: unknown[]; evidence?: Record<string, unknown> }
 
   /**
    * Small diagnostic bag. NEVER the financial source of truth and never PII —

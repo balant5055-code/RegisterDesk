@@ -9,7 +9,7 @@
 // the credit can be retried out of band. Retry is idempotent because
 // recordPlatformTransactionAndCredit is keyed on the ledger doc id.
 
-import { FieldValue, Timestamp } from 'firebase-admin/firestore'
+import { FieldValue, FieldPath, Timestamp } from 'firebase-admin/firestore'
 import type { Query, QueryDocumentSnapshot, DocumentData } from 'firebase-admin/firestore'
 import { adminDb }    from '@/lib/firebase/admin'
 import { captureFinancialError } from '@/lib/monitoring/sentry'
@@ -23,6 +23,7 @@ import { buildRegistrationLedgerAndCredit } from '@/lib/payments/registrationLed
 import type { PaymentIntentRecord } from '@/lib/firebase/firestore/paymentIntents'
 // RD-PAY-P0-3 — orphaned-capture recovery. The SAME settlement the webhook uses.
 import { settleCapturedRegistration } from '@/lib/payments/settleCapturedRegistration'
+import { closeRefundHoldAfterFullRefund } from '@/lib/refunds/registrationRefunds'
 import { upsertReconciliationCase, type CasePaymentState, type CaseStatus } from '@/lib/payments/reconciliationCases'
 import { resolvePaymentProvider, readProvider } from '@/lib/payments/providers'
 
@@ -157,7 +158,7 @@ export async function recordRefundLedgerReconciliation(
   }
 }
 
-export interface RetryResult { scanned: number; resolved: number; stillPending: number }
+export interface RetryResult { scanned: number; resolved: number; stillPending: number; deferred?: number; needsReview?: number }
 
 /**
  * Drains pending reconciliation records by replaying the atomic, idempotent
@@ -614,45 +615,217 @@ export async function recoverCapturedPaymentIntents(limitN = 200): Promise<Captu
   return out
 }
 
+// ─── Phase 3.3 · bounded retry for the registration refund queues ────────────────────────────────────────
+// Both refund queues (refundLedgerReconciliation, refundHoldClosureReconciliation) used to retry every
+// pending record on every run, forever, in no order — a few permanently failing records could fill every
+// batch forever. Now:
+//   • attempts are capped (REFUND_QUEUE_MAX_ATTEMPTS). A failed record is retried on the NEXT run, as before
+//     (no time backoff — a fixed cause is picked up at once); at the cap it leaves the batch;
+//   • a permanent failure, or the cap, ESCALATES the record to `needs_review` (attempts, lastError,
+//     escalatedAt, escalationReason kept as evidence; alerted; counted in operations health). It is never
+//     dropped and never forced — a human decides;
+//   • the drain pages `pending` records in document-id order (equality + __name__: no composite index) and
+//     takes up to limitN DUE ones, so records held by another drain's lease never consume the batch;
+//   • each record is CLAIMED (a short lease on nextAttemptAt, in a transaction) before its work runs, so
+//     concurrent drains run it once; a drain that dies mid-record leaves it due again when the lease ends.
+// The work each record replays is unchanged and idempotent.
+
+export const REFUND_QUEUE_MAX_ATTEMPTS = 8
+const REFUND_QUEUE_PAGE = 100
+const REFUND_QUEUE_SCAN_CAP = 2_000
+const REFUND_QUEUE_LEASE_MS = 2 * 60_000
+/** Failures no retry can fix (the reversal cannot tell which wallet bucket holds the funds). */
+export function isPermanentRefundQueueError(message: string): boolean {
+  return /^REVERSAL_BUCKET_UNKNOWN/.test(message)
+}
+
+const dueAt = (doc: { get(field: string): unknown }): number | null => {
+  const next = doc.get('nextAttemptAt') as { toMillis?: () => number } | undefined
+  return typeof next?.toMillis === 'function' ? next.toMillis() : null
+}
+
+/** Up to limitN DUE `pending` records of a queue, in document-id order (bounded scan). */
+async function dueRefundQueueRecords(collection: string, limitN: number): Promise<{ due: QueryDocumentSnapshot<DocumentData>[]; scanned: number; deferred: number }> {
+  const due: QueryDocumentSnapshot<DocumentData>[] = []
+  let scanned = 0, deferred = 0
+  let cursor: string | null = null
+  const now = Date.now()
+  while (due.length < limitN && scanned < REFUND_QUEUE_SCAN_CAP) {
+    let q = adminDb.collection(collection).where('status', '==', 'pending').orderBy(FieldPath.documentId())
+    if (cursor) q = q.startAfter(cursor)
+    const page = await q.limit(REFUND_QUEUE_PAGE).get()
+    for (const doc of page.docs) {
+      scanned++
+      const at = dueAt(doc)
+      if (at !== null && at > now) deferred++
+      else if (due.length < limitN) due.push(doc)
+    }
+    if (page.size < REFUND_QUEUE_PAGE) break
+    cursor = page.docs[page.docs.length - 1].id
+  }
+  return { due, scanned, deferred }
+}
+
+/** Claims a due record for THIS drain (lease on nextAttemptAt). False ⇒ another drain has it, or it is no longer pending. */
+async function claimRefundQueueRecord(ref: FirebaseFirestore.DocumentReference): Promise<boolean> {
+  return adminDb.runTransaction(async tx => {
+    const snap = await tx.get(ref)
+    if (!snap.exists || snap.get('status') !== 'pending') return false
+    const at = dueAt(snap)
+    if (at !== null && at > Date.now()) return false
+    tx.update(ref, { nextAttemptAt: Timestamp.fromMillis(Date.now() + REFUND_QUEUE_LEASE_MS), lastAttemptAt: FieldValue.serverTimestamp() })
+    return true
+  })
+}
+
+/** One failed run of a claimed record: count it (due again next run — the lease is released), or escalate to needs_review (alerted). */
+async function recordRefundQueueFailure(ref: FirebaseFirestore.DocumentReference, error: string, scope: string): Promise<'retry' | 'needs_review' | 'gone'> {
+  const out = await adminDb.runTransaction(async tx => {
+    const snap = await tx.get(ref)
+    if (!snap.exists || snap.get('status') !== 'pending') return 'gone' as const
+    const prev = snap.get('attempts')
+    const attempts = (typeof prev === 'number' && Number.isFinite(prev) ? prev : 0) + 1
+    const permanent = isPermanentRefundQueueError(error)
+    const escalate = permanent || attempts >= REFUND_QUEUE_MAX_ATTEMPTS
+    tx.update(ref, {
+      attempts, lastError: error.slice(0, 500), lastAttemptAt: FieldValue.serverTimestamp(), updatedAt: FieldValue.serverTimestamp(),
+      ...(escalate
+        ? { status: 'needs_review', escalatedAt: FieldValue.serverTimestamp(), escalationReason: permanent ? 'permanent_error' : 'max_attempts', nextAttemptAt: FieldValue.delete() }
+        : { nextAttemptAt: FieldValue.delete() }),
+    })
+    return escalate ? 'needs_review' as const : 'retry' as const
+  })
+  if (out === 'needs_review') {
+    captureFinancialError(new Error(`refund queue record NEEDS REVIEW: ${error}`.slice(0, 500)), { scope: `${scope}.needs_review`, recordId: ref.id })
+  }
+  return out
+}
+
 /**
  * Drains pending refund-reversal records by replaying the atomic, idempotent
  * ledger reversal + wallet debit. Safe to run repeatedly and concurrently: a
- * ledger entry already reversed is a no-op and is marked resolved.
+ * ledger entry already reversed is a no-op and is marked resolved. Phase 3.3:
+ * bounded (backoff, attempt cap → needs_review) and paged past backed-off records.
  */
 export async function retryPendingRefundLedgerReversals(limitN = 100): Promise<RetryResult> {
-  const snap = await adminDb.collection(REFUND_REVERSAL_COLLECTION)
-    .where('status', '==', 'pending')
-    .limit(limitN)
-    .get()
+  const { due, scanned, deferred } = await dueRefundQueueRecords(REFUND_REVERSAL_COLLECTION, limitN)
 
   let resolved = 0
   let stillPending = 0
+  let needsReview = 0
 
-  for (const doc of snap.docs) {
+  for (const doc of due) {
     const d = doc.data() as { ptxId?: string }
     if (!d.ptxId) {
       await doc.ref.set({ status: 'skipped', updatedAt: FieldValue.serverTimestamp() }, { merge: true }).catch(() => {})
       continue
     }
+    if (!(await claimRefundQueueRecord(doc.ref).catch(() => false))) continue   // another drain has it
     try {
       await reversePlatformTransactionAndDebit(d.ptxId)   // idempotent
       await doc.ref.set(
-        { status: 'resolved', resolvedAt: FieldValue.serverTimestamp(), updatedAt: FieldValue.serverTimestamp() },
+        { status: 'resolved', resolvedAt: FieldValue.serverTimestamp(), updatedAt: FieldValue.serverTimestamp(), nextAttemptAt: FieldValue.delete() },
         { merge: true },
       )
       resolved++
     } catch (e) {
-      await doc.ref.set(
-        {
-          attempts:  FieldValue.increment(1),
-          lastError: (e instanceof Error ? e.message : 'retry_failed').slice(0, 500),
-          updatedAt: FieldValue.serverTimestamp(),
-        },
-        { merge: true },
-      ).catch(() => {})
-      stillPending++
+      const r = await recordRefundQueueFailure(doc.ref, e instanceof Error ? e.message : 'retry_failed', 'refundReversalReconciliation')
+        .catch(() => 'retry' as const)
+      if (r === 'needs_review') needsReview++
+      else stillPending++
     }
   }
 
-  return { scanned: snap.size, resolved, stillPending }
+  return { scanned, resolved, stillPending, deferred, needsReview }
+}
+
+// ─── M1 follow-up · durable retry of a refund-hold CLOSURE ─────────────────────────────────────────
+
+const HOLD_CLOSURE_COLLECTION = 'refundHoldClosureReconciliation'
+
+/**
+ * M1 — the closure of a settlement refund hold (closeRefundHoldAfterFullRefund) could not run or failed
+ * (transaction / audit-write failure, or the ledger reversal it depends on was deferred). Persist a
+ * durable, idempotent retry record keyed by registration — the hold itself stays in place and visible.
+ * Returns whether the record was persisted: a caller that cannot persist it must fail loudly (non-2xx)
+ * so the provider redelivers.
+ */
+export async function recordRefundHoldClosureRetry(input: {
+  registrationId: string; orderId: string; refundId: string; error: string
+}): Promise<boolean> {
+  try {
+    await adminDb.collection(HOLD_CLOSURE_COLLECTION).doc(input.registrationId).set({
+      registrationId: input.registrationId,
+      orderId:        input.orderId,
+      ptxId:          `ptx_${input.registrationId}`,
+      refundId:       input.refundId,
+      status:         'pending',
+      attempts:       FieldValue.increment(1),
+      lastError:      input.error.slice(0, 500),
+      updatedAt:      FieldValue.serverTimestamp(),
+    }, { merge: true })
+    captureFinancialError(new Error(`refund hold closure deferred for retry: ${input.error}`.slice(0, 500)), {
+      scope: 'refundHoldClosureReconciliation.recorded', registrationId: input.registrationId, orderId: input.orderId,
+    })
+    return true
+  } catch (e) {
+    captureFinancialError(e, {
+      scope: 'refundHoldClosureReconciliation.persist_failed',
+      detail: 'CRITICAL: failed to persist refund hold closure retry record', registrationId: input.registrationId,
+    })
+    return false
+  }
+}
+
+/** Closure outcomes that end a retry record: the hold is closed (or was already closed / never held). */
+const CLOSURE_DONE = new Set(['no_hold'])
+/** Outcomes that must WAIT: the ledger reversal is itself still pending reconciliation. */
+const CLOSURE_WAIT = new Set(['not_reversed'])
+
+export interface HoldClosureRetryResult { scanned: number; closed: number; refused: number; stillPending: number; deferred: number; needsReview: number }
+
+/**
+ * Drains pending closure records by re-running closeRefundHoldAfterFullRefund — one transaction that
+ * re-checks ALL evidence and writes its audit row in the same commit; it moves no money and is safe to
+ * repeat or run concurrently (a second run finds no hold). A closure the evidence refuses (an open
+ * contradiction) is NOT forced: the record becomes `refused` with the reason, alerted, and the hold
+ * stays for the Super Admin review. Run after the refund-ledger reversal retry (a deferred reversal
+ * must land first). Phase 3.3: waiting on the reversal and failures both count bounded attempts (backoff;
+ * the cap escalates to needs_review), and the drain pages past backed-off records.
+ */
+export async function retryPendingRefundHoldClosures(limitN = 100): Promise<HoldClosureRetryResult> {
+  const { due, scanned, deferred } = await dueRefundQueueRecords(HOLD_CLOSURE_COLLECTION, limitN)
+  const out: HoldClosureRetryResult = { scanned, closed: 0, refused: 0, stillPending: 0, deferred, needsReview: 0 }
+  const failed = async (ref: FirebaseFirestore.DocumentReference, error: string) => {
+    const r = await recordRefundQueueFailure(ref, error, 'refundHoldClosureReconciliation').catch(() => 'retry' as const)
+    if (r === 'needs_review') out.needsReview++
+    else out.stillPending++
+  }
+  for (const doc of due) {
+    const d = doc.data() as { registrationId?: unknown; orderId?: unknown }
+    if (typeof d.registrationId !== 'string' || typeof d.orderId !== 'string') {
+      await doc.ref.set({ status: 'skipped', updatedAt: FieldValue.serverTimestamp() }, { merge: true }).catch(() => {})
+      continue
+    }
+    if (!(await claimRefundQueueRecord(doc.ref).catch(() => false))) continue   // another drain has it
+    try {
+      const r = await closeRefundHoldAfterFullRefund({ orderId: d.orderId, registrationId: d.registrationId })
+      if (r.closed || CLOSURE_DONE.has(r.why)) {
+        await doc.ref.set({ status: 'resolved', outcome: r.closed ? 'closed' : r.why, resolvedAt: FieldValue.serverTimestamp(), updatedAt: FieldValue.serverTimestamp(), nextAttemptAt: FieldValue.delete() }, { merge: true })
+        out.closed++
+      } else if (CLOSURE_WAIT.has(r.why)) {
+        await failed(doc.ref, `waiting: ${r.why}`)
+      } else {
+        await doc.ref.set({ status: 'refused', outcome: r.why, updatedAt: FieldValue.serverTimestamp(), nextAttemptAt: FieldValue.delete() }, { merge: true })
+        captureFinancialError(new Error(`refund hold not closed on retry: ${r.why}`), {
+          scope: 'refundHoldClosureReconciliation.refused', why: r.why, registrationId: d.registrationId, orderId: d.orderId,
+        })
+        out.refused++
+      }
+    } catch (e) {
+      captureFinancialError(e, { scope: 'refundHoldClosureReconciliation.retry_failed', registrationId: d.registrationId })
+      await failed(doc.ref, e instanceof Error ? e.message : 'retry_failed')
+    }
+  }
+  return out
 }

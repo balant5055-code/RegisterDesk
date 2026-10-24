@@ -27,6 +27,12 @@ export interface AdminSettlement {
   bankReference?:   string
   paidBy?:          string
   paymentNotes?:    string
+  /** M1 — present while the request is held for payout review (a refund reduced the balance backing it) */
+  review?:          { trigger: string; availableAtReviewPaise: number; keptAheadPaise: number; openedAt: string | null }
+  /** M1.2 — the destination this request was made against (masked; no identifiers) */
+  destination?:     { verifiedVersion: number; label: string | null }
+  /** M1.2 — a changed-destination transfer exception awaiting a second Super Admin */
+  transferException?: { status: 'pending_approval'; amountPaise: number; utrNumber: string; reason: string; initiatedBy: string; fingerprint: string; evidenceSource: string; evidenceReference: string }
 }
 
 export interface AdminSettlementsStats {
@@ -132,6 +138,16 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       ...(d.bankReference ? { bankReference: d.bankReference } : {}),
       ...(d.paidBy       ? { paidBy:       d.paidBy       } : {}),
       ...(d.paymentNotes ? { paymentNotes: d.paymentNotes } : {}),
+      ...(d.payoutReview?.status === 'open' ? { review: {
+        trigger: d.payoutReview.trigger?.kind ?? 'unknown', availableAtReviewPaise: d.payoutReview.availableAtReviewPaise,
+        keptAheadPaise: d.payoutReview.keptAheadPaise, openedAt: tsToISO(d.payoutReview.openedAt),
+      } } : {}),
+      ...(d.payoutDestination && typeof d.payoutDestination.verifiedVersion === 'number' ? { destination: { verifiedVersion: d.payoutDestination.verifiedVersion, label: d.payoutDestination.label ?? null } } : {}),
+      ...(d.transferException?.status === 'pending_approval' ? { transferException: {
+        status: 'pending_approval' as const, amountPaise: d.transferException.amountPaise, utrNumber: d.transferException.utrNumber,
+        reason: d.transferException.reason, initiatedBy: d.transferException.initiatedBy, fingerprint: d.transferException.fingerprint,
+        evidenceSource: d.transferException.evidence.transfer.source, evidenceReference: d.transferException.evidence.transfer.reference,
+      } } : {}),
     }
   })
 

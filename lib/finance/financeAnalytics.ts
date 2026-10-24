@@ -171,12 +171,13 @@ export interface LedgerTotals {
  */
 export async function getLedgerTotals(scope: FinanceScope): Promise<LedgerTotals> {
   const q = ledgerQuery(scope)
-  const [n, s, covered, reversedInPlace] = await Promise.all([
+  const [n, s, covered, reversals] = await Promise.all([
     countOf(q),
     sumsOf(q, LEDGER_5),
     countAndSumsOf(q.orderBy('gatewayFeeActualPaise'), GATEWAY_ACTUAL_AGG),
-    getInPlaceReversedNet(scope),
+    readReversalSums(scope),
   ])
+  const reversedInPlace = reversals.inPlaceNet
   const pick = (k: typeof LEDGER_5[number]): MaybeMoney => (s ? money(s[k]) : gone('query_failed'))
 
   const platformFeeTotal: MaybeMoney = s
@@ -191,7 +192,11 @@ export async function getLedgerTotals(scope: FinanceScope): Promise<LedgerTotals
 
   return {
     transactions:     n,
-    grossPaise:       pick('grossAmountPaise'),
+    // RD-REFUND-MANUAL-01 · a manual refund's negative reversal row is a refund, not a sale: added back, so ticket
+    // value is unchanged by a refund however it was paid (a gateway refund never changes it).
+    grossPaise:       !s ? gone('query_failed')
+      : !reversals.manualRefundGross.ok ? reversals.manualRefundGross
+      : money(s.grossAmountPaise + reversals.manualRefundGross.paise),
     // RD-FIN-02 · a refunded registration's net was debited from the wallet when the refund was
     // issued; it is no longer payable. Approved-but-unissued refunds never touch the ledger.
     organizerPayable: !s ? gone('query_failed')
@@ -286,25 +291,41 @@ export const IN_PLACE_REVERSAL_READ_CAP = 2000
 export async function getInPlaceReversedNet(
   scope: Pick<FinanceScope, 'organizerUid' | 'eventSlug'>, cap = IN_PLACE_REVERSAL_READ_CAP,
 ): Promise<MaybeMoney> {
-  const parts = await Promise.all(IN_PLACE_REVERSAL_STATUSES.map(async (status): Promise<MaybeMoney> => {
+  return (await readReversalSums(scope, cap)).inPlaceNet
+}
+
+/**
+ * The reversal-row read behind getInPlaceReversedNet. From the SAME rows (no extra query) it also yields
+ * RD-REFUND-MANUAL-01 · the gross returned by completed MANUAL registration refunds — their negative reversal rows
+ * (status 'refunded', parentTransactionId, refundMethod 'manual'), as positive paise.
+ */
+async function readReversalSums(
+  scope: Pick<FinanceScope, 'organizerUid' | 'eventSlug'>, cap = IN_PLACE_REVERSAL_READ_CAP,
+): Promise<{ inPlaceNet: MaybeMoney; manualRefundGross: MaybeMoney }> {
+  const parts = await Promise.all(IN_PLACE_REVERSAL_STATUSES.map(async (status): Promise<{ net: MaybeMoney; manualGross: number }> => {
     try {
       const snap = await ptx().where('organizerUid', '==', scope.organizerUid).where('status', '==', status)
         .orderBy('paidAt', 'desc')
-        .select('netSettlementPaise', 'sourceType', 'parentTransactionId', 'entityId', 'status')
+        .select('netSettlementPaise', 'sourceType', 'parentTransactionId', 'entityId', 'status', 'grossAmountPaise', 'refundMethod')
         .limit(cap + 1).get()
-      if (snap.size > cap) return gone('out_of_budget')
-      let p = 0
+      if (snap.size > cap) return { net: gone('out_of_budget'), manualGross: 0 }
+      let p = 0, manualGross = 0
       for (const d of snap.docs) {
         const x = d.data()
-        if (!isInPlaceReversal(x)) continue
         if (scope.eventSlug && x.entityId !== scope.eventSlug) continue
+        if (x.refundMethod === 'manual' && typeof x.parentTransactionId === 'string' && x.parentTransactionId) manualGross -= int(x.grossAmountPaise)
+        if (!isInPlaceReversal(x)) continue
         p += int(x.netSettlementPaise)
       }
-      return money(p)
-    } catch { return gone('query_failed') }
+      return { net: money(p), manualGross }
+    } catch { return { net: gone('query_failed'), manualGross: 0 } }
   }))
-  const bad = parts.find(m => !m.ok)
-  return bad ?? money(parts.reduce((sum, m) => sum + (m.ok ? m.paise : 0), 0))
+  const bad = parts.find(m => !m.net.ok)
+  if (bad) return { inPlaceNet: bad.net, manualRefundGross: bad.net }
+  return {
+    inPlaceNet:        money(parts.reduce((sum, m) => sum + (m.net.ok ? m.net.paise : 0), 0)),
+    manualRefundGross: money(parts.reduce((sum, m) => sum + m.manualGross, 0)),
+  }
 }
 
 // ─── Refunds — the gateway refund ledger ─────────────────────────────────────
@@ -324,7 +345,8 @@ export interface RefundTotals {
 }
 
 /**
- * Money actually returned through the gateway.
+ * Money actually returned through the gateway — and (RD-REFUND-MANUAL-01) completed manual refunds, which
+ * listOrganizerRefunds projects into the same records.
  *
  * The query, the unattributed-refund recovery and the read cap all live in
  * `lib/refunds/registrationRefunds.ts`, which is also what the reports use. That is

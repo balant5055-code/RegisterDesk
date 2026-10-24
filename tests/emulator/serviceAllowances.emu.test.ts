@@ -75,9 +75,14 @@ vi.mock('@/lib/razorpay/client', () => ({
       },
       refund: async () => {
         if (h.onRefund) { const f = h.onRefund; h.onRefund = null; await f() }
-        if (h.fail.refund > 0) { h.fail.refund--; throw new Error('simulated gateway refund failure') }
+        // H1 — a DEFINITE gateway rejection, in the shape the Razorpay SDK rethrows an API error response
+        // ({ statusCode, error }); a plain Error (timeout / network) is ambiguous and keeps everything held.
+        if (h.fail.refund > 0) { h.fail.refund--; throw { statusCode: 400, error: { code: 'BAD_REQUEST_ERROR', description: 'simulated gateway refund failure' } } }
         return { id: `rfnd_c02_${++h.seq}` }
       },
+      // RD-SA-COMMERCE-P1 (P1-1) — after a failed refund call the gateway is ASKED what happened; these
+      // simulated failures are definite (no refund was created), so the gateway reports none.
+      fetchMultipleRefund: async () => ({ entity: 'collection', count: 0, items: [] }),
     },
   },
 }))
@@ -1943,10 +1948,11 @@ describeEmu('RD-EVENT-COMMERCE-02 · prepaid services on real Firestore', () => 
     expect(await counterOf(code)).toBe(1)
     await expect(refund(s1)).rejects.toThrow()
     expect(await counterOf(code)).toBe(1)
-    // H — finalize FAILS (simulated Firestore error): the order stays 'refunding' and its use stays counted
+    // H — finalize FAILS (simulated Firestore error) before any money moved: the claim is undone (P1-3 —
+    // never a new stuck 'refunding' order) and its use stays counted (a paid order counts).
     h.fail.counterRef = 1
     await expect(refund(s2)).rejects.toThrow(/simulated Firestore failure/)
-    expect((await licOf(f2.d)).status).toBe('refunding')
+    expect((await licOf(f2.d)).status).toBe('paid')
     expect(await counterOf(code)).toBe(1)
     await adminDb.doc(`licenseCoupons/${code}`).update({ perOrganizerLimit: 1 })   // f2 (refunding) now fills the allowance
     const { POST: preview } = await import('@/app/api/licensing/coupons/validate/route')
@@ -1955,7 +1961,7 @@ describeEmu('RD-EVENT-COMMERCE-02 · prepaid services on real Firestore', () => 
     const g = id('m5-rf-4'); await seed(g, { serviceSelection: { whatsapp: 0, certificates: 0 } })
     const pr = await json(await purchase(req({ eventId: g, capacity: 437, couponCode: code })))
     expect(pr.status).toBe(422); expect(pr.body.failureReason).toBe('invalid_coupon')
-    // legacy seeding (counter removed) counts the refunding order too — f3 cannot take the pending use
+    // legacy seeding (counter removed) counts f2's order too — f3 cannot take the pending use
     await adminDb.doc(`licenseCoupons/${code}/organizerRedemptions/${UID}`).delete()
     expect((await confirmFree(f3.d)).status).toBe(409)
     expect(await counterOf(code)).toBeUndefined()

@@ -255,6 +255,22 @@ describeEmu('RD-ORGANIZER-REMAINING-ALL · organizer deletion on real Firestore'
     }
   }, T)
 
+  it('M1.3 · PRESERVES payout transfer-reference records (financial evidence) while still deleting what it always deleted', async () => {
+    const ref = `payoutTransferReferences/M13ORGDEL${process.pid}`
+    await adminDb.doc(ref).set({ utrNumber: `M13ORGDEL${process.pid}`, settlementId: 'sr-keep', organizerUid: uid, amountPaise: 1_000, recordedVia: 'mark_paid' })
+    await adminDb.doc(`apiKeys/ak-m13-${process.pid}`).set({ organizerUid: uid })
+    try {
+      const r = await runOrganizerDeletion(uid)
+      expect(r.summary.ok).toBe(true)
+      expect((await adminDb.doc(ref).get()).data()).toMatchObject({ settlementId: 'sr-keep', organizerUid: uid, amountPaise: 1_000 })
+      expect((await adminDb.doc(`apiKeys/ak-m13-${process.pid}`).get()).exists).toBe(false)   // unrelated deletion unchanged
+      expect((await user().get()).exists).toBe(false)
+      expect(await authExists()).toBe(false)
+    } finally {
+      await adminDb.doc(ref).delete().catch(() => null)
+    }
+  }, T)
+
   it('removes staff credentials: the username lock, the Auth user, then the row', async () => {
     const staffUid = `${uid}-staff-1`
     await adminAuth.createUser({ uid: staffUid, email: `gate.one.${process.pid}@staff.invalid`, password: 'StaffPassw0rd!' })

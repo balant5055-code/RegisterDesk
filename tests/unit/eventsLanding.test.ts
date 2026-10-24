@@ -884,3 +884,59 @@ describe('interactive targets the page owns are 44px', () => {
     expect(CARD).not.toMatch(/mt-2\.5 inline-flex h-8 /)
   })
 })
+
+// ═══ 20 · RD-EVENT-DRAFT-NAV-01 · one "Continue setup", and it reaches setup ══
+//
+// The reported symptom was two controls on one draft card both labelled "Continue setup".
+// The cause underneath it was worse than the duplication: they went to DIFFERENT places.
+// `primaryActionLabel` had said "Continue setup" for a draft for a long time, but
+// `manageHref` had no draft case, so the prominent button landed on the event workspace —
+// the surface for an event that already exists — while the wizard was reachable only from
+// the overflow menu, under the same name.
+
+describe('RD-EVENT-DRAFT-NAV-01 · a draft card routes to the wizard', () => {
+  it('sends a DRAFT to the wizard relay, not the event workspace', () => {
+    expect(manageHref(ev({ lifecycleStatus: 'draft', draftId: 'd-abc' })))
+      .toBe('/dashboard/events/new/visibility?draftId=d-abc')
+  })
+
+  it('leaves every other status on the event workspace', () => {
+    // The regression this guards is a blanket redirect: a published event must keep landing
+    // on its workspace, not be thrown into the wizard.
+    for (const ls of ['published', 'registration_closed', 'pending_review', 'changes_requested', 'completed', 'archived', 'cancelled'] as const) {
+      expect(manageHref(ev({ lifecycleStatus: ls, draftId: 'd-abc' })), ls).toBe('/dashboard/events/d-abc')
+    }
+  })
+
+  it('encodes the draft id, so an id with URL characters cannot break the query', () => {
+    expect(manageHref(ev({ lifecycleStatus: 'draft', draftId: 'a b&c=d' })))
+      .toBe('/dashboard/events/new/visibility?draftId=a%20b%26c%3Dd')
+  })
+
+  it('the primary button and the menu agree for a draft — they resolve to ONE destination', () => {
+    // The actual defect, stated as a property: whatever the card offers a draft, every route
+    // into editing it must be the same URL. Both sides are read from source rather than
+    // assumed, so a change to either one has to keep them equal.
+    const draft = ev({ lifecycleStatus: 'draft', draftId: 'd-abc' })
+    expect(CARD).toContain('href={manageHref(event)}')
+    expect(CARD).toContain('/dashboard/events/new/visibility?draftId=${event.draftId}')
+    expect(manageHref(draft)).toContain('/dashboard/events/new/visibility?draftId=')
+  })
+
+  it('offers the menu Edit entry only when it is NOT a duplicate of the button', () => {
+    // Gated on a non-draft status: for a draft the primary button is already the wizard, so
+    // a second entry with the same destination is exactly the duplication that was reported.
+    expect(CARD).toContain("avail.edit && ls !== 'draft'")
+    // And the surviving entry says what it does. 'Continue setup' must no longer be produced
+    // by the menu at all — the primary button is the only control that carries those words.
+    expect(CARD).toContain("label: 'Edit event'")
+    expect(CARD).not.toContain("'Continue setup' : 'Edit event'")
+  })
+
+  it('"Continue setup" is produced in exactly ONE place for a draft', () => {
+    // primaryActionLabel is that place. If the string reappears in the card itself, the two
+    // controls have drifted back apart.
+    expect(primaryActionLabel(ev({ lifecycleStatus: 'draft' }))).toBe('Continue setup')
+    expect(CARD).not.toContain('Continue setup')
+  })
+})

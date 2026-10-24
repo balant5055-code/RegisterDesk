@@ -148,7 +148,9 @@ export function notifyBroadcastComplete(args: {
 
 // ─── 7. Settlement events ─────────────────────────────────────────────────────
 
-export type SettlementKind = 'requested' | 'approved' | 'rejected' | 'paid' | 'released'
+// M1 — 'resumed': a payout request held for review (a refund reduced its balance) is back in the queue.
+// (The review itself is notified inside the refund transaction: lib/settlements/payoutReview.ts.)
+export type SettlementKind = 'requested' | 'approved' | 'rejected' | 'paid' | 'released' | 'resumed'
 
 export function notifySettlement(args: {
   workspaceUid:  string
@@ -156,8 +158,10 @@ export function notifySettlement(args: {
   kind:          SettlementKind
   amountPaise:   number
   reason?:       string
+  /** M1.1 — distinguishes repeatable transitions of one request (a resume per review); part of the dedupe id */
+  eventKey?:     string
 }): Promise<string> {
-  const { workspaceUid, settlementId, kind, amountPaise, reason } = args
+  const { workspaceUid, settlementId, kind, amountPaise, reason, eventKey } = args
   const amt = fmtMoney(amountPaise)
   const table: Record<SettlementKind, { title: string; body: string; severity: 'info' | 'success' | 'warning' | 'error'; action: boolean }> = {
     requested: { title: 'Payout requested', body: `Your payout request for ${amt} was submitted.`,      severity: 'info',    action: false },
@@ -165,13 +169,14 @@ export function notifySettlement(args: {
     rejected:  { title: 'Payout rejected',  body: `Your payout of ${amt} was rejected.${reason ? ` Reason: ${reason}` : ''}`, severity: 'error', action: true },
     paid:      { title: 'Payout paid',      body: `${amt} has been paid to your account.`,               severity: 'success', action: false },
     released:  { title: 'Funds released',   body: `${amt} is now available for payout.`,                 severity: 'success', action: false },
+    resumed:   { title: 'Payout review cleared', body: `Your payout request for ${amt} is back in the queue after review.`, severity: 'info', action: false },
   }
   const m = table[kind]
   return writeNotification({
     workspaceUid, category: 'settlement', type: `SETTLEMENT_${kind.toUpperCase()}`,
     title: m.title, body: m.body, severity: m.severity, actionRequired: m.action,
     link: '/dashboard/finance/settlements',   // H.5.1: the Settlement Center
-    dedupeId: `settlement-${settlementId}-${kind}`,
+    dedupeId: `settlement-${settlementId}-${kind}${eventKey ? `-${eventKey.replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 120)}` : ''}`,
   })
 }
 

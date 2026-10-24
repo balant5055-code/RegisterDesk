@@ -212,9 +212,19 @@ export function EventCard({ event, actions, pending, canDeleteDraft }: {
   const busy      = pending !== null
 
   const menuItems: EventMenuItem[] = []
-  if (avail.edit) {
+  // RD-EVENT-DRAFT-NAV-01 · NOT offered for a draft, because the primary button already is it.
+  //
+  // This entry used to read "Continue setup" for a draft — the same words as the primary
+  // button beside it — while the two went to different places: the button to the event
+  // workspace, this to the wizard. Two controls, one name, two destinations, and the
+  // working one hidden behind the overflow menu.
+  //
+  // `manageHref` now sends a draft's primary button to the wizard, so this would be an exact
+  // duplicate of it. It stays for every other editable status, where the button means
+  // something genuinely different ("Manage" → the event workspace).
+  if (avail.edit && ls !== 'draft') {
     menuItems.push({
-      key: `${event.draftId}-edit`, label: ls === 'draft' ? 'Continue setup' : 'Edit event',
+      key: `${event.draftId}-edit`, label: 'Edit event',
       icon: Pencil, onSelect: () => { window.location.href = `/dashboard/events/new/visibility?draftId=${event.draftId}` },
     })
   }

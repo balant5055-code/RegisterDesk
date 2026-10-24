@@ -263,8 +263,12 @@ describe('public availability reflects the exact capacity', () => {
   it('the call site passes the derived capacity, never the plan', async () => {
     const { readFileSync } = await import('node:fs')
     const { resolve } = await import('node:path')
-    const src = readFileSync(resolve(process.cwd(), 'app/events/[slug]/page.tsx'), 'utf8')
+    // The public page's template projection moved verbatim into the shared builder (also used
+    // by the Super Admin pre-approval preview); the page is pinned to delegate to it.
+    const src = readFileSync(resolve(process.cwd(), 'lib/events/eventPageProps.ts'), 'utf8')
     expect(src).toContain('deriveStoredEventCapacity(event as Parameters<typeof deriveStoredEventCapacity>[0])')
     expect(src).not.toMatch(/computeEventAvailability\([\s\S]{0,80}capacityPlan/)
+    const page = readFileSync(resolve(process.cwd(), 'app/events/[slug]/page.tsx'), 'utf8')
+    expect(page).toContain('buildEventPageProps(slug, event, data)')
   })
 })

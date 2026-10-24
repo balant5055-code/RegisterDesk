@@ -40,12 +40,15 @@ import {
   completeDonation,
   failDonation,
 } from '@/lib/donations/donationService'
-import { ensureRefundRecord, applyDonationRefundAccounting } from '@/lib/donations/refundService'
+import { attemptForRefund, recordDonationRefundGatewayOutcome, settleDonationRefundOutcome } from '@/lib/donations/refundService'
 import { extractActualGatewayFee, recordActualGatewayFee } from '@/lib/payments/actualGatewayFee'
 import { logAdminActionOrRecord }      from '@/lib/admin/audit'
 import { RazorpayDonationGateway }     from '@/lib/razorpay/donationGateway'
 import { flagSuspiciousPayment }      from '@/lib/payments/flagSuspicious'
 import { RAZORPAY_WEBHOOK_SECRET, RAZORPAY_KEY_SECRET } from '@/lib/env'
+
+// Phase 3.1 — a delivery can never outlive STALE_PROCESSING_MS (a stale claim is re-claimable).
+export const maxDuration = 60
 
 // ─── Razorpay webhook payload types ──────────────────────────────────────────
 
@@ -65,6 +68,23 @@ interface RazorpayRefundEntity {
   payment_id: string
   amount:     number
   status:     string
+  /** Phase 2.2 — RegisterDesk sends { donationId, reason, attemptId } in the refund's notes. */
+  notes?:     Record<string, string | undefined>
+}
+
+/**
+ * Phase 2.2 — a signed refund event naming a RegisterDesk refund ATTEMPT (notes.attemptId) resolves
+ * that attempt to this refund id (idempotent; never re-points a linked attempt). Returns the attempt's
+ * initiator when the refund belongs to one, so the record and the reservation stay owned by it.
+ */
+function warnIfAttemptConcluded(donationId: string, refund: RazorpayRefundEntity): void {
+  // A refund for an attempt already concluded to have created none: a contradiction for a human (the
+  // refund itself is still recorded exactly as the gateway reports it; the attempt is never re-pointed).
+  void attemptForRefund(donationId, refund.notes?.attemptId).then(attempt => {
+    if (attempt && (attempt.status === 'rejected' || attempt.status === 'resolved_none')) {
+      captureWebhookError(new Error('refund event for an attempt resolved as no-refund'), { scope: 'razorpay.donation_webhook.attempt_conflict', donationId, attemptId: refund.notes?.attemptId, refundId: refund.id })
+    }
+  }).catch(() => {})
 }
 
 interface RazorpayWebhookBody {
@@ -92,6 +112,9 @@ interface PaymentEventDocument {
   processedAt?: unknown
   result:       PaymentEventResult
   resultDetail: string
+  /** Phase 2 — the handler could not record durable state: the event may be claimed again (redelivery). */
+  retryable?:   boolean
+  attempts?:    number
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -126,6 +149,9 @@ function eventRef(eventId: string) {
   return adminDb.collection('paymentEvents').doc(eventId)
 }
 
+/** Longer than any handler run (maxDuration below): a refund event still processing after this was abandoned. */
+const STALE_PROCESSING_MS = 15 * 60_000
+
 async function claimEventSlot(
   eventId:    string,
   eventType:  string,
@@ -139,6 +165,18 @@ async function claimEventSlot(
   await adminDb.runTransaction(async txn => {
     const existing = await txn.get(eventRef(eventId))
     if (existing.exists) {
+      // Phase 2 — a delivery whose handler failed BEFORE it could record durable state was released
+      // for redelivery (retryable): re-claim it exactly once (this transaction serialises claimers).
+      const prev = existing.data() as Partial<PaymentEventDocument>
+      // Phase 3.1 — a REFUND event still 'processing' long after any handler could run (the process died
+      // before writing anything durable) is claimed again too; a recent one is a concurrent duplicate.
+      const ms = (v: unknown) => (v as { toMillis?: () => number } | undefined)?.toMillis?.() ?? 0
+      const receivedMs = Math.max(ms(prev.receivedAt), ms((prev as { reclaimedAt?: unknown }).reclaimedAt))   // the LATEST claim
+      const staleProcessing = prev.result === 'processing' && eventType.startsWith('refund.') && receivedMs > 0 && Date.now() - receivedMs > STALE_PROCESSING_MS
+      if ((prev.retryable === true && prev.result === 'failed') || staleProcessing) {
+        txn.update(eventRef(eventId), { result: 'processing', resultDetail: '', retryable: false, attempts: FieldValue.increment(1), reclaimedAt: FieldValue.serverTimestamp() })
+        return
+      }
       outcome = 'duplicate'
       return
     }
@@ -164,10 +202,12 @@ async function finaliseEvent(
   eventId:      string,
   result:       Exclude<PaymentEventResult, 'processing'>,
   resultDetail: string,
+  retryable = false,
 ): Promise<void> {
   await eventRef(eventId).update({
     result,
     resultDetail,
+    retryable,
     processedAt: FieldValue.serverTimestamp(),
   })
 }
@@ -336,19 +376,23 @@ async function handleRefundProcessed(
   // apply accounting exactly-once. Multiple deliveries / a prior organizer-side
   // apply are no-ops because applyDonationRefundAccounting gates on the refund
   // status. refund.amount is the GROSS amount of THIS refund (full or partial).
-  await ensureRefundRecord({
-    refundId:          refund.id,
-    donationId,
-    campaignId:        donation.campaignId,
-    campaignSlug:      donation.campaignSlug,
-    organizerUid:      donation.organizerUid,
-    razorpayPaymentId: refund.payment_id,
-    amountPaise:       refund.amount,
-    reason:            'gateway_refund',
-    initiatedBy:       'webhook',
+  // Phase 2 / 3.1 — refund.processed is TRUSTED evidence (a signed gateway event) that the money left. The
+  // attempt link (notes.attemptId), the refund record and an ACCOUNTING-PENDING marker are written in ONE
+  // transaction before accounting is attempted, so a crash anywhere after it is completed by the drain; an
+  // accounting failure is recorded durably (bounded retries, then needs_review). If the outcome itself
+  // cannot be recorded, this throws: the event is released for redelivery.
+  warnIfAttemptConcluded(donationId, refund)
+  const settled = await settleDonationRefundOutcome({
+    donationId, refundId: refund.id, paymentId: refund.payment_id, amountPaise: refund.amount,
+    gatewayStatus: 'processed', evidence: 'webhook_refund_processed', source: 'webhook',
+    attemptId: refund.notes?.attemptId ?? null, initiatedBy: 'webhook',
   })
-
-  const result = await applyDonationRefundAccounting(refund.id)
+  if (settled.record === 'conflict') return { result: 'failed', detail: `refund_outcome_conflict:${refund.id}` }
+  if (!settled.applied && settled.failure) {
+    if (settled.failure.state === 'completed') return { result: 'processed', detail: `refunded:${refund.id}:applied_concurrently` }
+    return { result: 'failed', detail: `refund_accounting_${settled.failure.state}:${refund.id}:attempt_${settled.failure.attempts}` }
+  }
+  const result = { applied: settled.applied, fullRefund: (await adminDb.collection('donationRefunds').doc(refund.id).get()).get('isFullRefund') === true }
 
   // RD-PHASE4-S4 · F10 — the actor is the SYSTEM (the gateway webhook), never the organizer: the
   // organizer did not act, and an organizer uid in the admin audit log misattributes a money
@@ -368,6 +412,34 @@ async function handleRefundProcessed(
 
   console.log(`[webhook] refund.processed: donation ${donationId}, refundId=${refund.id}, applied=${result.applied}, full=${result.fullRefund}`)
   return { result: 'processed', detail: `refunded:${refund.id}:applied=${result.applied}` }
+}
+
+// ─── refund.failed (Phase 2.1) ────────────────────────────────────────────────
+
+/**
+ * The gateway reports THIS refund (its own id) FAILED. Signed, so it is trusted for this refund only —
+ * never used to infer anything about another refund. Nothing is accounted, nothing is reversed, no
+ * gateway call is made and no hold is lifted; a contradiction with a recorded success is flagged for
+ * review (recordDonationRefundGatewayFailure).
+ */
+async function handleRefundFailed(
+  refund:  RazorpayRefundEntity,
+  payment: RazorpayPaymentEntity,
+): Promise<{ result: Exclude<PaymentEventResult, 'processing'>; detail: string }> {
+  const donationId = payment.notes.donationId
+  if (!donationId) return { result: 'skipped', detail: 'no_donation_id_in_notes' }
+  const donation = await getDonation(donationId)
+  if (!donation) return { result: 'failed', detail: `donation_not_found:${donationId}` }
+  const r = refund as RazorpayRefundEntity & { error_description?: string; error_reason?: string }
+  warnIfAttemptConcluded(donationId, refund)
+  const rr = await recordDonationRefundGatewayOutcome({
+    donationId, refundId: refund.id, paymentId: refund.payment_id, amountPaise: refund.amount,
+    gatewayStatus: 'failed', evidence: 'webhook_refund_processed', source: 'webhook',
+    attemptId: refund.notes?.attemptId ?? null, failureReason: r.error_description ?? r.error_reason ?? null, initiatedBy: 'webhook',
+  })
+  const outcome = rr.record === 'created' ? 'recorded_new' : rr.record === 'updated' ? 'recorded' : rr.record === 'conflict' ? 'conflict' : 'duplicate'
+  console.log(`[webhook] refund.failed: donation ${donationId}, refundId=${refund.id}, outcome=${outcome}`)
+  return { result: outcome === 'conflict' ? 'failed' : 'processed', detail: `refund_failed:${refund.id}:${outcome}` }
 }
 
 // ─── Route handler ────────────────────────────────────────────────────────────
@@ -454,6 +526,15 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         break
       }
 
+      case 'refund.failed': {
+        if (!refund || !payment) {
+          outcome = { result: 'failed', detail: 'missing_refund_or_payment_entity' }
+          break
+        }
+        outcome = await handleRefundFailed(refund, payment)
+        break
+      }
+
       default: {
         // Accept unknown event types; Razorpay may add new events in future
         console.log(`[webhook] Unhandled event type: ${eventType}`)
@@ -464,11 +545,17 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const message = err instanceof Error ? err.message : 'unknown_error'
     captureWebhookError(err, { scope: 'razorpay.donation_webhook', eventType, eventId })
     outcome = { result: 'failed', detail: message }
+    // Phase 2 — a refund.processed whose handler threw recorded NOTHING durable (no refund record, or
+    // no recovery state): release the claim and answer 500 so Razorpay redelivers it.
+    if (eventType === 'refund.processed' || eventType === 'refund.failed') {
+      await finaliseEvent(eventId, outcome.result, outcome.detail, true).catch(() => {})
+      return NextResponse.json({ received: false, retry: true }, { status: 500 })
+    }
   }
 
   // Persist result to audit trail
   await finaliseEvent(eventId, outcome.result, outcome.detail)
 
-  // Always 200 for Razorpay (non-200 triggers retries)
+  // Always 200 for Razorpay (non-200 triggers retries) — except the refund.processed case above.
   return NextResponse.json({ received: true })
 }

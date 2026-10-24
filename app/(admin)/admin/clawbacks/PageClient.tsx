@@ -180,7 +180,8 @@ export default function AdminClawbacksPage() {
               <Row label="Source"><span className="capitalize">{selected.sourceType} · {selected.reason}</span> <span className="font-mono text-[11px] text-muted-foreground">{selected.sourceId}</span></Row>
               <Row label="Linked transaction"><span className="font-mono text-[12px] break-all">{selected.transactionId}</span></Row>
               <Row label="Reversal amount">{inr(selected.reversalAmountPaise)}</Row>
-              <Row label="Recovered"><span className="text-emerald-700">{inr(selected.recoveredAmountPaise)}</span></Row>
+              <Row label="Recovered from wallet"><span className="text-emerald-700">{inr(selected.recoveredAmountPaise)}</span></Row>
+              {(selected.offPlatformRecoveredAmountPaise ?? 0) > 0 && <Row label="Collected off-platform"><span className="text-emerald-700">{inr(selected.offPlatformRecoveredAmountPaise)}</span></Row>}
               <Row label="Outstanding"><span className="font-semibold text-rose-700">{inr(selected.outstandingAmountPaise)}</span></Row>
               <Row label="Created">{fmt(selected.createdAt)}</Row>
               {selected.resolvedAt && <Row label="Resolved">{fmt(selected.resolvedAt)} {selected.resolvedBy && <span className="text-muted-foreground">by {selected.resolvedBy}</span>}</Row>}

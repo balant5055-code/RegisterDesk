@@ -120,7 +120,9 @@ export default function SettlementCenterPage() {
   }, [token, exporting])
 
   const w = overview?.wallet
-  const hasPendingRequest = settlements.some(s => s.status === 'pending')
+  // M1 — a request held for review also blocks a new one (the server refuses it too)
+  const hasPendingRequest = settlements.some(s => s.status === 'pending' || s.underReview === true)
+  const hasReviewHold     = settlements.some(s => s.underReview === true)
 
   const kpis = [
     { label: 'Available',   value: formatCompactINR(w?.availablePaise ?? 0), sub: 'Ready to settle',    icon: DollarSign, color: 'text-emerald-600', bg: 'bg-emerald-500/[0.09]' },
@@ -153,7 +155,7 @@ export default function SettlementCenterPage() {
             <button
               onClick={() => setShowModal(true)}
               disabled={hasPendingRequest}
-              title={hasPendingRequest ? 'A settlement request is already pending' : undefined}
+              title={hasReviewHold ? 'A payout request is on hold for review' : hasPendingRequest ? 'A settlement request is already pending' : undefined}
               className={cn(
                 'flex items-center gap-1.5 rounded-lg px-4 py-2 text-[13px] font-semibold text-primary-foreground transition-opacity',
                 hasPendingRequest ? 'cursor-not-allowed opacity-50' : 'hover:opacity-90',

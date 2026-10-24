@@ -237,6 +237,9 @@ async function main() {
     if (!snap.exists) continue
     const d = snap.data() as { status?: string }
     if (d.status === 'processed') continue
+    // W1 — a refund the gateway reported FAILED moved no money: never terminalised as processed /
+    // ledger-reversed (that would hide the failure and count it as money out). Left for review.
+    if (d.status === 'failed') { console.warn('  SKIPPED (gateway refund FAILED — review):', p.refundId); continue }
     await ref.update({ status: 'processed', processedAt: new Date(), ledgerReversed: true })
     terminalised++
   }

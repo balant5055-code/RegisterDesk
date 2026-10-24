@@ -41,7 +41,10 @@ export type PlatformTransactionStatus =
 
 // T+2 release state — tracks whether net proceeds have moved from
 // pendingPaise → availablePaise in the organizer revenue wallet.
-export type ReleaseStatus = 'pending' | 'released'
+// F1 — 'held': a refund of this payment that RegisterDesk could not apply in full (a partial refund, or a
+// contradictory one) is open for review. The release query only takes 'pending', so a held transaction is
+// never released (and never occupies a release batch) until an authorized operator resolves the refund.
+export type ReleaseStatus = 'pending' | 'released' | 'held'
 
 // ─── Fee config ───────────────────────────────────────────────────────────────
 
@@ -236,6 +239,9 @@ export interface PlatformTransactionDocument {
   // Refund-reversal linkage — set on donation-refund reversal ledger entries.
   parentTransactionId?: string   // the original ptx_{sourceId} being reversed
   refundId?:            string   // the donationRefunds/{refundId} that caused it
+  /** Phase 3.4 — on a compensating entry: the reversal row it cancels (net is the positive of that reversal). */
+  compensatesTransactionId?: string
+  entryType?:           'refund_reversal_compensation'
 
   // RD-PRICING-02B — INFORMATIONAL pricing snapshot. Additive + optional; absent on
   // every prior order. NOT the financial source of truth — lib/fees remains
@@ -268,6 +274,14 @@ export interface PlatformTransactionDocument {
   // createPlatformTransaction() always writes releaseStatus: 'pending'.
   releaseStatus?: ReleaseStatus
   releasedAt?:    unknown   // set by release-funds route; FieldValue.serverTimestamp()
+  /** F1 — why release is held: the open refund(s) of this payment awaiting review. Never lifted automatically. */
+  releaseHold?: {
+    reason:        'refund_review'
+    refundIds:     string[]
+    heldAt:        unknown
+    /** True when the funds had ALREADY been released before the refund was seen (nothing could be held). */
+    alreadyReleased?: boolean
+  }
 
   paidAt:    unknown   // FieldValue.serverTimestamp() — typed as unknown to allow admin/client FieldValue
   createdAt: unknown

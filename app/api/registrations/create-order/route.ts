@@ -39,6 +39,8 @@ import { resolveEffectivePassPricePaise, eventTimezone } from '@/lib/pricing/ear
 import { resolveAttendeeIdentity }   from '@/lib/registrations/attendeeIdentity'
 import type { IdentityField }        from '@/lib/registrations/attendeeIdentity'
 import { validateInviteCode }        from '@/app/api/registrations/validate-invite-code/route'
+import { checkApprovedContactAccess, verifiedRegistrationEmails } from '@/lib/registrations/approvedContactAccess'
+import type { DecodedIdToken } from 'firebase-admin/auth'
 import { validateFormResponses, sanitizeFormResponses } from '@/lib/registrations/validateFormResponses'
 import { resolveServerEligibility }  from '@/lib/registrations/ageEligibility'
 import type { RegistrationRules } from '@/components/wizard/registrationFormConfig'
@@ -184,12 +186,14 @@ export async function POST(
 
   // ── 1. Optional auth ───────────────────────────────────────────────────────
   let uid: string | undefined
+  let decodedToken: DecodedIdToken | null = null
   const authHeader = req.headers.get('authorization') ?? ''
   const token      = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : ''
   if (token) {
     try {
       const decoded = await adminAuth.verifyIdToken(token)
       uid = decoded.uid
+      decodedToken = decoded
     } catch { /* fall through as guest */ }
   }
 
@@ -326,6 +330,18 @@ export async function POST(
       { error: inviteCheck.error ?? 'Invalid invite code.', reason: 'INVITE_CODE_INVALID' },
       { status: 403 },
     )
+  }
+
+  // ── 5c'. Approved Contact List (lib/registrations/approvedContactAccess) ──
+  // The same rule as submit: only a VERIFIED email on the event's list, registering for
+  // itself. Checked before any order, intent or payment exists; fails closed.
+  const acAccess = checkApprovedContactAccess({
+    accessControl:  event.accessControl,
+    attendeeEmail:  attendee.email,
+    verifiedEmails: await verifiedRegistrationEmails(event.accessControl, decodedToken),
+  })
+  if (!acAccess.ok) {
+    return NextResponse.json({ error: acAccess.error, reason: acAccess.reason }, { status: acAccess.status })
   }
 
   // ── 6. Form validation ─────────────────────────────────────────────────────

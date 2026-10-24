@@ -150,6 +150,16 @@ export async function POST(
       { status: 400 },
     )
   }
+  // RD-REFUND-MANUAL-01 — part of this payment was already returned MANUALLY (outside the gateway). A full gateway
+  // refund would repay that part twice; the remainder is refunded through the manual workflow. The webhook holds
+  // any gateway refund of such a payment for review regardless (accumulatePaymentRefund).
+  const manualRefunded = (reg as { manualRefunds?: { refundedPaise?: unknown } }).manualRefunds?.refundedPaise
+  if (typeof manualRefunded === 'number' && manualRefunded > 0) {
+    return NextResponse.json(
+      { success: false, error: 'Part of this payment was already refunded manually. Refund the remainder through the manual refund workflow.' },
+      { status: 409 },
+    )
+  }
 
   // ── 4. Find the payment intent for this registration ──────────────────────
   const piSnap = await adminDb
@@ -212,6 +222,9 @@ export async function POST(
     const snap   = await txn.get(regRef)
     const latest = snap.data() as RegistrationDocument
     if (latest.paymentStatus !== 'paid') return false
+    // RD-REFUND-MANUAL-01 — re-checked HERE: a manual refund completed after the pre-flight read must still win.
+    const mr = (latest as { manualRefunds?: { refundedPaise?: unknown } }).manualRefunds?.refundedPaise
+    if (typeof mr === 'number' && mr > 0) return false
     txn.update(regRef, {
       paymentStatus: 'refund_pending',
       // RD-FIN-02 · the claim records WHICH payment and HOW MUCH, so the refund.processed webhook can

@@ -7,8 +7,16 @@
 //   cursor   — last uid from the previous page (createdAt-desc cursor)
 //   search   — case-insensitive substring over name / email / organizationName
 //   status   — 'active' | 'pending' | 'suspended' | 'banned' (effective; missing → active)
-//              'pending' (an unverified signup) is EXCLUDED from the default, unfiltered
-//              list and returned only when asked for by name.
+//              Organizer visibility (Option A): the default, unfiltered list is EVERY
+//              organizer, pending signups included — each row carries
+//              `pendingVerification` so the console badges it instead of hiding it. The
+//              'pending' filter still narrows to them. This makes "All" the same population
+//              the admin stats organizer count already reports.
+//
+// Legacy rows: a document WITHOUT `createdAt` is invisible to orderBy('createdAt'). Once the
+// createdAt-ordered scan is exhausted, a second pass ordered by document id returns ONLY the
+// documents that lack the field (cursor prefix '~legacy:'), so they are listed last instead
+// of never. Nothing is written to them.
 //
 // Search + status are applied IN MEMORY per fetched page (Firestore has no
 // substring search, and 'active' is the absence of a field which can't be
@@ -23,6 +31,9 @@ import { resolveAdminUid }           from '@/lib/admin/auth'
 import { isOrganizer }               from '@/lib/organizer/identity'
 import {
   resolveAccountStatus,
+  resolveEmailVerification,
+  isPendingVerification,
+  isStatusRecorded,
   type AccountStatus,
   type AdminOrganizerSummary,
   type AdminOrganizersListResponse,
@@ -36,11 +47,12 @@ function tsToISO(ts: unknown): string | null {
 }
 
 interface UserDoc {
+  [k: string]:       unknown
   role?:             unknown
   name?:             string
   email?:            string
   organizationName?: string
-  accountStatus?:    AccountStatus
+  accountStatus?:    unknown
   statusReason?:     string
   createdAt?:        unknown
 }
@@ -87,51 +99,72 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   let scanned = 0
   let exhausted = false
 
-  // Resume from the caller's cursor (last uid of the previous scan).
-  if (cursor) {
-    const curSnap = await adminDb.doc(`users/${cursor}`).get()
+  // Resume from the caller's cursor: a plain uid continues the createdAt-ordered pass (the
+  // pre-existing contract); '~legacy:<uid>' continues the second pass over documents that
+  // have no createdAt (and '~legacy:' starts it).
+  const LEGACY = '~legacy:'
+  let legacyPhase = cursor.startsWith(LEGACY)
+  const cursorUid = legacyPhase ? cursor.slice(LEGACY.length) : cursor
+  if (cursorUid) {
+    const curSnap = await adminDb.doc(`users/${cursorUid}`).get()
     if (curSnap.exists) scanAfter = curSnap
   }
 
   while (items.length < pageSize && scanned < SCAN_CAP) {
-    let q = adminDb.collection('users').orderBy('createdAt', 'desc').limit(SCAN_BATCH)
+    let q = legacyPhase
+      ? adminDb.collection('users').orderBy('__name__').limit(SCAN_BATCH)
+      : adminDb.collection('users').orderBy('createdAt', 'desc').limit(SCAN_BATCH)
     if (scanAfter) q = q.startAfter(scanAfter) as typeof q
     const snap = await q.get()
-    if (snap.empty) { exhausted = true; break }
+    let pageFull = false
 
     for (const doc of snap.docs) {
       scanned++
       lastRawId = doc.id
       scanAfter = doc
       const d = doc.data() as UserDoc
+      // pass 2 lists ONLY the documents pass 1 cannot see (no createdAt field at all)
+      if (legacyPhase && Object.prototype.hasOwnProperty.call(d, 'createdAt')) continue
       if (!isOrganizer(d)) continue                    // canonical organizer definition (M-C)
+      const accountStatus     = effectiveStatus(d.accountStatus)
+      const emailVerification = resolveEmailVerification(d)
       const item: AdminOrganizerSummary = {
         uid:              doc.id,
-        name:             d.name ?? '',
-        email:            d.email ?? '',
-        organizationName: d.organizationName ?? '',
-        accountStatus:    effectiveStatus(d.accountStatus),
-        statusReason:     d.statusReason ?? null,
+        name:             typeof d.name === 'string' ? d.name : '',
+        email:            typeof d.email === 'string' ? d.email : '',
+        organizationName: typeof d.organizationName === 'string' ? d.organizationName : '',
+        accountStatus,
+        statusReason:     typeof d.statusReason === 'string' ? d.statusReason : null,
         createdAt:        tsToISO(d.createdAt),
+        statusRecorded:      isStatusRecorded(d.accountStatus),
+        emailVerification,
+        pendingVerification: isPendingVerification(accountStatus, emailVerification),
       }
-      // RD-ORGANIZER-SIGNUP-02 · a signup that has not verified its email is not an
-      // organizer this list describes. It is excluded from the DEFAULT view (no status
-      // filter) and reachable only by asking for it explicitly with ?status=pending, so
-      // the unfiltered list cannot present an unverified row as an active organizer.
-      if (!status && item.accountStatus === 'pending') continue
+      // Option A · the unfiltered list includes pending signups (badged, not hidden);
+      // a status filter still narrows to exactly that effective status.
       if (status && item.accountStatus !== status) continue
       if (!matchesSearch(item)) continue
       items.push(item)
-      if (items.length >= pageSize) break
+      if (items.length >= pageSize) { pageFull = true; break }
     }
 
-    if (snap.docs.length < SCAN_BATCH) { exhausted = true; break }
+    if (pageFull) break
+    if (snap.docs.length < SCAN_BATCH) {
+      if (legacyPhase) { exhausted = true; break }
+      // createdAt pass exhausted → continue with the legacy pass from the beginning
+      legacyPhase = true
+      scanAfter = null
+      lastRawId = null
+    }
   }
 
-  // Cursor advances over the raw scan. null once the collection is exhausted; otherwise
-  // the last raw uid scanned (the client keeps paging until it's null). If the scan cap
-  // was hit before filling the page, the cursor is still returned so nothing is dropped.
-  const nextCursor = exhausted ? null : lastRawId
+  // Cursor advances over the raw scan. null once BOTH passes are exhausted; otherwise the
+  // last raw uid scanned, prefixed in the legacy pass (the client keeps paging until null).
+  // If the scan cap was hit before filling the page, the cursor is still returned so
+  // nothing is dropped.
+  const nextCursor = exhausted
+    ? null
+    : legacyPhase ? `${LEGACY}${lastRawId ?? ''}` : lastRawId
 
   return NextResponse.json({ items, nextCursor } satisfies AdminOrganizersListResponse)
 }

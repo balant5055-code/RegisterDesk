@@ -101,7 +101,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<BulkApproveRe
       if      (err instanceof RegistrationNotFoundError)     reason = 'Not found'
       else if (err instanceof UnauthorizedCancellationError) reason = 'Forbidden'
       else if (err instanceof NotPendingError)               reason = 'Not pending'
-      else if (err instanceof CapacityBlocksApprovalError)   reason = err.reason === 'PASS_CAPACITY_FULL' ? 'Pass full' : 'Event full'
+      else if (err instanceof CapacityBlocksApprovalError)   reason = err.reason === 'LICENCE_INACTIVE' ? 'Licence not active' : err.reason === 'PASS_CAPACITY_FULL' ? 'Pass full' : 'Event full'
       else console.error('[bulk-approve] approve error:', { id, err })
       results.push({ id, success: false, reason })
     }

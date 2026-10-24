@@ -23,7 +23,10 @@ const STEP7 = PAGE.slice(PAGE.indexOf('function Step7View('), PAGE.indexOf('// -
 const LSS   = read('components/wizard/LicenseServicesStep.tsx')
 const PANEL = read('components/wizard/ActivationPaymentPanel.tsx')
 const EDIT  = read('app/api/organizer/events/[eventId]/edit/route.ts')
-const SAVE  = read('app/api/organizer/events/[eventId]/save-changes/route.ts')
+// save-changes' copy rule moved verbatim into lib/events/editing/liveContentSync (shared with
+// the resubmit / republish transitions); the route is pinned below to delegate to it.
+const SAVE_ROUTE = read('app/api/organizer/events/[eventId]/save-changes/route.ts')
+const SAVE  = SAVE_ROUTE + '\n' + read('lib/events/editing/liveContentSync.ts')
 const ORDER = read('app/api/registrations/create-order/route.ts')
 const SWEEP = read('lib/payments/registrationReconciliation.ts')
 
@@ -72,6 +75,7 @@ describe('Fee Collection Method is organizer-editable after publishing — and o
     expect(EDIT).not.toMatch(/licenseOrders|lifecycleStatus:|publishedAt:/)
   })
   it('save-changes keeps the LIVE fee model (never copies the draft’s)', () => {
+    expect(SAVE_ROUTE).toContain('buildLiveContentSync(dn, live, slug,')
     expect(SAVE).toContain('findCommercialPricingChanges(live.pricing, dn.pricing, { ignoreFeeModel: true })')
     expect(SAVE).toContain("nextPricing = livePricing && 'feeModel' in livePricing ? { ...rest, feeModel: livePricing.feeModel } : rest")
   })

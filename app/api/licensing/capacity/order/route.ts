@@ -62,6 +62,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     if (applied === 'not_found') {
       return NextResponse.json({ error: 'Event not found.', code: 'EVENT_NOT_FOUND' }, { status: 404 })
     }
+    // RD-SA-COMMERCE-P1 — the licence went inactive between the quote and this change.
+    if (applied === 'lifecycle_ineligible') {
+      return NextResponse.json({ error: "This event's licence is not active (suspended, cancelled or refunded), so its capacity cannot be changed. Contact RegisterDesk support.", code: 'LICENCE_INACTIVE' }, { status: 409, headers: { 'Cache-Control': 'no-store' } })
+    }
     console.info(`[capacity] applied free change · eventId=${eventId} ${snapshot.previousCapacity} → ${snapshot.capacity} (${applied})`)
     return NextResponse.json({
       ok: true, paymentRequired: false, applied: applied === 'ok', unchanged: applied === 'already',

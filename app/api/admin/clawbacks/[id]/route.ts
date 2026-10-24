@@ -1,5 +1,7 @@
 // GET   /api/admin/clawbacks/[id]  — clawback detail + audit history
-// PATCH /api/admin/clawbacks/[id]  — { action: 'waive' | 'mark_recovered', reason }
+// PATCH /api/admin/clawbacks/[id]  — { action: 'waive' | 'mark_recovered', reason, amountPaise?, requestId? }
+//   mark_recovered = collected OUTSIDE the wallet (Phase 3.3: recorded as offPlatformRecoveredAmountPaise);
+//   amountPaise (+ requestId) records a PARTIAL off-platform recovery.
 //
 // GET is admin. PATCH is Super Admin only (RD-PHASE4-S4 · D1) with a 3–500 character reason
 // (D3, `reason` or the legacy `note`); the service stages the audit row in the SAME
@@ -56,17 +58,20 @@ export async function PATCH(req: NextRequest, { params }: Ctx): Promise<NextResp
   const adminUid = guard.uid
 
   const { id } = await params
-  let body: { action?: unknown; note?: unknown; reason?: unknown }
+  let body: { action?: unknown; note?: unknown; reason?: unknown; amountPaise?: unknown; requestId?: unknown }
   try { body = await req.json() } catch { return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 }) }
   if (body.action !== 'waive' && body.action !== 'mark_recovered') {
     return NextResponse.json({ error: 'Unknown action.' }, { status: 400 })
   }
   const r = parseFinancialReason(body.reason, body.note)
   if (!r.ok) return reasonErrorResponse(r)
+  if (body.amountPaise !== undefined && typeof body.amountPaise !== 'number') return NextResponse.json({ error: 'amountPaise must be a number of paise.' }, { status: 400 })
+  if (body.requestId !== undefined && typeof body.requestId !== 'string') return NextResponse.json({ error: 'requestId must be a string.' }, { status: 400 })
+  if (body.action === 'waive' && (body.amountPaise !== undefined || body.requestId !== undefined)) return NextResponse.json({ error: 'waive takes no amount.' }, { status: 400 })
 
   const result = body.action === 'waive'
     ? await waiveClawback(id, adminUid, r.reason)
-    : await markClawbackRecovered(id, adminUid, r.reason)
+    : await markClawbackRecovered(id, adminUid, r.reason, { amountPaise: body.amountPaise as number | undefined, requestId: body.requestId as string | undefined })
 
   if (!result.ok) return NextResponse.json({ error: result.error }, { status: result.status })
   return NextResponse.json({ clawback: result.view })

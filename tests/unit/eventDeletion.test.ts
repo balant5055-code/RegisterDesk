@@ -649,7 +649,17 @@ describe('the Archived tab card menu offers permanent deletion', () => {
   })
 
   it('keeps Edit / Duplicate / Manage behaviour unchanged', () => {
-    expect(card).toMatch(/ls === 'draft' \? 'Continue setup' : 'Edit event'/)
+    // RD-EVENT-DRAFT-NAV-01 — the first assertion used to pin the menu's old ternary,
+    // `ls === 'draft' ? 'Continue setup' : 'Edit event'`. That ternary is gone on purpose:
+    // it produced a second control with the SAME words as the primary button on a draft
+    // card, pointing somewhere else. The menu entry is now Edit-only and skipped for drafts.
+    //
+    // The case's own purpose is unchanged — it is a blast-radius guard proving the DELETION
+    // work left Edit / Duplicate / Manage alone — so it now pins the current shape of those
+    // three rather than a ternary that no longer exists. The label assertions below are
+    // untouched and still pass.
+    expect(card).toMatch(/label: 'Edit event'/)
+    expect(card).toMatch(/avail\.edit && ls !== 'draft'/)
     expect(card).toMatch(/label: 'Duplicate'/)
     expect(primaryActionLabel('archived')).toBe('View')
     expect(primaryActionLabel('draft')).toBe('Continue setup')

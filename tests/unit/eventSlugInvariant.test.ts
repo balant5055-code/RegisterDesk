@@ -339,8 +339,11 @@ describe('TEST 7/8 — a missing live document fails visibly on BOTH write paths
   })
 
   it('save-changes pins the live urlSlug to the document id it is writing to', () => {
-    // Saving may change what the page SAYS, never where it LIVES.
-    expect(SAVE).toContain('urlSlug: slug')
+    // Saving may change what the page SAYS, never where it LIVES. The copy rule moved verbatim
+    // into lib/events/editing/liveContentSync; save-changes passes it the slug it writes to.
+    expect(SAVE).toContain('buildLiveContentSync(dn, live, slug,')
+    expect(SAVE).toContain('txn.update(eventRef, { ...sync.update')
+    expect(code('lib/events/editing/liveContentSync.ts')).toContain('urlSlug: slug')
   })
 })
 

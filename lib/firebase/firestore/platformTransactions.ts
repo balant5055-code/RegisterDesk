@@ -4,9 +4,9 @@
 import { FieldValue }  from 'firebase-admin/firestore'
 import { adminDb }     from '@/lib/firebase/admin'
 import { captureFinancialError } from '@/lib/monitoring/sentry'
-import { computeWalletDebit, buildRevenueCreditUpdate } from '@/lib/firebase/firestore/revenueWallets'
-import { reconcileSettlementHoldsAfterRefund } from '@/lib/settlements/reconcile'
-import { writeClawbackOnShortfall, recoverClawbacks, logClawbackEvent } from '@/lib/clawbacks/clawbackService'
+import { computeReversalDebit, walletBucketForRelease, buildRevenueCreditUpdate } from '@/lib/firebase/firestore/revenueWallets'
+import { readOpenPayoutRequests, planPayoutRefit, stagePayoutReviews } from '@/lib/settlements/payoutReview'
+import { writeClawbackOnShortfall, logClawbackEvent } from '@/lib/clawbacks/clawbackService'
 import {
   resolveWalletSettlementPure,
   recordWalletSettlementMetric,
@@ -77,15 +77,15 @@ export async function recordPlatformTransactionAndCredit(
     return { created: true }
   })
 
-  // New revenue just credited → pay down any open clawbacks for this organizer,
-  // oldest first, bounded by the net amount. Best-effort, only on a real credit
-  // (created:true); never blocks or fails the credit path.
+  // Phase 3 (Option C) — clawback debt is NOT recovered here any more: recovering from pendingPaise at
+  // credit time left this transaction fully releasable while its pending backing had been spent (its
+  // release then failed INSUFFICIENT). Debt is recovered when the transaction is RELEASED, inside the
+  // release transaction (lib/settlements/releaseFunds.ts).
   if (result.created) {
     // RD-PRICING-02D: wallet-credit diagnostics. The credited value is already
     // resolved snapshot-first at order time (02C · data.pricingSource); this only
     // records which source fed the wallet. Metrics only — no value change.
     recordWalletCreditMetric(data)
-    await recoverClawbacks(credit.organizerUid, credit.netSettlementPaise).catch(() => {})
   }
   return result
 }
@@ -149,16 +149,15 @@ export async function reversePlatformTransactionAndDebit(
 ): Promise<ReverseAndDebitResult> {
   const txRef = txnsCol().doc(txId)
 
-  // Captured from the committed transaction so post-commit settlement
-  // reconciliation can run outside the wallet transaction.
-  let reconcileUid: string | null = null   // set only when a hold lost its backing
+  // M1 — payout requests this reversal sent to review (in the transaction; reported after commit).
+  let reviewed: string[] = []
   // Clawback recorded atomically inside the txn; audited after commit.
   let clawbackInfo: { clawbackId: string; outstandingPaise: number } | null = null
   // RD-PRICING-02D: which source produced the reversal settlement (metric, post-commit).
   let settlementSource: WalletSettlementSource = 'fallback'
 
   const result = await adminDb.runTransaction<ReverseAndDebitResult>(async tx => {
-    reconcileUid = null   // reset per attempt (transactions may retry)
+    reviewed = []         // reset per attempt (transactions may retry)
     clawbackInfo = null
     settlementSource = 'fallback'
 
@@ -174,6 +173,15 @@ export async function reversePlatformTransactionAndDebit(
       return { found: true, reversed: false, debited: 0, insolvent: false }
     }
 
+    // RD-REFUND-MANUAL-01 — part (or all) of this net was already reversed by MANUAL refunds (negative reversal rows,
+    // lib/refunds/manualRefunds.ts). Reversing the full net in place would debit the organizer twice and double-count
+    // it in every payable / reconciliation figure. Every caller of this function is a gateway refund, a dispute or a
+    // queued retry of one — all are refused before any write; the callers' durable reconciliation queue escalates it
+    // to a human (needs_review). The webhook already holds such a refund for review before reaching here.
+    if ((data as { manualRefund?: unknown }).manualRefund) {
+      throw new Error(`MANUAL_REFUND_PRESENT:${txId}`)
+    }
+
     // RD-PRICING-02D: reverse EXACTLY what was credited, snapshot-first. The resolver
     // guarantees `reversalNetPaise === data.netSettlementPaise` (the credited amount),
     // so the debit is byte-identical to production; it only records WHERE the value
@@ -181,6 +189,12 @@ export async function reversePlatformTransactionAndDebit(
     const settlement    = resolveWalletSettlementPure(data)
     settlementSource    = settlement.source
     const reversalNetPaise = settlement.netSettlementPaise
+
+    // The bucket holding THIS transaction's net, from its releaseStatus read in this transaction (the
+    // release job flips it in the same transaction that moves the net, so the two cannot disagree). An
+    // unknown status fails closed BEFORE any write: the caller's durable ledger-reversal retry keeps it.
+    const bucket = walletBucketForRelease(data.releaseStatus)
+    if (!bucket) throw new Error(`REVERSAL_BUCKET_UNKNOWN:${txId}:${String(data.releaseStatus)}`)
 
     // ── reads before writes ──
     const walletRef  = adminDb.collection('organizerRevenueWallets').doc(data.organizerUid)
@@ -191,18 +205,29 @@ export async function reversePlatformTransactionAndDebit(
 
     if (walletSnap.exists) {
       const wallet = walletSnap.data() as OrganizerRevenueWallet
-      const plan   = computeWalletDebit(wallet, reversalNetPaise)
+      const plan   = computeReversalDebit(wallet, reversalNetPaise, bucket)
       debited      = plan.totalDebited
       insolvent    = plan.totalDebited < reversalNetPaise
 
       const newAvailable = wallet.availablePaise - plan.fromAvailable
-      // INVARIANT: inTransitPaise must never exceed availablePaise, so a refund
-      // that drains funds backing a settlement hold clamps the hold down. This
-      // keeps freeBalance (= available − inTransit) >= 0. The settlement REQUESTS
-      // behind a clamped hold are reconciled (rejected) post-commit.
+      // INVARIANT: inTransitPaise must never exceed availablePaise (freeBalance = available − inTransit ≥ 0).
+      // M1 — when this refund leaves payout reservations unbacked, the requests that no longer fit go to REVIEW
+      // in THIS transaction (never auto-rejected, never reduced); inTransit becomes exactly the reservations
+      // kept. Read before any write. Otherwise the existing clamp applies unchanged.
+      // M1.1 — checked whenever the refund takes money from AVAILABLE (not only when the clamp bites): a stored
+      // inTransit that already drifted below its reservations (pre-M1 donation refunds left it so) must not hide
+      // requests this refund leaves unbacked.
       const oldInTransit = wallet.inTransitPaise ?? 0
-      const newInTransit = Math.min(oldInTransit, newAvailable)
-      if (newInTransit < oldInTransit) reconcileUid = data.organizerUid
+      let newInTransit = Math.min(oldInTransit, newAvailable)
+      if (plan.fromAvailable > 0) {
+        const requests = await readOpenPayoutRequests(tx, data.organizerUid)
+        const refit = planPayoutRefit(requests, newAvailable)
+        if (refit.toReview.length > 0) {
+          stagePayoutReviews(tx, { organizerUid: data.organizerUid, availablePaise: newAvailable, trigger: { kind: 'registration_refund', ref: txId }, plan: refit })
+          newInTransit = refit.keptPaise
+          reviewed = refit.toReview.map(r => r.id)
+        }
+      }
 
       tx.update(walletRef, {
         pendingPaise:   wallet.pendingPaise - plan.fromPending,
@@ -254,13 +279,12 @@ export async function reversePlatformTransactionAndDebit(
     })
   }
 
-  // A settlement hold lost its backing — reject the now-unbacked pending/approved
-  // requests and rebuild inTransitPaise. Best-effort: the wallet invariant is
-  // already guaranteed above, so a failure here can't make the wallet unsafe.
-  if (result.reversed && reconcileUid) {
-    await reconcileSettlementHoldsAfterRefund(reconcileUid).catch(err =>
-      captureFinancialError(err, { scope: 'reversePlatformTransactionAndDebit.settlement_reconcile_failed', txId }),
-    )
+  // M1 — the reviews, their audit rows and the organizer notifications committed WITH the reversal (nothing is
+  // left to a best-effort follow-up). Surfaced for operations: payouts now wait on a Super Admin.
+  if (result.reversed && reviewed.length > 0) {
+    captureFinancialError(new Error(`payout request(s) held for review after refund ${txId}`), {
+      scope: 'reversePlatformTransactionAndDebit.payout_review_opened', txId, settlementIds: reviewed.join(','),
+    })
   }
 
   return result

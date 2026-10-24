@@ -4,7 +4,7 @@
 // and (for non-financial entities) repairs it. Financial entities (wallets) are
 // verified and REPORTED ONLY — never auto-repaired.
 
-export type ReconcileEntityType = 'event' | 'pass' | 'campaign' | 'session' | 'wallet'
+export type ReconcileEntityType = 'event' | 'pass' | 'campaign' | 'session' | 'wallet' | 'donation' | 'registration' | 'release'
 
 export interface CounterMismatch {
   entityType: ReconcileEntityType
@@ -15,10 +15,24 @@ export interface CounterMismatch {
   repaired:   boolean    // whether this run wrote the corrected value
 }
 
+/**
+ * Phase 3.6A — a check that could NOT reach a verdict (a read failed or hit its safety cap, a legacy record
+ * lacks a field the calculation needs, a value is unreadable). It is never a clean result and never a
+ * guessed mismatch: it is reported as its own kind, with the reason.
+ */
+export interface ReconcileUnverifiable {
+  entityType: ReconcileEntityType
+  entityId:   string
+  check:      string     // the check that could not complete, e.g. 'balanceSum', 'stored:pendingPaise'
+  reason:     string     // why, e.g. 'in_place_reversals_query_failed', 'field_missing'
+}
+
 export interface ReconcileResult {
   entityType: string
   scanned:    number
   mismatches: CounterMismatch[]
+  /** Phase 3.6A — checks that could not complete (absent ⇒ none). Report-only. */
+  unverifiable?: ReconcileUnverifiable[]
   repaired:   number
 }
 
@@ -50,6 +64,10 @@ export const RECON_CURSOR_FLUSH = 25
 // Auto-repair is allowed only for non-financial entities. Financial integrity:
 // wallet/settlement/platformTransaction values are NEVER written by reconciliation.
 export const REPAIRABLE: ReadonlySet<ReconcileEntityType> = new Set(['event', 'pass', 'campaign', 'session'])
+
+export function unverifiable(entityType: ReconcileEntityType, entityId: string, check: string, reason: string): ReconcileUnverifiable {
+  return { entityType, entityId, check, reason: reason.slice(0, 300) }
+}
 
 export function mismatch(
   entityType: ReconcileEntityType, entityId: string, field: string,

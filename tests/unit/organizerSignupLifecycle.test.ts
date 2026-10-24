@@ -138,15 +138,19 @@ describe('C-F · resolveAccountStatus is the one reader, and it flattens nothing
   })
 })
 
-// ═══ 3 · B · the admin list excludes pending ═════════════════════════════════
+// ═══ 3 · B · the admin list shows pending, badged (Organizer visibility · Option A) ═══
+// Superseded decision: the unfiltered list used to SKIP pending signups, which made a new
+// signup invisible to admins in "All" while the stats count included it. It now lists
+// them with a pendingVerification flag the console renders as a badge.
 
-describe('B · a pending signup is not in the normal admin organizer list', () => {
-  it('the unfiltered list skips pending rows', () => {
+describe('B · a pending signup is in the admin organizer list, badged', () => {
+  it('the unfiltered list no longer skips pending rows, and flags them', () => {
     const src = code(ADMINLIST)
-    expect(src).toContain("if (!status && item.accountStatus === 'pending') continue")
+    expect(src).not.toContain("if (!status && item.accountStatus === 'pending') continue")
+    expect(src).toContain('pendingVerification: isPendingVerification(accountStatus, emailVerification)')
   })
 
-  it('pending is reachable only by asking for it explicitly', () => {
+  it('pending can still be asked for explicitly (the Pending filter)', () => {
     const src = code(ADMINLIST)
     expect(src).toMatch(/statusRaw === 'pending'/)
     // and the per-row equality filter is still the only other way a status narrows
@@ -156,8 +160,10 @@ describe('B · a pending signup is not in the normal admin organizer list', () =
   it('the admin UI offers Pending as its own filter and never as "All"', () => {
     const src = code('app/(admin)/admin/organizers/PageClient.tsx')
     expect(src).toMatch(/value: 'pending'/)
-    // "All" must stay the empty value — the route excludes pending from it.
+    // "All" stays the empty value (now every organizer, pending included) …
     expect(src).toMatch(/value: '',\s*label: 'All'/)
+    // … and a pending row carries the explicit badge
+    expect(src).toContain('PENDING_VERIFICATION_LABEL')
   })
 })
 

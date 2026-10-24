@@ -122,6 +122,13 @@ export default function OperationsPage() {
         { label: 'Campaign', value: health.dataIntegrity.campaignMismatches, danger: health.dataIntegrity.campaignMismatches > 0 },
         { label: 'Session', value: health.dataIntegrity.sessionMismatches, danger: health.dataIntegrity.sessionMismatches > 0 },
         { label: 'Wallet (report-only)', value: health.dataIntegrity.walletMismatches, danger: health.dataIntegrity.walletMismatches > 0 },
+        { label: 'Donation refunds (report-only)', value: health.dataIntegrity.donationMismatches ?? 0, danger: (health.dataIntegrity.donationMismatches ?? 0) > 0 },
+        { label: 'Wallets unverifiable', value: health.dataIntegrity.walletUnverifiable ?? 0, danger: (health.dataIntegrity.walletUnverifiable ?? 0) > 0 },
+        { label: 'Donations unverifiable', value: health.dataIntegrity.donationUnverifiable ?? 0, danger: (health.dataIntegrity.donationUnverifiable ?? 0) > 0 },
+        { label: 'Registration refunds (report-only)', value: health.dataIntegrity.registrationMismatches ?? 0, danger: (health.dataIntegrity.registrationMismatches ?? 0) > 0 },
+        { label: 'Registrations unverifiable', value: health.dataIntegrity.registrationUnverifiable ?? 0, danger: (health.dataIntegrity.registrationUnverifiable ?? 0) > 0 },
+        { label: 'Stuck releases', value: health.dataIntegrity.stuckReleases ?? 0, danger: (health.dataIntegrity.stuckReleases ?? 0) > 0 },
+        { label: 'Releases unverifiable', value: health.dataIntegrity.releaseUnverifiable ?? 0, danger: (health.dataIntegrity.releaseUnverifiable ?? 0) > 0 },
       ]} />
 
       {/* ── Cron Health ── */}

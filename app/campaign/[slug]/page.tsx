@@ -12,6 +12,7 @@ import { marketingButton } from '@/lib/marketing/theme'
 import { getCampaignBySlug, getCampaignCounter } from '@/lib/firebase/firestore/campaigns'
 import { isValidImageUrl, safeImageUrl } from '@/lib/utils/imageUrl'
 import { isContentTakenDown } from '@/lib/admin/moderation'
+import { campaignLinkedEventAllows } from '@/lib/campaigns/linkedEventGate'
 import ReportButton from '@/components/report/ReportButton'
 import { ROUTES } from '@/config/navigation'
 import {
@@ -40,19 +41,46 @@ export async function generateMetadata({ params }: PageProps): Promise<Metadata>
   const campaign = await getCampaignBySlug(slug)
   if (!campaign) return { title: `Campaign Not Found – ${platformName}` }
 
+  // RD-SEO-02 · the page body 404s a cancelled or taken-down campaign, but this function ran
+  // BEFORE that and still described it in full — title, tagline and cover image, on a URL the
+  // sitemap had already advertised. A crawler that saw the preview before the takedown kept a
+  // rich snippet for a campaign the platform refuses to serve.
+  //
+  // Mirrored, not re-decided: the same two gates the body applies, in the same order. Nothing
+  // about the campaign is returned here, because a 404 has nothing to preview.
+  if (campaign.status === 'cancelled' || isContentTakenDown(campaign.moderationStatus)) {
+    return { title: `Campaign Not Found – ${platformName}`, robots: { index: false, follow: false } }
+  }
+  // A campaign linked to an event that is not public (pending approval, rejected, unpublished,
+  // cancelled, …) is 404'd by the layout — and streamed metadata would otherwise still carry its
+  // title, tagline and canonical. Same gate as the layout (lib/campaigns/linkedEventGate).
+  if (!(await campaignLinkedEventAllows(campaign, slug))) {
+    return { title: `Campaign Not Found – ${platformName}`, robots: { index: false, follow: false } }
+  }
+
   const cd    = campaign.campaignDetails
   const title = cd.basics.title || 'Fundraising Campaign'
   const desc  = cd.basics.tagline || cd.basics.story.slice(0, 160)
   // Only reference an approved image in social metadata (never a Google thumbnail).
   const image = safeImageUrl(cd.media.coverImageUrl)
+  // RD-SEO-02 · ONE url for the canonical, Open Graph and the JSON-LD below, built from the
+  // runtime baseUrl this function already resolved. Deliberately not `canonical()` from
+  // lib/marketing/seo: that helper reads the STATIC code-default base URL, and mixing it with
+  // the runtime value already used for `openGraph.url` would put two base URLs in one file.
+  const url = `${baseUrl}/campaign/${slug}`
 
   return {
     title:       `${title} – ${platformName}`,
     description: desc,
+    metadataBase: new URL(baseUrl),
+    alternates:  { canonical: url },
+    // Matches the event route: a PRIVATE campaign stays reachable by its link, but must not
+    // be indexed. The sitemap already withholds it; this closes the shared-link path in.
+    robots: campaign.visibility === 'private' ? { index: false, follow: false } : undefined,
     openGraph: {
       title,
       description: desc,
-      url:         `${baseUrl}/campaign/${slug}`,
+      url,
       type:        'website',
       ...(image ? { images: [{ url: image, width: 1200, height: 630, alt: title }] } : {}),
     },
@@ -86,13 +114,75 @@ function progressPercent(raisedPaise: number, goalRupees: number | null): number
   return Math.min(100, Math.round((raisedPaise / (goalRupees * 100)) * 100))
 }
 
+// ─── JSON-LD ──────────────────────────────────────────────────────────────────
+//
+// RD-SEO-02 · event pages have carried schema.org markup since RD-SEO-01; donation campaigns
+// are sitemapped and indexable and had none, so a crawler saw a page about money with nothing
+// machine-readable describing what it is or who receives it.
+//
+// ═══ WHAT IS DELIBERATELY NOT HERE: THE MONEY ════════════════════════════════
+// No goal, raised total or donor count. Not an oversight — `DonateAction.monetaryValue` means
+// the amount a donation IS, not the amount a campaign is trying to RAISE, and there is no
+// schema.org property on DonateAction that honestly means "fundraising goal". Putting the
+// target there would publish a machine-readable claim that every donation is worth ₹target.
+// The figures are already on the page for humans; the markup states only what it can state
+// truthfully. If Google ever ships a fundraiser-goal vocabulary, that is the time to add it.
+//
+// Every value below is read from the stored campaign — nothing is derived, defaulted or
+// inferred, and each optional field is omitted entirely when the record does not carry it,
+// rather than emitted empty.
+function buildCampaignJsonLd(input: {
+  url: string
+  title: string
+  description: string
+  image: string | null
+  organizerName: string
+  organizerWebsite: string
+  beneficiaryName: string
+  startDate: string
+  endDate: string
+}): Record<string, unknown> {
+  const org = input.organizerName.trim()
+  const site = input.organizerWebsite.trim()
+  const beneficiary = input.beneficiaryName.trim()
+
+  return {
+    '@context': 'https://schema.org',
+    '@type':    'DonateAction',
+    name:        input.title,
+    ...(input.description ? { description: input.description } : {}),
+    url:         input.url,
+    // The donate flow lives on this same page, so the entry point IS this URL.
+    target: { '@type': 'EntryPoint', urlTemplate: input.url },
+    ...(input.image ? { image: input.image } : {}),
+    // `recipient` is the party being funded; `agent` would be the donor, who is unknown here.
+    // Emitted only when the campaign actually names a beneficiary or an organizer.
+    ...(beneficiary || org
+      ? {
+          recipient: {
+            '@type': 'Organization',
+            name:    beneficiary || org,
+            ...(site ? { url: site } : {}),
+          },
+        }
+      : {}),
+    // Dates are stored as ISO "YYYY-MM-DD" and emitted verbatim — no timezone is invented.
+    ...(input.startDate ? { startTime: input.startDate } : {}),
+    ...(input.endDate   ? { endTime:   input.endDate   } : {}),
+  }
+}
+
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default async function CampaignPage({ params }: PageProps) {
   const { slug } = await params
-  const [campaign, counter] = await Promise.all([
+  // RD-SEO-02 · `baseUrl` joins this read for the JSON-LD canonical URL below. getBrandingConfig
+  // is the cached config resolver generateMetadata already calls for this request, so this adds
+  // no Firestore round trip of its own.
+  const [campaign, counter, { baseUrl }] = await Promise.all([
     getCampaignBySlug(slug),
     getCampaignCounter(slug),
+    getBrandingConfig(),
   ])
 
   if (!campaign || campaign.status === 'cancelled') notFound()
@@ -135,8 +225,34 @@ export default async function CampaignPage({ params }: PageProps) {
         allowMessages:          true,
       }
 
+  // RD-SEO-02 · withheld for a PRIVATE campaign, which metadata marks noindex: structured data
+  // for a page that must not be indexed would be the one thing still advertising it.
+  const jsonLd = campaign.visibility === 'private'
+    ? null
+    : buildCampaignJsonLd({
+        url:              `${baseUrl}/campaign/${slug}`,
+        title:            cd.basics.title || 'Fundraising Campaign',
+        description:      cd.basics.tagline || cd.basics.story.slice(0, 160),
+        image:            safeImageUrl(cd.media.coverImageUrl),
+        organizerName:    cd.organizer.name,
+        organizerWebsite: cd.organizer.website,
+        beneficiaryName:  cd.beneficiary.name,
+        startDate:        cd.goal.startDate,
+        endDate:          cd.goal.endDate,
+      })
+
   return (
     <HomeShell>
+      {jsonLd && (
+        <script
+          type="application/ld+json"
+          dangerouslySetInnerHTML={{
+            // Escape '<' to prevent '</script>' injection inside JSON string values —
+            // the same guard app/events/[slug]/page.tsx applies to its Event markup.
+            __html: JSON.stringify(jsonLd).replace(/</g, '\\u003c'),
+          }}
+        />
+      )}
 
       {/* ── Hero image ───────────────────────────────────────────────────────── */}
       {isValidImageUrl(cd.media.coverImageUrl) ? (

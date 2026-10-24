@@ -26,6 +26,8 @@ import {
 } from '@/components/admin'
 import type { PillTone } from '@/components/admin'
 import { useConfirm } from '@/components/ui/ConfirmDialog'
+import { postLicenceAction, refundWithPreview, LicenceActionCancelled } from '@/lib/admin/licenceActionClient'
+import { LicenceRefundStatePanel } from '@/components/admin/LicenceRefundStatePanel'
 import { Bars, HBars } from '@/components/analytics/Charts'
 import { BadgeCouponsWorkspace } from '@/components/admin/BadgeCouponsWorkspace'
 import { BadgeAdminWorkspace } from '@/components/admin/printBadges/BadgeAdminWorkspace'
@@ -188,6 +190,9 @@ function OverviewWorkspace({ o, onGoto }: { o: LicenseCenterOverview; onGoto: (t
             <Row label="Cancelled" value={num(o.licenses.cancelled)} />
             <Row label="Consumed" value={num(o.licenses.consumed)} />
             <Row label="Expired windows" value={num(o.licenses.expired)} />
+            {/* RD-SA-COMMERCE-P1 (P1-5) — refunds holding sales; null = Unavailable. */}
+            <Row label="On refund hold" value={o.licenses.refundHold === null ? 'Unavailable' : num(o.licenses.refundHold)} />
+            <Row label="Orders refunding" value={o.licenses.refundingOrders === null ? 'Unavailable' : num(o.licenses.refundingOrders)} />
           </dl>
         </Card>
         <Card title="Coupon status" icon={Gift}>
@@ -227,6 +232,7 @@ function OverviewWorkspace({ o, onGoto }: { o: LicenseCenterOverview; onGoto: (t
 const LICENSE_STATUS_FILTERS = [
   { value: '', label: 'All' }, { value: 'active', label: 'Active' }, { value: 'pending', label: 'Pending' },
   { value: 'suspended', label: 'Suspended' }, { value: 'cancelled', label: 'Cancelled' }, { value: 'complimentary', label: 'Comp' },
+  { value: 'refund_hold', label: 'Refund hold' },
 ]
 
 function LicensesWorkspace() {
@@ -323,8 +329,17 @@ function LicenseDrawer({ eventId, onClose, onChanged }: { eventId: string; onClo
 
   async function act(action: LicenseAdminActionType, body: Partial<LicenseAdminActionRequest>) {
     setBusy(action); setErr(null)
-    try { await authedSend(`/api/admin/licenses/${eventId}`, 'POST', { action, reason: '', ...body }); setReloadKey(k => k + 1); onChanged() }
-    catch (e) { setErr(e instanceof Error ? e.message : 'Action failed') } finally { setBusy(null) }
+    // RD-SA-COMMERCE-P1 — shared client: confirms server-requested confirmations (refunded-licence restore).
+    try { await postLicenceAction(eventId, { action, ...body }, getToken, confirm); setReloadKey(k => k + 1); onChanged() }
+    catch (e) { if (!(e instanceof LicenceActionCancelled)) setErr(e instanceof Error ? e.message : 'Action failed') } finally { setBusy(null) }
+  }
+  // RD-SA-COMMERCE-P1 — refund: reason → server preview (amount, capacity before/after) → confirm → refund.
+  async function refundLicence() {
+    const reason = (await prompt({ title: 'Reason required', message: 'Reason for "refund":', required: true }))?.trim()
+    if (!reason) return
+    setBusy('refund'); setErr(null)
+    try { await refundWithPreview(eventId, reason, getToken, confirm); setReloadKey(k => k + 1); onChanged() }
+    catch (e) { if (!(e instanceof LicenceActionCancelled)) setErr(e instanceof Error ? e.message : 'Refund failed') } finally { setBusy(null) }
   }
   async function withReason(action: LicenseAdminActionType, extra: Partial<LicenseAdminActionRequest> = {}, confirmMsg?: string, danger = false) {
     if (confirmMsg && !(await confirm({ message: confirmMsg, tone: danger ? 'danger' : undefined }))) return
@@ -376,6 +391,17 @@ function LicenseDrawer({ eventId, onClose, onChanged }: { eventId: string; onClo
               {ov?.paymentReceived !== undefined && <Stat label="Payment received" value={ov.paymentReceived ? 'Yes' : 'No'} />}
             </div>
 
+            {/* RD-SA-COMMERCE-P1 (P1-5) — the same refund-state panel as the Licenses drawer and Event 360. */}
+            {detail?.refundState && (
+              <LicenceRefundStatePanel
+                state={detail.refundState}
+                busy={busy === 'releaseRefundHold' || busy === 'completeRefund' || busy === 'acknowledgeRefundFailure'}
+                onAcknowledgeFailure={() => void withReason('acknowledgeRefundFailure', {}, 'Acknowledge this failed refund? It records your decision only — nothing is refunded or restored.')}
+                onRelease={() => void withReason('releaseRefundHold', {}, 'Release this licence’s refund hold? Only possible when Razorpay confirms no refund was issued and the hold is at least 15 minutes old.')}
+                onComplete={() => void withReason('completeRefund', {}, 'Complete this refund? Only possible when Razorpay shows the full refund (or the wallet credit-back exists).', true)}
+              />
+            )}
+
             {/* Lifecycle + payment (RD-LEGACY-01 — tier actions are retired; nothing here sets a tier) */}
             <ActionGroup title="Lifecycle & payment">
               {lifecycle !== 'active'
@@ -383,7 +409,7 @@ function LicenseDrawer({ eventId, onClose, onChanged }: { eventId: string; onClo
                 : <Act icon={PauseCircle} label="Suspend" tone="amber" busy={busy === 'suspend'} onClick={() => void withReason('suspend')} />}
               <Act icon={XCircle} label="Cancel" tone="red" busy={busy === 'cancel'} onClick={() => void withReason('cancel', {}, 'Cancel this license?', true)} />
               <Act icon={BadgeCheck} label="Mark paid" tone="emerald" busy={busy === 'markPaymentReceived'} onClick={() => void withReason('markPaymentReceived', {}, 'Mark payment received?')} />
-              <Act icon={Undo2} label="Refund" tone="red" busy={busy === 'refund'} onClick={() => void withReason('refund', {}, 'Refund and cancel this license?', true)} />
+              <Act icon={Undo2} label="Refund" tone="red" busy={busy === 'refund'} onClick={() => void refundLicence()} />
               <Act icon={RefreshCw} label="Reissue" busy={busy === 'reissue'} onClick={() => void withReason('reissue', {}, 'Reissue this license?')} />
             </ActionGroup>
 

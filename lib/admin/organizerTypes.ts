@@ -38,6 +38,37 @@ export function resolveAccountStatus(stored: unknown): AccountStatus {
     : 'active'
 }
 
+// ═══ Organizer visibility (admin) · verification state, read honestly ═══════════
+// The admin console shows EVERY organizer, including signups that have not verified their
+// email (Option A). These pure readers decide what is shown about them. Absent fields are
+// never read as success: a profile that records nothing about email verification is
+// 'unknown', not 'verified'; a profile with no accountStatus is a legacy record whose
+// effective status stays 'active' (the moderation contract above) but is reported as
+// not recorded.
+
+/** Email verification as RECORDED on users/{uid}: an explicit true / false, or nothing. */
+export type EmailVerificationState = 'verified' | 'unverified' | 'unknown'
+
+export function resolveEmailVerification(u: Record<string, unknown> | null | undefined): EmailVerificationState {
+  const nested = (u?.verification && typeof u.verification === 'object')
+    ? (u.verification as { email?: { verified?: unknown } }).email?.verified
+    : undefined
+  const flat = u?.emailVerified
+  if (nested === true || flat === true) return 'verified'
+  if (nested === false || flat === false) return 'unverified'
+  return 'unknown'
+}
+
+/** Shown as "Pending verification": an explicit pending signup, or an explicitly unverified email. */
+export function isPendingVerification(status: AccountStatus, email: EmailVerificationState): boolean {
+  return status === 'pending' || email === 'unverified'
+}
+
+/** Did the document record an accountStatus at all? (false ⇒ legacy record, effective 'active'). */
+export function isStatusRecorded(stored: unknown): boolean {
+  return stored === 'active' || stored === 'pending' || stored === 'suspended' || stored === 'banned'
+}
+
 /**
  * Moderation fields layered onto the existing users/{uid} document.
  * All optional — absent fields mean the organizer has never been moderated
@@ -61,6 +92,11 @@ export interface AdminOrganizerSummary {
   accountStatus:    AccountStatus   // effective (missing → 'active')
   statusReason:     string | null
   createdAt:        string | null   // ISO 8601
+  /** false ⇒ the document records no accountStatus (legacy; effective status 'active') */
+  statusRecorded:      boolean
+  emailVerification:   EmailVerificationState
+  /** pending signup, or an explicitly unverified email — shown as "Pending verification" */
+  pendingVerification: boolean
 }
 
 export interface AdminOrganizersListResponse {
@@ -104,6 +140,9 @@ export interface AdminOrganizerDetail {
     statusUpdatedAt:  string | null
     statusUpdatedBy:  string | null
     createdAt:        string | null
+    statusRecorded:      boolean
+    emailVerification:   EmailVerificationState
+    pendingVerification: boolean
   }
   wallet:        AdminOrganizerWalletSummary
   payoutProfile: AdminOrganizerPayoutSummary

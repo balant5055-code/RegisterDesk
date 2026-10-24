@@ -252,7 +252,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       return NextResponse.json({ error: msg, reason: err.reason }, { status: 409 })
     }
     if (err instanceof CapacityExceededError) {
-      const msg = err.reason === 'EVENT_CAPACITY_FULL' ? 'This event is sold out.'
+      const msg = err.reason === 'LICENCE_INACTIVE'      ? "This event's licence is not active (suspended, cancelled or refunded), so new registrations are paused. Contact RegisterDesk support."
+        : err.reason === 'EVENT_CAPACITY_FULL'           ? 'This event is sold out.'
         : err.reason === 'PASS_CAPACITY_FULL'           ? 'This pass is sold out.'
         : 'This pass is no longer available.'
       return NextResponse.json({ error: msg, reason: err.reason }, { status: 409 })

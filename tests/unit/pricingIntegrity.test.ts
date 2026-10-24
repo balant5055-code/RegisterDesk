@@ -79,10 +79,15 @@ describe('no false alarms', () => {
 
 describe('the save-changes route enforces it on the server, inside a transaction', () => {
   const src = readFileSync(resolve(process.cwd(), 'app/api/organizer/events/[eventId]/save-changes/route.ts'), 'utf8')
+  // The copy rule moved verbatim into lib/events/editing/liveContentSync (shared with the
+  // resubmit / republish transitions); the route calls it inside its transaction.
+  const rule = readFileSync(resolve(process.cwd(), 'lib/events/editing/liveContentSync.ts'), 'utf8')
   it('compares the draft against the LIVE document, and refuses with 409', () => {
     // RD-EVENT-COMMERCE-05E — the fee model alone is excluded (changed only via PATCH /edit).
-    expect(src).toContain('findCommercialPricingChanges(live.pricing, dn.pricing, { ignoreFeeModel: true })')
-    expect(src).toMatch(/throw new SaveRefusal\([\s\S]*?409,\s*\)/)
+    expect(rule).toContain('findCommercialPricingChanges(live.pricing, dn.pricing, { ignoreFeeModel: true })')
+    expect(rule).toMatch(/if \(commercial\.length > 0\) \{\s*return \{\s*ok: false, status: 409,/)
+    expect(src).toContain('buildLiveContentSync(dn, live, slug,')
+    expect(src).toContain('if (!sync.ok) throw new SaveRefusal(sync.message, sync.status)')
   })
   it('re-reads draft, live event and sold counter inside ONE transaction, then writes there', () => {
     const body = src.slice(src.indexOf('adminDb.runTransaction'))

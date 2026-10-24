@@ -67,6 +67,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       ...(d.bankReference  ? { bankReference:  d.bankReference  } : {}),
       ...(d.paidBy        ? { paidBy:        d.paidBy        } : {}),
       ...(d.paymentNotes  ? { paymentNotes:  d.paymentNotes  } : {}),
+      ...(d.payoutReview?.status === 'open' ? { underReview: true } : {}),
     }
   })
 
@@ -153,12 +154,16 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const held   = wallet.inTransitPaise ?? 0
     const free   = wallet.availablePaise - held
 
-    const pendingSnap = await tx.get(
+    // M1 — the organizer's OPEN requests (pending / approved): a pending one blocks a new request (as before), and
+    // so does one held for payout review (it may already have been transferred; its balance must not be re-claimed).
+    const openSnap = await tx.get(
       adminDb.collection('settlementRequests')
         .where('organizerUid', '==', uid)
-        .where('status', '==', 'pending')
-        .limit(1),
+        .where('status', 'in', ['pending', 'approved'])
+        .limit(101),
     )
+    const hasPending  = openSnap.docs.some(d => d.get('status') === 'pending')
+    const underReview = openSnap.docs.some(d => (d.get('payoutReview') as { status?: unknown } | undefined)?.status === 'open')
     // RD-PHASE4-S4 · D5 — snapshot the VERIFIED destination this request is made against, read
     // in the same transaction. Mark-paid later requires the profile to still be verified at this
     // exact version (lib/payout/binding.ts). Masked label only — never a payout identifier.
@@ -178,7 +183,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     }
 
     // ── validations ──
-    if (!pendingSnap.empty) {
+    if (underReview) {
+      return { ok: false, status: 409, error: 'A payout request of yours is on hold for review after a refund changed your balance. You can request another payout once it is resolved.' }
+    }
+    if (hasPending) {
       return { ok: false, status: 409, error: 'You already have a pending settlement request. Wait for it to be processed before submitting another.' }
     }
     if (amountPaise > free) {

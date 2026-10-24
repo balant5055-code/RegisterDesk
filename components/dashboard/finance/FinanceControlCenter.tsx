@@ -278,7 +278,7 @@ export function FinanceControlCenter({ token }: { token: string }) {
             ? <span className="text-warning">No transaction reconciled yet</span>
             : <>{ledger.gateway.coverage.withActual ?? 0} of {ledger.gateway.coverage.total ?? 0} reconciled</>} />
         <Kpi icon={RotateCcw} label="Refunds" value={<Money v={refunds.amount} />}
-          hint="Money actually returned through the gateway, read from the refund ledger. A refund is not a cancellation, so this is never derived from registration status."
+          hint="Money actually returned to attendees — through the gateway, or as a manual transfer recorded by RegisterDesk — read from the refund ledger. A refund is not a cancellation, so this is never derived from registration status."
           sub={refunds.count === null
             ? 'Unavailable'
             : `${refunds.count} refund${refunds.count === 1 ? '' : 's'}${refunds.unlinked ? ` · ${refunds.unlinked} unlinked` : ''}`} />

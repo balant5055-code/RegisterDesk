@@ -73,6 +73,40 @@ export interface DonationDocument {
   // 'successful' with refundedAmountPaise > 0.
   refundedAmountPaise?: number
   pendingRefundPaise?:  number
+
+  /**
+   * Phase 2.2 — every gateway refund REQUEST, recorded before the gateway is called (keyed by an
+   * attempt id that is also sent to Razorpay in the refund's notes). An attempt whose outcome is not
+   * established keeps its reservation and the donation's settlement hold. Server-written only.
+   */
+  refundAttempts?:        Record<string, DonationRefundAttempt>
+  /** True while any attempt is `submitting` / `unknown` (single-field query for the reconciliation sweep). */
+  hasOpenRefundAttempt?:  boolean
+}
+
+/**
+ *   submitting    — recorded; the gateway call is (or was) in flight; outcome not yet known
+ *   unknown       — the call failed WITHOUT proof that no refund was created (timeout, network, 5xx…)
+ *   rejected      — a structured 4xx gateway response: proof no refund was created
+ *   linked        — the gateway refund this attempt created is known (refundId)
+ *   resolved_none — a Super Admin resolved it on authoritative evidence that no refund exists (PD-2)
+ */
+export type DonationRefundAttemptStatus = 'submitting' | 'unknown' | 'rejected' | 'linked' | 'resolved_none'
+
+export interface DonationRefundAttempt {
+  status:       DonationRefundAttemptStatus
+  amountPaise:  number
+  paymentId:    string
+  by:           string
+  startedAt:    unknown
+  refundId?:    string | null
+  error?:       string | null
+  resolvedAt?:  unknown
+  resolvedBy?:  string | null
+  evidence?:    Record<string, unknown> | null
+  /** Phase 3.3 — refund-list checks by the sweep that did not find the attempt's refund, and when the next is due. */
+  checks?:      number
+  nextCheckAt?: unknown
 }
 
 /**
@@ -182,6 +216,52 @@ export interface DonationRefundDocument {
   createdAt:          unknown  // Firestore Timestamp
   processedAt?:       unknown  // Firestore Timestamp — set when accounting applied
   metadata?:          Record<string, unknown>
+
+  /** Phase 2.1 — set when the signed refund.failed event marks the refund failed. */
+  failedAt?:          unknown
+  failureReason?:     string | null
+  /**
+   * Durable recovery state of this refund's ACCOUNTING (never of the gateway refund itself).
+   * Absent while nothing has gone wrong. See lib/donations/refundService.ts (recovery section).
+   */
+  accountingRecovery?: DonationRefundAccountingRecovery
+  /** Phase 3.3 — Super Admin resolutions of a needs_review refund (key = requestId), with their gateway evidence. */
+  reviewResolutions?: Record<string, Record<string, unknown>>
+  /** Phase 3.4 — the refund's reservation was released already (it was recorded failed): never released again. */
+  reservationReleased?: boolean
+  /** Phase 3.4 — Super Admin decisions closing a contradictory outcome (key = requestId): conflict, evidence, prior state. */
+  conflictResolutions?: Record<string, Record<string, unknown>>
+  /** Phase 3.4 — evidence submitted that DISAGREED with Razorpay (the conflict stayed), kept as investigation history. */
+  conflictInvestigations?: Record<string, Record<string, unknown>>
+  /** Phase 3.4 — the compensating ledger entry written when a refund accounted as processed was confirmed failed. */
+  compensation?: { ledgerId: string; compensatesTransactionId: string; creditedPaise: number; bucket: 'pending' | 'available'; requestId: string; by: string; at: unknown }
+}
+
+/**
+ *   awaiting_gateway — recorded, but the gateway has not yet reported the refund processed: never
+ *                      accounted speculatively; the refund.processed webhook completes it
+ *   retry            — the gateway reported it PROCESSED, the accounting failed: retried (bounded)
+ *   needs_review     — terminal: retries exhausted or a permanent failure; manual intervention
+ *   completed        — the accounting committed (set in the accounting transaction itself)
+ *   gateway_failed   — Phase 2.1: the gateway reported the refund FAILED (signed refund.failed) before
+ *                      any success: nothing is accounted; any hold stays until a Super Admin resolves it
+ */
+export type DonationRefundAccountingState = 'awaiting_gateway' | 'retry' | 'needs_review' | 'completed' | 'gateway_failed'
+
+export interface DonationRefundAccountingRecovery {
+  state:            DonationRefundAccountingState
+  /** Phase 2.1 — a signed gateway event contradicting the recorded outcome (never auto-resolved). */
+  conflict?:        string | null
+  /** Trusted evidence that the gateway refund succeeded (required for `retry`). */
+  gatewayEvidence?: 'webhook_refund_processed' | 'api_refund_processed' | null
+  gatewayStatus?:   string | null   // awaiting_gateway: the status Razorpay returned
+  attempts?:        number
+  lastError?:       string | null
+  lastSource?:      'webhook' | 'organizer' | 'recovery'
+  firstFailedAt?:   unknown
+  lastAttemptAt?:   unknown
+  nextAttemptAt?:   unknown        // Timestamp; retry only
+  completedAt?:     unknown
 }
 
 /**

@@ -20,7 +20,13 @@ import type {
  * without a second gateway refund or a second wallet debit.
  */
 export function canApplySideEffects(status: RegistrationRefundStatus): boolean {
-  return status !== 'processed'
+  // W1 — a FAILED refund moved no money: it can never be given a refund's side effects.
+  return status !== 'processed' && status !== 'failed'
+}
+
+/** W1 — does this record represent money that actually left (counted in refund totals)? */
+export function isCountedRefund(status: RegistrationRefundStatus | undefined): boolean {
+  return status !== 'failed'
 }
 
 /**
@@ -105,7 +111,8 @@ export function buildLinkagePatch(
     registrationId: resolved.registrationId,
     eventSlug:      resolved.eventSlug,
     organizerUid:   resolved.organizerUid,
-    status:         existing.status === 'processed' ? 'processed' : 'linked',
+    // A terminal state is never reopened by a linkage fill-in.
+    status:         existing.status === 'processed' || existing.status === 'failed' ? existing.status : 'linked',
   }
 }
 
@@ -147,11 +154,84 @@ export function findUnbackedTransactions(
  * registration's own payment id and amount). Pure.
  */
 export function pendingRefundMatches(
-  reg: { paymentStatus?: string; paymentId?: string; amount?: number; refundClaim?: { paymentId?: string; amountPaise?: number } },
+  reg: { paymentStatus?: string; paymentId?: string; amount?: number; refundClaim?: { paymentId?: string; amountPaise?: number; kind?: unknown } },
   refund: { gatewayPaymentId: string | null; amountPaise: number },
 ): boolean {
   if (reg.paymentStatus !== 'refund_pending') return false
+  // RD-REFUND-MANUAL-01 — a MANUAL refund's claim is never finished by a gateway refund (that would record the
+  // attendee repaid by the gateway while a transfer is also being made). The webhook holds such a refund for review.
+  if (reg.refundClaim?.kind === 'manual') return false
   const payId = reg.refundClaim?.paymentId ?? reg.paymentId
   const amt   = reg.refundClaim?.amountPaise ?? reg.amount
   return !!refund.gatewayPaymentId && refund.gatewayPaymentId === payId && refund.amountPaise === amt
+}
+
+// ─── W1 · Razorpay refund webhook payloads ───────────────────────────────────────
+
+/**
+ * The documented Razorpay refund webhook shape (refund.created / refund.processed / refund.failed):
+ *   payload.refund.entity  — id, amount (paise), currency, payment_id, status, … — NO order_id
+ *   payload.payment.entity — id, order_id, amount, currency, …  ("contains": ["refund","payment"])
+ * The order is taken ONLY from the payment entity, and only when that entity is the refund's own
+ * payment. A refund-entity order_id is not part of the contract and is never trusted.
+ */
+export interface ParsedRefundEvent {
+  refundId:      string
+  amountPaise:   number
+  currency:      string | null
+  paymentId:     string
+  /** From payload.payment.entity, only when its id is the refund's payment_id. */
+  orderId:       string | null
+  /** The payment entity named a DIFFERENT payment than the refund: nothing may be attributed. */
+  paymentMismatch: boolean
+  paymentAmountPaise: number | null
+  failureReason: string | null
+}
+
+const isStr = (v: unknown): v is string => typeof v === 'string' && v.trim().length > 0
+
+export function parseRazorpayRefundEvent(payload: unknown): { ok: true; event: ParsedRefundEvent } | { ok: false; reason: string } {
+  const p = (payload ?? {}) as { refund?: { entity?: Record<string, unknown> }; payment?: { entity?: Record<string, unknown> } }
+  const r = p.refund?.entity
+  if (!r || typeof r !== 'object') return { ok: false, reason: 'missing_refund_entity' }
+  if (!isStr(r.id)) return { ok: false, reason: 'missing_refund_id' }
+  if (typeof r.amount !== 'number' || !Number.isInteger(r.amount) || r.amount <= 0) return { ok: false, reason: 'invalid_amount' }
+  if (!isStr(r.payment_id)) return { ok: false, reason: 'missing_payment_id' }
+  const pay = p.payment?.entity
+  const payId = pay && isStr(pay.id) ? pay.id : null
+  const paymentMismatch = payId !== null && payId !== r.payment_id
+  const orderId = !paymentMismatch && pay && isStr(pay.order_id) ? pay.order_id : null
+  const failure = isStr((r as { error_description?: unknown }).error_description) ? String((r as { error_description?: unknown }).error_description)
+    : isStr((r as { notes?: { reason?: unknown } }).notes?.reason) ? String((r as { notes?: { reason?: unknown } }).notes!.reason) : null
+  return {
+    ok: true,
+    event: {
+      refundId: r.id, amountPaise: r.amount, currency: isStr(r.currency) ? r.currency : null, paymentId: r.payment_id,
+      orderId, paymentMismatch,
+      paymentAmountPaise: pay && typeof pay.amount === 'number' && Number.isInteger(pay.amount) ? pay.amount : null,
+      failureReason: failure ? failure.slice(0, 300) : null,
+    },
+  }
+}
+
+/**
+ * W1 — cumulative refund accounting for ONE captured payment, in integer paise. Pure.
+ *   duplicate     — this refund id is already counted (redelivery): nothing changes
+ *   partial       — cumulative refunds stay below the charged amount
+ *   full          — THIS refund brings the cumulative total exactly to the charged amount
+ *   already_full  — the payment was already fully refunded before this refund
+ *   exceeds       — this refund would take the total above the charged amount (contradictory)
+ */
+export type RefundAccumulation =
+  | { kind: 'duplicate' }
+  | { kind: 'partial' | 'full' | 'already_full' | 'exceeds'; priorPaise: number; totalPaise: number }
+
+export function accumulateRefund(prior: Record<string, unknown> | undefined, refundId: string, amountPaise: number, chargedPaise: number): RefundAccumulation {
+  const entries = Object.entries(prior ?? {})
+  if (entries.some(([id]) => id === refundId)) return { kind: 'duplicate' }
+  const priorPaise = entries.reduce((sum, [, v]) => sum + (typeof v === 'number' && Number.isInteger(v) && v > 0 ? v : 0), 0)
+  const totalPaise = priorPaise + amountPaise
+  if (priorPaise >= chargedPaise) return { kind: 'already_full', priorPaise, totalPaise }
+  if (totalPaise > chargedPaise) return { kind: 'exceeds', priorPaise, totalPaise }
+  return { kind: totalPaise === chargedPaise ? 'full' : 'partial', priorPaise, totalPaise }
 }

@@ -422,14 +422,16 @@ export async function buildRefunds(uid: string, f: ReportFilters): Promise<Repor
     rows.push({
       source:      'Registration',
       createdAt:   toISO(r.createdAt),
-      refundId:    String(r.razorpayRefundId ?? r.id ?? ''),
+      refundId:    String(r.razorpayRefundId || r.id || ''),
       paymentId:   String(r.gatewayPaymentId ?? ''),
       reference:   String(r.registrationId ?? ''),
       entity:      String(r.eventSlug ?? ''),
       amount:      Number(r.amountPaise ?? 0),
       status:      String(r.status),
       // Stated, never guessed: an unlinked refund says so rather than borrowing an id.
-      attribution: r.registrationId ? 'Linked to registration'
+      // RD-REFUND-MANUAL-01 — returned outside the gateway; the transfer reference is the evidence.
+      attribution: r.origin === 'manual' ? `Manual refund (outside the gateway) · ref ${String(r.metadata?.reference ?? '')}`
+        : r.registrationId ? 'Linked to registration'
         : r.organizerUid ? 'No registration linked'
         : 'Unattributed — matched via payment intent',
     })
@@ -569,6 +571,10 @@ export async function buildPayoutStatement(uid: string, f: ReportFilters): Promi
   const [txn, refundsSnap, settleSnap, userSnap] = await Promise.all([
     reduceScoped('platformTransactions', uid, 'paidAt', f, d => {
       const fig = readReportFromLedgerData(d)   // RD-PRICING-02F: snapshot-first (== ledger)
+      // RD-REFUND-MANUAL-01 — a manual registration refund's reversal row is a REFUND (listed in refundsPaise via
+      // the canonical refund read), not a sale: it reduces the payable, never gross — exactly as a gateway refund
+      // leaves gross untouched.
+      if (typeof d.parentTransactionId === 'string' && d.parentTransactionId && d.refundMethod === 'manual') { net += fig.netSettlementPaise; return }
       gross    += fig.grossAmountPaise
       feesBase += fig.platformFeeBasePaise
       gst      += fig.platformFeeGstPaise

@@ -55,7 +55,8 @@ export interface AdminFinanceTotals {
   /** Donation refunds actually processed (unchanged meaning). */
   refundsPaise: number; settlementsPaise: number
   transactionCount: number; truncated: boolean
-  /** RD-FIN-02 · registration refunds ISSUED AT THE GATEWAY (every registrationRefunds record is one). */
+  /** RD-FIN-02 · registration refunds ISSUED AT THE GATEWAY (every registrationRefunds record is one), plus
+   *  RD-REFUND-MANUAL-01 completed MANUAL refunds (their reversal rows, dated by completion). */
   registrationRefundsPaise: number; registrationRefundCount: number
   /** Donation refunds approved but not yet paid — reported, never deducted. */
   donationRefundsPendingPaise: number
@@ -134,6 +135,9 @@ export async function computeAdminTotals(f: ReportFilters): Promise<AdminFinance
       gst  += fig.platformFeeGstPaise
       // RD-FIN-02 · a donation reversal row (negative, parentTransactionId) is a REFUND, already
       // reported under "Refunds: donations" — counting it in GMV too deducted that refund twice.
+      // RD-REFUND-MANUAL-01 — a MANUAL registration refund (money returned outside the gateway) exists only as its
+      // reversal row (no registrationRefunds record): it is a registration refund, counted there (gross, positive).
+      if (typeof d.parentTransactionId === 'string' && d.parentTransactionId && d.refundMethod === 'manual') { regRefunds -= fig.grossAmountPaise; regRefundCount++; return }
       if (typeof d.parentTransactionId === 'string' && d.parentTransactionId) { reversalGross += fig.grossAmountPaise; return }
       gmv  += fig.grossAmountPaise
       count++
@@ -146,6 +150,8 @@ export async function computeAdminTotals(f: ReportFilters): Promise<AdminFinance
     // is a refund that EXISTS at the gateway (its status only tracks RegisterDesk side effects, and
     // organizer-route records stay 'linked'), so no status filter; createdAt is the one universal date.
     reducePlatform('registrationRefunds', 'createdAt', f, [], d => {
+      // W1 — the one exception: a refund the gateway reported FAILED moved no money.
+      if (d.status === 'failed') return
       regRefunds += Number(d.amountPaise ?? 0); regRefundCount++
     }),
     /**

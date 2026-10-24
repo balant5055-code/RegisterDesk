@@ -878,6 +878,11 @@ export async function decideServiceRequest(args: {
       : agg!
     const rec = await readRecords(inTxn(txn), r.organizerUid, r.sourceDraftId, aggNow)
     if (!rec) throw new ServiceRequestError(409, 'EVENT_NOT_FOUND', 'The source event no longer exists.')
+    // RD-SA-COMMERCE-P1 — a licence refund in flight holds this event's units / capacity (read in THIS
+    // transaction: the ledger and the licence it writes). Moving them now could refund them twice.
+    if (rec.ledger?.refundHold || rec.licence?.refundHold) {
+      throw new ServiceRequestError(409, 'LICENCE_REFUND_IN_PROGRESS', 'A licence refund for this event is in progress. Decide this request after it has finished.')
+    }
     const destRef = r.destinationDraftId ? draftRef(r.organizerUid, r.destinationDraftId) : null
     const destLedgerRef = r.destinationDraftId ? ledgerRef(r.destinationDraftId) : null
     const [destDraftSnap, destLedgerSnap] = await Promise.all([

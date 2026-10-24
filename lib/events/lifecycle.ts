@@ -7,6 +7,7 @@ import { adminDb }       from '@/lib/firebase/admin'
 import type { EventLifecycleStatus, LifecycleAction, EventReviewMeta } from '@/types/events'
 import { targetStatus, isValidTransition, deriveLifecycleStatus } from './lifecycleStateMachine'
 import { liveEventBelongsTo } from './liveEventRef'
+import { buildLiveContentSync } from './editing/liveContentSync'
 
 // Re-export the pure state machine so existing importers of this module are
 // unaffected (the machine now lives in ./lifecycleStateMachine for testability).
@@ -203,6 +204,14 @@ export async function applyLifecycleTransition(
   // draft (or the public event doc) changes between the transactional read and commit.
   // Same state machine, same update payloads — only the blind batch became a transaction.
   const eventRef = slug ? adminDb.collection('events').doc(slug) : null
+  // Resubmit and republish send the event BACK TO REVIEW, so they also make events/{slug} — the
+  // snapshot the Super Admin previews and approval publishes — the LATEST draft content, through
+  // the same rule Save Changes applies (lib/events/editing/liveContentSync: content fields only,
+  // commercial + identity freeze, value rules, sold-count floor). Approve copies nothing, so a
+  // draft edit made during review can never reach the public page unreviewed.
+  const syncsContent = action === 'resubmit' || action === 'republish'
+  const counterRef   = syncsContent && slug ? adminDb.collection('registrationCounters').doc(slug) : null
+  let contentChanged: string[] = []
   const txnFailure = await adminDb.runTransaction(async (txn): Promise<TransitionResult | null> => {
     const freshDraft = await txn.get(draftRef)
     if (!freshDraft.exists) {
@@ -218,9 +227,11 @@ export async function applyLifecycleTransition(
     }
     // All reads must precede writes: read the public event doc before staging updates.
     let eventExists = false
+    let eventData: Record<string, unknown> | undefined
     if (eventRef) {
       const eventSnap = await txn.get(eventRef)
       eventExists = eventSnap.exists
+      eventData   = eventSnap.data()
       // RD-CE-FIX C1 · the slug came from the client-writable draft. A live document that is not
       // THIS workspace's event for THIS draft is never touched, and the transition is refused so
       // the draft cannot drift from its real live page.
@@ -228,11 +239,36 @@ export async function applyLifecycleTransition(
         return { success: false, error: 'Event not found', statusCode: 404 }
       }
     }
+    let contentUpdate: Record<string, unknown> = {}
+    if (syncsContent && eventRef && eventExists && eventData && slug) {
+      const counterSnap = counterRef ? await txn.get(counterRef) : null
+      const sync = buildLiveContentSync(
+        freshDraft.data() as Record<string, unknown>,
+        eventData,
+        slug,
+        (counterSnap?.data()?.passCounts ?? {}) as Record<string, number>,
+      )
+      // A refused copy refuses the whole transition: nothing is written, the event stays where it
+      // was, and the organizer is told what to undo — the same answer Save Changes gives.
+      if (!sync.ok) return { success: false, error: sync.message, statusCode: sync.status }
+      contentUpdate  = sync.update
+      contentChanged = sync.changed
+    }
     txn.update(draftRef, draftUpdate)
-    if (eventRef && eventExists) txn.update(eventRef, eventUpdate)
+    if (eventRef && eventExists) txn.update(eventRef, { ...contentUpdate, ...eventUpdate })
     return null   // success — writes staged for commit
   })
   if (txnFailure) return txnFailure   // a concurrent change / precondition failed the transition
+
+  // Schedule / venue changes carried by the copy get the same change-log entry Save Changes
+  // writes (fire-and-forget; never fails the transition).
+  if (syncsContent && slug && contentChanged.length > 0) {
+    void adminDb.collection('events').doc(slug).collection('changeLog').add({
+      changedFields: contentChanged,
+      changedAt:     FieldValue.serverTimestamp(),
+      changedBy:     actorUid ?? uid,
+    }).catch(() => { /* best-effort change log */ })
+  }
 
   // ── 7. Audit (fire-and-forget) — archive / restore only ───────────────────
   // Uses the existing organizer audit collection (teamAuditLogs), the same one the

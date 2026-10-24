@@ -3,6 +3,7 @@ import { adminDb } from '@/lib/firebase/admin'
 import { getBrandingConfig } from '@/lib/config/resolveBrandingConfig'
 import { isContentTakenDown } from '@/lib/admin/moderation'
 import type { ModerationStatus } from '@/lib/admin/moderation'
+import { linkedEventSlugOf, linkedEventsAllowingCampaigns } from '@/lib/campaigns/linkedEventGate'
 
 // LS1: sitemap.xml (was missing) — static marketing/discovery routes plus every
 // published event and active donation campaign. Regenerated hourly (ISR). If
@@ -93,7 +94,8 @@ export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
       adminDb.collection('donationCampaigns')
         .where('status', '==', 'active')
         .where('visibility', '==', 'public')
-        .select('updatedAt', 'publishedAt', 'moderationStatus').limit(5000).get()
+        .select('updatedAt', 'publishedAt', 'moderationStatus', 'slug', 'campaignType', 'linkedEventSlug', 'linkedEventId')
+        .limit(5000).get()
         .catch(() => null),
     ])
     for (const d of events.docs) {
@@ -157,12 +159,20 @@ export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
       })
     }
 
-    for (const d of campaigns?.docs ?? []) {
+    // A campaign linked to an event is advertised only while that event is public — the same
+    // rule its page and donation orders apply (lib/campaigns/linkedEventGate). One batched read.
+    const campaignDocs = campaigns?.docs ?? []
+    const allowedLinkedEvents = await linkedEventsAllowingCampaigns(
+      campaignDocs.map(d => linkedEventSlugOf(d.data(), d.id)).filter((s): s is string => !!s),
+    )
+    for (const d of campaignDocs) {
       const data = d.data() as {
         updatedAt?: unknown; publishedAt?: unknown; moderationStatus?: ModerationStatus
       }
       // Same moderation axis as the events above — status stays 'active' on takedown.
       if (isContentTakenDown(data.moderationStatus)) continue
+      const linkedEvent = linkedEventSlugOf(d.data(), d.id)
+      if (linkedEvent !== null && !allowedLinkedEvents.has(linkedEvent)) continue
       dynamicEntries.push({
         url: `${BASE_URL}/campaign/${d.id}`,
         lastModified: tsToDate(data.updatedAt, data.publishedAt),

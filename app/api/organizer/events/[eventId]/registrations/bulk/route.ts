@@ -192,7 +192,7 @@ function mapActionError(action: Exclude<BulkAction, 'resend_email'>, err: unknow
     if (err instanceof AlreadyCancelledError) return 'Already cancelled'
   } else if (action === 'restore') {
     if (err instanceof NotCancelledError)          return 'Not cancelled'
-    if (err instanceof CapacityBlocksRestoreError) return err.reason === 'PASS_CAPACITY_FULL' ? 'Pass is at capacity' : 'Event is at capacity'
+    if (err instanceof CapacityBlocksRestoreError) return err.reason === 'LICENCE_INACTIVE' ? 'Licence not active' : err.reason === 'PASS_CAPACITY_FULL' ? 'Pass is at capacity' : 'Event is at capacity'
   } else { // check_in
     if (err instanceof CheckInNotAllowedError) {
       switch (err.reason) {
