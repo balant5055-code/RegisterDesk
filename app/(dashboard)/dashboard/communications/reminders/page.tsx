@@ -124,7 +124,7 @@ export default function RemindersPage() {
 
   return (
     <div className="space-y-6 p-5 sm:p-6">
-      <Link href="/dashboard/communications" className="inline-flex items-center gap-1.5 text-[13px] font-medium text-muted-foreground hover:text-foreground">
+      <Link href="/dashboard/communications" prefetch={false} className="inline-flex items-center gap-1.5 text-[13px] font-medium text-muted-foreground hover:text-foreground">
         <ArrowLeft className="size-4" /> Back to Communications
       </Link>
 

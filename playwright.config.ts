@@ -77,5 +77,13 @@ export default defineConfig({
       testMatch: /publicChrome\.spec\.ts/,
       use: { ...devices['Desktop Chrome'] },
     },
+    {
+      // RD-COMMS-TABS-01 · the Communication Center tabs from an event-scoped URL (?eventId=),
+      // signed in on the EMULATOR (the spec seeds and removes its own emailLogs rows and refuses
+      // to run without FIRESTORE_EMULATOR_HOST). No server started — see e2e/communicationTabs.spec.ts.
+      name: 'comm-tabs',
+      testMatch: /communicationTabs\.spec\.ts/,
+      use: { ...devices['Desktop Chrome'] },
+    },
   ],
 })
