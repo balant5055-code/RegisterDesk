@@ -17,6 +17,7 @@ import { buildMetadata }       from '@/lib/marketing/seo'
 import { ToastProvider } from '@/components/ui/Toast'
 import { RegisterClient }      from './RegisterClient'
 import { explicitFeeModel }    from '@/lib/fees/explicitFeeModel'
+import { resolveEventWaiver }  from '@/lib/registrations/waiver'
 import { resolvePlatformPricing } from '@/lib/platform/pricing/resolver'
 import { PassPrice }          from './PassPrice'
 import { ageRangeLabel }      from '@/lib/registrations/ageEligibility'
@@ -499,6 +500,10 @@ export default async function RegisterPage({
         refundPolicyUrl={refundPolicyUrl}
         // RD-COMMS-WA-CONSENT — offer the WhatsApp-updates opt-in only where WhatsApp is on.
         whatsappUpdatesAvailable={rawPricing?.whatsappEnabled === true}
+        // RD-WAIVER-01 — the waiver in force, resolved by the SAME rule /submit and /create-order
+        // enforce. The hash travels back with the acceptance, so the server can prove the attendee
+        // accepted the wording that is in force (a stale page is asked to reload, not recorded).
+        waiver={(() => { const w = resolveEventWaiver(event); return w.required ? { text: w.text, textHash: w.textHash } : null })()}
         // RD-FEE-RESTORE-03 — does THIS event add platform fees to the attendee's charge?
         //
         // Resolved here, on the server, through the SAME function checkout prices with

@@ -16,11 +16,18 @@
 //         validation must never be re-homed by a weaker signal.
 //       • it resolves to nothing at all (log row never written, message pre-dates the log)
 //         → the phone fallback below, exactly as if there were no reference.
-//  4. Phone fallback — EXISTING conversations only. Registrations are never searched by
-//     phone: attendee.phone is stored as typed, so an equality query cannot be trusted.
-//       • exactly one organizer AND one event            → routed ('phone_conversation').
+//  4. Phone fallback — the phone's EXISTING conversations plus RegisterDesk's OWN recent
+//     accepted sends to it (outbound WhatsApp log rows to an attendee registration, matched by
+//     the hashed recipientPhoneKey, within OUTBOUND_EVIDENCE_WINDOW_MS). Registrations are never
+//     searched by phone: attendee.phone is stored as typed, so an equality query cannot be trusted.
+//     Most attendees type into the chat rather than swipe-reply, so without the outbound evidence
+//     their FIRST message could never be routed and every later one followed it to unmatched.
+//       • all candidates agree on one organizer AND one event
+//           – an existing conversation among them        → routed ('phone_conversation').
+//           – outbound evidence only                     → routed ('outbound_recipient').
 //       • more than one organizer / event                → unmatched (ambiguous_*).
 //       • none                                           → unmatched (no_candidates).
+//       • the bounded evidence read was truncated        → unmatched (too_many_candidates).
 //
 // Nothing here ever picks "the most likely" candidate. Ambiguity is unmatched.
 
@@ -55,9 +62,40 @@ export interface PhoneConversation {
   eventName?:   string
 }
 
+/**
+ * An outbound WhatsApp log row addressed to the sender's number (matched by the hashed
+ * `recipientPhoneKey`). Evidence that RegisterDesk messaged this attendee for one organizer +
+ * event — used ONLY when the inbound message carries no usable reply reference.
+ */
+export interface OutboundEvidenceRow {
+  id:              string
+  channel?:        string
+  status?:         string
+  organizerUid?:   string
+  eventId?:        string
+  eventName?:      string
+  registrationId?: string
+  /** When the row was written (ms since epoch); 0 when unknown. */
+  sentAtMs:        number
+}
+
+export interface OutboundEvidence {
+  rows:      OutboundEvidenceRow[]
+  /** The bounded read hit its limit — the full picture is unknown, so nothing is routed. */
+  truncated: boolean
+}
+
+/** How far back an outbound send counts as evidence for a plain (non-reply) message. */
+export const OUTBOUND_EVIDENCE_WINDOW_MS = 30 * 24 * 60 * 60 * 1_000
+
 export interface InboundRoutingLookups {
   logsByWamid(wamid: string):            Promise<ContextLogRow[]>
   registrationsByWamid(wamid: string):   Promise<ContextRegistration[]>
+  /**
+   * Accepted outbound WhatsApp messages to this (normalized) phone. Optional so a caller that
+   * cannot provide it keeps the original conversation-only fallback.
+   */
+  outboundByPhone?(phone: string):       Promise<OutboundEvidence>
   conversationsByPhone(phone: string):   Promise<PhoneConversation[]>
 }
 
@@ -125,7 +163,7 @@ function judge(cands: Candidate[], phone: string): ContextVerdict {
 
 export async function resolveInboundRoute(
   input:   InboundRoutingInput,
-  options: { expectedPhoneNumberId: string },
+  options: { expectedPhoneNumberId: string; nowMs?: number; outboundWindowMs?: number },
   lookups: InboundRoutingLookups,
 ): Promise<RouteDecision> {
   const base = { context: 'none' as ContextOutcome, candidateCount: 0, matchedLogId: null as string | null, candidateRegistrationIds: [] as string[] }
@@ -187,17 +225,41 @@ export async function resolveInboundRoute(
     context = 'not_found'
   }
 
-  // 4. Phone fallback — existing conversations only.
+  // 4. Phone fallback — the number's existing conversations, PLUS RegisterDesk's own recent
+  //    accepted sends to it (an attendee usually just types into the chat, which carries no
+  //    reply reference). Both sources must agree on exactly ONE organizer + event; any
+  //    disagreement, or an incomplete picture, is unmatched — never a guess.
   const convs = await lookups.conversationsByPhone(phone)
-  const fallbackBase = { phone, context, candidateCount: convs.length, matchedLogId: null, candidateRegistrationIds: [] }
-  if (convs.length === 0) return { ...fallbackBase, outcome: 'unmatched', reason: 'no_candidates' }
-  if (uniq(convs.map(c => c.organizerUid)).length > 1) return { ...fallbackBase, outcome: 'unmatched', reason: 'ambiguous_organizer' }
-  if (uniq(convs.map(c => c.eventId)).length > 1)      return { ...fallbackBase, outcome: 'unmatched', reason: 'ambiguous_event' }
+  const evidence = lookups.outboundByPhone ? await lookups.outboundByPhone(phone) : { rows: [], truncated: false }
+  const nowMs  = options.nowMs ?? Date.now()
+  const window = options.outboundWindowMs ?? OUTBOUND_EVIDENCE_WINDOW_MS
+  // Only an ACCEPTED message to an ATTENDEE (a registration) of a known organizer + event, sent
+  // recently, is evidence. Organizer-directed notifications have no registrationId and never count.
+  // Accepted = 'sent', or 'delivered' once Meta's status webhook has advanced the row (a READ
+  // receipt is also stored as 'delivered' — and the attendee has usually read it before replying).
+  const sends = evidence.rows.filter(r =>
+    r.channel === 'whatsapp' && (r.status === 'sent' || r.status === 'delivered') && !!r.registrationId && !!r.organizerUid && !!r.eventId
+    && r.sentAtMs > 0 && nowMs - r.sentAtMs <= window)
 
-  const only = convs[0]
+  const fallbackBase = {
+    phone, context, candidateCount: convs.length + sends.length, matchedLogId: null,
+    candidateRegistrationIds: uniq(sends.map(s => s.registrationId!)),
+  }
+  if (evidence.truncated) return { ...fallbackBase, outcome: 'unmatched', reason: 'too_many_candidates' }
+
+  const pairs = [
+    ...convs.map(c => ({ organizerUid: c.organizerUid, eventId: c.eventId, eventName: c.eventName ?? null })),
+    ...sends.map(s => ({ organizerUid: s.organizerUid!, eventId: s.eventId!, eventName: s.eventName ?? null })),
+  ]
+  if (pairs.length === 0) return { ...fallbackBase, outcome: 'unmatched', reason: 'no_candidates' }
+  if (uniq(pairs.map(p => p.organizerUid)).length > 1) return { ...fallbackBase, outcome: 'unmatched', reason: 'ambiguous_organizer' }
+  if (uniq(pairs.map(p => p.eventId)).length > 1)      return { ...fallbackBase, outcome: 'unmatched', reason: 'ambiguous_event' }
+
+  const only = pairs[0]
   return {
-    ...fallbackBase, outcome: 'routed', method: 'phone_conversation',
-    organizerUid: only.organizerUid, eventId: only.eventId, eventName: only.eventName ?? null,
-    registrationIds: [],
+    ...fallbackBase, outcome: 'routed', method: convs.length ? 'phone_conversation' : 'outbound_recipient',
+    organizerUid: only.organizerUid, eventId: only.eventId,
+    eventName: pairs.find(p => p.eventName)?.eventName ?? null,
+    registrationIds: fallbackBase.candidateRegistrationIds,
   }
 }

@@ -20,6 +20,7 @@ import { writeEmailLog }                   from '@/lib/email-logs/write'
 import { generateIcs }                     from '@/lib/calendar/ics'
 import { loadOrganizerEmailBranding, resolveEmailBranding } from '@/lib/email/branding'
 import { sendWhatsAppConfirmation }         from './sendWhatsAppConfirmation'
+import { runAfterResponse }                 from '@/lib/server/afterResponse'
 import { getEmailAppUrl } from '@/lib/email/appUrl'
 
 // ─── Args ─────────────────────────────────────────────────────────────────────
@@ -198,13 +199,15 @@ export async function sendConfirmationEmail(args: ConfirmationEmailArgs): Promis
 
   // Attendee WhatsApp confirmation (Phase G3.4) — paid channel, applied AFTER the
   // free email and only when the organizer enabled WhatsApp + the wallet is funded.
-  // Fire-and-forget: it never throws and never affects the registration or email.
-  void sendWhatsAppConfirmation({
+  // It never throws and never affects the registration or email. Scheduled with after() so the
+  // platform keeps the function alive until it finishes — a detached `void` here was frozen with
+  // the response and sent minutes late or never (2026-10-26). Outside a request it runs inline.
+  await runAfterResponse(`whatsapp-confirmation ${registrationId}`, () => sendWhatsAppConfirmation({
     registrationId,
     organizerUid,
     eventSlug,
     attendeeName,
     eventName,
     ticketCode,
-  })
+  }))
 }

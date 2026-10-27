@@ -414,6 +414,13 @@ export interface IntegrationsConfig {
   metaApiVersion:  string    // Meta Graph API version, e.g. v21.0
   metaApiTimeoutMs: number   // Meta Graph API request timeout (ms)
   emailProvider:   string   // NOT read (RD-EMAIL-PROVIDER-03): event mail defaults to SES, override is per event
+  /**
+   * RD-WA-TEMPLATES-01 — how organizer WhatsApp templates reach Meta: 'manual' (default — a Super
+   * Admin approves each version first) or 'automatic' (server validation, then straight to Meta).
+   * Meta's own approval is required in BOTH modes before a template can be broadcast. Changed only
+   * through the Super Admin WhatsApp Templates page (reason required, audited).
+   */
+  whatsappTemplateReviewMode: 'manual' | 'automatic'
 }
 
 /** Auth/session/OTP security POLICY knobs (RD-CONF-11). Policy only — never
@@ -848,6 +855,7 @@ export const BUSINESS_CONFIG_DEFAULTS: BusinessConfigSections = {
     metaApiVersion:   process.env.META_API_VERSION || 'v21.0',
     metaApiTimeoutMs: 10_000,
     emailProvider:    'ses',
+    whatsappTemplateReviewMode: 'manual',
   },
   // RD-MEDIA-08 — faithful to the constants these replaced, so adding the section changed
   // no behaviour: 50 MB (platform-storage event-photo-original), 2000 (the duplicate-scan
@@ -1284,6 +1292,8 @@ function validateIntegrations(v: unknown): ConfigValidationResult {
     [typeof c?.metaApiVersion === 'string' && /^v\d+\.\d+$/.test(c.metaApiVersion), 'integrations.metaApiVersion must look like a Graph API version, e.g. v21.0'],
     [isInt(c?.metaApiTimeoutMs) && (c!.metaApiTimeoutMs as number) > 0, 'integrations.metaApiTimeoutMs must be a positive integer (ms)'],
     [isStr(c?.emailProvider), 'integrations.emailProvider must be a non-empty string'],
+    // Absent (a stored section written before this key) resolves to the default 'manual'.
+    [c?.whatsappTemplateReviewMode === undefined || c.whatsappTemplateReviewMode === 'manual' || c.whatsappTemplateReviewMode === 'automatic', "integrations.whatsappTemplateReviewMode must be 'manual' or 'automatic'"],
   ])
 }
 

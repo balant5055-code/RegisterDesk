@@ -3,6 +3,7 @@
 // /api/admin/events and /api/admin/campaigns routes hold no duplicated logic.
 
 import { FieldValue }            from 'firebase-admin/firestore'
+import { resolvePlatformEmailProvider } from '@/lib/email/platformProvider'
 import { adminDb }               from '@/lib/firebase/admin'
 import { logAdminAction }        from '@/lib/admin/audit'
 import { notificationEngine, NotificationType, NotificationChannel } from '@/lib/notifications'
@@ -180,7 +181,8 @@ export function notifyOrganizerModeration(
       eventSlug:    '',
       eventName:    title,
       templateKey:  `moderation_${action}`,
-      provider:     'ses',
+      // RD-EMAIL-PROVIDER-04 — the provider the engine will actually use (platform choice).
+      provider:     await resolvePlatformEmailProvider(),
       channel:      'email' as const,
     }
     try {

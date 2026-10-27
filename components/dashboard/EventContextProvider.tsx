@@ -34,7 +34,7 @@ import {
 import { usePathname, useRouter, useSearchParams } from 'next/navigation'
 import { useAuth } from '@/components/auth/AuthProvider'
 import {
-  EVENT_PARAM, EVENT_STORAGE_KEY, eventIdFromPathname, isEventScopedPath,
+  EVENT_PARAM, EVENT_STORAGE_KEY, eventIdFromPathname, selectionRewritesUrl,
   resolveSelectedEvent, withEventParam, ALL_EVENTS_SELECTION, isAllEventsSelection,
   type EventSummary,
 } from '@/lib/events/eventContext'
@@ -272,7 +272,9 @@ export function EventContextProvider({ children }: { children: React.ReactNode }
     // The Wallet (one event at a time, 2026-10-02) follows the selector through ?eventId= as well —
     // it is reached from Finance rather than its own nav row, and its "Increase Limit" round trip
     // returns with ?eventId=, which would otherwise outrank a later switch.
-    if (isEventScopedPath(pathname, EVENT_SCOPED_PREFIXES) || pathname === '/dashboard/wallet') {
+    // RD-FIN-SCOPE-01 — Finance joins the Wallet here (selectionRewritesUrl): its URL must follow the
+    // switch, or a stale ?eventId= would keep outranking the newer choice.
+    if (selectionRewritesUrl(pathname, EVENT_SCOPED_PREFIXES)) {
       const qs = searchParams.toString()
       // The sentinel travels in the URL like any selection, so Back/Forward move the
       // all-events choice exactly as they move an event choice.

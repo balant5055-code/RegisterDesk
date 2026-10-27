@@ -4,6 +4,7 @@
 // organizerPayoutProfiles/{uid} — keyed by organizer UID
 // isVerified is always reset to false on PUT (admin-only field).
 
+import { createHash }                from 'crypto'
 import { NextRequest, NextResponse } from 'next/server'
 import { FieldValue }                from 'firebase-admin/firestore'
 import { authorizeWorkspace }        from '@/lib/team/workspace'
@@ -22,6 +23,9 @@ import {
   buildHistoryRecord, snapshotFromDoc, type PayoutSnapshot,
 } from '@/lib/payout/historyRecord'
 import { stageHistoryRecord } from '@/lib/payout/history'
+import { stageOutboxMessage, scheduleOutboxDelivery, istNow } from '@/lib/notifications/outbox'
+import { payoutProfileAlert } from '@/lib/notifications/actionAlerts'
+import { resolveOrganizerEmailIdentity } from '@/lib/organizer/emailIdentity'
 import type { VendorPreparationStatus } from '@/lib/payout/vendorStatus'
 
 // ─── Validation patterns ──────────────────────────────────────────────────────
@@ -133,6 +137,26 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: 'Only the workspace owner can edit payout details.' }, { status: 403 })
   }
   const uid = authz.workspaceUid
+
+  // RD-NOTIFY-DEDUP · optional Idempotency-Key. The key names this save's outbox message, so a
+  // repeated request (double submit, network retry) is answered with the saved profile and writes
+  // nothing — no second history row, no second Super Admin email. A different key is a different,
+  // legitimate save and notifies on its own. Without a key every save is new (as before).
+  const idemKey = req.headers.get('idempotency-key')
+  if (idemKey !== null && !/^[A-Za-z0-9_-]{8,80}$/.test(idemKey)) {
+    return NextResponse.json({ error: 'Invalid Idempotency-Key.' }, { status: 400 })
+  }
+  const saveId = idemKey ? `k${createHash('sha256').update(`${uid}|${idemKey}`).digest('base64url').slice(0, 27)}` : null
+  const replayResponse = async () => {
+    const current = await adminDb.doc(`organizerPayoutProfiles/${uid}`).get()
+    if (!current.exists) return NextResponse.json({ error: 'Payout profile not found' }, { status: 404 })
+    const profile = toSummary(uid, current.data() as OrganizerPayoutProfileDoc, true)
+    return NextResponse.json({ profile, replayed: true } satisfies PayoutProfilePutResponse & { replayed: true })
+  }
+  if (saveId) {
+    const alertId = payoutProfileAlert({ historyId: saveId, created: false, wasVerified: false, changedFields: [], organizer: { uid, name: '', email: '' }, when: '' }).id
+    if ((await adminDb.collection('notificationOutbox').doc(alertId).get()).exists) return replayResponse()
+  }
 
   let body: PutBody
   try { body = await req.json() as PutBody }
@@ -278,7 +302,7 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
 
   const batch = adminDb.batch()
   batch.set(docRef, docData)
-  stageHistoryRecord(batch, buildHistoryRecord({
+  const historyRecord = buildHistoryRecord({
     organizerUid: uid,
     // The ACTOR is the human who made the call, which is not the workspace for a team
     // member. Only the owner can reach this handler today, but recording `callerUid`
@@ -289,8 +313,28 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
     wasVerified:  existingData?.isVerified === true,
     requestIp:    req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ?? null,
     userAgent:    req.headers.get('user-agent'),
-  }))
-  await batch.commit()
+  })
+  stageHistoryRecord(batch, historyRecord)
+  // RD-NOTIFY-01 — every save resets verification and blocks settlements until a Super Admin
+  // verifies again, so the Super Admins are alerted — in the SAME batch (no alert for a save that
+  // did not persist). Field NAMES only; never account / IFSC / PAN / UPI values.
+  const identity = await resolveOrganizerEmailIdentity(uid).catch(() => ({ name: '', email: '' }))
+  const profileAlert = payoutProfileAlert({
+    historyId: saveId ?? adminDb.collection('notificationOutbox').doc().id,
+    created: !existingData, wasVerified: existingData?.isVerified === true,
+    changedFields: Array.isArray((historyRecord as { changedFields?: unknown }).changedFields) ? (historyRecord as { changedFields: string[] }).changedFields : [],
+    organizer: { uid, name: identity.name, email: identity.email }, when: istNow(),
+  })
+  stageOutboxMessage(batch, profileAlert)
+  try {
+    await batch.commit()
+  } catch (err) {
+    // A concurrent request with the same Idempotency-Key committed first: the outbox `create` in this
+    // batch failed, so NOTHING here was written (the batch is atomic). Answer with the saved profile.
+    if (saveId && (err as { code?: number }).code === 6) return replayResponse()
+    throw err
+  }
+  scheduleOutboxDelivery(profileAlert.id)
 
   // Re-read to get server-resolved timestamps
   const saved    = await docRef.get()

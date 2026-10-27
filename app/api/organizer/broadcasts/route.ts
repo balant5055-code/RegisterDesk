@@ -4,12 +4,14 @@
 import { quoteWhatsAppBroadcastCapacity, type WhatsAppCapacityQuote } from '@/lib/communications/capacityQuote'
 import { applyAudienceRefundRule } from '@/lib/broadcasts/audienceRefunds'
 import { filterWhatsAppBroadcastRecipients } from '@/lib/whatsapp/broadcastConsent'
+import { createHash }                  from 'crypto'
 import { NextRequest, NextResponse }  from 'next/server'
 import { FieldValue, Timestamp }       from 'firebase-admin/firestore'
 import { adminDb }                     from '@/lib/firebase/admin'
 import type { BroadcastAudience, BroadcastChannel, BroadcastCampaign } from '@/lib/broadcasts/types'
 import type { RegistrationDocument }   from '@/lib/registrations/types'
 import { sanitizeBroadcastHtml }              from '@/lib/broadcasts/sanitize'
+import { unknownBroadcastVariables, unknownVariablesMessage } from '@/lib/broadcasts/eventVars'
 import { getOrganiserSuppressionSet }  from '@/lib/firebase/firestore/emailSuppressionList'
 import { dedupeRecipientsByEmail, dedupeRecipientsByPhone } from '@/lib/broadcasts/dedupeRecipients'
 import { checkBroadcastLimits, resolveMaxRecipientsPerBroadcast } from '@/lib/broadcasts/limits'
@@ -30,8 +32,13 @@ import { resolveBroadcastTimezone }    from '@/lib/broadcasts/resolveBroadcastTi
 import { countUndatedRegistrations }   from '@/lib/broadcasts/undatedRegistrations'
 import { todayISOInTz }                from '@/lib/registrations/salesWindow'
 import { WHATSAPP_BROADCAST_CAPACITY_REQUIRED } from '@/lib/communications/capacity'
+import { resolveSendableTemplate, validateCampaignValues, missingEventValues } from '@/lib/whatsappTemplates/service'
+import { templateEventValues, variablesUnavailableForEvent } from '@/lib/whatsappTemplates/sendValues'
+import { catalogVariable } from '@/lib/whatsappTemplates/types'
 
 const AUDIENCES: BroadcastAudience[] = ['all', 'confirmed', 'pending', 'rejected', 'cancelled']
+/** RD-BCAST-SCHED — a schedule must be at least this far ahead; anything sooner is "send now". */
+const SCHEDULE_MIN_LEAD_MS = 60_000
 
 // ─── Serialiser ───────────────────────────────────────────────────────────────
 
@@ -106,7 +113,7 @@ export async function GET(req: NextRequest): Promise<NextResponse<GetBroadcastsR
 // ─── POST — create + send campaign ────────────────────────────────────────────
 
 export type PostBroadcastResponse =
-  | { success: true;  campaign: BroadcastCampaign }
+  | { success: true;  campaign: BroadcastCampaign; /** RD-BCAST-IDEM — a repeat of an earlier request. */ replayed?: boolean }
   | {
       success: false
       /** Stable machine code (e.g. DAILY_LIMIT_REACHED). Kept for existing consumers. */
@@ -137,6 +144,26 @@ export async function POST(req: NextRequest): Promise<NextResponse<PostBroadcast
   if (!(await getFeatureFlags()).broadcast) {
     return NextResponse.json({ success: false, error: 'Broadcast is currently disabled.' }, { status: 403 })
   }
+
+  // ── Idempotency (RD-BCAST-IDEM) ───────────────────────────────────────────
+  // An optional Idempotency-Key names the campaign: the same workspace + key always maps to the
+  // same campaign id, so a double click or a retried request returns the campaign the first one
+  // created — it is never created, charged or sent twice. Without a key: a new campaign (as before).
+  const idemKey = req.headers.get('idempotency-key')
+  if (idemKey !== null && !/^[A-Za-z0-9_-]{8,80}$/.test(idemKey)) {
+    return NextResponse.json({ success: false, error: 'Invalid Idempotency-Key.' }, { status: 400 })
+  }
+  const campaignId = idemKey ? `k${createHash('sha256').update(`${uid}|${idemKey}`).digest('base64url').slice(0, 27)}` : null
+  const replay = async (): Promise<NextResponse<PostBroadcastResponse> | null> => {
+    if (!campaignId) return null
+    const prior = await adminDb.collection('broadcastCampaigns').doc(campaignId).get()
+    if (!prior.exists) return null
+    const p = prior.data() as Record<string, unknown>
+    if (p.organizerUid !== uid) return NextResponse.json({ success: false, error: 'IDEMPOTENCY_CONFLICT', message: 'This request was already used. Please reload and try again.' }, { status: 409 })
+    return NextResponse.json({ success: true, campaign: docToCampaign(prior.id, p), replayed: true })
+  }
+  const replayed = await replay()
+  if (replayed) return replayed
 
   // ── Parse + validate body ─────────────────────────────────────────────────
   let body: unknown
@@ -182,6 +209,8 @@ export async function POST(req: NextRequest): Promise<NextResponse<PostBroadcast
   let waTemplateType: string | undefined
   let waLanguageCode: string | undefined
   const waVariables:  Record<string, string> = {}
+  let waCustomTemplate: { templateId: string; version: number } | undefined
+  const { customTemplateId, customTemplateVersion } = body as Record<string, unknown>
 
   if (chosenChannel === 'email') {
     if (typeof subject !== 'string' || !subject.trim()) {
@@ -196,14 +225,39 @@ export async function POST(req: NextRequest): Promise<NextResponse<PostBroadcast
         {
           success: false,
           error:   'Email content contains disallowed HTML elements or attributes. ' +
-                   'Permitted tags: p, b, strong, i, em, u, a (https links only), ul, ol, li, h2, h3, blockquote, br, hr. ' +
-                   'Event handlers, scripts, iframes, and non-https links are not allowed.',
+                   'Permitted tags: p, b, strong, i, em, u, s, a (http/https links only), ul, ol, li, h2, h3, blockquote, br, hr, div, span. ' +
+                   'Event handlers, scripts, iframes, comments and other link types are not allowed.',
         },
         { status: 400 },
       )
     }
+    // RD-BCAST-VARS — a variable the composer does not offer would reach attendees as written.
+    const unknown = unknownBroadcastVariables(subject, clean)
+    if (unknown.length > 0) {
+      return NextResponse.json({ success: false, error: 'UNKNOWN_VARIABLE', message: unknownVariablesMessage(unknown) }, { status: 400 })
+    }
     storedSubject = subject.trim()
     storedHtml    = clean
+  } else if (typeof customTemplateId === 'string' && customTemplateId) {
+    // RD-WA-TEMPLATES-01 — the workspace's OWN template. Eligible only when it is this workspace's, the
+    // requested version is its active version, that exact content is internally approved, and Meta's
+    // status (re-read when older than a day) permits sending. Checked again by the job at send time.
+    const version = typeof customTemplateVersion === 'number' && Number.isInteger(customTemplateVersion) ? customTemplateVersion : null
+    if (version === null) return NextResponse.json({ success: false, error: 'TEMPLATE_VERSION_REQUIRED', message: 'Choose the template again.' }, { status: 400 })
+    const elig = await resolveSendableTemplate(uid, customTemplateId, version, { refreshIfStale: true })
+    if (!elig.ok) return NextResponse.json({ success: false, error: elig.code, message: elig.message }, { status: elig.code === 'TEMPLATE_NOT_FOUND' ? 404 : 422 })
+    const checkedValues = validateCampaignValues(elig.template, variables)
+    if (!checkedValues.ok) return NextResponse.json({ success: false, error: checkedValues.error }, { status: 400 })
+    // Values RegisterDesk fills from the event must exist, or Meta would refuse every recipient.
+    const ev = await templateEventValues(uid, eventSlug, liveData)
+    const unavailable = variablesUnavailableForEvent(elig.template, ev.eventType)
+    const missing = [...unavailable, ...missingEventValues(elig.template, ev.values)]
+    if (missing.length) {
+      return NextResponse.json({ success: false, error: 'TEMPLATE_VARIABLE_UNAVAILABLE', message: `This event has no value for ${missing.map(k => catalogVariable(k)?.label ?? k).join(', ')}, which the template uses. Add it to the event or use another template.` }, { status: 422 })
+    }
+    Object.assign(waVariables, checkedValues.values)
+    waCustomTemplate = { templateId: elig.template.templateId, version: elig.template.version }
+    storedSubject = `WhatsApp · ${elig.template.name}`
   } else {
     // WhatsApp — an approved Meta template ONLY. No free-text HTML is accepted.
     if (typeof templateType !== 'string' || !hasWhatsAppTemplate(templateType)) {
@@ -401,10 +455,22 @@ export async function POST(req: NextRequest): Promise<NextResponse<PostBroadcast
   }
 
   // ── Resolve schedule ───────────────────────────────────────────────────────
-  // scheduledFor may be ISO string or epoch ms. A future time ⇒ schedule it.
+  // scheduledFor may be ISO string or epoch ms. Absent / empty ⇒ send now.
+  // RD-BCAST-SCHED — a schedule that was ASKED FOR but is invalid or not in the future is refused.
+  // It used to fall through to "send now": picking the current minute, or confirming a minute
+  // late, turned "Schedule Send" into an immediate send to the whole audience.
+  const scheduleRequested = scheduledFor !== undefined && scheduledFor !== null && scheduledFor !== ''
   const scheduledMs = typeof scheduledFor === 'string' ? Date.parse(scheduledFor)
     : typeof scheduledFor === 'number' ? scheduledFor : NaN
-  const isScheduled = Number.isFinite(scheduledMs) && scheduledMs > Date.now()
+  if (scheduleRequested && (!Number.isFinite(scheduledMs) || scheduledMs <= Date.now() + SCHEDULE_MIN_LEAD_MS)) {
+    return NextResponse.json({
+      success: false, error: 'SCHEDULE_IN_PAST',
+      message: Number.isFinite(scheduledMs)
+        ? 'That schedule time has already passed (or is less than a minute away). Choose a later time, or clear it to send now.'
+        : 'The schedule time is not a valid date.',
+    }, { status: 400 })
+  }
+  const isScheduled = scheduleRequested
 
   // RD-BCAST-COST-01 — `estimatedCostPaise` is the MONEY this campaign is expected to debit from
   // the organizer's wallet at start, i.e. what chargeAndStartCampaign would write as
@@ -420,61 +486,75 @@ export async function POST(req: NextRequest): Promise<NextResponse<PostBroadcast
     : 0
 
   // ── Create campaign document ───────────────────────────────────────────────
-  const campaignRef = adminDb.collection('broadcastCampaigns').doc()
-  await campaignRef.set({
-    organizerUid:   uid,           // workspace owner (authorization/ownership)
-    createdBy:      callerUid,     // operator who created the broadcast (attribution)
-    // RD-INTEG — eventId is the verified event SLUG, the key every transactional log, usage row
-    // and analytics/Event-Communications query filters on (the client used to send the draft id
-    // here, so broadcast messages were missing from per-event counts). The draft id is kept
-    // alongside, from the live event — never from the body.
-    eventId:        eventSlug,
-    ...(liveDraftId ? { eventDraftId: liveDraftId } : {}),
-    eventSlug,
-    // RD-COMMS-P2-C — the event's own name (the event document), never the client's: it is what the
-    // message calls the event, and a typed name could pass one event off as another.
-    eventName:      authoritativeEventName(liveData, eventSlug),
-    channel:        chosenChannel,
-    audience,
-    subject:        storedSubject,
-    html:           storedHtml,
-    ...(chosenChannel === 'whatsapp' ? {
-      templateType: waTemplateType,
-      ...(waLanguageCode ? { languageCode: waLanguageCode } : {}),
-      variables:    waVariables,
-    } : {}),
-    recipientCount,
-    // EMAIL ONLY. Persisted so a SCHEDULED campaign, resolved later by the cron from this
-    // document alone, dedupes exactly like an immediate one. Written only when true, so
-    // existing campaigns and every WhatsApp campaign keep an absent field.
-    ...(dedupeEmails && chosenChannel !== 'whatsapp' ? { dedupeEmails: true } : {}),
-    // The WhatsApp counterpart, mirrored exactly: written ONLY for a WhatsApp campaign and
-    // ONLY when true, so an email campaign can never carry it and every existing campaign
-    // keeps an absent field. This is what lets a SCHEDULED broadcast dedupe identically —
-    // the cron resolves recipients hours later from this document alone.
-    ...(dedupePhones && chosenChannel === 'whatsapp' ? { dedupePhones: true } : {}),
-    // RD-BCAST-DATE-01 — the resolved window, as ABSOLUTE Timestamps. Written ONLY when a
-    // filter was chosen, so "All registrations" and every pre-existing campaign keep the
-    // fields absent, and send.ts adds no constraint at all for them. No migration.
-    //
-    // `registeredTo` is EXCLUSIVE. Persisting instants rather than the token 'today' is
-    // what makes a scheduled campaign target the day it was created for, not the day it
-    // happens to run.
-    ...(dateWindow ? {
-      registeredFrom:         Timestamp.fromDate(dateWindow.startUtc),
-      registeredTo:           Timestamp.fromDate(dateWindow.endUtcExclusive),
-      registrationDateFilter: toFilterRecord(parsedDate.value, dateWindow, undatedCount),
-    } : {}),
-    successCount:   0,
-    failCount:      0,
-    status:         isScheduled ? 'scheduled' : 'draft',
-    scheduledFor:   isScheduled ? Timestamp.fromMillis(scheduledMs) : null,
-    estimatedCostPaise,
-    actualCostPaise: 0,
-    failReason:     null,
-    createdAt:      FieldValue.serverTimestamp(),
-    sentAt:         null,
-  })
+  // RD-BCAST-IDEM — `create`, so a concurrent duplicate with the same key fails here and is
+  // answered with the campaign the first request made (nothing is charged or sent for it).
+  const campaignRef = campaignId ? adminDb.collection('broadcastCampaigns').doc(campaignId) : adminDb.collection('broadcastCampaigns').doc()
+  try {
+    await campaignRef.create({
+      organizerUid:   uid,           // workspace owner (authorization/ownership)
+      createdBy:      callerUid,     // operator who created the broadcast (attribution)
+      // RD-INTEG — eventId is the verified event SLUG, the key every transactional log, usage row
+      // and analytics/Event-Communications query filters on (the client used to send the draft id
+      // here, so broadcast messages were missing from per-event counts). The draft id is kept
+      // alongside, from the live event — never from the body.
+      eventId:        eventSlug,
+      ...(liveDraftId ? { eventDraftId: liveDraftId } : {}),
+      eventSlug,
+      // RD-COMMS-P2-C — the event's own name (the event document), never the client's: it is what the
+      // message calls the event, and a typed name could pass one event off as another.
+      eventName:      authoritativeEventName(liveData, eventSlug),
+      channel:        chosenChannel,
+      audience,
+      subject:        storedSubject,
+      html:           storedHtml,
+      ...(chosenChannel === 'whatsapp' && waCustomTemplate ? {
+        // RD-WA-TEMPLATES-01 — an organizer template, pinned to the version checked above.
+        customTemplate: waCustomTemplate,
+        variables:    waVariables,
+      } : chosenChannel === 'whatsapp' ? {
+        templateType: waTemplateType,
+        ...(waLanguageCode ? { languageCode: waLanguageCode } : {}),
+        variables:    waVariables,
+      } : {}),
+      recipientCount,
+      // EMAIL ONLY. Persisted so a SCHEDULED campaign, resolved later by the cron from this
+      // document alone, dedupes exactly like an immediate one. Written only when true, so
+      // existing campaigns and every WhatsApp campaign keep an absent field.
+      ...(dedupeEmails && chosenChannel !== 'whatsapp' ? { dedupeEmails: true } : {}),
+      // The WhatsApp counterpart, mirrored exactly: written ONLY for a WhatsApp campaign and
+      // ONLY when true, so an email campaign can never carry it and every existing campaign
+      // keeps an absent field. This is what lets a SCHEDULED broadcast dedupe identically —
+      // the cron resolves recipients hours later from this document alone.
+      ...(dedupePhones && chosenChannel === 'whatsapp' ? { dedupePhones: true } : {}),
+      // RD-BCAST-DATE-01 — the resolved window, as ABSOLUTE Timestamps. Written ONLY when a
+      // filter was chosen, so "All registrations" and every pre-existing campaign keep the
+      // fields absent, and send.ts adds no constraint at all for them. No migration.
+      //
+      // `registeredTo` is EXCLUSIVE. Persisting instants rather than the token 'today' is
+      // what makes a scheduled campaign target the day it was created for, not the day it
+      // happens to run.
+      ...(dateWindow ? {
+        registeredFrom:         Timestamp.fromDate(dateWindow.startUtc),
+        registeredTo:           Timestamp.fromDate(dateWindow.endUtcExclusive),
+        registrationDateFilter: toFilterRecord(parsedDate.value, dateWindow, undatedCount),
+      } : {}),
+      successCount:   0,
+      failCount:      0,
+      status:         isScheduled ? 'scheduled' : 'draft',
+      scheduledFor:   isScheduled ? Timestamp.fromMillis(scheduledMs) : null,
+      estimatedCostPaise,
+      actualCostPaise: 0,
+      failReason:     null,
+      createdAt:      FieldValue.serverTimestamp(),
+      sentAt:         null,
+    })
+  } catch (err) {
+    if ((err as { code?: number }).code === 6) {          // ALREADY_EXISTS — a concurrent duplicate won
+      const existing = await replay()
+      if (existing) return existing
+    }
+    throw err
+  }
 
   // ── Scheduled: leave for the cron; send-now: bill + deliver immediately ─────
   if (isScheduled) {

@@ -19,7 +19,7 @@ const PRICE_FIELDS = new Set(CENTRAL_PRICING_FIELDS.communication === '*' ? [] :
 type SectionDraft = Record<string, unknown>
 type SubKey       = 'email' | 'whatsapp' | 'sms' | 'certificates' | 'general'
 type FieldKind    = 'text' | 'number' | 'boolean'
-interface FieldSpec { key: string; label: string; kind: FieldKind }
+interface FieldSpec { key: string; label: string; kind: FieldKind; readOnly?: boolean }
 
 const toDraft = (v: unknown): SectionDraft => JSON.parse(JSON.stringify(v ?? {})) as SectionDraft
 
@@ -36,7 +36,9 @@ const COMMERCIAL_FIELDS: FieldSpec[] = [
 const SUBSECTIONS: Array<{ key: SubKey; title: string; fields: FieldSpec[] }> = [
   { key: 'email', title: 'Email', fields: [
     { key: 'enabled', label: 'Enabled', kind: 'boolean' },
-    { key: 'provider', label: 'Provider', kind: 'text' },
+    // RD-EMAIL-PROVIDER-04 · not read for delivery — the platform provider is chosen in
+    // Communication Center → Providers. Read-only so this box cannot look like a second switch.
+    { key: 'provider', label: 'Provider (not used — see Communication Center)', kind: 'text', readOnly: true },
     ...COMMERCIAL_FIELDS,
     { key: 'fromName', label: 'From name', kind: 'text' },
     { key: 'replyTo', label: 'Reply-to', kind: 'text' },
@@ -129,7 +131,7 @@ export function CommunicationEditor({
             <div key={sub.key} className="rounded-lg border border-border/70 p-3">
               <p className="mb-2 text-[12px] font-semibold uppercase tracking-wide text-muted-foreground">{sub.title}</p>
               <div className="grid grid-cols-1 gap-x-4 gap-y-2.5 sm:grid-cols-2 lg:grid-cols-3">
-                {sub.fields.map(f => { const locked = !canEditPricing && PRICE_FIELDS.has(`${sub.key}.${f.key}`); return (
+                {sub.fields.map(f => { const locked = f.readOnly === true || (!canEditPricing && PRICE_FIELDS.has(`${sub.key}.${f.key}`)); return (
                   <label key={f.key} className="flex flex-col gap-1">
                     <span className="text-[11.5px] text-muted-foreground">{f.label}{locked ? ' · Super Admin' : ''}</span>
                     {f.kind === 'boolean' ? (

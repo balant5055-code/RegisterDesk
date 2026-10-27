@@ -12,7 +12,8 @@ import type { EmailProvider } from '@/lib/email/provider'
 import { getMetaProvider, isMetaConfigured } from '@/lib/whatsapp'
 import type { WhatsAppProvider } from '@/lib/whatsapp'
 import { NotificationChannel } from './channels'
-import type { EmailProviderName } from '@/lib/email/providerName'
+import { EMAIL_PROVIDER_NAMES, type EmailProviderName } from '@/lib/email/providerName'
+import { platformEmailProviderSnapshot } from '@/lib/email/platformProvider'
 
 // The engine's send path resolves ONLY the email channel through here, so this
 // function's return type stays EmailProvider — dispatch typing is unaffected.
@@ -49,7 +50,11 @@ export function resolveProvider(
  */
 export function isChannelConfigured(channel: NotificationChannel): boolean {
   switch (channel) {
-    case NotificationChannel.EMAIL:    return getEmailProvider() !== null
+    // RD-EMAIL-PROVIDER-04 — the SELECTED platform provider (snapshot); unknown yet ⇒ any configured.
+    case NotificationChannel.EMAIL: {
+      const platform = platformEmailProviderSnapshot()
+      return platform ? getEmailProvider(platform) !== null : EMAIL_PROVIDER_NAMES.some(n => getEmailProvider(n) !== null)
+    }
     // Sync configured-check (secrets presence) — decoupled from the now-async
     // provider factory so notification availability checks stay synchronous.
     case NotificationChannel.WHATSAPP: return isMetaConfigured()

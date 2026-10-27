@@ -17,6 +17,7 @@ import { licenceRegistrationBlock, LICENCE_INACTIVE } from '@/lib/licensing/lice
 import { buildQrValue }          from '@/lib/tickets/generate'
 import { enqueueWebhook }        from '@/lib/integrations/webhooks'
 import { whatsappConsentFields } from '@/lib/whatsapp/broadcastConsent'
+import { resolveEventWaiver, waiverRegistrationFields } from '@/lib/registrations/waiver'
 import { crmRecordRegistration } from '@/lib/crm/service'
 import { readSessionSnaps, applyReleaseWrites, applyRestoreWrites } from '@/lib/sessions/allocation'
 import { checkInBlockReason } from '@/lib/registrations/checkinEligibility'
@@ -68,6 +69,14 @@ export interface CreateRegistrationInput {
   // onto the registration for auditability.
   termsAccepted?: boolean
   termsVersion?:  string
+  // RD-WAIVER-01 — the attendee's waiver acceptance, validated by the calling route against the
+  // wording in force (lib/registrations/waiver.ts checkWaiverAcceptance). `enforceWaiver` marks a
+  // SELF-registration: the requirement is then re-checked inside the transaction against the
+  // transaction-read event, so wording changed between the route's check and this write is
+  // refused, never recorded as accepted. Walk-in / import set neither: they are stamped
+  // "required, not accepted" on a waiver event, never accepted on the attendee's behalf.
+  enforceWaiver?:     boolean
+  waiverAcceptance?:  { textHash: string; acceptedAt: string } | null
   // RD-COMMS-WA-CONSENT — the attendee's EXPLICIT opt-in to organizer WhatsApp broadcasts (the
   // unchecked-by-default box), validated server-side by the calling route. Only `true` records
   // consent; absent/false records nothing (= not eligible). Never inferred from anything else.
@@ -99,6 +108,15 @@ export class DuplicateRegistrationError extends Error {
   constructor(public readonly reason: 'DUPLICATE_EMAIL' | 'DUPLICATE_MOBILE') {
     super(reason)
     this.name = 'DuplicateRegistrationError'
+  }
+}
+
+// RD-WAIVER-01: thrown inside the transaction when a self-registration's waiver acceptance does
+// not match the waiver the event requires at write time.
+export class WaiverNotAcceptedError extends Error {
+  constructor(public readonly reason: 'WAIVER_NOT_ACCEPTED' | 'WAIVER_CHANGED') {
+    super(reason)
+    this.name = 'WaiverNotAcceptedError'
   }
 }
 
@@ -266,6 +284,12 @@ export async function createRegistration(
 
         const eventCapacity = deriveStoredEventCapacity(eventData)
 
+        // RD-WAIVER-01 · the requirement as the transaction sees the event.
+        const waiver = resolveEventWaiver(eventSnap.data())
+        if (input.enforceWaiver && waiver.required && input.waiverAcceptance?.textHash !== waiver.textHash) {
+          throw new WaiverNotAcceptedError(input.waiverAcceptance ? 'WAIVER_CHANGED' : 'WAIVER_NOT_ACCEPTED')
+        }
+
         // P1-E: Re-read pass capacity from the live, transaction-locked event doc.
         // input.passCapacity was captured before the transaction in submit/route.ts
         // and may be stale if the organizer edits the pass concurrently.
@@ -338,6 +362,9 @@ export async function createRegistration(
             ...(input.termsVersion ? { termsVersion: input.termsVersion } : {}),
           } : {}),
           ...whatsappConsentFields(input.whatsappBroadcastOptIn, input.attendee.phone),
+          // RD-WAIVER-01 · nothing for a non-waiver event; on a waiver event, accepted only with
+          // the attendee's validated acceptance — every other path is "required, not accepted".
+          ...waiverRegistrationFields(waiver, input.waiverAcceptance ?? null),
           ticketCode,
           ticket: {
             ticketId:      registrationId,

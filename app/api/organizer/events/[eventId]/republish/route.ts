@@ -91,7 +91,7 @@ export async function POST(req: NextRequest, { params }: Ctx): Promise<NextRespo
   }
 
   // ── Lifecycle transition: unpublished → pending_review (reuses the license) ─
-  const result = await applyLifecycleTransition(uid, eventId, 'republish')
+  const result = await applyLifecycleTransition(uid, eventId, 'republish', undefined, undefined, authz.callerUid)
   if (!result.success) {
     return NextResponse.json({ success: false, error: result.error }, { status: result.statusCode })
   }
@@ -109,7 +109,7 @@ export async function POST(req: NextRequest, { params }: Ctx): Promise<NextRespo
   // Schedule via after() (not a dangling void) so the email + organizer WhatsApp
   // complete after the response instead of being cut off when the route returns —
   // matches the publish/review sites (reviewNotifications header requirement).
-  after(() => sendEventReviewEmail({ organizerUid: uid, eventName, kind: 'resubmitted', eventId }))
+  after(() => sendEventReviewEmail({ organizerUid: uid, eventName, kind: 'resubmitted', eventId, occurrenceId: result.reviewEntryId }))
 
   return NextResponse.json(
     { success: true, lifecycleStatus: result.lifecycleStatus },

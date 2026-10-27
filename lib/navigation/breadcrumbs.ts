@@ -71,6 +71,14 @@ export function buildBreadcrumbs(input: BreadcrumbInput): Crumb[] {
 
   const crumbs: Crumb[] = [{ label: 'Overview', href: '/dashboard' }]
 
+  // ── Create Event: /dashboard/events/new[/…] ────────────────────────────────
+  // RD-WIZARD-01 · `new` is a route, not an event id. It used to match the workspace pattern
+  // below, so the wizard's trail named whichever event the selector held — an EXISTING event —
+  // while the organizer was creating a different one.
+  if (pathname === '/dashboard/events/new' || pathname.startsWith('/dashboard/events/new/')) {
+    return [...crumbs, { label: 'Events', href: '/dashboard/events' }, { label: 'New event', href: null }]
+  }
+
   // ── The event workspace: /dashboard/events/{id} ────────────────────────────
   const onEventWorkspace = /^\/dashboard\/events\/[^/]+$/.test(pathname)
   if (onEventWorkspace) {
@@ -184,6 +192,8 @@ export const LEAF_LABELS: Record<string, string> = {
   '/dashboard/settings/billing':        'Billing',
   '/dashboard/settings/integrations':   'Integrations',
   '/dashboard/settings/email-branding': 'Email Branding',
+  // RD-FEATURE-REQ-01 · reached from the top bar, not the sidebar, so it names itself here.
+  '/dashboard/feature-requests':        'Feature Requests',
   '/dashboard/race-operations/publish-results': 'Publish Results',
   '/dashboard/race-operations/finisher-badges': 'Finisher Badges',
   '/dashboard/race-operations/history':         'History',

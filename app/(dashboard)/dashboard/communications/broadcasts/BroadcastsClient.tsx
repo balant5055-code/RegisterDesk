@@ -20,6 +20,8 @@ import { renderBroadcastBody } from '@/lib/broadcasts/renderBody'
 import { emailShell } from '@/lib/email/templates/base'
 import { WHATSAPP_TEMPLATE_REGISTRY, isSendableMetaStatus, isOrganizerBroadcastTemplate } from '@/lib/whatsapp/registry'
 import type { WhatsAppTemplateType } from '@/lib/whatsapp/registry'
+import type { SendableTemplateView } from '@/lib/whatsappTemplates/types'
+import { renderPreview } from '@/lib/whatsappTemplates/validate'
 import type { EventListItem } from '@/app/api/organizer/events/route'
 import type { PostBroadcastResponse, GetBroadcastsResponse } from '@/app/api/organizer/broadcasts/route'
 import type { GetBroadcastStatsResponse, BroadcastWhatsAppStats } from '@/app/api/organizer/broadcasts/[campaignId]/stats/route'
@@ -29,9 +31,13 @@ import {
   Bold, Italic, Underline, Link2, List,
   ChevronDown, Loader2, Send, Mail, AlertCircle,
   CheckCircle2, Users, Eye, History, Plus, RefreshCw,
-  FlaskConical, XCircle, CheckCheck, Clock, MessageCircle, AlertTriangle,
+  FlaskConical, XCircle, CheckCheck, Clock, MessageCircle, AlertTriangle, ShieldCheck,
 } from 'lucide-react'
 import { cn } from '@/lib/utils/cn'
+import { useConfirm } from '@/components/ui/ConfirmDialog'
+import {
+  DEFAULT_DUPLICATE_PROTECTION, DUPLICATE_PROTECTION_COPY, resolveDuplicateToggle, type DuplicateChannel,
+} from '@/lib/broadcasts/duplicateProtection'
 import { increaseLimitHref, broadcastsHrefFor } from '@/lib/wallet/purchaseIntent'
 import { LICENSE_SERVICES_CTA } from '@/lib/communications/capacity'
 import { broadcastCapacityWarning, broadcastCapacityWarningText } from '@/lib/broadcasts/capacityWarning'
@@ -40,6 +46,15 @@ import { useFocusTrap } from '@/lib/hooks/useFocusTrap'
 import { EmptyState, PageHeader, buttonVariants } from '@/components/ui'
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+/** The browser's time-zone LABEL — what a datetime-local schedule is interpreted in. Display only:
+ *  the registration-date window is always resolved by the server. */
+function browserTimeZone(): string {
+  try {
+    const part = new Intl.DateTimeFormat(undefined, { timeZoneName: 'short' }).formatToParts(new Date()).find(x => x.type === 'timeZoneName')
+    return part?.value ? `your local time, ${part.value}` : 'your local time'
+  } catch { return 'your local time' }
+}
 
 const AUDIENCE_OPTIONS: { value: BroadcastAudience; label: string }[] = [
   { value: 'all',       label: 'All Registrations' },
@@ -86,6 +101,11 @@ function undatedNotice(n: number): string {
 // declined to make when its diagnostic failed. Silence here would read as reassurance.
 const UNDATED_UNKNOWN_NOTICE =
   'Unable to determine whether any registrations have no registration date. The recipient count may not cover everyone who registered.'
+
+// RD-BCAST-DUP-01 — one field style for every composer control: a calm white-first surface, a
+// stronger border on hover, the brand ring on focus, and an explicit disabled state.
+const FIELD = 'w-full rounded-xl border border-border bg-background px-3 py-2.5 text-[14px] text-foreground shadow-[0_1px_2px_rgb(15_23_42_/_0.04)] transition-colors hover:border-border-strong focus:border-primary/50 focus:outline-none focus:ring-2 focus:ring-primary/20 disabled:cursor-not-allowed disabled:opacity-60'
+const FIELD_SM = 'rounded-lg border border-border bg-background px-2.5 py-1.5 text-[13px] text-foreground transition-colors hover:border-border-strong focus:border-primary/50 focus:outline-none focus:ring-2 focus:ring-primary/20'
 
 const humanizeTemplateType = (t: string) =>
   t.toLowerCase().split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')
@@ -305,13 +325,31 @@ function ComposeTab({
   const [eventSlug,       setEventSlug]       = useState(initialEvent)
   const [audience,        setAudience]        = useState<BroadcastAudience>('confirmed')
   const [channel,         setChannel]         = useState<BroadcastChannelUI>('email')
-  const [dedupeEmails,    setDedupeEmails]    = useState(false)
-  const [dedupePhones,    setDedupePhones]    = useState(false)
+  // RD-BCAST-DUP-01 — a NEW broadcast starts protected on both channels (the composer never edits a
+  // stored campaign, so no saved preference is rewritten). Each flag is sent to the server, which
+  // applies it to the preview, the billed count and dispatch (immediate or scheduled).
+  const [dedupeEmails,    setDedupeEmails]    = useState(DEFAULT_DUPLICATE_PROTECTION.email)
+  const [dedupePhones,    setDedupePhones]    = useState(DEFAULT_DUPLICATE_PROTECTION.whatsapp)
+  const { confirm } = useConfirm()
+  const duplicateToggleBusy = useRef(false)
+  /** Turning protection OFF asks first; cancel / Escape / closing keeps it ON. One dialog at a time. */
+  const toggleDuplicateProtection = useCallback(async (c: DuplicateChannel, requested: boolean) => {
+    if (duplicateToggleBusy.current) return
+    duplicateToggleBusy.current = true
+    try {
+      const next = await resolveDuplicateToggle(c, c === 'email' ? dedupeEmails : dedupePhones, requested, confirm)
+      if (c === 'email') setDedupeEmails(next); else setDedupePhones(next)
+    } finally { duplicateToggleBusy.current = false }
+  }, [dedupeEmails, dedupePhones, confirm])
   const [subject,         setSubject]         = useState('')
   const [body,            setBody]            = useState('')
   const [waTemplate,      setWaTemplate]      = useState<WhatsAppTemplateType | ''>('')
   const [waLanguage,      setWaLanguage]      = useState('')
   const [waVars,          setWaVars]          = useState<Record<string, string>>({})
+  // RD-WA-TEMPLATES-01 — the workspace's OWN Meta-approved templates. Listing is advisory; the server
+  // re-checks eligibility (version, internal + Meta approval) when the campaign is created and sent.
+  const [waCustomId,      setWaCustomId]      = useState<string | null>(null)
+  const [customTemplates, setCustomTemplates] = useState<SendableTemplateView[]>([])
   const [previewTab,      setPreviewTab]      = useState<'edit' | 'preview'>('edit')
 
   const [countLoading,    setCountLoading]    = useState(false)
@@ -332,6 +370,9 @@ function ComposeTab({
   const [testLoading,     setTestLoading]     = useState(false)
   const [testMsg,         setTestMsg]         = useState<{ ok: boolean; msg: string } | null>(null)
   const [sendLoading,     setSendLoading]     = useState(false)
+  // RD-BCAST-IDEM — one Idempotency-Key per send ATTEMPT: a retry of the same campaign (double click,
+  // network error) reuses it, so the server creates — and sends — the campaign once.
+  const sendAttempt = useRef<{ key: string; sig: string } | null>(null)
   const [sendError,       setSendError]       = useState<string | null>(null)
   // RD-COMMS-P1 — set when the server says the event needs WhatsApp capacity: the ONE place to buy it.
   const [capacityHref,    setCapacityHref]    = useState<string | null>(null)
@@ -350,8 +391,29 @@ function ComposeTab({
   // WhatsApp template state derived from the shared registry.
   const waDef        = waTemplate ? WHATSAPP_TEMPLATE_REGISTRY[waTemplate] : null
   const waManualVars = waDef ? waDef.requiredVariables.filter(v => !WA_AUTO_VARS.has(v)) : []
+  const waCustom     = waCustomId ? customTemplates.find(t => t.id === waCustomId) ?? null : null
+
+  useEffect(() => {
+    if (channel !== 'whatsapp') return
+    let alive = true
+    void (async () => {
+      try {
+        const token = await auth.currentUser?.getIdToken()
+        const res = await fetch('/api/organizer/whatsapp-templates?sendable=1', { headers: token ? { Authorization: `Bearer ${token}` } : {}, cache: 'no-store' })
+        const json = await res.json().catch(() => ({})) as { templates?: SendableTemplateView[] }
+        if (alive && res.ok) setCustomTemplates(json.templates ?? [])
+      } catch { /* the RegisterDesk templates remain available */ }
+    })()
+    return () => { alive = false }
+  }, [channel])
+
+  function selectWaOption(value: string) {
+    if (value.startsWith('custom:')) { selectWaTemplate(''); setWaCustomId(value.slice(7)); return }
+    selectWaTemplate(value as WhatsAppTemplateType | '')
+  }
 
   function selectWaTemplate(t: WhatsAppTemplateType | '') {
+    setWaCustomId(null)
     setWaTemplate(t)
     setWaVars({})
     setWaLanguage(t ? WHATSAPP_TEMPLATE_REGISTRY[t].language : '')
@@ -448,11 +510,12 @@ function ComposeTab({
       const res  = await fetch('/api/organizer/broadcasts/test', {
         method:  'POST',
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-        body:    JSON.stringify({ subject: subject.trim(), html: body.trim() }),
+        body:    JSON.stringify({ subject: subject.trim(), html: body.trim(), eventSlug: eventSlug || undefined }),
       })
-      const data = await res.json() as { success: boolean; error?: string }
+      const data = await res.json() as { success: boolean; error?: string; provider?: string; to?: string }
+      // RD-BCAST-TEST — the provider ACCEPTED it; delivery is not confirmed at this point.
       setTestMsg(data.success
-        ? { ok: true,  msg: 'Test email sent to your account email.' }
+        ? { ok: true,  msg: `Test email accepted by ${data.provider ?? 'the email provider'} for ${data.to ?? 'your account email'} — check your inbox.` }
         : { ok: false, msg: data.error ?? 'Test failed.' },
       )
     } catch {
@@ -480,13 +543,17 @@ function ComposeTab({
         // instants and persists those, so a scheduled send cannot re-interpret 'Today'.
         registrationDate,
       }
-      const payload = channel === 'whatsapp'
+      const payload = channel === 'whatsapp' && waCustom
+        ? { ...common, channel: 'whatsapp', customTemplateId: waCustom.id, customTemplateVersion: waCustom.version, variables: waVars, dedupePhones }
+        : channel === 'whatsapp'
         ? { ...common, channel: 'whatsapp', templateType: waTemplate, languageCode: waLanguage || undefined, variables: waVars, dedupePhones }
         : { ...common, channel: 'email', subject: subject.trim(), html: body.trim(), dedupeEmails }
+      const sig = JSON.stringify(payload)
+      if (!sendAttempt.current || sendAttempt.current.sig !== sig) sendAttempt.current = { key: crypto.randomUUID(), sig }
       const res  = await fetch('/api/organizer/broadcasts', {
         method:  'POST',
-        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-        body:    JSON.stringify(payload),
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': sendAttempt.current.key },
+        body:    sig,
       })
       const data = await res.json() as PostBroadcastResponse
       if (!data.success) {
@@ -504,11 +571,12 @@ function ComposeTab({
         return
       }
       onSent(data.campaign)
+      sendAttempt.current = null
       // Reset form
       setEventSlug('')
       setAudience('confirmed')
-        setDedupeEmails(false)
-        setDedupePhones(false)
+      setDedupeEmails(DEFAULT_DUPLICATE_PROTECTION.email)
+      setDedupePhones(DEFAULT_DUPLICATE_PROTECTION.whatsapp)
       setSubject('')
       setBody('')
       selectWaTemplate('')
@@ -523,7 +591,9 @@ function ComposeTab({
   }
 
   const emailReady   = !!subject.trim() && !!body.trim()
-  const waReady      = !!waTemplate && waManualVars.every(v => (waVars[v] ?? '').trim().length > 0)
+  const waReady      = waCustom
+    ? waCustom.customVariables.every(v => (waVars[v.key] ?? '').trim().length > 0)
+    : !!waTemplate && waManualVars.every(v => (waVars[v] ?? '').trim().length > 0)
   const contentReady = channel === 'whatsapp' ? waReady : emailReady
   const capacityShort = channel === 'whatsapp' && capacity !== null && !capacity.sufficient
   // RD-BCAST-ESTIMATE-01 — ONE decision for the estimate line AND the Send button. WhatsApp needs a
@@ -562,7 +632,16 @@ function ComposeTab({
       <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_420px]">
 
         {/* ── Left: compose form ── */}
-        <div className="rounded-2xl border border-border bg-card">
+        <div className="overflow-hidden rounded-2xl border border-border bg-card shadow-[0_1px_3px_rgb(15_23_42_/_0.05)]">
+          <div className="flex items-center gap-3 border-b border-border px-5 py-4">
+            <span className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-[linear-gradient(135deg,#4f46e5_0%,#7c3aed_100%)] text-white shadow-[0_4px_12px_-4px_rgb(79_70_229_/_0.6)]" aria-hidden>
+              <Send className="size-4" />
+            </span>
+            <div className="min-w-0">
+              <h2 className="text-[15px] font-semibold text-foreground">New broadcast</h2>
+              <p className="text-[12.5px] text-muted-foreground">Email or WhatsApp to the attendees of one event.</p>
+            </div>
+          </div>
           <div className="space-y-5 p-5">
 
             {/* Event selector */}
@@ -579,7 +658,7 @@ function ComposeTab({
                   id="bc-event"
                   value={eventSlug}
                   onChange={e => setEventSlug(e.target.value)}
-                  className="w-full rounded-xl border border-border bg-background px-3 py-2.5 text-[14px] text-foreground focus:border-primary/50 focus:outline-none focus:ring-2 focus:ring-primary/20"
+                  className={FIELD}
                 >
                   <option value="">Select an event…</option>
                   {events.filter(e => e.slug).map(e => (
@@ -591,14 +670,16 @@ function ComposeTab({
 
             {/* Channel selector */}
             <div className="space-y-1.5">
-              <span className="block text-[13px] font-semibold text-foreground">Channel</span>
-              <div className="flex gap-1 rounded-xl border border-border bg-muted/30 p-1">
+              <span id="bc-channel-label" className="block text-[13px] font-semibold text-foreground">Channel</span>
+              <div role="radiogroup" aria-labelledby="bc-channel-label" className="flex gap-1 rounded-xl border border-border bg-muted/40 p-1">
                 {([['email', 'Email', Mail], ['whatsapp', 'WhatsApp', MessageCircle]] as const).map(([val, label, Icon]) => (
                   <button
-                    key={val} type="button" onClick={() => setChannel(val)}
+                    key={val} type="button" role="radio" aria-checked={channel === val} onClick={() => setChannel(val)}
                     className={cn(
-                      'flex flex-1 items-center justify-center gap-2 rounded-lg px-3 py-2 text-[13px] font-medium transition-all',
-                      channel === val ? 'bg-card shadow-sm text-foreground' : 'text-muted-foreground hover:text-foreground',
+                      'flex flex-1 items-center justify-center gap-2 rounded-lg px-3 py-2 text-[13px] font-medium transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/30',
+                      channel === val
+                        ? 'bg-[linear-gradient(135deg,#4f46e5_0%,#7c3aed_100%)] text-white shadow-[0_2px_8px_-2px_rgb(79_70_229_/_0.55)]'
+                        : 'text-muted-foreground hover:bg-card hover:text-foreground',
                     )}
                   >
                     <Icon className="size-3.5" /> {label}
@@ -617,7 +698,7 @@ function ComposeTab({
                   id="bc-audience"
                   value={audience}
                   onChange={e => setAudience(e.target.value as BroadcastAudience)}
-                  className="flex-1 rounded-xl border border-border bg-background px-3 py-2.5 text-[14px] text-foreground focus:border-primary/50 focus:outline-none focus:ring-2 focus:ring-primary/20"
+                  className={cn(FIELD, 'flex-1')}
                 >
                   {AUDIENCE_OPTIONS.map(o => (
                     <option key={o.value} value={o.value}>{o.label}</option>
@@ -631,12 +712,12 @@ function ComposeTab({
                 <div className={cn(
                   'shrink-0 flex items-center gap-1.5 rounded-xl px-3 py-2 text-[13px] font-semibold tabular-nums min-w-[90px]',
                   countError
-                    ? 'bg-amber-100 text-amber-800'
+                    ? 'bg-amber-500/10 text-amber-800 ring-1 ring-inset ring-amber-500/25 dark:text-amber-300'
                     : recipientCount === null
-                      ? 'bg-muted text-muted-foreground'
+                      ? 'bg-muted text-muted-foreground ring-1 ring-inset ring-border'
                       : recipientCount === 0
-                        ? 'bg-rose-100 text-rose-700'
-                        : 'bg-emerald-100 text-emerald-700',
+                        ? 'bg-rose-500/10 text-rose-700 ring-1 ring-inset ring-rose-500/25 dark:text-rose-300'
+                        : 'bg-emerald-500/10 text-emerald-700 ring-1 ring-inset ring-emerald-500/25 dark:text-emerald-300',
                 )}>
                   {countLoading
                     ? <Loader2 className="size-3.5 animate-spin" />
@@ -676,7 +757,7 @@ function ComposeTab({
                   id="bc-regdate"
                   value={dateType}
                   onChange={e => setDateType(e.target.value as RegistrationDateFilterType)}
-                  className="w-full rounded-xl border border-border bg-background px-3 py-2.5 text-[14px] text-foreground focus:border-primary/50 focus:outline-none focus:ring-2 focus:ring-primary/20"
+                  className={FIELD}
                 >
                   <option value="all">All registrations</option>
                   <option value="today">Today</option>
@@ -691,7 +772,7 @@ function ComposeTab({
                     aria-label="Registration date"
                     value={dateSingle}
                     onChange={e => setDateSingle(e.target.value)}
-                    className="w-full rounded-lg border border-border bg-background px-2.5 py-1.5 text-[13px] text-foreground focus:border-primary/50 focus:outline-none focus:ring-2 focus:ring-primary/20"
+                    className={cn(FIELD_SM, 'w-full')}
                   />
                 )}
 
@@ -702,7 +783,7 @@ function ComposeTab({
                       aria-label="From date"
                       value={dateFrom}
                       onChange={e => setDateFrom(e.target.value)}
-                      className="flex-1 rounded-lg border border-border bg-background px-2.5 py-1.5 text-[13px] text-foreground focus:border-primary/50 focus:outline-none focus:ring-2 focus:ring-primary/20"
+                      className={cn(FIELD_SM, 'flex-1 min-w-0')}
                     />
                     <span className="text-[12px] text-muted-foreground">to</span>
                     <input
@@ -710,7 +791,7 @@ function ComposeTab({
                       aria-label="To date"
                       value={dateTo}
                       onChange={e => setDateTo(e.target.value)}
-                      className="flex-1 rounded-lg border border-border bg-background px-2.5 py-1.5 text-[13px] text-foreground focus:border-primary/50 focus:outline-none focus:ring-2 focus:ring-primary/20"
+                      className={cn(FIELD_SM, 'flex-1 min-w-0')}
                     />
                   </div>
                 )}
@@ -770,62 +851,52 @@ function ComposeTab({
               </div>
 
               {/*
-                EMAIL ONLY. One address can hold several registrations — family or team
-                sign-ups, multiple passes — and the audience is one row per REGISTRATION, so
-                by default such a person is mailed once per registration. This collapses them
-                to one. Rendered only for email: WhatsApp targets phone numbers and is
-                deliberately untouched by this option. Toggling it re-runs the recipient count
-                so the number shown is the number that will actually be sent.
+                RD-BCAST-DUP-01 · Duplicate protection. The audience is one row per REGISTRATION, so a
+                person holding several registrations (family or team sign-ups, several passes) would get
+                one message per registration. Protection collapses them to one per normalized email
+                address (email) or canonical phone number (WhatsApp — the same normalisation applied
+                just before Meta). Only the setting for the selected channel is shown; the two are
+                independent and both are kept while switching channels. Toggling re-runs the recipient
+                count, so the number shown is the number sent — and, for WhatsApp, the number billed.
               */}
-              {channel === 'email' && (
-                <label className="mt-3 flex cursor-pointer items-start gap-2.5">
-                  <input
-                    type="checkbox"
-                    checked={dedupeEmails}
-                    onChange={e => setDedupeEmails(e.target.checked)}
-                    className="mt-0.5 size-4 shrink-0 rounded border-border text-primary focus:ring-2 focus:ring-primary/20"
-                  />
-                  <span className="min-w-0">
-                    <span className="block text-[13.5px] font-medium text-foreground">
-                      Ignore duplicate email IDs
-                    </span>
-                    <span className="block text-[12.5px] text-muted-foreground">
-                      Send at most one email per address, even if it appears on several registrations.
-                    </span>
-                  </span>
-                </label>
-              )}
-
-              {/*
-                WHATSAPP ONLY. One person can hold several registrations — family or team sign-ups,
-                multiple passes — and the audience is one row per REGISTRATION, so by default that
-                person is messaged once per registration. This collapses them to one.
-
-                Numbers are matched by their CANONICAL form, the same normalisation applied just
-                before the message is handed to Meta, so '+91 98765 43210', '09876543210' and
-                '9876543210' count as one recipient. Rendered only for WhatsApp: email targets
-                addresses and is deliberately untouched by this option. Toggling it re-runs the
-                recipient count so the number shown is the number that will actually be sent — and,
-                because WhatsApp is billed per recipient, the number that will be charged.
-              */}
-              {channel === 'whatsapp' && (
-                <label className="mt-3 flex cursor-pointer items-start gap-2.5">
-                  <input
-                    type="checkbox"
-                    checked={dedupePhones}
-                    onChange={e => setDedupePhones(e.target.checked)}
-                    className="mt-0.5 size-4 shrink-0 rounded border-border text-primary focus:ring-2 focus:ring-primary/20"
-                  />
-                  <span className="min-w-0">
-                    <span className="block text-[13.5px] font-medium text-foreground">
-                      Ignore duplicate WhatsApp numbers
-                    </span>
-                    <span className="block text-[12.5px] text-muted-foreground">
-                      Send at most one message per number, even if it appears on several registrations.
-                    </span>
-                  </span>
-                </label>
-              )}
+              <fieldset className="mt-4 rounded-xl border border-indigo-200/70 bg-indigo-50/40 p-3.5 dark:border-indigo-500/25 dark:bg-indigo-500/[0.06]">
+                <legend className="sr-only">Duplicate protection</legend>
+                <p className="flex items-center gap-1.5 text-[11.5px] font-semibold uppercase tracking-[0.06em] text-indigo-700 dark:text-indigo-300">
+                  <ShieldCheck className="size-3.5" aria-hidden /> Duplicate protection
+                </p>
+                {(['email', 'whatsapp'] as const).filter(c => c === channel).map(c => {
+                  const on = c === 'email' ? dedupeEmails : dedupePhones
+                  const copy = DUPLICATE_PROTECTION_COPY[c]
+                  return (
+                    <label key={c} className="mt-2.5 flex cursor-pointer items-start gap-3">
+                      <input
+                        type="checkbox"
+                        checked={on}
+                        onChange={e => void toggleDuplicateProtection(c, e.target.checked)}
+                        aria-describedby={`bc-dup-${c}-help`}
+                        className="mt-0.5 size-4 shrink-0 rounded border-border accent-indigo-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/30"
+                      />
+                      <span className="min-w-0">
+                        <span className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[13.5px] font-medium text-foreground">
+                          {copy.label}
+                          <span className="rounded-full bg-indigo-600/10 px-2 py-0.5 text-[10.5px] font-semibold uppercase tracking-wide text-indigo-700 ring-1 ring-inset ring-indigo-600/20 dark:bg-indigo-400/10 dark:text-indigo-300 dark:ring-indigo-400/25">
+                            Recommended
+                          </span>
+                        </span>
+                        <span id={`bc-dup-${c}-help`} className="mt-0.5 block text-[12.5px] leading-snug text-muted-foreground">
+                          {copy.description}
+                        </span>
+                        {!on && (
+                          <span className="mt-1.5 flex items-start gap-1.5 text-[12px] font-medium text-amber-700 dark:text-amber-400" role="status">
+                            <AlertTriangle className="mt-px size-3.5 shrink-0" aria-hidden />
+                            Protection is off — anyone on several registrations may receive more than one {c === 'email' ? 'email' : 'WhatsApp message'}.
+                          </span>
+                        )}
+                      </span>
+                    </label>
+                  )
+                })}
+              </fieldset>
             </div>
 
             {/* Email content (subject + HTML body) */}
@@ -876,15 +947,43 @@ function ComposeTab({
                 <div className="space-y-1.5">
                   <label htmlFor="wa-template" className="block text-[13px] font-semibold text-foreground">Approved WhatsApp Template</label>
                   <select
-                    id="wa-template" value={waTemplate}
-                    onChange={e => selectWaTemplate(e.target.value as WhatsAppTemplateType | '')}
-                    className="w-full rounded-xl border border-border bg-background px-3 py-2.5 text-[14px] text-foreground focus:border-primary/50 focus:outline-none focus:ring-2 focus:ring-primary/20"
+                    id="wa-template" value={waCustom ? `custom:${waCustom.id}` : waTemplate}
+                    onChange={e => selectWaOption(e.target.value)}
+                    className={FIELD}
                   >
                     <option value="">Select a template…</option>
-                    {WA_TEMPLATE_TYPES.map(t => <option key={t} value={t}>{humanizeTemplateType(t)}</option>)}
+                    {customTemplates.length > 0 ? (
+                      <>
+                        <optgroup label="Your templates">
+                          {customTemplates.map(t => <option key={t.id} value={`custom:${t.id}`}>{t.name} (v{t.version} · {t.language})</option>)}
+                        </optgroup>
+                        <optgroup label="RegisterDesk templates">
+                          {WA_TEMPLATE_TYPES.map(t => <option key={t} value={t}>{humanizeTemplateType(t)}</option>)}
+                        </optgroup>
+                      </>
+                    ) : WA_TEMPLATE_TYPES.map(t => <option key={t} value={t}>{humanizeTemplateType(t)}</option>)}
                   </select>
                   <p className="text-[12px] text-muted-foreground">WhatsApp requires a pre-approved Meta template — free-text messages are not allowed.</p>
                 </div>
+
+                {waCustom && (
+                  <div className="space-y-2">
+                    <span className="block text-[13px] font-semibold text-foreground">Variables</span>
+                    <p className="text-[12px] text-muted-foreground">Attendee and event details are filled automatically for each recipient.</p>
+                    {waCustom.customVariables.length === 0 ? (
+                      <p className="text-[12px] text-muted-foreground">No values to type — every value is filled automatically.</p>
+                    ) : waCustom.customVariables.map(v => (
+                      <div key={v.key} className="space-y-1">
+                        <label htmlFor={`wa-cv-${v.key}`} className="block text-[12px] font-medium text-muted-foreground">{v.label}</label>
+                        <input
+                          id={`wa-cv-${v.key}`} value={waVars[v.key] ?? ''} placeholder={v.example}
+                          onChange={e => setWaVars(prev => ({ ...prev, [v.key]: e.target.value }))}
+                          className="w-full rounded-xl border border-border bg-background px-3.5 py-2 text-[14px] text-foreground placeholder:text-muted-foreground/50 focus:border-primary/50 focus:outline-none focus:ring-2 focus:ring-primary/20"
+                        />
+                      </div>
+                    ))}
+                  </div>
+                )}
 
                 {waDef && (
                   <>
@@ -892,7 +991,7 @@ function ComposeTab({
                       <label htmlFor="wa-lang" className="block text-[13px] font-semibold text-foreground">Language</label>
                       <select
                         id="wa-lang" value={waLanguage} onChange={e => setWaLanguage(e.target.value)}
-                        className="w-full rounded-xl border border-border bg-background px-3 py-2.5 text-[14px] text-foreground focus:border-primary/50 focus:outline-none focus:ring-2 focus:ring-primary/20"
+                        className={FIELD}
                       >
                         {waDef.languages.map(l => <option key={l} value={l}>{l}</option>)}
                       </select>
@@ -927,16 +1026,17 @@ function ComposeTab({
           </div>
 
           {/* Schedule + estimated cost */}
-          <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-t border-border px-5 py-3">
-            <label className="flex items-center gap-2 text-[13px] text-muted-foreground">
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-t border-border bg-muted/25 px-5 py-3">
+            <label className="flex flex-wrap items-center gap-2 text-[13px] text-muted-foreground">
               <Clock className="size-3.5" aria-hidden />
               Schedule for
               <input
                 type="datetime-local"
                 value={scheduleFor}
                 onChange={e => setScheduleFor(e.target.value)}
-                className="rounded-lg border border-border bg-card px-2.5 py-1.5 text-[13px] text-foreground outline-none focus:ring-2 focus:ring-primary/30"
+                className={cn(FIELD_SM, 'bg-card')}
               />
+              <span className="text-[11.5px]" suppressHydrationWarning>({browserTimeZone()})</span>
               {scheduleFor && (
                 <button type="button" onClick={() => setScheduleFor('')} className="text-[12px] font-medium text-muted-foreground hover:text-foreground underline">
                   clear
@@ -1044,7 +1144,14 @@ function ComposeTab({
 
               <button
                 type="button"
-                onClick={() => setShowConfirm(true)}
+                onClick={() => {
+                  // RD-BCAST-SCHED — a past schedule is refused (the server refuses it too), never sent now.
+                  if (scheduleFor && new Date(scheduleFor).getTime() <= Date.now() + 60_000) {
+                    setSendError('That schedule time has already passed (or is less than a minute away). Choose a later time, or clear it to send now.')
+                    return
+                  }
+                  setShowConfirm(true)
+                }}
                 disabled={!canSend}
                 className={buttonVariants({ variant: 'primary', size: 'sm' })}
               >
@@ -1066,10 +1173,19 @@ function ComposeTab({
             <div className="overflow-hidden rounded-2xl border border-border bg-card">
               <div className="border-b border-border px-4 py-3">
                 <p className="text-[11.5px] font-semibold uppercase tracking-[0.07em] text-muted-foreground/60">WhatsApp Preview — sample data</p>
-                <p className="mt-0.5 truncate text-[13px] font-medium text-foreground">{waTemplate ? humanizeTemplateType(waTemplate) : 'Select a template'}</p>
+                <p className="mt-0.5 truncate text-[13px] font-medium text-foreground">{waCustom ? waCustom.name : waTemplate ? humanizeTemplateType(waTemplate) : 'Select a template'}</p>
               </div>
               <div className="bg-[#e5ddd5] p-4">
-                {waDef ? (
+                {waCustom ? (() => {
+                  const r = renderPreview({ content: waCustom.content, customVariables: waCustom.customVariables, examples: {} }, waVars)
+                  return (
+                    <div className="max-w-[88%] rounded-lg rounded-tl-none bg-white px-3 py-2.5 shadow-sm">
+                      {r.header && <p className="text-[13px] font-bold text-foreground">{r.header}</p>}
+                      <p className="whitespace-pre-wrap break-words text-[12.5px] text-foreground">{r.body}</p>
+                      {r.footer && <p className="mt-1 text-[11px] text-muted-foreground">{r.footer}</p>}
+                    </div>
+                  )
+                })() : waDef ? (
                   <div className="max-w-[88%] rounded-lg rounded-tl-none bg-white px-3 py-2.5 shadow-sm">
                     <p className="text-[12px] font-semibold text-emerald-700">{waDef.templateName}</p>
                     <p className="mt-0.5 text-[11px] text-muted-foreground">Language {waLanguage || waDef.language} · {waDef.category}</p>
@@ -1314,7 +1430,7 @@ function HistoryTab({
         <table className="w-full min-w-[680px]">
           <thead>
             <tr className="border-b border-border bg-muted/30">
-              {['Subject', 'Event', 'Audience', 'Recipients', 'Status', 'Sent At'].map(h => (
+              {['Subject', 'Event', 'Audience', 'Accepted / Recipients', 'Status', 'Sent At'].map(h => (
                 <th key={h} scope="col" className="py-3 pl-4 pr-3 text-left text-[12px] font-semibold uppercase tracking-[0.07em] text-muted-foreground">
                   {h}
                 </th>
@@ -1513,7 +1629,7 @@ export function BroadcastsClient() {
       {/* ── Page header ── */}
       <PageHeader
         title="Broadcasts"
-        subtitle="Send email campaigns to your event attendees."
+        subtitle="Send email and WhatsApp messages to your event attendees."
         breadcrumb={[
           { label: 'Communications', href: '/dashboard/communications' },
           { label: 'Broadcasts' },

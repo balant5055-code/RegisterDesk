@@ -25,6 +25,7 @@ import { FieldValue } from 'firebase-admin/firestore'
 import { adminDb } from '@/lib/firebase/admin'
 import { notificationEngine, NotificationType, NotificationChannel } from '@/lib/notifications'
 import { sendOrganizerWhatsApp } from '@/lib/notifications/organizerWhatsApp'
+import { runAfterResponse } from '@/lib/server/afterResponse'
 import { deriveStoredEventCapacity } from '@/lib/registrations/capacity'
 import {
   decideCapacityAlert, CAPACITY_ALERT_FIELD, type CapacityThreshold,
@@ -113,8 +114,9 @@ async function dispatch(claim: Claim): Promise<boolean> {
     }
 
     // WhatsApp runs alongside the email and cannot affect it. It self-skips when the Meta
-    // template is not approved or the organizer has no account mobile on file.
-    void sendOrganizerWhatsApp({
+    // template is not approved or the organizer has no account mobile on file. Scheduled with
+    // after() (lib/server/afterResponse) so the cron response does not freeze it mid-send.
+    await runAfterResponse(`capacity-alert-whatsapp ${claim.eventId}`, () => sendOrganizerWhatsApp({
       type:         NotificationType.CAPACITY_THRESHOLD,
       organizerUid: claim.organizerUid,
       variables: {
@@ -125,7 +127,7 @@ async function dispatch(claim: Claim): Promise<boolean> {
       },
       eventSlug: claim.eventId,
       eventName: claim.eventName,
-    })
+    }))
 
     return true
   } catch (err) {

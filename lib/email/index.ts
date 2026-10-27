@@ -1,7 +1,8 @@
 // Email provider factory — server-only.
 //
-// Amazon SES is the sole production email provider. Environment variables are
-// validated at startup by lib/env.ts:
+// Two transports: Amazon SES and Resend. WHICH one a send uses is the Super Admin's platform
+// choice (lib/email/platformProvider — default SES), unless an event carries an explicit override.
+// SES environment variables are validated at startup by lib/env.ts:
 //   AWS_REGION             SES region (production: ap-south-1). REQUIRED explicitly in a
 //                          production deployment — see ./sesRegion; us-east-1 is only the
 //                          local/test default when unset

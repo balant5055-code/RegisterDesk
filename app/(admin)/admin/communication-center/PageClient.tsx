@@ -6,13 +6,14 @@
 // computes NO communication status locally — every value comes from the resolver. SMS/Push
 // always render "Unavailable", never Active. Future sections are shown as disabled tabs.
 
-import { Fragment, useEffect, useState } from 'react'
+import { Fragment, useCallback, useEffect, useState } from 'react'
 import { auth } from '@/lib/firebase/auth'
 import {
   Loader2, Mail, MessageSquare, Phone, BellRing, ShieldCheck, ShieldAlert, ShieldQuestion,
   CheckCircle2, AlertTriangle, XCircle, Wrench,
 } from 'lucide-react'
 import { ErrorBanner } from '@/components/admin'
+import { useConfirm } from '@/components/ui/ConfirmDialog'
 import { SuppressionLookupTab } from '@/components/admin/communications/SuppressionLookupTab'
 import type { AdminCommunicationOverview, AdminProviderView } from '@/lib/communications/health/adminOverview'
 import type { HealthStatus } from '@/lib/communications/health/types'
@@ -231,8 +232,112 @@ function Row({ label, value }: { label: string; value: React.ReactNode }) {
   )
 }
 
+// RD-EMAIL-PROVIDER-04 — the ONE place the platform email provider is chosen.
+interface EmailProviderStatusView {
+  name: 'ses' | 'resend'; label: string; configured: boolean; fromEmail: string | null; fromName: string | null
+  missing: string[]; feedbackConfigured: boolean; region?: string
+}
+interface EmailProviderResponse {
+  selected: 'ses' | 'resend'; selectedUnavailable: boolean; providers: EmailProviderStatusView[]
+  eventOverrides: Record<'ses' | 'resend', number | null>
+}
+
+function EmailProviderPanel() {
+  const { confirm } = useConfirm()
+  const [data, setData] = useState<EmailProviderResponse | null>(null)
+  const [err, setErr] = useState<string | null>(null)
+  const [msg, setMsg] = useState<string | null>(null)
+  const [choice, setChoice] = useState<'ses' | 'resend' | ''>('')
+  const [reason, setReason] = useState('')
+  const [saving, setSaving] = useState(false)
+
+  const call = useCallback(async (init?: RequestInit) => {
+    const u = auth.currentUser
+    if (!u) throw new Error('Not authenticated')
+    const res = await fetch('/api/admin/communications/email-provider', { ...init, cache: 'no-store', headers: { authorization: `Bearer ${await u.getIdToken()}`, 'content-type': 'application/json' } })
+    const json = await res.json().catch(() => ({})) as EmailProviderResponse & { error?: string }
+    if (!res.ok) throw new Error(json.error ?? `Request failed (${res.status})`)
+    return json
+  }, [])
+  useEffect(() => {
+    let alive = true
+    void (async () => {
+      try { const d = await call(); if (alive) { setData(d); setChoice(d.selected) } }
+      catch (e) { if (alive) setErr(e instanceof Error ? e.message : 'Failed to load') }
+    })()
+    return () => { alive = false }
+  }, [call])
+
+  async function save() {
+    if (!data || !choice || choice === data.selected) return
+    const target = data.providers.find(p => p.name === choice)!
+    const ok = await confirm({
+      title: `Switch all platform email to ${target.label}?`, tone: 'danger', confirmLabel: `Use ${target.label}`,
+      message: `Every email RegisterDesk sends — sign-in codes, tickets, reminders, certificates, broadcasts and admin alerts — will go through ${target.label} within about a minute, except events with their own override. Nothing switches back automatically.`,
+    })
+    if (!ok) return
+    setSaving(true); setErr(null); setMsg(null)
+    try {
+      await call({ method: 'PUT', body: JSON.stringify({ provider: choice, reason }) })
+      const d = await call()
+      setData(d); setChoice(d.selected); setReason('')
+      setMsg(`${target.label} is now the platform email provider. The change is recorded in the audit log.`)
+    } catch (e) { setErr(e instanceof Error ? e.message : 'Could not save') } finally { setSaving(false) }
+  }
+
+  if (err && !data) return <ErrorBanner>{err}</ErrorBanner>
+  if (!data) return <div className="flex justify-center py-6"><Loader2 className="size-4 animate-spin text-muted-foreground" aria-label="Loading email provider" /></div>
+  const selected = data.providers.find(p => p.name === data.selected)!
+  return (
+    <section className="rounded-2xl border border-border bg-card p-5" aria-labelledby="email-provider-title">
+      <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h2 id="email-provider-title" className="text-[15px] font-bold text-foreground">Platform email provider</h2>
+          <p className="text-[12.5px] text-muted-foreground">One choice for all email. A single event can still be overridden from its Governance tab.</p>
+        </div>
+        <span className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-[12px] font-semibold ${data.selectedUnavailable ? STATUS.red.cls : STATUS.green.cls}`}>
+          {selected.label} · {data.selectedUnavailable ? 'not configured — email is not being sent' : 'configured'}
+        </span>
+      </div>
+      {err && <ErrorBanner>{err}</ErrorBanner>}
+      {msg && <p role="status" className="mb-3 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-[12.5px] text-emerald-800">{msg}</p>}
+      <div className="grid gap-3 sm:grid-cols-2" role="radiogroup" aria-label="Platform email provider">
+        {data.providers.map(p => (
+          <label key={p.name} className={`flex cursor-pointer flex-col gap-1 rounded-xl border p-3.5 text-[12.5px] ${choice === p.name ? 'border-primary/60 bg-primary/[0.04]' : 'border-border'} ${!p.configured ? 'cursor-not-allowed opacity-70' : ''}`}>
+            <span className="flex items-center gap-2">
+              <input type="radio" name="email-provider" value={p.name} checked={choice === p.name} disabled={!p.configured || saving} onChange={() => setChoice(p.name)} />
+              <span className="text-[13.5px] font-semibold text-foreground">{p.label}</span>
+              {data.selected === p.name && <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[11px] font-semibold text-primary">Current</span>}
+            </span>
+            <span className="text-muted-foreground">Configuration: <span className="font-medium text-foreground">{p.configured ? 'Credentials present (live connection not tested)' : `Missing ${p.missing.join(', ') || 'settings'}`}</span></span>
+            <span className="text-muted-foreground">Sender: <span className="font-medium text-foreground">{p.fromEmail ? `${p.fromName ?? ''} <${p.fromEmail}>` : '—'}</span></span>
+            {p.region && <span className="text-muted-foreground">Region: <span className="font-medium text-foreground">{p.region}</span></span>}
+            <span className="text-muted-foreground">Bounce / complaint feedback: <span className="font-medium text-foreground">{p.feedbackConfigured ? 'Webhook configured' : 'Not configured'}</span></span>
+            <span className="text-muted-foreground">Sender domain verification: <span className="font-medium text-foreground">check in the {p.label} console</span></span>
+            <span className="text-muted-foreground">Events overriding to {p.label}: <span className="font-medium text-foreground">{data.eventOverrides[p.name] ?? 'unknown'}</span></span>
+          </label>
+        ))}
+      </div>
+      {choice && choice !== data.selected && (
+        <div className="mt-3 space-y-2">
+          <label className="block text-[12.5px] font-medium text-foreground">Reason for the change <span className="font-normal text-muted-foreground">(recorded in the audit log)</span>
+            <textarea value={reason} onChange={e => setReason(e.target.value)} maxLength={500} rows={2} className="mt-1 w-full rounded-lg border border-border bg-background px-2.5 py-1.5 text-[13px] text-foreground" />
+          </label>
+          <div className="flex justify-end">
+            <button type="button" disabled={saving || reason.trim().length < 5} onClick={() => void save()} className="inline-flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 text-[12.5px] font-semibold text-primary-foreground disabled:opacity-50">
+              {saving && <Loader2 className="size-3.5 animate-spin" aria-hidden />} Switch platform provider
+            </button>
+          </div>
+        </div>
+      )}
+    </section>
+  )
+}
+
 function ProvidersTab({ providers }: { providers: AdminProviderView[] }) {
   return (
+    <div className="space-y-4">
+    <EmailProviderPanel />
     <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
       {providers.map(p => {
         const Icon = CH_ICON[p.id] ?? Mail
@@ -266,6 +371,7 @@ function ProvidersTab({ providers }: { providers: AdminProviderView[] }) {
           </div>
         )
       })}
+    </div>
     </div>
   )
 }

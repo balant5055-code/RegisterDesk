@@ -13,6 +13,10 @@
 //            webhook answers 500 so Meta redelivers (a redelivery of a message already
 //            stored is a no-op). Routing runs after the response, with a cron sweep as
 //            the recovery path.
+//          • message_template_status_update / template_category_update (RD-WA-TEMPLATES-01)
+//            — organizer template review outcomes. Applied once per event (de-duplicated, and an
+//            event older than the stored state never rolls it back); a write failure asks Meta to
+//            redeliver. Templates RegisterDesk did not create (WhatsApp Manager) are ignored.
 
 import { NextRequest, NextResponse, after } from 'next/server'
 import { createHmac, timingSafeEqual } from 'node:crypto'
@@ -24,6 +28,8 @@ import { reconcileWhatsAppAcceptance } from '@/lib/whatsapp/acceptanceRecovery'
 import { recordInboundMessages, routeInboundBatch } from '@/lib/whatsapp-inbox/persist'
 import { applyInboundOptCommands } from '@/lib/whatsapp/broadcastConsent'
 import { META_APP_SECRET } from '@/lib/env'
+import { parseTemplateWebhookEvents } from '@/lib/whatsappTemplates/webhook'
+import { applyTemplateWebhookEvent } from '@/lib/whatsappTemplates/service'
 
 export const dynamic     = 'force-dynamic'
 // Status updates are applied sequentially and inbound routing runs in after(), which
@@ -103,6 +109,18 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     }
   }
 
+  // RD-WA-TEMPLATES-01 — template review outcomes. Never logs content; counts only.
+  let templateFailed = 0
+  const templateEvents = parseError ? [] : parseTemplateWebhookEvents(payload)
+  if (templateEvents.length) {
+    const counts: Record<string, number> = {}
+    for (const e of templateEvents) {
+      try { const r = await applyTemplateWebhookEvent(e); counts[r] = (counts[r] ?? 0) + 1 }
+      catch (err) { templateFailed++; console.error('[webhooks/whatsapp] template event not recorded — asking Meta to redeliver:', err instanceof Error ? err.message : err) }
+    }
+    console.info(`[webhooks/whatsapp] template events · ${Object.entries(counts).map(([k, n]) => `${k}=${n}`).join(' ') || 'none'} failed=${templateFailed}`)
+  }
+
   // Valid delivery — process status events. Parsing + updates are best-effort and
   // fully idempotent/order-safe (applyWhatsAppDeliveryStatus), so we always ACK 200:
   // losing a status update only affects delivery reporting, and a non-200 would make
@@ -130,7 +148,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   // RD-CLOSE — an acceptance that could not be recorded is a billing fact still owed: ask Meta to
   // redeliver. Every step here is idempotent (the acceptance record is keyed by the wamid; status
   // updates only advance), so a redelivery costs nothing and loses nothing.
-  if (inboundFailed > 0 || reconcileFailed > 0) {
+  if (inboundFailed > 0 || reconcileFailed > 0 || templateFailed > 0) {
     return NextResponse.json({ received: false, processed }, { status: 500 })
   }
   return NextResponse.json({ received: true, processed })

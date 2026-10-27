@@ -60,6 +60,54 @@ function Toggle({ checked, onChange, label, desc }: { checked: boolean; onChange
   )
 }
 
+/** RD-WAIVER-01 — longest wording accepted; the publish gate enforces the same limit. */
+const WAIVER_TEXT_MAX = 10_000
+
+/**
+ * RD-WAIVER-01 · the participation waiver, for every sports format. The organizer writes the
+ * wording — there is no default text, and switching the waiver on with no wording blocks
+ * publishing (lib/events/eventValueRules). What attendees accept is exactly this text.
+ */
+function WaiverSection({ requireWaiver, waiverText, onChange }: {
+  requireWaiver: boolean
+  waiverText:    string
+  onChange:      (p: { requireWaiver?: boolean; waiverText?: string }) => void
+}) {
+  const empty = requireWaiver && !waiverText.trim()
+  return (
+    <SectionCard title="Participation Waiver">
+      <div className="flex flex-col gap-3">
+        <Toggle
+          checked={requireWaiver}
+          onChange={v => onChange({ requireWaiver: v })}
+          label="Require participants to accept a waiver"
+          desc="Attendees must read and accept your wording before they can complete registration."
+        />
+        {requireWaiver && (
+          <div>
+            <label className={labelCls} htmlFor="rd-waiver-text">Waiver wording <span className="text-red-500">*</span></label>
+            <textarea
+              id="rd-waiver-text"
+              className={cn(inputCls, 'h-40 resize-y py-2', empty && 'border-red-400')}
+              maxLength={WAIVER_TEXT_MAX}
+              value={waiverText}
+              onChange={e => onChange({ waiverText: e.target.value })}
+              placeholder="Paste the waiver participants must read and accept."
+              aria-invalid={empty || undefined}
+              aria-describedby="rd-waiver-hint"
+            />
+            <p id="rd-waiver-hint" className={cn('mt-1 text-[12px] leading-snug', empty ? 'font-medium text-red-500' : 'text-muted-foreground')}>
+              {empty
+                ? 'Add the waiver wording, or turn the waiver off. Your event cannot be published with an empty waiver.'
+                : 'Use your own wording — RegisterDesk does not provide legal text. Edits apply to registrations made after you save; each registration records the wording it accepted.'}
+            </p>
+          </div>
+        )}
+      </div>
+    </SectionCard>
+  )
+}
+
 function ModeCard({ label, desc, selected, onClick, disabled }: { label: string; desc?: string; selected: boolean; onClick: () => void; disabled?: boolean }) {
   return (
     <button type="button" aria-pressed={selected} onClick={onClick} disabled={disabled}
@@ -754,6 +802,7 @@ function Tab6Dynamic({
     const d = (form.typeDetails ?? makeBlankTypeDetails('sports_running')) as import('@/components/wizard/eventDetailsConfig').SportsRunningDetails
     const set = (p: Partial<typeof d>) => utd({ ...d, ...p })
     typeContent = (
+      <>
       <SectionCard title="Running Event Details">
         <div className="flex flex-col gap-3">
           <UrlField label="Route Map URL" value={d.routeMapUrl} onChange={v => set({ routeMapUrl: v })} />
@@ -769,6 +818,8 @@ function Tab6Dynamic({
           <UrlField label="Rules URL" value={d.rulesUrl} onChange={v => set({ rulesUrl: v })} />
         </div>
       </SectionCard>
+      <WaiverSection requireWaiver={d.requireWaiver === true} waiverText={d.waiverText ?? ''} onChange={set} />
+      </>
     )
   }
 
@@ -776,6 +827,7 @@ function Tab6Dynamic({
     const d = (form.typeDetails ?? makeBlankTypeDetails(t)) as import('@/components/wizard/eventDetailsConfig').TeamSportDetails
     const set = (p: Partial<typeof d>) => utd({ ...d, ...p })
     typeContent = (
+      <>
       <SectionCard title={t === 'sports_cycling' ? 'Cycling Details' : 'Match Details'}>
         <div className="flex flex-col gap-3">
           <div><label className={labelCls}>{t === 'sports_cycling' ? 'Route Info' : 'Ground / Court Info'}</label><textarea className={cn(inputCls,'h-16 resize-none py-2')} value={d.groundInfo} onChange={e => set({ groundInfo: e.target.value })} /></div>
@@ -789,6 +841,8 @@ function Tab6Dynamic({
           </div>
         </div>
       </SectionCard>
+      <WaiverSection requireWaiver={d.requireWaiver === true} waiverText={d.waiverText ?? ''} onChange={set} />
+      </>
     )
   }
 

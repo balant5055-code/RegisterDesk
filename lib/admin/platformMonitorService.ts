@@ -15,6 +15,7 @@ import { isFinancialAuditEntry } from '@/lib/admin/auditConstants'
 import { getAdminAnalytics } from '@/lib/analytics/adminAnalytics'
 import { getAdminCommunications } from '@/lib/analytics/adminCommunications'
 import { ENGINES } from '@/lib/admin/operationsCenterService'
+import { checkWabaSubscription, type WabaSubscriptionHealth } from '@/lib/whatsapp/subscriptionHealth'
 import type {
   PlatformOverview, PlatformKpis, ServiceHealth, ServiceLevel, PlatformSecurity,
   SecurityAuditEntry, HealthIndicator, HealthLevel,
@@ -151,13 +152,24 @@ export function licensingService(ls: { paidCount: number | null; revenuePaise: n
   return { key: 'licensing', label: 'Licensing', level: ls.paidCount > 0 ? 'healthy' : 'unavailable', detail: `${ls.paidCount} paid licenses`, metric: ls.paidCount > 0 ? `${ls.paidCount}` : null }
 }
 
+/** The WhatsApp webhook tile: is the app subscribed to the Business Account (Meta's delivery gate)? */
+export function whatsappWebhooksService(h: WabaSubscriptionHealth): ServiceHealth {
+  const base = { key: 'whatsapp_webhooks', label: 'WhatsApp webhooks' }
+  if (h.state === 'subscribed') return { ...base, level: 'healthy', detail: 'App subscribed to the WhatsApp Business Account', metric: 'Subscribed' }
+  if (h.state === 'missing') {
+    return { ...base, level: 'warning', detail: 'App not subscribed to the WhatsApp Business Account — Meta delivers no replies, delivery statuses or template reviews', metric: 'Not subscribed' }
+  }
+  return { ...base, level: 'unavailable', detail: h.reason === 'not_configured' ? 'WhatsApp is not configured' : 'Subscription check unavailable (Meta API)', metric: null }
+}
+
 export async function getPlatformServices(): Promise<ServiceHealth[]> {
-  const [analytics, comm, cert, print, report] = await Promise.all([
+  const [analytics, comm, cert, print, report, waba] = await Promise.all([
     getAdminAnalytics().catch(() => null),
     getAdminCommunications().catch(() => null),
     engineJobHealth('certificate'),
     engineJobHealth('print'),
     engineJobHealth('export'),
+    checkWabaSubscription(),
   ])
 
   const services: ServiceHealth[] = []
@@ -187,6 +199,7 @@ export async function getPlatformServices(): Promise<ServiceHealth[]> {
     services.push({ key: 'email', label: 'Email', level: emailTotal === 0 ? 'unavailable' : emailFailRate > 0.15 ? 'warning' : 'healthy', detail: `${m.sent + m.delivered} delivered · ${m.failed} failed`, metric: emailTotal === 0 ? null : `${emailTotal} messages` })
     services.push({ key: 'whatsapp', label: 'WhatsApp', level: m.whatsapp > 0 ? 'healthy' : 'unavailable', detail: m.whatsapp > 0 ? 'Active' : 'No WhatsApp activity', metric: m.whatsapp > 0 ? `${m.whatsapp} messages` : null })
   }
+  services.push(whatsappWebhooksService(waba))
 
   // Job-backed services
   services.push(jobService('certificates', 'Certificates', cert))

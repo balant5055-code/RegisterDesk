@@ -87,6 +87,10 @@ export interface BroadcastHealth {
   sending: number
   failed: number
   stuckSending: number
+  /** RD-NOTIFY-01 outbox — notification emails that gave up after every retry / ended without a
+   *  confirmed send (suppressed or no definite provider answer). Optional: older fixtures omit it. */
+  notificationEmailsFailed?: number
+  notificationEmailsUnconfirmed?: number
 }
 export interface CronHealthEntry {
   cronName: string
@@ -283,6 +287,9 @@ export async function getOperationsHealth(): Promise<OperationsHealth> {
         return started > 0 && now - started > STUCK_SENDING_MS
       }).length)
       .catch(() => -1),
+    // RD-NOTIFY-01 — terminal outbox outcomes (single-field equality: no composite index).
+    countOf(col('notificationOutbox').where('status', '==', 'failed')),
+    countOf(col('notificationOutbox').where('status', '==', 'unconfirmed')),
   ])
 
   // ── Cron metrics ──
@@ -363,7 +370,7 @@ export async function getOperationsHealth(): Promise<OperationsHealth> {
       settlementsHeldForRefundReview: fin[13], registrationRefundsNeedingReview: fin[14],
     },
     webhook: { pendingDeliveries: wh[0], failedDeliveries: wh[1], exhaustedRetries: wh[1], oldestPendingAt: wh[2] },
-    broadcast: { scheduled: bc[0], sending: bc[1], failed: bc[2], stuckSending: bc[3] },
+    broadcast: { scheduled: bc[0], sending: bc[1], failed: bc[2], stuckSending: bc[3], notificationEmailsFailed: bc[4], notificationEmailsUnconfirmed: bc[5] },
     dataIntegrity: {
       eventMismatches: integrity.event, passMismatches: integrity.pass,
       campaignMismatches: integrity.campaign, sessionMismatches: integrity.session,
@@ -421,6 +428,10 @@ export function evaluateAlerts(h: OperationsHealth): OperationalAlert[] {
   // (the recovery cron settles ended jobs; a stale one belongs to a job still running).
   if (h.financial.badgeSuspiciousUnreviewed > 0) push('badge_suspicious_payments', 'warning', `${h.financial.badgeSuspiciousUnreviewed} ID-badge payment(s) recorded as suspicious and not reviewed (License Center › ID badges).`)
   if (h.financial.badgeRoundsStale > 0) push('badge_rounds_stale', 'warning', `${h.financial.badgeRoundsStale} ID-badge billing round(s) open for more than 24 hours (License Center › ID badges › Generation reconciliation).`)
+  // RD-NOTIFY-01 — a notification email (Super Admin alert / organizer decision) that never reached
+  // its recipient. A warning: the in-app item exists; the outbox doc's lastError names who and why.
+  if ((h.broadcast.notificationEmailsFailed ?? 0) > 0) push('notification_emails_failed', 'warning', `${h.broadcast.notificationEmailsFailed} notification email(s) failed after every retry (notificationOutbox status 'failed' — see lastError).`)
+  if ((h.broadcast.notificationEmailsUnconfirmed ?? 0) > 0) push('notification_emails_unconfirmed', 'warning', `${h.broadcast.notificationEmailsUnconfirmed} notification email(s) were suppressed or got no definite answer from the email provider and were not re-sent (notificationOutbox status 'unconfirmed').`)
   if (h.webhook.failedDeliveries > 10) push('webhook_failures', 'warning', `${h.webhook.failedDeliveries} webhook deliveries have failed (>10).`)
   const failedCrons = h.crons.filter(c => c.failedWithin24h)
   if (failedCrons.length > 0) push('cron_failure', 'critical', `Cron failure in the last 24h: ${failedCrons.map(c => c.cronName).join(', ')}.`)

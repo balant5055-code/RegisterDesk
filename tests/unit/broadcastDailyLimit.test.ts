@@ -221,8 +221,9 @@ describe('the surrounding guarantees are unchanged', () => {
 
   it('G — the limit check still precedes campaign creation AND billing', async () => {
     // A refusal must cost nothing: no campaign document, no wallet movement, no provider call.
+    // (RD-BCAST-IDEM — the document is now created with create(), so a duplicate key cannot overwrite it.)
     const check  = route.indexOf('checkBroadcastLimits(uid, recipientCount)')
-    const create = route.indexOf('campaignRef.set(')
+    const create = route.indexOf('campaignRef.create(')
     const send   = route.indexOf('startBroadcastCampaign({')
     expect(check).toBeGreaterThan(-1)
     expect(check).toBeLessThan(create)
@@ -240,7 +241,7 @@ describe('the surrounding guarantees are unchanged', () => {
     // No channel filter ⇒ the same configuration governs both channels.
     expect(query).not.toContain("'channel'")
     expect(route).toContain('checkBroadcastLimits(uid, recipientCount)')
-    expect(route.indexOf('checkBroadcastLimits')).toBeLessThan(route.indexOf('campaignRef.set('))
+    expect(route.indexOf('checkBroadcastLimits')).toBeLessThan(route.indexOf('campaignRef.create('))
   })
 
   it('the UI shows the message, not the token', () => {

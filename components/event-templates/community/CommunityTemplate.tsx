@@ -53,7 +53,7 @@ export function CommunityTemplate(props: EventDetailProps) {
     venueType, physical, online, venueName, mapsLink, venueMaps,
     showVenueMap,
     organizer, showOrg, showSocial,
-    isFreeEvent, passes, availability,
+    isFreeEvent, attendeePaysFees, passes, availability,
     speakers, sponsors,
     showSpeakers, showSponsors, showAgenda, showGallery, showAttendeeCount,
     typeDetails,
@@ -292,6 +292,7 @@ export function CommunityTemplate(props: EventDetailProps) {
       <CommunityRegistration
         passes={passes}
         isFreeEvent={isFreeEvent}
+        attendeePaysFees={attendeePaysFees}
         slug={slug}
         availability={availability}
         eventMilestoneAlert={eventMilestoneAlert}

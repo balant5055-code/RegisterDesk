@@ -350,12 +350,15 @@ export async function loadRegistrationJoins(sourceIds: string[]): Promise<Map<st
 export async function loadFinanceCoverage(
   organizerUid: string,
   ledgerTransactions: number,
+  /** RD-FIN-SCOPE-01 — one event (an OWNED slug, already resolved by the caller); null = all events. */
+  eventSlug: string | null = null,
 ): Promise<FinanceCoverage> {
   const empty: FinanceCoverage = {
     ledgerTransactions, totalRegistrations: 0, freeRegistrations: 0, hasUnrepresentedFree: false,
   }
   try {
-    const regQ = adminDb.collection('registrations').where('organizerUid', '==', organizerUid)
+    const orgQ = adminDb.collection('registrations').where('organizerUid', '==', organizerUid)
+    const regQ = eventSlug ? orgQ.where('eventSlug', '==', eventSlug) : orgQ
     const [totalAgg, freeAgg] = await Promise.all([
       regQ.count().get(),
       regQ.where('amount', '==', 0).count().get(),

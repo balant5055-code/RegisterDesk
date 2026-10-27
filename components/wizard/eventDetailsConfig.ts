@@ -304,6 +304,10 @@ export interface TeamSportDetails {
   overs?:        number | null
   squadSize?:    number | null
   courtInfo?:    string
+  // RD-WAIVER-01 — the participation waiver, as on SportsRunningDetails. Every sports format
+  // can require one (lib/registrations/waiver.ts resolves it from these two fields).
+  requireWaiver: boolean
+  waiverText:    string
 }
 
 export interface WorkshopDetails {
@@ -845,7 +849,7 @@ export function makeBlankTypeDetails(sectionType: DynamicSectionType): TypeDetai
     case 'sports_cycling':
     case 'sports_team':
     case 'sports_generic':
-      return { groundInfo: '', matchFormat: '', teamSize: null, matchDuration: '', rulesUrl: '' }
+      return { groundInfo: '', matchFormat: '', teamSize: null, matchDuration: '', rulesUrl: '', requireWaiver: false, waiverText: '' }
     case 'workshop':
       return { trainers: [], prerequisites: '', learningOutcomes: [], materialsIncluded: '', softwareRequired: '', batchSize: null, hasCertificate: false }
     case 'meetup_founder':

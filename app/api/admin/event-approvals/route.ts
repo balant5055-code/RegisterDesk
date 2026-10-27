@@ -1,6 +1,11 @@
 // GET /api/admin/event-approvals — events awaiting approval, enriched for the
 // admin approval queue (admin only).
 //
+// RD-REVIEW-01 · ?status=changes_requested lists the events SENT BACK to their organizers
+// (awaiting a resubmission) instead; any other value is the default pending_review queue. Each
+// row carries the review cycle (resubmission count + time, the request it answers) so a
+// resubmitted event is distinguishable from a first submission at a glance.
+//
 // Returns pending_review events with organizer identity, license tier + activation payment,
 // banner, dates, and registration limit. Reads are batched (getAll) over the pending set —
 // never a per-event round trip. (The former "wallet (communication) payment" columns read
@@ -27,6 +32,19 @@ export interface PendingEventRow {
   submittedAt:        string | null
   eventDate:          string | null
   status:             string
+  /** RD-REVIEW-01 */
+  reviewStatus:       string | null
+  changesComment:     string | null   // the OPEN request (changes_requested rows only)
+  changesRequestedAt: string | null
+  resubmittedAt:      string | null
+  resubmissionCount:  number
+  /** The request a resubmission answered (kept when the open request is cleared). */
+  lastReviewRequest:  { kind: string; comment: string | null; at: string | null } | null
+}
+
+export type ApprovalQueueStatus = 'pending_review' | 'changes_requested'
+function parseQueueStatus(v: string | null): ApprovalQueueStatus {
+  return v === 'changes_requested' ? 'changes_requested' : 'pending_review'
 }
 
 function tsToISO(ts: unknown): string | null {
@@ -45,13 +63,24 @@ function str(obj: unknown, ...keys: string[]): unknown {
   return cur
 }
 
+function lastReviewRequestOf(v: unknown): PendingEventRow['lastReviewRequest'] {
+  if (!v || typeof v !== 'object') return null
+  const r = v as Record<string, unknown>
+  return {
+    kind:    typeof r.kind === 'string' ? r.kind : 'changes_requested',
+    comment: typeof r.comment === 'string' && r.comment.trim() ? r.comment : null,
+    at:      tsToISO(r.at),
+  }
+}
+
 export async function GET(req: NextRequest): Promise<NextResponse> {
   const adminUid = await resolveAdminUid(req.headers.get('authorization'))
   if (!adminUid) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
+  const queue = parseQueueStatus(req.nextUrl.searchParams.get('status'))
   const snap = await adminDb
     .collection('events')
-    .where('lifecycleStatus', '==', 'pending_review')
+    .where('lifecycleStatus', '==', queue)
     .limit(100)
     .get()
 
@@ -97,7 +126,13 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       submittedAt:         tsToISO(raw.publishedAt),
       eventDate:           typeof str(raw, 'eventDetails', 'schedule', 'startDate') === 'string'
         ? (str(raw, 'eventDetails', 'schedule', 'startDate') as string) : null,
-      status:              typeof raw.lifecycleStatus === 'string' ? raw.lifecycleStatus : 'pending_review',
+      status:              typeof raw.lifecycleStatus === 'string' ? raw.lifecycleStatus : queue,
+      reviewStatus:        typeof raw.reviewStatus === 'string' ? raw.reviewStatus : null,
+      changesComment:      typeof raw.changesComment === 'string' && raw.changesComment.trim() ? raw.changesComment : null,
+      changesRequestedAt:  tsToISO(raw.changesRequestedAt),
+      resubmittedAt:       tsToISO(raw.resubmittedAt),
+      resubmissionCount:   typeof raw.resubmissionCount === 'number' ? raw.resubmissionCount : 0,
+      lastReviewRequest:   lastReviewRequestOf(raw.lastReviewRequest),
     }
   })
 

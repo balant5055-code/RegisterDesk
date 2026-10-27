@@ -2,6 +2,9 @@
 #
 # Sweeps orphaned certificate claims (>15-min TTL). Age is re-checked inside the
 # delete transaction, so the sweep is idempotent and safe to run repeatedly.
+#
+# RD-WA-TEMPLATES-01 — also re-reads (GET only) organizer WhatsApp templates whose Meta outcome
+# is still open, in case a template webhook was missed. It never creates anything at Meta.
 name: Cron - Group C (cleanup, hourly)
 
 on:
@@ -32,5 +35,12 @@ jobs:
         continue-on-error: true
         run: |
           curl -sS -X POST "$CRON_BASE_URL/api/cron/certificate-claims" \
+            -H "Authorization: Bearer $CRON_SECRET" \
+            --retry 2 --retry-delay 5 --max-time 65 --fail-with-body
+
+      - name: whatsapp-templates (sync open Meta template statuses)
+        continue-on-error: true
+        run: |
+          curl -sS -X POST "$CRON_BASE_URL/api/cron/whatsapp-templates" \
             -H "Authorization: Bearer $CRON_SECRET" \
             --retry 2 --retry-delay 5 --max-time 65 --fail-with-body

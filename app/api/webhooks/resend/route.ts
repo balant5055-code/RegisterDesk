@@ -1,18 +1,18 @@
 // POST /api/webhooks/resend
 //
 // Processes Resend delivery webhooks (Svix-signed). Handles:
-//   • email.bounced / email.complained → mark the matching email log(s) failed
-//     and add the recipient to the sending organizer's suppression list.
+//   • email.bounced / email.complained → suppress the address PLATFORM-WIDE (like SES), add it to
+//     the sending organizer's list, and mark a bounced log failed (a complaint was delivered).
 //   • email.delivered                  → advance the matching log(s) to delivered.
 //
 // Security: the Svix signature is verified against RESEND_WEBHOOK_SECRET. When the
 // secret is unset, the route fails closed (401) — it never processes unsigned data.
 
 import { NextRequest, NextResponse } from 'next/server'
-import crypto from 'crypto'
 import { adminDb }                   from '@/lib/firebase/admin'
 import { updateEmailLog }            from '@/lib/email-logs/write'
-import { addToSuppressionList }      from '@/lib/firebase/firestore/emailSuppressionList'
+import { addToSuppressionList, suppressEmailPlatformWide } from '@/lib/firebase/firestore/emailSuppressionList'
+import { verifySvix }                from '@/lib/email/svix'
 import { RESEND_WEBHOOK_SECRET }     from '@/lib/env'
 
 export const dynamic     = 'force-dynamic'
@@ -20,28 +20,7 @@ export const maxDuration = 30
 
 const LOG_QUERY_LIMIT = 50
 
-// ─── Svix signature verification (no SDK) ─────────────────────────────────────
-// Signed content = `${svix-id}.${svix-timestamp}.${rawBody}`, HMAC-SHA256 keyed
-// by the base64-decoded secret (after the `whsec_` prefix), base64-compared
-// (timing-safe) against each `v1,<sig>` entry in the svix-signature header.
-function verifySvix(rawBody: string, headers: Headers, secret: string): boolean {
-  const id   = headers.get('svix-id')
-  const ts   = headers.get('svix-timestamp')
-  const sigs = headers.get('svix-signature')
-  if (!id || !ts || !sigs) return false
-
-  const key = Buffer.from(secret.replace(/^whsec_/, ''), 'base64')
-  const expected = crypto.createHmac('sha256', key).update(`${id}.${ts}.${rawBody}`).digest()
-
-  for (const part of sigs.split(' ')) {
-    const comma = part.indexOf(',')
-    const value = comma >= 0 ? part.slice(comma + 1) : part
-    let actual: Buffer
-    try { actual = Buffer.from(value, 'base64') } catch { continue }
-    if (actual.length === expected.length && crypto.timingSafeEqual(actual, expected)) return true
-  }
-  return false
-}
+// Svix signature + replay-window verification lives in lib/email/svix.ts.
 
 interface ResendEvent {
   type?: string
@@ -109,8 +88,18 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
   if (type === 'email.bounced' || type === 'email.complained') {
     const reason = type === 'email.bounced' ? 'bounce' : 'complaint'
+    // RD-RESEND-WEBHOOK — parity with the SES webhook: a hard bounce or a complaint suppresses the
+    // address PLATFORM-WIDE (the provider gate checks that scope for every send), whether or not a
+    // log matched. It used to suppress only for the one organizer whose log matched, so an address
+    // that bounced on Resend kept receiving every other mail — the reputation damage this prevents.
+    for (const address of recipients.slice(0, 50)) {
+      await suppressEmailPlatformWide(address, reason, { ...(messageId ? { providerMessageId: messageId } : {}) })
+        .catch(err => console.error('[resend-webhook] platform suppression failed:', err instanceof Error ? err.message : err))
+    }
     for (const [logId, d] of matched) {
-      await updateEmailLog(logId, 'failed', { error: reason })
+      // A complaint means the mail WAS delivered (the recipient marked it as spam): recorded, not "Failed".
+      if (reason === 'bounce') await updateEmailLog(logId, 'failed', { error: reason })
+      else await col.doc(logId).update({ lastProviderEvent: 'complaint' }).catch(() => { /* best-effort */ })
       if (d.recipientEmail && d.organizerUid) {
         await addToSuppressionList(d.recipientEmail, d.organizerUid, reason).catch(() => { /* best-effort */ })
       }

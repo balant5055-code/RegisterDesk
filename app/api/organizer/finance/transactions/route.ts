@@ -3,11 +3,17 @@
 //   filter  = all | tickets | donations | refunds  (default: all)
 //   limit   = 1–100                                (default: 50)
 //   cursor  = platformTransactions document ID     (for next-page)
+//   eventId = the Event Selector's draft id         (RD-FIN-SCOPE-01; absent / '__all__' = all events)
 //
 // Composite indexes required in Firestore:
 //   platformTransactions: (organizerUid ASC, paidAt DESC)
 //   platformTransactions: (organizerUid ASC, category ASC, paidAt DESC)
 //   platformTransactions: (organizerUid ASC, status ASC,   paidAt DESC)
+//
+// RD-FIN-SCOPE-01 — ONE event: equality filters only (organizerUid, entityId[, category|status]),
+// which Firestore serves by merging single-field indexes — NO new composite index. The event's rows
+// are read up to EVENT_LEDGER_SCAN_CAP, ordered by paidAt in memory and paged by document id; past
+// the cap the response says `truncated` rather than silently dropping rows.
 
 import { NextRequest, NextResponse }        from 'next/server'
 import { authorizeWorkspace }               from '@/lib/team/workspace'
@@ -18,6 +24,10 @@ import {
   type FinanceCoverage,
 } from '@/lib/finance/financeService'
 import type { PlatformTransactionDocument } from '@/lib/fees/types'
+import { resolveFinanceEventScope, financeScopeRefusal } from '@/lib/finance/eventScope'
+
+/** RD-FIN-SCOPE-01 — the most rows one event's ledger page reads (an event has far fewer). */
+const EVENT_LEDGER_SCAN_CAP = 3000   // not exported: a route module may export only handlers + config
 
 /**
  * RD-FINANCE-P1 — the wire shape.
@@ -87,6 +97,11 @@ export interface FinanceTransactionsResponse {
    * here. Surfaced rather than hidden; free rows are never fabricated.
    */
   coverage:     FinanceCoverage
+  /**
+   * RD-FIN-SCOPE-01 — what this page is about. `eventSlug` null = every event of the workspace.
+   * `truncated`: an event with more than EVENT_LEDGER_SCAN_CAP rows lists only the newest of them.
+   */
+  scope?:       { eventId: string | null; eventSlug: string | null; truncated: boolean }
 }
 
 function tsToISO(ts: unknown): string | null {
@@ -106,27 +121,53 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   const limit  = Math.min(100, Math.max(1, parseInt(searchParams.get('limit') ?? '50', 10)))
   const cursor = searchParams.get('cursor') ?? ''
 
+  // RD-FIN-SCOPE-01 — the Event Selector's event, resolved and ownership-checked on the server.
+  // An unknown or foreign id is refused; it is never widened to "all events".
+  const eventScope = await resolveFinanceEventScope(uid, searchParams.get('eventId'))
+  const refused = financeScopeRefusal(eventScope)
+  if (refused) return refused
+  const eventSlug = eventScope.kind === 'event' ? eventScope.slug : null
+
   const baseQ = adminDb
     .collection('platformTransactions')
     .where('organizerUid', '==', uid)
+  const scopedQ = eventSlug ? baseQ.where('entityId', '==', eventSlug) : baseQ
 
   const filteredQ =
-    filter === 'tickets'   ? baseQ.where('category', '==', 'ticketed') :
-    filter === 'donations' ? baseQ.where('category', '==', 'donation') :
-    filter === 'refunds'   ? baseQ.where('status',   '==', 'refunded') :
-    baseQ
+    filter === 'tickets'   ? scopedQ.where('category', '==', 'ticketed') :
+    filter === 'donations' ? scopedQ.where('category', '==', 'donation') :
+    filter === 'refunds'   ? scopedQ.where('status',   '==', 'refunded') :
+    scopedQ
 
-  let q = filteredQ.orderBy('paidAt', 'desc').limit(limit + 1)
+  let pageDocs: FirebaseFirestore.QueryDocumentSnapshot[]
+  let hasMore: boolean
+  let nextCursor: string | null
+  let truncated = false
 
-  if (cursor) {
-    const cursorSnap = await adminDb.doc(`platformTransactions/${cursor}`).get()
-    if (cursorSnap.exists) q = q.startAfter(cursorSnap)
+  if (eventSlug) {
+    // Equality-only read (no orderBy ⇒ no composite index), newest first in memory, paged by id.
+    const all = await filteredQ.limit(EVENT_LEDGER_SCAN_CAP + 1).get()
+    truncated = all.docs.length > EVENT_LEDGER_SCAN_CAP
+    const ms = (d: FirebaseFirestore.QueryDocumentSnapshot) => {
+      const v = d.get('paidAt') as { toMillis?: () => number } | undefined
+      return typeof v?.toMillis === 'function' ? v.toMillis() : 0
+    }
+    const sorted = all.docs.slice(0, EVENT_LEDGER_SCAN_CAP).sort((a, b) => ms(b) - ms(a) || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0))
+    const start = cursor ? sorted.findIndex(d => d.id === cursor) + 1 : 0
+    pageDocs   = sorted.slice(start, start + limit)
+    hasMore    = start + limit < sorted.length
+    nextCursor = hasMore ? (pageDocs[pageDocs.length - 1]?.id ?? null) : null
+  } else {
+    let q = filteredQ.orderBy('paidAt', 'desc').limit(limit + 1)
+    if (cursor) {
+      const cursorSnap = await adminDb.doc(`platformTransactions/${cursor}`).get()
+      if (cursorSnap.exists) q = q.startAfter(cursorSnap)
+    }
+    const snap = await q.get()
+    hasMore    = snap.docs.length > limit
+    pageDocs   = hasMore ? snap.docs.slice(0, limit) : snap.docs
+    nextCursor = hasMore ? (pageDocs[pageDocs.length - 1]?.id ?? null) : null
   }
-
-  const snap      = await q.get()
-  const hasMore   = snap.docs.length > limit
-  const pageDocs  = hasMore ? snap.docs.slice(0, limit) : snap.docs
-  const nextCursor = hasMore ? (pageDocs[pageDocs.length - 1]?.id ?? null) : null
 
   const docs = pageDocs.map(doc => ({ id: doc.id, d: doc.data() as PlatformTransactionDocument }))
 
@@ -188,8 +229,11 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     }
   })
 
-  const coverage = await loadFinanceCoverage(uid, transactions.length)
+  const coverage = await loadFinanceCoverage(uid, transactions.length, eventSlug)
 
-  const response: FinanceTransactionsResponse = { transactions, hasMore, nextCursor, coverage }
+  const response: FinanceTransactionsResponse = {
+    transactions, hasMore, nextCursor, coverage,
+    scope: { eventId: eventScope.kind === 'event' ? eventScope.draftId : null, eventSlug, truncated },
+  }
   return NextResponse.json(response)
 }

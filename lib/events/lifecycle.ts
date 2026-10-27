@@ -8,6 +8,10 @@ import type { EventLifecycleStatus, LifecycleAction, EventReviewMeta } from '@/t
 import { targetStatus, isValidTransition, deriveLifecycleStatus } from './lifecycleStateMachine'
 import { liveEventBelongsTo } from './liveEventRef'
 import { buildLiveContentSync } from './editing/liveContentSync'
+import { stageOutboxMessage, scheduleOutboxDelivery, istNow } from '@/lib/notifications/outbox'
+import { eventReviewAlert } from '@/lib/notifications/actionAlerts'
+import { resolveOrganizerEmailIdentity } from '@/lib/organizer/emailIdentity'
+import { REVIEW_HISTORY, buildReviewHistoryEntry, isReviewHistoryAction, reviewActorRole, revisedSections } from './reviewHistory'
 
 // Re-export the pure state machine so existing importers of this module are
 // unaffected (the machine now lives in ./lifecycleStateMachine for testability).
@@ -21,6 +25,8 @@ export interface TransitionResult {
   lifecycleStatus?: EventLifecycleStatus
   error?:           string
   statusCode:       number
+  /** RD-REVIEW-01 — id of the reviewHistory entry this transition appended (review actions only). */
+  reviewEntryId?:   string
 }
 
 export async function applyLifecycleTransition(
@@ -147,15 +153,19 @@ export async function applyLifecycleTransition(
     draftUpdate.changesRequestedAt = now
     draftUpdate.reviewStatus       = 'changes_requested'
     draftUpdate.changesComment     = review?.changesComment ?? ''
+    draftUpdate.changesRequestedBy = actorUid ?? null
     eventUpdate.changesRequestedAt = now
     eventUpdate.reviewStatus       = 'changes_requested'
     eventUpdate.changesComment     = review?.changesComment ?? ''
+    eventUpdate.changesRequestedBy = actorUid ?? null
   }
   if (action === 'resubmit') {
     // Organizer resubmits after edits: back to review, clearing prior review notes.
     draftUpdate.status            = 'pending_review'
     draftUpdate.publishedAt       = now   // submit time for the new review cycle
     draftUpdate.resubmittedAt     = now
+    draftUpdate.resubmittedBy     = actorUid ?? uid
+    draftUpdate.resubmissionCount = FieldValue.increment(1)
     draftUpdate.reviewStatus      = null
     draftUpdate.rejectionReason   = null
     draftUpdate.rejectionCategory = null
@@ -163,6 +173,8 @@ export async function applyLifecycleTransition(
     draftUpdate.changesComment    = null
     eventUpdate.publishedAt       = now
     eventUpdate.resubmittedAt     = now
+    eventUpdate.resubmittedBy     = actorUid ?? uid
+    eventUpdate.resubmissionCount = FieldValue.increment(1)
     eventUpdate.reviewStatus      = null
     eventUpdate.rejectionReason   = null
     eventUpdate.rejectionCategory = null
@@ -178,6 +190,7 @@ export async function applyLifecycleTransition(
     draftUpdate.status            = 'pending_review'
     draftUpdate.publishedAt       = now   // submit time for the new review cycle
     draftUpdate.republishedAt     = now
+    draftUpdate.republishedBy     = actorUid ?? uid
     draftUpdate.reviewStatus      = null
     draftUpdate.rejectionReason   = null
     draftUpdate.rejectionCategory = null
@@ -185,6 +198,7 @@ export async function applyLifecycleTransition(
     draftUpdate.changesComment    = null
     eventUpdate.publishedAt       = now
     eventUpdate.republishedAt     = now
+    eventUpdate.republishedBy     = actorUid ?? uid
     eventUpdate.reviewStatus      = null
     eventUpdate.rejectionReason   = null
     eventUpdate.rejectionCategory = null
@@ -212,6 +226,22 @@ export async function applyLifecycleTransition(
   const syncsContent = action === 'resubmit' || action === 'republish'
   const counterRef   = syncsContent && slug ? adminDb.collection('registrationCounters').doc(slug) : null
   let contentChanged: string[] = []
+  // RD-REVIEW-01 — every review transition appends one history entry, staged in the same
+  // transaction, so an entry exists if and only if the transition persisted. The id is fixed
+  // before the transaction, so a retried attempt rewrites the same entry, never a second one.
+  const historyRef = isReviewHistoryAction(action) && eventRef ? eventRef.collection(REVIEW_HISTORY).doc() : null
+  let reviewEntryId: string | undefined
+  let contentRevised: string[] = []
+  // RD-NOTIFY-01 — sending an event BACK to review alerts the Super Admins, staged in the same
+  // transaction as the transition (no alert for a transition that did not persist). Built once,
+  // before the transaction, so a retried transaction keeps one id.
+  const reviewAlert = action === 'resubmit' || action === 'republish'
+    ? await resolveOrganizerEmailIdentity(uid).catch(() => ({ name: '', email: '' })).then(o => eventReviewAlert({
+        submission: action === 'resubmit' ? 'resubmitted' : 'republished', draftId: eventId, slug,
+        eventName: typeof (details.info as { name?: unknown } | undefined)?.name === 'string' ? String((details.info as { name: string }).name).trim() : '',
+        organizer: { uid, name: o.name, email: o.email }, at: new Date(), when: istNow(),
+      }))
+    : null
   const txnFailure = await adminDb.runTransaction(async (txn): Promise<TransitionResult | null> => {
     const freshDraft = await txn.get(draftRef)
     if (!freshDraft.exists) {
@@ -253,12 +283,43 @@ export async function applyLifecycleTransition(
       if (!sync.ok) return { success: false, error: sync.message, statusCode: sync.status }
       contentUpdate  = sync.update
       contentChanged = sync.changed
+      contentRevised = revisedSections(eventData, sync.update)
+    }
+    const fresh = freshDraft.data() as Record<string, unknown>
+    if (action === 'resubmit') {
+      // The request being answered is cleared above, so keep it as `lastReviewRequest` — what the
+      // Super Admin compares the resubmission against. Read from the transactional snapshot.
+      const rejected = fresh.reviewStatus === 'rejected'
+      const lastReviewRequest = {
+        kind:    rejected ? 'rejected' : 'changes_requested',
+        comment: (rejected ? fresh.rejectionReason : fresh.changesComment) ?? null,
+        at:      (rejected ? fresh.rejectedAt : fresh.changesRequestedAt) ?? null,
+      }
+      draftUpdate.lastReviewRequest = lastReviewRequest
+      eventUpdate.lastReviewRequest = lastReviewRequest
+    }
+    if (historyRef && eventExists && isReviewHistoryAction(action)) {
+      txn.set(historyRef, {
+        ...buildReviewHistoryEntry({
+          // An admin decision is attributed only to the admin the route names — never defaulted to
+          // the organizer. Only an organizer action may fall back to the workspace owner.
+          action, fromStatus: freshStatus, toStatus: newStatus,
+          actorUid: actorUid ?? (reviewActorRole(action) === 'organizer' ? uid : null),
+          comment: review?.changesComment, reason: review?.rejectionReason,
+          category: review?.rejectionCategory, notes: review?.rejectionNotes,
+          changedFields: contentChanged, revisedSections: contentRevised,
+        }),
+        at: FieldValue.serverTimestamp(),
+      })
+      reviewEntryId = historyRef.id
     }
     txn.update(draftRef, draftUpdate)
     if (eventRef && eventExists) txn.update(eventRef, { ...contentUpdate, ...eventUpdate })
+    if (reviewAlert) stageOutboxMessage(txn, reviewAlert)
     return null   // success — writes staged for commit
   })
   if (txnFailure) return txnFailure   // a concurrent change / precondition failed the transition
+  if (reviewAlert) scheduleOutboxDelivery(reviewAlert.id)
 
   // Schedule / venue changes carried by the copy get the same change-log entry Save Changes
   // writes (fire-and-forget; never fails the transition).
@@ -285,5 +346,5 @@ export async function applyLifecycleTransition(
     }).catch(() => { /* best-effort audit */ })
   }
 
-  return { success: true, lifecycleStatus: newStatus, statusCode: 200 }
+  return { success: true, lifecycleStatus: newStatus, statusCode: 200, reviewEntryId }
 }

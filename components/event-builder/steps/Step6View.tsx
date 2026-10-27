@@ -94,7 +94,8 @@ export function Step6View({ currentStep, completedValues, onNext, onBack, onSave
       <WizardFooter
         onBack={onBack}
         onSaveDraft={() => onSaveDraft?.(form)}
-        onNext={() => onNext('Event Details', form)}
+        // RD-WIZARD-01 · the stepper's completed label names the event instead of repeating the title.
+        onNext={() => onNext(form.info?.name?.trim().slice(0, 60) || 'Event Details', form)}
         // RD-CE-FIX M7 — blockers block (warnings only warn): the step health panel names what to fix.
         isNextDisabled={calcStepHealth(form).blockers.length > 0}
         stepContext={(() => {

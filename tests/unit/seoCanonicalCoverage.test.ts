@@ -232,8 +232,12 @@ describe('RD-SEO-03 · admin event preview cannot be indexed', () => {
     }
   })
 
-  it('the queue only ever lists pending_review, which is NOT publicly visible', () => {
-    expect(code(read(APPROVALS_API))).toContain("where('lifecycleStatus', '==', 'pending_review')")
+  it('the queue only ever lists pending_review or changes_requested, neither publicly visible', () => {
+    // RD-REVIEW-01 added the changes_requested queue. The status is still chosen from exactly
+    // these two values — any other ?status falls back to pending_review — never from the client.
+    const api = code(read(APPROVALS_API))
+    expect(api).toContain("where('lifecycleStatus', '==', queue)")
+    expect(api).toContain("return v === 'changes_requested' ? 'changes_requested' : 'pending_review'")
     // The allow-list decides, and it does not contain that status — so the "Preview" link
     // 404s today. Asserted on the allow-list itself, not on a copy of it.
     const vis = code(read(VISIBILITY))

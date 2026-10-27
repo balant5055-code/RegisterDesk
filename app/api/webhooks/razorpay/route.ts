@@ -61,6 +61,18 @@ import { activateAddonOrder, holdLicenceInactiveAddon, ADDON_LICENCE_INACTIVE } 
 import { settleBadgePayment } from '@/lib/licensing/printBadgePurchase/settle'
 import { releaseRegistrationSessions } from '@/lib/sessions/allocation'
 import { recordRefundLedgerReconciliation, recordRefundHoldClosureRetry } from '@/lib/payments/registrationReconciliation'
+import { enqueueOutboxMessage, scheduleOutboxDelivery, istNow } from '@/lib/notifications/outbox'
+import { refundAttentionAlert, type RefundAttention } from '@/lib/notifications/actionAlerts'
+
+/**
+ * RD-NOTIFY-01 — a registration refund that needs a human also alerts the Super Admins (email + the
+ * admin feed), next to the existing Sentry alert. Keyed by refund id + reason, so a redelivered
+ * webhook never alerts twice. Enqueued after the refund's own commit; never throws into the webhook.
+ */
+async function alertRefundAttention(attention: RefundAttention, refundId: string, reason: string, a: { registrationId: string | null; eventSlug: string | null; amountPaise: number | null }): Promise<void> {
+  const m = refundAttentionAlert({ attention, key: `${refundId}_${reason}`, registrationId: a.registrationId ?? '—', eventSlug: a.eventSlug, amountPaise: a.amountPaise, reason, when: istNow() })
+  if (await enqueueOutboxMessage(m) === 'queued') scheduleOutboxDelivery(m.id)
+}
 
 // ─── Signature verification ────────────────────────────────────────────────────
 
@@ -239,6 +251,7 @@ async function handleRegistrationRefund(ev: ParsedRefundEvent): Promise<void> {
   const review = async (reason: Parameters<typeof flagRefundForReview>[1], detail: Record<string, unknown>) => {
     await flagRefundForReview(razorpayRefundId, reason, detail)
     captureFinancialError(new Error(`registration refund needs review: ${reason}`), { scope: 'razorpay.refund_processed.review', reason, razorpayRefundId, orderId, ...detail })
+    await alertRefundAttention('review', razorpayRefundId, reason, { registrationId: registrationId ?? null, eventSlug: intent?.eventSlug ?? null, amountPaise: refundAmount })
   }
   if (record.status === 'failed') return review('processed_after_failed', { gatewayPaymentId })
   if (ev.paymentMismatch) return review('payment_mismatch', { gatewayPaymentId, note: 'payment entity names another payment' })
@@ -270,6 +283,7 @@ async function handleRegistrationRefund(ev: ParsedRefundEvent): Promise<void> {
       priorPaise: acc.priorPaise, refundPaise: refundAmount, chargedPaise: intent.amount,
       settlementHeld: acc.settlementHeld === true, settlementAlreadyReleased: acc.settlementAlreadyReleased === true,
     })
+    await alertRefundAttention('review', razorpayRefundId, acc.kind, { registrationId: registrationId ?? null, eventSlug: intent?.eventSlug ?? null, amountPaise: refundAmount })
     return
   }
   // `duplicate`: a redelivery. Only the refund that completed the full amount continues (a crash-retry of
@@ -443,6 +457,7 @@ async function handleRegistrationRefundFailed(ev: ParsedRefundEvent): Promise<vo
       scope: 'razorpay.refund_failed.review', razorpayRefundId, orderId, outcome: res.outcome,
       reasons: res.outcome === 'conflict_processed' ? ['failed_after_processed'] : res.reasons,
     })
+    await alertRefundAttention('failed', razorpayRefundId, res.outcome === 'conflict_processed' ? 'failed_after_processed' : (res.reasons[0] ?? 'failed'), { registrationId: registrationId ?? null, eventSlug: intent?.eventSlug ?? null, amountPaise })
   }
 }
 

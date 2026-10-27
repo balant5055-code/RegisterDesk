@@ -43,6 +43,7 @@ export interface ReviewNotificationParams {
   eventName: string
   reason?:   string   // rejection reason
   comment?:  string   // changes-requested comment
+  eventUrl?: string   // RD-REVIEW-01 — absolute link to the event in the organizer dashboard
 }
 
 // Billing lifecycle params (platform → organizer). The engine owns the email

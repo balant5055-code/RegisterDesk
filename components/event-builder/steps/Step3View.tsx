@@ -259,7 +259,10 @@ function Step3SummaryPanel({
         <div className="min-w-0">
           <p className="text-[14px] font-semibold leading-tight text-primary">{displayLabel}</p>
           <p className="mt-0.5 text-[12px] leading-snug text-muted-foreground">
-            Access restricted by selected method.
+            {/* RD-WIZARD-01 · it claimed a restriction before any method was chosen, and for "Open to All". */}
+            {!selectedOption ? 'Choose how people get access.'
+              : selectedOption.id === 'open' ? 'Anyone can register.'
+              : 'Access restricted by selected method.'}
           </p>
         </div>
       </div>
@@ -1678,7 +1681,7 @@ export function Step3View({ currentStep, completedValues, onNext, onBack, onSave
             <div className="flex items-center gap-2.5 rounded-lg border border-border/60 bg-muted/[0.04] px-4 py-2.5">
               <Lightbulb className="size-3.5 shrink-0 text-amber-500" aria-hidden />
               <p className="text-[12px] leading-snug text-muted-foreground">
-                You can change the access control settings anytime from Event Settings after your event is created.
+                You can change access control later by editing your event — changes apply to new registrations.
               </p>
             </div>
           )}

@@ -143,10 +143,13 @@ export const SECTION_FIELDS: Record<BusinessConfigSectionKey, FieldDef[]> = {
     { key: 'whatsappProvider', label: 'WhatsApp provider', kind: 'text' },
     { key: 'metaApiVersion',   label: 'Meta API version',  kind: 'text', hint: 'e.g. v21.0' },
     { key: 'metaApiTimeoutMs', label: 'Meta API timeout (ms)', kind: 'number' },
-    // RD-EMAIL-PROVIDER-03 · read by nothing: event mail defaults to Amazon SES and is
-    // overridden only per event (admin event Governance). Read-only so it cannot imply otherwise.
-    { key: 'emailProvider',    label: 'Email provider (not used)', kind: 'text', readOnly: true,
-      hint: 'Event email always defaults to Amazon SES. Override a single event from its Governance tab.' },
+    // RD-EMAIL-PROVIDER-04 · the PLATFORM email provider. Read-only HERE: it is changed in the
+    // Communication Center, which checks the provider is configured and records a reason.
+    { key: 'emailProvider',    label: 'Platform email provider', kind: 'text', readOnly: true,
+      hint: 'Change it in Communication Center → Providers (ses or resend). A single event can still be overridden from its Governance tab.' },
+    // RD-WA-TEMPLATES-01 · read-only HERE: changed on Admin → WhatsApp Templates (reason required, audited).
+    { key: 'whatsappTemplateReviewMode', label: 'WhatsApp template review', kind: 'text', readOnly: true,
+      hint: 'manual (Super Admin approves each template before Meta) or automatic (validated, then sent to Meta). Meta approval is always required. Change it on Admin → WhatsApp Templates.' },
   ],
   security: [
     { key: 'otpDigits',                 label: 'OTP digits',                  kind: 'number', hint: '4–10' },

@@ -12,6 +12,7 @@
 // interruption never re-send (WhatsApp has no provider-side idempotency).
 
 import { whatsappBroadcastSendBlock, WHATSAPP_SKIP_REASONS, type WhatsAppBroadcastBlock } from '@/lib/whatsapp/broadcastConsent'
+import { recipientPhoneKeyFields } from '@/lib/whatsapp/recipientKey'
 import { FieldPath, FieldValue } from 'firebase-admin/firestore'
 import { adminDb }       from '@/lib/firebase/admin'
 import { getJob } from '@/lib/jobs/kernel'
@@ -36,6 +37,8 @@ import { settleBroadcastBilling } from '@/lib/communications/billing'
 import { callbackDataFor, recordBroadcastAcceptance, withPersistRetry, messageLogId } from '@/lib/whatsapp/acceptance'
 import type { FinalizeCampaign, FinalizeRecipient } from './finalize'
 import type { RegistrationDocument } from '@/lib/registrations/types'
+import { resolveSendableTemplate, validateCampaignValues, missingEventValues, type SendableTemplate } from '@/lib/whatsappTemplates/service'
+import { templateEventValues, variablesUnavailableForEvent, buildTemplateMessage } from '@/lib/whatsappTemplates/sendValues'
 
 export const WHATSAPP_BROADCAST_JOBS = 'whatsappBroadcastJobs'
 
@@ -90,6 +93,8 @@ export interface WhatsAppBroadcastJob extends Job {
   templateType:    string
   languageCode?:   string
   variables?:      Record<string, string>
+  /** RD-WA-TEMPLATES-01 — an organizer template pinned to one version (instead of templateType). */
+  customTemplate?: { templateId: string; version: number }
   actualCostPaise: number
 }
 
@@ -100,6 +105,9 @@ interface WhatsAppRecipientRow {
   name:           string
   email:          string
   ticketCode:     string
+  /** RD-WA-TEMPLATES-01 — snapshotted for organizer templates ({{passName}}, {{bibNumber}}). */
+  passName?:      string
+  bibNumber?:     string
   sent?:          boolean
   wamid?:         string
   /** Running total of send attempts. Bounds retry ACROSS invocations. */
@@ -126,8 +134,9 @@ interface WhatsAppRecipientRow {
 /** RD-CLOSE — one log row per recipient outcome (deterministic id ⇒ a re-run page never duplicates it). */
 async function writeBroadcastLog(id: string, data: Record<string, unknown>): Promise<void> {
   const clean = Object.fromEntries(Object.entries(data).filter(([, v]) => v !== undefined))
+  // WhatsApp Inbox — the hashed recipient key inbound routing matches plain replies against.
   await withPersistRetry(() => adminDb.collection('emailLogs').doc(id).set(
-    { ...clean, createdAt: FieldValue.serverTimestamp(), updatedAt: FieldValue.serverTimestamp() }, { merge: true },
+    { ...clean, ...recipientPhoneKeyFields(clean.channel, clean.recipientPhone), createdAt: FieldValue.serverTimestamp(), updatedAt: FieldValue.serverTimestamp() }, { merge: true },
   ), 3).catch(err => console.error('[whatsapp-broadcast] log write failed:', { id, err: err instanceof Error ? err.message : err }))
 }
 
@@ -143,6 +152,7 @@ interface WhatsAppCampaignInput {
   templateType?:   string
   languageCode?:   string
   variables?:      Record<string, string>
+  customTemplate?: { templateId: string; version: number }
   actualCostPaise: number
 }
 
@@ -165,6 +175,8 @@ export async function createWhatsAppBroadcastJob(
     name:           r.data.attendee.name,
     email:          r.data.attendee.email,
     ticketCode:     r.data.ticketCode ?? '',
+    passName:       typeof r.data.passName === 'string' ? r.data.passName : '',
+    bibNumber:      typeof r.data.bibNumber === 'string' ? r.data.bibNumber : '',
   }))
   return buildBroadcastJob<WhatsAppBroadcastJob>({
     jobsCollection: WHATSAPP_BROADCAST_JOBS,
@@ -178,6 +190,7 @@ export async function createWhatsAppBroadcastJob(
       eventName:       campaign.eventName,
       subject:         campaign.subject,
       templateType:    campaign.templateType ?? '',
+      ...(campaign.customTemplate ? { customTemplate: campaign.customTemplate } : {}),
       ...(campaign.languageCode ? { languageCode: campaign.languageCode } : {}),
       variables:       campaign.variables ?? {},
       actualCostPaise: campaign.actualCostPaise ?? 0,
@@ -198,6 +211,8 @@ interface WhatsAppJobContext {
   /** RD-WA-BROADCAST-02 — this event's public Certificate Center, derived server-side. */
   certificateUrl:  string
   perMsgCostPaise: number
+  /** RD-WA-TEMPLATES-01 — set for an organizer template; the registry template fields are then unused. */
+  custom?:         { template: SendableTemplate; eventValues: Record<string, string> }
 }
 
 type RecipientItem = WhatsAppRecipientRow & { __id: string }
@@ -213,6 +228,30 @@ export function whatsAppBroadcastStrategy(): JobStrategy<WhatsAppBroadcastJob, W
       if (block) return { ok: false, error: blockedJobError(block) }
       const provider = await getMetaProvider()
       if (!provider) return { ok: false, error: 'WhatsApp provider is not configured' }
+      // RD-WA-TEMPLATES-01 — an organizer template: eligibility is re-checked HERE, at the send boundary
+      // (a scheduled campaign runs long after it was created; Meta may have paused the template since),
+      // with the same rules as the create route. Ineligible ⇒ the job fails and nothing is sent.
+      if (job.customTemplate) {
+        const elig = await resolveSendableTemplate(job.organizerUid, job.customTemplate.templateId, job.customTemplate.version, { refreshIfStale: true })
+        if (!elig.ok) {
+          console.warn('[whatsapp-broadcast] organizer template not eligible at send time — nothing sent:', { jobId: job.jobId, code: elig.code })
+          return { ok: false, error: 'template_not_eligible' }
+        }
+        const values = validateCampaignValues(elig.template, job.variables ?? {})
+        if (!values.ok) return { ok: false, error: `invalid_template_variables: ${values.error}` }
+        const ev = await templateEventValues(job.organizerUid, job.eventSlug)
+        const missing = [...variablesUnavailableForEvent(elig.template, ev.eventType), ...missingEventValues(elig.template, ev.values)]
+        if (missing.length) return { ok: false, error: `invalid_template_variables: no value for ${missing.join(', ')}` }
+        const total = job.counts.total || 1
+        return {
+          ok: true,
+          ctx: {
+            provider, templateType: job.templateType as WhatsAppTemplateType, staticVars: values.values, eventName: ev.values.eventName,
+            certificateUrl: ev.values.certificateUrl, perMsgCostPaise: Math.round((job.actualCostPaise ?? 0) / total),
+            custom: { template: elig.template, eventValues: ev.values },
+          },
+        }
+      }
       if (!hasWhatsAppTemplate(job.templateType)) return { ok: false, error: 'WhatsApp template is no longer available' }
       // RD-COMMS-P2-C — the send boundary re-applies the organizer-broadcast template allowlist (a
       // campaign stored before it, or written around the route, still cannot send a protected one),
@@ -313,7 +352,15 @@ export function whatsAppBroadcastStrategy(): JobStrategy<WhatsAppBroadcastJob, W
         // URL could be a preview host, a stale slug, or another event entirely.
         certificateUrl: ctx.certificateUrl,
       }
-      const resolved = resolveWhatsAppTemplateByType(ctx.templateType, normalizedPhone, vars, { languageCode: ctx.languageCode })
+      // RD-WA-TEMPLATES-01 — organizer template: event values, then the organizer's typed values, then the
+      // recipient's own (recipient and server values always win over anything typed).
+      const resolved = ctx.custom
+        ? buildTemplateMessage(ctx.custom.template, normalizedPhone, {
+            ...ctx.custom.eventValues, ...ctx.staticVars,
+            attendeeName: item.name, ticketCode: item.ticketCode ?? '', passName: item.passName ?? '', bibNumber: item.bibNumber ?? '',
+            eventName: ctx.custom.eventValues.eventName, certificateUrl: ctx.custom.eventValues.certificateUrl,
+          })
+        : resolveWhatsAppTemplateByType(ctx.templateType, normalizedPhone, vars, { languageCode: ctx.languageCode })
 
       let status: 'sent' | 'failed' = 'failed'
       let errorMsg: string | undefined

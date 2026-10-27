@@ -150,6 +150,12 @@ export interface EventDetailProps {
   showSocial:       boolean
   showVenueMap:     boolean
   isFreeEvent:      boolean
+  /**
+   * RD-WIZARD-01 · platform fees are ADDED to the ticket price at checkout (attendee-pays).
+   * Server-resolved through `checkoutFeeModel` — the rule checkout charges by — so pass copy
+   * never claims "prices include taxes" for an event that adds fees. Absent ⇒ false.
+   */
+  attendeePaysFees?: boolean
   passes:           PassPublic[]
   availability:     Record<string, PassAvailability>
   /**

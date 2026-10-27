@@ -87,6 +87,18 @@ export function explicitFeeModel(pricing: unknown): EngineFeeModel | null {
 }
 
 /**
+ * The fee model a NEW checkout for this event applies — create-order's rule without the
+ * per-attempt pin: the recorded choice when the pricing engine is on, else organizer-pays
+ * (`builderFeeModelToEngine(SUPPORTED_FEE_MODEL)`, inlined for the reason given above;
+ * `feeModelRestore.test.ts` holds the two equal). Surfaces that DESCRIBE or ESTIMATE an
+ * event's fees (the public event page, the Super Admin preview) read this, so they cannot
+ * disagree with what the attendee is charged.
+ */
+export function checkoutFeeModel(pricingEngineEnabled: boolean, pricing: unknown): EngineFeeModel {
+  return (pricingEngineEnabled ? explicitFeeModel(pricing) : null) ?? 'organizer_pays'
+}
+
+/**
  * Build a record to persist. `setAt` is passed in rather than read from the clock so callers
  * inside a Firestore transaction (which may retry) produce a stable value, and so tests are
  * deterministic.

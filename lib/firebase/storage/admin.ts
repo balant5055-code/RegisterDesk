@@ -103,6 +103,31 @@ export async function signedReadUrl(
   return url
 }
 
+/**
+ * RD-SUPPORT-01 · stores bytes PRIVATELY: unlike `uploadServerFile`, no download token is attached,
+ * so no capability URL exists for the object. Storage rules deny every client path not listed in
+ * storage.rules, so the only way to read it back is `readServerFile` behind an authorized route.
+ * Never overwrites: a second save to the same path fails (`ifGenerationMatch: 0`).
+ */
+export async function savePrivateServerFile(path: string, bytes: Uint8Array, contentType: string): Promise<void> {
+  await bucket().file(path).save(Buffer.from(bytes), {
+    resumable: false,
+    preconditionOpts: { ifGenerationMatch: 0 },
+    metadata: { contentType, cacheControl: 'private, no-store' },
+  })
+}
+
+/** RD-SUPPORT-01 · reads a stored object's bytes (server-side; the caller authorizes first). Null when missing. */
+export async function readServerFile(path: string): Promise<Buffer | null> {
+  try {
+    const [buf] = await bucket().file(path).download()
+    return buf
+  } catch (err) {
+    if ((err as { code?: number }).code === 404) return null
+    throw err
+  }
+}
+
 /** Deletes an object by storage path. Best-effort — missing objects are ignored. */
 export async function deleteServerFile(path: string): Promise<void> {
   try {

@@ -13,7 +13,7 @@ import { FieldValue }      from 'firebase-admin/firestore'
 import { adminAuth, adminDb } from '@/lib/firebase/admin'
 import { notificationEngine, NotificationType } from '@/lib/notifications'
 import { writeEmailLog }       from '@/lib/email-logs/write'
-import { EMAIL_PROVIDER_NAME } from '@/lib/email'
+import { resolvePlatformEmailProvider } from '@/lib/email/platformProvider'
 import { generateCode, generateSalt, hashCode } from '@/lib/otp'
 import { getSecurityConfig } from '@/lib/config/resolveSecurityConfig'
 import type { DecodedIdToken } from 'firebase-admin/auth'
@@ -175,7 +175,7 @@ export async function POST(req: Request): Promise<NextResponse> {
     recipientName:     displayName,
     subject:           OTP_EMAIL_SUBJECT,
     status:            result.success ? 'sent' : 'failed',
-    provider:          EMAIL_PROVIDER_NAME,
+    provider:          await resolvePlatformEmailProvider(),
     channel:           'email',
     providerMessageId: result.messageId,
     // Server-only diagnostic (full SES exception) is persisted here for debugging;

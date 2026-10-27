@@ -28,6 +28,7 @@ import { cn } from '@/lib/utils/cn'
 import { useToast } from '@/components/ui/Toast'
 import { useConfirm } from '@/components/ui/ConfirmDialog'
 import { isAllowedNumber } from '@/lib/registrations/identity'
+import { waiverStatusOf } from '@/lib/registrations/waiverStatus'
 import type { SerializedRegistration } from '@/app/api/organizer/events/[eventId]/registrations/route'
 
 // ─── Loose shapes for lazily-fetched data (existing endpoints) ──────────────────
@@ -193,6 +194,8 @@ export default function ParticipantWorkspace360({
   const timeline = useMemo(() => {
     const items: { ts: string; label: string; sub?: string }[] = []
     if (reg.registeredAt) items.push({ ts: reg.registeredAt, label: 'Registered', sub: reg.passName })
+    // RD-WAIVER-01 · the recorded acceptance time, exactly as stored.
+    if (waiverStatusOf(reg) === 'Accepted' && reg.waiverAcceptedAt) items.push({ ts: reg.waiverAcceptedAt, label: 'Waiver accepted' })
     if (reg.emailStatus === 'sent' && reg.emailSentAt) items.push({ ts: reg.emailSentAt, label: 'Confirmation email sent' })
     if (reg.checkedIn && reg.checkedInAt) items.push({ ts: reg.checkedInAt, label: 'Checked in' })
     const h = Array.isArray(history) ? history : []
@@ -224,6 +227,17 @@ export default function ParticipantWorkspace360({
           {timingTag && <Tile label={tagLabel} value={timingTag} literal />}
           <Tile label="Checked in" value={reg.checkedIn ? 'Yes' : 'No'} />
           <Tile label="Sessions" value={sessionCount} />
+          {/* RD-WAIVER-01 · only where a waiver applied to this registration — from the record:
+              "Accepted" with its time, or "Not accepted" (walk-in / import / pre-waiver). */}
+          {waiverStatusOf(reg) && (
+            <Tile
+              label="Waiver"
+              value={waiverStatusOf(reg) === 'Accepted' && reg.waiverAcceptedAt
+                ? `Accepted · ${fmtTs(reg.waiverAcceptedAt)}`
+                : 'Not accepted'}
+              literal
+            />
+          )}
         </div>
       </Panel>
 

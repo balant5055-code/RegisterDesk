@@ -39,6 +39,8 @@ import type { EventDetailProps, PassPublic } from '@/components/event-templates/
 import type { PublishedEvent } from '@/lib/firebase/firestore/events'
 import type { EventLifecycleStatus } from '@/types/events'
 import { linkedEventAllowsCampaign } from '@/lib/campaigns/linkedEventGate'
+import { resolvePlatformPricing } from '@/lib/platform/pricing/resolver'
+import { checkoutFeeModel } from '@/lib/fees/explicitFeeModel'
 
 type RegistrationCounter = Awaited<ReturnType<typeof getRegistrationCounter>>
 
@@ -114,6 +116,8 @@ export interface EventPageData {
   counter:            RegistrationCounter
   linkedCampaign:     EventDetailProps['linkedCampaign']
   exhibitorDirectory: { companyName: string; website: string | null }[]
+  /** RD-WIZARD-01 · the pricing-engine flag, for `attendeePaysFees` (absent ⇒ off). */
+  pricingEngineEnabled?: boolean
 }
 
 /** The reads the template needs beyond the event document itself. */
@@ -174,8 +178,12 @@ export async function loadEventPageData(
     }
   })()
 
-  const [counter, linkedCampaign, exhibitorDirectory] = await Promise.all([counterP, linkedCampaignP, exhibitorDirectoryP])
-  return { counter, linkedCampaign, exhibitorDirectory }
+  // RD-WIZARD-01 · read so the pass copy can say how fees are charged. A failed read leaves the
+  // flag off — the organizer-absorbs wording — never a claim the checkout would contradict more.
+  const engineP = resolvePlatformPricing().then(p => p.features.pricingEngineEnabled === true).catch(() => false)
+
+  const [counter, linkedCampaign, exhibitorDirectory, pricingEngineEnabled] = await Promise.all([counterP, linkedCampaignP, exhibitorDirectoryP, engineP])
+  return { counter, linkedCampaign, exhibitorDirectory, pricingEngineEnabled }
 }
 
 // ─── Mapping ──────────────────────────────────────────────────────────────────
@@ -404,6 +412,8 @@ export function buildEventPageProps(
       showSocial,
       showVenueMap,
       isFreeEvent,
+      // RD-WIZARD-01 · fees added at checkout? By the rule checkout charges by (checkoutFeeModel).
+      attendeePaysFees: checkoutFeeModel(data.pricingEngineEnabled === true, event.pricing) === 'customer_pays',
       passes:           passesWithAlerts,
       availability:     availabilityRecord,
       eventMilestoneAlert,

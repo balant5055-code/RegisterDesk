@@ -9,6 +9,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { financialViewFor } from '@/lib/admin/financialGuard'
 import { adminDb }                   from '@/lib/firebase/admin'
 import { resolveAdminUid }           from '@/lib/admin/auth'
+import { readFeeCollection }         from '@/lib/fees/explicitFeeModel'
 import { applyModeration, notifyOrganizerModeration } from '@/lib/admin/moderationService'
 import type { AdminAuditAction }     from '@/lib/admin/audit'
 import type {
@@ -174,6 +175,9 @@ export async function GET(req: NextRequest, ctx: RouteContext): Promise<NextResp
           }))
         : [],
       totalCapacity: ev.totalCapacity ?? null,
+      // The organizer's RECORDED fee choice (pricing.feeCollection); null = none recorded, which
+      // checkout treats as organizer-absorbs. The drawer used to print a fixed model instead.
+      feeModel:      readFeeCollection(ev.pricing)?.model ?? null,
     },
     timeline: {
       createdAt:          tsToISO(ev.createdAt) ?? tsToISO(draft?.createdAt),

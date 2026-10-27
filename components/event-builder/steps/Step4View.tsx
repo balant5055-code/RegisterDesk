@@ -55,6 +55,8 @@ import { ROUTES } from '@/config/navigation'
 import { cn } from '@/lib/utils/cn'
 import { MILESTONE_THRESHOLD_MAX, MILESTONE_MESSAGE_MAX } from '@/lib/events/milestoneAlerts'
 import { lockPublishedPricing } from '@/lib/events/editing/publishedPricingLock'
+import { useFeesConfig } from '@/lib/fees/feesConfigClient'
+import { readFeeCollection } from '@/lib/fees/explicitFeeModel'
 import type { MilestoneAlert } from '@/lib/events/milestoneAlerts'
 
 function generatePassId(): string {
@@ -894,6 +896,9 @@ function Step4SummaryPanel({ pricing }: { pricing: EventPricingDraft }) {
 export function Step4View({ currentStep, completedValues, onNext, onBack, onSaveDraft, onAutosave, initialData, wizardSteps }: StepViewProps) {
   const eventTypeId  = (initialData?.eventTypeId  as string | null) ?? null
   const eventSubtype = (initialData?.eventSubtype as string | null) ?? null
+  // RD-WIZARD-01 · the pass editor states how fees are charged: the recorded choice behind the
+  // live flag — the rule checkout charges by (lib/fees/explicitFeeModel `checkoutFeeModel`).
+  const feesConfig   = useFeesConfig()
 
   // RD-PRICING-UI-LOCK-01 — a PUBLISHED event's commercial pricing is read-only here.
   //
@@ -1127,7 +1132,8 @@ export function Step4View({ currentStep, completedValues, onNext, onBack, onSave
       <WizardFooter
         onBack={onBack}
         onSaveDraft={() => onSaveDraft?.(pricing)}
-        onNext={() => onNext('Passes & Pricing', pricing)}
+        // RD-WIZARD-01 · the stepper's completed label summarises the step instead of repeating its title.
+        onNext={() => onNext(`${pricing.passes.length} pass${pricing.passes.length === 1 ? '' : 'es'} · ${pricing.eventType === 'free' ? 'Free' : 'Paid'}`, pricing)}
         isNextDisabled={!canProceed}
         stepContext={(() => {
           const steps = wizardSteps ?? WIZARD_STEPS
@@ -1145,6 +1151,7 @@ export function Step4View({ currentStep, completedValues, onNext, onBack, onSave
         eventSubtype={eventSubtype}
         isFreeEvent={pricing.eventType === 'free'}
         pricingLocked={pricingLocked}
+        attendeePaysFees={feesConfig.pricingEngineEnabled === true && readFeeCollection(pricing)?.model === 'attendee_pays'}
       />
 
     </motion.div>

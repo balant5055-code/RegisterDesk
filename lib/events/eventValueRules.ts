@@ -116,6 +116,18 @@ export function validateEventValues(input: EventValueInput, mode: 'publish' | 'u
   if (str(info.shortDesc).length > 300) issues.push({ id: 'short_desc_length', title: 'Short Description Too Long', message: 'Keep the short description under 300 characters.', ...ED })
   if (str(info.fullDesc).length > 20_000) issues.push({ id: 'full_desc_length', title: 'Description Too Long', message: 'Keep the full description under 20,000 characters.', ...ED })
 
+  // ── RD-WAIVER-01 · sports participation waiver ─────────────────────────────────
+  // There is no default wording: a waiver switched on with nothing written is refused, never
+  // published as "required" with nothing to accept (lib/registrations/waiver.ts treats it as off).
+  if (input.eventType === 'sports') {
+    const td = rec(details.typeDetails)
+    if (td.requireWaiver === true) {
+      const text = str(td.waiverText)
+      if (!text) issues.push({ id: 'waiver_text_missing', title: 'Waiver Wording Missing', message: 'The participation waiver is switched on but has no wording. Add the waiver text, or turn the waiver off.', ...ED })
+      else if (text.length > 10_000) issues.push({ id: 'waiver_text_length', title: 'Waiver Too Long', message: 'Keep the waiver wording under 10,000 characters.', ...ED })
+    }
+  }
+
   // ── Schedule ───────────────────────────────────────────────────────────────────
   const startDate = str(schedule.startDate), endDate = str(schedule.endDate)
   const startTime = str(schedule.startTime), endTime = str(schedule.endTime)

@@ -25,9 +25,12 @@ export function notifyEventReviewed(args: {
   kind:         ReviewKind
   reason?:      string
   comment?:     string
+  /** RD-REVIEW-01 — the review-history entry of this decision; makes the item idempotent per occurrence. */
+  occurrenceId?: string
 }): Promise<string> {
-  const { workspaceUid, eventName, eventId, kind, reason, comment } = args
-  const link = eventLink(eventId)
+  const { workspaceUid, eventName, eventId, kind, reason, comment, occurrenceId } = args
+  // A decision the organizer must act on opens the event's Setup tab — where they edit it.
+  const link = eventLink(eventId, kind === 'rejected' || kind === 'changes_requested' ? 'setup' : undefined)
   const table: Record<ReviewKind, { title: string; body: string; severity: 'info' | 'success' | 'warning' | 'error'; action: boolean }> = {
     submitted:         { title: 'Event submitted for review', body: `“${eventName}” is now under review.`,                                        severity: 'info',    action: false },
     approved:          { title: 'Event approved',             body: `“${eventName}” has been approved.`,                                          severity: 'success', action: false },
@@ -40,6 +43,7 @@ export function notifyEventReviewed(args: {
     workspaceUid, category: 'approval', type: `EVENT_${kind.toUpperCase()}`,
     title: m.title, body: m.body, severity: m.severity, actionRequired: m.action,
     link, eventId: eventId ?? null, eventName,
+    dedupeId: occurrenceId ? `event-review-${kind}-${occurrenceId.replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 120)}` : undefined,
   })
 }
 

@@ -5,6 +5,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { authorizeSuperAdminInbox } from '@/lib/whatsapp-inbox/adminAuthz'
 import { getAdminConversation } from '@/lib/whatsapp-inbox/adminRead'
+import { auditInboxAccess } from '@/lib/whatsapp-inbox/adminAudit'
 import type { AdminConversationDetailResponse } from '@/lib/whatsapp-inbox/types'
 
 export const dynamic = 'force-dynamic'
@@ -24,6 +25,11 @@ export async function GET(
     if (r.status === 'not_found') {
       return NextResponse.json({ success: false, error: 'Conversation not found.' }, { status: 404, headers: NO_STORE })
     }
+    // Super Admin access to an attendee conversation is audited (once per admin + hour; ids only).
+    await auditInboxAccess({
+      adminUid: gate.adminUid, action: 'whatsapp_inbox.conversation_viewed', entityType: 'whatsapp_conversation',
+      entityId: conversationId, metadata: { organizerUid: r.conversation.organizerUid, eventId: r.conversation.eventId },
+    })
     return NextResponse.json({ success: true, conversation: r.conversation, messages: r.messages, olderCursor: r.olderCursor }, { headers: NO_STORE })
   } catch (err) {
     console.error('[admin/whatsapp-inbox] detail failed:', (err as Error)?.message)

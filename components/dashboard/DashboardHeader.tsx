@@ -21,7 +21,7 @@
 import Link from 'next/link'
 import { AnimatePresence, motion } from 'framer-motion'
 import { signOut } from 'firebase/auth'
-import { ChevronDown, LogOut, Menu, Moon, Search, Settings, Sun } from 'lucide-react'
+import { ChevronDown, Lightbulb, LogOut, Menu, Moon, Search, Settings, Sun } from 'lucide-react'
 import { auth } from '@/lib/firebase/auth'
 import { cn } from '@/lib/utils/cn'
 import { ROUTES } from '@/config/navigation'
@@ -72,6 +72,30 @@ function IconButton({ label, onClick, children }: {
     >
       {children}
     </button>
+  )
+}
+
+// ─── Request a Feature ────────────────────────────────────────────────────────
+// RD-FEATURE-REQ-01 · the organizer's way to tell RegisterDesk what to build next. The ONE
+// labelled action in the cluster, so it carries the brand gradient; the same 32px height as the
+// icon buttons beside it. Below sm it collapses to the icon (the label stays as aria-label).
+
+function RequestFeatureLink() {
+  return (
+    <Link
+      href={`${ROUTES.DASHBOARD_FEATURE_REQUESTS}?new=1`}
+      aria-label="Request a feature"
+      title="Request a feature"
+      className={cn(
+        'inline-flex h-8 shrink-0 items-center gap-1.5 rounded-control px-2 text-fs-xs font-semibold text-primary-foreground shadow-sm sm:px-3',
+        'transition-opacity hover:opacity-90',
+        'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 focus-visible:ring-offset-1',
+      )}
+      style={{ backgroundImage: 'var(--primary-gradient)' }}
+    >
+      <Lightbulb className="size-3.5" aria-hidden />
+      <span className="hidden sm:inline">Request a feature</span>
+    </Link>
   )
 }
 
@@ -215,6 +239,7 @@ export function DashboardHeader({
 
         <div className="flex-1" />
 
+        <RequestFeatureLink />
         <IconButton label="Search (⌘K)" onClick={openCommandPalette}>
           <Search className="size-4" aria-hidden />
         </IconButton>

@@ -15,6 +15,7 @@ import { FieldValue } from 'firebase-admin/firestore'
 import { adminDb } from '@/lib/firebase/admin'
 import { draftIdForEventSlug } from '@/lib/licensing/serviceAllowanceLedger'
 import type { WhatsAppStatusEvent } from './webhookStatus'
+import { recipientPhoneKeyFields } from './recipientKey'
 import {
   parseCallbackData, recordBroadcastAcceptance, messageLogId, messageUsageId, WHATSAPP_BROADCAST_JOBS_COLLECTION,
 } from './acceptance'
@@ -70,6 +71,7 @@ export async function reconcileWhatsAppAcceptance(event: WhatsAppStatusEvent): P
           organizerUid: str(j.organizerUid), eventId: str(j.eventId), eventSlug: str(j.eventSlug), eventName: str(j.eventName),
           templateKey: 'broadcast', channel: 'whatsapp', provider: 'meta', campaignId: str(j.campaignId),
           recipientEmail: str(r.email), recipientName: str(r.name), recipientPhone: str(r.phone), subject: str(j.subject),
+          ...recipientPhoneKeyFields('whatsapp', str(r.phone)),
           status: 'sent', registrationId: str(r.registrationId), providerMessageId: event.wamid, recoveredFrom: 'webhook',
           createdAt: FieldValue.serverTimestamp(), updatedAt: FieldValue.serverTimestamp(),
         }).catch(() => undefined)   // created concurrently — fine, one row per wamid

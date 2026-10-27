@@ -15,7 +15,17 @@ export const ADMIN_NOTIFICATIONS = 'adminNotifications'
 const col = () => adminDb.collection(ADMIN_NOTIFICATIONS)
 const ID = /^[A-Za-z0-9_:.-]{1,200}$/
 
-export type AdminNotificationKind = 'service_purchase'
+// RD-NOTIFY-01 — organizer actions that need a Super Admin (written through lib/notifications/outbox).
+export type AdminNotificationKind =
+  | 'service_purchase'
+  | 'event_review'          // an event submitted / resubmitted / republished for review
+  | 'payout_profile'        // a payout profile created or changed (verification reset)
+  | 'service_request'       // a wallet refund / carry-forward request submitted
+  | 'settlement_request'    // a payout (settlement) request submitted
+  | 'refund_attention'      // a registration refund needs review / failed / escalated
+  | 'feature_request'       // RD-FEATURE-REQ-01 — an organizer submitted a feature request
+  | 'support_ticket'        // RD-SUPPORT-01 — a support ticket opened, replied to or reopened by an organizer
+  | 'whatsapp_template'     // RD-WA-TEMPLATES-01 — a WhatsApp template awaits review, failed submission, or Meta rejected / paused it
 
 export interface AdminNotificationInput {
   dedupeId: string

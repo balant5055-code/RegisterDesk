@@ -44,6 +44,9 @@ import { liveEventBelongsTo } from '@/lib/events/liveEventRef'
 import { isConsistentBadgeSnapshot, type BadgePurchaseSnapshot } from '@/lib/licensing/printBadgePurchase/pricing'
 import { badgeOrderRef, badgeOrderRefundsRef, BADGE_COUPON_RELEASES_SUBCOLLECTION } from '@/lib/licensing/printBadgePurchase/orderDoc'
 import { badgeCouponRef, badgeCouponOrganizerCounterRef } from '@/lib/licensing/badgeCoupons/store'
+import { stageOutboxMessage, scheduleOutboxDelivery, istNow } from '@/lib/notifications/outbox'
+import { serviceRequestAlert, serviceRequestDecisionNotice, type ServiceRequestDecision } from '@/lib/notifications/actionAlerts'
+import { resolveOrganizerEmailIdentity } from '@/lib/organizer/emailIdentity'
 import {
   SERVICE_REQUESTS_COLLECTION, REQUESTABLE_SERVICES, isLedgerService,
   requestEligibility, valuationFor, destinationProblem, decisionTransition, targetStatus,
@@ -509,6 +512,13 @@ export async function submitServiceRequests(args: {
   const refs = wanted.map(() => col().doc())
   const groupId = wanted.length > 1 ? refs[0].id : null
   const at = new Date(nowMs).toISOString()
+  // RD-NOTIFY-01 — the Super Admins are alerted to the new request, staged in the SAME transaction
+  // (one alert per submission, however many services it covers; none if the submit is refused).
+  const identity = await resolveOrganizerEmailIdentity(uid).catch(() => ({ name: '', email: '' }))
+  const alert = serviceRequestAlert({
+    requestIds: refs.map(r => r.id), kind, services: wanted.map(s => ({ service: s, quantity: preElig.get(s)!.quantity })),
+    eventName: pre.draft.name, draftId, organizer: { uid, name: identity.name, email: identity.email }, when: istNow(new Date(nowMs)),
+  })
   await adminDb.runTransaction(async txn => {
     // Re-read the records and the locks INSIDE the transaction; anything changed → refuse.
     const rec = await readRecords(inTxn(txn), uid, draftId, agg)
@@ -543,7 +553,9 @@ export async function submitServiceRequests(args: {
       txn.create(refs[n], doc as unknown as FirebaseFirestore.DocumentData)
       txn.create(lockRef(draftId, service), { requestId: refs[n].id, organizerUid: uid, createdAt: FieldValue.serverTimestamp() })
     })
+    stageOutboxMessage(txn, alert)
   })
+  scheduleOutboxDelivery(alert.id)
   const saved = await Promise.all(refs.map(r => r.get()))
   return saved.map(s => toView(s.id, s.data() as RequestDoc))
 }
@@ -807,7 +819,9 @@ export async function decideServiceRequest(args: {
   const preDoc = pre.data() as RequestDoc
   const agg = action === 'approve' ? await readAggregates(preDoc.organizerUid, preDoc.sourceDraftId) : null
 
+  let noticeId: string | null = null
   const already = await adminDb.runTransaction(async txn => {
+    noticeId = null
     const snap = await txn.get(reqRef)
     if (!snap.exists) throw new ServiceRequestError(404, 'REQUEST_NOT_FOUND', 'Request not found.')
     const r = snap.data() as RequestDoc
@@ -830,6 +844,18 @@ export async function decideServiceRequest(args: {
 
     const now = new Date().toISOString()
     const entry = (a: ServiceRequestHistoryEntry['action'], note: string): ServiceRequestHistoryEntry => ({ at: now, by: adminUid, role: 'super_admin', action: a, note })
+    // RD-NOTIFY-01 — the organizer hears about every decision on THEIR request (in-app + email),
+    // staged as the LAST write of each branch below, in this same transaction. The id is
+    // request + decision, and a replay never reaches a branch (`already`), so it is sent once.
+    // Only a REJECTION shares the admin's reason; approve / process notes stay internal.
+    const notify = (decision: ServiceRequestDecision, note: string | null) => {
+      const m = serviceRequestDecisionNotice({
+        requestId: id, decision, kind: r.kind, service: r.service, quantity: r.quantity, eventName: r.sourceName ?? '',
+        draftId: r.sourceDraftId, organizerUid: r.organizerUid, note, when: istNow(),
+      })
+      noticeId = m.id
+      stageOutboxMessage(txn, m)
+    }
 
     if (action === 'reject') {
       releaseLock()
@@ -838,6 +864,7 @@ export async function decideServiceRequest(args: {
         status: 'rejected', decision: { action: 'rejected', by: adminUid, reason, at: FieldValue.serverTimestamp() },
         history: FieldValue.arrayUnion(entry('rejected', reason)), updatedAt: FieldValue.serverTimestamp(),
       })
+      notify('rejected', reason)
       return false
     }
 
@@ -859,6 +886,7 @@ export async function decideServiceRequest(args: {
         processed: { by: adminUid, reason, externalReference: ref, refundedAmountPaise: refunded, at: FieldValue.serverTimestamp() },
         history: FieldValue.arrayUnion(entry('processed', `${reason} (₹${(refunded / 100).toFixed(2)} refunded of ₹${((r.approvedAmountPaise ?? 0) / 100).toFixed(2)} approved · reference ${ref})`)), updatedAt: FieldValue.serverTimestamp(),
       })
+      notify('processed', `₹${(refunded / 100).toFixed(2)} refunded · reference ${ref}`)
       return false
     }
 
@@ -936,6 +964,7 @@ export async function decideServiceRequest(args: {
         history: FieldValue.arrayUnion(entry('approved', `${reason} (₹${(amt / 100).toFixed(2)} approved; not yet refunded${capacity ? ` · capacity ${capacity.before} → ${capacity.after}` : ''})`)),
         updatedAt: FieldValue.serverTimestamp(),
       })
+      notify('approved', `₹${(amt / 100).toFixed(2)} approved — the refund itself is made separately`)
       return false
     }
 
@@ -969,8 +998,10 @@ export async function decideServiceRequest(args: {
       history: FieldValue.arrayUnion(entry('approved', `${reason} (${r.quantity} unit(s) moved to ${dest.name})`)),
       updatedAt: FieldValue.serverTimestamp(),
     })
+    notify('approved', `${r.quantity} unit(s) moved to ${dest.name}`)
     return false
   })
+  if (!already && noticeId) scheduleOutboxDelivery(noticeId)
   const after = await reqRef.get()
   return { request: toView(id, after.data() as RequestDoc), already }
 }

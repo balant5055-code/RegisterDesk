@@ -26,6 +26,12 @@ export interface ConfirmOptions {
   confirmLabel?: string
   cancelLabel?:  string
   tone?:         'default' | 'danger'
+  /**
+   * Enter confirms by default (wherever focus is). Pass false for a PROTECTIVE dialog whose safe
+   * choice is Cancel: Enter then only activates the FOCUSED button, like a native button, so a stray
+   * Enter can never take the risky action. Escape always cancels.
+   */
+  confirmOnEnter?: boolean
 }
 
 export interface PromptOptions extends ConfirmOptions {
@@ -103,7 +109,7 @@ export function ConfirmProvider({ children }: { children: React.ReactNode }) {
     const multiline = pending.kind === 'prompt' && pending.opts.multiline === true
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape')                 { e.preventDefault(); cancel() }
-      else if (e.key === 'Enter' && !multiline) { e.preventDefault(); accept() }
+      else if (e.key === 'Enter' && !multiline && pending.opts.confirmOnEnter !== false) { e.preventDefault(); accept() }
     }
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)

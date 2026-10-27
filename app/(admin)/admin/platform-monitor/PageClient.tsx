@@ -67,7 +67,7 @@ const HEALTH_DOT: Record<HealthLevel, string> = {
 }
 const SERVICE_TONE: Record<ServiceLevel, PillTone> = { healthy: 'success', warning: 'warning', unavailable: 'neutral' }
 const SERVICE_ICON: Record<string, typeof CreditCard> = {
-  payments: CreditCard, email: Mail, whatsapp: MessageSquare, certificates: Award, print: Printer,
+  payments: CreditCard, email: Mail, whatsapp: MessageSquare, whatsapp_webhooks: MessageSquare, certificates: Award, print: Printer,
   reports: FileText, licensing: KeyRound, coupons: Gift,
 }
 

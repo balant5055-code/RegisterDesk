@@ -5,6 +5,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { authorizeSuperAdminInbox } from '@/lib/whatsapp-inbox/adminAuthz'
 import { getUnmatched } from '@/lib/whatsapp-inbox/adminRead'
+import { auditInboxAccess } from '@/lib/whatsapp-inbox/adminAudit'
 import type { UnmatchedDetailResponse } from '@/lib/whatsapp-inbox/types'
 
 export const dynamic = 'force-dynamic'
@@ -23,6 +24,10 @@ export async function GET(
     if (r.status === 'not_found') {
       return NextResponse.json({ success: false, error: 'Unmatched message not found.' }, { status: 404, headers: NO_STORE })
     }
+    await auditInboxAccess({
+      adminUid: gate.adminUid, action: 'whatsapp_inbox.unmatched_viewed', entityType: 'whatsapp_inbound',
+      entityId: inboundId, metadata: { reason: r.item.reason },
+    })
     return NextResponse.json({ success: true, item: r.item, evidence: r.evidence }, { headers: NO_STORE })
   } catch (err) {
     console.error('[admin/whatsapp-inbox] unmatched detail failed:', (err as Error)?.message)

@@ -3,6 +3,7 @@
 // pendingReviews  — events currently awaiting approval
 // approvedToday   — events approved since 00:00 UTC today
 // rejectedToday   — events rejected since 00:00 UTC today
+// awaitingChanges — events sent back (changes_requested), waiting for the organizer to resubmit
 // avgReviewMinutes— mean review turnaround for today's approvals (null if none)
 
 import { NextRequest, NextResponse } from 'next/server'
@@ -18,10 +19,12 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   const startOfDay = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()))
   const startTs    = Timestamp.fromDate(startOfDay)
 
-  const [pendingSnap, approvedSnap, rejectedSnap] = await Promise.all([
+  const [pendingSnap, approvedSnap, rejectedSnap, awaitingAgg] = await Promise.all([
     adminDb.collection('events').where('lifecycleStatus', '==', 'pending_review').get(),
     adminDb.collection('events').where('approvedAt', '>=', startTs).get(),
     adminDb.collection('events').where('rejectedAt', '>=', startTs).get(),
+    // RD-REVIEW-01 — events sent back and not yet resubmitted. An aggregate: no documents read.
+    adminDb.collection('events').where('lifecycleStatus', '==', 'changes_requested').count().get(),
   ])
 
   const durations = approvedSnap.docs
@@ -36,6 +39,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     pendingReviews:   pendingSnap.size,
     approvedToday:    approvedSnap.size,
     rejectedToday:    rejectedSnap.size,
+    awaitingChanges:  awaitingAgg.data().count,
     avgReviewMinutes,
   }, { headers: { 'Cache-Control': 'no-store' } })
 }

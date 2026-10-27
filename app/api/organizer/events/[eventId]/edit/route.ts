@@ -170,9 +170,10 @@ export async function PATCH(
 
   // RD-CE-FIX H1 · the edited event must still pass the server's VALUE rules (dates in order,
   // sane prices/quantities/windows). Only issues this edit introduces are refused.
+  // RD-WAIVER-01 · eventType lets the sports-waiver rule run on edits (frozen after publish).
   const introduced = introducedValueIssues(
-    { eventDetails: d.eventDetails, pricing: d.pricing },
-    (() => { const after = applyFieldPaths(d, updates as Record<string, unknown>); return { eventDetails: after.eventDetails, pricing: after.pricing } })(),
+    { eventDetails: d.eventDetails, pricing: d.pricing, eventType: d.eventType },
+    (() => { const after = applyFieldPaths(d, updates as Record<string, unknown>); return { eventDetails: after.eventDetails, pricing: after.pricing, eventType: d.eventType } })(),
   )
   if (introduced.length > 0) {
     return NextResponse.json({ success: false, error: introduced.map(i => i.message).join(' ') }, { status: 422 })

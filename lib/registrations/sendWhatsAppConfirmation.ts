@@ -145,7 +145,17 @@ export async function sendWhatsAppConfirmation(args: WhatsAppConfirmationArgs): 
 
     if (!regSnap.exists) return
     const reg = regSnap.data() as RegistrationDocument
-    if (reg.whatsappStatus === 'sent') return   // already delivered — idempotent
+    // ONE automatic attempt per registration. Any recorded outcome — sent, failed, unknown or a
+    // skip (no phone, no capacity, wallet) — means this path already ran: it must not run again.
+    // Otherwise a later re-invocation (a payment-webhook replay, a recovery re-settlement) would
+    // silently re-send an old skipped confirmation the moment capacity is bought. Re-sending a
+    // recorded outcome is an explicit organizer action (lib/email-logs/whatsappRetry), never this.
+    if (reg.whatsappStatus) {
+      if (reg.whatsappStatus !== 'sent') {
+        console.info(`[whatsapp] confirmation already attempted · registrationId=${args.registrationId} · status=${reg.whatsappStatus} — not re-sent automatically`)
+      }
+      return
+    }
 
     const email = reg.attendee.email ?? ''
     const phone = reg.attendee.phone?.trim()

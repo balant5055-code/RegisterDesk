@@ -265,6 +265,22 @@ export function isEventScopedPath(pathname: string, eventScopedPrefixes: readonl
 }
 
 /**
+ * Pages that are not event-scoped in navigation but whose figures FOLLOW the selector, and so must
+ * have the selection carried in their URL (`?eventId=`) whenever it changes.
+ *
+ * Why the URL: the selector resolves URL first, then the remembered choice. A page reached with
+ * `?eventId=A` whose URL were NOT rewritten on a switch to B would keep resolving A — a stale URL
+ * silently overriding the newer explicit choice. The Wallet (one event at a time) and, since
+ * RD-FIN-SCOPE-01, the Finance overview are such pages.
+ */
+export const SELECTOR_SYNCED_PATHS: readonly string[] = ['/dashboard/wallet', '/dashboard/finance']
+
+/** Whether a selection change on this page rewrites `?eventId=` (event-scoped routes + the synced pages). */
+export function selectionRewritesUrl(pathname: string, eventScopedPrefixes: readonly string[]): boolean {
+  return isEventScopedPath(pathname, eventScopedPrefixes) || SELECTOR_SYNCED_PATHS.includes(pathname)
+}
+
+/**
  * Builds an href that carries the selected event, without disturbing any other
  * query parameter the destination already relies on (`?status=`, `?filter=`, …).
  *

@@ -1,7 +1,8 @@
 'use client'
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useAuth }                          from '@/components/auth/AuthProvider'
+import { useEventContext }                  from '@/components/dashboard/EventContextProvider'
 import {
   ArrowDownLeft, BarChart3,
   Clock, CreditCard, DollarSign,
@@ -15,6 +16,7 @@ import Link                      from 'next/link'
 import { RequestSettlementModal } from '@/components/dashboard/finance/RequestSettlementModal'
 import { SettlementHistoryTable } from '@/components/dashboard/finance/SettlementHistoryTable'
 import { FinanceControlCenter }   from '@/components/dashboard/finance/FinanceControlCenter'
+import { financeViewScope, financeScopeParam, createLatestGate } from '@/lib/finance/viewScope'
 import { formatCompactINR, formatShortDate } from '@/lib/finance/format'
 import type { FinanceOverview } from '@/app/api/organizer/finance/route'
 import type { PayoutProfileGetResponse } from '@/lib/payout/types'
@@ -110,6 +112,8 @@ export default function FinancePage() {
   const [txnError,      setTxnError]      = useState<string | null>(null)
 
   const [hasMore,       setHasMore]       = useState(false)
+  // RD-FIN-SCOPE-01 — an event whose ledger exceeds the server's per-event read cap lists only its newest rows.
+  const [ledgerTruncated, setLedgerTruncated] = useState(false)
   const [cursor,        setCursor]        = useState<string | null>(null)
 
   const [token,            setToken]            = useState<string>('')
@@ -120,6 +124,21 @@ export default function FinancePage() {
   const handleRetry = useCallback(() => setRetryKey(k => k + 1), [])
 
   const { user, getToken } = useAuth()
+
+  // ── RD-FIN-SCOPE-01 · the global Event Selector decides the EVENT-scoped sections ──────────
+  // The page used to ignore it: every section showed workspace-wide figures under a header naming
+  // one event. Now: All events → workspace totals; one event → that event only (resolved and
+  // ownership-checked on the server); a link to an event this workspace cannot see → an explicit
+  // "not available" state, never a silent fall-back to all events. The wallet, settlements and
+  // payout profile are per WORKSPACE by design (payouts draw from one balance) and are labelled so.
+  const { selectedEventId, isAllEvents, selectedEvent, loading: eventsLoading, urlEventMissing } = useEventContext()
+  const viewScope = financeViewScope({
+    loading: eventsLoading, urlEventMissing, selectedEventId, isAllEvents, selectedEventName: selectedEvent?.name ?? null,
+  })
+  const scopeKey = financeScopeParam(viewScope)
+  const eventScoped = viewScope?.kind === 'event'
+  // Only the latest ledger request may write: a slow response for the previous event is dropped.
+  const txnGate = useRef(createLatestGate())
 
   // ── Fetch settlements (used both on initial load and after POST) ───────────
 
@@ -191,8 +210,10 @@ export default function FinancePage() {
     f:      TxnFilter,
     append: boolean,
     cur:    string | null,
+    scope:  string | null,
   ) => {
-    if (!tok) return
+    if (!tok || !scope) return
+    const mine = txnGate.current.take()
     const setter = append ? setLoadingMore : setLoadingTxns
     setter(true)
     setTxnError(null)
@@ -200,19 +221,29 @@ export default function FinancePage() {
       const url = new URL('/api/organizer/finance/transactions', window.location.origin)
       url.searchParams.set('filter', f)
       url.searchParams.set('limit', '50')
+      url.searchParams.set('eventId', scope)
       if (cur) url.searchParams.set('cursor', cur)
 
       const res = await fetch(url.toString(), { headers: { Authorization: `Bearer ${tok}` } })
-      if (!res.ok) throw new Error(`Failed to load transactions. (${res.status})`)
+      if (!txnGate.current.isLatest(mine)) return
+      if (!res.ok) {
+        const body = await res.json().catch(() => null) as { error?: string } | null
+        throw new Error(res.status === 409 || res.status === 404 ? (body?.error ?? 'This event has no finance records.') : `Failed to load transactions. (${res.status})`)
+      }
       const data = await res.json() as FinanceTransactionsResponse
+      if (!txnGate.current.isLatest(mine)) return
 
       setTransactions(prev => append ? [...prev, ...data.transactions] : data.transactions)
       setHasMore(data.hasMore)
       setCursor(data.nextCursor)
+      setLedgerTruncated(data.scope?.truncated === true)
     } catch (e) {
+      if (!txnGate.current.isLatest(mine)) return
+      // A failed request clears the list: the previous scope's rows must not read as current.
+      if (!append) setTransactions([])
       setTxnError(e instanceof Error ? e.message : 'Failed to load transactions.')
     } finally {
-      setter(false)
+      if (txnGate.current.isLatest(mine)) setter(false)
     }
   }, [])
 
@@ -222,15 +253,15 @@ export default function FinancePage() {
       setTransactions([])
       setCursor(null)
       setHasMore(false)
-      fetchTransactions(token, filter, false, null)
+      fetchTransactions(token, filter, false, null, scopeKey)
     }
     void run()
-  }, [token, filter, fetchTransactions])
+  }, [token, filter, scopeKey, fetchTransactions])
 
   const handleLoadMore = useCallback(() => {
     if (!cursor || loadingMore) return
-    fetchTransactions(token, filter, true, cursor)
-  }, [token, filter, cursor, loadingMore, fetchTransactions])
+    fetchTransactions(token, filter, true, cursor, scopeKey)
+  }, [token, filter, cursor, loadingMore, scopeKey, fetchTransactions])
 
   // ── Settlement request submission ─────────────────────────────────────────
 
@@ -310,6 +341,11 @@ export default function FinancePage() {
           <p className="mt-0.5 text-[14px] text-muted-foreground">
             Revenue balances and transaction history for your events.
           </p>
+          {viewScope && (
+            <p data-testid="finance-page-scope" className="mt-2 inline-flex items-center gap-1.5 rounded-full border border-primary/20 bg-primary/[0.06] px-2.5 py-0.5 text-[12.5px] font-medium text-foreground">
+              {viewScope.kind === 'event' ? <>Showing: <strong className="font-semibold">{viewScope.name}</strong></> : 'Showing: All events'}
+            </p>
+          )}
         </div>
         {!loadingPage && !error && (
           <div className="flex shrink-0 items-center gap-2">
@@ -357,7 +393,22 @@ export default function FinancePage() {
         )}
       </div>
 
-      {/* ── KPI cards ── */}
+      {/* RD-FIN-SCOPE-01 — a link naming an event this workspace cannot see: say so, never swap in other data. */}
+      {urlEventMissing && (
+        <div role="status" className="rounded-xl border border-amber-200 bg-amber-50/60 px-4 py-3 text-[13px] text-amber-800 dark:border-amber-500/20 dark:bg-amber-500/[0.07] dark:text-amber-400">
+          The event in this link isn’t available in this workspace. Choose an event — or All events — in the event selector to see its finance figures.
+        </div>
+      )}
+
+      {/* ── KPI cards ── wallet balances are per WORKSPACE (one balance, one payout), labelled as such */}
+      {!error && (
+        <p data-testid="finance-wallet-scope" className="text-[12.5px] text-muted-foreground">
+          <strong className="font-semibold text-foreground">Workspace wallet · all events.</strong>{' '}
+          {eventScoped
+            ? 'Balances and lifetime totals are held for your whole workspace — payouts draw from one balance, so they are not split by event. The selected event’s own figures are below.'
+            : 'Balances and lifetime totals across every event in this workspace.'}
+        </p>
+      )}
       {error ? (
         <ErrorState message={error} onRetry={handleRetry} />
       ) : (
@@ -413,16 +464,18 @@ export default function FinancePage() {
           /api/organizer/finance returns non-OK (a permission refusal included), and
           `token` stays empty until auth resolves — the same pair the settlement and
           ledger sections already depend on, so authorization behaviour is unchanged. */}
-      {!error && token && <FinanceControlCenter token={token} />}
+      {!error && token && viewScope && <FinanceControlCenter token={token} scope={viewScope} />}
 
-      {/* ── Settlement History ── */}
-      <DashboardCard title="Settlement Requests">
+      {/* ── Settlement History ── payouts are per workspace (one balance), never per event */}
+      <DashboardCard title="Settlement Requests · all events">
         <SettlementHistoryTable settlements={settlements} loading={loadingSettle} />
       </DashboardCard>
 
-      {/* ── Revenue Ledger ── */}
+      {/* ── Revenue Ledger ── RD-FIN-SCOPE-01: only with a known scope. Without one (an unavailable event link)
+          an empty "· all events" table would read as "no transactions" — false — so it is not rendered. */}
+      {viewScope && (
       <DashboardCard
-        title="Revenue Ledger"
+        title={eventScoped && viewScope?.kind === 'event' ? `Revenue Ledger · ${viewScope.name}` : 'Revenue Ledger · all events'}
         action={
           <div className="flex items-center gap-2">
             <div
@@ -447,7 +500,7 @@ export default function FinancePage() {
               ))}
             </div>
             <button
-              onClick={() => fetchTransactions(token, filter, false, null)}
+              onClick={() => fetchTransactions(token, filter, false, null, scopeKey)}
               disabled={loadingTxns}
               aria-label="Refresh transactions"
               className="flex size-7 items-center justify-center rounded-lg border border-border bg-card text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:opacity-50"
@@ -457,8 +510,13 @@ export default function FinancePage() {
           </div>
         }
       >
+        {ledgerTruncated && !txnError && (
+          <p className="mb-2 text-[12px] text-muted-foreground">
+            This event has more transactions than this view reads at once; the newest are listed. Use Reports &amp; Exports for the complete ledger.
+          </p>
+        )}
         {txnError ? (
-          <ErrorState message={txnError} onRetry={() => fetchTransactions(token, filter, false, null)} />
+          <ErrorState message={txnError} onRetry={() => fetchTransactions(token, filter, false, null, scopeKey)} />
         ) : (
           <div className="overflow-x-auto">
             <table
@@ -559,6 +617,7 @@ export default function FinancePage() {
           </div>
         )}
       </DashboardCard>
+      )}
 
       {/* ── Request Settlement modal ── */}
       {showModal && (

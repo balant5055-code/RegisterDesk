@@ -191,6 +191,7 @@ export function buildDeletionManifest(t: DeletionTarget): DeletionStep[] {
     // ── Subcollections of the event document ─────────────────────────────────
     { kind: 'subcollection', label: 'events/changeLog',    parentPath: `events/${slug}`, name: 'changeLog' },
     { kind: 'subcollection', label: 'events/editHistory',  parentPath: `events/${slug}`, name: 'editHistory' },
+    { kind: 'subcollection', label: 'events/reviewHistory', parentPath: `events/${slug}`, name: 'reviewHistory' },
 
     // ── Object storage, everything under this event's prefix ─────────────────
     { kind: 'storage', label: 'r2:events/' + slug, eventSlug: slug },
