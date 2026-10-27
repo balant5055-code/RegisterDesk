@@ -329,7 +329,7 @@ function MessagesInner() {
       <div className="rounded-2xl border border-border bg-card p-4 text-[12.5px] text-muted-foreground">
         <span className="font-semibold text-foreground">Email</span> is included at no charge.{' '}
         <span className="font-semibold text-foreground">WhatsApp</span> uses each event’s purchased capacity — see{' '}
-        <Link href={COMMUNICATION_USAGE_HREF} className="font-semibold text-primary hover:underline">Usage</Link> for what is used and what remains.
+        <Link href={COMMUNICATION_USAGE_HREF} prefetch={false} className="font-semibold text-primary hover:underline">Usage</Link> for what is used and what remains.
       </div>
 
       {selected && <DetailsDrawer row={selected} onClose={() => setSelected(null)} />}

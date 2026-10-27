@@ -78,7 +78,7 @@ export function CommunicationOverview() {
         </span>
         <p className="min-w-0 flex-1 text-[12.5px] text-muted-foreground">
           Workspace-wide activity across every event.
-          {eventScoped && <> The event selector does not filter this page — for <span className="font-medium text-foreground">{selectedEvent.name}</span> only, open <Link href="/dashboard/communications?tab=analytics" className="font-semibold text-primary hover:underline">Analytics</Link> or <Link href="/dashboard/communications?tab=usage" className="font-semibold text-primary hover:underline">Usage</Link>.</>}
+          {eventScoped && <> The event selector does not filter this page — for <span className="font-medium text-foreground">{selectedEvent.name}</span> only, open <Link href="/dashboard/communications?tab=analytics" prefetch={false} className="font-semibold text-primary hover:underline">Analytics</Link> or <Link href="/dashboard/communications?tab=usage" prefetch={false} className="font-semibold text-primary hover:underline">Usage</Link>.</>}
         </p>
       </div>
 
@@ -162,7 +162,7 @@ export function OverviewSections({ model, walletError }: { model: OverviewModel;
                   <p className="text-[13px] font-medium text-foreground">{a.title}</p>
                   <p className="text-[12px] text-muted-foreground">{a.detail}</p>
                 </div>
-                <Link href={a.href} className="shrink-0 rounded-md text-[12.5px] font-semibold text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/30">{a.cta} →</Link>
+                <Link href={a.href} prefetch={false} className="shrink-0 rounded-md text-[12.5px] font-semibold text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/30">{a.cta} →</Link>
               </li>
             ))}
           </ul>

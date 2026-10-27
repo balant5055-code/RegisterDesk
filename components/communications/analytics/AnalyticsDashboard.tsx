@@ -278,7 +278,7 @@ function Insights({ items }: { items: Insight[] }) {
             <p className="text-[13px] font-medium text-foreground">{i.title}</p>
             <p className="text-[12px] text-muted-foreground">{i.detail}</p>
           </div>
-          {i.href && i.cta && <Link href={i.href} className="shrink-0 text-[12.5px] font-semibold text-primary hover:underline">{i.cta} →</Link>}
+          {i.href && i.cta && <Link href={i.href} prefetch={false} className="shrink-0 text-[12.5px] font-semibold text-primary hover:underline">{i.cta} →</Link>}
         </div>
       ))}
     </section>
@@ -352,7 +352,7 @@ function Capacity({ data }: { data: CommunicationAnalyticsResponse }) {
   const f = cap.figures
   const usageHref = `/dashboard/communications?tab=usage${data.scope.eventId ? `&eventId=${encodeURIComponent(data.scope.eventId)}` : ''}`
   return (
-    <Panel title="WhatsApp capacity" subtitle="The same figures as Usage — current totals, not limited to the selected dates." action={<Link href={usageHref} className="text-[12.5px] font-semibold text-primary hover:underline">Usage →</Link>}>
+    <Panel title="WhatsApp capacity" subtitle="The same figures as Usage — current totals, not limited to the selected dates." action={<Link href={usageHref} prefetch={false} className="text-[12.5px] font-semibold text-primary hover:underline">Usage →</Link>}>
       {f ? (
         <dl className="grid grid-cols-2 gap-x-4 gap-y-2.5 text-[12.5px] sm:grid-cols-3">
           {(['purchased', 'used', 'available', 'inProgress', 'returned', 'refunded'] as const).map(k => (
@@ -400,7 +400,7 @@ function Templates({ rows }: { rows: TemplateRow[] }) {
                 <td className="py-2 pr-3 text-right tabular-nums">{nf(t.counts.skipped)}</td>
                 <td className="py-2 pr-3 text-right tabular-nums">{pctText(t.failureRate)}</td>
                 <td className="whitespace-nowrap py-2 pr-3 text-muted-foreground">{t.lastActivity ? new Date(t.lastActivity).toLocaleString('en-IN', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : '—'}</td>
-                <td className="py-2 text-right">{t.href && <Link href={t.href} className="text-[12px] font-semibold text-primary hover:underline">Open</Link>}</td>
+                <td className="py-2 text-right">{t.href && <Link href={t.href} prefetch={false} className="text-[12px] font-semibold text-primary hover:underline">Open</Link>}</td>
               </tr>
             ))}
           </tbody>
