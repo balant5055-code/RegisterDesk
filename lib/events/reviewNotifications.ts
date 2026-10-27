@@ -6,10 +6,12 @@
 // logged and must never interrupt the review action.
 
 import { notificationEngine, NotificationType, NotificationChannel } from '@/lib/notifications'
+import { resolvePlatformEmailProvider } from '@/lib/email/platformProvider'
 import { sendOrganizerWhatsApp } from '@/lib/notifications/organizerWhatsApp'
 import { writeEmailLog }         from '@/lib/email-logs/write'
 import { resolveOrganizerEmailIdentity } from '@/lib/organizer/emailIdentity'
 import { notifyEventReviewed }   from '@/lib/notifications/inbox/notify'
+import { emailUrl }              from '@/lib/email/appUrl'
 
 export type ReviewNotificationKind =
   | 'submitted'          // event submitted → under review
@@ -25,6 +27,15 @@ interface ReviewNotificationArgs {
   reason?:      string   // rejection reason
   comment?:     string   // changes-requested comment
   eventId?:     string | null   // draftId — used to deep-link the inbox notification (H.4.3)
+  /** RD-REVIEW-01 — the reviewHistory entry id of this transition (dedupes the inbox item). */
+  occurrenceId?: string
+}
+
+/** Where the organizer acts on a review decision: the event's Setup tab, or the event itself. */
+export function reviewEventPath(kind: ReviewNotificationKind, eventId?: string | null): string | null {
+  if (!eventId) return null
+  const base = `/dashboard/events/${encodeURIComponent(eventId)}`
+  return kind === 'rejected' || kind === 'changes_requested' ? `${base}?tab=setup` : base
 }
 
 const KIND_TO_TYPE: Record<ReviewNotificationKind, NotificationType> = {
@@ -58,6 +69,7 @@ export async function sendEventReviewEmail(args: ReviewNotificationArgs): Promis
     kind:         args.kind,
     reason:       args.reason,
     comment:      args.comment,
+    occurrenceId: args.occurrenceId,
   })
 
   const emailTask = (async () => {
@@ -71,7 +83,8 @@ export async function sendEventReviewEmail(args: ReviewNotificationArgs): Promis
       eventName:    args.eventName,
       templateKey:  type,
       subject:      `Event review: ${args.kind}`,
-      provider:     'ses',
+      // RD-EMAIL-PROVIDER-04 — the provider the engine will actually use (platform choice).
+      provider:     await resolvePlatformEmailProvider(),
       channel:      'email' as const,
     }
     try {
@@ -88,11 +101,17 @@ export async function sendEventReviewEmail(args: ReviewNotificationArgs): Promis
         return
       }
 
+      // The link is an addition: a misconfigured app URL (emailUrl throws in production) drops the
+      // button, never the review email itself.
+      const path = reviewEventPath(args.kind, args.eventId)
+      let eventUrl: string | undefined
+      try { eventUrl = path ? emailUrl(path) : undefined } catch { eventUrl = undefined }
       const result = await notificationEngine.send(type, {
         to:        identity.email,
         eventName: args.eventName,
         reason:    args.reason,
         comment:   args.comment,
+        eventUrl,
       })
       // PART 9: record the organizer email in the unified communication log
       // (channel='email') so it appears in the Communication Center alongside WhatsApp.

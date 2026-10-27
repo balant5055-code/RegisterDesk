@@ -197,6 +197,32 @@ export const AUDIT_ACTIONS = [
   // touched (no deletion without its audit row); `result` records the outcome of each run.
   'organizer.deletion_requested',
   'organizer.deletion_result',
+  // RD-FEATURE-REQ-01 — Super Admin triage of organizer feature requests (status, priority,
+  // responses, duplicate links, rollout plan) and internal notes. Staged in the same transaction.
+  'feature_request.updated',
+  'feature_request.note_added',
+  // RD-SUPPORT-01 — Super Admin work on organizer support tickets: status / priority / assignee,
+  // organizer-visible replies, and internal notes (the note TEXT is never copied into the audit row).
+  'support_ticket.updated',
+  'support_ticket.replied',
+  'support_ticket.note_added',
+  // RD-EMAIL-PROVIDER-04 — the Super Admin changed the PLATFORM email provider (SES / Resend).
+  // Provider names only; never a credential. Staged in the configuration save transaction.
+  'platform.email_provider_changed',
+  // RD-WA-TEMPLATES-01 — organizer WhatsApp templates: a Super Admin decision on a version (approve /
+  // reject / request changes), a Super Admin-initiated Meta submission or status sync, an internal
+  // note (text never copied here), and a change of the platform review mode (manual / automatic).
+  'whatsapp_template.reviewed',
+  'whatsapp_template.meta_submitted',
+  'whatsapp_template.meta_synced',
+  'whatsapp_template.note_added',
+  'platform.whatsapp_template_review_mode_changed',
+  // WhatsApp Inbox — Super Admin access to attendee conversations (phone numbers + message text).
+  // Recorded at most once per admin, item and hour (deterministic ids), so the page's polling
+  // cannot flood the log. Never carries message content or a phone number.
+  'whatsapp_inbox.conversation_viewed',
+  'whatsapp_inbox.conversation_marked_read',
+  'whatsapp_inbox.unmatched_viewed',
 ] as const
 
 export type AdminAuditAction = typeof AUDIT_ACTIONS[number]
@@ -220,6 +246,8 @@ export const AUDIT_ENTITY_TYPES = [
   'registration',
   'certificate',
   'platform_settings',
+  // RD-WA-TEMPLATES-01
+  'whatsapp_template',
   // MC-05
   'media_credit_refund',
   // MC-09
@@ -230,6 +258,13 @@ export const AUDIT_ENTITY_TYPES = [
   'wallet_topup',
   // RD-WALLET-REQ — a walletServiceRequests record
   'wallet_service_request',
+  // RD-FEATURE-REQ-01 — a featureRequests record (not financial)
+  'feature_request',
+  // RD-SUPPORT-01 — a supportTickets record (not financial)
+  'support_ticket',
+  // WhatsApp Inbox — a conversation, and an unmatched inbound receipt.
+  'whatsapp_conversation',
+  'whatsapp_inbound',
 ] as const
 
 export type AdminAuditEntityType = typeof AUDIT_ENTITY_TYPES[number]

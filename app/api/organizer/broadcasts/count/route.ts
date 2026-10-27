@@ -21,6 +21,7 @@ import {
 import { resolveBroadcastTimezone } from '@/lib/broadcasts/resolveBroadcastTimezone'
 import { countUndatedRegistrations } from '@/lib/broadcasts/undatedRegistrations'
 import { todayISOInTz }              from '@/lib/registrations/salesWindow'
+import { getOrganiserSuppressionSet } from '@/lib/firebase/firestore/emailSuppressionList'
 
 interface CountResponse {
   success: boolean
@@ -155,11 +156,17 @@ export async function POST(req: NextRequest): Promise<NextResponse<CountResponse
   // Reuses the WhatsApp branch's bounded shape above (projected read, capped at cap+1), so
   // the read cost is one already-established pattern rather than a new one, and the whole
   // collection is never loaded — here or in the browser.
-  if (dedupeEmails) {
+  // RD-BCAST-COUNT — the preview must count who will ACTUALLY be mailed. Campaign creation drops
+  // addresses that opted out of this organizer; the preview did not, so it over-stated the
+  // audience whenever any opt-out existed. With opt-outs (or dedupe) the count is computed from
+  // the same projected, bounded read, in the same order as creation: refunds → opt-outs → dedupe.
+  const suppressionSet = await getOrganiserSuppressionSet(uid)
+  if (dedupeEmails || suppressionSet.size > 0) {
     const snap = await query.select('attendee', 'paymentStatus').limit(maxRecipients + 1).get()
     const emails = applyAudienceRefundRule(audience as BroadcastAudience, snap.docs.map(d => ({ data: d.data() as { attendee?: { email?: string } } })))
       .map(r => r.data.attendee?.email)
-    return NextResponse.json({ success: true, count: countUniqueRecipients(emails), ...windowMeta })
+      .filter(e => typeof e !== 'string' || !suppressionSet.has(e.toLowerCase().trim()))
+    return NextResponse.json({ success: true, count: dedupeEmails ? countUniqueRecipients(emails) : emails.length, ...windowMeta })
   }
 
   // Email: exact count via an indexed aggregate — no documents transferred.

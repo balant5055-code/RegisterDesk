@@ -140,6 +140,7 @@ export interface Event360Governance {
 
 export type TimelineSource =
   | 'lifecycle' | 'audit' | 'license' | 'governance' | 'moderation'
+  | 'review'   // RD-REVIEW-01 — events/{slug}/reviewHistory (every review decision + resubmission)
 
 export interface Event360TimelineEntry {
   id:       string

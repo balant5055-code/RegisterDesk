@@ -224,16 +224,18 @@ export function SportsTemplate(props: EventDetailProps) {
         ctaLabel={td?.ctaLabel ?? 'Register'}
       />
 
-      {/* Waiver — registration consent (tokenised) */}
-      {td?.requireWaiver && (
+      {/* Waiver notice — RD-WAIVER-01: shown only when a waiver is actually in force (switched
+          on AND worded — the rule registration enforces), and it describes what WILL happen:
+          the attendee reads and accepts during registration. It no longer says that merely
+          registering means agreeing, which is not how acceptance is recorded. */}
+      {td?.requireWaiver === true && typeof td.waiverText === 'string' && td.waiverText.trim() !== '' && (
         <div className="border-b border-border/60 bg-muted/30">
           <div className={cn(EVENT_CONTAINER, BAND_PY, 'flex items-start gap-3')}>
             <Shield className="mt-0.5 size-4 shrink-0 text-action" aria-hidden />
             <div>
               <p className="text-fs-sm font-semibold text-foreground">Waiver required for participation</p>
               <p className="mt-0.5 text-fs-sm text-muted-foreground">
-                By registering, you agree to the event waiver and release of liability.
-                {td.waiverText?.trim() ? ' Please read the full waiver during registration.' : ''}
+                You’ll be asked to read and accept the event waiver before completing registration.
               </p>
             </div>
           </div>

@@ -83,9 +83,11 @@ export function buildLiveContentSync(
   // ── RD-CE-FIX H1 · the VALUES pushed must pass the server's rules ─
   // Only issues this copy introduces (vs the live event) are refused, so a legacy event with an
   // old inconsistency can still be edited — but no copy can make it invalid.
+  // RD-WAIVER-01 · eventType lets the sports-waiver rule run on edits too (switching the waiver on
+  // with no wording is refused). The type is identity — frozen after publish — so the live one.
   const introduced = introducedValueIssues(
-    { eventDetails: live.eventDetails, pricing: live.pricing },
-    { eventDetails: dn.eventDetails, pricing: dn.pricing },
+    { eventDetails: live.eventDetails, pricing: live.pricing, eventType: live.eventType },
+    { eventDetails: dn.eventDetails, pricing: dn.pricing, eventType: live.eventType },
   )
   if (introduced.length > 0) return { ok: false, status: 422, message: introduced.map(i => i.message).join(' ') }
 

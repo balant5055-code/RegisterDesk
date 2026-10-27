@@ -3359,6 +3359,20 @@ export default function CreateEventWizard() {
     if (refreshedForRef.current !== id) { refreshedForRef.current = id; eventCtx.refresh() }
   }, [draft?.id, eventCtx])
 
+  // RD-WIZARD-01 · …and once more whenever the SAVED name changes, so the header stops reading
+  // "Untitled Event" for an event the organizer has already named (it only caught up on reload).
+  // `draft` re-syncs at navigation and save points, never per keystroke, so this is one list read
+  // per rename. Keyed on the name, so a refresh that returns the same name cannot loop.
+  const draftNameRaw = (draft?.eventDetails as { info?: { name?: unknown } } | null | undefined)?.info?.name
+  const draftName = typeof draftNameRaw === 'string' ? draftNameRaw.trim() : ''
+  const refreshedNameRef = useRef<string>('')
+  useEffect(() => {
+    if (!draft?.id || !draftName || eventCtx.loading || eventCtx.selectedEventId !== draft.id) return
+    if (eventCtx.selectedEvent?.name === draftName || refreshedNameRef.current === draftName) return
+    refreshedNameRef.current = draftName
+    eventCtx.refresh()
+  }, [draft?.id, draftName, eventCtx])
+
   // Buffers the Step 1 (category) and Step 2 (visibility) selections BEFORE any
   // Firestore document exists. These seed the deferred createDraft and let the
   // organizer navigate Back without losing choices while no draft is persisted.

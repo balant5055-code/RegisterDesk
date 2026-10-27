@@ -184,7 +184,7 @@ describe('the manifest covers the audited event-owned data', () => {
       'certificates', 'certificateRecords', 'certificateJobs', 'certificateClaims',
       'scheduledReminders', 'registrationCounters', 'waitlistCounters', 'bibCounters',
       'identifierConfigs', 'donationCampaigns', 'donationCounters', 'certificateSettings',
-      'events/changeLog', 'events/editHistory', 'eventDraft', 'events',
+      'events/changeLog', 'events/editHistory', 'events/reviewHistory', 'eventDraft', 'events',
     ]) {
       expect(labels, `missing ${c}`).toContain(c)
     }

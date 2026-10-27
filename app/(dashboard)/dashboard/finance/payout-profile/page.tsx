@@ -151,6 +151,9 @@ export default function PayoutProfilePage() {
 
   // Track initial form to detect "first save" for the success message
   const savedOnce = useRef(false)
+  // RD-NOTIFY-DEDUP · one Idempotency-Key per save ATTEMPT: a retry of the same details (double
+  // submit, network error) reuses it, so the server saves — and alerts the Super Admins — once.
+  const attempt = useRef<{ key: string; sig: string } | null>(null)
 
   const { user, getToken } = useAuth()
 
@@ -202,20 +205,24 @@ export default function PayoutProfilePage() {
     setSaveError(null)
     setSavedAt(null)
 
+    const payload = {
+      accountHolderName: form.accountHolderName,
+      payoutMethod:      form.payoutMethod,
+      bankName:          form.bankName     || undefined,
+      accountNumber:     form.accountNumber || undefined,
+      ifscCode:          form.ifscCode.toUpperCase() || undefined,
+      upiId:             form.upiId        || undefined,
+      panNumber:         form.panNumber.toUpperCase(),
+      gstNumber:         form.gstNumber    || undefined,
+    }
+    const sig = JSON.stringify(payload)
+    if (!attempt.current || attempt.current.sig !== sig) attempt.current = { key: crypto.randomUUID(), sig }
+
     try {
       const res = await fetch('/api/organizer/payout-profile', {
         method:  'PUT',
-        headers: { Authorization: `Bearer ${token}`, 'content-type': 'application/json' },
-        body:    JSON.stringify({
-          accountHolderName: form.accountHolderName,
-          payoutMethod:      form.payoutMethod,
-          bankName:          form.bankName     || undefined,
-          accountNumber:     form.accountNumber || undefined,
-          ifscCode:          form.ifscCode.toUpperCase() || undefined,
-          upiId:             form.upiId        || undefined,
-          panNumber:         form.panNumber.toUpperCase(),
-          gstNumber:         form.gstNumber    || undefined,
-        }),
+        headers: { Authorization: `Bearer ${token}`, 'content-type': 'application/json', 'Idempotency-Key': attempt.current.key },
+        body:    sig,
       })
 
       if (!res.ok) {
@@ -230,6 +237,7 @@ export default function PayoutProfilePage() {
       setForm(profileToForm(data.profile))
       setSavedAt(new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }))
       savedOnce.current = true
+      attempt.current = null
       setHistoryVersion(v => v + 1)
     } catch {
       setSaveError('Network error — please try again.')

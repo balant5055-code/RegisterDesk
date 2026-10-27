@@ -426,6 +426,7 @@ function TabPricing({
   ebPriceErr,
   ebDateErr,
   pricingLocked = false,
+  attendeePaysFees = false,
 }: {
   pass:          EventPassFull
   onChange:      (p: Partial<EventPassFull>) => void
@@ -435,6 +436,8 @@ function TabPricing({
   ebDateErr?:    boolean
   /** RD-PRICING-UI-LOCK-01 — published event: price and early-bird pricing are read-only. */
   pricingLocked?: boolean
+  /** RD-WIZARD-01 — platform fees are added at checkout, not deducted from the payout. */
+  attendeePaysFees?: boolean
 }) {
   const isPaid     = pass.type === 'paid'
   const isUnlimited= pass.unlimited
@@ -536,7 +539,9 @@ function TabPricing({
           {isPaid && (
             <p className="flex items-center gap-1.5 text-[13px] text-muted-foreground">
               <Info className="size-3.5 shrink-0 text-muted-foreground/60" aria-hidden />
-              Attendees pay the ticket price shown. RegisterDesk platform fees are deducted from your payout.
+              {attendeePaysFees
+                ? 'Attendees pay the ticket price plus platform fees, added at checkout. You receive the full ticket price.'
+                : 'Attendees pay the ticket price shown. RegisterDesk platform fees are deducted from your payout.'}
             </p>
           )}
 
@@ -1630,6 +1635,8 @@ export interface AddPassEditorProps {
    * early bird) are read-only, and are restored from `editingPass` on save.
    */
   pricingLocked?: boolean
+  /** RD-WIZARD-01 — the event adds platform fees to the attendee's charge (attendee-pays). */
+  attendeePaysFees?: boolean
 }
 
 export function AddPassEditor({
@@ -1642,6 +1649,7 @@ export function AddPassEditor({
   eventSubtype,
   isFreeEvent = false,
   pricingLocked = false,
+  attendeePaysFees = false,
 }: AddPassEditorProps) {
   const [activeTab, setActiveTab] = useState<TabId>('basic')
   const [pass,      setPass]      = useState<EventPassFull>(
@@ -1789,7 +1797,7 @@ export function AddPassEditor({
               {/* Form */}
               <div className="min-w-0 flex-1 p-5 xl:pr-3">
                 {activeTab === 'basic'    && <TabBasic    pass={pass} onChange={handleChange} eventTypeId={eventTypeId} eventSubtype={pass.eventSubtype} isFreeEvent={isFreeEvent} pricingLocked={pricingLocked} />}
-                {activeTab === 'pricing'  && <TabPricing  pass={pass} onChange={handleChange} isFreeEvent={isFreeEvent} showPriceErr={showPriceErr} ebPriceErr={ebPriceErr} ebDateErr={ebDateErr} pricingLocked={pricingLocked} />}
+                {activeTab === 'pricing'  && <TabPricing  pass={pass} onChange={handleChange} isFreeEvent={isFreeEvent} showPriceErr={showPriceErr} ebPriceErr={ebPriceErr} ebDateErr={ebDateErr} pricingLocked={pricingLocked} attendeePaysFees={attendeePaysFees} />}
                 {activeTab === 'period'   && <TabPeriod   pass={pass} onChange={handleChange} />}
                 {activeTab === 'benefits' && (
                   <TabBenefits pass={pass} onChange={handleChange} eventTypeId={eventTypeId} eventSubtype={pass.eventSubtype} />

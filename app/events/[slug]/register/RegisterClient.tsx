@@ -147,6 +147,12 @@ export interface RegisterClientProps {
   /** RD-COMMS-WA-CONSENT — the event sends WhatsApp, so the optional opt-in box is offered. */
   whatsappUpdatesAvailable?: boolean
   /**
+   * RD-WAIVER-01 — the waiver this event requires, resolved on the server by the rule /submit and
+   * /create-order enforce. `textHash` is sent back with the acceptance so the server can confirm
+   * the wording accepted is the wording in force. Null/absent ⇒ no waiver.
+   */
+  waiver?: { text: string; textHash: string } | null
+  /**
    * RD-FEE-RESTORE-03 — true when THIS event adds platform fees to the attendee's charge.
    *
    * Server-resolved through the same `explicitFeeModel` + flag that price the checkout, so the
@@ -647,6 +653,7 @@ export function RegisterClient({
   refundPolicyUrl,
   whatsappUpdatesAvailable = false,
   attendeePaysFees = false,
+  waiver = null,
 }: RegisterClientProps) {
   const router = useRouter()
 
@@ -739,6 +746,22 @@ export function RegisterClient({
   // "stuck" was. The button is now always clickable and this flag carries the reason.
   const [needsConsent, setNeedsConsent] = useState(false)
   const { showToast } = useToast()
+
+  // RD-WAIVER-01 · the server refused because the organizer changed the waiver wording after this
+  // page loaded (409 WAIVER_CHANGED). The inline error and its alert stay as they are; on a phone
+  // that error renders far below the CTA, so a toast with a Reload action makes it visible at
+  // once. ONE toast per page load: a second refused attempt keeps the inline error without
+  // stacking another toast. Enforcement stays entirely server-side — this only reports it.
+  const staleWaiverToastShown = useRef(false)
+  const announceStaleWaiver = useCallback(() => {
+    if (staleWaiverToastShown.current) return
+    staleWaiverToastShown.current = true
+    showToast('The organiser updated the event waiver. Reload the page to read the new wording, then accept it again to register.', 'warning', {
+      title:    'Event waiver updated',
+      duration: 15_000,
+      action:   { label: 'Reload page', onClick: () => window.location.reload() },
+    })
+  }, [showToast])
 
 
   // …and otherwise fades after a short window so it never becomes permanent chrome.
@@ -1534,7 +1557,7 @@ export function RegisterClient({
   async function openPaymentReview(): Promise<void> {
     if (submitting || quoting || reviewOpen) return   // triple-tap → exactly one dialog
 
-    if (!isConsentComplete(consent, termsUrl, refundPolicyUrl)) {
+    if (!isConsentComplete(consent, termsUrl, refundPolicyUrl, waiver !== null)) {
       guideToConfirmation()
       return
     }
@@ -1611,7 +1634,7 @@ export function RegisterClient({
     }
 
     // GATE — before the duplicate precheck, before create-order, before Razorpay.
-    if (!isConsentComplete(consent, termsUrl, refundPolicyUrl)) {
+    if (!isConsentComplete(consent, termsUrl, refundPolicyUrl, waiver !== null)) {
       guideToConfirmation()
       return
     }
@@ -1665,6 +1688,9 @@ export function RegisterClient({
       // RD-COMMS-WA-CONSENT — OPTIONAL and unticked by default; never required to register.
       // The server records it only as a strict `true` with a usable phone number.
       ...(whatsappUpdatesAvailable && consent.whatsapp ? { whatsappBroadcastOptIn: true } : {}),
+      // RD-WAIVER-01 — sent only for a waiver event. The server re-checks BOTH values on both
+      // endpoints; the box above is the attendee's act, this is the evidence of it.
+      ...(waiver ? { waiverAccepted: consent.waiver === true, waiverTextHash: waiver.textHash } : {}),
     }
 
     try {
@@ -1722,6 +1748,7 @@ export function RegisterClient({
             // Every 4xx create-order returns is emitted BEFORE razorpay.orders.create, so
             // nothing exists to protect and the attendee can safely fix the problem.
             setSubmitError(outcome.error)
+            if (orderJson?.reason === 'WAIVER_CHANGED') announceStaleWaiver()
             return
           }
 
@@ -1797,8 +1824,9 @@ export function RegisterClient({
         method: 'POST', headers, body: JSON.stringify(requestBody),
       })
       const json = await res.json() as {
-        success: boolean; registrationId?: string; error?: string
+        success: boolean; registrationId?: string; error?: string; reason?: string
       }
+      if (json.reason === 'WAIVER_CHANGED') announceStaleWaiver()
       if (json.success && json.registrationId) {
         clearSavedForm()
         router.push(`/events/${eventSlug}/register/success?fresh=1&id=${json.registrationId}`)
@@ -1990,7 +2018,7 @@ export function RegisterClient({
 
   // ONE definition of "may proceed", shared by the submit handler, the sticky-summary
   // CTA and the mobile checkout bar, so no surface can become an ungated path to payment.
-  const consentReady = isConsentComplete(consent, termsUrl, refundPolicyUrl)
+  const consentReady = isConsentComplete(consent, termsUrl, refundPolicyUrl, waiver !== null)
 
   // RD-RT5.0 — the invoice rows shown in the on-page Payment Summary. Server-canonical
   // once create-order has answered with an itemised attendee charge; until then, the
@@ -2158,6 +2186,7 @@ export function RegisterClient({
               submitting={submitting}
               needsConsent={needsConsent && !consentReady}
               whatsappUpdatesFrom={whatsappUpdatesAvailable ? eventName : undefined}
+              waiverText={waiver?.text}
             />
 
             {/* Coupon — RD-RT4.0 gives it the same panel language as a form section, so

@@ -10,8 +10,9 @@
 // resend. Email is included; WhatsApp is drawn from the event's capacity (see Usage), so the
 // only money shown is what the LEGACY balance paid.
 
-import { useEffect, useMemo, useState } from 'react'
+import { Suspense, useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
+import { useSearchParams } from 'next/navigation'
 import {
   Mail, MessageCircle, XCircle, MinusCircle, Gauge, Wallet, ShieldCheck,
   UserCog, Download, Filter, X, RefreshCw, Search, HelpCircle,
@@ -101,7 +102,12 @@ function StatusBadge({ row }: { row: CommRow }) {
 
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
+// useSearchParams (the Analytics deep links) needs a Suspense boundary when this route renders alone.
 export default function CommunicationCenterPage() {
+  return <Suspense fallback={null}><MessagesInner /></Suspense>
+}
+
+function MessagesInner() {
   // The event selector decides the scope: one event (by its public slug), or every event.
   // null = the selector is still loading; '' = nothing to show (a draft has no messages yet).
   const { selectedEvent, isAllEvents, loading: eventsLoading } = useEventContext()
@@ -112,10 +118,13 @@ export default function CommunicationCenterPage() {
   const [error, setError]     = useState<string | null>(null)
   const [selected, setSelected] = useState<CommRow | null>(null)
 
-  // Filters
-  const [fChannel, setFChannel]     = useState('')
-  const [fStatus, setFStatus]       = useState('')
-  const [fType, setFType]           = useState('')
+  // Filters. RD-COMMS-ANALYTICS-02 — Analytics links here pre-filtered (?msgStatus / msgChannel /
+  // msgType); only known values are accepted, anything else starts unfiltered as before.
+  const params = useSearchParams()
+  const initial = (k: string, ok: (v: string) => boolean) => { const v = params.get(k) ?? ''; return ok(v) ? v : '' }
+  const [fChannel, setFChannel]     = useState(() => initial('msgChannel', v => v === 'email' || v === 'whatsapp'))
+  const [fStatus, setFStatus]       = useState(() => initial('msgStatus', v => ['sent', 'delivered', 'failed', 'unknown', 'skipped', 'queued'].includes(v)))
+  const [fType, setFType]           = useState(() => initial('msgType', v => /^[A-Za-z0-9_-]{1,64}$/.test(v)))
   const [fRecipient, setFRecipient] = useState('')
   const [dateFrom, setDateFrom]     = useState('')
   const [dateTo, setDateTo]         = useState('')

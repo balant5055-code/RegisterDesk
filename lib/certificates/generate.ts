@@ -22,6 +22,7 @@ import {
 
 import { reserveServiceUnits, releaseServiceUnits, draftIdForEventSlug } from '@/lib/licensing/serviceAllowanceLedger'
 import { sendCertificateWhatsApp } from './whatsapp'
+import { runAfterResponse } from '@/lib/server/afterResponse'
 import { uploadCertificateArtifact, deleteCertificateArtifact } from './artifact'
 import { safeFetchBytes, validateEventTemplateUrl, validateGlobalTemplateUrl } from './urlGuard'
 import { loadTemplateBytes, templateSourceIdentity } from './templateAsset'
@@ -454,16 +455,17 @@ export async function generateCertificate(
     const emailed = false
 
     // WhatsApp delivery (GA-4 S2) — automatically sent after successful generation.
-    // Fire-and-forget; reuses the Notification/WhatsApp engine + certificate_ready
-    // template. Never throws (a delivery problem must not fail generation).
-    void sendCertificateWhatsApp({
+    // Reuses the Notification/WhatsApp engine + certificate_ready template. Never throws (a
+    // delivery problem must not fail generation). Scheduled with after() so it is not frozen
+    // with the response (lib/server/afterResponse); outside a request it runs inline.
+    await runAfterResponse(`certificate-whatsapp ${certificateId}`, () => sendCertificateWhatsApp({
       certificateId,
       registrationId,
       organizerUid:  input.organizerUid,
       eventSlug:     input.eventSlug,
       attendeeName:  input.attendeeName,
       eventName:     input.eventName,
-    })
+    }))
 
     // Organizer webhook (fire-and-forget; no-op when no webhook configured).
     void enqueueWebhook(input.organizerUid, 'certificate.issued', {

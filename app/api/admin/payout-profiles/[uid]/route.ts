@@ -14,7 +14,7 @@
 // and the adminAuditLogs row in that same transaction. `verifiedVersion` binds settlements to the
 // exact destination reviewed (lib/payout/binding.ts). No payout identifier is logged or returned.
 
-import { NextRequest, NextResponse }      from 'next/server'
+import { NextRequest, NextResponse, after } from 'next/server'
 import { FieldValue }                     from 'firebase-admin/firestore'
 import { adminDb }                        from '@/lib/firebase/admin'
 import { stageAdminAudit }                from '@/lib/admin/audit'
@@ -23,6 +23,9 @@ import { profileUpdatedAtMillis }         from '@/lib/payout/binding'
 import { buildAdminReviewHistoryRecord, snapshotFromDoc } from '@/lib/payout/historyRecord'
 import { stageHistoryRecord }             from '@/lib/payout/history'
 import { notificationEngine, NotificationType, NotificationChannel } from '@/lib/notifications'
+import { stageOutboxMessage, scheduleOutboxDelivery, istNow } from '@/lib/notifications/outbox'
+import { payoutProfileChangesNotice } from '@/lib/notifications/actionAlerts'
+import { prepareNotification } from '@/lib/notifications/inbox/write'
 import type { OrganizerPayoutProfileDoc } from '@/lib/payout/types'
 import {
   readVendorPreparationStatus, canAdminTransition, hasReviewablePayoutProfile,
@@ -158,7 +161,14 @@ export async function PATCH(req: NextRequest, ctx: RouteContext): Promise<NextRe
       after:      { vendorStatus: next },
       metadata:   { previousStatus: current, newStatus: next, reviewNote },
     })
+    // RD-NOTIFY-01 — "changes requested" needs the organizer to act: in-app + email, in this batch.
+    // (A local "reviewed" mark is internal preparation and stays silent.)
+    const changesNotice = next === 'changes_requested'
+      ? payoutProfileChangesNotice({ organizerUid: uid, note: reviewNote, stamp: Date.now(), when: istNow() })
+      : null
+    if (changesNotice) stageOutboxMessage(batch, changesNotice)
     await batch.commit()
+    if (changesNotice) scheduleOutboxDelivery(changesNotice.id)
 
     return NextResponse.json({ success: true, vendorStatus: next })
   }
@@ -218,6 +228,19 @@ export async function PATCH(req: NextRequest, ctx: RouteContext): Promise<NextRe
         metadata:      { destination: history.next.label, reviewedVersion: version },
         correlation:   { organizerUid: uid },
       })
+      // RD-NOTIFY-01 — the decision also lands in the organizer's inbox, atomically with it. One per
+      // reviewed version + outcome (a replay cannot pass the stale check, and the id would match).
+      const inbox = prepareNotification({
+        workspaceUid: uid, dedupeId: `payout-review_${action}_${version ?? 'v'}`, category: 'settlement',
+        type: action === 'verify' ? 'payout_profile_verified' : 'payout_profile_rejected',
+        title: action === 'verify' ? 'Your payout profile is verified' : 'Your payout profile was not verified',
+        body: action === 'verify'
+          ? 'Payout requests can now be made to this destination.'
+          : `Update your payout profile and save it again to be re-reviewed.${rejectionNote ? ` Reason: ${rejectionNote}` : ''}`,
+        severity: action === 'verify' ? 'success' : 'warning', actionRequired: action !== 'verify',
+        link: '/dashboard/finance/payout-profile',
+      })
+      if (inbox) tx.set(inbox.ref, inbox.data)
     })
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'UNKNOWN'
@@ -232,9 +255,12 @@ export async function PATCH(req: NextRequest, ctx: RouteContext): Promise<NextRe
     return NextResponse.json({ error: 'The review could not be saved. Nothing was changed.' }, { status: 500 })
   }
 
-  // ── Fire-and-forget: email notification ───────────────────────────────────
+  // ── Email notification (after the response) ───────────────────────────────
+  // RD-NOTIFY-01 — scheduled with after() instead of a dangling `void` promise, which the platform
+  // could cut off once the response was sent. Best-effort, templated as before; the in-app item
+  // above is the durable record of the decision.
 
-  void (async () => {
+  const sendDecisionEmail = async () => {
     try {
       if (!notificationEngine.isAvailable(NotificationChannel.EMAIL)) return
 
@@ -264,7 +290,8 @@ export async function PATCH(req: NextRequest, ctx: RouteContext): Promise<NextRe
     } catch (err) {
       console.error('[email] payout_profile notification failed:', err)
     }
-  })()
+  }
+  try { after(sendDecisionEmail) } catch { void sendDecisionEmail() }
 
   return NextResponse.json({
     uid,

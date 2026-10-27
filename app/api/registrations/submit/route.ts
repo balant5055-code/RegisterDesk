@@ -18,12 +18,14 @@ import {
   DuplicateRegistrationError,
   CouponExhaustedError,
   IdempotencyHitError,
+  WaiverNotAcceptedError,
 } from '@/lib/firebase/firestore/registrations'
 import { setRegistrationSessions } from '@/lib/sessions/service'
 import { SessionError }            from '@/lib/sessions/types'
 import { checkRateLimit, getClientIp } from '@/lib/rateLimit'
 import { validateInviteCode }       from '@/app/api/registrations/validate-invite-code/route'
 import { validateTermsConsent }     from '@/lib/legal/platformTerms'
+import { resolveEventWaiver, checkWaiverAcceptance } from '@/lib/registrations/waiver'
 import { sendConfirmationEmail }    from '@/lib/registrations/sendConfirmationEmail'
 import { validateCoupon }           from '@/lib/coupons/validate'
 import { resolveEffectivePassPricePaise, eventTimezone } from '@/lib/pricing/earlyBird'
@@ -56,6 +58,9 @@ interface SubmitBody {
   // RD-COMMS-WA-CONSENT — OPTIONAL, explicit opt-in to organizer WhatsApp broadcasts. Only a
   // real boolean `true` records consent (lib/whatsapp/broadcastConsent); anything else, nothing.
   whatsappBroadcastOptIn?: unknown
+  // RD-WAIVER-01 — required on a waiver event: a literal `true` plus the hash of the wording shown.
+  waiverAccepted?: unknown
+  waiverTextHash?: unknown
 }
 
 export interface SubmitResponse {
@@ -164,6 +169,20 @@ export async function POST(
   if (!event) {
     return NextResponse.json({ success: false, error: 'Event not found' }, { status: 404 })
   }
+
+  // ── 4b. RD-WAIVER-01 · the sports waiver — enforced HERE, against the LIVE event's wording.
+  //    The checkbox is a UI affordance; this is the control. A refused request writes nothing.
+  //    The acceptance time is taken now, on the server, when the attendee's submission arrives.
+  const waiverCheck = checkWaiverAcceptance(resolveEventWaiver(event), body)
+  if (!waiverCheck.ok) {
+    return NextResponse.json(
+      { success: false, error: waiverCheck.error, reason: waiverCheck.code },
+      { status: waiverCheck.status },
+    )
+  }
+  const waiverAcceptance = waiverCheck.acceptance
+    ? { textHash: waiverCheck.acceptance.textHash, acceptedAt: new Date().toISOString() }
+    : null
 
   // ── 5. Resolve pass from server-side pricing (never trust client price) ───
   const rawPricing = event.pricing as Record<string, unknown> | null
@@ -409,6 +428,9 @@ export async function POST(
       termsAccepted: true,
       termsVersion:  termsCheck.version!,
       whatsappBroadcastOptIn: body.whatsappBroadcastOptIn === true,
+      // RD-WAIVER-01 · validated above; re-checked inside the transaction against the read event.
+      enforceWaiver:    true,
+      waiverAcceptance,
     })
 
     // ── 8b. Optional conference session selection (G.3) ───────────────────────
@@ -463,6 +485,19 @@ export async function POST(
         eventName,
         passName,
       })
+    }
+    if (err instanceof WaiverNotAcceptedError) {
+      // The wording changed (or the waiver was switched on) between the check above and the write.
+      return NextResponse.json(
+        {
+          success: false,
+          reason:  err.reason,
+          error:   err.reason === 'WAIVER_CHANGED'
+            ? 'The event waiver has been updated. Please reload the page, read it and accept it again.'
+            : 'Please read and accept the event waiver to register.',
+        },
+        { status: err.reason === 'WAIVER_CHANGED' ? 409 : 400 },
+      )
     }
     if (err instanceof DuplicateRegistrationError) {
       return NextResponse.json(

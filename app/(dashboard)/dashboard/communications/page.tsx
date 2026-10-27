@@ -15,7 +15,11 @@ import { Suspense, useCallback } from 'react'
 import { usePathname, useRouter, useSearchParams } from 'next/navigation'
 import { cn } from '@/lib/utils/cn'
 import { Radio } from 'lucide-react'
-import { CommOverview, CommAnalytics, TemplateCenter } from '@/components/communications/CommTabs'
+import { TemplateCenter } from '@/components/communications/CommTabs'
+// RD-COMMS-OVERVIEW-02 — sectioned Overview (same data sources; replaces CommTabs' CommOverview).
+import { CommunicationOverview } from '@/components/communications/overview/CommunicationOverview'
+// RD-COMMS-ANALYTICS-02 — server-aggregated, event-scoped analytics (replaces CommTabs' CommAnalytics).
+import { CommunicationAnalytics } from '@/components/communications/analytics/AnalyticsDashboard'
 import { CommUsage } from '@/components/communications/CommUsage'
 import { CommOptOuts } from '@/components/communications/CommOptOuts'
 import MessagesView from './notifications/page'
@@ -81,12 +85,12 @@ function CommunicationCenterInner() {
       </div>
 
       {/* Only the active tab renders, so each feature fetches on demand (no N+1). */}
-      {tab === 'overview'   && <CommOverview />}
+      {tab === 'overview'   && <CommunicationOverview />}
       {tab === 'messages'   && <Suspense fallback={null}><MessagesView /></Suspense>}
       {tab === 'broadcasts' && <Suspense fallback={null}><BroadcastsClient /></Suspense>}
       {tab === 'reminders'  && <Suspense fallback={null}><RemindersView /></Suspense>}
       {tab === 'templates'  && <TemplateCenter />}
-      {tab === 'analytics'  && <CommAnalytics />}
+      {tab === 'analytics'  && <CommunicationAnalytics />}
       {tab === 'usage'      && <CommUsage />}
       {tab === 'optouts'    && <CommOptOuts />}
     </div>

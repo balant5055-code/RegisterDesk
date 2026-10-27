@@ -25,6 +25,9 @@ import { snapshotFromDoc } from '@/lib/payout/historyRecord'
 import { maskDestination } from '@/lib/payout/mask'
 import type { OrganizerPayoutProfileDoc } from '@/lib/payout/types'
 import { stageAdminAudit } from '@/lib/admin/audit'
+import { stageOutboxMessage, scheduleOutboxDelivery, istNow } from '@/lib/notifications/outbox'
+import { settlementRequestAlert } from '@/lib/notifications/actionAlerts'
+import { resolveOrganizerEmailIdentity } from '@/lib/organizer/emailIdentity'
 
 // ─── Timestamp helpers ────────────────────────────────────────────────────────
 
@@ -140,6 +143,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const walletRef = adminDb.doc(`organizerRevenueWallets/${uid}`)
   const newRef    = adminDb.collection('settlementRequests').doc()
 
+  // RD-NOTIFY-01 — a payout request needs Super Admin approval: alert them, staged in the SAME
+  // transaction as the request (none for a refused one). Masked amounts/identities only.
+  const identity = await resolveOrganizerEmailIdentity(uid).catch(() => ({ name: '', email: '' }))
+  const payoutAlert = settlementRequestAlert({
+    settlementId: newRef.id, amountPaise, eventName: null,
+    organizer: { uid, name: identity.name, email: identity.email }, when: istNow(),
+  })
+
   type TxnResult =
     | { ok: true }
     | { ok: false; status: number; error: string; availablePaise?: number }
@@ -221,6 +232,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       metadata:    { organizerUid: uid, amountPaise, destination: label, destinationVersion: bindVersion },
       correlation: { settlementId: newRef.id, organizerUid: uid },
     })
+    stageOutboxMessage(tx, payoutAlert)
     return { ok: true }
   })
 
@@ -237,6 +249,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
   // H.4.3: organizer Notification Center inbox (best-effort).
   void notifySettlement({ workspaceUid: uid, settlementId: newRef.id, kind: 'requested', amountPaise })
+  scheduleOutboxDelivery(payoutAlert.id)
 
   const response: CreateSettlementResponse = {
     id:          newRef.id,

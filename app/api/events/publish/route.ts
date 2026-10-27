@@ -45,6 +45,9 @@ import { ledgerRef } from '@/lib/licensing/serviceAllowanceLedger'
 import { normalizeTypeDetails, passesForType } from '@/lib/events/builder/typeTransition'
 import { supersededActivationOrderId, RAZORPAY_ORDER_ID_RE } from '@/lib/licensing/manualRefundHold'
 import { settleCapturedActivation } from '@/lib/licensing/activationSelfHeal'
+import { stageOutboxMessage, scheduleOutboxDelivery, istNow } from '@/lib/notifications/outbox'
+import { eventReviewAlert } from '@/lib/notifications/actionAlerts'
+import { resolveOrganizerEmailIdentity } from '@/lib/organizer/emailIdentity'
 
 
 /** RD-HIGH-1 — shown when a draft's paid capacity was already applied to its event. */
@@ -502,6 +505,16 @@ export async function POST(req: NextRequest): Promise<NextResponse<PublishApiRes
     ? adminDb.collection('donationCounters').doc(slug)
     : null
 
+  // RD-NOTIFY-01 — a submission FOR REVIEW alerts the Super Admins. The alert is staged in the
+  // publish transaction below, so it exists if and only if the submission persisted. Built before
+  // the transaction (identity read + a fixed timestamp → one id however often the txn retries).
+  const reviewAlert = terminalStatus === 'pending_review'
+    ? await resolveOrganizerEmailIdentity(uid).then(
+        o => eventReviewAlert({ submission: 'submitted', draftId, slug, eventName, organizer: { uid, name: o.name, email: o.email }, at: new Date(), when: istNow() }),
+        () => eventReviewAlert({ submission: 'submitted', draftId, slug, eventName, organizer: { uid, name: '', email: '' }, at: new Date(), when: istNow() }),
+      )
+    : null
+
   try {
     await adminDb.runTransaction(async (txn) => {
       // ── READS (all before any write — Firestore requirement) ────────────────
@@ -755,6 +768,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<PublishApiRes
         'eventDetails.seo.urlSlug': slug,
         publishAgreement:           { ...publishAgreementRecord, acceptedAt: FieldValue.serverTimestamp() },
       })
+      if (reviewAlert) stageOutboxMessage(txn, reviewAlert)
 
       // Atomically publish the linked donation campaign alongside the event
       if (campaignRef && linkedCampaignDoc) {
@@ -824,6 +838,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<PublishApiRes
     console.info(`[wa-trace][EVENT_SUBMITTED] STEP 1  Event submitted ✓ · slug=${slug} organizerUid=${uid}`)
     console.info(`[wa-trace][EVENT_SUBMITTED] STEP 2  Notification scheduled via after() ✓ (runs after response)`)
     after(() => sendEventReviewEmail({ organizerUid: uid, eventName, kind: 'submitted', eventId: draftId }))
+    if (reviewAlert) scheduleOutboxDelivery(reviewAlert.id)
   }
 
   console.info(`[publish] success · draftId=${draftId} slug=${slug} lifecycleStatus=${terminalStatus} tier=${resolvedTier}`)

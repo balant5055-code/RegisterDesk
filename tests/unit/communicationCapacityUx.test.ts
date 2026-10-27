@@ -43,7 +43,7 @@ describe('M2 · refused before anything exists; a later failure says why', () =>
     const route = read('app/api/organizer/broadcasts/route.ts')
     const quote = route.indexOf('const capacity = await quoteWhatsAppBroadcastCapacity({ organizerUid: uid, eventSlug, recipientCount })')
     expect(quote).toBeGreaterThan(-1)
-    expect(quote).toBeLessThan(route.indexOf('await campaignRef.set({'))
+    expect(quote).toBeLessThan(route.indexOf('await campaignRef.create({'))
     expect(quote).toBeLessThan(route.indexOf('if (isScheduled) {'))
     expect(route).toMatch(/error: 'WHATSAPP_CAPACITY_REQUIRED', message: WHATSAPP_BROADCAST_CAPACITY_REQUIRED, capacity \},\s*\{ status: 402 \}/)
     // The authoritative funding check at start is still there (capacity can change before a scheduled send).

@@ -213,7 +213,10 @@ const sportsCore = (): FormField[] => [
   f   ('Emergency Contact Number', 'mobile'),
   fOpt('Medical Conditions / Allergies', 'textarea', { helperText: 'Optional — share any conditions the medical team should know' }),
   f   ('Medical Consent', 'checkbox', true, { options: ['I confirm I am medically fit to participate in this event'] }),
-  f   ('Sports Waiver',   'checkbox', true, { options: ['I have read and agree to the event waiver and release of liability'] }),
+  // RD-WAIVER-01 · no "Sports Waiver" checkbox: the waiver is the event's own Participation
+  // Waiver (Details step), shown and enforced at checkout. The old field asked attendees to agree
+  // to wording they were never shown, and duplicated the real waiver where one is configured.
+  // Templates are copied into each event's form on selection, so existing events keep theirs.
 ]
 
 // ─── Event-type field set builders ────────────────────────────────────────────
@@ -303,7 +306,7 @@ const sportsSections = (raceExtra: FormField[] = []): FormSection[] => [
   ], 2),
   makeSection('Terms & Consent', [
     f('Medical Consent', 'checkbox', true, { options: ['I confirm I am medically fit to participate in this event'] }),
-    f('Sports Waiver',   'checkbox', true, { options: ['I have read and agree to the event waiver and release of liability'] }),
+    // RD-WAIVER-01 · no "Sports Waiver" checkbox — see sportsCore.
   ], 3),
 ]
 
@@ -324,7 +327,7 @@ const teamSportSections = (teamExtra: FormField[] = []): FormSection[] => [
   ], 2),
   makeSection('Terms & Consent', [
     f('Medical Consent', 'checkbox', true, { options: ['I confirm I am medically fit to participate in this event'] }),
-    f('Sports Waiver',   'checkbox', true, { options: ['I have read and agree to the event waiver and release of liability'] }),
+    // RD-WAIVER-01 · no "Sports Waiver" checkbox — see sportsCore.
   ], 3),
 ]
 

@@ -70,6 +70,7 @@ import {
 } from '@/lib/settlements/confirmedTransfer'
 import { captureFinancialError } from '@/lib/monitoring/sentry'
 import type { OrganizerPayoutProfileDoc } from '@/lib/payout/types'
+import { runAfterResponse } from '@/lib/server/afterResponse'
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -228,7 +229,9 @@ export async function PATCH(req: NextRequest, { params }: Ctx): Promise<NextResp
       return NextResponse.json({ error: 'The approval could not be saved. Nothing was changed.' }, { status: 500 })
     }
 
-    void (async () => {
+    // Scheduled with after() (lib/server/afterResponse): a detached promise can be frozen with the
+    // response on Vercel and the email/WhatsApp then never sent.
+    await runAfterResponse(`settlement-approved-notify ${id}`, async () => {
       try {
         const profile = await fetchOrganizerProfile(d.organizerUid)
         if (profile) {
@@ -239,7 +242,7 @@ export async function PATCH(req: NextRequest, { params }: Ctx): Promise<NextResp
             requestedAt:   tsToISO(d.requestedAt),
           })
           // Settlement Ready — organizer WhatsApp (FREE, Phase G3.5).
-          void sendOrganizerWhatsApp({
+          await sendOrganizerWhatsApp({
             type:         NotificationType.SETTLEMENT_APPROVED,
             organizerUid: d.organizerUid,
             variables:    { organizerName: profile.name, amount: `₹${(d.amountPaise / 100).toLocaleString('en-IN')}` },
@@ -248,7 +251,7 @@ export async function PATCH(req: NextRequest, { params }: Ctx): Promise<NextResp
       } catch (err) {
         console.error('[settlement] Failed to send approved email:', { id, err })
       }
-    })()
+    })
 
     // H.4.3: organizer Notification Center inbox (best-effort).
     void notifySettlement({ workspaceUid: d.organizerUid, settlementId: id, kind: 'approved', amountPaise: d.amountPaise })

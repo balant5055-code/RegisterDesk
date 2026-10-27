@@ -5,7 +5,7 @@
 // knows the subject/body — it only passes ReviewNotificationParams. Output is
 // byte-identical to the previous implementation (same emailShell wrapper).
 
-import { emailShell, escHtml } from '@/lib/email/templates/base'
+import { emailShell, escHtml, btn } from '@/lib/email/templates/base'
 import type { CustomEmailParams } from '@/lib/email/provider'
 import type { ReviewNotificationParams } from '../catalog'
 
@@ -58,5 +58,10 @@ export function renderReviewEmail(
   params: ReviewNotificationParams,
 ): CustomEmailParams {
   const { subject, body } = buildContent(kind, params)
-  return { to: params.to, subject, html: emailShell(subject, body) }
+  // RD-REVIEW-01 — a link to the event, when the caller supplies one. Without it the output is
+  // unchanged, so a caller that passes no URL still renders the original email.
+  const cta = params.eventUrl
+    ? `<p style="margin-top:16px">${btn(kind === 'rejected' || kind === 'changes_requested' ? 'Edit and resubmit' : 'Open event', params.eventUrl)}</p>`
+    : ''
+  return { to: params.to, subject, html: emailShell(subject, body + cta) }
 }

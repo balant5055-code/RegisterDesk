@@ -11,7 +11,10 @@ import {
   type ContextLogRow,
   type ContextRegistration,
   type InboundRoutingLookups,
+  type OutboundEvidence,
+  type OutboundEvidenceRow,
   type PhoneConversation,
+  OUTBOUND_EVIDENCE_WINDOW_MS,
 } from '@/lib/whatsapp/inboundRouting'
 
 const PNID  = 'PNID-1'
@@ -20,11 +23,13 @@ const OPTS  = { expectedPhoneNumberId: PNID }
 
 function lookups(data: {
   logs?: ContextLogRow[]; regs?: ContextRegistration[]; convs?: PhoneConversation[]
+  evidence?: OutboundEvidence
 } = {}) {
   const l = {
     logsByWamid:          vi.fn(async () => data.logs  ?? []),
     registrationsByWamid: vi.fn(async () => data.regs  ?? []),
     conversationsByPhone: vi.fn(async () => data.convs ?? []),
+    outboundByPhone:      vi.fn(async () => data.evidence ?? { rows: [], truncated: false }),
   }
   return l as typeof l & InboundRoutingLookups
 }
@@ -163,5 +168,114 @@ describe('no context → constrained phone fallback', () => {
     const l = lookups()
     await resolveInboundRoute(input({ from: '+91 98765-43210', contextWamid: null }), OPTS, l)
     expect(l.conversationsByPhone).toHaveBeenCalledWith(PHONE)
+  })
+})
+
+// ─── Outbound evidence (the plain-message fix) ────────────────────────────────
+//
+// Most attendees just type into the chat, so the message carries NO reply reference. Before
+// this fallback such a FIRST message could never be routed (no conversation existed yet), and
+// every later message followed it into the unmatched queue. RegisterDesk's OWN accepted sends
+// to the number now count as evidence — but only when everything agrees on ONE organizer + event.
+
+describe('no reply reference → outbound evidence (RegisterDesk messaged this number)', () => {
+  const NOW = Date.UTC(2026, 9, 26, 12)
+  const OPTS_T = { ...OPTS, nowMs: NOW }
+  const noCtx = input({ contextWamid: null })
+  const sent = (over: Partial<OutboundEvidenceRow> = {}): OutboundEvidenceRow => ({
+    id: 'wa_1', channel: 'whatsapp', status: 'sent', organizerUid: 'orgA', eventId: 'event-a',
+    eventName: 'Event A', registrationId: 'reg1', sentAtMs: NOW - 60 * 60 * 1_000, ...over,
+  })
+  const ev = (rows: OutboundEvidenceRow[], truncated = false): OutboundEvidence => ({ rows, truncated })
+
+  it('a first message with one recent attendee send routes to that organizer + event', async () => {
+    const l = lookups({ evidence: ev([sent()]) })
+    const d = await resolveInboundRoute(noCtx, OPTS_T, l)
+    expect(d).toMatchObject({
+      outcome: 'routed', method: 'outbound_recipient', organizerUid: 'orgA', eventId: 'event-a',
+      eventName: 'Event A', registrationIds: ['reg1'], context: 'none',
+    })
+    expect(l.outboundByPhone).toHaveBeenCalledWith(PHONE)
+  })
+
+  it('several sends (broadcast + confirmation) for the SAME organizer + event still route, with every registration', async () => {
+    const d = await resolveInboundRoute(noCtx, OPTS_T, lookups({ evidence: ev([sent(), sent({ id: 'wa_2', registrationId: 'reg2' })]) }))
+    expect(d).toMatchObject({ outcome: 'routed', method: 'outbound_recipient', registrationIds: ['reg1', 'reg2'] })
+  })
+
+  it('a context that resolves to nothing also falls through to the evidence', async () => {
+    const d = await resolveInboundRoute(input({ contextWamid: 'wamid.UNKNOWN' }), OPTS_T, lookups({ evidence: ev([sent()]) }))
+    expect(d).toMatchObject({ outcome: 'routed', method: 'outbound_recipient', context: 'not_found' })
+  })
+
+  it('an INVALID explicit context is still final — the evidence is never consulted', async () => {
+    const l = lookups({ logs: [log({ recipientPhone: '91 11111 11111' })], evidence: ev([sent()]) })
+    const d = await resolveInboundRoute(input(), OPTS_T, l)
+    expect(d).toMatchObject({ outcome: 'unmatched', reason: 'context_phone_mismatch' })
+    expect(l.outboundByPhone).not.toHaveBeenCalled()
+  })
+
+  it('sends for two organizers → unmatched ambiguous_organizer, never guessed', async () => {
+    const d = await resolveInboundRoute(noCtx, OPTS_T, lookups({ evidence: ev([sent(), sent({ id: 'wa_2', organizerUid: 'orgB', eventId: 'event-b' })]) }))
+    expect(d).toMatchObject({ outcome: 'unmatched', reason: 'ambiguous_organizer', candidateCount: 2 })
+  })
+
+  it('sends for two events of one organizer → unmatched ambiguous_event', async () => {
+    const d = await resolveInboundRoute(noCtx, OPTS_T, lookups({ evidence: ev([sent(), sent({ id: 'wa_2', eventId: 'event-b' })]) }))
+    expect(d).toMatchObject({ outcome: 'unmatched', reason: 'ambiguous_event' })
+  })
+
+  it('an existing conversation and a recent send for ANOTHER organizer disagree → unmatched (no longer routed blindly)', async () => {
+    const d = await resolveInboundRoute(noCtx, OPTS_T, lookups({
+      convs: [{ id: 'c1', organizerUid: 'orgA', eventId: 'event-a' }],
+      evidence: ev([sent({ organizerUid: 'orgB', eventId: 'event-b' })]),
+    }))
+    expect(d).toMatchObject({ outcome: 'unmatched', reason: 'ambiguous_organizer' })
+  })
+
+  it('an existing conversation and a send that AGREE route to the conversation and add the registration', async () => {
+    const d = await resolveInboundRoute(noCtx, OPTS_T, lookups({
+      convs: [{ id: 'c1', organizerUid: 'orgA', eventId: 'event-a' }], evidence: ev([sent()]),
+    }))
+    expect(d).toMatchObject({ outcome: 'routed', method: 'phone_conversation', registrationIds: ['reg1'] })
+  })
+
+  it('only ACCEPTED attendee messages count: failed/skipped, organizer-directed, non-WhatsApp and incomplete rows are ignored', async () => {
+    const d = await resolveInboundRoute(noCtx, OPTS_T, lookups({ evidence: ev([
+      sent({ id: 'f', status: 'failed', organizerUid: 'orgB' }),
+      sent({ id: 's', status: 'skipped', organizerUid: 'orgC' }),
+      sent({ id: 'o', registrationId: undefined, organizerUid: 'orgD' }),   // platform → organizer notification
+      sent({ id: 'e', channel: 'email', organizerUid: 'orgE' }),
+      sent({ id: 'i', eventId: undefined, organizerUid: 'orgF' }),
+      sent({ id: 'ok' }),
+    ]) }))
+    expect(d).toMatchObject({ outcome: 'routed', organizerUid: 'orgA', eventId: 'event-a', candidateCount: 1 })
+  })
+
+  it('a send the status webhook advanced to delivered (delivered OR read) still counts; webhook-failed does not', async () => {
+    const delivered = await resolveInboundRoute(noCtx, OPTS_T, lookups({ evidence: ev([sent({ status: 'delivered' })]) }))
+    expect(delivered).toMatchObject({ outcome: 'routed', method: 'outbound_recipient', organizerUid: 'orgA', eventId: 'event-a' })
+    const failed = await resolveInboundRoute(noCtx, OPTS_T, lookups({ evidence: ev([sent({ status: 'failed' })]) }))
+    expect(failed).toMatchObject({ outcome: 'unmatched', reason: 'no_candidates' })
+  })
+
+  it('sends older than the evidence window are ignored', async () => {
+    const stale = sent({ sentAtMs: NOW - OUTBOUND_EVIDENCE_WINDOW_MS - 1 })
+    expect(await resolveInboundRoute(noCtx, OPTS_T, lookups({ evidence: ev([stale]) }))).toMatchObject({ outcome: 'unmatched', reason: 'no_candidates' })
+    const undated = sent({ sentAtMs: 0 })
+    expect(await resolveInboundRoute(noCtx, OPTS_T, lookups({ evidence: ev([undated]) }))).toMatchObject({ outcome: 'unmatched', reason: 'no_candidates' })
+  })
+
+  it('a truncated evidence read is never routed, even when the rows it returned agree', async () => {
+    const d = await resolveInboundRoute(noCtx, OPTS_T, lookups({ evidence: ev([sent()], true) }))
+    expect(d).toMatchObject({ outcome: 'unmatched', reason: 'too_many_candidates' })
+  })
+
+  it('a caller without the evidence lookup keeps the original conversation-only behaviour', async () => {
+    const legacy = {
+      logsByWamid: vi.fn(async () => []), registrationsByWamid: vi.fn(async () => []),
+      conversationsByPhone: vi.fn(async () => []),
+    }
+    expect(await resolveInboundRoute(noCtx, OPTS_T, legacy)).toMatchObject({ outcome: 'unmatched', reason: 'no_candidates' })
   })
 })

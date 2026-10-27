@@ -19,6 +19,7 @@ import { NOTIFICATION_META, NotificationType, isOrganizerNotification } from '@/
 import { WHATSAPP_TEMPLATE_REGISTRY } from '@/lib/whatsapp/registry'
 import { REMINDER_KINDS, REMINDER_KIND_LABELS, KIND_AUDIENCE } from '@/lib/reminders/types'
 import { buildReminderContent } from '@/lib/reminders/templates'
+import { WhatsAppTemplateLibrary } from './whatsappTemplates/TemplateLibrary'
 
 const rupees = (p: number) => `₹${Math.round(p / 100).toLocaleString('en-IN')}`
 
@@ -203,6 +204,9 @@ export function TemplateCenter() {
 
   return (
     <div className="space-y-4">
+      {/* RD-WA-TEMPLATES-01 — the organizer's own WhatsApp templates (build, submit, track approval). */}
+      <WhatsAppTemplateLibrary />
+
       <Section title={`Reminder templates (${reminderKinds.length})`}>
         <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
           {reminderKinds.map(kind => (
@@ -218,7 +222,7 @@ export function TemplateCenter() {
         </div>
       </Section>
 
-      <Section title={`WhatsApp templates (${whatsappEntries.length})`} action={<span className="rounded-full bg-muted px-2 py-0.5 text-[11px] font-semibold text-muted-foreground">Meta-approved · view only</span>}>
+      <Section title={`RegisterDesk WhatsApp templates (${whatsappEntries.length})`} action={<span className="rounded-full bg-muted px-2 py-0.5 text-[11px] font-semibold text-muted-foreground">Meta-approved · view only</span>}>
         <div className="overflow-x-auto">
           <table className="w-full min-w-[560px] text-[12.5px]">
             <thead><tr className="border-b border-border text-left text-[11px] font-semibold uppercase text-muted-foreground"><th className="py-2 pr-3">Type</th><th className="py-2 pr-3">Template</th><th className="py-2 pr-3">Language</th><th className="py-2 pr-3">Category</th><th className="py-2 pr-3">Variables</th></tr></thead>

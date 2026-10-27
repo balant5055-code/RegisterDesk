@@ -131,6 +131,16 @@ describe('the page only asks for data it can show', () => {
   it('permission is decided before the flag (matches the API: 403 before 404)', () => {
     expect(ui.indexOf("You don’t have access to the Inbox")).toBeLessThan(ui.indexOf('The Inbox isn’t switched on yet'))
   })
+  it('the flag is not judged until the platform configuration has loaded (no "switched off" flash)', () => {
+    // While BusinessConfigProvider is loading, useFeatureFlags() returns the CODE DEFAULTS
+    // (whatsappInbox: false) — deciding then would show "not switched on" where it IS on.
+    expect(ui).toContain('const configLoading = useBusinessConfig().loading')
+    expect(ui.indexOf('if (configLoading)')).toBeGreaterThan(0)
+    expect(ui.indexOf('if (configLoading)')).toBeLessThan(ui.indexOf('if (!flags.whatsappInbox || gate === \'disabled\')'))
+  })
+  it('the disabled state does not send organizers to a per-workspace setting that does not exist', () => {
+    expect(read('app/(dashboard)/dashboard/inbox/InboxClient.tsx')).not.toContain('enabled for your workspace')
+  })
 })
 
 describe('reply composer — Coming Soon, not implemented', () => {

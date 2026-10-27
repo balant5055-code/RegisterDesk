@@ -21,6 +21,7 @@ import { cn } from '@/lib/utils/cn'
 import { Button, Card, EmptyState, ErrorState, PageHeader, Skeleton } from '@/components/ui'
 import { fieldControl } from '@/components/ui/field'
 import { useFeatureFlags } from '@/lib/config/featureFlagsClient'
+import { useBusinessConfig } from '@/lib/config/BusinessConfigProvider'
 import { useWorkspacePermissions } from '@/lib/hooks/useWorkspacePermissions'
 import { useEventContext } from '@/components/dashboard/EventContextProvider'
 import { ComingSoonComposer, ConversationRow, ListSkeleton, Thread, displayName } from '@/components/whatsapp-inbox/InboxParts'
@@ -63,6 +64,7 @@ export function InboxClient() {
   const selectedId   = searchParams.get('c')
 
   const flags = useFeatureFlags()
+  const configLoading = useBusinessConfig().loading
   const perms = useWorkspacePermissions()
   const { events } = useEventContext()
 
@@ -259,6 +261,18 @@ export function InboxClient() {
       </div>
     )
   }
+  // Until the platform configuration has loaded, `flags` holds the CODE DEFAULTS (Inbox off), so
+  // deciding now would flash "not switched on" at every workspace where the Inbox IS on.
+  if (configLoading) {
+    return (
+      <div className="space-y-4">
+        {header}
+        <Card padded={false} className="overflow-hidden"><ListSkeleton /></Card>
+      </div>
+    )
+  }
+  // `whatsappInbox` is ONE platform-wide switch (Business Configuration → Feature Flags), not a
+  // per-workspace setting — the copy says so, so nobody looks for it in workspace settings.
   if (!flags.whatsappInbox || gate === 'disabled') {
     return (
       <div className="space-y-4">
@@ -267,7 +281,7 @@ export function InboxClient() {
           size="lg"
           icon={Inbox}
           title="The Inbox isn’t switched on yet"
-          description="Attendee WhatsApp replies are being received and kept. The Inbox will appear here once it is enabled for your workspace."
+          description="Attendee WhatsApp replies are being received and kept. The Inbox will appear here once RegisterDesk switches it on."
         />
       </div>
     )

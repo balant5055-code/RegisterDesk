@@ -67,6 +67,7 @@ import { buildRegistrationPaymentFields } from '@/lib/registrations/paymentIdent
 import { captureFinancialError }     from '@/lib/monitoring/sentry'
 import { flagSuspiciousPayment }     from '@/lib/payments/flagSuspicious'
 import { whatsappConsentFields }     from '@/lib/whatsapp/broadcastConsent'
+import { resolveEventWaiver, waiverRegistrationFields } from '@/lib/registrations/waiver'
 
 /** Which path is settling. Only affects the unexpected-error policy and the recovery marker. */
 export type SettlementSource = 'verify' | 'webhook' | 'sweep'
@@ -494,6 +495,10 @@ export async function settleCapturedRegistration(args: {
           } : {}),
           // RD-COMMS-WA-CONSENT — explicit WhatsApp broadcast opt-in, from the same snapshot.
           ...whatsappConsentFields(intent.whatsappBroadcastOptIn, intent.attendee?.phone),
+          // RD-WAIVER-01 · the acceptance validated at create-order (server time + wording hash),
+          // from the intent snapshot. Money is already captured here, so settlement RECORDS — it
+          // never refuses over the waiver; enforcement happened before any order existed.
+          ...waiverRegistrationFields(resolveEventWaiver(eventData), intent.waiverAcceptance ?? null),
           registeredAt:    FieldValue.serverTimestamp(),
           updatedAt:       FieldValue.serverTimestamp(),
           ...(uidOverride ?? intent.uid ? { uid: uidOverride ?? intent.uid } : {}),

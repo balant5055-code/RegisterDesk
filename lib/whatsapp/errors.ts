@@ -11,6 +11,10 @@ export interface NormalizedMetaError {
   retriable:        boolean   // classification hint for a future retry phase
   httpStatus?:      number    // HTTP status of the Graph response (LS2.1 diagnostics)
   providerMessage?: string    // raw Meta error message — for server logs/diagnostics only
+  /** RD-WA-TEMPLATES-01 — Graph error_subcode (template-management errors are told apart by it). */
+  subcode?:         number
+  /** RD-WA-TEMPLATES-01 — Meta's end-user explanation (error_user_title / error_user_msg), when given. */
+  userMessage?:     string
 }
 
 interface GraphErrorBody {
@@ -20,6 +24,8 @@ interface GraphErrorBody {
     code?:          number
     error_subcode?: number
     fbtrace_id?:    string
+    error_user_title?: string
+    error_user_msg?:   string
   }
 }
 
@@ -57,7 +63,13 @@ export function normalizeMetaError(status: number, body: unknown): NormalizedMet
     }
   })()
 
-  return { ...base, httpStatus: status, providerMessage }
+  const subcode = typeof err?.error_subcode === 'number' ? err.error_subcode : undefined
+  const userParts = [err?.error_user_title, err?.error_user_msg].filter((v): v is string => typeof v === 'string' && v.trim().length > 0)
+  return {
+    ...base, httpStatus: status, providerMessage,
+    ...(subcode !== undefined ? { subcode } : {}),
+    ...(userParts.length ? { userMessage: userParts.join(': ').slice(0, 500) } : {}),
+  }
 }
 
 /** Normalize a network/transport failure (timeout, DNS, abort). */

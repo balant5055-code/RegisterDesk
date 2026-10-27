@@ -929,6 +929,7 @@ function GovernanceWorkspace({ slug, o, onChanged }: {
 
 const TIMELINE_TONE: Record<Event360TimelineEntry['source'], PillTone> = {
   lifecycle: 'neutral', audit: 'info', license: 'accent', governance: 'warning', moderation: 'danger',
+  review: 'success',
 }
 
 // ─── Shared primitives ─────────────────────────────────────────────────────────

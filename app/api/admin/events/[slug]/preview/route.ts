@@ -30,6 +30,8 @@ import { loadEventPageData, buildEventPageProps } from '@/lib/events/eventPagePr
 import { validateEventPublish } from '@/lib/events/validatePublish'
 import { resolveEventFeeConfig } from '@/lib/fees/resolveEventFeeConfig'
 import { calculateFee } from '@/lib/fees/engine'
+import { checkoutFeeModel } from '@/lib/fees/explicitFeeModel'
+import { resolvePlatformPricing } from '@/lib/platform/pricing/resolver'
 import { nowLocalInTz, resolvePassSaleState } from '@/lib/registrations/salesWindow'
 import { approvedContactEmails } from '@/lib/registrations/approvedContactAccess'
 import type { EventDetailProps } from '@/components/event-templates/types'
@@ -204,11 +206,15 @@ export async function GET(req: NextRequest, { params }: Ctx): Promise<NextRespon
   const nowLocal = nowLocalInTz(tz)
 
   // Per-ticket economics from the SAME engine the registration ledger uses (lib/payments/
-  // registrationLedger → calculateFee), with this event's resolved terms and the fee model checkout
-  // actually applies (organizer pays — fixed, create-order). An ESTIMATE: real terms lock at checkout.
+  // registrationLedger → calculateFee), with this event's resolved terms and the fee model a new
+  // checkout applies (`checkoutFeeModel` — create-order's rule: the organizer's recorded choice when
+  // the pricing engine is on, else organizer pays). It was hard-coded to organizer pays, so an
+  // attendee-pays event was approved against the wrong attendee total and net. An ESTIMATE: real
+  // terms lock at checkout.
+  const feeModel = checkoutFeeModel((await resolvePlatformPricing()).features.pricingEngineEnabled, event.pricing)
   const feesFor = (pricePaise: number): AdminPreviewFees | null => {
     if (!feeTerms.ok || pricePaise <= 0) return null
-    const r = calculateFee({ transactionType: 'event_registration', grossAmountPaise: pricePaise, feeModel: 'organizer_pays', config: feeTerms.config })
+    const r = calculateFee({ transactionType: 'event_registration', grossAmountPaise: pricePaise, feeModel, config: feeTerms.config })
     return {
       attendeePaysPaise:       r.chargeAmountPaise,
       platformFeePaise:        r.platformFeeTotalPaise,
@@ -303,7 +309,9 @@ export async function GET(req: NextRequest, { params }: Ctx): Promise<NextRespon
         registrationOpenDate: str(pricing.registrationOpenDate),
         registrationEndDate:  str(pricing.registrationEndDate),
         feeCollection: {
-          applied:       'Organizer pays — attendees are charged the ticket price only; platform and gateway fees are deducted from the organizer payout (fixed by RegisterDesk)',
+          applied:       feeModel === 'customer_pays'
+            ? 'Attendee pays — platform fees are added to the ticket price at checkout; the organizer receives the ticket value'
+            : 'Organizer pays — attendees are charged the ticket price only; platform and gateway fees are deducted from the organizer payout',
           storedValue:   str(pricing.feeModel),
           termsSource:   feeTerms.ok ? feeTerms.source : null,
           feesAvailable: feeTerms.ok,

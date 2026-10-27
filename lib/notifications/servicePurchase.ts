@@ -15,7 +15,7 @@
 // Best-effort by contract: never throws to the caller (a notification must never fail a payment).
 
 import { FieldValue } from 'firebase-admin/firestore'
-import { adminDb, adminAuth } from '@/lib/firebase/admin'
+import { adminDb } from '@/lib/firebase/admin'
 import { LICENSE_ORDERS_COLLECTION, type CapacityChargeSnapshot } from '@/lib/licensing/schema'
 import { viewOf, type ServiceLedgerDoc } from '@/lib/licensing/serviceAllowanceLedger'
 import type { ServiceChargeItem } from '@/lib/licensing/serviceAllowances'
@@ -23,7 +23,7 @@ import { currentCapacityFromEvent, soldFromCounter } from '@/lib/licensing/capac
 import { notificationEngine, NotificationType, NotificationChannel } from '@/lib/notifications'
 import type { ServicePurchaseLine, ServicePurchaseBalance } from './catalog'
 import { writeAdminNotification } from './adminInbox'
-import { getBrandingConfig } from '@/lib/config/resolveBrandingConfig'
+import { superAdminRecipients } from './superAdminRecipients'
 import { emailUrl } from '@/lib/email/appUrl'
 import { after } from 'next/server'
 
@@ -56,22 +56,9 @@ export function purchaseLines(order: Rec): ServicePurchaseLine[] {
   return lines
 }
 
-/**
- * The Super Admin email recipients: the platform support inbox (branding.supportEmail) plus the
- * account email of every uid in ADMIN_UIDS (the Super Admin list — never the legacy admin:true claim).
- * Deduplicated case-insensitively; an address that cannot be resolved is skipped, never guessed.
- */
-export async function superAdminRecipients(): Promise<string[]> {
-  const out = new Map<string, string>()
-  const add = (e: unknown) => { if (typeof e === 'string' && /^[^\s@]+@[^\s@]+$/.test(e.trim())) out.set(e.trim().toLowerCase(), e.trim()) }
-  add((await getBrandingConfig().catch(() => null))?.supportEmail)
-  const uids = [...new Set((process.env.ADMIN_UIDS ?? '').split(',').map(u => u.trim()).filter(Boolean))].slice(0, 100)
-  if (uids.length) {
-    const res = await adminAuth.getUsers(uids.map(uid => ({ uid }))).catch(() => null)
-    for (const u of res?.users ?? []) if (!u.disabled) add(u.email)
-  }
-  return [...out.values()]
-}
+// RD-NOTIFY-01 — moved to ./superAdminRecipients (shared with the notification outbox, without
+// pulling in this module's licensing imports); re-exported so existing importers are unchanged.
+export { superAdminRecipients }
 
 /** Notifies once for a paid order. Returns what happened (for logs / tests); never throws. */
 export async function notifyServicePurchase(orderId: string): Promise<'sent' | 'duplicate' | 'not_paid' | 'skipped' | 'failed'> {

@@ -9,16 +9,16 @@
 // The stored value passes through `parseEmailProviderName`, so a legacy or corrupt value
 // can never name a transport the platform did not define.
 //
-// ═══ PRECEDENCE (RD-EMAIL-PROVIDER-03) ═══════════════════════════════════════
+// ═══ PRECEDENCE (RD-EMAIL-PROVIDER-04, product decision 2026-10-26) ══════════
 //   1. events/{slug}.emailProvider          — an EXPLICIT per-event admin override
-//   2. DEFAULT_EMAIL_PROVIDER ('ses')        — every event that has not been overridden
+//   2. the PLATFORM provider                 — the Super Admin's one global choice
+//                                              (lib/email/platformProvider; default SES)
 //
-// Amazon SES is THE default for event mail, deterministically. RD-EMAIL-PROVIDER-02 had
-// inserted the Business Configuration `integrations.emailProvider` value between these two,
-// so a single global edit could move every un-overridden event — and every legacy event —
-// onto Resend at once. That layer is removed by product decision: the only way an event
-// leaves SES is an admin deliberately overriding THAT event (PATCH …/email-provider). The
-// Business Configuration field is now read-only and labelled as unused for event delivery.
+// RD-EMAIL-PROVIDER-03 had made SES unconditional for un-overridden events, because a
+// global edit could move every event at once. The product decision of 2026-10-26 restores
+// ONE platform-wide choice for ALL mail, with the safeguards that made the old layer risky
+// now enforced: the choice is made in one Super Admin place, a provider without credentials
+// cannot be selected, every change is audited, and nothing ever falls back silently.
 //
 // INHERITED, NOT SNAPSHOTTED. Absence is resolved at SEND time rather than stamped onto the
 // event, so legacy events need no migration and the default lives in one constant.
@@ -30,15 +30,16 @@
 
 import { adminDb } from '@/lib/firebase/admin'
 import {
-  DEFAULT_EMAIL_PROVIDER, parseEmailProviderName, isExplicitProviderChoice,
+  parseEmailProviderName, isExplicitProviderChoice,
   type EmailProviderName,
 } from './providerName'
+import { resolvePlatformEmailProvider } from './platformProvider'
 
 /** Deliberately short: long enough to spare a read per recipient in a broadcast wave,
  *  short enough that an admin's change takes effect without a restart. */
 const TTL_MS = 30_000
 
-const cache = new Map<string, { value: EmailProviderName; at: number }>()
+const cache = new Map<string, { value: EmailProviderName | null; at: number }>()
 
 /** Test seam — lets the routing tests exercise resolution without Firestore. */
 export function __clearEventProviderCache(): void {
@@ -48,7 +49,7 @@ export function __clearEventProviderCache(): void {
 /**
  * The transport this event's mail leaves through.
  *
- * Never throws: a read failure falls back to the SES default so a Firestore blip cannot
+ * Never throws: a read failure falls back to the platform provider so a Firestore blip cannot
  * stop an event's mail entirely. An event that explicitly and validly selects a provider is
  * honoured strictly — and if that provider is unconfigured the factory returns null rather
  * than substituting the other one (see getEmailProvider).
@@ -57,25 +58,27 @@ export async function resolveEventEmailProvider(
   eventSlug: string | null | undefined,
 ): Promise<EmailProviderName> {
   const slug = (eventSlug ?? '').trim()
-  // No event in play: nothing can carry an override, so the default applies.
-  if (!slug) return DEFAULT_EMAIL_PROVIDER
+  // No event in play: nothing can carry an override, so the platform provider applies.
+  if (!slug) return resolvePlatformEmailProvider()
 
+  // The cache holds only the per-event OVERRIDE (or null for "none"), so a platform change is
+  // never masked by a cached event entry.
   const hit = cache.get(slug)
-  if (hit && Date.now() - hit.at < TTL_MS) return hit.value
+  if (hit && Date.now() - hit.at < TTL_MS) return hit.value ?? resolvePlatformEmailProvider()
 
-  let value: EmailProviderName
+  let override: EmailProviderName | null
   try {
     const snap = await adminDb.collection('events').doc(slug).get()
     const raw  = (snap.data() as { emailProvider?: unknown } | undefined)?.emailProvider
-    // Only a valid explicit choice is honoured. Absent, null, legacy or corrupt values all
-    // resolve to the SES default — never to an arbitrary or global-configured transport.
-    value = isExplicitProviderChoice(raw) ? parseEmailProviderName(raw) : DEFAULT_EMAIL_PROVIDER
+    // Only a valid explicit choice is an override. Absent, null, legacy or corrupt values all
+    // mean "no override" — the platform provider — never an arbitrary transport.
+    override = isExplicitProviderChoice(raw) ? parseEmailProviderName(raw) : null
   } catch (err) {
-    console.error('[email] event provider lookup failed; using the SES default:',
+    console.error('[email] event provider lookup failed; using the platform provider:',
       err instanceof Error ? err.message : err)
-    value = DEFAULT_EMAIL_PROVIDER
+    override = null
   }
 
-  cache.set(slug, { value, at: Date.now() })
-  return value
+  cache.set(slug, { value: override, at: Date.now() })
+  return override ?? resolvePlatformEmailProvider()
 }

@@ -15,7 +15,7 @@
   order listed.
 - **`vercel.json`** is `{}` — it declares **no** crons. Never add one there for a route that a
   workflow already calls: every route must have exactly one scheduler.
-- **33** cron routes exist under `app/api/cron/`; **all 33** are scheduled, each exactly once.
+- **34** cron routes exist under `app/api/cron/`; **all 34** are scheduled, each exactly once.
 
 ## Schedules (UTC)
 
@@ -26,7 +26,7 @@ treat every cadence as "at most this often".
 |---|---|---|---|
 | `cron-runners.yml` | A — queue runners | `*/5 * * * *` | `broadcasts`, `email-broadcasts`, `whatsapp-broadcasts`, `print-generation`, `print-packaging`, `certificate-jobs`, `certificate-email-jobs`, `registration-import`, `registration-bulk`, `report-exports`, `identifier-assign`, `timing-tags`, `media-jobs`, `ai-jobs`, `whatsapp-inbound`, `job-reaper` |
 | `cron-recovery.yml` | B — financial recovery, retries, dispatch | `*/10 * * * *` | `registration-reconciliation`, `donation-reconciliation`, `wallet-reconciliation`, `badge-orders-reconcile`, `badge-rounds-reconcile`, `media-credit-reconciliation`, `media-credit-sessions`, `webhooks`, `reminders`, `capacity-alerts`, `ops-alerts` |
-| `cron-cleanup.yml` | C — cleanup | `0 * * * *` | `certificate-claims` |
+| `cron-cleanup.yml` | C — cleanup | `0 * * * *` | `certificate-claims`, `whatsapp-templates` |
 | `cron-maintenance.yml` | D — daily maintenance | `0 2 * * *` | `global-reconciliation`, `session-reconciliation`, `release-funds`, `storage-cleanup`, `print-runs-reconcile` |
 
 `0 2 * * *` is 02:00 UTC = **07:30 IST**.

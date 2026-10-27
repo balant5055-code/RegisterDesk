@@ -18,6 +18,7 @@ import { razorpay, RAZORPAY_KEY_SECRET as KEY_SECRET } from '@/lib/razorpay/clie
 import type { WalletTopupVerifyResponse }          from '@/types/events'
 import { notificationEngine, NotificationType, NotificationChannel } from '@/lib/notifications'
 import { sendOrganizerWhatsApp }                   from '@/lib/notifications/organizerWhatsApp'
+import { runAfterResponse }                        from '@/lib/server/afterResponse'
 import { notifyWalletRecharged }                   from '@/lib/notifications/inbox/notify'
 
 const HEX_64 = /^[0-9a-f]{64}$/
@@ -202,7 +203,8 @@ export async function POST(req: NextRequest): Promise<NextResponse<VerifyRespons
     // Wallet Recharge — organizer Email + WhatsApp (FREE, Phase G3.5). Only on the
     // real credit (not an idempotent replay). Best-effort; never blocks the response.
     if (credited) {
-      void (async () => {
+      // Scheduled with after() (lib/server/afterResponse) — a detached promise is frozen with the response.
+      await runAfterResponse(`wallet-recharged-notify ${topupRef.id}`, async () => {
         try {
           const userSnap = await adminDb.collection('users').doc(uid).get()
           const u = userSnap.data() as { email?: string; name?: string } | undefined
@@ -212,14 +214,14 @@ export async function POST(req: NextRequest): Promise<NextResponse<VerifyRespons
               to: u.email, organizerName: u.name ?? '', amountPaise: topup.amountPaise, newBalancePaise: newBalance,
             })
           }
-          void sendOrganizerWhatsApp({
+          await sendOrganizerWhatsApp({
             type: NotificationType.WALLET_RECHARGED, organizerUid: uid,
             variables: { organizerName: u.name ?? '', amount: `₹${(topup.amountPaise / 100).toLocaleString('en-IN')}` },
           })
         } catch (err) {
           console.error('[wallet] recharge notification failed:', err)
         }
-      })()
+      })
 
       // H.4.3: record in the organizer Notification Center inbox (best-effort).
       void notifyWalletRecharged({ workspaceUid: uid, amountPaise: topup.amountPaise, newBalancePaise: newBalance, topupId: topupRef.id })

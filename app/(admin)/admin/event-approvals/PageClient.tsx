@@ -8,8 +8,9 @@ import { auth } from '@/lib/firebase/auth'
 import { cn } from '@/lib/utils/cn'
 import { Loader2, ClipboardCheck, Check, X, Eye, ExternalLink, MessageSquare, LayoutGrid } from 'lucide-react'
 import {
-  AdminToolbar, TableFrame, THead, Th, TBody, Tr, Td, ErrorBanner,
+  AdminToolbar, TableFrame, THead, Th, TBody, Tr, Td, ErrorBanner, FilterTabs, StatusPill, type PillTone,
 } from '@/components/admin'
+import type { ReviewHistoryResponse } from '@/app/api/admin/events/[slug]/review-history/route'
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -29,12 +30,47 @@ interface Row {
   submittedAt:         string | null
   eventDate:           string | null
   status:              string
+  // RD-REVIEW-01 — the review cycle
+  reviewStatus:        string | null
+  changesComment:      string | null
+  changesRequestedAt:  string | null
+  resubmittedAt:       string | null
+  resubmissionCount:   number
+  lastReviewRequest:   { kind: string; comment: string | null; at: string | null } | null
 }
+
+// RD-REVIEW-01 · the two queues an event can sit in while it is being reviewed.
+type Queue = 'pending_review' | 'changes_requested'
+const QUEUES = [
+  { value: 'pending_review',    label: 'Pending review' },
+  { value: 'changes_requested', label: 'Changes requested' },
+] as const satisfies ReadonlyArray<{ value: Queue; label: string }>
+
+/** The four states a reviewer must never confuse, from the event's own fields. */
+function reviewState(lifecycleStatus: string | null, reviewStatus: string | null): { label: string; tone: PillTone } {
+  if (lifecycleStatus === 'pending_review')    return { label: 'Pending review',    tone: 'info' }
+  if (lifecycleStatus === 'changes_requested') return { label: 'Changes requested', tone: 'warning' }
+  if (reviewStatus === 'rejected')             return { label: 'Rejected',          tone: 'danger' }
+  if (lifecycleStatus === 'published')         return { label: 'Approved',          tone: 'success' }
+  return { label: lifecycleStatus ? lifecycleStatus.replace(/_/g, ' ') : 'Unknown', tone: 'neutral' }
+}
+
+const HISTORY_LABEL: Record<string, string> = {
+  approve: 'Approved', reject: 'Rejected', request_changes: 'Changes requested',
+  resubmit: 'Resubmitted', republish: 'Republished',
+}
+
+const SECTION_LABEL: Record<string, string> = {
+  pricing: 'tickets & pricing', registrationForm: 'registration form', accessControl: 'access',
+}
+/** 'eventDetails.schedule' → 'schedule'; other content fields by their reviewer-facing name. */
+const sectionLabel = (s: string) => SECTION_LABEL[s] ?? s.replace(/^eventDetails\./, '').replace(/([A-Z])/g, ' $1').toLowerCase()
 
 interface Stats {
   pendingReviews:   number
   approvedToday:    number
   rejectedToday:    number
+  awaitingChanges?: number
   avgReviewMinutes: number | null
 }
 
@@ -47,7 +83,7 @@ interface Detail {
   payment:      Record<string, unknown>
   organizer:    Record<string, unknown>
   venue:        Record<string, unknown>
-  pricing:      { eventType: unknown; passes: Array<Record<string, unknown>>; totalCapacity: unknown }
+  pricing:      { eventType: unknown; passes: Array<Record<string, unknown>>; totalCapacity: unknown; feeModel?: string | null }
   timeline:     Record<string, unknown>
 }
 
@@ -73,11 +109,11 @@ async function authHeader(): Promise<Record<string, string> | null> {
   return { authorization: `Bearer ${await u.getIdToken()}` }
 }
 
-async function fetchApproval(headers: Record<string, string>): Promise<{ stats: Stats; settings: Settings; rows: Row[] }> {
+async function fetchApproval(headers: Record<string, string>, queue: Queue): Promise<{ stats: Stats; settings: Settings; rows: Row[] }> {
   const [sRes, cRes, eRes] = await Promise.all([
     fetch('/api/admin/event-approvals/stats',  { headers, cache: 'no-store' }),
     fetch('/api/admin/settings/publishing',    { headers, cache: 'no-store' }),
-    fetch('/api/admin/event-approvals',        { headers, cache: 'no-store' }),
+    fetch(`/api/admin/event-approvals?status=${queue}`, { headers, cache: 'no-store' }),
   ])
   if (!sRes.ok || !cRes.ok || !eRes.ok) throw new Error('Failed to load')
   const stats    = await sRes.json() as Stats
@@ -96,6 +132,7 @@ export default function AdminEventApprovalsPage() {
   const [loading,  setLoading]  = useState(true)
   const [error,    setError]    = useState<string | null>(null)
   const [busy,     setBusy]     = useState<string | null>(null)
+  const [queue,    setQueue]    = useState<Queue>('pending_review')
 
   // Reject modal
   const [rejectRow, setRejectRow] = useState<Row | null>(null)
@@ -111,6 +148,7 @@ export default function AdminEventApprovalsPage() {
   const [detailRow,     setDetailRow]     = useState<Row | null>(null)
   const [detail,        setDetail]        = useState<Detail | null>(null)
   const [detailLoading, setDetailLoading] = useState(false)
+  const [history,       setHistory]       = useState<ReviewHistoryResponse | null>(null)
 
   useEffect(() => {
     let alive = true
@@ -118,7 +156,7 @@ export default function AdminEventApprovalsPage() {
       const headers = await authHeader()
       if (!headers) { if (alive) { setError('Not authenticated'); setLoading(false) } return }
       try {
-        const data = await fetchApproval(headers)
+        const data = await fetchApproval(headers, queue)
         if (alive) { setStats(data.stats); setSettings(data.settings); setRows(data.rows) }
       } catch (err) {
         if (alive) setError(err instanceof Error ? err.message : 'Failed to load')
@@ -127,16 +165,16 @@ export default function AdminEventApprovalsPage() {
       }
     })()
     return () => { alive = false }
-  }, [])
+  }, [queue])
 
   const reload = useCallback(async () => {
     const headers = await authHeader()
     if (!headers) return
     try {
-      const data = await fetchApproval(headers)
+      const data = await fetchApproval(headers, queue)
       setStats(data.stats); setSettings(data.settings); setRows(data.rows)
     } catch { /* keep current view */ }
-  }, [])
+  }, [queue])
 
   const doReview = useCallback(async (slug: string, body: Record<string, unknown>) => {
     const headers = await authHeader()
@@ -176,12 +214,17 @@ export default function AdminEventApprovalsPage() {
   }, [settings])
 
   const openDetail = useCallback(async (row: Row) => {
-    setDetailRow(row); setDetail(null); setDetailLoading(true)
+    setDetailRow(row); setDetail(null); setHistory(null); setDetailLoading(true)
     const headers = await authHeader()
     if (!headers) { setDetailLoading(false); return }
     try {
-      const res = await fetch(`/api/admin/events/${encodeURIComponent(row.slug)}`, { headers, cache: 'no-store' })
+      const slug = encodeURIComponent(row.slug)
+      const [res, hRes] = await Promise.all([
+        fetch(`/api/admin/events/${slug}`, { headers, cache: 'no-store' }),
+        fetch(`/api/admin/events/${slug}/review-history`, { headers, cache: 'no-store' }),
+      ])
       if (res.ok) setDetail((await res.json() as { detail: Detail }).detail)
+      if (hRes.ok) setHistory(await hRes.json() as ReviewHistoryResponse)
     } catch { /* ignore */ } finally { setDetailLoading(false) }
   }, [])
 
@@ -207,9 +250,10 @@ export default function AdminEventApprovalsPage() {
       <AdminToolbar icon={ClipboardCheck} title="Event Approvals" description="Review, approve, and manage every submitted event." />
 
       {/* Metrics */}
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
         {[
           { label: 'Pending Reviews', value: stats ? stats.pendingReviews : '—' },
+          { label: 'Awaiting Organizer', value: stats?.awaitingChanges ?? '—' },
           { label: 'Approved Today',  value: stats ? stats.approvedToday  : '—' },
           { label: 'Rejected Today',  value: stats ? stats.rejectedToday  : '—' },
           { label: 'Avg Review Time', value: stats ? fmtDuration(stats.avgReviewMinutes) : '—' },
@@ -261,15 +305,20 @@ export default function AdminEventApprovalsPage() {
 
       {error && <ErrorBanner>{error}</ErrorBanner>}
 
+      <FilterTabs options={QUEUES} value={queue} onChange={q => { if (q === queue) return; setLoading(true); setRows([]); setQueue(q) }} aria-label="Review queue" />
+
       {/* Queue */}
       {loading ? (
         <div className="flex justify-center py-20"><Loader2 className="size-6 animate-spin text-muted-foreground" /></div>
       ) : rows.length === 0 ? (
-        <div className="rounded-xl border border-border bg-muted/[0.04] px-4 py-10 text-center text-[13px] text-muted-foreground">No events awaiting approval.</div>
+        <div className="rounded-xl border border-border bg-muted/[0.04] px-4 py-10 text-center text-[13px] text-muted-foreground">
+          {queue === 'changes_requested' ? 'No events are waiting on organizer changes.' : 'No events awaiting approval.'}
+        </div>
       ) : (
         <TableFrame minWidth="min-w-[900px]">
           <THead>
             <Th>Event</Th>
+            <Th>Review</Th>
             <Th>Organizer</Th>
             <Th>License</Th>
             <Th>Payments</Th>
@@ -291,6 +340,7 @@ export default function AdminEventApprovalsPage() {
                     </div>
                   </div>
                 </Td>
+                <Td className="max-w-[240px] text-[12px]"><ReviewCell row={r} /></Td>
                 <Td>
                   <div className="text-foreground">{r.organizerName ?? '—'}</div>
                   <div className="text-[11.5px] text-muted-foreground">{r.organizerEmail ?? '—'}</div>
@@ -317,6 +367,8 @@ export default function AdminEventApprovalsPage() {
                         approval, so it can never preview a pending event. */}
                     <a href={`/admin/preview/events/${encodeURIComponent(r.slug)}`} target="_blank" rel="noreferrer" title="Preview the public page before approving"
                       className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-[11.5px] font-semibold text-foreground"><ExternalLink className="size-3.5" /> Preview</a>
+                    {/* Only an event IN review can be decided — the server refuses anything else. */}
+                    {r.status === 'pending_review' && (<>
                     <button type="button" disabled={busy === r.slug} onClick={async () => {
                         const ok = await confirm({
                           title: 'Approve & publish event?',
@@ -331,6 +383,7 @@ export default function AdminEventApprovalsPage() {
                       className="inline-flex items-center gap-1 rounded-md bg-rose-600 px-2 py-1 text-[11.5px] font-semibold text-white disabled:opacity-50"><X className="size-3.5" /> Reject</button>
                     <button type="button" disabled={busy === r.slug} onClick={() => { setChangesRow(r) }}
                       className="inline-flex items-center gap-1 rounded-md bg-orange-600 px-2 py-1 text-[11.5px] font-semibold text-white disabled:opacity-50"><MessageSquare className="size-3.5" /> Changes</button>
+                    </>)}
                   </div>
                 </Td>
               </Tr>
@@ -377,11 +430,11 @@ export default function AdminEventApprovalsPage() {
 
       {/* Detail drawer */}
       {detailRow && (
-        <div className="fixed inset-0 z-50 flex justify-end bg-foreground/30" onClick={() => { setDetailRow(null); setDetail(null) }}>
+        <div className="fixed inset-0 z-50 flex justify-end bg-foreground/30" onClick={() => { setDetailRow(null); setDetail(null); setHistory(null) }}>
           <div className="h-full w-full max-w-md overflow-y-auto bg-card p-5 shadow-xl" onClick={e => e.stopPropagation()}>
             <div className="mb-3 flex items-center justify-between">
               <h2 className="text-[16px] font-bold text-foreground">{detailRow.name}</h2>
-              <button type="button" onClick={() => { setDetailRow(null); setDetail(null) }} className="rounded-md p-1 text-muted-foreground hover:bg-muted"><X className="size-4" /></button>
+              <button type="button" onClick={() => { setDetailRow(null); setDetail(null); setHistory(null) }} className="rounded-md p-1 text-muted-foreground hover:bg-muted"><X className="size-4" /></button>
             </div>
             {detailLoading || !detail ? (
               <div className="flex justify-center py-12"><Loader2 className="size-5 animate-spin text-muted-foreground" /></div>
@@ -391,6 +444,7 @@ export default function AdminEventApprovalsPage() {
                   className="flex items-center justify-center gap-1.5 rounded-md bg-primary px-3 py-2 text-[12.5px] font-semibold text-primary-foreground">
                   <ExternalLink className="size-3.5" /> Full review — open the public page preview
                 </a>
+                <ReviewPanel history={history} />
                 <Section title="General" rows={[['Slug', txt(detail.general.slug)], ['Type', txt(detail.general.eventType)], ['Status', txt(detail.general.status)], ['Tagline', txt(detail.general.tagline)]]} />
                 <Section title="Event details" rows={[['Start', `${txt(detail.eventDetails.startDate)} ${txt(detail.eventDetails.startTime)}`], ['End', txt(detail.eventDetails.endDate)], ['Timezone', txt(detail.eventDetails.timezone)]]} />
                 <Section title="License" rows={detail.license ? [['Tier', txt(detail.license.tier)], ['Status', txt(detail.license.status)], ['Amount', inr(Number(detail.license.amountPaise) || 0)]] : [['License', 'None']]} />
@@ -398,18 +452,101 @@ export default function AdminEventApprovalsPage() {
                 <p className="-mt-2 px-1 text-[11px] text-muted-foreground">Activation order only — pre-publish capacity or service add-ons are separate orders.</p>
                 <Section title="Organizer" rows={[['Name', txt(detail.organizer.name)], ['Email', txt(detail.organizer.email)], ['Workspace', txt(detail.organizer.workspace)], ['Phone', txt(detail.organizer.supportPhone)]]} />
                 <Section title="Venue" rows={[['Type', txt(detail.venue.type)], ['Name', txt(detail.venue.name)], ['City', txt(detail.venue.city)], ['State', txt(detail.venue.state)]]} />
-                <Section title="Pricing" rows={[['Model', txt(detail.pricing.eventType)], ['Capacity', txt(detail.pricing.totalCapacity)], ['Fee collection', 'Organizer pays (fixed)']]} />
+                <Section title="Pricing" rows={[['Model', txt(detail.pricing.eventType)], ['Capacity', txt(detail.pricing.totalCapacity)], ['Fee collection', detail.pricing.feeModel === 'attendee_pays' ? 'Attendee pays' : detail.pricing.feeModel === 'organizer_absorbs' ? 'Organizer absorbs' : 'Organizer absorbs (default)']]} />
                 <Section title={`Tickets (${detail.pricing.passes.length})`} rows={detail.pricing.passes.length
                   ? detail.pricing.passes.map(p => [
                       `${txt(p.name)}${p.status === 'inactive' ? ' · INACTIVE' : ''}${p.visibility && p.visibility !== 'public' ? ` · ${p.visibility}` : ''}${p.type === 'complimentary' ? ' · complimentary' : ''}`,
                       `${Number(p.price) > 0 ? inr(Math.round(Number(p.price) * 100)) : 'Free'} · ${p.unlimited ? 'unlimited' : `qty ${txt(p.quantity)}`}${p.salesEndDate ? ` · sales end ${p.salesEndDate}` : ''}`,
                     ] as [string, string])
                   : [['Tickets', 'None configured']]} />
-                <Section title="Timeline" rows={[['Created', fmtDateTime(detail.timeline.createdAt)], ['Submitted', fmtDateTime(detail.timeline.submittedAt)], ['Approved', fmtDateTime(detail.timeline.approvedAt)], ['Rejected', fmtDateTime(detail.timeline.rejectedAt)]]} />
+                <Section title="Timeline" rows={[['Created', fmtDateTime(detail.timeline.createdAt)], ['Submitted', fmtDateTime(detail.timeline.submittedAt)], ['Changes requested', fmtDateTime(detail.timeline.changesRequestedAt)], ['Resubmitted', fmtDateTime(detail.timeline.resubmittedAt)], ['Approved', fmtDateTime(detail.timeline.approvedAt)], ['Rejected', fmtDateTime(detail.timeline.rejectedAt)]]} />
               </div>
             )}
           </div>
         </div>
+      )}
+    </div>
+  )
+}
+
+// ─── Review (RD-REVIEW-01) ────────────────────────────────────────────────────
+
+/** Queue cell: a first submission, a resubmission, or waiting on the organizer. */
+function ReviewCell({ row }: { row: Row }) {
+  if (row.status === 'changes_requested') {
+    return (
+      <div className="space-y-1">
+        <StatusPill tone="warning">Awaiting organizer</StatusPill>
+        <div className="text-muted-foreground">Requested {fmtDateTime(row.changesRequestedAt)}</div>
+        {row.changesComment && <p className="line-clamp-2 break-words text-foreground" title={row.changesComment}>{row.changesComment}</p>}
+      </div>
+    )
+  }
+  // A resubmission is shown only when one was actually recorded — never inferred.
+  if (row.resubmissionCount > 0 && row.resubmittedAt) {
+    const answered = row.lastReviewRequest?.comment
+    return (
+      <div className="space-y-1">
+        <StatusPill tone="info">Resubmitted{row.resubmissionCount > 1 ? ` ×${row.resubmissionCount}` : ''}</StatusPill>
+        <div className="text-muted-foreground">{fmtDateTime(row.resubmittedAt)}</div>
+        {answered && <p className="line-clamp-2 break-words text-muted-foreground" title={answered}>Answering: {answered}</p>}
+      </div>
+    )
+  }
+  return <StatusPill tone="neutral">New submission</StatusPill>
+}
+
+/** Drawer: the current review state, then every decision and resubmission, newest first. */
+function ReviewPanel({ history }: { history: ReviewHistoryResponse | null }) {
+  if (!history) {
+    return <div className="rounded-lg border border-border p-3 text-muted-foreground">Review history unavailable.</div>
+  }
+  const { current, entries } = history
+  const state = reviewState(current.lifecycleStatus, current.reviewStatus)
+  const openRequest = current.lifecycleStatus === 'changes_requested' ? current.changesComment : null
+  return (
+    <div className="rounded-lg border border-border p-3">
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Review</p>
+        <StatusPill tone={state.tone}>{state.label}</StatusPill>
+      </div>
+      <dl className="space-y-1">
+        <div className="flex justify-between gap-3"><dt className="text-muted-foreground">First submitted</dt><dd className="text-foreground">{fmtDateTime(current.firstSubmittedAt)}</dd></div>
+        <div className="flex justify-between gap-3"><dt className="text-muted-foreground">This review cycle</dt><dd className="text-foreground">{fmtDateTime(current.submittedAt)}</dd></div>
+        <div className="flex justify-between gap-3"><dt className="text-muted-foreground">Resubmissions</dt><dd className="text-foreground">{current.resubmissionCount}</dd></div>
+      </dl>
+      {openRequest && (
+        <div className="mt-2 rounded-md bg-warning/10 p-2">
+          <p className="font-semibold text-foreground">Open request · waiting for the organizer</p>
+          <p className="mt-0.5 whitespace-pre-wrap break-words text-foreground">{openRequest}</p>
+        </div>
+      )}
+      {!openRequest && current.resubmissionCount > 0 && current.lastReviewRequest?.comment && (
+        <div className="mt-2 rounded-md bg-muted/50 p-2">
+          <p className="font-semibold text-foreground">This resubmission answers</p>
+          <p className="mt-0.5 whitespace-pre-wrap break-words text-muted-foreground">{current.lastReviewRequest.comment}</p>
+        </div>
+      )}
+      {entries.length === 0 ? (
+        <p className="mt-2 text-muted-foreground">No review decisions recorded yet.</p>
+      ) : (
+        <ol className="mt-3 space-y-2 border-t border-border pt-2">
+          {entries.map(e => (
+            <li key={e.id}>
+              <div className="flex items-baseline justify-between gap-2">
+                <span className="font-semibold text-foreground">{HISTORY_LABEL[e.action] ?? e.action}<span className="font-normal text-muted-foreground"> · {e.actorRole === 'organizer' ? 'organizer' : 'admin'}</span></span>
+                <span className="shrink-0 text-[11.5px] text-muted-foreground">{fmtDateTime(e.at)}</span>
+              </div>
+              {(e.comment ?? e.reason) && <p className="mt-0.5 whitespace-pre-wrap break-words text-foreground">{e.comment ?? e.reason}</p>}
+              {e.notes && <p className="mt-0.5 whitespace-pre-wrap break-words text-muted-foreground">Internal note: {e.notes}</p>}
+              {e.revisedSections.length > 0 && <p className="mt-0.5 break-words text-muted-foreground">Revised: {e.revisedSections.map(sectionLabel).join(', ')}</p>}
+              {e.changedFields.length > 0 && <p className="mt-0.5 break-words text-muted-foreground">Schedule / venue: {e.changedFields.join(', ')}</p>}
+              {(e.action === 'resubmit' || e.action === 'republish') && e.revisedSections.length === 0 && (
+                <p className="mt-0.5 text-muted-foreground">Resubmitted without content changes.</p>
+              )}
+            </li>
+          ))}
+        </ol>
       )}
     </div>
   )

@@ -54,7 +54,7 @@ export function ConferenceTemplate(props: EventDetailProps) {
     venueType, physical, online, venueName, mapsLink, venueMaps,
     showVenueMap,
     organizer, showOrg, showSocial,
-    isFreeEvent, passes, availability,
+    isFreeEvent, attendeePaysFees, passes, availability,
     speakers, sponsors,
     gallery,
     showSpeakers, showSponsors, showAgenda, showGallery, showAttendeeCount,
@@ -213,6 +213,7 @@ export function ConferenceTemplate(props: EventDetailProps) {
       <ConferenceTickets
         passes={passes}
         isFreeEvent={isFreeEvent}
+        attendeePaysFees={attendeePaysFees}
         slug={slug}
         availability={availability}
         eventMilestoneAlert={eventMilestoneAlert}

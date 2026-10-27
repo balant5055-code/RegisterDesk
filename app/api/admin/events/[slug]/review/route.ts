@@ -88,7 +88,8 @@ export async function POST(req: NextRequest, { params }: Ctx): Promise<NextRespo
   }
 
   // Reuse the shared lifecycle transition.
-  const result = await applyLifecycleTransition(uid, draftId, action, undefined, review)
+  // adminUid is the actor: the review history and changesRequestedBy name the admin who decided.
+  const result = await applyLifecycleTransition(uid, draftId, action, undefined, review, adminUid)
   if (!result.success) {
     return NextResponse.json({ success: false, error: result.error }, { status: result.statusCode })
   }
@@ -106,13 +107,16 @@ export async function POST(req: NextRequest, { params }: Ctx): Promise<NextRespo
   const eventName = eventNameOf(ev)
   // Scheduled via after() so email + WhatsApp complete after the response without
   // being cut off by serverless termination (LS1 fix).
+  // occurrenceId = the review-history entry of THIS decision: the organizer's inbox item is keyed
+  // to it, so a repeated delivery of one decision lands once, while a later cycle is a new item.
+  const occurrenceId = result.reviewEntryId
   if (action === 'approve') {
     try { await ensureCounterExists(slug) } catch { /* idempotent */ }
-    after(() => sendEventReviewEmail({ organizerUid: uid, eventName, kind: 'approved', eventId: draftId }))
+    after(() => sendEventReviewEmail({ organizerUid: uid, eventName, kind: 'approved', eventId: draftId, occurrenceId }))
   } else if (action === 'reject') {
-    after(() => sendEventReviewEmail({ organizerUid: uid, eventName, kind: 'rejected', reason: review?.rejectionReason, eventId: draftId }))
+    after(() => sendEventReviewEmail({ organizerUid: uid, eventName, kind: 'rejected', reason: review?.rejectionReason, eventId: draftId, occurrenceId }))
   } else {
-    after(() => sendEventReviewEmail({ organizerUid: uid, eventName, kind: 'changes_requested', comment: review?.changesComment, eventId: draftId }))
+    after(() => sendEventReviewEmail({ organizerUid: uid, eventName, kind: 'changes_requested', comment: review?.changesComment, eventId: draftId, occurrenceId }))
   }
 
   return NextResponse.json(

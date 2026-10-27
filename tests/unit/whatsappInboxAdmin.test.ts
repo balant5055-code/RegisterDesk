@@ -111,7 +111,7 @@ describe('admin routes', () => {
     expect(Object.keys(UNROUTED_REASON_LABELS).sort()).toEqual([
       'ambiguous_event', 'ambiguous_organizer', 'context_conflict', 'context_incomplete',
       'context_organizer_notification', 'context_phone_mismatch', 'foreign_number',
-      'invalid_phone', 'no_candidates', 'processing_failed',
+      'invalid_phone', 'no_candidates', 'processing_failed', 'too_many_candidates',
     ])
   })
 })

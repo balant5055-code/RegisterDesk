@@ -306,7 +306,11 @@ describe('purchase notifications', () => {
     expect(code('app/api/licensing/purchase/route.ts')).toContain('scheduleServicePurchaseNotification(`lic_${eventId}`)')
     const n = code('lib/notifications/servicePurchase.ts')
     // Super Admin email = the support inbox + every ADMIN_UIDS account (never the legacy admin:true claim).
-    expect(n).toContain("process.env.ADMIN_UIDS ?? ''")
+    // RD-NOTIFY-01 — the resolver moved to its own module (shared with the outbox); servicePurchase uses it.
+    const r = code('lib/notifications/superAdminRecipients.ts')
+    expect(r).toContain("process.env.ADMIN_UIDS ?? ''")
+    expect(r).not.toMatch(/customClaims|\.admin === true/)
+    expect(n).toContain("import { superAdminRecipients } from './superAdminRecipients'")
     expect(n).toContain('for (const to of adminRecipients)')
     expect(n).not.toMatch(/customClaims|\.admin === true/)
     // after() inside a request; outside a request scope (scripts, direct handler calls) it falls back.

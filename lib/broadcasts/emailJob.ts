@@ -25,6 +25,7 @@ import type { EmailProviderName } from '@/lib/email/providerName'
 import { emailShell }              from '@/lib/email/templates/base'
 import { substituteVariables }     from '@/lib/email-templates/types'
 import { renderBroadcastBody }     from '@/lib/broadcasts/renderBody'
+import { broadcastEventVars, type BroadcastEventVars } from '@/lib/broadcasts/eventVars'
 import { writeEmailLog }           from '@/lib/email-logs/write'
 import { buildUnsubscribeUrl, unsubscribeHeaders } from '@/lib/email/unsubscribeToken'
 import { suppressionStatus } from '@/lib/firebase/firestore/emailSuppressionList'
@@ -154,6 +155,8 @@ interface EmailJobContext {
   perMsgCostPaise: number
   /** RD-EMAIL-PROVIDER — resolved ONCE per job from this broadcast's own event. */
   emailProviderName: EmailProviderName
+  /** RD-BCAST-VARS — {{eventDate}} / {{eventLocation}} / {{organizerName}}, from the live event. */
+  eventVars: BroadcastEventVars
 }
 
 type RecipientItem = EmailRecipientRow & { __id: string }
@@ -174,7 +177,16 @@ export function emailBroadcastStrategy(): JobStrategy<EmailBroadcastJob, EmailJo
       if (!notificationEngine.isAvailable(NotificationChannel.EMAIL, emailProviderName)) {
         return { ok: false, error: 'Email provider is not configured' }
       }
-      const branding = await resolvePublicBranding(job.organizerUid)
+      const [branding, eventSnap, orgSnap] = await Promise.all([
+        resolvePublicBranding(job.organizerUid),
+        adminDb.collection('events').doc(job.eventSlug).get().catch(() => null),
+        adminDb.collection('users').doc(job.organizerUid).get().catch(() => null),
+      ])
+      const orgData = (orgSnap?.data() ?? {}) as { organizationName?: unknown; name?: unknown }
+      const organizerName = branding?.companyName
+        || (typeof orgData.organizationName === 'string' ? orgData.organizationName : '')
+        || (typeof orgData.name === 'string' ? orgData.name : '')
+      const eventVars = broadcastEventVars(eventSnap?.data(), organizerName)
       const total = job.counts.total || 1
       return {
         ok: true,
@@ -184,6 +196,7 @@ export function emailBroadcastStrategy(): JobStrategy<EmailBroadcastJob, EmailJo
             : undefined,
           fromName:        branding?.emailSenderName ?? undefined,
           emailProviderName,
+          eventVars,
           perMsgCostPaise: Math.round((job.actualCostPaise ?? 0) / total),
         },
       }
@@ -245,9 +258,11 @@ export function emailBroadcastStrategy(): JobStrategy<EmailBroadcastJob, EmailJo
         return { ok: true, skipped: true }
       }
 
+      // RD-BCAST-VARS — every variable the composer offers is filled; event values from the live
+      // event (were '' — "Join us on  at ."). All values are HTML-escaped by renderBroadcastBody.
       const vars: Record<string, string> = {
         attendeeName: item.name, eventName: job.eventName, ticketCode: item.ticketCode,
-        registrationId: item.registrationId, organizerName: '', eventDate: '', eventLocation: '',
+        registrationId: item.registrationId, ...ctx.eventVars,
       }
       const renderedSubject = substituteVariables(job.subject, vars)
       // RD-BCAST-FMT-01 — the shared body renderer (line breaks + escaped substitution).

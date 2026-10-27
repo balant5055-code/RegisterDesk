@@ -63,6 +63,8 @@ export type RoutingMethod =
   | 'context'               // reply context → outbound emailLogs row
   | 'context_registration'  // reply context → registrations.whatsappMessageId (log row missing)
   | 'phone_conversation'    // no usable context → the phone's ONE existing conversation
+  | 'outbound_recipient'    // no usable context, no conversation → the ONE organizer + event
+                            // RegisterDesk recently messaged this number for (accepted sends)
 
 export type UnroutedReason =
   | 'foreign_number'                   // delivered to a different phone number on the WABA
@@ -75,6 +77,7 @@ export type UnroutedReason =
   | 'ambiguous_organizer'              // phone has conversations with >1 organizer
   | 'ambiguous_event'                  // phone has conversations for >1 event
   | 'processing_failed'                // routing threw repeatedly; parked for review
+  | 'too_many_candidates'              // outbound evidence for the phone exceeded the bounded read
 
 /** What the reply context resolved to — kept on the receipt for investigation. */
 export type ContextOutcome = 'none' | 'matched' | 'invalid' | 'not_found'
@@ -294,4 +297,5 @@ export const UNROUTED_REASON_LABELS: Record<UnroutedReason, string> = {
   ambiguous_organizer:            'Phone used with several organizers',
   ambiguous_event:                'Phone used for several events',
   processing_failed:              'Routing failed repeatedly',
+  too_many_candidates:            'Too many recent messages to this phone to decide',
 }

@@ -49,6 +49,10 @@ export interface PaymentIntentRecord {
   // RD-COMMS-WA-CONSENT — explicit WhatsApp broadcast opt-in, validated at create-order and
   // stamped onto the registration at settlement (never re-read from a client).
   whatsappBroadcastOptIn?: boolean
+  // RD-WAIVER-01 — the attendee's waiver acceptance, validated at create-order against the live
+  // wording (server time + wording hash), stamped onto the registration at settlement. Absent for
+  // an event without a waiver.
+  waiverAcceptance?: { textHash: string; acceptedAt: string }
   status:         PaymentIntentStatus
   registrationId?: string        // set atomically when registration is created
   paymentId?:      string        // Razorpay payment ID, set after verification

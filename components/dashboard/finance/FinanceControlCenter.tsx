@@ -26,7 +26,8 @@
 // purpose. Settlement — money moved to the bank — is not revenue and appears nowhere in the
 // money flow below.
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { financeScopeParam, createLatestGate, type FinanceViewScope } from '@/lib/finance/viewScope'
 import {
   AlertTriangle, CheckCircle2, Loader2, TrendingUp, Ticket, Wallet,
   Landmark, Receipt, Users, Percent, RotateCcw,
@@ -35,7 +36,7 @@ import { cn } from '@/lib/utils/cn'
 import { DashboardCard } from '@/components/dashboard/DashboardCard'
 import { ErrorState } from '@/components/ui'
 import type {
-  FinanceAnalyticsResponse, EventOption,
+  FinanceAnalyticsResponse,
 } from '@/app/api/organizer/finance/analytics/route'
 import type { MaybeMoney, HealthItem, GatewayFeeBasis } from '@/lib/finance/financeAnalytics'
 
@@ -161,30 +162,53 @@ const RANGES = [
   { key: '90',  label: '90 days', days: 90 },
 ] as const
 
-export function FinanceControlCenter({ token }: { token: string }) {
+/**
+ * RD-FIN-SCOPE-01 — which event the Control Center shows. It FOLLOWS the global Event Selector (the
+ * page passes it down); it no longer keeps a private event dropdown that silently defaulted to
+ * "All events" while the header showed a selected event. Rules: lib/finance/viewScope.
+ */
+export type { FinanceViewScope }
+
+export function FinanceControlCenter({ token, scope: viewScope }: { token: string; scope: FinanceViewScope }) {
   const [data, setData]       = useState<FinanceAnalyticsResponse | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError]     = useState<string | null>(null)
-  const [eventSlug, setEventSlug] = useState<string>('')
   const [rangeKey, setRangeKey]   = useState<string>('30')
+  const scopeKey = financeScopeParam(viewScope) as string
+  // Only the LATEST request may write state: switching events quickly must never let an older,
+  // slower response paint the previous event's figures under the new event's name.
+  const gate = useRef(createLatestGate())
 
   const load = useCallback(async () => {
+    const mine = gate.current.take()
     setError(null)
     const days = RANGES.find(r => r.key === rangeKey)?.days ?? 30
     const to   = new Date()
     const from = new Date(to.getTime() - days * 86_400_000)
-    const qs = new URLSearchParams({ from: from.toISOString(), to: to.toISOString() })
-    if (eventSlug) qs.set('eventSlug', eventSlug)
+    const qs = new URLSearchParams({ from: from.toISOString(), to: to.toISOString(), eventId: scopeKey })
     const res = await fetch(`/api/organizer/finance/analytics?${qs}`, {
       headers: { Authorization: `Bearer ${token}` }, cache: 'no-store',
     })
-    if (!res.ok) { setError(`Could not load finance data. (${res.status})`); setLoading(false); return }
-    setData(await res.json() as FinanceAnalyticsResponse)
+    if (!gate.current.isLatest(mine)) return
+    if (!res.ok) {
+      const body = await res.json().catch(() => null) as { error?: string } | null
+      setData(null)
+      setError(res.status === 409 || res.status === 404 ? (body?.error ?? 'This event has no finance data.') : `Could not load finance data. (${res.status})`)
+      setLoading(false)
+      return
+    }
+    const json = await res.json() as FinanceAnalyticsResponse
+    if (!gate.current.isLatest(mine)) return
+    setData(json)
     setLoading(false)
-  }, [token, eventSlug, rangeKey])
+  }, [token, scopeKey, rangeKey])
 
+  // A scope change clears the previous figures at once (loading state), rather than leaving the
+  // last event's numbers on screen until the new ones arrive.
   // eslint-disable-next-line react-hooks/set-state-in-effect
-  useEffect(() => { setLoading(true); void load().catch(() => { setError('Could not load finance data.'); setLoading(false) }) }, [load])
+  useEffect(() => { setData(null); setLoading(true) }, [scopeKey])
+  // eslint-disable-next-line react-hooks/set-state-in-effect
+  useEffect(() => { setLoading(true); void load().catch(() => { setData(null); setError('Could not load finance data.'); setLoading(false) }) }, [load])
 
   const trendMax = useMemo(
     () => Math.max(1, ...(data?.trend.points ?? []).map(p => p.grossPaise)),
@@ -218,17 +242,10 @@ export function FinanceControlCenter({ token }: { token: string }) {
     <div className="space-y-5">
       {/* ── Filters ───────────────────────────────────────────────────────── */}
       <div className="flex flex-wrap items-center gap-2">
-        <select
-          value={eventSlug}
-          onChange={e => setEventSlug(e.target.value)}
-          aria-label="Filter by event"
-          className="h-8 rounded-lg border border-border bg-card px-2.5 text-[13px] text-foreground"
-        >
-          <option value="">All events</option>
-          {scope.events.map((e: EventOption) => (
-            <option key={e.slug} value={e.slug}>{e.slug}</option>
-          ))}
-        </select>
+        {/* RD-FIN-SCOPE-01 — the scope is the global Event Selector's; shown, not chosen, here. */}
+        <span data-testid="finance-scope" className="inline-flex h-8 items-center rounded-lg border border-primary/20 bg-primary/[0.06] px-2.5 text-[12.5px] font-medium text-foreground">
+          {viewScope.kind === 'event' ? `Selected event · ${viewScope.name}` : 'All events'}
+        </span>
         <span className="text-[12px] text-muted-foreground">Trend</span>
         <div role="group" aria-label="Trend window" className="flex items-center gap-px rounded-lg border border-border bg-muted p-0.5">
           {RANGES.map(r => (
@@ -241,7 +258,7 @@ export function FinanceControlCenter({ token }: { token: string }) {
         </div>
         {!scope.eventSlug && (
           <span className="text-[12px] text-muted-foreground">
-            Select an event for status, coupon, pass and trend detail.
+            Choose an event in the event selector for status, coupon, pass and trend detail.
           </span>
         )}
       </div>

@@ -4,6 +4,9 @@
 //
 // Query params (all optional):
 //   eventSlug  — restrict to one event; omitted = every event in the workspace
+//   eventId    — RD-FIN-SCOPE-01: the Event Selector's DRAFT id (absent / '__all__' = all events).
+//                Resolved and ownership-checked server-side (lib/finance/eventScope); an unknown or
+//                foreign id is refused (404), an unpublished one answered 409 — never widened.
 //   from, to   — ISO dates for the trend window
 //   bucket     — 'day' | 'week'
 //
@@ -23,6 +26,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { authorizeWorkspace } from '@/lib/team/workspace'
 import { adminDb } from '@/lib/firebase/admin'
+import { resolveFinanceEventScope, financeScopeRefusal } from '@/lib/finance/eventScope'
 import {
   getLedgerTotals, getStatusBreakdown, getAttendeePaid, getRegistrationSplit, getRefundTotals,
   getCouponTotals, getPassBreakdown, getTrend, buildHealth, MAX_TREND_BUCKETS,
@@ -128,7 +132,14 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   const uid = authz.workspaceUid
 
   const sp        = req.nextUrl.searchParams
-  const rawSlug   = sp.get('eventSlug')
+  let rawSlug     = sp.get('eventSlug')
+  // RD-FIN-SCOPE-01 — the Event Selector sends a draft id; it becomes an owned slug here or is refused.
+  if (sp.has('eventId')) {
+    const es = await resolveFinanceEventScope(uid, sp.get('eventId'))
+    const refused = financeScopeRefusal(es)
+    if (refused) return refused
+    rawSlug = es.kind === 'event' ? es.slug : null
+  }
   const bucket    = sp.get('bucket') === 'week' ? 'week' : 'day'
 
   const events = await ownedEvents(uid)

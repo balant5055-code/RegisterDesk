@@ -33,6 +33,7 @@ import { toCashfreeCustomerPhone } from '@/lib/payments/providers/cashfreeAdapte
 // Razorpay credentials — even for a deployment paying through Cashfree.
 import { getClientIp } from '@/lib/rateLimit'
 import { validateTermsConsent } from '@/lib/legal/platformTerms'
+import { resolveEventWaiver, checkWaiverAcceptance } from '@/lib/registrations/waiver'
 import { checkDistributedRateLimit } from '@/lib/rateLimit/redis'
 import { validateCoupon }            from '@/lib/coupons/validate'
 import { resolveEffectivePassPricePaise, eventTimezone } from '@/lib/pricing/earlyBird'
@@ -74,6 +75,9 @@ interface CreateOrderBody {
   // RD-COMMS-WA-CONSENT — OPTIONAL, explicit opt-in to organizer WhatsApp broadcasts. Only a
   // real boolean `true` records consent (lib/whatsapp/broadcastConsent); anything else, nothing.
   whatsappBroadcastOptIn?: unknown
+  // RD-WAIVER-01 — required on a waiver event: a literal `true` plus the hash of the wording shown.
+  waiverAccepted?: unknown
+  waiverTextHash?: unknown
 }
 
 export interface CreateOrderResponse {
@@ -243,6 +247,17 @@ export async function POST(
   // ── 4. Load event and pass (Firestore is source of truth) ─────────────────
   const event = await getEventBySlug(slug)
   if (!event) return NextResponse.json({ error: 'Event not found' }, { status: 404 })
+
+  // RD-WAIVER-01 · the sports waiver — enforced before any payment order exists, against the LIVE
+  // event's wording, exactly as terms consent is above. The acceptance (server time, wording hash)
+  // rides on the payment intent and is copied onto the registration at settlement.
+  const waiverCheck = checkWaiverAcceptance(resolveEventWaiver(event), body)
+  if (!waiverCheck.ok) {
+    return NextResponse.json({ error: waiverCheck.error, reason: waiverCheck.code }, { status: waiverCheck.status })
+  }
+  const waiverAcceptance = waiverCheck.acceptance
+    ? { textHash: waiverCheck.acceptance.textHash, acceptedAt: new Date().toISOString() }
+    : null
 
   const rawPricing = event.pricing as Record<string, unknown> | null
   const passes     = Array.isArray(rawPricing?.passes)
@@ -730,6 +745,8 @@ export async function POST(
       termsAccepted: true,
       termsVersion:  termsCheck.version!,
       ...(body.whatsappBroadcastOptIn === true ? { whatsappBroadcastOptIn: true } : {}),
+      // RD-WAIVER-01 · validated above; absent for an event without a waiver.
+      ...(waiverAcceptance ? { waiverAcceptance } : {}),
       ...(inviteCode?.trim() ? { inviteCode: inviteCode.trim() } : {}),
       ...(appliedCouponCode ? {
         couponCode:     appliedCouponCode,

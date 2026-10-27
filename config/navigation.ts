@@ -6,7 +6,7 @@ import {
   LayoutDashboard, Activity, Building2, Wallet, BarChart3,
   AlertTriangle, ClipboardCheck, ShieldAlert, PlusCircle, Undo2,
   Globe, SlidersHorizontal, ArrowRightLeft, ScrollText, KeyRound, Bell, Radio,
-  Gauge, LifeBuoy, Search, Boxes, FileText, Receipt, Inbox,
+  Gauge, LifeBuoy, Search, Boxes, FileText, Receipt, Inbox, Lightbulb, Headset, MessageSquareText,
 } from 'lucide-react'
 
 // ─── Route constants ─────────────────────────────────────────────────────────
@@ -61,6 +61,11 @@ export const ROUTES = {
   ADMIN_PRICING_OPS:           '/admin/pricing-ops',
   ADMIN_SEARCH:                '/admin/search',
   ADMIN_SUPPORT:               '/admin/support',
+  // RD-FEATURE-REQ-01 · Super Admin triage of organizer feature requests.
+  ADMIN_FEATURE_REQUESTS:      '/admin/feature-requests',
+  // RD-SUPPORT-01 · Super Admin Support Desk (organizer support tickets).
+  ADMIN_SUPPORT_DESK:          '/admin/support-desk',
+  ADMIN_WHATSAPP_TEMPLATES:    '/admin/whatsapp-templates',
 
   // Dashboard
   DASHBOARD:                  '/dashboard',
@@ -72,6 +77,10 @@ export const ROUTES = {
   DASHBOARD_COMMUNICATIONS:   '/dashboard/communications',
   DASHBOARD_CERTIFICATES:     '/dashboard/communications/certificates',
   DASHBOARD_SETTINGS:         '/dashboard/settings',
+  // RD-FEATURE-REQ-01 · "Request a Feature" + My Requests (reached from the top bar).
+  DASHBOARD_FEATURE_REQUESTS: '/dashboard/feature-requests',
+  // RD-SUPPORT-01 · Support Center (tickets) — the sidebar's Help & Support destination.
+  DASHBOARD_SUPPORT:          '/dashboard/support',
   DASHBOARD_FINANCE:                  '/dashboard/finance',
   DASHBOARD_FINANCE_PAYOUT_PROFILE:  '/dashboard/finance/payout-profile',
   NEW_EVENT:                         '/dashboard/events/new/visibility',
@@ -260,6 +269,9 @@ export const ADMIN_SIDEBAR_NAV: AdminNavGroup[] = [
       // WhatsApp Inbox (Phase 1c). Super Admin ONLY — every API behind it uses
       // resolveSuperAdminUid, so a claim-only admin who opens it gets the page's access-denied
       // state and no data. The admin nav has no per-item Super Admin gate to hide the row.
+      // RD-WA-TEMPLATES-01 · Super Admin ONLY — every API behind it uses requireSuperAdmin.
+      { label: 'WhatsApp Templates',   href: ROUTES.ADMIN_WHATSAPP_TEMPLATES,   icon: MessageSquareText,
+        description: "Review organizer WhatsApp templates, Meta approval status and the review mode", keywords: "whatsapp template meta approval review rejected submission governance" },
       { label: 'WhatsApp Inbox',       href: ROUTES.ADMIN_WHATSAPP_INBOX,       icon: Inbox,
         description: "Attendee WhatsApp replies across organizers, and unmatched messages", keywords: "whatsapp inbox replies messages conversations unmatched unrouted attendee" },
       { label: 'Reminders',            href: ROUTES.ADMIN_REMINDERS,            icon: Bell,
@@ -282,6 +294,13 @@ export const ADMIN_SIDEBAR_NAV: AdminNavGroup[] = [
     items: [
       { label: 'Support Workspace', href: ROUTES.ADMIN_SUPPORT, icon: LifeBuoy,
         description: "Support workspace", keywords: "support ticket help customer" },
+      // RD-SUPPORT-01 · Super Admin ONLY — every API behind it uses requireSuperAdmin.
+      { label: 'Support Desk',      href: ROUTES.ADMIN_SUPPORT_DESK, icon: Headset,
+        description: "Organizer support tickets — replies, internal notes, assignment and status", keywords: "support ticket help desk organizer issue reply" },
+      // RD-FEATURE-REQ-01 · Super Admin ONLY — every API behind it uses requireSuperAdmin, so a
+      // claim-only admin reaches the page's access-denied state and no data.
+      { label: 'Feature Requests',  href: ROUTES.ADMIN_FEATURE_REQUESTS, icon: Lightbulb,
+        description: "Organizer feature requests — triage, responses, duplicates and rollout plans", keywords: "feature request idea roadmap suggestion organizer feedback" },
       { label: 'Global Search',     href: ROUTES.ADMIN_SEARCH,  icon: Search,
         description: "Search across the platform", keywords: "search find lookup global" },
     ],

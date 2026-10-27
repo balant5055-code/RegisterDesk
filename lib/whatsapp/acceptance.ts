@@ -32,6 +32,7 @@ import type { OrganizerWallet } from '@/types/events'
 import { legacyBalanceCanFund, legacyBalanceCanFundNewWhatsApp } from '@/lib/communications/capacity'
 import { WHATSAPP_HOLDS } from './funding'
 import type { WriteEmailLogInput } from '@/lib/email-logs/types'
+import { recipientPhoneKeyFields } from './recipientKey'
 import {
   ledgerRef as serviceLedgerRef, ledgerLine, availableUnits, ALLOWANCE_USAGE_SUBCOLLECTION, draftIdForEventSlug, type ServiceLedgerDoc,
 } from '@/lib/licensing/serviceAllowanceLedger'
@@ -214,7 +215,7 @@ export async function recordMessageAcceptance(input: MessageAcceptanceInput): Pr
         error: FieldValue.delete(), recoveredFrom: input.source, updatedAt: FieldValue.serverTimestamp(),
       })
     } else if (input.log && !logSnap.exists) {
-      txn.set(logRef, clean({ ...input.log, status: 'sent', providerMessageId: input.wamid, costPaise: chargedPaise, createdAt: FieldValue.serverTimestamp(), updatedAt: FieldValue.serverTimestamp() }))
+      txn.set(logRef, clean({ ...input.log, ...recipientPhoneKeyFields(input.log.channel, input.log.recipientPhone), status: 'sent', providerMessageId: input.wamid, costPaise: chargedPaise, createdAt: FieldValue.serverTimestamp(), updatedAt: FieldValue.serverTimestamp() }))
     }
 
     // ── registration status (never downgrade an already-recorded send) ──

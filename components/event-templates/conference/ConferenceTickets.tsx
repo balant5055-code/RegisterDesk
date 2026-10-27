@@ -14,6 +14,7 @@ import { organizerFeaturedPassId } from '@/components/event-templates/shared/uti
 import { MilestoneNotice } from '@/components/event-templates/shared/registration/MilestoneNotice'
 import { formatBenefits } from '@/components/event-templates/shared/registration/benefitLabels'
 import type { ResolvedMilestoneAlert } from '@/lib/events/milestoneAlerts'
+import { FEES_ADDED_AT_CHECKOUT_NOTE, TAX_INCLUSIVE_NOTE } from '@/lib/pricing/copy'
 
 // ─── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -34,6 +35,8 @@ function fmtDateShort(d: string) {
 interface ConferenceTicketsProps {
   passes:           PassPublic[]
   isFreeEvent:      boolean
+  /** Platform fees are added at checkout (attendee-pays) — see EventDetailProps. */
+  attendeePaysFees?: boolean
   slug:             string
   availability:     Record<string, PassAvailability>
   /** EVENT-TOTAL milestone, resolved server-side. Absent ⇒ nothing renders. */
@@ -45,7 +48,7 @@ interface ConferenceTicketsProps {
 // ─── Component ─────────────────────────────────────────────────────────────────
 
 export function ConferenceTickets({
-  passes, isFreeEvent, slug, availability, eventMilestoneAlert, registrationOpen, closedMessage,
+  passes, isFreeEvent, attendeePaysFees = false, slug, availability, eventMilestoneAlert, registrationOpen, closedMessage,
 }: ConferenceTicketsProps) {
   const visible = passes.filter(p => {
     if (p.status === 'inactive') return false
@@ -77,7 +80,7 @@ export function ConferenceTickets({
           </h2>
           {!isFreeEvent && visible.length > 0 && (
             <p className="mt-2 text-base text-gray-500">
-              All prices include taxes · Limited seats available
+              {attendeePaysFees ? FEES_ADDED_AT_CHECKOUT_NOTE : TAX_INCLUSIVE_NOTE} · Limited seats available
             </p>
           )}
         </motion.div>

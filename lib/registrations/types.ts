@@ -184,6 +184,11 @@ export interface RegistrationDocument {
   identifier?:  import('@/lib/identifiers/types').RegistrationIdentifier | null
   timingTag?:   import('@/lib/identifiers/timingTags').RegistrationTimingTag | null
   waiverAcceptedAt?: string | null  // ISO timestamp when participant accepted the waiver
+  // RD-WAIVER-01 · present only on registrations of an event that required a waiver when they
+  // were written (lib/registrations/waiver.ts). Absent on every other registration.
+  waiverRequired?:   boolean
+  waiverAccepted?:   boolean        // false = written without the attendee (walk-in, import)
+  waiverTextHash?:   string         // sha256 of the exact wording shown and accepted
   // Exhibition-specific fields (extracted from formResponses at submission time)
   companyName?:      string | null
   designation?:      string | null

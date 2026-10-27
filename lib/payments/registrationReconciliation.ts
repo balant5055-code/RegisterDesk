@@ -26,6 +26,8 @@ import { settleCapturedRegistration } from '@/lib/payments/settleCapturedRegistr
 import { closeRefundHoldAfterFullRefund } from '@/lib/refunds/registrationRefunds'
 import { upsertReconciliationCase, type CasePaymentState, type CaseStatus } from '@/lib/payments/reconciliationCases'
 import { resolvePaymentProvider, readProvider } from '@/lib/payments/providers'
+import { stageOutboxMessage, scheduleOutboxDelivery, istNow } from '@/lib/notifications/outbox'
+import { refundAttentionAlert } from '@/lib/notifications/actionAlerts'
 
 const COLLECTION = 'registrationFinancialReconciliation'
 const REFUND_REVERSAL_COLLECTION = 'refundLedgerReconciliation'
@@ -680,7 +682,9 @@ async function claimRefundQueueRecord(ref: FirebaseFirestore.DocumentReference):
 
 /** One failed run of a claimed record: count it (due again next run — the lease is released), or escalate to needs_review (alerted). */
 async function recordRefundQueueFailure(ref: FirebaseFirestore.DocumentReference, error: string, scope: string): Promise<'retry' | 'needs_review' | 'gone'> {
+  let alertId: string | null = null
   const out = await adminDb.runTransaction(async tx => {
+    alertId = null
     const snap = await tx.get(ref)
     if (!snap.exists || snap.get('status') !== 'pending') return 'gone' as const
     const prev = snap.get('attempts')
@@ -693,10 +697,22 @@ async function recordRefundQueueFailure(ref: FirebaseFirestore.DocumentReference
         ? { status: 'needs_review', escalatedAt: FieldValue.serverTimestamp(), escalationReason: permanent ? 'permanent_error' : 'max_attempts', nextAttemptAt: FieldValue.delete() }
         : { nextAttemptAt: FieldValue.delete() }),
     })
+    // RD-NOTIFY-01 — the escalation also alerts the Super Admins (email + admin feed), staged in THIS
+    // transaction so it exists exactly when the record moved to needs_review. Unique per escalation.
+    if (escalate) {
+      const m = refundAttentionAlert({
+        attention: 'queue_escalated', key: `${ref.parent.id}-${ref.id}-${attempts}`, registrationId: ref.id,
+        eventSlug: typeof snap.get('eventSlug') === 'string' ? snap.get('eventSlug') : null, amountPaise: null,
+        reason: permanent ? 'permanent error' : `gave up after ${attempts} attempts`, when: istNow(),
+      })
+      alertId = m.id
+      stageOutboxMessage(tx, m)
+    }
     return escalate ? 'needs_review' as const : 'retry' as const
   })
   if (out === 'needs_review') {
     captureFinancialError(new Error(`refund queue record NEEDS REVIEW: ${error}`.slice(0, 500)), { scope: `${scope}.needs_review`, recordId: ref.id })
+    if (alertId) scheduleOutboxDelivery(alertId)
   }
   return out
 }

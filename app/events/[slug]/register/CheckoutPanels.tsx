@@ -43,6 +43,8 @@ export interface ConsentState {
   refund: boolean
   /** RD-COMMS-WA-CONSENT — OPTIONAL opt-in to WhatsApp updates. Not part of the gate. */
   whatsapp?: boolean
+  /** RD-WAIVER-01 — the event waiver, accepted explicitly. Part of the gate only when the event has one. */
+  waiver?: boolean
 }
 
 /**
@@ -56,11 +58,13 @@ export function isConsentComplete(
   c: ConsentState,
   termsUrl?: string,
   refundPolicyUrl?: string,
+  /** RD-WAIVER-01 — the event requires a waiver; then `c.waiver` must be a deliberate `true`. */
+  waiverRequired = false,
 ): boolean {
   // `c.terms` is now unconditional: the PLATFORM Terms & Conditions are mandatory for every
   // event, shown in a modal rather than depending on an organiser-published URL. The refund
   // row keeps its URL-conditional behaviour, which is unchanged.
-  return c.info && c.terms && (!refundPolicyUrl?.trim() || c.refund)
+  return c.info && c.terms && (!refundPolicyUrl?.trim() || c.refund) && (!waiverRequired || c.waiver === true)
 }
 
 /**
@@ -114,7 +118,7 @@ function CheckoutSection({ id, icon, title, description, emphasis, children }: {
 // ─── 1 · Terms & Consent ────────────────────────────────────────────────────────
 
 export function ConsentPanel({
-  consent, onConsent, termsUrl, refundPolicyUrl, submitting, needsConsent = false, whatsappUpdatesFrom,
+  consent, onConsent, termsUrl, refundPolicyUrl, submitting, needsConsent = false, whatsappUpdatesFrom, waiverText,
 }: {
   consent:          ConsentState
   onConsent:        (key: keyof ConsentState, value: boolean) => void
@@ -125,6 +129,8 @@ export function ConsentPanel({
   needsConsent?:    boolean
   /** RD-COMMS-WA-CONSENT — the event name, when the event sends WhatsApp; offers the opt-in. */
   whatsappUpdatesFrom?: string
+  /** RD-WAIVER-01 — the organizer's waiver wording, when the event requires one. Shown in full. */
+  waiverText?: string
 }) {
   const [termsOpen, setTermsOpen] = useState(false)
   const terms  = termsUrl?.trim()
@@ -171,6 +177,26 @@ export function ConsentPanel({
             </>
           )}
         </CheckOption>
+
+        {/* RD-WAIVER-01 — the organizer's own wording, in full, then an UNTICKED box. Nothing is
+            pre-accepted and nothing is inferred: the server refuses registration without this
+            exact `true`, and records the wording's fingerprint with the time it arrived. */}
+        {waiverText && (
+          <div className="flex flex-col gap-2">
+            <p id="event-waiver-title" className="text-fs-xs font-semibold text-foreground">Event waiver</p>
+            <div
+              role="region"
+              aria-labelledby="event-waiver-title"
+              tabIndex={0}
+              className="max-h-56 overflow-y-auto whitespace-pre-wrap break-words rounded-lg border border-border bg-muted/30 px-3 py-2 text-fs-xs leading-relaxed text-foreground [overflow-wrap:anywhere]"
+            >
+              {waiverText}
+            </div>
+            <CheckOption checked={consent.waiver === true} disabled={submitting} onToggle={v => onConsent('waiver', v)}>
+              I have read and accept the event waiver above
+            </CheckOption>
+          </div>
+        )}
 
         {refund && (
           <CheckOption checked={consent.refund} disabled={submitting} onToggle={v => onConsent('refund', v)}>

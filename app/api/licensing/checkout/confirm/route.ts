@@ -29,6 +29,7 @@ import { confirmBadgePurchase } from '@/lib/licensing/printBadgePurchase/confirm
 import { holdSupersededPayment, isSupersededUnheld, supersededActivationOrderId, RAZORPAY_ORDER_ID_RE, recordDuplicateLicensePayment } from '@/lib/licensing/manualRefundHold'
 import { NotificationType } from '@/lib/notifications'
 import { sendOrganizerWhatsApp } from '@/lib/notifications/organizerWhatsApp'
+import { runAfterResponse } from '@/lib/server/afterResponse'
 
 const verifier = new RazorpayDonationGateway()
 
@@ -416,7 +417,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   // License Purchased — organizer WhatsApp (FREE, Phase G3.5; the email is the Wallet-02 one above). Only on a
   // fresh purchase (not an idempotent replay). Best-effort; never blocks the response.
   if (activation.kind === 'ok') {
-    void (async () => {
+    // Scheduled with after() (lib/server/afterResponse) — a detached promise is frozen with the response.
+    await runAfterResponse(`license-purchased-whatsapp ${eventId}`, async () => {
       try {
         const [userSnap, eventSnap] = await Promise.all([
           adminDb.collection('users').doc(uid).get(),
@@ -433,7 +435,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           ? `${capacityCharge.capacity.toLocaleString('en-IN')} registrations`
           : licenseName
 
-        void sendOrganizerWhatsApp({
+        await sendOrganizerWhatsApp({
           type: NotificationType.LICENSE_PURCHASED, organizerUid: uid,
           variables: { organizerName: u.name ?? '', eventName, tierName },
           eventSlug: eventId, eventName,
@@ -441,7 +443,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       } catch (err) {
         console.error('[license] purchase notification failed:', err)
       }
-    })()
+    })
   }
 
   // RD-CE-FIX M4 — the order is already PAID. An already-paid order owes nothing, so the checks above

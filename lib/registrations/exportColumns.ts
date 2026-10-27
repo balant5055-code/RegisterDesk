@@ -28,6 +28,7 @@
 
 import type { ReportColumn, ReportRow, ReportCell } from '@/lib/reports/types'
 import { refundLabel } from './paymentDisplay'
+import { waiverStatusOf } from './waiverStatus'
 // Pure as well — it reaches only lib/payments/providers/types.ts, which has no imports at
 // all — so this module stays unit-testable in the `node` environment.
 import { resolveRegistrationOrderId, type RegistrationPaymentIdentifiers } from './paymentIdentifiers'
@@ -114,6 +115,10 @@ const FIXED_COLUMNS: ReportColumn[] = [
    * carrying.
    */
   { key: 'timingTag',        label: 'Timing Chip',       type: 'text' },
+  // RD-WAIVER-01 · the RECORDED status beside the existing timestamp column (kept as-is for
+  // compatibility): "Accepted", "Not accepted" (a waiver event, no acceptance recorded — walk-in,
+  // import), or blank where no waiver applied. Never inferred from anything but the record.
+  { key: 'waiverStatus',     label: 'Waiver Status',      type: 'text' },
   { key: 'waiverAcceptedAt', label: 'Waiver Accepted At', type: 'text' },
   { key: 'companyName',      label: 'Company Name',      type: 'text' },
   { key: 'designation',      label: 'Designation',       type: 'text' },
@@ -253,6 +258,7 @@ export function buildRegistrationExportRow(
       const t = raw.timingTag as { tag?: unknown; state?: unknown } | null | undefined
       return t?.state === 'assigned' && typeof t.tag === 'string' ? t.tag : ''
     })(),
+    waiverStatus:     waiverStatusOf(raw),
     waiverAcceptedAt: toISO(raw.waiverAcceptedAt),
     companyName:      str(raw.companyName),
     designation:      str(raw.designation),

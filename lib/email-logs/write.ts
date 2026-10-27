@@ -4,6 +4,7 @@
 import { FieldValue }  from 'firebase-admin/firestore'
 import { adminDb }     from '@/lib/firebase/admin'
 import type { WriteEmailLogInput, EmailLogStatus } from './types'
+import { recipientPhoneKeyFields } from '@/lib/whatsapp/recipientKey'
 
 const COLLECTION = 'emailLogs'
 
@@ -23,7 +24,8 @@ export async function writeEmailLog(input: WriteEmailLogInput): Promise<string> 
     for (const [k, v] of Object.entries(input)) {
       if (v !== undefined) clean[k] = v
     }
-    await ref.set({ ...clean, createdAt: now, updatedAt: now })
+    // WhatsApp Inbox — the hashed recipient key inbound routing matches replies against.
+    await ref.set({ ...clean, ...recipientPhoneKeyFields(input.channel, input.recipientPhone), createdAt: now, updatedAt: now })
     return ref.id
   } catch (err) {
     console.error('[emailLogs] write failed:', err)

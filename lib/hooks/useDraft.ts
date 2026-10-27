@@ -328,8 +328,21 @@ export function useDraft() {
     const run = async () => {
       if (!user) { setIsLoading(false); return }
       uidRef.current = user.uid
-      const storedId = localStorage.getItem(DRAFT_KEY)
+      // RD-WIZARD-01 · the address bar names the draft once one exists (`?eventId=`, written by
+      // the event selector), but only this browser's stored id was read — so that URL opened a
+      // BLANK wizard anywhere else (another device, a new browser, a teammate), and continuing
+      // created a duplicate; with a different stored id the URL named one event while the
+      // wizard edited another. The URL's draft now wins when it loads for this workspace (the
+      // drafts API scopes the read, so a foreign id is a 404); otherwise the stored id, as before.
+      const urlId = new URLSearchParams(window.location.search).get('eventId')
+      const fromUrl = urlId && /^[A-Za-z0-9_-]{1,128}$/.test(urlId) ? urlId : null
+      let storedId = localStorage.getItem(DRAFT_KEY)
       try {
+        if (fromUrl && fromUrl !== storedId) {
+          const urlDraft = await loadEventDraft(user.uid, fromUrl).catch(() => null)
+          if (cancelled) return
+          if (urlDraft) { localStorage.setItem(DRAFT_KEY, fromUrl); storedId = fromUrl }
+        }
         if (storedId) {
           const existing = await loadEventDraft(user.uid, storedId)
           if (cancelled) return

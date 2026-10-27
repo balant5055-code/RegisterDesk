@@ -293,7 +293,9 @@ export const WORKSPACE_NAV: WorkspaceNavSection[] = [
   {
     sectionLabel: 'Support',
     items: [
-      { key: 'support', label: 'Help & Support', icon: LifeBuoy, href: '/contact', scope: 'global', newTab: true },
+      // RD-SUPPORT-01 · signed-in organizers get the Support Center (tickets) instead of the public
+      // contact page, which stays available to visitors at /contact.
+      { key: 'support', label: 'Help & Support', icon: LifeBuoy, href: '/dashboard/support', scope: 'global' },
     ],
   },
 ]

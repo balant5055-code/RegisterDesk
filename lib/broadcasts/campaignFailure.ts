@@ -20,6 +20,13 @@ const LABELS: Record<string, string> = {
   whatsapp_disabled:    'Failed — WhatsApp switched off for this event',
   email_disabled:       'Failed — Email switched off',
   template_not_allowed: 'Failed — Template not allowed',
+  // RD-BCAST-AUDIT — written by the send path (lib/broadcasts/send.ts) but had no label, so the
+  // organizer saw only "could not be sent". Nothing was sent in either case.
+  provider_unavailable: 'Failed — The email/WhatsApp provider is not configured; nothing was sent',
+  invalid_template:     'Failed — WhatsApp template unavailable; nothing was sent',
+  // RD-WA-TEMPLATES-01 — the organizer template lost its approval (Meta paused / disabled it, or a
+  // newer version replaced it) between scheduling and sending.
+  template_not_eligible: 'Failed — WhatsApp template is no longer approved; nothing was sent',
 }
 
 /** True when buying WhatsApp capacity is what would let this campaign send. */

@@ -4,7 +4,10 @@
 //
 // Only campaigns funded by THIS event's capacity carry `allowanceDraftId` (billing sets it when
 // it takes the units), so the key is exactly "funded by this event". Equality-only filters with
-// sum aggregations: served by single-field indexes, unbounded (no scan cap), 3 aggregation reads.
+// sum aggregations, unbounded (no scan cap), 3 aggregation reads. Each sum() NEEDS ITS OWN COMPOSITE
+// INDEX (the three equality fields + the summed field) in firestore.indexes.json — single-field
+// indexes do not serve a filtered sum, and the emulator does not enforce this (production answers
+// 9 FAILED_PRECONDITION). Guarded by tests/unit/usageAggregateIndexes.test.ts.
 // ONE sum per query on purpose: a query with several aggregations counts only documents that hold
 // EVERY aggregated field, so a settled campaign without `unknownHeldUnits` would drop its
 // `refundedUnits` from the sum.

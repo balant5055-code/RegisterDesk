@@ -46,6 +46,8 @@ interface CampaignData {
   templateType?: string
   languageCode?: string
   variables?:    Record<string, string>
+  /** RD-WA-TEMPLATES-01 — an organizer template (instead of templateType), pinned to one version. */
+  customTemplate?: { templateId: string; version: number }
   // WA-3 / OE-2: the generic-runner job that executes this campaign (once created).
   whatsappJobId?: string
   emailJobId?:    string
@@ -316,7 +318,10 @@ async function deliverWhatsAppCampaign(
     }
 
     const provider      = await getMetaProvider()
-    const validTemplate = typeof c.templateType === 'string' && hasWhatsAppTemplate(c.templateType)
+    // RD-WA-TEMPLATES-01 — an organizer template is re-checked for eligibility by the job's loadContext
+    // (the same place the registry allowlist is re-applied), so here it only has to be present.
+    const validTemplate = (typeof c.templateType === 'string' && hasWhatsAppTemplate(c.templateType))
+      || (!!c.customTemplate && typeof c.customTemplate.templateId === 'string' && Number.isInteger(c.customTemplate.version))
 
     // No provider / no template / no recipients — resolve immediately (no job).
     if (!provider || !validTemplate || recipients.length === 0) {

@@ -19,6 +19,7 @@ import { adminDb } from '@/lib/firebase/admin'
 import { META_PHONE_NUMBER_ID } from '@/lib/env'
 import { getFeatureFlags } from '@/lib/config/resolveFeatureFlags'
 import { prepareNotification } from '@/lib/notifications/inbox/write'
+import { RECIPIENT_PHONE_KEY_FIELD, recipientPhoneKeyFields } from '@/lib/whatsapp/recipientKey'
 import type { WhatsAppInboundMessage } from '@/lib/whatsapp/webhookInbound'
 import {
   resolveInboundRoute,
@@ -129,7 +130,28 @@ export const firestoreRoutingLookups: InboundRoutingLookups = {
       return { id: d.id, organizerUid: x.organizerUid, eventId: x.eventId, eventName: x.eventName }
     })
   },
+  // Outbound evidence for a plain (non-reply) message. ONE equality on the hashed key — served
+  // by Firestore's automatic single-field index, so no composite index is required. The read is
+  // bounded; hitting the bound reports `truncated` and the router refuses to route.
+  async outboundByPhone(phone) {
+    const key = recipientPhoneKeyFields('whatsapp', phone).recipientPhoneKey
+    if (!key) return { rows: [], truncated: false }
+    const snap = await adminDb.collection('emailLogs')
+      .where(RECIPIENT_PHONE_KEY_FIELD, '==', key).limit(OUTBOUND_EVIDENCE_LIMIT + 1).get()
+    const rows = snap.docs.slice(0, OUTBOUND_EVIDENCE_LIMIT).map(d => {
+      const x = d.data()
+      const at = (x.createdAt as Timestamp | undefined)?.toMillis?.() ?? 0
+      return {
+        id: d.id, channel: x.channel, status: x.status, organizerUid: x.organizerUid, eventId: x.eventId,
+        eventName: x.eventName, registrationId: x.registrationId, sentAtMs: at,
+      }
+    })
+    return { rows, truncated: snap.size > OUTBOUND_EVIDENCE_LIMIT }
+  },
 }
+
+/** Upper bound on outbound log rows read for one sender (see outboundByPhone). */
+export const OUTBOUND_EVIDENCE_LIMIT = 100
 
 export type RouteInboundResult =
   | { status: 'routed'; conversationId: string; notified: boolean }

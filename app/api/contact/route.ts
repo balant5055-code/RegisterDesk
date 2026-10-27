@@ -16,6 +16,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { adminDb }                    from '@/lib/firebase/admin'
 import { FieldValue }                 from 'firebase-admin/firestore'
 import { getEmailProvider }           from '@/lib/email'
+import { resolvePlatformEmailProvider } from '@/lib/email/platformProvider'
 import { checkRateLimit, getClientIp } from '@/lib/rateLimit'
 import {
   validateEnquiry, normaliseEnquiry, buildEnquiryEmailHtml,
@@ -103,7 +104,8 @@ export async function POST(req: NextRequest): Promise<NextResponse<ContactRespon
   // Best-effort by design: the enquiry is already safe in Firestore, so a mail failure
   // must not tell the visitor their message was lost. It is logged for follow-up.
   try {
-    const provider = getEmailProvider()
+    // RD-EMAIL-PROVIDER-04 — the platform provider the Super Admin selected (default SES).
+    const provider = getEmailProvider(await resolvePlatformEmailProvider())
     if (provider) {
       const receivedAt = new Date().toLocaleString('en-IN', {
         dateStyle: 'medium', timeStyle: 'short', timeZone: 'Asia/Kolkata',

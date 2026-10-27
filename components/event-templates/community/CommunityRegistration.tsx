@@ -13,6 +13,7 @@ import { organizerFeaturedPassId } from '@/components/event-templates/shared/uti
 import { MilestoneNotice } from '@/components/event-templates/shared/registration/MilestoneNotice'
 import { formatBenefits } from '@/components/event-templates/shared/registration/benefitLabels'
 import type { ResolvedMilestoneAlert } from '@/lib/events/milestoneAlerts'
+import { FEES_ADDED_AT_CHECKOUT_NOTE, TAX_INCLUSIVE_NOTE } from '@/lib/pricing/copy'
 
 const PASS_ACCENTS = [
   'from-action to-action-end',
@@ -22,10 +23,12 @@ const PASS_ACCENTS = [
 ]
 
 export function CommunityRegistration({
-  passes, isFreeEvent, slug, availability, eventMilestoneAlert, registrationOpen, closedMessage,
+  passes, isFreeEvent, attendeePaysFees = false, slug, availability, eventMilestoneAlert, registrationOpen, closedMessage,
 }: {
   passes:           PassPublic[]
   isFreeEvent:      boolean
+  /** Platform fees are added at checkout (attendee-pays) — see EventDetailProps. */
+  attendeePaysFees?: boolean
   slug:             string
   availability:     Record<string, PassAvailability>
   /** EVENT-TOTAL milestone, resolved server-side. Absent ⇒ nothing renders. */
@@ -304,7 +307,7 @@ export function CommunityRegistration({
               className="mt-6 flex items-center justify-center gap-2 text-center text-[0.8125rem] text-gray-400"
             >
               <ShieldCheck className="size-4 text-gray-300" aria-hidden />
-              Secure checkout · All prices inclusive of taxes
+              Secure checkout · {attendeePaysFees ? FEES_ADDED_AT_CHECKOUT_NOTE : TAX_INCLUSIVE_NOTE}
             </motion.p>
           </>
         )}

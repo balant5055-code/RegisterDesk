@@ -7,6 +7,7 @@
 
 import { NextRequest, NextResponse } from 'next/server'
 import { resolveAdminUid, resolveSuperAdminUid } from '@/lib/admin/auth'
+import { emailProviderSelectionRefusal } from '@/lib/email/providerSelection'
 import { resolveGlobalCommercialTerms } from '@/lib/licensing/resolveCommercialTerms'
 import { getServiceCatalog } from '@/lib/licensing/serviceAllowanceConfig'
 import { serviceSaleReadinessErrors, SERVICE_KINDS, type ServiceKind, type ServiceSaleState } from '@/lib/licensing/serviceAllowances'
@@ -219,6 +220,21 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       emulator:          Boolean(process.env.FIRESTORE_EMULATOR_HOST),
     })
     if (refusal) return NextResponse.json({ error: refusal, code: 'CASHFREE_NOT_ENABLED' }, { status: 409, headers: NO_STORE })
+  }
+
+  // RD-EMAIL-PROVIDER-04 — the platform email provider: the same refusal the Communication Center
+  // applies. A provider without credentials can never become the platform provider (no fallback).
+  if (body.section === 'integrations' && (body.patch as { emailProvider?: unknown }).emailProvider !== undefined) {
+    if (!isSuperAdmin) return NextResponse.json({ error: 'Only a Super Admin can change the email provider.', code: 'SUPER_ADMIN_REQUIRED' }, { status: 403, headers: NO_STORE })
+    const refusal = await emailProviderSelectionRefusal((body.patch as { emailProvider?: unknown }).emailProvider)
+    if (refusal) return NextResponse.json({ error: refusal, code: 'PROVIDER_NOT_CONFIGURED' }, { status: 409, headers: NO_STORE })
+  }
+  // RD-WA-TEMPLATES-01 — the WhatsApp template review mode has ONE writer: the Super Admin
+  // WhatsApp Templates page (reason required, its own audit action). Never edited from here. The
+  // editor sends the whole section, so an UNCHANGED value passes; only a change is refused.
+  const patchedReviewMode = body.section === 'integrations' ? (body.patch as { whatsappTemplateReviewMode?: unknown }).whatsappTemplateReviewMode : undefined
+  if (patchedReviewMode !== undefined && patchedReviewMode !== (await businessConfig.getSection('integrations') as { whatsappTemplateReviewMode?: unknown }).whatsappTemplateReviewMode) {
+    return NextResponse.json({ error: 'Change the WhatsApp template review mode from Admin → WhatsApp Templates.', code: 'USE_TEMPLATE_GOVERNANCE' }, { status: 403, headers: NO_STORE })
   }
 
   // RD-EVENT-COMMERCE-05 — SAVE-TIME sale readiness for prepaid services: a service may not be

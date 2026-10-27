@@ -174,7 +174,8 @@ export default function PricingOpsPage() {
                   </div>
                   <p className="mt-1 text-[12.5px] text-muted-foreground">
                     Enable organizers to select &ldquo;Attendee Pays Fees&rdquo; when creating events. While off, the
-                    builder shows &ldquo;Coming Soon&rdquo; and every event uses Organizer Absorbs Fees.
+                    choice is hidden and every new checkout uses Organizer Absorbs Fees &mdash; including events
+                    that chose Attendee Pays. Checkouts already in progress keep the terms they started with.
                   </p>
                 </div>
                 <button
