@@ -13,6 +13,7 @@
 // than no alert, because it teaches them to ignore the panel.
 
 import type { DailyStatsPoint } from '@/lib/dashboard/dailyStats'
+import { eventEditorPath } from '@/lib/events/editorPath'
 
 // ─── Severity ─────────────────────────────────────────────────────────────────
 
@@ -43,6 +44,8 @@ export interface EventSignalInput {
   capacity:        number | null
   passCount:       number
   reviewStatus:    'rejected' | 'changes_requested' | null
+  /** RD-REVIEW-03 — the Super Admin's exact words (changes comment / rejection reason), when saved. */
+  reviewComment?:  string | null
 }
 
 const DAY_MS = 86_400_000
@@ -175,13 +178,18 @@ export function buildAttention(input: AttentionInput): AttentionSignal[] {
 
     // Admin returned the event — the organizer cannot publish until they act.
     if (e.reviewStatus) {
+      // RD-REVIEW-03 — the organizer reads WHAT was asked, never a generic line (and nothing is invented
+      // when no message was saved); requested changes are made in the editor.
+      const said = e.reviewComment?.trim() || null
       out.push({
         id: `review:${e.draftId}`, severity: 'critical',
         title: e.name,
         detail: e.reviewStatus === 'rejected'
-          ? 'Rejected in review — changes are required before it can go live.'
-          : 'Changes requested in review.',
-        eventId: e.draftId, actionHref: manage, actionLabel: 'Review',
+          ? (said ? `Not approved: ${said}` : 'Rejected in review — changes are required before it can go live.')
+          : (said ? `Changes requested: ${said}` : 'Changes requested in review.'),
+        eventId: e.draftId,
+        actionHref: e.reviewStatus === 'changes_requested' ? eventEditorPath(e.draftId) : manage,
+        actionLabel: e.reviewStatus === 'changes_requested' ? 'Edit and resubmit' : 'Review',
       })
       continue
     }

@@ -32,7 +32,7 @@ const TABS: readonly EventsTab[] = [
   { key: 'active',    label: 'Active'    },
   { key: 'published', label: 'Published' },
   { key: 'drafts',    label: 'Drafts'    },
-  // RD-REVIEW-02 — events whose first changes deadline passed: one more 24-hour window.
+  // RD-REVIEW-03 — events the Super Admin returned for changes (with the request and time left).
   { key: 'action_required', label: 'Action Required' },
   { key: 'archived',  label: 'Archived'  },
 ]
@@ -43,7 +43,7 @@ const EMPTY: Record<EventListingTabKey, {
   active:    { icon: TrendingUp, title: 'No active events',    desc: 'Publish an event to start accepting registrations.' },
   published: { icon: TrendingUp, title: 'No published events', desc: 'Published events with open registration appear here.' },
   drafts:    { icon: FileText,   title: 'No draft events',     desc: "Events you're working on appear here.", action: true },
-  action_required: { icon: AlertTriangle, title: 'Nothing needs action', desc: 'Events whose requested changes are overdue appear here, with time left before they close.' },
+  action_required: { icon: AlertTriangle, title: 'Nothing needs action', desc: 'Events returned to you for changes appear here, with the Super Admin’s request and the time left to resubmit.' },
   archived:  { icon: Archive,    title: 'No archived events',  desc: 'Completed, cancelled, and archived events appear here.' },
 }
 

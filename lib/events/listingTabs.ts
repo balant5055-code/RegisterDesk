@@ -9,9 +9,9 @@
 
 import type { EventLifecycleStatus } from '@/types/events'
 
-// RD-REVIEW-02 — 'action_required': events whose first changes deadline passed (the second 24-hour
-// window). It is a deadline PHASE of 'changes_requested', so it is decided per document by
-// listingTabsForDoc — never by the lifecycle status alone.
+// RD-REVIEW-03 — 'action_required': every event the Super Admin returned for changes
+// (lifecycle 'changes_requested'), in BOTH deadline windows and for legacy events without a
+// deadline. It is the organizer's to-do list — never mixed into Drafts.
 export type EventListingTabKey = 'active' | 'published' | 'drafts' | 'action_required' | 'archived'
 
 export const EVENT_LISTING_TAB_KEYS: readonly EventListingTabKey[] =
@@ -27,14 +27,15 @@ export function parseListingTab(value: string | null | undefined): EventListingT
 // An event may appear in multiple tabs (e.g. published → both 'active' and 'published').
 //   Active    : published | registration_closed | pending_review  (currently in-flight)
 //   Published : published only                                    (open for registration)
-//   Drafts    : draft | changes_requested
+//   Drafts    : draft
+//   Action Required : changes_requested (returned by the Super Admin; RD-REVIEW-03)
 //   Archived  : completed | cancelled | archived | unpublished
 export function listingTabsForEvent(ls: EventLifecycleStatus): EventListingTabKey[] {
   switch (ls) {
     case 'published':            return ['active', 'published']
     case 'registration_closed':  return ['active']
     case 'pending_review':       return ['active']
-    case 'changes_requested':    return ['drafts']
+    case 'changes_requested':    return ['action_required']   // RD-REVIEW-03 — never a plain draft
     case 'draft':                return ['drafts']
     case 'completed':
     case 'cancelled':
@@ -72,17 +73,14 @@ export function eventInListingTab(ls: EventLifecycleStatus, tab: EventListingTab
 // dashboard but must stay editable, restorable and NOT permanently deletable.
 
 import { deriveLifecycleStatus, isArchivedEvent } from './lifecycleStateMachine'
-import { reviewPhaseOf } from './reviewDeadline'
 
 /**
- * RD-REVIEW-02 — the listing tabs of an event DOCUMENT: as listingTabsForEvent, except that a
- * changes-requested event in its second deadline window belongs to 'action_required' only.
- * (Legacy events without a deadline stay under Drafts.)
+ * The listing tabs of an event DOCUMENT (the lifecycle the document should be treated as — see
+ * effectiveLifecycleStatus). RD-REVIEW-03: a changes-requested event is under Action Required in
+ * either deadline window (the card shows which one), and so is a legacy one without a deadline.
  */
 export function listingTabsForDoc(d: Record<string, unknown>): EventListingTabKey[] {
-  const ls = effectiveLifecycleStatus(d)
-  if (reviewPhaseOf(ls, d.reviewDeadline) === 'action_required') return ['action_required']
-  return listingTabsForEvent(ls)
+  return listingTabsForEvent(effectiveLifecycleStatus(d))
 }
 
 /** True when an event document belongs to the given tab. tab === null ⇒ no filter. */

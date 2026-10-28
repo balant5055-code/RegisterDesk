@@ -126,13 +126,15 @@ describe('Action Required listing tab', () => {
   it('the new tab is part of the listing SSOT', () => {
     expect(EVENT_LISTING_TAB_KEYS).toContain('action_required')
   })
-  it('a changes-requested event moves from Drafts to Action Required only in the second window', () => {
-    expect(listingTabsForDoc(doc({ reviewDeadline: first }))).toEqual(['drafts'])
+  it('RD-REVIEW-03 — a changes-requested event is under Action Required in BOTH windows, never Drafts', () => {
+    expect(listingTabsForDoc(doc({ reviewDeadline: first }))).toEqual(['action_required'])
     expect(listingTabsForDoc(doc({ reviewDeadline: second }))).toEqual(['action_required'])
-    expect(eventDocInListingTab(doc({ reviewDeadline: second }), 'drafts')).toBe(false)
+    for (const dl of [first, second]) expect(eventDocInListingTab(doc({ reviewDeadline: dl }), 'drafts')).toBe(false)
   })
-  it('legacy changes-requested events (no deadline) stay under Drafts; other statuses are unaffected', () => {
-    expect(listingTabsForDoc(doc({}))).toEqual(['drafts'])
+  it('RD-REVIEW-03 — legacy changes-requested events (no deadline) are under Action Required too; other statuses are unaffected', () => {
+    expect(listingTabsForDoc(doc({}))).toEqual(['action_required'])
+    expect(listingTabsForDoc({ lifecycleStatus: 'draft', status: 'draft' })).toEqual(['drafts'])
+    expect(listingTabsForDoc({ lifecycleStatus: 'pending_review', status: 'pending_review' })).toEqual(['active'])
     expect(reviewPhaseOf('published', second)).toBeNull()
     expect(listingTabsForDoc({ lifecycleStatus: 'cancelled', reviewDeadline: second })).toEqual(['archived'])
   })

@@ -21,6 +21,7 @@
 import { accent, type AccentTone } from '@/lib/dashboard/accents'
 import { readiness } from '@/lib/eventSetup/readiness'
 import { eventHasWaitlist } from './eventCapabilities'
+import { eventEditorPath } from './editorPath'
 import type { EventDetailResponse } from '@/app/api/organizer/events/[eventId]/route'
 import type {
   RegistrationsApiResponse, SerializedRegistration,
@@ -189,7 +190,8 @@ export function homeAttention(
       id: 'review', tone: 'critical',
       title: event.reviewStatus === 'rejected' ? 'Not approved by review' : 'Changes requested by review',
       detail: event.rejectionReason ?? event.changesComment ?? null,
-      href: tab('setup'),
+      // RD-REVIEW-03 — requested changes are made and resubmitted in the editor, which shows the request.
+      href: event.reviewStatus === 'changes_requested' ? eventEditorPath(event.draftId) : tab('setup'),
     })
   }
 

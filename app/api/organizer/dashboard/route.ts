@@ -2091,6 +2091,9 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       passCount:       passes.length,
       reviewStatus:    d.reviewStatus === 'rejected' ? 'rejected' as const
         : d.reviewStatus === 'changes_requested' ? 'changes_requested' as const : null,
+      // RD-REVIEW-03 — the Super Admin's exact words for the Attention Center (none ⇒ no text invented).
+      reviewComment:   d.reviewStatus === 'rejected' ? (typeof d.rejectionReason === 'string' ? d.rejectionReason : null)
+        : d.reviewStatus === 'changes_requested' ? (typeof d.changesComment === 'string' ? d.changesComment : null) : null,
     }
   })
 

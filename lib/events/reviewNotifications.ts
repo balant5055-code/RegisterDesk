@@ -12,6 +12,7 @@ import { writeEmailLog }         from '@/lib/email-logs/write'
 import { resolveOrganizerEmailIdentity } from '@/lib/organizer/emailIdentity'
 import { notifyEventReviewed }   from '@/lib/notifications/inbox/notify'
 import { emailUrl }              from '@/lib/email/appUrl'
+import { eventEditorPath }       from '@/lib/events/editorPath'
 
 export type ReviewNotificationKind =
   | 'submitted'          // event submitted → under review
@@ -31,11 +32,16 @@ interface ReviewNotificationArgs {
   occurrenceId?: string
 }
 
-/** Where the organizer acts on a review decision: the event's Setup tab, or the event itself. */
+/**
+ * Where the organizer acts on a review decision: requested changes open the event EDITOR (the request,
+ * its deadline and Submit for review — RD-REVIEW-03); a rejection opens the Setup tab; anything else
+ * the event itself.
+ */
 export function reviewEventPath(kind: ReviewNotificationKind, eventId?: string | null): string | null {
   if (!eventId) return null
+  if (kind === 'changes_requested') return eventEditorPath(eventId)
   const base = `/dashboard/events/${encodeURIComponent(eventId)}`
-  return kind === 'rejected' || kind === 'changes_requested' ? `${base}?tab=setup` : base
+  return kind === 'rejected' ? `${base}?tab=setup` : base
 }
 
 const KIND_TO_TYPE: Record<ReviewNotificationKind, NotificationType> = {

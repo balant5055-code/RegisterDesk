@@ -231,7 +231,7 @@ function ReviewRequestPanel({ event, busy, pending, onClose }: {
           label={actionRequired ? 'Closes automatically' : 'Changes due'}
           expiredText={actionRequired
             ? 'The event is being closed. It can no longer be edited or resubmitted.'
-            : 'Edit and resubmit soon: the event moves to Action Required and then closes 24 hours later.'}
+            : 'Edit and resubmit soon: one final 24-hour window starts, then the event closes.'}
         />
       )}
       {actionRequired && (
