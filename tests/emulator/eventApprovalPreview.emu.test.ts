@@ -100,8 +100,12 @@ describeEmu('event approval: preview, authorization and reviewed-content publica
   const ctxEvent = (eventId: string) => ({ params: Promise.resolve({ eventId }) })
   const liveDesc = async (slug: string) =>
     (((await adminDb.doc(`events/${slug}`).get()).data()!.eventDetails as Json).info as Json).fullDesc
-  const doReview = async (slug: string, body: Json, who = ADMIN) =>
-    review(req(`http://localhost/api/admin/events/${slug}/review`, tokens[who] ?? null, 'POST', body), ctxSlug(slug))
+  // RD-REVIEW-02 — a decision names the review cycle it reviewed: the event's CURRENT cycle (null for
+  // an event seeded without one), read here as the review page would have loaded it.
+  const doReview = async (slug: string, body: Json, who = ADMIN) => {
+    const reviewCycleId = (((await adminDb.doc(`events/${slug}`).get()).data() ?? {}).reviewCycleId as string | undefined) ?? null
+    return review(req(`http://localhost/api/admin/events/${slug}/review`, tokens[who] ?? null, 'POST', { reviewCycleId, ...body }), ctxSlug(slug))
+  }
   async function editDraft(draftId: string, desc: string, extra: Json = {}) {
     const snap = (await adminDb.doc(`users/${ORG}/eventDrafts/${draftId}`).get()).data()!
     const ed = { ...(draftContent(desc, extra).eventDetails as Json), seo: (snap.eventDetails as Json).seo }

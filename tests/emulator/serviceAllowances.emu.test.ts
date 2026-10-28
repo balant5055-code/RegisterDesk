@@ -47,6 +47,12 @@ const h = vi.hoisted(() => ({
   fail:     { apply: 0, recordHold: 0, holdSuperseded: 0, couponCount: 0, refund: 0, counterRef: 0, rzpCreate: 0, attach: 0 } as Record<'apply' | 'recordHold' | 'holdSuperseded' | 'couponCount' | 'refund' | 'counterRef' | 'rzpCreate' | 'attach', number>,
 }))
 
+// RD-EVENT-TYPES-01 — this suite publishes Conference events (nothing here is sports-specific), so
+// every type is switched on; the default-off refusals are covered by releaseControls.emu.
+vi.mock('@/lib/events/eventTypeAvailabilityServer', async orig => ({
+  ...(await orig<typeof import('@/lib/events/eventTypeAvailabilityServer')>()),
+  getEventTypeAvailability: async () => ({ availability: Object.fromEntries((await import('@/lib/events/eventTypeAvailability')).EVENT_TYPE_IDS.map(t => [t, true])), unavailable: false }),
+}))
 vi.mock('@/lib/razorpay/client', () => ({
   RAZORPAY_KEY_ID:     'rzp_test_c02',
   RAZORPAY_KEY_SECRET: SECRET,

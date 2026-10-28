@@ -328,7 +328,8 @@ describe('TEST 7/8 — a missing live document fails visibly on BOTH write paths
     // THE defect: `if (eventSnap.exists) batch.update(eventRef, eventUpdate)`.
     expect(EDIT).not.toContain('if (eventSnap.exists)')
     expect(EDIT).toContain('resolveLiveEventRef(eventId, d, uid)')
-    expect(EDIT).toContain('if (liveRef) batch.update(liveRef, eventUpdate)')
+    // RD-REVIEW-02 — the write is now transactional (it re-checks a review closure); same guarantee.
+    expect(EDIT).toContain('if (liveRef) txn.update(liveRef, eventUpdate)')
   })
 
   it('neither route creates or renames a live document', () => {

@@ -12,12 +12,17 @@
 //
 // Only a 'pending_review' event may be reviewed — this guards against duplicate
 // approvals, double publishes, and approval after archive/cancel/publish.
+//
+// RD-REVIEW-02 — every body also names `reviewCycleId`: the cycle the Super Admin reviewed (null for
+// an event submitted before cycles existed). The transition compares it, and that the event is still
+// pending review, INSIDE its transaction — a decision made on an older version (the organizer has
+// since resubmitted) is refused with 409 REVIEW_CYCLE_STALE instead of publishing unreviewed content.
+// The audit row is staged in the same transaction as the decision.
 
 import { NextRequest, NextResponse, after } from 'next/server'
 import { adminDb }              from '@/lib/firebase/admin'
 import { resolveAdminUid }      from '@/lib/admin/auth'
 import { applyLifecycleTransition } from '@/lib/events/lifecycle'
-import { logAdminAction }        from '@/lib/admin/audit'
 import { ensureCounterExists }  from '@/lib/firebase/firestore/registrationCounters'
 import { sendEventReviewEmail } from '@/lib/events/reviewNotifications'
 import type { EventReviewMeta } from '@/types/events'
@@ -36,7 +41,7 @@ export async function POST(req: NextRequest, { params }: Ctx): Promise<NextRespo
 
   const { slug } = await params
 
-  let body: { action?: unknown; reason?: unknown; category?: unknown; notes?: unknown; comment?: unknown }
+  let body: { action?: unknown; reason?: unknown; category?: unknown; notes?: unknown; comment?: unknown; reviewCycleId?: unknown }
   try {
     body = await req.json()
   } catch {
@@ -46,6 +51,13 @@ export async function POST(req: NextRequest, { params }: Ctx): Promise<NextRespo
   if (action !== 'approve' && action !== 'reject' && action !== 'request_changes') {
     return NextResponse.json({ error: "action must be 'approve', 'reject' or 'request_changes'" }, { status: 400 })
   }
+  // RD-REVIEW-02 — the reviewed cycle is REQUIRED (an explicit null for a legacy event): a client
+  // that does not send it cannot prove which version it reviewed.
+  if (!body || !Object.prototype.hasOwnProperty.call(body, 'reviewCycleId')
+      || !(body.reviewCycleId === null || (typeof body.reviewCycleId === 'string' && body.reviewCycleId.length > 0 && body.reviewCycleId.length <= 100))) {
+    return NextResponse.json({ error: 'reviewCycleId is required (the review cycle you reviewed). Reload the review page.', code: 'REVIEW_CYCLE_REQUIRED' }, { status: 400 })
+  }
+  const expectedCycleId = body.reviewCycleId as string | null
 
   // Per-action input validation.
   let review: EventReviewMeta | undefined
@@ -89,19 +101,24 @@ export async function POST(req: NextRequest, { params }: Ctx): Promise<NextRespo
 
   // Reuse the shared lifecycle transition.
   // adminUid is the actor: the review history and changesRequestedBy name the admin who decided.
-  const result = await applyLifecycleTransition(uid, draftId, action, undefined, review, adminUid)
-  if (!result.success) {
-    return NextResponse.json({ success: false, error: result.error }, { status: result.statusCode })
-  }
-
-  // Immutable admin audit trail — approve/reject/request_changes previously left NO
-  // record of which admin acted (applyLifecycleTransition only audits archive/restore).
+  // Immutable admin audit trail, staged IN the decision's transaction (the decision and its audit
+  // row commit together). The internal rejection note is never copied into the audit row.
   const auditAction = action === 'approve' ? 'event.approved'
     : action === 'reject' ? 'event.rejected' : 'event.changes_requested'
-  void logAdminAction({
-    adminUid, action: auditAction, entityType: 'event', entityId: slug,
-    metadata: { organizerUid: uid, draftId, reason: review?.rejectionReason, comment: review?.changesComment },
-  }).catch(() => { /* audit must never block the review */ })
+  const result = await applyLifecycleTransition(uid, draftId, action, undefined, review, adminUid, {
+    expectedStatus: 'pending_review',
+    expectedCycleId,
+    audit: {
+      adminUid, actorRole: 'super_admin', action: auditAction, entityType: 'event', entityId: slug,
+      reason: review?.rejectionReason ?? review?.changesComment,
+      before: { lifecycleStatus: 'pending_review' },
+      after:  { lifecycleStatus: action === 'approve' ? 'published' : action === 'reject' ? 'draft' : 'changes_requested' },
+      metadata: { organizerUid: uid, draftId, category: review?.rejectionCategory || null },
+    },
+  })
+  if (!result.success) {
+    return NextResponse.json({ success: false, error: result.error, code: result.code ?? null }, { status: result.statusCode })
+  }
 
   // Side-effects (best-effort; never block the response).
   const eventName = eventNameOf(ev)

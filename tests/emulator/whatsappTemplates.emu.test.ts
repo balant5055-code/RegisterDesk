@@ -52,7 +52,8 @@ vi.mock('@/lib/whatsappTemplates/metaApi', () => ({
   getMetaTemplate: async () => ({ ok: false, error: 'not used', notFound: false }),
   findMetaTemplate: async () => null,
 }))
-vi.mock('@/lib/whatsappTemplates/governance', () => ({ resolveReviewMode: async () => ({ mode: h.mode, unavailable: false }) }))
+// RD-WA-MARKETING-01 — Marketing creation is switched on here; its default-off refusal is covered by releaseControls.emu.
+vi.mock('@/lib/whatsappTemplates/governance', () => ({ resolveReviewMode: async () => ({ mode: h.mode, unavailable: false }), resolveMarketingTemplatesEnabled: async () => ({ enabled: true, unavailable: false }) }))
 vi.mock('@/lib/notifications/outbox', async orig => ({ ...(await orig<typeof import('@/lib/notifications/outbox')>()), scheduleOutboxDelivery: () => undefined }))
 vi.mock('@/lib/whatsapp', async orig => ({
   ...(await orig<typeof import('@/lib/whatsapp')>()),

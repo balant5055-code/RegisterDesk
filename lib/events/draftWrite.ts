@@ -106,7 +106,13 @@ export function pinPublishedDraftFields(
 }
 
 /** JSON-safe view of a stored draft: Firestore Timestamps become epoch millis. */
-export function serializeDraft(id: string, data: Record<string, unknown>): Record<string, unknown> {
+/** RD-REVIEW-02 — admin-only fields that never leave the server in an organizer-facing draft. */
+const ADMIN_ONLY_DRAFT_FIELDS = ['rejectionNotes'] as const
+
+export function serializeDraft(id: string, input: Record<string, unknown>): Record<string, unknown> {
+  // The rejection NOTES are the Super Admin's internal note (older code copied them onto the draft).
+  const data = { ...input }
+  for (const k of ADMIN_ONLY_DRAFT_FIELDS) delete data[k]
   const walk = (v: unknown): unknown => {
     if (v && typeof v === 'object') {
       const t = v as { toMillis?: () => number }

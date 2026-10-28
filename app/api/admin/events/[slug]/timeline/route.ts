@@ -44,6 +44,12 @@ const REVIEW_LABEL: Record<ReviewHistoryItem['action'], string> = {
   request_changes: 'Changes requested',
   resubmit:        'Resubmitted by organizer',
   republish:       'Republished by organizer',
+  // RD-REVIEW-02 — the first submission, the deadline steps and the review closures.
+  submit:          'Submitted for review',
+  review_reminder: 'Deadline reminder sent',
+  action_required: 'Moved to Action Required (first deadline passed)',
+  close_review:    'Closed by organizer',
+  expire_review:   'Closed — second deadline passed',
 }
 function reviewDetail(r: ReviewHistoryItem): string {
   const text = r.comment ?? r.reason

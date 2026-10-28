@@ -32,6 +32,7 @@ import {
 import type { EventEditPayload, EventEditResponse } from '@/types/events'
 import { introducedValueIssues, applyFieldPaths } from '@/lib/events/eventValueRules'
 import { resolvePlatformPricing }    from '@/lib/platform/pricing/resolver'
+import { isReviewClosed }            from '@/lib/events/lifecycleStateMachine'
 
 // ─── Handler ──────────────────────────────────────────────────────────────────
 
@@ -103,6 +104,13 @@ export async function PATCH(
   }
 
   const d       = draftSnap.data() as Record<string, unknown>
+  // RD-REVIEW-02 — an event closed during review is permanently closed for ordinary editing.
+  if (isReviewClosed(d)) {
+    return NextResponse.json(
+      { success: false, error: 'This event was closed during review and can no longer be edited.' },
+      { status: 409 },
+    )
+  }
   const isPublished = d.status === 'published'
 
   // ── 3b. Locate the live document BEFORE anything is computed from the slug ──
@@ -187,19 +195,31 @@ export async function PATCH(
   const draftUpdate = { ...updates, ...meta }
   const eventUpdate = { ...updates, ...meta }
 
-  // ── 6. Atomic batch update (draft + live doc if published) ──────────────────
+  // ── 6. Atomic update (draft + live doc if published) ─────────────────────────
+  // RD-REVIEW-02 — a transaction (it was a blind batch) so the closure check above cannot race a
+  // permanent review closure: the draft is re-read here, and if a closure commits after that read,
+  // Firestore retries this transaction, which then sees the closure and writes nothing.
+  let closedMeanwhile = false as boolean   // set inside the transaction callback (not narrowed away)
   try {
-    const batch = adminDb.batch()
-    batch.update(draftRef, draftUpdate)
+    await adminDb.runTransaction(async txn => {
+      closedMeanwhile = false
+      const fresh = await txn.get(draftRef)
+      if (!fresh.exists || isReviewClosed(fresh.data() as Record<string, unknown>)) { closedMeanwhile = true; return }
+      txn.update(draftRef, draftUpdate)
 
-    // `liveRef` is non-null for every published event — step 3b already refused the
-    // request otherwise, so there is no "exists?" branch left that can swallow the write.
-    if (liveRef) batch.update(liveRef, eventUpdate)
-
-    await batch.commit()
+      // `liveRef` is non-null for every published event — step 3b already refused the
+      // request otherwise, so there is no "exists?" branch left that can swallow the write.
+      if (liveRef) txn.update(liveRef, eventUpdate)
+    })
   } catch (err) {
     console.error('[edit] Failed to save:', err)
     return NextResponse.json({ success: false, error: 'Failed to save changes' }, { status: 500 })
+  }
+  if (closedMeanwhile) {
+    return NextResponse.json(
+      { success: false, error: 'This event was closed during review and can no longer be edited.' },
+      { status: 409 },
+    )
   }
 
   const notificationRequired = requiresAttendeeNotification(changedFields)

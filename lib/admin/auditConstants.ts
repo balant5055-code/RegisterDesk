@@ -36,6 +36,15 @@ export const AUDIT_ACTIONS = [
   'event.approved',
   'event.rejected',
   'event.changes_requested',
+  // RD-REVIEW-02 — review deadlines: the first deadline passed (Action Required), and a review
+  // closure by the owner or because the second deadline passed (actorRole organizer | system).
+  'event.review_action_required',
+  'event.review_closed',
+  'event.review_expired',
+  // RD-EVENT-TYPES-01 — a Super Admin changed which event types organizers may choose.
+  'platform.event_type_availability_changed',
+  // RD-WA-MARKETING-01 — a Super Admin enabled / disabled organizer Marketing WhatsApp templates.
+  'platform.whatsapp_marketing_templates_changed',
   // Campaign moderation
   'campaign.taken_down',
   'campaign.restored',

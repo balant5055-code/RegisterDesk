@@ -11,6 +11,8 @@ import { adminDb }                     from '@/lib/firebase/admin'
 import { authorizeWorkspace }          from '@/lib/team/workspace'
 import { randomUUID }                  from 'crypto'
 import type { DuplicateEventResponse } from '@/types/events'
+import { getEventTypeAvailability }    from '@/lib/events/eventTypeAvailabilityServer'
+import { isEventTypeAvailable, EVENT_TYPE_UNAVAILABLE_CODE, EVENT_TYPE_UNAVAILABLE_MESSAGE } from '@/lib/events/eventTypeAvailability'
 
 export async function POST(
   req:     NextRequest,
@@ -31,6 +33,13 @@ export async function POST(
   }
 
   const source = sourceSnap.data() as Record<string, unknown>
+
+  // RD-EVENT-TYPES-01 — a duplicate is a NEW event of the source's type, so that type must be
+  // available. The source event itself is untouched and keeps every workflow.
+  const { availability } = await getEventTypeAvailability()
+  if (!isEventTypeAvailable(availability, source.eventType ?? null)) {
+    return NextResponse.json({ success: false, error: EVENT_TYPE_UNAVAILABLE_MESSAGE, code: EVENT_TYPE_UNAVAILABLE_CODE } as DuplicateEventResponse, { status: 403 })
+  }
 
   // ── 3. Deep-clone event content with sanitized fields ─────────────────────
 

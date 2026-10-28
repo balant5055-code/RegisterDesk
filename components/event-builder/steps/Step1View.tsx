@@ -47,6 +47,10 @@ import { EASE, WIZARD_STEPS } from '@/lib/events/builder/constants'
 import type { StepViewProps } from '@/lib/events/builder/types'
 import { getTemplate } from '@/lib/events/templateRegistry'
 import { EVENT_SUBTYPE_NAMES, EVENT_TYPE_NAMES } from '@/lib/events/taxonomy'
+import { auth } from '@/lib/firebase/auth'
+import {
+  DEFAULT_EVENT_TYPE_AVAILABILITY, resolveEventTypeAvailability, isEventTypeAvailable, type EventTypeAvailability,
+} from '@/lib/events/eventTypeAvailability'
 import {
   type CampaignType,
   type DonationCampaignSubtype,
@@ -255,11 +259,14 @@ function EventTypeCard({
   type,
   selected,
   onSelect,
+  available = true,
 }: {
   type:         EventTypeOption
   selected:     boolean
   onSelect:     (id: string) => void
   recommended?: boolean
+  /** RD-EVENT-TYPES-01 — false ⇒ "Coming Soon": shown, never selectable (the server refuses it too). */
+  available?:   boolean
 }) {
   // 2026-10-01 luxury pass (owner: "smooth to create a new event"): a TILE in a grid rather
   // than a full-width row, so all ten categories read at a glance. On a phone it is icon +
@@ -267,11 +274,13 @@ function EventTypeCard({
   return (
     <motion.button
       type="button"
-      onClick={() => onSelect(type.id)}
-      whileTap={{ scale: 0.985 }}
+      onClick={() => { if (available) onSelect(type.id) }}
+      whileTap={available ? { scale: 0.985 } : undefined}
       aria-pressed={selected}
-      aria-label={`Select ${type.name}`}
+      aria-disabled={!available || undefined}
+      aria-label={available ? `Select ${type.name}` : `${type.name} — coming soon, not available yet`}
       className={cn(
+        !available && 'cursor-not-allowed opacity-60 hover:translate-y-0 hover:shadow-none',
         'group relative flex h-full w-full cursor-pointer flex-col items-start gap-3 rounded-surface border p-3.5 text-left sm:p-4',
         // Custom Event is the escape hatch, not a peer: where the grid runs three across it
         // becomes one full-width dashed strip instead of an orphan tile on the last row.
@@ -305,6 +314,11 @@ function EventTypeCard({
         <span className="mt-1 hidden text-fs-xs leading-relaxed text-muted-foreground sm:line-clamp-2">
           {type.description}
         </span>
+        {!available && (
+          <span className="mt-1.5 inline-flex items-center rounded-full border border-border bg-muted px-2 py-0.5 text-fs-2xs font-semibold uppercase tracking-wide text-muted-foreground">
+            Coming Soon
+          </span>
+        )}
       </span>
 
       {/* Selection tick — top-right corner */}
@@ -670,8 +684,29 @@ export function Step1View({ currentStep, completedValues, onNext, onSaveDraft, i
   // the second, and `[selectedType]` alone cannot tell them apart.
   const userPickedTypeRef = useRef(false)
 
+  // RD-EVENT-TYPES-01 — which types may be chosen now (Super Admin switches). Display only: the
+  // server refuses an unavailable type on create, type change, duplicate and first submission.
+  // Until the switches arrive, the launch defaults apply (the same ones the server falls back to).
+  const [typeAvailability, setTypeAvailability] = useState<EventTypeAvailability>({ ...DEFAULT_EVENT_TYPE_AVAILABILITY })
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      try {
+        const token = await auth.currentUser?.getIdToken()
+        if (!token) return
+        const res = await fetch('/api/organizer/event-types', { headers: { authorization: `Bearer ${token}` }, cache: 'no-store' })
+        if (!res.ok) return
+        const json = await res.json() as { availability?: unknown }
+        if (!cancelled) setTypeAvailability(resolveEventTypeAvailability({ enabled: json.availability }))
+      } catch { /* keep the defaults */ }
+    })()
+    return () => { cancelled = true }
+  }, [])
+  const selectedTypeUnavailable = !!selectedType && !isEventTypeAvailable(typeAvailability, selectedType)
+
   const handleSelectType = (id: string) => {
     if (locked) return   // RD-CE-FIX H5 — a published event's type is frozen
+    if (!isEventTypeAvailable(typeAvailability, id)) return   // RD-EVENT-TYPES-01 — "Coming Soon"
     userPickedTypeRef.current = true
     setStep1(prev => ({
       eventType:    id,
@@ -777,10 +812,19 @@ export function Step1View({ currentStep, completedValues, onNext, onSaveDraft, i
                 selected={selectedType === et.id}
                 onSelect={handleSelectType}
                 recommended={getTemplate(et.id)?.recommended}
+                available={isEventTypeAvailable(typeAvailability, et.id)}
               />
               </div>
             ))}
           </div>
+
+          {/* RD-EVENT-TYPES-01 — an existing draft whose type is now "Coming Soon" stays editable. */}
+          {selectedTypeUnavailable && !locked && (
+            <p role="status" className="rounded-control border border-warning/30 bg-warning/10 px-3 py-2.5 text-fs-xs text-foreground">
+              This event type is coming soon. Your draft is saved and you can keep editing it, but it can’t be
+              submitted until RegisterDesk enables this type. To submit now, choose an available event type.
+            </p>
+          )}
 
           {/* Secondary selector — subtype or campaign-type intercept */}
           <AnimatePresence mode="wait">

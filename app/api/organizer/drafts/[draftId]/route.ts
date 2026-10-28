@@ -9,6 +9,9 @@ import { FieldValue }                from 'firebase-admin/firestore'
 import { adminDb }                   from '@/lib/firebase/admin'
 import { authorizeWorkspace }        from '@/lib/team/workspace'
 import { deriveLifecycleStatus }     from '@/lib/events/lifecycle'
+import { isReviewClosed }            from '@/lib/events/lifecycleStateMachine'
+import { getEventTypeAvailability }  from '@/lib/events/eventTypeAvailabilityServer'
+import { isEventTypeAvailable, EVENT_TYPE_UNAVAILABLE_CODE, EVENT_TYPE_UNAVAILABLE_MESSAGE } from '@/lib/events/eventTypeAvailability'
 import { EVENT_LICENSES_COLLECTION, LICENSE_ORDERS_COLLECTION } from '@/lib/licensing/schema'
 import { sanitizeDraftPayload, pinPublishedDraftFields, serializeDraft } from '@/lib/events/draftWrite'
 import { resolveOwnedEventSlug, liveEventBelongsTo } from '@/lib/events/liveEventRef'
@@ -45,14 +48,31 @@ export async function PATCH(
   if (!check.ok) return NextResponse.json({ error: check.error, field: check.field ?? null }, { status: 400 })
 
   const ref = adminDb.doc(`users/${authz.workspaceUid}/eventDrafts/${draftId}`)
+  // RD-EVENT-TYPES-01 — read only when the save carries a type (the wizard's type step).
+  const availability = check.fields.eventType !== undefined ? (await getEventTypeAvailability()).availability : null
   const result = await adminDb.runTransaction(async txn => {
     const snap = await txn.get(ref)
     if (!snap.exists) return null
+    // RD-REVIEW-02 — an event closed during review is permanently closed for ordinary editing.
+    // Checked on the transactional snapshot, so a save racing the closure cannot slip in after it.
+    if (isReviewClosed(snap.data() as Record<string, unknown>)) return { closed: true as const }
     const { fields, refused } = pinPublishedDraftFields(check.fields, snap.data() as Record<string, unknown>)
+    // RD-EVENT-TYPES-01 — a draft may not be SWITCHED to an unavailable type. Re-saving the type it
+    // already has is allowed (an existing draft of a now-disabled type stays editable). Checked after
+    // pinning: a published draft's type is frozen and reported in `refused`, never a 403.
+    if (availability && fields.eventType !== undefined && fields.eventType !== snap.get('eventType') && !isEventTypeAvailable(availability, fields.eventType)) {
+      return { typeUnavailable: true as const }
+    }
     txn.update(ref, { ...fields, updatedAt: FieldValue.serverTimestamp(), updatedBy: authz.callerUid })
     return { refused }
   })
   if (!result) return NextResponse.json({ error: 'Draft not found' }, { status: 404 })
+  if ('closed' in result) {
+    return NextResponse.json({ error: 'This event was closed during review and can no longer be edited.', code: 'REVIEW_CLOSED' }, { status: 409 })
+  }
+  if ('typeUnavailable' in result) {
+    return NextResponse.json({ error: EVENT_TYPE_UNAVAILABLE_MESSAGE, code: EVENT_TYPE_UNAVAILABLE_CODE, field: 'eventType' }, { status: 403 })
+  }
   return NextResponse.json({ ok: true, dropped: check.dropped, refused: result.refused })
 }
 

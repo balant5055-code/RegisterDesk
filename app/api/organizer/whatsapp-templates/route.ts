@@ -12,6 +12,7 @@ import { checkRateLimit } from '@/lib/rateLimit'
 import { parseDraftInput } from '@/lib/whatsappTemplates/validate'
 import { createTemplate, submitForReview, listOrganizerTemplates, listSendableTemplates } from '@/lib/whatsappTemplates/service'
 import { NO_STORE, readJson, templateErrorResponse } from '@/lib/whatsappTemplates/http'
+import { resolveMarketingTemplatesEnabled } from '@/lib/whatsappTemplates/governance'
 
 export async function GET(req: NextRequest): Promise<NextResponse> {
   const authz = await authorizeWorkspace(req, 'broadcasts')
@@ -19,7 +20,9 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   const caller = { workspaceUid: authz.workspaceUid, callerUid: authz.callerUid }
   try {
     if (req.nextUrl.searchParams.get('sendable') === '1') return NextResponse.json({ templates: await listSendableTemplates(caller) }, { headers: NO_STORE })
-    return NextResponse.json({ templates: await listOrganizerTemplates(caller) }, { headers: NO_STORE })
+    // RD-WA-MARKETING-01 — the editor offers Marketing only when it is enabled (the service enforces it).
+    const marketing = await resolveMarketingTemplatesEnabled()
+    return NextResponse.json({ templates: await listOrganizerTemplates(caller), marketingTemplatesEnabled: marketing.enabled }, { headers: NO_STORE })
   } catch (err) { return templateErrorResponse(err, 'list') }
 }
 

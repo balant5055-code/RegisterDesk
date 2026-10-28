@@ -45,7 +45,29 @@ export function targetStatus(action: LifecycleAction): EventLifecycleStatus {
     case 'resubmit':             return 'pending_review'
     case 'republish':            return 'pending_review'
     case 'restore':              return 'unpublished'
+    // RD-REVIEW-02 — a review closure is a cancellation: every existing guard already treats
+    // 'cancelled' as terminal and not live. The `reviewClosure` marker says why.
+    case 'close_review':         return 'cancelled'
+    case 'expire_review':        return 'cancelled'
   }
+}
+
+/**
+ * RD-REVIEW-02 — was this event closed by the review workflow (by its owner, or because both
+ * deadlines passed)? Such an event is permanently closed for ordinary organizer operations.
+ */
+export function isReviewClosed(d: Record<string, unknown> | null | undefined): boolean {
+  const c = d?.reviewClosure as { source?: unknown } | null | undefined
+  return !!c && typeof c === 'object' && (c.source === 'organizer' || c.source === 'deadline_expired')
+}
+
+/**
+ * RD-REVIEW-02 — actions refused on a review-closed event. Restore / republish are the ordinary way
+ * back to review from a cancelled-then-archived event; reopening a review closure needs an
+ * authorized Super Admin action, which this workflow does not provide.
+ */
+export function blockedByReviewClosure(action: LifecycleAction): boolean {
+  return action === 'restore' || action === 'republish' || action === 'resubmit'
 }
 
 export function isValidTransition(from: EventLifecycleStatus, to: EventLifecycleStatus): boolean {

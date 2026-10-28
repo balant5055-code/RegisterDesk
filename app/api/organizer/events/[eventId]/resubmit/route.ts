@@ -95,9 +95,14 @@ export async function POST(req: NextRequest, { params }: Ctx): Promise<NextRespo
   }
 
   // callerUid (not the workspace owner) is who resubmitted — a team member acting for the owner.
-  const result = await applyLifecycleTransition(uid, eventId, 'resubmit', undefined, undefined, authz.callerUid)
+  // RD-REVIEW-02 — the transition opens a NEW review cycle and ends the previous cycle's deadline in
+  // the same transaction; it refuses (409 DEADLINE_PASSED) once the last deadline has passed, even
+  // if the scheduler has not closed the event yet — the server, not the countdown, decides.
+  const result = await applyLifecycleTransition(uid, eventId, 'resubmit', undefined, undefined, authz.callerUid, {
+    expectedStatus: ls,
+  })
   if (!result.success) {
-    return NextResponse.json({ success: false, error: result.error }, { status: result.statusCode })
+    return NextResponse.json({ success: false, error: result.error, code: result.code ?? null }, { status: result.statusCode })
   }
 
   // Record this publish against the immutable identity baseline (bumps publishCount;
@@ -114,7 +119,7 @@ export async function POST(req: NextRequest, { params }: Ctx): Promise<NextRespo
   after(() => sendEventReviewEmail({ organizerUid: uid, eventName, kind: 'resubmitted', eventId, occurrenceId: result.reviewEntryId }))
 
   return NextResponse.json(
-    { success: true, lifecycleStatus: result.lifecycleStatus },
+    { success: true, lifecycleStatus: result.lifecycleStatus, reviewCycleId: result.reviewCycleId ?? null },
     { headers: { 'Cache-Control': 'no-store' } },
   )
 }

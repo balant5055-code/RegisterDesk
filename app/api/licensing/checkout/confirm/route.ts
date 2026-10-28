@@ -24,7 +24,7 @@ import { getEffectiveDefinitionForVersion } from '@/lib/licensing/resolveCatalog
 import { LICENSE_ORDERS_COLLECTION, licenseOrderConverter } from '@/lib/licensing/schema'
 import { deriveLicenseCharge, activateLicenseOrder, holdExhaustedCouponRemainder, holdPhotoCapacityExceeded, PHOTO_CAPACITY_HELD_MESSAGE, orderListPricePaise } from '@/lib/licensing/finalizeLicensePurchase'
 import { isConsistentServiceItem } from '@/lib/licensing/serviceAllowances'
-import { activateAddonOrder, holdLicenceInactiveAddon, ADDON_LICENCE_INACTIVE } from '@/lib/licensing/draftCommerce'
+import { activateAddonOrder, holdLicenceInactiveAddon, ADDON_LICENCE_INACTIVE, ADDON_EVENT_REVIEW_CLOSED } from '@/lib/licensing/draftCommerce'
 import { confirmBadgePurchase } from '@/lib/licensing/printBadgePurchase/confirm'
 import { holdSupersededPayment, isSupersededUnheld, supersededActivationOrderId, RAZORPAY_ORDER_ID_RE, recordDuplicateLicensePayment } from '@/lib/licensing/manualRefundHold'
 import { NotificationType } from '@/lib/notifications'
@@ -143,8 +143,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         amountPaise: addon.razorpayAmountPaise ?? 0, eventId, organizerUid: uid, detectedBy: 'confirm',
       })
       console.warn(`[license] add-on refused (licence inactive) — HELD for review · order=${addonOrderId} created=${held.created} skipped=${held.skipped === true}`)
+      // RD-REVIEW-02 — wording only: the same refusal and hold, explained accurately when the event was
+      // closed during review (activateAddonOrder records why on the order).
+      const refused = (await adminDb.collection(LICENSE_ORDERS_COLLECTION).doc(addonOrderId).get().catch(() => null))?.data() as { failDetail?: unknown } | undefined
+      const why = refused?.failDetail === ADDON_EVENT_REVIEW_CLOSED
+        ? 'This event was closed during review, so nothing was applied.'
+        : "This event's licence is not active, so nothing was applied."
       return NextResponse.json({
-        error: "This event's licence is not active, so nothing was applied. Your payment is on hold for review by the RegisterDesk team — nothing further will be charged. Please do not pay again.",
+        error: `${why} Your payment is on hold for review by the RegisterDesk team — nothing further will be charged. Please do not pay again.`,
         code: 'PAYMENT_HELD',
       }, { status: 409, headers: { 'Cache-Control': 'no-store' } })
     }

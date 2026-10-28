@@ -94,6 +94,12 @@ export interface LicenseServicesStepProps {
    * (moved off Review). `publicHref` is the event's canonical public URL, or null when unknown.
    */
   liveStatus?:      { publicHref: string | null }
+  /**
+   * RD-REVIEW-02 — the event's server-written lifecycle. `draftStatus` alone reads 'pending_review'
+   * for an event whose changes were requested or that was closed, so the banner and its actions
+   * follow this instead. Purchases for a closed event are refused by the server regardless.
+   */
+  lifecycle?:       { status: string | null; reviewClosed: boolean }
 }
 
 /** RD-EVENT-COMMERCE-05B — what the final action needs to know about the payment. */
@@ -176,7 +182,7 @@ const EXHAUSTION_TEXT: Record<string, string> = { block: EXHAUSTED_TEXT, wallet_
 
 export function LicenseServicesStep({
   currentStep, completedValues, onNext, onBack, steps, selectedCapacity, onSelectCapacity,
-  initialServiceSelection, onServiceSelectionChange, onSettle, pricing, onServicesChange, draftStatus, draftId, embeddedFinal, liveStatus,
+  initialServiceSelection, onServiceSelectionChange, onSettle, pricing, onServicesChange, draftStatus, draftId, embeddedFinal, liveStatus, lifecycle,
 }: LicenseServicesStepProps) {
   const isSubmitted     = isSubmittedDraftStatus(draftStatus)
   // ── RD-EVENT-COMMERCE-05E · locked by default (submitted events) ──────────────────────
@@ -189,6 +195,9 @@ export function LicenseServicesStep({
   const [editing, setEditing] = useState(false)
   const locked = isSubmitted && !editing
   const isPendingReview = draftStatus === 'pending_review'
+  // RD-REVIEW-02 — a closed review is final: no purchase is offered (the server refuses one anyway).
+  const reviewClosed     = lifecycle?.reviewClosed === true
+  const changesRequested = !reviewClosed && lifecycle?.status === 'changes_requested'
   const mode: 'draft' | 'published' = isSubmitted ? 'published' : 'draft'
 
   // Draft: the activation target + TOTAL service units (persisted on the draft as intent).
@@ -468,7 +477,11 @@ export function LicenseServicesStep({
     payableKind: payable?.kind ?? null, payablePaise: ctxPayable, blocked: !!blockedReason,
     eligible: !quote?.published || quote.published.eligible,
   })
-  const submittedFooter = {
+  // A closed event's only action is leaving — `goDone` would try to save PAYG switches the server
+  // now refuses for a closed event.
+  const submittedFooter = reviewClosed ? {
+    label: 'Done', disabled: false, onNext: () => router.push(ROUTES.DASHBOARD_EVENTS), secondary: undefined,
+  } : {
     label:    fm.label,
     disabled: fm.disabled,
     onNext:   fm.primary === 'unlock' ? unlockAndFocus
@@ -492,7 +505,9 @@ export function LicenseServicesStep({
       <div className="mt-6">
         <h1 className="text-[22px] font-bold tracking-tight text-foreground">License &amp; Services</h1>
         <p className="mt-1 text-[13px] text-muted-foreground">
-          {isSubmitted
+          {reviewClosed
+            ? 'The capacity and services purchased for this event.'
+            : isSubmitted
             ? 'Buy more capacity or prepaid services for this event. Changes apply only after RegisterDesk verifies the payment.'
             : 'Choose your registration capacity and services, check the exact cost, then pay and publish — all on this page.'}
         </p>
@@ -501,19 +516,24 @@ export function LicenseServicesStep({
       {/* RD-EVENT-COMMERCE-05D — the published / pending event's status: ONE banner, at the top of the
           final step (it used to sit at the bottom of Review). Purchases here ADD to this event. */}
       {isSubmitted && liveStatus && (
+        // RD-REVIEW-02 — a review-closed event gets the same ONE banner in a neutral tone, with no purchase action.
         <div role="status" className={cn('mt-4 flex flex-wrap items-center gap-3 rounded-xl border px-4 py-3.5 shadow-sm',
-          isPendingReview ? 'border-amber-200/70 bg-amber-50/60' : 'border-emerald-200/60 bg-emerald-50/60')}>
-          <div className={cn('flex size-8 shrink-0 items-center justify-center rounded-full', isPendingReview ? 'bg-amber-100' : 'bg-emerald-100')}>
-            {isPendingReview ? <Clock className="size-4 text-amber-600" aria-hidden /> : <Globe className="size-4 text-emerald-600" aria-hidden />}
+          reviewClosed ? 'border-border bg-muted/50' : isPendingReview ? 'border-amber-200/70 bg-amber-50/60' : 'border-emerald-200/60 bg-emerald-50/60')}>
+          <div className={cn('flex size-8 shrink-0 items-center justify-center rounded-full', reviewClosed ? 'bg-muted' : isPendingReview ? 'bg-amber-100' : 'bg-emerald-100')}>
+            {reviewClosed ? <Lock className="size-4 text-muted-foreground" aria-hidden />
+              : isPendingReview ? <Clock className="size-4 text-amber-600" aria-hidden /> : <Globe className="size-4 text-emerald-600" aria-hidden />}
           </div>
           <div className="min-w-0 flex-1 basis-56">
-            <p className={cn('text-[13.5px] font-bold', isPendingReview ? 'text-amber-800' : 'text-emerald-800')}>
-              {isPendingReview ? 'Submitted — awaiting approval' : 'Event is Live'}
+            <p className={cn('text-[13.5px] font-bold', reviewClosed ? 'text-foreground' : isPendingReview ? 'text-amber-800' : 'text-emerald-800')}>
+              {reviewClosed ? 'Event closed' : changesRequested ? 'Changes requested — update the event and resubmit' : isPendingReview ? 'Submitted — awaiting approval' : 'Event is Live'}
             </p>
-            <p className={cn('text-[12px]', isPendingReview ? 'text-amber-700' : 'text-emerald-700')}>
-              Buying capacity or services adds to this event — it doesn’t create a new event or republish it.
+            <p className={cn('text-[12px]', reviewClosed ? 'text-muted-foreground' : isPendingReview ? 'text-amber-700' : 'text-emerald-700')}>
+              {reviewClosed
+                ? 'This event’s review is closed, so capacity and services can no longer be bought for it. Purchases you already made are listed below.'
+                : 'Buying capacity or services adds to this event — it doesn’t create a new event or republish it.'}
             </p>
           </div>
+          {!reviewClosed && (
           <div className="flex w-full flex-wrap gap-2 sm:w-auto">
             {!isPendingReview && liveStatus.publicHref && (
               <Link href={liveStatus.publicHref} target="_blank" rel="noopener noreferrer"
@@ -528,6 +548,7 @@ export function LicenseServicesStep({
               <ShoppingCart className="size-3.5" aria-hidden />Buy capacity or services
             </button>
           </div>
+          )}
         </div>
       )}
 
@@ -549,6 +570,7 @@ export function LicenseServicesStep({
               coverage={coverage}
               media={{ purchased: mediaCapacity, base: 0, used: mediaUsed }}
               unavailable={!quote && !quoting}
+              closed={reviewClosed}
             />
           )}
 
@@ -694,7 +716,9 @@ export function LicenseServicesStep({
             onSettled={onSettled}
             hidePayButton={!!embeddedFinal || isSubmitted}
             onRegisterPay={embeddedFinal || isSubmitted ? registerPay : undefined}
-            coveredNote={locked
+            coveredNote={reviewClosed
+              ? <>Nothing to pay. This event is closed, so no more capacity or services can be bought.</>
+              : locked
               ? <>Nothing to pay. Your purchases are locked — select “Unlock to edit” below to buy more capacity or services.</>
               : <>Nothing to pay yet. Raise the capacity or add service units above.</>}
           />
@@ -760,8 +784,10 @@ export function submittedPurchaseFooter(s: {
  * guessed. `editing` swaps the Locked state for the "Editing additional capacity and services"
  * indicator — these stay the ACTUAL values while the proposed additions are chosen below.
  */
-export function PurchasedPanel({ editing, capacity, coverage, media, unavailable }: {
+export function PurchasedPanel({ editing, capacity, coverage, media, unavailable, closed = false }: {
   editing:     boolean
+  /** RD-REVIEW-02 — a review-closed event: nothing more can be bought, so no unlock hint. */
+  closed?:     boolean
   capacity:    { total: number; used: number } | null
   coverage:    CheckoutQuoteResponse['coverage']
   media:       { purchased: number | null; base: number | null; used: number | null }
@@ -831,7 +857,9 @@ export function PurchasedPanel({ editing, capacity, coverage, media, unavailable
         </tbody>
       </table>
       <p className="border-t border-border/50 px-4 py-2.5 text-[11.5px] text-muted-foreground">
-        {editing
+        {closed
+          ? 'These are the purchases made for this event. It is closed, so nothing more can be bought.'
+          : editing
           ? 'These are your actual purchases. What you choose below is added only after RegisterDesk verifies the payment.'
           : 'Select “Unlock to edit” to buy more capacity or services. Nothing changes until a payment is verified.'}
       </p>

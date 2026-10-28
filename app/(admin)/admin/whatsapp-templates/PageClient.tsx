@@ -38,7 +38,7 @@ interface Detail extends TemplateDetail {
   notes: { id: string; text: string; version: number | null; authorUid: string; createdAt: string | null }[]
   organizer: { uid: string; name: string | null; email: string | null }
 }
-interface Governance { mode: ReviewMode; unavailable: boolean; metaConfigured?: boolean }
+interface Governance { mode: ReviewMode; unavailable: boolean; metaConfigured?: boolean; marketingTemplatesEnabled?: boolean }
 
 const fmt = (iso: string | null) => (iso ? new Date(iso).toLocaleString(undefined, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : '—')
 
@@ -86,6 +86,21 @@ export default function WhatsAppTemplatesAdminPage() {
     await load()
   }
 
+  // RD-WA-MARKETING-01 — organizer Marketing templates on / off (reason required, audited server-side).
+  const changeMarketing = async (next: boolean) => {
+    const reason = await prompt({
+      title: next ? 'Enable Marketing templates?' : 'Disable Marketing templates?',
+      message: next
+        ? 'Organizers will be able to create and edit Marketing-category templates. Utility templates are unaffected. Give a reason for the audit log.'
+        : 'Organizers will no longer be able to create or edit Marketing templates (the server refuses them). Existing templates and anything already approved or sent are kept. Give a reason for the audit log.',
+      confirmLabel: next ? 'Enable Marketing' : 'Disable Marketing', required: true, multiline: true, placeholder: 'Reason (5–500 characters)',
+    })
+    if (!reason) return
+    const r = await api('/api/admin/whatsapp-templates/governance', { method: 'PUT', body: JSON.stringify({ marketingTemplatesEnabled: next, reason }) }).catch(() => null)
+    if (!r?.ok) { setError(String(r?.body.error ?? 'Could not change the Marketing setting.')); return }
+    await load()
+  }
+
   return (
     <div className="space-y-5 p-5 sm:p-6">
       <AdminToolbar icon={MessageSquareText} title="WhatsApp Templates" description="Organizer message templates: review them, follow Meta’s decision, and choose how templates reach Meta." />
@@ -103,6 +118,21 @@ export default function WhatsAppTemplatesAdminPage() {
           </div>
           <button type="button" onClick={() => changeMode(gov.mode === 'manual' ? 'automatic' : 'manual')} className="rounded-lg border border-border px-3 py-1.5 text-[12.5px] font-semibold text-foreground hover:bg-muted">
             {gov.mode === 'manual' ? 'Switch to automatic…' : 'Switch to manual…'}
+          </button>
+        </section>
+      )}
+      {gov && (
+        <section className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border bg-card px-4 py-3">
+          <div className="min-w-0">
+            <p className="text-[13.5px] font-semibold text-foreground">Marketing templates: {gov.marketingTemplatesEnabled ? 'Enabled' : 'Disabled'}</p>
+            <p className="mt-0.5 max-w-[80ch] text-[12.5px] text-muted-foreground">
+              {gov.marketingTemplatesEnabled
+                ? 'Organizers can create and edit Marketing-category templates.'
+                : 'Organizers cannot create or edit Marketing-category templates; the server refuses them. Utility templates are unaffected.'}
+            </p>
+          </div>
+          <button type="button" onClick={() => changeMarketing(!gov.marketingTemplatesEnabled)} className="rounded-lg border border-border px-3 py-1.5 text-[12.5px] font-semibold text-foreground hover:bg-muted">
+            {gov.marketingTemplatesEnabled ? 'Disable Marketing…' : 'Enable Marketing…'}
           </button>
         </section>
       )}

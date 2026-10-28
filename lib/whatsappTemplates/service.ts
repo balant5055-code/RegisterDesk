@@ -44,7 +44,7 @@ import {
 import { validateTemplate, compileTemplate, hasErrors, type CompiledTemplate } from './validate'
 import { normalizeMetaStatus, normalizeMetaCategory, normalizeRejectionReason, isStatusRestoringEvent } from './metaStatus'
 import { submitMetaTemplate, getMetaTemplate, findMetaTemplate, type MetaTemplateNode } from './metaApi'
-import { resolveReviewMode } from './governance'
+import { resolveReviewMode, resolveMarketingTemplatesEnabled } from './governance'
 import type { TemplateWebhookEvent } from './webhook'
 
 export const TEMPLATES = 'whatsappTemplates'
@@ -167,8 +167,24 @@ function inputOf(t: StoredTemplate, v: StoredVersion): TemplateDraftInput {
 
 // ─── Organizer: create, edit, revise, submit ─────────────────────────────────
 
+export const MARKETING_DISABLED_MESSAGE =
+  'Marketing templates are not available yet. Choose the Utility category, or try again once RegisterDesk enables Marketing templates.'
+
+/**
+ * RD-WA-MARKETING-01 — creating, editing or starting a new version of a MARKETING template is refused
+ * while the Super Admin switch is off (the default). Checked here, at the service boundary every
+ * organizer route goes through, before anything is written. Utility templates are never affected;
+ * existing Marketing templates stay readable and keep their approved / sending state.
+ */
+async function assertMarketingAllowed(input: TemplateDraftInput): Promise<void> {
+  if (input.category !== 'marketing') return
+  if ((await resolveMarketingTemplatesEnabled()).enabled) return
+  throw new TemplateError('MARKETING_DISABLED', MARKETING_DISABLED_MESSAGE, 403)
+}
+
 export async function createTemplate(a: { caller: OrganizerCaller; input: TemplateDraftInput }): Promise<{ id: string; version: number; findings: ValidationFinding[] }> {
   const { caller, input } = a
+  await assertMarketingAllowed(input)
   const id = templateIdFor(caller.workspaceUid, input.name)
   const { eventType, findings } = await validateFor(caller.workspaceUid, input, id, false)
   if (findings.some(f => f.code === 'NAME_FORMAT' || f.code === 'NAME_LENGTH')) {
@@ -208,6 +224,7 @@ function checkRevision(t: StoredTemplate, expected: unknown) {
 export async function updateDraft(a: { caller: OrganizerCaller; id: string; version: number; expectedRevision: unknown; input: TemplateDraftInput }): Promise<{ findings: ValidationFinding[] }> {
   const t0 = await loadOwned(null, a.caller, a.id)
   const input = { ...a.input, name: t0.name }                      // the name is fixed for the template's life
+  await assertMarketingAllowed(input)
   const { eventType, findings } = await validateFor(a.caller.workspaceUid, input, a.id, false)
   await adminDb.runTransaction(async txn => {
     const t = await loadOwned(txn, a.caller, a.id)
@@ -235,6 +252,7 @@ export async function updateDraft(a: { caller: OrganizerCaller; id: string; vers
 export async function reviseTemplate(a: { caller: OrganizerCaller; id: string; fromVersion: number; expectedRevision: unknown; input: TemplateDraftInput }): Promise<{ version: number; findings: ValidationFinding[] }> {
   const t0 = await loadOwned(null, a.caller, a.id)
   const input = { ...a.input, name: t0.name }
+  await assertMarketingAllowed(input)
   const { eventType, findings } = await validateFor(a.caller.workspaceUid, input, a.id, false)
   let created = 0
   await adminDb.runTransaction(async txn => {
