@@ -70,6 +70,16 @@ describe('the dead-cron monitor expects each cron at its real schedule', () => {
     expect(isStale('webhooks', now - 30 * MIN, now)).toBe(true)
   })
 
+  // RD-REVIEW-02 — review-deadlines runs in cron-recovery.yml every 10 minutes; a stopped scheduler must
+  // show up on the Cron & Recovery health panel instead of silently leaving deadlines unenforced.
+  it('review-deadlines is monitored at its real 10-minute schedule', () => {
+    expect(real.get('review-deadlines')).toBe(10 * MIN)
+    expect(CRON_INTERVAL_MS['review-deadlines']).toBe(10 * MIN)
+    const now = 1_000_000_000_000
+    expect(isStale('review-deadlines', now - 12 * MIN, now)).toBe(false)
+    expect(isStale('review-deadlines', now - 30 * MIN, now)).toBe(true)
+  })
+
   it('a cron that never recorded a run is not flagged (left to the dashboard)', () => {
     expect(isStale('release-funds', 0, Date.now())).toBe(false)
   })

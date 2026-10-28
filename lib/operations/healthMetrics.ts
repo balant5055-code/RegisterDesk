@@ -147,6 +147,8 @@ const CRON_NAMES = [
   'media-credit-reconciliation',
   // MC-06D — upload-session reclamation (seal → settle → reservation cleanup).
   'media-credit-sessions',
+  // RD-REVIEW-02 — event review deadlines: reminders, Action Required and automatic closure.
+  'review-deadlines',
 ]
 
 // GA-7E S1: expected execution interval per cron, used to detect a cron that has STOPPED FIRING —
@@ -170,6 +172,7 @@ export const CRON_INTERVAL_MS: Record<string, number> = {
   'webhooks': 10 * MIN,
   'registration-reconciliation': 10 * MIN, 'wallet-reconciliation': 10 * MIN, 'donation-reconciliation': 10 * MIN,
   'reminders': 10 * MIN, 'ops-alerts': 10 * MIN,
+  'review-deadlines': 10 * MIN,
   'media-credit-reconciliation': 10 * MIN,
   'media-credit-sessions': 10 * MIN,
   // RD-PRINT-P8 (W6) — ID-badge purchase and billing-round recovery.
