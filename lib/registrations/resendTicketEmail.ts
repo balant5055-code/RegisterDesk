@@ -15,6 +15,7 @@ import { notificationEngine, NotificationType, NotificationChannel } from '@/lib
 import { resolveEventEmailProvider } from '@/lib/email/resolveEventProvider'
 import type { RegistrationDocument } from '@/lib/registrations/types'
 import { getEmailAppUrl } from '@/lib/email/appUrl'
+import { meetingAccessForRegistration } from './meetingAccess'
 
 export type ResendResult = { ok: true } | { ok: false; error: string; status: number }
 
@@ -59,6 +60,12 @@ export async function resendRegistrationTicketEmail(registrationId: string): Pro
   const pdfToken = signTicketToken(registrationId)
   const pdfUrl   = `${baseUrl}/api/tickets/${registrationId}/pdf?token=${encodeURIComponent(pdfToken)}`
 
+  // RD-MEETING-ACCESS-01 — a resend carries the joining details too, but only for a CONFIRMED
+  // registration of this event (a pending / waitlisted resend gets the ticket without them).
+  const meetingAccess = await meetingAccessForRegistration({
+    registrationId, eventSlug: reg.eventSlug, eventDetails: rawDet, registration: reg,
+  })
+
   let emailStatus: 'sent' | 'failed' = 'failed'
   let emailFailureReason: string | undefined
   try {
@@ -75,6 +82,7 @@ export async function resendRegistrationTicketEmail(registrationId: string): Pro
       registrationId,
       ticketPageUrl:  `${baseUrl}/tickets/${registrationId}`,
       pdfDownloadUrl: pdfUrl,
+      meetingAccess:  meetingAccess ?? undefined,
     }, emailProviderName)
     emailStatus = result.success ? 'sent' : 'failed'
     if (!result.success) emailFailureReason = result.error

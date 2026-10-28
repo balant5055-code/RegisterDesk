@@ -1,4 +1,5 @@
 import type { TicketEmailParams } from '../provider'
+import { meetingAccessBlock } from './meetingAccess'
 
 export function ticketTemplate(p: TicketEmailParams): { subject: string; html: string } {
   const subject  = `Your ticket: ${p.eventName}`
@@ -68,6 +69,9 @@ export function ticketTemplate(p: TicketEmailParams): { subject: string; html: s
           </tr>` : ''}
         </table>
       </td></tr>
+
+      ${p.meetingAccess ? `<!-- How to join (RD-MEETING-ACCESS-01) -->
+      <tr><td style="padding:0 28px 4px;">${meetingAccessBlock(p.meetingAccess)}</td></tr>` : ''}
 
       <!-- CTAs -->
       <tr><td style="padding:0 28px 28px;">

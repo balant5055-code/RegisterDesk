@@ -17,6 +17,7 @@ import { getEventBySlug }              from '@/lib/firebase/firestore/events'
 import type { EmailLog }               from '@/lib/email-logs/types'
 import type { RegistrationDocument }   from '@/lib/registrations/types'
 import { getEmailAppUrl } from '@/lib/email/appUrl'
+import { meetingAccessForRegistration } from '@/lib/registrations/meetingAccess'
 
 export interface RetryEmailLogResponse {
   success: boolean
@@ -119,6 +120,12 @@ async function resend(logId: string, log: EmailLog): Promise<NextResponse<RetryE
   // RD-EMAIL-PROVIDER — retry must leave through the SAME transport a fresh send would.
   const emailProviderName = await resolveEventEmailProvider(reg.eventSlug)
 
+  // RD-MEETING-ACCESS-01 — a retried confirmation carries the joining details the original would
+  // have, under the same entitlement rule (the registration read above, server-side).
+  const meetingAccess = await meetingAccessForRegistration({
+    registrationId: log.registrationId, eventSlug: reg.eventSlug, eventDetails: rawDet, registration: reg,
+  })
+
   // ── 7. Re-send (templateKey already validated during the claim) ────────────
   let emailStatus: 'sent' | 'failed' = 'failed'
   let errorMsg: string | undefined
@@ -139,6 +146,7 @@ async function resend(logId: string, log: EmailLog): Promise<NextResponse<RetryE
       registrationId: log.registrationId,
       ticketPageUrl:  `${baseUrl}/tickets/${log.registrationId}`,
       pdfDownloadUrl: pdfUrl,
+      meetingAccess:  meetingAccess ?? undefined,
     }, emailProviderName)
     emailStatus         = result.success ? 'sent' : 'failed'
     providerMessageId   = result.messageId

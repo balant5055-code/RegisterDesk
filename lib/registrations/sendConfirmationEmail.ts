@@ -22,6 +22,7 @@ import { loadOrganizerEmailBranding, resolveEmailBranding } from '@/lib/email/br
 import { sendWhatsAppConfirmation }         from './sendWhatsAppConfirmation'
 import { runAfterResponse }                 from '@/lib/server/afterResponse'
 import { getEmailAppUrl } from '@/lib/email/appUrl'
+import { meetingAccessForRegistration } from './meetingAccess'
 
 // ─── Args ─────────────────────────────────────────────────────────────────────
 
@@ -131,6 +132,10 @@ export async function sendConfirmationEmail(args: ConfirmationEmailArgs): Promis
     { logoUrl: typeof eventLogo === 'string' ? eventLogo : null },
   )
 
+  // RD-MEETING-ACCESS-01 — online / hybrid joining details, only for a confirmed registration of
+  // this event (checked against the registration document, server-side).
+  const meetingAccess = await meetingAccessForRegistration({ registrationId, eventSlug, eventDetails: rawDetails })
+
   let emailStatus: 'sent' | 'failed' = 'failed'
   let emailFailureReason: string | undefined
   // RD-COMMS-P2-D — the provider gave no definite answer: it may have been delivered. Recorded on the
@@ -157,6 +162,7 @@ export async function sendConfirmationEmail(args: ConfirmationEmailArgs): Promis
       // RD-FEE-RESTORE-01 — null for organizer-absorbs and free registrations (the record
       // carries no attendee fees), so the email is unchanged for every registration sent today.
       feeBreakdown: buildAttendeeFeeBreakdown(financials) ?? undefined,
+      meetingAccess: meetingAccess ?? undefined,
     }, emailProviderName)
 
     emailStatus = result.success ? 'sent' : 'failed'
