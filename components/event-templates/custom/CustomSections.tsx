@@ -235,9 +235,18 @@ export function VenueBlock({ venueType, venueName, physical, online, mapsLink, m
 }
 
 // ─── Organizer ──────────────────────────────────────────────────────────────────
-export function OrganizerBlock({ organizer, supportEmail, showSocial = true }: { organizer: OrganizerInfo; supportEmail: string; showSocial?: boolean }) {
+export function OrganizerBlock({ organizer, supportEmail, supportPhone = '', showSocial = true }: {
+  organizer: OrganizerInfo; supportEmail: string; supportPhone?: string; showSocial?: boolean
+}) {
   const contact = resolveOrganizerContact({ supportEmail, organizerEmail: organizer.email, organizerPhone: organizer.phone })
   const website = organizer.website?.trim()
+  // RD-CUSTOM-ORG-01 — the Organizer tab's contact phone is attendee-facing (the publish checklist
+  // warns "No Contact Phone — attendees … have no way to reach you"), but it was only the THIRD
+  // fallback of the Contact button behind two emails, the organizer email being required — so it
+  // never appeared. It is now its own Call action, unless the Contact button already dials it or
+  // "Good to know" already lists the same number as the support phone.
+  const phone    = organizer.phone?.trim() || ''
+  const showCall = !!phone && !contact.href.startsWith('tel:') && phone !== supportPhone.trim()
   const about   = organizer.bio?.trim() || organizer.tagline?.trim()
   // RD-CUSTOM-PUBLIC-01 — the organizer's social links (Organizer tab), honouring the
   // "Show social links" toggle. Every other template renders them; this one had dropped them.
@@ -249,6 +258,11 @@ export function OrganizerBlock({ organizer, supportEmail, showSocial = true }: {
     s?.facebook?.trim()  && { label: 'Facebook',  url: s.facebook.trim() },
     s?.youtube?.trim()   && { label: 'YouTube',   url: s.youtube.trim() },
   ].filter(Boolean) as { label: string; url: string }[]) : []
+  // RD-CUSTOM-ORG-01 — "Event Hashtags" (Organizer tab, beside the social links) were saved and
+  // never rendered. Shown with the social links, under the same "Show social links" toggle.
+  const hashtags = showSocial
+    ? [...new Set((s?.hashtags ?? []).map(h => (typeof h === 'string' ? h.trim().replace(/^#+/, '') : '')).filter(Boolean))]
+    : []
   return (
     <LuxeBlock id="organizer" eyebrow="Hosted by" title={organizer.name}>
       <div className={cn(LUXE_CARD, 'flex flex-col gap-4 p-5 sm:flex-row sm:items-center')}>
@@ -259,12 +273,18 @@ export function OrganizerBlock({ organizer, supportEmail, showSocial = true }: {
         <p className={cn('min-w-0 flex-1', about ? BODY : 'text-fs-sm text-hero-ink-soft')}>
           {about || 'Questions about this event? Reach the organizer directly.'}
         </p>
-        {(contact.href || website) && (
+        {(contact.href || website || showCall) && (
           <div className="flex shrink-0 flex-wrap gap-2">
             {contact.href && (
               <a href={contact.href} className={cn(marketingButton({ variant: 'outline', size: 'sm' }), 'gap-1.5')}>
                 {contact.href.startsWith('tel:') ? <Phone className="size-3.5" aria-hidden /> : <Mail className="size-3.5" aria-hidden />}
                 Contact
+              </a>
+            )}
+            {showCall && (
+              <a href={`tel:${phone}`} aria-label={`Call ${organizer.name} on ${phone}`} className={cn(marketingButton({ variant: 'outline', size: 'sm' }), 'gap-1.5')}>
+                <Phone className="size-3.5" aria-hidden />
+                Call
               </a>
             )}
             {website && (
@@ -291,6 +311,11 @@ export function OrganizerBlock({ organizer, supportEmail, showSocial = true }: {
             </li>
           ))}
         </ul>
+      )}
+      {hashtags.length > 0 && (
+        <p className="mt-3 text-fs-xs font-medium text-hero-ink-soft">
+          {hashtags.map(h => `#${h}`).join('  ')}
+        </p>
       )}
     </LuxeBlock>
   )

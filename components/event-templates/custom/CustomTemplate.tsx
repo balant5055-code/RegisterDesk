@@ -95,7 +95,7 @@ export function CustomTemplate(props: EventDetailProps) {
               maps={props.showVenueMap ? props.venueMaps : null}
             />
 
-            {showOrg && organizer?.name?.trim() && <OrganizerBlock organizer={organizer} supportEmail={supportEmail} showSocial={showSocial} />}
+            {showOrg && organizer?.name?.trim() && <OrganizerBlock organizer={organizer} supportEmail={supportEmail} supportPhone={supportPhone} showSocial={showSocial} />}
 
             {showGallery && (
               <GalleryBlock items={props.galleryMedia?.length ? props.galleryMedia : mediaToGallery(gallery)} />

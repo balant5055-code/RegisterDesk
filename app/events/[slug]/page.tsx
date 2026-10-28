@@ -84,7 +84,9 @@ function buildJsonLd(
   const physical  = ed.venue?.physical
   // The public projection: never a "reveal after registration" link (RD-CUSTOM-PUBLIC-01).
   const online    = publicOnlineVenue(ed.venue?.online)
-  const organizer = ed.organizer
+  // RD-CUSTOM-ORG-01 — the structured data follows the "Show organizer info" toggle, exactly as
+  // the page does; it used to print the organizer's name and email even when the organizer hid them.
+  const organizer = ed.publicPage?.showOrganizerInfo === false ? undefined : ed.organizer
 
   const location: Record<string, unknown> =
     venueType === 'online'
