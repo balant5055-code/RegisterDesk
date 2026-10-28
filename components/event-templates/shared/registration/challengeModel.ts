@@ -33,7 +33,7 @@ export interface Challenge {
 }
 
 /** Attendee-facing notes derived from the pass's real booking + policy flags. */
-function passNotes(p: PassPublic): string[] {
+export function passNotes(p: PassPublic): string[] {
   const a = p.advancedSettings
   return [
     p.maxPurchase && p.maxPurchase > 1 ? `Up to ${p.maxPurchase} entries per booking` : '',

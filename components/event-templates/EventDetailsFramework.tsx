@@ -181,8 +181,9 @@ function ComposedBody({
         registrationOpen={registrationOpen}
         isFreeEvent={isFreeEvent}
         passes={passes}
-        organizerVerified={Boolean((organizer as { verified?: boolean } | null | undefined)?.verified)}
-        organizerName={organizer?.name}
+        // RD-CUSTOM-AUDIT-03 — the hero's "Hosted by" follows "Show organizer info", like every section.
+        organizerVerified={showOrg && Boolean((organizer as { verified?: boolean } | null | undefined)?.verified)}
+        organizerName={showOrg ? organizer?.name : undefined}
         registerHref={`#${registrationTargetId}`}
       />
 

@@ -15,7 +15,7 @@ import type {
   AgendaSession, Speaker, Sponsor, OrganizerInfo, GalleryItem, FaqItem,
   PhysicalVenueConfig, OnlineVenueConfig, VenueMaps, RefundWindow,
 } from '@/components/wizard/eventDetailsConfig'
-import { ONLINE_PLATFORM_LABELS } from '@/components/wizard/eventDetailsConfig'
+import { ONLINE_PLATFORM_LABELS, SESSION_TYPE_LABELS } from '@/components/wizard/eventDetailsConfig'
 import { formatDate, formatTime, getVideoEmbed } from '@/components/event-templates/shared/utils/format'
 import { resolveOrganizerContact } from '@/components/event-templates/shared/people/contactModel'
 import { languageLabel, timezoneLabel, refundLines } from '@/components/event-templates/shared/ui/EventInfoSection'
@@ -39,7 +39,19 @@ export function AboutBlock({ description }: { description: string }) {
 // ─── Film ───────────────────────────────────────────────────────────────────────
 export function FilmBlock({ url, title }: { url: string; title: string }) {
   const src = getVideoEmbed(url)
-  if (!src) return null
+  if (!src) {
+    // RD-CUSTOM-AUDIT-03 — a promo video on a host we cannot embed was silently dropped. A plain
+    // http(s) link is offered instead (never an iframe of an unknown origin).
+    const href = /^https?:\/\//i.test(url?.trim() ?? '') ? url.trim() : ''
+    if (!href) return null
+    return (
+      <LuxeBlock id="film" eyebrow="Film" title="A glimpse of the event">
+        <a href={href} target="_blank" rel="noopener noreferrer" className={cn(marketingButton({ variant: 'outline', size: 'md' }), 'gap-1.5')}>
+          Watch the video <ArrowUpRight className="size-3.5" aria-hidden />
+        </a>
+      </LuxeBlock>
+    )
+  }
   return (
     <LuxeBlock id="film" eyebrow="Film" title="A glimpse of the event">
       <div className={cn(LUXE_CARD, 'overflow-hidden')}>
@@ -76,6 +88,11 @@ export function ProgrammeBlock({ agenda, speakers }: { agenda: AgendaSession[]; 
             <ol className={cn(LUXE_CARD, 'divide-y divide-border/60')}>
               {items.filter(s => (s.date || '') === day).map(s => {
                 const names = (s.speakerIds ?? []).map(id => byId.get(id)).filter(Boolean)
+                // RD-CUSTOM-AUDIT-02 — the session editor's Session Type and Track were saved but never
+                // shown. The default type ("Session") and a break add nothing, so only a real format shows.
+                const kind  = !s.isBreak && s.type && s.type !== 'session' && s.type !== 'custom' ? SESSION_TYPE_LABELS[s.type] : ''
+                const track = s.track?.trim() ? `${s.track.trim()} track` : ''
+                const meta  = [kind, track, names.join(', '), s.location?.trim()].filter(Boolean).join(' · ')
                 return (
                   <li key={s.id} className="grid grid-cols-[5.5rem_minmax(0,1fr)] gap-4 px-5 py-3.5 sm:grid-cols-[7rem_minmax(0,1fr)]">
                     <p className="pt-0.5 text-fs-xs font-medium tabular-nums text-hero-eyebrow">
@@ -85,11 +102,7 @@ export function ProgrammeBlock({ agenda, speakers }: { agenda: AgendaSession[]; 
                     <div className="min-w-0">
                       <p className={cn('text-fs-sm font-medium leading-snug', s.isBreak ? 'text-hero-ink-soft' : 'text-hero-ink')}>{s.title}</p>
                       {s.description?.trim() && <p className="mt-1 text-fs-xs text-hero-ink-soft leading-relaxed">{s.description}</p>}
-                      {(names.length > 0 || s.location?.trim()) && (
-                        <p className="mt-1 text-fs-xs text-hero-eyebrow">
-                          {[names.join(', '), s.location?.trim()].filter(Boolean).join(' · ')}
-                        </p>
-                      )}
+                      {meta && <p className="mt-1 text-fs-xs text-hero-eyebrow">{meta}</p>}
                     </div>
                   </li>
                 )
@@ -143,7 +156,8 @@ export function VenueBlock({ venueType, venueName, physical, online, mapsLink, m
 }) {
   const addr     = physical
   const lines    = [addr?.addressLine1, addr?.addressLine2].map(s => s?.trim()).filter(Boolean) as string[]
-  const cityLine = [addr?.city, addr?.state, addr?.pincode].map(s => s?.trim()).filter(Boolean).join(', ')
+  // RD-CUSTOM-AUDIT-02 — the Country the organizer entered completes the printed address.
+  const cityLine = [addr?.city, addr?.state, addr?.pincode, addr?.country].map(s => s?.trim()).filter(Boolean).join(', ')
   // Same existence rule as VenueShowcase: real address atoms, never the "Venue TBA" label.
   const hasAddress  = !!(addr?.name?.trim() || lines.length || cityLine || mapsLink?.trim())
   const hasPhysical = venueType !== 'online' && hasAddress
@@ -325,11 +339,12 @@ export function OrganizerBlock({ organizer, supportEmail, supportPhone = '', sho
 export function GalleryBlock({ items }: { items: GalleryItem[] }) {
   const images = (items ?? []).filter(g => g?.enabled !== false && g?.url?.trim() && (!g.type || g.type === 'image' || g.type === 'poster' || g.type === 'banner' || g.type === 'drone'))
   if (images.length === 0) return null
-  const shown = images.slice(0, 6)
+  // RD-CUSTOM-AUDIT-02 — every image the organizer added (up to 6 uploaded + 20 by URL). This
+  // used to stop at the first six, silently dropping the rest; they are lazy-loaded.
   return (
     <LuxeBlock id="gallery" eyebrow="Gallery" title="Moments">
       <ul className="grid grid-cols-2 gap-2 sm:grid-cols-3">
-        {shown.map(g => (
+        {images.map(g => (
           <li key={g.id}>
             <a href={g.url} target="_blank" rel="noopener noreferrer" className="group block overflow-hidden rounded-control border border-border/60 bg-surface-3">
               {/* eslint-disable-next-line @next/next/no-img-element */}

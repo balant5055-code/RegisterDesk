@@ -127,6 +127,14 @@ export interface EventDetailProps {
   customEventSubtype?: string
   registrationOpen: boolean
   regClosedMessage: string
+  /** RD-CUSTOM-AUDIT-02 · the organizer's "Registration Opens" date (Passes & Pricing). Absent ⇒ none set. */
+  registrationOpensOn?: string
+  /** RD-CUSTOM-AUDIT-02 · the organizer's "Registration Closes" date. Absent ⇒ none set. */
+  registrationClosesOn?: string
+  /** RD-CUSTOM-AUDIT-03 · who may register (Access Control) — the MODE only, never a code or list. */
+  registrationAccess?: 'open' | 'invite_code' | 'approved_contacts'
+  /** RD-CUSTOM-AUDIT-03 · registrations wait for the organizer's approval (manual confirmation). */
+  approvalRequired?: boolean
   title:            string
   tagline:          string
   /** info.fullDesc || info.shortDesc — the long-form body the Story section renders. */

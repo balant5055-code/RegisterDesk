@@ -257,7 +257,8 @@ export function CommunityTemplate(props: EventDetailProps) {
       {/* ── 7. How You Can Help — participation paths ─────────────────────── */}
       <CommunityActionCards
         typeDetails={typeDetails}
-        organizer={organizer}
+        // RD-CUSTOM-AUDIT-03 — the organizer's email / website only when "Show organizer info" is on.
+        organizer={showOrg ? organizer : undefined}
         isFreeEvent={isFreeEvent}
         registrationOpen={registrationOpen}
         passes={passes}

@@ -18,6 +18,7 @@ import { benefitIcon } from '@/components/event-templates/shared/ui/framework'
 import { formatINR, passDisplayPrice } from '@/components/event-templates/shared/utils/format'
 import { resolveFeaturedPassId } from '@/components/event-templates/shared/utils/featuredPass'
 import { formatBenefits } from '@/components/event-templates/shared/registration/benefitLabels'
+import { passNotes } from '@/components/event-templates/shared/registration/challengeModel'
 import { MilestoneNotice } from '@/components/event-templates/shared/registration/MilestoneNotice'
 import { LuxeBlock, LUXE_CARD, LUXE_LABEL, formatSalesMoment } from './luxe'
 import { visibleAdmissionPasses, type AdmissionState } from './admissionModel'
@@ -33,6 +34,13 @@ function PassRow({ pass, slug, avail, isFreeEvent, featured }: {
   const benefits  = formatBenefits(pass.benefits, pass.customBenefits)
   const opens     = formatSalesMoment(pass.salesStartDate)
   const closes    = formatSalesMoment(pass.salesEndDate)
+  // RD-CUSTOM-AUDIT-02 — the pass builder's early-bird and booking / policy settings. The price
+  // shown was already the early-bird price, with nothing saying so or when it ends; the
+  // per-booking limit and transfer / refund / waitlist / group flags were not shown at all.
+  const display   = passDisplayPrice(pass)
+  const earlyBird = !free && pass.earlyBirdEnabled === true && display < pass.price
+  const ebEnds    = earlyBird ? formatSalesMoment(pass.earlyBirdEndDate) : ''
+  const notes     = passNotes(pass)
 
   return (
     <article className={cn(
@@ -58,14 +66,26 @@ function PassRow({ pass, slug, avail, isFreeEvent, featured }: {
             })}
           </ul>
         )}
+        {notes.length > 0 && (
+          <ul className="mt-3 space-y-0.5 text-fs-xs text-hero-ink-soft">
+            {notes.map(n => <li key={n}>{n}</li>)}
+          </ul>
+        )}
         <MilestoneNotice alert={pass.milestoneAlert} />
       </div>
 
       <div className="flex flex-col justify-between gap-4 border-t border-border/60 bg-surface-3/40 p-5 sm:border-l sm:border-t-0">
         <div>
           <p className="font-display text-fs-2xl font-light tabular-nums text-hero-ink leading-none">
-            {free ? 'Free' : formatINR(passDisplayPrice(pass))}
+            {free ? 'Free' : formatINR(display)}
           </p>
+          {earlyBird && (
+            <p className="mt-1.5 text-fs-xs text-hero-ink-soft">
+              <span className="sr-only">Regular price </span>
+              <s className="tabular-nums">{formatINR(pass.price)}</s>
+              {' · '}Early bird{ebEnds ? ` until ${ebEnds}` : ''}
+            </p>
+          )}
           <div className="mt-2 space-y-1 text-fs-xs text-hero-ink-soft">
             {pass.showRemainingSeats && avail?.remaining != null && onSale && (
               <p className="flex items-center gap-1.5">
@@ -100,7 +120,7 @@ function PassRow({ pass, slug, avail, isFreeEvent, featured }: {
   )
 }
 
-export function CustomAdmission({ admission, passes, availability, slug, isFreeEvent, attendeePaysFees = false, eventMilestoneAlert }: {
+export function CustomAdmission({ admission, passes, availability, slug, isFreeEvent, attendeePaysFees = false, registrationAccess = 'open', approvalRequired = false, eventMilestoneAlert }: {
   admission:    AdmissionState
   passes:       PassPublic[]
   availability: Record<string, PassAvailability>
@@ -108,6 +128,9 @@ export function CustomAdmission({ admission, passes, availability, slug, isFreeE
   isFreeEvent:  boolean
   /** RD-CUSTOM-PUBLIC-01 · fees are added at checkout — never claim "prices include taxes" then. */
   attendeePaysFees?: boolean
+  /** RD-CUSTOM-AUDIT-03 · Access Control mode and manual approval — told to the attendee up front. */
+  registrationAccess?: 'open' | 'invite_code' | 'approved_contacts'
+  approvalRequired?: boolean
   eventMilestoneAlert?: ResolvedMilestoneAlert | null
 }) {
   const visible    = visibleAdmissionPasses(passes, availability)
@@ -139,6 +162,15 @@ export function CustomAdmission({ admission, passes, availability, slug, isFreeE
         </div>
       ) : (
         <div className="space-y-3">
+          {/* RD-CUSTOM-AUDIT-03 — how registration works here, before the attendee clicks through
+              to a form that would otherwise be the first to say so. */}
+          {(registrationAccess !== 'open' || approvalRequired) && (
+            <ul className={cn(LUXE_CARD, 'space-y-1 px-5 py-3.5 text-fs-sm text-hero-ink-soft')}>
+              {registrationAccess === 'invite_code' && <li>An invite code from the organizer is required to register.</li>}
+              {registrationAccess === 'approved_contacts' && <li>Registration is open to invited guests on the organizer’s list.</li>}
+              {approvalRequired && <li>Registrations are confirmed once the organizer approves them.</li>}
+            </ul>
+          )}
           <MilestoneNotice alert={eventMilestoneAlert} className="mt-0" />
           {visible.map(pass => (
             <PassRow
