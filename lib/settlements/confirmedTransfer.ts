@@ -17,8 +17,8 @@
 //     canonical, the submitted and the upper-cased submitted spelling only — a legacy UTR stored in any OTHER
 //     spelling is not detected. Reference records are financial evidence and are retained on organizer deletion
 //     (lib/admin/organizerDeletionManifest.ts ORGANIZER_RETAINED_COLLECTIONS).
-//   • maker-checker has NO bypass: with no eligible independent Super Admin the exception stays pending (manual
-//     fallback: docs/OPERATIONS_RUNBOOK.md B.12).
+//   • RD-SETTLE-PAY-02: one Super Admin may request and approve the exception; approval restates the amount, UTR
+//     and evidence fingerprint and confirms the transfer completed (docs/OPERATIONS_RUNBOOK.md B.12).
 
 import { createHash } from 'node:crypto'
 import { FieldValue, type Transaction, type DocumentReference } from 'firebase-admin/firestore'

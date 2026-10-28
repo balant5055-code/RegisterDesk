@@ -5,8 +5,8 @@
 //     each omitted alone, all omitted, all empty strings, all populated;
 //   • D1 Super Admin only, with the REAL ADMIN_UIDS parsing (only the Firebase token check is mocked):
 //     empty / single / padded lists; a non-admin and a legacy-claim-only caller are refused;
-//   • D2 maker-checker: the approver is refused (with the single-admin message when only one is configured),
-//     a different Super Admin succeeds;
+//   • D2 (RD-SETTLE-PAY-02): with ONE Super Admin configured, the same admin approves and records the payout
+//     (explicit confirmation, genuine UTR, reason; audited as same_admin); a different Super Admin still works;
 //   • duplicate and concurrent submissions debit the wallet ONCE; invalid states are refused;
 //   • the approval and the payment are each audited once.
 //
@@ -14,6 +14,11 @@
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest'
 import { NextRequest } from 'next/server'
+
+/** RD-SETTLE-PAY-02 — recording a payment requires the explicit confirmation; tests opt OUT by passing it themselves. */
+const PAYMENT_ACTIONS = new Set(['paid', 'record_transfer', 'transfer_exception_approve'])
+const withTransferConfirmed = (b: Record<string, unknown>) =>
+  PAYMENT_ACTIONS.has(String(b.action)) && !('confirmTransferCompleted' in b) ? { ...b, confirmTransferCompleted: true } : b
 
 const EMULATOR = process.env.FIRESTORE_EMULATOR_HOST
 const describeEmu = EMULATOR ? describe : describe.skip
@@ -99,7 +104,7 @@ describeEmu('RD-SETTLE-PAY-01 · Mark as Paid on real Firestore', () => {
   const settle = async (id: string, body: Record<string, unknown>, as: string) => {
     const { PATCH } = await import('@/app/api/admin/settlements/[id]/route')
     h.admin = as
-    try { return await json(await PATCH(req(body, 'PATCH'), ctx(id))) } finally { h.admin = '' }
+    try { return await json(await PATCH(req(withTransferConfirmed(body), 'PATCH'), ctx(id))) } finally { h.admin = '' }
   }
   /** A request the organizer made, approved by SUPER. */
   async function approved(amountPaise = 5_000) {
@@ -224,19 +229,102 @@ describeEmu('RD-SETTLE-PAY-01 · Mark as Paid on real Firestore', () => {
     expect((await settlementOf(id)).status).toBe('approved')
   }, T)
 
-  it('D2: the approver is refused (single-admin message when only one is configured); never bypassed', async () => {
+  // ─── RD-SETTLE-PAY-02 · ONE Super Admin runs the whole payout workflow ─────────────────────
+  it('ONE Super Admin: the same admin approves and records the payout; admin, approver and times are audited', async () => {
+    process.env.ADMIN_UIDS = SUPER                       // exactly one Super Admin configured
+    const { id, org } = await approved(6_000)            // approved by SUPER
+    const before = await walletOf(org)
+    const u = utr()
+    const r = await settle(id, { action: 'paid', reason: 'bank transfer sent', utrNumber: u, confirmTransferCompleted: true }, SUPER)
+    expect(r).toMatchObject({ status: 200, body: { id, status: 'paid' } })
+    const s = await settlementOf(id)
+    expect(s).toMatchObject({ status: 'paid', approvedBy: SUPER, paidByAdmin: SUPER, utrNumber: u })
+    expect(s.approvedAt).toBeTruthy()
+    expect(s.paidAt).toBeTruthy()
+    expect((await walletOf(org)).availablePaise).toBe(before.availablePaise - 6_000)
+    const approvals = await auditRows(id, 'settlement.approved')
+    expect(approvals).toHaveLength(1)
+    expect(approvals[0]).toMatchObject({ adminUid: SUPER, actorRole: 'super_admin' })
+    const paid = await auditRows(id, 'settlement.paid')
+    expect(paid).toHaveLength(1)
+    expect(paid[0]).toMatchObject({
+      adminUid: SUPER, actorRole: 'super_admin', reason: 'bank transfer sent',
+      metadata: { approvedBy: SUPER, recordedBy: SUPER, makerChecker: 'same_admin', transferConfirmed: true, utrNumber: u },
+    })
+    expect((paid[0].metadata as Record<string, unknown>).approvedAt).toBeTruthy()
+    expect(paid[0].createdAt ?? paid[0].timestamp ?? paid[0].at).toBeTruthy()
+  }, T)
+
+  it('ONE Super Admin: the explicit confirmation is required (only a literal true), and nothing moves without it', async () => {
+    process.env.ADMIN_UIDS = SUPER
     const { id, org } = await approved()
     const before = await walletOf(org)
-    const two = await settle(id, { action: 'paid', reason: 'paid by the approver', utrNumber: utr() }, SUPER)
-    expect(two.status).toBe(409); expect(two.body.code).toBe('MAKER_CHECKER_REQUIRED')
-    expect(String(two.body.error)).toMatch(/Ask another Super Admin to record the payout/)
+    for (const confirmTransferCompleted of [false, 'true', 1, null]) {
+      const r = await settle(id, { action: 'paid', reason: 'bank transfer sent', utrNumber: utr(), confirmTransferCompleted }, SUPER)
+      expect(r.status, JSON.stringify(confirmTransferCompleted)).toBe(422)
+      expect(r.body.code).toBe('TRANSFER_CONFIRMATION_REQUIRED')
+    }
+    const { PATCH } = await import('@/app/api/admin/settlements/[id]/route')
+    h.admin = SUPER
+    const omitted = await json(await PATCH(req({ action: 'paid', reason: 'bank transfer sent', utrNumber: utr() }, 'PATCH'), ctx(id)))
+    h.admin = ''
+    expect(omitted).toMatchObject({ status: 422, body: { code: 'TRANSFER_CONFIRMATION_REQUIRED' } })
+    expect((await settlementOf(id)).status).toBe('approved')
+    expect(await walletOf(org)).toEqual(before)
+    expect(await auditRows(id, 'settlement.paid')).toHaveLength(0)
+  }, T)
+
+  it('ONE Super Admin: a genuine UTR and a reason are required', async () => {
     process.env.ADMIN_UIDS = SUPER
-    const one = await settle(id, { action: 'paid', reason: 'paid by the approver', utrNumber: utr() }, SUPER)
-    expect(one.status).toBe(409); expect(one.body.code).toBe('MAKER_CHECKER_REQUIRED')
-    expect(String(one.body.error)).toMatch(/Only one Super Admin is configured/)
-    // a duplicate entry is still ONE Super Admin
-    process.env.ADMIN_UIDS = `${SUPER}, ${SUPER} `
-    expect(String((await settle(id, { action: 'paid', reason: 'paid by the approver', utrNumber: utr() }, SUPER)).body.error)).toMatch(/Only one Super Admin is configured/)
+    const { id, org } = await approved()
+    const before = await walletOf(org)
+    for (const bad of ['1', 'TEST', '12345', 'UTR#1234567', 'A'.repeat(41)]) {
+      const r = await settle(id, { action: 'paid', reason: 'bank transfer sent', utrNumber: bad }, SUPER)
+      expect(r.status, bad).toBe(422)
+    }
+    expect((await settle(id, { action: 'paid', reason: '', utrNumber: utr() }, SUPER)).status).toBe(400)
+    expect((await settle(id, { action: 'paid', reason: 'ok', utrNumber: utr() }, SUPER)).status).toBe(400)
+    expect((await settlementOf(id)).status).toBe('approved')
+    expect(await walletOf(org)).toEqual(before)
+    // a real-format reference then succeeds (IMPS / UPI references are 12 digits)
+    expect((await settle(id, { action: 'paid', reason: 'bank transfer sent', utrNumber: `4${String(P).padStart(11, '0')}` }, SUPER)).status).toBe(200)
+  }, T)
+
+  it('ONE Super Admin: duplicate and concurrent recordings debit the wallet once', async () => {
+    process.env.ADMIN_UIDS = SUPER
+    const { id, org } = await approved(7_000)
+    const before = await walletOf(org)
+    const { PATCH } = await import('@/app/api/admin/settlements/[id]/route')
+    h.admin = SUPER
+    const results = await Promise.all([0, 1, 2].map(async k => json(await PATCH(
+      req({ action: 'paid', reason: 'bank transfer sent', utrNumber: `CONC${P}K${k}`, confirmTransferCompleted: true }, 'PATCH'), ctx(id)))))
+    h.admin = ''
+    expect(results.filter(r => r.status === 200)).toHaveLength(1)
+    expect(results.filter(r => r.status === 409)).toHaveLength(2)
+    expect((await walletOf(org)).availablePaise).toBe(before.availablePaise - 7_000)
+    expect(await auditRows(id, 'settlement.paid')).toHaveLength(1)
+    const again = await settle(id, { action: 'paid', reason: 'bank transfer sent', utrNumber: utr() }, SUPER)
+    expect(again.status).toBe(409)
+    expect((await walletOf(org)).availablePaise).toBe(before.availablePaise - 7_000)
+  }, T)
+
+  it('ONE Super Admin: unauthorized callers are still refused at every step', async () => {
+    process.env.ADMIN_UIDS = SUPER
+    const org = await organizer()
+    const { POST } = await import('@/app/api/organizer/settlements/route')
+    h.who = org
+    const created = await json(await POST(req({ amountPaise: 5_000 })))
+    h.who = ''
+    const id = created.body.id as string
+    cleanup.add(`settlementRequests/${id}`)
+    for (const as of [OUTSIDER, CLAIM, SUPER2, org]) {        // SUPER2 is NOT configured here
+      expect((await settle(id, { action: 'approve', reason: 'documents checked' }, as)).status, `approve as ${as}`).toBe(403)
+    }
+    expect((await settle(id, { action: 'approve', reason: 'documents checked' }, SUPER)).status).toBe(200)
+    const before = await walletOf(org)
+    for (const as of [OUTSIDER, CLAIM, SUPER2, org]) {
+      expect((await settle(id, { action: 'paid', reason: 'bank transfer sent', utrNumber: utr() }, as)).status, `paid as ${as}`).toBe(403)
+    }
     expect((await settlementOf(id)).status).toBe('approved')
     expect(await walletOf(org)).toEqual(before)
     expect(await auditRows(id, 'settlement.paid')).toHaveLength(0)
@@ -274,7 +362,7 @@ describeEmu('RD-SETTLE-PAY-01 · Mark as Paid on real Firestore', () => {
     const u = utr()
     const { PATCH } = await import('@/app/api/admin/settlements/[id]/route')
     h.admin = SUPER2
-    const results = await Promise.all([0, 1].map(async () => json(await PATCH(req({ action: 'paid', reason: 'bank transfer sent', utrNumber: u }, 'PATCH'), ctx(id)))))
+    const results = await Promise.all([0, 1].map(async () => json(await PATCH(req({ action: 'paid', reason: 'bank transfer sent', utrNumber: u, confirmTransferCompleted: true }, 'PATCH'), ctx(id)))))
     h.admin = ''
     expect(results.map(r => r.status).sort()).toEqual([200, 409])
     expect((await walletOf(org)).availablePaise).toBe(before.availablePaise - 4_000)

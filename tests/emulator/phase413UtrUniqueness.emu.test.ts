@@ -5,6 +5,11 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest'
 import { NextRequest } from 'next/server'
 
+/** RD-SETTLE-PAY-02 — recording a payment requires the explicit confirmation; tests opt OUT by passing it themselves. */
+const PAYMENT_ACTIONS = new Set(['paid', 'record_transfer', 'transfer_exception_approve'])
+const withTransferConfirmed = (b: Record<string, unknown>) =>
+  PAYMENT_ACTIONS.has(String(b.action)) && !('confirmTransferCompleted' in b) ? { ...b, confirmTransferCompleted: true } : b
+
 const EMULATOR = process.env.FIRESTORE_EMULATOR_HOST
 const describeEmu = EMULATOR ? describe : describe.skip
 const T = 240_000
@@ -84,7 +89,7 @@ describeEmu('M1.3 · one UTR, one payout — and maker-checker without bypass', 
   }
   const settle = async (id: string, body: Record<string, unknown>, as = SUPER) => {
     const { PATCH } = await import('@/app/api/admin/settlements/[id]/route')
-    return json(await PATCH(req(body, 'PATCH', `Bearer as:${as}`), ctx(id)))
+    return json(await PATCH(req(withTransferConfirmed(body), 'PATCH', `Bearer as:${as}`), ctx(id)))
   }
   const approved = async (uid: string, amountPaise: number) => {
     const { POST } = await import('@/app/api/organizer/settlements/route')
@@ -293,33 +298,32 @@ describeEmu('M1.3 · one UTR, one payout — and maker-checker without bypass', 
     for (const s of ['a', 'b', 'c']) await db.doc(`settlementRequests/m13-legacy-${P}-${s}`).delete()
   }, T)
 
-  it('13 · the exception can be approved by neither its requester nor the payout approver', async () => {
+  it('13 · RD-SETTLE-PAY-02: the payout approver may approve the exception (audited as same_admin)', async () => {
     const uid = await organizer('u13')
     await released(uid, 10_000)
     const id = await approved(uid, 6_000)                                              // payout approved by SUPER
     await changeDestination(uid)
     expect((await exception(id, utr(), SUPER2)).status).toBe(200)                      // requested by SUPER2
-    for (const as of [SUPER2, SUPER]) expect(await approveEx(id, as)).toMatchObject({ status: 409, body: { code: 'MAKER_CHECKER_REQUIRED' } })
     expect(await reqDoc(id)).toMatchObject({ status: 'approved', transferException: { status: 'pending_approval' } })
-    expect((await approveEx(id, SUPER3)).status).toBe(200)
+    expect((await approveEx(id, SUPER)).status).toBe(200)                               // the payout's own approver
+    expect(await reqDoc(id)).toMatchObject({ status: 'paid', paidByAdmin: SUPER })
+    expect(await auditCount(id, 'settlement.paid')).toBe(1)
   }, T)
 
-  it('14 · with only TWO Super Admins configured there is no eligible approver: the exception stays pending, the response says what to do, nothing is recorded', async () => {
-    process.env.ADMIN_UIDS = `${SUPER},${SUPER2}`
+  it('14 · RD-SETTLE-PAY-02: with ONE Super Admin configured the same admin requests and approves the exception — recorded once, the UTR reserved once', async () => {
     const uid = await organizer('u14')
     await released(uid, 10_000)
-    const id = await approved(uid, 6_000)
+    const id = await approved(uid, 6_000)                                              // approved by SUPER
     await changeDestination(uid)
+    process.env.ADMIN_UIDS = SUPER
     const u = utr()
-    expect((await exception(id, u, SUPER2)).status).toBe(200)
-    const before = await snapshot(uid, id)
-    for (const as of [SUPER, SUPER2]) {
-      const r = await approveEx(id, as)
-      expect(r).toMatchObject({ status: 409, body: { code: 'MAKER_CHECKER_REQUIRED', exception: 'pending_approval' } })
-      expect(String(r.body.error)).toMatch(/Only 2 Super Admin\(s\) are configured.*stays PENDING.*Operations Runbook B\.12.*cannot be bypassed/)
-    }
-    const after = await snapshot(uid, id)
-    expect(after).toEqual(before)
-    expect(await refDoc(u)).toBeNull()
+    expect((await exception(id, u, SUPER)).status).toBe(200)
+    expect((await approveEx(id, SUPER)).status).toBe(200)
+    expect(await reqDoc(id)).toMatchObject({ status: 'paid', paidByAdmin: SUPER })
+    expect(await refDoc(u)).not.toBeNull()
+    expect(await auditCount(id, 'settlement.paid')).toBe(1)
+    const replay = await approveEx(id, SUPER)                                           // idempotent replay records nothing more
+    expect(replay.status).toBe(200)
+    expect(await auditCount(id, 'settlement.paid')).toBe(1)
   }, T)
 })

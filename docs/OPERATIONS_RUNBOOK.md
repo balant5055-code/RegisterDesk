@@ -150,21 +150,20 @@ verify the following in the GCP console for the production project and record th
 If PITR/scheduled backups are NOT enabled, treat it as a launch blocker: a data-loss
 event would be unrecoverable regardless of the application's idempotency guarantees.
 
-### B.12 Payout recorded with a changed destination — no eligible approver (M1.3)
+### B.12 Recording a payout — single Super Admin operation (RD-SETTLE-PAY-02)
 
-A changed-destination transfer exception (Finance → Release Engine → "Changed-destination transfer")
-records a bank transfer that ALREADY completed to the payout's original destination. It must be
-approved by a Super Admin who neither requested the exception nor approved the payout. There is no
-self-approval, two-person override or configuration bypass: an ineligible approver is refused
-(`MAKER_CHECKER_REQUIRED`) and the exception stays **pending** — with only two Super Admins configured
-there may be no eligible approver at all.
+RegisterDesk runs with ONE Super Admin (owner decision, 2026-10-28). The Super Admin who approved a payout
+may also record it paid — through Mark as Paid, Record completed transfer, or a changed-destination transfer
+exception (Finance → Release Engine → "Changed-destination transfer", requested and then approved). Every
+recording requires:
 
-Manual fallback until an independent Super Admin is available:
+1. a genuine bank transfer reference (UTR: 6–40 letters and digits, never used on another payout);
+2. a reason (3–500 characters);
+3. the explicit confirmation "I confirm this bank transfer has been completed" (`confirmTransferCompleted: true`).
 
-1. Verify the transfer independently (bank statement / bank confirmation) — never from RegisterDesk status.
-2. Preserve the UTR and the supporting evidence reference; keep the exception pending in RegisterDesk.
-3. Do not reject the payout (a pending exception blocks rejection) and do not mark it paid by any other route.
-4. When an eligible Super Admin is available, they approve the pending exception, re-entering the UTR.
+Verify the transfer independently first (bank statement / bank confirmation) — never from RegisterDesk status.
+The audit row (`settlement.paid`) records the admin, the approver, both timestamps and whether one admin did
+both (`makerChecker: same_admin`). A duplicate or concurrent recording is refused and the wallet is debited once.
 
 One UTR can be recorded against one payout only (mark-paid, record transfer and the exception alike).
 `UTR_IN_USE` means the reference is already recorded elsewhere: investigate, never re-key it to pass.

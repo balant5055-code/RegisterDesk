@@ -211,13 +211,16 @@ describe('closeout · preserved decisions', () => {
     expect(src).toMatch(/action !== 'approve_refund' && action !== 'resolve'/)
     expect(src).not.toMatch(/'ignore'|'ignored'/)
   })
-  it('settlement maker-checker is still enforced inside the paid transaction, with no bypass', () => {
+  it('RD-SETTLE-PAY-02 — one Super Admin may approve and record a payout; recording still needs Super Admin, a reason, a genuine UTR and an explicit confirmation, and is audited', () => {
     const src = code('app/api/admin/settlements/[id]/route.ts')
-    expect(src).toMatch(/settlement\.approvedBy && settlement\.approvedBy === adminUid/)
-    expect(src).toMatch(/MAKER_CHECKER_REQUIRED/)
-    // no flag / parameter can switch it off (the user-facing message saying it "cannot be bypassed" is fine)
-    expect(src).not.toMatch(/skipMakerChecker|bypassMakerChecker|allowSameApprover|makerCheckerOverride/i)
-    expect(src).toMatch(/cannot be bypassed/)
+    expect(src).not.toMatch(/MAKER_CHECKER/)
+    expect(src).toMatch(/const guard = await requireSuperAdmin\(req\)/)
+    expect(src).toMatch(/parseFinancialReason\(body\.reason, body\.adminNote\)/)
+    expect(src).toMatch(/body\.confirmTransferCompleted === true/)
+    expect(src).toMatch(/recordableUtr\(utrNumber\)/)
+    expect(src).toMatch(/makerChecker:\s+recorderRelation\(/)
+    // the confirmation cannot be switched off by any flag or parameter
+    expect(src).not.toMatch(/skipConfirm|bypassConfirm|confirmOverride/i)
   })
   it('the C7 rules deployment requirement is documented (not deployed)', () => {
     const doc = readFileSync('docs/RD-PHASE4-C7-RULES-DEPLOYMENT.md', 'utf8')
