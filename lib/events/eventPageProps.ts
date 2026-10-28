@@ -80,6 +80,99 @@ export function publicOnlineVenue(online: OnlineVenueConfig | undefined): Online
   }
 }
 
+/**
+ * RD-CUSTOM-AUDIT-02 — the pass fields the PUBLIC page may carry (an allow-list).
+ *
+ * Passes used to reach the page verbatim (`pricing.passes`), so fields the pass builder labels
+ * internal travelled to every visitor's browser: the pass `code` ("Internal reference — not
+ * visible to attendees"), badge prefix / category, coupon / tax flags, and the organizer's raw
+ * milestone thresholds (types.ts already promised those never cross to the client). Only what
+ * a template renders is kept. `showRemainingSeats` also honours the EVENT-level "Show remaining
+ * seats" switch (Passes & Pricing), which no public surface read before.
+ */
+export function publicPass(p: PassPublic, eventShowsRemaining: boolean): PassPublic {
+  const a = p.advancedSettings
+  const r = p.raceDetails
+  const out: PassPublic = {
+    id:                 p.id,
+    name:               p.name,
+    description:        typeof p.description === 'string' ? p.description : '',
+    price:              p.price,
+    quantity:           p.quantity ?? null,
+    unlimited:          p.unlimited === true,
+    showRemainingSeats: Boolean(p.showRemainingSeats) && eventShowsRemaining,
+  }
+  const keep = <K extends keyof PassPublic>(k: K) => { if (p[k] !== undefined) out[k] = p[k] }
+  ;(['salesStartDate', 'salesEndDate', 'hideWhenSoldOut', 'milestoneAlert', 'status', 'visibility', 'benefits',
+    'customBenefits', 'featured', 'earlyBirdEnabled', 'earlyBirdPrice', 'earlyBirdEndDate', 'effectivePrice',
+    'saleState', 'maxPurchase'] as const).forEach(keep)
+  if (a) out.advancedSettings = { transferable: a.transferable === true, refundable: a.refundable === true, waitlist: a.waitlist === true, groupBooking: a.groupBooking === true }
+  if (r) out.raceDetails = { category: r.category, customCategory: r.customCategory, minAge: r.minAge ?? null, maxAge: r.maxAge ?? null, teamSize: r.teamSize ?? null }
+  return out
+}
+
+/**
+ * RD-CUSTOM-AUDIT-03 — the availability the PUBLIC page may carry.
+ *
+ * `computeEventAvailability` returns the raw confirmed counts (`passCount`, `eventTotalCount`)
+ * and the exact seats left for every pass, and the whole record was sent to the browser — so
+ * the registration count was readable on every event, whatever the organizer chose. Now:
+ *   • the counts are zeroed unless "Show attendee count" is on (the only surfaces that display
+ *     them already require that toggle);
+ *   • the seats left are withheld (null) for a pass whose remaining seats are hidden — pass
+ *     setting or the event-level switch — and its "low" status becomes "available", so no
+ *     template can print a scarcity number the organizer hid (capacity − remaining = count).
+ * "Sold out" always stays: it decides whether a pass can be bought.
+ */
+export function publicAvailability(
+  record: Record<string, PassAvailability>, passes: PassPublic[], showAttendeeCount: boolean,
+): Record<string, PassAvailability> {
+  const seatsShown = new Map(passes.map(p => [p.id, p.showRemainingSeats === true]))
+  return Object.fromEntries(Object.entries(record).map(([id, a]) => {
+    const seats = seatsShown.get(id) === true
+    return [id, {
+      ...a,
+      passCount:       showAttendeeCount ? a.passCount : 0,
+      eventTotalCount: showAttendeeCount ? a.eventTotalCount : 0,
+      remaining:       seats ? a.remaining : null,
+      status:          !seats && a.status === 'low' ? 'available' : a.status,
+    }]
+  }))
+}
+
+/**
+ * RD-CUSTOM-AUDIT-03 — how an attendee gets in, for the page to SAY so (Access Control step).
+ * Only the mode — never the invite code or the approved-contact list. Approval follows the
+ * submit route's precedence: accessControl.confirmationMode, then the form's approvalMode.
+ */
+function registrationAccessOf(event: PublishedEvent): { access: 'open' | 'invite_code' | 'approved_contacts'; approvalRequired: boolean } {
+  const ac = (event.accessControl ?? null) as { type?: unknown; confirmationMode?: unknown } | null
+  const type = ac?.type === 'invite_code' || ac?.type === 'approved_contacts' ? ac.type : 'open'
+  const rules = (event.registrationForm as { registrationRules?: { approvalMode?: unknown } } | null)?.registrationRules
+  const mode = ac?.confirmationMode === 'manual' || ac?.confirmationMode === 'auto' ? ac.confirmationMode : rules?.approvalMode
+  return { access: type, approvalRequired: mode === 'manual' }
+}
+
+/**
+ * RD-CUSTOM-AUDIT-02 — legacy aliases. The publish checklist (lib/events/publishRequirements)
+ * accepts these older field names as "present", so an event saved with them passed its checks —
+ * and then showed nothing, because this projection read only the current names. Current names
+ * always win; a legacy value is used only when the current one is empty.
+ */
+function legacyStr(ed: EventDetailsDraft, key: 'description' | 'coverImage' | 'bannerUrl' | 'logoUrl'): string {
+  const info = (ed.info ?? {}) as unknown as Record<string, unknown>
+  const v = info[key] ?? (ed as unknown as Record<string, unknown>)[key]
+  return typeof v === 'string' ? v.trim() : ''
+}
+
+/** The cover and event-logo URLs, current names first (shared by the page metadata / JSON-LD). */
+export function eventImageUrls(ed: EventDetailsDraft): { bannerUrl: string; logoUrl: string } {
+  return {
+    bannerUrl: ed.media?.coverBanner?.value?.trim() || legacyStr(ed, 'coverImage') || legacyStr(ed, 'bannerUrl'),
+    logoUrl:   ed.media?.logo?.value?.trim() || legacyStr(ed, 'logoUrl'),
+  }
+}
+
 function extractSpeakers(typeDetails: Record<string, unknown> | null): Speaker[] {
   if (!typeDetails) return []
   // judges is used by the Awards type; speakers/trainers/artists by others.
@@ -271,11 +364,10 @@ export function buildEventPageProps(
   const tagline     = ed.info?.tagline?.trim()  || ''
   const fullDesc    = ed.info?.fullDesc?.trim()  || ''
   const shortDesc   = ed.info?.shortDesc?.trim() || ''
-  const description = fullDesc || shortDesc
+  const description = fullDesc || shortDesc || legacyStr(ed, 'description')
 
   // ── Media ──────────────────────────────────────────────────────────────────
-  const bannerUrl = ed.media?.coverBanner?.value?.trim() || ''
-  const logoUrl   = ed.media?.logo?.value?.trim()        || ''
+  const { bannerUrl, logoUrl } = eventImageUrls(ed)
   const gallery   = (ed.media?.galleryImages ?? []).filter(img => img.value?.trim())
 
   // ── Schedule ───────────────────────────────────────────────────────────────
@@ -354,7 +446,7 @@ export function buildEventPageProps(
     deriveStoredEventCapacity(event as Parameters<typeof deriveStoredEventCapacity>[0]),
     counter,
   )
-  const availabilityRecord: Record<string, PassAvailability> = Object.fromEntries(availability)
+  const rawAvailabilityRecord: Record<string, PassAvailability> = Object.fromEntries(availability)
 
   // ── Booking Milestone Alerts ───────────────────────────────────────────────
   // Resolved ONCE here, server-side, from the counter this page already loaded — so the
@@ -365,9 +457,15 @@ export function buildEventPageProps(
   // PRESENTATION ONLY. This runs AFTER availability is computed and feeds nothing back into
   // it, so a milestone can never influence capacity, price or whether a pass is sellable.
   const milestoneAlerts = resolveMilestoneAlertsByPass(passes, counter?.passCounts)
+  // RD-CUSTOM-AUDIT-02 — public allow-list, applied AFTER the milestones were resolved from the
+  // raw configuration (which therefore never leaves the server).
+  const eventShowsRemaining = pricing?.showRemainingSeats !== false
   const passesWithAlerts: PassPublic[] = passes.map(p =>
-    milestoneAlerts[p.id] ? { ...p, milestoneAlert: milestoneAlerts[p.id] } : p,
+    publicPass(milestoneAlerts[p.id] ? { ...p, milestoneAlert: milestoneAlerts[p.id] } : p, eventShowsRemaining),
   )
+  // RD-CUSTOM-AUDIT-03 — counts / seats only as the organizer's toggles allow (see publicAvailability).
+  const availabilityRecord = publicAvailability(rawAvailabilityRecord, passesWithAlerts, showAttendeeCount)
+  const { access: registrationAccess, approvalRequired } = registrationAccessOf(event)
 
   // ── Event-TOTAL milestone ──────────────────────────────────────────────────
   // Keyed to the WHOLE event's confirmed bookings, so 1,500 + 700 across two passes fires a
@@ -408,6 +506,11 @@ export function buildEventPageProps(
       customEventSubtype: event.customEventSubtype?.trim() || undefined,
       registrationOpen,
       regClosedMessage,
+      // RD-CUSTOM-AUDIT-02 — the organizer's Registration Opens / Closes dates (Passes & Pricing).
+      registrationOpensOn: typeof pricing?.registrationOpenDate === 'string' && pricing.registrationOpenDate.trim() ? pricing.registrationOpenDate.trim() : undefined,
+      registrationClosesOn: typeof pricing?.registrationEndDate === 'string' && pricing.registrationEndDate.trim() ? pricing.registrationEndDate.trim() : undefined,
+      registrationAccess,
+      approvalRequired,
       title,
       tagline,
       description,

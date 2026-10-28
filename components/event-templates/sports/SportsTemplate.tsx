@@ -108,10 +108,12 @@ export function SportsTemplate(props: EventDetailProps) {
   // RD-ST15.0: ONE contact target for the whole page. Organizer, FAQ and Policies all
   // resolved "Contact Organizer" independently — the first from organizer.email, the
   // other two from supportEmail — so one label could point at two different addresses.
+  // RD-CUSTOM-AUDIT-03 — the organizer's own email / phone are a fallback only while "Show
+  // organizer info" is on; the public Support Email is unaffected.
   const contact = resolveOrganizerContact({
     supportEmail,
-    organizerEmail: organizer?.email,
-    organizerPhone: organizer?.phone,
+    organizerEmail: showOrg ? organizer?.email : undefined,
+    organizerPhone: showOrg ? organizer?.phone : undefined,
   })
 
   // Course — the distances that actually exist on this race, in pass order. The
@@ -184,7 +186,7 @@ export function SportsTemplate(props: EventDetailProps) {
         countdownLabel={td?.countdownLabel}
         // Hero-only wiring. Every value already exists on the page's props — nothing
         // extra is fetched, computed server-side, or added to the schema.
-        organizer={organizer}
+        organizer={showOrg ? organizer : null}
         availability={availability}
         distances={courseDistances}
         showAttendeeCount={props.showAttendeeCount}

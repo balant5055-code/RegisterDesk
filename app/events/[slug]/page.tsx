@@ -3,7 +3,7 @@ import { notFound } from 'next/navigation'
 import { findPublicEvent }          from '@/lib/events/publicEventAccess'
 import ReportButton                  from '@/components/report/ReportButton'
 import type { EventDetailsDraft } from '@/components/wizard/eventDetailsConfig'
-import { loadEventPageData, buildEventPageProps, publicOnlineVenue } from '@/lib/events/eventPageProps'
+import { loadEventPageData, buildEventPageProps, publicOnlineVenue, eventImageUrls } from '@/lib/events/eventPageProps'
 import { TemplateRouter } from '@/components/event-templates/TemplateRouter'
 import { stripMarkdown } from '@/components/event-templates/shared/ui/RichText'
 import type { PassPublic } from '@/components/event-templates/types'
@@ -42,7 +42,8 @@ export async function generateMetadata({ params }: PageProps): Promise<Metadata>
   // RD-CUSTOM-PUBLIC-01 — the organizer's "Social Share Image" (SEO tab) was saved but never
   // used: link previews always took the cover banner. It now wins when it is a web URL.
   const share    = ed.seo?.shareImageUrl?.trim() || ''
-  const image    = (/^https?:\/\//i.test(share) ? share : '') || ed.media?.coverBanner?.value?.trim() || ed.media?.logo?.value?.trim() || ''
+  const { bannerUrl, logoUrl } = eventImageUrls(ed)
+  const image    = (/^https?:\/\//i.test(share) ? share : '') || bannerUrl || logoUrl || ''
   const keywords = (ed.seo?.keywords ?? []).join(', ')
   const url      = `${baseUrl}/events/${slug}`
 
@@ -109,7 +110,7 @@ function buildJsonLd(
     '@type':    'Event',
     name:        ed.info?.name      || 'Event',
     description: ed.info?.shortDesc || stripMarkdown(ed.info?.fullDesc) || '',
-    image:       ed.media?.coverBanner?.value || ed.media?.logo?.value || '',
+    image:       eventImageUrls(ed).bannerUrl || eventImageUrls(ed).logoUrl || '',
     url:         `${BASE_URL}/events/${slug}`,
     startDate: ed.schedule?.startDate
       ? `${ed.schedule.startDate}T${ed.schedule.startTime || '00:00'}:00`

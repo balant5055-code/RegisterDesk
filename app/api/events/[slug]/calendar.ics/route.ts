@@ -10,6 +10,8 @@ import { getEventBySlug }  from '@/lib/firebase/firestore/events'
 import { canExposePublicEvent } from '@/lib/events/publicVisibility'
 import { generateIcs }     from '@/lib/calendar/ics'
 import type { EventDetailsDraft } from '@/components/wizard/eventDetailsConfig'
+import { ONLINE_PLATFORM_LABELS } from '@/components/wizard/eventDetailsConfig'
+import { stripMarkdown } from '@/components/event-templates/shared/ui/RichText'
 
 const BASE_URL = process.env.NEXT_PUBLIC_BASE_URL ?? 'https://registerdesk.in'
 
@@ -38,19 +40,22 @@ export async function GET(
   const startTime  = schedule?.startTime ?? ''
   const endTime    = schedule?.endTime   ?? ''
   const title      = ed.info?.name?.trim() || 'Event'
-  const description = (ed.info?.shortDesc || ed.info?.fullDesc || '').trim()
+  // RD-CUSTOM-AUDIT-02 — calendars show plain text, never the organizer's Markdown markers.
+  const description = (ed.info?.shortDesc?.trim() || stripMarkdown(ed.info?.fullDesc)).trim()
 
   // Build location string
   const venueType = venue?.type ?? 'physical'
   const physical  = venue?.physical
   const online    = venue?.online
-  let location = ''
-  if (venueType === 'online' || venueType === 'hybrid') {
-    location = online?.platform ? `${online.platform} (Online)` : 'Online'
-  } else {
-    const parts = [physical?.name, physical?.addressLine1, physical?.city, physical?.state].filter(Boolean)
-    location = parts.join(', ')
-  }
+  // RD-CUSTOM-AUDIT-02 — the platform's NAME (it printed the raw id, "zoom"), and a hybrid event
+  // keeps its physical address. Never the meeting link, ID or passcode: this file is public.
+  const platform = online?.platform
+    ? (online.platform === 'custom' && online.platformCustomName?.trim() ? online.platformCustomName.trim() : ONLINE_PLATFORM_LABELS[online.platform] ?? 'Online')
+    : 'Online'
+  const address  = [physical?.name, physical?.addressLine1, physical?.city, physical?.state].filter(Boolean).join(', ')
+  const location = venueType === 'online' ? `${platform} (Online)`
+    : venueType === 'hybrid' ? (address ? `${address} · also online via ${platform}` : `${platform} (Online)`)
+    : address
 
   const icsContent = generateIcs({
     uid:         `${slug}@registerdesk.in`,

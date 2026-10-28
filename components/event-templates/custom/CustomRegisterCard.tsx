@@ -7,7 +7,7 @@
 
 import { useState } from 'react'
 import Link from 'next/link'
-import { ArrowRight, Share2, Check, CalendarDays, Clock, MapPin, Globe } from 'lucide-react'
+import { ArrowRight, Share2, Check, CalendarDays, Clock, MapPin, Globe, CalendarClock, Users } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { cn } from '@/lib/utils/cn'
 import { marketingButton } from '@/lib/marketing/theme'
@@ -19,6 +19,16 @@ import { resolveAdmissionPrice, type AdmissionState } from './admissionModel'
 import { LUXE_CARD, LUXE_LABEL, longDateParts, formatSalesMoment } from './luxe'
 
 interface Row { Icon: LucideIcon; value: string; sub?: string }
+
+/**
+ * RD-CUSTOM-AUDIT-02 — the place to print for a physical or hybrid event. The shared `venueName`
+ * label is the ONLINE platform for a hybrid event ("Zoom"), so a hybrid card read "Zoom · Kochi ·
+ * In person & online" instead of the hall the organizer entered. Hybrid uses the physical name.
+ */
+function placeName(p: EventDetailProps): string {
+  if (p.venueType === 'hybrid') return p.physical?.name?.trim() || ''
+  return p.venueName?.trim() ?? ''
+}
 
 function buildRows(p: EventDetailProps): Row[] {
   const rows: Row[] = []
@@ -36,7 +46,7 @@ function buildRows(p: EventDetailProps): Row[] {
     })
   }
   const city  = p.physical?.city?.trim() ?? ''
-  const venue = p.venueName?.trim() ?? ''
+  const venue = placeName(p)
   if (p.venueType === 'online') {
     rows.push({ Icon: Globe, value: 'Online event' })
   } else if (venue || city) {
@@ -47,6 +57,17 @@ function buildRows(p: EventDetailProps): Row[] {
       value: venue || city,
       sub:   p.venueType === 'hybrid' ? [sub, 'In person & online'].filter(Boolean).join(' · ') : sub,
     })
+  }
+  // RD-CUSTOM-AUDIT-02 — the organizer's "Registration Closes" date (Passes & Pricing). Only while
+  // registration is open: once closed, the status line already says so.
+  if (p.registrationOpen && p.registrationClosesOn) {
+    const closes = formatSalesMoment(p.registrationClosesOn)
+    if (closes) rows.push({ Icon: CalendarClock, value: `Registration closes ${closes}` })
+  }
+  // RD-CUSTOM-AUDIT-02 — "Show attendee count" (Details → Public page). Off by default.
+  const registered = Object.values(p.availability ?? {})[0]?.eventTotalCount ?? 0
+  if (p.showAttendeeCount && registered > 0) {
+    rows.push({ Icon: Users, value: `${registered.toLocaleString('en-IN')} registered` })
   }
   return rows
 }
@@ -145,7 +166,7 @@ export function CustomRegisterCard({ props, admission }: { props: EventDetailPro
             endDate={endDate || startDate}
             startTime={startTime}
             endTime={endTime}
-            location={[venueName, physical?.city].filter(Boolean).join(', ')}
+            location={[placeName(props) || (props.venueType === 'online' ? venueName : ''), physical?.city].filter((v, i, a) => v && a.indexOf(v) === i).join(', ')}
             description={description}
             slug={slug}
             label="Calendar"

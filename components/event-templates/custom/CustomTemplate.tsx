@@ -73,6 +73,8 @@ export function CustomTemplate(props: EventDetailProps) {
               slug={slug}
               isFreeEvent={isFreeEvent}
               attendeePaysFees={props.attendeePaysFees === true}
+              registrationAccess={props.registrationAccess}
+              approvalRequired={props.approvalRequired === true}
               eventMilestoneAlert={props.eventMilestoneAlert}
             />
 
