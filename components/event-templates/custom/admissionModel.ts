@@ -12,6 +12,7 @@
 import type { PassAvailability } from '@/lib/registrations/types'
 import type { PassPublic } from '@/components/event-templates/types'
 import { buildRegisterHref } from '@/lib/events/registerHref'
+import { minPassPrice } from '@/components/event-templates/shared/utils/format'
 
 export type AdmissionState =
   /** At least one pass can be bought now. `directHref` is set when exactly one can. */
@@ -37,6 +38,21 @@ export function visibleAdmissionPasses(
 
 export function isPassPurchasable(p: PassPublic, availability: Record<string, PassAvailability>): boolean {
   return p.saleState !== 'scheduled' && p.saleState !== 'ended' && availability[p.id]?.status !== 'sold_out'
+}
+
+/**
+ * RD-CUSTOM-PUBLIC-01 — the ONE "From ₹… / Free" headline for the registration card and the
+ * mobile bar. Both used to take the minimum over EVERY pass, so a hidden sold-out or ended
+ * early-bird still set the "From" price although nothing could be bought at it — and the two
+ * surfaces computed "free" differently. Now: the passes on sale when admission is open, else
+ * the passes an attendee can see. `from` is null when there is no such pass.
+ */
+export function resolveAdmissionPrice(
+  admission: AdmissionState, passes: PassPublic[], availability: Record<string, PassAvailability>, isFreeEvent: boolean,
+): { free: boolean; from: number | null } {
+  const priced = admission.kind === 'open' ? admission.purchasable : visibleAdmissionPasses(passes, availability)
+  if (priced.length === 0) return { free: isFreeEvent, from: null }
+  return { free: isFreeEvent || priced.every(p => p.price === 0), from: minPassPrice(priced) }
 }
 
 export function resolveAdmissionState({

@@ -36,14 +36,15 @@ export function CustomTemplate(props: EventDetailProps) {
     slug, title, passes, availability, registrationOpen, regClosedMessage, isFreeEvent,
     eventType, eventSubtype, physical, description, shortDesc,
     showAgenda, agenda, speakers, showSpeakers, showOrg, organizer,
-    showGallery, gallery, showSponsors, sponsors, supportEmail, supportPhone,
+    showGallery, gallery, showSponsors, sponsors, supportEmail, supportPhone, showSocial,
   } = props
 
   const admission = resolveAdmissionState({ slug, passes, availability, registrationOpen, regClosedMessage })
 
   // The organizer's own subtype if they set one, else the city. Never the raw type id —
   // "CUSTOM" is our vocabulary, not the attendee's.
-  const kicker = eventSubtypeLabel(eventType, eventSubtype) ?? (physical?.city?.trim() || null)
+  // RD-CUSTOM-PUBLIC-01: includes the free text the organizer typed in Step 1 ("Product Launch").
+  const kicker = eventSubtypeLabel(eventType, eventSubtype, props.customEventSubtype) ?? (physical?.city?.trim() || null)
 
   // The About block would only repeat the hero lede when the long text IS the short text.
   const story = description?.trim() && description.trim() !== shortDesc?.trim() ? description : ''
@@ -71,6 +72,7 @@ export function CustomTemplate(props: EventDetailProps) {
               availability={availability}
               slug={slug}
               isFreeEvent={isFreeEvent}
+              attendeePaysFees={props.attendeePaysFees === true}
               eventMilestoneAlert={props.eventMilestoneAlert}
             />
 
@@ -93,7 +95,7 @@ export function CustomTemplate(props: EventDetailProps) {
               maps={props.showVenueMap ? props.venueMaps : null}
             />
 
-            {showOrg && organizer?.name?.trim() && <OrganizerBlock organizer={organizer} supportEmail={supportEmail} />}
+            {showOrg && organizer?.name?.trim() && <OrganizerBlock organizer={organizer} supportEmail={supportEmail} showSocial={showSocial} />}
 
             {showGallery && (
               <GalleryBlock items={props.galleryMedia?.length ? props.galleryMedia : mediaToGallery(gallery)} />
@@ -107,6 +109,9 @@ export function CustomTemplate(props: EventDetailProps) {
               timezone={props.timezone}
               refundWindow={props.refundWindow}
               refundPolicyUrl={props.refundPolicyUrl}
+              termsUrl={props.termsUrl}
+              privacyPolicyUrl={props.privacyPolicyUrl}
+              faqUrl={props.faqUrl}
               supportEmail={supportEmail}
               supportPhone={supportPhone}
             />
@@ -116,7 +121,7 @@ export function CustomTemplate(props: EventDetailProps) {
         </div>
       </div>
 
-      <CustomMobileBar admission={admission} passes={passes} isFreeEvent={isFreeEvent} />
+      <CustomMobileBar admission={admission} passes={passes} availability={availability} isFreeEvent={isFreeEvent} />
     </EventDetailsFramework>
   )
 }

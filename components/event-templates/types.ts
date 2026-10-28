@@ -119,6 +119,12 @@ export interface EventDetailProps {
   cancelReason?:     string
   eventType?:        string
   eventSubtype?:     string
+  /**
+   * RD-CUSTOM-PUBLIC-01 · the organizer's own free-text event kind ("Product Launch"), from Step 1.
+   * Publish has always copied it onto events/{slug}; the projection simply never passed it on,
+   * so a Custom Event's kicker fell back to the city. Absent ⇒ no free-text kind.
+   */
+  customEventSubtype?: string
   registrationOpen: boolean
   regClosedMessage: string
   title:            string

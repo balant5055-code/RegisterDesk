@@ -23,6 +23,7 @@ import { AwardsNominationForm }  from './AwardsNominationForm'
 import { AddToCalendarButton }   from '@/components/event-templates/shared/ui/AddToCalendarButton'
 import { PromoVideoSection }     from '@/components/event-templates/shared/media/PromoVideoSection'
 import { SharedGallery }       from '@/components/event-templates/shared/media/SharedGallery'
+import { RichText }            from '@/components/event-templates/shared/ui/RichText'
 
 // ─── Template ──────────────────────────────────────────────────────────────────
 
@@ -180,9 +181,7 @@ export function AwardsTemplate(props: EventDetailProps) {
       {description?.trim() && (
         <section className="border-b border-zinc-800/60 bg-zinc-900 py-8 sm:py-10">
           <div className="mx-auto max-w-4xl px-4 sm:px-6 lg:px-8">
-            <p className="whitespace-pre-line text-[0.9375rem] leading-[1.85] text-zinc-400">
-              {description}
-            </p>
+            <RichText text={description} className="text-[0.9375rem] leading-[1.85] text-zinc-400" />
           </div>
         </section>
       )}

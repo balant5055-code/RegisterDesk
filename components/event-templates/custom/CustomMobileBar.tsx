@@ -18,21 +18,22 @@ import Link from 'next/link'
 import { ArrowRight } from 'lucide-react'
 import { cn } from '@/lib/utils/cn'
 import { marketingButton } from '@/lib/marketing/theme'
-import { formatINR, minPassPrice } from '@/components/event-templates/shared/utils/format'
+import { formatINR } from '@/components/event-templates/shared/utils/format'
 import type { PassPublic } from '@/components/event-templates/types'
-import type { AdmissionState } from './admissionModel'
+import type { PassAvailability } from '@/lib/registrations/types'
+import { resolveAdmissionPrice, type AdmissionState } from './admissionModel'
 import { LUXE_LABEL, formatSalesMoment } from './luxe'
 
 // 64rem = Tailwind's lg breakpoint; 4.5rem = the bar's height (h-[4.5rem] below).
 const RESERVE_BAR_SPACE =
   '@media (width < 64rem){body:has([data-rd-register-bar]){padding-bottom:calc(4.5rem + env(safe-area-inset-bottom))}}'
 
-export function CustomMobileBar({ admission, passes, isFreeEvent }: {
-  admission: AdmissionState; passes: PassPublic[]; isFreeEvent: boolean
+export function CustomMobileBar({ admission, passes, availability, isFreeEvent }: {
+  admission: AdmissionState; passes: PassPublic[]; availability: Record<string, PassAvailability>; isFreeEvent: boolean
 }) {
   const isOpen = admission.kind === 'open'
-  const free = isFreeEvent || (passes.length > 0 && passes.every(p => p.price === 0))
-  const price = passes.length === 0 ? null : free ? 'Free' : `From ${formatINR(minPassPrice(passes))}`
+  const { free, from } = resolveAdmissionPrice(admission, passes, availability, isFreeEvent)
+  const price = from === null ? null : free ? 'Free' : `From ${formatINR(from)}`
 
   const status =
     admission.kind === 'open'      ? 'Registration open'

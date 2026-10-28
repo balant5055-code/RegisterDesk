@@ -12,7 +12,7 @@ import { marketingButton } from '@/lib/marketing/theme'
 import type { PassAvailability } from '@/lib/registrations/types'
 import type { PassPublic } from '@/components/event-templates/types'
 import { buildRegisterHref } from '@/lib/events/registerHref'
-import { TAX_INCLUSIVE_NOTE } from '@/lib/pricing/copy'
+import { TAX_INCLUSIVE_NOTE, FEES_ADDED_AT_CHECKOUT_NOTE } from '@/lib/pricing/copy'
 import type { ResolvedMilestoneAlert } from '@/lib/events/milestoneAlerts'
 import { benefitIcon } from '@/components/event-templates/shared/ui/framework'
 import { formatINR, passDisplayPrice } from '@/components/event-templates/shared/utils/format'
@@ -100,12 +100,14 @@ function PassRow({ pass, slug, avail, isFreeEvent, featured }: {
   )
 }
 
-export function CustomAdmission({ admission, passes, availability, slug, isFreeEvent, eventMilestoneAlert }: {
+export function CustomAdmission({ admission, passes, availability, slug, isFreeEvent, attendeePaysFees = false, eventMilestoneAlert }: {
   admission:    AdmissionState
   passes:       PassPublic[]
   availability: Record<string, PassAvailability>
   slug:         string
   isFreeEvent:  boolean
+  /** RD-CUSTOM-PUBLIC-01 · fees are added at checkout — never claim "prices include taxes" then. */
+  attendeePaysFees?: boolean
   eventMilestoneAlert?: ResolvedMilestoneAlert | null
 }) {
   const visible    = visibleAdmissionPasses(passes, availability)
@@ -117,7 +119,9 @@ export function CustomAdmission({ admission, passes, availability, slug, isFreeE
       id="tickets"
       eyebrow="Admission"
       title="Reserve your place"
-      aside={admission.kind === 'open' && anyPaid ? <p className="text-fs-xs text-hero-ink-soft">{TAX_INCLUSIVE_NOTE}</p> : undefined}
+      aside={admission.kind === 'open' && anyPaid
+        ? <p className="text-fs-xs text-hero-ink-soft">{attendeePaysFees ? FEES_ADDED_AT_CHECKOUT_NOTE : TAX_INCLUSIVE_NOTE}</p>
+        : undefined}
     >
       {admission.kind === 'closed' || admission.kind === 'soon' ? (
         <div className={cn(LUXE_CARD, 'flex items-start gap-3 p-5')}>

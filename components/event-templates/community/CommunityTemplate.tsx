@@ -26,6 +26,7 @@ import { CommunityRegistration }   from './CommunityRegistration'
 import { CommunityVenue }          from './CommunityVenue'
 import { CommunityOrganizer }      from './CommunityOrganizer'
 import { passDisplayPrice }        from '@/components/event-templates/shared/utils/format'
+import { RichText }                from '@/components/event-templates/shared/ui/RichText'
 
 function fmtDate(d: string) {
   if (!d) return ''
@@ -247,9 +248,7 @@ export function CommunityTemplate(props: EventDetailProps) {
                   About This Event
                 </h2>
               </div>
-              <p className="whitespace-pre-line text-[0.9375rem] leading-[1.75] text-gray-600 lg:pt-0.5">
-                {description}
-              </p>
+              <RichText text={description} className="text-[0.9375rem] leading-[1.75] text-gray-600 lg:pt-0.5" />
             </motion.div>
           </div>
         </section>

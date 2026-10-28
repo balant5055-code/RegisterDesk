@@ -9,7 +9,7 @@ import type { PassAvailability } from '@/lib/registrations/types'
 import type { PassPublic } from '@/components/event-templates/types'
 import { AvailabilityBadge } from '@/components/event-templates/shared/registration/AvailabilityBadge'
 import { formatINR, formatDateShort, minPassPrice } from '@/components/event-templates/shared/utils/format'
-import { TAX_INCLUSIVE_NOTE_SHORT } from '@/lib/pricing/copy'
+import { TAX_INCLUSIVE_NOTE_SHORT, FEES_ADDED_AT_CHECKOUT_NOTE_SHORT } from '@/lib/pricing/copy'
 
 const trustSignals = [
   { icon: <CheckCircle className="size-3 text-action" aria-hidden />, text: 'Instant Confirmation' },
@@ -19,12 +19,14 @@ const trustSignals = [
 ]
 
 export function StickyRegistrationCard({
-  passes, isFreeEvent, slug, availability,
+  passes, isFreeEvent, attendeePaysFees = false, slug, availability,
   registrationOpen, closedMessage,
   registrationEndDate, saved, onSave,
 }: {
   passes:              PassPublic[]
   isFreeEvent:         boolean
+  /** RD-CUSTOM-PUBLIC-01 · fees are added at checkout (server-resolved) — never "Incl. taxes" then. */
+  attendeePaysFees?:   boolean
   slug:                string
   availability:        Record<string, PassAvailability>
   registrationOpen:    boolean
@@ -83,7 +85,7 @@ export function StickyRegistrationCard({
               {isFreeEvent || minPassPrice(passes) === 0 ? 'Free' : formatINR(minPassPrice(passes))}
             </p>
             {!isFreeEvent && minPassPrice(passes) > 0 && (
-              <p className="mt-0.5 text-[10px] text-muted-foreground">{TAX_INCLUSIVE_NOTE_SHORT}</p>
+              <p className="mt-0.5 text-[10px] text-muted-foreground">{attendeePaysFees ? FEES_ADDED_AT_CHECKOUT_NOTE_SHORT : TAX_INCLUSIVE_NOTE_SHORT}</p>
             )}
 
             <div className="mt-2.5 flex items-center justify-between">

@@ -21,6 +21,7 @@ import { CulturalVenue }           from './CulturalVenue'
 import { CulturalFAQ }             from './CulturalFAQ'
 import { CulturalOrganizer }       from './CulturalOrganizer'
 import { PromoVideoSection }        from '@/components/event-templates/shared/media/PromoVideoSection'
+import { RichText }                 from '@/components/event-templates/shared/ui/RichText'
 
 // ─── Template ──────────────────────────────────────────────────────────────────
 
@@ -181,9 +182,7 @@ export function CulturalTemplate(props: EventDetailProps) {
       {description?.trim() && (
         <section className="border-b border-white/5 bg-gray-900 py-8 sm:py-10">
           <div className="mx-auto max-w-4xl px-4 sm:px-6 lg:px-8">
-            <p className="whitespace-pre-line text-[0.9375rem] leading-[1.9] text-white/50">
-              {description}
-            </p>
+            <RichText text={description} className="text-[0.9375rem] leading-[1.9] text-white/50" />
           </div>
         </section>
       )}

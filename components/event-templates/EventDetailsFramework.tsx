@@ -44,6 +44,7 @@ import { SponsorsShowcase } from '@/components/event-templates/shared/sponsors/S
 import { PromoVideoSection } from '@/components/event-templates/shared/media/PromoVideoSection'
 import { JourneySection } from '@/components/event-templates/shared/journey/JourneySection'
 import { agendaToTimeline } from '@/components/event-templates/shared/journey/journeyModel'
+import { RichText } from '@/components/event-templates/shared/ui/RichText'
 
 // ─── Lifecycle banner ───────────────────────────────────────────────────────────
 // 'standard' = the tokenised slim band used by the composed showcase templates.
@@ -190,6 +191,7 @@ function ComposedBody({
       <TicketSection
         passes={passes}
         isFreeEvent={isFreeEvent}
+        attendeePaysFees={props.attendeePaysFees}
         slug={slug}
         availability={availability}
         eventMilestoneAlert={eventMilestoneAlert}
@@ -204,7 +206,7 @@ function ComposedBody({
       {description?.trim() && (
         <SectionShell id="about" measure="prose" bg="muted">
           <EventSectionHeader eyebrow={aboutEyebrow} title={aboutTitle} />
-          <p className={cn('whitespace-pre-line', TYPE.sectionDesc)}>{description}</p>
+          <RichText text={description} className={TYPE.sectionDesc} />
         </SectionShell>
       )}
 

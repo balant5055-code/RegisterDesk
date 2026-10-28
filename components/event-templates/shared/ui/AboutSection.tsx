@@ -4,22 +4,22 @@ import { useState } from 'react'
 import { ChevronDown, ChevronUp } from 'lucide-react'
 import type { ReactNode } from 'react'
 import { SectionWrapper } from '@/components/event-templates/shared/ui/SectionWrapper'
+import { parseMarkdownBlocks, RichBlocks } from '@/components/event-templates/shared/ui/RichText'
 
 export function AboutSection({ description, highlights }: {
   description: string
   highlights?: { icon: ReactNode; label: string }[]
 }) {
   const [expanded, setExpanded] = useState(false)
-  const paras   = description.split('\n').filter(Boolean)
-  const isLong  = paras.length > 4
-  const visible = isLong && !expanded ? paras.slice(0, 4) : paras
+  // RD-MARKDOWN-01 — Markdown blocks (shared/ui/RichText); "Read more" still folds after four.
+  const blocks  = parseMarkdownBlocks(description)
+  const isLong  = blocks.length > 4
+  const visible = isLong && !expanded ? blocks.slice(0, 4) : blocks
 
   return (
     <SectionWrapper title="About This Event">
       <div className="space-y-3">
-        {visible.map((para, i) => (
-          <p key={i} className="text-sm leading-relaxed text-muted-foreground">{para}</p>
-        ))}
+        <RichBlocks blocks={visible} className="space-y-3 text-sm leading-relaxed text-muted-foreground" />
         {isLong && (
           <button
             onClick={() => setExpanded(e => !e)}

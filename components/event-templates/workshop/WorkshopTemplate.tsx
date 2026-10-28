@@ -22,6 +22,7 @@ import { PromoVideoSection }    from '@/components/event-templates/shared/media/
 import { VenueSection }         from '@/components/event-templates/shared/venue/VenueSection'
 import { ConferenceSponsors }   from '@/components/event-templates/conference/ConferenceSponsors'
 import { SharedGallery }        from '@/components/event-templates/shared/media/SharedGallery'
+import { RichText }             from '@/components/event-templates/shared/ui/RichText'
 
 // ─── Template ──────────────────────────────────────────────────────────────────
 
@@ -142,9 +143,7 @@ export function WorkshopTemplate(props: EventDetailProps) {
       {description?.trim() && (
         <section className="border-b border-gray-100 bg-gray-50 py-8 sm:py-10">
           <div className="mx-auto max-w-4xl px-4 sm:px-6 lg:px-8">
-            <p className="whitespace-pre-line text-[0.9375rem] leading-[1.85] text-gray-600">
-              {description}
-            </p>
+            <RichText text={description} className="text-[0.9375rem] leading-[1.85] text-gray-600" />
           </div>
         </section>
       )}

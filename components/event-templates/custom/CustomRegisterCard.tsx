@@ -13,9 +13,9 @@ import { cn } from '@/lib/utils/cn'
 import { marketingButton } from '@/lib/marketing/theme'
 import { AddToCalendarButton } from '@/components/event-templates/shared/ui/AddToCalendarButton'
 import { DownloadTicketLink } from '@/components/event-templates/shared/registration/DownloadTicketLink'
-import { formatDateShort, formatTime, formatINR, minPassPrice } from '@/components/event-templates/shared/utils/format'
+import { formatDateShort, formatTime, formatINR } from '@/components/event-templates/shared/utils/format'
 import type { EventDetailProps } from '@/components/event-templates/types'
-import type { AdmissionState } from './admissionModel'
+import { resolveAdmissionPrice, type AdmissionState } from './admissionModel'
 import { LUXE_CARD, LUXE_LABEL, longDateParts, formatSalesMoment } from './luxe'
 
 interface Row { Icon: LucideIcon; value: string; sub?: string }
@@ -56,10 +56,9 @@ export function CustomRegisterCard({ props, admission }: { props: EventDetailPro
   const [copied, setCopied] = useState(false)
   const rows   = buildRows(props)
   const isOpen = admission.kind === 'open'
-  const free   = isFreeEvent || (isOpen && admission.purchasable.every(p => p.price === 0))
-    || (!isOpen && passes.length > 0 && passes.every(p => p.price === 0))
+  const { free, from } = resolveAdmissionPrice(admission, passes, props.availability, isFreeEvent)
 
-  const price = passes.length === 0 ? null : free ? 'Free' : `From ${formatINR(minPassPrice(passes))}`
+  const price = from === null ? null : free ? 'Free' : `From ${formatINR(from)}`
 
   const status =
     admission.kind === 'open'    ? 'Registration open'

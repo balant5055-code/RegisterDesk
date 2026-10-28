@@ -22,6 +22,7 @@ import { ConferenceFAQ }         from './ConferenceFAQ'
 import { PromoVideoSection }     from '@/components/event-templates/shared/media/PromoVideoSection'
 import { SharedGallery }        from '@/components/event-templates/shared/media/SharedGallery'
 import { passDisplayPrice }     from '@/components/event-templates/shared/utils/format'
+import { RichText }             from '@/components/event-templates/shared/ui/RichText'
 
 // ─── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -188,9 +189,7 @@ export function ConferenceTemplate(props: EventDetailProps) {
               <h2 className="mb-6 text-2xl font-black tracking-tight text-gray-950 sm:text-[2rem]">
                 About This Conference
               </h2>
-              <p className="whitespace-pre-line text-[1.0625rem] leading-[1.8] text-gray-600">
-                {description}
-              </p>
+              <RichText text={description} className="text-[1.0625rem] leading-[1.8] text-gray-600" />
             </motion.div>
           </div>
         </section>
