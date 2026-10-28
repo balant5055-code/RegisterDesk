@@ -31,6 +31,7 @@ import {
 } from '@/lib/events/liveEventRef'
 import type { EventEditPayload, EventEditResponse } from '@/types/events'
 import { introducedValueIssues, applyFieldPaths } from '@/lib/events/eventValueRules'
+import { galleryChangeProblem, galleryOf } from '@/lib/events/galleryLimits'
 import { resolvePlatformPricing }    from '@/lib/platform/pricing/resolver'
 import { isReviewClosed }            from '@/lib/events/lifecycleStateMachine'
 
@@ -185,6 +186,13 @@ export async function PATCH(
   )
   if (introduced.length > 0) {
     return NextResponse.json({ success: false, error: introduced.map(i => i.message).join(' ') }, { status: 422 })
+  }
+
+  // RD-GALLERY-01 — 6 uploaded / 20 URL gallery images, growth-only: an event saved under the old
+  // limit can still be edited and trimmed, but no edit can grow a count past its limit.
+  if (changedFields.includes('galleryImages')) {
+    const gallery = galleryChangeProblem(galleryOf(d.eventDetails), galleryOf(applyFieldPaths(d, updates as Record<string, unknown>).eventDetails))
+    if (gallery) return NextResponse.json({ success: false, error: gallery, code: 'GALLERY_LIMIT' }, { status: 422 })
   }
 
   // Capture the "before" snapshot of exactly the changed fields (for rollback + audit).

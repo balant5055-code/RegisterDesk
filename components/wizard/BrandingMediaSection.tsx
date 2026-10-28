@@ -13,6 +13,8 @@ import { cn } from '@/lib/utils/cn'
 import type { MediaConfig, MediaAsset } from '@/components/wizard/eventDetailsConfig'
 import { uploadEventAsset } from '@/lib/firebase/storage'
 import { getVideoEmbed } from '@/components/event-templates/shared/utils/format'
+import { GALLERY_UPLOAD_MAX, GALLERY_URL_MAX, GALLERY_COMPRESSION, countGallery } from '@/lib/events/galleryLimits'
+import { compressToBudget } from '@/lib/media/galleryCompression'
 
 // ─── Shared primitives (mirror EventDetailsBuilder theme exactly) ─────────────
 
@@ -69,8 +71,9 @@ function SourceTabs({ active, onChange }: { active: 'upload' | 'url'; onChange: 
 
 const LOGO_LIMIT    = 5  * 1024 * 1024   // 5 MB
 const BANNER_LIMIT  = 10 * 1024 * 1024   // 10 MB
-const GALLERY_LIMIT = 5  * 1024 * 1024   // 5 MB per item
-const GALLERY_MAX   = 20
+const GALLERY_LIMIT = GALLERY_COMPRESSION.originalMaxBytes   // 5 MB per ORIGINAL file
+// RD-GALLERY-01 — the gallery's limits (6 uploaded, 20 by URL) live in lib/events/galleryLimits,
+// shared with the server, which enforces them on save, edit and publish.
 const ACCEPT        = 'image/png,image/jpeg,image/webp'
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -83,39 +86,70 @@ function validateFile(file: File, maxBytes: number): string | null {
   return null
 }
 
-/** Compresses a File (via its objectURL) to JPEG, resizing and iterating quality. */
-async function compressToJpeg(
-  objectUrl: string,
-  maxW: number,
-  maxH: number,
-  targetBytes: number,
-): Promise<string> {
+// ─── RD-GALLERY-01 · gallery image compression ───────────────────────────────
+
+function loadImage(src: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
     const img = new Image()
-    img.onload = () => {
-      const canvas  = document.createElement('canvas')
-      let w = img.naturalWidth, h = img.naturalHeight
-      const ratio   = Math.min(maxW / w, maxH / h, 1)
-      canvas.width  = Math.round(w * ratio)
-      canvas.height = Math.round(h * ratio)
-      canvas.getContext('2d')!.drawImage(img, 0, 0, canvas.width, canvas.height)
-
-      let q = 0.92
-      const attempt = () => {
-        canvas.toBlob(blob => {
-          if (!blob) { reject(new Error('Canvas export failed')); return }
-          if (blob.size <= targetBytes || q <= 0.4) {
-            const fr = new FileReader()
-            fr.onload = () => resolve(fr.result as string)
-            fr.readAsDataURL(blob)
-          } else { q = Math.max(0.4, q - 0.08); attempt() }
-        }, 'image/jpeg', q)
-      }
-      attempt()
-    }
-    img.onerror = () => reject(new Error('Image load failed'))
-    img.src = objectUrl
+    img.onload  = () => resolve(img)
+    img.onerror = () => reject(new Error('This image could not be read.'))
+    img.src = src
   })
+}
+
+function canvasBlob(canvas: HTMLCanvasElement, type: string, quality: number): Promise<Blob | null> {
+  return new Promise(resolve => canvas.toBlob(resolve, type, quality))
+}
+
+function blobToDataUrl(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const fr = new FileReader()
+    fr.onload  = () => resolve(fr.result as string)
+    fr.onerror = () => reject(new Error('This image could not be read.'))
+    fr.readAsDataURL(blob)
+  })
+}
+
+/** True when this browser can ENCODE WebP from a canvas (Safari before 14 cannot). */
+function canEncodeWebp(): boolean {
+  try {
+    const c = document.createElement('canvas'); c.width = c.height = 1
+    return c.toDataURL('image/webp').startsWith('data:image/webp')
+  } catch { return false }
+}
+
+/**
+ * RD-GALLERY-01 — an uploaded gallery image, made web-sized before it leaves the browser:
+ * longest side ≤ 1920 px (aspect ratio kept, never upscaled), WebP where the browser can encode
+ * it (JPEG otherwise), quality stepped down toward ~400 KB, then the size stepped down if needed.
+ * The decisions live in lib/media/galleryCompression (tested); this supplies the canvas. It THROWS
+ * rather than return anything over 1 MB — the original is never uploaded instead.
+ */
+async function compressGalleryImage(file: File): Promise<{ dataUrl: string; ext: 'webp' | 'jpg' }> {
+  const { maxDimension, targetBytes, maxBytes } = GALLERY_COMPRESSION
+  const objectUrl = URL.createObjectURL(file)
+  try {
+    const img  = await loadImage(objectUrl)
+    const webp = canEncodeWebp()
+    const type = webp ? 'image/webp' : 'image/jpeg'
+    let canvas: HTMLCanvasElement | null = null
+    const encode = async (w: number, h: number, quality: number): Promise<Blob | null> => {
+      if (!canvas || canvas.width !== w || canvas.height !== h) {
+        canvas = document.createElement('canvas')
+        canvas.width = w; canvas.height = h
+        const ctx = canvas.getContext('2d')
+        if (!ctx) return null
+        // JPEG has no transparency: paint a white base so a transparent PNG does not turn black.
+        if (!webp) { ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, w, h) }
+        ctx.drawImage(img, 0, 0, w, h)
+      }
+      return canvasBlob(canvas, type, quality)
+    }
+    const { result } = await compressToBudget({ w: img.naturalWidth, h: img.naturalHeight }, encode, { type, maxDimension, targetBytes, maxBytes })
+    return { dataUrl: await blobToDataUrl(result), ext: webp ? 'webp' : 'jpg' }
+  } finally {
+    URL.revokeObjectURL(objectUrl)
+  }
 }
 
 /** Returns the natural dimensions of an image src (data URL or external URL). */
@@ -962,34 +996,65 @@ function GallerySection({ images, onChange, uploadContext }: {
   const [urlIn,   setUrlIn]   = useState('')
   const [busy,    setBusy]    = useState(false)
   const [preview, setPreview] = useState<number | null>(null)
+  // RD-GALLERY-01 — what did not get added, and why (never a silent skip).
+  const [notices, setNotices] = useState<string[]>([])
+  // A second selection while one is still processing is refused, so a double submit can never
+  // upload twice or overrun the limit on stale counts.
+  const busyRef = useRef(false)
 
-  const remaining = GALLERY_MAX - images.length
+  // RD-GALLERY-01 — uploads and URL images are counted and limited SEPARATELY (6 / 20).
+  const counts           = countGallery(images)
+  const remainingUploads = Math.max(0, GALLERY_UPLOAD_MAX - counts.uploads)
+  const remainingUrls    = Math.max(0, GALLERY_URL_MAX - counts.urls)
+  const canAdd           = remainingUploads > 0 || remainingUrls > 0
 
   const handleFiles = async (files: File[]) => {
+    if (busyRef.current) return
+    busyRef.current = true
     setBusy(true)
+    const problems: string[] = []
     const batch: MediaAsset[] = []
-    for (const f of files.slice(0, remaining)) {
-      try {
-        const obj  = URL.createObjectURL(f)
-        const data = await compressToJpeg(obj, 1200, 900, 300 * 1024)
-        URL.revokeObjectURL(obj)
-
-        if (uploadContext) {
-          const filename = `gallery-${Date.now()}-${Math.random().toString(36).slice(2, 7)}.jpg`
-          const downloadUrl = await uploadEventAsset(uploadContext.uid, uploadContext.draftId, 'gallery', data, filename)
-          batch.push({ source: 'url', value: downloadUrl, originalFileName: f.name })
-        } else {
-          batch.push({ source: 'upload', value: data, originalFileName: f.name })
-        }
-      } catch { /* skip failed images */ }
+    const accepted = files.slice(0, remainingUploads)
+    if (files.length > accepted.length) {
+      const skipped = files.length - accepted.length
+      problems.push(remainingUploads === 0
+        ? `The gallery already has ${GALLERY_UPLOAD_MAX} uploaded images — remove one to upload another, or add photos by URL.`
+        : `Only ${remainingUploads} more upload${remainingUploads === 1 ? '' : 's'} allowed (${GALLERY_UPLOAD_MAX} max); ${skipped} file${skipped === 1 ? ' was' : 's were'} not added.`)
     }
-    onChange([...images, ...batch])
-    setBusy(false)
+    try {
+      for (const f of accepted) {
+        // Validated HERE too: the quick-add tile hands files straight to this handler.
+        const invalid = validateFile(f, GALLERY_LIMIT)
+        if (invalid) { problems.push(`${f.name}: ${invalid}`); continue }
+        try {
+          const { dataUrl, ext } = await compressGalleryImage(f)
+          if (uploadContext) {
+            const filename = `gallery-${Date.now()}-${Math.random().toString(36).slice(2, 7)}.${ext}`
+            const downloadUrl = await uploadEventAsset(uploadContext.uid, uploadContext.draftId, 'gallery', dataUrl, filename)
+            batch.push({ source: 'url', value: downloadUrl, originalFileName: f.name, origin: 'upload' })
+          } else {
+            batch.push({ source: 'upload', value: dataUrl, originalFileName: f.name, origin: 'upload' })
+          }
+        } catch (e) {
+          problems.push(`${f.name}: ${e instanceof Error ? e.message : 'could not be uploaded.'}`)
+        }
+      }
+      if (batch.length) onChange([...images, ...batch])
+    } finally {
+      setNotices(problems)
+      setBusy(false)
+      busyRef.current = false
+    }
   }
 
   const addUrl = () => {
-    const v = urlIn.trim(); if (!v || !remaining) return
-    onChange([...images, { source: 'url', value: v }])
+    const v = urlIn.trim(); if (!v) return
+    if (remainingUrls === 0) {
+      setNotices([`The gallery already has ${GALLERY_URL_MAX} images added by URL — remove one to add another.`])
+      return
+    }
+    onChange([...images, { source: 'url', value: v, origin: 'url' }])
+    setNotices([])
     setUrlIn('')
   }
 
@@ -1009,7 +1074,11 @@ function GallerySection({ images, onChange, uploadContext }: {
   return (
     <>
       <Card title="Gallery Images"
-        action={<span className="text-[12px] text-muted-foreground">{images.length} / {GALLERY_MAX}</span>}>
+        action={
+          <span className="text-[12px] text-muted-foreground" data-testid="gallery-counts">
+            {counts.uploads} / {GALLERY_UPLOAD_MAX} uploaded · {counts.urls} / {GALLERY_URL_MAX} by URL
+          </span>
+        }>
         <div className="flex flex-col gap-4">
 
           {/* Thumbnail grid */}
@@ -1048,11 +1117,11 @@ function GallerySection({ images, onChange, uploadContext }: {
                 </div>
               ))}
               {/* Quick-add slot */}
-              {remaining > 0 && (
+              {remainingUploads > 0 && !busy && (
                 <label className="flex aspect-square cursor-pointer flex-col items-center justify-center gap-1 rounded-lg border-2 border-dashed border-border/60 text-muted-foreground/50 transition-colors hover:border-primary/40 hover:text-primary/60">
                   <Plus className="size-5" />
                   <span className="text-[12px]">Add</span>
-                  <input type="file" accept={ACCEPT} multiple className="sr-only"
+                  <input type="file" accept={ACCEPT} multiple className="sr-only" disabled={busy}
                     onChange={e => { if (e.target.files) handleFiles(Array.from(e.target.files)); e.target.value = '' }} />
                 </label>
               )}
@@ -1060,7 +1129,7 @@ function GallerySection({ images, onChange, uploadContext }: {
           )}
 
           {/* Add controls */}
-          {remaining > 0 && (
+          {canAdd && (
             <div className="flex flex-col gap-3">
               <div className="flex w-fit overflow-hidden rounded-lg border border-border text-[12px] font-medium">
                 {(['upload', 'url'] as const).map(m => (
@@ -1072,8 +1141,18 @@ function GallerySection({ images, onChange, uploadContext }: {
               </div>
 
               {mode === 'upload' ? (
-                <DropZone multiple onFiles={handleFiles} maxBytes={GALLERY_LIMIT} disabled={busy}
-                  hint={`PNG, JPG, WEBP · max 5 MB · ${remaining} slot${remaining !== 1 ? 's' : ''} remaining`} />
+                remainingUploads > 0 ? (
+                  <DropZone multiple onFiles={handleFiles} maxBytes={GALLERY_LIMIT} disabled={busy}
+                    hint={`PNG, JPG, WEBP · max 5 MB · resized to 1920 px · ${remainingUploads} of ${GALLERY_UPLOAD_MAX} uploads remaining`} />
+                ) : (
+                  <p className={cn(hintCls, 'mt-0')}>
+                    All {GALLERY_UPLOAD_MAX} upload slots are used. Remove an uploaded image to upload another, or add photos by URL ({remainingUrls} remaining).
+                  </p>
+                )
+              ) : remainingUrls === 0 ? (
+                <p className={cn(hintCls, 'mt-0')}>
+                  All {GALLERY_URL_MAX} URL slots are used. Remove a URL image to add another.
+                </p>
               ) : (
                 <div className="flex gap-2">
                   <input className={cn(inputCls, 'flex-1')} type="url" value={urlIn}
@@ -1087,12 +1166,20 @@ function GallerySection({ images, onChange, uploadContext }: {
                 </div>
               )}
 
-              {busy && <p className="text-[12px] text-muted-foreground">Processing images…</p>}
+              {busy && <p className="text-[12px] text-muted-foreground">Compressing and uploading images…</p>}
             </div>
           )}
 
+          {notices.length > 0 && (
+            <ul role="alert" data-testid="gallery-notices" className="flex flex-col gap-1 rounded-lg border border-amber-300/60 bg-amber-50 px-3 py-2 text-[12px] text-amber-900 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-200">
+              {notices.map((n, i) => <li key={i}>{n}</li>)}
+            </ul>
+          )}
+
           {images.length === 0 && !busy && (
-            <p className={cn(hintCls, 'mt-0')}>Add up to {GALLERY_MAX} event photos to engage attendees.</p>
+            <p className={cn(hintCls, 'mt-0')}>
+              Upload up to {GALLERY_UPLOAD_MAX} event photos and add up to {GALLERY_URL_MAX} more by URL.
+            </p>
           )}
         </div>
       </Card>

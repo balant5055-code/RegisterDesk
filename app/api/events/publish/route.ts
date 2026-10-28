@@ -17,6 +17,7 @@ import { adminDb } from '@/lib/firebase/admin'
 import { authorizeWorkspace } from '@/lib/team/workspace'
 import { organizerStatusGuard }  from '@/lib/admin/organizerStatus'
 import { validateEventPublish }  from '@/lib/events/validatePublish'
+import { galleryProblem, galleryOf } from '@/lib/events/galleryLimits'
 import { ensureCounterExists }   from '@/lib/firebase/firestore/registrationCounters'
 import { isEmailProviderName } from '@/lib/email/providerName'
 import { resolveTotalCapacity, capacityPlanForRegistrationLimit } from '@/lib/registrations/capacity'
@@ -139,6 +140,15 @@ export async function POST(req: NextRequest): Promise<NextResponse<PublishApiRes
         { status: 403 },
       )
     }
+  }
+
+  // ── 4a2. RD-GALLERY-01 — a NEW event must be within the gallery limits (6 uploaded, 20 by URL).
+  // The draft can be written by the browser directly, so this is the server's check before the
+  // gallery reaches the live event. Strict here (first publish); later changes are growth-only.
+  const galleryIssue = galleryProblem(galleryOf(draft.eventDetails))
+  if (galleryIssue) {
+    console.warn(`[publish] gallery over limit · draftId=${draftId}`)
+    return NextResponse.json({ canPublish: false, reason: 'INVALID_EVENT_VALUES', error: galleryIssue }, { status: 422 })
   }
 
   // ── 4b. RD-EVENT-COMMERCE-05F — the organizer's Publish Agreement, enforced HERE ─────────

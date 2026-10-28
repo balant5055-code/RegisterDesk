@@ -21,6 +21,7 @@
 
 import { findCommercialPricingChanges } from '@/lib/events/editing/pricingIntegrity'
 import { introducedValueIssues } from '@/lib/events/eventValueRules'
+import { galleryChangeProblem, galleryOf } from '@/lib/events/galleryLimits'
 import { normalizeTypeDetails, passesForType } from '@/lib/events/builder/typeTransition'
 
 export type LiveContentSync =
@@ -90,6 +91,12 @@ export function buildLiveContentSync(
     { eventDetails: dn.eventDetails, pricing: dn.pricing, eventType: live.eventType },
   )
   if (introduced.length > 0) return { ok: false, status: 422, message: introduced.map(i => i.message).join(' ') }
+
+  // ── RD-GALLERY-01 · gallery limits (6 uploaded / 20 URL), growth-only vs the live event ──
+  // Resubmit / republish copy the whole draft gallery; a draft written directly by the browser
+  // cannot use the copy to grow the live gallery past its limits.
+  const gallery = galleryChangeProblem(galleryOf(live.eventDetails), galleryOf(dn.eventDetails))
+  if (gallery) return { ok: false, status: 422, message: gallery }
 
   // ── Pricing integrity guard (parity with PATCH /edit) ─────────────
   // /edit blocks lowering a pass capacity below its sold count on a published event. The copy

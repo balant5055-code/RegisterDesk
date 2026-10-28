@@ -16,6 +16,13 @@ export interface MediaAsset {
   source:            MediaSource
   value:             string   // data URL (upload) or external URL (url)
   originalFileName?: string
+  /**
+   * RD-GALLERY-01 — how a GALLERY image was added. An upload is stored with `source: 'url'` (its
+   * storage URL), so this is what tells it apart from a pasted link for the separate 6-upload /
+   * 20-URL limits. Optional: older entries have none and are classified by their address
+   * (lib/events/galleryLimits).
+   */
+  origin?:           'upload' | 'url'
 }
 
 // ─── Interfaces ───────────────────────────────────────────────────────────────
