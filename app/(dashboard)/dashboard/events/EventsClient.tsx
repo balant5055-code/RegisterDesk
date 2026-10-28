@@ -11,7 +11,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
 import { useRouter, useSearchParams } from 'next/navigation'
-import { Plus, Search, X, ChevronLeft, ChevronRight, TrendingUp, FileText, Archive } from 'lucide-react'
+import { Plus, Search, X, ChevronLeft, ChevronRight, TrendingUp, FileText, Archive, AlertTriangle } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { auth } from '@/lib/firebase/auth'
 import { useAuth } from '@/components/auth/AuthProvider'
@@ -20,6 +20,7 @@ import { EmptyState, ErrorState, PageHeader, buttonVariants, useToast, useConfir
 import { PERMANENT_DELETE_TITLE, PERMANENT_DELETE_DESCRIPTION } from '@/lib/events/permanentDeleteCopy'
 import type { EventListItem, EventsListResponse } from '@/app/api/organizer/events/route'
 import type { EventListingTabKey } from '@/lib/events/listingTabs'
+import { CLOSURE_SERVICES_DETAIL } from '@/lib/notifications/reviewDeadlineAlerts'
 import { EventCard, EventCardSkeleton, EVENTS_GRID_CLASS, type PendingAction } from './EventCard'
 import { EventsTabs, tabId, tabPanelId, type EventsTab } from './EventsTabs'
 import {
@@ -31,6 +32,8 @@ const TABS: readonly EventsTab[] = [
   { key: 'active',    label: 'Active'    },
   { key: 'published', label: 'Published' },
   { key: 'drafts',    label: 'Drafts'    },
+  // RD-REVIEW-02 — events whose first changes deadline passed: one more 24-hour window.
+  { key: 'action_required', label: 'Action Required' },
   { key: 'archived',  label: 'Archived'  },
 ]
 
@@ -40,6 +43,7 @@ const EMPTY: Record<EventListingTabKey, {
   active:    { icon: TrendingUp, title: 'No active events',    desc: 'Publish an event to start accepting registrations.' },
   published: { icon: TrendingUp, title: 'No published events', desc: 'Published events with open registration appear here.' },
   drafts:    { icon: FileText,   title: 'No draft events',     desc: "Events you're working on appear here.", action: true },
+  action_required: { icon: AlertTriangle, title: 'Nothing needs action', desc: 'Events whose requested changes are overdue appear here, with time left before they close.' },
   archived:  { icon: Archive,    title: 'No archived events',  desc: 'Completed, cancelled, and archived events appear here.' },
 }
 
@@ -356,9 +360,31 @@ export default function EventsClient() {
     )
   }, [runMutation, authedFetch])
 
+  // RD-REVIEW-02 — closing ends the event for ordinary operations, so it is confirmed first; a
+  // cancelled dialog sends nothing. The request names the review cycle this card was loaded with.
+  const onCloseReview = useCallback(async (event: EventListItem) => {
+    const ok = await confirm({
+      title:        `Close “${event.name}”?`,
+      message:      'Closing this event is permanent: you will no longer be able to edit it, resubmit it for review or publish it. '
+        + CLOSURE_SERVICES_DETAIL,
+      confirmLabel: 'Close event',
+      tone:         'danger',
+    })
+    if (!ok) return
+    void runMutation(event, 'close',
+      () => authedFetch(`/api/organizer/events/${event.draftId}/close-review`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ confirm: true, reviewCycleId: event.reviewCycleId ?? null }),
+      }),
+      `“${event.name}” closed.`,
+      'Could not close this event. Reload the page and try again.',
+    )
+  }, [confirm, runMutation, authedFetch])
+
   const cardActions = useMemo(
-    () => ({ onDuplicate, onArchive, onRestore, onDeleteDraft, onDeleteForever, onResubmit }),
-    [onDuplicate, onArchive, onRestore, onDeleteDraft, onDeleteForever, onResubmit],
+    () => ({ onDuplicate, onArchive, onRestore, onDeleteDraft, onDeleteForever, onResubmit, onCloseReview }),
+    [onDuplicate, onArchive, onRestore, onDeleteDraft, onDeleteForever, onResubmit, onCloseReview],
   )
 
   const searching = urlSearch.length > 0

@@ -15,6 +15,7 @@ import { writeEmailLog }                  from '@/lib/email-logs/write'
 import { generateIcs }                    from '@/lib/calendar/ics'
 import type { RegistrationDocument }      from './types'
 import { getEmailAppUrl } from '@/lib/email/appUrl'
+import { meetingAccessForRegistration } from './meetingAccess'
 
 export async function sendApprovalEmail(registrationId: string): Promise<void> {
   const regSnap = await adminDb.collection('registrations').doc(registrationId).get()
@@ -92,6 +93,11 @@ export async function sendApprovalEmail(registrationId: string): Promise<void> {
     } catch { /* ICS generation failure must not break email sending */ }
   }
 
+  // RD-MEETING-ACCESS-01 — the registration just read is the entitlement record (approved ⇒ confirmed).
+  const meetingAccess = await meetingAccessForRegistration({
+    registrationId, eventSlug: reg.eventSlug, eventDetails: rawDetails, registration: reg,
+  })
+
   let emailStatus: 'sent' | 'failed' = 'failed'
   let emailFailureReason: string | undefined
 
@@ -111,6 +117,7 @@ export async function sendApprovalEmail(registrationId: string): Promise<void> {
       pdfDownloadUrl:     pdfUrl,
       receiptDownloadUrl: receiptUrl,
       icsContent,
+      meetingAccess:      meetingAccess ?? undefined,
     }, emailProviderName)
     emailStatus = result.success ? 'sent' : 'failed'
     if (!result.success) {

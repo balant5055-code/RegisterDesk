@@ -20,19 +20,18 @@ import { formatDate, formatTime, getVideoEmbed } from '@/components/event-templa
 import { resolveOrganizerContact } from '@/components/event-templates/shared/people/contactModel'
 import { languageLabel, timezoneLabel, refundLines } from '@/components/event-templates/shared/ui/EventInfoSection'
 import { AttachmentChips } from '@/components/event-templates/shared/ui/framework'
+import { RichText } from '@/components/event-templates/shared/ui/RichText'
 import { LuxeBlock, LUXE_CARD, LUXE_LABEL } from './luxe'
 
 const BODY = 'text-fs-base text-hero-ink-soft leading-relaxed'
 
 // ─── About ──────────────────────────────────────────────────────────────────────
 export function AboutBlock({ description }: { description: string }) {
-  const paragraphs = (description ?? '').split(/\n\s*\n/).map(s => s.trim()).filter(Boolean)
-  if (paragraphs.length === 0) return null
+  if (!description?.trim()) return null
+  // RD-MARKDOWN-01 — the wizard's promised Markdown subset, rendered safely (shared/ui/RichText).
   return (
     <LuxeBlock id="about" eyebrow="The occasion" title="About the event">
-      <div className="max-w-2xl space-y-4">
-        {paragraphs.map((p, i) => <p key={i} className={cn('whitespace-pre-line', BODY)}>{p}</p>)}
-      </div>
+      <RichText text={description} className={cn('max-w-2xl space-y-4', BODY)} />
     </LuxeBlock>
   )
 }
@@ -236,10 +235,34 @@ export function VenueBlock({ venueType, venueName, physical, online, mapsLink, m
 }
 
 // ─── Organizer ──────────────────────────────────────────────────────────────────
-export function OrganizerBlock({ organizer, supportEmail }: { organizer: OrganizerInfo; supportEmail: string }) {
+export function OrganizerBlock({ organizer, supportEmail, supportPhone = '', showSocial = true }: {
+  organizer: OrganizerInfo; supportEmail: string; supportPhone?: string; showSocial?: boolean
+}) {
   const contact = resolveOrganizerContact({ supportEmail, organizerEmail: organizer.email, organizerPhone: organizer.phone })
   const website = organizer.website?.trim()
+  // RD-CUSTOM-ORG-01 — the Organizer tab's contact phone is attendee-facing (the publish checklist
+  // warns "No Contact Phone — attendees … have no way to reach you"), but it was only the THIRD
+  // fallback of the Contact button behind two emails, the organizer email being required — so it
+  // never appeared. It is now its own Call action, unless the Contact button already dials it or
+  // "Good to know" already lists the same number as the support phone.
+  const phone    = organizer.phone?.trim() || ''
+  const showCall = !!phone && !contact.href.startsWith('tel:') && phone !== supportPhone.trim()
   const about   = organizer.bio?.trim() || organizer.tagline?.trim()
+  // RD-CUSTOM-PUBLIC-01 — the organizer's social links (Organizer tab), honouring the
+  // "Show social links" toggle. Every other template renders them; this one had dropped them.
+  const s = organizer.social
+  const socials = showSocial ? ([
+    s?.instagram?.trim() && { label: 'Instagram', url: s.instagram.trim() },
+    s?.linkedin?.trim()  && { label: 'LinkedIn',  url: s.linkedin.trim() },
+    s?.twitter?.trim()   && { label: 'Twitter',   url: s.twitter.trim() },
+    s?.facebook?.trim()  && { label: 'Facebook',  url: s.facebook.trim() },
+    s?.youtube?.trim()   && { label: 'YouTube',   url: s.youtube.trim() },
+  ].filter(Boolean) as { label: string; url: string }[]) : []
+  // RD-CUSTOM-ORG-01 — "Event Hashtags" (Organizer tab, beside the social links) were saved and
+  // never rendered. Shown with the social links, under the same "Show social links" toggle.
+  const hashtags = showSocial
+    ? [...new Set((s?.hashtags ?? []).map(h => (typeof h === 'string' ? h.trim().replace(/^#+/, '') : '')).filter(Boolean))]
+    : []
   return (
     <LuxeBlock id="organizer" eyebrow="Hosted by" title={organizer.name}>
       <div className={cn(LUXE_CARD, 'flex flex-col gap-4 p-5 sm:flex-row sm:items-center')}>
@@ -250,12 +273,18 @@ export function OrganizerBlock({ organizer, supportEmail }: { organizer: Organiz
         <p className={cn('min-w-0 flex-1', about ? BODY : 'text-fs-sm text-hero-ink-soft')}>
           {about || 'Questions about this event? Reach the organizer directly.'}
         </p>
-        {(contact.href || website) && (
+        {(contact.href || website || showCall) && (
           <div className="flex shrink-0 flex-wrap gap-2">
             {contact.href && (
               <a href={contact.href} className={cn(marketingButton({ variant: 'outline', size: 'sm' }), 'gap-1.5')}>
                 {contact.href.startsWith('tel:') ? <Phone className="size-3.5" aria-hidden /> : <Mail className="size-3.5" aria-hidden />}
                 Contact
+              </a>
+            )}
+            {showCall && (
+              <a href={`tel:${phone}`} aria-label={`Call ${organizer.name} on ${phone}`} className={cn(marketingButton({ variant: 'outline', size: 'sm' }), 'gap-1.5')}>
+                <Phone className="size-3.5" aria-hidden />
+                Call
               </a>
             )}
             {website && (
@@ -267,6 +296,27 @@ export function OrganizerBlock({ organizer, supportEmail }: { organizer: Organiz
           </div>
         )}
       </div>
+      {socials.length > 0 && (
+        <ul aria-label={`${organizer.name} on social media`} className="mt-3 flex flex-wrap gap-2">
+          {socials.map(soc => (
+            <li key={soc.label}>
+              <a
+                href={soc.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1 rounded-pill border border-border/70 bg-card px-3 py-1 text-fs-xs font-medium text-hero-ink-soft transition-colors hover:border-border-strong hover:text-hero-ink"
+              >
+                {soc.label}<ArrowUpRight className="size-3" aria-hidden />
+              </a>
+            </li>
+          ))}
+        </ul>
+      )}
+      {hashtags.length > 0 && (
+        <p className="mt-3 text-fs-xs font-medium text-hero-ink-soft">
+          {hashtags.map(h => `#${h}`).join('  ')}
+        </p>
+      )}
     </LuxeBlock>
   )
 }
@@ -325,9 +375,11 @@ export function SponsorsBlock({ sponsors }: { sponsors: Sponsor[] }) {
 }
 
 // ─── Good to know ───────────────────────────────────────────────────────────────
-export function EssentialsBlock({ language, dressCode, timezone, refundWindow, refundPolicyUrl, supportEmail, supportPhone }: {
+export function EssentialsBlock({ language, dressCode, timezone, refundWindow, refundPolicyUrl, termsUrl, privacyPolicyUrl, faqUrl, supportEmail, supportPhone }: {
   language: string; dressCode: string; timezone?: string
   refundWindow?: RefundWindow | null; refundPolicyUrl: string
+  /** RD-CUSTOM-PUBLIC-01 — the Organizer tab's policy / FAQ links; the template had dropped them. */
+  termsUrl?: string; privacyPolicyUrl?: string; faqUrl?: string
   supportEmail: string; supportPhone: string
 }) {
   const refunds = refundWindow && !refundWindow.useExternalPolicyUrl ? refundLines(refundWindow) : []
@@ -337,6 +389,9 @@ export function EssentialsBlock({ language, dressCode, timezone, refundWindow, r
     timezone?.trim()  ? { label: 'Timezone',   lines: [timezoneLabel(timezone.trim())] } : null,
     refunds.length    ? { label: 'Refunds',    lines: refunds } : null,
     !refunds.length && refundPolicyUrl?.trim() ? { label: 'Refunds', lines: ['Read the refund policy'], href: refundPolicyUrl.trim() } : null,
+    termsUrl?.trim()         ? { label: 'Terms',   lines: ['Read the terms & conditions'], href: termsUrl.trim() } : null,
+    privacyPolicyUrl?.trim() ? { label: 'Privacy', lines: ['Read the privacy policy'],     href: privacyPolicyUrl.trim() } : null,
+    faqUrl?.trim()           ? { label: 'FAQ',     lines: ['Read the full FAQ'],           href: faqUrl.trim() } : null,
     supportEmail?.trim() ? { label: 'Email', lines: [supportEmail.trim()], href: `mailto:${supportEmail.trim()}` } : null,
     supportPhone?.trim() ? { label: 'Phone', lines: [supportPhone.trim()], href: `tel:${supportPhone.trim()}` } : null,
   ].filter(Boolean) as { label: string; lines: string[]; href?: string }[]

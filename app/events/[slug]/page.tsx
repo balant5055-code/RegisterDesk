@@ -3,8 +3,9 @@ import { notFound } from 'next/navigation'
 import { findPublicEvent }          from '@/lib/events/publicEventAccess'
 import ReportButton                  from '@/components/report/ReportButton'
 import type { EventDetailsDraft } from '@/components/wizard/eventDetailsConfig'
-import { loadEventPageData, buildEventPageProps } from '@/lib/events/eventPageProps'
+import { loadEventPageData, buildEventPageProps, publicOnlineVenue } from '@/lib/events/eventPageProps'
 import { TemplateRouter } from '@/components/event-templates/TemplateRouter'
+import { stripMarkdown } from '@/components/event-templates/shared/ui/RichText'
 import type { PassPublic } from '@/components/event-templates/types'
 import { getBrandingConfig } from '@/lib/config/resolveBrandingConfig'
 import { EventResultsBanner } from '@/features/race-operations/components/public/EventResultsBanner'
@@ -38,7 +39,10 @@ export async function generateMetadata({ params }: PageProps): Promise<Metadata>
   const ed       = event.eventDetails as unknown as EventDetailsDraft
   const title    = ed.seo?.metaTitle?.trim()       || ed.info?.name?.trim()      || 'Event'
   const desc     = ed.seo?.metaDescription?.trim() || ed.info?.shortDesc?.trim() || ''
-  const image    = ed.media?.coverBanner?.value?.trim() || ed.media?.logo?.value?.trim() || ''
+  // RD-CUSTOM-PUBLIC-01 — the organizer's "Social Share Image" (SEO tab) was saved but never
+  // used: link previews always took the cover banner. It now wins when it is a web URL.
+  const share    = ed.seo?.shareImageUrl?.trim() || ''
+  const image    = (/^https?:\/\//i.test(share) ? share : '') || ed.media?.coverBanner?.value?.trim() || ed.media?.logo?.value?.trim() || ''
   const keywords = (ed.seo?.keywords ?? []).join(', ')
   const url      = `${baseUrl}/events/${slug}`
 
@@ -78,12 +82,15 @@ function buildJsonLd(
 ): Record<string, unknown> {
   const venueType = ed.venue?.type ?? 'physical'
   const physical  = ed.venue?.physical
-  const online    = ed.venue?.online
-  const organizer = ed.organizer
+  // The public projection: never a "reveal after registration" link (RD-CUSTOM-PUBLIC-01).
+  const online    = publicOnlineVenue(ed.venue?.online)
+  // RD-CUSTOM-ORG-01 — the structured data follows the "Show organizer info" toggle, exactly as
+  // the page does; it used to print the organizer's name and email even when the organizer hid them.
+  const organizer = ed.publicPage?.showOrganizerInfo === false ? undefined : ed.organizer
 
   const location: Record<string, unknown> =
     venueType === 'online'
-      ? { '@type': 'VirtualLocation', url: online?.meetingUrl || BASE_URL }
+      ? { '@type': 'VirtualLocation', url: online?.meetingUrl?.trim() || `${BASE_URL}/events/${slug}` }
       : {
           '@type': 'Place',
           name:    physical?.name || 'TBA',
@@ -101,7 +108,7 @@ function buildJsonLd(
     '@context': 'https://schema.org',
     '@type':    'Event',
     name:        ed.info?.name      || 'Event',
-    description: ed.info?.shortDesc || ed.info?.fullDesc || '',
+    description: ed.info?.shortDesc || stripMarkdown(ed.info?.fullDesc) || '',
     image:       ed.media?.coverBanner?.value || ed.media?.logo?.value || '',
     url:         `${BASE_URL}/events/${slug}`,
     startDate: ed.schedule?.startDate

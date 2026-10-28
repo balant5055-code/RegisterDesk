@@ -51,7 +51,7 @@ import { emailShell, escHtml } from '@/lib/email/templates/base'
 import { emailUrl } from '@/lib/email/appUrl'
 import { resolveOrganizerEmailIdentity } from '@/lib/organizer/emailIdentity'
 import { superAdminRecipients } from './superAdminRecipients'
-import { uniqueMailboxes } from './mailbox'
+import { uniqueMailboxes, canonicalMailbox } from './mailbox'
 import { ADMIN_NOTIFICATIONS, type AdminNotificationKind } from './adminInbox'
 import { prepareNotification } from './inbox/write'
 import type { NotificationCategory, NotificationSeverity } from './inbox/types'
@@ -143,9 +143,31 @@ export async function enqueueOutboxMessage(m: OutboxMessageInput): Promise<'queu
   }
 }
 
-/** A recipient address as a Firestore-safe map key. */
+/** A recipient address as a Firestore-safe map key. (The LEGACY delivery key — see mailboxKey.) */
 export function recipientKey(email: string): string {
   return email.trim().toLowerCase().replace(/[^a-z0-9]/g, '_').slice(0, 150)
+}
+
+/**
+ * RD-NOTIFY-DEDUP-02 — the delivery key: the recipient's canonical MAILBOX (lib/notifications/mailbox),
+ * the same identity the recipient list is de-duplicated by. Keying delivery by the raw address let a
+ * retry that picked a different spelling of one mailbox (two Super Admin accounts sharing an inbox,
+ * resolved in a different order) miss "already delivered" and send that inbox a second copy.
+ */
+export function mailboxKey(email: string): string {
+  return recipientKey(canonicalMailbox(email))
+}
+
+/**
+ * Has this recipient's mailbox already been settled on this message? Checks the mailbox key AND the
+ * legacy raw-address key, so records written before RD-NOTIFY-DEDUP-02 still count — no migration.
+ */
+function settledFor(s: { delivered?: Record<string, boolean>; skipped?: Record<string, unknown> }, email: string): { delivered: boolean; skipped: unknown } {
+  const keys = [mailboxKey(email), recipientKey(email)]
+  return {
+    delivered: keys.some(k => s.delivered?.[k] === true),
+    skipped:   keys.map(k => s.skipped?.[k]).find(v => v !== undefined),
+  }
 }
 
 /** Pure: the email body for a message. Every value is escaped. */
@@ -217,12 +239,13 @@ export async function deliverOutboxMessage(id: string, now = Date.now()): Promis
     }
     const html = renderOutboxEmail({ ...d, url: absolute(d.path) })
     for (const email of to) {
-      const key = recipientKey(email)
+      const key = mailboxKey(email)
       // 2. Per-recipient claim: still our lease, not already settled → mark in flight, extend lease.
       const go = await adminDb.runTransaction(async txn => {
         const s = (await txn.get(r)).data() as Doc
         if (s.leaseId !== leaseId) return 'lost' as const
-        if (s.delivered?.[key] || s.skipped?.[key]) return 'settled' as const
+        const done = settledFor(s, email)
+        if (done.delivered || done.skipped !== undefined) return 'settled' as const
         txn.update(r, { [`inflight.${key}`]: leaseId, leaseUntil: Timestamp.fromMillis(Math.max(now, Date.now()) + LEASE_MS) })
         return 'send' as const
       })
@@ -250,11 +273,11 @@ export async function deliverOutboxMessage(id: string, now = Date.now()): Promis
       if (errors.length === 0) {
         // Only an all-accepted message is 'sent'; a suppressed / no-definite-answer recipient makes it
         // 'unconfirmed' (terminal — never re-sent, never reported as delivered).
-        const unsettled = to.filter(e => !s.delivered?.[recipientKey(e)] && s.skipped?.[recipientKey(e)])
+        const unsettled = to.filter(e => { const st = settledFor(s, e); return !st.delivered && st.skipped !== undefined })
         if (unsettled.length > 0) {
           txn.update(r, {
             status: 'unconfirmed', settledAt: FieldValue.serverTimestamp(), leaseUntil: FieldValue.delete(), leaseId: FieldValue.delete(), nextAttemptAt: FieldValue.delete(),
-            lastError: unsettled.map(e => `${e}: ${s.skipped?.[recipientKey(e)] === 'suppressed' ? 'suppressed by the email provider (not sent)' : 'no definite answer from the email provider (not re-sent)'}`).join(' | ').slice(0, 1000),
+            lastError: unsettled.map(e => `${e}: ${settledFor(s, e).skipped === 'suppressed' ? 'suppressed by the email provider (not sent)' : 'no definite answer from the email provider (not re-sent)'}`).join(' | ').slice(0, 1000),
           })
           console.warn('[notification-outbox] not confirmed', { id, recipients: unsettled.length })
           return 'unconfirmed' as const

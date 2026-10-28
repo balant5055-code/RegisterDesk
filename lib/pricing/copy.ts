@@ -17,3 +17,5 @@ export const TAX_INCLUSIVE_NOTE       = 'All prices include taxes'
  */
 export const FEES_ADDED_AT_CHECKOUT_NOTE = 'Platform fees are added at checkout and itemised before payment opens'
 export const TAX_INCLUSIVE_NOTE_SHORT = 'Incl. taxes'
+/** RD-CUSTOM-PUBLIC-01 — the short form of FEES_ADDED_AT_CHECKOUT_NOTE, for compact price blocks. */
+export const FEES_ADDED_AT_CHECKOUT_NOTE_SHORT = '+ platform fees at checkout'

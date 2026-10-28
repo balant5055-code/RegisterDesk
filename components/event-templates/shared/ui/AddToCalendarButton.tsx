@@ -4,6 +4,7 @@ import { useState, useRef, useEffect } from 'react'
 import { CalendarPlus, ChevronDown, Globe, Mail, Download } from 'lucide-react'
 import { cn } from '@/lib/utils/cn'
 import { googleCalendarUrl, outlookCalendarUrl } from '@/lib/calendar/ics'
+import { stripMarkdown } from './RichText'
 
 // ─── Props ────────────────────────────────────────────────────────────────────
 
@@ -47,7 +48,8 @@ export function AddToCalendarButton({
     return () => document.removeEventListener('mousedown', handler)
   }, [open])
 
-  const calInput = { title, startDate, endDate: endDate || startDate, startTime, endTime, location, description }
+  // RD-MARKDOWN-01 — calendars show plain text, not the organizer's Markdown markers.
+  const calInput = { title, startDate, endDate: endDate || startDate, startTime, endTime, location, description: stripMarkdown(description) }
 
   const isDark = variant === 'dark'
 

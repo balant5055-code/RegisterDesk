@@ -60,6 +60,26 @@ function venueLabel(
   return city ? (name ? `${name}, ${city}` : city) : (name ?? 'Venue TBA')
 }
 
+/**
+ * RD-CUSTOM-PUBLIC-01 — the online-venue fields the PUBLIC page may carry.
+ *
+ * The whole `venue.online` object used to reach the page, and most templates are client
+ * components, so the meeting ID and passcode — which no template ever shows — and a meeting
+ * link the organizer chose to "reveal after registration" were all serialised into the page
+ * payload (and the link into the JSON-LD), where anyone could read them. The templates only
+ * HID them. Blanking them here, in the one mapping, removes them from every template, the
+ * admin preview and the structured data at once. Nothing the page displays changes.
+ */
+export function publicOnlineVenue(online: OnlineVenueConfig | undefined): OnlineVenueConfig | undefined {
+  if (!online) return undefined
+  return {
+    ...online,
+    meetingId:  '',
+    passcode:   '',
+    meetingUrl: online.revealAfterRegistration ? '' : (online.meetingUrl ?? ''),
+  }
+}
+
 function extractSpeakers(typeDetails: Record<string, unknown> | null): Speaker[] {
   if (!typeDetails) return []
   // judges is used by the Awards type; speakers/trainers/artists by others.
@@ -268,7 +288,7 @@ export function buildEventPageProps(
   // ── Venue ──────────────────────────────────────────────────────────────────
   const venueType      = ed.venue?.type ?? 'physical'
   const physical       = ed.venue?.physical
-  const online         = ed.venue?.online
+  const online         = publicOnlineVenue(ed.venue?.online)
   const venueName      = venueLabel(venueType, physical, online)
   const mapsLink  = physical?.mapsLink?.trim() || ''
   const venueMaps = physical?.maps?.layoutImageUrl?.trim() ||
@@ -385,6 +405,7 @@ export function buildEventPageProps(
       cancelReason:     event.cancelReason ?? undefined,
       eventType:        event.eventType ?? undefined,
       eventSubtype:     event.eventSubtype ?? undefined,
+      customEventSubtype: event.customEventSubtype?.trim() || undefined,
       registrationOpen,
       regClosedMessage,
       title,

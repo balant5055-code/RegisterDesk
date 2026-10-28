@@ -201,7 +201,8 @@ describe('wiring', () => {
   })
 
   it('never attributes an admin decision to the organizer', () => {
-    expect(LIFECYCLE).toContain("actorUid: actorUid ?? (reviewActorRole(action) === 'organizer' ? uid : null)")
+    // RD-REVIEW-02 — a system action (deadline steps / expiry) has no actor at all.
+    expect(LIFECYCLE).toContain("actorUid: role === 'system' ? null : actorUid ?? (role === 'organizer' ? uid : null)")
   })
 
   it('records who resubmitted, how often, and the request it answered', () => {
@@ -217,10 +218,11 @@ describe('wiring', () => {
   })
 
   it('passes the real actor from every review route', () => {
+    // RD-REVIEW-02 — both now also pass transaction preconditions (expected status / review cycle).
     expect(code(read('app/api/admin/events/[slug]/review/route.ts')))
-      .toContain('applyLifecycleTransition(uid, draftId, action, undefined, review, adminUid)')
+      .toContain('applyLifecycleTransition(uid, draftId, action, undefined, review, adminUid, {')
     expect(code(read('app/api/organizer/events/[eventId]/resubmit/route.ts')))
-      .toContain("applyLifecycleTransition(uid, eventId, 'resubmit', undefined, undefined, authz.callerUid)")
+      .toContain("applyLifecycleTransition(uid, eventId, 'resubmit', undefined, undefined, authz.callerUid, {")
     expect(code(read('app/api/organizer/events/[eventId]/republish/route.ts')))
       .toContain("applyLifecycleTransition(uid, eventId, 'republish', undefined, undefined, authz.callerUid)")
   })

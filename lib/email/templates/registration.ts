@@ -1,5 +1,6 @@
 import { emailShell, btn, metaRow } from './base'
 import type { RegistrationEmailParams } from '../provider'
+import { meetingAccessBlock } from './meetingAccess'
 
 export function registrationTemplate(p: RegistrationEmailParams): { subject: string; html: string } {
   const subject = `You're registered: ${p.eventName}`
@@ -26,6 +27,8 @@ export function registrationTemplate(p: RegistrationEmailParams): { subject: str
         ${metaRow('Ticket',   p.ticketCode)}
       </table>
     </div>
+
+    ${meetingAccessBlock(p.meetingAccess)}
 
     ${feeBreakdownBlock(p)}
 

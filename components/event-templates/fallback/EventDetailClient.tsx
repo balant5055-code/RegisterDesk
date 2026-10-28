@@ -43,6 +43,7 @@ import { EventInfoSection }  from '@/components/event-templates/shared/ui/EventI
 import { StickyMobileCTA }         from '@/components/event-templates/shared/registration/StickyMobileCTA'
 import { formatBenefits } from '@/components/event-templates/shared/registration/benefitLabels'
 import { AddToCalendarButton }     from '@/components/event-templates/shared/ui/AddToCalendarButton'
+import { stripMarkdown }           from '@/components/event-templates/shared/ui/RichText'
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -574,7 +575,7 @@ export function EventDetailClient(props: EventDetailProps) {
                 {/* Short description */}
                 {description && (
                   <p className="mt-1 max-w-lg text-xs leading-relaxed text-white/55 line-clamp-2">
-                    {description}
+                    {stripMarkdown(description)}
                   </p>
                 )}
 
@@ -696,6 +697,7 @@ export function EventDetailClient(props: EventDetailProps) {
                 <TicketSection
                   passes={passes}
                   isFreeEvent={isFreeEvent}
+                  attendeePaysFees={props.attendeePaysFees}
                   slug={slug}
                   availability={availability}
                   eventMilestoneAlert={eventMilestoneAlert}
@@ -793,6 +795,7 @@ export function EventDetailClient(props: EventDetailProps) {
                 <StickyRegistrationCard
                   passes={passes}
                   isFreeEvent={isFreeEvent}
+                  attendeePaysFees={props.attendeePaysFees}
                   slug={slug}
                   availability={availability}
                   registrationOpen={registrationOpen}

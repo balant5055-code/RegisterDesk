@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState, type ReactNode } from 'react'
 import { useConfirm } from '@/components/ui'
+import { EventTypeAvailabilityPanel } from '@/components/admin/EventTypeAvailabilityPanel'
 import { Dialog } from '@/components/ui/Dialog'
 import Link from 'next/link'
 import { auth } from '@/lib/firebase/auth'
@@ -37,6 +38,9 @@ interface Row {
   resubmittedAt:       string | null
   resubmissionCount:   number
   lastReviewRequest:   { kind: string; comment: string | null; at: string | null } | null
+  // RD-REVIEW-02 — every decision names the cycle it reviewed; the open changes deadline.
+  reviewCycleId:       string | null
+  reviewDeadline:      { phase: 'changes_requested' | 'action_required'; dueAt: string } | null
 }
 
 // RD-REVIEW-01 · the two queues an event can sit in while it is being reviewed.
@@ -58,6 +62,9 @@ function reviewState(lifecycleStatus: string | null, reviewStatus: string | null
 const HISTORY_LABEL: Record<string, string> = {
   approve: 'Approved', reject: 'Rejected', request_changes: 'Changes requested',
   resubmit: 'Resubmitted', republish: 'Republished',
+  // RD-REVIEW-02
+  submit: 'Submitted', review_reminder: 'Reminder sent', action_required: 'Moved to Action Required',
+  close_review: 'Closed by organizer', expire_review: 'Closed — deadline passed',
 }
 
 const SECTION_LABEL: Record<string, string> = {
@@ -176,16 +183,21 @@ export default function AdminEventApprovalsPage() {
     } catch { /* keep current view */ }
   }, [queue])
 
-  const doReview = useCallback(async (slug: string, body: Record<string, unknown>) => {
+  // RD-REVIEW-02 — the decision carries the review cycle THIS row was loaded with: if the organizer
+  // resubmitted since, the server refuses it (409 REVIEW_CYCLE_STALE) and the queue is reloaded.
+  const doReview = useCallback(async (row: Row, body: Record<string, unknown>) => {
     const headers = await authHeader()
     if (!headers) return
+    const slug = row.slug
     setBusy(slug)
     try {
       const res = await fetch(`/api/admin/events/${encodeURIComponent(slug)}/review`, {
-        method: 'POST', headers: { ...headers, 'content-type': 'application/json' }, body: JSON.stringify(body),
+        method: 'POST', headers: { ...headers, 'content-type': 'application/json' },
+        body: JSON.stringify({ ...body, reviewCycleId: row.reviewCycleId ?? null }),
       })
       if (!res.ok) {
-        const j = await res.json().catch(() => ({})) as { error?: string }
+        const j = await res.json().catch(() => ({})) as { error?: string; code?: string }
+        if (j.code === 'REVIEW_CYCLE_STALE' || j.code === 'STATUS_CHANGED') void reload()
         throw new Error(j.error ?? `Request failed (${res.status})`)
       }
       setRows(prev => prev.filter(r => r.slug !== slug))
@@ -230,16 +242,16 @@ export default function AdminEventApprovalsPage() {
 
   async function submitReject() {
     if (!rejectRow) return
-    const slug = rejectRow.slug
+    const row = rejectRow
     setRejectRow(null)
-    await doReview(slug, { action: 'reject', reason: rjReason, category: rjCategory, notes: rjNotes })
+    await doReview(row, { action: 'reject', reason: rjReason, category: rjCategory, notes: rjNotes })
     setRjReason(''); setRjCategory(REJECT_CATEGORIES[0]); setRjNotes('')
   }
   async function submitChanges() {
     if (!changesRow) return
-    const slug = changesRow.slug
+    const row = changesRow
     setChangesRow(null)
-    await doReview(slug, { action: 'request_changes', comment: chComment })
+    await doReview(row, { action: 'request_changes', comment: chComment })
     setChComment('')
   }
 
@@ -264,6 +276,9 @@ export default function AdminEventApprovalsPage() {
           </div>
         ))}
       </div>
+
+      {/* RD-EVENT-TYPES-01 — which event types organizers may choose (runtime, audited). */}
+      <EventTypeAvailabilityPanel />
 
       {/* Settings: publishing mode + SLA */}
       <div className="rounded-lg border border-border bg-card px-4 py-3">
@@ -376,7 +391,7 @@ export default function AdminEventApprovalsPage() {
                           confirmLabel: 'Approve & publish',
                           tone: 'danger',
                         })
-                        if (ok) await doReview(r.slug, { action: 'approve' })
+                        if (ok) await doReview(r, { action: 'approve' })
                       }}
                       className="inline-flex items-center gap-1 rounded-md bg-emerald-600 px-2 py-1 text-[11.5px] font-semibold text-white disabled:opacity-50"><Check className="size-3.5" /> Approve</button>
                     <button type="button" disabled={busy === r.slug} onClick={() => { setRejectRow(r) }}
@@ -476,8 +491,13 @@ function ReviewCell({ row }: { row: Row }) {
   if (row.status === 'changes_requested') {
     return (
       <div className="space-y-1">
-        <StatusPill tone="warning">Awaiting organizer</StatusPill>
+        <StatusPill tone="warning">{row.reviewDeadline?.phase === 'action_required' ? 'Action required' : 'Awaiting organizer'}</StatusPill>
         <div className="text-muted-foreground">Requested {fmtDateTime(row.changesRequestedAt)}</div>
+        {row.reviewDeadline && (
+          <div className="text-muted-foreground">
+            {row.reviewDeadline.phase === 'action_required' ? 'Closes automatically' : 'Changes due'} {fmtDateTime(row.reviewDeadline.dueAt)}
+          </div>
+        )}
         {row.changesComment && <p className="line-clamp-2 break-words text-foreground" title={row.changesComment}>{row.changesComment}</p>}
       </div>
     )

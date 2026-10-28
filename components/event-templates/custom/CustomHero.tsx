@@ -16,7 +16,7 @@ import type { EventDetailProps } from '@/components/event-templates/types'
 import { LuxeEyebrow } from './luxe'
 
 export function CustomHero({ props, kicker }: { props: EventDetailProps; kicker: string | null }) {
-  const { title, tagline, shortDesc, bannerUrl } = props
+  const { title, tagline, shortDesc, bannerUrl, logoUrl } = props
   const lede = shortDesc?.trim() || ''
   const presentedBy = props.showOrg && props.organizer?.name?.trim() ? props.organizer.name.trim() : null
 
@@ -28,6 +28,16 @@ export function CustomHero({ props, kicker }: { props: EventDetailProps; kicker:
         <div className="mt-6 grid items-center gap-8 sm:mt-8 md:grid-cols-12 lg:gap-12">
           {/* ── Identity ──────────────────────────────────────────────── */}
           <div className="min-w-0 md:col-span-7">
+            {/* RD-CUSTOM-PUBLIC-01 — the event logo (Branding & Media). The legacy page this
+                template replaced showed it; the template had dropped it. */}
+            {logoUrl?.trim() && (
+              // eslint-disable-next-line @next/next/no-img-element -- organizer artwork of arbitrary aspect
+              <img
+                src={logoUrl}
+                alt={`${title} logo`}
+                className="mb-5 block size-14 rounded-control border border-border/60 bg-card object-contain p-1"
+              />
+            )}
             {kicker && <LuxeEyebrow>{kicker}</LuxeEyebrow>}
             <h1 className="mt-4 text-balance font-display text-fs-display-md font-light tracking-[-0.02em] text-hero-ink leading-[1.08]">
               {title}

@@ -307,6 +307,14 @@ function Builder(p: {
   const [busy, setBusy] = useState<'save' | 'submit' | null>(null)
   const [serverError, setServerError] = useState<{ text: string; findings?: ValidationFinding[] } | null>(null)
   const bodyRef = useRef<HTMLTextAreaElement | null>(null)
+  // RD-WA-MARKETING-01 — Marketing is offered only while a Super Admin has it enabled (the server
+  // refuses Marketing create / edit / new version otherwise). Unknown until loaded ⇒ treated as off.
+  const [marketingEnabled, setMarketingEnabled] = useState(false)
+  useEffect(() => {
+    let alive = true
+    void call<{ marketingTemplatesEnabled?: boolean }>(API).then(r => { if (alive) setMarketingEnabled(r.ok && r.body.marketingTemplatesEnabled === true) }).catch(() => null)
+    return () => { alive = false }
+  }, [])
   const eventType = linkEvent ? (selectedEvent?.eventType ?? null) : null
   const input: TemplateDraftInput = { ...d, eventSlug: linkEvent ? (d.eventSlug ?? selectedEvent?.slug ?? null) : null }
   // The SAME validator the server runs on save, on submit and at approval time.
@@ -391,9 +399,18 @@ function Builder(p: {
               <div className="space-y-1.5">
                 <label htmlFor="wt-cat" className={labelCls}>Category</label>
                 <select id="wt-cat" value={d.category} onChange={e => setD(x => ({ ...x, category: e.target.value as TemplateDraftInput['category'] }))} className={inputCls}>
-                  {SUPPORTED_CATEGORIES.map(c => <option key={c} value={c}>{CATEGORY_LABEL[c]}</option>)}
+                  {SUPPORTED_CATEGORIES.map(c => (
+                    <option key={c} value={c} disabled={c === 'marketing' && !marketingEnabled}>
+                      {c === 'marketing' && !marketingEnabled ? `${CATEGORY_LABEL[c]} (coming soon)` : CATEGORY_LABEL[c]}
+                    </option>
+                  ))}
                 </select>
                 <p className="text-[11.5px] text-muted-foreground">{CATEGORY_HINT[d.category]}</p>
+                {d.category === 'marketing' && !marketingEnabled && (
+                  <p role="status" className="text-[11.5px] text-amber-700 dark:text-amber-300">
+                    Marketing templates are not available yet, so this template can’t be saved as Marketing. Choose Utility, or wait until RegisterDesk enables Marketing templates.
+                  </p>
+                )}
               </div>
               <div className="space-y-1.5">
                 <label htmlFor="wt-lang" className={labelCls}>Language</label>

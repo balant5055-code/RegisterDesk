@@ -9,15 +9,17 @@ import { SectionWrapper } from '@/components/event-templates/shared/ui/SectionWr
 import { AvailabilityBadge } from '@/components/event-templates/shared/registration/AvailabilityBadge'
 import { formatINR, formatDateShort, passDisplayPrice } from '@/components/event-templates/shared/utils/format'
 import { organizerFeaturedPassId } from '@/components/event-templates/shared/utils/featuredPass'
-import { TAX_INCLUSIVE_NOTE } from '@/lib/pricing/copy'
+import { TAX_INCLUSIVE_NOTE, FEES_ADDED_AT_CHECKOUT_NOTE } from '@/lib/pricing/copy'
 import { MilestoneNotice } from './MilestoneNotice'
 import { formatBenefits } from './benefitLabels'
 import { DownloadTicketLink } from './DownloadTicketLink'
 import type { ResolvedMilestoneAlert } from '@/lib/events/milestoneAlerts'
 
-export function TicketSection({ passes, isFreeEvent, slug, availability, eventMilestoneAlert, registrationOpen, closedMessage }: {
+export function TicketSection({ passes, isFreeEvent, attendeePaysFees = false, slug, availability, eventMilestoneAlert, registrationOpen, closedMessage }: {
   passes:           PassPublic[]
   isFreeEvent:      boolean
+  /** RD-CUSTOM-PUBLIC-01 · fees are added at checkout (server-resolved). Absent ⇒ false. */
+  attendeePaysFees?: boolean
   slug:             string
   availability:     Record<string, PassAvailability>
   /** EVENT-TOTAL milestone, resolved server-side. Absent ⇒ nothing renders. */
@@ -39,7 +41,7 @@ export function TicketSection({ passes, isFreeEvent, slug, availability, eventMi
       title={isFreeEvent ? 'Registration' : 'Ticket Categories'}
       subtitle={
         registrationOpen && !isFreeEvent && visiblePasses.length > 0
-          ? TAX_INCLUSIVE_NOTE
+          ? (attendeePaysFees ? FEES_ADDED_AT_CHECKOUT_NOTE : TAX_INCLUSIVE_NOTE)
           : undefined
       }
     >

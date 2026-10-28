@@ -202,6 +202,7 @@ export function actionAvailability(
   // UNKNOWN. Permanent delete is irreversible, so an unknown is treated as "may be paid"
   // and the action is withheld — the delete route would refuse it anyway.
   const licenceKnown = !e.licenseUnavailable
+  const reviewClosed = !!e.reviewClosure
 
   return {
     // The duplicate endpoint has no lifecycle restriction — any owned event can be copied.
@@ -209,9 +210,11 @@ export function actionAvailability(
     // Exactly the state machine's own answer, not a second opinion about it.
     archive:   isValidTransition(ls, 'archived'),
     // The restore route accepts an ARCHIVED event and 409s anything else.
-    restore:   ls === 'archived',
+    // RD-REVIEW-02 — a review-closed event is final: restore is refused (409) and permanent deletion
+    // would erase its review history, which closure keeps on purpose. Neither is offered.
+    restore:   ls === 'archived' && !reviewClosed,
     deleteDraft:   ls === 'draft' && opts.canDeleteDraft && licenceKnown && !e.hasPaidLicense,
-    deleteForever: ls === 'archived' && licenceKnown && !e.hasPaidLicense,
+    deleteForever: ls === 'archived' && !reviewClosed && licenceKnown && !e.hasPaidLicense,
     edit:      !isReadOnlyLifecycle(ls),
   }
 }

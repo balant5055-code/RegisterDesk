@@ -94,7 +94,9 @@ describe('email outcome is never inferred from the queue', () => {
   it("'sent' is written only when every recipient was accepted; suppressed / no-answer are recorded, not retried", () => {
     const src = code(read('lib/notifications/outbox.ts'))
     expect(src).toContain("const reason: SkipReason | null = res.suppressed ? 'suppressed' : res.deliveryUnknown ? 'unconfirmed' : null")
-    expect(src).toContain("if (s.delivered?.[key] || s.skipped?.[key]) return 'settled' as const")
+    // RD-NOTIFY-DEDUP-02 — "settled" is now checked by MAILBOX (and the legacy raw-address key).
+    expect(src).toContain("if (done.delivered || done.skipped !== undefined) return 'settled' as const")
+    expect(src).toContain('const keys = [mailboxKey(email), recipientKey(email)]')
     expect(src).toContain("if (s.leaseId !== leaseId) return 'lost' as const")
     expect(src.indexOf("status: 'unconfirmed'")).toBeGreaterThan(-1)
     expect(src.indexOf("status: 'unconfirmed'")).toBeLessThan(src.indexOf("status: 'sent'"))

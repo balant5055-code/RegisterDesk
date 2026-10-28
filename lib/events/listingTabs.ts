@@ -9,10 +9,13 @@
 
 import type { EventLifecycleStatus } from '@/types/events'
 
-export type EventListingTabKey = 'active' | 'published' | 'drafts' | 'archived'
+// RD-REVIEW-02 — 'action_required': events whose first changes deadline passed (the second 24-hour
+// window). It is a deadline PHASE of 'changes_requested', so it is decided per document by
+// listingTabsForDoc — never by the lifecycle status alone.
+export type EventListingTabKey = 'active' | 'published' | 'drafts' | 'action_required' | 'archived'
 
 export const EVENT_LISTING_TAB_KEYS: readonly EventListingTabKey[] =
-  ['active', 'published', 'drafts', 'archived']
+  ['active', 'published', 'drafts', 'action_required', 'archived']
 
 /** Narrow an untrusted query-param string to a valid tab key (else null = no tab filter). */
 export function parseListingTab(value: string | null | undefined): EventListingTabKey | null {
@@ -69,6 +72,23 @@ export function eventInListingTab(ls: EventLifecycleStatus, tab: EventListingTab
 // dashboard but must stay editable, restorable and NOT permanently deletable.
 
 import { deriveLifecycleStatus, isArchivedEvent } from './lifecycleStateMachine'
+import { reviewPhaseOf } from './reviewDeadline'
+
+/**
+ * RD-REVIEW-02 — the listing tabs of an event DOCUMENT: as listingTabsForEvent, except that a
+ * changes-requested event in its second deadline window belongs to 'action_required' only.
+ * (Legacy events without a deadline stay under Drafts.)
+ */
+export function listingTabsForDoc(d: Record<string, unknown>): EventListingTabKey[] {
+  const ls = effectiveLifecycleStatus(d)
+  if (reviewPhaseOf(ls, d.reviewDeadline) === 'action_required') return ['action_required']
+  return listingTabsForEvent(ls)
+}
+
+/** True when an event document belongs to the given tab. tab === null ⇒ no filter. */
+export function eventDocInListingTab(d: Record<string, unknown>, tab: EventListingTabKey | null): boolean {
+  return tab === null || listingTabsForDoc(d).includes(tab)
+}
 
 /**
  * The lifecycle status a raw event-draft document should be treated as.

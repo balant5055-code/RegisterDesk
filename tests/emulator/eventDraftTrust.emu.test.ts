@@ -64,7 +64,7 @@ describeEmu('RD-CE-FIX M2/H6/H5 · draft writes, ownership and Wallet trust', ()
   it('create: protected stamps and unknown keys in the seed never land; the draft starts as a draft', async () => {
     as(OWNER)
     const r = await create(req('POST', { seed: {
-      eventType: 'conference', visibility: 'public',
+      eventType: 'custom', visibility: 'public',   // an available type (RD-EVENT-TYPES-01)
       status: 'published', lifecycleStatus: 'completed', completedAt: 1, reviewStatus: 'approved',
       publishedAt: 1, restoredAt: 1, zzInjected: { x: 1 },
     } }))
@@ -75,7 +75,7 @@ describeEmu('RD-CE-FIX M2/H6/H5 · draft writes, ownership and Wallet trust', ()
     expect(d.status).toBe('draft')
     expect(d.publishedAt).toBeNull()
     for (const k of ['lifecycleStatus', 'completedAt', 'reviewStatus', 'restoredAt', 'zzInjected']) expect(d[k], k).toBeUndefined()
-    expect(d.eventType).toBe('conference')
+    expect(d.eventType).toBe('custom')
     expect(d.createdBy).toBe(OWNER)
   }, T)
 
@@ -121,7 +121,7 @@ describeEmu('RD-CE-FIX M2/H6/H5 · draft writes, ownership and Wallet trust', ()
 
   it('H6: a manager creates the WORKSPACE draft; the owner resumes it; another organizer and a gate-only member cannot', async () => {
     as(MGR)
-    const r = await create(req('POST', { seed: { eventType: 'workshop' } }))
+    const r = await create(req('POST', { seed: { eventType: 'fundraising' } }))
     expect(r.status).toBe(201)
     const { id } = await r.json() as { id: string }
     expect((await db.doc(`users/${OWNER}/eventDrafts/${id}`).get()).exists).toBe(true)
@@ -131,7 +131,7 @@ describeEmu('RD-CE-FIX M2/H6/H5 · draft writes, ownership and Wallet trust', ()
     as(OWNER)
     const own = await draftRoute.GET(req('GET'), ctx(id))
     expect(own.status).toBe(200)
-    expect(((await own.json()) as { draft: { eventType: string; currentStep: number } }).draft).toMatchObject({ eventType: 'workshop', currentStep: 2 })
+    expect(((await own.json()) as { draft: { eventType: string; currentStep: number } }).draft).toMatchObject({ eventType: 'fundraising', currentStep: 2 })
 
     as(OTHER)
     expect((await draftRoute.GET(req('GET'), ctx(id))).status).toBe(404)

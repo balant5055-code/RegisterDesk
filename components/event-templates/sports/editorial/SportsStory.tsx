@@ -24,6 +24,7 @@
 import { cn } from '@/lib/utils/cn'
 import { BODY, FIELD, INDEX, SectionHead, SportsSection, idx, ITEM } from './primitives'
 import { parseStory } from './storyModel'
+import { renderInline } from '@/components/event-templates/shared/ui/RichText'
 
 export interface SportsStoryProps {
   description: string
@@ -48,7 +49,7 @@ export function SportsStory({ description, languageNote, eyebrow = 'Our Story', 
           {story.plain ? (
             <div className="max-w-[68ch] space-y-4">
               {story.groups[0].entries[0].body.map(p => (
-                <p key={p.slice(0, 40)} className={cn('whitespace-pre-line', BODY)}>{p}</p>
+                <p key={p.slice(0, 40)} className={cn('whitespace-pre-line', BODY)}>{renderInline(p)}</p>
               ))}
             </div>
           ) : (
@@ -59,7 +60,7 @@ export function SportsStory({ description, languageNote, eyebrow = 'Our Story', 
                     <span aria-hidden className="h-px w-10 bg-hero-accent-rule/60 sm:w-16" />
                     <span className={INDEX}>{idx(gi)}</span>
                     {group.mark && <span aria-hidden className="text-fs-sm leading-none">{group.mark}</span>}
-                    {group.title}
+                    {renderInline(group.title)}
                     <span aria-hidden className="h-px w-10 bg-hero-accent-rule/60 sm:w-16" />
                   </h3>
                 )}
@@ -70,12 +71,12 @@ export function SportsStory({ description, languageNote, eyebrow = 'Our Story', 
                       {entry.title && (
                         <h4 className={cn('text-balance', ITEM)}>
                           {entry.mark && <span aria-hidden className="mr-1.5 text-fs-sm leading-none">{entry.mark}</span>}
-                          {entry.title}
+                          {renderInline(entry.title)}
                         </h4>
                       )}
                       <span aria-hidden className="mt-2 block h-px w-6 bg-hero-accent-rule/70" />
                       {entry.body.map(p => (
-                        <p key={p.slice(0, 40)} className={cn(entry.title ? 'mt-2.5' : '', 'text-pretty', BODY)}>{p}</p>
+                        <p key={p.slice(0, 40)} className={cn(entry.title ? 'mt-2.5' : '', 'text-pretty', BODY)}>{renderInline(p)}</p>
                       ))}
                     </article>
                   ))}
@@ -94,12 +95,12 @@ export function SportsStory({ description, languageNote, eyebrow = 'Our Story', 
               {story.closing.title && (
                 <p className={cn(FIELD, 'mb-3')}>
                   {story.closing.mark && <span aria-hidden className="mr-1.5">{story.closing.mark}</span>}
-                  {story.closing.title}
+                  {renderInline(story.closing.title)}
                 </p>
               )}
               {story.closing.body.map(p => (
                 <p key={p.slice(0, 40)} className="text-pretty text-fs-md leading-relaxed text-hero-ink">
-                  {p}
+                  {renderInline(p)}
                 </p>
               ))}
             </blockquote>

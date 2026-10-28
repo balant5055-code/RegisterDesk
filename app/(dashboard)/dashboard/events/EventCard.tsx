@@ -14,9 +14,11 @@ import { useCallback, useState } from 'react'
 import Link from 'next/link'
 import {
   Calendar, Users, IndianRupee, ExternalLink, Pencil, Copy, Archive,
-  ArchiveRestore, Trash2, ArrowRight,
+  ArchiveRestore, Trash2, ArrowRight, XCircle,
 } from 'lucide-react'
 import { cn } from '@/lib/utils/cn'
+import { ReviewDeadlineCountdown } from '@/components/events/ReviewDeadlineCountdown'
+import { CLOSURE_SERVICES_SHORT } from '@/lib/notifications/reviewDeadlineAlerts'
 import { accent } from '@/lib/dashboard/accents'
 import type { EventListItem } from '@/app/api/organizer/events/route'
 import { EventCardMenu, type EventMenuItem } from './EventCardMenu'
@@ -34,11 +36,16 @@ export interface EventCardActions {
   onDeleteDraft: (e: EventListItem) => void
   onDeleteForever: (e: EventListItem) => void
   onResubmit:    (e: EventListItem) => void
+  /** RD-REVIEW-02 — close an event whose changes were requested (asks for confirmation first). */
+  onCloseReview: (e: EventListItem) => void
 }
 
 /** Which mutation, if any, is currently in flight for this card. */
 export type PendingAction =
-  | 'duplicate' | 'archive' | 'restore' | 'delete' | 'resubmit' | null
+  | 'duplicate' | 'archive' | 'restore' | 'delete' | 'resubmit' | 'close' | null
+
+/** RD-REVIEW-02 — the wizard entry point for an event (the same relay every other deep link uses). */
+const editEventHref = (e: EventListItem) => `/dashboard/events/new/visibility?draftId=${encodeURIComponent(e.draftId)}`
 
 // ─── Status + type chips ──────────────────────────────────────────────────────
 
@@ -193,6 +200,75 @@ function Metric({ icon: Icon, label, value, unavailable, className }: {
   )
 }
 
+// ─── RD-REVIEW-02 · Changes requested / Action Required ───────────────────────
+
+/**
+ * What the Super Admin asked for, the deadline the SERVER stored (the countdown only displays it),
+ * and the two things the organizer can do: Edit Event — the existing editor, whose Submit for Review
+ * resubmits — or Close Event. Deliberately no Resubmit button here: resubmission goes through the
+ * editor so its validation and the saved content are what reaches review.
+ */
+function ReviewRequestPanel({ event, busy, pending, onClose }: {
+  event: EventListItem; busy: boolean; pending: PendingAction; onClose: () => void
+}) {
+  const dl = event.reviewDeadline ?? null
+  const actionRequired = dl?.phase === 'action_required'
+  return (
+    <div className={cn('mx-3 mb-3 min-w-0 space-y-2.5 rounded-control border p-3 sm:mx-4',
+      actionRequired ? 'border-destructive/30 bg-destructive/5' : 'border-warning/30 bg-warning/10')}>
+      <div>
+        <p className="text-fs-xs font-semibold text-foreground">{actionRequired ? 'Action required' : 'Changes requested'}</p>
+        {event.changesComment && (
+          // The request is the whole point of the notice, so it wraps in full rather than truncating.
+          <p className="mt-1 break-words text-fs-xs leading-relaxed text-muted-foreground [overflow-wrap:anywhere]">
+            {event.changesComment}
+          </p>
+        )}
+      </div>
+      {dl && (
+        <ReviewDeadlineCountdown
+          dueAt={actionRequired && dl.actionDueAt !== null ? dl.actionDueAt : dl.changesDueAt}
+          label={actionRequired ? 'Closes automatically' : 'Changes due'}
+          expiredText={actionRequired
+            ? 'The event is being closed. It can no longer be edited or resubmitted.'
+            : 'Edit and resubmit soon: the event moves to Action Required and then closes 24 hours later.'}
+        />
+      )}
+      {actionRequired && (
+        <p className="text-fs-2xs leading-relaxed text-muted-foreground">
+          If you do nothing, this event is closed at the deadline and can no longer be edited or resubmitted.{' '}
+          {CLOSURE_SERVICES_SHORT}
+        </p>
+      )}
+      <div className="flex flex-wrap gap-2">
+        <Link
+          href={editEventHref(event)}
+          aria-disabled={busy || undefined}
+          className={cn(
+            'inline-flex h-11 items-center gap-1.5 rounded-control bg-foreground px-3.5 text-fs-xs font-semibold text-background',
+            'transition-opacity hover:opacity-90 aria-disabled:pointer-events-none aria-disabled:opacity-50',
+            'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40',
+          )}
+        >
+          <Pencil className="size-3.5" aria-hidden /> Edit Event
+        </Link>
+        <button
+          type="button"
+          onClick={onClose}
+          disabled={busy}
+          className={cn(
+            'inline-flex h-11 items-center gap-1.5 rounded-control border border-border bg-card px-3.5 text-fs-xs font-semibold text-foreground',
+            'transition-colors hover:bg-muted disabled:opacity-50',
+            'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40',
+          )}
+        >
+          <XCircle className="size-3.5" aria-hidden /> {pending === 'close' ? 'Closing…' : 'Close Event'}
+        </button>
+      </div>
+    </div>
+  )
+}
+
 // ─── Card ─────────────────────────────────────────────────────────────────────
 
 export function EventCard({ event, actions, pending, canDeleteDraft }: {
@@ -328,8 +404,14 @@ export function EventCard({ event, actions, pending, canDeleteDraft }: {
         </div>
       </Link>
 
+      {/* RD-REVIEW-02 — changes requested: what to fix, the server-stored deadline, ONE edit action
+          (the editor's own Submit for Review resubmits) and a separate Close Event. */}
+      {event.lifecycleStatus === 'changes_requested' && (
+        <ReviewRequestPanel event={event} busy={busy} pending={pending} onClose={() => actions.onCloseReview(event)} />
+      )}
+
       {/* Attention: an admin sent this back. Interactive, so it sits outside the link. */}
-      {needsResubmit(event) && (
+      {needsResubmit(event) && event.lifecycleStatus !== 'changes_requested' && (
         <div className="mx-3 mb-3 min-w-0 rounded-control sm:mx-4 border border-warning/30 bg-warning/10 p-3">
           <p className="text-fs-xs font-semibold text-foreground">
             {event.reviewStatus === 'rejected' ? 'Not approved' : 'Changes requested'}

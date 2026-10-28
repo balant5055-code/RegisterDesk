@@ -16,6 +16,8 @@ export interface PublishedEvent {
   draftId:       string
   eventType:     string | null
   eventSubtype:  string | null
+  /** The organizer's free-text event kind (Custom / "Other"), copied by publish. Absent on older events. */
+  customEventSubtype?: string | null
   visibility:    string | null
   pricing:       Record<string, unknown> | null
   eventDetails:  Record<string, unknown>

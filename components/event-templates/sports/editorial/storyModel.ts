@@ -56,12 +56,18 @@ const LEAD_MARK = /^(\p{Extended_Pictographic}(?:️|‍\p{Extended_Pictographic
 const CLOSING_WORDS = /^(conclusion|in closing|closing note|summary|final word)$/i
 
 function splitMark(line: string): { mark: string; text: string } {
+  // RD-MARKDOWN-01 — a Markdown heading marker (`## Key objectives`) is dropped from the text.
+  line = line.replace(MD_HEADING, '')
   const m = LEAD_MARK.exec(line)
   return m ? { mark: m[1], text: line.slice(m[0].length).trim() } : { mark: '', text: line.trim() }
 }
 
+const MD_HEADING = /^#{1,6}\s+/
+
 /** Is this line a heading rather than body copy? */
 function isHeading(line: string, next: string | undefined): boolean {
+  // RD-MARKDOWN-01 — the organizer's explicit Markdown heading always is one.
+  if (MD_HEADING.test(line) && line.replace(MD_HEADING, '').trim()) return true
   const { mark, text } = splitMark(line)
   if (!text || text.length > 72) return false
   if (/[.:?;]$/.test(text)) return false

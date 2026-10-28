@@ -421,6 +421,13 @@ export interface IntegrationsConfig {
    * through the Super Admin WhatsApp Templates page (reason required, audited).
    */
   whatsappTemplateReviewMode: 'manual' | 'automatic'
+  /**
+   * RD-WA-MARKETING-01 — may organizers create or edit MARKETING-category templates? Default false.
+   * Utility templates are never affected, and existing templates (and anything already approved /
+   * sent) are untouched. Changed only through the Super Admin WhatsApp Templates page (reason
+   * required, audited); enforced by the template service on create, edit and new version.
+   */
+  whatsappMarketingTemplatesEnabled: boolean
 }
 
 /** Auth/session/OTP security POLICY knobs (RD-CONF-11). Policy only — never
@@ -856,6 +863,8 @@ export const BUSINESS_CONFIG_DEFAULTS: BusinessConfigSections = {
     metaApiTimeoutMs: 10_000,
     emailProvider:    'ses',
     whatsappTemplateReviewMode: 'manual',
+    // RD-WA-MARKETING-01 — organizer MARKETING templates are off until a Super Admin turns them on.
+    whatsappMarketingTemplatesEnabled: false,
   },
   // RD-MEDIA-08 — faithful to the constants these replaced, so adding the section changed
   // no behaviour: 50 MB (platform-storage event-photo-original), 2000 (the duplicate-scan
@@ -1294,6 +1303,8 @@ function validateIntegrations(v: unknown): ConfigValidationResult {
     [isStr(c?.emailProvider), 'integrations.emailProvider must be a non-empty string'],
     // Absent (a stored section written before this key) resolves to the default 'manual'.
     [c?.whatsappTemplateReviewMode === undefined || c.whatsappTemplateReviewMode === 'manual' || c.whatsappTemplateReviewMode === 'automatic', "integrations.whatsappTemplateReviewMode must be 'manual' or 'automatic'"],
+    // Absent (a stored section written before this key) resolves to the default false (disabled).
+    [c?.whatsappMarketingTemplatesEnabled === undefined || typeof c.whatsappMarketingTemplatesEnabled === 'boolean', 'integrations.whatsappMarketingTemplatesEnabled must be true or false'],
   ])
 }
 

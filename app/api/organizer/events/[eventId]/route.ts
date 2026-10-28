@@ -9,6 +9,7 @@ import { getEventStats, sumConfirmedRevenueFromLedgerChecked } from '@/lib/fireb
 import { evaluatePublishRequirements, severityOf } from '@/lib/events/publishRequirements'
 import { authorizeWorkspace }        from '@/lib/team/workspace'
 import { deriveLifecycleStatus, isArchivedEvent } from '@/lib/events/lifecycle'
+import { isReviewClosed }            from '@/lib/events/lifecycleStateMachine'
 import { runEventDeletion }          from '@/lib/events/eventDeletion'
 import { revenueStateFrom, toConfirmedRevenueFields } from '@/lib/finance/revenueState'
 import { resolveIdentifierConfig }   from '@/lib/identifiers/config'
@@ -688,6 +689,14 @@ export async function DELETE(
   if (!isArchivedEvent(draft)) {
     return NextResponse.json(
       { error: 'Only archived events can be permanently deleted. Archive this event first.' },
+      { status: 409 },
+    )
+  }
+  // RD-REVIEW-02 — a review-closed event keeps its record and review history (runEventDeletion
+  // would erase reviewHistory). Removing one needs a Super Admin decision, not an organizer delete.
+  if (isReviewClosed(draft)) {
+    return NextResponse.json(
+      { error: 'This event was closed during review. Its record and review history are kept, so it cannot be permanently deleted. Contact RegisterDesk support if it must be removed.', code: 'REVIEW_CLOSED' },
       { status: 409 },
     )
   }

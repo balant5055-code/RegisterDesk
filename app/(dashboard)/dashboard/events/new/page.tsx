@@ -17,6 +17,9 @@ import {
 import { readFeeCollection, buildFeeCollection } from '@/lib/fees/explicitFeeModel'
 import { useAuth } from '@/components/auth/AuthProvider'
 import { draftKeyFor, indexOfStep, resumeStepFor, isSubmittedDraftStatus, type WizardFlow } from '@/lib/events/builder/stepRegistry'
+import { readReviewDeadline, currentDueAt } from '@/lib/events/reviewDeadline'
+import { isReviewClosed } from '@/lib/events/lifecycleStateMachine'
+import { ReviewDeadlineCountdown } from '@/components/events/ReviewDeadlineCountdown'
 import { readIntent, clearIntent, returnLabelFor } from '@/lib/wallet/purchaseIntent'
 import { validateStep } from '@/lib/events/builder/stepValidation'
 import { EASE, WIZARD_STEPS } from '@/lib/events/builder/constants'
@@ -1484,8 +1487,10 @@ function PublishConfirmModal({
               {/* RD-EVENT-41 — ids referenced by the dialog's aria-labelledby/-describedby.
                   Verified missing at runtime: the dialog reported aria-labelledby: null, so a
                   screen reader announced it with no name. */}
-              <p id="publish-confirm-title" className="text-[16px] font-bold text-foreground">Ready to Publish?</p>
-              <p id="publish-confirm-desc" className="text-[13px] text-muted-foreground">Your event will go live immediately.</p>
+              <p id="publish-confirm-title" className="text-[16px] font-bold text-foreground">Ready to submit?</p>
+              {/* RD-REVIEW-02 — the publishing mode is admin-only, so this cannot promise "live immediately":
+                  under manual approval (the default) the event waits for a RegisterDesk review. */}
+              <p id="publish-confirm-desc" className="text-[13px] text-muted-foreground">Your event goes live after RegisterDesk approves it, or straight away if no review is needed.</p>
             </div>
           </div>
           <button
@@ -1547,8 +1552,9 @@ function PublishConfirmModal({
               </div>
               <div className="flex flex-col divide-y divide-border/40">
                 {([
-                  { icon: Globe,        text: 'Event page goes live — accessible via your event link' },
-                  { icon: Users,        text: 'Registrations open — attendees can sign up immediately' },
+                  { icon: Clock,        text: 'If a review is required, RegisterDesk checks the event and notifies you of the decision' },
+                  { icon: Globe,        text: 'Once live, the event page is reachable via your event link' },
+                  { icon: Users,        text: 'Registrations open — attendees can sign up' },
                   { icon: Mail,         text: 'Confirmation emails activate — sent on every registration' },
                   { icon: TrendingUp,   text: 'Organizer dashboard tracking begins — real-time insights' },
                 ] as Array<{ icon: LucideIcon; text: string }>).map(({ icon: Icon, text }) => (
@@ -1984,6 +1990,15 @@ function Step7View({
   // draft that may be submitted again nor a published event that may Save Changes.
   const isSubmitted        = isSubmittedDraftStatus(draftStatus)
   const isPendingReview    = draftStatus === 'pending_review'
+  // RD-REVIEW-02 — a Super Admin requested changes: the legacy `status` still reads 'pending_review',
+  // so the lifecycle field decides. Review's own action then submits the event for review again
+  // (POST …/resubmit — a new review cycle; nothing is charged). The deadline is the SERVER's.
+  const isChangesRequested = (initialData?.lifecycleStatus as string | null | undefined) === 'changes_requested'
+  const reviewDeadlineRaw  = isChangesRequested ? readReviewDeadline(initialData?.reviewDeadline) : null
+  const reviewDeadline     = reviewDeadlineRaw && reviewDeadlineRaw.cycleId === initialData?.reviewCycleId ? reviewDeadlineRaw : null
+  const requestedChanges   = isChangesRequested && typeof initialData?.changesComment === 'string' ? initialData.changesComment : ''
+  const reviewInSecondWindow = reviewDeadline !== null && reviewDeadline.phase === 'action_required'
+  const reviewDueAtMs      = reviewDeadline !== null ? currentDueAt(reviewDeadline) : null
 
   // Build shareable event URL once — used by both the publish success screen
   // and the "Changes saved" banner.
@@ -2277,6 +2292,54 @@ function Step7View({
     try { await confirmPublishOnce(confirmIdentityChange) } finally { publishInFlight.current = false }
   }, [confirmPublishOnce])
 
+  // RD-REVIEW-02 — Submit for review again, for an event whose changes were requested. Saved edits are
+  // flushed first (the server reads the DRAFT), then the existing resubmit route validates, applies
+  // the same identity governance as publishing, opens a new review cycle and ends the deadline. On a
+  // refusal the organizer sees the server's own reason and nothing they saved is lost.
+  const resubmitInFlight = useRef(false)
+  async function handleResubmit(confirmIdentityChange = false) {
+    if (resubmitInFlight.current || publishState !== 'idle' || !draftId) return
+    resubmitInFlight.current = true
+    setPublishState('publishing')
+    try {
+      if (!(await settleDraft())) { setPublishState('idle'); return }
+      const token = await auth.currentUser?.getIdToken()
+      const res = await fetch(`/api/organizer/events/${encodeURIComponent(draftId)}/resubmit`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ confirmIdentityChange }),
+      })
+      const json = await res.json().catch(() => ({})) as {
+        success?: boolean; error?: string; reason?: string
+        blockers?: Array<{ title: string; description: string; step: string }>
+        governance?: PublishGovernanceInfo
+      }
+      if (res.ok && json.success) {
+        setSubmittedStatus('pending_review')
+        setPublishState('published')
+        return
+      }
+      setPublishState('idle')
+      if (json.reason === 'IDENTITY_CONFIRMATION_REQUIRED') {
+        setIdentityConfirm(json.governance ?? {
+          decision: 'warn', level: 'moderate', changedFields: [], requiresConfirmation: true, suggestDuplicate: false,
+        })
+        return
+      }
+      const first = json.blockers?.[0]
+      showToast(
+        first ? `${first.title} — ${first.description} (Step: ${first.step})`
+          : json.error ?? 'The event could not be submitted for review. Your changes are saved — please try again.',
+        'error',
+      )
+    } catch {
+      setPublishState('idle')
+      showToast('Network error — your changes are saved. Check your connection and try again.', 'error')
+    } finally {
+      resubmitInFlight.current = false
+    }
+  }
+
   // ── Activation & services (RD-EVENT-COMMERCE-05B) ─────────────────────────────
   // Payment and submission now happen together on the FINAL step (License & Services), so
   // Review no longer quotes or reports activation. On the final step the gate is the embedded
@@ -2469,6 +2532,28 @@ function Step7View({
         className="mb-4 inline-flex items-center gap-1.5 text-[13px] font-medium text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary rounded">
         <ArrowLeft className="size-4" aria-hidden />Back to Dashboard
       </Link>
+
+      {/* RD-REVIEW-02 — what the Super Admin asked for, and the server-stored deadline. */}
+      {isChangesRequested && (
+        <div role="status" className="mb-4 space-y-2.5 rounded-xl border border-warning/30 bg-warning/10 px-4 py-3.5">
+          <p className="text-[13.5px] font-bold text-foreground">
+            {reviewInSecondWindow ? 'Action required: update and resubmit this event' : 'Changes requested by RegisterDesk'}
+          </p>
+          {requestedChanges && (
+            <p className="break-words text-[12.5px] leading-relaxed text-muted-foreground [overflow-wrap:anywhere]">{requestedChanges}</p>
+          )}
+          {reviewDueAtMs !== null && (
+            <ReviewDeadlineCountdown
+              dueAt={reviewDueAtMs}
+              label={reviewInSecondWindow ? 'Closes automatically' : 'Changes due'}
+              expiredText={reviewInSecondWindow
+                ? 'The deadline has passed, so this event is being closed and can no longer be resubmitted.'
+                : 'Submit soon: the event moves to Action Required, then closes 24 hours later.'}
+            />
+          )}
+          <p className="text-[12px] text-muted-foreground">Make the changes in the steps above, then select “Submit for review” below.</p>
+        </div>
+      )}
 
       <Stepper currentStep={currentStep} completedValues={completedValues} steps={stepsList} />
 
@@ -2880,12 +2965,22 @@ function Step7View({
             open={!!identityConfirm}
             governance={identityConfirm}
             onCancel={() => setIdentityConfirm(null)}
-            onConfirm={() => { setIdentityConfirm(null); void handleConfirmPublish(true) }}
+            onConfirm={() => { setIdentityConfirm(null); void (isChangesRequested ? handleResubmit(true) : handleConfirmPublish(true)) }}
             isPublishing={publishState === 'publishing'}
           />
         )}
       </AnimatePresence>
-      {phase === 'review' ? (
+      {phase === 'review' && isChangesRequested ? (
+        // RD-REVIEW-02 — the event's own "Submit for review": resubmits the saved event (no payment).
+        <WizardFooter
+          onBack={onBack}
+          onNext={() => { void handleResubmit() }}
+          isFinalStep
+          nextLabel={publishState === 'publishing' ? 'Submitting…' : 'Submit for review'}
+          isNextDisabled={!report.canPublish || publishState !== 'idle'}
+          stepContext={stepContext}
+        />
+      ) : phase === 'review' ? (
         // RD-EVENT-COMMERCE-05B — Review collects nothing: it continues to License & Services.
         // A LIVE event keeps "Save Changes" here (buying more is one click away, above).
         <WizardFooter
@@ -3477,9 +3572,14 @@ export default function CreateEventWizard() {
         draft.eventType === 'fundraising' && draft.campaignType === 'event_plus_donation' ? 'fundraising' : 'standard'
       // The Wallet's "Increase Limit" hand-off opens License & Services directly (lib/wallet/purchaseIntent).
       const walletIntent = readIntent(draft.id)
+      // RD-REVIEW-02 — an event whose changes were requested opens on Review: the requested changes,
+      // the deadline and "Submit for review" are there (License & Services would read "awaiting approval").
+      const changesRequested = (draft as unknown as Record<string, unknown>).lifecycleStatus === 'changes_requested'
       setCurrentStep(draft.eventType === 'fundraising' && draft.campaignType === 'donation_only'
         ? (draft.currentStep ?? 0)   // the campaign wizard keeps its own indexing, untouched
-        : walletIntent ? indexOfStep(draftFlow, 'license') : resumeStepFor(draftFlow, draft.currentStep))
+        : walletIntent ? indexOfStep(draftFlow, 'license')
+        : changesRequested ? indexOfStep(draftFlow, 'review')
+        : resumeStepFor(draftFlow, draft.currentStep))
       setCompletedValues(
         (draft.completedValues ?? Array(WIZARD_STEPS.length).fill(null)).map(
           v => (v as string | null | undefined) ?? undefined,
@@ -3831,6 +3931,17 @@ export default function CreateEventWizard() {
     eventEndDate:   (draft?.eventDetails as Record<string, unknown> | null)?.endDate as string | null ?? null,
   }), [draft?.linkedCampaign, draft?.eventDetails])
 
+  // RD-REVIEW-02 — the server-written review fields of the draft (not part of the wizard's own shape).
+  const draftRecord = draft as unknown as Record<string, unknown> | null
+  const reviewFields = useMemo(() => ({
+    lifecycleStatus: (draftRecord?.lifecycleStatus as string | undefined) ?? null,
+    reviewDeadline:  draftRecord?.reviewDeadline ?? null,
+    reviewCycleId:   (draftRecord?.reviewCycleId as string | undefined) ?? null,
+    changesComment:  (draftRecord?.changesComment as string | undefined) ?? null,
+    reviewClosed:    isReviewClosed(draftRecord),
+  }), [draftRecord])
+  const licenseLifecycle = useMemo(() => ({ status: reviewFields.lifecycleStatus, reviewClosed: reviewFields.reviewClosed }), [reviewFields.lifecycleStatus, reviewFields.reviewClosed])
+
   // Both Review mount points read the identical payload — one memo serves both.
   const reviewInitialData = useMemo(() => ({
     draftId:          draft?.id               ?? null,
@@ -3849,9 +3960,15 @@ export default function CreateEventWizard() {
     registrationCapacity: selectedCapacity,
     // RD-EVENT-COMMERCE-02 — Review checks the SAME selection License & Services paid for.
     serviceSelection:     initialServiceSelection,
+    // RD-REVIEW-02 — Review shows the requested changes and the server deadline, and becomes the
+    // event's "Submit for review" when its changes were requested (server-written fields).
+    lifecycleStatus:      reviewFields.lifecycleStatus,
+    reviewDeadline:       reviewFields.reviewDeadline,
+    reviewCycleId:        reviewFields.reviewCycleId,
+    changesComment:       reviewFields.changesComment,
   }), [draft?.id, draft?.status, draft?.eventType, draft?.eventSubtype, draft?.visibility,
        draft?.accessControl, draft?.pricing, draft?.registrationForm, draft?.eventDetails,
-       selectedLicense, selectedCapacity, initialServiceSelection])
+       selectedLicense, selectedCapacity, initialServiceSelection, reviewFields])
 
   // Loading skeleton — shown while draft is being fetched from Firestore
   if (!hydrated || isLoading) {
@@ -4023,6 +4140,7 @@ export default function CreateEventWizard() {
               initialServiceSelection={initialServiceSelection}
               onServiceSelectionChange={onServiceSelectionChange}
               draftStatus={draftStatus}
+              lifecycle={licenseLifecycle}
               draftId={draft?.id ?? null}
             />
           )}
@@ -4056,6 +4174,7 @@ export default function CreateEventWizard() {
               initialServiceSelection={initialServiceSelection}
               onServiceSelectionChange={onServiceSelectionChange}
               draftStatus={draftStatus}
+              lifecycle={licenseLifecycle}
               draftId={draft?.id ?? null}
               embeddedFinal={{ onContext }}
             />

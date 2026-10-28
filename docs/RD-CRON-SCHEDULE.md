@@ -15,7 +15,7 @@
   order listed.
 - **`vercel.json`** is `{}` — it declares **no** crons. Never add one there for a route that a
   workflow already calls: every route must have exactly one scheduler.
-- **34** cron routes exist under `app/api/cron/`; **all 34** are scheduled, each exactly once.
+- **35** cron routes exist under `app/api/cron/`; **all 35** are scheduled, each exactly once.
 
 ## Schedules (UTC)
 
@@ -25,11 +25,28 @@ treat every cadence as "at most this often".
 | Workflow | Group | Schedule | Routes, in order |
 |---|---|---|---|
 | `cron-runners.yml` | A — queue runners | `*/5 * * * *` | `broadcasts`, `email-broadcasts`, `whatsapp-broadcasts`, `print-generation`, `print-packaging`, `certificate-jobs`, `certificate-email-jobs`, `registration-import`, `registration-bulk`, `report-exports`, `identifier-assign`, `timing-tags`, `media-jobs`, `ai-jobs`, `whatsapp-inbound`, `job-reaper` |
-| `cron-recovery.yml` | B — financial recovery, retries, dispatch | `*/10 * * * *` | `registration-reconciliation`, `donation-reconciliation`, `wallet-reconciliation`, `badge-orders-reconcile`, `badge-rounds-reconcile`, `media-credit-reconciliation`, `media-credit-sessions`, `webhooks`, `reminders`, `capacity-alerts`, `ops-alerts` |
+| `cron-recovery.yml` | B — financial recovery, retries, dispatch | `*/10 * * * *` | `registration-reconciliation`, `donation-reconciliation`, `wallet-reconciliation`, `badge-orders-reconcile`, `badge-rounds-reconcile`, `media-credit-reconciliation`, `media-credit-sessions`, `webhooks`, `reminders`, `review-deadlines`, `capacity-alerts`, `ops-alerts` |
 | `cron-cleanup.yml` | C — cleanup | `0 * * * *` | `certificate-claims`, `whatsapp-templates` |
 | `cron-maintenance.yml` | D — daily maintenance | `0 2 * * *` | `global-reconciliation`, `session-reconciliation`, `release-funds`, `storage-cleanup`, `print-runs-reconcile` |
 
 `0 2 * * *` is 02:00 UTC = **07:30 IST**.
+
+## Event review deadlines (RD-REVIEW-02)
+
+- **`review-deadlines` — every 10 minutes** (Group B, after `reminders` and before `ops-alerts`,
+  so the notices it stages are delivered by the same tick's outbox drain). After a Super Admin
+  requests changes it sends the reminders (+12 h, +22 h), moves the event to **Action Required**
+  when the first 24-hour deadline passes, sends a reminder 4 h before the second deadline, and
+  closes the event (`lifecycleStatus: 'cancelled'` + `reviewClosure.source: 'deadline_expired'`)
+  when the second 24-hour deadline passes. Every step is a status + review-cycle compare-and-set,
+  so repeated or overlapping runs do nothing twice. It never moves money.
+- A run may act up to ~10 minutes (more under GitHub load) after a deadline; the deadline itself
+  is still exact, because resubmission and voluntary closure are refused by the server once it
+  has passed, whether or not this job has run yet.
+- It is scheduled only from the **default branch**: the step takes effect once this workflow
+  change is merged to `master`. It uses the existing `CRON_BASE_URL` / `CRON_SECRET` secrets —
+  no new secret, and it queries a single-field range (`reviewDeadlineNextAt <= now`), so no new
+  Firestore index is needed.
 
 ## What the cadence means for money paths
 

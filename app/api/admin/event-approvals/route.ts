@@ -14,6 +14,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { adminDb }         from '@/lib/firebase/admin'
 import { resolveAdminUid } from '@/lib/admin/auth'
+import { readReviewDeadline, currentDueAt } from '@/lib/events/reviewDeadline'
 
 export interface PendingEventRow {
   slug:               string
@@ -38,6 +39,10 @@ export interface PendingEventRow {
   changesRequestedAt: string | null
   resubmittedAt:      string | null
   resubmissionCount:  number
+  /** RD-REVIEW-02 — the cycle a decision must name (null = submitted before review cycles existed). */
+  reviewCycleId:      string | null
+  /** RD-REVIEW-02 — the open changes deadline (changes_requested rows), ISO. */
+  reviewDeadline:     { phase: 'changes_requested' | 'action_required'; dueAt: string } | null
   /** The request a resubmission answered (kept when the open request is cleared). */
   lastReviewRequest:  { kind: string; comment: string | null; at: string | null } | null
 }
@@ -106,6 +111,8 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     const u   = userMap.get(uid)
     const lic = licMap.get(doc.id)
 
+    const reviewCycleId = typeof raw.reviewCycleId === 'string' && raw.reviewCycleId ? raw.reviewCycleId : null
+    const dl = readReviewDeadline(raw.reviewDeadline)
     const name = typeof str(raw, 'eventDetails', 'info', 'name') === 'string'
       ? (str(raw, 'eventDetails', 'info', 'name') as string).trim() || 'Untitled Event'
       : 'Untitled Event'
@@ -133,6 +140,8 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       resubmittedAt:       tsToISO(raw.resubmittedAt),
       resubmissionCount:   typeof raw.resubmissionCount === 'number' ? raw.resubmissionCount : 0,
       lastReviewRequest:   lastReviewRequestOf(raw.lastReviewRequest),
+      reviewCycleId,
+      reviewDeadline:      dl && dl.cycleId === reviewCycleId ? { phase: dl.phase, dueAt: new Date(currentDueAt(dl)).toISOString() } : null,
     }
   })
 

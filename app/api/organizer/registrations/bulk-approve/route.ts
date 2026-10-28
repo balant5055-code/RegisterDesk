@@ -28,6 +28,7 @@ import {
 } from '@/lib/firebase/firestore/registrations'
 import type { RegistrationDocument, AuditAction } from '@/lib/registrations/types'
 import { getEmailAppUrl } from '@/lib/email/appUrl'
+import { meetingAccessForRegistration } from '@/lib/registrations/meetingAccess'
 
 // Sequential per-id approval keeps counter contention off a single event's
 // counter doc; ≤200 admin-triggered approvals fit comfortably in the budget.
@@ -177,6 +178,10 @@ async function sendBulkApprovalEmails(
     // Cached by slug, so a bulk approve over one event costs one lookup, not one per row.
     const emailProviderName = await resolveEventEmailProvider(reg.eventSlug)
 
+    // RD-MEETING-ACCESS-01 — `reg` is the snapshot from BEFORE approval (still 'pending'), so the
+    // entitlement is read fresh from the now-approved registration document.
+    const meetingAccess = await meetingAccessForRegistration({ registrationId: id, eventSlug: reg.eventSlug, eventDetails: rawDetails })
+
     let emailStatus: 'sent' | 'failed' = 'failed'
     try {
       const result = await notificationEngine.send(NotificationType.REGISTRATION_APPROVED, {
@@ -192,6 +197,7 @@ async function sendBulkApprovalEmails(
         registrationId: id,
         ticketPageUrl:  `${baseUrl}/tickets/${id}`,
         pdfDownloadUrl: pdfUrl,
+        meetingAccess:  meetingAccess ?? undefined,
       }, emailProviderName)
       emailStatus = result.success ? 'sent' : 'failed'
       if (!result.success) {

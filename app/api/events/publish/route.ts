@@ -7,12 +7,17 @@
 //   4. Status is written only after successful validation.
 
 import { NextRequest, NextResponse, after } from 'next/server'
+import { randomUUID } from 'crypto'
 import { organizerPaysPricing } from '@/lib/events/builder/types'
+import { REVIEW_HISTORY, buildReviewHistoryEntry } from '@/lib/events/reviewHistory'
+import { getEventTypeAvailability } from '@/lib/events/eventTypeAvailabilityServer'
+import { isEventTypeAvailable, EVENT_TYPE_UNAVAILABLE_CODE, EVENT_TYPE_SUBMIT_UNAVAILABLE_MESSAGE } from '@/lib/events/eventTypeAvailability'
 import { FieldValue } from 'firebase-admin/firestore'
 import { adminDb } from '@/lib/firebase/admin'
 import { authorizeWorkspace } from '@/lib/team/workspace'
 import { organizerStatusGuard }  from '@/lib/admin/organizerStatus'
 import { validateEventPublish }  from '@/lib/events/validatePublish'
+import { galleryProblem, galleryOf } from '@/lib/events/galleryLimits'
 import { ensureCounterExists }   from '@/lib/firebase/firestore/registrationCounters'
 import { isEmailProviderName } from '@/lib/email/providerName'
 import { resolveTotalCapacity, capacityPlanForRegistrationLimit } from '@/lib/registrations/capacity'
@@ -121,6 +126,30 @@ export async function POST(req: NextRequest): Promise<NextResponse<PublishApiRes
     )
   }
   console.info(`[publish] validation ok · draftId=${draftId}`)
+
+  // ── 4a. RD-EVENT-TYPES-01 — a FIRST submission needs an available event type (strict: an existing
+  // draft of a now-disabled type stays saved and editable, and can be submitted once the type is
+  // enabled). This route only ever handles first submissions; events already submitted or published
+  // are never affected. After the lifecycle validation, so a repeat still answers EVENT_ALREADY_PUBLISHED.
+  {
+    const { availability } = await getEventTypeAvailability()
+    if (!isEventTypeAvailable(availability, draft.eventType ?? null)) {
+      console.warn(`[publish] event type unavailable · draftId=${draftId} eventType=${String(draft.eventType)}`)
+      return NextResponse.json(
+        { canPublish: false, reason: EVENT_TYPE_UNAVAILABLE_CODE, error: EVENT_TYPE_SUBMIT_UNAVAILABLE_MESSAGE },
+        { status: 403 },
+      )
+    }
+  }
+
+  // ── 4a2. RD-GALLERY-01 — a NEW event must be within the gallery limits (6 uploaded, 20 by URL).
+  // The draft can be written by the browser directly, so this is the server's check before the
+  // gallery reaches the live event. Strict here (first publish); later changes are growth-only.
+  const galleryIssue = galleryProblem(galleryOf(draft.eventDetails))
+  if (galleryIssue) {
+    console.warn(`[publish] gallery over limit · draftId=${draftId}`)
+    return NextResponse.json({ canPublish: false, reason: 'INVALID_EVENT_VALUES', error: galleryIssue }, { status: 422 })
+  }
 
   // ── 4b. RD-EVENT-COMMERCE-05F — the organizer's Publish Agreement, enforced HERE ─────────
   // The wizard shows it unchecked on License & Services and blocks the button, but that is only
@@ -514,6 +543,12 @@ export async function POST(req: NextRequest): Promise<NextResponse<PublishApiRes
         () => eventReviewAlert({ submission: 'submitted', draftId, slug, eventName, organizer: { uid, name: '', email: '' }, at: new Date(), when: istNow() }),
       )
     : null
+  // RD-REVIEW-02 — a submission for review opens review cycle 1: every admin decision must name it,
+  // and the first submission is now recorded in the review history (staged in the publish
+  // transaction, so it exists if and only if the submission persisted). Fixed before the
+  // transaction, so a retried attempt writes the same cycle and the same history entry.
+  const reviewCycleId   = terminalStatus === 'pending_review' ? randomUUID() : null
+  const submitEntryRef  = reviewCycleId ? adminDb.collection('events').doc(slug).collection(REVIEW_HISTORY).doc() : null
 
   try {
     await adminDb.runTransaction(async (txn) => {
@@ -695,7 +730,16 @@ export async function POST(req: NextRequest): Promise<NextResponse<PublishApiRes
         publishAgreement:   { ...publishAgreementRecord, acceptedAt: FieldValue.serverTimestamp() },
         publishedAt:        FieldValue.serverTimestamp(),
         updatedAt:          FieldValue.serverTimestamp(),
+        ...(reviewCycleId ? { reviewCycleId, reviewCycleStartedAt: FieldValue.serverTimestamp() } : {}),
       })
+      if (submitEntryRef && reviewCycleId) {
+        txn.set(submitEntryRef, {
+          ...buildReviewHistoryEntry({
+            action: 'submit', fromStatus: 'draft', toStatus: 'pending_review', actorUid: authz.callerUid, cycleId: reviewCycleId,
+          }),
+          at: FieldValue.serverTimestamp(),
+        })
+      }
 
       // Event License — created atomically with the event, keyed by the same slug.
       // The CANONICAL license document (source of truth): its tier is the paid tier
@@ -767,6 +811,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<PublishApiRes
         updatedAt:                  FieldValue.serverTimestamp(),
         'eventDetails.seo.urlSlug': slug,
         publishAgreement:           { ...publishAgreementRecord, acceptedAt: FieldValue.serverTimestamp() },
+        ...(reviewCycleId ? { reviewCycleId, reviewCycleStartedAt: FieldValue.serverTimestamp() } : {}),
       })
       if (reviewAlert) stageOutboxMessage(txn, reviewAlert)
 
@@ -837,7 +882,8 @@ export async function POST(req: NextRequest): Promise<NextResponse<PublishApiRes
   if (terminalStatus === 'pending_review') {
     console.info(`[wa-trace][EVENT_SUBMITTED] STEP 1  Event submitted ✓ · slug=${slug} organizerUid=${uid}`)
     console.info(`[wa-trace][EVENT_SUBMITTED] STEP 2  Notification scheduled via after() ✓ (runs after response)`)
-    after(() => sendEventReviewEmail({ organizerUid: uid, eventName, kind: 'submitted', eventId: draftId }))
+    // occurrenceId = this submission's history entry, so a repeated delivery lands in the inbox once.
+    after(() => sendEventReviewEmail({ organizerUid: uid, eventName, kind: 'submitted', eventId: draftId, occurrenceId: submitEntryRef?.id }))
     if (reviewAlert) scheduleOutboxDelivery(reviewAlert.id)
   }
 

@@ -118,8 +118,11 @@ describeEmu('event review workflow: changes requested → resubmission → appro
     expect(res.status, await res.clone().text()).toBe(200)
   }
 
+  // RD-REVIEW-02 — a decision names the review cycle it reviewed: the event's CURRENT cycle (null for
+  // an event seeded without one), read here as the review page would have loaded it.
   const doReview = async (slug: string, body: Json, who: string | null = ADMIN) => {
-    const res = await review(req(`http://localhost/api/admin/events/${slug}/review`, who ? tokens[who] : null, 'POST', body), ctxSlug(slug))
+    const reviewCycleId = (((await adminDb.doc(`events/${slug}`).get()).data() ?? {}).reviewCycleId as string | undefined) ?? null
+    const res = await review(req(`http://localhost/api/admin/events/${slug}/review`, who ? tokens[who] : null, 'POST', { reviewCycleId, ...body }), ctxSlug(slug))
     await flush()
     return res
   }

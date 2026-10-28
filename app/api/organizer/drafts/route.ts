@@ -10,6 +10,8 @@ import { FieldValue }                from 'firebase-admin/firestore'
 import { adminDb }                   from '@/lib/firebase/admin'
 import { authorizeWorkspace }        from '@/lib/team/workspace'
 import { sanitizeDraftPayload }      from '@/lib/events/draftWrite'
+import { getEventTypeAvailability }  from '@/lib/events/eventTypeAvailabilityServer'
+import { isEventTypeAvailable, EVENT_TYPE_UNAVAILABLE_CODE, EVENT_TYPE_UNAVAILABLE_MESSAGE } from '@/lib/events/eventTypeAvailability'
 
 const MAX_STEPS = 9
 
@@ -22,6 +24,13 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const seed = (body as { seed?: unknown } | null)?.seed ?? {}
   const check = sanitizeDraftPayload(seed)
   if (!check.ok) return NextResponse.json({ error: check.error, field: check.field ?? null }, { status: 400 })
+  // RD-EVENT-TYPES-01 — a new draft may only start with an event type that is currently available.
+  if (check.fields.eventType !== undefined && check.fields.eventType !== null) {
+    const { availability } = await getEventTypeAvailability()
+    if (!isEventTypeAvailable(availability, check.fields.eventType)) {
+      return NextResponse.json({ error: EVENT_TYPE_UNAVAILABLE_MESSAGE, code: EVENT_TYPE_UNAVAILABLE_CODE, field: 'eventType' }, { status: 403 })
+    }
+  }
 
   // RD-CE-FIX (orphan drafts) — an optional client request id makes creation idempotent: the id is
   // kept in the tab's sessionStorage until creation is acknowledged, so a refresh mid-create (or a

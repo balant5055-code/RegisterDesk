@@ -32,6 +32,7 @@ import { ledgerRef, txnApplyServiceItems, type ServiceLedgerDoc } from './servic
 import { checkPhotoPurchase, mediaUnitsIn, paidPhotoCapacity } from './photoCapacity'
 import { quoteAddon, type DraftCoverage } from './draftCoverage'
 import { licenceRegistrationBlock } from './licenceRegistrationBlock'
+import { isReviewClosed } from '@/lib/events/lifecycleStateMachine'
 import { recordManualRefundHold, recordDuplicateLicensePayment } from './manualRefundHold'
 export { readDraftCoverage, quoteAddon, type DraftCoverage } from './draftCoverage'
 import type { AnyEventLicenseTier } from './eventLicense'
@@ -177,6 +178,8 @@ export type AddonActivationKind = 'ok' | 'already' | 'not_payable' | 'inconsiste
  * next delivery / confirm retry sees 'licence_inactive' again and completes the same hold.
  */
 export const ADDON_LICENCE_INACTIVE = 'licence_inactive'
+/** RD-REVIEW-02 — `failDetail` on an add-on refused because its event was closed during review. */
+export const ADDON_EVENT_REVIEW_CLOSED = 'event_review_closed'
 
 export async function holdLicenceInactiveAddon(input: {
   orderId: string; razorpayOrderId: string; paymentId: string; amountPaise: number; eventId: string; organizerUid: string
@@ -231,8 +234,17 @@ export async function activateAddonOrder(input: {
     // is server-written by publish). A draft that was never published has no live event and no licence.
     const live = (await txn.get(liveEventsForDraft(o.eventId))).docs.filter(d => d.get('uid') === o.organizerUid)
     const lics = await Promise.all(live.map(d => txn.get(adminDb.collection(EVENT_LICENSES_COLLECTION).doc(d.id))))
-    if (lics.some(l => licenceRegistrationBlock(l.exists ? l.data() : undefined))) {
-      txn.set(adminDb.collection(LICENSE_ORDERS_COLLECTION).doc(o.orderId), { status: 'failed', failReason: ADDON_LICENCE_INACTIVE, updatedAt: now() }, { merge: true })
+    // RD-REVIEW-02 — an event closed during review (owner closure or expired deadlines) is permanently
+    // closed: a checkout opened before the closure but paid after it grants nothing. It takes the SAME
+    // refusal as an inactive licence (order failed, slot released, the caller holds the captured
+    // payment for a Super Admin decision — never an automatic refund); `failDetail` only lets the
+    // organizer-facing message say why.
+    const reviewClosed = live.some(d => isReviewClosed(d.data()))
+    if (reviewClosed || lics.some(l => licenceRegistrationBlock(l.exists ? l.data() : undefined))) {
+      txn.set(adminDb.collection(LICENSE_ORDERS_COLLECTION).doc(o.orderId), {
+        status: 'failed', failReason: ADDON_LICENCE_INACTIVE, updatedAt: now(),
+        ...(reviewClosed ? { failDetail: ADDON_EVENT_REVIEW_CLOSED } : {}),
+      }, { merge: true })
       if ((ledgerSnap.data() as ServiceLedgerDoc | undefined)?.pendingAddonOrderId === o.orderId) {
         txn.set(ledgerRef(o.eventId), { pendingAddonOrderId: null, updatedAt: FieldValue.serverTimestamp() }, { merge: true })
       }

@@ -10,6 +10,19 @@
 import { businessConfig } from '@/lib/config/businessConfigService'
 import { parseReviewMode, DEFAULT_REVIEW_MODE, type ReviewMode } from './types'
 
+/**
+ * RD-WA-MARKETING-01 — may organizers create / edit MARKETING templates? Business Configuration
+ * `integrations.whatsappMarketingTemplatesEnabled`. Fails CLOSED: absent or unreadable ⇒ disabled.
+ */
+export async function resolveMarketingTemplatesEnabled(): Promise<{ enabled: boolean; unavailable: boolean }> {
+  try {
+    const integrations = await businessConfig.getSection('integrations')
+    return { enabled: (integrations as { whatsappMarketingTemplatesEnabled?: unknown }).whatsappMarketingTemplatesEnabled === true, unavailable: false }
+  } catch {
+    return { enabled: false, unavailable: true }
+  }
+}
+
 export async function resolveReviewMode(): Promise<{ mode: ReviewMode; unavailable: boolean }> {
   try {
     const integrations = await businessConfig.getSection('integrations')

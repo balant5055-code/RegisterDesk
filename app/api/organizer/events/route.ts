@@ -14,7 +14,28 @@ import { adminDb }                   from '@/lib/firebase/admin'
 import { authorizeAnyWorkspace }     from '@/lib/team/workspace'
 
 import { getEventStats, sumConfirmedRevenueFromLedgerChecked } from '@/lib/firebase/firestore/registrationCounters'
-import { parseListingTab, eventInListingTab, effectiveLifecycleStatus } from '@/lib/events/listingTabs'
+import { parseListingTab, eventDocInListingTab, effectiveLifecycleStatus } from '@/lib/events/listingTabs'
+import { readReviewDeadline, toMillis } from '@/lib/events/reviewDeadline'
+import { isReviewClosed } from '@/lib/events/lifecycleStateMachine'
+
+/**
+ * RD-REVIEW-02 — the review fields of a draft, for the organizer's own listing. Only the deadline of
+ * the CURRENT cycle is reported, and only while the event is still in its changes request.
+ */
+function reviewFieldsOf(d: Record<string, unknown>): Pick<EventListItem, 'reviewCycleId' | 'reviewDeadline' | 'reviewClosure'> {
+  const cycle = typeof d.reviewCycleId === 'string' && d.reviewCycleId ? d.reviewCycleId : null
+  const dl = readReviewDeadline(d.reviewDeadline)
+  const live = dl && dl.cycleId === cycle && effectiveLifecycleStatus(d) === 'changes_requested' ? dl : null
+  const closure = isReviewClosed(d) ? d.reviewClosure as { source: 'organizer' | 'deadline_expired'; closedAt?: unknown } : null
+  return {
+    reviewCycleId:  cycle,
+    reviewDeadline: live ? {
+      phase: live.phase, changesRequestedAt: live.changesRequestedAt, changesDueAt: live.changesDueAt,
+      actionRequiredAt: live.actionRequiredAt, actionDueAt: live.actionDueAt,
+    } : null,
+    reviewClosure:  closure ? { source: closure.source, closedAt: toMillis(closure.closedAt) } : null,
+  }
+}
 import { LICENSE_ORDERS_COLLECTION } from '@/lib/licensing/schema'
 import { revenueStateFrom, toConfirmedRevenueFields } from '@/lib/finance/revenueState'
 import type { EventLifecycleStatus } from '@/types/events'
@@ -82,6 +103,12 @@ export interface EventListItem {
   reviewStatus:       'rejected' | 'changes_requested' | null
   rejectionReason:    string | null
   changesComment:     string | null
+  // RD-REVIEW-02 — the review cycle and the changes deadline (server-stored; the card's countdown
+  // is computed FROM these, never decided by the browser), and whether the event was closed during
+  // review. Absent / null for events without them (legacy, or not in a changes request).
+  reviewCycleId?:     string | null
+  reviewDeadline?:    { phase: 'changes_requested' | 'action_required'; changesRequestedAt: number; changesDueAt: number; actionRequiredAt: number | null; actionDueAt: number | null } | null
+  reviewClosure?:     { source: 'organizer' | 'deadline_expired'; closedAt: number | null } | null
   // Phase L1 — true when a PAID license order exists for this event. Drives the
   // organizer UI to hide the permanent-delete affordance for paid events
   // (the delete API is the authoritative guard). Optional/absent ⇒ not paid.
@@ -253,7 +280,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       let filled = false
       for (const doc of batch.docs) {
         const d = doc.data() as Record<string, unknown>
-        if (eventInListingTab(effectiveLifecycleStatus(d), tab) && draftMatchesSearch(d, searchTerm)) {
+        if (eventDocInListingTab(d, tab) && draftMatchesSearch(d, searchTerm)) {
           matched.push(doc)
           if (matched.length >= wanted) { filled = true; break }
         }
@@ -474,6 +501,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       reviewStatus:       d.reviewStatus === 'rejected' || d.reviewStatus === 'changes_requested' ? d.reviewStatus : null,
       rejectionReason:    typeof d.rejectionReason === 'string' && d.rejectionReason ? d.rejectionReason : null,
       changesComment:     typeof d.changesComment  === 'string' && d.changesComment  ? d.changesComment  : null,
+      ...reviewFieldsOf(d),
       hasPaidLicense:     paidDraftIds.has(doc.id),
       statsUnavailable,
       licenseUnavailable: licenseReadFailed,

@@ -2,16 +2,23 @@
 // Contains the event lifecycle state machine and the shared transition function
 // called by the status / cancel / archive API routes.
 
-import { FieldValue }    from 'firebase-admin/firestore'
+import { randomUUID }    from 'crypto'
+import { FieldValue, Timestamp } from 'firebase-admin/firestore'
 import { adminDb }       from '@/lib/firebase/admin'
 import type { EventLifecycleStatus, LifecycleAction, EventReviewMeta } from '@/types/events'
-import { targetStatus, isValidTransition, deriveLifecycleStatus } from './lifecycleStateMachine'
+import { targetStatus, isValidTransition, deriveLifecycleStatus, isReviewClosed, blockedByReviewClosure } from './lifecycleStateMachine'
 import { liveEventBelongsTo } from './liveEventRef'
 import { buildLiveContentSync } from './editing/liveContentSync'
-import { stageOutboxMessage, scheduleOutboxDelivery, istNow } from '@/lib/notifications/outbox'
+import { stageOutboxMessage, scheduleOutboxDelivery, istNow, type OutboxMessageInput } from '@/lib/notifications/outbox'
 import { eventReviewAlert } from '@/lib/notifications/actionAlerts'
+import { reviewReminderNotice, actionRequiredNotice, reviewClosedNotice } from '@/lib/notifications/reviewDeadlineAlerts'
 import { resolveOrganizerEmailIdentity } from '@/lib/organizer/emailIdentity'
+import { stageAdminAudit, type AdminAuditParams } from '@/lib/admin/audit'
 import { REVIEW_HISTORY, buildReviewHistoryEntry, isReviewHistoryAction, reviewActorRole, revisedSections } from './reviewHistory'
+import {
+  readReviewDeadline, newChangesDeadline, enterActionRequired, markReminders, nextDeadlineStep,
+  nextDeadlineAt, reviewDeadlinePassed, currentDueAt, type ReviewDeadline,
+} from './reviewDeadline'
 
 // Re-export the pure state machine so existing importers of this module are
 // unaffected (the machine now lives in ./lifecycleStateMachine for testability).
@@ -27,6 +34,46 @@ export interface TransitionResult {
   statusCode:       number
   /** RD-REVIEW-01 — id of the reviewHistory entry this transition appended (review actions only). */
   reviewEntryId?:   string
+  /** RD-REVIEW-02 — a stable reason for a refusal the caller may want to explain. */
+  code?:            'STATUS_CHANGED' | 'REVIEW_CYCLE_STALE' | 'DEADLINE_PASSED' | 'REVIEW_CLOSED' | 'NOT_DUE' | 'USE_CLOSE_EVENT'
+  /** RD-REVIEW-02 — the review cycle the event is in after the transition. */
+  reviewCycleId?:   string | null
+}
+
+/** RD-REVIEW-02 — preconditions and side records checked / staged INSIDE the transition's transaction. */
+export interface TransitionOptions {
+  /** The draft must be in exactly this lifecycle status when the transaction reads it. */
+  expectedStatus?:  EventLifecycleStatus
+  /** The stored review cycle must equal this (null = an event from before review cycles). Undefined = not checked. */
+  expectedCycleId?: string | null
+  /** Admin audit row staged in the same transaction (the transition and its audit commit together). */
+  audit?:           AdminAuditParams
+  /** Organizer-visible reason recorded with a review closure. */
+  closureReason?:   string
+}
+
+/** RD-REVIEW-02 — the admin decisions: each may only answer an event that is pending review. */
+const ADMIN_REVIEW_ACTIONS = new Set<LifecycleAction>(['approve', 'reject', 'request_changes'])
+
+/** RD-REVIEW-02 — a deadline as stored (Firestore Timestamps). */
+function storedDeadline(d: ReviewDeadline): Record<string, unknown> {
+  const ts = (ms: number | null) => (ms === null ? null : Timestamp.fromMillis(ms))
+  const sent: Record<string, Timestamp> = {}
+  for (const [k, v] of Object.entries(d.remindersSent)) if (typeof v === 'number') sent[k] = Timestamp.fromMillis(v)
+  return {
+    cycleId: d.cycleId, phase: d.phase,
+    changesRequestedAt: ts(d.changesRequestedAt), changesDueAt: ts(d.changesDueAt),
+    actionRequiredAt: ts(d.actionRequiredAt), actionDueAt: ts(d.actionDueAt),
+    remindersSent: sent,
+  }
+}
+
+const reviewCycleOf = (d: Record<string, unknown>): string | null =>
+  typeof d.reviewCycleId === 'string' && d.reviewCycleId ? d.reviewCycleId : null
+
+const eventNameOf = (d: Record<string, unknown>): string => {
+  const info = ((d.eventDetails as Record<string, unknown> | undefined)?.info ?? {}) as { name?: unknown }
+  return typeof info.name === 'string' ? info.name.trim() : ''
 }
 
 export async function applyLifecycleTransition(
@@ -36,6 +83,7 @@ export async function applyLifecycleTransition(
   cancelReason?: string,
   review?:       EventReviewMeta,
   actorUid?:     string,   // caller uid for audit (defaults to uid / workspace owner)
+  opts:          TransitionOptions = {},
 ): Promise<TransitionResult> {
   // ── 1. Load draft (uid in path proves ownership) ───────────────────────────
   const draftRef  = adminDb.doc(`users/${uid}/eventDrafts/${eventId}`)
@@ -142,12 +190,15 @@ export async function applyLifecycleTransition(
     draftUpdate.reviewStatus      = 'rejected'
     draftUpdate.rejectionReason   = review?.rejectionReason   ?? ''
     draftUpdate.rejectionCategory = review?.rejectionCategory ?? ''
-    draftUpdate.rejectionNotes    = review?.rejectionNotes    ?? ''
     eventUpdate.rejectedAt        = now
     eventUpdate.reviewStatus      = 'rejected'
     eventUpdate.rejectionReason   = review?.rejectionReason   ?? ''
     eventUpdate.rejectionCategory = review?.rejectionCategory ?? ''
-    eventUpdate.rejectionNotes    = review?.rejectionNotes    ?? ''
+    // RD-REVIEW-02 — the rejection NOTES are the admin's internal note: they live only in the
+    // admin-only review history, never on the organizer-readable draft or the event document.
+    // Null also clears a note an older version of this code copied here.
+    draftUpdate.rejectionNotes    = null
+    eventUpdate.rejectionNotes    = null
   }
   if (action === 'request_changes') {
     draftUpdate.changesRequestedAt = now
@@ -206,6 +257,53 @@ export async function applyLifecycleTransition(
     eventUpdate.changesComment    = null
   }
 
+  // ── 4b. RD-REVIEW-02 — review cycles and deadlines ─────────────────────────
+  // One clock for every instant this transition derives (deadline arithmetic needs a real number,
+  // so it cannot be the serverTimestamp sentinel). The new cycle id is fixed before the
+  // transaction, so a retried attempt writes the same id.
+  const nowMs   = Date.now()
+  const nowTs   = Timestamp.fromMillis(nowMs)
+  const newCycleId = randomUUID()
+  const startsCycle = action === 'resubmit' || action === 'republish'
+  const isClosure   = action === 'close_review' || action === 'expire_review'
+  if (startsCycle) {
+    // A new submission = a new review cycle; the previous cycle's deadline ends here.
+    draftUpdate.reviewCycleId        = newCycleId
+    draftUpdate.reviewCycleStartedAt = nowTs
+    draftUpdate.reviewDeadline       = FieldValue.delete()
+    eventUpdate.reviewCycleId        = newCycleId
+    eventUpdate.reviewCycleStartedAt = nowTs
+    eventUpdate.reviewDeadline       = FieldValue.delete()
+    eventUpdate.reviewDeadlineNextAt = null
+  }
+  if (action === 'approve' || action === 'reject') {
+    // A decision ends the cycle's open deadline (there is none while pending review; this also
+    // clears a stale one left by data written before the deadline existed).
+    draftUpdate.reviewDeadline       = FieldValue.delete()
+    eventUpdate.reviewDeadline       = FieldValue.delete()
+    eventUpdate.reviewDeadlineNextAt = null
+  }
+  if (isClosure) {
+    // A review closure is a cancellation (every existing guard treats 'cancelled' as terminal and
+    // not live) plus the `reviewClosure` marker that says why. The deadline record is KEPT (it is
+    // the evidence of both windows); only the scheduler pointer is cleared.
+    const closedBy = action === 'close_review' ? (actorUid ?? uid) : null
+    const reason   = (opts.closureReason ?? '').trim().slice(0, 500)
+      || (action === 'close_review' ? 'Closed by the organizer during review' : 'Requested changes were not submitted before the deadline')
+    for (const u of [draftUpdate, eventUpdate]) {
+      u.cancelledAt  = now
+      u.cancelledBy  = closedBy ?? uid
+      u.cancelReason = reason
+      // The request is no longer open: readers that key on reviewStatus (the event workspace banner,
+      // the dashboard's "changes requested" count) must not keep asking for changes. What was
+      // requested stays in changesComment, the review history and reviewClosure.
+      u.reviewStatus = null
+    }
+    eventUpdate.reviewDeadlineNextAt = null
+    // reviewClosure itself is written inside the transaction (it records the transactional cycle).
+    opts = { ...opts, closureReason: reason }
+  }
+
   // ── 5. Resolve public slug (needed to update events/{slug}) ───────────────
   const details = (d.eventDetails as Record<string, unknown>) ?? {}
   const seo     = (details.seo as Record<string, unknown>) ?? {}
@@ -242,6 +340,8 @@ export async function applyLifecycleTransition(
         organizer: { uid, name: o.name, email: o.email }, at: new Date(), when: istNow(),
       }))
     : null
+  // What the (last, committed) transaction attempt staged — read only after a successful commit.
+  let staged: { cycleAfter: string | null; closureNoticeId: string | null } = { cycleAfter: null, closureNoticeId: null }
   const txnFailure = await adminDb.runTransaction(async (txn): Promise<TransitionResult | null> => {
     const freshDraft = await txn.get(draftRef)
     if (!freshDraft.exists) {
@@ -255,6 +355,38 @@ export async function applyLifecycleTransition(
         statusCode: 409,
       }
     }
+    // ── RD-REVIEW-02 — preconditions on the TRANSACTIONAL snapshot ──
+    const fresh0 = freshDraft.data() as Record<string, unknown>
+    // An admin decision answers only an event that is pending review, and a review closure only one
+    // whose changes were requested — whatever else the generic machine would allow (approve and
+    // reopen-registrations share the target 'published'; reject and a draft share 'draft').
+    const requiredStatus: EventLifecycleStatus | undefined = opts.expectedStatus
+      ?? (ADMIN_REVIEW_ACTIONS.has(action) ? 'pending_review' : isClosure ? 'changes_requested' : undefined)
+    if (requiredStatus && freshStatus !== requiredStatus) {
+      return { success: false, error: `This event is '${freshStatus}', not '${requiredStatus}'. Reload and try again.`, statusCode: 409, code: 'STATUS_CHANGED' }
+    }
+    // An event whose changes were requested is closed ONLY through the review closure (owner-only,
+    // confirmed, recorded as reviewClosure). An ordinary cancel would leave no marker, and a cancelled
+    // → archived → restored → republished event would then escape the review deadline.
+    if (action === 'cancel' && freshStatus === 'changes_requested') {
+      return { success: false, error: 'This event is waiting for the changes RegisterDesk requested. Edit and resubmit it, or use Close Event.', statusCode: 409, code: 'USE_CLOSE_EVENT' }
+    }
+    if (blockedByReviewClosure(action) && isReviewClosed(fresh0)) {
+      return { success: false, error: 'This event was closed during review and can no longer be resubmitted, restored or republished.', statusCode: 409, code: 'REVIEW_CLOSED' }
+    }
+    const storedCycle = reviewCycleOf(fresh0)
+    if (opts.expectedCycleId !== undefined && storedCycle !== opts.expectedCycleId) {
+      return { success: false, error: 'This review is out of date: the event was resubmitted or changed since it was loaded. Reload and review the current version.', statusCode: 409, code: 'REVIEW_CYCLE_STALE' }
+    }
+    // A deadline belongs to one cycle; one left over from another cycle is not this event's deadline.
+    const rawDeadline = readReviewDeadline(fresh0.reviewDeadline)
+    const deadline = rawDeadline && rawDeadline.cycleId === storedCycle ? rawDeadline : null
+    if ((action === 'resubmit' || action === 'close_review') && freshStatus === 'changes_requested' && deadline && reviewDeadlinePassed(deadline, nowMs)) {
+      return { success: false, error: 'The deadline for these changes has passed, so the event is being closed. It can no longer be resubmitted.', statusCode: 409, code: 'DEADLINE_PASSED' }
+    }
+    if (action === 'expire_review' && !(deadline && deadline.phase === 'action_required' && deadline.actionDueAt !== null && nowMs >= deadline.actionDueAt)) {
+      return { success: false, error: 'The review deadline has not passed.', statusCode: 409, code: 'NOT_DUE' }
+    }
     // All reads must precede writes: read the public event doc before staging updates.
     let eventExists = false
     let eventData: Record<string, unknown> | undefined
@@ -267,6 +399,11 @@ export async function applyLifecycleTransition(
       // the draft cannot drift from its real live page.
       if (eventExists && !liveEventBelongsTo(eventSnap.data(), uid, eventId)) {
         return { success: false, error: 'Event not found', statusCode: 404 }
+      }
+      // RD-REVIEW-02 — an admin decision is about the reviewed (live) document: it must agree with
+      // the draft, so a decision can never land on an event whose live state moved underneath it.
+      if (ADMIN_REVIEW_ACTIONS.has(action) && eventExists && eventData && deriveLifecycleStatus(eventData) !== freshStatus) {
+        return { success: false, error: 'This event changed while it was being reviewed. Reload and try again.', statusCode: 409, code: 'STATUS_CHANGED' }
       }
     }
     let contentUpdate: Record<string, unknown> = {}
@@ -298,16 +435,56 @@ export async function applyLifecycleTransition(
       draftUpdate.lastReviewRequest = lastReviewRequest
       eventUpdate.lastReviewRequest = lastReviewRequest
     }
+    // ── RD-REVIEW-02 — cycle / deadline / closure writes (from the transactional snapshot) ──
+    // The cycle this transition belongs to: a new one when it starts a cycle; otherwise the stored
+    // one (a change request on an event submitted before cycles existed opens one now, so its
+    // deadline is bound to something every later step can compare against).
+    let cycleAfter: string | null = startsCycle ? newCycleId : storedCycle
+    let entryDueAt: number | null = null
+    if (action === 'request_changes') {
+      if (!cycleAfter) {
+        cycleAfter = newCycleId
+        draftUpdate.reviewCycleId = newCycleId
+        eventUpdate.reviewCycleId = newCycleId
+      }
+      // The first 24-hour window starts with THIS commit (a failed transaction leaves no deadline).
+      const dl = newChangesDeadline(cycleAfter, nowMs)
+      draftUpdate.reviewDeadline       = storedDeadline(dl)
+      eventUpdate.reviewDeadline       = storedDeadline(dl)
+      eventUpdate.reviewDeadlineNextAt = Timestamp.fromMillis(nextDeadlineAt(dl))
+      entryDueAt = dl.changesDueAt
+    }
+    let closureNotice: OutboxMessageInput | null = null
+    if (isClosure) {
+      const source = action === 'close_review' ? 'organizer' as const : 'deadline_expired' as const
+      const closure = {
+        source, cycleId: storedCycle, closedAt: nowTs,
+        closedBy: action === 'close_review' ? (actorUid ?? uid) : null, reason: opts.closureReason ?? null,
+      }
+      draftUpdate.reviewClosure = closure
+      eventUpdate.reviewClosure = closure
+      entryDueAt = deadline?.actionDueAt ?? null
+      if (storedCycle) {
+        closureNotice = reviewClosedNotice({
+          organizerUid: uid, draftId: eventId, cycleId: storedCycle, eventName: eventNameOf(fresh0),
+          changesComment: typeof fresh0.changesComment === 'string' ? fresh0.changesComment : '', source, closedAtMs: nowMs,
+        })
+      }
+    }
     if (historyRef && eventExists && isReviewHistoryAction(action)) {
+      const role = reviewActorRole(action)
       txn.set(historyRef, {
         ...buildReviewHistoryEntry({
           // An admin decision is attributed only to the admin the route names — never defaulted to
-          // the organizer. Only an organizer action may fall back to the workspace owner.
+          // the organizer. Only an organizer action may fall back to the workspace owner; a system
+          // action has no actor.
           action, fromStatus: freshStatus, toStatus: newStatus,
-          actorUid: actorUid ?? (reviewActorRole(action) === 'organizer' ? uid : null),
-          comment: review?.changesComment, reason: review?.rejectionReason,
+          actorUid: role === 'system' ? null : actorUid ?? (role === 'organizer' ? uid : null),
+          comment: review?.changesComment,
+          reason: isClosure ? opts.closureReason : review?.rejectionReason,
           category: review?.rejectionCategory, notes: review?.rejectionNotes,
           changedFields: contentChanged, revisedSections: contentRevised,
+          cycleId: cycleAfter, dueAt: entryDueAt,
         }),
         at: FieldValue.serverTimestamp(),
       })
@@ -316,10 +493,19 @@ export async function applyLifecycleTransition(
     txn.update(draftRef, draftUpdate)
     if (eventRef && eventExists) txn.update(eventRef, { ...contentUpdate, ...eventUpdate })
     if (reviewAlert) stageOutboxMessage(txn, reviewAlert)
+    if (closureNotice) stageOutboxMessage(txn, closureNotice)
+    if (opts.audit) {
+      stageAdminAudit(txn, {
+        ...opts.audit,
+        correlation: { ...(opts.audit.correlation ?? {}), draftId: eventId, slug: slug ?? null, reviewCycleId: cycleAfter, reviewEntryId: reviewEntryId ?? null },
+      })
+    }
+    staged = { cycleAfter, closureNoticeId: closureNotice?.id ?? null }
     return null   // success — writes staged for commit
   })
   if (txnFailure) return txnFailure   // a concurrent change / precondition failed the transition
   if (reviewAlert) scheduleOutboxDelivery(reviewAlert.id)
+  if (staged.closureNoticeId) scheduleOutboxDelivery(staged.closureNoticeId)
 
   // Schedule / venue changes carried by the copy get the same change-log entry Save Changes
   // writes (fire-and-forget; never fails the transition).
@@ -346,5 +532,96 @@ export async function applyLifecycleTransition(
     }).catch(() => { /* best-effort audit */ })
   }
 
-  return { success: true, lifecycleStatus: newStatus, statusCode: 200, reviewEntryId }
+  return { success: true, lifecycleStatus: newStatus, statusCode: 200, reviewEntryId, reviewCycleId: staged.cycleAfter }
+}
+
+// ─── RD-REVIEW-02 · review deadline scheduler step ────────────────────────────
+
+export type DeadlineAdvanceOutcome =
+  | 'reminder_sent' | 'action_required' | 'closed'
+  | 'not_due' | 'stale_cleared' | 'skipped' | 'missing' | 'failed'
+
+/**
+ * Takes the ONE step that is due for this event's review deadline (a reminder, the move into Action
+ * Required, or the closure), or nothing. Idempotent and safe to run concurrently: every step
+ * re-reads the draft inside a transaction and compares status, review cycle and deadline state
+ * before writing, and the reminder / phase record is written in the same transaction as its
+ * notice — so a repeated or overlapping run finds nothing left to do. Never moves money.
+ */
+export async function advanceReviewDeadline(uid: string, draftId: string, slug: string, nowMs = Date.now()): Promise<DeadlineAdvanceOutcome> {
+  const draftRef = adminDb.doc(`users/${uid}/eventDrafts/${draftId}`)
+  const eventRef = adminDb.collection('events').doc(slug)
+  let notice: OutboxMessageInput | null = null
+  let close: { cycleId: string } | null = null
+  const outcome = await adminDb.runTransaction(async (txn): Promise<DeadlineAdvanceOutcome> => {
+    notice = null; close = null
+    const [ds, es] = await Promise.all([txn.get(draftRef), txn.get(eventRef)])
+    if (!ds.exists || !es.exists) return 'missing'
+    if (!liveEventBelongsTo(es.data(), uid, draftId)) return 'missing'
+    const d = ds.data() as Record<string, unknown>
+    const cycle = reviewCycleOf(d)
+    const dl = readReviewDeadline(d.reviewDeadline)
+    // Not (or no longer) in a deadline: clear the scheduler pointer so it is never picked up again.
+    if (deriveLifecycleStatus(d) !== 'changes_requested' || !dl || dl.cycleId !== cycle || isReviewClosed(d)) {
+      txn.update(eventRef, { reviewDeadlineNextAt: null })
+      return 'stale_cleared'
+    }
+    const step = nextDeadlineStep(dl, nowMs)
+    if (!step) {
+      txn.update(eventRef, { reviewDeadlineNextAt: Timestamp.fromMillis(nextDeadlineAt(dl)) })
+      return 'not_due'
+    }
+    if (step.kind === 'close') { close = { cycleId: dl.cycleId }; return 'closed' }
+
+    const base = {
+      organizerUid: uid, draftId, cycleId: dl.cycleId, eventName: eventNameOf(d),
+      changesComment: typeof d.changesComment === 'string' ? d.changesComment : '',
+    }
+    const next = step.kind === 'reminder' ? markReminders(dl, step.covers, nowMs) : enterActionRequired(dl, nowMs)
+    notice = step.kind === 'reminder'
+      ? reviewReminderNotice({ ...base, key: step.key, dueAtMs: currentDueAt(next) })
+      : actionRequiredNotice({ ...base, closesAtMs: next.actionDueAt ?? currentDueAt(next) })
+    const stored = storedDeadline(next)
+    txn.update(draftRef, { reviewDeadline: stored, updatedAt: FieldValue.serverTimestamp() })
+    txn.update(eventRef, { reviewDeadline: stored, reviewDeadlineNextAt: Timestamp.fromMillis(nextDeadlineAt(next)) })
+    txn.set(eventRef.collection(REVIEW_HISTORY).doc(), {
+      ...buildReviewHistoryEntry({
+        action: step.kind === 'reminder' ? 'review_reminder' : 'action_required',
+        fromStatus: 'changes_requested', toStatus: 'changes_requested', actorUid: null,
+        cycleId: dl.cycleId, reminder: step.kind === 'reminder' ? step.key : null, dueAt: currentDueAt(next),
+      }),
+      at: FieldValue.serverTimestamp(),
+    })
+    if (step.kind === 'enter_action_required') {
+      stageAdminAudit(txn, {
+        adminUid: 'system', actorRole: 'system', action: 'event.review_action_required', entityType: 'event', entityId: slug,
+        before: { phase: 'changes_requested', changesDueAt: dl.changesDueAt }, after: { phase: 'action_required', actionDueAt: next.actionDueAt },
+        correlation: { draftId, slug, organizerUid: uid, reviewCycleId: dl.cycleId },
+      })
+    }
+    stageOutboxMessage(txn, notice)
+    return step.kind === 'reminder' ? 'reminder_sent' : 'action_required'
+  }).catch((err): DeadlineAdvanceOutcome => {
+    console.error('[review-deadline] step failed:', { slug, draftId, err })
+    return 'failed'
+  })
+  const staged = notice as OutboxMessageInput | null
+  if (outcome !== 'failed' && staged) scheduleOutboxDelivery(staged.id)
+  const pendingClose = close as { cycleId: string } | null
+  if (outcome === 'closed' && pendingClose) {
+    // The closure is the shared lifecycle transition: it re-checks status, cycle and that the second
+    // deadline really passed, inside its own transaction (a resubmission or an approval that won the
+    // race makes it a no-op refusal).
+    const r = await applyLifecycleTransition(uid, draftId, 'expire_review', undefined, undefined, undefined, {
+      expectedStatus: 'changes_requested', expectedCycleId: pendingClose.cycleId,
+      audit: {
+        adminUid: 'system', actorRole: 'system', action: 'event.review_expired', entityType: 'event', entityId: slug,
+        reason: 'Requested changes were not submitted before the second deadline',
+        before: { lifecycleStatus: 'changes_requested', phase: 'action_required' }, after: { lifecycleStatus: 'cancelled', reviewClosure: 'deadline_expired' },
+      },
+    }).catch(err => { console.error('[review-deadline] closure failed:', { slug, draftId, err }); return null })
+    if (!r) return 'failed'
+    return r.success ? 'closed' : 'skipped'
+  }
+  return outcome
 }

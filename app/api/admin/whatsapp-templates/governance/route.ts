@@ -13,14 +13,43 @@ import { requireSuperAdmin } from '@/lib/admin/financialGuard'
 import { stageAdminAudit } from '@/lib/admin/audit'
 import { businessConfig } from '@/lib/config/businessConfigService'
 import { isMetaConfigured } from '@/lib/whatsapp/config'
-import { resolveReviewMode } from '@/lib/whatsappTemplates/governance'
+import { resolveReviewMode, resolveMarketingTemplatesEnabled } from '@/lib/whatsappTemplates/governance'
 import { parseReviewMode, type ReviewMode } from '@/lib/whatsappTemplates/types'
 import { NO_STORE, readJson } from '@/lib/whatsappTemplates/http'
+
+/** RD-WA-MARKETING-01 — switch organizer Marketing templates (reason required; audited in the same transaction). */
+async function setMarketing(adminUid: string, rawEnabled: unknown, rawReason: unknown): Promise<NextResponse> {
+  if (typeof rawEnabled !== 'boolean') return NextResponse.json({ error: 'marketingTemplatesEnabled must be true or false.', code: 'INVALID' }, { status: 400, headers: NO_STORE })
+  const reason = typeof rawReason === 'string' ? rawReason.trim() : ''
+  if (reason.length < 5 || reason.length > 500) return NextResponse.json({ error: 'Give a reason for the change (5–500 characters).', code: 'REASON_REQUIRED' }, { status: 400, headers: NO_STORE })
+  const current = await resolveMarketingTemplatesEnabled()
+  if (current.unavailable) return NextResponse.json({ error: 'The current setting could not be read, so nothing was changed. Try again.', code: 'CONFIG_UNAVAILABLE' }, { status: 503, headers: NO_STORE })
+  if (current.enabled === rawEnabled) return NextResponse.json({ error: `Marketing templates are already ${rawEnabled ? 'enabled' : 'disabled'}.`, code: 'NO_CHANGE' }, { status: 400, headers: NO_STORE })
+  try {
+    const result = await businessConfig.updateSection('integrations', { whatsappMarketingTemplatesEnabled: rawEnabled }, {
+      updatedBy: adminUid, reason, canEditPricing: false,
+      stageInTransaction: (txn, info) => {
+        const before = (info.before as { whatsappMarketingTemplatesEnabled?: unknown } | null)?.whatsappMarketingTemplatesEnabled === true
+        stageAdminAudit(txn, {
+          adminUid, actorRole: 'super_admin', action: 'platform.whatsapp_marketing_templates_changed', entityType: 'platform_settings',
+          entityId: 'integrations.whatsappMarketingTemplatesEnabled', reason,
+          changedFields: ['whatsappMarketingTemplatesEnabled'], before: { whatsappMarketingTemplatesEnabled: before }, after: { whatsappMarketingTemplatesEnabled: rawEnabled },
+          metadata: { configVersion: info.version },
+        })
+      },
+    })
+    return NextResponse.json({ ok: true, marketingTemplatesEnabled: rawEnabled, version: result.version }, { headers: NO_STORE })
+  } catch (err) {
+    console.error('[admin/whatsapp-templates/governance] marketing update failed', err instanceof Error ? err.message : err)
+    return NextResponse.json({ error: 'Could not save the change. Nothing was changed.' }, { status: 500, headers: NO_STORE })
+  }
+}
 
 export async function GET(req: NextRequest): Promise<NextResponse> {
   const gate = await requireSuperAdmin(req)
   if (gate.response) return gate.response
-  return NextResponse.json({ ...(await resolveReviewMode()), metaConfigured: isMetaConfigured() }, { headers: NO_STORE })
+  const marketing = await resolveMarketingTemplatesEnabled()
+  return NextResponse.json({ ...(await resolveReviewMode()), metaConfigured: isMetaConfigured(), marketingTemplatesEnabled: marketing.enabled }, { headers: NO_STORE })
 }
 
 export async function PUT(req: NextRequest): Promise<NextResponse> {
@@ -28,6 +57,10 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
   if (gate.response) return gate.response
   const parsed = await readJson(req)
   if (!parsed.ok) return parsed.response
+  // RD-WA-MARKETING-01 — { marketingTemplatesEnabled: boolean, reason } switches organizer Marketing templates.
+  if (Object.prototype.hasOwnProperty.call(parsed.body, 'marketingTemplatesEnabled')) {
+    return setMarketing(gate.uid, parsed.body.marketingTemplatesEnabled, parsed.body.reason)
+  }
   const { mode: rawMode, reason: rawReason } = parsed.body
   if (rawMode !== 'manual' && rawMode !== 'automatic') return NextResponse.json({ error: "mode must be 'manual' or 'automatic'.", code: 'INVALID' }, { status: 400, headers: NO_STORE })
   const reason = typeof rawReason === 'string' ? rawReason.trim() : ''

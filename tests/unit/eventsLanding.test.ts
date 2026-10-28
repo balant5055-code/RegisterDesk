@@ -254,7 +254,7 @@ describe('actions are offered exactly where the server allows them', () => {
 
 describe('tab semantics', () => {
   it('the bar offers exactly the listing SSOT\'s tabs, in its order', () => {
-    const rendered = [...CLIENT.matchAll(/\{ key: '([a-z]+)', +label:/g)].map(m => m[1])
+    const rendered = [...CLIENT.matchAll(/\{ key: '([a-z_]+)', +label:/g)].map(m => m[1])
     expect(rendered).toEqual([...EVENT_LISTING_TAB_KEYS])
   })
 

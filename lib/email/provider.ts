@@ -56,6 +56,21 @@ export interface RegistrationEmailParams {
    * the figures in the email cannot disagree with what was charged.
    */
   feeBreakdown?:  AttendeeFeeBreakdown
+  /**
+   * RD-MEETING-ACCESS-01 — joining details of an online / hybrid event, for a CONFIRMED attendee.
+   * Attached only by lib/registrations/meetingAccess (server-side entitlement check); absent ⇒
+   * the email renders exactly as before.
+   */
+  meetingAccess?: MeetingAccessEmail
+}
+
+/** RD-MEETING-ACCESS-01 — see lib/registrations/meetingAccess.ts (`MeetingAccess`). */
+export interface MeetingAccessEmail {
+  platform:     string
+  joinUrl:      string | null
+  meetingId:    string | null
+  passcode:     string | null
+  instructions: string | null
 }
 
 // Ticket re-delivery email — same shape as registration confirmation

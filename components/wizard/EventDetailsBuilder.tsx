@@ -320,7 +320,7 @@ function Tab2VenueSchedule({
                       <button type="button" onClick={() => setShowPass(v => !v)} className="mt-1 text-[12px] text-primary hover:underline">{showPass ? 'Hide' : 'Show'} passcode</button>
                     </div>
                   </div>
-                  <Toggle checked={form.venue.online.revealAfterRegistration} onChange={v => uon({ revealAfterRegistration: v })} label="Reveal meeting link after registration" desc="Meeting URL is sent only in the confirmation message, not shown publicly" />
+                  <Toggle checked={form.venue.online.revealAfterRegistration} onChange={v => uon({ revealAfterRegistration: v })} label="Reveal meeting link after registration" desc="The link, meeting ID and passcode are emailed to confirmed attendees only, never shown publicly" />
                   <div><label className={labelCls}>Join Instructions <span className={hintCls.replace('mt-1 ', '')}>(optional)</span></label><textarea className={cn(inputCls, 'h-16 resize-none py-2')} value={form.venue.online.joinInstructions} onChange={e => uon({ joinInstructions: e.target.value })} placeholder="Steps to join the session…" /></div>
                 </div>
               </motion.div>

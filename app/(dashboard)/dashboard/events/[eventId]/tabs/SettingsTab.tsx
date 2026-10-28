@@ -8,6 +8,7 @@ import {
 import type { EventDetailResponse, SpeakerDetail, SponsorDetail } from '@/app/api/organizer/events/[eventId]/route'
 import type { EventEditPayload } from '@/types/events'
 import { EventCapacityManager } from '@/components/dashboard/EventCapacityManager'
+import { countGallery, GALLERY_URL_MAX, GALLERY_UPLOAD_MAX } from '@/lib/events/galleryLimits'
 
 // ─── Shared display components ────────────────────────────────────────────────
 
@@ -244,6 +245,8 @@ export default function SettingsTab({ event, eventId, token, onSuccess }: Settin
   const [speakers, setSpeakers] = useState<SpeakerDetail[]>(() => event.speakers)
   const [sponsors, setSponsors] = useState<SponsorDetail[]>(() => event.sponsors)
   const [gallery,  setGallery]  = useState<string[]>(() => event.galleryImages)
+  // RD-GALLERY-01 — this editor adds URLs only; uploaded images (on platform storage) count separately.
+  const galleryCounts = countGallery(gallery.map(value => ({ value })))
 
   // ── SEO ──────────────────────────────────────────────────────────────────────
   const [metaTitle,       setMetaTitle]       = useState(event.metaTitle       ?? '')
@@ -622,7 +625,13 @@ export default function SettingsTab({ event, eventId, token, onSuccess }: Settin
       {/* ── Gallery ── */}
       {editing ? (
         <div className="rounded-xl border border-border bg-card p-4 space-y-3">
-          <p className="text-[15px] font-semibold text-foreground">Gallery Images</p>
+          <div className="flex items-baseline justify-between gap-2">
+            <p className="text-[15px] font-semibold text-foreground">Gallery Images</p>
+            {/* RD-GALLERY-01 — limits are per method: 6 uploaded (in the event builder), 20 by URL. */}
+            <span className="text-[12px] text-muted-foreground" data-testid="settings-gallery-counts">
+              {galleryCounts.urls} / {GALLERY_URL_MAX} by URL · {galleryCounts.uploads} / {GALLERY_UPLOAD_MAX} uploaded
+            </span>
+          </div>
           {gallery.map((url, i) => (
             <div key={i} className="flex gap-2">
               <input
@@ -640,7 +649,8 @@ export default function SettingsTab({ event, eventId, token, onSuccess }: Settin
               </button>
             </div>
           ))}
-          <button type="button" onClick={() => setGallery(prev => [...prev, ''])} disabled={saving}
+          <button type="button" onClick={() => setGallery(prev => [...prev, ''])} disabled={saving || galleryCounts.urls >= GALLERY_URL_MAX}
+            title={galleryCounts.urls >= GALLERY_URL_MAX ? `Up to ${GALLERY_URL_MAX} gallery images can be added by URL` : undefined}
             className="flex items-center gap-1.5 rounded-xl border border-dashed border-border bg-muted/20 px-3 py-2 text-[13px] font-medium text-muted-foreground hover:bg-muted/40 disabled:opacity-50">
             <Plus className="size-3.5" aria-hidden /> Add Image
           </button>

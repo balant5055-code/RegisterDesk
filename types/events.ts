@@ -29,6 +29,16 @@ export type LifecycleAction =
   | 'resubmit'                // organizer: changes_requested / rejected-draft → pending_review
   | 'republish'               // organizer: unpublished → pending_review (reuses the existing paid license; no payment)
   | 'restore'                 // organizer: archived → unpublished (stays private; reuses license; re-launch via republish)
+  | 'close_review'            // organizer (owner): changes_requested → cancelled, recorded as a review closure
+  | 'expire_review'           // system: changes_requested (Action Required) → cancelled once the second deadline passed
+
+// RD-REVIEW-02 — the two 24-hour windows after a change request. Action Required is a PHASE of
+// 'changes_requested', never a lifecycle status of its own: the registration gate and the broadcast
+// guard deny by listing the not-live statuses, so any new status would read as live.
+export type ReviewDeadlinePhase = 'changes_requested' | 'action_required'
+
+// RD-REVIEW-02 — who ended a review by closing the event (stored on `reviewClosure.source`).
+export type ReviewClosureSource = 'organizer' | 'deadline_expired'
 
 // Outcome of the last admin review, surfaced to the organizer.
 export type EventReviewStatus = 'rejected' | 'changes_requested'
@@ -200,6 +210,7 @@ export type PublishBlockReason =
   | 'PAYMENT_STATUS_UNCONFIRMED'       // RD-CE-FIX H4 — an earlier checkout's payment status could not be established
   | 'CAPACITY_BELOW_PAID'              // RD-CE-FIX M3 — capacity below what was already paid for
   | 'WRONG_FLOW'
+  | 'EVENT_TYPE_UNAVAILABLE'           // RD-EVENT-TYPES-01 — the event type is "Coming Soon" (Super Admin switch)
   // EA-4 S1 — Publish Governance
   | 'IDENTITY_CHANGED'                 // major identity drift → block, offer Duplicate
   | 'IDENTITY_CONFIRMATION_REQUIRED'   // moderate drift → confirm to proceed
