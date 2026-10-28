@@ -17,6 +17,7 @@ import type { AdminTransaction, AdminTransactionsResponse }
 import type { ReleasePreviewResponse } from '@/app/api/admin/finance/release-preview/route'
 import type { ReleaseFundsResponse }   from '@/app/api/admin/finance/release-funds/route'
 import { releaseRunNotice }            from '@/lib/settlements/releaseRunSummary'
+import { checkMarkPaidForm, approvedByViewer, MAKER_CHECKER_NOTICE } from '@/lib/settlements/markPaidForm'
 import { GatewayVarianceCard } from '@/components/admin/GatewayVarianceCard'
 import { RefundHoldsPanel } from '@/components/admin/RefundHoldsPanel'
 import type {
@@ -179,9 +180,12 @@ function TransferExceptionModal({ settlement, onClose, onSubmit }: {
 interface MarkPaidModalProps {
   settlement: AdminSettlement
   onClose:    () => void
+  /** Rejects with the server's message on failure, so the form stays open with what was typed. */
   onConfirm:  (proof: PayoutProof, note: string) => Promise<void>
   /** M1 — 'transfer': record a bank transfer that ALREADY completed for a request under review */
   mode?:      'paid' | 'transfer'
+  /** The signed-in Super Admin — D2: the approver cannot record the payout (the server enforces it). */
+  viewerUid:  string | null
 }
 
 interface PayoutProof {
@@ -191,7 +195,7 @@ interface PayoutProof {
   paymentNotes:  string
 }
 
-function MarkPaidModal({ settlement, onClose, onConfirm, mode = 'paid' }: MarkPaidModalProps) {
+function MarkPaidModal({ settlement, onClose, onConfirm, mode = 'paid', viewerUid }: MarkPaidModalProps) {
   const [utrNumber,     setUtrNumber]     = useState('')
   const [bankReference, setBankReference] = useState('')
   const [paidBy,        setPaidBy]        = useState('')
@@ -210,8 +214,15 @@ function MarkPaidModal({ settlement, onClose, onConfirm, mode = 'paid' }: MarkPa
     return () => window.removeEventListener('keydown', handler)
   }, [onClose])
 
-  // RD-PHASE4-S4 · D3 — the note is the required reason (3–500 characters).
-  const canSubmit = utrNumber.trim().length > 0 && adminNote.trim().length >= 3 && adminNote.trim().length <= 500 && !submitting
+  // RD-SETTLE-PAY-01 — only the UTR and the reason (D3, 3–500 characters) are required, checked with the
+  // server's own rules; the optional fields are not inputs to the check. D2: the approver is warned up front.
+  const check     = checkMarkPaidForm({ utrNumber, reason: adminNote })
+  const isApprover = approvedByViewer(settlement.approvedBy, viewerUid)
+  const canSubmit = check.ok && !isApprover && !submitting
+  // A field error shows once something was typed there; until then the button's hint names what is missing.
+  const utrHint    = utrNumber.trim() ? check.utrError : null
+  const reasonHint = adminNote.trim() ? check.reasonError : null
+  const missing    = [check.utrError && !utrHint ? 'the UTR number' : null, check.reasonError && !reasonHint ? 'a reason' : null].filter(Boolean)
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
@@ -287,8 +298,12 @@ function MarkPaidModal({ settlement, onClose, onConfirm, mode = 'paid' }: MarkPa
               value={utrNumber}
               onChange={e => setUtrNumber(e.target.value)}
               placeholder="e.g. HDFC24061700012345"
+              required
+              aria-invalid={utrHint ? true : undefined}
+              aria-describedby={utrHint ? 'utr-number-error' : undefined}
               className="w-full rounded-lg border border-border bg-background px-3 py-2 text-[13.5px] text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/40"
             />
+            {utrHint && <p id="utr-number-error" className="mt-1 text-[12px] text-destructive">{utrHint}</p>}
           </div>
 
           {/* Bank Reference — optional */}
@@ -336,10 +351,10 @@ function MarkPaidModal({ settlement, onClose, onConfirm, mode = 'paid' }: MarkPa
             />
           </div>
 
-          {/* Admin Note — optional */}
+          {/* Reason — required (D3) */}
           <div>
             <label htmlFor="admin-note-paid" className="mb-1 block text-[13px] font-medium text-foreground">
-              Reason <span className="text-[12px] font-normal text-muted-foreground">(required, 3–500 characters)</span>
+              Reason <span className="text-destructive">*</span> <span className="text-[12px] font-normal text-muted-foreground">(3–500 characters)</span>
             </label>
             <input
               id="admin-note-paid"
@@ -349,9 +364,20 @@ function MarkPaidModal({ settlement, onClose, onConfirm, mode = 'paid' }: MarkPa
               placeholder="Why this payout is being recorded (audited)"
               maxLength={500}
               required
+              aria-invalid={reasonHint ? true : undefined}
+              aria-describedby={reasonHint ? 'admin-note-paid-error' : undefined}
               className="w-full rounded-lg border border-border bg-background px-3 py-2 text-[13.5px] text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/40"
             />
+            {reasonHint && <p id="admin-note-paid-error" className="mt-1 text-[12px] text-destructive">{reasonHint}</p>}
           </div>
+
+          {/* D2 — the approver is told before anything is submitted (the server refuses regardless) */}
+          {isApprover && (
+            <div role="status" className="flex items-start gap-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2.5 text-[13px] text-amber-900 dark:border-amber-800 dark:bg-amber-900/20 dark:text-amber-300">
+              <AlertCircle className="mt-0.5 size-3.5 shrink-0" aria-hidden />
+              {MAKER_CHECKER_NOTICE}
+            </div>
+          )}
 
           {/* Error */}
           {error && (
@@ -362,6 +388,9 @@ function MarkPaidModal({ settlement, onClose, onConfirm, mode = 'paid' }: MarkPa
           )}
 
           {/* Actions */}
+          {!isApprover && missing.length > 0 && (
+            <p className="text-right text-[12px] text-muted-foreground">To confirm, enter {missing.join(' and ')}. The other fields are optional.</p>
+          )}
           <div className="flex items-center justify-end gap-2 pt-1">
             <button
               type="button"
@@ -1144,13 +1173,17 @@ export default function AdminFinancePage() {
 
   // ── Settlement actions ────────────────────────────────────────────────────────
 
-  /** M1 — review resolutions; the list is re-read afterwards (the server decides the resulting state). */
+  /**
+   * M1 — review resolutions; the list is re-read afterwards (the server decides the resulting state).
+   * Resolves with the failure message (null on success). `inline`: the caller shows it, so no toast.
+   */
   async function runReviewAction(
     id:     string,
     action: 'resume_review' | 'reject' | 'record_transfer' | 'transfer_exception_initiate' | 'transfer_exception_approve' | 'transfer_exception_decline',
     note:   string,
     extra?: Record<string, unknown>,
-  ) {
+    inline = false,
+  ): Promise<string | null> {
     setProcessing(id)
     try {
       const token = await getToken()
@@ -1161,24 +1194,30 @@ export default function AdminFinancePage() {
       })
       if (!res.ok) {
         const body = await res.json() as { error?: string }
-        showToast(body.error ?? `Action failed (${res.status})`, 'error')
-        return
+        const message = body.error ?? `Action failed (${res.status})`
+        if (!inline) showToast(message, 'error')
+        return message
       }
       setExpanded(null); setNoteText('')
       await fetchSettlements()
+      return null
     } catch {
-      showToast('Network error — please try again.', 'error')
+      const message = 'Network error — please try again.'
+      if (!inline) showToast(message, 'error')
+      return message
     } finally {
       setProcessing(null)
     }
   }
 
+  /** Resolves with the failure message (null on success). `inline`: the caller shows it, so no toast. */
   async function runAction(
     id:     string,
     action: 'approve' | 'reject' | 'paid',
     note?:  string,
     proof?: PayoutProof,
-  ) {
+    inline = false,
+  ): Promise<string | null> {
     setProcessing(id)
     try {
       const token = await getToken()
@@ -1191,8 +1230,9 @@ export default function AdminFinancePage() {
       })
       if (!res.ok) {
         const body = await res.json() as { error?: string }
-        showToast(body.error ?? `Action failed (${res.status})`, 'error')
-        return
+        const message = body.error ?? `Action failed (${res.status})`
+        if (!inline) showToast(message, 'error')
+        return message
       }
       // Optimistic update
       setSettlements(prev => prev.map(s => {
@@ -1226,8 +1266,11 @@ export default function AdminFinancePage() {
         return next
       })
       setExpanded(null); setNoteText('')
+      return null
     } catch {
-      showToast('Network error — please try again.', 'error')
+      const message = 'Network error — please try again.'
+      if (!inline) showToast(message, 'error')
+      return message
     } finally {
       setProcessing(null)
     }
@@ -2347,10 +2390,14 @@ export default function AdminFinancePage() {
         <MarkPaidModal
           settlement={markPaidModal}
           mode={markPaidMode}
+          viewerUid={getAuth().currentUser?.uid ?? null}
           onClose={() => setMarkPaidModal(null)}
           onConfirm={async (proof, note) => {
-            if (markPaidMode === 'transfer') await runReviewAction(markPaidModal.id, 'record_transfer', note, { ...proof })
-            else await runAction(markPaidModal.id, 'paid', note, proof)
+            // RD-SETTLE-PAY-01 — a refusal stays IN the form (the typed UTR and notes are kept) instead of closing it.
+            const failure = markPaidMode === 'transfer'
+              ? await runReviewAction(markPaidModal.id, 'record_transfer', note, { ...proof }, true)
+              : await runAction(markPaidModal.id, 'paid', note, proof, true)
+            if (failure) throw new Error(failure)
           }}
         />
       )}

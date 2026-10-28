@@ -23,6 +23,8 @@ export interface AdminSettlement {
   approvedAt:       string | null
   paidAt:           string | null
   adminNote:        string
+  /** D2 — the approving Super Admin's uid; the console warns that this admin cannot record the payout */
+  approvedBy?:      string
   utrNumber?:       string
   bankReference?:   string
   paidBy?:          string
@@ -134,6 +136,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       approvedAt:       tsToISO(d.approvedAt),
       paidAt:           tsToISO(d.paidAt),
       adminNote:        d.adminNote ?? '',
+      ...(d.approvedBy   ? { approvedBy:   d.approvedBy   } : {}),
       ...(d.utrNumber    ? { utrNumber:    d.utrNumber    } : {}),
       ...(d.bankReference ? { bankReference: d.bankReference } : {}),
       ...(d.paidBy       ? { paidBy:       d.paidBy       } : {}),
