@@ -24,6 +24,7 @@ import { notificationEngine, NotificationType, NotificationChannel } from '@/lib
 import type { ServicePurchaseLine, ServicePurchaseBalance } from './catalog'
 import { writeAdminNotification } from './adminInbox'
 import { superAdminRecipients } from './superAdminRecipients'
+import { uniqueMailboxes } from './mailbox'
 import { emailUrl } from '@/lib/email/appUrl'
 import { after } from 'next/server'
 
@@ -139,7 +140,9 @@ export async function notifyServicePurchase(orderId: string): Promise<'sent' | '
     }
     // The platform copy goes to the support inbox AND to every Super Admin (ADMIN_UIDS) — each address
     // once, however many of those lists it appears on.
-    const adminRecipients = emailOn ? await superAdminRecipients() : []
+    // RD-NOTIFY-DEDUP-02 — one copy per MAILBOX, exactly as the outbox does: the support inbox and the
+    // admin accounts can spell one mailbox differently (case, +tag, Gmail dots / googlemail.com).
+    const adminRecipients = emailOn ? uniqueMailboxes(await superAdminRecipients()) : []
     for (const to of adminRecipients) {
       await notificationEngine.send(NotificationType.SERVICE_PURCHASE_ADMIN, {
         to, organizerName: str(user.name) ?? '', organizerEmail: userEmail ?? '', organizerUid: uid,
