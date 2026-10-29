@@ -35,6 +35,11 @@ export interface PlanSummaryInput {
   /** lib/communications/health/channels — whether each channel can send at all. */
   emailImplemented: boolean
   smsImplemented:   boolean
+  /**
+   * The draft carries a capacity of its own (saved before, or chosen on License & Services this session).
+   * Then that capacity publishes, and a legacy tier entitlement no longer decides it. Default: false.
+   */
+  capacityExplicit?: boolean
 }
 
 const n = (v: number) => v.toLocaleString('en-IN')
@@ -42,7 +47,19 @@ const n = (v: number) => v.toLocaleString('en-IN')
 /** The switch that gates a prepaid service, where the License step has one. */
 const SWITCH: Partial<Record<ServiceKind, keyof PlanServiceFlags>> = { whatsapp: 'whatsappEnabled', certificates: 'certEnabled' }
 
-function capacityItem(quote: CheckoutQuoteResponse): PlanItem {
+function capacityItem(quote: CheckoutQuoteResponse, capacityExplicit: boolean): PlanItem {
+  // RD-CAPACITY-DEFAULT — a VERIFIED historical paid tier (the publish route's own rule, reported by the
+  // quote) still governs a draft that carries no capacity of its own: publishing grants the tier's
+  // capacity, not the 100 the quote priced. Once the organizer has set a capacity, that is what publishes.
+  const legacy = quote.legacyEntitlement
+  if (legacy && !capacityExplicit) {
+    const tier = legacy.tier.charAt(0).toUpperCase() + legacy.tier.slice(1)
+    return {
+      key: 'capacity', label: 'Registration capacity',
+      value: legacy.totalCapacity === null ? 'Unlimited registrations' : `${n(legacy.totalCapacity)} registrations`,
+      status: 'purchased', detail: `${tier} licence, paid before capacity pricing · nothing more to pay`,
+    }
+  }
   if (!quote.capacity.ok) return { key: 'capacity', label: 'Registration capacity', value: 'Not available', status: 'unavailable', detail: quote.capacity.error }
   const cap = quote.capacity.quote
   const included = Math.min(cap.capacity, cap.freeCapacity)
@@ -94,7 +111,7 @@ export function buildPlanSummary(input: PlanSummaryInput): PlanItem[] | null {
   const { quote } = input
   if (!quote || quote.mode !== 'draft') return null
   return [
-    capacityItem(quote),
+    capacityItem(quote, input.capacityExplicit === true),
     ...SERVICE_KINDS.map(k => serviceItem(quote, k, input.flags)),
     input.emailImplemented
       ? { key: 'email', label: 'Email notifications', value: 'Included', status: 'included' as const }

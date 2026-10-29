@@ -136,6 +136,8 @@ export interface FinalPayContext {
    */
   quote:        CheckoutQuoteResponse | null
   payg:         PaygServiceFlags
+  /** The organizer changed the registration capacity on this step during this visit (draft mode). */
+  capacityChosen: boolean
 }
 
 function Switch({ checked, onChange, label, disabled }: { checked: boolean; onChange: (v: boolean) => void; label: string; disabled?: boolean }) {
@@ -216,6 +218,8 @@ export function LicenseServicesStep({
   // Draft: the activation target + TOTAL service units (persisted on the draft as intent).
   // Submitted: a new capacity TARGET for the live event + ADDITIONAL units (never persisted).
   const [capacity, setCapacity]   = useState<number>(selectedCapacity)
+  // RD-PUBLISH-PLAN — the organizer set a capacity here this visit (reported to the publish confirmation).
+  const [capacityChosen, setCapacityChosen] = useState(false)
   const [target, setTarget]       = useState<number | null>(null)
   const [selection, setSelection] = useState<ServiceSelection>(isSubmitted ? { ...EMPTY_SELECTION } : initialServiceSelection)
   const [payg, setPayg] = useState<PaygServiceFlags>(() => ({
@@ -393,8 +397,8 @@ export function LicenseServicesStep({
   const ctxPayable = ctxReady ? (payNowPaise ?? payable?.totalPaise ?? null) : null
   useEffect(() => {
     finalOnContext?.({ quoteReady: ctxReady, covered: ctxCovered, payablePaise: ctxPayable, blockedReason, pay: payViaPanel, refresh: refreshQuote, locked,
-      quote: ctxReady ? quote : null, payg })
-  }, [finalOnContext, ctxReady, ctxCovered, ctxPayable, blockedReason, payViaPanel, refreshQuote, locked, quote, payg])
+      quote: ctxReady ? quote : null, payg, capacityChosen })
+  }, [finalOnContext, ctxReady, ctxCovered, ctxPayable, blockedReason, payViaPanel, refreshQuote, locked, quote, payg, capacityChosen])
   const router = useRouter()
   const { showToast } = useToast()
   useEffect(() => {
@@ -406,7 +410,7 @@ export function LicenseServicesStep({
 
   const selectCapacity = (n: number) => {
     if (isSubmitted) { setTarget(n); return }
-    setCapacity(n); onSelectCapacity(n)
+    setCapacity(n); onSelectCapacity(n); setCapacityChosen(true)
   }
   const handleNext = () => {
     if (!canContinue) return

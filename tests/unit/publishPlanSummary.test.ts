@@ -12,6 +12,8 @@ import { priceServiceItem, type ServiceKind } from '@/lib/licensing/serviceAllow
 import { buildPlanSummary, groupPlanItems, type PlanItem } from '@/components/wizard/publishPlanSummary'
 import { PublishPlanSection } from '@/components/wizard/PublishPlanSection'
 import type { CheckoutQuoteResponse, CatalogEntryDto } from '@/components/wizard/LicenseCostSummary'
+import { EVENT_LICENSE_DEFINITIONS_V2 } from '@/lib/licensing/eventLicense'
+import { capacityPlanForRegistrationLimit, resolveTotalCapacity } from '@/lib/registrations/capacity'
 
 const code = (rel: string) => readFileSync(path.resolve(__dirname, '../..', rel), 'utf8').replace(/\r\n/g, '\n')
 
@@ -37,6 +39,7 @@ function quote(opts: {
   media?: Partial<CheckoutQuoteResponse['media']>
   mode?: 'draft' | 'published'
   capacityError?: string
+  legacy?: { tier: string; totalCapacity: number | null } | null
 } = {}): CheckoutQuoteResponse {
   const services = {} as CheckoutQuoteResponse['services']
   const catalog  = {} as CheckoutQuoteResponse['catalog']
@@ -54,6 +57,7 @@ function quote(opts: {
     coverage: { activationPaid: (opts.paidCapacity ?? null) !== null, paidCapacity: opts.paidCapacity ?? null, purchased, consumed: NONE, remaining: purchased },
     published: null,
     media: { baseCap: 0, used: null, capacity: 0, purchased: 0, maxTotal: 3000, maxAdditional: 3000, ...opts.media },
+    legacyEntitlement: opts.legacy ?? null,
   }
 }
 const ON  = { whatsappEnabled: true, certEnabled: true }
@@ -80,6 +84,33 @@ describe('buildPlanSummary — capacity', () => {
   })
   it('a capacity the server refuses is shown neutrally with its reason', () => {
     expect(item(plan(quote({ capacityError: 'Too many registrations.' })), 'capacity')).toMatchObject({ status: 'unavailable', detail: 'Too many registrations.' })
+  })
+})
+
+describe('buildPlanSummary — legacy paid tier (RD-CAPACITY-DEFAULT)', () => {
+  // What publish grants a legacy Professional draft: the catalog limit through the route's own formula.
+  const professional = resolveTotalCapacity(capacityPlanForRegistrationLimit(EVENT_LICENSE_DEFINITIONS_V2.professional.limits.maxRegistrations))
+  const legacyPlan = (capacityExplicit: boolean, q = quote({ capacity: 100, legacy: { tier: 'professional', totalCapacity: professional } })) =>
+    buildPlanSummary({ quote: q, flags: ON, emailImplemented: true, smsImplemented: false, capacityExplicit })!
+
+  it('a legacy Professional draft shows 2,500 registrations — its paid tier — not the quoted 100', () => {
+    expect(professional).toBe(2500)
+    const c = item(legacyPlan(false), 'capacity')
+    expect(c.value).toBe('2,500 registrations')
+    expect(c.value).not.toContain('100')
+    expect(c).toMatchObject({ status: 'purchased' })
+    expect(c.detail).toContain('Professional licence')
+    expect(groupPlanItems(legacyPlan(false)).paid.map(i => i.key)).toContain('capacity')
+  })
+  it('once the organizer has set a capacity, that capacity is shown (it is what publishes)', () => {
+    const c = item(legacyPlan(true, quote({ capacity: 437, legacy: { tier: 'professional', totalCapacity: professional } })), 'capacity')
+    expect(c).toMatchObject({ value: '437 registrations', status: 'paid' })
+  })
+  it('an unlimited legacy tier reads "Unlimited registrations"', () => {
+    expect(item(legacyPlan(false, quote({ legacy: { tier: 'enterprise', totalCapacity: null } })), 'capacity').value).toBe('Unlimited registrations')
+  })
+  it('no legacy entitlement: the free default stays 100 · Included', () => {
+    expect(item(plan(quote({ capacity: 100, legacy: null })), 'capacity')).toMatchObject({ value: '100 registrations', status: 'included' })
   })
 })
 
@@ -165,7 +196,10 @@ describe('wiring — the existing popup, enhanced', () => {
     expect(page.match(/function PublishConfirmModal\(/g)).toHaveLength(1)   // no duplicate popup
   })
   it('the popup gets the final step\'s live plan; the License step reports only a current quote', () => {
-    expect(page).toContain("plan={phase === 'final' ? (payCtx ?? null) : undefined}")
-    expect(code('components/wizard/LicenseServicesStep.tsx')).toContain('quote: ctxReady ? quote : null, payg })')
+    expect(page).toContain("? (payCtx ? { ...payCtx, capacityExplicit: payCtx.capacityChosen || initialData?.registrationCapacitySaved === true } : null)")
+    expect(page).toContain('registrationCapacitySaved: isPersistedCapacity(draft?.registrationCapacity)')
+    const step = code('components/wizard/LicenseServicesStep.tsx')
+    expect(step).toContain('quote: ctxReady ? quote : null, payg, capacityChosen })')
+    expect(step).toContain('setCapacity(n); onSelectCapacity(n); setCapacityChosen(true)')
   })
 })
