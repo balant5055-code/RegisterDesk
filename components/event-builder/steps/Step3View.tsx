@@ -71,6 +71,8 @@ import {
   parseContactsFromRows,
 } from '@/lib/events/builder/contacts'
 import { ROUTES } from '@/config/navigation'
+import { accessIssues, healthReport, isFieldRequired, FIELD } from '@/lib/events/builder/stepHealth'
+import { StepHealthPanel, StepIssuesProvider, InlineIssue, RequiredMark } from '@/components/event-builder/StepHealth'
 import { cn } from '@/lib/utils/cn'
 
 // --- Step 3 constants ---------------------------------------------------------
@@ -620,7 +622,6 @@ function Step3InviteCodePanel({
           <div>
             <label className="mb-1 flex items-center text-[12px] font-medium text-foreground">
               Invite Code
-              <span className="ml-0.5 text-[12px] text-red-500" aria-hidden>*</span>
             </label>
             <div className="flex gap-2">
               <input
@@ -648,7 +649,6 @@ function Step3InviteCodePanel({
           <div>
             <label className="mb-1 flex items-center text-[12px] font-medium text-foreground">
               Confirm Invite Code
-              <span className="ml-0.5 text-[12px] text-red-500" aria-hidden>*</span>
             </label>
             <div className="relative">
               <input
@@ -1550,7 +1550,7 @@ interface Step3State { accessControl: { type: AccessControlId } | null }
 
 // --- Step 3 view --------------------------------------------------------------
 
-export function Step3View({ currentStep, completedValues, onNext, onBack, onSaveDraft, onAutosave, initialData, wizardSteps }: StepViewProps) {
+export function Step3View({ currentStep, completedValues, onNext, onBack, onSaveDraft, onAutosave, initialData, wizardSteps, onNavigateIssue }: StepViewProps) {
   // Cast the saved access-control snapshot (may be null on first visit)
   const savedAC = initialData as {
     type?:             AccessControlId | null
@@ -1584,6 +1584,8 @@ export function Step3View({ currentStep, completedValues, onNext, onBack, onSave
   const canProceed      = validateStep('access', {
     selectedAccess, approvedContactsCount: approvedContacts.length,
   }).valid
+  // RD-WIZARD-HEALTH — the same rule, as named findings.
+  const health          = healthReport('access', accessIssues({ selectedAccess, approvedContactsCount: approvedContacts.length }))
   const selectedOption  = ACCESS_CONTROL_OPTIONS.find(o => o.id === selectedAccess) ?? null
   const visibilityLabel = completedValues[1] ?? ''
 
@@ -1639,15 +1641,20 @@ export function Step3View({ currentStep, completedValues, onNext, onBack, onSave
         </p>
       </div>
 
+      <StepHealthPanel className="mt-4" report={health} onNavigate={i => onNavigateIssue?.(i)} />
+      <StepIssuesProvider issues={health.issues}>
+
       {/* -- Content: cards + summary panel -- */}
       <div className="mt-4 grid flex-1 items-start gap-4 lg:grid-cols-[minmax(0,1fr)_264px]">
 
         {/* Left column: card grid + info strip */}
         <div className="flex flex-col gap-3">
+          <p className="-mb-1 text-[13px] font-semibold text-foreground">Access type{isFieldRequired(FIELD.accessType) && <RequiredMark />}</p>
           <div
+            id={FIELD.accessType}
             role="group"
             aria-label="Access control options"
-            className="grid grid-cols-1 gap-3 sm:grid-cols-3"
+            className="grid grid-cols-1 gap-3 rounded-xl sm:grid-cols-3"
           >
             {ACCESS_CONTROL_OPTIONS.map(option => (
               <AccessControlCard
@@ -1658,6 +1665,7 @@ export function Step3View({ currentStep, completedValues, onNext, onBack, onSave
               />
             ))}
           </div>
+          <InlineIssue field={FIELD.accessType} />
 
           {/* Selected-option detail panel */}
           <AnimatePresence>
@@ -1669,10 +1677,16 @@ export function Step3View({ currentStep, completedValues, onNext, onBack, onSave
               />
             )}
             {selectedAccess === 'approved_contacts' && (
-              <Step3ApprovedContactListPanel
-                contacts={approvedContacts}
-                onUpdate={setApprovedContacts}
-              />
+              <div id={FIELD.approvedContacts} className="rounded-xl">
+                <p className="mb-1.5 text-[13px] font-semibold text-foreground">
+                  Approved contacts{isFieldRequired(FIELD.approvedContacts, { access: { selectedAccess } }) && <RequiredMark />}
+                </p>
+                <Step3ApprovedContactListPanel
+                  contacts={approvedContacts}
+                  onUpdate={setApprovedContacts}
+                />
+                <InlineIssue field={FIELD.approvedContacts} />
+              </div>
             )}
           </AnimatePresence>
 
@@ -1701,6 +1715,7 @@ export function Step3View({ currentStep, completedValues, onNext, onBack, onSave
           approvedContactsCount={selectedAccess === 'approved_contacts' ? approvedContacts.length : undefined}
         />
       </div>
+      </StepIssuesProvider>
 
       <WizardFooter
         onBack={onBack}

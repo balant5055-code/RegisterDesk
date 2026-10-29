@@ -85,6 +85,24 @@ export interface FormInput { templateCount: number; fieldCount: number }
 export interface DetailsInput { draft: CampaignDetailsDraft }
 export interface FundraisingInput { draft: LinkedCampaignDraft }
 
+/**
+ * RD-WIZARD-HEALTH — the Event Type step's "format / cause" rule, moved here VERBATIM from
+ * Step1View (was its local `hasValidSubtype`) so the Continue gate and the required-field
+ * markers read one expression. A custom event and an event-with-donations need no subtype;
+ * "Other" needs its free-text description.
+ */
+export function isEventSubtypeSatisfied(i: {
+  selectedType: string | null
+  selectedSubtype: string | null
+  customSubtype: string
+  campaignType: string | null
+}): boolean {
+  if (!i.selectedType) return false
+  if (i.selectedType === 'custom') return true
+  if (i.selectedType === 'fundraising' && i.campaignType === 'event_plus_donation') return true
+  return i.selectedSubtype !== null && (i.selectedSubtype !== 'other' || i.customSubtype.trim().length > 0)
+}
+
 // ─── Validators — one per gate, mirroring the live expression ────────────────
 
 export function validateEventType(i: EventTypeInput): StepValidation {

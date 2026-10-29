@@ -31,6 +31,8 @@ import { auth } from '@/lib/firebase/auth'
 import { makeBlankEventDetailsDraft, normalizeEventDetailsDraft, type EventDetailsDraft, calcStepHealth } from '@/components/wizard/eventDetailsConfig'
 import type { EventPassFull } from '@/components/wizard/AddPassEditor'
 import { ROUTES } from '@/config/navigation'
+import { detailsIssues, publishIssuesFor, requirementFindings, valueFindings, mergeIssues, healthReport } from '@/lib/events/builder/stepHealth'
+import { StepHealthPanel, StepIssuesProvider } from '@/components/event-builder/StepHealth'
 
 // Step-6's lazy event-details + communication builder. Mirrors the parent's shared
 // `builderLoading` fallback so the dynamic import stays self-contained here (the parent keeps
@@ -42,7 +44,7 @@ const EventDetailsBuilder = dynamic(
   () => import('@/components/wizard/EventDetailsBuilder').then(m => m.EventDetailsBuilder), { loading: builderLoading },
 )
 
-export function Step6View({ currentStep, completedValues, onNext, onBack, onSaveDraft, onAutosave, initialData, focusHint, wizardSteps }: StepViewProps) {
+export function Step6View({ currentStep, completedValues, onNext, onBack, onSaveDraft, onAutosave, initialData, focusHint, wizardSteps, onNavigateIssue }: StepViewProps) {
   const eventTypeId  = (initialData?.eventTypeId  as string | null) ?? null
   const eventSubtype = (initialData?.eventSubtype as string | null) ?? null
   const rawForm      = initialData?.eventDetails
@@ -69,6 +71,20 @@ export function Step6View({ currentStep, completedValues, onNext, onBack, onSave
 
   useAutosaveEmit(form, onAutosave)   // RD-PRODUCT-01B: autosave event details as edited
 
+  // RD-WIZARD-HEALTH — the Continue gate (detailsHealthItems, behind calcStepHealth) plus what the
+  // server would refuse at publish for THIS step (value rules), live. The publish REQUIREMENTS'
+  // criticals are already the gate's blockers (RD-CE-FIX M7) — listing them again would count one
+  // problem twice, anchored to the wrong input — so only their warnings are added.
+  const detailsRecord = form as unknown as Record<string, unknown>
+  const reqs   = requirementFindings({ pricing: null, eventDetails: detailsRecord, registrationForm: null })
+  const health = healthReport('details', mergeIssues(
+    detailsIssues(form),
+    publishIssuesFor('details', {
+      critical: valueFindings({ eventDetails: form, pricing: initialData?.pricing ?? null, eventType: eventTypeId, eventSubtype }),
+      warning:  reqs.warning,
+    }),
+  ))
+
   return (
     <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.35, ease: EASE }} className="flex flex-col">
       <Link href={ROUTES.DASHBOARD} className="mb-4 inline-flex items-center gap-1.5 text-[13px] font-medium text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary rounded">
@@ -79,6 +95,8 @@ export function Step6View({ currentStep, completedValues, onNext, onBack, onSave
         <h1 className="text-[22px] font-bold tracking-tight text-foreground">Event Details &amp; Communication</h1>
         <p className="mt-1 text-[13px] text-muted-foreground">Configure your event page, venue, schedule, and attendee communication.</p>
       </div>
+      <StepHealthPanel className="mt-4" report={health} onNavigate={i => onNavigateIssue?.(i)} />
+      <StepIssuesProvider issues={health.issues}>
       <div className="mt-4">
         <EventDetailsBuilder
           form={form}
@@ -89,8 +107,10 @@ export function Step6View({ currentStep, completedValues, onNext, onBack, onSave
           uploadContext={uploadContext}
           focusHint={focusHint}
           slugLocked={slugLocked}
+          healthCounts={{ blockers: health.blockers.length, warnings: health.warnings.length }}
         />
       </div>
+      </StepIssuesProvider>
       <WizardFooter
         onBack={onBack}
         onSaveDraft={() => onSaveDraft?.(form)}

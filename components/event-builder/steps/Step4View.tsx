@@ -58,6 +58,8 @@ import { lockPublishedPricing } from '@/lib/events/editing/publishedPricingLock'
 import { useFeesConfig } from '@/lib/fees/feesConfigClient'
 import { readFeeCollection } from '@/lib/fees/explicitFeeModel'
 import type { MilestoneAlert } from '@/lib/events/milestoneAlerts'
+import { pricingIssues, publishIssuesFor, valueFindings, mergeIssues, healthReport, isFieldRequired, FIELD } from '@/lib/events/builder/stepHealth'
+import { StepHealthPanel, StepIssuesProvider, InlineIssue, RequiredMark } from '@/components/event-builder/StepHealth'
 
 function generatePassId(): string {
   return 'pass_' + Math.random().toString(36).slice(2, 10)
@@ -555,7 +557,8 @@ function RegistrationPeriodSection({
       icon:    Zap,
       label:   'Registration Opens',
       hint:    'When attendees can start registering',
-      optional: false,
+      optional: true,   // RD-WIZARD-HEALTH — empty is accepted; only a bad date or order is refused
+      fieldId: FIELD.regOpen,
       value:   draft.registrationOpenDate,
       onChange:(v: string) => onUpdate({ registrationOpenDate: v }),
       dotCls:  'bg-primary',
@@ -568,7 +571,8 @@ function RegistrationPeriodSection({
       icon:    Lock,
       label:   'Registration Closes',
       hint:    'Last day attendees can register',
-      optional: false,
+      optional: true,
+      fieldId: FIELD.regClose,
       value:   draft.registrationEndDate,
       onChange:(v: string) => onUpdate({ registrationEndDate: v }),
       dotCls:  'bg-rose-400',
@@ -589,7 +593,7 @@ function RegistrationPeriodSection({
       {/* Timeline */}
       <div className="px-5 py-5 sm:px-6">
         <div className="flex flex-col gap-0">
-          {milestones.map(({ key, icon: Icon, label, hint, optional, value, onChange, iconCls }, i, arr) => (
+          {milestones.map(({ key, icon: Icon, label, hint, optional, value, onChange, iconCls, fieldId }, i, arr) => (
             <div key={key} className="flex items-start gap-4">
               {/* Dot + connector */}
               <div className="flex flex-col items-center">
@@ -604,7 +608,7 @@ function RegistrationPeriodSection({
               {/* Content */}
               <div className={cn('min-w-0 flex-1', i < arr.length - 1 ? 'pb-5' : '')}>
                 <div className="mb-2 flex flex-wrap items-center gap-2">
-                  <label className="text-[13px] font-semibold text-foreground">{label}</label>
+                  <label htmlFor={fieldId} className="text-[13px] font-semibold text-foreground">{label}</label>
                   {optional && (
                     <span className="rounded-full bg-muted/60 px-2 py-0.5 text-[12px] font-medium text-muted-foreground">
                       Optional
@@ -617,12 +621,14 @@ function RegistrationPeriodSection({
                   )}
                 </div>
                 <input
+                  id={fieldId}
                   type="date"
                   value={value}
                   onChange={e => onChange(e.target.value)}
                   className={cn(inputCls, 'max-w-[220px]')}
                   aria-label={label}
                 />
+                <InlineIssue field={fieldId} />
                 <p className="mt-1.5 text-[13px] text-muted-foreground">{hint}</p>
               </div>
             </div>
@@ -893,7 +899,7 @@ function Step4SummaryPanel({ pricing }: { pricing: EventPricingDraft }) {
     </aside>
   )
 }
-export function Step4View({ currentStep, completedValues, onNext, onBack, onSaveDraft, onAutosave, initialData, wizardSteps }: StepViewProps) {
+export function Step4View({ currentStep, completedValues, onNext, onBack, onSaveDraft, onAutosave, initialData, wizardSteps, onNavigateIssue }: StepViewProps) {
   const eventTypeId  = (initialData?.eventTypeId  as string | null) ?? null
   const eventSubtype = (initialData?.eventSubtype as string | null) ?? null
   // RD-WIZARD-01 · the pass editor states how fees are charged: the recorded choice behind the
@@ -993,6 +999,12 @@ export function Step4View({ currentStep, completedValues, onNext, onBack, onSave
   // RD-EVENT-05: this step had no `canProceed` — its rule was written inline at the footer
   // AND again on the warning below. One source now drives both.
   const canProceed = validateStep('pricing', { passCount: pricing.passes.length }).valid
+  // RD-WIZARD-HEALTH — the Continue rule above, plus what the server's value rules would refuse at
+  // publish for THIS step (pass values, the registration window), as named findings.
+  const health = healthReport('pricing', mergeIssues(
+    pricingIssues({ passCount: pricing.passes.length }),
+    publishIssuesFor('pricing', { critical: valueFindings({ pricing, eventDetails: initialData?.eventDetails ?? null, eventType: eventTypeId, eventSubtype }), warning: [] }),
+  ))
 
   return (
     <motion.div
@@ -1024,6 +1036,9 @@ export function Step4View({ currentStep, completedValues, onNext, onBack, onSave
         </p>
       </div>
 
+      <StepHealthPanel className="mt-4" report={health} onNavigate={i => onNavigateIssue?.(i)} />
+      <StepIssuesProvider issues={health.issues}>
+
       {/* -- Main content -- */}
       <div className="mt-4 grid flex-1 items-start gap-5 lg:grid-cols-[minmax(0,1fr)_280px]">
 
@@ -1031,11 +1046,14 @@ export function Step4View({ currentStep, completedValues, onNext, onBack, onSave
         <div className="flex min-w-0 flex-col gap-5">
 
           {/* SECTION 1: RegisterDesk Plan */}
-          <EventTypeSelectorSection
-            value={pricing.eventType}
-            onChange={v => updatePricing({ eventType: v })}
-            locked={pricingLocked}
-          />
+          <div id={FIELD.pricingModel} className="rounded-2xl">
+            <EventTypeSelectorSection
+              value={pricing.eventType}
+              onChange={v => updatePricing({ eventType: v })}
+              locked={pricingLocked}
+            />
+            <InlineIssue field={FIELD.pricingModel} />
+          </div>
 
           {/* SECTION 2: Ticket Types & Pricing */}
           {(() => {
@@ -1044,7 +1062,7 @@ export function Step4View({ currentStep, completedValues, onNext, onBack, onSave
               ? null
               : pricing.passes.reduce((s, p) => s + (p.quantity ?? 0), 0)
             return (
-          <div className="overflow-hidden rounded-2xl border border-border bg-card shadow-sm">
+          <div id={FIELD.passes} className="overflow-hidden rounded-2xl border border-border bg-card shadow-sm">
             {/* Section header */}
             <div className="border-b border-border px-5 py-4 sm:px-6">
               <div className="flex items-center justify-between gap-3">
@@ -1054,7 +1072,7 @@ export function Step4View({ currentStep, completedValues, onNext, onBack, onSave
                   </div>
                   <div>
                     <div className="flex flex-wrap items-center gap-2">
-                      <p className="text-[15px] font-bold tracking-tight text-foreground">Ticket Types &amp; Pricing</p>
+                      <p className="text-[15px] font-bold tracking-tight text-foreground">Ticket Types &amp; Pricing{isFieldRequired(FIELD.passes) && <RequiredMark />}</p>
                       {hasUnlimitedPass ? (
                         <span className="rounded-full bg-amber-100 px-2.5 py-0.5 text-[12px] font-semibold text-amber-700">
                           Unlimited Capacity
@@ -1098,6 +1116,7 @@ export function Step4View({ currentStep, completedValues, onNext, onBack, onSave
                 onEdit={handleEditPass}
                 locked={pricingLocked}
               />
+              <InlineIssue field={FIELD.passes} />
             </div>
 
             {/* Spacer at bottom when section has content */}
@@ -1122,6 +1141,7 @@ export function Step4View({ currentStep, completedValues, onNext, onBack, onSave
         <Step4SummaryPanel pricing={pricing} />
 
       </div>
+      </StepIssuesProvider>
 
       {!canProceed && (
         <p className="mt-4 text-center text-[13px] font-medium text-amber-600">

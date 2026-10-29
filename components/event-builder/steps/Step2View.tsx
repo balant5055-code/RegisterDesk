@@ -40,6 +40,8 @@ import type { StepViewProps, VisibilityId } from '@/lib/events/builder/types'
 import { ROUTES } from '@/config/navigation'
 import { cn } from '@/lib/utils/cn'
 import { useBranding } from '@/lib/config/brandingClient'
+import { visibilityIssues, healthReport, isFieldRequired, FIELD } from '@/lib/events/builder/stepHealth'
+import { StepHealthPanel, StepIssuesProvider, InlineIssue, RequiredMark } from '@/components/event-builder/StepHealth'
 
 // --- Step 2 constants ---------------------------------------------------------
 
@@ -279,13 +281,15 @@ interface Step2State { visibility: VisibilityId | null }
 
 // --- Step 2 view --------------------------------------------------------------
 
-export function Step2View({ currentStep, completedValues, onNext, onBack, onSaveDraft, initialData, wizardSteps }: StepViewProps) {
+export function Step2View({ currentStep, completedValues, onNext, onBack, onSaveDraft, initialData, wizardSteps, onNavigateIssue }: StepViewProps) {
   const [step2, setStep2] = useState<Step2State>({
     visibility: (initialData?.visibility as VisibilityId | null) ?? null,
   })
 
   const selectedVisibility = step2.visibility
   const canProceed         = validateStep('visibility', { selectedVisibility }).valid
+  // RD-WIZARD-HEALTH — the same rule, as a named finding.
+  const health             = healthReport('visibility', visibilityIssues({ selectedVisibility }))
 
   const handleSelect = (id: VisibilityId) => setStep2({ visibility: id })
   const handleNext   = () => {
@@ -322,11 +326,17 @@ export function Step2View({ currentStep, completedValues, onNext, onBack, onSave
         </p>
       </div>
 
+      <StepHealthPanel className="mt-4" report={health} onNavigate={i => onNavigateIssue?.(i)} />
+      <StepIssuesProvider issues={health.issues}>
+
       <div className="mt-5 grid flex-1 items-start gap-5 lg:grid-cols-[minmax(0,1fr)_256px]">
+        <div className="min-w-0">
+        <p className="mb-2 text-[13px] font-semibold text-foreground">Visibility{isFieldRequired(FIELD.visibility) && <RequiredMark />}</p>
         <div
+          id={FIELD.visibility}
           role="group"
           aria-label="Choose visibility"
-          className="grid grid-cols-1 gap-4 sm:grid-cols-2"
+          className="grid grid-cols-1 gap-4 rounded-xl sm:grid-cols-2"
         >
           {VISIBILITY_OPTIONS.map(option => (
             <VisibilityCard
@@ -337,9 +347,12 @@ export function Step2View({ currentStep, completedValues, onNext, onBack, onSave
             />
           ))}
         </div>
+        <InlineIssue field={FIELD.visibility} />
+        </div>
 
         <Step2HelperPanel />
       </div>
+      </StepIssuesProvider>
 
       <WizardFooter
         onBack={onBack}
