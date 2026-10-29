@@ -18,6 +18,11 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } 
 import { NextRequest } from 'next/server'
 import { appendFileSync } from 'node:fs'
 
+/** RD-SETTLE-PAY-02 — recording a payment requires the explicit confirmation; tests opt OUT by passing it themselves. */
+const PAYMENT_ACTIONS = new Set(['paid', 'record_transfer', 'transfer_exception_approve'])
+const withTransferConfirmed = (b: Record<string, unknown>) =>
+  PAYMENT_ACTIONS.has(String(b.action)) && !('confirmTransferCompleted' in b) ? { ...b, confirmTransferCompleted: true } : b
+
 const EMULATOR = process.env.FIRESTORE_EMULATOR_HOST
 const describeEmu = EMULATOR ? describe : describe.skip
 const T = 240_000
@@ -146,7 +151,7 @@ describeEmu('Phase 4.0A · refunds vs open payout requests (current behaviour)',
   const settle = async (id: string, body: Record<string, unknown>, as = SUPER) => {
     const { PATCH } = await import('@/app/api/admin/settlements/[id]/route')
     h.admin = as
-    return json(await PATCH(req(body, 'PATCH'), ctx(id)))
+    return json(await PATCH(req(withTransferConfirmed(body), 'PATCH'), ctx(id)))
   }
   /** A request through the real route; approved by SUPER when asked (requests are created one at a time:
    *  only a PENDING request blocks the next, so earlier ones are approved first). */
@@ -220,8 +225,8 @@ describeEmu('Phase 4.0A · refunds vs open payout requests (current behaviour)',
     expect(await auditRows(a, 'settlement.review_opened')).toHaveLength(0)              // M1
     expect(await check(uid)).toEqual([])
     // the request under review cannot be paid (M1: 409 UNDER_REVIEW); the surviving approved one can (maker-checker)
-    expect((await settle(b, { action: 'paid', reason: 'try paying reviewed', utrNumber: 'UTRB' }, SUPER2))).toMatchObject({ status: 409, body: { code: 'UNDER_REVIEW' } })
-    expect((await settle(a, { action: 'paid', reason: 'bank transfer sent', utrNumber: 'UTRA' }, SUPER2)).status).toBe(200)
+    expect((await settle(b, { action: 'paid', reason: 'try paying reviewed', utrNumber: 'UTRBNEFT0001' }, SUPER2))).toMatchObject({ status: 409, body: { code: 'UNDER_REVIEW' } })
+    expect((await settle(a, { action: 'paid', reason: 'bank transfer sent', utrNumber: 'UTRANEFT0001' }, SUPER2)).status).toBe(200)
     expect(await wallet(uid)).toMatchObject({ available: 1_000, inTransit: 1_000, settled: 4_000 })
     expect(await check(uid)).toEqual([])
   }, T)
@@ -258,7 +263,7 @@ describeEmu('Phase 4.0A · refunds vs open payout requests (current behaviour)',
     expect(await wallet(uid)).toMatchObject({ available: 4_000, inTransit: 0 })
     expect(await reqDoc(a)).toMatchObject({ status: 'approved', reserved: false, payoutReview: { status: 'open' } })
     const before = await wallet(uid)
-    const paid = await settle(a, { action: 'paid', reason: 'bank transfer sent', utrNumber: 'UTR3' }, SUPER2)
+    const paid = await settle(a, { action: 'paid', reason: 'bank transfer sent', utrNumber: 'UTR3NEFT0001' }, SUPER2)
     expect(paid).toMatchObject({ status: 409, body: { code: 'UNDER_REVIEW' } })
     expect(await wallet(uid)).toEqual(before)
     expect(await reqDoc(a)).toMatchObject({ status: 'approved' })
@@ -301,14 +306,14 @@ describeEmu('Phase 4.0A · refunds vs open payout requests (current behaviour)',
     const a = await open(uid, 5_000, true)
     await db.doc(`organizerRevenueWallets/${uid}`).update({ availablePaise: 4_999 })    // synthetic: one paisa short
     const before = await wallet(uid)
-    const r = await settle(a, { action: 'paid', reason: 'bank transfer sent', utrNumber: 'UTR5' }, SUPER2)
+    const r = await settle(a, { action: 'paid', reason: 'bank transfer sent', utrNumber: 'UTR5NEFT0001' }, SUPER2)
     expect(r).toMatchObject({ status: 422, body: { error: 'Insufficient available balance. Available: ₹49.99.' } })
     expect(await wallet(uid)).toEqual(before)
     expect(await reqDoc(a)).toMatchObject({ status: 'approved' })
     expect(await reqDoc(a)).not.toHaveProperty('utrNumber')
     expect(await auditRows(a, 'settlement.paid')).toHaveLength(0)
     await db.doc(`organizerRevenueWallets/${uid}`).update({ availablePaise: 5_000 })    // exactly enough
-    expect((await settle(a, { action: 'paid', reason: 'bank transfer sent', utrNumber: 'UTR5' }, SUPER2)).status).toBe(200)
+    expect((await settle(a, { action: 'paid', reason: 'bank transfer sent', utrNumber: 'UTR5NEFT0001' }, SUPER2)).status).toBe(200)
     expect(await wallet(uid)).toMatchObject({ available: 0, inTransit: 0, settled: 5_000 })
     expect(await check(uid)).toEqual([])
   }, T)
@@ -334,7 +339,7 @@ describeEmu('Phase 4.0A · refunds vs open payout requests (current behaviour)',
     // a pending request exists (and one is under review): a new request is refused
     expect((await request(uid, 100)).status).toBe(409)
     // the approved request is under review: mark-paid refuses (M1: 409 UNDER_REVIEW)
-    expect((await settle(a, { action: 'paid', reason: 'bank transfer sent', utrNumber: 'UTR6' }, SUPER2))).toMatchObject({ status: 409, body: { code: 'UNDER_REVIEW' } })
+    expect((await settle(a, { action: 'paid', reason: 'bank transfer sent', utrNumber: 'UTR6NEFT0001' }, SUPER2))).toMatchObject({ status: 409, body: { code: 'UNDER_REVIEW' } })
     // approving the pending one is NOT balance-checked (current behaviour)
     expect((await settle(b, { action: 'approve', reason: 'checked for test' })).status).toBe(200)
     expect(await reqDoc(b)).toMatchObject({ status: 'approved' })
@@ -458,7 +463,7 @@ describeEmu('Phase 4.0A · refunds vs open payout requests (current behaviour)',
       const rid = await donationRefund(d, uid, 5_000)
       const [, paid] = await Promise.all([
         applyDonation(rid),
-        settle(a, { action: 'paid', reason: 'bank transfer sent', utrNumber: `UTR9${i}` }, SUPER2),
+        settle(a, { action: 'paid', reason: 'bank transfer sent', utrNumber: `UTR9RACE00${i}` }, SUPER2),
       ])
       const w = await wallet(uid)
       const s = await reqDoc(a)

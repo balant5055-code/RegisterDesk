@@ -10,8 +10,12 @@
 // RD-PHASE4-S4 — financial controls:
 //   • D1 Super Admin only (ADMIN_UIDS). A legacy `admin: true` claim alone → 403 SUPER_ADMIN_REQUIRED.
 //   • D3 every action needs a 3–500 character reason (`reason`, falling back to `adminNote`).
-//   • D2 maker-checker: the Super Admin who APPROVED cannot mark the same settlement PAID
-//     (409 MAKER_CHECKER_REQUIRED) — enforced inside the paid transaction, never bypassed.
+//   • D2 (RD-SETTLE-PAY-02, owner decision 2026-10-28): RegisterDesk runs with ONE Super Admin, so the Super
+//     Admin who approved a settlement MAY record it paid. Recording a payment instead requires a genuine bank
+//     UTR (6–40 letters/digits, never reused on another payout), a reason, and an explicit
+//     `confirmTransferCompleted: true`; the audit row names the admin, the approver and whether they are the same
+//     (`makerChecker: 'same_admin' | 'distinct_approver' | 'legacy_no_approver'`). Status is re-read inside the
+//     transaction, so a duplicate or concurrent recording is refused (409) and the wallet is debited once.
 //   • D5 approve and paid re-check the payout destination INSIDE the transaction against the
 //     destination snapshotted when the organizer requested (409 DESTINATION_CHANGED).
 //   • D6/F1 the audit row is staged in the SAME transaction as the change (stageAdminAudit):
@@ -22,7 +26,7 @@
 // (409 UNDER_REVIEW). A Super Admin resolves it with:
 //   resume_review   → re-reserve it (only if the free balance covers it now); status unchanged
 //   reject          → as before; an APPROVED request under review also needs confirmNoTransfer: true
-//   record_transfer → the bank transfer HAD already completed (approved + under review; UTR, maker-checker and
+//   record_transfer → the bank transfer HAD already completed (approved + under review; UTR, confirmation and
 //                     destination binding as for paid): recorded paid; available covers what it can and the
 //                     rest becomes a 'payout_shortfall' clawback; other reservations that no longer fit go to
 //                     review in the same transaction. Nothing here makes or retries a bank transfer.
@@ -34,8 +38,9 @@
 //       completed to the request's ORIGINAL destination after the organizer's payout details changed:
 //         transfer_exception_initiate → Super Admin, UTR, reason, evidence (original destination + completed
 //                                       transfer); only when the standard binding refuses; UTR unused elsewhere
-//         transfer_exception_approve  → a DIFFERENT Super Admin (also not the request's approver), restating the
-//                                       amount, UTR and evidence fingerprint; records it paid ONCE (UTR reserved)
+//         transfer_exception_approve  → a Super Admin (RD-SETTLE-PAY-02: may be the same one) restating the amount, UTR
+//                                       and evidence fingerprint and confirming the transfer completed; records it
+//                                       paid ONCE (UTR reserved)
 //         transfer_exception_decline  → kept as evidence; the request is unchanged
 //       It never sends, retries or authorizes a transfer, and the ordinary paid / record_transfer guards are unchanged.
 
@@ -57,7 +62,7 @@ import { sendOrganizerWhatsApp } from '@/lib/notifications/organizerWhatsApp'
 import { notifySettlement } from '@/lib/notifications/inbox/notify'
 import { stageAdminAudit } from '@/lib/admin/audit'
 import {
-  requireSuperAdmin, parseFinancialReason, reasonErrorResponse, configuredSuperAdminCount,
+  requireSuperAdmin, parseFinancialReason, reasonErrorResponse,
 } from '@/lib/admin/financialGuard'
 import { enqueueWebhook } from '@/lib/integrations/webhooks'
 import { PAYOUT_PROFILE_UNVERIFIED_MESSAGE } from '@/lib/payout/verification'
@@ -65,9 +70,10 @@ import { checkSettlementBinding, DESTINATION_CHANGED_MESSAGE } from '@/lib/payou
 import { readOpenPayoutRequests } from '@/lib/settlements/payoutReview'
 import { logClawbackEvent } from '@/lib/clawbacks/clawbackService'
 import {
-  stageConfirmedTransferPaid, normalizeUtr, canonicalUtr, validateTransferEvidence, transferExceptionFingerprint,
+  stageConfirmedTransferPaid, normalizeUtr, validateTransferEvidence, transferExceptionFingerprint,
   readTransferReferenceConflict, TRANSFER_REFERENCES_COLLECTION,
 } from '@/lib/settlements/confirmedTransfer'
+import { recordableUtr } from '@/lib/settlements/utr'
 import { captureFinancialError } from '@/lib/monitoring/sentry'
 import type { OrganizerPayoutProfileDoc } from '@/lib/payout/types'
 import { runAfterResponse } from '@/lib/server/afterResponse'
@@ -108,19 +114,14 @@ const exceptionPendingResponse = () => NextResponse.json({ error: EXCEPTION_PEND
 // M1.3 — one UTR, one payout (lib/settlements/confirmedTransfer.ts). Refused before any write.
 const utrInUseResponse = () => NextResponse.json({ error: 'This transfer reference (UTR) is already recorded against another payout. Nothing was recorded — investigate before retrying.', code: 'UTR_IN_USE' }, { status: 409 })
 const utrInvalidResponse = () => NextResponse.json({ error: 'The UTR must contain letters and digits only (spaces and hyphens are ignored), up to 64 characters.', code: 'UTR_INVALID' }, { status: 422 })
-/** M1.3 — maker-checker for the exception has NO bypass: explain what to do when no eligible approver exists. */
-function exceptionMakerCheckerMessage(): string {
-  const base = 'A different Super Admin — not the one who requested the exception, and not the one who approved the payout — must approve it.'
-  return configuredSuperAdminCount() < 3
-    ? `${base} Only ${configuredSuperAdminCount()} Super Admin(s) are configured, so no eligible approver may exist: the exception stays PENDING (nothing was recorded). Follow the manual fallback (Operations Runbook B.12) until an independent Super Admin can approve it. This control cannot be bypassed.`
-    : base
-}
-
-/** D2 — actionable, and explicit that the control is never bypassed. */
-function makerCheckerMessage(): string {
-  return configuredSuperAdminCount() < 2
-    ? 'You approved this settlement, so a different Super Admin must mark it paid. Only one Super Admin is configured: add a second Super Admin to ADMIN_UIDS before this payout can be recorded. This control cannot be bypassed.'
-    : 'You approved this settlement, so a different Super Admin must mark it paid. Ask another Super Admin to record the payout.'
+/** RD-SETTLE-PAY-02 — recording a payment needs the admin's explicit confirmation that the bank transfer completed. */
+const transferConfirmationResponse = () => NextResponse.json({
+  error: 'Confirm that this bank transfer has been completed (confirmTransferCompleted: true). Nothing was recorded.',
+  code: 'TRANSFER_CONFIRMATION_REQUIRED',
+}, { status: 422 })
+/** RD-SETTLE-PAY-02 — who approved vs. who recorded the payment, for the audit row. */
+function recorderRelation(approvedBy: string | null | undefined, adminUid: string): 'same_admin' | 'distinct_approver' | 'legacy_no_approver' {
+  return !approvedBy ? 'legacy_no_approver' : approvedBy === adminUid ? 'same_admin' : 'distinct_approver'
 }
 
 export interface AdminSettlementPatchResponse {
@@ -147,6 +148,8 @@ export async function PATCH(req: NextRequest, { params }: Ctx): Promise<NextResp
   const bankReference = typeof body.bankReference === 'string' ? body.bankReference.trim() : ''
   const paidBy        = typeof body.paidBy        === 'string' ? body.paidBy.trim()        : ''
   const paymentNotes  = typeof body.paymentNotes  === 'string' ? body.paymentNotes.trim()  : ''
+  // RD-SETTLE-PAY-02 — strict boolean: only a literal `true` confirms that the bank transfer completed.
+  const transferConfirmed = body.confirmTransferCompleted === true
 
   const ACTIONS = ['approve', 'reject', 'paid', 'resume_review', 'record_transfer', 'transfer_exception_initiate', 'transfer_exception_approve', 'transfer_exception_decline'] as const
   if (typeof action !== 'string' || !(ACTIONS as readonly string[]).includes(action)) {
@@ -430,8 +433,9 @@ export async function PATCH(req: NextRequest, { params }: Ctx): Promise<NextResp
     if (!utrNumber) {
       return NextResponse.json({ error: 'utrNumber is required to record a completed transfer.' }, { status: 422 })
     }
-    const recordUtr = canonicalUtr(utrNumber)   // M1.3
+    const recordUtr = recordableUtr(utrNumber)   // M1.3 key; RD-SETTLE-PAY-02 genuine length
     if (!recordUtr) return utrInvalidResponse()
+    if (!transferConfirmed) return transferConfirmationResponse()
     let out: { organizerUid: string; amountPaise: number; shortfallPaise: number; clawbackId: string | null; reviewed: string[] }
     try {
       out = await adminDb.runTransaction(async tx => {
@@ -441,7 +445,6 @@ export async function PATCH(req: NextRequest, { params }: Ctx): Promise<NextResp
         if (settlement.status !== 'approved') throw new Error(`WRONG_STATE:${settlement.status}`)
         if (settlement.payoutReview?.status !== 'open') throw new Error('NOT_UNDER_REVIEW')
         if (settlement.transferException?.status === 'pending_approval') throw new Error('EXCEPTION_PENDING')
-        if (settlement.approvedBy && settlement.approvedBy === adminUid) throw new Error('MAKER_CHECKER')
         const profileSnap = await tx.get(adminDb.doc(`organizerPayoutProfiles/${settlement.organizerUid}`))
         const binding = checkSettlementBinding(settlement.payoutDestination, profileSnap.exists ? profileSnap.data() as OrganizerPayoutProfileDoc : null)
         if (!binding.ok) throw new Error(binding.code)
@@ -476,7 +479,8 @@ export async function PATCH(req: NextRequest, { params }: Ctx): Promise<NextResp
           after:  { status: 'paid', review: 'resolved', availablePaise: newAvailable, settledPaise: wallet.settledPaise + amount },
           metadata: {
             organizerUid: settlement.organizerUid, amountPaise: amount, utrNumber, bankReference: bankReference || null, paidBy: paidBy || null,
-            approvedBy: settlement.approvedBy ?? null, makerChecker: settlement.approvedBy ? 'distinct_approver' : 'legacy_no_approver',
+            approvedBy: settlement.approvedBy ?? null, approvedAt: settlement.approvedAt ?? null, recordedBy: adminUid,
+            makerChecker: recorderRelation(settlement.approvedBy, adminUid), transferConfirmed: true,
             destinationBinding: binding.mode, destination: settlement.payoutDestination?.label ?? null,
             reviewResolution: 'paid_after_transfer', takenFromAvailablePaise: take, shortfallPaise: shortfall, clawbackId: claw?.clawbackId ?? null,
             reviewTrigger: settlement.payoutReview?.trigger ?? null, otherRequestsReviewed: plan.reviewed,
@@ -492,7 +496,6 @@ export async function PATCH(req: NextRequest, { params }: Ctx): Promise<NextResp
       if (msg === 'NOT_UNDER_REVIEW') return NextResponse.json({ error: 'This settlement is not under review: use Mark Paid.', code: 'NOT_UNDER_REVIEW' }, { status: 409 })
       if (msg === 'EXCEPTION_PENDING') return exceptionPendingResponse()
       if (msg === 'UTR_IN_USE' || /ALREADY_EXISTS|already exists/i.test(msg)) return utrInUseResponse()
-      if (msg === 'MAKER_CHECKER') return NextResponse.json({ error: makerCheckerMessage(), code: 'MAKER_CHECKER_REQUIRED' }, { status: 409 })
       if (msg === 'UNVERIFIED_PROFILE') return NextResponse.json({ error: PAYOUT_PROFILE_UNVERIFIED_MESSAGE }, { status: 422 })
       if (msg === 'DESTINATION_CHANGED') return NextResponse.json({ error: DESTINATION_CHANGED_MESSAGE, code: 'DESTINATION_CHANGED' }, { status: 409 })
       if (msg === 'NO_WALLET') return NextResponse.json({ error: 'Organizer revenue wallet not found.' }, { status: 400 })
@@ -575,7 +578,7 @@ export async function PATCH(req: NextRequest, { params }: Ctx): Promise<NextResp
     return NextResponse.json({ id, status: 'approved', exception: 'pending_approval', fingerprint: result.fingerprint, duplicate: result.duplicate })
   }
 
-  // ── M1.2 · B · APPROVE (a different Super Admin; bound to amount, UTR and evidence; records it paid ONCE) ────────
+  // ── M1.2 · B · APPROVE (a Super Admin — may be the same one; bound to amount, UTR and evidence; records it paid ONCE) ─
 
   if (action === 'transfer_exception_approve') {
     const utr = normalizeUtr(body.utrNumber)
@@ -584,6 +587,7 @@ export async function PATCH(req: NextRequest, { params }: Ctx): Promise<NextResp
     if (!utr || typeof expectedAmount !== 'number' || !expectedFingerprint) {
       return NextResponse.json({ error: 'Approval must restate the UTR, the expected amount (expectedAmountPaise) and the evidence fingerprint.', code: 'APPROVAL_BINDING_REQUIRED' }, { status: 422 })
     }
+    if (!transferConfirmed) return transferConfirmationResponse()
     let out: { duplicate: boolean; organizerUid: string; amountPaise: number; shortfallPaise: number; clawbackId: string | null; reviewed: string[] }
     try {
       out = await adminDb.runTransaction(async tx => {
@@ -598,7 +602,6 @@ export async function PATCH(req: NextRequest, { params }: Ctx): Promise<NextResp
         }
         if (d.status !== 'approved') throw new Error(`WRONG_STATE:${d.status}`)
         if (!ex || ex.status !== 'pending_approval') throw new Error('NO_PENDING_EXCEPTION')
-        if (ex.initiatedBy === adminUid || (d.approvedBy && d.approvedBy === adminUid)) throw new Error('MAKER_CHECKER_EXCEPTION')
         if (!bindingMatches) throw new Error('APPROVAL_MISMATCH')
         // re-validate the evidence against the request as it is NOW, and that the destination still differs
         const ev = validateTransferEvidence(ex.evidence, d.payoutDestination)
@@ -640,7 +643,8 @@ export async function PATCH(req: NextRequest, { params }: Ctx): Promise<NextResp
           metadata: {
             organizerUid: d.organizerUid, amountPaise: d.amountPaise, utrNumber: utr,
             paidVia: 'transfer_exception', exceptionInitiatedBy: ex.initiatedBy, exceptionApprovedBy: adminUid, settlementApprovedBy: d.approvedBy ?? null,
-            makerChecker: 'distinct_initiator_and_approver', bindingCode: binding.code, fingerprint: ex.fingerprint,
+            makerChecker: ex.initiatedBy === adminUid || d.approvedBy === adminUid ? 'same_admin' : 'distinct_initiator_and_approver',
+            settlementApprovedAt: d.approvedAt ?? null, exceptionInitiatedAt: ex.initiatedAt ?? null, transferConfirmed: true, bindingCode: binding.code, fingerprint: ex.fingerprint,
             evidence: { originalDestination: ex.evidence.originalDestination, transferSource: ex.evidence.transfer.source, transferReference: ex.evidence.transfer.reference },
             takenFromAvailablePaise: plan.takePaise, shortfallPaise: plan.shortfallPaise, clawbackId: plan.clawbackId,
             ...(reviewOpen ? { reviewResolution: 'paid_after_transfer', reviewTrigger: d.payoutReview?.trigger ?? null } : {}),
@@ -655,7 +659,6 @@ export async function PATCH(req: NextRequest, { params }: Ctx): Promise<NextResp
       if (msg === 'NOT_FOUND') return NextResponse.json({ error: 'Settlement not found' }, { status: 404 })
       if (msg.startsWith('WRONG_STATE:')) return NextResponse.json({ error: `The payout is not awaiting this approval (current: '${msg.split(':')[1]}').`, code: 'WRONG_STATE' }, { status: 409 })
       if (msg === 'NO_PENDING_EXCEPTION') return NextResponse.json({ error: 'No transfer exception is pending approval for this payout.', code: 'NO_PENDING_EXCEPTION' }, { status: 409 })
-      if (msg === 'MAKER_CHECKER_EXCEPTION') return NextResponse.json({ error: exceptionMakerCheckerMessage(), code: 'MAKER_CHECKER_REQUIRED', exception: 'pending_approval' }, { status: 409 })
       if (msg === 'APPROVAL_MISMATCH') return NextResponse.json({ error: 'The amount, UTR or evidence fingerprint does not match the pending exception. Nothing was recorded.', code: 'APPROVAL_MISMATCH' }, { status: 409 })
       if (msg === 'EVIDENCE_STALE') return NextResponse.json({ error: 'The request changed since the exception was requested; its evidence no longer matches. Decline it and investigate.', code: 'EVIDENCE_STALE' }, { status: 409 })
       if (msg === 'DESTINATION_UNCHANGED') return NextResponse.json({ error: 'The payout destination no longer differs: decline the exception and use the standard path.', code: 'DESTINATION_UNCHANGED' }, { status: 409 })
@@ -729,8 +732,9 @@ export async function PATCH(req: NextRequest, { params }: Ctx): Promise<NextResp
     )
   }
   // M1.3 — one UTR, one payout: the shared canonical form (validated before any write)
-  const paidUtr = canonicalUtr(utrNumber)
+  const paidUtr = recordableUtr(utrNumber)   // RD-SETTLE-PAY-02 genuine length
   if (!paidUtr) return utrInvalidResponse()
+  if (!transferConfirmed) return transferConfirmationResponse()
 
   try {
     let capturedOrganizerUid = ''
@@ -748,11 +752,7 @@ export async function PATCH(req: NextRequest, { params }: Ctx): Promise<NextResp
       if (settlement.payoutReview?.status === 'open') throw new Error('UNDER_REVIEW')
       if (settlement.transferException?.status === 'pending_approval') throw new Error('EXCEPTION_PENDING')   // M1.2
 
-      // D2 — maker-checker. Approvals recorded before `approvedBy` existed carry no approver;
-      // they are allowed and flagged in the audit row (`makerChecker: 'legacy_no_approver'`).
-      if (settlement.approvedBy && settlement.approvedBy === adminUid) {
-        throw new Error('MAKER_CHECKER')
-      }
+      // D2 (RD-SETTLE-PAY-02) — the approving Super Admin may record the payment; the audit row says so.
 
       // P9.1 + D5: re-verify the payout destination INSIDE the transaction before any money
       // moves — verified, and (when the request snapshotted one) the SAME verified destination.
@@ -828,7 +828,10 @@ export async function PATCH(req: NextRequest, { params }: Ctx): Promise<NextResp
           bankReference:      bankReference || null,
           paidBy:             paidBy || null,
           approvedBy:         settlement.approvedBy ?? null,
-          makerChecker:       settlement.approvedBy ? 'distinct_approver' : 'legacy_no_approver',
+          approvedAt:         settlement.approvedAt ?? null,
+          recordedBy:         adminUid,
+          makerChecker:       recorderRelation(settlement.approvedBy, adminUid),
+          transferConfirmed:  true,
           destinationBinding: binding.mode,
           destination:        settlement.payoutDestination?.label ?? null,
           releasedHoldPaise:  releaseHold,
@@ -874,9 +877,6 @@ export async function PATCH(req: NextRequest, { params }: Ctx): Promise<NextResp
     if (msg === 'UNVERIFIED_PROFILE') return NextResponse.json({ error: PAYOUT_PROFILE_UNVERIFIED_MESSAGE }, { status: 422 })
     if (msg === 'DESTINATION_CHANGED') {
       return NextResponse.json({ error: DESTINATION_CHANGED_MESSAGE, code: 'DESTINATION_CHANGED' }, { status: 409 })
-    }
-    if (msg === 'MAKER_CHECKER') {
-      return NextResponse.json({ error: makerCheckerMessage(), code: 'MAKER_CHECKER_REQUIRED' }, { status: 409 })
     }
     if (msg === 'UNDER_REVIEW') return underReviewResponse()
     if (msg === 'EXCEPTION_PENDING') return exceptionPendingResponse()

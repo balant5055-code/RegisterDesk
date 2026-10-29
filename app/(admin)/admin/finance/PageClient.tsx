@@ -17,6 +17,7 @@ import type { AdminTransaction, AdminTransactionsResponse }
 import type { ReleasePreviewResponse } from '@/app/api/admin/finance/release-preview/route'
 import type { ReleaseFundsResponse }   from '@/app/api/admin/finance/release-funds/route'
 import { releaseRunNotice }            from '@/lib/settlements/releaseRunSummary'
+import { checkMarkPaidForm } from '@/lib/settlements/markPaidForm'
 import { GatewayVarianceCard } from '@/components/admin/GatewayVarianceCard'
 import { RefundHoldsPanel } from '@/components/admin/RefundHoldsPanel'
 import type {
@@ -135,7 +136,7 @@ function TransferExceptionModal({ settlement, onClose, onSubmit }: {
         <p className="mt-3 text-[12.5px] text-amber-800 dark:text-amber-300">
           Use this only when the bank transfer has ALREADY succeeded to the original destination
           {settlement.destination?.label ? <> (<span className="font-mono">{settlement.destination.label}</span>)</> : null}, and the organizer has
-          since changed their payout details. Nothing is sent. A different Super Admin must approve before it is recorded.
+          since changed their payout details. Nothing is sent. It is recorded only once a Super Admin approves it, restating the amount, UTR and evidence and confirming the transfer completed.
         </p>
         <div className="mt-4 space-y-3 text-[13px]">
           <label className="block">UTR / bank transfer reference
@@ -179,6 +180,7 @@ function TransferExceptionModal({ settlement, onClose, onSubmit }: {
 interface MarkPaidModalProps {
   settlement: AdminSettlement
   onClose:    () => void
+  /** Rejects with the server's message on failure, so the form stays open with what was typed. */
   onConfirm:  (proof: PayoutProof, note: string) => Promise<void>
   /** M1 — 'transfer': record a bank transfer that ALREADY completed for a request under review */
   mode?:      'paid' | 'transfer'
@@ -189,6 +191,8 @@ interface PayoutProof {
   bankReference: string
   paidBy:        string
   paymentNotes:  string
+  /** RD-SETTLE-PAY-02 — the admin's explicit confirmation that the bank transfer completed (server-required) */
+  confirmTransferCompleted: true
 }
 
 function MarkPaidModal({ settlement, onClose, onConfirm, mode = 'paid' }: MarkPaidModalProps) {
@@ -198,6 +202,7 @@ function MarkPaidModal({ settlement, onClose, onConfirm, mode = 'paid' }: MarkPa
   const [paymentNotes,  setPaymentNotes]  = useState('')
   const [adminNote,     setAdminNote]     = useState(settlement.adminNote)
   const [submitting,    setSubmitting]    = useState(false)
+  const [confirmed,     setConfirmed]     = useState(false)
   const [error,         setError]         = useState<string | null>(null)
   const utrRef = useRef<HTMLInputElement>(null)
   const trapRef = useFocusTrap<HTMLDivElement>(true)   // GA-8 P1-5: focus trap + restore
@@ -210,8 +215,15 @@ function MarkPaidModal({ settlement, onClose, onConfirm, mode = 'paid' }: MarkPa
     return () => window.removeEventListener('keydown', handler)
   }, [onClose])
 
-  // RD-PHASE4-S4 · D3 — the note is the required reason (3–500 characters).
-  const canSubmit = utrNumber.trim().length > 0 && adminNote.trim().length >= 3 && adminNote.trim().length <= 500 && !submitting
+  // RD-SETTLE-PAY-01/02 — the UTR, the reason (D3, 3–500 characters) and the explicit transfer confirmation are
+  // required, checked with the server's own rules; the optional fields are not inputs to the check. The Super Admin
+  // who approved the settlement may record it (single-Super-Admin operation; the audit row records it).
+  const check     = checkMarkPaidForm({ utrNumber, reason: adminNote, confirmed })
+  const canSubmit = check.ok && !submitting
+  // A field error shows once something was typed there; until then the button's hint names what is missing.
+  const utrHint    = utrNumber.trim() ? check.utrError : null
+  const reasonHint = adminNote.trim() ? check.reasonError : null
+  const missing    = [check.utrError && !utrHint ? 'the UTR number' : null, check.reasonError && !reasonHint ? 'a reason' : null, check.confirmError ? 'the transfer confirmation' : null].filter(Boolean)
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
@@ -221,7 +233,7 @@ function MarkPaidModal({ settlement, onClose, onConfirm, mode = 'paid' }: MarkPa
     try {
       await onConfirm(
         { utrNumber: utrNumber.trim(), bankReference: bankReference.trim(),
-          paidBy: paidBy.trim(), paymentNotes: paymentNotes.trim() },
+          paidBy: paidBy.trim(), paymentNotes: paymentNotes.trim(), confirmTransferCompleted: true },
         adminNote,
       )
       onClose()
@@ -287,8 +299,12 @@ function MarkPaidModal({ settlement, onClose, onConfirm, mode = 'paid' }: MarkPa
               value={utrNumber}
               onChange={e => setUtrNumber(e.target.value)}
               placeholder="e.g. HDFC24061700012345"
+              required
+              aria-invalid={utrHint ? true : undefined}
+              aria-describedby={utrHint ? 'utr-number-error' : undefined}
               className="w-full rounded-lg border border-border bg-background px-3 py-2 text-[13.5px] text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/40"
             />
+            {utrHint && <p id="utr-number-error" className="mt-1 text-[12px] text-destructive">{utrHint}</p>}
           </div>
 
           {/* Bank Reference — optional */}
@@ -336,10 +352,10 @@ function MarkPaidModal({ settlement, onClose, onConfirm, mode = 'paid' }: MarkPa
             />
           </div>
 
-          {/* Admin Note — optional */}
+          {/* Reason — required (D3) */}
           <div>
             <label htmlFor="admin-note-paid" className="mb-1 block text-[13px] font-medium text-foreground">
-              Reason <span className="text-[12px] font-normal text-muted-foreground">(required, 3–500 characters)</span>
+              Reason <span className="text-destructive">*</span> <span className="text-[12px] font-normal text-muted-foreground">(3–500 characters)</span>
             </label>
             <input
               id="admin-note-paid"
@@ -349,8 +365,27 @@ function MarkPaidModal({ settlement, onClose, onConfirm, mode = 'paid' }: MarkPa
               placeholder="Why this payout is being recorded (audited)"
               maxLength={500}
               required
+              aria-invalid={reasonHint ? true : undefined}
+              aria-describedby={reasonHint ? 'admin-note-paid-error' : undefined}
               className="w-full rounded-lg border border-border bg-background px-3 py-2 text-[13.5px] text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/40"
             />
+            {reasonHint && <p id="admin-note-paid-error" className="mt-1 text-[12px] text-destructive">{reasonHint}</p>}
+          </div>
+
+          {/* RD-SETTLE-PAY-02 — explicit confirmation (required by the server too) */}
+          <div className="flex items-start gap-2.5 rounded-lg border border-border bg-muted/30 p-3">
+            <input
+              id="confirm-transfer-completed"
+              type="checkbox"
+              checked={confirmed}
+              onChange={e => setConfirmed(e.target.checked)}
+              disabled={submitting}
+              className="mt-0.5 size-4 shrink-0 accent-[var(--primary)]"
+            />
+            <label htmlFor="confirm-transfer-completed" className="text-[12.5px] leading-relaxed text-foreground">
+              I confirm this bank transfer has been completed and the UTR above is the bank&rsquo;s reference for it.
+              Recording it marks the payout paid and debits the organizer&rsquo;s wallet; it cannot be undone here.
+            </label>
           </div>
 
           {/* Error */}
@@ -362,6 +397,9 @@ function MarkPaidModal({ settlement, onClose, onConfirm, mode = 'paid' }: MarkPa
           )}
 
           {/* Actions */}
+          {missing.length > 0 && (
+            <p className="text-right text-[12px] text-muted-foreground">To confirm, enter {missing.join(' and ')}. The other fields are optional.</p>
+          )}
           <div className="flex items-center justify-end gap-2 pt-1">
             <button
               type="button"
@@ -1144,13 +1182,17 @@ export default function AdminFinancePage() {
 
   // ── Settlement actions ────────────────────────────────────────────────────────
 
-  /** M1 — review resolutions; the list is re-read afterwards (the server decides the resulting state). */
+  /**
+   * M1 — review resolutions; the list is re-read afterwards (the server decides the resulting state).
+   * Resolves with the failure message (null on success). `inline`: the caller shows it, so no toast.
+   */
   async function runReviewAction(
     id:     string,
     action: 'resume_review' | 'reject' | 'record_transfer' | 'transfer_exception_initiate' | 'transfer_exception_approve' | 'transfer_exception_decline',
     note:   string,
     extra?: Record<string, unknown>,
-  ) {
+    inline = false,
+  ): Promise<string | null> {
     setProcessing(id)
     try {
       const token = await getToken()
@@ -1161,24 +1203,30 @@ export default function AdminFinancePage() {
       })
       if (!res.ok) {
         const body = await res.json() as { error?: string }
-        showToast(body.error ?? `Action failed (${res.status})`, 'error')
-        return
+        const message = body.error ?? `Action failed (${res.status})`
+        if (!inline) showToast(message, 'error')
+        return message
       }
       setExpanded(null); setNoteText('')
       await fetchSettlements()
+      return null
     } catch {
-      showToast('Network error — please try again.', 'error')
+      const message = 'Network error — please try again.'
+      if (!inline) showToast(message, 'error')
+      return message
     } finally {
       setProcessing(null)
     }
   }
 
+  /** Resolves with the failure message (null on success). `inline`: the caller shows it, so no toast. */
   async function runAction(
     id:     string,
     action: 'approve' | 'reject' | 'paid',
     note?:  string,
     proof?: PayoutProof,
-  ) {
+    inline = false,
+  ): Promise<string | null> {
     setProcessing(id)
     try {
       const token = await getToken()
@@ -1191,8 +1239,9 @@ export default function AdminFinancePage() {
       })
       if (!res.ok) {
         const body = await res.json() as { error?: string }
-        showToast(body.error ?? `Action failed (${res.status})`, 'error')
-        return
+        const message = body.error ?? `Action failed (${res.status})`
+        if (!inline) showToast(message, 'error')
+        return message
       }
       // Optimistic update
       setSettlements(prev => prev.map(s => {
@@ -1226,8 +1275,11 @@ export default function AdminFinancePage() {
         return next
       })
       setExpanded(null); setNoteText('')
+      return null
     } catch {
-      showToast('Network error — please try again.', 'error')
+      const message = 'Network error — please try again.'
+      if (!inline) showToast(message, 'error')
+      return message
     } finally {
       setProcessing(null)
     }
@@ -1527,14 +1579,14 @@ export default function AdminFinancePage() {
                                       const ex = s.transferException!
                                       const ok = await confirm({
                                         title: 'Approve transfer exception?',
-                                        message: `This records ${paise(ex.amountPaise)} as ALREADY transferred to the original destination (evidence: ${ex.evidenceSource} · ${ex.evidenceReference}). Nothing is sent. You must not be the Super Admin who requested it or who approved the payout.`,
+                                        message: `This records ${paise(ex.amountPaise)} as ALREADY transferred to the original destination (evidence: ${ex.evidenceSource} · ${ex.evidenceReference}). Nothing is sent. Continue only if you have confirmed this bank transfer was completed.`,
                                         confirmLabel: 'Continue', tone: 'danger',
                                       })
                                       if (!ok) return
                                       const utr = (await prompt({ title: 'Re-enter the UTR', message: 'Type the transfer reference exactly, to confirm it matches the request:', required: true }))?.trim()
                                       if (!utr) return
                                       const reason = (await prompt({ title: 'Reason required', message: 'Reason for approving this exception:', required: true }))?.trim()
-                                      if (reason) await runReviewAction(s.id, 'transfer_exception_approve', reason, { utrNumber: utr, expectedAmountPaise: ex.amountPaise, evidenceFingerprint: ex.fingerprint })
+                                      if (reason) await runReviewAction(s.id, 'transfer_exception_approve', reason, { utrNumber: utr, expectedAmountPaise: ex.amountPaise, evidenceFingerprint: ex.fingerprint, confirmTransferCompleted: true })
                                     }}
                                     className="rounded-md bg-primary px-2.5 py-1.5 text-[12px] font-semibold text-primary-foreground hover:opacity-90 disabled:opacity-50"
                                   >
@@ -2349,8 +2401,11 @@ export default function AdminFinancePage() {
           mode={markPaidMode}
           onClose={() => setMarkPaidModal(null)}
           onConfirm={async (proof, note) => {
-            if (markPaidMode === 'transfer') await runReviewAction(markPaidModal.id, 'record_transfer', note, { ...proof })
-            else await runAction(markPaidModal.id, 'paid', note, proof)
+            // RD-SETTLE-PAY-01 — a refusal stays IN the form (the typed UTR and notes are kept) instead of closing it.
+            const failure = markPaidMode === 'transfer'
+              ? await runReviewAction(markPaidModal.id, 'record_transfer', note, { ...proof }, true)
+              : await runAction(markPaidModal.id, 'paid', note, proof, true)
+            if (failure) throw new Error(failure)
           }}
         />
       )}

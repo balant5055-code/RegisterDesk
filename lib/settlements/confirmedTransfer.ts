@@ -17,8 +17,8 @@
 //     canonical, the submitted and the upper-cased submitted spelling only — a legacy UTR stored in any OTHER
 //     spelling is not detected. Reference records are financial evidence and are retained on organizer deletion
 //     (lib/admin/organizerDeletionManifest.ts ORGANIZER_RETAINED_COLLECTIONS).
-//   • maker-checker has NO bypass: with no eligible independent Super Admin the exception stays pending (manual
-//     fallback: docs/OPERATIONS_RUNBOOK.md B.12).
+//   • RD-SETTLE-PAY-02: one Super Admin may request and approve the exception; approval restates the amount, UTR
+//     and evidence fingerprint and confirms the transfer completed (docs/OPERATIONS_RUNBOOK.md B.12).
 
 import { createHash } from 'node:crypto'
 import { FieldValue, type Transaction, type DocumentReference } from 'firebase-admin/firestore'
@@ -32,16 +32,8 @@ export const TRANSFER_REFERENCES_COLLECTION = 'payoutTransferReferences'
 
 // ─── transfer references ──────────────────────────────────────────────────────────────────────
 
-/**
- * M1.3 — THE canonical form of a transfer reference, shared by every recording path: uppercase; whitespace,
- * hyphens and underscores (formatting separators) removed; letters and digits only (1–64). Two spellings with the
- * same canonical form are the SAME UTR — conservative: a separator never makes two references distinct.
- */
-export function canonicalUtr(raw: unknown): string | null {
-  if (typeof raw !== 'string') return null
-  const v = raw.trim().toUpperCase().replace(/[\s_-]/g, '')
-  return /^[A-Z0-9]{1,64}$/.test(v) ? v : null
-}
+/** M1.3 — THE canonical form of a transfer reference (lib/settlements/utr.ts: pure, so the console shares it). */
+export { canonicalUtr } from './utr'
 
 /**
  * The exception path's stricter format (M1.2, unchanged acceptance: letters and digits once spaces and hyphens are

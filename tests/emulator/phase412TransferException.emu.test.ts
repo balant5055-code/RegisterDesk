@@ -5,6 +5,11 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest'
 import { NextRequest } from 'next/server'
 
+/** RD-SETTLE-PAY-02 — recording a payment requires the explicit confirmation; tests opt OUT by passing it themselves. */
+const PAYMENT_ACTIONS = new Set(['paid', 'record_transfer', 'transfer_exception_approve'])
+const withTransferConfirmed = (b: Record<string, unknown>) =>
+  PAYMENT_ACTIONS.has(String(b.action)) && !('confirmTransferCompleted' in b) ? { ...b, confirmTransferCompleted: true } : b
+
 const EMULATOR = process.env.FIRESTORE_EMULATOR_HOST
 const describeEmu = EMULATOR ? describe : describe.skip
 const T = 240_000
@@ -94,7 +99,7 @@ describeEmu('M1.2 · approved-payout rejection + changed-destination transfer ex
   const settle = async (id: string, body: Record<string, unknown>, as = SUPER) => {
     const { PATCH } = await import('@/app/api/admin/settlements/[id]/route')
     h.admin = as
-    return json(await PATCH(req(body, 'PATCH'), ctx(id)))
+    return json(await PATCH(req(withTransferConfirmed(body), 'PATCH'), ctx(id)))
   }
   /** an approved request (approved by SUPER) */
   const approved = async (uid: string, amountPaise: number) => {
@@ -273,7 +278,7 @@ describeEmu('M1.2 · approved-payout rejection + changed-destination transfer ex
     expect(await settle(id2, { action: 'transfer_exception_initiate', reason: 'r e a s o n', utrNumber: newUtr(), evidence: good }, SUPER)).toMatchObject({ status: 422, body: { code: 'NO_DESTINATION_SNAPSHOT' } })
   }, T)
 
-  it('B3 · authorization: a non-Super-Admin is refused at both steps; maker-checker refuses the initiator AND the payout approver as exception approvers', async () => {
+  it('B3 · authorization: a non-Super-Admin is refused at both steps; the requesting Super Admin may approve it (single-admin operation; audited as same_admin)', async () => {
     const uid = await organizer('b3')
     await released(uid, 10_000)
     const id = await approved(uid, 6_000)                                             // payout approved by SUPER
@@ -282,10 +287,10 @@ describeEmu('M1.2 · approved-payout rejection + changed-destination transfer ex
     expect((await initiate(id, newUtr(), '')).status).toBe(403)
     expect((await initiate(id, newUtr(), SUPER2)).status).toBe(200)                   // requested by SUPER2
     expect((await approveEx(id, NOBODY)).status).toBe(403)
-    expect(await approveEx(id, SUPER2)).toMatchObject({ status: 409, body: { code: 'MAKER_CHECKER_REQUIRED' } })   // the initiator
-    expect(await approveEx(id, SUPER)).toMatchObject({ status: 409, body: { code: 'MAKER_CHECKER_REQUIRED' } })    // the payout approver
     expect(await reqDoc(id)).toMatchObject({ status: 'approved', transferException: { status: 'pending_approval' } })
-    expect((await approveEx(id, SUPER3)).status).toBe(200)
+    expect((await approveEx(id, SUPER2)).status).toBe(200)                            // RD-SETTLE-PAY-02: the requester approves
+    const [paidRow] = await auditRows(id, 'settlement.paid')
+    expect(paidRow).toMatchObject({ adminUid: SUPER2, metadata: { paidVia: 'transfer_exception', exceptionInitiatedBy: SUPER2, makerChecker: 'same_admin', transferConfirmed: true } })
   }, T)
 
   it('B4 · an approval is bound to its request, amount, UTR and evidence: any mismatch (or another request\'s fingerprint) records nothing', async () => {
@@ -352,7 +357,7 @@ describeEmu('M1.2 · approved-payout rejection + changed-destination transfer ex
       await changeDestination(uid)
       await initiate(id, newUtr())
       const ex = (await reqDoc(id)).transferException as { amountPaise: number; utrNumber: string; fingerprint: string }
-      const body = { action: 'transfer_exception_approve', reason: 'evidence verified by second admin', utrNumber: ex.utrNumber, expectedAmountPaise: ex.amountPaise, evidenceFingerprint: ex.fingerprint }
+      const body = { action: 'transfer_exception_approve', reason: 'evidence verified by second admin', utrNumber: ex.utrNumber, expectedAmountPaise: ex.amountPaise, evidenceFingerprint: ex.fingerprint, confirmTransferCompleted: true }
       const { PATCH } = await import('@/app/api/admin/settlements/[id]/route')
       // two admins at once, each identified by its own request token
       const asAdmin = async (uidAs: string) => json(await PATCH(new NextRequest('http://localhost/api/test', { method: 'PATCH', headers: { 'Content-Type': 'application/json', authorization: `Bearer as:${uidAs}` }, body: JSON.stringify(body) }), ctx(id)))

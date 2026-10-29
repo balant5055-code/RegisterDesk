@@ -11,6 +11,11 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest'
 import { NextRequest } from 'next/server'
 
+/** RD-SETTLE-PAY-02 — recording a payment requires the explicit confirmation; tests opt OUT by passing it themselves. */
+const PAYMENT_ACTIONS = new Set(['paid', 'record_transfer', 'transfer_exception_approve'])
+const withTransferConfirmed = (b: Record<string, unknown>) =>
+  PAYMENT_ACTIONS.has(String(b.action)) && !('confirmTransferCompleted' in b) ? { ...b, confirmTransferCompleted: true } : b
+
 const EMULATOR = process.env.FIRESTORE_EMULATOR_HOST
 const describeEmu = EMULATOR ? describe : describe.skip
 const T = 240_000
@@ -128,7 +133,7 @@ describeEmu('M1 · payout requests held for review when a refund leaves them unb
   const settle = async (id: string, body: Record<string, unknown>, as = SUPER) => {
     const { PATCH } = await import('@/app/api/admin/settlements/[id]/route')
     h.admin = as
-    return json(await PATCH(req(body, 'PATCH'), ctx(id)))
+    return json(await PATCH(req(withTransferConfirmed(body), 'PATCH'), ctx(id)))
   }
   const open = async (uid: string, amountPaise: number, approve: boolean) => {
     const r = await request(uid, amountPaise)
@@ -255,7 +260,7 @@ describeEmu('M1 · payout requests held for review when a refund leaves them unb
     const appr = await open(uid2, 7_000, true)
     await reverse(q1.ptxId)
     const before2 = await wallet(uid2)
-    expect(await settle(appr, { action: 'paid', reason: 'bank transfer sent', utrNumber: 'UTR4' }, SUPER2)).toMatchObject({ status: 409, body: { code: 'UNDER_REVIEW' } })
+    expect(await settle(appr, { action: 'paid', reason: 'bank transfer sent', utrNumber: 'UTR4NEFT0001' }, SUPER2)).toMatchObject({ status: 409, body: { code: 'UNDER_REVIEW' } })
     expect(await wallet(uid2)).toEqual(before2)
     expect(await reqDoc(appr)).not.toHaveProperty('utrNumber')
     expect(await auditRows(appr, 'settlement.paid')).toHaveLength(0)
@@ -276,8 +281,7 @@ describeEmu('M1 · payout requests held for review when a refund leaves them unb
     expect(await auditRows(a, 'settlement.review_resumed')).toEqual([expect.objectContaining({ adminUid: SUPER, reason: 'balance restored' })])
     expect((await db.doc(`users/${uid}/notifications/settlement-${a}-resumed-${p1.ptxId}`).get()).data()).toMatchObject({ type: 'SETTLEMENT_RESUMED' })   // M1.1 — keyed per review
     expect(await settle(a, { action: 'resume_review', reason: 'again' })).toMatchObject({ status: 409, body: { code: 'NOT_UNDER_REVIEW' } })   // idempotent
-    expect((await settle(a, { action: 'paid', reason: 'bank transfer sent', utrNumber: 'UTR5' }, SUPER)).status).toBe(409)   // maker-checker still applies
-    expect((await settle(a, { action: 'paid', reason: 'bank transfer sent', utrNumber: 'UTR5' }, SUPER2)).status).toBe(200)
+    expect((await settle(a, { action: 'paid', reason: 'bank transfer sent', utrNumber: 'UTR5NEFT0001' }, SUPER)).status).toBe(200)   // RD-SETTLE-PAY-02: the approver may record it
     expect(await wallet(uid)).toMatchObject({ available: 0, inTransit: 0, settled: 7_000 })
     expect(await check(uid)).toEqual([])
   }, T)
@@ -289,12 +293,12 @@ describeEmu('M1 · payout requests held for review when a refund leaves them unb
     const a = await open(uid, 7_000, true)                                             // approved by SUPER; bank transfer made
     await reverse(p1.ptxId)                                                            // refund lands before mark-paid → review
     expect(await settle(a, { action: 'record_transfer', reason: 'transfer confirmed' }, SUPER2)).toMatchObject({ status: 422 })   // UTR required
-    expect(await settle(a, { action: 'record_transfer', reason: 'transfer confirmed', utrNumber: 'UTR6' }, SUPER)).toMatchObject({ status: 409, body: { code: 'MAKER_CHECKER_REQUIRED' } })
-    const r = await settle(a, { action: 'record_transfer', reason: 'transfer confirmed by bank statement', utrNumber: 'UTR6' }, SUPER2)
+    // RD-SETTLE-PAY-02 — the payout's own approver records the confirmed transfer (single-Super-Admin operation)
+    const r = await settle(a, { action: 'record_transfer', reason: 'transfer confirmed by bank statement', utrNumber: 'UTR6NEFT0001' }, SUPER)
     expect(r).toMatchObject({ status: 200, body: { status: 'paid' } })
     expect(await reqDoc(a)).toMatchObject({
-      status: 'paid', utrNumber: 'UTR6', paidByAdmin: SUPER2,
-      payoutReview: { status: 'resolved', outcome: 'paid_after_transfer', shortfallPaise: 3_000, clawbackId: `clawback_payout_${a}`, resolvedBy: SUPER2 },
+      status: 'paid', utrNumber: 'UTR6NEFT0001', paidByAdmin: SUPER,
+      payoutReview: { status: 'resolved', outcome: 'paid_after_transfer', shortfallPaise: 3_000, clawbackId: `clawback_payout_${a}`, resolvedBy: SUPER },
     })
     expect(await wallet(uid)).toMatchObject({ available: 0, inTransit: 0, settled: 7_000 })
     expect(await clawbacksOf(uid)).toEqual([expect.objectContaining({
@@ -302,12 +306,12 @@ describeEmu('M1 · payout requests held for review when a refund leaves them unb
       reversalAmountPaise: 7_000, recoveredAmountPaise: 4_000, outstandingAmountPaise: 3_000, status: 'partially_recovered',
     })])
     const [paidRow] = await auditRows(a, 'settlement.paid')
-    expect(paidRow).toMatchObject({ adminUid: SUPER2, metadata: { reviewResolution: 'paid_after_transfer', takenFromAvailablePaise: 4_000, shortfallPaise: 3_000, approvedBy: SUPER, makerChecker: 'distinct_approver' } })
+    expect(paidRow).toMatchObject({ adminUid: SUPER, metadata: { reviewResolution: 'paid_after_transfer', takenFromAvailablePaise: 4_000, shortfallPaise: 3_000, approvedBy: SUPER, recordedBy: SUPER, makerChecker: 'same_admin', transferConfirmed: true } })
     expect(scopes()).toContain('settlement.record_transfer_shortfall')
     expect(await check(uid)).toEqual([])
     // never twice, never paid again, never rejected afterwards
-    expect((await settle(a, { action: 'record_transfer', reason: 'again', utrNumber: 'UTR6' }, SUPER2)).status).toBe(409)
-    expect((await settle(a, { action: 'paid', reason: 'again', utrNumber: 'UTR6' }, SUPER2)).status).toBe(409)
+    expect((await settle(a, { action: 'record_transfer', reason: 'again', utrNumber: 'UTR6NEFT0001' }, SUPER2)).status).toBe(409)
+    expect((await settle(a, { action: 'paid', reason: 'again', utrNumber: 'UTR6NEFT0001' }, SUPER2)).status).toBe(409)
     expect((await settle(a, { action: 'reject', reason: 'reject paid', confirmNoTransfer: true })).status).toBe(409)
     expect(await wallet(uid)).toMatchObject({ available: 0, settled: 7_000 })
     // the organizer is no longer blocked (no open review) — a new request is judged on the free balance (0)
@@ -329,7 +333,7 @@ describeEmu('M1 · payout requests held for review when a refund leaves them unb
     expect(await reqDoc(b)).toMatchObject({ payoutReview: { status: 'open' } })
     expect(await wallet(uid)).toMatchObject({ available: 9_000, inTransit: 8_000 })
     // b had in fact been transferred: recording it takes the 9,000 available, so a (8,000) loses its backing
-    expect((await settle(b, { action: 'record_transfer', reason: 'transfer confirmed', utrNumber: 'UTR7B' }, SUPER2)).status).toBe(200)
+    expect((await settle(b, { action: 'record_transfer', reason: 'transfer confirmed', utrNumber: 'UTR7BNEFT0001' }, SUPER2)).status).toBe(200)
     expect(await wallet(uid)).toMatchObject({ available: 4_000, inTransit: 0, settled: 5_000 })
     expect(await reqDoc(a)).toMatchObject({ status: 'approved', reserved: false, payoutReview: { status: 'open', trigger: { kind: 'payout_after_transfer', ref: b } } })
     expect(await clawbacksOf(uid)).toEqual([])                                         // 5,000 fully covered: no debt
@@ -339,7 +343,7 @@ describeEmu('M1 · payout requests held for review when a refund leaves them unb
     const q = await released(uid, 3_000)                                               // available 7,000
     const [, rec] = await Promise.all([
       reverse(q.ptxId),
-      settle(a, { action: 'record_transfer', reason: 'transfer confirmed', utrNumber: 'UTR7A' }, SUPER2),
+      settle(a, { action: 'record_transfer', reason: 'transfer confirmed', utrNumber: 'UTR7ANEFT0001' }, SUPER2),
     ])
     expect(rec.status).toBe(200)
     const w = await wallet(uid)

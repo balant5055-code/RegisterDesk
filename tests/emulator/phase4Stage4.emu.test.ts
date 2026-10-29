@@ -12,6 +12,11 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest'
 import { NextRequest } from 'next/server'
 
+/** RD-SETTLE-PAY-02 — recording a payment requires the explicit confirmation; tests opt OUT by passing it themselves. */
+const PAYMENT_ACTIONS = new Set(['paid', 'record_transfer', 'transfer_exception_approve'])
+const withTransferConfirmed = (b: Record<string, unknown>) =>
+  PAYMENT_ACTIONS.has(String(b.action)) && !('confirmTransferCompleted' in b) ? { ...b, confirmTransferCompleted: true } : b
+
 // RD-SEC-01 · two roles only. A legacy-claim caller is no longer a "plain admin": routes refuse it
 // at the admin door like any non-admin (bare 403/401) or, behind requireSuperAdmin, with
 // SUPER_ADMIN_REQUIRED. Either way it must be an AUTHORIZATION refusal — never a validation code
@@ -137,7 +142,7 @@ describeEmu('RD-PHASE4-S4 · financial controls & audit logging on real Firestor
   }
   const settle = async (id: string, body: Record<string, unknown>) => {
     const { PATCH } = await import('@/app/api/admin/settlements/[id]/route')
-    return json(await PATCH(req(body, 'PATCH'), ctx('id', id)))
+    return json(await PATCH(req(withTransferConfirmed(body), 'PATCH'), ctx('id', id)))
   }
   const walletOf = async (uid: string) => (await adminDb.doc(`organizerRevenueWallets/${uid}`).get()).data()!
 
@@ -168,7 +173,7 @@ describeEmu('RD-PHASE4-S4 · financial controls & audit logging on real Firestor
     expect(await auditRows(id, 'settlement.approved')).toHaveLength(0)
   }, T)
 
-  it('SET · F1 approve with NO adminNote persists its audit row (actor, role, reason, before/after); D2 the approver cannot mark it paid; a DIFFERENT Super Admin can', async () => {
+  it('SET · F1 approve with NO adminNote persists its audit row (actor, role, reason, before/after); D2 a different Super Admin may still record it', async () => {
     const org = await organizer('mc')
     const id = (await requestSettlement(org, 20_000)).body.id as string
     h.admin = SUPER
@@ -180,11 +185,6 @@ describeEmu('RD-PHASE4-S4 · financial controls & audit logging on real Firestor
     expect((row.metadata as Record<string, unknown>).adminNote).toBeNull()        // the F1 bug was `undefined` here
 
     const walletBefore = await walletOf(org)
-    const same = await settle(id, { action: 'paid', reason: 'paid by the approver', utrNumber: 'UTR123' })
-    expect(same.status).toBe(409); expect(same.body.code).toBe('MAKER_CHECKER_REQUIRED')
-    expect(await walletOf(org)).toEqual(walletBefore)
-    expect((await adminDb.doc(`settlementRequests/${id}`).get()).data()!.status).toBe('approved')
-
     h.admin = SUPER2
     const paid = await settle(id, { action: 'paid', reason: 'bank transfer sent', utrNumber: 'UTR123' })
     expect(paid.status).toBe(200)
@@ -198,18 +198,19 @@ describeEmu('RD-PHASE4-S4 · financial controls & audit logging on real Firestor
     expect(JSON.stringify(p)).not.toContain('123456789012')
   }, T)
 
-  it('SET · D2 with only ONE Super Admin configured the response says exactly what to do — and never bypasses', async () => {
+  it('SET · D2 (RD-SETTLE-PAY-02) with only ONE Super Admin configured, the approver records the payout — audited as same_admin', async () => {
     const org = await organizer('single')
     const id = (await requestSettlement(org, 1_000)).body.id as string
     h.admin = SUPER
     await settle(id, { action: 'approve', reason: 'documents checked' })
     process.env.ADMIN_UIDS = SUPER
     try {
-      const r = await settle(id, { action: 'paid', reason: 'only admin', utrNumber: 'UTR1' })
-      expect(r.status).toBe(409); expect(r.body.code).toBe('MAKER_CHECKER_REQUIRED')
-      expect(String(r.body.error)).toMatch(/Only one Super Admin is configured/)
+      const r = await settle(id, { action: 'paid', reason: 'only admin', utrNumber: 'UTR1NEFT0001' })
+      expect(r.status).toBe(200)
     } finally { process.env.ADMIN_UIDS = `${SUPER},${SUPER2}` }
-    expect((await adminDb.doc(`settlementRequests/${id}`).get()).data()!.status).toBe('approved')
+    expect((await adminDb.doc(`settlementRequests/${id}`).get()).data()).toMatchObject({ status: 'paid', approvedBy: SUPER, paidByAdmin: SUPER })
+    const [p] = await auditRows(id, 'settlement.paid')
+    expect(p).toMatchObject({ adminUid: SUPER, metadata: { approvedBy: SUPER, recordedBy: SUPER, makerChecker: 'same_admin', transferConfirmed: true } })
   }, T)
 
   it('SET · D5 a re-verified (changed) destination blocks the payout; a legacy request without a snapshot keeps the old rule (flagged)', async () => {
@@ -221,14 +222,14 @@ describeEmu('RD-PHASE4-S4 · financial controls & audit logging on real Firestor
     await adminDb.doc(`organizerPayoutProfiles/${org}`).update({ verifiedVersion: PROFILE_MS + 99_000 })
     h.admin = SUPER2
     const before = await walletOf(org)
-    const r = await settle(id, { action: 'paid', reason: 'pay it', utrNumber: 'UTR9' })
+    const r = await settle(id, { action: 'paid', reason: 'pay it', utrNumber: 'UTR9NEFT0001' })
     expect(r.status).toBe(409); expect(r.body.code).toBe('DESTINATION_CHANGED')
     expect(await walletOf(org)).toEqual(before)
 
     // legacy: an approved request from before D5 (no snapshot, no approvedBy)
     const legacy = `p4s4-legacy-${P}`
     await put(`settlementRequests/${legacy}`, { organizerUid: org, amountPaise: 1_000, status: 'approved', requestedAt: Timestamp.now(), approvedAt: Timestamp.now(), paidAt: null, adminNote: '' })
-    const lr = await settle(legacy, { action: 'paid', reason: 'legacy payout', utrNumber: 'UTR10' })
+    const lr = await settle(legacy, { action: 'paid', reason: 'legacy payout', utrNumber: 'UTR10NEFT0001' })
     expect(lr.status).toBe(200)
     const [row] = await auditRows(legacy, 'settlement.paid')
     expect(row.metadata).toMatchObject({ makerChecker: 'legacy_no_approver', destinationBinding: 'legacy_unbound' })
@@ -242,7 +243,7 @@ describeEmu('RD-PHASE4-S4 · financial controls & audit logging on real Firestor
     h.admin = SUPER2
     const before = await walletOf(org)
     failAuditCreate()
-    const r = await settle(id, { action: 'paid', reason: 'pay it', utrNumber: 'UTR11' })
+    const r = await settle(id, { action: 'paid', reason: 'pay it', utrNumber: 'UTR11NEFT0001' })
     vi.restoreAllMocks()
     expect(r.status).toBe(500)
     expect(await walletOf(org)).toEqual(before)
