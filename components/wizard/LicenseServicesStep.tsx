@@ -66,6 +66,12 @@ export interface LicenseServicesStepProps {
   steps:            WizardStep[]
   selectedCapacity: number
   onSelectCapacity: (capacity: number) => void
+  /**
+   * RD-CAPACITY-DEFAULT — draft mode: reports, from the server quote, whether the draft's capacity is
+   * still governed by a verified historical paid tier (true) or not (false). The page persists the
+   * free default only after hearing false.
+   */
+  onLegacyEntitlement?: (legacy: boolean) => void
   initialServiceSelection:  ServiceSelection
   onServiceSelectionChange: (selection: ServiceSelection) => void
   onSettle?:        () => Promise<boolean>
@@ -181,7 +187,7 @@ const EXHAUSTED_TEXT = 'When it is used up, nothing more is sent (each is record
 const EXHAUSTION_TEXT: Record<string, string> = { block: EXHAUSTED_TEXT, wallet_payg: EXHAUSTED_TEXT }
 
 export function LicenseServicesStep({
-  currentStep, completedValues, onNext, onBack, steps, selectedCapacity, onSelectCapacity,
+  currentStep, completedValues, onNext, onBack, steps, selectedCapacity, onSelectCapacity, onLegacyEntitlement,
   initialServiceSelection, onServiceSelectionChange, onSettle, pricing, onServicesChange, draftStatus, draftId, embeddedFinal, liveStatus, lifecycle,
 }: LicenseServicesStepProps) {
   const isSubmitted     = isSubmittedDraftStatus(draftStatus)
@@ -278,6 +284,9 @@ export function LicenseServicesStep({
     }, 250)
     return () => { alive = false; clearTimeout(t) }
   }, [effectiveCapacity, selection, draftId, refreshKey])
+
+  const legacyVerdict = quote && quote.mode === 'draft' ? quote.legacyEntitlement != null : null
+  useEffect(() => { if (legacyVerdict !== null) onLegacyEntitlement?.(legacyVerdict) }, [legacyVerdict, onLegacyEntitlement])
 
   // Submitted events start at — and after every purchase return to — the ENFORCED capacity.
   const current = quote?.published?.currentCapacity ?? null

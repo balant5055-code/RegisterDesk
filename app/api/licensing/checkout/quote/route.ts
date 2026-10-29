@@ -37,6 +37,7 @@ import { resolveCapacityEventSlug, loadCapacityChangeContext, readSoldCount, isP
 import { photoCapacityUsageQuery } from '@/features/media-studio/repositories/assetRepo'
 import { MAX_EVENT_PHOTO_CAPACITY, maxAdditionalPhotos } from '@/lib/licensing/photoCapacity'
 import { readEventPhotoLedger, checkPhotoSelection, type EventPhotoLedger } from '@/lib/licensing/photoCapacityServer'
+import { readLegacyEntitlement, type LegacyEntitlement } from '@/lib/licensing/legacyEntitlement'
 
 export const dynamic = 'force-dynamic'
 const EVENT_ID_RE = /^[A-Za-z0-9_-]{1,128}$/
@@ -174,6 +175,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   if (coverage && uid && coverage.purchased.whatsapp + coverage.carriedIn.whatsapp > 0) {
     whatsappActivity = await readWhatsAppCapacityActivity(uid, eventId).catch(() => null)
   }
+  // RD-CAPACITY-DEFAULT — a draft whose capacity is still governed by a VERIFIED historical paid tier
+  // (the publish route's own rule): the wizard must not persist the free default over it.
+  const legacyEntitlement: LegacyEntitlement | null = ownedDraft && !submitted && !published && uid
+    ? await readLegacyEntitlement(eventId, uid) : null
   const commLine = (c: NonNullable<typeof coverage>, k: 'whatsapp' | 'certificates') => ({
     purchased: c.purchased[k], consumed: c.consumed[k], carriedIn: c.carriedIn[k],
     carriedOut: c.carriedOut[k], refunded: c.refunded[k], remaining: c.remaining[k],
@@ -211,5 +216,6 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     } : null,
     published: published ? { currentCapacity: published.currentCapacity, sold: published.sold, eligible: published.eligible } : null,
     media,
+    legacyEntitlement,
   }, { status: 200, headers: noStore })
 }

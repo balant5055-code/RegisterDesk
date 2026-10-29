@@ -287,7 +287,13 @@ describe('decision 4 · no obsolete tier price or forged tier decides a NEW publ
     const src = code('app/api/events/publish/route.ts')
     expect(src).not.toMatch(/draft\.licenseTier/)
     expect(src).not.toMatch(/isPaidTier|selectedDef|validatePublishEligibility|starterActiveEventCount/)
-    expect(src).toContain("order.commercialModel !== 'capacity'")
+    // RD-CAPACITY-DEFAULT — the rule moved verbatim to lib/licensing/legacyEntitlement so the
+    // License & Services quote reports the SAME verdict; the route decides with it.
+    expect(src).toContain('const legacyTier: AnyEventLicenseTier | null = resolveLegacyTier(order, currentVersion)')
+    const rule = code('lib/licensing/legacyEntitlement.ts')
+    expect(rule).toContain("order.commercialModel !== 'capacity'")
+    expect(rule).toContain("order.status === 'paid'")
+    expect(rule).not.toMatch(/draft\.licenseTier|licensePricePaise/)
     expect(src).toContain('const resolvedTier: AnyEventLicenseTier = legacyTier ?? freeStamp')
   })
   it('checkout/confirm settles ONLY an existing historical tier order (410 TIER_RETIRED otherwise), at its stored price', () => {

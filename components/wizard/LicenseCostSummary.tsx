@@ -38,6 +38,12 @@ export interface CheckoutQuoteResponse {
    * capacity = net paid units; maxTotal = 3,000; maxAdditional = 3,000 − capacity.
    */
   media:    { baseCap: number | null; used: number | null; capacity: number; purchased: number; maxTotal: number; maxAdditional: number }
+  /**
+   * RD-CAPACITY-DEFAULT — a draft whose capacity is still governed by a VERIFIED historical paid tier
+   * order (lib/licensing/legacyEntitlement — the publish route's rule), else null. Optional: older
+   * responses omit it.
+   */
+  legacyEntitlement?: { tier: string; totalCapacity: number | null } | null
 }
 
 function Row({ label, value, strong, muted, indent }: { label: ReactNode; value: ReactNode; strong?: boolean; muted?: boolean; indent?: boolean }) {
