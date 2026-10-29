@@ -76,7 +76,7 @@ const HOUR = 3_600_000
 type Json = Record<string, unknown>
 
 /** A draft that passes every publish requirement (free capacity 100 ⇒ no payment). */
-function draftDoc(id: string, type: 'sports' | 'conference', extra: Json = {}): Json {
+function draftDoc(id: string, type: string, extra: Json = {}): Json {
   const base: Json = {
     id, uid: ORG, status: 'draft', lifecycleStatus: 'draft', currentStep: 7, completedValues: Array(9).fill(null),
     eventType: type, eventSubtype: type === 'sports' ? 'marathon' : null, customEventSubtype: null, campaignType: 'event_only', linkedCampaign: null,
@@ -133,7 +133,7 @@ describeEmu('RD-REVIEW-02 · review cycles, the two 24-hour deadlines and review
   const audits = async (slug: string, action: string) => (await db.collection('adminAuditLogs').where('entityId', '==', slug).where('action', '==', action).get()).docs.map(d => d.data() as Json)
 
   /** A real first submission (manual review): returns the draft id and the live slug. */
-  async function submitted(type: 'sports' | 'conference' = 'sports') {
+  async function submitted(type: string = 'sports') {
     const id = `${P}-d${++seq}`
     drafts.add(id)
     await db.doc(`users/${ORG}/eventDrafts/${id}`).set(draftDoc(id, type))
@@ -230,6 +230,54 @@ describeEmu('RD-REVIEW-02 · review cycles, the two 24-hour deadlines and review
     const hist = await history(slug)
     expect(hist).toHaveLength(1)
     expect(hist[0]).toMatchObject({ action: 'submit', actorRole: 'organizer', actorUid: ORG, cycleId: e.reviewCycleId, fromStatus: 'draft', toStatus: 'pending_review' })
+  }, T)
+
+  // RD-REVIEW-03 — returned for changes: Action Required (not Drafts) at once, the Super Admin's EXACT words
+  // in the list and the editor, then a resubmission back to review with the history kept — for several types.
+  it('RD-REVIEW-03 · changes requested → Action Required immediately with the exact comment → editor → resubmit, for every type', async () => {
+    const { GET: listEvents } = await import('@/app/api/organizer/events/route')
+    const list = async (tab: string) => {
+      asOrg()
+      const r = await json(await listEvents(new NextRequest(`http://localhost/api/organizer/events?tab=${tab}&limit=50`, { headers: { Authorization: 'Bearer t' } })))
+      expect(r.status, JSON.stringify(r.body)).toBe(200)
+      return (r.body.events as Json[])
+    }
+    for (const type of ['sports', 'conference', 'exhibition', 'workshop', 'fundraising', 'custom']) {
+      const { id, slug } = await submitted(type)
+      const comment = `Change the ${type} venue map: add gate numbers ${P}-${type}.`   // exactly what the Super Admin types
+      await requestChanges(slug, comment)
+
+      // A — Action Required straight away (first deadline window), never Drafts
+      const ar = (await list('action_required')).find(e => e.draftId === id)
+      expect(ar, `${type} under Action Required`).toBeTruthy()
+      expect(ar).toMatchObject({ lifecycleStatus: 'changes_requested', changesComment: comment, reviewDeadline: { phase: 'changes_requested' } })
+      expect((await list('drafts')).some(e => e.draftId === id), `${type} not under Drafts`).toBe(false)
+      expect((await list('active')).some(e => e.draftId === id), `${type} not under Active`).toBe(false)
+
+      // B — the exact words persist on the documents the organizer screens read (and survive a re-read)
+      expect((await draftOf(id)).changesComment).toBe(comment)
+      expect((await eventOf(slug)).changesComment).toBe(comment)
+      asOrg()
+      const ed = await json(await getDraft(getReq(), p('draftId', id)))
+      expect(ed.status).toBe(200)
+      expect((ed.body.draft as Json)).toMatchObject({ lifecycleStatus: 'changes_requested', changesComment: comment })
+
+      // C — the organizer edits and resubmits through the review workflow
+      asOrg()
+      const ed0 = (await draftOf(id)).eventDetails as Json
+      const edited = { ...ed0, info: { ...(ed0.info as Json), tagline: `Updated for review ${type}` } }
+      const save = await json(await saveDraft(req({ eventDetails: edited }), p('draftId', id)))
+      expect(save.status, JSON.stringify(save.body)).toBe(200)
+      const rs = await doResubmit(id)
+      expect(rs.status, JSON.stringify(rs.body)).toBe(200)
+      expect(await eventOf(slug)).toMatchObject({ lifecycleStatus: 'pending_review', reviewStatus: null, changesComment: null })
+      expect((await list('active')).some(e => e.draftId === id), `${type} back under Active (in review)`).toBe(true)
+      expect((await list('action_required')).some(e => e.draftId === id)).toBe(false)
+      // the review history keeps the request and its words
+      const hist = await history(slug)
+      expect(hist.map(e => e.action)).toEqual(['submit', 'request_changes', 'resubmit'])
+      expect(hist[1]).toMatchObject({ actorRole: 'admin', comment })
+    }
   }, T)
 
   it('2/3/6/8/26 · request changes → first deadline (only on commit) → resubmit (new cycle, no new charge) → approve publishes it', async () => {

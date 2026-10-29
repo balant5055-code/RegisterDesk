@@ -10,6 +10,7 @@
 import { COMMUNICATION_BALANCE_HREF } from '@/lib/wallet/communicationBalance'
 import { fmtMoney } from '@/lib/reports/format'
 import { writeNotification } from './write'
+import { eventEditorPath } from '@/lib/events/editorPath'
 
 const eventLink = (eventId?: string | null, tab?: string) =>
   eventId ? `/dashboard/events/${eventId}${tab ? `?tab=${tab}` : ''}` : '/dashboard/events'
@@ -29,8 +30,10 @@ export function notifyEventReviewed(args: {
   occurrenceId?: string
 }): Promise<string> {
   const { workspaceUid, eventName, eventId, kind, reason, comment, occurrenceId } = args
-  // A decision the organizer must act on opens the event's Setup tab — where they edit it.
-  const link = eventLink(eventId, kind === 'rejected' || kind === 'changes_requested' ? 'setup' : undefined)
+  // A decision the organizer must act on opens where they act on it: requested changes open the event
+  // EDITOR (the request, its deadline and Submit for review — RD-REVIEW-03); a rejection opens Setup.
+  const link = kind === 'changes_requested' && eventId ? eventEditorPath(eventId)
+    : eventLink(eventId, kind === 'rejected' ? 'setup' : undefined)
   const table: Record<ReviewKind, { title: string; body: string; severity: 'info' | 'success' | 'warning' | 'error'; action: boolean }> = {
     submitted:         { title: 'Event submitted for review', body: `“${eventName}” is now under review.`,                                        severity: 'info',    action: false },
     approved:          { title: 'Event approved',             body: `“${eventName}” has been approved.`,                                          severity: 'success', action: false },

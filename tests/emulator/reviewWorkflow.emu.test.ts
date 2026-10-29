@@ -204,14 +204,14 @@ describeEmu('event review workflow: changes requested → resubmission → appro
     expect(h).toHaveLength(1)
     expect(h[0]).toMatchObject({ action: 'request_changes', actorRole: 'admin', actorUid: ADMIN, comment: 'Please add the venue map', fromStatus: 'pending_review', toStatus: 'changes_requested' })
 
-    // organizer: one inbox item, keyed to this decision, opening Setup; one email to the owner
+    // organizer: one inbox item, keyed to this decision, opening the EDITOR (RD-REVIEW-03); one email to the owner
     const items = await inbox(draftId)
     expect(items).toHaveLength(1)
-    expect(items[0]).toMatchObject({ id: `event-review-changes_requested-${h[0].id}`, type: 'EVENT_CHANGES_REQUESTED', actionRequired: true, link: `/dashboard/events/${draftId}?tab=setup`, read: false })
+    expect(items[0]).toMatchObject({ id: `event-review-changes_requested-${h[0].id}`, type: 'EVENT_CHANGES_REQUESTED', actionRequired: true, link: `/dashboard/events/new/visibility?draftId=${draftId}`, read: false })
     const mails = sent.filter(s => s.type === 'EVENT_CHANGES_REQUESTED')
     expect(mails).toHaveLength(1)
     expect(mails[0].params).toMatchObject({ to: `${ORG}@rd.test`, comment: 'Please add the venue map' })
-    expect(String(mails[0].params.eventUrl)).toMatch(new RegExp(`/dashboard/events/${draftId}\\?tab=setup$`))
+    expect(String(mails[0].params.eventUrl)).toMatch(new RegExp(`/dashboard/events/new/visibility\\?draftId=${draftId}$`))
     // no Super Admin alert for an admin's own decision
     expect((await adminDb.collection('adminNotifications').where('metadata.draftId', '==', draftId).get()).size).toBe(0)
 

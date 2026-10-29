@@ -141,7 +141,7 @@ describe('organizer review notification', () => {
     const [type, params] = send.mock.calls[0]
     expect(type).toBe('EVENT_CHANGES_REQUESTED')
     expect(params).toMatchObject({ to: 'owner@org.test', comment: 'Add map' })
-    expect(params.eventUrl).toMatch(/\/dashboard\/events\/d1\?tab=setup$/)
+    expect(params.eventUrl).toMatch(/\/dashboard\/events\/new\/visibility\?draftId=d1$/)   // RD-REVIEW-03 — the editor
     expect(inbox).toHaveBeenCalledWith(expect.objectContaining({ workspaceUid: 'ws-1', eventId: 'd1', kind: 'changes_requested', occurrenceId: 'h-9' }))
     expect(logs).toHaveBeenCalledWith(expect.objectContaining({ status: 'sent', recipientEmail: 'owner@org.test' }))
   })
@@ -161,9 +161,9 @@ describe('organizer review notification', () => {
     expect(logs).toHaveBeenCalledWith(expect.objectContaining({ status: 'failed', error: 'bounced' }))
   })
 
-  it('sends the decisions that need action to Setup, the rest to the event', async () => {
+  it('RD-REVIEW-03 — requested changes open the editor; a rejection opens Setup; the rest the event', async () => {
     const { reviewEventPath } = await import('@/lib/events/reviewNotifications')
-    expect(reviewEventPath('changes_requested', 'd 1')).toBe('/dashboard/events/d%201?tab=setup')
+    expect(reviewEventPath('changes_requested', 'd 1')).toBe('/dashboard/events/new/visibility?draftId=d%201')
     expect(reviewEventPath('rejected', 'd1')).toBe('/dashboard/events/d1?tab=setup')
     expect(reviewEventPath('approved', 'd1')).toBe('/dashboard/events/d1')
     expect(reviewEventPath('resubmitted', null)).toBeNull()
@@ -171,7 +171,7 @@ describe('organizer review notification', () => {
 })
 
 describe('organizer inbox item', () => {
-  it('is idempotent per decision and opens Setup for an action-required decision', async () => {
+  it('is idempotent per decision and opens the editor for requested changes (RD-REVIEW-03)', async () => {
     vi.resetModules()
     vi.doUnmock('@/lib/notifications/inbox/notify')   // mocked by the describe above
     const write = vi.fn(async () => 'id')
@@ -182,7 +182,7 @@ describe('organizer inbox item', () => {
     await notifyEventReviewed({ workspaceUid: 'ws', eventName: 'Run', eventId: 'd1', kind: 'changes_requested', comment: 'Map', occurrenceId: 'h/1' })
     await notifyEventReviewed({ workspaceUid: 'ws', eventName: 'Run', eventId: 'd1', kind: 'approved' })
     const [first, second] = write.mock.calls.map(c => (c as unknown[])[0] as Record<string, unknown>)
-    expect(first).toMatchObject({ workspaceUid: 'ws', link: '/dashboard/events/d1?tab=setup', actionRequired: true, dedupeId: 'event-review-changes_requested-h_1' })
+    expect(first).toMatchObject({ workspaceUid: 'ws', link: '/dashboard/events/new/visibility?draftId=d1', actionRequired: true, dedupeId: 'event-review-changes_requested-h_1' })
     expect(second).toMatchObject({ link: '/dashboard/events/d1', dedupeId: undefined })
   })
 })
