@@ -64,7 +64,8 @@ describe('RD-LICENSE-LOCK-01 · every service control obeys the lock', () => {
   it('reports the lock upward so the Fee Collection Method obeys it too', () => {
     // That control is rendered by the final step, OUTSIDE this component, and was added after
     // the lock existed — so it needs the flag passed to it rather than inferring one.
-    expect(STEP).toContain('refresh: refreshQuote, locked })')
+    // The flag is a member of the context the step reports upward (RD-PUBLISH-PLAN adds fields after it).
+    expect(STEP).toMatch(/finalOnContext\?\.\(\{[^)]*\brefresh: refreshQuote, locked[,\s]/)
     expect(STEP).toMatch(/locked:\s+boolean/)
     // The exact expression is pinned by the fail-closed case below; here it is enough that the
     // page reads the reported flag at all rather than inferring a lock of its own.
