@@ -238,7 +238,12 @@ describe('publish', () => {
   it('refuses a capacity-less draft unless it carries a PAID legacy licence', () => {
     // RD-LEGACY-01 — the entitlement is a PAID, NON-capacity (historical) tier ORDER — never the draft.
     expect(src).toContain('const hasLegacyPaidEntitlement = legacyTier !== null')
-    expect(src).toMatch(/order\.status === 'paid' && order\.commercialModel !== 'capacity'/)
+    // RD-CAPACITY-DEFAULT — the rule lives in lib/licensing/legacyEntitlement (shared with the License quote);
+    // the route decides with it, and the rule itself is unchanged.
+    expect(src).toContain('const legacyTier: AnyEventLicenseTier | null = resolveLegacyTier(order, currentVersion)')
+    const rule = read('lib/licensing/legacyEntitlement.ts')
+    expect(rule).toMatch(/order\.status === 'paid' && order\.commercialModel !== 'capacity'/)
+    expect(rule).toContain('ownerVerdict(order?.organizerUid, uid) !== \'own\'')
     expect(src).toContain('if (requestedCapacity === null && !hasLegacyPaidEntitlement) {')
     expect(src).toContain("reason: 'CAPACITY_NOT_CONFIGURED'")
     // …and refuses BEFORE governance can record a publish baseline or anything is written.

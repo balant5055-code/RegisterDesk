@@ -93,6 +93,7 @@ import { ReviewSummary } from '@/components/wizard/ReviewSummary'
 import type { PublishApiResponse, PublishGovernanceInfo } from '@/types/events'
 import { CURRENT_LICENSE_VERSION, isValidTierForVersion, defaultLicenseTierForVersion, type AnyEventLicenseTier } from '@/lib/licensing/eventLicense'
 import { DEFAULT_COMMERCIAL_TERMS } from '@/lib/licensing/capacityCommercial'
+import { capacityIntentToPersist } from '@/lib/events/builder/capacityIntent'
 import { LicenseServicesStep, type LicenseServicesStepProps, type PaygServiceFlags, type FinalPayContext } from '@/components/wizard/LicenseServicesStep'
 import { PUBLISH_AGREEMENT_DOCUMENTS, type PublishAgreementInput } from '@/lib/legal/organizerAgreement'
 import { EMPTY_SELECTION, parseServiceSelection, type ServiceSelection } from '@/lib/licensing/serviceAllowances'
@@ -3748,6 +3749,27 @@ export default function CreateEventWizard() {
     (capacity: number) => { void updateDraft({ registrationCapacity: capacity }) },
     [updateDraft],
   )
+  // RD-CAPACITY-DEFAULT — License & Services is the final step and has no Continue, so the capacity
+  // it opens on (the free allowance) was shown and quoted but never saved, and publish refused the
+  // draft (CAPACITY_NOT_CONFIGURED). Save it once the step's quote has answered; Pay and Publish both
+  // wait for that quote and settle the draft first, so the write lands before the server reads it.
+  // Once per draft: `updateDraft` advances the persisted draft, not render state (RD-EVENT-12).
+  // Not over a verified legacy paid tier: the License step reports the quote's verdict per draft.
+  const capacityIntentWrittenFor = useRef<string | null>(null)
+  const [legacyVerdict, setLegacyVerdict] = useState<{ draftId: string; legacy: boolean } | null>(null)
+  const onLegacyEntitlement = useCallback((legacy: boolean) => {
+    const id = draft?.id
+    if (id) setLegacyVerdict(v => (v?.draftId === id && v.legacy === legacy ? v : { draftId: id, legacy }))
+  }, [draft?.id])
+  const capacityIntent = capacityIntentToPersist(
+    draft, currentStep === indexOfStep(wizardFlow, 'license'), selectedCapacity,
+    legacyVerdict && legacyVerdict.draftId === draft?.id ? legacyVerdict.legacy : null,
+  )
+  useEffect(() => {
+    if (capacityIntent === null || !draft?.id || capacityIntentWrittenFor.current === draft.id) return
+    capacityIntentWrittenFor.current = draft.id
+    void updateDraft({ registrationCapacity: capacityIntent })
+  }, [capacityIntent, draft?.id, updateDraft])
   // RD-EVENT-COMMERCE-02 · the License & Services step's service switches live on `pricing`,
   // where every sender already reads them (`pricing.whatsappEnabled` gates each WhatsApp send).
   // Merged over the current pricing so no pass, date or fee field is touched.
@@ -4134,6 +4156,7 @@ export default function CreateEventWizard() {
               steps={activeWizardSteps}
               selectedCapacity={selectedCapacity}
               onSelectCapacity={onSelectCapacity}
+              onLegacyEntitlement={onLegacyEntitlement}
               onSettle={settle}
               pricing={draft?.pricing ?? null}
               onServicesChange={onServicesChange}
@@ -4168,6 +4191,7 @@ export default function CreateEventWizard() {
               steps={activeWizardSteps}
               selectedCapacity={selectedCapacity}
               onSelectCapacity={onSelectCapacity}
+              onLegacyEntitlement={onLegacyEntitlement}
               onSettle={settle}
               pricing={draft?.pricing ?? null}
               onServicesChange={onServicesChange}

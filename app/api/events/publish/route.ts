@@ -29,7 +29,6 @@ import type { LinkedCampaignDraft }   from '@/lib/campaigns/linkedCampaignConfig
 import { EVENT_LICENSES_COLLECTION, LICENSE_ORDERS_COLLECTION, eventLicenseConverter } from '@/lib/licensing/schema'
 import {
   CURRENT_LICENSE_VERSION,
-  isValidTierForVersion,
   defaultLicenseTierForVersion,
   type AnyEventLicenseTier,
 } from '@/lib/licensing/eventLicense'
@@ -50,6 +49,7 @@ import { ledgerRef } from '@/lib/licensing/serviceAllowanceLedger'
 import { normalizeTypeDetails, passesForType } from '@/lib/events/builder/typeTransition'
 import { supersededActivationOrderId, RAZORPAY_ORDER_ID_RE } from '@/lib/licensing/manualRefundHold'
 import { settleCapturedActivation } from '@/lib/licensing/activationSelfHeal'
+import { resolveLegacyTier } from '@/lib/licensing/legacyEntitlement'
 import { stageOutboxMessage, scheduleOutboxDelivery, istNow } from '@/lib/notifications/outbox'
 import { eventReviewAlert } from '@/lib/notifications/actionAlerts'
 import { resolveOrganizerEmailIdentity } from '@/lib/organizer/emailIdentity'
@@ -263,11 +263,9 @@ export async function POST(req: NextRequest): Promise<NextResponse<PublishApiRes
   // version. Such orders can no longer be created (/api/licensing/purchase refuses any activation
   // without a capacity, and checkout/confirm settles only an existing tier order), so this path
   // can only ever honour money paid before retirement. It reads the ORDER, never the draft, and
-  // never a catalog price.
-  const legacyTier: AnyEventLicenseTier | null =
-    !!order && order.status === 'paid' && order.commercialModel !== 'capacity'
-      && isValidTierForVersion(order.tier, currentVersion) && order.tier !== freeStamp
-      ? order.tier : null
+  // never a catalog price. RD-CAPACITY-DEFAULT — the rule lives in lib/licensing/legacyEntitlement
+  // so the License & Services quote reports the SAME verdict to the wizard.
+  const legacyTier: AnyEventLicenseTier | null = resolveLegacyTier(order, currentVersion)
   const resolvedTier: AnyEventLicenseTier = legacyTier ?? freeStamp
   const hasPaidOrder = !!order && order.status === 'paid' && order.tier === resolvedTier
 
