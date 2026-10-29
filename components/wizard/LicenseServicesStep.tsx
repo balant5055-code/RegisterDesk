@@ -129,6 +129,13 @@ export interface FinalPayContext {
    * Always false for an unpublished draft, which is never locked.
    */
   locked:       boolean
+  /**
+   * RD-PUBLISH-PLAN — the server quote for the CURRENT selection (null while re-quoting or when it
+   * does not match), and the organizer's service switches. The publish confirmation lists the plan
+   * from these; it never prices anything itself.
+   */
+  quote:        CheckoutQuoteResponse | null
+  payg:         PaygServiceFlags
 }
 
 function Switch({ checked, onChange, label, disabled }: { checked: boolean; onChange: (v: boolean) => void; label: string; disabled?: boolean }) {
@@ -385,8 +392,9 @@ export function LicenseServicesStep({
   const ctxCovered = ctxReady && payable?.kind === 'covered'
   const ctxPayable = ctxReady ? (payNowPaise ?? payable?.totalPaise ?? null) : null
   useEffect(() => {
-    finalOnContext?.({ quoteReady: ctxReady, covered: ctxCovered, payablePaise: ctxPayable, blockedReason, pay: payViaPanel, refresh: refreshQuote, locked })
-  }, [finalOnContext, ctxReady, ctxCovered, ctxPayable, blockedReason, payViaPanel, refreshQuote, locked])
+    finalOnContext?.({ quoteReady: ctxReady, covered: ctxCovered, payablePaise: ctxPayable, blockedReason, pay: payViaPanel, refresh: refreshQuote, locked,
+      quote: ctxReady ? quote : null, payg })
+  }, [finalOnContext, ctxReady, ctxCovered, ctxPayable, blockedReason, payViaPanel, refreshQuote, locked, quote, payg])
   const router = useRouter()
   const { showToast } = useToast()
   useEffect(() => {

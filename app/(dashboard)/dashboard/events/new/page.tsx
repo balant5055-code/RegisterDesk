@@ -95,6 +95,9 @@ import { CURRENT_LICENSE_VERSION, isValidTierForVersion, defaultLicenseTierForVe
 import { DEFAULT_COMMERCIAL_TERMS } from '@/lib/licensing/capacityCommercial'
 import { capacityIntentToPersist } from '@/lib/events/builder/capacityIntent'
 import { LicenseServicesStep, type LicenseServicesStepProps, type PaygServiceFlags, type FinalPayContext } from '@/components/wizard/LicenseServicesStep'
+import { PublishPlanSection } from '@/components/wizard/PublishPlanSection'
+import { buildPlanSummary } from '@/components/wizard/publishPlanSummary'
+import { isChannelImplemented } from '@/lib/communications/health/channels'
 import { PUBLISH_AGREEMENT_DOCUMENTS, type PublishAgreementInput } from '@/lib/legal/organizerAgreement'
 import { EMPTY_SELECTION, parseServiceSelection, type ServiceSelection } from '@/lib/licensing/serviceAllowances'
 import { useFeesConfig } from '@/lib/fees/feesConfigClient'
@@ -1437,6 +1440,7 @@ function PublishConfirmModal({
   isFreeEvent,
   isPublishing,
   feeModel,
+  plan,
 }: {
   open:         boolean
   onClose:      () => void
@@ -1449,6 +1453,12 @@ function PublishConfirmModal({
   isFreeEvent:  boolean
   isPublishing: boolean
   feeModel:     FeeModel
+  /**
+   * RD-PUBLISH-PLAN — the License & Services plan for "Your Plan & Included Services": the step's
+   * current server quote and switches. Absent on a path without that step; null fields render a
+   * neutral "not available" state, never invented figures.
+   */
+  plan?:        Pick<FinalPayContext, 'quote' | 'payg' | 'payablePaise' | 'covered'> | null
 }) {
   // RD-EVENT-33 — declared BEFORE the `!open` early return: a hook after it would be
   // conditional and violate rules-of-hooks. The modal is conditionally rendered by its
@@ -1526,6 +1536,20 @@ function PublishConfirmModal({
               ))}
             </div>
           </div>
+
+          {/* RD-PUBLISH-PLAN — capacity and services, from the License & Services quote. */}
+          {plan !== undefined && (
+            <PublishPlanSection
+              items={buildPlanSummary({
+                quote: plan?.quote ?? null,
+                flags: plan ? { whatsappEnabled: plan.payg.whatsappEnabled, certEnabled: plan.payg.certEnabled } : null,
+                emailImplemented: isChannelImplemented('email'),
+                smsImplemented:   isChannelImplemented('sms'),
+              })}
+              payablePaise={plan?.payablePaise ?? null}
+              covered={plan?.covered === true}
+            />
+          )}
 
           {/* Blockers */}
           {report.blockers.length > 0 && (
@@ -2956,6 +2980,7 @@ function Step7View({
             isFreeEvent={isFreeEvent}
             isPublishing={publishState === 'publishing'}
             feeModel={localFeeModel}
+            plan={phase === 'final' ? (payCtx ?? null) : undefined}
           />
         )}
       </AnimatePresence>
