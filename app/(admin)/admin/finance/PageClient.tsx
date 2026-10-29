@@ -136,7 +136,7 @@ function TransferExceptionModal({ settlement, onClose, onSubmit }: {
         <p className="mt-3 text-[12.5px] text-amber-800 dark:text-amber-300">
           Use this only when the bank transfer has ALREADY succeeded to the original destination
           {settlement.destination?.label ? <> (<span className="font-mono">{settlement.destination.label}</span>)</> : null}, and the organizer has
-          since changed their payout details. Nothing is sent. A different Super Admin must approve before it is recorded.
+          since changed their payout details. Nothing is sent. It is recorded only once a Super Admin approves it, restating the amount, UTR and evidence and confirming the transfer completed.
         </p>
         <div className="mt-4 space-y-3 text-[13px]">
           <label className="block">UTR / bank transfer reference

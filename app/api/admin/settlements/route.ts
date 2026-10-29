@@ -23,7 +23,7 @@ export interface AdminSettlement {
   approvedAt:       string | null
   paidAt:           string | null
   adminNote:        string
-  /** D2 — the approving Super Admin's uid; the console warns that this admin cannot record the payout */
+  /** D2 — the approving Super Admin's uid (RD-SETTLE-PAY-02: that admin may also record the payout; the audit row says so) */
   approvedBy?:      string
   utrNumber?:       string
   bankReference?:   string

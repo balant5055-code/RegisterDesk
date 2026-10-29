@@ -578,7 +578,7 @@ export async function PATCH(req: NextRequest, { params }: Ctx): Promise<NextResp
     return NextResponse.json({ id, status: 'approved', exception: 'pending_approval', fingerprint: result.fingerprint, duplicate: result.duplicate })
   }
 
-  // ── M1.2 · B · APPROVE (a different Super Admin; bound to amount, UTR and evidence; records it paid ONCE) ────────
+  // ── M1.2 · B · APPROVE (a Super Admin — may be the same one; bound to amount, UTR and evidence; records it paid ONCE) ─
 
   if (action === 'transfer_exception_approve') {
     const utr = normalizeUtr(body.utrNumber)
