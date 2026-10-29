@@ -38,6 +38,8 @@ export interface StepViewProps {
   wizardSteps?:    WizardStep[]
   // RD-CE-FIX H5 — the step's identity choices are frozen (the event is already published).
   locked?:         boolean
+  // RD-WIZARD-HEALTH — open the step + field a Step Health finding is about (step by stable id).
+  onNavigateIssue?: (issue: { step: string; field: string }) => void
 }
 
 export type VisibilityId = 'public' | 'private'

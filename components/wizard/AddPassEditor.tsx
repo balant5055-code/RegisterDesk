@@ -40,6 +40,7 @@ import {
 } from '@/components/wizard/passSubtypeConfig'
 import type { BenefitGroup, BenefitItem } from '@/components/wizard/passEventTypeConfig'
 import { passAgeLimits, passTeamSize } from '@/lib/passes/passRaceRules'
+import { RequiredMark } from '@/components/event-builder/StepHealth'
 
 // ─── Data model ────────────────────────────────────────────────────────────────
 
@@ -182,7 +183,7 @@ function FieldGroup({
     <div>
       <label className={labelCls}>
         {label}
-        {required && <span className="ml-0.5 text-red-500">*</span>}
+        {required && <RequiredMark />}
         {optional && <span className="ml-1 text-[12px] font-normal text-muted-foreground">(Optional)</span>}
       </label>
       {children}
@@ -425,6 +426,7 @@ function TabPricing({
   showPriceErr,
   ebPriceErr,
   ebDateErr,
+  qtyErr,
   pricingLocked = false,
   attendeePaysFees = false,
 }: {
@@ -434,6 +436,7 @@ function TabPricing({
   showPriceErr?: boolean
   ebPriceErr?:   boolean
   ebDateErr?:    boolean
+  qtyErr?:       boolean
   /** RD-PRICING-UI-LOCK-01 — published event: price and early-bird pricing are read-only. */
   pricingLocked?: boolean
   /** RD-WIZARD-01 — platform fees are added at checkout, not deducted from the payout. */
@@ -495,7 +498,7 @@ function TabPricing({
             {EARLY_BIRD_ENABLED && earlyBirdFlag && (
             <div>
               <div className="mb-1 flex items-center justify-between">
-                <label className={labelCls}>Early Bird Price (₹)</label>
+                <label className={labelCls}>Early Bird Price (₹){pass.earlyBirdEnabled && <RequiredMark />}</label>
                 <button
                   type="button"
                   disabled={pricingLocked}
@@ -567,6 +570,7 @@ function TabPricing({
           {EARLY_BIRD_ENABLED && earlyBirdFlag && pass.earlyBirdEnabled && (
           <FieldGroup
             label="Early Bird Ends"
+            required
             hint="Early bird pricing expires at this date and time, then falls back to the regular price"
           >
             <div className="relative">
@@ -612,6 +616,7 @@ function TabPricing({
             {/* Total available */}
             <FieldGroup
               label="Total Available"
+              required={!isUnlimited}
               hint={isUnlimited ? 'Unlimited registrations' : 'Total seats for this pass'}
             >
               <input
@@ -623,7 +628,12 @@ function TabPricing({
                 onChange={e => onChange({ quantity: e.target.value ? Number(e.target.value) : null })}
                 disabled={isUnlimited}
               />
-              {!isUnlimited && pass.quantity !== null && (
+              {qtyErr && (
+                <p role="alert" className="mt-1 text-[12px] font-medium text-destructive">
+                  Enter the number of seats (a whole number of at least 1), or switch on Unlimited.
+                </p>
+              )}
+              {!isUnlimited && pass.quantity !== null && !qtyErr && (
                 <p className="mt-1 text-[12px] font-medium text-emerald-600">
                   {pass.quantity.toLocaleString('en-IN')} seats available
                 </p>
@@ -817,7 +827,7 @@ function TabPeriod({
     <div className="flex flex-col gap-4">
       <SectionCard title="Sales Window">
         <div className="grid gap-4 sm:grid-cols-2">
-          <FieldGroup label="Sales Start Date" required hint="When this pass goes on sale">
+          <FieldGroup label="Sales Start Date" optional hint="When this pass goes on sale">
             <div className="relative">
               <Calendar className="pointer-events-none absolute left-3 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" aria-hidden />
               <input
@@ -829,7 +839,7 @@ function TabPeriod({
             </div>
           </FieldGroup>
 
-          <FieldGroup label="Sales End Date" required hint="Last date to purchase this pass">
+          <FieldGroup label="Sales End Date" optional hint="Last date to purchase this pass">
             <div className="relative">
               <Calendar className="pointer-events-none absolute left-3 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" aria-hidden />
               <input
@@ -905,7 +915,6 @@ function RaceDetailsSection({
         {/* Category / Format dropdown */}
         <FieldGroup
           label={sportCfg.categoryLabel}
-          required
           hint={isCustom ? 'Enter a custom value below' : undefined}
         >
           <select
@@ -935,7 +944,7 @@ function RaceDetailsSection({
             >
               <FieldGroup
                 label={sportCfg.customCategoryLabel}
-                required
+                optional
                 hint={`e.g. ${sportCfg.categoryOptions[0] ?? 'Custom format'}`}
               >
                 <input
@@ -970,7 +979,7 @@ function RaceDetailsSection({
           <div>
             <p className="mb-2 text-[12px] font-semibold text-foreground">Age Rules</p>
             <div className="grid grid-cols-2 gap-3">
-              <FieldGroup label="Minimum Age" required>
+              <FieldGroup label="Minimum Age" optional>
                 <div className="flex items-center gap-2">
                   <input type="number" min={0} max={120} className={inputCls} placeholder="e.g. 14"
                     value={rd.minAge ?? ''}
@@ -979,7 +988,7 @@ function RaceDetailsSection({
                   <span className="shrink-0 text-[12px] text-muted-foreground">years</span>
                 </div>
               </FieldGroup>
-              <FieldGroup label="Maximum Age" required>
+              <FieldGroup label="Maximum Age" optional>
                 <div className="flex items-center gap-2">
                   <input type="number" min={0} max={120} className={inputCls} placeholder="e.g. 65"
                     value={rd.maxAge ?? ''}
@@ -1703,7 +1712,10 @@ export function AddPassEditor({
                                   && pass.earlyBirdPrice <= pass.price)
   const ebDateErr     = ebOn && !pass.earlyBirdEndDate.trim()
 
-  const canSave     = hasName && (!needsPrice || hasPrice) && !ebPriceErr && !ebDateErr
+  // RD-WIZARD-HEALTH — quantity, by the server's publish rule (eventValueRules): unless Unlimited, a whole
+  // number from 1 to 1,000,000. Checked here so a pass the server would refuse at publish cannot be saved.
+  const qtyErr      = pass.unlimited !== true && !(typeof pass.quantity === 'number' && Number.isInteger(pass.quantity) && pass.quantity >= 1 && pass.quantity <= 1_000_000)
+  const canSave     = hasName && (!needsPrice || hasPrice) && !ebPriceErr && !ebDateErr && !qtyErr
   const showPriceErr = needsPrice && !hasPrice && hasName
 
   const handleSave = () => {
@@ -1797,7 +1809,7 @@ export function AddPassEditor({
               {/* Form */}
               <div className="min-w-0 flex-1 p-5 xl:pr-3">
                 {activeTab === 'basic'    && <TabBasic    pass={pass} onChange={handleChange} eventTypeId={eventTypeId} eventSubtype={pass.eventSubtype} isFreeEvent={isFreeEvent} pricingLocked={pricingLocked} />}
-                {activeTab === 'pricing'  && <TabPricing  pass={pass} onChange={handleChange} isFreeEvent={isFreeEvent} showPriceErr={showPriceErr} ebPriceErr={ebPriceErr} ebDateErr={ebDateErr} pricingLocked={pricingLocked} attendeePaysFees={attendeePaysFees} />}
+                {activeTab === 'pricing'  && <TabPricing  pass={pass} onChange={handleChange} isFreeEvent={isFreeEvent} showPriceErr={showPriceErr} ebPriceErr={ebPriceErr} ebDateErr={ebDateErr} qtyErr={qtyErr} pricingLocked={pricingLocked} attendeePaysFees={attendeePaysFees} />}
                 {activeTab === 'period'   && <TabPeriod   pass={pass} onChange={handleChange} />}
                 {activeTab === 'benefits' && (
                   <TabBenefits pass={pass} onChange={handleChange} eventTypeId={eventTypeId} eventSubtype={pass.eventSubtype} />
@@ -1831,6 +1843,7 @@ export function AddPassEditor({
                         : (needsPrice && !hasPrice) ? 'Enter a valid ticket price.'
                         : ebPriceErr       ? 'Fix the early bird price to save.'
                         : ebDateErr        ? 'Set an early bird end date to save.'
+                        : qtyErr           ? 'Enter the number of seats, or switch on Unlimited.'
                         : 'Enter a valid ticket price.'}
                     </p>
                   )}

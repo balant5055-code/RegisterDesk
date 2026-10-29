@@ -24,6 +24,9 @@ import { readIntent, clearIntent, returnLabelFor } from '@/lib/wallet/purchaseIn
 import { validateStep } from '@/lib/events/builder/stepValidation'
 import { EASE, WIZARD_STEPS } from '@/lib/events/builder/constants'
 import { Stepper } from '@/components/event-builder/Stepper'
+import { FieldFocusDriver, requestFieldFocus, StepHealthPanel, StepIssuesProvider, InlineIssue, RequiredMark } from '@/components/event-builder/StepHealth'
+import { reviewIssues, licenseIssues, mergeIssues, healthReport, isFieldRequired, FIELD } from '@/lib/events/builder/stepHealth'
+import type { WizardStepId } from '@/lib/events/builder/stepHealth'
 import { Step1View, type Step1State } from '@/components/event-builder/steps/Step1View'
 import { Step2View } from '@/components/event-builder/steps/Step2View'
 import { Step3View } from '@/components/event-builder/steps/Step3View'
@@ -1934,7 +1937,7 @@ function buildReadinessReport(
 // fee-collection choice, the server's activation state and the publish agreement, and submits.
 function Step7View({
   currentStep, completedValues, onNext, onBack, initialData, onGoToStep, wizardSteps,
-  onSettle, phase = 'review', renderLicense, onServerSaved, onFeeModelChange,
+  onSettle, phase = 'review', renderLicense, onServerSaved, onFeeModelChange, onNavigateIssue,
 }: StepViewProps & {
   /** RD-EVENT-COMMERCE-05D — called after the SERVER confirmed Save Changes (re-align the draft baseline). */
   onServerSaved?: () => void
@@ -2137,6 +2140,7 @@ function Step7View({
   // RD-EVENT-COMMERCE-05B · final step: the License & Services payment context (server quote),
   // the payment stage, and a guard so a double click / retry cannot start two payments.
   const [payCtx, setPayCtx]         = useState<FinalPayContext | null>(null)
+
   const [finalStage, setFinalStage] = useState<'paying' | null>(null)
   const finalInFlight = useRef(false)
 
@@ -2516,6 +2520,23 @@ function Step7View({
   const stepsList   = wizardSteps ?? WIZARD_STEPS
   const stepContext = `Step ${currentStep + 1} of ${stepsList.length} · ${stepsList[currentStep]?.name ?? ''}`
 
+  // RD-WIZARD-HEALTH — Review lists every publish finding (each navigates to the step that fixes
+  // it); License & Services adds what the final action itself waits on: the agreement ticks and a
+  // capacity / services refusal. The SAME inputs as isNextDisabled below, so they cannot disagree.
+  const licenseRequiredCtx = { license: { isPaid: !isFreeEvent, published: isAlreadyPublished } }
+  const publishFindingIssues = reviewIssues({ critical: report.findings.critical, warning: report.findings.warning })
+  const health = phase === 'review'
+    ? healthReport('review', publishFindingIssues)
+    : healthReport('license', mergeIssues(
+        licenseIssues({
+          published: isAlreadyPublished, isPaid: !isFreeEvent,
+          terms: { info: termInfo, fees: termsFees, tos: consentFeeModel, privacy: consentTimeline },
+          blockedReason: payCtx?.blockedReason ?? null,
+        }),
+        publishFindingIssues,
+      ))
+  const navigateIssue = (i: { step: string; field: string }) => onNavigateIssue?.(i)
+
   return (
     <motion.div
       initial={{ opacity: 0, y: 8 }}
@@ -2526,6 +2547,9 @@ function Step7View({
       {/* RD-EVENT-COMMERCE-05B — the final step is License & Services (it renders its own
           stepper and header); the agreement and the final action follow it below. */}
       {phase === 'final' && renderLicense?.(setPayCtx)}
+      {phase === 'final' && !isSubmitted && (
+        <StepHealthPanel className="mt-4" report={health} onNavigate={navigateIssue} />
+      )}
 
       {phase === 'review' && <>
       <Link href={ROUTES.DASHBOARD}
@@ -2584,6 +2608,8 @@ function Step7View({
         <Shield className="size-3 shrink-0" aria-hidden />
         Your event is safe. You can edit anytime before publishing.
       </p>
+
+      <StepHealthPanel className="mt-4" report={health} onNavigate={navigateIssue} />
 
       {/* ── PUBLISH READINESS CARD ─────────────────────────────────────── */}
       {(() => {
@@ -2831,18 +2857,20 @@ function Step7View({
               Required — tick every item below to enable “{payCtx && !payCtx.covered ? 'Pay & Publish Event' : 'Publish Event'}”.
             </p>
           )}
+          <StepIssuesProvider issues={health.issues}>
           <div className="flex flex-col divide-y divide-border/40 px-4">
             {/* 1: accurate */}
-            <button type="button" onClick={() => setTermInfo(v => !v)} role="checkbox" aria-checked={termInfo}
-              className="flex items-center gap-3 py-3.5 text-left focus-visible:outline-none">
+            <button id={FIELD.termInfo} type="button" onClick={() => setTermInfo(v => !v)} role="checkbox" aria-checked={termInfo}
+              className="flex items-center gap-3 rounded py-3.5 text-left focus-visible:outline-none">
               <span className={cn('flex size-[18px] shrink-0 items-center justify-center rounded border-2 transition-all',
                 termInfo ? 'border-primary bg-primary' : 'border-border bg-background hover:border-primary/50')}>
                 {termInfo && <Check className="size-2.5 text-primary-foreground" aria-hidden />}
               </span>
               <span className={cn('text-[13px]', termInfo ? 'font-medium text-foreground' : 'text-muted-foreground')}>
-                Event information is accurate and complete.
+                Event information is accurate and complete.{isFieldRequired(FIELD.termInfo, licenseRequiredCtx) && <RequiredMark />}
               </span>
             </button>
+            <InlineIssue field={FIELD.termInfo} className="mt-0 pb-3" />
 
             {/* 2: settlement modal — paid events only */}
             {!isFreeEvent && (
@@ -2855,7 +2883,7 @@ function Step7View({
                     `aria-labelledby` names it from the existing visible text instead, with no
                     duplicated string and no DOM restructure. The other two consent checkboxes
                     (3076, 3109) already get their name from content, so only this one differs. */}
-                <button type="button"
+                <button id={FIELD.termFees} type="button"
                   onClick={() => termsFees ? setFeesAcceptedAt(null) : setShowCommercialModal(true)}
                   role="checkbox" aria-checked={termsFees}
                   aria-labelledby="terms-fees-label"
@@ -2869,39 +2897,44 @@ function Step7View({
                     className="text-primary underline underline-offset-2 hover:no-underline">
                     settlement timelines and fee policy
                   </button>
-                  .{feesAcceptedAt && <span className="ml-1.5 text-[12px] text-emerald-600">Reviewed ✓</span>}
+                  .{isFieldRequired(FIELD.termFees, licenseRequiredCtx) && <RequiredMark />}
+                  {feesAcceptedAt && <span className="ml-1.5 text-[12px] text-emerald-600">Reviewed ✓</span>}
                 </p>
               </div>
             )}
+            {!isFreeEvent && <InlineIssue field={FIELD.termFees} className="mt-0 pb-3" />}
 
             {/* 3: ToS — RD-EVENT-COMMERCE-05F: same wording; "Terms of Service" now opens the existing
                 /terms page. A link can't sit inside the checkbox button, so the checkbox is named by
                 its visible label (aria-labelledby), exactly like item 2. */}
             <div className="flex items-center gap-3 py-3.5">
-              <button type="button" onClick={() => setConsentFeeModel(v => !v)} role="checkbox" aria-checked={consentFeeModel}
+              <button id={FIELD.termTos} type="button" onClick={() => setConsentFeeModel(v => !v)} role="checkbox" aria-checked={consentFeeModel}
                 aria-labelledby="terms-tos-label"
                 className={cn('flex size-[18px] shrink-0 items-center justify-center rounded border-2 transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-1',
                   consentFeeModel ? 'border-primary bg-primary' : 'border-border bg-background hover:border-primary/50')}>
                 {consentFeeModel && <Check className="size-2.5 text-primary-foreground" aria-hidden />}
               </button>
               <p id="terms-tos-label" className={cn('text-[13px]', consentFeeModel ? 'font-medium text-foreground' : 'text-muted-foreground')}>
-                I agree to RegisterDesk <a href={PUBLISH_AGREEMENT_DOCUMENTS.termsOfService} target="_blank" rel="noopener noreferrer" className="text-primary underline underline-offset-2 hover:no-underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary rounded">Terms of Service</a>.
+                I agree to RegisterDesk <a href={PUBLISH_AGREEMENT_DOCUMENTS.termsOfService} target="_blank" rel="noopener noreferrer" className="text-primary underline underline-offset-2 hover:no-underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary rounded">Terms of Service</a>.{isFieldRequired(FIELD.termTos, licenseRequiredCtx) && <RequiredMark />}
               </p>
             </div>
+            <InlineIssue field={FIELD.termTos} className="mt-0 pb-3" />
 
             {/* 4: Privacy — same wording; "Privacy Policy" opens the existing /privacy page. */}
             <div className="flex items-center gap-3 py-3.5">
-              <button type="button" onClick={() => setConsentTimeline(v => !v)} role="checkbox" aria-checked={consentTimeline}
+              <button id={FIELD.termPrivacy} type="button" onClick={() => setConsentTimeline(v => !v)} role="checkbox" aria-checked={consentTimeline}
                 aria-labelledby="terms-privacy-label"
                 className={cn('flex size-[18px] shrink-0 items-center justify-center rounded border-2 transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-1',
                   consentTimeline ? 'border-primary bg-primary' : 'border-border bg-background hover:border-primary/50')}>
                 {consentTimeline && <Check className="size-2.5 text-primary-foreground" aria-hidden />}
               </button>
               <p id="terms-privacy-label" className={cn('text-[13px]', consentTimeline ? 'font-medium text-foreground' : 'text-muted-foreground')}>
-                I agree to RegisterDesk <a href={PUBLISH_AGREEMENT_DOCUMENTS.privacyPolicy} target="_blank" rel="noopener noreferrer" className="text-primary underline underline-offset-2 hover:no-underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary rounded">Privacy Policy</a>.
+                I agree to RegisterDesk <a href={PUBLISH_AGREEMENT_DOCUMENTS.privacyPolicy} target="_blank" rel="noopener noreferrer" className="text-primary underline underline-offset-2 hover:no-underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary rounded">Privacy Policy</a>.{isFieldRequired(FIELD.termPrivacy, licenseRequiredCtx) && <RequiredMark />}
               </p>
             </div>
+            <InlineIssue field={FIELD.termPrivacy} className="mt-0 pb-3" />
           </div>
+          </StepIssuesProvider>
         </div>}
       </div>
 
@@ -3677,6 +3710,8 @@ export default function CreateEventWizard() {
       syncRenderState()
       setCurrentStep(step)
       setStepFocusHint(fieldHint)
+      // RD-WIZARD-HEALTH — scroll to / focus the field once its step (and tab) has rendered.
+      if (fieldHint) requestFieldFocus(fieldHint)
     },
     [syncRenderState],
   )
@@ -3901,10 +3936,12 @@ export default function CreateEventWizard() {
 
   const pricingInitialData = useMemo(() => ({
     pricing: draft?.pricing ?? null, eventTypeId: draft?.eventType ?? null, eventSubtype: draft?.eventSubtype ?? null,
+    // RD-WIZARD-HEALTH — Step Health checks the registration window against the event dates (publish rule).
+    eventDetails: draft?.eventDetails ?? null,
     // RD-PRICING-UI-LOCK-01 — Passes & Pricing locks commercial fields on a PUBLISHED event.
     // `status` is server-written only (firestore.rules refuse client writes to it).
     status:  draft?.status ?? null,
-  }), [draft?.pricing, draft?.eventType, draft?.eventSubtype, draft?.status])
+  }), [draft?.pricing, draft?.eventType, draft?.eventSubtype, draft?.status, draft?.eventDetails])
 
   const formInitialData = useMemo(() => ({
     registrationForm: draft?.registrationForm ?? null,
@@ -4000,7 +4037,10 @@ export default function CreateEventWizard() {
   // slug source Review used: the draft's SEO slug == events/{slug}; null when not set).
   const liveSlug: unknown = draft?.eventDetails ? normalizeEventDetailsDraft(draft.eventDetails as unknown as EventDetailsDraft)?.seo?.urlSlug : undefined
   const livePublicHref = typeof liveSlug === 'string' && liveSlug ? buildEventHref(liveSlug) : null
-  const sharedProps = { completedValues, onNext: goNext, onBack: goBack, wizardSteps: activeWizardSteps }
+  // RD-WIZARD-HEALTH — a Step Health finding names the step that fixes it by stable id; the flow maps it to an index.
+  const navigateIssue = (issue: { step: string; field: string }) =>
+    goToStep(indexOfStep(wizardFlow, issue.step as WizardStepId), issue.field)
+  const sharedProps = { completedValues, onNext: goNext, onBack: goBack, wizardSteps: activeWizardSteps, onGoToStep: goToStep, onNavigateIssue: navigateIssue }
 
 
   // When donation-only: step 0 shows event type selector; step 1+ hands off to DonationCampaignWizard
@@ -4019,6 +4059,7 @@ export default function CreateEventWizard() {
 
   return (
     <>
+      <FieldFocusDriver />
       {/* RD-PRODUCT-01B — always-visible save status + draft recovery */}
       <div className="sticky top-0 z-30 -mb-1 flex justify-end px-1 pt-0.5">
         <SaveStatusIndicator state={saveState} lastSavedAt={lastSavedAt} />

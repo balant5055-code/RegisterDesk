@@ -42,7 +42,9 @@ import {
 import type { LucideIcon } from 'lucide-react'
 import { WizardFooter } from '@/components/wizard/WizardFooter'
 import { Stepper } from '@/components/event-builder/Stepper'
-import { validateStep } from '@/lib/events/builder/stepValidation'
+import { validateStep, isEventSubtypeSatisfied } from '@/lib/events/builder/stepValidation'
+import { eventTypeIssues, healthReport, isFieldRequired, FIELD } from '@/lib/events/builder/stepHealth'
+import { StepHealthPanel, StepIssuesProvider, InlineIssue, RequiredMark } from '@/components/event-builder/StepHealth'
 import { EASE, WIZARD_STEPS } from '@/lib/events/builder/constants'
 import type { StepViewProps } from '@/lib/events/builder/types'
 import { getTemplate } from '@/lib/events/templateRegistry'
@@ -396,6 +398,7 @@ function SubtypeSelector({
       exit={{ opacity: 0, y: -6 }}
       transition={{ duration: 0.2, ease: EASE }}
       className="flex flex-col gap-3"
+      id={isCustomType ? undefined : FIELD.eventSubtype}
     >
       {/* 2026-10-01: the follow-up question as its own panel — the chosen category on the
           left of its header, the question beside it, a hairline, then the answers. */}
@@ -420,7 +423,7 @@ function SubtypeSelector({
             <p className="relative flex items-center gap-1.5 text-fs-2xs font-semibold uppercase tracking-[0.14em] text-[color:var(--primary-text)]">
               <Sparkles className="size-3 shrink-0" aria-hidden />
               {isCustomType ? 'Custom category' : `${et?.name ?? 'Event'} · Format`}
-              {!isCustomType && <span className="text-destructive" aria-hidden>*</span>}
+              {!isCustomType && <RequiredMark />}
             </p>
             <p className="relative mt-0.5 text-fs-sm font-semibold text-foreground">
               {isCustomType
@@ -485,7 +488,11 @@ function SubtypeSelector({
                   className="overflow-hidden"
                 >
                   <div className="mt-3">
+                    <label htmlFor={FIELD.subtypeOther} className="mb-1 block text-fs-xs font-medium text-foreground">
+                      Describe your format<RequiredMark />
+                    </label>
                     <input
+                      id={FIELD.subtypeOther}
                       ref={otherInputRef}
                       className={inputCls}
                       placeholder="Describe your event format…"
@@ -493,6 +500,7 @@ function SubtypeSelector({
                       onChange={e => onCustomSubtype(e.target.value)}
                       maxLength={60}
                     />
+                    <InlineIssue field={FIELD.subtypeOther} />
                     <p className="mt-1.5 text-fs-xs text-muted-foreground">
                       e.g. 15K Run, Ultra Marathon, Product Demo Day…
                     </p>
@@ -525,6 +533,7 @@ function SubtypeSelector({
           </p>
         </motion.div>
       )}
+      {!isCustomType && <InlineIssue field={FIELD.eventSubtype} />}
     </motion.div>
   )
 }
@@ -568,8 +577,9 @@ function CampaignTypeSelector({
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.25, ease: EASE }}
       className="rounded-surface border border-border/80 bg-card p-4 shadow-[0_1px_2px_rgb(15_23_42_/_0.04)] sm:p-5"
+      id={FIELD.campaignType}
     >
-      <p className="text-fs-2xs font-semibold uppercase tracking-[0.14em] text-[color:var(--primary-text)]">Fundraising · Model</p>
+      <p className="text-fs-2xs font-semibold uppercase tracking-[0.14em] text-[color:var(--primary-text)]">Fundraising · Model<RequiredMark /></p>
       <p className="mb-3.5 mt-0.5 text-fs-sm font-semibold text-foreground">
         How do you want to raise funds?
       </p>
@@ -607,6 +617,7 @@ function CampaignTypeSelector({
           </button>
         ))}
       </div>
+      <InlineIssue field={FIELD.campaignType} />
     </motion.div>
   )
 }
@@ -619,8 +630,8 @@ function DonationSubtypeSelector({
   onSubtype: (id: string) => void
 }) {
   return (
-    <div className="rounded-surface border border-border/80 bg-card p-4 shadow-[0_1px_2px_rgb(15_23_42_/_0.04)] sm:p-5">
-      <p className="text-fs-2xs font-semibold uppercase tracking-[0.14em] text-[color:var(--primary-text)]">Fundraising · Cause</p>
+    <div id={FIELD.eventSubtype} className="rounded-surface border border-border/80 bg-card p-4 shadow-[0_1px_2px_rgb(15_23_42_/_0.04)] sm:p-5">
+      <p className="text-fs-2xs font-semibold uppercase tracking-[0.14em] text-[color:var(--primary-text)]">Fundraising · Cause<RequiredMark /></p>
       <p className="mb-3.5 mt-0.5 text-fs-sm font-semibold text-foreground">
         What is your cause?
       </p>
@@ -643,13 +654,14 @@ function DonationSubtypeSelector({
           </button>
         ))}
       </div>
+      <InlineIssue field={FIELD.eventSubtype} />
     </div>
   )
 }
 
 // --- Step 1 view --------------------------------------------------------------
 
-export function Step1View({ currentStep, completedValues, onNext, onSaveDraft, initialData, wizardSteps, locked }: StepViewProps) {
+export function Step1View({ currentStep, completedValues, onNext, onSaveDraft, initialData, wizardSteps, locked, onNavigateIssue }: StepViewProps) {
   const [step1, setStep1] = useState<Step1State>({
     eventType:    (initialData?.eventType         as string | null)       ?? null,
     subtype:      (initialData?.eventSubtype       as string | null)       ?? null,
@@ -665,17 +677,16 @@ export function Step1View({ currentStep, completedValues, onNext, onSaveDraft, i
   const isFundraising   = selectedType === 'fundraising'
   const isOtherSubtype  = selectedSubtype === 'other'
 
-  const hasValidSubtype =
-    !selectedType ? false
-    : isCustomType ? true  // custom event can proceed without a subtype
-    // event_plus_donation is a ticketed event — no cause-category subtype required
-    : (isFundraising && campaignType === 'event_plus_donation') ? true
-    : selectedSubtype !== null && (!isOtherSubtype || customSubtype.trim().length > 0)
+  // The rule lives in the shared contract (custom and event-with-donations need no subtype;
+  // "Other" needs its description) — the same expression the required markers read.
+  const hasValidSubtype = isEventSubtypeSatisfied({ selectedType, selectedSubtype, customSubtype, campaignType })
 
   // The rule (incl. "fundraising requires a campaign type") lives in the shared contract.
   const canProceed = validateStep('eventType', {
     selectedType, hasValidSubtype, isFundraising, campaignType,
   }).valid
+  // RD-WIZARD-HEALTH — the same rules, as named findings (live: recomputed on every change).
+  const health = healthReport('eventType', eventTypeIssues({ selectedType, selectedSubtype, customSubtype, campaignType }))
 
   const subtypeSectionRef = useRef<HTMLDivElement>(null)
 
@@ -773,6 +784,7 @@ export function Step1View({ currentStep, completedValues, onNext, onSaveDraft, i
       </Link>
 
       <Stepper currentStep={currentStep} completedValues={completedValues} steps={wizardSteps ?? WIZARD_STEPS} />
+      <StepIssuesProvider issues={health.issues}>
 
       {/* 2026-10-01: a question, not a label — the organizer is being asked something. */}
       <div className="mt-6 sm:mt-8">
@@ -787,6 +799,8 @@ export function Step1View({ currentStep, completedValues, onNext, onSaveDraft, i
         </p>
       </div>
 
+      <StepHealthPanel className="mt-4" report={health} onNavigate={i => onNavigateIssue?.(i)} />
+
       {locked && (
         <p role="status" className="mt-4 rounded-control border border-border bg-muted px-3 py-2 text-fs-sm text-muted-foreground">
           This event is published, so its type and format can’t be changed. Duplicate it to create an event of a different type.
@@ -799,7 +813,11 @@ export function Step1View({ currentStep, completedValues, onNext, onSaveDraft, i
       >
         {/* Left: cards grid + secondary selector (inert once published — RD-CE-FIX H5) */}
         <div className={locked ? 'flex flex-col gap-4 opacity-60' : 'flex flex-col gap-4'} inert={locked || undefined}>
+          <p className="-mb-1.5 text-fs-xs font-semibold text-foreground">
+            Event type{isFieldRequired(FIELD.eventType) && <RequiredMark />}
+          </p>
           <div
+            id={FIELD.eventType}
             role="group"
             aria-label="Event types"
             // Two tiles a row on a phone and at lg (beside the preview), three from sm and xl.
@@ -817,6 +835,7 @@ export function Step1View({ currentStep, completedValues, onNext, onSaveDraft, i
               </div>
             ))}
           </div>
+          <InlineIssue field={FIELD.eventType} />
 
           {/* RD-EVENT-TYPES-01 — an existing draft whose type is now "Coming Soon" stays editable. */}
           {selectedTypeUnavailable && !locked && (
@@ -904,6 +923,7 @@ export function Step1View({ currentStep, completedValues, onNext, onSaveDraft, i
           <TemplatePreviewPanel selectedTypeId={selectedType} />
         </div>
       </div>
+      </StepIssuesProvider>
 
       <WizardFooter
         cancelHref={ROUTES.DASHBOARD_EVENTS}

@@ -32,6 +32,8 @@ import { makeBlankFormDraft, type RegistrationFormDraft } from '@/components/wiz
 import type { PassSummary } from '@/components/wizard/RegistrationFormBuilder'
 import type { EventPassFull } from '@/components/wizard/AddPassEditor'
 import { ROUTES } from '@/config/navigation'
+import { formIssues, publishIssuesFor, requirementFindings, valueFindings, mergeIssues, healthReport, isFieldRequired, FIELD } from '@/lib/events/builder/stepHealth'
+import { StepHealthPanel, StepIssuesProvider, InlineIssue, RequiredMark } from '@/components/event-builder/StepHealth'
 
 // Step-5's lazy field builder. Mirrors the parent's shared `builderLoading` fallback so the
 // dynamic import stays self-contained here (the parent keeps its own copy for the other
@@ -43,7 +45,7 @@ const RegistrationFormBuilder = dynamic(
   () => import('@/components/wizard/RegistrationFormBuilder').then(m => m.RegistrationFormBuilder), { loading: builderLoading },
 )
 
-export function Step5View({ currentStep, completedValues, onNext, onBack, onSaveDraft, onAutosave, initialData, wizardSteps }: StepViewProps) {
+export function Step5View({ currentStep, completedValues, onNext, onBack, onSaveDraft, onAutosave, initialData, wizardSteps, onNavigateIssue }: StepViewProps) {
   const eventTypeId  = (initialData?.eventTypeId  as string | null) ?? null
   const eventSubtype = (initialData?.eventSubtype as string | null) ?? null
 
@@ -72,6 +74,17 @@ export function Step5View({ currentStep, completedValues, onNext, onBack, onSave
     templateCount: form.template.length, fieldCount: form.fields.length,
   }).valid
   const [step5Error, setStep5Error] = useState<string | null>(null)
+  // RD-WIZARD-HEALTH — the Continue rule above, plus the server's publish checks for the form (a
+  // template or a section; a form built for THIS event type), as named findings.
+  const formRecord = form as unknown as Record<string, unknown>
+  const reqs   = requirementFindings({ pricing: null, eventDetails: null, registrationForm: formRecord })
+  const health = healthReport('form', mergeIssues(
+    formIssues({ templateCount: form.template.length, fieldCount: form.fields.length }),
+    publishIssuesFor('form', {
+      critical: [...reqs.critical, ...valueFindings({ eventDetails: null, pricing: null, registrationForm: formRecord, eventType: eventTypeId, eventSubtype })],
+      warning:  reqs.warning,
+    }),
+  ))
 
   const handleNext = () => {
     if (!canProceed) {
@@ -113,8 +126,13 @@ export function Step5View({ currentStep, completedValues, onNext, onBack, onSave
         </p>
       </div>
 
+      <StepHealthPanel className="mt-4" report={health} onNavigate={i => onNavigateIssue?.(i)} />
+      <StepIssuesProvider issues={health.issues}>
+
       {/* -- Builder -- */}
-      <div className="mt-4 flex-1">
+      <div id={FIELD.registrationForm} className="mt-4 flex-1 rounded-xl">
+        <p className="mb-2 text-[13px] font-semibold text-foreground">Registration form{isFieldRequired(FIELD.registrationForm) && <RequiredMark />}</p>
+        <InlineIssue field={FIELD.registrationForm} className="mb-2" />
         <RegistrationFormBuilder
           form={form}
           onChange={f => { setForm(f); if (step5Error) setStep5Error(null) }}
@@ -146,6 +164,7 @@ export function Step5View({ currentStep, completedValues, onNext, onBack, onSave
           </motion.div>
         )}
       </AnimatePresence>
+      </StepIssuesProvider>
 
       <WizardFooter
         onBack={onBack}

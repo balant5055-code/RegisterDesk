@@ -17,10 +17,12 @@ import { isChannelImplemented } from '@/lib/communications/health/channels'
 // RD-COMMS-01 Phase 2B: channel availability comes from the canonical capability SSOT. SMS
 // has no transport, so it is never offered as a selectable confirmation/reminder channel.
 const SMS_AVAILABLE = isChannelImplemented('sms')
-import { type EventDetailsDraft, type EventInfo, type MediaConfig, type VenueConfig, type VenueMaps, type PhysicalVenueConfig, type OnlineVenueConfig, type AgendaSession, type EventSchedule, type OrganizerInfo, type CommunicationConfig, type ReminderRule, type SupportConfig, type SeoConfig, type PublicPageSettings, type Speaker, type Sponsor, type ConferenceTrack, type ConferenceDetails, type WorkshopDetails, type CulturalDetails, type AwardsDetails, type ExhibitionDetails, type ExhibitorEntry, type PastWinner, type Tab6Config, type CommChannel, makeBlankEventDetailsDraft, makeBlankSession, makeBlankSpeaker, makeBlankSponsor, makeTrackId, makeAwardCatId, getEventDays, formatDayLabel, fmtTime, slugify, calcStepHealth, getTab6Config, makeBlankTypeDetails, makePastWinnerId, makeExhibitorId, makeHighlightId, makeZoneId, makeExhibitionCatId, SESSION_TYPE_LABELS, SPONSOR_TIER_LABELS, ONLINE_PLATFORM_LABELS, LANGUAGE_OPTIONS, TIMEZONE_OPTIONS, TypeDetails } from '@/components/wizard/eventDetailsConfig'
+import { type EventDetailsDraft, type EventInfo, type MediaConfig, type VenueConfig, type VenueMaps, type PhysicalVenueConfig, type OnlineVenueConfig, type AgendaSession, type EventSchedule, type OrganizerInfo, type CommunicationConfig, type ReminderRule, type SupportConfig, type SeoConfig, type PublicPageSettings, type Speaker, type Sponsor, type ConferenceTrack, type ConferenceDetails, type WorkshopDetails, type CulturalDetails, type AwardsDetails, type ExhibitionDetails, type ExhibitorEntry, type PastWinner, type Tab6Config, type CommChannel, makeBlankEventDetailsDraft, makeBlankSession, makeBlankSpeaker, makeBlankSponsor, makeTrackId, makeAwardCatId, getEventDays, formatDayLabel, fmtTime, slugify, calcStepHealth, DETAILS_FIELD_TAB, getTab6Config, makeBlankTypeDetails, makePastWinnerId, makeExhibitorId, makeHighlightId, makeZoneId, makeExhibitionCatId, SESSION_TYPE_LABELS, SPONSOR_TIER_LABELS, ONLINE_PLATFORM_LABELS, LANGUAGE_OPTIONS, TIMEZONE_OPTIONS, TypeDetails } from '@/components/wizard/eventDetailsConfig'
 import { BrandingMediaSection } from '@/components/wizard/BrandingMediaSection'
 import { ImageAssetInput } from '@/components/wizard/ImageAssetInput'
 import { normalizeTypeDetails } from '@/lib/events/builder/typeTransition'
+import { isFieldRequired } from '@/lib/events/builder/stepHealth'
+import { RequiredMark, InlineIssue, useFieldFocusRequest } from '@/components/event-builder/StepHealth'
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -85,7 +87,7 @@ function WaiverSection({ requireWaiver, waiverText, onChange }: {
         />
         {requireWaiver && (
           <div>
-            <label className={labelCls} htmlFor="rd-waiver-text">Waiver wording <span className="text-red-500">*</span></label>
+            <label className={labelCls} htmlFor="rd-waiver-text">Waiver wording{isFieldRequired('rd-waiver-text', { sportsWaiverOn: requireWaiver }) && <RequiredMark />}</label>
             <textarea
               id="rd-waiver-text"
               className={cn(inputCls, 'h-40 resize-y py-2', empty && 'border-red-400')}
@@ -101,11 +103,20 @@ function WaiverSection({ requireWaiver, waiverText, onChange }: {
                 ? 'Add the waiver wording, or turn the waiver off. Your event cannot be published with an empty waiver.'
                 : 'Use your own wording — RegisterDesk does not provide legal text. Edits apply to registrations made after you save; each registration records the wording it accepted.'}
             </p>
+            <InlineIssue field="rd-waiver-text" />
           </div>
         )}
       </div>
     </SectionCard>
   )
+}
+
+/**
+ * RD-WIZARD-HEALTH — a Details field's red asterisk, shown only when the step's own rules
+ * (detailsHealthItems) would raise a blocker if the field were empty in the CURRENT state.
+ */
+function Req({ field, form }: { field: string; form: EventDetailsDraft }) {
+  return isFieldRequired(field, { details: form }) ? <RequiredMark /> : null
 }
 
 function ModeCard({ label, desc, selected, onClick, disabled }: { label: string; desc?: string; selected: boolean; onClick: () => void; disabled?: boolean }) {
@@ -153,12 +164,7 @@ const BASE_TABS: { id: Tab; label: string; icon: typeof FileText }[] = [
   { id: 'seo',       label: 'SEO & Discovery',  icon: Globe     },
 ]
 
-const FIELD_TO_TAB: Record<string, Tab> = {
-  'rd-event-name':     'details',
-  'rd-start-date':     'venue',
-  'rd-venue-type':     'venue',
-  'rd-organizer-name': 'organizer',
-}
+const FIELD_TO_TAB: Readonly<Record<string, Tab>> = DETAILS_FIELD_TAB
 
 // ─── Tab 1 — Details ─────────────────────────────────────────────────────────
 
@@ -172,13 +178,14 @@ function Tab1Details({ form, update, uploadContext }: { form: EventDetailsDraft;
       {/* Event Information */}
       <SectionCard title="Event Information">
         <div className="flex flex-col gap-3">
-          <div><label className={labelCls} htmlFor="rd-event-name">Event Name <span className="text-red-500">*</span></label><input id="rd-event-name" className={inputCls} maxLength={120} value={form.info.name} onChange={e => ui({ name: e.target.value })} placeholder="e.g. TechFest India 2026" /></div>
+          <div><label className={labelCls} htmlFor="rd-event-name">Event Name<Req field="rd-event-name" form={form} /></label><input id="rd-event-name" className={inputCls} maxLength={120} value={form.info.name} onChange={e => ui({ name: e.target.value })} placeholder="e.g. TechFest India 2026" /><InlineIssue field="rd-event-name" /></div>
           <div><label className={labelCls}>Tagline <span className={hintCls.replace('mt-1 ', '')}>(optional)</span></label><input className={inputCls} maxLength={100} value={form.info.tagline} onChange={e => ui({ tagline: e.target.value })} placeholder="e.g. India's largest developer conference" /></div>
           <div>
-            <label className={labelCls}>Short Description <span className={hintCls.replace('mt-1 ', '')}>(shown in search &amp; cards — 300 chars)</span></label>
-            <div className="relative"><textarea className={cn(inputCls, 'h-20 resize-none py-2 pr-14')} maxLength={300} value={form.info.shortDesc} onChange={e => ui({ shortDesc: e.target.value })} placeholder="A brief overview of your event…" /><span className="pointer-events-none absolute bottom-2 right-3 text-[12px] text-muted-foreground">{form.info.shortDesc.length}/300</span></div>
+            <label className={labelCls} htmlFor="rd-short-desc">Short Description <span className={hintCls.replace('mt-1 ', '')}>(shown in search &amp; cards — 300 chars)</span></label>
+            <div className="relative"><textarea id="rd-short-desc" className={cn(inputCls, 'h-20 resize-none py-2 pr-14')} maxLength={300} value={form.info.shortDesc} onChange={e => ui({ shortDesc: e.target.value })} placeholder="A brief overview of your event…" /><span className="pointer-events-none absolute bottom-2 right-3 text-[12px] text-muted-foreground">{form.info.shortDesc.length}/300</span></div>
+            <InlineIssue field="rd-short-desc" />
           </div>
-          <div><label className={labelCls}>Full Description <span className={hintCls.replace('mt-1 ', '')}>(shown on event page — markdown supported)</span></label><textarea className={cn(inputCls, 'h-32 resize-none py-2')} value={form.info.fullDesc} onChange={e => ui({ fullDesc: e.target.value })} placeholder="Tell attendees everything about your event…" /></div>
+          <div><label className={labelCls} htmlFor="rd-event-description">Full Description <span className={hintCls.replace('mt-1 ', '')}>(shown on event page — markdown supported)</span></label><textarea id="rd-event-description" className={cn(inputCls, 'h-32 resize-none py-2')} value={form.info.fullDesc} onChange={e => ui({ fullDesc: e.target.value })} placeholder="Tell attendees everything about your event…" /><InlineIssue field="rd-event-description" /></div>
           <div className="grid gap-3 sm:grid-cols-2">
             <div>
               <label className={labelCls}>Event Language</label>
@@ -192,7 +199,10 @@ function Tab1Details({ form, update, uploadContext }: { form: EventDetailsDraft;
       </SectionCard>
 
       {/* Branding & Media */}
-      <BrandingMediaSection media={form.media} onChange={um} uploadContext={uploadContext} />
+      <div id="rd-cover-banner" className="rounded-xl">
+        <BrandingMediaSection media={form.media} onChange={um} uploadContext={uploadContext} />
+        <InlineIssue field="rd-cover-banner" />
+      </div>
 
       {/* Public Page Settings */}
       <SectionCard title="Public Page Settings" action={<span className="text-[12px] text-muted-foreground">Controls what appears on your event page</span>}>
@@ -270,7 +280,8 @@ function Tab2VenueSchedule({
       {/* Venue */}
       <SectionCard title="Venue & Access">
         <div className="flex flex-col gap-4">
-          <div id="rd-venue-type" className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+          <p className="-mb-2 text-[13px] font-semibold text-foreground">Venue type</p>
+          <div id="rd-venue-type" className="grid grid-cols-1 gap-2 rounded-xl sm:grid-cols-3">
             {([['physical','Physical',Building2,'In-person venue'],['online','Online',Video,'Virtual / live-stream'],['hybrid','Hybrid',Users,'Both physical & online']] as const).map(([id, label, Icon, desc]) => (
               <ModeCard key={id} label={label} desc={desc} selected={form.venue.type === id} onClick={() => uv({ type: id })} />
             ))}
@@ -280,7 +291,7 @@ function Tab2VenueSchedule({
               <motion.div key="physical" initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }} exit={{ height: 0, opacity: 0 }} transition={{ duration: 0.2 }} className="overflow-hidden">
                 <div className="flex flex-col gap-3 rounded-xl border border-border bg-muted/[0.02] p-4">
                   <p className="flex items-center gap-2 text-[12px] font-semibold text-foreground"><Building2 className="size-3.5 shrink-0 text-muted-foreground/50" aria-hidden />Physical Venue</p>
-                  <div><label className={labelCls}>Venue Name <span className="text-red-500">*</span></label><input className={inputCls} value={form.venue.physical.name} onChange={e => uph({ name: e.target.value })} placeholder="e.g. NSCI Dome, Mumbai" /></div>
+                  <div><label className={labelCls} htmlFor="rd-venue-name">Venue Name<Req field="rd-venue-name" form={form} /></label><input id="rd-venue-name" className={inputCls} value={form.venue.physical.name} onChange={e => uph({ name: e.target.value })} placeholder="e.g. NSCI Dome, Mumbai" /><InlineIssue field="rd-venue-name" /></div>
                   <div><label className={labelCls}>Address Line 1</label><input className={inputCls} value={form.venue.physical.addressLine1} onChange={e => uph({ addressLine1: e.target.value })} placeholder="Street / Building name" /></div>
                   <div><label className={labelCls}>Address Line 2</label><input className={inputCls} value={form.venue.physical.addressLine2} onChange={e => uph({ addressLine2: e.target.value })} placeholder="Area / Landmark" /></div>
                   <div className="grid grid-cols-3 gap-2">
@@ -309,8 +320,9 @@ function Tab2VenueSchedule({
                     <div><label className={labelCls}>Platform Name</label><input className={inputCls} value={form.venue.online.platformCustomName} onChange={e => uon({ platformCustomName: e.target.value })} placeholder="e.g. Hopin, StreamYard" /></div>
                   )}
                   <div>
-                    <label className={labelCls}>Meeting URL <span className="text-red-500">*</span></label>
-                    <input type="url" className={inputCls} value={form.venue.online.meetingUrl} onChange={e => uon({ meetingUrl: e.target.value })} placeholder="https://zoom.us/j/..." />
+                    <label className={labelCls} htmlFor="rd-meeting-url">Meeting URL<Req field="rd-meeting-url" form={form} /></label>
+                    <input id="rd-meeting-url" type="url" className={inputCls} value={form.venue.online.meetingUrl} onChange={e => uon({ meetingUrl: e.target.value })} placeholder="https://zoom.us/j/..." />
+                    <InlineIssue field="rd-meeting-url" />
                   </div>
                   <div className="grid gap-2 sm:grid-cols-2">
                     <div><label className={labelCls}>Meeting ID <span className={hintCls.replace('mt-1 ', '')}>(optional)</span></label><input className={inputCls} value={form.venue.online.meetingId} onChange={e => uon({ meetingId: e.target.value })} /></div>
@@ -360,12 +372,12 @@ function Tab2VenueSchedule({
             </select>
           </div>
           <div className="grid grid-cols-2 gap-3">
-            <div><label className={labelCls} htmlFor="rd-start-date">Start Date <span className="text-red-500">*</span></label><input id="rd-start-date" type="date" className={inputCls} value={form.schedule.startDate} onChange={e => us({ startDate: e.target.value })} /></div>
-            <div><label className={labelCls}>Start Time <span className="text-red-500">*</span></label><input type="time" className={inputCls} value={form.schedule.startTime} onChange={e => us({ startTime: e.target.value })} /></div>
+            <div><label className={labelCls} htmlFor="rd-start-date">Start Date<Req field="rd-start-date" form={form} /></label><input id="rd-start-date" type="date" className={inputCls} value={form.schedule.startDate} onChange={e => us({ startDate: e.target.value })} /><InlineIssue field="rd-start-date" /></div>
+            <div><label className={labelCls} htmlFor="rd-start-time">Start Time<Req field="rd-start-time" form={form} /></label><input id="rd-start-time" type="time" className={inputCls} value={form.schedule.startTime} onChange={e => us({ startTime: e.target.value })} /><InlineIssue field="rd-start-time" /></div>
           </div>
           <div className="grid grid-cols-2 gap-3">
-            <div><label className={labelCls}>End Date <span className="text-red-500">*</span></label><input type="date" className={inputCls} value={form.schedule.endDate} onChange={e => us({ endDate: e.target.value })} /></div>
-            <div><label className={labelCls}>End Time <span className="text-red-500">*</span></label><input type="time" className={inputCls} value={form.schedule.endTime} onChange={e => us({ endTime: e.target.value })} /></div>
+            <div><label className={labelCls} htmlFor="rd-end-date">End Date<Req field="rd-end-date" form={form} /></label><input id="rd-end-date" type="date" className={inputCls} value={form.schedule.endDate} onChange={e => us({ endDate: e.target.value })} /><InlineIssue field="rd-end-date" /></div>
+            <div><label className={labelCls} htmlFor="rd-end-time">End Time<Req field="rd-end-time" form={form} /></label><input id="rd-end-time" type="time" className={inputCls} value={form.schedule.endTime} onChange={e => us({ endTime: e.target.value })} /><InlineIssue field="rd-end-time" /></div>
           </div>
           {duration && (
             <div className="flex items-center gap-2 rounded-lg border border-border/60 bg-muted/[0.03] px-3 py-2">
@@ -453,11 +465,11 @@ function Tab3Organizer({ form, update }: { form: EventDetailsDraft; update: (p: 
       <SectionCard title="Organizer Information">
         <div className="flex flex-col gap-3">
           <div className="grid gap-3 sm:grid-cols-2">
-            <div><label className={labelCls} htmlFor="rd-organizer-name">Organizer Name <span className="text-red-500">*</span></label><input id="rd-organizer-name" className={inputCls} value={form.organizer.name} onChange={e => uo({ name: e.target.value })} placeholder="e.g. TechFest Foundation" /></div>
-            <div><label className={labelCls}>Organizer Email <span className="text-red-500">*</span></label><input type="email" className={inputCls} value={form.organizer.email} onChange={e => uo({ email: e.target.value })} placeholder="organizer@example.com" /></div>
+            <div><label className={labelCls} htmlFor="rd-organizer-name">Organizer Name<Req field="rd-organizer-name" form={form} /></label><input id="rd-organizer-name" className={inputCls} value={form.organizer.name} onChange={e => uo({ name: e.target.value })} placeholder="e.g. TechFest Foundation" /><InlineIssue field="rd-organizer-name" /></div>
+            <div><label className={labelCls} htmlFor="rd-organizer-email">Organizer Email<Req field="rd-organizer-email" form={form} /></label><input id="rd-organizer-email" type="email" className={inputCls} value={form.organizer.email} onChange={e => uo({ email: e.target.value })} placeholder="organizer@example.com" /><InlineIssue field="rd-organizer-email" /></div>
           </div>
           <div className="grid gap-3 sm:grid-cols-2">
-            <div><label className={labelCls}>Organizer Mobile (WhatsApp)</label><input type="tel" className={inputCls} value={form.organizer.phone} onChange={e => uo({ phone: e.target.value })} placeholder="+91 9800000000" /></div>
+            <div><label className={labelCls} htmlFor="rd-organizer-phone">Organizer Mobile (WhatsApp)</label><input id="rd-organizer-phone" type="tel" className={inputCls} value={form.organizer.phone} onChange={e => uo({ phone: e.target.value })} placeholder="+91 9800000000" /><InlineIssue field="rd-organizer-phone" /></div>
             <div><label className={labelCls}>Website</label><input type="url" className={inputCls} value={form.organizer.website} onChange={e => uo({ website: e.target.value })} placeholder="https://your-org.com" /></div>
           </div>
           <ImageAssetInput label="Organizer Logo" value={form.organizer.logoUrl} onChange={v => uo({ logoUrl: v })} hint="Square PNG / JPG — 300 × 300 px recommended" shape="square" maxDim={600} targetKB={150} />
@@ -483,7 +495,7 @@ function Tab3Organizer({ form, update }: { form: EventDetailsDraft; update: (p: 
       <SectionCard title="Contact & Support">
         <div className="flex flex-col gap-3">
           <div className="grid gap-3 sm:grid-cols-2">
-            <div><label className={labelCls}>Support Email</label><input type="email" className={inputCls} value={form.support.supportEmail} onChange={e => usp({ supportEmail: e.target.value })} placeholder="support@yourorg.com" /></div>
+            <div><label className={labelCls} htmlFor="rd-support-email">Support Email</label><input id="rd-support-email" type="email" className={inputCls} value={form.support.supportEmail} onChange={e => usp({ supportEmail: e.target.value })} placeholder="support@yourorg.com" /><InlineIssue field="rd-support-email" /></div>
             <div><label className={labelCls}>Support Phone</label><input type="tel" className={inputCls} value={form.support.supportPhone} onChange={e => usp({ supportPhone: e.target.value })} /></div>
           </div>
           <div className="grid gap-3 sm:grid-cols-2">
@@ -535,7 +547,7 @@ function Tab4Communication({ form, update }: { form: EventDetailsDraft; update: 
         <div className="flex flex-col gap-4">
           <div>
             <p className={labelCls}>Notification Channels</p>
-            <div className="flex flex-wrap gap-2">
+            <div id="rd-confirmation-channels" className="flex flex-wrap gap-2 rounded-lg">
               {CHANNELS.map(ch => {
                 const on = form.communication.confirmation.channels.includes(ch.id)
                 return (
@@ -546,6 +558,7 @@ function Tab4Communication({ form, update }: { form: EventDetailsDraft; update: 
                 )
               })}
             </div>
+            <InlineIssue field="rd-confirmation-channels" />
           </div>
           <Toggle checked={form.communication.confirmation.calendarInvite}   onChange={v => ucf({ calendarInvite: v })}   label="Send Calendar Invite (.ics)" desc="Attached to the confirmation email for easy calendar add" />
           <Toggle checked={form.communication.confirmation.generateQrTicket} onChange={v => ucf({ generateQrTicket: v })} label="Generate QR E-Ticket" desc="A unique QR code per registration included in confirmation" />
@@ -605,13 +618,14 @@ function Tab5SEO({ form, update, slugLocked = false }: {
       <SectionCard title="Event URL &amp; SEO">
         <div className="flex flex-col gap-3">
           <div>
-            <label className={labelCls}>Event URL Slug <span className="text-red-500">*</span></label>
+            <label className={labelCls} htmlFor="rd-event-slug">Event URL Slug<Req field="rd-event-slug" form={form} /></label>
             <div className="flex items-center gap-0 overflow-hidden rounded-lg border border-border focus-within:border-primary/50 focus-within:ring-2 focus-within:ring-primary/20">
               <span className="shrink-0 whitespace-nowrap bg-muted/40 px-3 py-2 text-[12px] text-muted-foreground">registerdesk.co/e/</span>
               {/* Published: the slug is the live page's address and its Firestore id. It is
                   displayed, never edited — `readOnly` rather than `disabled` so it stays
                   selectable and copyable, and the coercing onChange is not attached at all. */}
               <input
+                id="rd-event-slug"
                 className={cn('h-9 flex-1 px-2 text-[13px] outline-none',
                   slugLocked ? 'bg-muted/40 text-muted-foreground' : 'bg-background text-foreground')}
                 value={form.seo.urlSlug}
@@ -632,14 +646,16 @@ function Tab5SEO({ form, update, slugLocked = false }: {
               // address is already live — so the lowercase rule is not applied here.
               ? <p className="mt-1 text-[12px] text-muted-foreground">This event is live — its URL is fixed and cannot be changed.</p>
               : form.seo.urlSlug && !EVENT_SLUG_PATTERN.test(form.seo.urlSlug) && <p className="mt-1 text-[12px] text-red-500">Only lowercase letters, numbers and hyphens allowed.</p>}
+            <InlineIssue field="rd-event-slug" />
           </div>
           <div>
             <div className="flex items-center justify-between"><label className={labelCls}>Meta Title</label><span className="text-[12px] text-muted-foreground">{(form.seo.metaTitle || title).length}/60</span></div>
             <input className={inputCls} maxLength={60} value={form.seo.metaTitle} onChange={e => us({ metaTitle: e.target.value })} placeholder={form.info.name || 'Your event name'} />
           </div>
           <div>
-            <div className="flex items-center justify-between"><label className={labelCls}>Meta Description</label><span className="text-[12px] text-muted-foreground">{(form.seo.metaDescription || desc).length}/160</span></div>
-            <textarea className={cn(inputCls, 'h-20 resize-none py-2')} maxLength={160} value={form.seo.metaDescription} onChange={e => us({ metaDescription: e.target.value })} placeholder={form.info.shortDesc || 'Brief event description for search results'} />
+            <div className="flex items-center justify-between"><label className={labelCls} htmlFor="rd-meta-description">Meta Description</label><span className="text-[12px] text-muted-foreground">{(form.seo.metaDescription || desc).length}/160</span></div>
+            <textarea id="rd-meta-description" className={cn(inputCls, 'h-20 resize-none py-2')} maxLength={160} value={form.seo.metaDescription} onChange={e => us({ metaDescription: e.target.value })} placeholder={form.info.shortDesc || 'Brief event description for search results'} />
+            <InlineIssue field="rd-meta-description" />
           </div>
           <div>
             <label className={labelCls}>Keywords <span className={hintCls.replace('mt-1 ', '')}>(comma-separated)</span></label>
@@ -1232,13 +1248,17 @@ function SponsorModal({ sponsor, isNew, onSave, onCancel }: {
 
 // ─── Summary Panel ────────────────────────────────────────────────────────────
 
-function SummaryPanel({ form, eventTypeId, eventSubtype, tab6Config, onPreview, passes, slugLocked = false }: {
+function SummaryPanel({ form, eventTypeId, eventSubtype, tab6Config, onPreview, passes, slugLocked = false, healthCounts }: {
   form: EventDetailsDraft; eventTypeId?: string | null; eventSubtype?: string | null
   tab6Config: Tab6Config | null; onPreview: () => void
   passes: { id: string; name: string; price: number; type: 'paid'|'free' }[]
   slugLocked?: boolean
+  /** RD-WIZARD-HEALTH — the step's Step Health counts, so this card never disagrees with it. */
+  healthCounts?: { blockers: number; warnings: number }
 }) {
   const health = calcStepHealth(form)
+  const blockerCount = healthCounts?.blockers ?? health.blockers.length
+  const warningCount = healthCounts?.warnings ?? health.warnings.length
 
   const barColor = health.score >= 80 ? 'bg-emerald-500' : health.score >= 50 ? 'bg-amber-500' : 'bg-rose-500'
 
@@ -1259,7 +1279,8 @@ function SummaryPanel({ form, eventTypeId, eventSubtype, tab6Config, onPreview, 
     [!!form.info.name.trim(), true,  'Event Name'],
     [!!form.media.coverBanner.value.trim(), false, 'Cover Banner'],
     [!!(form.venue.type && (form.venue.type !== 'physical' || form.venue.physical.name)), true, 'Venue Configured'],
-    [!!(form.schedule.startDate && form.schedule.endDate), true, 'Dates & Times'],
+    // RD-WIZARD-HEALTH — only the start date is required; a missing end is a warning.
+    [!!(form.schedule.startDate && form.schedule.endDate), !form.schedule.startDate, 'Dates & Times'],
     [!!(form.organizer.name.trim() && form.organizer.email.trim()), true, 'Organizer Info'],
     [(form.communication.confirmation.channels?.length ?? 0) > 0, false, 'Notification Channel'],
     // A LIVE event's slug is already its public address. Historical slugs can contain
@@ -1268,7 +1289,7 @@ function SummaryPanel({ form, eventTypeId, eventSubtype, tab6Config, onPreview, 
     // Pre-publish the full rule still applies: a new slug must be canonical.
     [slugLocked
       ? !!form.seo.urlSlug.trim()
-      : !!(form.seo.urlSlug && EVENT_SLUG_PATTERN.test(form.seo.urlSlug)), true, 'URL Slug'],
+      : !!(form.seo.urlSlug && EVENT_SLUG_PATTERN.test(form.seo.urlSlug)), false, 'URL Slug'],   // generated at publish when empty
   ]
 
   return (
@@ -1285,9 +1306,9 @@ function SummaryPanel({ form, eventTypeId, eventSubtype, tab6Config, onPreview, 
         </div>
         <div className="h-2 w-full overflow-hidden rounded-full bg-border"><div className={cn('h-full rounded-full transition-all duration-500', barColor)} style={{ width: `${health.score}%` }} /></div>
         <div className="mt-2 flex items-center gap-3 text-[12px]">
-          {health.blockers.length > 0 && <span className="text-rose-600">{health.blockers.length} blocker{health.blockers.length > 1 ? 's' : ''}</span>}
-          {health.warnings.length > 0 && <span className="text-amber-600">{health.warnings.length} warning{health.warnings.length > 1 ? 's' : ''}</span>}
-          {health.blockers.length === 0 && health.warnings.length === 0 && <span className="text-emerald-600">All good!</span>}
+          {blockerCount > 0 && <span className="text-rose-600">{blockerCount} blocker{blockerCount > 1 ? 's' : ''}</span>}
+          {warningCount > 0 && <span className="text-amber-600">{warningCount} warning{warningCount > 1 ? 's' : ''}</span>}
+          {blockerCount === 0 && warningCount === 0 && <span className="text-emerald-600">All good!</span>}
         </div>
       </div>
 
@@ -1403,6 +1424,8 @@ export interface EventDetailsBuilderProps {
   pricingPasses?: { id: string; name: string; price: number; type: 'paid' | 'free' }[]
   uploadContext?: { uid: string; draftId: string }
   focusHint?:     string
+  /** RD-WIZARD-HEALTH — the step's merged Step Health counts, shown in the summary card. */
+  healthCounts?:  { blockers: number; warnings: number }
   /**
    * RD-EVENT-SLUG — true once the event is published.
    *
@@ -1417,7 +1440,7 @@ export interface EventDetailsBuilderProps {
 
 export function EventDetailsBuilder({
   form: rawForm, onChange, eventTypeId, eventSubtype, pricingPasses = [], uploadContext, focusHint,
-  slugLocked = false,
+  slugLocked = false, healthCounts,
 }: EventDetailsBuilderProps) {
   const blank = makeBlankEventDetailsDraft()
   const raw   = rawForm ?? blank
@@ -1458,6 +1481,14 @@ export function EventDetailsBuilder({
     pendingFocusRef.current = focusHint
     if (tab && tab !== activeTab) setActiveTab(tab)
   }, [focusHint]) // activeTab intentionally excluded — switching tabs triggers Effect 2
+
+  // RD-WIZARD-HEALTH — a Step Health item clicked while already on this step: open the field's tab.
+  // (FieldFocusDriver waits for the field to mount, then scrolls, focuses and highlights it.)
+  const focusRequest = useFieldFocusRequest()
+  useEffect(() => {
+    const tab = focusRequest ? FIELD_TO_TAB[focusRequest.field] : undefined
+    if (tab) setActiveTab(tab)
+  }, [focusRequest])
 
   useEffect(() => {
     const hint = pendingFocusRef.current
@@ -1573,7 +1604,7 @@ export function EventDetailsBuilder({
       </div>
 
       <div className="lg:sticky lg:top-4">
-        <SummaryPanel form={effectiveForm} eventTypeId={eventTypeId} eventSubtype={eventSubtype} tab6Config={tab6Config} onPreview={() => setPreviewOpen(true)} passes={pricingPasses} slugLocked={slugLocked} />
+        <SummaryPanel form={effectiveForm} eventTypeId={eventTypeId} eventSubtype={eventSubtype} tab6Config={tab6Config} onPreview={() => setPreviewOpen(true)} passes={pricingPasses} slugLocked={slugLocked} healthCounts={healthCounts} />
       </div>
 
       <AnimatePresence>

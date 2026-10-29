@@ -899,95 +899,125 @@ export interface StepHealth {
   warnings: string[]
 }
 
-export function calcStepHealth(input: EventDetailsDraft): StepHealth {
+/**
+ * RD-WIZARD-HEALTH — one Details finding, anchored to the field it is about.
+ *
+ * `field` is the DOM id of the input (see DETAILS_FIELD_TAB) so Step Health can open the right
+ * tab, scroll to the field and show this message next to it. `message` is the exact string
+ * calcStepHealth has always returned, so nothing an organizer reads changes.
+ */
+export interface DetailsHealthItem {
+  field:    string
+  label:    string
+  message:  string
+  severity: 'blocker' | 'warning'
+}
+
+/** Which Details tab each anchored field lives on (the builder opens it before focusing). */
+export const DETAILS_FIELD_TAB: Readonly<Record<string, 'details' | 'venue' | 'organizer' | 'comms' | 'seo' | 'type'>> = {
+  'rd-event-name':            'details',
+  'rd-short-desc':            'details',
+  'rd-event-description':     'details',
+  'rd-cover-banner':          'details',
+  'rd-venue-type':            'venue',
+  'rd-venue-name':            'venue',
+  'rd-meeting-url':           'venue',
+  'rd-start-date':            'venue',
+  'rd-start-time':            'venue',
+  'rd-end-date':              'venue',
+  'rd-end-time':              'venue',
+  'rd-organizer-name':        'organizer',
+  'rd-organizer-email':       'organizer',
+  'rd-organizer-phone':       'organizer',
+  'rd-support-email':         'organizer',
+  'rd-confirmation-channels': 'comms',
+  'rd-event-slug':            'seo',
+  'rd-meta-description':      'seo',
+  'rd-waiver-text':           'type',
+}
+
+/**
+ * The Details step's findings, each anchored to its field. THE rule set behind calcStepHealth
+ * (which is derived from this, unchanged) — RD-CE-FIX M7: a blocker here BLOCKS the step's
+ * Continue, so the list is exactly what the server refuses at publish (publishRequirements
+ * criticals + lib/events/eventValueRules); everything the server accepts is a warning.
+ */
+export function detailsHealthItems(input: EventDetailsDraft): DetailsHealthItem[] {
   // Normalize at the entry point: guarantees every nested sub-object
   // (info, venue, organizer, seo, …) is populated even when Firestore
   // returned a partial document or an old-schema draft.
   const d = normalizeEventDetailsDraft(input)
-
-  const blockers: string[] = []
-  const warnings: string[] = []
-  let score = 0
+  const out: DetailsHealthItem[] = []
+  const block = (field: string, label: string, message: string) => out.push({ field, label, message, severity: 'blocker' })
+  const warn  = (field: string, label: string, message: string) => out.push({ field, label, message, severity: 'warning' })
 
   // ── Blockers (required) ──
-  // RD-CE-FIX M7 — a blocker here BLOCKS the step's Continue, so the list is exactly what the server
-  // refuses at publish (publishRequirements criticals + lib/events/eventValueRules); everything the
-  // server accepts is a warning. The UI can then never reject what the server accepts, or the reverse.
-  if (d.info.name.trim().length > 0) {
-    score += 10
-  } else {
-    blockers.push('Event name is required')
-  }
+  if (!(d.info.name.trim().length > 0)) block('rd-event-name', 'Event name', 'Event name is required')
 
   if (d.schedule.startDate) {
-    score += 8
-    if (!d.schedule.startTime) warnings.push('Add a start time so attendees know when to arrive')
+    if (!d.schedule.startTime) warn('rd-start-time', 'Start time', 'Add a start time so attendees know when to arrive')
   } else {
-    blockers.push('Event start date is required')
+    block('rd-start-date', 'Start date', 'Event start date is required')
   }
 
   if (d.schedule.endDate) {
-    score += 4
     if (d.schedule.startDate) {
       const start = new Date(`${d.schedule.startDate}T${d.schedule.startTime || '00:00'}`)
       const end   = new Date(`${d.schedule.endDate}T${d.schedule.endTime || '23:59'}`)
-      if (end < start) blockers.push('Event end must be after event start')
+      if (end < start) block('rd-end-date', 'End date', 'Event end must be after event start')
     }
-    if (!d.schedule.endTime) warnings.push('Add an end time')
+    if (!d.schedule.endTime) warn('rd-end-time', 'End time', 'Add an end time')
   } else {
-    warnings.push('Add an end date and time')
+    warn('rd-end-date', 'End date', 'Add an end date and time')
   }
 
   const vt = d.venue.type
-  let venueOk = true
   if (vt === 'physical' || vt === 'hybrid') {
-    if (!d.venue.physical.name.trim()) { blockers.push('Venue name is required for physical events'); venueOk = false }
+    if (!d.venue.physical.name.trim()) block('rd-venue-name', 'Venue name', 'Venue name is required for physical events')
   }
   if (vt === 'online' || vt === 'hybrid') {
     const url = d.venue.online.meetingUrl.trim()
-    if (!url) { warnings.push('Add the meeting link before the event starts'); venueOk = false }
-    else if (!/^https?:\/\/\S+$/i.test(url)) { blockers.push('The meeting link must start with http:// or https://'); venueOk = false }
+    if (!url) warn('rd-meeting-url', 'Meeting link', 'Add the meeting link before the event starts')
+    else if (!/^https?:\/\/\S+$/i.test(url)) block('rd-meeting-url', 'Meeting link', 'The meeting link must start with http:// or https://')
   }
-  if (venueOk) score += 12
 
-  if (d.organizer.name.trim()) score += 6
-  else blockers.push('Organizer name is required')
-
-  if (d.organizer.email.trim()) score += 6
-  else blockers.push('Organizer email is required')
+  if (!d.organizer.name.trim())  block('rd-organizer-name', 'Organizer name', 'Organizer name is required')
+  if (!d.organizer.email.trim()) block('rd-organizer-email', 'Organizer email', 'Organizer email is required')
 
   // The public URL is generated (and normalised) at publish, so a missing or unusual slug is a warning.
-  if (d.seo.urlSlug.trim() && /^[a-z0-9-]+$/.test(d.seo.urlSlug.trim())) {
-    score += 8
-  } else {
-    warnings.push('Set a URL slug (lowercase letters, numbers, hyphens) — otherwise one is generated')
+  if (!(d.seo.urlSlug.trim() && /^[a-z0-9-]+$/.test(d.seo.urlSlug.trim()))) {
+    warn('rd-event-slug', 'URL slug', 'Set a URL slug (lowercase letters, numbers, hyphens) — otherwise one is generated')
   }
 
   // ── Warnings (recommended) ──
-  if (d.info.shortDesc.trim()) {
-    score += 8
-  } else {
-    warnings.push('Short description improves search visibility')
+  if (!d.info.shortDesc.trim())              warn('rd-short-desc', 'Short description', 'Short description improves search visibility')
+  if (!d.media.coverBanner.value.trim())     warn('rd-cover-banner', 'Cover banner', 'Cover banner makes your event page stand out')
+  if (!((d.communication.confirmation.channels?.length ?? 0) > 0)) {
+    warn('rd-confirmation-channels', 'Confirmation channel', "No confirmation channel configured — attendees won't be notified")
   }
+  if (!d.support.supportEmail.trim())        warn('rd-support-email', 'Support email', 'Support email helps attendees reach you')
+  if (!d.seo.metaDescription.trim())         warn('rd-meta-description', 'Meta description', 'Meta description improves click-through from search')
 
-  if (d.media.coverBanner.value.trim()) {
-    score += 10
-  } else {
-    warnings.push('Cover banner makes your event page stand out')
-  }
+  return out
+}
 
-  if ((d.communication.confirmation.channels?.length ?? 0) > 0) {
-    score += 8
-  } else {
-    warnings.push("No confirmation channel configured — attendees won't be notified")
-  }
+export function calcStepHealth(input: EventDetailsDraft): StepHealth {
+  const d = normalizeEventDetailsDraft(input)
+  const items = detailsHealthItems(d)
+  const has = (field: string, severity: 'blocker' | 'warning') => items.some(i => i.field === field && i.severity === severity)
+  let score = 0
 
-  if (!d.support.supportEmail.trim()) {
-    warnings.push('Support email helps attendees reach you')
-  }
-
+  if (d.info.name.trim().length > 0) score += 10
+  if (d.schedule.startDate) score += 8
+  if (d.schedule.endDate) score += 4
+  if (!has('rd-venue-name', 'blocker') && !items.some(i => i.field === 'rd-meeting-url')) score += 12
+  if (d.organizer.name.trim()) score += 6
+  if (d.organizer.email.trim()) score += 6
+  if (d.seo.urlSlug.trim() && /^[a-z0-9-]+$/.test(d.seo.urlSlug.trim())) score += 8
+  if (d.info.shortDesc.trim()) score += 8
+  if (d.media.coverBanner.value.trim()) score += 10
+  if ((d.communication.confirmation.channels?.length ?? 0) > 0) score += 8
   if (d.seo.metaDescription.trim()) score += 4
-  else warnings.push('Meta description improves click-through from search')
 
   // ── Bonus ──
   if (d.info.fullDesc.trim())             score += 4
@@ -995,7 +1025,11 @@ export function calcStepHealth(input: EventDetailsDraft): StepHealth {
   if (d.organizer.social.instagram.trim()
    || d.organizer.social.linkedin.trim())  score += 2
 
-  return { score: Math.min(100, Math.max(0, score)), blockers, warnings }
+  return {
+    score:    Math.min(100, Math.max(0, score)),
+    blockers: items.filter(i => i.severity === 'blocker').map(i => i.message),
+    warnings: items.filter(i => i.severity === 'warning').map(i => i.message),
+  }
 }
 
 // ─── Event date utilities ─────────────────────────────────────────────────────
